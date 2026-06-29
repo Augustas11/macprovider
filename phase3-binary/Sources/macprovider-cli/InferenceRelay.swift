@@ -422,14 +422,27 @@ actor InferenceRelay {
                 finishReason: NSNull()
             )))
 
+            let streamedAnyToolCallDelta = StreamedFlag()
             let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { state.isCancelled }) { chunk in
-                _ = buffer.enqueue(sseEvent(chatCompletionChunk(
-                    id: id,
-                    created: created,
-                    model: request.model,
-                    delta: ["content": chunk],
-                    finishReason: NSNull()
-                )))
+                switch chunk {
+                case .content(let text):
+                    _ = buffer.enqueue(sseEvent(chatCompletionChunk(
+                        id: id,
+                        created: created,
+                        model: request.model,
+                        delta: ["content": text],
+                        finishReason: NSNull()
+                    )))
+                case .toolCallDelta(let toolDelta):
+                    streamedAnyToolCallDelta.set()
+                    _ = buffer.enqueue(sseEvent(chatCompletionChunk(
+                        id: id,
+                        created: created,
+                        model: request.model,
+                        delta: ["tool_calls": [toolDelta.openAIDeltaDict()]],
+                        finishReason: NSNull()
+                    )))
+                }
             }
 
             state.setUsage(completion)
@@ -449,14 +462,19 @@ actor InferenceRelay {
                 return completion
             }
 
-            if let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
-                _ = buffer.enqueue(sseEvent(chatCompletionChunk(
-                    id: id,
-                    created: created,
-                    model: request.model,
-                    delta: ["tool_calls": toolCallDeltas(toolCalls)],
-                    finishReason: NSNull()
-                )))
+            // Fallback for non-streaming-incremental path: if tool calls landed only
+            // in the final CompletionResult and were never streamed via .toolCallDelta
+            // chunks, emit them now.
+            if !streamedAnyToolCallDelta.get(), let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
+                for delta in toolCallDeltaChunks(toolCalls) {
+                    _ = buffer.enqueue(sseEvent(chatCompletionChunk(
+                        id: id,
+                        created: created,
+                        model: request.model,
+                        delta: ["tool_calls": delta],
+                        finishReason: NSNull()
+                    )))
+                }
             }
 
             _ = buffer.enqueue(sseEvent(chatCompletionChunk(
@@ -508,7 +526,7 @@ actor InferenceRelay {
         }
     }
 
-    private static func errorEndFrame(requestID: String, error: APIError, chunksSent: Int) -> [String: Any] {
+    static func errorEndFrame(requestID: String, error: APIError, chunksSent: Int) -> [String: Any] {
         let status: String
         switch error.code {
         case "model_not_loaded", "model_not_found":
@@ -517,16 +535,22 @@ actor InferenceRelay {
             status = "error_context_exceeded"
         case "queue_full":
             status = "error_queue_full"
+        case "malformed_json_response", "json_schema_validation_failed":
+            status = error.code
         default:
             status = "error_internal"
         }
-        return [
+        var frame: [String: Any] = [
             "type": "inference_response_end",
             "request_id": requestID,
             "status": status,
             "chunks_sent": chunksSent,
             "error": error.message,
         ]
+        if error.code == "malformed_json_response" || error.code == "json_schema_validation_failed" {
+            frame["retryable"] = (error.envelope["error"] as? [String: Any])?["retryable"] as? Bool
+        }
+        return frame
     }
 
     private static func sendChunk(
@@ -615,10 +639,37 @@ actor InferenceRelay {
         return message
     }
 
-    private static func toolCallDeltas(_ toolCalls: [ToolCall]) -> [[String: Any]] {
-        toolCalls.enumerated().map { index, call in
-            call.openAIDelta(index: index)
+    private static func toolCallDeltaChunks(_ toolCalls: [ToolCall]) -> [[[String: Any]]] {
+        var chunks: [[[String: Any]]] = []
+        for (index, call) in toolCalls.enumerated() {
+            chunks.append([call.openAIInitialDelta(index: index)])
+            for fragment in splitArguments(call.arguments) {
+                chunks.append([call.openAIArgumentsDelta(index: index, fragment: fragment)])
+            }
         }
+        return chunks
+    }
+
+    private static func splitArguments(_ arguments: String, chunkBytes: Int = 2048) -> [String] {
+        guard !arguments.isEmpty else { return [] }
+        var result: [String] = []
+        var current = ""
+        var currentBytes = 0
+        for scalar in arguments.unicodeScalars {
+            let scalarString = String(scalar)
+            let scalarBytes = scalarString.utf8.count
+            if currentBytes > 0, currentBytes + scalarBytes > chunkBytes {
+                result.append(current)
+                current = ""
+                currentBytes = 0
+            }
+            current += scalarString
+            currentBytes += scalarBytes
+        }
+        if !current.isEmpty {
+            result.append(current)
+        }
+        return result
     }
 
     private static func usage(_ completion: CompletionResult) -> [String: Any] {
@@ -626,6 +677,7 @@ actor InferenceRelay {
             "prompt_tokens": completion.promptTokens,
             "completion_tokens": completion.completionTokens,
             "total_tokens": completion.promptTokens + completion.completionTokens,
+            "macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull(),
         ]
     }
 
@@ -634,6 +686,7 @@ actor InferenceRelay {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            "macprovider_model_hash_observed": NSNull(),
         ]
     }
 

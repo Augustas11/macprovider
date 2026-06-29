@@ -224,6 +224,90 @@ func TestWriteHotPath_DuplicateRequestIDWithoutRetryQuarantinesAttempt(t *testin
 	}
 }
 
+// SPEC-002 v1.5.0 / issue #211 defense-in-depth regression: should
+// the same coordinator-internal request_id ever recur across rows
+// belonging to different accounts (UUID v4 collision, retry-loop
+// bug, future schema change), RecoverLedger MUST derive attempt_n
+// and same_request_count by scoping (account_id, request_id), not
+// request_id alone. Note that internal request_id is server-minted
+// (uuid.NewString() per buyer request) — this is NOT the actual
+// #211 buyer-supplied collision class on external_request_id; it's
+// defense-in-depth against any future internal-id recurrence.
+// ISS-211 R1 architect HIGH spotted the scoping gap; R6 reframed
+// from "cross-account collision class" to "defense-in-depth".
+func TestRecoverLedger_AccountScopedInternalRequestIDDefenseInDepth(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "synthetic-internal-uuid-collision-recovery"
+	input.RequestID = row.RequestID
+	row.AccountID = "acct_A"
+	// Use the hot-path-failure fallback so RecoverLedger does the
+	// derivation work (rather than hotpath.go's in-line check).
+	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	input2 := input
+	row2 := row
+	input2.ProviderID = "provider-b"
+	input2.ProviderAssignedID = "assigned-b"
+	row2.ProviderAssignedID = "assigned-b"
+	row2.AccountID = "acct_B"
+	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row2, input2); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'ambiguous_attempt_n'`, row.RequestID); got != 0 {
+		t.Fatalf("synthetic internal request_id recurrence quarantined rows after recovery=%d, want 0 (issue #211 defense-in-depth regression)", got)
+	}
+	// Both accounts' rows should have produced a clean credit row.
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 0`, row.RequestID); got != 2 {
+		t.Fatalf("non-quarantined ledger rows for synthetic internal request_id recurrence=%d, want 2 (one per account)", got)
+	}
+}
+
+// SPEC-002 v1.5.0 / issue #211 defense-in-depth regression: should
+// the same coordinator-internal request_id ever recur across writes
+// belonging to different accounts, the AttemptN-derivation COUNT in
+// hotpath.go MUST scope by (account_id, request_id) and NOT trip the
+// `ambiguous_attempt_n` zero-credit path that would fire under the
+// unscoped COUNT. Note that internal request_id is server-minted, so
+// this scenario is hypothetical — the actual #211 collision class
+// lives on external_request_id and is addressed by the reconciliation
+// key. The parallel adjacent test
+// TestWriteHotPath_DuplicateRequestIDWithoutRetryQuarantinesAttempt
+// covers the legacy NULL-`account_id` clustering case where the
+// quarantine fires by design.
+func TestWriteHotPath_AccountScopedInternalRequestIDDefenseInDepth(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "synthetic-internal-uuid-collision-hotpath"
+	input.RequestID = row.RequestID
+	row.AccountID = "acct_A"
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	input2 := input
+	row2 := row
+	input2.ProviderID = "provider-b"
+	input2.ProviderAssignedID = "assigned-b"
+	row2.ProviderAssignedID = "assigned-b"
+	row2.AccountID = "acct_B" // different account, same request_id
+	if err := store.WriteHotPath(context.Background(), reqStore, row2, input2); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-#211 (unscoped COUNT): would have counted 2 rows for the
+	// same request_id, derived AttemptN=1, and quarantined the second
+	// row as `ambiguous_attempt_n` → zero credit for acct_B. With the
+	// account-scoped count, acct_B sees only its own one row and the
+	// derived AttemptN matches input.AttemptN, so no quarantine fires.
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'ambiguous_attempt_n'`, row.RequestID); got != 0 {
+		t.Fatalf("synthetic internal request_id recurrence quarantined rows=%d, want 0 (issue #211 defense-in-depth regression)", got)
+	}
+}
+
 func TestWriteHotPath_DerivedBillingAttemptAllowedWhenAttemptMatches(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)

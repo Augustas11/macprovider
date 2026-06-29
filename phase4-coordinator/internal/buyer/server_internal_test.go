@@ -103,8 +103,8 @@ func TestIsCommitWorthyDataLine(t *testing.T) {
 		{"choices_with_delta_content_string", "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n", true},
 		{"choices_with_delta_refusal_string", "data: {\"choices\":[{\"delta\":{\"refusal\":\"i cannot\"}}]}\n", true},
 		{"choices_with_delta_reasoning_string", "data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking\"}}]}\n", true},
-		{"choices_with_delta_tool_calls_array_invalid_minimal_shape", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"f\"}}]}}]}\n", false},
-		{"choices_with_delta_tool_calls_array", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n", true},
+		{"choices_with_delta_tool_calls_array_invalid_minimal_shape", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_0123456789abcdef\",\"function\":{\"name\":\"f\"}}]}}]}\n", false},
+		{"choices_with_delta_tool_calls_array", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0123456789abcdef\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n", true},
 		{"choices_with_delta_function_call_object", "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"f\"}}}]}\n", true},
 		{"choices_with_message_content_string", "data: {\"choices\":[{\"message\":{\"content\":\"hi\"}}]}\n", true},
 
@@ -142,43 +142,59 @@ func TestCommitSignal_EmptyToolCallObject_Rejected(t *testing.T) {
 	}
 }
 
-func TestCommitSignal_NonObjectArguments_Rejected(t *testing.T) {
-	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"[]\"}}]}}]}\n"
-	if isCommitWorthyDataLine([]byte(line)) {
-		t.Fatal("non-object function.arguments must not be commit-worthy")
+func TestCommitSignal_NonObjectArguments_IncrementalOpenAccepted(t *testing.T) {
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0123456789abcdef\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"[]\"}}]}}]}\n"
+	if !isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("incremental-open validator must accept argument fragments before final-close")
+	}
+	validator := newStreamToolCallFinalValidator()
+	if err := validator.observeLine([]byte(line)); err != nil {
+		t.Fatalf("observeLine: %v", err)
+	}
+	_ = validator.observeLine([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n"))
+	_ = validator.observeLine([]byte("data: [DONE]\n"))
+	if validator.finalCloseOK() {
+		t.Fatal("final-close validator must reject non-object accumulated arguments")
 	}
 }
 
-func TestCommitSignal_DeepNestedArguments_Rejected(t *testing.T) {
+func TestCommitSignal_DeepNestedArguments_FinalCloseRejected(t *testing.T) {
 	arguments := "1"
 	for i := 0; i < 100; i++ {
 		arguments = `{"x":` + arguments + `}`
 	}
-	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":" + string(mustJSONString(t, arguments)) + "}}]}}]}\n"
-	if isCommitWorthyDataLine([]byte(line)) {
-		t.Fatal("deeply nested function.arguments must not be commit-worthy")
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0123456789abcdef\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":" + string(mustJSONString(t, arguments)) + "}}]}}]}\n"
+	if !isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("incremental-open validator must accept argument fragments before final-close")
+	}
+	validator := newStreamToolCallFinalValidator()
+	if err := validator.observeLine([]byte(line)); err != nil {
+		t.Fatalf("observeLine: %v", err)
+	}
+	_ = validator.observeLine([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n"))
+	_ = validator.observeLine([]byte("data: [DONE]\n"))
+	if validator.finalCloseOK() {
+		t.Fatal("final-close validator must reject deeply nested accumulated arguments")
 	}
 }
 
-func TestCommitSignal_OversizedArguments_Rejected(t *testing.T) {
-	arguments := `{"blob":"` + strings.Repeat("x", 256*1024) + `"}`
-	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":" + string(mustJSONString(t, arguments)) + "}}]}}]}\n"
+func TestCommitSignal_OversizedArguments_FinalCloseRejected(t *testing.T) {
+	arguments := `{"blob":"` + strings.Repeat("x", maxToolCallArgumentsBytes) + `"}`
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0123456789abcdef\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":" + string(mustJSONString(t, arguments)) + "}}]}}]}\n"
 	if isCommitWorthyDataLine([]byte(line)) {
-		t.Fatal("oversized function.arguments must not be commit-worthy")
+		t.Fatal("cap-crossing opening chunk must not be commit-worthy")
 	}
 }
 
 func TestCommitSignal_MixedInvalidToolCalls_Rejected(t *testing.T) {
-	valid := `{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}`
-	oversizedArguments := `{"blob":"` + strings.Repeat("x", 256*1024) + `"}`
-	oversized := `{"index":1,"id":"call_2","type":"function","function":{"name":"f","arguments":` + string(mustJSONString(t, oversizedArguments)) + `}}`
-	nonObjectArguments := `{"index":2,"id":"call_3","type":"function","function":{"name":"f","arguments":"[]"}}`
+	valid := `{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}`
+	oversizedArguments := `{"blob":"` + strings.Repeat("x", maxToolCallArgumentsBytes) + `"}`
+	oversized := `{"index":1,"id":"call_abcdefabcdefabcd","type":"function","function":{"name":"f","arguments":` + string(mustJSONString(t, oversizedArguments)) + `}}`
 	cases := []struct {
 		name  string
 		calls string
 	}{
 		{"empty_object_then_valid", `{}` + "," + valid},
-		{"valid_then_non_object_arguments", valid + "," + nonObjectArguments},
 		{"valid_then_oversized_arguments", valid + "," + oversized},
 	}
 	for _, tc := range cases {
@@ -192,14 +208,13 @@ func TestCommitSignal_MixedInvalidToolCalls_Rejected(t *testing.T) {
 }
 
 func TestCommitSignal_InvalidToolCallsWithOtherSignals_Rejected(t *testing.T) {
-	oversizedArguments := `{"blob":"` + strings.Repeat("x", 256*1024) + `"}`
+	oversizedArguments := `{"blob":"` + strings.Repeat("x", maxToolCallArgumentsBytes) + `"}`
 	cases := []struct {
 		name  string
 		delta string
 	}{
 		{"role_with_empty_object", `"role":"assistant","tool_calls":[{}]`},
-		{"content_with_non_object_arguments", `"content":"x","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"[]"}}]`},
-		{"reasoning_with_oversized_arguments", `"reasoning":"trace","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":` + string(mustJSONString(t, oversizedArguments)) + `}}]`},
+		{"reasoning_with_oversized_arguments", `"reasoning":"trace","tool_calls":[{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"f","arguments":` + string(mustJSONString(t, oversizedArguments)) + `}}]`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,7 +237,7 @@ func TestCommitSignal_InvalidToolCallsStatusPoisonsPreCommit(t *testing.T) {
 }
 
 func TestCommitSignal_MinimalValidShape_Accepted(t *testing.T) {
-	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n"
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0123456789abcdef\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n"
 	if !isCommitWorthyDataLine([]byte(line)) {
 		t.Fatal("minimal valid tool-call delta must be commit-worthy")
 	}
@@ -243,11 +258,11 @@ func TestRequestSidePassThrough_ToolCalls_ByteEquivalent(t *testing.T) {
 			"messages":[
 				{"role":"user","content":"plan"},
 			{"role":"assistant","content":null,"tool_calls":[
-				{"id":"call_alpha-1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"ToolCallParser\",\"n\":1}"}},
-				{"id":"call.beta_2","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"phase3-binary/Sources/macprovider-cli/ToolCallParser.swift\"}"}}
+				{"id":"call_alpha12345678901","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"ToolCallParser\",\"n\":1}"}},
+				{"id":"call_beta123456789012","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"phase3-binary/Sources/macprovider-cli/ToolCallParser.swift\"}"}}
 			]},
-			{"role":"tool","tool_call_id":"call_alpha-1","content":"{\"ok\":true}"},
-				{"role":"tool","tool_call_id":"call.beta_2","content":"{\"bytes\":42}"}
+			{"role":"tool","tool_call_id":"call_alpha12345678901","content":"{\"ok\":true}"},
+				{"role":"tool","tool_call_id":"call_beta123456789012","content":"{\"bytes\":42}"}
 			]
 		}`)
 	req, status, code, msg := validateChatRequest(body)

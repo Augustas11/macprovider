@@ -125,7 +125,14 @@ type ExplorerStore interface {
 	ExplorerListBuyers(ctx context.Context, q ExplorerBuyerQuery) (ExplorerBuyerList, error)
 	ExplorerBuyerDetail(ctx context.Context, accountID string, q ExplorerDetailQuery) (ExplorerBuyerDetail, error)
 	ExplorerListSessions(ctx context.Context, q ExplorerSessionQuery) (ExplorerSessionList, error)
-	ExplorerSessionDetail(ctx context.Context, requestID string) (ExplorerSessionDetail, error)
+	// ExplorerSessionDetail looks up the row trail for a request_id.
+	// accountID may be empty for backward-compat callers; when empty
+	// AND the request_id resolves to multiple accounts (allowed since
+	// issue #196 made usage_events PK composite), the call returns
+	// ErrExplorerAmbiguousRequestID and populates
+	// ExplorerSessionDetail.MatchedAccountIDs so the caller can
+	// disambiguate.
+	ExplorerSessionDetail(ctx context.Context, accountID, requestID string) (ExplorerSessionDetail, error)
 	ExplorerActivity(ctx context.Context, q ExplorerActivityQuery) (ExplorerActivityList, error)
 	ExplorerHealth(ctx context.Context, since time.Time) (ExplorerHealth, error)
 }

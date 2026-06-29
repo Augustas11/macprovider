@@ -1831,14 +1831,17 @@ func TestChatCompletionsRoutesModelClassByObjective(t *testing.T) {
 func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
 	const concreteModel = "mlx-community/Qwen2.5-7B-Instruct-4bit"
 	const otherModel = "mlx-community/Other-7B-Instruct-4bit"
+	jsonSchemaResponseFormat := `"response_format":{"type":"json_schema","json_schema":{"name":"person-v1","strict":true,"schema":{"type":"object","properties":{"name":{"type":"string"},"age":{"type":"number"}},"required":["name","age"],"additionalProperties":false}}}`
 	bodyFor := func(stream bool) []byte {
 		streamField := ""
+		responseFormat := jsonSchemaResponseFormat + `,`
 		if stream {
 			streamField = `,"stream":true`
+			responseFormat = ""
 		}
-		return []byte(`{"model":"mlx-accurate","messages":[{"role":"user","content":"hello"}],"max_tokens":8,"seed":12345,"presence_penalty":0.25,"frequency_penalty":-0.5,"response_format":{"type":"json_object"},"metadata":{"trace":"preserve-me"}` + streamField + `}`)
+		return []byte(`{"model":"mlx-accurate","messages":[{"role":"user","content":"hello"}],"max_tokens":8,"seed":12345,"presence_penalty":0.25,"frequency_penalty":-0.5,` + responseFormat + `"metadata":{"trace":"preserve-me"}` + streamField + `}`)
 	}
-	assertForwardedBody := func(t *testing.T, body []byte) {
+	assertForwardedBody := func(t *testing.T, body []byte, expectResponseFormat bool) {
 		t.Helper()
 		var got map[string]json.RawMessage
 		if err := json.Unmarshal(body, &got); err != nil {
@@ -1851,8 +1854,12 @@ func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
 		if model != concreteModel {
 			t.Fatalf("forwarded model = %q, want concrete %q", model, concreteModel)
 		}
-		if string(got["response_format"]) != `{"type":"json_object"}` {
-			t.Fatalf("response_format not preserved: %s", string(got["response_format"]))
+		if expectResponseFormat {
+			if string(got["response_format"]) != `{"type":"json_schema","json_schema":{"name":"person-v1","strict":true,"schema":{"type":"object","properties":{"name":{"type":"string"},"age":{"type":"number"}},"required":["name","age"],"additionalProperties":false}}}` {
+				t.Fatalf("response_format not preserved: %s", string(got["response_format"]))
+			}
+		} else if _, ok := got["response_format"]; ok {
+			t.Fatalf("streaming response_format should be omitted in this fixture: %s", string(got["response_format"]))
 		}
 		if string(got["seed"]) != `12345` {
 			t.Fatalf("seed not preserved: %s", string(got["seed"]))
@@ -1887,7 +1894,7 @@ func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
 				if err != nil {
 					t.Fatalf("read upstream body: %v", err)
 				}
-				assertForwardedBody(t, capturedBody)
+				assertForwardedBody(t, capturedBody, !tc.stream)
 				if tc.stream {
 					w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 					_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
@@ -1914,7 +1921,7 @@ func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
 			if tc.path == pool.InferencePathWSTunneled {
 				opts = append(opts, buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
 					capturedBody = append([]byte(nil), body...)
-					assertForwardedBody(t, capturedBody)
+					assertForwardedBody(t, capturedBody, !tc.stream)
 					chunks := make(chan providerws.InferenceResponseChunk, 1)
 					done := make(chan providerws.InferenceResponseEnd, 1)
 					errs := make(chan error, 1)
@@ -2043,7 +2050,7 @@ func TestChatCompletionsRejectsOversizedBodyBeforeParsing(t *testing.T) {
 	if rr.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized invalid status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"request_too_large"`)) {
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"request_body_too_large"`)) {
 		t.Fatalf("oversized invalid body=%s", rr.Body.String())
 	}
 
@@ -3671,7 +3678,7 @@ func TestChatCompletionsProvisionalQuotaReturns429(t *testing.T) {
 func TestChatCompletionsValidationPrecedesModelLookup(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
-	body := []byte(`{"model":"missing-model","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"test","arguments":"{not json}"}}]}]}`)
+	body := []byte(`{"model":"missing-model","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_0123456789abcdef","type":"function","function":{"name":"test","arguments":"{not json}"}}]}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	rr := httptest.NewRecorder()
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/storage"
@@ -85,15 +86,107 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
+// maxKnownSchemaVersion is the highest schema_migrations.version this
+// binary understands. Version history:
+//   v1 — original schema.
+//   v2 — issue #196: usage_events PK (account_id, request_id).
+//   v3 — issue #210: demo_usage_events PK (demo_token_hash, request_id).
+//
+// At Open time the store reads the current applied version; if it
+// exceeds this constant the binary is older than the DB and refuses
+// to start, preventing silent data hazards on rollback (e.g., a
+// legacy `WHERE request_id = ?` lookup returning a wrong-identity
+// row once cross-identity collisions exist).
+//
+// Operators rolling back the gateway binary on a DB at a higher
+// version must restore /var/lib/macprovider/gateway.db from the
+// pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
+const maxKnownSchemaVersion = 3
+
 func (s *Store) Migrate(ctx context.Context) error {
+	if err := s.checkSchemaVersionGate(ctx); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
+		return err
+	}
+	// usage_events table + auxiliary DDL (indexes + append-only
+	// triggers) are kept in shared constants so the in-place upgrade
+	// path (ensureUsageEventsCompositePK) creates them with identical
+	// text, preserving sqlite_master byte-equality across fresh
+	// installs and migrated DBs.
+	if _, err := s.db.ExecContext(ctx, usageEventsTableDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, usageEventsAuxiliaryDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, demoUsageEventsTableDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, demoUsageEventsAuxiliaryDDL); err != nil {
 		return err
 	}
 	if err := s.ensureOAuthStateActionColumn(ctx); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)", encodeTime(time.Now().UTC()))
-	return err
+	if err := s.ensureUsageEventsCompositePK(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureDemoUsageEventsCompositePK(ctx); err != nil {
+		return err
+	}
+	// Stamp the schema version. We always insert v1 (preserves
+	// historical behavior for any tooling that checked exactly that
+	// row) AND the post-#196 marker v2. INSERT OR IGNORE keeps it
+	// idempotent on re-run.
+	//
+	// Note: ensureUsageEventsCompositePK ALSO stamps v2 inside its
+	// rebuild transaction so the shape change and the version marker
+	// commit atomically (ISS-196 R4 architect HIGH). The outer v2
+	// insert here is the no-op repair path for new installs and for
+	// DBs that came through Migrate without needing a rebuild.
+	now := encodeTime(time.Now().UTC())
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)", now); err != nil {
+		return err
+	}
+	return nil
+}
+
+// checkSchemaVersionGate refuses to run Migrate when the DB carries
+// a schema version higher than this binary knows about. Protects
+// against the silent-corruption rollback scenario flagged in the
+// ISS-196 R1 architect HIGH finding: an older binary opening a
+// DB that has already been migrated to a composite-PK shape would
+// run the legacy `WHERE request_id = ?` query and risk returning
+// a wrong-account row once cross-account request_id duplicates
+// exist. Failing closed at Open is the safe choice.
+func (s *Store) checkSchemaVersionGate(ctx context.Context) error {
+	// schema_migrations may not exist yet on a brand-new DB; the
+	// follow-up schemaSQL run creates it. Tolerate the missing-table
+	// case here.
+	var current sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&current)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return nil
+		}
+		return err
+	}
+	if !current.Valid {
+		return nil
+	}
+	if current.Int64 > maxKnownSchemaVersion {
+		return fmt.Errorf("gateway DB schema_migrations.version=%d exceeds this binary's max-known version %d — refusing to open (issue #196 rollback safety). Restore from pre-deploy snapshot.",
+			current.Int64, maxKnownSchemaVersion)
+	}
+	return nil
 }
 
 // ensureOAuthStateActionColumn handles upgrade-in-place for pre-existing
@@ -128,6 +221,210 @@ func (s *Store) ensureOAuthStateActionColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx, `ALTER TABLE oauth_states ADD COLUMN action TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+// ensureUsageEventsCompositePK upgrades pre-issue-#196 gateway.db files
+// whose `usage_events` table has PRIMARY KEY (request_id) — a global
+// uniqueness constraint that lets a buyer with two accounts collide on
+// the same X-Request-ID after streaming has flushed, escaping
+// settlement. The fix is composite PK (account_id, request_id).
+//
+// New installs land on the composite PK directly via schemaSQL. Old
+// installs need a table rebuild because SQLite cannot ALTER PRIMARY
+// KEY in place. Detection: PRAGMA table_info pk-column count and
+// names.
+//
+// The rebuild runs inside a single deferred-FK transaction so partial
+// state cannot leak. The append-only DELETE/UPDATE triggers and the
+// two secondary indexes ride along with the renamed table per SQLite
+// ALTER TABLE RENAME semantics (verified against the SQLite docs);
+// no manual recreate is needed.
+func (s *Store) ensureUsageEventsCompositePK(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(usage_events)`)
+	if err != nil {
+		return err
+	}
+	type col struct {
+		name string
+		pk   int
+	}
+	var pkCols []col
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if pk > 0 {
+			pkCols = append(pkCols, col{name: name, pk: pk})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	// Composite (account_id, request_id) — already migrated.
+	if len(pkCols) == 2 &&
+		((pkCols[0].name == "account_id" && pkCols[1].name == "request_id") ||
+			(pkCols[0].name == "request_id" && pkCols[1].name == "account_id")) {
+		return nil
+	}
+	// Anything other than the legacy single-column (request_id) PK is
+	// an unrecognized shape — bail loudly rather than corrupt data.
+	if !(len(pkCols) == 1 && pkCols[0].name == "request_id") {
+		return fmt.Errorf("usage_events PK shape unrecognized: %+v", pkCols)
+	}
+	// Rebuild. PRAGMA foreign_keys is OFF for the duration so the
+	// drop+rename does not trip cascading FK checks (usage_events is
+	// not a FK target today, but defensive). Restored on exit.
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	}()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Sequence: legacy → legacy_old (rename), then create the
+	// canonical usage_events with the new PK using its REAL name
+	// from the start. This keeps sqlite_master.sql for usage_events
+	// byte-equal between fresh installs and migrated DBs (an
+	// ALTER...RENAME would store `CREATE TABLE "usage_events"` with
+	// quotes — caught by ISS-196 R2 architect MEDIUM).
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE usage_events RENAME TO usage_events_legacy`); err != nil {
+		return fmt.Errorf("rename legacy usage_events aside: %w", err)
+	}
+	// Use the SAME usageEventsTableDDL the fresh-install path runs so
+	// sqlite_master.sql for usage_events is byte-equal across paths.
+	if _, err := tx.ExecContext(ctx, usageEventsTableDDL); err != nil {
+		return fmt.Errorf("create new usage_events: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO usage_events
+			(request_id, account_id, demo_identity, window_date,
+			 prompt_tokens, completion_tokens, total_tokens,
+			 token_source, outcome, created_at)
+		SELECT request_id, account_id, demo_identity, window_date,
+		       prompt_tokens, completion_tokens, total_tokens,
+		       token_source, outcome, created_at
+		FROM usage_events_legacy`); err != nil {
+		return fmt.Errorf("copy usage_events rows: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE usage_events_legacy`); err != nil {
+		return fmt.Errorf("drop legacy usage_events table: %w", err)
+	}
+	// Recreate the secondary indexes and append-only triggers. DROP
+	// TABLE removed them. The shared usageEventsAuxiliaryDDL constant
+	// is the SAME text Migrate() executes on a fresh install, so the
+	// post-migration sqlite_master entries are byte-for-byte identical
+	// — addresses architect R1 MEDIUM finding.
+	if _, err := tx.ExecContext(ctx, usageEventsAuxiliaryDDL); err != nil {
+		return fmt.Errorf("recreate usage_events index/trigger: %w", err)
+	}
+	// Stamp schema_migrations version 2 inside the SAME transaction as
+	// the rebuild. Without this atomicity, the rebuild could commit but
+	// the version stamp could fail — leaving a composite-PK DB with no
+	// v2 marker, which the next open (or an old binary) would treat as
+	// v1 and proceed against a shape it doesn't understand. ISS-196 R4
+	// architect HIGH.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v2 inside rebuild tx: %w", err)
+	}
+	return tx.Commit()
+}
+
+// ensureDemoUsageEventsCompositePK is the issue #210 sibling of
+// ensureUsageEventsCompositePK. Migrates `demo_usage_events` from
+// PRIMARY KEY (request_id) — pre-existing global uniqueness across
+// all demo identities, exploitable when two demo_token_hash values
+// collide on the same buyer-supplied X-Request-ID — to composite
+// PRIMARY KEY (demo_token_hash, request_id).
+//
+// Same rebuild pattern as the v2 migration: detect legacy shape,
+// rename-aside + create-canonical + copy + drop, stamp v3 inside
+// the same transaction so the shape change and the version marker
+// commit atomically.
+func (s *Store) ensureDemoUsageEventsCompositePK(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(demo_usage_events)`)
+	if err != nil {
+		return err
+	}
+	type col struct {
+		name string
+		pk   int
+	}
+	var pkCols []col
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if pk > 0 {
+			pkCols = append(pkCols, col{name: name, pk: pk})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	// Composite (demo_token_hash, request_id) — already migrated.
+	if len(pkCols) == 2 &&
+		((pkCols[0].name == "demo_token_hash" && pkCols[1].name == "request_id") ||
+			(pkCols[0].name == "request_id" && pkCols[1].name == "demo_token_hash")) {
+		return nil
+	}
+	if !(len(pkCols) == 1 && pkCols[0].name == "request_id") {
+		return fmt.Errorf("demo_usage_events PK shape unrecognized: %+v", pkCols)
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	}()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE demo_usage_events RENAME TO demo_usage_events_legacy`); err != nil {
+		return fmt.Errorf("rename legacy demo_usage_events aside: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, demoUsageEventsTableDDL); err != nil {
+		return fmt.Errorf("create new demo_usage_events: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO demo_usage_events
+			(request_id, client_ip, demo_token_hash, window_date, total_tokens, created_at)
+		SELECT request_id, client_ip, demo_token_hash, window_date, total_tokens, created_at
+		FROM demo_usage_events_legacy`); err != nil {
+		return fmt.Errorf("copy demo_usage_events rows: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE demo_usage_events_legacy`); err != nil {
+		return fmt.Errorf("drop legacy demo_usage_events table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, demoUsageEventsAuxiliaryDDL); err != nil {
+		return fmt.Errorf("recreate demo_usage_events index/trigger: %w", err)
+	}
+	// Stamp v3 inside the same transaction — atomicity per ISS-196 R4.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v3 inside rebuild tx: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) CreateAccount(ctx context.Context, account storage.Account) error {
@@ -659,16 +956,30 @@ func (s *Store) InsertUsageEvent(ctx context.Context, event storage.UsageEvent) 
 // is missing or in an unexpected state, the buyer-facing usage record
 // MUST exist after bytes have flowed (issue #187).
 //
-// PK-collision verify (ISS-187 R1 code+security MAJOR): the gateway
-// `usage_events.request_id` is a GLOBAL primary key (issue #196,
-// pre-existing). If INSERT OR IGNORE silently no-ops on conflict,
-// an attacker with two accounts could collide a request_id and skip
-// the audit row. EnsureUsageEvent now checks RowsAffected; on 0, it
-// reads the existing row and confirms (account_id, demo_identity,
-// token_source, outcome) MATCH the incoming event. If they
-// disagree, returns ErrUsageEventConflict so the caller knows the
-// fallback failed and must refund.
+// PK-collision verify (ISS-187 R1 code+security MAJOR): historically
+// the gateway `usage_events.request_id` was a GLOBAL primary key,
+// allowing cross-account collisions (issue #196). The schema is now
+// `(account_id, request_id)`, so the only legitimate INSERT OR IGNORE
+// no-op is a same-account retry — typically a SPEC-006 § 17.7 fallback
+// firing again after the primary settle path. EnsureUsageEvent still
+// checks RowsAffected on 0 and verifies the full billing payload
+// (tokens + window + identity) matches; a mismatch returns
+// ErrUsageEventConflict so the caller knows the fallback failed and
+// must refund. With the composite PK the cross-account branch can no
+// longer occur — the verify is retained as defense in depth against
+// same-account payload drift (e.g. two settle paths racing with
+// different token counts).
 func (s *Store) EnsureUsageEvent(ctx context.Context, event storage.UsageEvent) error {
+	// Normalize identically to insertUsageEventExec so the post-insert
+	// payload comparison below reads the same TotalTokens value that
+	// is persisted on disk. Without this, a benign retry that passes
+	// TotalTokens=0 (with prompt+completion set) would compare 0
+	// against the row's normalized prompt+completion sum and
+	// falsely return ErrUsageEventConflict, triggering a wrong
+	// refund. Caught by ISS-196 R2 codex CODE MEDIUM.
+	if event.TotalTokens == 0 {
+		event.TotalTokens = event.PromptTokens + event.CompletionTokens
+	}
 	result, err := s.insertUsageEventExec(ctx, event, true)
 	if err != nil {
 		return err
@@ -702,7 +1013,7 @@ func (s *Store) EnsureUsageEvent(ctx context.Context, event storage.UsageEvent) 
 	}
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome
-		FROM usage_events WHERE request_id = ?`, event.RequestID).Scan(
+		FROM usage_events WHERE account_id = ? AND request_id = ?`, event.AccountID, event.RequestID).Scan(
 		&existing.AccountID, &existing.DemoIdentity, &existing.WindowDate,
 		&existing.PromptTokens, &existing.CompletionTokens, &existing.TotalTokens,
 		&existing.TokenSource, &existing.Outcome,

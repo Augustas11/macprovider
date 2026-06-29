@@ -46,6 +46,22 @@ INSERT INTO ledger_reconciliation_runs (
 	}()
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// SPEC-002 v1.5.0 / issue #211 money-path defense-in-depth: the
+	// orphan-detection subquery and the `prior` / `same` counts below
+	// scope by (account_id, request_id) using SQLite `IS` semantics
+	// so all three reconciliation sites (hotpath.go, this file,
+	// endpoints.go admin reconcile) compute the same attempt ordinal.
+	// Note that rl.request_id is coordinator-internal (server-minted
+	// UUID v4); the buyer-supplied collision class lives on
+	// external_request_id and is addressed by the composite
+	// (account_id, external_request_id) reconciliation key. This
+	// scoping is defense-in-depth: should the same internal
+	// request_id ever recur across accounts (UUID collision,
+	// retry-loop bug, future schema change), each account's
+	// attempts are derived within its own scope rather than
+	// misclassified as cross-account retries. NULL-account_id
+	// legacy rows cluster with NULL-account_id rows only —
+	// backwards-compatible with pre-v1.5.0 single-account behavior.
 	orphanRes, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET quarantined = 1,
@@ -65,7 +81,9 @@ UPDATE ledger_request_credits
         WHERE rl.request_id = ledger_request_credits.request_id
           AND COALESCE((
               SELECT COUNT(*) - 1 FROM request_log prior
-               WHERE prior.request_id = rl.request_id AND prior.id <= rl.id
+               WHERE prior.account_id IS rl.account_id
+                 AND prior.request_id = rl.request_id
+                 AND prior.id <= rl.id
           ), 0) = ledger_request_credits.attempt_n
    )`, now, in.ScanFrom.UTC().Format(time.RFC3339Nano), in.ScanTo.UTC().Format(time.RFC3339Nano))
 	if err != nil {
@@ -79,11 +97,14 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
        rl.retried,
        COALESCE((
          SELECT COUNT(*) - 1 FROM request_log prior
-          WHERE prior.request_id = rl.request_id AND prior.id <= rl.id
+          WHERE prior.account_id IS rl.account_id
+            AND prior.request_id = rl.request_id
+            AND prior.id <= rl.id
        ), 0) AS attempt_n,
        COALESCE((
          SELECT COUNT(*) FROM request_log same
-          WHERE same.request_id = rl.request_id
+          WHERE same.account_id IS rl.account_id
+            AND same.request_id = rl.request_id
        ), 0) AS same_request_count
   FROM request_log rl
  WHERE rl.ts_utc >= ? AND rl.ts_utc < ?

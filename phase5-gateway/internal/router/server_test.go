@@ -1559,6 +1559,18 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	if got := captured.Get("X-Request-ID"); got != "55555555-5555-4555-8555-555555555555" {
 		t.Fatalf("forwarded X-Request-ID = %q, want buyer-supplied value preserved", got)
 	}
+	// SPEC-006 v0.9.1 + SPEC-002 v1.5.0 + issue #211: the gateway MUST
+	// forward X-MacProvider-Account on EVERY forwarded buyer request
+	// (not just the sticky-routing conditional path). The composite
+	// (account_id, external_request_id) is the reconciliation key
+	// joining gateway usage_events to coordinator request_log; without
+	// the header on the hot non-sticky path the coordinator could not
+	// attribute the row to the gateway account, reopening the
+	// cross-account request_id-collision class on the coordinator
+	// audit-trail side. This test exercises the non-sticky bearer path.
+	if got := captured.Get("X-MacProvider-Account"); got != "acct_strip_success" {
+		t.Fatalf("forwarded X-MacProvider-Account = %q, want %q (issue #211: non-sticky hot path must forward account id)", got, "acct_strip_success")
+	}
 	if got := captured.Get("X-MacProvider-Retry"); got != "1" {
 		t.Fatalf("forwarded retry = %q, want 1", got)
 	}
@@ -1757,14 +1769,30 @@ func TestStickyConversationIgnoredForDemoTraffic(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
+	// SPEC-006 v0.9.1 / issue #211: sticky's distinguishing header is
+	// X-MacProvider-Internal-Conv; it MUST remain suppressed on demo
+	// traffic. That's the test's name and core intent.
 	if got := captured.Get("X-MacProvider-Internal-Conv"); got != "" {
 		t.Fatalf("demo internal conversation forwarded: %q", got)
 	}
-	if got := captured.Get("X-MacProvider-Account"); got != "" {
-		t.Fatalf("demo account forwarded: %q", got)
+	// SPEC-006 v0.9.1 / issue #211: X-MacProvider-Account is now
+	// forwarded unconditionally (including for demo subjects) so
+	// coordinator request_log.account_id can hold "demo:<ip>" and
+	// the reconciliation key (account_id, external_request_id) is
+	// well-defined for demo rows too. The coordinator gates the
+	// header behind the upstream Authorization bearer
+	// (hasInternalRoutingHeader / internalBearerAuthorized in
+	// phase4-coordinator/internal/buyer/server.go), so the bearer
+	// is also now sent on every forward — including demo. This is
+	// a SPEC-006 v0.9.1 contract change relative to pre-v0.9.1
+	// behavior where Authorization was sticky-gated. Sticky-only
+	// state (X-MacProvider-Internal-Conv) is still suppressed for
+	// demo; that's what this test's name still guards.
+	if got := captured.Get("X-MacProvider-Account"); got != "demo:1.2.3.4" {
+		t.Fatalf("demo account header = %q, want %q", got, "demo:1.2.3.4")
 	}
-	if got := captured.Get("Authorization"); got != "" {
-		t.Fatalf("demo coordinator auth forwarded: %q", got)
+	if got := captured.Get("Authorization"); got == "" {
+		t.Fatalf("demo coordinator Authorization missing — SPEC-006 v0.9.1 / issue #211 requires it whenever X-MacProvider-Account is forwarded")
 	}
 	if got := captured.Get("X-Demo-Token"); got != "" {
 		t.Fatalf("demo token forwarded: %q", got)
@@ -1950,17 +1978,84 @@ func TestUsageFromJSONValidatesProviderReportedUsage(t *testing.T) {
 		{name: "exceeds_request_bound", body: `{"usage":{"prompt_tokens":1,"completion_tokens":10,"total_tokens":11}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, ok, err := usageFromJSON([]byte(tc.body), 10); !ok || err == nil {
+			if _, ok, err := usageFromJSON([]byte(tc.body), 10, 10); !ok || err == nil {
 				t.Fatalf("usageFromJSON ok=%v err=%v, want provider usage validation error", ok, err)
 			}
 		})
 	}
-	usage, ok, err := usageFromJSON([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2}}`), 10)
+	usage, ok, err := usageFromJSON([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2}}`), 10, 10)
 	if err != nil || !ok || usage.TotalTokens != 3 {
 		t.Fatalf("valid usage = %#v ok=%v err=%v, want total 3", usage, ok, err)
 	}
-	if _, ok, err := usageFromJSON([]byte(`{"usage":null}`), 10); ok || err != nil {
+	if _, ok, err := usageFromJSON([]byte(`{"usage":null}`), 10, 10); ok || err != nil {
 		t.Fatalf("usage null ok=%v err=%v, want absent usage", ok, err)
+	}
+}
+
+// TestEstimatePromptTokensHeadroomCoversAir5 regresses the 2026-06-28
+// phase-A re-run finding where a 115-byte body + max_tokens=4 produced
+// a cap of 33, but mlx-community/Qwen2.5-Coder-7B-Instruct-4bit's
+// tokenizer reported prompt=30 + completion=4 = 34, tripping the
+// usageFromJSON cap as invalid_provider_usage even though the
+// provider's response was correct. The fix adds
+// promptHeadroomTokens (= 64) padding to the byte-heuristic so a
+// 1-token discrepancy between heuristic and actual tokenizer no
+// longer breaks chat completions with small max_tokens.
+func TestEstimatePromptTokensHeadroomCoversAir5(t *testing.T) {
+	body := []byte(`{"model":"mlx-community/Qwen2.5-Coder-7B-Instruct-4bit","max_tokens":4,"messages":[{"role":"user","content":"hi"}]}`)
+	maxTokens := int64(4)
+	// Cap uses promptCapTokens (with chat-template headroom). Billing
+	// paths use bare estimatePromptTokens — see chat_proxy.go split.
+	maxUsageTokens := promptCapTokens(body) + maxTokens
+	// Provider's actual tokenization for this body.
+	providerUsage := []byte(`{"usage":{"prompt_tokens":30,"completion_tokens":4,"total_tokens":34}}`)
+	usage, ok, err := usageFromJSON(providerUsage, maxUsageTokens, maxTokens)
+	if !ok || err != nil {
+		t.Fatalf("usageFromJSON ok=%v err=%v, want clean accept of provider tokenization within headroom (cap=%d, sum=34)", ok, err, maxUsageTokens)
+	}
+	if usage.PromptTokens != 30 || usage.CompletionTokens != 4 || usage.TotalTokens != 34 {
+		t.Fatalf("usage=%#v, want prompt=30 completion=4 total=34", usage)
+	}
+
+	// Sanity: a malicious provider reporting prompt=10000 for the same
+	// 115-byte body must STILL trip the cap. Headroom doesn't break
+	// the over-billing defense.
+	abusiveUsage := []byte(`{"usage":{"prompt_tokens":10000,"completion_tokens":1,"total_tokens":10001}}`)
+	if _, _, err := usageFromJSON(abusiveUsage, maxUsageTokens, maxTokens); err == nil {
+		t.Fatalf("expected cap rejection for prompt=10000 on a 115-byte body (cap=%d)", maxUsageTokens)
+	}
+
+	// R1 CODE HIGH #1: a malicious provider must NOT be able to spend
+	// the prompt-cap headroom as inflated completion_tokens. Buyer
+	// asked for max_tokens=4; provider reporting completion=68 (well
+	// under maxUsageTokens=97 thanks to the +64 prompt headroom)
+	// would over-bill the buyer 17× the requested max. Must reject
+	// on the explicit completion check.
+	inflatedCompletion := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":68,"total_tokens":78}}`)
+	if _, _, err := usageFromJSON(inflatedCompletion, maxUsageTokens, maxTokens); err == nil {
+		t.Fatalf("expected rejection of completion=68 when max_tokens=4 (sum=78 within maxUsageTokens=%d but completion exceeds max)", maxUsageTokens)
+	}
+}
+
+// TestCompletionFromHeaderCapsAtMaxTokens — R2 CODE HIGH: the
+// X-MacProvider-Completion-Tokens header path is used on the
+// upstream-error settlement paths. With the +64 prompt-cap
+// headroom, a malicious upstream could send a header value above
+// max_tokens and over-bill the buyer through the gateway-estimated
+// fallback. The completionFromHeaderCapped wrapper clamps to
+// maxTokens, mirroring the JSON-usage maxCompletion check.
+func TestCompletionFromHeaderCapsAtMaxTokens(t *testing.T) {
+	header := http.Header{}
+	header.Set("X-MacProvider-Completion-Tokens", "68")
+	if got := completionFromHeaderCapped(header, 4); got != 4 {
+		t.Fatalf("completionFromHeaderCapped clamped=%d, want 4 (max_tokens cap)", got)
+	}
+	if got := completionFromHeaderCapped(header, 100); got != 68 {
+		t.Fatalf("completionFromHeaderCapped under cap=%d, want 68 (pass-through)", got)
+	}
+	emptyHeader := http.Header{}
+	if got := completionFromHeaderCapped(emptyHeader, 4); got != 0 {
+		t.Fatalf("completionFromHeaderCapped no-header=%d, want 0", got)
 	}
 }
 
@@ -2381,14 +2476,16 @@ func TestStreamingSettlementFallbackWritesUsageEventOnMissingReservation(t *test
 	}
 }
 
-// TestEnsureUsageEventRejectsCrossAccountConflict pins the ISS-187
-// R1 code+security MAJOR: when the gateway's INSERT OR IGNORE
-// silently no-ops on the pre-existing #196 PK-collision attack
-// surface, EnsureUsageEvent now reads the existing row and rejects
-// the call if (account_id, demo_identity, token_source, outcome)
-// don't match — preventing a malicious buyer from skipping their
-// audit row by colliding with an unrelated request_id.
-func TestEnsureUsageEventRejectsCrossAccountConflict(t *testing.T) {
+// TestEnsureUsageEventCrossAccountInsertsBothRows pins the issue
+// #196 schema fix: usage_events PRIMARY KEY is now
+// (account_id, request_id), so a buyer using the same X-Request-ID
+// under two different accounts produces TWO distinct rows — each
+// account is billed independently and the attack surface that
+// motivated the earlier ISS-187 R1 payload-verify defense no longer
+// exists. The verify code is retained as defense in depth against
+// same-account payload drift (covered by the sibling
+// TestEnsureUsageEventRejectsSameIdentityPayloadMismatch).
+func TestEnsureUsageEventCrossAccountInsertsBothRows(t *testing.T) {
 	dir := t.TempDir()
 	st, err := sqlite.Open(context.Background(), dir+"/test.db")
 	if err != nil {
@@ -2397,21 +2494,36 @@ func TestEnsureUsageEventRejectsCrossAccountConflict(t *testing.T) {
 	defer st.Close()
 	rid := "55555555-5555-4555-8555-555555555555"
 	now := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
-	if err := st.InsertUsageEvent(context.Background(), storage.UsageEvent{
+	victim := storage.UsageEvent{
 		RequestID: rid, AccountID: "victim_account",
 		WindowDate: "2026-06-28", PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30,
 		TokenSource: "provider_reported", Outcome: "ok", CreatedAt: now,
-	}); err != nil {
+	}
+	if err := st.InsertUsageEvent(context.Background(), victim); err != nil {
 		t.Fatalf("InsertUsageEvent (victim row): %v", err)
 	}
-	// Attacker tries to write the SAME request_id under a different account.
-	err = st.EnsureUsageEvent(context.Background(), storage.UsageEvent{
+	attacker := storage.UsageEvent{
 		RequestID: rid, AccountID: "attacker_account",
 		WindowDate: "2026-06-28", PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
 		TokenSource: "gateway_estimated", Outcome: "stream_truncated", CreatedAt: now,
-	})
-	if !errors.Is(err, storage.ErrUsageEventConflict) {
-		t.Fatalf("EnsureUsageEvent on cross-account PK collision: err=%v, want ErrUsageEventConflict", err)
+	}
+	if err := st.EnsureUsageEvent(context.Background(), attacker); err != nil {
+		t.Fatalf("EnsureUsageEvent for cross-account same-request_id must succeed under composite PK: %v", err)
+	}
+	// Both rows persisted, each billed against its own account.
+	victimUsed, _, err := st.DailyUsage(context.Background(), "victim_account", "2026-06-28")
+	if err != nil {
+		t.Fatalf("DailyUsage(victim): %v", err)
+	}
+	if victimUsed != 30 {
+		t.Errorf("victim used = %d, want 30", victimUsed)
+	}
+	attackerUsed, _, err := st.DailyUsage(context.Background(), "attacker_account", "2026-06-28")
+	if err != nil {
+		t.Fatalf("DailyUsage(attacker): %v", err)
+	}
+	if attackerUsed != 2 {
+		t.Errorf("attacker used = %d, want 2 (must be billed independently from victim)", attackerUsed)
 	}
 }
 
@@ -2631,7 +2743,7 @@ func TestStreamingProviderReportedUsageCannotUnderstateTruncatedOutput(t *testin
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
 	promptEstimate := estimatePromptTokens([]byte(body))
-	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), promptEstimate, promptEstimate+500)
+	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), 500)
 	wantUsed := float64(promptEstimate + wantCompletion)
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
@@ -3247,7 +3359,7 @@ func TestStreamingProviderReportedUsageCannotUnderstateObservedOutput(t *testing
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
 	promptEstimate := estimatePromptTokens([]byte(body))
-	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), promptEstimate, promptEstimate+500)
+	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), 500)
 	wantUsed := float64(promptEstimate + wantCompletion)
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
@@ -3288,7 +3400,7 @@ func TestStreamingUnderreportedUsageWithHighProviderPromptFallsBackToGatewayEsti
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
-	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), promptEstimate, promptEstimate+20)
+	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), 20)
 	wantUsed := float64(promptEstimate + wantCompletion)
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
@@ -3949,6 +4061,71 @@ func TestCoordinatorTier2PolicyErrorsPassThroughAndDoNotChargeQuota(t *testing.T
 				}
 				if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
 					t.Fatalf("daily_tokens_reserved=%v, want 0", reserved)
+				}
+			})
+		}
+	}
+}
+
+// TestCoordinatorIdempotencyReplayPassesThroughAndRefunds pins
+// issue #200: when the coordinator returns 409
+// idempotency_key_replayed (or idempotency_key_body_mismatch), the
+// gateway MUST refund the reservation it made and pass the
+// coordinator response body through verbatim. Pre-fix it fell
+// through the generic !=200 branch, called settleBeforeResponse
+// with outcome="upstream_error" (billing the buyer for the prompt
+// estimate even though no provider work ran), and remapped the
+// response to a 502.
+func TestCoordinatorIdempotencyReplayPassesThroughAndRefunds(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+	}{
+		{"replayed", "idempotency_key_replayed"},
+		{"body_mismatch", "idempotency_key_body_mismatch"},
+	}
+	for _, tc := range cases {
+		for _, stream := range []bool{false, true} {
+			name := tc.name + "_non_stream"
+			if stream {
+				name = tc.name + "_stream"
+			}
+			t.Run(name, func(t *testing.T) {
+				coordBody := fmt.Sprintf(`{"error":{"code":%q,"message":"idempotency","param":null,"type":"invalid_request_error"}}`, tc.code)
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return responseWithBody(http.StatusConflict, http.Header{"Content-Type": []string{"application/json"}}, coordBody), nil
+				})}
+				h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+					cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				}, WithHTTPClient(client))
+				fullKey := createAccountAndKey(t, store, cfg, "acct_"+name)
+
+				body := `{"model":"model-a","max_tokens":1000,"messages":[{"role":"user","content":"x"}]}`
+				if stream {
+					body = `{"model":"model-a","max_tokens":1000,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+				}
+				resp := postChat(t, h, fullKey, body, nil)
+
+				// (a) Buyer sees the coordinator 409 + envelope verbatim,
+				//     NOT a remapped 502 / upstream_provider_error.
+				if resp.Code != http.StatusConflict {
+					t.Fatalf("status=%d, want 409, body=%s", resp.Code, resp.Body.String())
+				}
+				if !strings.Contains(resp.Body.String(), `"code":"`+tc.code+`"`) {
+					t.Fatalf("body lost coord error envelope: %s", resp.Body.String())
+				}
+				if strings.Contains(resp.Body.String(), "upstream_provider_error") {
+					t.Fatalf("body remapped to upstream_provider_error: %s", resp.Body.String())
+				}
+
+				// (b) No quota burn — refund must have fired.
+				usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+				quota := readQuota(t, usageResp)
+				if used := quota["daily_tokens_used"].(float64); used != 0 {
+					t.Fatalf("daily_tokens_used=%v, want 0 — idempotency 409 must not charge quota", used)
+				}
+				if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+					t.Fatalf("daily_tokens_reserved=%v, want 0 — reservation must be refunded on idempotency 409", reserved)
 				}
 			})
 		}

@@ -23,8 +23,20 @@ func TestStrangerKeyOpenAIChatUsageFlow(t *testing.T) {
 		if r.URL.Path != "/v1/chat/completions" {
 			return responseWithBody(http.StatusNotFound, nil, `{}`), nil
 		}
-		if got := r.Header.Get("Authorization"); got != "" {
-			t.Fatalf("forwarded buyer auth header=%q", got)
+		// SPEC-006 v0.9.1 / issue #211: the upstream Authorization
+		// header is now hoisted out of the sticky-routing conditional
+		// and set on every forward (alongside X-MacProvider-Account)
+		// because the coordinator gates X-MacProvider-Account behind
+		// internalBearerAuthorized. The value MUST be the gateway's
+		// configured upstream coordinator bearer — NOT the buyer's
+		// mp_-prefixed API key. This assertion guards that the
+		// buyer's bearer is not silently exfiltrated upstream.
+		got := r.Header.Get("Authorization")
+		if strings.Contains(got, "mp_") {
+			t.Fatalf("forwarded buyer auth header (mp_ key leaked)=%q", got)
+		}
+		if got != "Bearer operator-key" {
+			t.Fatalf("forwarded Authorization=%q, want %q", got, "Bearer operator-key")
 		}
 		forwardedRequestID = r.Header.Get("X-Request-ID")
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
@@ -383,7 +395,7 @@ func TestProviderUnavailableReturns503AndRefunds(t *testing.T) {
 	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	assertErrorCode(t, resp.Body.String(), "provider_unavailable")
+	assertErrorCode(t, resp.Body.String(), "no_provider_available")
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
 	if quota["daily_tokens_used"].(float64) != 0 || quota["daily_tokens_reserved"].(float64) != 0 {

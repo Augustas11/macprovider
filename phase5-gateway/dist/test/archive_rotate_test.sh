@@ -308,7 +308,7 @@ test_schema_mismatch_refused() {
   local db="$w/gateway.db"
   seed_db "$db"
   # Forge an archive-equivalent DB with schema_migrations bumped beyond
-  # expected version (which is 1 in the restore script).
+  # expected version (now 2 after issue #196).
   sqlite3 "$db" "INSERT INTO schema_migrations VALUES (9999, '2099-01-01T00:00:00Z');"
 
   FORCE_ROTATE=1 run_rotate "$db" "$w/archive" 2>"$w/r.stderr" || { cat "$w/r.stderr"; rm -rf "$w"; record_result "T5_schema_mismatch_refused" "0"; return; }

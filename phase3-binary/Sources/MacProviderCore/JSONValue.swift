@@ -39,4 +39,31 @@ public indirect enum JSONValue: Equatable, Sendable {
         }
         throw APIError(status: 400, message: "Unsupported JSON value", code: "invalid_request")
     }
+
+    public var jsonObject: Any {
+        switch self {
+        case .object(let object):
+            return object.mapValues { $0.jsonObject }
+        case .array(let array):
+            return array.map { $0.jsonObject }
+        case .string(let string):
+            return string
+        case .int(let int):
+            return int
+        case .double(let double):
+            return double
+        case .bool(let bool):
+            return bool
+        case .null:
+            return NSNull()
+        }
+    }
+
+    public func deterministicJSONString() throws -> String {
+        let data = try JSONSerialization.data(
+            withJSONObject: jsonObject,
+            options: [.sortedKeys, .withoutEscapingSlashes, .fragmentsAllowed]
+        )
+        return String(decoding: data, as: UTF8.self)
+    }
 }

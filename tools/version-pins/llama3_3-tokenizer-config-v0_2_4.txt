@@ -1,0 +1,34 @@
+# Llama-3.3-70B-Instruct tokenizer_config.json — structural pin for SPEC-018 v0.2 §3.8.1
+#
+# Source: https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct/blob/main/tokenizer_config.json
+# Status: GATED on HuggingFace (Meta access agreement required). Cannot be fetched
+#         without HF_TOKEN holding access grant.
+#
+# Structural pin rather than byte-exact: §3.8.1 explicitly allows "structural plus
+# pinned upstream artifact where they are not byte-stable." Llama-3.3 chat template
+# semantics are documented at:
+# - https://www.llama.com/docs/model-cards-and-prompt-formats/llama3_3/
+# - https://huggingface.co/blog/llama31 (Llama-3.1 inherits to 3.3)
+#
+# Normative template structure for Llama-3.3 multi-turn tool calling (per public docs):
+#
+# - System turn delimiter: "<|begin_of_text|><|start_header_id|>system<|end_header_id|>"
+# - User turn delimiter:   "<|start_header_id|>user<|end_header_id|>"
+# - Assistant turn delimiter: "<|start_header_id|>assistant<|end_header_id|>"
+# - Tool turn delimiter:   "<|start_header_id|>ipython<|end_header_id|>"
+# - End-of-message marker: "<|eot_id|>"
+# - Tool-call sentinel (assistant emitting): "<|python_tag|>" followed by JSON
+#   with shape {"name": "<fn>", "parameters": {<args>}}
+# - Tool-result rendering (provider injecting): plain JSON-stringified result
+#   content inside the ipython turn body
+#
+# Implementation in phase3-binary/Sources/macprovider-cli/ToolPromptRenderer.swift
+# follows this structural contract. Golden fixture in MultiTurnTests.swift verifies
+# the structural assertions: presence of <|python_tag|>, <|eot_id|>, ipython turn
+# delimiters in the expected positions for a known multi-turn fixture input.
+#
+# Update procedure: when Meta publishes Llama-3.4+ or changes the chat template,
+# re-verify against new docs + update this pin file before updating ToolPromptRenderer.
+#
+# Fetched: 2026-06-28 (structural docs at the URLs above; the actual tokenizer_config.json
+# was 401 unauthenticated as expected for gated Meta models).

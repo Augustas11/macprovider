@@ -210,11 +210,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         var parsedRequest: ChatCompletionRequest?
 
         do {
+            try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
             let request = try ChatCompletionRequest.parse(data: data)
             parsedRequest = request
             if !warmSwapEnabled {
                 try request.validateModelMatches(modelID)
             }
+
+            try Self.validateStructuredStreamingUnsupported(request)
 
             if request.stream {
                 ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .streamingRequest)
@@ -430,6 +433,47 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
+    static func validateContentEncoding(_ values: [String]) throws {
+        guard !values.isEmpty else { return }
+        let normalized = values.joined(separator: ",")
+            .filter { !Self.isASCIIContentEncodingWhitespace($0) }
+            .lowercased()
+        guard normalized == "identity" else {
+            throw APIError(
+                status: 415,
+                message: "v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding` header; compressed request bodies are deferred to v0.2 per §10.",
+                code: "request_content_encoding_unsupported",
+                param: "Content-Encoding"
+            )
+        }
+    }
+
+    private static func isASCIIContentEncodingWhitespace(_ character: Character) -> Bool {
+        character == " " || character == "\t" || character == "\n" || character == "\r"
+    }
+
+    static func validateStructuredStreamingUnsupported(_ request: ChatCompletionRequest) throws {
+        guard request.stream else { return }
+        switch request.responseFormat {
+        case .jsonSchema:
+            throw APIError(
+                status: 400,
+                message: "v0.1.0 does not stream structured `json_schema` output; resend with `stream:false`.",
+                code: "streaming_json_schema_unsupported",
+                param: "stream"
+            )
+        case .jsonObject:
+            throw APIError(
+                status: 400,
+                message: "v0.1.0 does not stream structured `json_object` output; resend with `stream:false`.",
+                code: "streaming_json_object_unsupported",
+                param: "stream"
+            )
+        case .text:
+            return
+        }
+    }
+
     private func handleStreamingChatCompletions(
         request: ChatCompletionRequest,
         writer: ResponseWriter,
@@ -457,7 +501,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 try await modelRuntime.preflight(request, with: handle)
 
-                writer.startSSE()
+                writer.startSSE(extraHeaders: [
+                    ("X-MacProvider-Provider-Unix-Ms", "\(Int64(Date().timeIntervalSince1970 * 1000))"),
+                ])
                 sseStarted = true
                 writer.writeSSEJSON(
                     Self.chatCompletionChunk(
@@ -469,29 +515,54 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     )
                 )
 
+                let toolCallOpenEmitted = StreamedFlag()
+                let streamedAnyToolCallDelta = StreamedFlag()
                 let completion = try await modelRuntime.stream(request, with: handle) { chunk in
-                    writer.writeSSEJSON(
-                        Self.chatCompletionChunk(
-                            id: id,
-                            created: created,
-                            model: request.model,
-                            delta: ["content": chunk],
-                            finishReason: NSNull()
+                    switch chunk {
+                    case .content(let text):
+                        writer.writeSSEJSON(
+                            Self.chatCompletionChunk(
+                                id: id,
+                                created: created,
+                                model: request.model,
+                                delta: ["content": text],
+                                finishReason: NSNull()
+                            )
                         )
-                    )
+                    case .toolCallDelta(let toolDelta):
+                        if toolCallOpenEmitted.setIfUnset() {
+                            let unixMs = Int64(Date().timeIntervalSince1970 * 1000)
+                            writer.writeRawSSE(": macprovider_tool_call_open unix_ms=\(unixMs)\n\n")
+                        }
+                        streamedAnyToolCallDelta.set()
+                        writer.writeSSEJSON(
+                            Self.chatCompletionChunk(
+                                id: id,
+                                created: created,
+                                model: request.model,
+                                delta: ["tool_calls": [toolDelta.openAIDeltaDict()]],
+                                finishReason: NSNull()
+                            )
+                        )
+                    }
                 }
                 await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
 
-                if let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
-                    writer.writeSSEJSON(
-                        Self.chatCompletionChunk(
-                            id: id,
-                            created: created,
-                            model: request.model,
-                            delta: ["tool_calls": Self.toolCallDeltas(toolCalls)],
-                            finishReason: NSNull()
+                // Fallback for non-streaming-incremental path: if tool calls landed only
+                // in the final CompletionResult (e.g. buffered/downgrade/test paths) and
+                // were never streamed via .toolCallDelta chunks, emit them now.
+                if !streamedAnyToolCallDelta.get(), let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
+                    for delta in Self.toolCallDeltaChunks(toolCalls) {
+                        writer.writeSSEJSON(
+                            Self.chatCompletionChunk(
+                                id: id,
+                                created: created,
+                                model: request.model,
+                                delta: ["tool_calls": delta],
+                                finishReason: NSNull()
+                            )
                         )
-                    )
+                    }
                 }
 
                 writer.writeSSEJSON(
@@ -510,11 +581,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         "created": created,
                         "model": request.model,
                         "choices": [],
-                        "usage": [
-                            "prompt_tokens": completion.promptTokens,
-                            "completion_tokens": completion.completionTokens,
-                            "total_tokens": completion.promptTokens + completion.completionTokens,
-                        ],
+                        "usage": Self.usage(completion),
                     ]
                 )
                 writer.writeSSEDone()
@@ -787,11 +854,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     "finish_reason": completion.finishReason,
                 ]
             ],
-            "usage": [
-                "prompt_tokens": completion.promptTokens,
-                "completion_tokens": completion.completionTokens,
-                "total_tokens": completion.promptTokens + completion.completionTokens,
-            ],
+            "usage": Self.usage(completion),
         ]
     }
 
@@ -828,10 +891,46 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         return message
     }
 
-    private static func toolCallDeltas(_ toolCalls: [ToolCall]) -> [[String: Any]] {
-        toolCalls.enumerated().map { index, call in
-            call.openAIDelta(index: index)
+    private static func toolCallDeltaChunks(_ toolCalls: [ToolCall]) -> [[[String: Any]]] {
+        var chunks: [[[String: Any]]] = []
+        for (index, call) in toolCalls.enumerated() {
+            chunks.append([call.openAIInitialDelta(index: index)])
+            for fragment in splitArguments(call.arguments) {
+                chunks.append([call.openAIArgumentsDelta(index: index, fragment: fragment)])
+            }
         }
+        return chunks
+    }
+
+    private static func splitArguments(_ arguments: String, chunkBytes: Int = 2048) -> [String] {
+        guard !arguments.isEmpty else { return [] }
+        var result: [String] = []
+        var current = ""
+        var currentBytes = 0
+        for scalar in arguments.unicodeScalars {
+            let scalarString = String(scalar)
+            let scalarBytes = scalarString.utf8.count
+            if currentBytes > 0, currentBytes + scalarBytes > chunkBytes {
+                result.append(current)
+                current = ""
+                currentBytes = 0
+            }
+            current += scalarString
+            currentBytes += scalarBytes
+        }
+        if !current.isEmpty {
+            result.append(current)
+        }
+        return result
+    }
+
+    private static func usage(_ completion: CompletionResult) -> [String: Any] {
+        [
+            "prompt_tokens": completion.promptTokens,
+            "completion_tokens": completion.completionTokens,
+            "total_tokens": completion.promptTokens + completion.completionTokens,
+            "macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull(),
+        ]
     }
 
     private static func statusResponse(_ snapshot: ProviderSnapshot, providerID: String?, coordinatorURL: String?) -> [String: Any] {
@@ -966,9 +1065,9 @@ private struct ResponseWriter: @unchecked Sendable {
         )
     }
 
-    func startSSE() {
+    func startSSE(extraHeaders: [(String, String)] = []) {
         context.eventLoop.execute {
-            writeRawSSEHead(context: context)
+            writeRawSSEHead(context: context, extraHeaders: extraHeaders)
         }
     }
 
@@ -994,6 +1093,12 @@ private struct ResponseWriter: @unchecked Sendable {
     private func writeSSEData(_ payload: String) {
         context.eventLoop.execute {
             writeRawSSEData(context: context, payload: payload)
+        }
+    }
+
+    func writeRawSSE(_ payload: String) {
+        context.eventLoop.execute {
+            writeRawSSEPayload(context: context, payload: payload)
         }
     }
 }
@@ -1025,14 +1130,19 @@ private func writeRawJSON(
     }
 }
 
-private func writeRawSSEHead(context: ChannelHandlerContext) {
-    let headers = makeSSEResponseHeaders()
+private func writeRawSSEHead(context: ChannelHandlerContext, extraHeaders: [(String, String)] = []) {
+    let headers = makeSSEResponseHeaders(extraHeaders: extraHeaders)
     let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
     context.writeAndFlush(NIOAny(HTTPServerResponsePart.head(head)), promise: nil)
 }
 
 private func writeRawSSEData(context: ChannelHandlerContext, payload: String) {
     let line = "data: \(payload)\n\n"
+    writeRawSSEPayload(context: context, payload: line)
+}
+
+private func writeRawSSEPayload(context: ChannelHandlerContext, payload: String) {
+    let line = payload
     var buffer = context.channel.allocator.buffer(capacity: line.utf8.count)
     buffer.writeString(line)
     context.writeAndFlush(NIOAny(HTTPServerResponsePart.body(.byteBuffer(buffer))), promise: nil)
@@ -1056,12 +1166,15 @@ func makeJSONResponseHeaders(
     return headers
 }
 
-func makeSSEResponseHeaders() -> HTTPHeaders {
+func makeSSEResponseHeaders(extraHeaders: [(String, String)] = []) -> HTTPHeaders {
     var headers = HTTPHeaders()
     headers.add(name: "content-type", value: "text/event-stream; charset=utf-8")
     headers.add(name: "cache-control", value: "no-cache")
     headers.add(name: "connection", value: "close")
     headers.add(name: "transfer-encoding", value: "chunked")
+    for (name, value) in extraHeaders {
+        headers.add(name: name, value: value)
+    }
     return headers
 }
 

@@ -15,6 +15,10 @@ public struct ChatCompletionRequest: Sendable {
     public let promptSource: ChatCompletionPromptSource
 
     public static func parse(data: Data) throws -> ChatCompletionRequest {
+        guard data.count <= RequestValidation.rawBodyByteCap else {
+            throw APIError(status: 413, message: "Request body exceeds 4 MiB", code: "request_body_too_large")
+        }
+
         let json: Any
         do {
             json = try JSONSerialization.jsonObject(with: data)
@@ -76,10 +80,15 @@ public struct ChatCompletionRequest: Sendable {
             throw APIError(status: 400, message: "user must be a string", code: "invalid_request")
         }
 
-        let responseFormat = try parseResponseFormat(dict["response_format"])
+        let schemaRawByteCount = rawJSONValueByteCount(
+            in: data,
+            path: ["response_format", "json_schema", "schema"]
+        )
+        let responseFormat = try parseResponseFormat(dict["response_format"], rawSchemaByteCount: schemaRawByteCount)
         let messages = try rawMessages.enumerated().map { index, raw in
             try ChatMessage.parse(raw, index: index)
         }
+        try RequestValidation.validate(messages)
 
         try validateTools(dict["tools"])
         try validateToolChoice(dict["tool_choice"])
@@ -175,6 +184,15 @@ public enum ChatRole: String, Sendable {
 public struct ChatMessage: Sendable {
     public let role: ChatRole
     public let content: String?
+    public let toolCallID: String?
+    public let toolCalls: [ToolCall]?
+
+    public init(role: ChatRole, content: String?, toolCallID: String? = nil, toolCalls: [ToolCall]? = nil) {
+        self.role = role
+        self.content = content
+        self.toolCallID = toolCallID
+        self.toolCalls = toolCalls
+    }
 
     static func parse(_ raw: Any, index: Int) throws -> ChatMessage {
         guard let dict = raw as? [String: Any] else {
@@ -190,45 +208,127 @@ public struct ChatMessage: Sendable {
             guard let content, !content.isEmpty else {
                 throw APIError(status: 400, message: "messages[\(index)].content must be non-empty", code: "invalid_request")
             }
-            return ChatMessage(role: role, content: content)
+            return ChatMessage(role: role, content: content, toolCallID: nil, toolCalls: nil)
         case .assistant:
             let content = try textProjection(from: dict["content"], messageIndex: index, allowNull: true)
+            let parsedToolCalls: [ToolCall]?
             if let toolCalls = dict["tool_calls"], !(toolCalls is NSNull) {
-                try validateAssistantToolCalls(toolCalls, messageIndex: index)
+                parsedToolCalls = try parseAssistantToolCalls(toolCalls, messageIndex: index)
             } else if content == nil {
                 throw APIError(status: 400, message: "assistant message requires content or tool_calls", code: "invalid_request")
+            } else {
+                parsedToolCalls = nil
             }
-            return ChatMessage(role: role, content: content)
+            return ChatMessage(role: role, content: content, toolCallID: nil, toolCalls: parsedToolCalls)
         case .tool:
-            guard dict["tool_call_id"] is String else {
-                throw APIError(status: 400, message: "tool message requires tool_call_id", code: "invalid_request")
+            guard let toolCallID = dict["tool_call_id"] as? String, !toolCallID.isEmpty else {
+                throw APIError(status: 400, message: "tool message requires tool_call_id", code: "invalid_tool_call_id", param: "messages[\(index)].tool_call_id")
+            }
+            guard !(dict["content"] is NSNull) else {
+                throw APIError(status: 400, message: "tool message requires content", code: "invalid_request", param: "messages[\(index)].content")
             }
             guard let content = try textProjection(from: dict["content"], messageIndex: index, allowNull: false) else {
-                throw APIError(status: 400, message: "tool message requires content", code: "invalid_request")
+                throw APIError(status: 400, message: "tool message requires content", code: "invalid_request", param: "messages[\(index)].content")
             }
-            return ChatMessage(role: role, content: content)
+            return ChatMessage(role: role, content: content, toolCallID: toolCallID, toolCalls: nil)
         }
     }
 }
 
-public enum ResponseFormat: String, Sendable {
+public struct ToolCall: Equatable, Sendable {
+    public let id: String
+    public let functionName: String
+    public let arguments: String
+
+    public init(id: String, functionName: String, arguments: String) {
+        self.id = id
+        self.functionName = functionName
+        self.arguments = arguments
+    }
+}
+
+public enum ResponseFormat: Sendable {
     case text
-    case jsonObject = "json_object"
+    case jsonObject
+    case jsonSchema(JSONSchemaSpec)
+}
+
+public struct JSONSchemaSpec: Sendable {
+    public let name: String
+    public let description: String?
+    public let strict: Bool
+    public let schema: JSONValue
+
+    public init(name: String, description: String?, strict: Bool = true, schema: JSONValue) {
+        self.name = name
+        self.description = description
+        self.strict = strict
+        self.schema = schema
+    }
 }
 
 public struct APIError: Error, Sendable {
+    private static let retryableByCode: [String: Bool] = [
+        "byte_cap_exceeded": false,
+        "response_byte_cap_exceeded": false,
+        "malformed_tool_call_final_json": true,
+        "provider_stream_downgraded": true,
+        "json_schema_missing_name": false,
+        "json_schema_missing_schema": false,
+        "json_schema_invalid_name": false,
+        "json_schema_non_strict_unsupported": false,
+        "streaming_json_schema_unsupported": false,
+        "streaming_json_object_unsupported": false,
+        "json_schema_unsupported_keyword": false,
+        "json_schema_strict_requires_additional_properties_false": false,
+        "json_schema_strict_requires_all_properties_required": false,
+        "json_schema_invalid_const_or_enum_type": false,
+        "json_schema_too_deep": false,
+        "json_schema_too_large": false,
+        "request_content_encoding_unsupported": false,
+        "malformed_json_response": true,
+        "json_schema_validation_failed": true,
+        "request_body_too_large": false,
+        "tool_result_too_large": false,
+        "tool_results_aggregate_too_large": false,
+        "tool_call_arguments_too_large": false,
+        "tool_call_arguments_aggregate_too_large": false,
+        "messages_too_long": false,
+        "too_many_tool_calls": false,
+        "invalid_tool_call_id": false,
+        "tool_call_id_not_found": false,
+        "duplicate_tool_call_id": false,
+        "tool_call_result_out_of_order": false,
+        "unsupported_modelID_for_multi_turn": false,
+    ]
+
     public let status: Int
     public let message: String
     public let type: String
     public let code: String
     public let param: String?
+    public let retryableOverride: Bool?
+    public let inferenceRan: Bool
+    public let settlementRan: Bool
 
-    public init(status: Int, message: String, type: String = "invalid_request_error", code: String, param: String? = nil) {
+    public init(
+        status: Int,
+        message: String,
+        type: String = "invalid_request_error",
+        code: String,
+        param: String? = nil,
+        retryable: Bool? = nil,
+        inferenceRan: Bool = false,
+        settlementRan: Bool = false
+    ) {
         self.status = status
         self.message = message
         self.type = type
         self.code = code
         self.param = param
+        self.retryableOverride = retryable
+        self.inferenceRan = inferenceRan
+        self.settlementRan = settlementRan
     }
 
     public var envelope: [String: Any] {
@@ -239,6 +339,10 @@ public struct APIError: Error, Sendable {
                 "type": type,
                 "param": paramValue,
                 "code": code,
+                "retryable": retryableOverride ?? Self.retryableByCode[code] ?? false,
+                "request_id": NSNull(),
+                "inference_ran": inferenceRan,
+                "settlement_ran": settlementRan,
             ]
         ]
     }
@@ -320,14 +424,272 @@ private func parseStop(_ raw: Any?) throws -> [String] {
     return stops
 }
 
-private func parseResponseFormat(_ raw: Any?) throws -> ResponseFormat {
+private func parseResponseFormat(_ raw: Any?, rawSchemaByteCount: Int?) throws -> ResponseFormat {
     guard let raw, !(raw is NSNull) else { return .text }
-    guard let dict = raw as? [String: Any], let type = dict["type"] as? String,
-          let format = ResponseFormat(rawValue: type)
-    else {
-        throw APIError(status: 400, message: "response_format.type must be text or json_object", code: "invalid_request")
+    guard let dict = raw as? [String: Any], let type = dict["type"] as? String else {
+        throw APIError(status: 400, message: "response_format.type must be text, json_object, or json_schema", code: "invalid_request")
     }
-    return format
+    switch type {
+    case "text":
+        return .text
+    case "json_object":
+        return .jsonObject
+    case "json_schema":
+        guard let rawSpec = dict["json_schema"] as? [String: Any] else {
+            throw APIError(status: 400, message: "response_format.json_schema must be an object", code: "json_schema_missing_schema", param: "response_format.json_schema")
+        }
+        guard let name = rawSpec["name"] as? String else {
+            throw APIError(status: 400, message: "response_format.json_schema.name is required", code: "json_schema_missing_name", param: "response_format.json_schema.name")
+        }
+        guard isValidJSONSchemaName(name) else {
+            throw APIError(status: 400, message: "response_format.json_schema.name must match ^[A-Za-z0-9_-]{1,64}$", code: "json_schema_invalid_name", param: "response_format.json_schema.name")
+        }
+        let description = rawSpec["description"] as? String
+        let strict = try optionalBool(rawSpec["strict"], key: "response_format.json_schema.strict") ?? true
+        guard strict else {
+            throw APIError(
+                status: 400,
+                message: "Non-strict structured output is unsupported in SPEC-019 v0.1.0",
+                code: "json_schema_non_strict_unsupported",
+                param: "response_format.json_schema.strict"
+            )
+        }
+        guard let rawSchema = rawSpec["schema"], !(rawSchema is NSNull) else {
+            throw APIError(status: 400, message: "response_format.json_schema.schema is required", code: "json_schema_missing_schema", param: "response_format.json_schema.schema")
+        }
+        if let rawSchemaByteCount, rawSchemaByteCount > JSONSchemaValidator.maxSchemaBytes {
+            throw APIError(status: 413, message: "response_format.json_schema.schema exceeds 16384 bytes", code: "json_schema_too_large", param: "response_format.json_schema.schema")
+        }
+        let schema = try JSONValue.parse(rawSchema)
+        guard try schema.deterministicJSONString().utf8.count <= JSONSchemaValidator.maxSchemaBytes else {
+            throw APIError(status: 413, message: "response_format.json_schema.schema exceeds 16384 bytes", code: "json_schema_too_large", param: "response_format.json_schema.schema")
+        }
+        try JSONSchemaValidator.validateSchemaShape(schema: schema)
+        return .jsonSchema(JSONSchemaSpec(name: name, description: description, strict: strict, schema: schema))
+    default:
+        throw APIError(status: 400, message: "response_format.type must be text, json_object, or json_schema", code: "invalid_request")
+    }
+}
+
+private func isValidJSONSchemaName(_ name: String) -> Bool {
+    let bytes = Array(name.utf8)
+    guard (1 ... 64).contains(bytes.count) else { return false }
+    return bytes.allSatisfy { byte in
+        (byte >= 65 && byte <= 90) ||
+            (byte >= 97 && byte <= 122) ||
+            (byte >= 48 && byte <= 57) ||
+            byte == 95 ||
+            byte == 45
+    }
+}
+
+private func rawJSONValueByteCount(in data: Data, path: [String]) -> Int? {
+    guard !path.isEmpty else { return nil }
+    let scanner = RawJSONPathScanner(bytes: Array(data))
+    return (try? scanner.valueRange(at: path))?.count
+}
+
+private struct RawJSONPathScanner {
+    let bytes: [UInt8]
+
+    func valueRange(at path: [String]) throws -> Range<Int>? {
+        var index = 0
+        skipWhitespace(&index)
+        return try findInObject(&index, path: path)
+    }
+
+    private func findInObject(_ index: inout Int, path: [String]) throws -> Range<Int>? {
+        skipWhitespace(&index)
+        guard consume(&index, byte: UInt8(ascii: "{")) else { return nil }
+        skipWhitespace(&index)
+        if consume(&index, byte: UInt8(ascii: "}")) {
+            return nil
+        }
+        while index < bytes.count {
+            skipWhitespace(&index)
+            let key = try parseString(&index)
+            skipWhitespace(&index)
+            guard consume(&index, byte: UInt8(ascii: ":")) else { throw RawJSONScanError.invalidJSON }
+            skipWhitespace(&index)
+            let valueStart = index
+            if key == path[0] {
+                if path.count == 1 {
+                    try skipValue(&index)
+                    return valueStart ..< index
+                }
+                var nestedIndex = index
+                if let found = try findInObject(&nestedIndex, path: Array(path.dropFirst())) {
+                    return found
+                }
+            }
+            try skipValue(&index)
+            skipWhitespace(&index)
+            if consume(&index, byte: UInt8(ascii: "}")) {
+                return nil
+            }
+            guard consume(&index, byte: UInt8(ascii: ",")) else { throw RawJSONScanError.invalidJSON }
+        }
+        throw RawJSONScanError.invalidJSON
+    }
+
+    private func skipValue(_ index: inout Int) throws {
+        skipWhitespace(&index)
+        guard index < bytes.count else { throw RawJSONScanError.invalidJSON }
+        switch bytes[index] {
+        case UInt8(ascii: "{"):
+            try skipObject(&index)
+        case UInt8(ascii: "["):
+            try skipArray(&index)
+        case UInt8(ascii: "\""):
+            try skipString(&index)
+        case UInt8(ascii: "t"):
+            try consumeLiteral("true", &index)
+        case UInt8(ascii: "f"):
+            try consumeLiteral("false", &index)
+        case UInt8(ascii: "n"):
+            try consumeLiteral("null", &index)
+        default:
+            try skipNumber(&index)
+        }
+    }
+
+    private func skipObject(_ index: inout Int) throws {
+        guard consume(&index, byte: UInt8(ascii: "{")) else { throw RawJSONScanError.invalidJSON }
+        skipWhitespace(&index)
+        if consume(&index, byte: UInt8(ascii: "}")) {
+            return
+        }
+        while index < bytes.count {
+            skipWhitespace(&index)
+            try skipString(&index)
+            skipWhitespace(&index)
+            guard consume(&index, byte: UInt8(ascii: ":")) else { throw RawJSONScanError.invalidJSON }
+            try skipValue(&index)
+            skipWhitespace(&index)
+            if consume(&index, byte: UInt8(ascii: "}")) {
+                return
+            }
+            guard consume(&index, byte: UInt8(ascii: ",")) else { throw RawJSONScanError.invalidJSON }
+        }
+        throw RawJSONScanError.invalidJSON
+    }
+
+    private func skipArray(_ index: inout Int) throws {
+        guard consume(&index, byte: UInt8(ascii: "[")) else { throw RawJSONScanError.invalidJSON }
+        skipWhitespace(&index)
+        if consume(&index, byte: UInt8(ascii: "]")) {
+            return
+        }
+        while index < bytes.count {
+            try skipValue(&index)
+            skipWhitespace(&index)
+            if consume(&index, byte: UInt8(ascii: "]")) {
+                return
+            }
+            guard consume(&index, byte: UInt8(ascii: ",")) else { throw RawJSONScanError.invalidJSON }
+        }
+        throw RawJSONScanError.invalidJSON
+    }
+
+    private func parseString(_ index: inout Int) throws -> String {
+        let start = index
+        try skipString(&index)
+        let data = Data(bytes[start ..< index])
+        guard let value = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? String else {
+            throw RawJSONScanError.invalidJSON
+        }
+        return value
+    }
+
+    private func skipString(_ index: inout Int) throws {
+        guard consume(&index, byte: UInt8(ascii: "\"")) else { throw RawJSONScanError.invalidJSON }
+        while index < bytes.count {
+            let byte = bytes[index]
+            index += 1
+            if byte == UInt8(ascii: "\"") {
+                return
+            }
+            if byte == UInt8(ascii: "\\") {
+                guard index < bytes.count else { throw RawJSONScanError.invalidJSON }
+                let escaped = bytes[index]
+                index += 1
+                if escaped == UInt8(ascii: "u") {
+                    guard index + 4 <= bytes.count else { throw RawJSONScanError.invalidJSON }
+                    index += 4
+                }
+                continue
+            }
+            guard byte >= 0x20 else { throw RawJSONScanError.invalidJSON }
+        }
+        throw RawJSONScanError.invalidJSON
+    }
+
+    private func skipNumber(_ index: inout Int) throws {
+        let start = index
+        if index < bytes.count, bytes[index] == UInt8(ascii: "-") {
+            index += 1
+        }
+        guard index < bytes.count else { throw RawJSONScanError.invalidJSON }
+        if bytes[index] == UInt8(ascii: "0") {
+            index += 1
+        } else if (UInt8(ascii: "1") ... UInt8(ascii: "9")).contains(bytes[index]) {
+            index += 1
+            while index < bytes.count, (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(bytes[index]) {
+                index += 1
+            }
+        } else {
+            throw RawJSONScanError.invalidJSON
+        }
+        if index < bytes.count, bytes[index] == UInt8(ascii: ".") {
+            index += 1
+            guard index < bytes.count, (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(bytes[index]) else {
+                throw RawJSONScanError.invalidJSON
+            }
+            while index < bytes.count, (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(bytes[index]) {
+                index += 1
+            }
+        }
+        if index < bytes.count, bytes[index] == UInt8(ascii: "e") || bytes[index] == UInt8(ascii: "E") {
+            index += 1
+            if index < bytes.count, bytes[index] == UInt8(ascii: "+") || bytes[index] == UInt8(ascii: "-") {
+                index += 1
+            }
+            guard index < bytes.count, (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(bytes[index]) else {
+                throw RawJSONScanError.invalidJSON
+            }
+            while index < bytes.count, (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(bytes[index]) {
+                index += 1
+            }
+        }
+        guard index > start else { throw RawJSONScanError.invalidJSON }
+    }
+
+    private func consumeLiteral(_ literal: String, _ index: inout Int) throws {
+        for byte in literal.utf8 {
+            guard consume(&index, byte: byte) else { throw RawJSONScanError.invalidJSON }
+        }
+    }
+
+    private func skipWhitespace(_ index: inout Int) {
+        while index < bytes.count {
+            switch bytes[index] {
+            case UInt8(ascii: " "), UInt8(ascii: "\n"), UInt8(ascii: "\r"), UInt8(ascii: "\t"):
+                index += 1
+            default:
+                return
+            }
+        }
+    }
+
+    private func consume(_ index: inout Int, byte: UInt8) -> Bool {
+        guard index < bytes.count, bytes[index] == byte else { return false }
+        index += 1
+        return true
+    }
+}
+
+private enum RawJSONScanError: Error {
+    case invalidJSON
 }
 
 private func validateTools(_ raw: Any?) throws {
@@ -361,26 +723,31 @@ private func validateToolChoice(_ raw: Any?) throws {
     }
 }
 
-private func validateAssistantToolCalls(_ raw: Any, messageIndex: Int) throws {
+private func parseAssistantToolCalls(_ raw: Any, messageIndex: Int) throws -> [ToolCall] {
     guard let calls = raw as? [Any], !calls.isEmpty else {
         throw APIError(status: 400, message: "messages[\(messageIndex)].tool_calls must be a non-empty array", code: "invalid_tools")
     }
-    for (index, rawCall) in calls.enumerated() {
+    return try calls.enumerated().map { index, rawCall in
         guard let call = rawCall as? [String: Any] else {
             throw APIError(status: 400, message: "Invalid messages[\(messageIndex)].tool_calls[\(index)]", code: "invalid_tools")
         }
-        guard call["id"] is String, call["type"] as? String == "function",
+        guard let id = call["id"] as? String, call["type"] as? String == "function",
               let function = call["function"] as? [String: Any],
-              function["name"] is String,
+              let name = function["name"] as? String,
+              !name.isEmpty,
               let arguments = function["arguments"] as? String
         else {
             throw APIError(status: 400, message: "Invalid messages[\(messageIndex)].tool_calls[\(index)]", code: "invalid_tools")
         }
+        guard arguments.utf8.count <= RequestValidation.toolCallArgumentsPerCallByteCap else {
+            throw APIError(status: 413, message: "tool_call arguments exceed 1 MiB", code: "tool_call_arguments_too_large", param: "messages[\(messageIndex)].tool_calls[\(index)].function.arguments")
+        }
         guard let data = arguments.data(using: .utf8),
-              (try? JSONSerialization.jsonObject(with: data)) != nil
+              (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
         else {
             throw APIError(status: 400, message: "Invalid tool_call arguments JSON", code: "invalid_tools")
         }
+        return ToolCall(id: id, functionName: name, arguments: arguments)
     }
 }
 
@@ -425,4 +792,88 @@ private func textProjection(from raw: Any?, messageIndex: Int, allowNull: Bool) 
         }
     }
     return textParts.joined(separator: "\n")
+}
+
+private enum RequestValidation {
+    static let rawBodyByteCap = 4 * 1024 * 1024
+    static let toolResultPerMessageByteCap = 256 * 1024
+    static let toolResultsAggregateByteCap = 1024 * 1024
+    static let toolCallArgumentsPerCallByteCap = 1024 * 1024
+    static let toolCallArgumentsAggregateByteCap = 2 * 1024 * 1024
+    static let maxMessages = 256
+    static let maxAssistantToolCalls = 128
+
+    static func validate(_ messages: [ChatMessage]) throws {
+        guard messages.count <= maxMessages else {
+            throw APIError(status: 400, message: "messages may contain at most 256 entries", code: "messages_too_long")
+        }
+
+        var assistantIDs: [String: Int] = [:]
+        var duplicateAssistantID: String?
+        var totalToolCalls = 0
+        var aggregateArgumentsBytes = 0
+
+        for (messageIndex, message) in messages.enumerated() {
+            guard let calls = message.toolCalls else { continue }
+            totalToolCalls += calls.count
+            guard totalToolCalls <= maxAssistantToolCalls else {
+                throw APIError(status: 400, message: "assistant tool_calls may contain at most 128 entries", code: "too_many_tool_calls")
+            }
+            for (callIndex, call) in calls.enumerated() {
+                guard isRequestAcceptedToolCallID(call.id) else {
+                    throw APIError(status: 400, message: "Invalid tool_call id", code: "invalid_tool_call_id", param: "messages[\(messageIndex)].tool_calls[\(callIndex)].id")
+                }
+                if assistantIDs[call.id] != nil {
+                    duplicateAssistantID = call.id
+                } else {
+                    assistantIDs[call.id] = messageIndex
+                }
+                aggregateArgumentsBytes += call.arguments.utf8.count
+                guard aggregateArgumentsBytes <= toolCallArgumentsAggregateByteCap else {
+                    throw APIError(status: 413, message: "assistant-history tool_call arguments exceed aggregate cap", code: "tool_call_arguments_aggregate_too_large")
+                }
+            }
+        }
+        if duplicateAssistantID != nil {
+            throw APIError(status: 400, message: "Duplicate assistant tool_call id", code: "duplicate_tool_call_id")
+        }
+
+        var fulfilledToolIDs: Set<String> = []
+        var aggregateToolResultBytes = 0
+        for (messageIndex, message) in messages.enumerated() where message.role == .tool {
+            guard let toolCallID = message.toolCallID, isRequestAcceptedToolCallID(toolCallID) else {
+                throw APIError(status: 400, message: "Invalid tool_call_id", code: "invalid_tool_call_id", param: "messages[\(messageIndex)].tool_call_id")
+            }
+            guard let assistantIndex = assistantIDs[toolCallID] else {
+                throw APIError(status: 400, message: "tool_call_id does not reference an earlier assistant tool_call", code: "tool_call_id_not_found")
+            }
+            guard assistantIndex < messageIndex else {
+                throw APIError(status: 400, message: "tool result appears before matching assistant tool_call", code: "tool_call_result_out_of_order")
+            }
+            guard !fulfilledToolIDs.contains(toolCallID) else {
+                throw APIError(status: 400, message: "Duplicate tool result for tool_call_id", code: "duplicate_tool_call_id")
+            }
+            fulfilledToolIDs.insert(toolCallID)
+
+            let contentBytes = message.content?.utf8.count ?? 0
+            guard contentBytes <= toolResultPerMessageByteCap else {
+                throw APIError(status: 413, message: "tool message content exceeds 256 KiB", code: "tool_result_too_large", param: "messages[\(messageIndex)].content")
+            }
+            aggregateToolResultBytes += contentBytes
+            guard aggregateToolResultBytes <= toolResultsAggregateByteCap else {
+                throw APIError(status: 413, message: "tool message content exceeds aggregate cap", code: "tool_results_aggregate_too_large")
+            }
+        }
+    }
+
+    static func isRequestAcceptedToolCallID(_ value: String) -> Bool {
+        guard value.hasPrefix("call_") else { return false }
+        let suffix = value.dropFirst(5)
+        guard (16 ... 64).contains(suffix.utf8.count) else { return false }
+        return suffix.utf8.allSatisfy { byte in
+            (byte >= 48 && byte <= 57) ||
+                (byte >= 65 && byte <= 90) ||
+                (byte >= 97 && byte <= 122)
+        }
+    }
 }

@@ -14,7 +14,7 @@ final class PromptCanonicalizerTests: XCTestCase {
         XCTAssertTrue(canonical.contains(#""logprobs":true"#))
         XCTAssertTrue(canonical.contains(#""messages":["#))
         XCTAssertTrue(canonical.contains(#""top_logprobs":2"#))
-        XCTAssertEqual(hash, "a762aef8cf64fd65f05096e7f98010804a1c4e8fb07f0a1ea7616f1cde2663cd")
+        XCTAssertEqual(hash, "c4715d132435b621e920d68bf24f3b65205ebecb29d2dfadd90e12177e5a904e")
     }
 
     func testAbsentCommittedFieldsCanonicalizeAsNull() throws {
@@ -74,7 +74,7 @@ final class PromptCanonicalizerTests: XCTestCase {
                     "content": NSNull(),
                     "tool_calls": [
                         [
-                            "id": "call_1",
+                            "id": "call_0123456789abcdef",
                             "type": "function",
                             "function": [
                                 "name": "lookup",
@@ -93,7 +93,7 @@ final class PromptCanonicalizerTests: XCTestCase {
                     "content": NSNull(),
                     "tool_calls": [
                         [
-                            "id": "call_1",
+                            "id": "call_0123456789abcdef",
                             "type": "function",
                             "function": [
                                 "name": "lookup",
@@ -148,7 +148,7 @@ final class PromptCanonicalizerTests: XCTestCase {
                     "content": NSNull(),
                     "tool_calls": [
                         [
-                            "id": "call_1",
+                            "id": "call_0123456789abcdef",
                             "type": "function",
                             "function": [
                                 "name": "lookup",
@@ -159,7 +159,7 @@ final class PromptCanonicalizerTests: XCTestCase {
                 ],
                 [
                     "role": "tool",
-                    "tool_call_id": "call_1",
+                    "tool_call_id": "call_0123456789abcdef",
                     "content": "15 C",
                 ],
             ],

@@ -1,0 +1,17 @@
+# Qwen3-32B tokenizer_config.json — pinned for SPEC-018 v0.2 §3.8.1 family-renderer
+#
+# Source: https://huggingface.co/Qwen/Qwen3-32B/raw/main/tokenizer_config.json
+# Fetched: 2026-06-28
+# Content SHA-256: d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101
+# Byte size: 9732
+#
+# Pin scope: §3.8 ToolPromptRenderer uses this tokenizer_config.json's chat_template
+# field as the authoritative source for Qwen3-family multi-turn rendering of
+# assistant-history tool_calls[] and role:"tool" results. v0.2 IMPL embeds the
+# template structure normatively per §3.8.1 "byte-exact where upstream is
+# byte-stable, structural plus pinned upstream artifact where they are not."
+#
+# IMPL prompt golden fixtures in phase3-binary/Tests/macprovider-cliTests/MultiTurnTests.swift
+# assert the rendered prompt structure matches the chat_template semantics of this pinned
+# config. Future updates: re-fetch + verify SHA-256 + update this pin file before
+# updating ToolPromptRenderer.swift Qwen-family rendering.

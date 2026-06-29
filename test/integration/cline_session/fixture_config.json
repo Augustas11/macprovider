@@ -1,0 +1,35 @@
+{
+  "schema_version": "spec018.cline_session.v1",
+  "extension": {
+    "id": "saoudrizwan.claude-dev",
+    "version": "4.0.0"
+  },
+  "target_repo": "spec018-ci-fixture",
+  "prompt": "Read README.md, summarize, add a sentence to docs/CHANGELOG.md",
+  "minimums": {
+    "provider_turns": 20,
+    "tool_calls": 30,
+    "file_edits": 3,
+    "files_edited": 2,
+    "commands": 2,
+    "command_failures": 1,
+    "history_echoes": 1,
+    "write_to_file_bytes": 65536,
+    "write_first_delta_ms": 1500,
+    "write_deltas_before_finish": 3
+  },
+  "legacy_tool_category_mapping": {
+    "list_files": "search",
+    "search_files": "search",
+    "read_file": "read_files",
+    "write_to_file": "editor",
+    "execute_command": "bash"
+  },
+  "cline_core_tool_category_mapping": {
+    "bash": "bash",
+    "editor": "editor",
+    "read_files": "read_files",
+    "apply_patch": "editor",
+    "search": "search"
+  }
+}

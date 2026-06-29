@@ -64,6 +64,15 @@ type billingRecorder struct {
 	// coordinator request_log by a stable shared id. Empty when the
 	// inbound request carried no X-Request-ID.
 	externalRequestID string
+	// accountID is the gateway-forwarded X-MacProvider-Account (SPEC-002
+	// v1.5.0, SPEC-006 v0.9.1, issue #211). Preserved into
+	// request_log.account_id so reconciliation can use the composite
+	// (account_id, external_request_id) key instead of
+	// external_request_id alone — the latter is ambiguous on
+	// cross-account X-Request-ID collisions after #196. Empty when the
+	// inbound request carried no header (direct legacy buyer, demo
+	// without gateway, pre-v0.9.1 gateway).
+	accountID string
 
 	// attemptN is the running per-provider-attempt counter. Pre-refactor
 	// this was billingAttemptN, incremented via deferred closure on
@@ -76,7 +85,7 @@ type billingRecorder struct {
 // forwardState pointer the sequence helpers will mutate; the recorder
 // reads state.routingDone at write time to compute RoutingMs (matching
 // the pre-refactor closure's live-capture semantics).
-func (s *Server) newBillingRecorder(r *http.Request, state *forwardState, startedAt time.Time, requestID, externalRequestID string) *billingRecorder {
+func (s *Server) newBillingRecorder(r *http.Request, state *forwardState, startedAt time.Time, requestID, externalRequestID, accountID string) *billingRecorder {
 	return &billingRecorder{
 		server:            s,
 		state:             state,
@@ -84,6 +93,7 @@ func (s *Server) newBillingRecorder(r *http.Request, state *forwardState, starte
 		startedAt:         startedAt,
 		requestID:         requestID,
 		externalRequestID: externalRequestID,
+		accountID:         accountID,
 	}
 }
 
@@ -145,6 +155,7 @@ func (b *billingRecorder) recordRow(
 		TSUtc:               b.startedAt,
 		RequestID:           b.requestID,
 		ExternalRequestID:   b.externalRequestID,
+		AccountID:           b.accountID,
 		Model:               b.model,
 		ProviderAssignedID:  providerAssignedID,
 		PromptTokens:        promptTok,

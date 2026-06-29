@@ -10,6 +10,6 @@
     "unix_ts": 1800000000
   },
   "provider_pubkey_seed_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
-  "canonical_jcs_sha256_hex": "48c3f1ccc85a4de04f95aad465af55f0217f7a2c7086f4468c6f23f4a407f6c3",
+  "canonical_jcs_sha256_hex": "0653a996722f13112e7eb5f70526b008936e59c34c71f41901d06d04d613f368",
   "canonical_jcs_length": 405
 }
