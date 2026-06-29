@@ -186,11 +186,11 @@ Indexes:
 Explorer uses:
 
 - Recent request feed.  - Request/session detail.  - Latency and routing latency summaries.  - Status/error/retry
-summaries.  - Join to SPEC-005 ledger rows.  - Join to gateway usage rows by `request_id`.
+summaries.  - Join to SPEC-005 ledger rows on coordinator-internal `request_id`.  - Join to gateway usage rows on the composite `(account_id, external_request_id)` ⇔ gateway `(account_id, request_id)` reconciliation key (SPEC-002 v1.5.0 / #211). For pre-#211 rows with NULL `account_id`, the explorer's §5.6 session-detail handler does NOT proxy to the gateway (returns `gateway_identity_unavailable`); out-of-process audit tooling MAY join on `external_request_id` alone with documented cross-account ambiguity.
 
 Gaps:
 
-- **[GAP]** No coordinator-side `account_id`.  - **[GAP]** No coordinator-side `key_id`.  - **[GAP]** No stored
+- **[GAP]** No coordinator-side `key_id`.  - **[GAP]** No stored
 `attempt_n`; SPEC-005 derives attempt order from
   `(request_id, id)`.
 - **[GAP]** No durable in-flight request table.  - **[GAP]** No request body digest or response byte count.
@@ -426,15 +426,28 @@ pause state through runtime config.
 
 Available joins:
 
-- `request_id` joins coordinator request/ledger rows to gateway usage,
-  quota, feedback, and audit rows. **Caveat (post #196):** on the
-  gateway side `request_id` alone is only a logical join key — the
-  physical identity of `usage_events`, `quota_reservations`, and
-  `concurrency_reservations` is the composite `(account_id,
-  request_id)`. The same buyer-supplied `X-Request-ID` MAY appear in
-  rows belonging to different accounts and any join that reconciles
-  gateway rows MUST scope by `(account_id, request_id)` to avoid
-  cross-account contamination. See SPEC-007 § 6.4 v0.2.1 addendum.
+- **Intra-coordinator** (single coordinator-internal id):
+  coordinator-internal `request_log.request_id` joins to
+  `ledger_request_credits.request_id`,
+  `ledger_operator_credits.request_id`, and
+  `ledger_provider_identity_snapshots.request_id`.
+  `request_log.request_id` is server-minted (UUID v4 per buyer
+  request — see SPEC-002 v1.5.0 §11); it does NOT travel to the
+  gateway.
+- **Cross-service** (coordinator ⇔ gateway, MUST be account-scoped):
+  coordinator `(request_log.account_id, request_log.external_request_id)`
+  ⇔ gateway `(account_id, request_id)` across all five account-keyed
+  session-detail tables (`usage_events`, `quota_reservations`,
+  `concurrency_reservations`, `feedback_events`, `audit_events`).
+  After SPEC-002 v1.5.0 / #211 the composite is the reconciliation
+  key; `external_request_id` alone is a logical correlation value
+  only, ambiguous on cross-account `X-Request-ID` collisions
+  (#196 / #211). See SPEC-007 § 6.4 v0.3 ambiguity contract.
+- **Legacy NULL-account fallback:** rows written by pre-v1.5.0
+  coordinators OR by v1.5.0 coordinators serving pre-v0.9.1
+  gateway traffic carry NULL `account_id`. Tooling MUST gate
+  per-row (`account_id IS NOT NULL`), not per-schema; see
+  SPEC-002 v1.5.0 §11 "Deploy ordering".
 - `provider_id` joins live pool state to provider tokens and ledger rows.  - `account_id` joins gateway accounts,
 identities, keys, usage, quota,
   concurrency, feedback, and audit rows.
@@ -444,10 +457,19 @@ Gaps:
 
 - **[GAP]** No shared durable `session_id` across gateway, coordinator,
   and provider.
-- **[GAP]** No coordinator-side buyer identity.  - **[GAP]** Demo usage is not tied to a stable account.
-- **[GAP]** Coordinator `request_log` still keys reconciliation by
-  buyer-supplied `external_request_id` alone (no `account_id`
-  scope). Tracked in issue #211.
+- **[GAP]** Demo usage is not tied to a stable account
+  (`account_id` is a per-call `"demo:<ip>"` synthetic).
+- **Closed by SPEC-002 v1.5.0 / #211:** the previous "no
+  coordinator-side buyer identity" gap. Coordinator `request_log`
+  now carries `account_id`; the composite
+  `(account_id, external_request_id)` is the reconciliation key
+  joining coordinator `request_log` to gateway session-detail
+  tables. Pre-#211 rows persist with NULL `account_id`: the
+  explorer §5.6 session-detail handler does NOT proxy such rows
+  to the gateway (returns `gateway_identity_unavailable`), while
+  out-of-process audit tooling MAY join on `external_request_id`
+  alone with documented cross-account ambiguity. See SPEC-002
+  v1.5.0 §11.
 
 ## 3. What the operator wants to see
 
@@ -701,19 +723,32 @@ Filters:
 
 `GET /admin/explorer/sessions/{request_id}`
 
-Optional query parameters:
+Path segment (v0.3):
 
-- `account_id` - disambiguator for cross-account `request_id`
-  collisions. Gateway-owned session rows are physically keyed by
-  `(account_id, request_id)` (see SPEC-007 § 6.4 v0.2.1 addendum
-  and #196); `request_id` alone is a logical join key. When the
-  unscoped lookup matches rows from more than one account the
-  endpoint returns `409 ambiguous_request_id` and the operator UI
-  re-issues the request with one of the returned account IDs.
+- `{request_id}` is the coordinator-internal `request_log.request_id`
+  (server-minted UUID v4). It is NOT the buyer-supplied
+  `X-Request-ID` — that lives in `request_log.external_request_id`.
+  Operators starting from a buyer-facing ticket carrying an
+  `X-Request-ID` MUST resolve the internal id via direct SQL in
+  v0.3 (UI surface for external-id lookup is deferred to v0.4).
+  See SPEC-007 §5.6 v0.3.
+
+Gateway proxy (v0.3 both-or-nothing):
+
+- The coordinator forwards
+  `GET /admin/explorer/sessions/<external_request_id>?account_id=<account_id>`
+  to the gateway ONLY when the resolved coordinator row supplies
+  BOTH a non-empty `external_request_id` AND a non-empty
+  `account_id`. Otherwise the coordinator does NOT proxy and the
+  response carries `gateway: {"error": {"code":
+  "gateway_identity_unavailable"}}`. Gateway-side ambiguity is
+  documented in SPEC-007 §6.4 v0.3 — the coordinator surface
+  never exposes the 409 itself in v0.3 (the path-segment-overload
+  + 409 surfacing is deferred to v0.4).
 
 Returns:
 
-- All request attempts.  - Ledger rows.  - Provider identity snapshots.  - Gateway usage rows.  - Quota reservation.  -
+- All request attempts.  - Ledger rows.  - Provider identity snapshots.  - Gateway usage rows (only when proxy fires).  - Quota reservation.  -
 Feedback rows.
 
 Pagination should be mandatory for lists.

@@ -1,14 +1,46 @@
-# SPEC-007 v0.2.1 — Audit findings + R2 disposition
+# SPEC-007 v0.3 — Audit findings + R1–R2 dispositions
 
-Three-lane codex audit run on the R1 draft of the SPEC-007 v0.2.1
-addendum for ISS-212 (composite-PK addendum to § 6.4 sessions detail).
+Multi-round three-lane codex audit on the SPEC-007 composite-PK
+addendum for ISS-212 (#221). R1 landed the v0.2.1 draft; R2
+extended scope to v0.3 after the #211 / PR #224 merge surfaced
+additional cross-spec consistency work.
 
 Audit prompts:
-- `specs/AUDIT_ISS_212_R1_CODE_PROMPT.md`
-- `specs/AUDIT_ISS_212_R1_SECURITY_PROMPT.md`
-- `specs/AUDIT_ISS_212_R1_ARCHITECT_PROMPT.md`
+- `specs/AUDIT_ISS_212_R1_*.md`
+- `specs/AUDIT_ISS_212_R2_*.md`
 
 Bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM across all three lanes.
+
+## R2 scope-expansion summary
+
+R1 left two deferrals + several SPEC-007-only items the #224 audit
+loop also flagged (it could not edit SPEC-007 without conflict).
+R2 absorbed all of them and bumped the version v0.2.1 → v0.3:
+
+- **R1 deferral S2 (now fixed):** the gateway IMPL ambiguity-source
+  union extended from 3 tables (usage_events, quota_reservations,
+  concurrency_reservations) to all 5 account-keyed session-detail
+  tables (added feedback_events, audit_events). New regression
+  `TestExplorerSessionDetailAmbiguityExtendedToFeedbackAndAudit`
+  in `phase5-gateway/internal/storage/sqlite/usage_events_pk_test.go`.
+- **R1 deferral S1 (still deferred):** bounded `matched_account_ids`
+  (max 10 + `truncated`) + operator-workflow MUST on
+  untrusted-input request_id. Defensible deferral: it requires
+  additional schema (no `truncated` field exists) and a new MUST
+  on workflow discipline that benefits from operator review of
+  the existing 409 patterns. Tracked in a follow-up issue.
+- **§5.6 coordinator session-detail:** path-segment overload
+  (internal request_id OR external_request_id), `?account_id=`
+  disambiguation, 409 contract mirroring §6.4, gateway-proxy
+  rule (forward external_request_id + ?account_id=).
+- **§7.5 cross-component join keys:** rewritten to split
+  intra-coordinator (on internal request_id) from cross-service
+  (on composite (account_id, external_request_id) ⇔
+  (account_id, request_id)) joins.
+- **AC-7 fixture:** two-account collision + scoped re-issue +
+  NULL-account fallback sub-case.
+- **§2.8 design-companion pointer:** updated from "Tracked in
+  issue #211" to "Closed by SPEC-002 v1.5.0 / #211 / PR #224".
 
 ## R1 findings (7 MEDIUM, 0 HIGH, 0 CRITICAL)
 
