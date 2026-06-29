@@ -667,18 +667,21 @@ invariant.
 | `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | local row id | insert only |
 | `request_credit_id` | INTEGER | NOT NULL REFERENCES ledger_request_credits(id) | quarantined row being resolved | insert only |
 | `resolution_kind` | TEXT | NOT NULL CHECK(resolution_kind IN ('force_credit','force_void')) | operator's resolution | insert only |
-| `operator_id` | TEXT | NOT NULL CHECK(length(operator_id) BETWEEN 1 AND 64) | operator identity (free-form; see §11.6.2) | insert only |
-| `resolution_reason` | TEXT | NOT NULL CHECK(length(resolution_reason) BETWEEN 1 AND 500) | operator-supplied justification | insert only |
+| `operator_id` | TEXT | NOT NULL CHECK(length(operator_id) BETWEEN 1 AND 64) | self-asserted operator identity; the SCHEMA enforces only length; endpoint-layer validation (§11.6.1, §11.6.4) is authoritative for charset, trim, and UTF-8 | insert only |
+| `resolution_reason` | TEXT | NOT NULL CHECK(length(resolution_reason) BETWEEN 1 AND 500) | operator-supplied justification; SCHEMA enforces only length; endpoint-layer validation (§11.6.4) is authoritative for sanitization | insert only |
 | `created_at_utc` | TEXT | NOT NULL | resolution time (RFC3339Nano) | insert only |
 
 Indexes and uniqueness constraints:
 - `UNIQUE(request_credit_id)` — terminal: one resolution per
-  quarantined row, ever. The second POST to either `force-credit` or
+  quarantined row, ever. SQLite creates an implicit index for the
+  UNIQUE clause (`sqlite_autoindex_ledger_quarantine_resolutions_1`)
+  that ALSO covers the LEFT JOIN read path used by §11.1 / §11.2 /
+  §11.4 / §7. No additional non-unique index on
+  `request_credit_id` is added because the UNIQUE auto-index is
+  sufficient. The second POST to either `force-credit` or
   `force-void` against an already-resolved row MUST hit this
-  constraint, surface as HTTP 409 per §11.6.3, and MUST NOT insert
-  a second resolution row.
-- `INDEX idx_lqr_request_credit(request_credit_id)` — covers the
-  LEFT JOIN read path used by §11.1 / §11.2 / §11.4 / §7.
+  UNIQUE constraint, surface as HTTP 409 per §11.6.3, and MUST
+  NOT insert a second resolution row.
 - `INDEX idx_lqr_kind_created(resolution_kind, created_at_utc)` —
   covers operator-facing audit-of-resolutions browsing.
 
@@ -1118,11 +1121,16 @@ No HTML, chart markup, Slack payload, or email body is returned.
   "split_delta_rows": 0,
   "rows_scanned": 128,
   "rows_recovered": 1,
-  "rows_quarantined": 0
+  "rows_quarantined": 0,
+  "rows_force_resolved_in_range": 0
 }
 ```
 
-`delta_gross_credits` MUST be 0 for a clean H-005 range.
+`delta_gross_credits` MUST be 0 for a clean H-005 range, computed
+over `INCLUDED_PREDICATE` per §11.6.6 (SPEC-005 v0.4). The
+`rows_force_resolved_in_range` field is mandatory under v0.4 and
+counts both `force_credit` and `force_void` resolutions with
+`created_at_utc` inside the range; see §11.6.6.3.
 `buyer_equivalent_credits` is computed by SPEC-005 from request_log and the section  6 D8 matrix; it is not read from SPEC-006 usage tables.
 Provider/operator split validation is reported separately with `split_delta_rows`.
 A non-zero `delta_gross_credits` MUST be returned in this JSON response and MUST fail AC-H005.
@@ -1197,19 +1205,30 @@ Missing token returns 401.
 Unknown provider_id returns 404 without enumerating valid providers.
 When SPEC-002 v1.5.0 `auth.require_provider_tokens` is `false`, the `/providers/{provider_id}/earnings` endpoint MUST be disabled at the route layer. SPEC-005 v0.3.1 does NOT specify a side-channel per-provider bearer-token provisioning scheme; provider economics in this deployment mode are available only via the operator-keyed `/admin/ledger/providers` endpoint. SPEC-005 v0.3.1 production launch gate adds this as item 9 alongside the SPEC-006 production launch gate.
 
-**Production launch gate item 10 (v0.4, issue #169).** Before
-enabling the §11.6 quarantine-resolution endpoints in production
-the operator MUST: (a) review the §11.6.6.4 mistaken-resolution
-runbook; (b) test the §7 settlement-runner pause/resume procedure
-in staging; (c) test the SPEC-016 USDC payout-runner pause/resume
-procedure in staging; (d) document the operator-key holder set
-(who can hit `/admin/ledger/quarantine/*`) and the per-human
-authentication path the audit trail relies on (per the §11.6.5
-operator-attribution caveat). The endpoints SHOULD remain
-disabled at the route layer (404 surface) until the gate is
-cleared; v0.4 ships the SPEC text and IMPL but the operator
-flip is a deliberate, runbook-gated event. SPEC-006 production
-launch gate also adds this item 10 alongside.
+**Production launch gate item 10 (v0.4, issue #169).** v0.4
+introduces two new config keys gating §11.6 at the route layer:
+`billing.quarantine_resolution_force_credit_enabled` (default
+`false`) and `billing.quarantine_resolution_force_void_enabled`
+(default `false`). When the corresponding flag is `false`, the
+endpoint MUST return HTTP 404 `not_found` (route-layer gate, not
+405) — the endpoint is invisible to clients. The flags are
+operator-toggleable via the existing config-reload primitive
+(no coordinator restart required).
+
+Before flipping EITHER flag to `true` in production the operator
+MUST: (a) review the §11.6.6.4 mistaken-resolution runbook;
+(b) document the operator-key holder set (who can hit
+`/admin/ledger/quarantine/*`) and the per-human attribution
+limitation per §11.6.5; (c) for the force-credit flag
+specifically, verify SPEC-016 USDC payout status (see
+§11.6.6.5 below — force-credit is automatically gated 503 when
+SPEC-016 payout is active in v0.4).
+
+The route-layer default-disabled posture is a MUST, not a SHOULD.
+v0.4 ships the SPEC text and IMPL with both flags FALSE; operator
+flip is a deliberate, runbook-gated event. The SPEC-006
+production launch gate is NOT modified by SPEC-005 v0.4 — the
+gate item 10 lives in SPEC-005 alone.
 
 ### 11.6 Quarantine resolution admin surface (v0.4, issue #169)
 
@@ -1238,8 +1257,10 @@ authority for inclusion.
 key of a row in `ledger_request_credits`. Decimal digits only; any
 other character returns HTTP 400 `bad_request`.
 
-**Auth:** operator key (per §11). Missing or wrong key returns HTTP
-403 `forbidden` with the §11 envelope.
+**Auth:** operator key (per §11). Missing `Authorization` header
+returns HTTP 401 `unauthorized`; wrong operator key returns HTTP 403
+`forbidden`. Both share the §11 envelope; the status distinction
+follows the §11.6.1.1 response-code table.
 
 **Request body:** JSON object with these fields:
 
@@ -1264,7 +1285,7 @@ submitted values to avoid log-injection).
 | 400 | `bad_request` | path `{request_credit_id}` not a base-10 integer, OR overflows int64, OR body not valid JSON, OR top-level not an object, OR contains duplicate keys, OR contains unknown keys |
 | 401 | `unauthorized` | no `Authorization` header present |
 | 403 | `forbidden` | wrong operator key (per §11 envelope) |
-| 404 | `not_found` | no `ledger_request_credits` row with that `id` |
+| 404 | `not_found` | (a) the per-endpoint config flag `billing.quarantine_resolution_force_credit_enabled` (or `_force_void_enabled`) is `false` — endpoint is route-layer disabled per §11.5 launch-gate item 10; OR (b) the flag is true but no `ledger_request_credits` row exists with that `id`; the response body is identical in both cases (no leak of which) |
 | 405 | `method_not_allowed` | method is not POST |
 | 409 | `already_resolved` | UNIQUE(request_credit_id) constraint hit (per §11.6.3) |
 | 413 | `request_too_large` | body > 4 KiB |
@@ -1277,6 +1298,7 @@ submitted values to avoid log-injection).
 | 422 | `bad_operator_id` | `operator_id` empty after trim, length > 64, or contains characters outside `[A-Za-z0-9_.-]` |
 | 422 | `missing_field` | `operator_id` or `reason` field absent from body |
 | 500 | `internal_error` | any unreachable FK / CHECK violation surfaces after validation (NOT silent corruption) |
+| 503 | `payout_runner_active` | force-credit endpoint only: SPEC-016 USDC payout is active in this deployment per §11.6.6.5; 503 fires BEFORE validation / INSERT / audit; no side effect |
 
 All error responses follow the §11 envelope shape:
 
@@ -1374,10 +1396,13 @@ because they are not the race target.
 **SQLite error-class mapping.** When the INSERT into
 `ledger_quarantine_resolutions` fails:
 
-- `SQLITE_CONSTRAINT_UNIQUE` on `idx_lqr_request_credit` (the
-  UNIQUE clause) → HTTP 409 `already_resolved`; the handler MUST
-  re-read the existing row to populate `existing_resolution` in
-  the response.
+- `SQLITE_CONSTRAINT_UNIQUE` against the `UNIQUE(request_credit_id)`
+  constraint (SQLite reports the error with the
+  `sqlite_autoindex_ledger_quarantine_resolutions_1` index name
+  but the handler MUST match on the constraint identity, not on
+  any index name string) → HTTP 409 `already_resolved`; the
+  handler MUST re-read the existing row to populate
+  `existing_resolution` in the response.
 - `SQLITE_CONSTRAINT_FOREIGN_KEY` (the `REFERENCES
   ledger_request_credits(id)` clause) → unreachable after the
   404 precondition; if it surfaces (e.g., a race deleting the
@@ -1421,6 +1446,17 @@ C0 / C1 / Unicode-bidi / zero-width / BOM injection surface:
    leading) → HTTP 422 `unsanitized_reason`. ZW characters are
    not visible in most renderings; rejecting them keeps the
    audit-log byte content faithful to its display form.
+6. **Unicode variation selectors / tag chars / private-use
+   reject:** U+FE00..U+FE0F (variation selectors), U+180B..U+180D
+   (Mongolian variation selectors), U+E0000..U+E007F (tag
+   characters; emoji-tag bases), U+E0080..U+E00FF (reserved tag
+   range), U+E000..U+F8FF (BMP private-use area), U+F0000..U+FFFFD
+   (supplementary private-use plane A), U+100000..U+10FFFD
+   (supplementary private-use plane B) → HTTP 422
+   `unsanitized_reason`. Variation selectors and tag chars are
+   default-ignorable and combine invisibly with prior codepoints;
+   private-use range has no Unicode-defined rendering, so its
+   audit-log contents are not reproducibly forensic.
 
 Length is measured AFTER trimming leading/trailing whitespace
 (`\t \n \r \v \f` plus ASCII space), NOT raw byte length, and
@@ -1486,6 +1522,7 @@ with EXACTLY these fields:
 | Field | Type | Source |
 |---|---|---|
 | `severity` | string | constant `"WARN"` |
+| `operator_attribution` | string | constant `"operator_key_self_asserted"` in v0.4 (per §11.6.5 attribution caveat); the field makes the limitation forensically explicit to readers who only see the audit row |
 | `operator_id` | string | request body, post-sanitization (§11.6.4) |
 | `request_credit_id` | integer (int64) | path parameter, parsed as base-10 int64 |
 | `request_id` | string | `request_id` column of base ledger_request_credits row |
@@ -1538,11 +1575,17 @@ OPEN_PREDICATE :=
                     WHERE r.request_credit_id = ledger_request_credits.id))
 ```
 
-Force-voided rows match NEITHER predicate — they are
-resolved-and-excluded from the payable set and explicitly excluded
-from the open-quarantine count. The two predicates are exhaustive
-and mutually exclusive for any `ledger_request_credits` row that
-has at most one resolution.
+The two predicates are mutually exclusive (no row matches both),
+but they are NOT exhaustive: a `quarantined=1` row with a
+`force_void` resolution matches NEITHER. Force-voided rows are a
+third resolved-and-excluded state — present in
+`ledger_request_credits`, present in
+`ledger_quarantine_resolutions` with `resolution_kind = 'force_void'`,
+and excluded from BOTH the payable set AND the open-quarantine
+count. A reader that wants the COUNT of resolved rows uses
+`SELECT COUNT(*) FROM ledger_quarantine_resolutions` directly; the
+INCLUDED / OPEN predicates above are about the base ledger
+read path only.
 
 Concrete touch-list:
 
@@ -1573,23 +1616,35 @@ no longer create the delta because they ARE in
 ##### 11.6.6.1 Settlement-sweep snapshot ordering (normative)
 
 The §7 settlement sweep MUST run inside a SQLite `BEGIN IMMEDIATE`
-transaction. The same transaction MUST:
+transaction. The same transaction MUST, in this order:
 
 1. Read the source rows over `INCLUDED_PREDICATE` for the
    `(provider_id, window_start_utc, window_end_utc)` triple.
-2. Compute the `provider_credits` sum for the window.
-3. INSERT the resulting `ledger_payout_ready` row, OR
-4. Mark the source rows `settled=1` with `settlement_id` pointing
-   at the new payout-ready row.
+2. Compute the `provider_credits` sum for the window. If zero
+   eligible rows, COMMIT without writing — the
+   `ledger_payout_ready` row is NOT created and step 4 does not
+   execute.
+3. INSERT the resulting `ledger_payout_ready` row using the sum
+   from step 2.
+4. UPDATE the source rows from step 1 to set `settled=1` and
+   `settlement_id` pointing at the row just inserted in step 3.
+
+Steps 3 and 4 are sequential, not alternative — every non-empty
+window produces both a payout-ready row AND the corresponding
+`settled=1` flips in the same transaction. Splitting them across
+transactions, or running step 4 without step 3, is forbidden.
 
 A `ledger_quarantine_resolutions` INSERT that commits while the
 sweep transaction is OPEN — i.e., AFTER step 1 reads its snapshot
 but BEFORE step 4 commits — MUST be invisible to the sweep due to
 SQLite's serializable isolation. The resolution waits for the
 sweep to commit, then commits separately; the affected row is
-observed by the NEXT sweep tick for the SAME
-`(provider_id, window_start_utc)` triple (which is now CLOSED —
-see §11.6.6.2 next-window handling).
+observed by the **next OPEN window** (the first window triple
+whose `window_start_utc` is strictly greater than the closed
+window the sweep just wrote — see §11.6.6.2). The closed window
+triple itself is not re-swept; force-credited rows landing after
+a window closes contribute to the NEXT window, never modify the
+closed window's existing payout-ready row.
 
 A `ledger_quarantine_resolutions` INSERT that commits BEFORE the
 sweep transaction begins is fully visible to the sweep and
@@ -1638,42 +1693,86 @@ or it is in both — never one without the other). Force-credit
 resolutions never produce an AC-H005 failure under the amended
 semantic.
 
-##### 11.6.6.4 Mistaken-resolution operator runbook (deferred to v0.5)
+##### 11.6.6.4 Mistaken-resolution operator runbook
 
 A mistaken `force_credit` resolution becomes eligible for the
-NEXT §7 settlement tick (§11.6.6.2) and from there for SPEC-016
-USDC payout. v0.4 does NOT support resolution amendment (§11.6.3:
-the resolution is terminal). v0.4 PATCH: operators executing bulk
-quarantine resolutions MUST follow the operator runbook (tracked
-in `doc/runbooks/quarantine-resolution.md`):
+NEXT §7 settlement tick (§11.6.6.2). v0.4 does NOT support
+resolution amendment (§11.6.3: the resolution is terminal).
+The settlement runner is an in-process goroutine (§7.1 / §2.2
+D2 — no external scheduler), so "pause the runner" is not a
+real primitive in v0.4.
 
-1. PAUSE the §7 settlement runner before issuing the resolution
-   (e.g. systemd `systemctl stop macprovider-settlement.timer`
-   on Pearl VPS deployments).
-2. PAUSE the SPEC-016 USDC payout runner before issuing the
-   resolution. See SPEC-016 ops runbook for the equivalent
-   procedure.
-3. Issue the resolution(s).
-4. VERIFY the `ledger_quarantine_resolutions` rows are correct
-   via `SELECT * FROM ledger_quarantine_resolutions WHERE id > <highwater>`.
-5. If a mistake is identified BEFORE the runners resume, the
-   resolution row is committed but no downstream payout has
-   fired — the mistake is auditable but not money-out. Filing a
-   correcting resolution requires a v0.5 SPEC amendment
-   (deferred); the v0.4 operator must wait for that surface OR
-   accept the immutability.
-6. RESUME the §7 settlement runner. RESUME the SPEC-016 payout
-   runner.
+The v0.4 mitigation has two parts, both NORMATIVE:
 
-A pre-payout hold window (e.g., 24h delay between a
-force-credit resolution committing and the row entering the
-§7 sweep's `INCLUDED_PREDICATE`) is the architecturally cleaner
-fix — it removes the runner-pause requirement and gives a real
-auditable buffer. v0.4 DEFERS this to v0.5 with rationale: the
-delay clause is a normative change to the §7 sweep contract
-that needs its own spec audit; v0.4 prefers the runbook escape
-hatch in the short term and a clean v0.5 amendment in the
-medium term. Tracking issue to be filed alongside the v0.4 PR.
+1. **Route-layer gate (§11.5 launch gate item 10).** Force-credit
+   and force-void endpoints default to HTTP 404 until the
+   operator explicitly flips the per-endpoint config flag
+   (`billing.quarantine_resolution_force_credit_enabled` /
+   `billing.quarantine_resolution_force_void_enabled`). Flipping
+   the force-credit flag false again via config reload causes
+   any subsequent POST to return 404; in-flight requests at the
+   moment of the flip MAY commit (small race window), but new
+   resolutions are blocked. Operators correcting a window of
+   mistaken resolutions MUST flip the flag false first, then
+   investigate.
+
+2. **SPEC-016 USDC payout interaction (§11.6.6.5).** When the
+   SPEC-016 USDC payout runner is active in this deployment,
+   the force-credit endpoint MUST additionally return HTTP 503
+   `payout_runner_active`. This blocks force-credit while
+   real-money payouts are flowing.
+
+If a mistake is detected AFTER the resolution commits but BEFORE
+the §7 sweep includes it, the operator MUST flip the
+`billing.quarantine_resolution_force_credit_enabled` flag false
+and investigate; the resolution row is committed and audit-logged
+but no payout has fired. A correcting resolution path
+(force-void over a force-credit) requires a v0.5 SPEC amendment
+that lifts the UNIQUE constraint to allow a single corrective
+resolution within a hold window. v0.4 explicitly does NOT
+support this; tracking issue to be filed.
+
+A pre-payout hold window (e.g., 24h delay between a force-credit
+resolution committing and the row entering the §7 sweep's
+`INCLUDED_PREDICATE`) is the architecturally cleaner long-term
+fix. v0.4 DEFERS this to v0.5 with rationale: the delay clause
+is a normative change to the §7 sweep contract that needs its
+own spec audit; v0.4 instead pairs the route-layer gate with
+the SPEC-016 interaction (§11.6.6.5) so the v0.4 default-disabled
+posture combined with the SPEC-016 503 gate prevent money loss
+even without the v0.5 delay.
+
+##### 11.6.6.5 SPEC-016 USDC payout interaction (v0.4)
+
+When the SPEC-016 USDC payout runner is enabled in this
+deployment (SPEC-016 v0.1.21+; detection via the operator-set
+config key `payout.spec016_enabled = true`), the force-credit
+endpoint (§11.6.1) MUST return HTTP 503 with this body:
+
+```json
+{"error":{"code":"payout_runner_active","message":"force-credit is unavailable while SPEC-016 USDC payout is active; see SPEC-005 §11.6.6.5"}}
+```
+
+The 503 response MUST be emitted BEFORE any validation, INSERT,
+or audit-log write — no resolution row exists, no audit row is
+written. The route-layer gate (§11.5 launch gate item 10)
+remains in effect: even when this 503 gate is satisfied (SPEC-016
+disabled), the operator MUST still have flipped the per-endpoint
+config flag to `true`.
+
+The force-VOID endpoint is NOT gated by SPEC-016 status. Voiding
+a quarantined row never produces a payout — it only
+resolves-and-excludes. v0.4 keeps force-void available so an
+operator running SPEC-016 USDC payout can still clear false-
+positive quarantines from the open-quarantine count.
+
+v0.5 lifts the §11.6.6.5 503 gate by introducing a pre-payout
+hold window (default 24h) between a force-credit resolution
+committing and the row entering the §7 sweep's
+`INCLUDED_PREDICATE`. During the hold the operator can detect a
+mistake and apply a corrective resolution. v0.4 does NOT
+implement the hold; the SPEC-016 503 gate is the v0.4 safety
+mechanism for real-money deployments.
 
 #### 11.6.7 Rate limit, concurrency, and threat-model notes
 
@@ -2207,8 +2306,8 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### AC-Q045: Reader-side widening (v0.4 §11.6.6)
 
-**Verification:** Seed three rows in `ledger_request_credits`: one `quarantined=0`, one `quarantined=1` with no resolution, one `quarantined=1` with a `force_credit` resolution. Hit `/admin/ledger/summary` and `/providers/{id}/earnings`.
-**Expected:** `total_provider_credits` covers row 1 + row 3 (sums match). `quarantined_count` = 1 (the unresolved row only). Provider earnings `total_credits` covers row 1 + row 3. A fourth row with `force_void` resolution does NOT contribute to either total.
+**Verification:** Seed FOUR rows in `ledger_request_credits`: (a) `quarantined=0`, (b) `quarantined=1` with no resolution, (c) `quarantined=1` with a `force_credit` resolution row, (d) `quarantined=1` with a `force_void` resolution row. Hit `/admin/ledger/summary` and `/providers/{id}/earnings`.
+**Expected:** `total_provider_credits` covers (a) + (c) only (sums match the two rows' `provider_credits`). `quarantined_count` = 1 (row (b) only — open quarantines). Provider earnings `total_credits` covers (a) + (c) only. Row (d) does NOT contribute to `total_provider_credits` AND does NOT count toward `quarantined_count`.
 **Network:** Not required.
 **State reset:** Fresh fixture database.
 
@@ -2260,6 +2359,20 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 **Expected:** The existing W1 payout-ready row remains unchanged (still `provider_credits=400000`). No second payout-ready row for W1. The force-credited row has `settled=0` after the second W1 sweep. Run the §7 sweep for the NEXT window (W2): the force-credited row's `provider_credits=100000` rolls into the W2 payout-ready row; the row's `settled=1` is set in the W2 sweep.
 **Network:** Not required.
 **State reset:** Fresh fixture database.
+
+### AC-Q053: Route-layer config flag gate (v0.4 §11.5 / §11.6.1.1)
+
+**Verification:** With `billing.quarantine_resolution_force_credit_enabled = false` (default), POST `/admin/ledger/quarantine/12345/force-credit` against a valid quarantined row. Then config-reload with the flag = `true` and POST again. Then config-reload back to `false` and POST a third time.
+**Expected:** First POST returns HTTP 404 `not_found` with the §11.6.1.1 envelope; no resolution INSERT; no audit row. Second POST returns HTTP 200 with a fresh resolution row + audit row. Third POST against a DIFFERENT quarantined row returns HTTP 404 again. The 404 body for the disabled-flag case is byte-identical to the row-not-found 404 body — no leak of which case fired.
+**Network:** Not required.
+**State reset:** Fresh fixture database; config-reload primitive exercised between scenarios.
+
+### AC-Q054: SPEC-016 USDC payout 503 gate (v0.4 §11.6.6.5)
+
+**Verification:** With `billing.quarantine_resolution_force_credit_enabled = true` AND `payout.spec016_enabled = true` (simulated), POST `/admin/ledger/quarantine/12345/force-credit` against a valid quarantined row. Then flip `payout.spec016_enabled = false` (or simulate the payout runner stopping) and POST against a DIFFERENT quarantined row.
+**Expected:** First POST returns HTTP 503 `payout_runner_active` with the §11.6.6.5 envelope; the response fires BEFORE any validation / INSERT / audit-write (assert via timing or by absence of the row even when the body is intentionally malformed). Second POST returns HTTP 200 with a fresh resolution row. The force-VOID endpoint is NOT 503-gated by SPEC-016 — issue a parallel POST to `/admin/ledger/quarantine/{id}/force-void` against a third quarantined row with SPEC-016 active; it returns HTTP 200.
+**Network:** Not required.
+**State reset:** Fresh fixture database; config-reload primitive exercised.
 
 ### AC-ROUND-HALF-EVEN: Rounding exactness
 
