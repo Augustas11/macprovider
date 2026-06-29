@@ -506,6 +506,7 @@ final class CoordinatorClientTests: XCTestCase {
             modelHash: String(repeating: "a", count: 64)
         )
         let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: false)
+        await AutoUpdateEventStore.shared.clear()
 
         try await client.sendHeartbeatForTest()
         let frames = await recorder.frames

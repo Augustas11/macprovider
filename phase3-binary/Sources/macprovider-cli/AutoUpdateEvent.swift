@@ -256,6 +256,10 @@ actor AutoUpdateEventStore {
         event.emitLocal()
     }
 
+    func clear() {
+        last = nil
+    }
+
     func lastWireObject() -> [String: Any]? {
         last?.wireObject()
     }
