@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -94,10 +95,40 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 	if !s.explorerAllowed(w, r) {
 		return
 	}
-	requestID := strings.TrimPrefix(r.URL.Path, "/admin/explorer/sessions/")
-	if requestID == "" || strings.Contains(requestID, "/") {
+	rawSegment := strings.TrimPrefix(r.URL.Path, "/admin/explorer/sessions/")
+	if rawSegment == "" || strings.Contains(rawSegment, "/") {
 		writeError(w, http.StatusNotFound, "invalid_request_error", "not_found", "Explorer resource not found")
 		return
+	}
+	// #231 SPEC-007 v0.4 path-segment typing (deprecation window):
+	// accept `ext_<external_request_id>` prefix as the typed gateway
+	// form. Untyped (bare-id) segments are still resolved AS the
+	// external_request_id (v0.3 behavior) but emit a deprecation
+	// audit row so operators see the upcoming v0.5 break.
+	requestID, typed := parseTypedSegment(rawSegment, "ext_")
+	if !typed {
+		// Fire-and-forget — do not block the request path on audit
+		// emit failure, but surface in audit_events when it works.
+		// json.Marshal-safe payload (R1 SEC MEDIUM closure).
+		// #231 R5 code LOW closure: include request_id + ts_utc in
+		// the payload so a journald-only consumer (no audit_events
+		// row column join) can still see the full event shape per
+		// SPEC §6.4.
+		payloadJSON, _ := json.Marshal(map[string]any{
+			"endpoint":    "GET /admin/explorer/sessions",
+			"request_id":  requestID,
+			"severity":    "WARN",
+			"ts_utc":      s.now().UTC().Format(time.RFC3339Nano),
+			"deprecation": "v0.5 will reject untyped with 400 session_id_untyped — use ext_<external_request_id>",
+		})
+		_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
+			EventID:   mustID("audit"),
+			RequestID: requestID,
+			Actor:     "explorer",
+			Type:      "payout_explorer_path_segment_untyped",
+			Payload:   string(payloadJSON),
+			CreatedAt: s.now(),
+		})
 	}
 	// Issue #196: a request_id can now legitimately match rows in
 	// multiple accounts under the composite-PK schema. Operators
@@ -111,21 +142,88 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 		// account list so the UI can render a disambiguation
 		// picker rather than a generic 500.
 		if errors.Is(err, storage.ErrExplorerAmbiguousRequestID) {
-			writeJSON(w, http.StatusConflict, map[string]any{
+			body := map[string]any{
 				"error": map[string]any{
 					"type":    "invalid_request_error",
 					"code":    "ambiguous_request_id",
 					"message": "request_id matches multiple accounts; supply ?account_id= to disambiguate",
 				},
-				"request_id":          requestID,
-				"matched_account_ids": out.MatchedAccountIDs,
-			})
+				"request_id":                    requestID,
+				"matched_account_ids":           out.MatchedAccountIDs,
+				"matched_account_ids_truncated": out.MatchedAccountIDsTruncated,
+			}
+			// #231 v0.4: when truncation fired, emit a bounded
+			// forensic sample of the matched account_id set to
+			// audit_events for post-hoc investigation. The sample
+			// is capped at storage.ExplorerForensicMatchedAccountIDsCap
+			// so neither the 409 response NOR the audit row can be
+			// flooded by a malicious cross-account-collision
+			// attacker (R1 SEC HIGH closure). When the bounded
+			// forensic SELECT returns MORE rows than the cap,
+			// `forensic_truncated_at` surfaces the partial capture.
+			if out.MatchedAccountIDsTruncated {
+				forensic := out.MatchedAccountIDsForensicSample
+				var forensicTruncatedAt int
+				if len(forensic) > storage.ExplorerForensicMatchedAccountIDsCap {
+					forensicTruncatedAt = storage.ExplorerForensicMatchedAccountIDsCap
+					forensic = forensic[:storage.ExplorerForensicMatchedAccountIDsCap]
+				}
+				payload := map[string]any{
+					"matched_account_ids": forensic,
+					"cap":                 storage.ExplorerMatchedAccountIDsCap,
+					"forensic_cap":        storage.ExplorerForensicMatchedAccountIDsCap,
+					"severity":            "WARN",
+				}
+				if forensicTruncatedAt > 0 {
+					payload["forensic_truncated_at"] = forensicTruncatedAt
+				}
+				// #231 R2 CODE MEDIUM closure: when the forensic
+				// SELECT failed and storage fell back to the
+				// response probe, surface the source so operators
+				// can tell a partial sample apart from a real
+				// "exactly cap+1 accounts" result.
+				if out.MatchedAccountIDsForensicDegraded {
+					payload["forensic_source"] = "response_probe"
+				} else {
+					payload["forensic_source"] = "forensic_select"
+				}
+				// json.Marshal is a stdlib JSON encoder — closes R1
+				// CODE M2 / SEC MEDIUM (hand-rolled quotedCSV was
+				// not C0-safe).
+				payloadJSON, jerr := json.Marshal(payload)
+				if jerr == nil {
+					_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
+						EventID:   mustID("audit"),
+						RequestID: requestID,
+						Actor:     "explorer",
+						Type:      "explorer_matched_account_ids_truncated",
+						Payload:   string(payloadJSON),
+						CreatedAt: s.now(),
+					})
+				}
+			}
+			writeJSON(w, http.StatusConflict, body)
 			return
 		}
 		writeExplorerStorageError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// parseTypedSegment accepts the #231 SPEC-007 v0.4 typed-prefix path
+// segment. Returns (stripped_id, true) when the prefix matches;
+// (raw, false) for the legacy bare-id form. Empty prefix is rejected
+// to avoid ambiguity with a literal "ext_" or "int_" id substring.
+func parseTypedSegment(raw, prefix string) (string, bool) {
+	if prefix != "" && strings.HasPrefix(raw, prefix) {
+		stripped := strings.TrimPrefix(raw, prefix)
+		if stripped == "" {
+			return raw, false
+		}
+		return stripped, true
+	}
+	return raw, false
 }
 
 func (s *Server) handleExplorerActivity(w http.ResponseWriter, r *http.Request) {

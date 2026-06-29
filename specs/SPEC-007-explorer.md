@@ -1,13 +1,14 @@
 # SPEC-007 - Internal Operator Protocol Explorer
 Dependency lines: depends on `specs/SPEC-002-coordinator.md`, `specs/SPEC-005-billing.md`, `specs/SPEC-006-buyer-api.md`, `specs/SPEC-007-explorer-design.md`, and `specs/SPEC-007-operator-decisions.md`.
 Normative language in this document uses RFC 2119 meanings for MUST, MUST NOT, SHOULD,
-SHOULD NOT, and MAY. SPEC-007 v0.3 defines an internal, read-only,
+SHOULD NOT, and MAY. SPEC-007 v0.4 defines an internal, read-only,
 single-operator explorer for the Mac Provider protocol. The explorer is an operator
 cockpit. It is not a public explorer. It is not a control plane. It is not a
 settlement mutator. It is not a parallel analytics store.
 ## 1. Change log
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| v0.4 | 2026-06-29 | docs+impl (ISS-231) | Closes the v0.3 R2 architect lane deferrals from PR #221. **§6.4 v0.4 audit payload:** when truncation fires the gateway emits a bounded forensic sample (cap `N_forensic=100`, scan probed at `N_forensic+1`) to `audit_events` — NOT an unbounded list (closes R1 SEC HIGH collision-flood DoS; an operator-runbook offline-query is the recovery path when a deeper sample is needed). **R1 audit deferrals** (filed as separate follow-ups, not blocking v0.4): (a) SPEC-007 centralized event table — A future SPEC-007 vN.M+1 should add a §-level event registry analogous to SPEC-016 §7.1 so BetterStack alert filters catch new event names by convention. (b) `payout_explorer_path_segment_untyped` channel asymmetry — gateway emits to audit_events DB rows; coordinator emits to journald JSON via stdlib log. Runbook should reflect both. (c) Near-cap 409 audit — only the truncated 409 path emits an audit row; 2–9 account ambiguities are still visible only via the response. The v0.5 break (#245) is the natural place to revisit. **R4 SEC MEDIUM deferred to #246**: the five session-detail fetch helpers (usage_events / quota_reservations / concurrency_reservations / feedback_events / audit_events) use an optional-predicate `(? = '' OR request_id = ?)` shape so the same prepared statement serves both scoped and unscoped paths. SQLite plans this as `SCAN`. Tracked at #246 (not blocking v0.4 — the ambiguity probe AND scoped-path are now indexed; the unscoped 200 path is auth-gated and not a hot path). **R1 closures absorbed in v0.4:** bounded forensic SELECT at N_forensic=100+1 entries (closes SEC HIGH collision-flood DoS class — the unbounded variant was the wrong primitive); `json.Marshal` for ALL audit/log JSON payloads (closes SEC MEDIUM hand-rolled escape gap — C0 controls and U+2028/U+2029 are now correctly handled); `omitempty` dropped from `MatchedAccountIDsTruncated` DTO so a future direct serialization keeps the field present (closes ARCH LOW); cap=10 documented as a security invariant, not an operator knob (closes ARCH LOW); v0.5 break filed as issue #245 with concrete trigger conditions (closes ARCH MEDIUM-2). **§6.4 (gateway session-detail):** `matched_account_ids` MUST be capped at N=10 entries in the 409 ambiguity response; the SQL UNION carries `LIMIT 11` so the handler detects overflow without inflating the row set. When the underlying union produces >10 distinct account_ids the response MUST include `"matched_account_ids_truncated": true` and the gateway MUST emit an `audit_events` row at WARN with a bounded forensic sample (post-hoc investigation; bound N_forensic=100 per §6.4). Bounds operator log noise + protects the 409 response body against malicious collision floods. **§5.6 + §6.4 (path-segment typing, deprecation-window mode):** the `{request_id}` path-segment MAY now carry a typed prefix — `int_<coordinator-internal request_id>` for §5.6, `ext_<external_request_id>` for §6.4. Untyped (legacy bare-id) calls remain accepted in v0.4 BUT both handlers MUST emit a `payout_explorer_path_segment_untyped` audit row (severity=WARN, fields: `endpoint, request_id, ts_utc`) to surface the deprecation. **v0.5 (tracked at #245) will reject untyped with `400 session_id_untyped`.** Typed-prefix mode closes the path-segment-overload class properly — pre-v0.3 lookup-order disambiguation is no longer the contract authority. **IMPL:** `phase5-gateway/internal/storage/sqlite/explorer.go::explorerAccountIDsForRequest` gains `LIMIT 11`; gateway 409 handler computes the truncation flag + emits the WARN audit row; gateway + coordinator session-detail handlers parse the typed prefix when present and emit deprecation WARN when untyped. **Tests:** `TestExplorerAccountIDsForRequest_CapAt10WithTruncationFlag`, `TestExplorerSessionDetail_TypedPrefixIsParsedCorrectly`, `TestExplorerSessionDetail_UntypedEmitsDeprecationAudit` pin the new contracts. Three-lane codex audit findings in `specs/SPEC-007-v0-4-audit.md`. |
 | v0.3 | 2026-06-29 | docs+impl (ISS-212) | Composite-PK addendum reflecting the gateway PK schema landed in #196 + the coordinator-side composite reconciliation key landed in #211 (PR #224 / SPEC-002 v1.5.0). **§6.4 (gateway session-detail):** `(account_id, request_id)` is the physical identity for `usage_events`, `quota_reservations`, `concurrency_reservations`, `feedback_events`, and `audit_events`; `request_id` alone is only a logical join key. Optional `?account_id=` disambiguation query parameter; `409 ambiguous_request_id` response with `matched_account_ids[]` computed over ALL FIVE account-keyed session-detail tables (R2: extended from the three reservation/usage tables to include feedback_events and audit_events — buyer-attachable feedback would otherwise cross-pollinate a 200 response). Window-contract split between scoped/unscoped paths; `idx_usage_request` supports the unscoped path. Forbidden-fields block. **§6.1:** endpoint-specific error-exception note covering §6.4's OpenAI-compatible 409 envelope. **§5.6 (coordinator session-detail):** path-segment is the coordinator-internal `request_id` only in v0.3 (path-segment overload deferred to v0.4). Both-or-nothing gateway-proxy rule: the coordinator MUST forward `external_request_id` + `?account_id=` (NOT the internal id) when proxying, and MUST NOT proxy when either field is missing on the resolved row — incomplete-identity rows return `gateway: {"error": {"code": "gateway_identity_unavailable"}}` with `partial=false` and full coordinator-side detail. Unknown coordinator-internal `request_id` returns 404 regardless of gateway data. §14.7.1 added to document the new identity-unavailable failure mode; UI MUST distinguish it from `gateway_unavailable`. **§7.5 (cross-component join keys):** rewritten to split intra-coordinator joins (on internal `request_id`) from cross-service joins (on the composite `(account_id, external_request_id)` ⇔ `(account_id, request_id)`). **AC-7:** updated to seed coordinator rows carrying composite identity, assert gateway proxy uses `external_request_id` + `?account_id=` (not the internal id), exercise the cross-account isolation case (two coordinator rows with the same external_request_id route to different accounts), and exercise the legacy NULL-account "no proxy → gateway_identity_unavailable" sub-case. **IMPL:** `phase5-gateway/internal/storage/sqlite/explorer.go` `explorerAccountIDsForRequest` extended to union all five tables; new regression `TestExplorerSessionDetailAmbiguityExtendedToFeedbackAndAudit` pins the feedback/audit cross-pollination guard. **Paired:** SPEC-007-explorer-design.md §2.8 GAP-closed pointer updated to SPEC-002 v1.5.0 / #211. Three-lane codex audit findings + dispositions in `specs/SPEC-007-v0-3-audit.md`. |
 | triage 2026-06-26 | 2026-06-26 | docs/OPEN_QUESTIONS.md | M-3 through M-12 (deferred-to-v0.3 audit findings) closed as unrecoverable — the underlying audit document was never persisted to the repo and the findings list is not reconstructible from history. If operator-explorer concerns recur, run a fresh audit cycle and number anew. No version bump; no normative change. |
 | v0.2 | 2026-06-01 | operator | resolved B-1 by dropping the explorer bearer env knob and pinning bearer source to `auth.operator_key`; resolved B-2 by making SPEC-005 payout mutation a future payout-rail contract; resolved B-3 with D15 shared gateway admin bearer; resolved M-1 with exact `email` and prefix `email_prefix` semantics; resolved M-2 with per-endpoint window knobs. Deferred to v0.3: M-3 through M-12. Future infra follow-up: coordinator `env:` resolution for `auth.operator_key`. |
@@ -442,16 +443,24 @@ Identity model (v0.3):
   under unrelated coordinator-side data. The both-or-nothing
   contract eliminates that risk.
 
-Deferred to v0.4 (future enhancement, not in v0.3 IMPL):
-- Path-segment overload (operator pastes `external_request_id`
-  directly into the path) with `?account_id=` disambiguation
-  and 409 ambiguous_request_id mirroring §6.4. v0.3 only
-  resolves the path-segment as an internal id; an external
-  lookup is left to v0.4 once an operator workflow demands it.
+Path-segment-overload status (v0.4 — #231):
+- `int_<request_id>` continues to resolve as a
+  coordinator-internal id; `ext_<external_request_id>` resolves
+  by re-issuing a scoped lookup against
+  `request_log.external_request_id` then proxying to the gateway.
+  The bare-id form remains accepted in v0.4 with a deprecation
+  WARN; v0.5 (tracked at #245) will reject it with
+  `400 session_id_untyped`.
 Path parameters:
 - `request_id`: required string. **v0.3:** coordinator-internal
-  billing id (UUID v4) only. External-id lookup is deferred to
-  v0.4 (see "Deferred to v0.4" above).
+  billing id (UUID v4) only. **v0.4 (#231):** the coordinator
+  handler MAY accept an `int_`-prefixed value (e.g.
+  `int_<uuid>`) to mark the segment as a coordinator-internal
+  `request_id` explicitly; the prefix is stripped before the SQL
+  lookup runs. Untyped (bare-UUID) calls are still accepted in
+  v0.4 BUT the handler MUST emit a
+  `payout_explorer_path_segment_untyped` audit row at severity
+  WARN. v0.5 (tracked at #245) will reject untyped with `400 session_id_untyped`.
 Headers:
 - `Authorization: Bearer <coordinator operator bearer>` is required.
 Query parameters:
@@ -1355,7 +1364,16 @@ Identity model:
   MUST treat `request_id` as account-scoped when reconciling against
   gateway storage.
 Path parameters:
-- `request_id`: required string.
+- `request_id`: required string. **v0.4 path-segment typing
+  (#231):** the gateway handler MAY accept an `ext_`-prefixed value
+  (e.g. `ext_req-abc123`) to mark the segment as an
+  `external_request_id` explicitly; the prefix is stripped before
+  the SQL lookup runs. Untyped (bare) calls are still accepted in
+  v0.4 for backward compatibility BUT the handler MUST emit a
+  `payout_explorer_path_segment_untyped` `audit_events` row at
+  severity WARN with `endpoint, request_id, ts_utc` to surface the
+  upcoming v0.5 break. v0.5 will reject untyped with
+  `400 session_id_untyped`.
 Headers:
 - `Authorization: Bearer <coordinator.operator_key>` is required.
 Query parameters:
@@ -1394,7 +1412,8 @@ Ambiguity contract:
       "message": "request_id matches multiple accounts; supply ?account_id= to disambiguate"
     },
     "request_id": "<request_id>",
-    "matched_account_ids": ["acct_A", "acct_B"]
+    "matched_account_ids": ["acct_A", "acct_B"],
+    "matched_account_ids_truncated": false
   }
   ```
 - `matched_account_ids` MUST be the set of distinct `account_id`
@@ -1411,6 +1430,25 @@ Ambiguity contract:
   Clients SHOULD re-issue the request with one of the returned
   account IDs as the `?account_id=` query parameter. The handler
   MUST NOT 409 when `account_id` is supplied.
+- **v0.4 bound (#231):** `matched_account_ids` MUST be capped at
+  N=10 entries. The cap is a **security invariant**, not an
+  operator-tunable knob — protects the 409 response body against
+  malicious cross-account-collision floods. When the underlying
+  UNION resolves to >10 distinct account_ids the response MUST set
+  `"matched_account_ids_truncated": true`; the field MUST be
+  present and `false` on the non-truncated path so clients can
+  rely on its presence (presence-based branching, not omitempty).
+  When truncation fires the gateway MUST also emit an
+  `audit_events` row at severity WARN containing a BOUNDED forensic
+  sample of the matched account_ids under
+  `event_payload.matched_account_ids`. The forensic cap is
+  N_forensic=100 (also a security invariant for the same DoS class
+  — the SQL scan is bounded to N_forensic+1 so an attacker cannot
+  drive an unbounded materialization via the audit path). When
+  more than N_forensic accounts exist, the payload's
+  `forensic_truncated_at` field carries the cap value; operators
+  needing the full unbounded set MUST use a separate offline query
+  against the operator's SQLite copy.
 Response fields:
 - `request_id`: string.
 - `usage_event.request_id`: string.
@@ -2270,7 +2308,9 @@ The implementation SHOULD start with existing indexes:
 - `idx_usage_created_at`.
 - `idx_quota_active_account_date`.
 - `idx_quota_expires_at`.
+- `idx_quota_request` (v0.4 promoted from §12.4 candidates — required by §6.4 ambiguity probe to avoid SCAN).
 - `idx_concurrency_active_account`.
+- `idx_concurrency_request` (v0.4 promoted from §12.4 candidates — required by §6.4 ambiguity probe to avoid SCAN).
 - `idx_feedback_request`.
 - `idx_feedback_created_at`.
 - `idx_audit_request`.
@@ -2286,8 +2326,6 @@ Candidate indexes:
 - `idx_lpr_status_window_id` on `ledger_payout_ready(status, window_end_utc, id)`.
 - `idx_api_key_events_created_id` on `api_key_events(created_at, event_id)`.
 - `idx_usage_created_account` on `usage_events(created_at, account_id)`.
-- `idx_quota_request` on `quota_reservations(request_id)`.
-- `idx_concurrency_request` on `concurrency_reservations(request_id)`.
 - `idx_feedback_account_created` on `feedback_events(account_id, created_at)`.
 - `idx_capacity_signal_created_id` on `capacity_signal_events(created_at, event_id)`.
 ### 12.5 Queries requiring care

@@ -282,18 +282,53 @@ func (s *Store) ExplorerSessionDetail(ctx context.Context, accountID, requestID 
 	// limit=2 so we can detect "more than one" without paging the
 	// whole result set.
 	if accountID == "" {
-		// Ambiguity probe spans all three session-detail tables that
+		// Ambiguity probe spans all five session-detail tables that
 		// share (account_id, request_id) keys. Quota and concurrency
 		// already had composite PKs pre-#196 and could carry
 		// cross-account collisions before usage_events ever has a
 		// row (e.g., reservation reserved but not yet settled).
-		// Caught by ISS-196 R2 codex ARCHITECT HIGH.
+		// Caught by ISS-196 R2 codex ARCHITECT HIGH; extended to
+		// feedback/audit by ISS-212 R2 security MEDIUM.
+		//
+		// #231 v0.4: the inner SELECT carries LIMIT cap+1 so the
+		// handler can detect overflow without inflating the result
+		// set. When >cap distinct ids are observed the response cap
+		// is applied + truncation flag set; a BOUNDED forensic sample
+		// (cap ExplorerForensicMatchedAccountIDsCap+1) is preserved
+		// for the audit_events emit.
 		accountIDs, err := s.explorerAccountIDsForRequest(ctx, requestID)
 		if err != nil {
 			return storage.ExplorerSessionDetail{}, err
 		}
 		if len(accountIDs) > 1 {
-			out.MatchedAccountIDs = accountIDs
+			cap := storage.ExplorerMatchedAccountIDsCap
+			if len(accountIDs) > cap {
+				// #231 SPEC-007 v0.4 + R1 SEC HIGH closure: the
+				// bounded probe returned cap+1 entries — enough to
+				// flag truncation. Re-issue a BOUNDED forensic scan
+				// (capped at ExplorerForensicMatchedAccountIDsCap+1)
+				// so the unbounded collision-flood DoS class can't
+				// hit the request path. Cap+1 lets the handler
+				// detect "more than the forensic cap" and set the
+				// payload's forensic_truncated_at flag.
+				full, ferr := s.explorerAccountIDsForRequestForensic(ctx, requestID, storage.ExplorerForensicMatchedAccountIDsCap)
+				if ferr != nil {
+					// Forensic emit is best-effort — degrade
+					// gracefully to the bounded probe rather than
+					// failing the 409 response. #231 R2 CODE
+					// MEDIUM closure: surface the degradation via
+					// the audit payload so operators can tell a
+					// partial sample apart from a real
+					// "exactly cap+1 accounts" result.
+					full = accountIDs
+					out.MatchedAccountIDsForensicDegraded = true
+				}
+				out.MatchedAccountIDsForensicSample = full
+				out.MatchedAccountIDs = accountIDs[:cap]
+				out.MatchedAccountIDsTruncated = true
+			} else {
+				out.MatchedAccountIDs = accountIDs
+			}
 			return out, storage.ErrExplorerAmbiguousRequestID
 		}
 	}
@@ -343,17 +378,18 @@ func (s *Store) ExplorerSessionDetail(ctx context.Context, accountID, requestID 
 // and audit_events — buyer-attachable feedback can otherwise
 // cross-pollinate a 200 response on the unscoped path without
 // triggering 409.
-func (s *Store) explorerAccountIDsForRequest(ctx context.Context, requestID string) ([]string, error) {
-	// Filter empty-string account_id from every branch:
-	// - audit_events.account_id is `TEXT NOT NULL DEFAULT ''`; many
-	//   gateway audit insert paths (OAuth callbacks, admin actions,
-	//   etc.) write rows without an account_id, which would otherwise
-	//   appear here as a bogus matched account `""`.
-	// - usage_events / quota_reservations / concurrency_reservations /
-	//   feedback_events all carry account_id NOT NULL but in
-	//   practice always non-empty; the filter is defensive against
-	//   future writers that might fall back to empty string.
-	// ISS-212 R3 code MEDIUM.
+// explorerAccountIDsForRequestForensic returns a BOUNDED forensic
+// account_id sample — used by #231 SPEC-007 v0.4 §6.4 audit_events
+// emit on the truncation path. The cap is the runtime
+// ExplorerForensicMatchedAccountIDsCap +1 (passed in to keep this
+// storage helper independent of the router package) so the caller
+// can detect "more rows than the forensic cap" and flag the
+// payload accordingly. Bounding the SELECT here closes the R1 SEC
+// HIGH collision-flood DoS: an attacker who creates N>>cap
+// collisions can no longer drive an unbounded scan/materialization
+// in the request path.
+func (s *Store) explorerAccountIDsForRequestForensic(ctx context.Context, requestID string, forensicCap int) ([]string, error) {
+	limit := forensicCap + 1
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT account_id FROM (
 			SELECT account_id FROM usage_events WHERE request_id = ? AND account_id != ''
@@ -365,7 +401,51 @@ func (s *Store) explorerAccountIDsForRequest(ctx context.Context, requestID stri
 			SELECT account_id FROM feedback_events WHERE request_id = ? AND account_id != ''
 			UNION
 			SELECT account_id FROM audit_events WHERE request_id = ? AND account_id != ''
-		) ORDER BY account_id`, requestID, requestID, requestID, requestID, requestID)
+		) ORDER BY account_id LIMIT ?`, requestID, requestID, requestID, requestID, requestID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) explorerAccountIDsForRequest(ctx context.Context, requestID string) ([]string, error) {
+	// Filter empty-string account_id from every branch:
+	// - audit_events.account_id is `TEXT NOT NULL DEFAULT ''`; many
+	//   gateway audit insert paths (OAuth callbacks, admin actions,
+	//   etc.) write rows without an account_id, which would otherwise
+	//   appear here as a bogus matched account `""`.
+	// - usage_events / quota_reservations / concurrency_reservations /
+	//   feedback_events all carry account_id NOT NULL but in
+	//   practice always non-empty; the filter is defensive against
+	//   future writers that might fall back to empty string.
+	// ISS-212 R3 code MEDIUM.
+	//
+	// #231 v0.4: outer SELECT is bounded by
+	// ExplorerMatchedAccountIDsCap+1 so the handler detects overflow
+	// without inflating the row set. ORDER BY runs before LIMIT in
+	// SQLite so the truncation is deterministic (lexicographic).
+	probe := storage.ExplorerMatchedAccountIDsCap + 1
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT account_id FROM (
+			SELECT account_id FROM usage_events WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM quota_reservations WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM concurrency_reservations WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM feedback_events WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM audit_events WHERE request_id = ? AND account_id != ''
+		) ORDER BY account_id LIMIT ?`, requestID, requestID, requestID, requestID, requestID, probe)
 	if err != nil {
 		return nil, err
 	}
