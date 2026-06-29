@@ -153,18 +153,50 @@ same scenario without reading the artifact bundle first.
 After a run, `--out` contains:
 
 ```
-scenario.yaml          # verbatim copy of the input
-run_meta.json          # scenario name, UTC window, git sha
-per_request.jsonl      # one row per request — the raw evidence
-metrics_summary.json   # aggregated histograms + route distribution
-ledger_reconcile.json  # three-way drift report (omitted when skipped)
-invariants.json        # the 4 hard verdicts
+scenario.yaml             # verbatim copy of the input
+run_meta.json             # scenario name, UTC window, git sha
+per_request.jsonl         # one row per request — the raw evidence
+metrics_summary.json      # aggregated histograms + route distribution
+ledger_reconcile.json     # three-way drift report (omitted when skipped)
+invariants.json           # the 4 hard verdicts
+benchmark_summary.json    # B-invariants source data (only when benchmark.enabled)
+benchmark_verdict.json    # B-invariant PASS/WARN/FAIL list (only when benchmark.enabled)
 ```
 
 For phase-B triage, the artifact bundle is the input. Read
 `metrics_summary.json` for routing distribution and latency shape;
 `ledger_reconcile.json` for billing drift; `per_request.jsonl` for any
 case the summaries elide.
+
+## Phase-B benchmark suite (B1-B6)
+
+Scenarios that declare a `benchmark:` block evaluate the network-
+performance invariants from `specs/SPEC-NETWORK-BENCHMARK-v0.1.md`
+alongside I1-I4. The benchmark is REPORTING-ONLY — FAIL verdicts log
+but do not change the harness exit code (I1-I4 still gate via exit 10).
+
+```yaml
+benchmark:
+  enabled: true
+  invariants: [B1, B2, B3, B4, B5, B6]
+  pricing_source: pearl:/opt/macprovider/tier2-catalog.json   # only needed for B6
+  provider_slots: 3                                            # default 3 (Pearl AccountConcurrency)
+```
+
+| ID | Title | PASS target | Bare-min | SKIP when |
+|---|---|---|---|---|
+| B1 | TTFT p50 | ≤ 800ms | ≤ 2000ms | no streaming samples |
+| B2 | Streaming TPS p50 | ≥ 30 tok/s | ≥ 15 tok/s | non-streaming scenario |
+| B3 | Tail ratio p99/p50 | ≤ 3.0 | ≤ 5.0 | no TTFT distribution |
+| B4 | Error rate /1000 | ≤ 5 | ≤ 25 | 0 requests |
+| B5 | Slot utilization % | ≥ 40 | ≥ 15 | no X-Provider-Id attribution |
+| B6 | Earnings $/hr | ≥ $1.00 | ≥ $0.30 | no pricing manifest or attribution |
+
+Pricing manifests are loaded via local path or `host:/path` SSH spec.
+The loader accepts three JSON shapes: an array of `{model, price_per_1k_*}`,
+a `{models: [...]}` wrapper, or a map `{model_id: {...}}`. Unknown models
+encountered in results are recorded but contribute zero earnings — B6
+reflects only priced traffic.
 
 ## Scenarios committed
 

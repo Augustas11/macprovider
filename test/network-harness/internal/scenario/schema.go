@@ -58,6 +58,29 @@ type Scenario struct {
 	// throttles for chaos scenarios. Each command runs via /bin/sh -c;
 	// stdout/stderr/exit are captured into run_meta.json.
 	ChaosEvents []ChaosEvent `yaml:"chaos_events"`
+
+	// Benchmark, when Enabled, runs the phase-B benchmark suite (B1-B6)
+	// against this scenario's results. See specs/SPEC-NETWORK-BENCHMARK-v0.1.md.
+	Benchmark Benchmark `yaml:"benchmark"`
+}
+
+// Benchmark declares which B-invariants this scenario should evaluate
+// and where to source pricing for B6 (earnings/hr). Enabled=false (or
+// the whole block omitted) skips the benchmark suite.
+type Benchmark struct {
+	Enabled    bool     `yaml:"enabled"`
+	Invariants []string `yaml:"invariants"`
+
+	// PricingSource locates a tier-2 pricing manifest for B6. Two forms:
+	//   * local path:     "/abs/path/to/tier2-catalog.json"
+	//   * SSH host:path:  "pearl:/opt/macprovider/tier2-catalog.json"
+	// Unset → B6 SKIP.
+	PricingSource string `yaml:"pricing_source"`
+
+	// ProviderSlots is the assumed per-provider concurrency cap used by
+	// B5 (slot utilization). Defaults to 3 — the Pearl coordinator's
+	// AccountConcurrency at the time this spec landed (PR #205).
+	ProviderSlots int `yaml:"provider_slots"`
 }
 
 // ChaosEvent is one scheduled shell action. `At` is measured from
@@ -166,6 +189,9 @@ func (s *Scenario) applyDefaults() {
 	if s.Buyers.RequestsPerBuyer == 0 {
 		s.Buyers.RequestsPerBuyer = 1
 	}
+	if s.Benchmark.Enabled && s.Benchmark.ProviderSlots == 0 {
+		s.Benchmark.ProviderSlots = 3
+	}
 }
 
 // Validate returns a non-nil error if the scenario is missing required
@@ -228,6 +254,20 @@ func (s *Scenario) Validate() error {
 	}
 	if s.Duration <= 0 && s.Buyers.Pattern != "burst" {
 		return fmt.Errorf("duration must be > 0 unless pattern=burst")
+	}
+	if s.Benchmark.Enabled {
+		if len(s.Benchmark.Invariants) == 0 {
+			return fmt.Errorf("benchmark.invariants must list at least one B-ID when benchmark.enabled=true")
+		}
+		known := map[string]bool{"B1": true, "B2": true, "B3": true, "B4": true, "B5": true, "B6": true}
+		for _, id := range s.Benchmark.Invariants {
+			if !known[id] {
+				return fmt.Errorf("benchmark.invariants: unknown id %q (known: B1-B6)", id)
+			}
+		}
+		if s.Benchmark.ProviderSlots < 1 {
+			return fmt.Errorf("benchmark.provider_slots must be >= 1")
+		}
 	}
 	return nil
 }
