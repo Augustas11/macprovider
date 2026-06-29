@@ -88,11 +88,12 @@ func (s *Store) Ping(ctx context.Context) error {
 
 // maxKnownSchemaVersion is the highest schema_migrations.version this
 // binary understands. Version history:
-//   v1 — original schema.
-//   v2 — issue #196: usage_events PK (account_id, request_id).
-//   v3 — issue #210: demo_usage_events PK (demo_token_hash, request_id).
-//   v4 — issue #231: idx_quota_request + idx_concurrency_request so
-//        the §6.4 ambiguity probe stops full-scanning those tables.
+//
+//	v1 — original schema.
+//	v2 — issue #196: usage_events PK (account_id, request_id).
+//	v3 — issue #210: demo_usage_events PK (demo_token_hash, request_id).
+//	v4 — issue #231: idx_quota_request + idx_concurrency_request so
+//	     the §6.4 ambiguity probe stops full-scanning those tables.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses

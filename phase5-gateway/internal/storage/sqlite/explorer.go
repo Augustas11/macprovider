@@ -293,8 +293,9 @@ func (s *Store) ExplorerSessionDetail(ctx context.Context, accountID, requestID 
 		// #231 v0.4: the inner SELECT carries LIMIT cap+1 so the
 		// handler can detect overflow without inflating the result
 		// set. When >cap distinct ids are observed the response cap
-		// is applied + truncation flag set; the FULL untrimmed list
-		// is preserved for the audit_events forensic emit.
+		// is applied + truncation flag set; a BOUNDED forensic sample
+		// (cap ExplorerForensicMatchedAccountIDsCap+1) is preserved
+		// for the audit_events emit.
 		accountIDs, err := s.explorerAccountIDsForRequest(ctx, requestID)
 		if err != nil {
 			return storage.ExplorerSessionDetail{}, err

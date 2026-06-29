@@ -360,8 +360,9 @@ type ExplorerSessionDetail struct {
 	// MatchedAccountIDsTruncated flag is set when the underlying UNION
 	// resolved to more than the cap and protects the 409 body against
 	// malicious collision floods + bounds operator log noise. The
-	// untruncated full list is emitted to audit_events for forensic
-	// retrieval — never silently dropped.
+	// bounded forensic sample (capped at ExplorerForensicMatchedAccountIDsCap)
+	// is emitted to audit_events for forensic retrieval — never
+	// silently dropped.
 	MatchedAccountIDs               []string `json:"matched_account_ids,omitempty"`
 	MatchedAccountIDsTruncated      bool     `json:"matched_account_ids_truncated"` // #231 R1 arch LOW: explicit presence required by SPEC §6.4 contract — `omitempty` would drop `false` and break clients that branch on field presence.
 	MatchedAccountIDsForensicSample []string `json:"-"`                             // #231 R2: bounded forensic sample (cap ExplorerForensicMatchedAccountIDsCap+1) for the audit_events emit; never sent over the wire. Renamed from MatchedAccountIDsUntrimmed in R2 — the list is bounded, not "untrimmed", and the audit payload surfaces partial capture via forensic_truncated_at.

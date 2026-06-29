@@ -67,7 +67,7 @@ func TestExplorerAccountIDsForRequest_CapAt10WithTruncationFlag(t *testing.T) {
 }
 
 // TestExplorerAccountIDsForRequest_BelowCapDoesNotTruncate pins the
-// happy-path: 2 ≤ N ≤ cap accounts return the full list with
+// happy-path: 2 ≤ N ≤ cap accounts return all entries (no cap hit) with
 // MatchedAccountIDsTruncated=false. This guards against an off-by-one
 // in the cap+1 probe where the 10th account would be incorrectly
 // flagged as truncation.
@@ -99,7 +99,7 @@ func TestExplorerAccountIDsForRequest_BelowCapDoesNotTruncate(t *testing.T) {
 		t.Errorf("MatchedAccountIDsTruncated=true at exactly cap; want false")
 	}
 	if len(got.MatchedAccountIDs) != storage.ExplorerMatchedAccountIDsCap {
-		t.Errorf("len=%d, want %d (full list)", len(got.MatchedAccountIDs), storage.ExplorerMatchedAccountIDsCap)
+		t.Errorf("len=%d, want %d (all entries returned, no cap hit)", len(got.MatchedAccountIDs), storage.ExplorerMatchedAccountIDsCap)
 	}
 	if len(got.MatchedAccountIDsForensicSample) != 0 {
 		t.Errorf("forensic sample populated at non-truncation: %v", got.MatchedAccountIDsForensicSample)

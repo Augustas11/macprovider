@@ -15,7 +15,7 @@ import (
 //   - matched_account_ids in the 409 body is capped at N=10
 //   - matched_account_ids_truncated=true when the underlying union
 //     resolved to >10 accounts
-//   - audit_events row is emitted with the FULL untrimmed list
+//   - audit_events row is emitted with the bounded forensic sample
 func TestExplorerSessionDetail_409CapAndTruncationFlag(t *testing.T) {
 	h, store, _, cfg := newTestHarness(t, fakeOAuth{})
 	ctx := context.Background()
