@@ -384,6 +384,15 @@ func (s *Store) ForceVoidEnabled() bool {
 // "startup" callers MUST pass a zero-value old (we infer first-time
 // init from changed == false on the swap).
 func (s *Store) SetForceVoidEnabled(ctx context.Context, newValue bool, reloadSource string) error {
+	// R6 fix (CODE-M1): reloadSource enum is documented as restricted
+	// to "startup" | "sighup" | "http_reload". Validate before doing
+	// any state mutation or DB write — otherwise a typo in a caller
+	// silently writes a malformed audit row.
+	switch reloadSource {
+	case "startup", "sighup", "http_reload":
+	default:
+		return fmt.Errorf("SetForceVoidEnabled: invalid reloadSource %q (want startup|sighup|http_reload)", reloadSource)
+	}
 	// Serialize so that the (audit insert, publish) pair is atomic:
 	// no other reloader can change the value between our Load() and
 	// Store(), and no handler can observe a value whose audit row has

@@ -141,6 +141,29 @@ func TestACQ040_SchemaShape(t *testing.T) {
 	if err == nil {
 		t.Fatal("second INSERT must hit UNIQUE constraint")
 	}
+	// R6 fix (CODE-M2): pin the §4.10 length CHECK constraints on
+	// operator_id and resolution_reason. Empty values and over-cap
+	// values must fail INSERT regardless of the API-layer sanitizer.
+	id2 := insertQuarantinedCredit(t, store, "p-q040b")
+	checkCases := []struct {
+		name, opID, reason string
+	}{
+		{"empty_operator_id", "", "x"},
+		{"empty_resolution_reason", "alice", ""},
+		{"operator_id_65_chars", strings.Repeat("a", 65), "x"},
+		{"resolution_reason_501_chars", "alice", strings.Repeat("r", 501)},
+	}
+	for _, c := range checkCases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := store.db.Exec(`INSERT INTO ledger_quarantine_resolutions(request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc) VALUES (?, 'force_void', ?, ?, ?)`, id2, c.opID, c.reason, now)
+			if err == nil {
+				t.Fatalf("INSERT (%s) must hit length CHECK", c.name)
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), "check") {
+				t.Fatalf("error must mention CHECK, got: %v", err)
+			}
+		})
+	}
 }
 
 // AC-Q042: force-void happy path.
@@ -248,6 +271,10 @@ func TestACQ044_ValidationMatrix(t *testing.T) {
 		// JSON \uXXXX escapes so the JSON parser accepts the
 		// string and the §11.6.3 sanitizer is the one that
 		// rejects (HTTP 422 unsanitized_reason).
+		// R6 fix (CODE-M3): SPEC AC-Q044 names ASCII ESC (U+001B,
+		// C0 control) — added explicit `` case alongside the
+		// pre-existing C1 / bidi / DICP set.
+		{"ascii_esc_in_reason", `{"operator_id":"alice","reason":"hi\u001bx"}`, "application/json", id, http.StatusUnprocessableEntity, "unsanitized_reason"},
 		{"c1_csi_in_reason", `{"operator_id":"alice","reason":"hix"}`, "application/json", id, http.StatusUnprocessableEntity, "unsanitized_reason"},
 		{"bidi_rlo_in_reason", `{"operator_id":"alice","reason":"hi‮x"}`, "application/json", id, http.StatusUnprocessableEntity, "unsanitized_reason"},
 		{"zwsp_in_reason", `{"operator_id":"alice","reason":"hi​x"}`, "application/json", id, http.StatusUnprocessableEntity, "unsanitized_reason"},
