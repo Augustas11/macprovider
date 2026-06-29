@@ -58,3 +58,8 @@ phase5-gateway/dist/gateway.yaml
 /logs/
 /results/
 phase4-coordinator/stats.test
+
+# Internal harness — secrets and artifacts (never committed)
+.env.harness
+test/network-harness/artifacts/
+test/network-harness/harness

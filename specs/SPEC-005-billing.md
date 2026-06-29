@@ -1,7 +1,32 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.3.1 (2026-06-29, SPEC-002 v1.5.0 dependency bump — issue #211)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.0, SPEC-003 v0.7, SPEC-004 v0.3.1, SPEC-006 v0.9.1
+**Version:** 0.3.2 (2026-06-29, SPEC-002 v1.5.1 per-key migration-state dependency — issue #197)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.1, SPEC-003 v0.7, SPEC-004 v0.3.1, SPEC-006 v0.9.1
+
+**Change log v0.3.2 (2026-06-29, issue #197 — SPEC-002 v1.5.1 dependency bump + per-key migration-state contract):**
+- Dependency bump: SPEC-002 v1.5.0 → v1.5.1 to absorb the per-key
+  `legacy | unindexed | indexed` migration-state machine. The §10.4
+  "production startup MUST fail the schema check" sentence below is
+  reworded to read the per-key state instead of the prior binary
+  legacy/migrated model. Schema-check failure conditions are now:
+  - any depended-on composite reconciliation key in state `legacy`
+    (column absent) → production reconciliation MUST fail closed;
+  - any depended-on composite reconciliation key in state `unindexed`
+    (column present, partial-NULL composite index absent) →
+    production reconciliation MUST fail closed unless an explicit
+    bounded `--allow-unindexed-scan` override is provided (operator
+    response: run `coordinator migrate-indexes`).
+  Scope is by **data-surface contract, not process placement**: this
+  binding governs any reconciliation surface that performs **closing-
+  the-books joins** between coordinator `request_log` and gateway
+  `usage_events` / `audit_events` (the SPEC-005 v0.3+ contract) —
+  out-of-process harnesses AND any future coordinator-hosted endpoint
+  that exposes the same join. The coordinator's own in-process
+  `RecoverLedger`, admin reconcile, and hot-path AttemptN paths
+  derive ordinals via single-table SQLite `IS` clustering and are
+  correct (just unindexed-slow) under state `unindexed`; they do NOT
+  fail closed during the daemon-startup rollout window. No code
+  change in this version.
 
 **Change log v0.3.1 (2026-06-29, issue #211):**
 - Dependency bump: SPEC-002 v1.3.4 → v1.5.0 and SPEC-006 v0.8.2 → v0.9.1
@@ -102,11 +127,12 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 - usage object has prompt_tokens, completion_tokens, total_tokens.
 - cancel usage is authoritative for v1.2.4+ providers.
 - SPEC-005 MUST NOT require new provider fields.
-**SPEC-002 v1.5.0:**
+**SPEC-002 v1.5.1:**
 - coordinator owns request_log and provider auth.
 - request_log is read-only to SPEC-005.
 - request_log carries deterministic `error_code` for SPEC-001 null-usage errors.
 - request_log has `ts_utc`, `(request_id, id)`, `external_request_id` (partial-NULL), and `(account_id, external_request_id)` (partial-NULL composite) indexes for reconciliation scans and attempt fallback. (Composite index added in v1.5.0 / issue #211.)
+- per-key migration state `legacy | unindexed | indexed` is exposed by `coordinator migrate-indexes --check --format json`. SPEC-005 reconciliation tooling that performs **closing-the-books joins** between coordinator `request_log` and gateway `usage_events` / `audit_events` MUST consume this state and fail closed on any depended-on key in state `legacy` or `unindexed` (v0.3.2 / issue #197).
 - each provider attempt for a repeated request_id has its own request_log row.
 - request_log carries `account_id` (v1.5.0 / issue #211). The composite `(account_id, request_id)` is the grouping key for attempt-ordinal derivation; SQLite `IS` semantics preserve the pre-v1.5.0 grouping for legacy NULL-`account_id` rows.
 - FR-P11a supplies fault categories.
@@ -763,7 +789,7 @@ Same inputs produce byte-identical outputs.
 Time is explicit input.
 No live network call may affect output.
 `scanWindow.to_utc` MUST be no closer to wall-clock now than `settlement.recovery_grace_seconds` (default 30s). Rows with `request_log.ts_utc` newer than this cutoff are excluded from the scan to prevent races with in-flight hot-path transactions.
-SPEC-002 v1.5.0 indexes `request_log.ts_utc`, `(request_id, id)`, `external_request_id` (partial-NULL), and `(account_id, external_request_id)` (partial-NULL composite) are preconditions for production-scale reconciliation scans; missing indexes in a fixture MAY use a bounded chunked scan, but production startup MUST fail the schema check. (v0.3.1 / issue #211.)
+SPEC-002 v1.5.1 indexes `request_log.ts_utc`, `(request_id, id)`, `external_request_id` (partial-NULL), and `(account_id, external_request_id)` (partial-NULL composite) are preconditions for production-scale reconciliation scans. Any reconciliation surface that performs closing-the-books joins between coordinator `request_log` and gateway `usage_events` / `audit_events` by composite reconciliation key — whether run as an out-of-process harness OR as a future coordinator-hosted reconciliation endpoint — MUST read per-key migration state via `coordinator migrate-indexes --check --format json` (`requestlog.Store.MigrationState`) and fail closed when any depended-on composite key is in state `legacy` or `unindexed`, per the SPEC-002 v1.5.1 operational binding. Fixture / dev / one-shot recovery runs MAY pass an explicit bounded `--allow-unindexed-scan` override; the override MUST NOT be the default. Coordinator's own in-process AttemptN paths (`hotpath.go`, `recovery.go`, `endpoints.go` `/admin/ledger/reconcile`) use single-table SQLite `IS` clustering and are correct (just unindexed-slow) under state `unindexed`; they do NOT fail closed during the rollout window. (v0.3.2 / issue #197; v0.3.1 / issue #211 added the composite index dependency.)
 For each recoverable request_log row, the algorithm selects the latest config snapshot whose effective_at_utc is less than or equal to request_log.ts_utc.
 If no config snapshot or provider identity snapshot can be selected for a provider-reached row, the row is quarantined.
 

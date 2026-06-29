@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>live.streamvc.macprovider-watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/augstar/macprovider-e2e-harness/ops/macprovider-watchdog/watchdog.sh</string>
+  </array>
+
+  <!-- Fire every 60s. -->
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <!-- Also fire once at load so a freshly-loaded plist runs immediately. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/augstar/Library/Logs/macprovider/watchdog.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/augstar/Library/Logs/macprovider/watchdog.stderr.log</string>
+
+  <!-- Inherit a sane PATH so launchctl, pgrep, lsof are found. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>

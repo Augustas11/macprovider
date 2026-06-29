@@ -652,6 +652,102 @@ func openTestStore(t *testing.T) *Store {
 	return store
 }
 
+// TestMigrationStateReportsPerKeyStatesAndAggregate exercises SPEC-002
+// v1.5.1 R-2 / issue #197: MigrationState MUST report per-key state
+// (legacy | unindexed | indexed) plus an aggregate, distinguishing
+// "column-present + index-absent" (unindexed) from "column-absent"
+// (legacy) so reconciliation tooling can fail closed under state (B)
+// rather than silently fuzzy-matching.
+func TestMigrationStateReportsPerKeyStatesAndAggregate(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+
+	// Fresh OpenStore: both columns present (ensureColumns ran), no
+	// composite-PK indexes (MigrateIndexes is operator-driven). This
+	// is the "unindexed" / state (B) rollout window for both keys.
+	status, err := store.MigrationState(ctx)
+	if err != nil {
+		t.Fatalf("MigrationState: %v", err)
+	}
+	if status.Aggregate != "unindexed" {
+		t.Fatalf("aggregate=%q, want unindexed (state B both keys)", status.Aggregate)
+	}
+	if len(status.Keys) != 2 {
+		t.Fatalf("len(keys)=%d, want 2: %#v", len(status.Keys), status.Keys)
+	}
+	for _, k := range status.Keys {
+		if k.State != "unindexed" {
+			t.Errorf("key %q state=%q, want unindexed", k.Key, k.State)
+		}
+		if !k.ColumnsPresent {
+			t.Errorf("key %q columns_present=false, want true", k.Key)
+		}
+		if k.IndexPresent {
+			t.Errorf("key %q index_present=true, want false", k.Key)
+		}
+	}
+
+	if err := store.MigrateIndexes(ctx); err != nil {
+		t.Fatalf("MigrateIndexes: %v", err)
+	}
+	status, err = store.MigrationState(ctx)
+	if err != nil {
+		t.Fatalf("MigrationState post-migrate: %v", err)
+	}
+	if status.Aggregate != "indexed" {
+		t.Fatalf("aggregate post-migrate=%q, want indexed", status.Aggregate)
+	}
+	for _, k := range status.Keys {
+		if k.State != "indexed" {
+			t.Errorf("key %q post-migrate state=%q, want indexed", k.Key, k.State)
+		}
+		if !k.IndexPresent {
+			t.Errorf("key %q post-migrate index_present=false", k.Key)
+		}
+	}
+
+	// Simulate a partial-rollout legacy mix: drop both indexes (their
+	// account_id reference would block DROP COLUMN), then drop the
+	// account_id column. account_external_request_id key → legacy
+	// (column absent). external_request_id key → unindexed (column
+	// present, no index). Aggregate MUST be legacy (any-legacy wins).
+	if _, err := store.db.ExecContext(ctx, `DROP INDEX idx_request_log_account_external_request_id`); err != nil {
+		t.Fatalf("DROP INDEX composite: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `DROP INDEX idx_request_log_external_request_id`); err != nil {
+		t.Fatalf("DROP INDEX ext: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `ALTER TABLE request_log DROP COLUMN account_id`); err != nil {
+		t.Skipf("DROP COLUMN unsupported on this sqlite build (need 3.35+): %v", err)
+	}
+	status, err = store.MigrationState(ctx)
+	if err != nil {
+		t.Fatalf("MigrationState mixed: %v", err)
+	}
+	if status.Aggregate != "legacy" {
+		t.Fatalf("aggregate mixed=%q, want legacy (any-legacy wins)", status.Aggregate)
+	}
+	var sawLegacy, sawUnindexed bool
+	for _, k := range status.Keys {
+		switch k.Key {
+		case "account_external_request_id":
+			if k.State != "legacy" {
+				t.Errorf("account key state=%q, want legacy", k.State)
+			}
+			sawLegacy = true
+		case "external_request_id":
+			if k.State != "unindexed" {
+				t.Errorf("ext key state=%q, want unindexed", k.State)
+			}
+			sawUnindexed = true
+		}
+	}
+	if !sawLegacy || !sawUnindexed {
+		t.Fatalf("expected one legacy + one unindexed key; got %#v", status.Keys)
+	}
+}
+
 // TestOpenStoreCapsPoolAtOneConn pins the SetMaxOpenConns(1) +
 // SetMaxIdleConns(1) discipline at the constructor that owns it. Issue
 // #21 / ARCH-3: billing reuses this *sql.DB via

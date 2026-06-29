@@ -1,0 +1,61 @@
+# 03_sticky_multi_turn.yaml — 3 buyers each fire 5 sequential prompts.
+#
+# Live /v1/models reports `sticky_affinity.enabled: false` for tier1
+# disclosure. This scenario will confirm that finding empirically: with
+# sticky off, each buyer's 5 requests should scatter across providers
+# (when multiple providers serve the requested model).
+#
+# What we want to learn (phase A, descriptive — recorded only):
+#  - Phase B will judge: do we WANT sticky for beta? If providers cache
+#    model context, sticky reduces TTFT. If not, sticky just trades
+#    fairness for stickiness with no benefit.
+#  - The fact that tier1 disclosure ALREADY says sticky_affinity.enabled=false
+#    is itself a finding — if we want sticky for beta, the disclosure
+#    and the routing default both need to flip.
+#
+# What gets asserted (the 4 hard invariants): all 4 run.
+#
+# Cost estimate (15 requests x 32 max_tokens): order of cents.
+name: sticky_multi_turn
+description: |
+  3 buyers, each sends 5 sequential non-streaming requests. Used to
+  detect whether sticky routing fires on multi-turn workloads (it
+  should NOT, per live disclosure).
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - 15 total requests (3 buyers x 5 each).
+   - With sticky OFF (current live state): each buyer's requests
+     scatter across providers serving the model.
+   - per_request.jsonl is the authoritative source — group by buyer_index
+     and look at route_provider_id distribution.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 3
+  stream: false
+  pattern: interval
+  interval_ms: 1500
+  requests_per_buyer: 5
+
+duration: 300s
+request_timeout: 60s
+silent_hang_threshold: 30s
+
+prompts:
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Turn 1: pick a fruit and remember it."
+    max_tokens: 24
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Turn 2: what was the fruit?"
+    max_tokens: 24
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Turn 3: count to three."
+    max_tokens: 24
