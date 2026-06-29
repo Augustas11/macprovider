@@ -299,11 +299,25 @@ func (h *handler) buyerEquivalentCredits(ctx context.Context, from, to time.Time
 		errorCode  sql.NullString
 		attemptN   int
 	}
+	// SPEC-002 v1.5.0 / issue #211 money-path defense-in-depth:
+	// the attempt_n subquery scopes by (account_id, request_id)
+	// under SQLite `IS` semantics so all three reconciliation
+	// sites (hotpath.go, recovery.go, this admin reconcile)
+	// compute identical ordinals for the same row. rl.request_id
+	// is coordinator-internal (server-minted UUID v4); the
+	// buyer-supplied #211 collision class lives on
+	// external_request_id and is addressed by the composite
+	// reconciliation key. Account scoping here is defense-in-depth
+	// against any future internal-request_id recurrence; NULL-
+	// account_id legacy rows cluster among themselves only,
+	// preserving pre-v1.5.0 behavior.
 	rows, err := h.store.db.QueryContext(ctx, `
 SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_tokens, rl.status, rl.error_code,
        COALESCE((
          SELECT COUNT(*) - 1 FROM request_log prior
-          WHERE prior.request_id = rl.request_id AND prior.id <= rl.id
+          WHERE prior.account_id IS rl.account_id
+            AND prior.request_id = rl.request_id
+            AND prior.id <= rl.id
        ), 0) AS attempt_n
   FROM request_log rl
  WHERE rl.ts_utc >= ? AND rl.ts_utc < ?

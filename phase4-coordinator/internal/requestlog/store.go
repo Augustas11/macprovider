@@ -41,6 +41,15 @@ type Row struct {
 	// request, enabling end-to-end billing reconciliation. Empty when
 	// the inbound request carried no X-Request-ID.
 	ExternalRequestID string
+	// AccountID is the gateway's authenticated subject account id,
+	// forwarded via X-MacProvider-Account (SPEC-006 v0.9.1, SPEC-002
+	// v1.5.0). The composite (AccountID, ExternalRequestID) is the
+	// reconciliation key joining coordinator request_log to gateway
+	// usage_events; without it the same buyer-supplied X-Request-ID
+	// across two accounts cannot be attributed back to the correct
+	// gateway account (issue #211, follow-up to #196). Empty for
+	// direct legacy buyer calls without the header.
+	AccountID         string
 	Model             string
 	ProviderAssignedID string
 	PromptTokens        *int64
@@ -122,6 +131,7 @@ CREATE TABLE IF NOT EXISTS request_log (
     ts_utc               TEXT    NOT NULL,
     request_id           TEXT    NOT NULL,
     external_request_id  TEXT    NULL,
+    account_id           TEXT    NULL,
     model                TEXT    NOT NULL,
     provider_assigned_id TEXT    NULL,
     prompt_tokens        INTEGER NULL,
@@ -150,6 +160,11 @@ CREATE INDEX IF NOT EXISTS idx_request_log_request_id_id
 -- runbook subcommand "coordinator migrate-indexes" — NOT from the
 -- daemon startup path, because SQLite has no concurrent index build
 -- and the request-log store caps the pool at one writer connection.
+--
+-- SPEC-002 v1.5.0 (issue #211): request_log.account_id is added by
+-- ensureColumns for the same reason; the matching partial-NULL
+-- composite index on (account_id, external_request_id) is also built
+-- by MigrateIndexes.
 
 CREATE TABLE IF NOT EXISTS request_idempotency_keys (
     idempotency_key TEXT PRIMARY KEY,
@@ -323,6 +338,7 @@ INSERT INTO request_log (
     ts_utc,
     request_id,
     external_request_id,
+    account_id,
     model,
     provider_assigned_id,
     prompt_tokens,
@@ -339,10 +355,11 @@ INSERT INTO request_log (
     pref_header,
     provider_header,
     retried
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.TSUtc.UTC().Format(time.RFC3339Nano),
 		row.RequestID,
 		nullString(row.ExternalRequestID),
+		nullString(row.AccountID),
 		row.Model,
 		nullString(row.ProviderAssignedID),
 		nullInt64(row.PromptTokens),
@@ -392,6 +409,13 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		// Pre-existing rows scan as NULL; new INSERTs carry the
 		// gateway-forwarded id when present.
 		{name: "external_request_id", sql: `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL`},
+		// SPEC-002 v1.5.0 / issue #211: gateway-forwarded account id
+		// from X-MacProvider-Account. The composite (account_id,
+		// external_request_id) is the reconciliation key joining to
+		// gateway usage_events; without it the same buyer-supplied
+		// X-Request-ID across two accounts cannot be attributed back
+		// to the correct gateway account.
+		{name: "account_id", sql: `ALTER TABLE request_log ADD COLUMN account_id TEXT NULL`},
 	} {
 		if cols[migration.name] {
 			continue
@@ -430,6 +454,13 @@ func (s *Store) MigrateIndexes(ctx context.Context) error {
 		{
 			name: "idx_request_log_external_request_id",
 			ddl:  `CREATE INDEX idx_request_log_external_request_id ON request_log(external_request_id) WHERE external_request_id IS NOT NULL`,
+		},
+		// SPEC-002 v1.5.0 / issue #211: composite reconciliation-key
+		// index. Partial-NULL keeps the index small (legacy rows
+		// have NULL on either column and are not indexed).
+		{
+			name: "idx_request_log_account_external_request_id",
+			ddl:  `CREATE INDEX idx_request_log_account_external_request_id ON request_log(account_id, external_request_id) WHERE account_id IS NOT NULL AND external_request_id IS NOT NULL`,
 		},
 	}
 	for _, ix := range indexes {

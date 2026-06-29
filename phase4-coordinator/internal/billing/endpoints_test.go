@@ -172,6 +172,72 @@ func TestReconcileEndpoint_CleanDelta(t *testing.T) {
 	}
 }
 
+// SPEC-002 v1.5.0 / issue #211 defense-in-depth regression:
+// the /admin/ledger/reconcile `buyerEquivalentCredits` attempt_n
+// derivation uses the same (account_id, request_id) IS-clustering as
+// hotpath.go and recovery.go so all three sites produce identical
+// ordinals for the same row. This test pins the contract under a
+// synthetic scenario — two non-NULL distinct accounts that happen to
+// share the same coordinator-internal request_id (UUID collision /
+// retry-loop bug / future schema change) — and asserts the reconcile
+// endpoint surfaces a clean zero delta. Note: this is NOT the actual
+// #211 buyer-supplied collision class (which is on external_request_id
+// and never reaches the internal request_id). It's a defense-in-depth
+// regression against the underlying SQL scoping logic. Use distinct
+// providers per account so the ledger_request_credits UNIQUE
+// constraint (account-blind on (request_id, attempt_n, provider_id))
+// does not fire — that's an orthogonal concern.
+func TestReconcileEndpoint_AccountScopedInternalRequestIDDefenseInDepth(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+	prompt, completion := int64(1000), int64(2000)
+	inputA := HotPathInput{
+		RequestID: "synthetic-internal-uuid-collision", AttemptN: 0, ProviderAssignedID: "assigned-a", ProviderID: "provider-a",
+		Model: "model-a", Status: 200, TSUtc: ts, PromptTokens: &prompt, CompletionTokens: &completion,
+		ConfigSnapshotID: snapshotID, RateEntry: RateFor(cfg.RateCard, "model-a"),
+		MultiplierPPM: 1000000, ProviderShareBps: 9000,
+	}
+	rowA := requestLogRow(inputA)
+	rowA.AccountID = "acct_A"
+	if err := store.WriteHotPath(context.Background(), reqStore, rowA, inputA); err != nil {
+		t.Fatal(err)
+	}
+	inputB := inputA
+	inputB.ProviderID = "provider-b"
+	inputB.ProviderAssignedID = "assigned-b"
+	rowB := requestLogRow(inputB)
+	rowB.AccountID = "acct_B"
+	if err := store.WriteHotPath(context.Background(), reqStore, rowB, inputB); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile?from=2026-06-01&to=2026-06-08", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	// Both accounts independently derive attempt_n=0 within their
+	// own (account_id, request_id) group → both ledger rows are
+	// clean → reconcile delta MUST be 0. Pre-defense-in-depth
+	// (when endpoints.go used unscoped request_id grouping) the
+	// second account's row would have derived attempt_n=1, and the
+	// ledger row's recorded attempt_n=0 would have produced a
+	// non-zero reconcile delta.
+	if got := resp["delta_gross_credits"].(float64); got != 0 {
+		t.Fatalf("delta_gross_credits=%v want 0 (issue #211 endpoints account-scoped derivation)", got)
+	}
+}
+
 func TestReconcileEndpoint_DetectsMissingOperatorSplit(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	cfg := testRewards()
