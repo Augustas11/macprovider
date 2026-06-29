@@ -1,8 +1,8 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.1.5 LOCKED (2026-06-28, round-5b architect re-fire 0/0/0)
+**Version:** 0.2.0 (2026-06-29, draft for audit)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
-**Status:** LOCKED — all 6 audit lanes returned READY TO LOCK.
+**Status:** DRAFT — audit loop pending.
 
 ## Quick orientation
 
@@ -54,6 +54,34 @@ PR #202, and the implementation landed at `c77313a` via PR #209
 commit anchors). SPEC-018 §10b names structured-output response synthesis as the
 follow-on surface promoted after streaming-incremental wire contract stability
 (`specs/SPEC-018-agentic-tool-calling.md:671-675`, follow-on surface list).
+
+v0.2.0 amendment anchors at `47dc2724`: the current provider still rejects
+structured streaming before inference
+(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:220`,
+`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:455-474`), and the
+coordinator mirrors the `stream:true` rejects
+(`phase4-coordinator/internal/buyer/server.go:3676-3687`). The current
+streaming provider emits OpenAI-style SSE content deltas and terminates success
+with `data: [DONE]`
+(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:520-587`,
+`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:1074-1085`,
+`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:1139-1148`). Current
+streaming error fallback already writes an error envelope followed by `[DONE]`
+after SSE has started
+(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:588-615`). The
+non-streaming structured validator entry point is
+`validateStructuredCompletion`
+(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:504-510`,
+`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:911-939`), while the
+streaming path currently returns an unvalidated final `CompletionResult`
+(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:520-641`). The v0.1
+schema subset reject helper rejects all unknown keywords at provider and
+coordinator boundaries
+(`phase3-binary/Sources/MacProviderCore/JSONSchemaValidator.swift:65-67`,
+`phase4-coordinator/internal/buyer/server.go:3738-3742`), and current
+coordinator tests still include `minimum`, `maximum`, `multipleOf`, and
+`$schema` in the rejected-keyword fixture
+(`phase4-coordinator/internal/buyer/structured_output_validation_test.go:80-85`).
 
 ## 1. Buyer-visible contract
 
@@ -121,6 +149,34 @@ out of scope for v0.1.0; `json_object` with `stream:true` MUST fail before
 inference with HTTP 400 `streaming_json_object_unsupported` rather than silently
 stream unconstrained text. Error messages MUST carry the "unsupported in
 SPEC-019 v0.1.0" context instead of versioning the error code.
+
+**v0.2 streaming amendment**: v0.2.0 supersedes the v0.1.0 streaming reject
+paragraph above for implementations advertising SPEC-019 v0.2. A request with
+`stream:true` and `response_format.type == "json_schema"` is now accepted. A
+request with `stream:true` and `response_format.type == "json_object"` is now
+accepted. The provider emits normal OpenAI-compatible SSE `content` deltas
+during generation and validates only after the stream reaches end-of-stream.
+Streaming validation is end-of-stream validation over the concatenated assistant
+content buffer, not incremental partial-JSON-prefix validation. On success, the
+buyer sees the normal terminal `data: [DONE]`. On validation failure,
+malformed JSON, empty / whitespace-only structured content, validator panic, or
+validation timeout, the stream terminates with the same OpenAI-style terminal
+SSE error-frame shape as SPEC-018 v0.2.4 §10d.4. The failure format is `data:
+{"error":{...}}\n\n` followed by `data: [DONE]\n\n` when the buyer connection
+can still be written (`specs/SPEC-018-agentic-tool-calling.md:736-753`,
+`specs/SPEC-018-agentic-tool-calling.md:834-864`).
+
+**v0.1.5 -> v0.2.0 behavior change**: buyers who depended on HTTP 400
+`streaming_json_schema_unsupported` or `streaming_json_object_unsupported` to
+detect unsupported structured streaming MUST update detection logic. v0.2
+removes those buyer-visible reject codes from the active error-code table and
+returns HTTP 200 `text/event-stream` for accepted streaming requests. Failure is
+reported, if needed, as a terminal SSE error frame after inference has run. The
+current v0.1 reject sites are the provider pre-stream gate
+(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:220`,
+`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:455-474`) and the
+coordinator pre-dispatch gate
+(`phase4-coordinator/internal/buyer/server.go:3676-3687`).
 
 Tools interaction: when both `tools` and `response_format.type ==
 "json_schema"` are supplied, tool calls take precedence after inference. If the
@@ -273,6 +329,117 @@ returns HTTP 400 `streaming_json_schema_unsupported` with envelope
 `stream:false` retry. Same envelope shape for
 `streaming_json_object_unsupported`.
 
+### v0.2 streaming
+
+The AC-V2-* numbering below is additive and supersedes AC-20 only for
+implementations advertising SPEC-019 v0.2. AC-20 remains the locked v0.1.x
+contract.
+
+AC-V2-1. `response_format: {"type":"json_schema", ...}` with `stream:true`
+returns HTTP 200 `text/event-stream` and emits normal OpenAI-compatible SSE
+content deltas. End-of-stream validation runs over the concatenated assistant
+content buffer before success is finalized. Fail condition: either current
+v0.1 reject code remains active
+(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:455-474`,
+`phase4-coordinator/internal/buyer/server.go:3676-3687`), or the provider
+skips structured validation on the final streaming buffer.
+
+AC-V2-2. `response_format: {"type":"json_object"}` with `stream:true` returns
+HTTP 200 `text/event-stream`, emits normal SSE content deltas, and validates the
+concatenated final content as JSON whose top-level value is an object or array.
+Fail condition: v0.1 `streaming_json_object_unsupported` remains active, or the
+stream silently permits unconstrained text.
+
+AC-V2-3. A streaming output that fails post-stream validation emits a terminal
+SSE error frame matching SPEC-018 v0.2.4 §10d.4 minimum envelope fields
+(`error.type`, `error.code`, `error.message`, optional `error.param`,
+`error.retryable`, `error.request_id`, `error.inference_ran`,
+`error.settlement_ran`) and the stream is settled
+`FaultBreakerQualifying` with zero provider-positive credits. Fail condition:
+the failure is normalized to `api_error`, returns a plain HTTP 502 after bytes
+were already streamed, emits a success terminal only, or records
+provider-positive settlement.
+
+AC-V2-4. A streaming output whose concatenated content is valid JSON matching
+`response_format.json_schema.schema` reaches the normal `data: [DONE]`
+terminal and emits no terminal SSE error frame. Fail condition: successful
+structured streaming is downgraded to non-streaming, or success emits both an
+error frame and `[DONE]`.
+
+AC-V2-5. Cline live-fixture: `@ai-sdk/openai-compatible@2.0.38` with
+`supportsStructuredOutputs:true` against the macprovider streaming endpoint
+parses to the expected object. The existing v0.1 fixture pins
+`@ai-sdk/openai-compatible` at `2.0.38`
+(`test/integration/spec_019/vercel_ai_sdk_strict_json_schema/package.json:1-6`)
+and documents the `supportsStructuredOutputs:true` capture path
+(`test/integration/spec_019/vercel_ai_sdk_strict_json_schema/README.md:3-6`);
+v0.2 adds the streaming live fixture rather than a request-body-only fixture.
+
+AC-V2-6. openai-python streaming fixture mirrors AC-15's successful
+`json_schema` contract with `stream=True`: the fixture accumulates streamed
+content deltas into the same JSON string shape and parses it into the expected
+Pydantic object. The current non-streaming anchor pins `openai==2.44.0` and
+`pydantic>=2,<3`
+(`test/integration/spec_019/openai_python_strict_json_schema/requirements.txt:1-2`)
+and captures `response_format.json_schema`
+(`test/integration/spec_019/openai_python_strict_json_schema/fixture_request_body.json:9-31`).
+
+AC-V2-7. Streaming token-incremental `content` deltas concatenate to the same
+assistant content bytes as the non-streaming response for the same deterministic
+fixture, modulo transport chunk boundaries. The provider already computes
+content deltas from `emittedText` to the candidate/final text
+(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:562-592`,
+`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:603-619`); v0.2
+requires the validated final buffer to be that same concatenation. Fail
+condition: streaming validation uses bytes that differ from the buyer-visible
+delta concatenation.
+
+AC-V2-8. Empty-content streaming fixture: when the model emits zero tokens, or
+only ASCII structured-output whitespace, under `json_schema` or `json_object`,
+the stream ends with a terminal SSE error frame using
+`malformed_json_response`, `retryable:false`, and an actionable buyer message.
+This is the streaming analogue of AC-18 and reuses the current empty /
+whitespace classification
+(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:942-956`). Fail
+condition: the buyer sees 200 success with empty content, or the error is
+`retryable:true`.
+
+AC-V2-9. Streaming validation timeout: if the stream cannot reach a complete
+terminal state for the final validation buffer, including a long connection
+that never reaches the provider/coordinator terminal marker, the request fails
+closed and settles `FaultBreakerQualifying`. This follows SPEC-018 v0.2.4's
+missing-terminal-marker final-close posture
+(`specs/SPEC-018-agentic-tool-calling.md:864`). Fail condition: incomplete
+streaming output is treated as successful structured output or earns
+provider-positive credits.
+
+AC-V2-10. Numeric bounds `minimum`, `maximum`, and `multipleOf` MUST be accepted
+on `number` and `integer` schema nodes. The pre-inference
+`json_schema_unsupported_keyword` reject is removed for these three keywords;
+the output validator still enforces the constraints on decoded model output.
+Fail condition: the current unknown-keyword reject path
+(`phase3-binary/Sources/MacProviderCore/JSONSchemaValidator.swift:65-67`,
+`phase4-coordinator/internal/buyer/server.go:3738-3742`) still rejects any of
+the three keywords.
+
+AC-V2-11. `$schema` at the top-level
+`response_format.json_schema.schema` object MUST be accepted with any JSON
+value and ignored for validation-time meta-schema selection. `$schema` remains
+rejected at nested schema nodes. Fail condition: the v0.1 fixture-side
+normalization that strips top-level `$schema` is still required for an otherwise
+valid request
+(`test/integration/spec_019/vercel_ai_sdk_strict_json_schema/README.md:14-20`).
+
+AC-V2-12. Vercel Zod paired fixture with `z.number().int()` is accepted
+end-to-end without SDK-side normalization when emitted through
+`@ai-sdk/openai-compatible@2.0.38` with `supportsStructuredOutputs:true`. This
+closes the v0.1 AC-31 deferral where `.int()` was replaced by `z.number()` and
+top-level `$schema` was stripped; the existing fixture documents that
+normalization step
+(`test/integration/spec_019/vercel_ai_sdk_strict_json_schema/README.md:8-20`).
+Fail condition: SDK-side schema rewriting is still needed to pass
+pre-inference validation.
+
 ### Family rendering
 
 AC-21. Family-prompt rendering fixtures for Qwen3 and Llama-3.3 show the schema
@@ -326,7 +493,7 @@ AC-26. Money-path proof: `malformed_json_response` and
 `json_schema_validation_failed` produce `FaultBreakerQualifying` request-log
 rows and zero provider-positive credits. The billing recorder normalizes empty
 fault flags only when none is provided
-(`phase4-coordinator/internal/buyer/billing_recorder.go:181-183`), and the
+(`phase4-coordinator/internal/buyer/billing_recorder.go:192-194`), and the
 billing formula returns before positive-credit calculation for
 `FaultBreakerQualifying` (`phase4-coordinator/internal/billing/formula.go:112-114`).
 Order-of-operations regression test: no success receipt row, no sticky success
@@ -457,6 +624,35 @@ Rejected keywords in v0.1.0: count = 34. v0.1.0 rejects `oneOf`, `anyOf`,
 `examples`, `readOnly`, `writeOnly`, and any unknown keyword. Rejection uses
 HTTP 400 `json_schema_unsupported_keyword`.
 
+**v0.2 schema-subset amendment**: v0.2.0 widens the v0.1.0 subset in exactly
+four places:
+
+- `minimum` is allowed only on schema nodes whose `type` is `number` or
+  `integer`.
+- `maximum` is allowed only on schema nodes whose `type` is `number` or
+  `integer`.
+- `multipleOf` is allowed only on schema nodes whose `type` is `number` or
+  `integer`.
+- `$schema` is allowed only as a top-level key of
+  `response_format.json_schema.schema`. The value MAY be any JSON value. The
+  provider and coordinator MUST ignore it for meta-schema selection and MUST
+  validate against the SPEC-019 subset, not against the URI or value named by
+  `$schema`.
+
+The v0.2 rejected-keyword list is otherwise unchanged. `oneOf`, `anyOf`,
+`allOf`, `not`, `$ref`, `$defs`, `definitions`, `pattern`, `format`,
+`exclusiveMinimum`, `exclusiveMaximum`, `minLength`, `maxLength`, `minItems`,
+`maxItems`, `uniqueItems`, `contains`, `minProperties`, `maxProperties`,
+`propertyNames`, `patternProperties`, `dependentSchemas`, `dependentRequired`,
+`if`, `then`, `else`, `default`, `examples`, `readOnly`, `writeOnly`, nested
+`$schema`, and any unknown keyword still fail before inference with HTTP 400
+`json_schema_unsupported_keyword`.
+
+Pre-inference subset checking acknowledges `minimum`, `maximum`, and
+`multipleOf` as valid keywords but does not satisfy the output constraint by
+itself. The runtime validator MUST enforce these keywords against the decoded
+model output when validating `json_schema` responses.
+
 The schema root MAY be any allowed `type`, including array or scalar. If the
 root is an object, it MUST include `additionalProperties:false` under
 `strict:true`. If a nested schema is an object, the same rule applies
@@ -552,6 +748,11 @@ Descriptions, enum strings, const strings, property names, and
 string data inside the schema block; renderer tests MUST include attempts to
 close the block, inject new system text, and include tool-call sentinels.
 
+**v0.2 amendment**: no family-rendering rule changes in v0.2. Streaming
+structured output uses the same family-keyed renderer and the same composite
+render order. The only streaming-specific change is that the final concatenated
+assistant content buffer is validated at end-of-stream.
+
 ## 5. Validator behavior
 
 After non-streaming inference completes and stop-token filtering has run
@@ -637,6 +838,49 @@ buyers MUST key retry logic off `error.code`.
 
 No internal retry is allowed in v0.1.0. Buyer retries happen at the buyer layer.
 
+### v0.2 streaming validation
+
+For `stream:true` with `json_schema` or `json_object`, the validator runs at
+end-of-stream over the exact byte-equivalent concatenation of buyer-visible SSE
+`content` deltas. This is the same post-hoc validation posture as v0.1
+non-streaming, using the same structured validator semantics; v0.2 relaxes the
+pre-inference `stream:true` reject gate rather than introducing constrained
+decoding. Current non-streaming validation is anchored at
+`validateStructuredCompletion`
+(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:504-510`,
+`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:911-939`), and the
+current streaming path already returns the final `CompletionResult` after
+emitting content deltas
+(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:562-641`).
+
+Validation trigger: when the streaming generator is ready to emit its success
+terminal `[DONE]`, the provider first validates the concatenated content buffer.
+If validation succeeds, the provider emits the normal finish chunk, optional
+usage chunk, and `data: [DONE]` success terminal. If validation fails, the
+provider emits a terminal SSE error frame in the SPEC-018 v0.2.4 §10d.4 shape
+and does not emit a success terminal. The current provider success terminal is
+`writeSSEDone()`
+(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:568-587`,
+`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:1084-1089`), and the
+current post-start error path already writes `error.envelope` followed by
+`[DONE]`
+(`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:588-592`).
+
+Empty-content and whitespace-only override: the v0.1 empty-content rule applies
+unchanged, except the buyer-visible surface is a terminal SSE error frame rather
+than HTTP 502 after a non-streaming response. Empty string and ASCII
+whitespace-only content map to `malformed_json_response`, `retryable:false`,
+and an actionable buyer-side message
+(`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:942-956`).
+
+Validator panic / fatal-error catch-all: the v0.1 catch-all posture applies to
+streaming end-of-stream validation. A panic, thrown error, recursion abort,
+resource-limit abort, timeout, or unexpected validator internal error during
+streaming validation MUST become a terminal SSE error frame with
+`FaultBreakerQualifying`, no success receipt, no sticky-success route, and zero
+provider-positive credits. Partial validator state MUST be discarded as in the
+v0.1 rule.
+
 ### SPEC-019 error codes
 
 | Code | HTTP | Phase | Retryable | Notes |
@@ -661,6 +905,16 @@ No internal retry is allowed in v0.1.0. Buyer retries happen at the buyer layer.
 * Empty-content subcase override: `malformed_json_response` caused by `""` after
   stop-token filtering is `retryable:false` with an actionable buyer-side fix
   message; non-empty malformed JSON remains `retryable:true`.
+
+**v0.2 error-code amendment**: `streaming_json_schema_unsupported` and
+`streaming_json_object_unsupported` are deleted from the active buyer-visible
+SPEC-019 v0.2 error table. They remain documented only as v0.1.x migration
+history. `malformed_json_response` and `json_schema_validation_failed` are valid
+HTTP and terminal-SSE error-envelope codes in v0.2. The coordinator retryability
+table currently marks the two streaming reject codes false and the two
+post-inference structured-output codes retryable
+(`phase4-coordinator/internal/buyer/server.go:59-73`); v0.2 removes the former
+from active request validation while preserving the latter.
 
 Minimum terminal error envelope:
 
@@ -731,6 +985,12 @@ Decoded output JSON depth is capped at `32`, matching SPEC-018's public depth
 constant (`phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:4-6`,
 public depth constant).
 
+v0.2 does not change SPEC-019 schema-size or schema-depth caps. For streaming
+structured output, the response-side accumulation cap reuses SPEC-018 v0.2.4
+§10d.7's `2_097_152`-byte response cap and inclusive byte-counting posture
+(`specs/SPEC-018-agentic-tool-calling.md:963-975`). Structured-output parsing
+and validation do not run on over-cap output.
+
 ## 7. Coordinator / gateway behavior
 
 Coordinator request validation currently accepts `response_format.type` only if
@@ -748,6 +1008,15 @@ defense-in-depth validation for:
 - strict object `required` contains every `properties` key;
 - `const` / `enum` type conformance;
 - `stream:true` unsupported errors from §1.
+
+**v0.2 coordinator amendment**: the final bullet above is v0.1.x-only. For
+v0.2, coordinator request validation MUST NOT reject `stream:true` solely
+because `response_format` is `json_schema` or `json_object`; the current
+coordinator reject branches at
+`phase4-coordinator/internal/buyer/server.go:3676-3687` are removed for v0.2.
+Coordinator validation still enforces the §3 schema subset before dispatch.
+End-of-stream structured-output validation then runs with the same semantics as
+the non-streaming path.
 
 After validation, coordinator dispatch remains pass-through. It MUST preserve
 the buyer's `response_format` field through provider dispatch.
@@ -802,6 +1071,25 @@ receipt-eligible provider error pass-through helper, and
 `phase5-gateway/internal/router/chat_proxy.go:601-607`,
 `isNullUsageProviderError` predicate.
 
+**v0.2 streaming pass-through allow-list amendment**: SPEC-006 gateway
+normalization MUST also pass through terminal SSE error frames whose
+`error.code` is `malformed_json_response` or
+`json_schema_validation_failed`. The gateway MUST NOT remap these terminal SSE
+error frames to `api_error` or generic `upstream_provider_error`, and MUST NOT
+drop the structured `retryable`, `request_id`, `inference_ran`, or
+`settlement_ran` fields required by SPEC-018 v0.2.4 §10d.0. The coordinator
+already recognizes those two codes as SPEC-019 provider detail codes
+(`phase4-coordinator/internal/buyer/server.go:4944-4955`) and has an
+OpenAI-style SSE error writer with the required minimum fields for terminal
+streaming errors
+(`phase4-coordinator/internal/buyer/server.go:5150-5170`).
+
+Streaming auto-downgrade reuses SPEC-018 v0.2.4 §10d.4 per-(buyer, provider)
+attribution and recovery: malformed streams from one buyer to one provider MUST
+NOT downgrade that provider for all buyers
+(`specs/SPEC-018-agentic-tool-calling.md:834-840`). SPEC-019 v0.2 does not add
+a new public streaming negotiation surface.
+
 ## 8. Money path
 
 Post-inference structured-output failures are provider-output failures, not
@@ -811,7 +1099,7 @@ zero provider-positive credits.
 
 The coordinator billing path already accepts a fault flag and only fills
 `FaultNone` when the flag is empty
-(`phase4-coordinator/internal/buyer/billing_recorder.go:181-183`). The billing
+(`phase4-coordinator/internal/buyer/billing_recorder.go:192-194`). The billing
 formula returns immediately when `row.FaultFlag == FaultBreakerQualifying`
 (`phase4-coordinator/internal/billing/formula.go:112-114`), before positive
 credit calculation. SPEC-019 uses those existing paths.
@@ -822,6 +1110,19 @@ Pre-inference request-validation failures such as `json_schema_missing_name`,
 `json_schema_invalid_const_or_enum_type`, `json_schema_invalid_name`,
 `json_schema_non_strict_unsupported`, and `streaming_json_schema_unsupported` do
 not run inference and do not create provider-positive settlement.
+
+**v0.2 streaming money-path amendment**: streaming structured-output validation
+failure is a provider-output failure after inference has run. It MUST be
+recorded as `FaultBreakerQualifying` and settle zero provider-positive credits,
+the same posture as v0.1 non-streaming `malformed_json_response` and
+`json_schema_validation_failed`. The billing recorder preserves an explicit
+fault flag and only normalizes an empty flag to `FaultNone`
+(`phase4-coordinator/internal/buyer/billing_recorder.go:192-208`), and the
+billing formula returns before positive-credit calculation for
+`FaultBreakerQualifying`
+(`phase4-coordinator/internal/billing/formula.go:112-114`). For v0.2,
+`streaming_json_schema_unsupported` and `streaming_json_object_unsupported` are
+not pre-inference failure modes because structured streaming is accepted.
 
 ## 9. Forward-compatibility invariants
 
@@ -859,26 +1160,36 @@ fields explicitly. This is the JCS-canonicalization contract of
 to v0.1.0; a future version MAY fold defaults in but MUST announce the
 migration.
 
+**v0.2 streaming validation invariant**: v0.2 MAY use end-of-stream validation
+for `stream:true` structured output. Future versions MAY promote streaming
+validation to incremental partial-JSON-prefix tolerant validation, but MUST NOT
+regress below v0.2's end-of-stream validation guarantee for accepted
+`stream:true` + `response_format` requests.
+
+**v0.2 schema-keyword monotonicity**: acceptance of `minimum`, `maximum`,
+`multipleOf`, and top-level `$schema` is monotonic. Future v0.2.x versions MAY
+widen the accepted-keyword set but MUST NOT remove those four accepted keywords
+from default behavior.
+
+**v0.2 receipt invariant**: no SPEC-015 schema change is required for streaming
+structured output. `response_format` remains bound into the prompt hash through
+the existing JCS canonical prompt object
+(`phase3-binary/Sources/macprovider-cli/PromptCanonicalizer.swift:5-16`).
+
 ## 10. Deferred to v0.2 / v0.3
 
-Deferred to v0.2:
+Deferred after v0.2.0:
 
-- v0.2: streaming structured output with partial-JSON-prefix validation per
-  chunk.
-- v0.2: Cline structured-output enablement on the active streaming path.
-- v0.2: Vercel AI SDK and OpenAI SDK matrix expansion beyond the v0.1.0 anchor
-  fixtures.
-- v0.2: wider schema subset after Cline and Vercel AI SDK compatibility
-  evidence.
-- v0.2: schema warm-cache between requests on the same connection.
-- v0.2: transparent gateway-side decompression of `Content-Encoding: gzip` /
-  `deflate` / `br` request bodies with a decompressed-byte cap. v0.1.0 keeps
-  the single uncompressed byte-domain invariant for caps and JCS. v0.1.0
-  returns HTTP 415 `request_content_encoding_unsupported` for compressed bodies
-  until v0.2 decompression semantics land.
-- v0.2: §3 numeric-bound keywords (`minimum`, `maximum`, `multipleOf`) and
-  `$schema` top-level acceptance to enable direct round-trip with Vercel AI
-  SDK's full Zod expressivity without an SDK-side normalization step.
+- v0.2.x or v0.3: transparent gateway-side decompression of
+  `Content-Encoding: gzip` / `deflate` / `br` request bodies with a
+  decompressed-byte cap. v0.2.0 keeps the single uncompressed byte-domain
+  invariant for caps and JCS and continues returning HTTP 415
+  `request_content_encoding_unsupported` for compressed request bodies.
+- v0.2.x or v0.3: schema warm-cache between requests on the same connection.
+- v0.2.x or v0.3: wider schema subset beyond numeric bounds and top-level
+  `$schema`.
+- v0.2.x or v0.3: partial-JSON-prefix tolerant streaming validation. v0.2.0
+  ships end-of-stream validation over the concatenated content buffer.
 
 Deferred to v0.3 or later:
 
@@ -902,6 +1213,31 @@ acceptance criterion.
 enablement is a v0.2 streaming-validation deliverable. v0.1.0 unlocks
 structured output for non-streaming SDK consumers (openai-python, Vercel AI SDK
 non-stream).
+
+**v0.2.0 amendment**: Cline structured-output enablement on the active
+streaming path, streaming structured output, and §3 numeric-bound plus
+top-level `$schema` acceptance are no longer deferred. They are the v0.2.0
+deliverables. Partial-JSON-prefix tolerant validation remains deferred.
+
+Historical v0.1.5 deferred text retained for audit traceability, superseded by
+the v0.2.0 active deferred list above:
+
+- v0.2: streaming structured output with partial-JSON-prefix validation per
+  chunk.
+- v0.2: Cline structured-output enablement on the active streaming path.
+- v0.2: Vercel AI SDK and OpenAI SDK matrix expansion beyond the v0.1.0 anchor
+  fixtures.
+- v0.2: wider schema subset after Cline and Vercel AI SDK compatibility
+  evidence.
+- v0.2: schema warm-cache between requests on the same connection.
+- v0.2: transparent gateway-side decompression of `Content-Encoding: gzip` /
+  `deflate` / `br` request bodies with a decompressed-byte cap. v0.1.0 keeps
+  the single uncompressed byte-domain invariant for caps and JCS. v0.1.0
+  returns HTTP 415 `request_content_encoding_unsupported` for compressed bodies
+  until v0.2 decompression semantics land.
+- v0.2: §3 numeric-bound keywords (`minimum`, `maximum`, `multipleOf`) and
+  `$schema` top-level acceptance to enable direct round-trip with Vercel AI
+  SDK's full Zod expressivity without an SDK-side normalization step.
 
 ## 11. Open questions / audit hooks
 
@@ -935,25 +1271,68 @@ Audit lanes should probe:
     `@ai-sdk/openai-compatible@2.0.38` Zod parsing should fail only on real
     schema violations, not on envelope or content-shape drift.
 
+v0.2 audit lanes should additionally probe:
+
+11. Whether end-of-stream validation creates an unacceptable buyer DoS posture
+    when a provider emits up to the 2 MiB response cap of unvalidated tokens and
+    then fails validation. The counter-argument is parity with v0.1
+    non-streaming post-hoc validation: inference ran, buyer receives an error,
+    and settlement is `FaultBreakerQualifying`.
+12. Whether the terminal SSE error-frame shape should exactly reuse SPEC-018
+    v0.2.4 §10d.4 or whether SPEC-019 needs a dedicated structured-output
+    streaming shape before lock.
+13. Whether `Content-Type: text/event-stream; charset=utf-8` and chunked
+    transfer encoding are preserved through the gateway/coordinator path on
+    structured-output terminal-error streams. The provider SSE headers are
+    currently `content-type`, `cache-control`, `connection`, and
+    `transfer-encoding: chunked`
+    (`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:1169-1178`).
+14. Whether `[DONE]` remains the right transport close marker for both success
+    and failure paths when the failure is semantically terminal-error rather
+    than successful completion.
+
 ## 12. Document metadata
 
-**Version:** 0.1.5 (2026-06-28, round-5 final polish)
+**Version:** 0.2.0 (2026-06-29, draft for audit)
 
-**Status:** DRAFT — final defensive lock candidate.
+**Status:** DRAFT — audit loop pending.
 
 Precondition: SPEC-018 v0.2.4 LOCKED at `7e50832` via PR #202, with
 implementation shipped at `c77313a` via PR #209
 (`specs/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
 commit anchors).
 
-Successor: TBD. Expected next step is architect-only r5 re-fire for 0/0/0
-closure before lock, or v0.2.0 if the audit loop promotes streaming structured
-output into scope.
+Successor: TBD. Expected next step is the 4-round 6-lane v0.2 audit loop:
+Codex architect, code, security, and product-design lanes plus Claude critic
+and Claude narrative lanes. Lock bar: 0 CRITICAL + 0 HIGH + 0 MEDIUM across all
+6 lanes.
 
 Drafting scope: no implementation code, no SPEC-018 edits, no SPEC-015 schema
 change, no new HTTP endpoint.
 
 ### Change log
+
+- **v0.2.0 (2026-06-29, draft for audit):** v0.2 amendment on top of
+  locked v0.1.5 for the narrow Cline drop-in structured-output build.
+  Resolved design calls are normative: streaming validation is
+  end-of-stream validation over concatenated `content` deltas, not
+  partial-JSON-prefix validation; Cline is the anchor framework through
+  `@ai-sdk/openai-compatible@2.0.38` with
+  `supportsStructuredOutputs:true`; numeric bounds plus top-level
+  `$schema` are the only schema-subset widening; and
+  `streaming_json_schema_unsupported` /
+  `streaming_json_object_unsupported` are deleted from the active v0.2
+  buyer-visible error table. Four narrow deliverables: (1)
+  `stream:true` + `json_schema` / `json_object` accepted with normal
+  SSE deltas and terminal validation; (2) terminal streaming
+  validation failures reuse SPEC-018 v0.2.4 §10d.4 error frames and
+  settle `FaultBreakerQualifying`; (3) §3 accepts `minimum`,
+  `maximum`, `multipleOf`, and top-level `$schema` while leaving
+  polymorphism / `$ref` / `$defs` deferred; (4) SDK fixtures expand to
+  live Cline/Vercel streaming plus openai-python streaming, including
+  the former v0.1 AC-31 `z.number().int()` / `$schema` gap. No
+  SPEC-015 schema change; `PromptCanonicalizer.swift:5-16` already
+  binds `response_format` into the prompt hash. No SPEC-018 edits.
 
 - **v0.1.5 (2026-06-28, round-5 final polish):** Absorbed the single
   r5 MEDIUM. AC-28a fixture wording rewritten to match the §7
