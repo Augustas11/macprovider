@@ -32,6 +32,40 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
         )
     }
 
+    func testWhitespaceOnlyStructuredOutputIsNotRetryable() async throws {
+        let runtime = Self.runtimeReturning(CompletionResult(content: "   \n\t", finishReason: "stop", promptTokens: 1, completionTokens: 1))
+
+        await XCTAssertAsyncAPIError(
+            try await runtime.complete(Self.request(responseFormat: Self.jsonSchemaResponseFormat())),
+            status: 502,
+            code: "malformed_json_response",
+            retryable: false
+        )
+    }
+
+    func testJsonSchemaDepthOverflowReturnsStructuredEnvelope() async throws {
+        let runtime = Self.runtimeReturning(CompletionResult(content: Self.nestedArrayJSON(jsonDepth: 33), finishReason: "stop", promptTokens: 1, completionTokens: 1))
+
+        await XCTAssertAsyncAPIError(
+            try await runtime.complete(Self.request(responseFormat: Self.deepArrayResponseFormat())),
+            status: 502,
+            code: "json_schema_validation_failed",
+            retryable: true
+        )
+    }
+
+    func testIntegerSchemaRejectsDoubleOutput() async throws {
+        let runtime = Self.runtimeReturning(CompletionResult(content: #"{"age":1.0}"#, finishReason: "stop", promptTokens: 1, completionTokens: 1))
+
+        await XCTAssertAsyncAPIError(
+            try await runtime.complete(Self.request(responseFormat: Self.integerConstResponseFormat())),
+            status: 502,
+            code: "json_schema_validation_failed",
+            retryable: true,
+            param: "/age"
+        )
+    }
+
     func testJsonSchemaValidationFailureReportsPointer() async throws {
         let runtime = Self.runtimeReturning(CompletionResult(content: #"{"name":"Ada","age":"old"}"#, finishReason: "stop", promptTokens: 1, completionTokens: 2))
 
@@ -103,6 +137,46 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
                 ],
             ],
         ]
+    }
+
+    private static func deepArrayResponseFormat() -> [String: Any] {
+        [
+            "type": "json_schema",
+            "json_schema": [
+                "name": "deep-array",
+                "strict": true,
+                "schema": nestedArraySchema(depth: 32),
+            ],
+        ]
+    }
+
+    private static func integerConstResponseFormat() -> [String: Any] {
+        [
+            "type": "json_schema",
+            "json_schema": [
+                "name": "integer-const",
+                "strict": true,
+                "schema": [
+                    "type": "object",
+                    "properties": [
+                        "age": ["type": "integer", "const": 1],
+                    ],
+                    "required": ["age"],
+                    "additionalProperties": false,
+                ],
+            ],
+        ]
+    }
+
+    private static func nestedArraySchema(depth: Int) -> [String: Any] {
+        if depth == 1 {
+            return ["type": "integer"]
+        }
+        return ["type": "array", "items": nestedArraySchema(depth: depth - 1)]
+    }
+
+    private static func nestedArrayJSON(jsonDepth: Int) -> String {
+        String(repeating: "[", count: jsonDepth - 1) + "0" + String(repeating: "]", count: jsonDepth - 1)
     }
 
     private enum TestError: Error {

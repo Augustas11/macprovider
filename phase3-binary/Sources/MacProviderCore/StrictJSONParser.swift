@@ -1,9 +1,32 @@
 import Foundation
 
+// StrictJSONParser
+//
+// Why this exists:
+// SPEC-019 v0.1.5 §5 requires post-inference structured-output
+// validation to be panic-safe and to honor a depth cap of 32 BEFORE
+// stack overflow can abort the request handler. Foundation's
+// `JSONSerialization.jsonObject(with:)` is recursive without an
+// observable depth limit, so we cannot wrap it in `do/catch` to
+// satisfy SPEC §5's catch-all rule.
+//
+// This parser is depth-bounded: every recursion threads a `depth`
+// counter; exceeding `JSONSchemaValidator.maxDepth` throws a
+// structured `json_schema_validation_failed` 502 before the next
+// recursion is entered. It also reuses the same byte-level value
+// representation (`JSONValue`) that the schema validator and prompt
+// canonicalizer expect, avoiding double-parse cost.
+//
+// What it does NOT do:
+// - Duplicate-key rejection (model output may legitimately repeat
+//   keys; SPEC-019 §5 routes duplicate-key fail-closed handling to
+//   the validator, not the parser).
+// - Number canonicalization beyond what JSONValue already provides.
+// - Streaming. v0.1.0 is non-streaming only.
 public enum StrictJSONParser {
     public static func parse(_ text: String) throws -> JSONValue {
         var parser = Parser(scalars: Array(text.unicodeScalars))
-        let value = try parser.parseValue()
+        let value = try parser.parseValue(depth: 1)
         parser.skipWhitespace()
         guard parser.isAtEnd else {
             throw ParseError.trailingData
@@ -26,14 +49,25 @@ public enum StrictJSONParser {
 
         var isAtEnd: Bool { index >= scalars.count }
 
-        mutating func parseValue() throws -> JSONValue {
+        mutating func parseValue(depth: Int) throws -> JSONValue {
+            if depth > JSONSchemaValidator.maxDepth {
+                throw APIError(
+                    status: 502,
+                    message: "Structured-output JSON exceeds depth cap of \(JSONSchemaValidator.maxDepth) levels",
+                    type: "upstream_provider_error",
+                    code: "json_schema_validation_failed",
+                    param: "",
+                    inferenceRan: true,
+                    settlementRan: true
+                )
+            }
             skipWhitespace()
             guard !isAtEnd else { throw ParseError.unexpectedEnd }
             switch scalars[index] {
             case "{":
-                return try parseObject()
+                return try parseObject(depth: depth)
             case "[":
-                return try parseArray()
+                return try parseArray(depth: depth)
             case "\"":
                 return .string(try parseString())
             case "t":
@@ -50,7 +84,7 @@ public enum StrictJSONParser {
             }
         }
 
-        mutating func parseObject() throws -> JSONValue {
+        mutating func parseObject(depth: Int) throws -> JSONValue {
             try consume("{")
             skipWhitespace()
             var object: [String: JSONValue] = [:]
@@ -62,7 +96,7 @@ public enum StrictJSONParser {
                 guard object[key] == nil else { throw ParseError.duplicateKey(key) }
                 skipWhitespace()
                 try consume(":")
-                object[key] = try parseValue()
+                object[key] = try parseValue(depth: depth + 1)
                 skipWhitespace()
                 if consumeIf("}") {
                     return .object(object)
@@ -71,13 +105,13 @@ public enum StrictJSONParser {
             }
         }
 
-        mutating func parseArray() throws -> JSONValue {
+        mutating func parseArray(depth: Int) throws -> JSONValue {
             try consume("[")
             skipWhitespace()
             var array: [JSONValue] = []
             guard !consumeIf("]") else { return .array(array) }
             while true {
-                array.append(try parseValue())
+                array.append(try parseValue(depth: depth + 1))
                 skipWhitespace()
                 if consumeIf("]") {
                     return .array(array)

@@ -424,6 +424,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 			return
 		}
+		if coordinatorStructuredOutputStreamingReject(resp.StatusCode, body) {
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			return
+		}
 		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completionFromHeaderCapped(resp.Header, maxTokens), maxUsageTokens, "gateway_estimated", "upstream_error") {
 			return
 		}
@@ -650,6 +654,18 @@ func isNullUsageProviderError(body []byte) bool {
 	}
 }
 
+func coordinatorStructuredOutputStreamingReject(status int, body []byte) bool {
+	if status != http.StatusBadRequest {
+		return false
+	}
+	switch openAIErrorCode(body) {
+	case "streaming_json_schema_unsupported", "streaming_json_object_unsupported":
+		return true
+	default:
+		return false
+	}
+}
+
 func contentEncodingSupported(values []string) bool {
 	if len(values) == 0 {
 		return true
@@ -661,7 +677,7 @@ func contentEncodingSupported(values []string) bool {
 		}
 		return r
 	}, normalized)
-	return normalized == "" || normalized == "identity"
+	return normalized == "identity"
 }
 
 // coordinatorIdempotencyError detects coordinator-issued 409 responses

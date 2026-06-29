@@ -940,10 +940,13 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private static func parseStructuredJSONContent(_ content: String, requireObjectOrArray: Bool) throws -> MacProviderCore.JSONValue {
-        guard !content.isEmpty else {
+        // Whitespace-only output is classified as empty per SPEC-019 §5
+        // empty-content override; this prevents `retryable:true` on
+        // deterministic whitespace-emit failures.
+        guard !content.filter({ !Self.isASCIIStructuredOutputWhitespace($0) }).isEmpty else {
             throw APIError(
                 status: 502,
-                message: "Model emitted zero tokens for the requested schema; adjust `temperature` / `seed` (for stochastic models), or modify the prompt or schema before retrying — automatic same-request retry will not succeed.",
+                message: "Model emitted zero tokens for the requested schema; adjust `temperature` / `seed` (for stochastic models), or modify the prompt or schema before retrying — automatic same-request retry will not succeed. If you intended free-form prose, send response_format: {\"type\":\"text\"} or omit the field. Per SPEC-019 v0.1.0, json_object now enforces top-level JSON; this is a breaking change from earlier versions where json_object was a silent no-op.",
                 type: "upstream_provider_error",
                 code: "malformed_json_response",
                 param: "",
@@ -955,10 +958,12 @@ actor ModelRuntime: ModelRuntimeServing {
         let parsed: MacProviderCore.JSONValue
         do {
             parsed = try StrictJSONParser.parse(content)
+        } catch let error as APIError {
+            throw error
         } catch {
             throw APIError(
                 status: 502,
-                message: "Model output was not valid JSON for the requested response_format",
+                message: "Model output was not valid JSON for the requested response_format. If you intended free-form prose, send response_format: {\"type\":\"text\"} or omit the field. Per SPEC-019 v0.1.0, json_object now enforces top-level JSON; this is a breaking change from earlier versions where json_object was a silent no-op.",
                 type: "upstream_provider_error",
                 code: "malformed_json_response",
                 param: "",
@@ -984,6 +989,10 @@ actor ModelRuntime: ModelRuntimeServing {
             }
         }
         return parsed
+    }
+
+    private static func isASCIIStructuredOutputWhitespace(_ character: Character) -> Bool {
+        character == " " || character == "\t" || character == "\n" || character == "\r"
     }
 
     static func mlxToolsForTemplate(from value: MacProviderCore.JSONValue?) -> [[String: Any]]? {

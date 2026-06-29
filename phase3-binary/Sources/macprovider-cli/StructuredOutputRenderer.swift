@@ -1,6 +1,20 @@
 import Foundation
 import MacProviderCore
 
+// StructuredOutputRenderer
+//
+// Renders the SPEC-019 v0.1.5 structured-output schema instruction
+// into the chat-template system position per family (Qwen3,
+// Llama-3.3). Composed BEFORE ToolPromptRenderer.renderMessages
+// per SPEC §4 composite-render rule: schema-adjusted ChatMessage →
+// ToolPromptRenderer → UserInput.
+//
+// Stateless: no per-request, per-connection, or per-family cache.
+// Concurrent requests render independently. Cache deferred to v0.2
+// per SPEC §10.
+//
+// Family selection mirrors ToolPromptRenderer.detect(modelID:) —
+// modelID substring match; Qwen3 / Llama-3.3 only in v0.1.0.
 enum StructuredOutputRenderer {
     enum Family {
         case qwen3

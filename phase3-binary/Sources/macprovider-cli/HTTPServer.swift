@@ -436,9 +436,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     static func validateContentEncoding(_ values: [String]) throws {
         guard !values.isEmpty else { return }
         let normalized = values.joined(separator: ",")
-            .filter { !$0.isWhitespace }
+            .filter { !Self.isASCIIContentEncodingWhitespace($0) }
             .lowercased()
-        guard normalized.isEmpty || normalized == "identity" else {
+        guard normalized == "identity" else {
             throw APIError(
                 status: 415,
                 message: "v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding` header; compressed request bodies are deferred to v0.2 per §10.",
@@ -446,6 +446,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 param: "Content-Encoding"
             )
         }
+    }
+
+    private static func isASCIIContentEncodingWhitespace(_ character: Character) -> Bool {
+        character == " " || character == "\t" || character == "\n" || character == "\r"
     }
 
     static func validateStructuredStreamingUnsupported(_ request: ChatCompletionRequest) throws {

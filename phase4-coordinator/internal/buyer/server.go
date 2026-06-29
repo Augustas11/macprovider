@@ -1870,6 +1870,24 @@ func (s *Server) forwardHTTPSequence(
 				respBody, _ = readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 				_ = resp.Body.Close()
 				attempt.ErrorCode = nullUsageProviderErrorCode(respBody)
+				if isSpec019ProviderDetailCode(attempt.ErrorCode) {
+					if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, status, nil, nil, http.StatusText(status), attempt.ErrorCode, state.explicitRetries, nil, billing.FaultBreakerQualifying); err != nil {
+						cancelAttempt()
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+						return dispatchedAttempt{}, false
+					}
+					copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
+					w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+					if w.Header().Get("Content-Type") == "" {
+						w.Header().Set("Content-Type", "application/json")
+					}
+					w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
+					w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
+					w.WriteHeader(status)
+					_, _ = w.Write(respBody)
+					cancelAttempt()
+					return dispatchedAttempt{}, false
+				}
 				// Receipt-bearing null-usage early-return (Round-1
 				// audit H1). Only short-circuit when the retry budget
 				// is genuinely exhausted; otherwise fall through so
@@ -4921,11 +4939,15 @@ func spec001StatusFromBody(body []byte) string {
 
 func spec001EndStatus(status string) string {
 	switch status {
-	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal":
+	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed":
 		return status
 	default:
 		return ""
 	}
+}
+
+func isSpec019ProviderDetailCode(code string) bool {
+	return code == "malformed_json_response" || code == "json_schema_validation_failed"
 }
 
 func endErrorMessage(end providerws.InferenceResponseEnd) string {
@@ -5077,11 +5099,37 @@ func writeWSEndError(w http.ResponseWriter, end providerws.InferenceResponseEnd)
 		writeError(w, wsEndHTTPStatus(end.Status), "context_exceeds_capacity", "Request exceeds provider context capacity")
 	case "error_model_not_loaded", "error_queue_full":
 		writeError(w, wsEndHTTPStatus(end.Status), "no_provider_available", "Selected provider is not reachable")
+	case "malformed_json_response", "json_schema_validation_failed":
+		writeProviderStructuredOutputError(w, wsEndHTTPStatus(end.Status), end.Status, end.Error, end.Retryable)
 	case "cancelled":
 		return
 	default:
 		writeError(w, wsEndHTTPStatus(end.Status), "provider_error", "Selected provider failed; buyer should retry")
 	}
+}
+
+func writeProviderStructuredOutputError(w http.ResponseWriter, status int, code, message string, retryable *bool) {
+	if message == "" {
+		message = http.StatusText(status)
+	}
+	retry := spec018Retryable(code)
+	if retryable != nil {
+		retry = *retryable
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"message":        message,
+			"type":           spec018ErrorType(code, errorType(status)),
+			"param":          nil,
+			"code":           code,
+			"retryable":      retry,
+			"request_id":     nil,
+			"inference_ran":  true,
+			"settlement_ran": true,
+		},
+	})
 }
 
 func wsEndHTTPStatus(status string) int {
@@ -5320,7 +5368,7 @@ func contentEncodingSupported(values []string) bool {
 		}
 		return r
 	}, normalized)
-	return normalized == "" || normalized == "identity"
+	return normalized == "identity"
 }
 
 func readLimitedBody(r io.Reader, maxBytes int64) ([]byte, error) {

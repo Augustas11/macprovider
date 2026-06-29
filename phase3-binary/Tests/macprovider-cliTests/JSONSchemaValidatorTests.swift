@@ -7,7 +7,7 @@ final class JSONSchemaValidatorTests: XCTestCase {
     }
 
     func testUnsupportedKeywordsAreRejected() throws {
-        let keywords = ["oneOf", "$ref", "$defs", "$schema", "pattern", "minimum", "maxItems", "default"]
+        let keywords = ["oneOf", "anyOf", "allOf", "not", "$ref", "$defs", "pattern", "format", "minimum", "maximum", "multipleOf", "minItems", "maxItems", "uniqueItems", "$schema"]
         for keyword in keywords {
             var schema = Self.personSchemaObject()
             schema[keyword] = .array([])
@@ -58,6 +58,20 @@ final class JSONSchemaValidatorTests: XCTestCase {
             status: 400,
             code: "json_schema_invalid_const_or_enum_type"
         )
+    }
+
+    func testIntegerSchemaRejectsDoubleDriftForConstAndEnum() throws {
+        let constSchema: JSONValue = .object([
+            "type": .string("integer"),
+            "const": .int(1),
+        ])
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(1.0), against: constSchema), status: 502, code: "json_schema_validation_failed")
+
+        let enumSchema: JSONValue = .object([
+            "type": .string("integer"),
+            "enum": .array([.int(1)]),
+        ])
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(1.0), against: enumSchema), status: 502, code: "json_schema_validation_failed")
     }
 
     func testSchemaDepthBoundary() throws {

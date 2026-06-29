@@ -15,9 +15,10 @@ final class HTTPServerStructuredOutputTests: XCTestCase {
         XCTAssertNoThrow(try RouterHandler.validateContentEncoding([]))
         XCTAssertNoThrow(try RouterHandler.validateContentEncoding(["identity"]))
         XCTAssertNoThrow(try RouterHandler.validateContentEncoding([" Identity "]))
+        XCTAssertNoThrow(try RouterHandler.validateContentEncoding(["\tidentity "]))
         XCTAssertNoThrow(try RouterHandler.validateContentEncoding(["IDENTITY"]))
 
-        for rejected in [["gzip"], ["deflate"], ["br"], ["identity, gzip"]] {
+        for rejected in [["gzip"], ["deflate"], ["br"], ["identity, gzip"], ["   "], ["\u{00a0}identity"]] {
             XCTAssertAPIError(try RouterHandler.validateContentEncoding(rejected), status: 415, code: "request_content_encoding_unsupported", param: "Content-Encoding")
         }
     }

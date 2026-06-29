@@ -1,6 +1,7 @@
 package buyer
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -47,12 +48,6 @@ func TestValidateResponseFormatSchemaCapsAndSubset(t *testing.T) {
 			code:   "json_schema_invalid_name",
 		},
 		{
-			name:   "unsupported keyword",
-			body:   strings.Replace(validStructuredOutputRequest(false), `"additionalProperties":false`, `"additionalProperties":false,"minimum":0`, 1),
-			status: http.StatusBadRequest,
-			code:   "json_schema_unsupported_keyword",
-		},
-		{
 			name:   "missing additionalProperties",
 			body:   strings.Replace(validStructuredOutputRequest(false), `,"additionalProperties":false`, ``, 1),
 			status: http.StatusBadRequest,
@@ -81,6 +76,19 @@ func TestValidateResponseFormatSchemaCapsAndSubset(t *testing.T) {
 	}
 }
 
+func TestValidateResponseFormatRejectsUnsupportedKeywords(t *testing.T) {
+	keywords := []string{"oneOf", "anyOf", "allOf", "not", "$ref", "$defs", "pattern", "format", "minimum", "maximum", "multipleOf", "minItems", "maxItems", "uniqueItems", "$schema"}
+	for _, keyword := range keywords {
+		t.Run(keyword, func(t *testing.T) {
+			body := strings.Replace(validStructuredOutputRequest(false), `"additionalProperties":false`, `"additionalProperties":false,"`+keyword+`":[]`, 1)
+			_, status, code, msg := validateChatRequest([]byte(body))
+			if status != http.StatusBadRequest || code != "json_schema_unsupported_keyword" {
+				t.Fatalf("status=%d code=%s msg=%s", status, code, msg)
+			}
+		})
+	}
+}
+
 func TestValidateResponseFormatSchemaDepthAndByteCaps(t *testing.T) {
 	if _, status, code, _ := validateChatRequest([]byte(requestWithSchema(nestedArraySchemaJSON(32)))); status != 0 {
 		t.Fatalf("depth 32 status=%d code=%s", status, code)
@@ -96,6 +104,70 @@ func TestValidateResponseFormatSchemaDepthAndByteCaps(t *testing.T) {
 	}
 	if _, status, code, _ := validateChatRequest([]byte(requestWithSchema(`{"type":"object","properties":{},"required":[],"additionalProperties":false,"title":"` + title + `x"}`))); status != http.StatusRequestEntityTooLarge || code != "json_schema_too_large" {
 		t.Fatalf("byte cap over status=%d code=%s", status, code)
+	}
+}
+
+func TestValidateResponseFormatNameRegexParity(t *testing.T) {
+	cases := []struct {
+		name       string
+		schemaName string
+		wantStatus int
+	}{
+		{"dash accepted", "person-v1", 0},
+		{"dot rejected", "person.v1", http.StatusBadRequest},
+		{"unicode rejected", "Café", http.StatusBadRequest},
+		{"long rejected", strings.Repeat("a", 65), http.StatusBadRequest},
+		{"newline rejected", "name\nINJECT", http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			quotedName, err := json.Marshal(tc.schemaName)
+			if err != nil {
+				t.Fatalf("marshal schema name: %v", err)
+			}
+			body := strings.Replace(validStructuredOutputRequest(false), `"person-v1"`, string(quotedName), 1)
+			_, status, code, msg := validateChatRequest([]byte(body))
+			if status != tc.wantStatus {
+				t.Fatalf("status=%d code=%s msg=%s, want %d", status, code, msg, tc.wantStatus)
+			}
+			if tc.wantStatus != 0 && code != "json_schema_invalid_name" {
+				t.Fatalf("code=%s want json_schema_invalid_name", code)
+			}
+		})
+	}
+}
+
+func TestIntegerSchemaScalarConformanceRejectsDoubleDrift(t *testing.T) {
+	if !jsonSchemaScalarConforms(json.RawMessage(`1`), "integer") {
+		t.Fatal("integer literal should conform to integer schema")
+	}
+	if jsonSchemaScalarConforms(json.RawMessage(`1.0`), "integer") {
+		t.Fatal("decimal literal should not conform to integer schema")
+	}
+}
+
+func TestContentEncodingSupportedForSpec019(t *testing.T) {
+	for _, values := range [][]string{
+		nil,
+		{"identity"},
+		{"\tidentity "},
+		{"IDENTITY"},
+	} {
+		if !contentEncodingSupported(values) {
+			t.Fatalf("expected accepted content-encoding values %#v", values)
+		}
+	}
+	for _, values := range [][]string{
+		{"gzip"},
+		{"deflate"},
+		{"br"},
+		{"identity, gzip"},
+		{"   "},
+		{"\u00a0identity"},
+	} {
+		if contentEncodingSupported(values) {
+			t.Fatalf("expected rejected content-encoding values %#v", values)
+		}
 	}
 }
 
