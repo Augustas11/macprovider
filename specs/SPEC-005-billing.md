@@ -99,8 +99,14 @@ satisfied); the full close moves to v0.5.
   hold), SPEC-016 USDC payout interaction text, settlement-sweep
   snapshot ordering, existing-payout-ready interaction, mistaken-
   resolution operator runbook, first-class
-  `GET /admin/ledger/quarantine?status=open` list endpoint. All
-  become coherent once the v0.5 hold primitive exists.
+  `GET /admin/ledger/quarantine?status=open` list endpoint,
+  **SPEC-007 explorer current-vs-history projection** (the v0.4
+  LEFT JOIN in §11.6.5 projects exactly one resolution row per
+  base row because of the v0.4 UNIQUE constraint; v0.5's UNIQUE
+  relaxation turns the join into one-to-many, so v0.5 MUST define
+  whether the explorer surfaces the latest resolution, the entire
+  history, or both via separate columns). All become coherent
+  once the v0.5 hold primitive exists.
 
 **Change log v0.3.3 (2026-06-29, issue #168 — SPEC-002 v1.5.2 monotonic `attempt_n` adoption, closes §OQ-1):**
 - Dependency bump: SPEC-002 v1.5.1 → v1.5.2 to absorb the new
@@ -1425,16 +1431,44 @@ ledger table. Per-codepoint reject classes:
 6. **Unicode variation selectors / tag chars / private-use:**
    U+FE00..U+FE0F, U+180B..U+180D, U+E0000..U+E007F, U+E0080..U+E00FF,
    U+E000..U+F8FF, U+F0000..U+FFFFD, U+100000..U+10FFFD → HTTP 422.
-7. **Other Unicode `Default_Ignorable_Code_Point` set members:**
-   U+034F (CGJ), U+061C (ALM), U+115F, U+1160, U+17B4, U+17B5,
-   U+180E (MVS), U+2060..U+2064 (WORD JOINER + invisible operators),
-   U+2065 (reserved), U+2066..U+2069 (already in #4),
-   U+3164 (HANGUL FILLER), U+FFA0 (HALFWIDTH HANGUL FILLER),
-   U+FE00..U+FE0F (already in #6), U+FFF0..U+FFF8 (reserved),
-   U+FFFC (OBJECT REPLACEMENT), U+FFFD (REPLACEMENT) → HTTP 422
-   `unsanitized_reason`. The intent is to reject EVERY codepoint
-   with the `Default_Ignorable_Code_Point=Yes` Unicode property
-   so the audit log byte content matches its visible display.
+7. **Unicode `Default_Ignorable_Code_Point` (DICP) set:** every
+   codepoint with `Default_Ignorable_Code_Point=Yes` in Unicode
+   16.0 `DerivedCoreProperties.txt` MUST be rejected with HTTP 422
+   `unsanitized_reason`. The reference list (Unicode 16.0):
+   - U+00AD (SOFT HYPHEN)
+   - U+034F (COMBINING GRAPHEME JOINER)
+   - U+061C (ARABIC LETTER MARK)
+   - U+115F, U+1160 (HANGUL CHOSEONG/JUNGSEONG FILLER)
+   - U+17B4, U+17B5 (KHMER vowel-inherent markers)
+   - U+180B..U+180D (Mongolian variation selectors — also in #6)
+   - U+180E (MONGOLIAN VOWEL SEPARATOR)
+   - U+180F (MONGOLIAN FREE VARIATION SELECTOR FOUR — Unicode 14+)
+   - U+200B..U+200F (zero-width + LRM/RLM — also in #4/#5)
+   - U+202A..U+202E (bidi controls — also in #4)
+   - U+2060..U+2064 (WORD JOINER + invisible operators)
+   - U+2065 (reserved)
+   - U+2066..U+2069 (bidi isolates — also in #4)
+   - U+206A..U+206F (deprecated format chars — DICP per Unicode 16.0)
+   - U+3164 (HANGUL FILLER)
+   - U+FE00..U+FE0F (variation selectors — also in #6)
+   - U+FEFF (ZWNBSP / BOM — also in #5)
+   - U+FFA0 (HALFWIDTH HANGUL FILLER)
+   - U+FFF0..U+FFF8 (reserved)
+   - U+1BCA0..U+1BCA3 (Duployan shorthand format)
+   - U+1D173..U+1D17A (musical-notation format chars)
+   - U+E0000 (reserved; tag identifier)
+   - U+E0001 (LANGUAGE TAG)
+   - U+E0020..U+E007F (tag chars — also in #6)
+   - U+E0080..U+E00FF (reserved tag range — also in #6)
+   - U+E0100..U+E01EF (variation selectors supplement)
+   - U+E01F0..U+E0FFF (reserved supplementary tag plane)
+   The implementation MUST source this list from the Unicode 16.0
+   `DerivedCoreProperties.txt` file (or equivalent shipped data)
+   rather than re-deriving from the SPEC's enumerated ranges,
+   because Unicode property assignments can shift between
+   versions and the DICP=Yes set is the load-bearing identity. A
+   future Unicode-version bump in the coordinator MUST re-extract
+   the list; the SPEC pins Unicode 16.0 as the v0.4 reference.
 
 Length is measured AFTER trimming whitespace (`\t \n \r \v \f` +
 ASCII space), NOT raw byte length, BEFORE the per-codepoint
@@ -1507,17 +1541,23 @@ only that some holder of the operator key made the call. The
 the payload makes this limitation visible to a forensic reader
 who sees only the audit row.
 
-**Config-flag flip auditing.** Every change to
-`billing.quarantine_resolution_force_void_enabled` (via the
-existing config-reload primitive per §13.2) MUST emit a separate
-audit-log row with `event_type = "billing_config_flag_changed"`,
-payload `{"flag": "quarantine_resolution_force_void_enabled",
-"old_value": <bool>, "new_value": <bool>, "reload_source":
-"sighup"|"http_reload"|"startup", "ts_utc": "<RFC3339Nano>"}`.
-This is in addition to the existing `ledger_config_snapshots`
-row §13.2 already requires; it surfaces the flip as a discrete
-WARN event so an audit-log scan can correlate
-force-void resolutions to the flag state at the time.
+**Config-flag flip auditing.** Every hot-reload-acknowledged
+CHANGE to `billing.quarantine_resolution_force_void_enabled` —
+i.e., the post-reload value differs from the pre-reload value —
+MUST emit a separate audit-log row with `event_type =
+"billing_config_flag_changed"`, payload `{"flag":
+"quarantine_resolution_force_void_enabled", "old_value": <bool>,
+"new_value": <bool>, "reload_source": "sighup"|"http_reload",
+"ts_utc": "<RFC3339Nano>"}`. The `reload_source` enum is
+restricted to actual reload mechanisms; v0.4 does NOT emit at
+startup, because "no prior acknowledged value" has no defined
+`old_value` and the startup `ledger_config_snapshots` row already
+captures the initial state. A reload that ACKNOWLEDGES the same
+value (no change) MUST NOT emit. This is in addition to the
+existing `ledger_config_snapshots` row §13.2 already requires;
+it surfaces the flip as a discrete WARN event so an audit-log
+scan can correlate force-void resolutions to the flag state at
+the time.
 
 #### 11.6.5 Reader-side composition (SPEC-007 explorer and §11 aggregates)
 
