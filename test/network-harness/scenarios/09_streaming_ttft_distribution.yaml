@@ -1,20 +1,27 @@
 # 09_streaming_ttft_distribution.yaml — benchmark, phase B.
 #
 # Goal: characterize the TTFT distribution at high sample count.
-# 100 short streaming requests with a 500ms gap to keep providers
-# warm but avoid concurrency contention. This is the canonical
-# "what does TTFT look like at scale" reference for B1 + B3.
+# 100 short streaming requests sequenced so each completes before the
+# next fires — gives a clean TTFT signal uncontaminated by queue wait.
+#
+# Pacing math (2026-06-28 baseline):
+#   B=1 buyer, wall ≈ 1.5s (TTFT ~300ms + 8 tokens @ ~14 tok/s).
+#   Pearl AccountConcurrency N=3.
+#   mean_active = B × wall / interval = 1 × 1.5 / 1.5 = 1.0 → well under N.
+# The initial v0.1 run used interval=500ms → mean_active=3.0 → 72% 503s.
+# 1500ms is the tightest interval that keeps the success path clean
+# without bloating wall-clock (100 × 1.5s = 150s, fits 180s duration).
 #
 # Cost estimate (100 × 8 max_tokens): negligible.
 name: streaming_ttft_distribution
 description: |
-  100 sequential short streaming requests (max_tokens=8), 500ms gap.
+  100 sequential short streaming requests (max_tokens=8), 1500ms gap.
   Characterizes the TTFT histogram; enough samples for stable
   percentiles. Benchmark — B1, B3.
 
 expected_shape: |
   Phase B benchmark:
-   - 100 requests, all 200.
+   - 100 requests, all 200 (interval ≥ wall ensures no queue).
    - TTFT p50 ≤ 800ms target.
    - p99/p50 ≤ 3.0 target.
    - Should land cleanly on one model so the latency signal isn't
@@ -32,7 +39,7 @@ buyers:
   count: 1
   stream: true
   pattern: interval
-  interval_ms: 500
+  interval_ms: 1500
   requests_per_buyer: 100
 
 duration: 180s

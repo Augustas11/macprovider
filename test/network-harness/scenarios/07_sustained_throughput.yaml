@@ -5,10 +5,21 @@
 # (TTFT p50), B2 (streaming TPS p50), B3 (tail ratio p99/p50), B4
 # (error rate /1000), B5 (slot util %).
 #
+# Pacing math (2026-06-28 baseline):
+#   B=2 buyers, wall ≈ 5.5s (TTFT ~300ms + 64 tokens @ ~14 tok/s).
+#   Pearl AccountConcurrency N=3.
+#   mean_active = B × wall / interval = 2 × 5.5 / 5.0 = 2.2 → under N.
+# The initial v0.1 run used interval=2500ms → mean_active=4.4 → 48%
+# non-2xx from queue contention. 5000ms is the tightest interval that
+# keeps mean_active under N with margin for tail jitter.
+#
+# requests_per_buyer = 50 gives 50 × 5s = 250s firing window, leaving
+# ~50s tail buffer for last-request completion within the 300s duration.
+#
 # Not a chaos test — providers should stay up the whole window. Any
 # 5xx in the error_taxonomy is real signal worth investigating.
 #
-# Cost estimate (~120 requests × 64 max_tokens): order of $0.05-0.10.
+# Cost estimate (~100 requests × 64 max_tokens): order of $0.05-0.10.
 #
 # See specs/SPEC-NETWORK-BENCHMARK-v0.1.md for thresholds + invariants.
 name: sustained_throughput
@@ -19,7 +30,7 @@ description: |
 
 expected_shape: |
   Phase B benchmark (descriptive, B-invariants asserted):
-   - ~120 requests over 5 min.
+   - ~100 requests over 5 min, all 200 (pacing keeps mean_active < N=3).
    - 2 providers should both serve roughly half each.
    - TTFT p50 ≤ 800ms (target), ≤ 2000ms (bare-min).
    - Streaming TPS p50 ≥ 30 tok/s (target), ≥ 15 tok/s (bare-min).
@@ -38,8 +49,8 @@ buyers:
   count: 2
   stream: true
   pattern: interval
-  interval_ms: 2500
-  requests_per_buyer: 60
+  interval_ms: 5000
+  requests_per_buyer: 50
 
 duration: 300s
 request_timeout: 30s
