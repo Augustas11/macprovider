@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "café": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "café"
+  ],
+  "additionalProperties": false
+}

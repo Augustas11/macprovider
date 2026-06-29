@@ -217,6 +217,7 @@ type InferenceResponseEnd struct {
 	ChunksSent int             `json:"chunks_sent"`
 	Usage      json.RawMessage `json:"usage,omitempty"`
 	Error      string          `json:"error,omitempty"`
+	Retryable  *bool           `json:"retryable,omitempty"`
 	// SPEC-015 v0.1.x: WS-tunneled non-streaming inference carries the
 	// X-MacProvider-Receipt header value as a field on the
 	// inference_response_end frame. Coordinator stamps it as the

@@ -108,6 +108,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "request_too_large", "Request body too large")
 		return
 	}
+	if !contentEncodingSupported(r.Header.Values("Content-Encoding")) {
+		writeSpec019PreflightError(
+			w,
+			http.StatusUnsupportedMediaType,
+			"request_content_encoding_unsupported",
+			"v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding` header; compressed request bodies are deferred to v0.2 per §10.",
+			"Content-Encoding",
+		)
+		return
+	}
 	chat, err := parseChatRequest(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request", err.Error())
@@ -414,6 +424,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 			return
 		}
+		if coordinatorStructuredOutputStreamingReject(resp.StatusCode, body) {
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			return
+		}
 		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completionFromHeaderCapped(resp.Header, maxTokens), maxUsageTokens, "gateway_estimated", "upstream_error") {
 			return
 		}
@@ -633,11 +647,37 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 
 func isNullUsageProviderError(body []byte) bool {
 	switch openAIErrorCode(body) {
-	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal":
+	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed":
 		return true
 	default:
 		return false
 	}
+}
+
+func coordinatorStructuredOutputStreamingReject(status int, body []byte) bool {
+	if status != http.StatusBadRequest {
+		return false
+	}
+	switch openAIErrorCode(body) {
+	case "streaming_json_schema_unsupported", "streaming_json_object_unsupported":
+		return true
+	default:
+		return false
+	}
+}
+
+func contentEncodingSupported(values []string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	normalized := strings.ToLower(strings.Join(values, ","))
+	normalized = strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, normalized)
+	return normalized == "identity"
 }
 
 // coordinatorIdempotencyError detects coordinator-issued 409 responses
