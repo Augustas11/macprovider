@@ -62,19 +62,30 @@ func Evaluate(sc *scenario.Scenario, results []buyer.Result, summary *metrics.Su
 // I1 — ledger reconciliation drift must be zero. Verified live
 // 2026-06-27: gateway and coordinator use SEPARATE request_id spaces
 // (a gateway UUID and a coord UUID never overlap), so we correlate by
-// (model, completion_tokens, ts ± window) plus aggregate-sum checks.
+// (model, completion_tokens, ts ± window).
 //
-// Drift here means:
-//   * a harness success had no matching gateway row in the window
-//     (unmatched_successes) — billing-bypass risk
-//   * gateway and coordinator disagree on summed completion_tokens
-//     for the window — money-path drift
-//   * gateway over-billed vs what harness observed on the wire —
-//     overcharge
+// Since #226 + #229 R4, drift is computed PER MATCHED PAIR (not as
+// aggregate population sums — which false-fired when most gateway
+// settlements landed as SPEC-006 §17.7 fallback outcomes). The
+// reconciler stamps drift_basis="per_matched_pair_v2" so artifact
+// consumers know what algorithm produced the numbers.
 //
-// Extra gateway rows beyond the harness's count are RECORDED (as
-// reconcile.Notes) but NOT counted as drift in phase A — they are
-// expected when other live buyers fire concurrently.
+// Drift here means ANY of:
+//   * harness success unmatched on gateway (UnmatchedSuccesses) —
+//     billing-bypass risk
+//   * gateway "ok"-outcome row unmatched on any harness success
+//     (UnmatchedGatewayOKRows) — orphan/leaked settlement or
+//     concurrent buyer traffic
+//   * gateway "ok" matched pair with no coord row (MatchedCoordMissing)
+//     — fallback outcomes legitimately lack coord rows and are NOT
+//     flagged here
+//   * gateway over-billed vs harness across matched pairs
+//     (GatewayOverbillVsHarnessTokens > 0, positive-only sum so a
+//     +N overbill is not hidden by a -N underbill). Underbill alone
+//     is allowed — gateway-side streaming rounding is legitimate.
+//   * gateway and coord disagree on per-pair tokens in EITHER direction
+//     (AbsGatewayCoordinatorMismatchTokens > 0) — both are settlement
+//     systems and must agree on per-request token counts.
 func checkI1(ledger *reconcile.Result) Check {
 	c := Check{ID: "I1", Title: "billing-ledger reconciliation drift == 0"}
 	if ledger == nil {
@@ -83,29 +94,47 @@ func checkI1(ledger *reconcile.Result) Check {
 		return c
 	}
 
-	gwVsCoord := ledger.GatewayMinusCoordinatorTokens
-	gwVsHarness := ledger.GatewayMinusHarnessTokens
+	// I1 reads matched-pair drift produced by the reconciler under
+	// drift_basis="per_matched_pair_v2" (#226 + #229 R2). Five signals:
+	//   - harness successes unmatched on gateway (missing settlement)
+	//   - gateway-ok rows unmatched on the harness side (orphan settlement)
+	//   - matched gateway-ok pairs with no coord row (suspicious; fallback
+	//     outcomes legitimately lack coord rows and are excluded upstream)
+	//   - gateway-vs-harness positive overbill across pairs (signed-safe;
+	//     underbill alone is allowed per streaming rounding semantics)
+	//   - gateway-vs-coord absolute mismatch (any direction; both are
+	//     settlement systems and MUST agree on per-pair token counts)
+	gwOverbillVsHarness := ledger.GatewayOverbillVsHarnessTokens
+	absGwCoordMismatch := ledger.AbsGatewayCoordinatorMismatchTokens
 	unmatched := len(ledger.UnmatchedSuccesses)
+	unmatchedGwOK := len(ledger.UnmatchedGatewayOKRows)
+	unmatchedCoord2xx := len(ledger.UnmatchedCoordinator2xxRows)
+	coordMissingOK := len(ledger.MatchedCoordMissing)
 
 	driftSignals := 0
 	if unmatched > 0 {
 		driftSignals++
 	}
-	if gwVsCoord != 0 {
+	if unmatchedGwOK > 0 {
 		driftSignals++
 	}
-	if gwVsHarness > 0 {
-		// Gateway billed MORE than harness saw on the wire — overcharge.
-		// gwVsHarness < 0 (gateway billed less) is acceptable on streaming
-		// where chunks the harness counted may not all hit the usage_events
-		// settlement (legitimate gateway-side rounding).
+	if unmatchedCoord2xx > 0 {
+		driftSignals++
+	}
+	if coordMissingOK > 0 {
+		driftSignals++
+	}
+	if gwOverbillVsHarness > 0 {
+		driftSignals++
+	}
+	if absGwCoordMismatch > 0 {
 		driftSignals++
 	}
 
 	if driftSignals == 0 {
 		c.Passed = true
-		c.Detail = fmt.Sprintf("reconciled cleanly: harness=%d ok, gw=%d ok, coord=%d 2xx; token sums all equal at %d",
-			ledger.HarnessSuccessful, ledger.GatewayRowsOK, ledger.CoordinatorRows2xx, ledger.HarnessCompletionTokens)
+		c.Detail = fmt.Sprintf("reconciled cleanly: harness=%d ok, gw=%d ok, coord=%d 2xx; %d matched pairs, no overbills (per_matched_pair_v2 basis)",
+			ledger.HarnessSuccessful, ledger.GatewayRowsOK, ledger.CoordinatorRows2xx, len(ledger.MatchedSuccesses))
 		return c
 	}
 
@@ -115,16 +144,28 @@ func checkI1(ledger *reconcile.Result) Check {
 	if unmatched > 0 {
 		parts = append(parts, fmt.Sprintf("%d harness successes unmatched on gateway", unmatched))
 	}
-	if gwVsCoord != 0 {
-		parts = append(parts, fmt.Sprintf("gateway-coord token drift=%d", gwVsCoord))
+	if unmatchedGwOK > 0 {
+		parts = append(parts, fmt.Sprintf("%d gateway-ok rows unmatched by any harness success", unmatchedGwOK))
 	}
-	if gwVsHarness > 0 {
-		parts = append(parts, fmt.Sprintf("gateway over-billed by %d vs harness-observed", gwVsHarness))
-	} else if gwVsHarness < 0 {
-		parts = append(parts, fmt.Sprintf("(note: gateway billed %d fewer than harness-observed; allowed)", -gwVsHarness))
+	if unmatchedCoord2xx > 0 {
+		parts = append(parts, fmt.Sprintf("%d coord 2xx rows unmatched by any harness success", unmatchedCoord2xx))
+	}
+	if coordMissingOK > 0 {
+		parts = append(parts, fmt.Sprintf("%d gateway-ok matched pairs with no coord row", coordMissingOK))
+	}
+	if gwOverbillVsHarness > 0 {
+		parts = append(parts, fmt.Sprintf("gateway over-billed by %d vs harness across %d pair(s)", gwOverbillVsHarness, len(ledger.OverbilledPairs)))
+	}
+	if absGwCoordMismatch > 0 {
+		parts = append(parts, fmt.Sprintf("gateway-coord ledger mismatch %d tokens across %d pair(s)", absGwCoordMismatch, len(ledger.GatewayCoordMismatchedPairs)))
 	}
 	c.Detail = strings.Join(parts, "; ")
 	c.OffendingIDs = append(c.OffendingIDs, ledger.UnmatchedSuccesses...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.UnmatchedGatewayOKRows...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.UnmatchedCoordinator2xxRows...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.OverbilledPairs...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.MatchedCoordMissing...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.GatewayCoordMismatchedPairs...)
 	return c
 }
 
@@ -206,7 +247,7 @@ func checkI3(results []buyer.Result) Check {
 	}
 	if len(offenders) == 0 {
 		c.Passed = true
-		c.Detail = "no overcharges observed (phase A: structural check only; reconcile.token_mismatches carries the DB-level signal)"
+		c.Detail = "no overcharges observed (phase A: structural check only; reconcile.OverbilledPairs + GatewayOverbillVsHarnessTokens carry the DB-level signal)"
 		return c
 	}
 	c.Passed = false

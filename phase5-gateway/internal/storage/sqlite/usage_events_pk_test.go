@@ -300,6 +300,46 @@ func TestExplorerSessionDetailAmbiguityWhenAccountIDOmitted(t *testing.T) {
 	}
 }
 
+// TestExplorerSessionDetailAmbiguityExtendedToFeedbackAndAudit pins the
+// ISS-212 R2 security MEDIUM finding: a buyer-attachable feedback row
+// (request_id is caller-supplied) from one account would otherwise
+// cross-pollinate another account's 200 response on the unscoped path
+// without triggering 409. The ambiguity union MUST include
+// feedback_events and audit_events alongside usage_events,
+// quota_reservations, and concurrency_reservations.
+func TestExplorerSessionDetailAmbiguityExtendedToFeedbackAndAudit(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	const sharedRequestID = "amb-feedback-uuid-0001"
+	createAccount(t, store, "acct_A")
+	createAccount(t, store, "acct_B")
+	// acct_A has a usage_events row; acct_B has only a feedback_events
+	// row (the buyer-attachable cross-account contamination shape).
+	if err := store.EnsureUsageEvent(ctx, storage.UsageEvent{
+		RequestID: sharedRequestID, AccountID: "acct_A",
+		WindowDate: "2026-06-28", PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
+		TokenSource: "provider_reported", Outcome: "ok", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("EnsureUsageEvent(acct_A): %v", err)
+	}
+	if err := store.InsertFeedbackEvent(ctx, storage.FeedbackEvent{
+		EventID: "evt_b_feedback", RequestID: sharedRequestID, AccountID: "acct_B",
+		Scope: "request", Rating: 4, Comment: "hijack attempt", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("InsertFeedbackEvent(acct_B): %v", err)
+	}
+	got, err := store.ExplorerSessionDetail(ctx, "", sharedRequestID)
+	if !errors.Is(err, storage.ErrExplorerAmbiguousRequestID) {
+		t.Fatalf("unscoped lookup with feedback-only second account: err=%v, want ErrExplorerAmbiguousRequestID", err)
+	}
+	if len(got.MatchedAccountIDs) != 2 {
+		t.Fatalf("MatchedAccountIDs=%v, want both accounts", got.MatchedAccountIDs)
+	}
+	if got.MatchedAccountIDs[0] != "acct_A" || got.MatchedAccountIDs[1] != "acct_B" {
+		t.Errorf("MatchedAccountIDs=%v, want [acct_A acct_B] (sorted)", got.MatchedAccountIDs)
+	}
+}
+
 // TestSchemaVersionGateRejectsNewerDB pins the ISS-196 R1 architect
 // HIGH "rollback" finding: an older binary opening a DB whose
 // schema_migrations.version exceeds the binary's max-known version

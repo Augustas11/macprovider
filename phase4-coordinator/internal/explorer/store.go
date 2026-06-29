@@ -60,7 +60,7 @@ func (Store) RecentSessions(ctx context.Context, q ReadDB, from, to time.Time, c
 
 func (Store) SessionDetail(ctx context.Context, q ReadDB, requestID string) (map[string]any, error) {
 	attempts, err := queryMaps(ctx, q, `
-		SELECT id AS request_log_id, ts_utc, request_id, model, provider_assigned_id,
+		SELECT id AS request_log_id, ts_utc, request_id, external_request_id, account_id, model, provider_assigned_id,
 		       prompt_tokens, completion_tokens, total_tokens, latency_ms, routing_ms,
 		       status, stream, buyer_ip, error, error_code, pref_header, provider_header, retried
 		FROM request_log

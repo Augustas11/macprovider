@@ -38,11 +38,27 @@ We are in phase A.
 These fail the run (exit 10) regardless of any contract:
 
 - **I1** — billing-ledger reconciliation drift == 0
-  (no harness-successful request missing on coordinator request_log or gateway usage_events; coordinator and gateway agree on completion tokens)
+  (per-matched-pair semantics since #226; the `drift_basis` field in
+  `ledger_reconcile.json` pins which algorithm produced the sums.
+  I1 fails on any of:
+    1. unmatched harness successes (`UnmatchedSuccesses`),
+    2. unmatched gateway "ok" rows (`UnmatchedGatewayOKRows`),
+    3. unmatched coord 2xx rows (`UnmatchedCoordinator2xxRows`),
+    4. gateway-ok pairs with no coord row (`MatchedCoordMissing`;
+       fallback outcomes legitimately lack coord rows and are excluded),
+    5. positive gateway-vs-harness overbill across pairs
+       (`GatewayOverbillVsHarnessTokens` > 0; only "ok" outcomes — fallback
+       pairs are excluded per F-8 SSE-undercount artifact, see issue #232),
+    6. absolute gateway-vs-coord mismatch across pairs
+       (`AbsGatewayCoordinatorMismatchTokens` > 0; both directions, since
+       gateway and coord are both settlement systems and must agree).
+  Gateway-vs-harness underbill alone is allowed — gateway-side streaming
+  rounding is legitimate.)
 - **I2** — no 5xx response without a billing settlement entry
   (gateway must echo a request id on every 5xx; orphaning is a billing-bypass risk)
 - **I3** — no charged-tokens > delivered-tokens
-  (phase-A structural check; the DB-level overcharge signal lives in `ledger_reconcile.json` → `token_mismatches`)
+  (phase-A structural check; the DB-level overcharge signal lives in
+  `ledger_reconcile.json` → `overbilled_pairs` and `gateway_overbill_*_tokens`)
 - **I4** — no silent hang
   (a streaming response that stays open past `silent_hang_threshold` with no bytes and no `data: [DONE]` is a UX failure regardless of what the contract says about latency)
 
@@ -179,7 +195,7 @@ but do not change the harness exit code (I1-I4 still gate via exit 10).
 benchmark:
   enabled: true
   invariants: [B1, B2, B3, B4, B5, B6]
-  pricing_source: ../../../specs/BENCHMARK_PRICING_v0.1.json   # only needed for B6
+  pricing_source: pearl:/opt/macprovider/coordinator.yaml      # only needed for B6 (or .json fallback)
   provider_slots: 3                                             # default 3 (Pearl AccountConcurrency)
 ```
 
@@ -199,11 +215,23 @@ sleeps `inter_pair_idle_seconds` before the cold request, then fires
 the warm request immediately. The harness tags results with
 `phase: cold|warm` so B7 can compute the p50 ratio.
 
-Pricing manifests are loaded via local path or `host:/path` SSH spec.
-The loader accepts three JSON shapes: an array of `{model, price_per_1k_*}`,
-a `{models: [...]}` wrapper, or a map `{model_id: {...}}`. Unknown models
-encountered in results are recorded but contribute zero earnings — B6
-reflects only priced traffic.
+Pricing sources are loaded via local path or `host:/path` SSH spec.
+The loader distinguishes by extension:
+
+- **`*.yaml` / `*.yml`** — coordinator config file. Derives provider-net
+  USD/1k rates from `rewards.rate_card × global_multiplier ×
+  provider_share × stats.rollup.usd_per_million_credits` — the exact
+  formula coord uses to settle. **Recommended** for production runs
+  (issue #223 fix): pricing tracks the live coordinator. Unset coord
+  fields fall back to the defaults in
+  `phase4-coordinator/internal/config/config.go:528`. Unknown models
+  fall back to the `default` rate-card entry, matching coord's
+  `RateFor` behavior.
+- **`*.json`** — frozen pricing manifest. Three accepted shapes
+  (array of `{model, price_per_1k_*}`, `{models: [...]}` wrapper, or
+  `{model_id: {...}}` map). Useful for offline reproducibility or
+  bench-against-hypothetical-rates analysis. Unknown models contribute
+  zero earnings and are recorded in `UnknownModels` for triage.
 
 ## Scenarios committed
 
