@@ -46,14 +46,22 @@ INSERT INTO ledger_reconciliation_runs (
 	}()
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	// SPEC-002 v1.5.0 / issue #211 money-path scope: the orphan-
-	// detection subquery and the `prior` / `same` counts below MUST
-	// scope by (account_id, request_id) so a cross-account collision
-	// on request_id (after #196) cannot misclassify legitimate first
-	// attempts as retries or mark them as ambiguous. SQLite `IS`
-	// compares NULL = NULL as true, so legacy rows where both sides
-	// have NULL account_id cluster together exactly as they did
-	// pre-v1.5.0 — backwards compatible.
+	// SPEC-002 v1.5.0 / issue #211 money-path defense-in-depth: the
+	// orphan-detection subquery and the `prior` / `same` counts below
+	// scope by (account_id, request_id) using SQLite `IS` semantics
+	// so all three reconciliation sites (hotpath.go, this file,
+	// endpoints.go admin reconcile) compute the same attempt ordinal.
+	// Note that rl.request_id is coordinator-internal (server-minted
+	// UUID v4); the buyer-supplied collision class lives on
+	// external_request_id and is addressed by the composite
+	// (account_id, external_request_id) reconciliation key. This
+	// scoping is defense-in-depth: should the same internal
+	// request_id ever recur across accounts (UUID collision,
+	// retry-loop bug, future schema change), each account's
+	// attempts are derived within its own scope rather than
+	// misclassified as cross-account retries. NULL-account_id
+	// legacy rows cluster with NULL-account_id rows only —
+	// backwards-compatible with pre-v1.5.0 single-account behavior.
 	orphanRes, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET quarantined = 1,

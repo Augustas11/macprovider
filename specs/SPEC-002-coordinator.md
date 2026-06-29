@@ -31,15 +31,32 @@
   bearer was only set on the sticky path. The coordinator's
   acceptance logic is unchanged — only the gateway's emission
   envelope. See SPEC-006 v0.9.1 for the gateway-side rule.
-- **Money-path scope (hot path).** Coordinator queries that
-  attribute multiple `request_log` rows to a single logical request
-  (notably `internal/billing/hotpath.go` AttemptN derivation) MUST
-  scope by `(account_id, request_id)` when `account_id` is non-empty
-  on the incoming row, to prevent a cross-account collision from
-  inflating AttemptN and triggering the `ambiguous_attempt_n`
-  zero-credit path under the SPEC-005 v0.3 multi-attempt
-  attribution contract. Legacy rows with NULL `account_id` continue
-  to use the prior unscoped count.
+- **Money-path scope (hot path + recovery + admin reconcile).**
+  Coordinator queries that attribute multiple `request_log` rows
+  to a single logical request — `internal/billing/hotpath.go`
+  AttemptN derivation, `internal/billing/recovery.go` startup /
+  nightly reconciliation, and `internal/billing/endpoints.go`
+  `/admin/ledger/reconcile` `buyerEquivalentCredits` — MUST scope
+  by `(account_id, request_id)` using SQLite `IS` semantics
+  (`account_id IS ?` / `prior.account_id IS rl.account_id`).
+  Note: `request_log.request_id` is coordinator-internal
+  (server-minted UUID v4 per buyer call), so two accounts do not
+  naturally collide on it; the buyer-supplied collision class
+  motivating #211 lives on `external_request_id` and is fully
+  addressed by the composite `(account_id, external_request_id)`
+  reconciliation key. The internal-`request_id` account scoping
+  here is therefore defense-in-depth so that any UUID v4
+  collision, retry-loop bug, or future schema change that ever
+  causes the same internal `request_id` to appear in rows from
+  different accounts cannot inflate the count and silently
+  trigger the `ambiguous_attempt_n` zero-credit path under the
+  SPEC-005 v0.3.1 multi-attempt attribution contract. Legacy
+  NULL-`account_id` rows cluster with NULL-`account_id` rows
+  only (NULL = NULL true under `IS`), preserving the pre-v1.5.0
+  intra-NULL grouping without bleeding non-NULL rows into the
+  legacy bucket. All three sites MUST use identical NULL
+  semantics so the same row gets the same `attempt_n`
+  derivation regardless of which path scans it.
 - **Index.** A new partial-NULL composite index
   `idx_request_log_account_external_request_id ON request_log(account_id, external_request_id) WHERE account_id IS NOT NULL AND external_request_id IS NOT NULL`
   supports reconciliation scans. Built by the operator-runbook
@@ -50,9 +67,16 @@
   begins sending the unconditional header so that even pre-gateway
   rollout coordinator writes accept and persist the new column.
   Coordinator without the column behaves as if `account_id` were
-  always NULL; downstream auditors detect this via column presence
-  in `PRAGMA table_info(request_log)`. See SPEC-002-coordinator §11
-  "Deploy ordering" subsection for the canonical sequence.
+  always NULL. Downstream auditors MAY use
+  `PRAGMA table_info(request_log)` only to detect "column absent —
+  pre-v1.5.0 schema; fall back wholesale to the v1.4.2 R-2
+  reconciliation key". Once the column exists, all audit /
+  reconciliation gating MUST be per-row `account_id IS NOT NULL`
+  (see §11 "Deploy ordering" canonical sequence). Column presence
+  alone is NOT sufficient because a v1.5.0 coordinator can be
+  serving pre-v0.9.1 gateway traffic OR rolled back to a v1.4.x
+  binary that doesn't populate the column — both cases produce
+  rows with NULL `account_id` despite the column being present.
 - **Cross-spec.** SPEC-006 §6 gains a forward-header requirement
   for `X-MacProvider-Account`. SPEC-007 §6.4 records the
   gateway-side composite-PK addendum once issue #212 / PR #221
@@ -1384,7 +1408,7 @@ Every buyer request is logged to the `request_log` table in SQLite:
 Token counts are extracted from the provider's response `usage` field.
 For streaming responses, they come from the usage chunk (SPEC-001 FR-7).
 
-Each provider attempt for a given `request_id` MUST produce its own `request_log` row. The only uniqueness constraint is on (`id`). `request_id` MAY recur across rows when SPEC-004 retry logic produces multiple attempts. The `retried` column counts additional explicit-retry attempts beyond the first per SPEC-004 v0.3.1; the row order within a `request_id` is determined by `id ASC`. This contract is load-bearing for SPEC-005 v0.3 multi-attempt attribution.
+Each provider attempt for a given `request_id` MUST produce its own `request_log` row. The only uniqueness constraint is on (`id`). `request_id` MAY recur across rows when SPEC-004 retry logic produces multiple attempts within a single account. Note that `request_log.request_id` is coordinator-internal (server-minted UUID v4 per buyer request — see `requestIDForBuyerRequest()`); it is NOT the inbound `X-Request-ID` (which is persisted as `external_request_id`). The cross-account collision class motivating #211 lives on `external_request_id`, not on internal `request_id`. The `retried` column counts additional explicit-retry attempts beyond the first per SPEC-004 v0.3.1; the row order within a single `(account_id, request_id)` group is determined by `id ASC` under SQLite `IS` clustering — account scoping here is defense-in-depth so that if a UUID v4 collision or future schema change ever causes the same internal `request_id` to appear in rows from different accounts, each account's attempt sequence is computed within its own scope. This contract is load-bearing for SPEC-005 v0.3.1 multi-attempt attribution.
 
 `request_id` MUST be indexed. Any service in the request path that fails to propagate `X-Request-ID` degrades cross-layer debuggability; new buyer/request log surfaces MUST include X-Request-ID propagation.
 
@@ -1404,7 +1428,7 @@ Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN e
 
 **Deploy ordering (v1.5.0).** Coordinator MUST be deployed first; it accepts and persists `X-MacProvider-Account` whether or not the gateway sends it. Gateway then deploys with the unconditional header. Auditor tooling MUST detect the boundary at row granularity (not schema granularity): rows with NULL `account_id` are either (a) pre-v1.5.0-coordinator rows, (b) v1.5.0-coordinator rows from a pre-v0.9.1 gateway, or (c) v1.5.0-coordinator rows written during a v1.4.x rollback window where the column existed but the writer didn't populate it. In all three cases the join MUST fall back to the prior `external_request_id`-only key and accept the documented ambiguity. Tooling MUST NOT use `PRAGMA table_info(request_log)` column-presence as a switch — that would misclassify rollback-window rows as scoped-ready. Use `account_id IS NOT NULL` as the per-row gate instead.
 
-**Money-path: AttemptN derivation (v1.5.0).** `internal/billing/hotpath.go` derives `AttemptN` from `SELECT COUNT(*) FROM request_log WHERE request_id = ?`. When the incoming row carries a non-empty `account_id`, the query MUST scope by `(account_id, request_id)`; otherwise a cross-account collision on `request_id` inflates the count, mis-derives `AttemptN`, and silently triggers the `ambiguous_attempt_n` zero-credit path documented in SPEC-005 v0.3 multi-attempt attribution. Legacy rows with NULL `account_id` continue to use the prior unscoped count for backwards compatibility.
+**Money-path: AttemptN derivation defense-in-depth (v1.5.0).** `internal/billing/hotpath.go`, `internal/billing/recovery.go`, and `internal/billing/endpoints.go` admin-reconcile all derive `AttemptN` from a COUNT over `request_log` rows sharing the same internal `request_id`. **Note on identity:** `request_log.request_id` is the coordinator-internal billing id (server-minted UUID v4 per buyer request — see `requestIDForBuyerRequest()`), NOT the inbound `X-Request-ID` (which is persisted as `external_request_id`). The buyer-supplied collision class motivating #211 lives on `external_request_id` and is fully addressed by the composite `(account_id, external_request_id)` reconciliation key; it does NOT naturally manifest as collisions on internal `request_id`. Account-scoping the AttemptN derivation by `(account_id, request_id)` using SQLite `IS` semantics is therefore defense-in-depth — it ensures that if a UUID v4 collision, a misconfigured retry path, or any future schema-level change ever causes the same internal `request_id` to appear in `request_log` rows belonging to different accounts, each account's first attempt is correctly counted within its own scope rather than silently quarantined by `ambiguous_attempt_n`. All three sites MUST use identical `IS` semantics so the same row gets the same `AttemptN` derivation regardless of which path scans it. The pre-v1.5.0 same-account multi-attempt grouping (legacy NULL-`account_id` rows cluster among themselves) is preserved exactly.
 
 ### Routing logic
 
@@ -3768,7 +3792,7 @@ Run by: `phase4-coordinator/scripts/test-routing-preference.sh`
 Run by: `phase4-coordinator/scripts/test-operator-endpoints.sh`
 
 **AC-FR-B9-MULTI. request_log permits one row per provider attempt.**
-A deterministic fixture sends one logical request_id through two SPEC-004 retry attempts. The assertion is two `request_log` rows with the same `request_id`, distinct auto-increment `id` values, provider attribution per attempt, and row order defined by `id ASC`. No uniqueness constraint may reject the repeated `request_id`.
+A deterministic fixture sends one logical request through two SPEC-004 retry attempts (single account). The assertion is two `request_log` rows sharing the same `(account_id, request_id)` group, with distinct auto-increment `id` values, provider attribution per attempt, and row order within that group defined by `id ASC` under SQLite `IS` clustering (so legacy NULL-`account_id` fixtures cluster identically). No uniqueness constraint may reject the repeated `request_id` within an account.
 
 Run by: `go test ./phase4-coordinator/... -run TestRequestLogMultiAttemptRows`
 

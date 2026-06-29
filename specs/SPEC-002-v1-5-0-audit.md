@@ -1,15 +1,53 @@
-# SPEC-002 v1.5.0 — Audit findings + R2 disposition
+# SPEC-002 v1.5.0 — Audit findings + R1–R6 dispositions
 
-Three-lane codex audit run on the R1 draft of the SPEC-002 v1.5.0
-(coordinator-side account-scoped reconciliation key) + SPEC-006
-v0.9.1 + IMPL bundle for ISS-211 (follow-up to #196).
+Three-lane codex audit loop on the SPEC-002 v1.5.0 (coordinator-side
+account-scoped reconciliation key) + SPEC-005 v0.3.1 + SPEC-006 v0.9.1
++ IMPL bundle for ISS-211 (follow-up to #196). Converged through
+R1 → R2 → R3 → R4 → R5 → R6, fixing as we went.
 
-Audit prompts:
-- `specs/AUDIT_ISS_211_R1_CODE_PROMPT.md`
-- `specs/AUDIT_ISS_211_R1_SECURITY_PROMPT.md`
-- `specs/AUDIT_ISS_211_R1_ARCHITECT_PROMPT.md`
+Audit prompts (per round):
+- `specs/AUDIT_ISS_211_R1_*.md`
+- `specs/AUDIT_ISS_211_R2_*.md`
+- `specs/AUDIT_ISS_211_R3_*.md`
+- `specs/AUDIT_ISS_211_R4_*.md`
+- `specs/AUDIT_ISS_211_R5_*.md`
+- `specs/AUDIT_ISS_211_R6_*.md`
 
 Bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM across all three lanes.
+
+## R6 conceptual reframe (important for reviewers)
+
+R1–R5 carried a recurring misframing — calling
+"`(account_id, request_id)` AttemptN scoping" the *load-bearing fix
+for the #211 cross-account collision class*. R5 security caught the
+confusion: the buyer-supplied collision class motivating #211 lives
+on **external_request_id** (the inbound X-Request-ID, persisted
+verbatim), NOT on coordinator-internal **request_id** (server-minted
+UUID v4 per buyer call). Two accounts cannot naturally collide on
+the latter.
+
+R6 reframes:
+- The **load-bearing #211 fix** is the composite
+  `(account_id, external_request_id)` reconciliation key
+  (request_log.account_id column + partial-NULL composite index).
+- The hotpath.go / recovery.go / endpoints.go `(account_id, request_id)`
+  scoping under SQLite `IS` semantics is **defense-in-depth**: if
+  the same coordinator-internal `request_id` ever recurs across
+  rows from different accounts (UUID collision, retry-loop bug,
+  future schema change), each account's attempt sequence is derived
+  within its own scope rather than misclassified.
+- The R4 "Money-path: same-provider cross-account collision" §11
+  subsection — and the `TestWriteHotPath_SameProviderCrossAccount...`
+  test it pointed at — were artifacts of the misframing and were
+  **deleted in R6**. The scenario they pinned (two accounts sharing
+  the same internal `request_id` AND routing to the same provider)
+  doesn't naturally arise; the test forced an artificial UUID
+  collision to exercise the underlying SQL.
+
+The historical R1–R5 framings below are preserved for the
+narrative record; readers comparing against the final commit
+should treat the R6 reframe as authoritative for current
+behavior and SPEC text.
 
 ## R1 findings (1 HIGH from security, 1 HIGH from architect, 4 MEDIUM from architect)
 

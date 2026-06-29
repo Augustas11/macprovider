@@ -1,7 +1,22 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.3 (2026-05-31, Claude R2 + cross-spec FIX pass)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.4, SPEC-003 v0.7, SPEC-004 v0.3.1, SPEC-006 v0.8.2
+**Version:** 0.3.1 (2026-06-29, SPEC-002 v1.5.0 dependency bump — issue #211)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.0, SPEC-003 v0.7, SPEC-004 v0.3.1, SPEC-006 v0.9.1
+
+**Change log v0.3.1 (2026-06-29, issue #211):**
+- Dependency bump: SPEC-002 v1.3.4 → v1.5.0 and SPEC-006 v0.8.2 → v0.9.1
+  to absorb the coordinator-side account-scoped reconciliation key
+  introduced in #211 (follow-up to #196). No new normative billing
+  rate / formula change; §4.2 and §8.2 fallback-attempt-ordinal
+  derivation text updated in-place to group rows by
+  `(account_id, request_id)` under SQLite `IS` semantics. Under `IS`
+  a NULL-`account_id` row clusters with NULL-`account_id` rows
+  only — it does NOT mix with non-NULL `account_id` rows that
+  happen to share the same `request_id`. This preserves the
+  pre-v0.3.1 intra-NULL grouping for legacy rows while keeping
+  all three IMPL sites (`hotpath.go`, `recovery.go`, and
+  `endpoints.go` admin reconcile) consistent on the same
+  derivation contract. Per ISS-211 R1/R2/R3/R4 audit convergence.
 
 **Triage note 2026-06-26 (no version bump, no normative change):**
 - §OQ-2 (round-half-to-even) and §OQ-3 (24h/7d recovery windows) marked RESOLVED inline as implicitly confirmed by sustained production traffic. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-005. OQ-1 / OQ-4 / OQ-5 remain open and are routed to follow-up issues per the ledger.
@@ -87,12 +102,13 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 - usage object has prompt_tokens, completion_tokens, total_tokens.
 - cancel usage is authoritative for v1.2.4+ providers.
 - SPEC-005 MUST NOT require new provider fields.
-**SPEC-002 v1.3.4:**
+**SPEC-002 v1.5.0:**
 - coordinator owns request_log and provider auth.
 - request_log is read-only to SPEC-005.
 - request_log carries deterministic `error_code` for SPEC-001 null-usage errors.
-- request_log has `ts_utc` and `(request_id, id)` indexes for reconciliation scans and attempt fallback.
+- request_log has `ts_utc`, `(request_id, id)`, `external_request_id` (partial-NULL), and `(account_id, external_request_id)` (partial-NULL composite) indexes for reconciliation scans and attempt fallback. (Composite index added in v1.5.0 / issue #211.)
 - each provider attempt for a repeated request_id has its own request_log row.
+- request_log carries `account_id` (v1.5.0 / issue #211). The composite `(account_id, request_id)` is the grouping key for attempt-ordinal derivation; SQLite `IS` semantics preserve the pre-v1.5.0 grouping for legacy NULL-`account_id` rows.
 - FR-P11a supplies fault categories.
 - FR-P12 supplies provider bearer-token auth.
 - FR-R3 distinguishes stable provider_id from assigned_id.
@@ -105,11 +121,12 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 - smart-router attempts must preserve accounting.
 - retried is a fallback but not a full attempt ordinal.
 - FR-SR-18 composes routing with FR-P11a and eligibility checks.
-**SPEC-006 v0.8.2:**
+**SPEC-006 v0.9.1:**
 - gateway has no billing state.
 - section  17.7 is the buyer-debit source of truth.
 - section  17.7 includes the SPEC-001 null-usage error row with zero buyer debit.
 - SPEC-005 mirrors the matrix.
+- gateway MUST forward `X-MacProvider-Account` + upstream `Authorization` bearer on every chat forward (v0.9.1 / issue #211); the coordinator persists the account into `request_log.account_id` for SPEC-005's attempt-ordinal grouping rule.
 **SPEC-007 future:**
 - owns AntFeed and USDC conversion.
 - consumes payout-ready rows.
@@ -237,14 +254,14 @@ Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 
 ### 4.2 request_log read-only contract
 
-SPEC-005 reads request_id, ts_utc, model, provider_assigned_id, prompt_tokens, completion_tokens, total_tokens, status, stream, error, error_code, provider_header, and retried.
+SPEC-005 reads request_id, ts_utc, model, provider_assigned_id, prompt_tokens, completion_tokens, total_tokens, status, stream, error, error_code, provider_header, retried, and (v0.3.1) account_id.
 SPEC-005 never changes these columns.
 The D10 attempt_n need remains a future SPEC-002 patch candidate.
-Until attempt_n exists, v0.3 derives attempt ordinal by sorting same-request_id rows by request_log.id ASC.
+Until attempt_n exists, v0.3.1 derives attempt ordinal by grouping rows that share the same `(account_id, request_id)` under SQLite `IS` semantics, then ordering each group by request_log.id ASC. Under `IS` a NULL-`account_id` row clusters with NULL-`account_id` rows only — it does NOT cluster with non-NULL rows that happen to share `request_id`. This preserves the pre-v0.3.1 intra-NULL grouping for legacy rows while keeping all three IMPL sites (hotpath.go, recovery.go, endpoints.go admin reconcile) consistent.
 Row 1 becomes attempt_n=0.
 Row 2 becomes attempt_n=1 only when request_log.retried indicates an explicit retry.
 Row 3+ MUST be quarantined until SPEC-002 gains monotonic attempt_n.
-If rows cannot be ordered uniquely, all ambiguous rows MUST be quarantined.
+If rows cannot be ordered uniquely within their `(account_id, request_id)` group, all ambiguous rows MUST be quarantined.
 SPEC-005 resolves stable provider_id through `ledger_provider_identity_snapshots`; it MUST NOT require ALTER request_log.
 
 ### 4.3 Table `ledger_request_credits`
@@ -504,7 +521,7 @@ Recovery rows MUST use the `ledger_config_snapshots` row selected by section  10
 
 ## 6. Credit calculation: D8 mapping
 
-SPEC-006 v0.8.2 section  17.7 is the source of truth for buyer debits.
+SPEC-006 v0.9.1 section  17.7 is the source of truth for buyer debits. (v0.8.2 introduced this section; v0.9.1 adds the X-MacProvider-Account forward contract but does not change the byte-debit math.)
 SPEC-005 mirrors every row with a provider-credit derivation.
 This section implements the locked failed-request accounting decision (D8) by mirroring the SPEC-006 section  17.7 D3 matrix after the coordinated v0.8.2 null-usage row.
 
@@ -573,11 +590,11 @@ If a reconciliation summary needs to count provider-not-reached requests, it doe
 **Buyer debit:** prompt + `ceil(bytes_emitted_so_far / 4)`.
 **SPEC-005 provider-credit rule:** Use the same estimate as buyer debit.
 **Closed form:** apply section  5.3 to this row after its token-source selection and overrides.
-The byte-estimate completion-token formula is exactly `ceil(bytes_emitted_so_far / 4)` per SPEC-006 v0.8.2 section  17.7. SPEC-005 v0.3 mirrors this formula here normatively; any future SPEC-006 byte-estimate change MUST trigger a coordinated SPEC-005 bump.
+The byte-estimate completion-token formula is exactly `ceil(bytes_emitted_so_far / 4)` per SPEC-006 v0.9.1 section  17.7 (formula introduced in v0.8.2, unchanged in v0.9.1). SPEC-005 v0.3.1 mirrors this formula here normatively; any future SPEC-006 byte-estimate change MUST trigger a coordinated SPEC-005 bump.
 
 ### 6.9 Null usage error path
 
-If SPEC-002 v1.3.4 `request_log.error_code` is `error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, or `error_internal`, provider credit is 0.
+If SPEC-002 v1.5.0 `request_log.error_code` is `error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, or `error_internal`, provider credit is 0.
 When `usage_source = 'null_error'`, both `prompt_tokens` and `completion_tokens` MAY be NULL. The row MUST set `gross_credits = 0`, `provider_credits = 0`, and `operator_credits = 0` before the formula evaluates; the formula MUST NOT be evaluated on NULL operands.
 A provider-reached null-error path writes a zero-credit row for audit completeness.
 The row sets usage_source=null_error and fault_flag=null_usage_error unless FR-P11a breaker_qualifying is more specific.
@@ -650,11 +667,11 @@ Stable provider_id is the economic identity.
 ### 8.2 Derivation
 
 When SPEC-002 exposes attempt_n, copy it exactly.
-Until then, derive the fallback ordinal by sorting rows with the same request_id by request_log.id ASC.
+Until then, derive the fallback ordinal by grouping rows that share the same `(account_id, request_id)` under SQLite `IS` semantics, then ordering each group by request_log.id ASC. NULL-`account_id` rows cluster with NULL-`account_id` rows only; they do NOT cluster with non-NULL rows that happen to share `request_id`.
 The first ordered row uses attempt_n=0.
 The second ordered row uses attempt_n=1 only when request_log.retried indicates an explicit retry.
 The third and later ordered rows MUST be quarantined until SPEC-002 gains monotonic attempt_n.
-If request_log.id cannot produce a unique order, all ambiguous rows for that request_id MUST be quarantined.
+If request_log.id cannot produce a unique order within an `(account_id, request_id)` group, all ambiguous rows in that group MUST be quarantined.
 Stable provider_id MUST be copied from `ledger_provider_identity_snapshots` when request_log only supplies provider_assigned_id.
 
 ### 8.3 Invariant
@@ -746,7 +763,7 @@ Same inputs produce byte-identical outputs.
 Time is explicit input.
 No live network call may affect output.
 `scanWindow.to_utc` MUST be no closer to wall-clock now than `settlement.recovery_grace_seconds` (default 30s). Rows with `request_log.ts_utc` newer than this cutoff are excluded from the scan to prevent races with in-flight hot-path transactions.
-SPEC-002 v1.3.4 indexes `request_log.ts_utc` and `(request_id, id)` are preconditions for production-scale reconciliation scans; missing indexes in a fixture MAY use a bounded chunked scan, but production startup MUST fail the schema check.
+SPEC-002 v1.5.0 indexes `request_log.ts_utc`, `(request_id, id)`, `external_request_id` (partial-NULL), and `(account_id, external_request_id)` (partial-NULL composite) are preconditions for production-scale reconciliation scans; missing indexes in a fixture MAY use a bounded chunked scan, but production startup MUST fail the schema check. (v0.3.1 / issue #211.)
 For each recoverable request_log row, the algorithm selects the latest config snapshot whose effective_at_utc is less than or equal to request_log.ts_utc.
 If no config snapshot or provider identity snapshot can be selected for a provider-reached row, the row is quarantined.
 
@@ -940,7 +957,7 @@ Token subject MUST equal path provider_id.
 Wrong-subject token returns 403.
 Missing token returns 401.
 Unknown provider_id returns 404 without enumerating valid providers.
-When SPEC-002 v1.3.4 `auth.require_provider_tokens` is `false`, the `/providers/{provider_id}/earnings` endpoint MUST be disabled at the route layer. SPEC-005 v0.3 does NOT specify a side-channel per-provider bearer-token provisioning scheme; provider economics in this deployment mode are available only via the operator-keyed `/admin/ledger/providers` endpoint. SPEC-005 v0.3 production launch gate adds this as item 9 alongside the SPEC-006 production launch gate.
+When SPEC-002 v1.5.0 `auth.require_provider_tokens` is `false`, the `/providers/{provider_id}/earnings` endpoint MUST be disabled at the route layer. SPEC-005 v0.3.1 does NOT specify a side-channel per-provider bearer-token provisioning scheme; provider economics in this deployment mode are available only via the operator-keyed `/admin/ledger/providers` endpoint. SPEC-005 v0.3.1 production launch gate adds this as item 9 alongside the SPEC-006 production launch gate.
 
 ## 12. Buyer-balance interaction (D7)
 
@@ -1016,14 +1033,14 @@ Recovery MUST use historical `ledger_config_snapshots`; it MUST NOT price old re
 ### 15.1 Pre-v1.2.4 cancel usage
 
 Use byte-estimation fallback only when usage is absent.
-Use the same estimate as SPEC-006 v0.8.2 section  17.7 buyer debit: `ceil(bytes_emitted_so_far / 4)`.
+Use the same estimate as SPEC-006 v0.9.1 section  17.7 buyer debit: `ceil(bytes_emitted_so_far / 4)`.
 Set usage_source=byte_estimated.
 
 ### 15.2 attempt_n fallback
 
-Before the SPEC-002 patch, same-request_id rows are ordered by request_log.id ASC.
+Before the SPEC-002 monotonic attempt_n patch, rows are grouped by `(account_id, request_id)` (using SQLite `IS` so legacy NULL-account_id rows cluster identically to pre-v0.3.1 behavior) and ordered within each group by request_log.id ASC. (v0.3.1 / SPEC-002 v1.5.0 / issue #211.)
 No-retry and one explicit retry are supported before SPEC-002 patch.
-Row 3+, non-explicit retry row 2, and non-unique ordering are quarantined.
+Row 3+, non-explicit retry row 2, and non-unique ordering within an `(account_id, request_id)` group are quarantined.
 section  20 surfaces the patch.
 
 ### 15.3 Unknown models
@@ -1174,7 +1191,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 ### AC-D10: Multi-provider attribution encoded
 
 **Traceability verification:** Parse section  2 and locate D10; then locate at least one later normative reference.
-**Behavior verification:** Seed two same-request_id rows ordered by request_log.id ASC plus matching provider identity snapshots.
+**Behavior verification:** Seed two rows that share the same `(account_id, request_id)` group, ordered by request_log.id ASC, plus matching provider identity snapshots. (Legacy fixtures may use NULL `account_id` on both rows; SQLite `IS` clusters NULLs.)
 **Expected:** D10 exists in section  2, is enforced outside section  2, rows receive distinct attempt_n/provider_id keys, row 2 is accepted only with explicit retried semantics, and row 3+ or ambiguous ordering is quarantined.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
@@ -1197,7 +1214,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### AC-H005: H-005 symmetry
 
-**Verification:** Construct all nine SPEC-006 v0.8.2 section  17.7 states and run the section  6 credit function.
+**Verification:** Construct all nine SPEC-006 v0.9.1 section  17.7 states and run the section  6 credit function.
 **Expected:** Each buyer-debit state has the specified provider-credit state; provider-not-reached writes no row; null-usage errors write zero-credit rows; cross-process states disclaimed in section  10.6 are excluded; delta_gross_credits equals 0 for a clean SPEC-005-owned range; provider/operator splits satisfy provider_credits + operator_credits == gross_credits per row.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
@@ -1254,7 +1271,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 ### AC-DISCONNECT-ESTIMATE: Cancel byte estimate
 
 **Verification:** Fixture bytes_emitted=120 prompt=1000 usage absent.
-**Expected:** estimated_completion_tokens=30 by SPEC-006 v0.8.2 section  17.7 `ceil(bytes_emitted_so_far / 4)` and gross includes 30 completion.
+**Expected:** estimated_completion_tokens=30 by SPEC-006 v0.9.1 section  17.7 `ceil(bytes_emitted_so_far / 4)` and gross includes 30 completion.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -1281,15 +1298,15 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### AC-MULTIHOP: Two-attempt attribution
 
-**Verification:** Fixture two providers and one request_id.
+**Verification:** Fixture two providers and one logical request sharing the same `(account_id, request_id)` group (single account; cross-account fixtures need their own account scope per v0.3.1).
 **Expected:** Two rows with distinct attempt_n/provider_id keys from identity snapshots; sums match attempt totals.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-ATTEMPT-FALLBACK: retried fallback limit
 
-**Verification:** Fixture three rows before attempt_n patch.
-**Expected:** request_log.id ASC assigns row 1 to attempt_n=0; row 2 becomes attempt_n=1 only with explicit retried semantics; row 3+ is quarantined.
+**Verification:** Fixture three rows before attempt_n patch, all sharing the same `(account_id, request_id)` group under SQLite `IS` clustering (legacy NULL-`account_id` fixtures cluster identically among themselves).
+**Expected:** Within each `(account_id, request_id)` group, `request_log.id ASC` assigns row 1 to attempt_n=0; row 2 becomes attempt_n=1 only with explicit retried semantics; row 3+ is quarantined.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -1482,7 +1499,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### OQ-1: SPEC-002 attempt_n patch
 
-SPEC-005 v0.3 permits the quarantining fallback: same-request_id rows are ordered by request_log.id ASC, row 1 maps to attempt_n=0, row 2 maps to attempt_n=1 only with explicit retried semantics, and row 3+ or ambiguous ordering is quarantined.
+SPEC-005 v0.3.1 permits the quarantining fallback: rows are grouped by `(account_id, request_id)` (SQLite `IS` for the NULL-NULL legacy case) and ordered within each group by request_log.id ASC; row 1 maps to attempt_n=0, row 2 maps to attempt_n=1 only with explicit retried semantics, and row 3+ or ambiguous ordering within a group is quarantined.
 A future SPEC-002 monotonic attempt_n remains a cross-spec patch candidate, not a SPEC-005 v0.3 launch blocker.
 
 ### OQ-2: Rounding rule acceptance
@@ -1527,7 +1544,7 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 - [x] ACs deterministic
 - [x] out-of-scope guards explicit
 - [x] no SPEC-001 change
-- [x] SPEC-006 v0.8.2 dependency pinned
+- [x] SPEC-006 v0.9.1 dependency pinned (v0.3.1 / issue #211; was v0.8.2 in v0.3)
 - [x] no gateway billing state
 - [x] Go coordinator assumed
 - [x] single SQLite deployment assumed
@@ -2283,8 +2300,8 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 ### AC-D10 fixture detail
 
 - Claim: Multi-provider attribution encoded.
-- Setup: Parse section  2 and later D10 references; seed same-request_id rows ordered by request_log.id ASC plus identity snapshots.
-- Oracle: D10 exists in section  2, is enforced outside section  2, rows receive distinct attempt_n/provider_id keys, row 2 requires explicit retry semantics, and row 3+ or ambiguous order quarantines.
+- Setup: Parse section  2 and later D10 references; seed rows sharing the same `(account_id, request_id)` group, ordered by request_log.id ASC, plus identity snapshots. (Legacy fixtures may use NULL account_id; SQLite `IS NULL` clusters NULLs identically to the v0.3 pre-account-scope behavior.)
+- Oracle: D10 exists in section  2, is enforced outside section  2, rows receive distinct attempt_n/provider_id keys, row 2 requires explicit retry semantics, and row 3+ or ambiguous order within an `(account_id, request_id)` group quarantines.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
@@ -2307,7 +2324,7 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 ### AC-H005 fixture detail
 
 - Claim: H-005 symmetry.
-- Setup: Construct all nine SPEC-006 v0.8.2 section  17.7 states and run the section  6 credit function.
+- Setup: Construct all nine SPEC-006 v0.9.1 section  17.7 states and run the section  6 credit function.
 - Oracle: Each buyer-debit state has the specified provider-credit state; provider-not-reached writes no row; null-usage errors write zero-credit rows; section  10.6 cross-process states are excluded; delta_gross_credits is 0 for a clean SPEC-005-owned range; provider/operator split sums to gross per row.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
@@ -2372,7 +2389,7 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 
 - Claim: Cancel byte estimate.
 - Setup: Fixture bytes_emitted=120 prompt=1000 usage absent.
-- Oracle: estimated_completion_tokens=30 by SPEC-006 v0.8.2 section  17.7 `ceil(bytes_emitted_so_far / 4)` and gross includes 30 completion.
+- Oracle: estimated_completion_tokens=30 by SPEC-006 v0.9.1 section  17.7 `ceil(bytes_emitted_so_far / 4)` and gross includes 30 completion.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
@@ -2403,7 +2420,7 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 ### AC-MULTIHOP fixture detail
 
 - Claim: Two-attempt attribution.
-- Setup: Fixture two providers and one request_id.
+- Setup: Fixture two providers and one logical request sharing the same `(account_id, request_id)` group (single account; legacy NULL-`account_id` fixtures cluster identically among themselves under SQLite `IS`).
 - Oracle: Two rows with distinct attempt_n/provider_id keys; sums match attempt totals.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
@@ -2411,8 +2428,8 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 ### AC-ATTEMPT-FALLBACK fixture detail
 
 - Claim: retried fallback limit.
-- Setup: Fixture three rows before attempt_n patch.
-- Oracle: Ambiguous row is quarantined.
+- Setup: Fixture three rows before attempt_n patch, all sharing the same `(account_id, request_id)` group under SQLite `IS` clustering.
+- Oracle: Ambiguous row within an `(account_id, request_id)` group is quarantined.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
