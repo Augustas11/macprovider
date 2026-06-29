@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
@@ -767,7 +768,7 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Pool check rate limit exceeded")
 		return
 	}
-	providerID := strings.TrimSpace(r.URL.Query().Get("provider_id"))
+	providerID := sanitizeRequestLogText(r.URL.Query().Get("provider_id"))
 	if providerID == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "Missing provider_id")
 		return
@@ -4987,9 +4988,13 @@ func normalizeIdempotencyKey(value string) string {
 //   - Cap at 128 bytes (UUID v4 is 36; allowing for vendor-prefixed
 //     ids like "req_<48hex>" gives reasonable headroom without
 //     unbounded growth).
-//   - Reject control characters (< 0x20, 0x7f, and the C1 range
-//     0x80-0x9f) to keep the value safe for structured logs and DB
-//     storage.
+//   - Reject control characters byte-by-byte (< 0x20, 0x7f, and the
+//     C1 range 0x80-0x9f) so raw control bytes cannot slip past as
+//     `utf8.RuneError` under rune iteration. (See SPEC-002 v1.5.1 +
+//     issue #197 R1 security: raw 0x9b CSI bytes were bypassing the
+//     prior rune-based loop.)
+//   - Reject invalid UTF-8 outright; the coordinator stores this in
+//     structured logs and SQLite, both of which assume UTF-8.
 //
 // On failure, returns "" — the coordinator treats the value as if no
 // header was present, which is allowed by §11 ("If absent, coordinator
@@ -4997,33 +5002,39 @@ func normalizeIdempotencyKey(value string) string {
 // surfaced to the buyer; logging it as-is would replay any
 // log-injection payload.
 func sanitizeExternalRequestID(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 128 {
-		return ""
-	}
-	for _, r := range value {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-			return ""
-		}
-	}
-	return value
+	return sanitizeOpaqueHeader(value)
 }
 
 // sanitizeAccountID normalizes the inbound X-MacProvider-Account header
 // for persistent storage in request_log.account_id (SPEC-002 v1.5.0,
 // issue #211). Same defense-in-depth shape as sanitizeExternalRequestID:
 // trim, cap at 128 bytes (gateway account ids are "acct_<...>" or
-// "demo:<ip>" — both well under 128), reject C0/C1 control characters.
-// On failure, returns "" — the coordinator treats the value as if no
-// header was present, which is allowed by SPEC-002 v1.5.0 ("Absent
-// header MUST be tolerated; the column carries NULL in that case").
+// "demo:<ip>" — both well under 128), reject C0/C1 control characters
+// byte-by-byte, reject invalid UTF-8. On failure, returns "" — the
+// coordinator treats the value as if no header was present, which is
+// allowed by SPEC-002 v1.5.0 ("Absent header MUST be tolerated; the
+// column carries NULL in that case").
 func sanitizeAccountID(value string) string {
+	return sanitizeOpaqueHeader(value)
+}
+
+// sanitizeOpaqueHeader is the shared byte-level defense-in-depth filter
+// for opaque-sanitized-text headers (X-Request-ID, X-MacProvider-Account).
+// SPEC-002 v1.5.1 R-2: 1-128 bytes, valid UTF-8, no control characters
+// in C0 (0x00-0x1f), DEL (0x7f), or C1 (0x80-0x9f). Iterating runes is
+// NOT sufficient — raw bytes in the C1 range decode to utf8.RuneError
+// (U+FFFD) which would pass a rune-only check.
+func sanitizeOpaqueHeader(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > 128 {
 		return ""
 	}
-	for _, r := range value {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+	if !utf8.ValidString(value) {
+		return ""
+	}
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if b < 0x20 || b == 0x7f || (b >= 0x80 && b <= 0x9f) {
 			return ""
 		}
 	}
@@ -5050,8 +5061,21 @@ func buyerIP(remoteAddr string) string {
 
 func sanitizeRequestLogText(value string) string {
 	const maxRunes = 256
+	// SPEC-002 v1.5.1 / issue #197 R2 security: text fields persisted in
+	// request_log (error, pref_header, provider_header, model) carry the
+	// same log-injection / terminal-CSI risk as the opaque header IDs.
+	// Reject invalid UTF-8 outright so raw C1 bytes (e.g. 0x9b) cannot
+	// slip through as `utf8.RuneError` (U+FFFD) during rune iteration;
+	// after that gate, strip C0/DEL/C1 codepoints via the rune map.
+	// (Multi-byte UTF-8 continuation bytes 0x80-0xbf are only "in range"
+	// at byte level, but valid UTF-8 sequences resolve to a single
+	// codepoint outside C1 — so the rune-level strip is safe AFTER the
+	// utf8.ValidString gate.)
+	if !utf8.ValidString(value) {
+		return ""
+	}
 	value = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			return -1
 		}
 		return r

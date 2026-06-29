@@ -291,6 +291,9 @@ func ParseHello(payload []byte) (Hello, string, error) {
 		if err := json.Unmarshal(v, &h.ModelHash); err != nil {
 			return Hello{}, "model_hash", err
 		}
+		if containsControlChar(h.ModelHash) {
+			return Hello{}, "model_hash", fieldError{Field: "model_hash"}
+		}
 	}
 	if err := requireFloat(raw, "model_params_b", &h.ModelParamsB); err != nil {
 		return Hello{}, err.Field, err
@@ -323,6 +326,9 @@ func ParseHello(payload []byte) (Hello, string, error) {
 		var endpoint string
 		if err := json.Unmarshal(v, &endpoint); err != nil {
 			return Hello{}, "endpoint_url", err
+		}
+		if containsControlChar(endpoint) {
+			return Hello{}, "endpoint_url", fieldError{Field: "endpoint_url"}
 		}
 		h.EndpointURL = &endpoint
 	}
@@ -390,6 +396,9 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 		if err := json.Unmarshal(v, &req.ModelHash); err != nil {
 			return AuthRequest{}, Spec010Presence{}, "model_hash", err
 		}
+		if containsControlChar(req.ModelHash) {
+			return AuthRequest{}, Spec010Presence{}, "model_hash", fieldError{Field: "model_hash"}
+		}
 	}
 	if err := requireFloat(raw, "model_params_b", &req.ModelParamsB); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
@@ -418,6 +427,9 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 		var endpoint string
 		if err := json.Unmarshal(v, &endpoint); err != nil {
 			return AuthRequest{}, Spec010Presence{}, "endpoint_url", err
+		}
+		if containsControlChar(endpoint) {
+			return AuthRequest{}, Spec010Presence{}, "endpoint_url", fieldError{Field: "endpoint_url"}
 		}
 		req.EndpointURL = &endpoint
 	}
@@ -578,7 +590,26 @@ func requireString(raw map[string]json.RawMessage, field string, out *string) *f
 	if err := json.Unmarshal(v, out); err != nil || *out == "" {
 		return &fieldError{Field: field}
 	}
+	if containsControlChar(*out) {
+		return &fieldError{Field: field}
+	}
 	return nil
+}
+
+// containsControlChar reports whether s contains any C0 control
+// (`<0x20`), DEL (`0x7f`), or C1 control (`0x80-0x9f`) codepoint.
+// SPEC-002 v1.5.1 R-2 / issue #197 R4-R5 security: provider-controlled
+// strings reaching structured logs or close-frame reason fields MUST
+// be rejected when they carry these codepoints. JSON `` decodes
+// to U+009B and is valid UTF-8 but would otherwise inject a terminal
+// CSI sequence into log sinks.
+func containsControlChar(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return true
+		}
+	}
+	return false
 }
 
 func requireInt(raw map[string]json.RawMessage, field string, out *int) *fieldError {
@@ -660,6 +691,9 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 		if err := json.Unmarshal(v, &hb.ModelHash); err != nil {
 			return Heartbeat{}, presence, "model_hash", err
 		}
+		if containsControlChar(hb.ModelHash) {
+			return Heartbeat{}, presence, "model_hash", fieldError{Field: "model_hash"}
+		}
 	}
 	if v, ok := raw["loading"]; ok {
 		presence.Loading = true
@@ -690,9 +724,15 @@ func ParseStateUpdate(payload []byte) (StateUpdate, string, error) {
 	}
 	if v, ok := raw["reason"]; ok {
 		_ = json.Unmarshal(v, &update.Reason)
+		if containsControlChar(update.Reason) {
+			return StateUpdate{}, "reason", fieldError{Field: "reason"}
+		}
 	}
 	if v, ok := raw["since"]; ok {
 		_ = json.Unmarshal(v, &update.Since)
+		if containsControlChar(update.Since) {
+			return StateUpdate{}, "since", fieldError{Field: "since"}
+		}
 	}
 	if v, ok := raw["metrics_snapshot"]; ok && string(v) != "null" {
 		if err := json.Unmarshal(v, &update.MetricsSnapshot); err != nil {
@@ -712,6 +752,9 @@ func ParsePreflightAck(payload []byte) (PreflightAck, string, error) {
 	}
 	if ack.RequestID == "" {
 		return PreflightAck{}, "request_id", fieldError{Field: "missing request_id"}
+	}
+	if containsControlChar(ack.RequestID) {
+		return PreflightAck{}, "request_id", fieldError{Field: "request_id"}
 	}
 	if !ack.Accepted {
 		if _, ok := preflightRejectionReasons[ack.Reason]; !ok {
@@ -756,6 +799,19 @@ func ParseNak(payload []byte) (Nak, string, error) {
 	}
 	if nak.Error.Code == "" {
 		return Nak{}, "error.code", fieldError{Field: "missing error.code"}
+	}
+	// SPEC-002 v1.5.1 R-2 / issue #197 R5 security: nak.in_reply_to,
+	// nak.error.code, and nak.error.message all reach structured logs
+	// on the inference-failure path; reject control-character payloads
+	// at parse time to prevent terminal-CSI log injection.
+	if containsControlChar(nak.InReplyTo) {
+		return Nak{}, "in_reply_to", fieldError{Field: "in_reply_to"}
+	}
+	if containsControlChar(nak.Error.Code) {
+		return Nak{}, "error.code", fieldError{Field: "error.code"}
+	}
+	if containsControlChar(nak.Error.Message) {
+		return Nak{}, "error.message", fieldError{Field: "error.message"}
 	}
 	return nak, "", nil
 }

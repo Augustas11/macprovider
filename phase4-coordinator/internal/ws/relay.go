@@ -586,6 +586,17 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid inference_response_chunk")
 		return
 	}
+	// SPEC-002 v1.5.1 R-2 / issue #197 R6 code: reject control-character
+	// payloads in envelope.RequestID and decoded AAD request_id BEFORE any
+	// log statement or tier2 log helper call. Otherwise a malicious
+	// provider can route through the encrypted-frame failure paths
+	// (closeProviderForTier2AEADFailure, LogAEADDecryptFailed,
+	// LogEncryptedLegSessionClosed) and reach structured logs with raw
+	// C1/CSI before the post-parse containsControlChar check fires.
+	if containsControlChar(envelope.RequestID) {
+		s.log.Warn().Str("provider_id", providerID).Msg("inference_response_chunk envelope.request_id contains control chars; dropping")
+		return
+	}
 	session, ok := s.sessionFor(providerID, assignedID)
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Str("request_id", envelope.RequestID).Msg("chunk from unknown provider session")
@@ -601,6 +612,10 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 		requestID := aad.RequestID
 		if requestID == "" {
 			requestID = envelope.RequestID
+		}
+		if containsControlChar(requestID) {
+			s.log.Warn().Str("provider_id", providerID).Msg("encrypted inference_response_chunk AAD request_id contains control chars; dropping")
+			return
 		}
 		active, ok := session.activeFor(requestID)
 		if !ok {
@@ -638,6 +653,10 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid inference_response_chunk")
 		return
 	}
+	if containsControlChar(chunk.RequestID) {
+		s.log.Warn().Str("provider_id", providerID).Msg("invalid inference_response_chunk request_id (control chars)")
+		return
+	}
 	active, ok := session.activeFor(chunk.RequestID)
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Str("request_id", chunk.RequestID).Msg("unknown inference_response_chunk request_id")
@@ -668,6 +687,12 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid inference_response_end")
 		return
 	}
+	// SPEC-002 v1.5.1 R-2 / issue #197 R6 code: reject control-character
+	// envelope.RequestID before any tier2 log helper or structured log.
+	if containsControlChar(envelope.RequestID) {
+		s.log.Warn().Str("provider_id", providerID).Msg("inference_response_end envelope.request_id contains control chars; dropping")
+		return
+	}
 	if envelope.Encrypted {
 		aad, _, err := tier2.DecodeAEADAAD(envelope.Enc.AAD)
 		if err != nil {
@@ -677,6 +702,10 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		requestID := aad.RequestID
 		if requestID == "" {
 			requestID = envelope.RequestID
+		}
+		if containsControlChar(requestID) {
+			s.log.Warn().Str("provider_id", providerID).Msg("encrypted inference_response_end AAD request_id contains control chars; dropping")
+			return
 		}
 		active, ok := session.activeFor(requestID)
 		if !ok {
@@ -707,6 +736,10 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		return
 	} else if err := json.Unmarshal(payload, &end); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid inference_response_end")
+		return
+	}
+	if containsControlChar(end.RequestID) {
+		s.log.Warn().Str("provider_id", providerID).Msg("invalid inference_response_end request_id (control chars)")
 		return
 	}
 	active, ok := session.removeActive(end.RequestID)

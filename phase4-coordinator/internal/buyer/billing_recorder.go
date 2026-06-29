@@ -156,7 +156,7 @@ func (b *billingRecorder) recordRow(
 		RequestID:           b.requestID,
 		ExternalRequestID:   b.externalRequestID,
 		AccountID:           b.accountID,
-		Model:               b.model,
+		Model:               sanitizeRequestLogText(b.model),
 		ProviderAssignedID:  providerAssignedID,
 		PromptTokens:        promptTok,
 		CompletionTokens:    completionTok,

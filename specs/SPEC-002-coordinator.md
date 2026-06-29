@@ -1,7 +1,151 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.5.0 (2026-06-29, account-scoped reconciliation key — issue #211 follow-up to #196)
+**Version:** 1.5.1 (2026-06-29, R-2 normative clarifications — issue #197)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.5.1 (2026-06-29, issue #197 — R-2 normative clarifications + sanitizer hardening):**
+- **`external_request_id` UUID-tolerance clause.** Formalizes the
+  pre-existing implementation contract for the inbound `X-Request-ID`
+  header: `request_log.external_request_id` is **opaque sanitized
+  text**, not a UUIDv4-shape-required field. Gateway-routed traffic
+  carries a UUIDv4 per SPEC-006 R-G3 (the gateway middleware mints a
+  UUIDv4 if the inbound `X-Request-ID` is absent or non-UUIDv4-like).
+  Direct coordinator buyer-port traffic (no gateway in front) MAY
+  carry an arbitrary printable, sanitized string up to 128 bytes.
+  Coordinator implementations MUST NOT reject non-UUID-shaped
+  inbound IDs but MUST apply the sanitization documented in this
+  section: trim whitespace; cap at 128 bytes; reject invalid UTF-8;
+  reject control bytes **at byte granularity** (`< 0x20`, `0x7f`,
+  and the C1 range `0x80-0x9f`). Rune-based iteration is NOT
+  sufficient — raw bytes in `0x80-0x9f` decode to `utf8.RuneError`
+  (U+FFFD) and would otherwise pass a rune-only check, bypassing
+  the load-bearing C1/CSI rejection that the
+  `c1-control-chars-terminal-sanitizer-bypass` hardening was added
+  for. On failure the value is treated as if the header was absent
+  and the malformed payload MUST NOT be echoed to structured logs
+  (re-introduces the log-injection class the sanitizer exists to
+  defeat). Cross-service reconciliation MUST NOT assume UUIDv4
+  shape when joining gateway `usage_events` to coordinator
+  `request_log` by `external_request_id`; parity is byte-exact on
+  the sanitized string. The same sanitization applies to
+  `X-MacProvider-Account` → `request_log.account_id` (SPEC-002
+  v1.5.0); both headers share `sanitizeOpaqueHeader`.
+- **Registry invariant.** The composite-key registry
+  (`migrationKeyDefs` in code, table in this SPEC) MUST be non-empty.
+  Entries are append-only: future SPEC versions add reconciliation keys
+  by appending entries and MUST NOT rename existing `key` strings. The
+  JSON `keys` array order is **normative** — consumers MAY rely on the
+  i-th entry being stable across coordinator versions; new entries
+  append at the end. If a `key` ever must be replaced
+  (irreconcilable shape change — including cosmetic rename or
+  same-columns-different-name), the path is **deprecate-and-add**:
+  the OLD `key` entry continues to enumerate with its real
+  `legacy | unindexed | indexed` state — the state-enum vocabulary
+  is NOT extended, no new `deprecated` state value is introduced —
+  while the SPEC change-log explicitly marks the old `key` as
+  deprecated and names the new `key` as its replacement. If the
+  rename is cosmetic (same columns + same index), both entries
+  report the same state derived from the same underlying schema;
+  if the shape changed, the old `key` reports `unindexed` (its
+  index dropped) or `legacy` (its column dropped) while the new
+  `key` reports the new shape's state. The deprecated `key` is
+  dropped in a later SPEC version after at least one minor-version
+  deprecation window. Tooling MUST match by `key` and MUST
+  tolerate additional entries beyond what it knows about
+  (forward-compat).
+- **Per-key migration-state machine.** Each composite reconciliation
+  key on `request_log` has its OWN three-state migration:
+  - state `legacy` — required column(s) absent in
+    `PRAGMA table_info(request_log)`. Exact composite-key
+    reconciliation is unavailable; downstream tooling MAY fall
+    back to the prior-version key (e.g.
+    `account_external_request_id` legacy → `external_request_id`
+    alone, documented ambiguity).
+  - state `unindexed` — column(s) present but the partial-NULL
+    composite index is absent in `sqlite_master`. Exact
+    reconciliation is **available** but unindexed, with the
+    operator-visible performance penalty of a full `request_log`
+    scan per join. This is NOT legacy.
+  - state `indexed` — column(s) AND partial-NULL composite index
+    present. Steady-state.
+  The aggregate `migration_state` across all keys is `legacy` if
+  ANY key is legacy; `indexed` only if EVERY key is indexed;
+  `unindexed` otherwise. Reconciliation tooling MUST decide join
+  strategy per-key, not whole-schema, because v1.4.2 R-2 and
+  v1.5.0 added separate composite keys at different times
+  (`idx_request_log_external_request_id` and
+  `idx_request_log_account_external_request_id` respectively) and
+  may be at different states on the same deployment.
+- **Canonical state vocabulary.** The strings `"legacy"`,
+  `"unindexed"`, `"indexed"` are normative. Reconciliation
+  harnesses, dashboards, and operator tooling MUST emit these
+  literal strings (no synonyms, no casing variation) so that
+  cross-team tooling is interoperable.
+- **Machine-readable surface.** The coordinator MUST expose this
+  state via `coordinator migrate-indexes --check --format json`
+  (a read-only sibling of the existing build path). JSON shape:
+  ```json
+  {
+    "migration_state": "legacy|unindexed|indexed",
+    "keys": [
+      {
+        "key": "<key-name>",
+        "column_names": ["<col>", ...],
+        "columns_present": true|false,
+        "index_name": "<idx>",
+        "index_present": true|false,
+        "state": "legacy|unindexed|indexed"
+      }
+    ]
+  }
+  ```
+  Implementation: `requestlog.Store.MigrationState(ctx)`. The
+  `--check` form does NOT mutate the schema; it is the canonical
+  state probe for external tooling.
+- **State `(unindexed)` operational binding.** Scope is by
+  **data-surface contract, not process placement**. In scope:
+  any reconciliation surface that performs **closing-the-books
+  joins** between coordinator `request_log` and gateway
+  `usage_events` / `audit_events` by composite reconciliation
+  key — out-of-process harnesses AND any future coordinator-
+  hosted endpoint that exposes the same join. Out of scope:
+  coordinator's own in-process AttemptN paths (`hotpath.go`,
+  `recovery.go`, `endpoints.go` `/admin/ledger/reconcile`)
+  which derive ordinals via single-table SQLite `IS`
+  clustering on `(account_id, request_id)` and are correct
+  (just unindexed-slow) under state `unindexed`. In-scope
+  tooling MUST fail closed when it observes state `unindexed`
+  for a composite key it depends on. Operator response: run
+  `coordinator migrate-indexes` once, then resume. Tooling MAY
+  support an explicit override (`--allow-unindexed-scan`,
+  bounded by row-count or wall-clock budget) for fixture, dev,
+  or one-shot recovery use; the override MUST NOT be the
+  default. Falling back silently to fuzzy match under state
+  `unindexed` is a SPEC violation — it conflates with state
+  `legacy` and hides an operator-action gap.
+- **Expected operator workflow.** Normal sequence is (A) daemon
+  startup applies ALTER TABLE migrations (legacy → unindexed),
+  then (B) operator runs `coordinator migrate-indexes`
+  (unindexed → indexed). The `migrate-indexes` subcommand also
+  calls `requestlog.OpenStore` and so applies any pending ALTER
+  TABLE migrations itself before building indexes; running it
+  against a legacy DB takes the schema directly to indexed in
+  one invocation.
+- **Sanitizer hardening (code change).** v1.5.1 ships byte-level
+  C1 rejection + invalid-UTF-8 rejection in
+  `sanitizeExternalRequestID` and `sanitizeAccountID` via a
+  shared `sanitizeOpaqueHeader` helper. Pre-v1.5.1 the rune-based
+  loop accepted raw C1 bytes via `utf8.RuneError` decoding;
+  v1.5.1 closes that bypass and pins it with regression tests
+  for `0x80`, `0x9b`, `0x9f`, and invalid UTF-8 leads.
+- **Cross-SPEC alignment.** SPEC-005 reconciliation tooling that
+  enforces schema-check (failing closed on missing indexes) MUST
+  read the per-key state vocabulary defined here. SPEC-007 v0.3
+  explorer surface gates by resolved row fields (not schema
+  state) and is independent of this state machine. SPEC-006
+  R-G3 (gateway UUIDv4 minting) is unchanged — gateway-routed
+  traffic remains UUIDv4-shaped; the v1.5.1 opaque-text tolerance
+  is scoped to the direct coordinator buyer-port input.
 
 **Change log v1.5.0 (2026-06-29, issue #211 — coordinator-side counterpart to #196 composite-PK):**
 - `request_log` gains an `account_id TEXT NULL` column. The
@@ -1389,7 +1533,7 @@ Every buyer request is logged to the `request_log` table in SQLite:
 | `request_id` | TEXT | Coordinator-internal request/billing id (NOT the inbound `X-Request-ID`). On the non-pinned retry path multiple `request_log` rows for one logical buyer request share this value; pinned-client retries get distinct values. |
 | `external_request_id` | TEXT NULL | Inbound `X-Request-ID` header value. Shared across all `request_log` rows for one logical request and across the gateway's `usage_events.request_id` for the same logical request, enabling end-to-end billing reconciliation. NULL when the inbound request carried no `X-Request-ID`. (v1.4.2 R-2; formally documented here.) |
 | `account_id` | TEXT NULL | (v1.5.0) Gateway account id propagated via `X-MacProvider-Account` on the gateway → coordinator forward. NULL on legacy rows and on direct legacy buyer calls without the header. The composite `(account_id, external_request_id)` is the reconciliation key joining to gateway `usage_events`; `external_request_id` alone is a logical join key only. |
-| `model` | TEXT | Requested model |
+| `model` | TEXT | Requested model. **Sanitized at the buyer-handler boundary (v1.5.1):** valid-UTF-8 only; C0 / DEL / C1 codepoints stripped via `sanitizeRequestLogText`. The same sanitizer applies to `error`, `pref_header`, `provider_header` below. |
 | `provider_assigned_id` | TEXT | Pool ID of serving provider (null if 503) |
 | `prompt_tokens` | INTEGER | From provider response usage (null if failed) |
 | `completion_tokens` | INTEGER | From provider response usage (null if failed) |
@@ -1422,9 +1566,40 @@ CREATE INDEX idx_request_log_account_external_request_id ON request_log(account_
     WHERE account_id IS NOT NULL AND external_request_id IS NOT NULL;
 ```
 
-The `idx_request_log_ts_utc` index supports SPEC-005 v0.3 reconciliation scans (24h startup, 7d nightly, ad-hoc admin ranges) at 10K-provider scale. The composite `(request_id, id)` index supports the SPEC-005 § 8.2 attempt-ordinal fallback and SPEC-004 multi-attempt log queries. The partial-NULL `external_request_id` and `(account_id, external_request_id)` indexes support out-of-process reconciliation joins to gateway `usage_events`.
+The `idx_request_log_ts_utc` index supports SPEC-005 v0.3 reconciliation scans (24h startup, 7d nightly, ad-hoc admin ranges) at 10K-provider scale. The composite `(request_id, id)` index supports the SPEC-005 § 8.2 attempt-ordinal fallback and SPEC-004 multi-attempt log queries. The partial-NULL `external_request_id` and `(account_id, external_request_id)` indexes support closing-the-books reconciliation joins to gateway `usage_events` and `audit_events` (whether run as out-of-process harnesses or via a future coordinator-hosted reconciliation endpoint).
 
 Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`, `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL` (v1.4.2 R-2), and `ALTER TABLE request_log ADD COLUMN account_id TEXT NULL` (v1.5.0), and create the four indexes above. The two partial-NULL reconciliation indexes are built via `coordinator migrate-indexes`, NOT from daemon startup.
+
+**Per-key migration-state machine (v1.5.1).** Because ALTER TABLE migrations run at daemon startup but the partial-NULL composite indexes are built only by the operator subcommand `coordinator migrate-indexes`, each composite reconciliation key on `request_log` has its OWN three-state migration:
+
+| State | Column(s) | Index | Meaning |
+|---|---|---|---|
+| `legacy` | absent | n/a | pre-migration; exact composite-key reconciliation unavailable |
+| `unindexed` | present | absent | rollout incomplete; exact reconciliation **available** but unindexed |
+| `indexed` | present | present | steady-state |
+
+The state machine is PER-KEY because v1.4.2 R-2 (`external_request_id`) and v1.5.0 (`account_external_request_id`) added their composite indexes at different points in time; the same deployment may be at different states on each. The aggregate `migration_state` across all keys is `legacy` if ANY key is legacy; `indexed` only if EVERY key is indexed; `unindexed` otherwise. **`unindexed` is NOT legacy** — exact composite-key reconciliation is available but unindexed (full-scan), and reconciliation tooling MUST distinguish it. Reconciliation tooling MUST introspect BOTH `PRAGMA table_info(request_log)` (column presence) AND `sqlite_master` (index presence) per key. The canonical state vocabulary is `"legacy" | "unindexed" | "indexed"` — tooling MUST emit these literal strings.
+
+**Machine-readable state surface (v1.5.1).** The coordinator exposes per-key migration state via `coordinator migrate-indexes --check --format json` (a read-only sibling of the existing build path), backed by `requestlog.Store.MigrationState`. JSON shape:
+
+```json
+{
+  "migration_state": "unindexed",
+  "keys": [
+    { "key": "external_request_id", "column_names": ["external_request_id"], "columns_present": true, "index_name": "idx_request_log_external_request_id", "index_present": false, "state": "unindexed" },
+    { "key": "account_external_request_id", "column_names": ["account_id", "external_request_id"], "columns_present": true, "index_name": "idx_request_log_account_external_request_id", "index_present": false, "state": "unindexed" }
+  ]
+}
+```
+
+**State `unindexed` operational binding (v1.5.1).** **Scope is defined by data-surface contract, not process placement:**
+
+- **In scope (MUST fail closed on state `unindexed`/`legacy`):** any reconciliation surface that performs **closing-the-books joins** between coordinator `request_log` and gateway `usage_events` / `audit_events` by the composite reconciliation key — the SPEC-005 v0.3+ closing-the-books contract. This includes both out-of-process harnesses (e.g. nightly reconciler, issue #226 harness) AND any future coordinator-hosted endpoint that exposes the same join (e.g. a hypothetical `/admin/explorer/reconcile` returning cross-table joined rows for external auditors).
+- **Out of scope (MUST NOT fail closed during the `unindexed` rollout window):** coordinator's own in-process AttemptN derivation paths — `internal/billing/hotpath.go`, `internal/billing/recovery.go`, `internal/billing/endpoints.go` `/admin/ledger/reconcile`. These derive attempt ordinals via SQLite `IS` clustering on `(account_id, request_id)` over a single table (`request_log`); they do NOT join gateway tables. They are correct (just unindexed-slow) under state `unindexed`, and the daemon-startup `legacy → unindexed` rollout window is by design a transient state the daemon serves traffic in.
+
+In-scope tooling MUST fail closed when it observes state `unindexed` (or `legacy`) for a composite key it depends on, until the operator runs `coordinator migrate-indexes`. Tooling MAY support an explicit `--allow-unindexed-scan` override (bounded by row-count or wall-clock budget) for fixture, dev, or one-shot recovery use; the override MUST NOT be the default. Silently falling back to fuzzy match under state `unindexed` is a SPEC violation — it conflates with state `legacy` and hides an operator-action gap.
+
+**Expected operator workflow.** Daemon startup applies ALTER TABLE migrations (`legacy → unindexed`), then operator runs `coordinator migrate-indexes` (`unindexed → indexed`). The `migrate-indexes` subcommand also calls `requestlog.OpenStore` and so applies any pending ALTER TABLE migrations itself before building indexes; running it against a `legacy` DB takes the schema directly to `indexed` in one invocation.
 
 **Deploy ordering (v1.5.0).** Coordinator MUST be deployed first; it accepts and persists `X-MacProvider-Account` whether or not the gateway sends it. Gateway then deploys with the unconditional header. Auditor tooling MUST detect the boundary at row granularity (not schema granularity): rows with NULL `account_id` are either (a) pre-v1.5.0-coordinator rows, (b) v1.5.0-coordinator rows from a pre-v0.9.1 gateway, or (c) v1.5.0-coordinator rows written during a v1.4.x rollback window where the column existed but the writer didn't populate it. In all three cases the join MUST fall back to the prior `external_request_id`-only key and accept the documented ambiguity. Tooling MUST NOT use `PRAGMA table_info(request_log)` column-presence as a switch — that would misclassify rollback-window rows as scoped-ready. Use `account_id IS NOT NULL` as the per-row gate instead.
 
@@ -2346,6 +2521,15 @@ Wire-compatible with SPEC-001 section 6.2. The harness (`beta/harness.py`)
 is the first buyer and generates SPEC-001-shaped requests.
 
 Coordinator MUST honor any inbound `X-Request-ID` header on buyer-facing `/v1/*` requests and persist it as `request_log.external_request_id` (v1.4.2 R-2). If absent, coordinator's internal `request_log.request_id` is generated locally as a UUID v4 and `external_request_id` is NULL. The `request_log` schema includes a partial-NULL `external_request_id` index for cross-service reconciliation.
+
+**Buyer-controlled text sanitization (v1.5.1).** Every column in `request_log` whose value originates from buyer-controlled input — `external_request_id` (from `X-Request-ID`), `account_id` (from `X-MacProvider-Account`), `model` (from JSON body), `error` (provider/upstream error message), `pref_header` (from `X-MacProvider-Pref`), `provider_header` (from `X-MacProvider-Provider`) — MUST pass through a sanitizer at the buyer-handler boundary:
+- **Opaque headers** (`external_request_id`, `account_id`): `sanitizeOpaqueHeader` — reject the whole value on UTF-8 invalid OR control bytes (C0 `<0x20`, DEL `0x7f`, C1 `0x80-0x9f`) at byte granularity, cap at 128 bytes.
+- **Text fields** (`model`, `error`, `pref_header`, `provider_header`): `sanitizeRequestLogText` — reject UTF-8 invalid; strip C0/DEL/C1 codepoints; cap at 256 runes.
+- **WS provider hello required strings** (`provider_id`, `hostname`, `model_id`, `binary_version` — provider-controlled, not buyer-controlled, but they reach the same structured-log surface): `requireString` rejects control characters at parse time so a malicious provider cannot inject CSI sequences via the hello.
+
+Reason: terminal-control-character (CSI / OSC) sequences in structured logs and SQLite text columns are a load-bearing log-injection class — the `c1-control-chars-terminal-sanitizer-bypass` audit established this for opaque headers and v1.5.1 extends the contract to every buyer-controlled persisted text column.
+
+**UUID-tolerance (v1.5.1).** `external_request_id` is **opaque sanitized text**, not UUIDv4-shape-required. Gateway-routed traffic carries a UUIDv4 per SPEC-006 R-G3 (the gateway middleware mints a UUIDv4 if the inbound `X-Request-ID` is absent or non-UUIDv4-like). Direct coordinator buyer-port traffic MAY carry any non-control 1-128-byte ASCII/UTF-8 string. Coordinator implementations MUST NOT reject non-UUID-shaped inbound IDs but MUST apply `sanitizeExternalRequestID` (trim whitespace; cap at 128 bytes; reject invalid UTF-8; reject control bytes `< 0x20`, `0x7f`, and the C1 range `0x80-0x9f` **at byte granularity** — rune iteration is insufficient because raw C1 bytes decode to `utf8.RuneError` and would otherwise slip through, defeating the load-bearing C1/CSI rejection; on failure treat as absent and DO NOT echo the malformed payload to logs). Cross-service reconciliation MUST NOT assume UUIDv4 shape; the value is opaque text and parity is byte-exact on the sanitized string.
 
 When forwarding work to a provider over the SPEC-001 § 6.6 `inference_request` message, coordinator MUST preserve the request ID it recorded for the buyer request. Providers MAY echo `X-Request-ID` back in usage reporting; this is OPTIONAL under SPEC-001 v1.2.4 and is filed as a SPEC-001 v1.2.3 candidate.
 
