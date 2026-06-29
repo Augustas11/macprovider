@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -94,10 +95,28 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 	if !s.explorerAllowed(w, r) {
 		return
 	}
-	requestID := strings.TrimPrefix(r.URL.Path, "/admin/explorer/sessions/")
-	if requestID == "" || strings.Contains(requestID, "/") {
+	rawSegment := strings.TrimPrefix(r.URL.Path, "/admin/explorer/sessions/")
+	if rawSegment == "" || strings.Contains(rawSegment, "/") {
 		writeError(w, http.StatusNotFound, "invalid_request_error", "not_found", "Explorer resource not found")
 		return
+	}
+	// #231 SPEC-007 v0.4 path-segment typing (deprecation window):
+	// accept `ext_<external_request_id>` prefix as the typed gateway
+	// form. Untyped (bare-id) segments are still resolved AS the
+	// external_request_id (v0.3 behavior) but emit a deprecation
+	// audit row so operators see the upcoming v0.5 break.
+	requestID, typed := parseTypedSegment(rawSegment, "ext_")
+	if !typed {
+		// Fire-and-forget — do not block the request path on audit
+		// emit failure, but surface in audit_events when it works.
+		_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
+			EventID:   mustID("audit"),
+			RequestID: requestID,
+			Actor:     "explorer",
+			Type:      "payout_explorer_path_segment_untyped",
+			Payload:   `{"endpoint":"GET /admin/explorer/sessions","severity":"WARN"}`,
+			CreatedAt: s.now(),
+		})
 	}
 	// Issue #196: a request_id can now legitimately match rows in
 	// multiple accounts under the composite-PK schema. Operators
@@ -111,21 +130,93 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 		// account list so the UI can render a disambiguation
 		// picker rather than a generic 500.
 		if errors.Is(err, storage.ErrExplorerAmbiguousRequestID) {
-			writeJSON(w, http.StatusConflict, map[string]any{
+			body := map[string]any{
 				"error": map[string]any{
 					"type":    "invalid_request_error",
 					"code":    "ambiguous_request_id",
 					"message": "request_id matches multiple accounts; supply ?account_id= to disambiguate",
 				},
-				"request_id":          requestID,
-				"matched_account_ids": out.MatchedAccountIDs,
-			})
+				"request_id":                    requestID,
+				"matched_account_ids":           out.MatchedAccountIDs,
+				"matched_account_ids_truncated": out.MatchedAccountIDsTruncated,
+			}
+			// #231 v0.4: when truncation fired, emit the FULL
+			// account_id list to audit_events for forensic
+			// retrieval. The 409 body never carries more than the
+			// cap so a collision-flood attack cannot inflate
+			// operator log noise via the JSON response.
+			if out.MatchedAccountIDsTruncated {
+				_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
+					EventID:   mustID("audit"),
+					RequestID: requestID,
+					Actor:     "explorer",
+					Type:      "explorer_matched_account_ids_truncated",
+					Payload: fmt.Sprintf(
+						`{"matched_account_ids":[%s],"cap":%d,"severity":"WARN"}`,
+						quotedCSV(out.MatchedAccountIDsUntrimmed), storage.ExplorerMatchedAccountIDsCap,
+					),
+					CreatedAt: s.now(),
+				})
+			}
+			writeJSON(w, http.StatusConflict, body)
 			return
 		}
 		writeExplorerStorageError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// parseTypedSegment accepts the #231 SPEC-007 v0.4 typed-prefix path
+// segment. Returns (stripped_id, true) when the prefix matches;
+// (raw, false) for the legacy bare-id form. Empty prefix is rejected
+// to avoid ambiguity with a literal "ext_" or "int_" id substring.
+func parseTypedSegment(raw, prefix string) (string, bool) {
+	if prefix != "" && strings.HasPrefix(raw, prefix) {
+		stripped := strings.TrimPrefix(raw, prefix)
+		if stripped == "" {
+			return raw, false
+		}
+		return stripped, true
+	}
+	return raw, false
+}
+
+// quotedCSV emits a comma-separated list of JSON-quoted strings.
+// Used by #231 audit_events forensic emit; avoids pulling in a full
+// json.Marshal for a known-shape inline payload.
+func quotedCSV(in []string) string {
+	if len(in) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, s := range in {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('"')
+		// Escape minimal JSON specials. account_id values are
+		// gateway-internal opaque strings (currently alphanumeric +
+		// underscore / dash via OAuth subject derivation) so this
+		// minimal escape is sufficient for forensic capture.
+		for _, r := range s {
+			switch r {
+			case '"', '\\':
+				b.WriteByte('\\')
+				b.WriteRune(r)
+			case '\n':
+				b.WriteString(`\n`)
+			case '\r':
+				b.WriteString(`\r`)
+			case '\t':
+				b.WriteString(`\t`)
+			default:
+				b.WriteRune(r)
+			}
+		}
+		b.WriteByte('"')
+	}
+	return b.String()
 }
 
 func (s *Server) handleExplorerActivity(w http.ResponseWriter, r *http.Request) {

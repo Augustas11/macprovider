@@ -355,10 +355,24 @@ type ExplorerSessionDetail struct {
 	// from multiple accounts (issue #196 composite-PK semantics).
 	// Returned together with ErrExplorerAmbiguousRequestID so the
 	// caller can re-issue scoped lookups.
-	MatchedAccountIDs []string `json:"matched_account_ids,omitempty"`
-	Partial           bool     `json:"partial"`
-	Error             any      `json:"error"`
+	//
+	// #231 v0.4: bounded at ExplorerMatchedAccountIDsCap entries; the
+	// MatchedAccountIDsTruncated flag is set when the underlying UNION
+	// resolved to more than the cap and protects the 409 body against
+	// malicious collision floods + bounds operator log noise. The
+	// untruncated full list is emitted to audit_events for forensic
+	// retrieval — never silently dropped.
+	MatchedAccountIDs           []string `json:"matched_account_ids,omitempty"`
+	MatchedAccountIDsTruncated  bool     `json:"matched_account_ids_truncated,omitempty"`
+	MatchedAccountIDsUntrimmed  []string `json:"-"` // full list for the audit_events emit; never sent over the wire.
+	Partial                     bool     `json:"partial"`
+	Error                       any      `json:"error"`
 }
+
+// ExplorerMatchedAccountIDsCap is the §6.4 v0.4 normative cap on the
+// number of entries returned in the 409 ambiguity response body
+// (#231). The 11th row triggers the truncation flag.
+const ExplorerMatchedAccountIDsCap = 10
 
 type ExplorerUsageEvent struct {
 	RequestID        string    `json:"request_id"`
