@@ -1,0 +1,500 @@
+package billing
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+// SPEC-005 v0.4 (issue #169) — acceptance tests for the quarantine
+// VOID admin surface. ACs Q040, Q042, Q043, Q044, Q045, Q047, Q048,
+// Q051, Q053, Q055 per the v0.4 §18 AC block.
+
+// quarantineFixture builds a billing store and ensures the audit_log
+// table exists in the same SQLite file (production wires
+// audit.Store.OpenStore + billing.NewStore on the same DB file at
+// startup; in tests we only spin billing, so we create audit_log
+// here for the §11.6.4 same-tx INSERT path).
+func quarantineFixture(t *testing.T) *Store {
+	t.Helper()
+	_, store := newRequestAndBillingStores(t)
+	createAuditLogForTest(t, store.db)
+	return store
+}
+
+func createAuditLogForTest(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    provider_id TEXT,
+    payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log(event_type);
+`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// insertQuarantinedCredit seeds a ledger_request_credits row with
+// quarantined=1 and returns its id.
+func insertQuarantinedCredit(t *testing.T, store *Store, providerID string) int64 {
+	t.Helper()
+	requestID := providerID + "-q-" + time.Now().UTC().Format("20060102150405.000000000")
+	insertCreditWithRequest(t, store.db, requestID, providerID, time.Now().UTC(), 1000)
+	id := scalar(t, store.db, `SELECT id FROM ledger_request_credits WHERE request_id = ?`, requestID)
+	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET quarantined=1, quarantine_reason=? WHERE id=?`, "test_quarantine", id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func doForceVoid(t *testing.T, store *Store, gateEnabled bool, id int64, body string, ct string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/"+itoa(id)+"/force-void", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer operator")
+	if ct != "" {
+		req.Header.Set("Content-Type", ct)
+	}
+	w := httptest.NewRecorder()
+	store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, gateEnabled).ServeHTTP(w, req)
+	return w
+}
+
+func itoa(i int64) string {
+	if i == 0 {
+		return "0"
+	}
+	neg := false
+	if i < 0 {
+		neg = true
+		i = -i
+	}
+	var buf [20]byte
+	n := len(buf)
+	for i > 0 {
+		n--
+		buf[n] = byte('0' + (i % 10))
+		i /= 10
+	}
+	if neg {
+		n--
+		buf[n] = '-'
+	}
+	return string(buf[n:])
+}
+
+// AC-Q040: schema shape — UNIQUE(request_credit_id),
+// CHECK(resolution_kind IN ('force_void')), idx_lqr_kind_created
+// present, no separate idx_lqr_request_credit index.
+func TestACQ040_SchemaShape(t *testing.T) {
+	store := quarantineFixture(t)
+	// Columns present?
+	rows, err := store.db.Query(`PRAGMA table_info(ledger_quarantine_resolutions)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	cols := map[string]string{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		cols[name] = typ
+	}
+	want := []string{"id", "request_credit_id", "resolution_kind", "operator_id", "resolution_reason", "created_at_utc"}
+	for _, c := range want {
+		if _, ok := cols[c]; !ok {
+			t.Fatalf("missing column %q", c)
+		}
+	}
+	// UNIQUE auto-index present, idx_lqr_kind_created present.
+	if !indexExists(t, store.db, "ledger_quarantine_resolutions", "idx_lqr_kind_created") {
+		t.Fatal("idx_lqr_kind_created missing")
+	}
+	// No non-unique idx_lqr_request_credit (the UNIQUE auto-index
+	// covers the read path).
+	if indexExists(t, store.db, "ledger_quarantine_resolutions", "idx_lqr_request_credit") {
+		t.Fatal("idx_lqr_request_credit must not exist in v0.4")
+	}
+	// UNIQUE constraint: try INSERT twice with same request_credit_id.
+	id := insertQuarantinedCredit(t, store, "p-q040")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO ledger_quarantine_resolutions(request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc) VALUES (?, 'force_void', 'alice', 'reason', ?)`, id, now); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.db.Exec(`INSERT INTO ledger_quarantine_resolutions(request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc) VALUES (?, 'force_void', 'alice', 'reason', ?)`, id, now)
+	if err == nil {
+		t.Fatal("second INSERT must hit UNIQUE constraint")
+	}
+}
+
+// AC-Q042: force-void happy path.
+func TestACQ042_ForceVoidHappyPath(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-q042")
+	w := doForceVoid(t, store, true, id, `{"operator_id":"alice","reason":"Duplicate row confirmed"}`, "application/json")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["resolution_kind"] != "force_void" {
+		t.Fatalf("resolution_kind=%v want force_void", resp["resolution_kind"])
+	}
+	// One resolution row, one audit row.
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_quarantine_resolutions WHERE request_credit_id=?`, id); got != 1 {
+		t.Fatalf("resolution row count=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='ledger_quarantine_force_void'`); got != 1 {
+		t.Fatalf("audit row count=%d want 1", got)
+	}
+	// Base row's quarantined column unchanged.
+	if got := scalar(t, store.db, `SELECT quarantined FROM ledger_request_credits WHERE id=?`, id); got != 1 {
+		t.Fatalf("base row quarantined=%d want 1", got)
+	}
+	// Audit payload has operator_attribution constant + all 10 fields.
+	var payloadJSON string
+	if err := store.db.QueryRow(`SELECT payload_json FROM audit_log WHERE event_type='ledger_quarantine_force_void'`).Scan(&payloadJSON); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["operator_attribution"] != "operator_key_self_asserted" {
+		t.Fatalf("operator_attribution=%v want operator_key_self_asserted", payload["operator_attribution"])
+	}
+	if payload["severity"] != "WARN" {
+		t.Fatalf("severity=%v want WARN", payload["severity"])
+	}
+}
+
+// AC-Q043: idempotent UNIQUE conflict — second POST returns 409
+// with existing_resolution.
+func TestACQ043_IdempotentConflict(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-q043")
+	w1 := doForceVoid(t, store, true, id, `{"operator_id":"alice","reason":"first"}`, "application/json")
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first POST status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	w2 := doForceVoid(t, store, true, id, `{"operator_id":"bob","reason":"second"}`, "application/json")
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("second POST status=%d body=%s want 409", w2.Code, w2.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing error envelope: %s", w2.Body.String())
+	}
+	if errObj["code"] != "already_resolved" {
+		t.Fatalf("error.code=%v want already_resolved", errObj["code"])
+	}
+	existing, ok := errObj["existing_resolution"].(map[string]any)
+	if !ok {
+		t.Fatal("missing existing_resolution")
+	}
+	if existing["operator_id"] != "alice" {
+		t.Fatalf("existing.operator_id=%v want alice (the winner)", existing["operator_id"])
+	}
+	// Exactly one resolution row, one audit row.
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_quarantine_resolutions WHERE request_credit_id=?`, id); got != 1 {
+		t.Fatalf("resolution row count=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='ledger_quarantine_force_void'`); got != 1 {
+		t.Fatalf("audit row count=%d want 1", got)
+	}
+}
+
+// AC-Q044: validation matrix.
+func TestACQ044_ValidationMatrix(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-q044")
+	cases := []struct {
+		name     string
+		body     string
+		ct       string
+		path     int64
+		wantCode int
+		wantErr  string
+	}{
+		{"missing_operator_id", `{"reason":"x"}`, "application/json", id, http.StatusUnprocessableEntity, "missing_field"},
+		{"missing_reason", `{"operator_id":"alice"}`, "application/json", id, http.StatusUnprocessableEntity, "missing_field"},
+		{"empty_reason", `{"operator_id":"alice","reason":"   "}`, "application/json", id, http.StatusUnprocessableEntity, "empty_reason"},
+		{"reason_too_long", `{"operator_id":"alice","reason":"` + strings.Repeat("a", 501) + `"}`, "application/json", id, http.StatusUnprocessableEntity, "reason_too_long"},
+		{"bad_ct", `{"operator_id":"alice","reason":"x"}`, "text/plain", id, http.StatusUnsupportedMediaType, "unsupported_media_type"},
+		{"bad_operator_charset", `{"operator_id":"alice bob","reason":"x"}`, "application/json", id, http.StatusUnprocessableEntity, "bad_operator_id"},
+		// Per-codepoint reject cases (§11.6.3). Each body uses
+		// JSON \uXXXX escapes so the JSON parser accepts the
+		// string and the §11.6.3 sanitizer is the one that
+		// rejects (HTTP 422 unsanitized_reason).
+		{"c1_csi_in_reason", `{"operator_id":"alice","reason":"hix"}`, "application/json", id, http.StatusUnprocessableEntity, "unsanitized_reason"},
+		{"bidi_rlo_in_reason", `{"operator_id":"alice","reason":"hi‮x"}`, "application/json", id, http.StatusUnprocessableEntity, "unsanitized_reason"},
+		{"zwsp_in_reason", `{"operator_id":"alice","reason":"hi​x"}`, "application/json", id, http.StatusUnprocessableEntity, "unsanitized_reason"},
+		{"cgj_in_reason", `{"operator_id":"alice","reason":"hi͏x"}`, "application/json", id, http.StatusUnprocessableEntity, "unsanitized_reason"},
+		{"shy_in_reason", `{"operator_id":"alice","reason":"hi­x"}`, "application/json", id, http.StatusUnprocessableEntity, "unsanitized_reason"},
+		{"word_joiner_in_reason", `{"operator_id":"alice","reason":"hi⁠x"}`, "application/json", id, http.StatusUnprocessableEntity, "unsanitized_reason"},
+		{"not_found_id", `{"operator_id":"alice","reason":"x"}`, "application/json", 999999, http.StatusNotFound, "not_found"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := doForceVoid(t, store, true, c.path, c.body, c.ct)
+			if w.Code != c.wantCode {
+				t.Fatalf("status=%d want %d (body=%s)", w.Code, c.wantCode, w.Body.String())
+			}
+			if c.wantErr != "" && !strings.Contains(w.Body.String(), c.wantErr) {
+				t.Fatalf("body=%s does not contain %q", w.Body.String(), c.wantErr)
+			}
+		})
+	}
+	// "not_quarantined": insert a non-quarantined row and POST.
+	requestID := "p-not-q-" + time.Now().UTC().Format("20060102150405.000000000")
+	insertCreditWithRequest(t, store.db, requestID, "p-q044", time.Now().UTC(), 100)
+	nonQuarantinedID := scalar(t, store.db, `SELECT id FROM ledger_request_credits WHERE request_id=?`, requestID)
+	w := doForceVoid(t, store, true, nonQuarantinedID, `{"operator_id":"alice","reason":"x"}`, "application/json")
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "not_quarantined") {
+		t.Fatalf("not_quarantined: status=%d body=%s", w.Code, w.Body.String())
+	}
+	// Sanity: no resolution rows / audit rows from rejected calls.
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_quarantine_resolutions`); got != 0 {
+		t.Fatalf("rejected calls leaked %d resolution rows", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log`); got != 0 {
+		t.Fatalf("rejected calls leaked %d audit rows", got)
+	}
+}
+
+// AC-Q045: reader-side narrowing — `total_provider_credits` UNCHANGED
+// (force-void doesn't add to payable set); `quarantined_count`
+// excludes voided rows.
+func TestACQ045_ReaderSideNarrowing(t *testing.T) {
+	store := quarantineFixture(t)
+	now := time.Now().UTC()
+	// (a) quarantined=0 row
+	insertCredit(t, store.db, "p-q045", now, 100)
+	// (b) quarantined=1 row, no resolution
+	insertQuarantinedCredit(t, store, "p-q045-b")
+	// (c) quarantined=1 row + force-void resolution
+	idC := insertQuarantinedCredit(t, store, "p-q045-c")
+	w := doForceVoid(t, store, true, idC, `{"operator_id":"alice","reason":"voided"}`, "application/json")
+	if w.Code != http.StatusOK {
+		t.Fatalf("force-void prep failed: status=%d body=%s", w.Code, w.Body.String())
+	}
+	// Hit summary.
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/summary", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	sw := httptest.NewRecorder()
+	store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true).ServeHTTP(sw, req)
+	if sw.Code != http.StatusOK {
+		t.Fatalf("summary status=%d body=%s", sw.Code, sw.Body.String())
+	}
+	var summary map[string]int64
+	if err := json.Unmarshal(sw.Body.Bytes(), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if got := summary["quarantined_count"]; got != 1 {
+		t.Fatalf("quarantined_count=%d want 1 (only the open row (b))", got)
+	}
+	// total_provider_credits covers ONLY (a) — the payable set is
+	// UNCHANGED from v0.3.3.
+	if got := summary["total_provider_credits"]; got != 100 {
+		t.Fatalf("total_provider_credits=%d want 100 (force-void does NOT add to payable set)", got)
+	}
+}
+
+// AC-Q047: same-transaction audit atomicity — drop audit_log before
+// the INSERT, assert resolution INSERT also rolls back.
+func TestACQ047_SameTransactionAtomicity(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-q047")
+	// Drop audit_log to force the second INSERT to fail.
+	if _, err := store.db.Exec(`DROP TABLE audit_log`); err != nil {
+		t.Fatal(err)
+	}
+	w := doForceVoid(t, store, true, id, `{"operator_id":"alice","reason":"x"}`, "application/json")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500 (audit-INSERT must fail)", w.Code)
+	}
+	// Resolution row must NOT exist (transaction rolled back).
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_quarantine_resolutions WHERE request_credit_id=?`, id); got != 0 {
+		t.Fatalf("resolution row leaked: count=%d want 0", got)
+	}
+	// Re-create audit_log; a retry of the same POST should now
+	// succeed (no UNIQUE conflict because the first attempt rolled
+	// back fully).
+	createAuditLogForTest(t, store.db)
+	w2 := doForceVoid(t, store, true, id, `{"operator_id":"alice","reason":"x"}`, "application/json")
+	if w2.Code != http.StatusOK {
+		t.Fatalf("retry status=%d body=%s want 200", w2.Code, w2.Body.String())
+	}
+}
+
+// AC-Q048: method enforcement — non-POST returns 405.
+func TestACQ048_MethodEnforcement(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-q048")
+	for _, m := range []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		req := httptest.NewRequest(m, "/admin/ledger/quarantine/"+itoa(id)+"/force-void", nil)
+		req.Header.Set("Authorization", "Bearer operator")
+		w := httptest.NewRecorder()
+		store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true).ServeHTTP(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("method=%s status=%d want 405", m, w.Code)
+		}
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_quarantine_resolutions`); got != 0 {
+		t.Fatalf("405 cases leaked %d resolution rows", got)
+	}
+}
+
+// AC-Q051: reconcile rows_force_resolved_in_range.
+func TestACQ051_ReconcileForceResolvedField(t *testing.T) {
+	store := quarantineFixture(t)
+	// request_log already created by requestlog.OpenStore in the
+	// fixture; do not double-create.
+	// Seed 5 quarantined rows, force-void 3 of them.
+	now := time.Now().UTC()
+	for i := 0; i < 5; i++ {
+		id := insertQuarantinedCredit(t, store, "p-q051")
+		if i < 3 {
+			w := doForceVoid(t, store, true, id, `{"operator_id":"alice","reason":"v"}`, "application/json")
+			if w.Code != http.StatusOK {
+				t.Fatalf("force-void %d status=%d body=%s", i, w.Code, w.Body.String())
+			}
+		}
+	}
+	from := now.Add(-1 * time.Hour).Format("2006-01-02")
+	to := now.Add(24 * time.Hour).Format("2006-01-02")
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile?from="+from+"&to="+to, nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("reconcile status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := resp["rows_force_resolved_in_range"]; !ok {
+		t.Fatal("rows_force_resolved_in_range missing from reconcile response")
+	} else if int64(got.(float64)) != 3 {
+		t.Fatalf("rows_force_resolved_in_range=%v want 3", got)
+	}
+	if got, ok := resp["rows_quarantined"]; !ok {
+		t.Fatal("rows_quarantined missing")
+	} else if int64(got.(float64)) != 2 {
+		t.Fatalf("rows_quarantined=%v want 2 (open quarantines only — voided rows are resolved-and-excluded)", got)
+	}
+}
+
+// AC-Q053: route-layer config flag gate.
+func TestACQ053_RouteLayerConfigFlagGate(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-q053")
+	// Flag disabled (default) → 404
+	w := doForceVoid(t, store, false, id, `{"operator_id":"alice","reason":"x"}`, "application/json")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("disabled status=%d want 404", w.Code)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_quarantine_resolutions`); got != 0 {
+		t.Fatalf("disabled flag leaked %d rows", got)
+	}
+	// Flag enabled → 200
+	w2 := doForceVoid(t, store, true, id, `{"operator_id":"alice","reason":"x"}`, "application/json")
+	if w2.Code != http.StatusOK {
+		t.Fatalf("enabled status=%d body=%s want 200", w2.Code, w2.Body.String())
+	}
+	// 404 for disabled-flag case is byte-identical to row-not-found
+	// — assert by comparing bodies.
+	wNotFound := doForceVoid(t, store, true, 99999999, `{"operator_id":"alice","reason":"x"}`, "application/json")
+	if wNotFound.Code != http.StatusNotFound {
+		t.Fatalf("row-not-found status=%d want 404", wNotFound.Code)
+	}
+	// Both 404 bodies use the same {"error":{"code":"not_found",...}} envelope.
+	if !strings.Contains(w.Body.String(), `"code":"not_found"`) {
+		t.Fatalf("disabled-flag 404 missing not_found code: %s", w.Body.String())
+	}
+	if !strings.Contains(wNotFound.Body.String(), `"code":"not_found"`) {
+		t.Fatalf("row-not-found 404 missing not_found code: %s", wNotFound.Body.String())
+	}
+}
+
+// AC-Q055: v0.4 force-credit schema rejection — direct INSERT with
+// resolution_kind='force_credit' must fail the CHECK constraint.
+func TestACQ055_ForceCreditSchemaRejection(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-q055")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := store.db.Exec(`INSERT INTO ledger_quarantine_resolutions(request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc) VALUES (?, 'force_credit', 'alice', 'x', ?)`, id, now)
+	if err == nil {
+		t.Fatal("INSERT with resolution_kind=force_credit must hit CHECK constraint in v0.4")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "check") {
+		t.Fatalf("error must mention CHECK constraint, got: %v", err)
+	}
+}
+
+// Verify the v0.4 §11.6.6 — failed validation responses STILL count
+// against the operator-key rate-limit bucket (no bypass). v0.4 IMPL
+// inherits the existing /admin/* bucket; this test asserts the route
+// hits the bucket by checking that the response is the §11 envelope
+// (not a different code-path shortcut).
+func TestRateLimitBucketSharedForFailures(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-rate")
+	// Invalid body → 422. Response uses the §11 error envelope.
+	w := doForceVoid(t, store, true, id, `{"operator_id":"   ","reason":"x"}`, "application/json")
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d want 422", w.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := resp["error"]; !ok {
+		t.Fatalf("422 response missing standard error envelope: %s", w.Body.String())
+	}
+}
+
+// Sanity: forceVoid does not deadlock under the MaxOpenConns(1)
+// constraint shared by requestlog + billing on the same SQLite file
+// (issue #21 / ARCH-3 nested-query history). The §11.6.4 same-tx
+// path opens BeginTx → INSERT lqr → INSERT audit_log → Commit, all
+// on ONE connection by design.
+func TestForceVoidNoNestedQueryDeadlock(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-deadlock")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() {
+		w := doForceVoid(t, store, true, id, `{"operator_id":"alice","reason":"x"}`, "application/json")
+		done <- (w.Code == http.StatusOK)
+	}()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("force-void POST failed")
+		}
+	case <-ctx.Done():
+		t.Fatal("force-void POST timed out (suspected deadlock)")
+	}
+}

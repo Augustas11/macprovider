@@ -169,6 +169,25 @@ CREATE TABLE IF NOT EXISTS ledger_provider_identity_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_lpis_request ON ledger_provider_identity_snapshots(request_id, attempt_n);
 CREATE INDEX IF NOT EXISTS idx_lpis_provider ON ledger_provider_identity_snapshots(provider_id, created_at_utc);
+
+-- SPEC-005 v0.4 (issue #169) — MIG-005-010
+-- ledger_quarantine_resolutions records the operator-issued force-void
+-- decision for a quarantined ledger_request_credits row. v0.4 ships
+-- force-void only; CHECK widens in v0.5 to include 'force_credit' once
+-- the pre-payout hold primitive lands.
+-- UNIQUE(request_credit_id) makes the resolution terminal; the implicit
+-- sqlite_autoindex covers the LEFT JOIN read path (no separate
+-- non-unique index is added).
+CREATE TABLE IF NOT EXISTS ledger_quarantine_resolutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_credit_id INTEGER NOT NULL REFERENCES ledger_request_credits(id),
+    resolution_kind TEXT NOT NULL CHECK(resolution_kind IN ('force_void')),
+    operator_id TEXT NOT NULL CHECK(length(operator_id) BETWEEN 1 AND 64),
+    resolution_reason TEXT NOT NULL CHECK(length(resolution_reason) BETWEEN 1 AND 500),
+    created_at_utc TEXT NOT NULL,
+    UNIQUE(request_credit_id)
+);
+CREATE INDEX IF NOT EXISTS idx_lqr_kind_created ON ledger_quarantine_resolutions(resolution_kind, created_at_utc);
 `); err != nil {
 		return err
 	}

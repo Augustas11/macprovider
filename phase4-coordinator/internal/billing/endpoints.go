@@ -24,6 +24,25 @@ func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireP
 	return s.HandlersWithBridge(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin)
 }
 
+// HandlersWithQuarantineGate is the SPEC-005 v0.4 (issue #169)
+// constructor that lets callers wire the force-void route-layer
+// gate (config flag `billing.quarantine_resolution_force_void_enabled`).
+// Existing callers MAY continue to use Handlers() — that path
+// defaults the gate to false (force-void endpoint returns 404
+// regardless of config).
+//
+// SPEC-005 v0.4 §13.2 mandates that flag-flip audit emission
+// (event_type=billing_config_flag_changed) is the responsibility of
+// the config-reload caller, not the handler. On SIGHUP / HTTP
+// reload, the caller compares old and new config, re-wires this
+// Handler with the new value, and emits the audit row through the
+// billing store's BeginTx path (see EmitConfigFlagChangedAudit
+// below) so it shares atomicity with the ledger_config_snapshots
+// row §13.2 already requires.
+func (s *Store) HandlersWithQuarantineGate(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool) http.Handler {
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled)
+}
+
 // HandlersWithBridge mounts the admin/provider handlers. The
 // `/admin/ledger/*` endpoints are operator-only (the codex security
 // audit on PR #73, HIGH-1, flagged that accepting gateway_service_token
@@ -34,12 +53,17 @@ func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireP
 // accepted. Handlers (the legacy single-arg signature) is kept as a
 // thin shim so test fixtures and direct callers don't churn.
 func (s *Store) HandlersWithBridge(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int) http.Handler {
+	return s.handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly, tokenStore, requireProviderTokens, earningsRateLimitPerMin, false)
+}
+
+func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool) http.Handler {
 	h := &handler{
 		store:                   s,
 		operatorKey:             operatorKey,
 		tokenStore:              tokenStore,
 		requireProviderTokens:   requireProviderTokens,
 		earningsRateLimitPerMin: earningsRateLimitPerMin,
+		forceVoidEnabled:        forceVoidEnabled,
 		lastEarnings:            map[string][]time.Time{},
 		log:                     zerolog.New(os.Stdout).With().Timestamp().Logger(),
 	}
@@ -52,12 +76,21 @@ type handler struct {
 	tokenStore              tokenValidator
 	requireProviderTokens   bool
 	earningsRateLimitPerMin int
+	forceVoidEnabled        bool
 	mu                      sync.Mutex
 	lastEarnings            map[string][]time.Time
 	log                     zerolog.Logger
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	// SPEC-005 v0.4 §11.6 quarantine surface (issue #169).
+	if id, kind, ok := matchQuarantinePath(r.URL.Path); ok {
+		switch kind {
+		case "force-void":
+			h.forceVoidHandler(w, r, id)
+			return
+		}
+	}
 	switch {
 	case r.URL.Path == "/admin/ledger/summary":
 		h.admin(w, r, h.summary)
@@ -104,7 +137,14 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 		"current_window_provider_credits":   h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE quarantined=0 AND ts_utc >= ?`, current),
 		"pending_payout_count":              h.sum(ctx, `SELECT COUNT(*) FROM ledger_payout_ready WHERE status='ready'`),
 		"pending_payout_credits":            h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE status='ready'`),
-		"quarantined_count":                 h.sum(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE quarantined=1`),
+		// SPEC-005 v0.4 §11.6.5 OPEN_PREDICATE — `quarantined_count`
+		// surfaces ONLY open quarantines (not force_void-resolved).
+		// Force-voided rows are resolved-and-excluded.
+		"quarantined_count": h.sum(ctx, `
+SELECT COUNT(*) FROM ledger_request_credits lrc
+ WHERE lrc.quarantined=1
+   AND NOT EXISTS (SELECT 1 FROM ledger_quarantine_resolutions r
+                    WHERE r.request_credit_id = lrc.id)`),
 		"fault_count":                       h.sum(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE fault_flag != 'none'`),
 		"last_reconciliation_delta_credits": h.sum(ctx, `SELECT reconciliation_delta_credits FROM ledger_reconciliation_runs ORDER BY started_at_utc DESC, id DESC LIMIT 1`),
 	}
@@ -148,7 +188,9 @@ SELECT lrc.provider_id,
        SUM(CASE WHEN lrc.ts_utc >= ? THEN lrc.provider_credits ELSE 0 END),
        MAX(lrc.ts_utc),
        SUM(CASE WHEN lrc.fault_flag != 'none' THEN 1 ELSE 0 END),
-       SUM(CASE WHEN lrc.quarantined=1 THEN 1 ELSE 0 END),
+       SUM(CASE WHEN lrc.quarantined=1 AND NOT EXISTS (
+             SELECT 1 FROM ledger_quarantine_resolutions r WHERE r.request_credit_id = lrc.id
+       ) THEN 1 ELSE 0 END),
        MAX(lrc.attestation_class),
        COALESCE(pp.pending_payout, 0) AS pending_payout
   FROM ledger_request_credits lrc
@@ -242,7 +284,26 @@ SELECT COUNT(*)
 		return
 	}
 	rowsRecovered := int64(0)
-	rowsQuarantined, err := h.sumErr(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND quarantined=1`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	// SPEC-005 v0.4 §11.6.5 OPEN_PREDICATE — narrow rows_quarantined
+	// to open quarantines only (force-voided rows are resolved-and-
+	// excluded).
+	rowsQuarantined, err := h.sumErr(ctx, `
+SELECT COUNT(*) FROM ledger_request_credits lrc
+ WHERE lrc.ts_utc >= ? AND lrc.ts_utc < ? AND lrc.quarantined=1
+   AND NOT EXISTS (SELECT 1 FROM ledger_quarantine_resolutions r
+                    WHERE r.request_credit_id = lrc.id)`,
+		from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	// SPEC-005 v0.4 §11.6.5 — new mandatory reconcile field. Counts
+	// `force_void` resolutions with created_at_utc in [from, to);
+	// v0.5 will widen to include `force_credit`.
+	rowsForceResolved, err := h.sumErr(ctx, `
+SELECT COUNT(*) FROM ledger_quarantine_resolutions
+ WHERE created_at_utc >= ? AND created_at_utc < ?`,
+		from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -264,15 +325,16 @@ INSERT INTO ledger_reconciliation_runs (
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"from_utc":                 from.Format(time.RFC3339),
-		"to_utc":                   to.Format(time.RFC3339),
-		"buyer_equivalent_credits": buyerEquivalent,
-		"provider_gross_credits":   providerGross,
-		"delta_gross_credits":      delta,
-		"split_delta_rows":         splitDelta,
-		"rows_scanned":             rowsScanned,
-		"rows_recovered":           rowsRecovered,
-		"rows_quarantined":         rowsQuarantined,
+		"from_utc":                     from.Format(time.RFC3339),
+		"to_utc":                       to.Format(time.RFC3339),
+		"buyer_equivalent_credits":     buyerEquivalent,
+		"provider_gross_credits":       providerGross,
+		"delta_gross_credits":          delta,
+		"split_delta_rows":             splitDelta,
+		"rows_scanned":                 rowsScanned,
+		"rows_recovered":               rowsRecovered,
+		"rows_quarantined":             rowsQuarantined,
+		"rows_force_resolved_in_range": rowsForceResolved,
 	})
 }
 

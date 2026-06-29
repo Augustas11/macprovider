@@ -530,12 +530,16 @@ func main() {
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
-	billingHandler := billingStore.HandlersWithBridge(
+	// SPEC-005 v0.4 (issue #169) — `billing.quarantine_resolution_force_void_enabled`
+	// gates the §11.6 force-void endpoint at the route layer. Default
+	// false: endpoint returns HTTP 404 until the operator explicitly
+	// flips the flag via the existing config-reload primitive.
+	billingHandler := billingStore.HandlersWithQuarantineGate(
 		cfg.Auth.OperatorKey,
-		cfg.Auth.GatewayServiceToken,
 		tokenStore,
 		cfg.Auth.RequireProviderTokens,
 		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
+		cfg.Billing.QuarantineResolutionForceVoidEnabled,
 	)
 	providerMux.Handle("/admin/ledger/", billingHandler)
 	if cfg.Auth.RequireProviderTokens {
