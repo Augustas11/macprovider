@@ -16,13 +16,20 @@ type canonicalConfig struct {
 	ProviderShareBps    int64                    `json:"provider_share_bps"`
 	GlobalMultiplierPPM int64                    `json:"global_multiplier_ppm"`
 	RateCard            map[string]RateCardEntry `json:"rate_card"`
+	// R4 fix (CODE-M2): SPEC-005 v0.4 §11.6.4 / §13.2 require the
+	// startup `ledger_config_snapshots` row to capture the initial
+	// `quarantine_resolution_force_void_enabled` value. Including
+	// the boolean in the canonical hash makes the snapshot a
+	// forensic record of the flag state at that reload.
+	QuarantineResolutionForceVoidEnabled bool `json:"quarantine_resolution_force_void_enabled"`
 }
 
 func (s *Store) InsertConfigSnapshot(ctx context.Context, cfg RewardsConfig, now time.Time) (int64, error) {
 	canon := canonicalConfig{
-		ProviderShareBps:    ParseShareBps(cfg.ProviderShare),
-		GlobalMultiplierPPM: ParseMultiplierPPM(cfg.GlobalMultiplier),
-		RateCard:            cfg.RateCard,
+		ProviderShareBps:                     ParseShareBps(cfg.ProviderShare),
+		GlobalMultiplierPPM:                  ParseMultiplierPPM(cfg.GlobalMultiplier),
+		RateCard:                             cfg.RateCard,
+		QuarantineResolutionForceVoidEnabled: s.forceVoidEnabled.Load(),
 	}
 	rateJSON, err := json.Marshal(canon.RateCard)
 	if err != nil {
@@ -79,10 +86,14 @@ func (s *Store) ReloadBillingConfig(ctx context.Context, cfg RewardsConfig, forc
 	s.forceVoidReloadMu.Lock()
 	defer s.forceVoidReloadMu.Unlock()
 
+	// R4 fix (CODE-M2): snapshot captures the POST-reload force-void
+	// value so the ledger_config_snapshots row reflects what the
+	// next handler-request observes (not the pre-reload value).
 	canon := canonicalConfig{
-		ProviderShareBps:    ParseShareBps(cfg.ProviderShare),
-		GlobalMultiplierPPM: ParseMultiplierPPM(cfg.GlobalMultiplier),
-		RateCard:            cfg.RateCard,
+		ProviderShareBps:                     ParseShareBps(cfg.ProviderShare),
+		GlobalMultiplierPPM:                  ParseMultiplierPPM(cfg.GlobalMultiplier),
+		RateCard:                             cfg.RateCard,
+		QuarantineResolutionForceVoidEnabled: forceVoidEnabled,
 	}
 	rateJSON, err := json.Marshal(canon.RateCard)
 	if err != nil {

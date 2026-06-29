@@ -166,6 +166,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing: %v\n", err)
 		os.Exit(1)
 	}
+	// R4 fix (CODE-M2): set the route-layer flag atomic BEFORE the
+	// startup snapshot so the snapshot's canonical hash captures the
+	// initial flag state (SPEC-005 v0.4 §11.6.4 / §13.2). The
+	// "startup" source suppresses the billing_config_flag_changed
+	// audit emit per SPEC §11.6.4 (no prior acknowledged value).
+	if err := billingStore.SetForceVoidEnabled(context.Background(), cfg.Billing.QuarantineResolutionForceVoidEnabled, "startup"); err != nil {
+		fmt.Fprintf(os.Stderr, "billing force-void flag init: %v\n", err)
+		os.Exit(1)
+	}
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)

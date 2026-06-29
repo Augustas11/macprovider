@@ -463,18 +463,14 @@ func TestACQ053_RouteLayerConfigFlagGate(t *testing.T) {
 	if w2.Code != http.StatusOK {
 		t.Fatalf("enabled status=%d body=%s want 200", w2.Code, w2.Body.String())
 	}
-	// 404 for disabled-flag case is byte-identical to row-not-found
-	// — assert by comparing bodies.
+	// R4 fix (CODE-M3): byte-identity is the actual SPEC requirement.
+	// Compare the response bodies exactly, not via strings.Contains.
 	wNotFound := doForceVoid(t, store, true, 99999999, `{"operator_id":"alice","reason":"x"}`, "application/json")
 	if wNotFound.Code != http.StatusNotFound {
 		t.Fatalf("row-not-found status=%d want 404", wNotFound.Code)
 	}
-	// Both 404 bodies use the same {"error":{"code":"not_found",...}} envelope.
-	if !strings.Contains(w.Body.String(), `"code":"not_found"`) {
-		t.Fatalf("disabled-flag 404 missing not_found code: %s", w.Body.String())
-	}
-	if !strings.Contains(wNotFound.Body.String(), `"code":"not_found"`) {
-		t.Fatalf("row-not-found 404 missing not_found code: %s", wNotFound.Body.String())
+	if w.Body.String() != wNotFound.Body.String() {
+		t.Fatalf("disabled-flag 404 body NOT byte-identical to row-not-found:\n  disabled  = %q\n  not_found = %q", w.Body.String(), wNotFound.Body.String())
 	}
 }
 
@@ -554,6 +550,12 @@ func TestACQ049_ConcurrentUNIQUEConflict(t *testing.T) {
 	var wg sync.WaitGroup
 	var ok200 int64
 	var ok409 int64
+	// R4 fix (CODE-M5): SPEC AC-Q049 requires that EVERY 409 carries
+	// the {"error":{"code":"already_resolved","existing_resolution":
+	// {...winner...}}} envelope. Decode each 409 body and assert
+	// structure rather than just counting status codes.
+	bodies := make([][]byte, N)
+	var bodiesMu sync.Mutex
 	for i := 0; i < N; i++ {
 		wg.Add(1)
 		go func(i int) {
@@ -570,6 +572,9 @@ func TestACQ049_ConcurrentUNIQUEConflict(t *testing.T) {
 			case http.StatusConflict:
 				atomic.AddInt64(&ok409, 1)
 			}
+			bodiesMu.Lock()
+			bodies[i] = append([]byte(nil), w.Body.Bytes()...)
+			bodiesMu.Unlock()
 		}(i)
 	}
 	wg.Wait()
@@ -584,6 +589,61 @@ func TestACQ049_ConcurrentUNIQUEConflict(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='ledger_quarantine_force_void'`); got != 1 {
 		t.Fatalf("audit rows=%d want 1", got)
+	}
+	// R4 fix (CODE-M5): inspect each 409 body. All must share the
+	// SAME winner identity in existing_resolution and the same
+	// already_resolved code.
+	var winnerCreatedAt, winnerOpID, winnerReason string
+	conflictCount := 0
+	for i, raw := range bodies {
+		var resp struct {
+			Error struct {
+				Code               string `json:"code"`
+				ExistingResolution struct {
+					RequestCreditID  int64  `json:"request_credit_id"`
+					ResolutionKind   string `json:"resolution_kind"`
+					OperatorID       string `json:"operator_id"`
+					ResolutionReason string `json:"resolution_reason"`
+					CreatedAtUTC     string `json:"created_at_utc"`
+				} `json:"existing_resolution"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			// 200 winner is a different envelope; skip JSON-decode
+			// failures on the winner and on any non-409 bodies.
+			continue
+		}
+		if resp.Error.Code == "" {
+			// Winner envelope — no error.code field.
+			continue
+		}
+		if resp.Error.Code != "already_resolved" {
+			t.Fatalf("worker %d 409 body code=%q want already_resolved (body=%s)", i, resp.Error.Code, string(raw))
+		}
+		if resp.Error.ExistingResolution.RequestCreditID != id {
+			t.Fatalf("worker %d existing_resolution.request_credit_id=%d want %d", i, resp.Error.ExistingResolution.RequestCreditID, id)
+		}
+		if resp.Error.ExistingResolution.ResolutionKind != "force_void" {
+			t.Fatalf("worker %d existing_resolution.resolution_kind=%q want force_void", i, resp.Error.ExistingResolution.ResolutionKind)
+		}
+		if resp.Error.ExistingResolution.CreatedAtUTC == "" {
+			t.Fatalf("worker %d existing_resolution.created_at_utc is empty", i)
+		}
+		if winnerCreatedAt == "" {
+			winnerCreatedAt = resp.Error.ExistingResolution.CreatedAtUTC
+			winnerOpID = resp.Error.ExistingResolution.OperatorID
+			winnerReason = resp.Error.ExistingResolution.ResolutionReason
+		} else {
+			if resp.Error.ExistingResolution.CreatedAtUTC != winnerCreatedAt ||
+				resp.Error.ExistingResolution.OperatorID != winnerOpID ||
+				resp.Error.ExistingResolution.ResolutionReason != winnerReason {
+				t.Fatalf("worker %d existing_resolution disagrees with prior conflicts (race coherence violated): got %+v", i, resp.Error.ExistingResolution)
+			}
+		}
+		conflictCount++
+	}
+	if int64(conflictCount) != ok409 {
+		t.Fatalf("decoded conflict bodies=%d want %d", conflictCount, ok409)
 	}
 }
 
@@ -933,6 +993,118 @@ func TestProviderRollupPayableIndependentOfFilter(t *testing.T) {
 	}
 	t.Run("default", func(t *testing.T) { check(t, "", 100, 1) })
 	t.Run("include_quarantined_true", func(t *testing.T) { check(t, "?include_quarantined=true", 100, 1) })
+}
+
+// R4 (CODE-M1): pin the precedence of disabled-flag hide vs
+// operator-key auth on the quarantine surface. The actual order
+// in serveHTTP for /admin/ledger/quarantine/{id}/force-void is:
+//
+//  1. Rate-limit bucket charge.
+//  2. matchQuarantinePath → matched.
+//  3. Flag-disabled check → 404 universal (SEC-M1 hide).
+//     This precedes auth so the route is invisible to BOTH
+//     unauthenticated and authenticated probes when flag is off.
+//  4. Method check / bad-id check / forceVoidHandler.
+//  5. forceVoidHandler internals: method check / auth check / flag
+//     check (defense-in-depth) / body validation.
+//
+// Trade-off: the disabled-flag hide returns 404 even to
+// unauthenticated callers. This is preferable to leaking the
+// quarantine surface's existence to anyone with network reach to
+// the coordinator — operators with the wrong key can't even tell
+// the surface is real. When the flag is ENABLED, auth runs inside
+// the handler and missing/wrong keys get 403.
+func TestQuarantineRoutePrecedenceAuthThenFlag(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-prec")
+	// HandlersWithQuarantineGate calls
+	// SetForceVoidEnabled(..., "startup") which MUTATES the shared
+	// store atomic. Rebuild the handler when we want the flag flipped
+	// rather than building both handlers up-front (would leak
+	// enabled-state into the disabled cases).
+	handlerDisabled := store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, false)
+
+	// Flag DISABLED + NO auth → 404 (hide precedes auth; route is
+	// invisible to network-reachable callers regardless of credentials).
+	{
+		req := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/"+itoa(id)+"/force-void", strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handlerDisabled.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("disabled+no-auth status=%d want 404 (hide precedes auth)", w.Code)
+		}
+	}
+	// Flag DISABLED + WRONG bearer → 404 (same hide).
+	{
+		req := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/"+itoa(id)+"/force-void", strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+		req.Header.Set("Authorization", "Bearer wrong")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handlerDisabled.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("disabled+wrong-bearer status=%d want 404", w.Code)
+		}
+	}
+	// Flag DISABLED + GOOD auth + GET → 404 (auth passes, route-match
+	// hits, flag-disabled hides the method-not-allowed distinction).
+	{
+		req := httptest.NewRequest(http.MethodGet, "/admin/ledger/quarantine/"+itoa(id)+"/force-void", nil)
+		req.Header.Set("Authorization", "Bearer operator")
+		w := httptest.NewRecorder()
+		handlerDisabled.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("disabled+good-auth+GET status=%d want 404 (flag hide must mask 405)", w.Code)
+		}
+	}
+	// Flag DISABLED + GOOD auth + bad-id POST → 404 (flag-disabled
+	// hides the bad-id 400).
+	{
+		req := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/notanid/force-void", strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+		req.Header.Set("Authorization", "Bearer operator")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handlerDisabled.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("disabled+good-auth+bad-id status=%d want 404 (flag hide must mask 400)", w.Code)
+		}
+	}
+
+	// Now flip to enabled and verify auth/method/id checks run.
+	handlerEnabled := store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true)
+
+	// Flag ENABLED + NO auth → 403.
+	{
+		req := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/"+itoa(id)+"/force-void", strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handlerEnabled.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden && w.Code != http.StatusUnauthorized {
+			t.Fatalf("enabled+no-auth status=%d want 401/403", w.Code)
+		}
+	}
+	// Flag ENABLED + GOOD auth + GET → 405 (method check runs).
+	{
+		req := httptest.NewRequest(http.MethodGet, "/admin/ledger/quarantine/"+itoa(id)+"/force-void", nil)
+		req.Header.Set("Authorization", "Bearer operator")
+		w := httptest.NewRecorder()
+		handlerEnabled.ServeHTTP(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("enabled+good-auth+GET status=%d want 405", w.Code)
+		}
+	}
+	// Flag ENABLED + GOOD auth + bad-id POST → 400 (id-shape check
+	// runs).
+	{
+		req := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/notanid/force-void", strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+		req.Header.Set("Authorization", "Bearer operator")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handlerEnabled.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("enabled+good-auth+bad-id status=%d want 400", w.Code)
+		}
+	}
 }
 
 // R3 (SEC-M1): when the route-layer flag is DISABLED the entire
