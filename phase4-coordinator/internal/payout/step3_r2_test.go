@@ -49,7 +49,7 @@ func TestProduceStaleOutboxRows_BothRPCsMissAfterThreshold_Produces(t *testing.T
 
 	produced, err := ProduceStaleOutboxRows(
 		context.Background(), db, zerolog.Nop(),
-		rpcs, "run-A", time.Now(), runInterval,
+		rpcs, "run-A", time.Now(), runInterval, 0,
 	)
 	if err != nil {
 		t.Fatalf("ProduceStaleOutboxRows: %v", err)
@@ -105,7 +105,7 @@ func TestProduceStaleOutboxRows_PrimaryReturnsReceipt_DoesNotPage(t *testing.T) 
 
 	produced, err := ProduceStaleOutboxRows(
 		context.Background(), db, zerolog.Nop(),
-		rpcs, "run-B", time.Now(), runInterval,
+		rpcs, "run-B", time.Now(), runInterval, 0,
 	)
 	if err != nil {
 		t.Fatalf("ProduceStaleOutboxRows: %v", err)
@@ -133,7 +133,7 @@ func TestProduceStaleOutboxRows_NoRPCs_Disabled(t *testing.T) {
 	_ = seedStaleCancelRow(t, db, time.Minute, "0xdisabled")
 	produced, err := ProduceStaleOutboxRows(
 		context.Background(), db, zerolog.Nop(),
-		TwoRPCs{}, "run-C", time.Now(), time.Minute,
+		TwoRPCs{}, "run-C", time.Now(), time.Minute, 0,
 	)
 	if err != nil {
 		t.Fatalf("err: %v", err)

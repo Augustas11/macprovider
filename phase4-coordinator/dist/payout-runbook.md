@@ -125,10 +125,13 @@ WARN fires when ~1 day of headroom remains.
 
 ## 3. BetterStack synthetic-alert verification (SPEC §9.7 prereq)
 
-Before flipping `payout.enabled: true`, verify EVERY §7.1 PAGE
-event fires a BetterStack alert. The synthetic-alert harness
-lives at `dist/synthetic-alerts/` (test fixtures only; never
-fire against production).
+Before flipping `payout.enabled: true`, verify EVERY §7.1
+PAGE/WARN event fires a BetterStack alert (per SPEC §9 item 6,
+the canonical event list lives at
+`specs/SPEC-016-payout-pipeline.md` §9 item 6 — re-derive at
+deploy time). The synthetic-alert harness lives at
+`dist/synthetic-alerts/` (test fixtures only; never fire against
+production).
 
 Required PAGE-class events (test each by hand on a staging
 coordinator):
@@ -144,6 +147,18 @@ coordinator):
 - `payout_reorg_orphan_recorded`
 - `payout_cancel_self_transfer_reconfirm_stale`
 - `payout_config_reloaded` / `payout_config_reload_rejected`
+- `payout_rpc_chronic_outage` (NEW v0.1.22 — chronic single-RPC outage detector)
+
+Required WARN-class events (also verified per §9 item 6):
+
+- `payout_stale_outbox_backlog` (NEW v0.1.22 — §4.7 step 5 production capped; escalates to PAGE when `scan_ceiling_hit=true`)
+- `payout_spki_drain_skipped_unsupported_client` (NEW v0.1.22 — verify SEPARATE synthetic alert per `rpc_label` value: `primary` AND `secondary`)
+- `payout_stale_outbox_reaped`
+- `payout_flag_audit_reaped`
+- `payout_low_balance` / `payout_low_native_balance`
+- `payout_nonce_gap`
+- `provider_payout_address_change_rejected`
+- `provider_payout_address_rejected_unknown_provider`
 
 For each: pre-trigger the underlying state in staging, watch
 BetterStack receive the alert within 60s, and tick the

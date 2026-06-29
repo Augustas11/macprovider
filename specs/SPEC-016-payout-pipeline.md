@@ -1,6 +1,6 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.21 (2026-06-25, draft — codex round-21 fix pass on v0.1.20. Round 21 returned NEEDS FIX PASS 0/1/1/1 against v0.1.20: MAJOR-1 stale `[2, 50]` confirmation_blocks bound at §4.3 step 7 + BUILD prompt; MEDIUM-1 ambiguous IMPL test (4) wording in §4.8b; LOW-1 two-RPC re-poll budget undercounted RPC calls in §4.7. All three absorbed. Pending codex round-22 confirmation. Full r20 findings: `specs/SPEC-016-r20-audit.md`; r21 closure narrative: `specs/SPEC-016-r21-audit.md`.)
+**Version:** 0.1.22 (2026-06-29, draft — IMPL follow-up #165, converged across 3 codex audit rounds. R1 returned 0/3/1/1; R2 returned 0/3/2/1; R3 absorbed the unbounded-scan + SPKI-drain-event findings. Normative §7.1 gains three events (`payout_stale_outbox_backlog`, `payout_rpc_chronic_outage`, `payout_spki_drain_skipped_unsupported_client`); §4.7 step 5 producer migrated to keyset-paginated bounded-memory scan with defensive `staleOutboxScanCeiling=20000` runner-cycle row cap; §4.4 two-RPC discipline gap closed via `TrackingRPCClient` wrapper + `ChronicOutageTracker` ticking independently of `payout.tuning.run_interval`.) PRIOR: 0.1.21 (2026-06-25, draft — codex round-21 fix pass on v0.1.20. Round 21 returned NEEDS FIX PASS 0/1/1/1 against v0.1.20: MAJOR-1 stale `[2, 50]` confirmation_blocks bound at §4.3 step 7 + BUILD prompt; MEDIUM-1 ambiguous IMPL test (4) wording in §4.8b; LOW-1 two-RPC re-poll budget undercounted RPC calls in §4.7. All three absorbed. Pending codex round-22 confirmation. Full r20 findings: `specs/SPEC-016-r20-audit.md`; r21 closure narrative: `specs/SPEC-016-r21-audit.md`.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -23,6 +23,102 @@ git-history-only). The change-log entries below are one-liners per
 version pointing at the corresponding audit file. Per
 [[feedback-spec-audit-file-convention]], audit narrative does NOT
 live in this SPEC body.
+
+**v0.1.22 (2026-06-29, draft — issue #165 IMPL follow-up, 3-round
+codex audit converged):**
+Absorbs the two LOW arch advisories deferred from the PR #164 FULL
+audit cycle (see [[tracking-issue-scope-control]]), expanded
+through R1/R2/R3 audit to also close the prefix-starvation
+denial-of-detection class, the SIGHUP-vs-wrapper SPKI-drain
+regression, and the unbounded-materialization risk. §7.1 gains
+three event rows:
+- `payout_stale_outbox_backlog` (severity=WARN) — emitted by the
+  §4.7 step 5 producer when this cycle's PRODUCED outbox row count
+  hit the operator-configured cap (sized from
+  `payout.tuning.max_rows_per_run`) before the candidate set was
+  exhausted, so a backlog remains for future cycles to drain.
+  Repeats every runner cycle while the backlog persists — operators
+  see the gauge per cycle until queue depth falls below cap.
+  Fields: `run_id, limit, produced, total_candidates,
+  scan_ceiling_hit, total_scanned, ts_utc`.
+  `total_candidates` is the REMAINING un-paged backlog AFTER this
+  cycle's production completes (NOT pre-cycle count). A
+  `total_candidates = -1` sentinel signals the operator that the
+  count query itself failed (degraded observability, NOT that there
+  is no backlog). Severity escalates from WARN to PAGE when
+  `scan_ceiling_hit = true` (the defensive runner-cycle scan
+  ceiling of 20000 rows was reached; backlog is deeper than the
+  cycle can drain).
+- `payout_rpc_chronic_outage` (severity=PAGE) — emitted by the
+  chronic-outage tracker when one RPC's error rate exceeds the
+  threshold over the sliding window. Fields: `rpc_label,
+  window_seconds, sample_count, error_count, error_rate,
+  threshold, ts_utc`. Defaults: 10-minute window, 50% threshold,
+  10 minimum samples, 10-minute PAGE cooldown per label. Closes
+  the silent-degradation gap where ONE chronic RPC failure
+  produces no operator event (the §4.4 disagreement detector
+  fires only when BOTH RPCs return AND disagree).
+- `payout_spki_drain_skipped_unsupported_client` (severity=WARN)
+  — emitted when an accepted SPKI pin rotation could NOT drain
+  pooled TLS connections because the current `RPCClient`
+  implementation doesn't expose `CloseIdleConnections()`. Fields:
+  `rpc_label, ts_utc`. Until the idle-conn TTL expires, the OLD
+  pin remains in force on existing connections. Operators MUST
+  rotate again or restart to enforce hardening immediately. Future
+  RPC wrappers MUST forward `CloseIdleConnections()` to remain
+  rotation-safe; this WARN is the canary for that contract.
+IMPL surface: `phase4-coordinator/internal/payout/orphans.go`
+(LIMIT + backlog gauge) and `phase4-coordinator/internal/payout/chronic.go`
+(sliding-window tracker + `TrackingRPCClient` wrapper).
+
+**§4.7 step 5 production cap (NORMATIVE in v0.1.22).** The
+stale-cancel producer's per-cycle PAGE production is capped by
+`payout.tuning.max_rows_per_run` (the same operator config the
+§4.3 step 1 ready-row scan uses). The cap bounds *produced outbox
+rows*, NOT *scanned candidates* — non-actionable candidates
+(missing `tx_hash`, transient RPC error, at-least-one-RPC-still-
+sees-receipt) do not consume the budget; the scan continues past
+them via keyset pagination so persistent non-actionable rows
+cannot indefinitely suppress truly stale cancels from PAGEing.
+The SELECT scans in chunks of 256 rows ordered by
+`(updated_at_utc, payout_id, attempt_seq)` (covered by the
+partial index `idx_pa_stale_cancel_keyset` per migration 0013);
+each chunk advances a strict-tuple cursor so memory stays O(chunk)
+regardless of backlog. A defensive runner-cycle ceiling of
+`staleOutboxScanCeiling = 20000` rows caps total scan work and
+keeps RunOnce wall-time bounded; the final chunk's `LIMIT` is
+clamped to the remaining ceiling so total scanned rows never
+exceed 20000.
+When the production cap is hit before the candidate set is
+exhausted, the producer emits `payout_stale_outbox_backlog` with
+`run_id, limit, produced, total_candidates, scan_ceiling_hit,
+total_scanned, ts_utc`. Severity is `WARN` by default but
+escalates to `PAGE` when `scan_ceiling_hit = true` (the 20000-row
+ceiling was reached — backlog is deeper than this cycle can drain
+and demands operator action). The event repeats every cycle until
+backlog drains under cap. `total_candidates` is the *remaining*
+un-paged candidates AFTER this cycle's production completes (i.e.
+backlog awaiting future cycles); a value of -1 is the sentinel
+emitted when the count query itself fails (degraded observability,
+NOT zero backlog). Operators sizing
+`max_rows_per_run` MUST recognize it as a SHARED budget across §4.3
+step-1 ready-row payment work AND §4.7 step-5 stale-cancel PAGE
+production; lowering the cap reduces both. The cap's normative
+bound remains `[1, 500]` per §payout.tuning.
+
+**§4.4 two-RPC discipline gap closure (NORMATIVE in v0.1.22).** The
+§4.4 disagreement detector fires only when BOTH RPCs return AND
+disagree. A chronic single-RPC failure (network partition, vendor
+outage) is silently swallowed by the runner's degrade-and-retry
+behavior. The `payout_rpc_chronic_outage` PAGE closes that gap:
+every RPC call through the production `TrackingRPCClient` wrapper
+records success/failure into the `ChronicOutageTracker`; an
+independent goroutine ticker drives Evaluate at `min(window/2,
+1min)` (decoupled from `payout.tuning.run_interval` so detection
+stays responsive when operators run the cycle at the [5m, 24h]
+upper bound). The wrapper covers every `RPCClient` interface method
+including `CloseIdleConnections()` so SIGHUP SPKI pin rotation
+still drains pooled TLS connections through the wrapper.
 
 **v0.1.21 (2026-06-25, draft — codex round-21 fix pass on
 v0.1.20):** Round 21 returned NEEDS FIX PASS 0/1/1/1. Fixes:
@@ -3751,6 +3847,9 @@ operator-key endpoints log actor=operator_key):
 | `payout_cancel_self_transfer_confirmed` (severity=INFO; NEW v0.1.14; v0.1.15 clarifies transition-only emission) | `run_id, payout_id, attempt_seq, nonce, tx_hash, block_number, gas_used_native_wei, ts_utc` |
 | `payout_cancel_self_transfer_reconfirm_stale` (severity=PAGE; NEW v0.1.15; v0.1.17 adds `event_id`) | `event_id (=cancel_reconfirm_stale_outbox.id), run_id, payout_id, attempt_seq, nonce, tx_hash, last_seen_block, updated_at_utc, ts_utc` |
 | `payout_stale_outbox_reaped` (severity=WARN; NEW v0.1.17) | `event_id (=cancel_reconfirm_stale_outbox.id), payout_id, attempt_seq, stale_started_at_utc, reap_lag_seconds, ts_utc` |
+| `payout_stale_outbox_backlog` (severity=WARN; escalates to PAGE on `scan_ceiling_hit=true`; NEW v0.1.22) | `run_id, limit, produced, total_candidates, scan_ceiling_hit, total_scanned, ts_utc` |
+| `payout_rpc_chronic_outage` (severity=PAGE; NEW v0.1.22) | `rpc_label, window_seconds, sample_count, error_count, error_rate, threshold, ts_utc` |
+| `payout_spki_drain_skipped_unsupported_client` (severity=WARN; NEW v0.1.22) | `rpc_label, ts_utc` — emitted when an accepted SPKI pin rotation could not drain pooled TLS conns because the RPC client doesn't implement `CloseIdleConnections`. Pooled conns will eventually drain via idle-timeout but until then the OLD pin remains in force on existing connections. |
 
 ### 7.1.1 Where these events live
 
@@ -4395,6 +4494,9 @@ discharged:
    - `payout_cancel_self_transfer_confirmed` (INFO — NEW v0.1.14; OPTIONAL for the alert filter, INFO not PAGE/WARN, but include if operator wants per-cancel visibility)
    - `payout_cancel_self_transfer_reconfirm_stale` (PAGE — NEW v0.1.15)
    - `payout_stale_outbox_reaped` (WARN — NEW v0.1.17)
+   - `payout_stale_outbox_backlog` (WARN — NEW v0.1.22; A1: §4.7 step 5 production capped before candidate set exhausted)
+   - `payout_rpc_chronic_outage` (PAGE — NEW v0.1.22; A2: per-RPC sliding-window error rate crossed threshold)
+   - `payout_spki_drain_skipped_unsupported_client` (WARN — NEW v0.1.22; verify per `rpc_label` value: `primary` AND `secondary`)
    - `provider_payout_address_change_rejected` (WARN)
    - `provider_payout_address_rejected_unknown_provider` (WARN)
 
@@ -4525,6 +4627,28 @@ fresh session after this v0.1.x merges. That prompt will:
   shouldn't see directly). The boolean is computed
   server-side as `registered_against_hot_wallet ==
   payout.security.hot_wallet_address`.
+- SPEC-016 v0.2 candidate (#165 R4 arch LOW closure):
+  revisit the defensive `staleOutboxScanCeiling = 20000`
+  cap on the §4.7 step-5 producer. Trigger conditions:
+  sustained `payout_stale_outbox_backlog scan_ceiling_hit=true`
+  observations in production OR provider count / cancel
+  backlog depth grows enough that 20000 rows per cycle is
+  no longer comfortable headroom. Decision options:
+  (a) raise the ceiling (cheap if `idx_pa_stale_cancel_keyset`
+  scales linearly), (b) shorten the runner cycle, (c) split
+  to a dedicated stale-cancel reconciliation worker
+  (heaviest; only if the producer cycle starts blowing past
+  its wall-clock budget). v0.1.22 ships with 20000 because
+  it's well above expected v0.1 scale.
+- SPEC-016 v0.2 candidate (#165 R4 sec MEDIUM closure):
+  add a build-time CI check that enforces SPEC §7.1 +
+  SPEC §9 alert-filter + `dist/payout-runbook.md` §3 stay
+  in sync with the code's emit-event-name set. Currently
+  each must be hand-edited per release; the v0.1.22 audit
+  required four parallel edits to land
+  `payout_spki_drain_skipped_unsupported_client`. A
+  reflection-based or `go generate`-based check would
+  catch drift at PR time.
 - SPEC-016 v0.2 (filed by v0.1.7 round-8 SEC-MED): replace
   the one-table-at-a-time same-DB pins (`provider_payout_
   addresses` in §3.1; `payout_reorg_orphans` in §4.7;

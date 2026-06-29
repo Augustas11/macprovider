@@ -353,6 +353,15 @@ func main() {
 		if payoutS2.chainWorker != nil {
 			payoutS2.chainWorker.Start(shutdownCtx)
 		}
+		// #165 R1 architect HIGH closure: drive the chronic-outage
+		// Evaluate on a window-internal cadence independent of the
+		// runner ticker. RunInterval can be up to 24h per §6.5 but
+		// the tracker window defaults to 10min, so per-cycle Evaluate
+		// would prune samples before observing them. Run() ticks at
+		// min(window/2, 1min).
+		if payoutS2.chronic != nil {
+			go payoutS2.chronic.Run(shutdownCtx)
+		}
 		// Step 4 §6.5 SIGHUP-only payout.tuning.* reload. Reading
 		// the YAML on SIGHUP MUST NOT touch payout.security.* (the
 		// loader is read-only on the security namespace); the
@@ -628,6 +637,7 @@ type payoutStep2 struct {
 	chainWorker *payout.ChainBalanceWorker // Step 4 §7.4
 	tuning      *payout.TuningProvider     // Step 4 §6.5 SIGHUP-reloadable
 	rpcs        payout.TwoRPCs             // Step 4 r3 [sec:r3-1] SPKI pin rotation: CloseIdleConnections on SIGHUP
+	chronic     *payout.ChronicOutageTracker // #165 A2 — per-RPC sliding-window error tracker; Run() goroutine drives Evaluate
 	stop        func(context.Context)      // calls Stop on every component then Release
 }
 
@@ -729,17 +739,24 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 	// Step 4 r2 [arch:r2-4.2] MAJOR closure: pin is now func() string
 	// reading the live TuningProvider snapshot so SIGHUP SPKI rotations
 	// take effect at the next TLS handshake (not just accepted and logged).
+	// #165 A2: chronic-outage tracker wraps both RPC clients so every
+	// JSON-RPC call records success/failure into a sliding-window
+	// detector. Runner evaluates per cycle and emits
+	// payout_rpc_chronic_outage PAGE if either RPC's per-label error
+	// rate crosses the threshold. Tracker uses SPEC defaults (10min
+	// window / 50% threshold / 10 minSamples / 10min PAGE cooldown).
+	chronicTracker := payout.NewChronicOutageTracker(logger, nil)
 	rpcs := payout.TwoRPCs{
-		Primary: payout.NewHTTPRPCClient(
+		Primary: payout.NewTrackingRPCClient(payout.NewHTTPRPCClient(
 			cfg.Payout.Security.RPCURLPrimary, "primary",
 			func() string { return tuningProvider.Snapshot().RPCURLPrimaryPinSPKI },
 			20*time.Second,
-		),
-		Secondary: payout.NewHTTPRPCClient(
+		), chronicTracker),
+		Secondary: payout.NewTrackingRPCClient(payout.NewHTTPRPCClient(
 			cfg.Payout.Security.RPCURLSecondary, "secondary",
 			func() string { return tuningProvider.Snapshot().RPCURLSecondaryPinSPKI },
 			20*time.Second,
-		),
+		), chronicTracker),
 	}
 	rpcCtx, rpcCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer rpcCancel()
@@ -817,6 +834,7 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		LowBalanceThreshold:   cfg.Payout.Tuning.LowBalanceThreshold,
 		LowNativeThreshold:    cfg.Payout.Tuning.LowNativeThreshold,
 		Tuning:                tuningProvider,
+		ChronicOutage:         chronicTracker,
 	}, state)
 	if err != nil {
 		// Release the lease on construction failure so the next
@@ -1002,6 +1020,7 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		chainWorker: chainWorker,
 		tuning:      tuningProvider,
 		rpcs:        rpcs,
+		chronic:     chronicTracker,
 		stop: func(stopCtx context.Context) {
 			// Codex Step 3 r1 [arch:3.1] MAJOR closure: shutdown
 			// ordering is runner → poller → reaper → Release.
@@ -1413,14 +1432,38 @@ func startPayoutSIGHUPListener(
 				// connection alive after operators believe the new pin is
 				// active. Called only on accepted reloads where the pin key
 				// actually changed; no-op for non-SPKI reload cycles.
+				// #165 R1/R2 code/arch HIGH+MEDIUM (convergent): assert
+				// on a CloseIdleConnections-shaped interface so the
+				// SPKI reload drain still fires through the chronic-
+				// outage TrackingRPCClient wrapper. Both
+				// *payout.HTTPRPCClient and *trackingRPC implement
+				// this method. The miss-branch logs at WARN so a
+				// future RPCClient implementation that lacks the
+				// method is operator-visible at SPKI rotation time
+				// (rather than silently failing to drain).
+				type idleCloser interface{ CloseIdleConnections() }
 				for _, k := range changedKeys {
 					if k == "payout.tuning.rpc_url_primary_pin_spki" ||
 						k == "payout.tuning.rpc_url_secondary_pin_spki" {
-						if rpc, ok := rpcs.Primary.(*payout.HTTPRPCClient); ok {
+						if rpc, ok := rpcs.Primary.(idleCloser); ok {
 							rpc.CloseIdleConnections()
+						} else {
+							log.Warn().
+								Str("event", "payout_spki_drain_skipped_unsupported_client").
+								Str("rpc_label", "primary").
+								Str("severity", "WARN").
+								Str("ts_utc", time.Now().UTC().Format(time.RFC3339Nano)).
+								Msg("SPKI pin rotated but primary RPC client does not implement CloseIdleConnections — pooled TLS conns survive the rotation")
 						}
-						if rpc, ok := rpcs.Secondary.(*payout.HTTPRPCClient); ok {
+						if rpc, ok := rpcs.Secondary.(idleCloser); ok {
 							rpc.CloseIdleConnections()
+						} else {
+							log.Warn().
+								Str("event", "payout_spki_drain_skipped_unsupported_client").
+								Str("rpc_label", "secondary").
+								Str("severity", "WARN").
+								Str("ts_utc", time.Now().UTC().Format(time.RFC3339Nano)).
+								Msg("SPKI pin rotated but secondary RPC client does not implement CloseIdleConnections — pooled TLS conns survive the rotation")
 						}
 						break
 					}

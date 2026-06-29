@@ -383,10 +383,33 @@ func (s *OrphansService) emitOrphanResolved(orphanID int64, resolution, reason s
 // a zero-value TwoRPCs (i.e. nil clients) disables the producer
 // entirely and returns (0, nil); tests use this path to avoid
 // wiring mock RPCs when the producer is not under test.
+//
+// limit bounds the per-cycle PRODUCED outbox row count (#165 A1:
+// derived from snap.MaxRowsPerRun). The SCAN is bounded only by
+// the WHERE predicate (un-paged cancel-self-transfer rows older
+// than the stale cutoff) and traversed in keyset-paginated chunks
+// of staleOutboxChunkSize so memory stays O(chunk) regardless of
+// backlog size. A defensive runner-cycle ceiling of
+// staleOutboxScanCeiling rows caps total scan work; reaching it
+// promotes the backlog WARN to PAGE severity. Non-actionable
+// candidates (no tx_hash, transient RPC error, one-RPC-still-
+// sees-receipt) do NOT consume the production limit — they're
+// silently skipped and re-evaluated next cycle (their
+// updated_at_utc doesn't advance, so they stay in the candidate
+// set under cursor).
+//
+// A limit <= 0 is treated as "no production cap" (back-compat for
+// any caller wiring a zero-value MaxRowsPerRun before the snapshot
+// bound check fires).
+//
+// When production is capped before the candidate set is exhausted
+// the producer emits a payout_stale_outbox_backlog WARN with the
+// remaining-un-paged backlog count so operators can see drain
+// progress; subsequent cycles continue.
 func ProduceStaleOutboxRows(
 	ctx context.Context, db *sql.DB, log zerolog.Logger,
 	rpcs TwoRPCs, runID string,
-	now time.Time, runInterval time.Duration,
+	now time.Time, runInterval time.Duration, limit int,
 ) (int, error) {
 	if rpcs.Primary == nil || rpcs.Secondary == nil {
 		// Producer disabled — typically a test path. The reaper
@@ -394,7 +417,74 @@ func ProduceStaleOutboxRows(
 		return 0, nil
 	}
 	cutoff := now.Add(-3 * runInterval).UTC().Format(time.RFC3339Nano)
-	rows, err := db.QueryContext(ctx, `
+	// #165 R1+R2+R3 SECURITY HIGH closure: bound the PRODUCED outbox
+	// row count, NOT the scanned candidate set. Non-actionable skip
+	// branches (empty tx_hash, RPC error, one-RPC-still-sees-receipt)
+	// persist in the candidate set across cycles (updated_at_utc
+	// doesn't advance on skip), so any *tight* ceiling on scanned
+	// rows reintroduces prefix-starvation denial-of-detection.
+	//
+	// R3 SEC HIGH closure refines this further: load via keyset
+	// pagination in chunks of staleOutboxChunkSize so memory stays
+	// bounded at O(chunk) regardless of pathological backlog, and
+	// terminate as soon as `produced == limit` (zero wasted scan
+	// past the production cap). A defensive hard ceiling
+	// staleOutboxScanCeiling caps total cycle scan rows to prevent
+	// runaway scans from blowing past the runner cycle budget; when
+	// hit, the producer emits payout_stale_outbox_backlog WARN with
+	// scan_ceiling_hit=true so operators see the emergency.
+	const (
+		staleOutboxChunkSize     = 256
+		staleOutboxScanCeiling   = 20000
+	)
+	type cand struct {
+		PayoutID         int64
+		AttemptSeq       int
+		Nonce            int64
+		TxHash           sql.NullString
+		BlockNumber      sql.NullInt64
+		ReorgReactivated string
+	}
+
+	produced := 0
+	scannedAll := true
+	scanCeilingHit := false
+	totalScanned := 0
+	var (
+		cursorUpdated   = ""
+		cursorPayoutID  int64
+		cursorAttemptSeq int
+		firstChunk      = true
+	)
+	staleStarted := now.UTC().Format(time.RFC3339Nano)
+
+chunkLoop:
+	for {
+		if totalScanned >= staleOutboxScanCeiling {
+			scanCeilingHit = true
+			scannedAll = false
+			break
+		}
+		// #165 R4 code LOW closure: clamp the chunk LIMIT to the
+		// remaining ceiling so we never scan past
+		// staleOutboxScanCeiling rows in a single cycle (R4 audit
+		// flagged a 20224-row worst case at chunk 256 + ceiling
+		// 20000 — off by one chunk).
+		chunkLimit := staleOutboxChunkSize
+		if remaining := staleOutboxScanCeiling - totalScanned; remaining < chunkLimit {
+			chunkLimit = remaining
+		}
+		// Keyset query: portable strict-tuple-ordering form
+		// `(updated_at_utc > ?) OR (... = ? AND payout_id > ?) OR
+		// (... = ? AND ... = ? AND attempt_seq > ?)`. Works on all
+		// SQLite versions in the project's mattn/go-sqlite3 line.
+		var (
+			chunk      []cand
+			rows       *sql.Rows
+			queryErr   error
+		)
+		if firstChunk {
+			rows, queryErr = db.QueryContext(ctx, `
 SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
   FROM payout_attempts
  WHERE is_cancel_self_transfer = 1
@@ -404,36 +494,66 @@ SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
    AND cancel_reconfirm_stale_paged_at_utc IS NULL
    AND abandoned_at_utc IS NULL
    AND updated_at_utc < ?
- ORDER BY updated_at_utc ASC`, cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("ProduceStaleOutboxRows: SELECT: %w", err)
-	}
-	type cand struct {
-		PayoutID         int64
-		AttemptSeq       int
-		Nonce            int64
-		TxHash           sql.NullString
-		BlockNumber      sql.NullInt64
-		ReorgReactivated string
-	}
-	var candidates []cand
-	for rows.Next() {
-		var c cand
-		if err := rows.Scan(&c.PayoutID, &c.AttemptSeq, &c.Nonce,
-			&c.TxHash, &c.BlockNumber, &c.ReorgReactivated); err != nil {
-			rows.Close()
-			return 0, err
+ ORDER BY updated_at_utc ASC, payout_id ASC, attempt_seq ASC
+ LIMIT ?`, cutoff, chunkLimit)
+		} else {
+			rows, queryErr = db.QueryContext(ctx, `
+SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
+  FROM payout_attempts
+ WHERE is_cancel_self_transfer = 1
+   AND raw_signed_tx IS NOT NULL
+   AND broadcast_at_utc IS NOT NULL
+   AND confirmed_at_utc IS NULL
+   AND cancel_reconfirm_stale_paged_at_utc IS NULL
+   AND abandoned_at_utc IS NULL
+   AND updated_at_utc < ?
+   AND (
+        updated_at_utc > ?
+     OR (updated_at_utc = ? AND payout_id > ?)
+     OR (updated_at_utc = ? AND payout_id = ? AND attempt_seq > ?)
+   )
+ ORDER BY updated_at_utc ASC, payout_id ASC, attempt_seq ASC
+ LIMIT ?`,
+				cutoff,
+				cursorUpdated,
+				cursorUpdated, cursorPayoutID,
+				cursorUpdated, cursorPayoutID, cursorAttemptSeq,
+				chunkLimit,
+			)
 		}
-		candidates = append(candidates, c)
-	}
-	rows.Close()
-
-	produced := 0
-	staleStarted := now.UTC().Format(time.RFC3339Nano)
-	for _, c := range candidates {
-		if ctx.Err() != nil {
-			return produced, ctx.Err()
+		firstChunk = false
+		if queryErr != nil {
+			return produced, fmt.Errorf("ProduceStaleOutboxRows: SELECT: %w", queryErr)
 		}
+		for rows.Next() {
+			var c cand
+			if err := rows.Scan(&c.PayoutID, &c.AttemptSeq, &c.Nonce,
+				&c.TxHash, &c.BlockNumber, &c.ReorgReactivated); err != nil {
+				rows.Close()
+				return produced, err
+			}
+			chunk = append(chunk, c)
+		}
+		rows.Close()
+		if len(chunk) == 0 {
+			break
+		}
+		// Advance cursor to the LAST row in this chunk before
+		// processing — even on per-row early return / break, the
+		// next cycle resumes past this chunk.
+		last := chunk[len(chunk)-1]
+		cursorUpdated = last.ReorgReactivated
+		cursorPayoutID = last.PayoutID
+		cursorAttemptSeq = last.AttemptSeq
+		totalScanned += len(chunk)
+		for _, c := range chunk {
+			if ctx.Err() != nil {
+				return produced, ctx.Err()
+			}
+			if limit > 0 && produced >= limit {
+				scannedAll = false
+				break chunkLoop
+			}
 		// Codex Step 3 r2 [arch:r2-3.2-A] MAJOR closure: SPEC §4.7
 		// requires BOTH RPCs to still return "not found" before
 		// the stale PAGE fires. A cancel that one of the two
@@ -565,6 +685,57 @@ SELECT id FROM cancel_reconfirm_stale_outbox
 				})
 			}
 		}
+		} // close inner per-row range
+		if len(chunk) < chunkLimit {
+			// Drained — no more candidates past the cursor.
+			break
+		}
+	} // close chunkLoop
+
+	// #165 A1 backlog gauge. Emit payout_stale_outbox_backlog WARN
+	// when production was capped before the candidate set was
+	// exhausted (limit > 0 AND produced == limit AND we broke early)
+	// OR when the defensive scan ceiling was hit (true emergency:
+	// backlog is so deep the producer can't drain it under cycle
+	// budget). The event repeats every runner cycle while backlog
+	// persists — intentionally, so the operator sees the gauge each
+	// cycle until the queue drains under cap.
+	productionCapped := limit > 0 && produced >= limit && !scannedAll
+	if productionCapped || scanCeilingHit {
+		var total int
+		if err := db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+  FROM payout_attempts
+ WHERE is_cancel_self_transfer = 1
+   AND raw_signed_tx IS NOT NULL
+   AND broadcast_at_utc IS NOT NULL
+   AND confirmed_at_utc IS NULL
+   AND cancel_reconfirm_stale_paged_at_utc IS NULL
+   AND abandoned_at_utc IS NULL
+   AND updated_at_utc < ?`, cutoff).Scan(&total); err != nil {
+			// COUNT failure is observability-only; degrade to a
+			// cap-hit signal (total=-1 sentinel) rather than
+			// stalling the producer.
+			total = -1
+		}
+		// Severity is PAGE when scan_ceiling_hit (true emergency:
+		// backlog exceeds the defensive runner-cycle scan budget) and
+		// WARN otherwise (normal cap-throttled drain in progress).
+		severity := "WARN"
+		if scanCeilingHit {
+			severity = "PAGE"
+		}
+		log.Warn().
+			Str("event", "payout_stale_outbox_backlog").
+			Str("run_id", runID).
+			Int("limit", limit).
+			Int("produced", produced).
+			Int("total_candidates", total).
+			Bool("scan_ceiling_hit", scanCeilingHit).
+			Int("total_scanned", totalScanned).
+			Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
+			Str("severity", severity).
+			Send()
 	}
 	return produced, nil
 }
