@@ -4,6 +4,33 @@ import XCTest
 @testable import macprovider_cli
 
 final class AutoUpdateTests: XCTestCase {
+    func testFailureClassEnumMatchesSpecR65() {
+        XCTAssertEqual(AutoUpdateFailureClass.allCases.map(\.rawValue), [
+            "rollback_observer_unavailable",
+            "target_release_not_found",
+            "release_asset_missing",
+            "recommended_version_invalid",
+            "version_too_long",
+            "version_component_too_long",
+            "autoupdate_already_pending",
+            "orphaned_pending_marker",
+            "orphaned_success_sentinel",
+            "rollback_backup_corrupt",
+            "target_revoked_or_below_minimum",
+            "signature_invalid",
+            "checksum_mismatch",
+            "self_test_failed",
+            "drain_timeout",
+            "trust_state_lost",
+            "post_start_crash",
+            "post_start_health_failed",
+            "post_start_rejoin_timeout",
+            "insufficient_disk_space",
+            "event_payload_too_large",
+            "other",
+        ])
+    }
+
     func testRecommendedVersionValidationNormalizesAndRejectsOversize() throws {
         XCTAssertEqual(try AutoUpdateRecommendation.validate("v1.7.0").normalized, "1.7.0")
         XCTAssertEqual(try AutoUpdateRecommendation.validate("V1.7.0").normalized, "1.7.0")

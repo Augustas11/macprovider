@@ -6,16 +6,16 @@ enum AutoUpdateError: Error, CustomStringConvertible {
     case trustStateLost(String)
     case drainTimeout
     case observerUnavailable
-    case unsupportedInstallTopology
     case currentBinaryUnknown
+    case other(String)
 
     var description: String {
         switch self {
         case let .trustStateLost(reason): return "autoupdate trust state lost: \(reason)"
         case .drainTimeout: return "autoupdate drain timed out"
         case .observerUnavailable: return "rollback observer unavailable"
-        case .unsupportedInstallTopology: return "unsupported install topology"
         case .currentBinaryUnknown: return "current binary unknown"
+        case let .other(reason): return reason
         }
     }
 }
@@ -123,7 +123,7 @@ struct AutoUpdater: Sendable {
                 return
             }
             guard launchdProviderAvailable() else {
-                await fail(updateID: updateID, target: target, phase: .eligibility, failure: .unsupportedInstallTopology, reason: "unsupported_install_topology")
+                await fail(updateID: updateID, target: target, phase: .eligibility, failure: .other, reason: "unsupported_install_topology")
                 return
             }
             guard rollbackObserverAvailable() else {
@@ -189,7 +189,7 @@ struct AutoUpdater: Sendable {
             }
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .trustStateLost, reason: reason)
         } catch is AutoUpdateSignedPolicyPersistError {
-            markerStore.recordCooldown(target: target, failureClass: .signedPolicyPersistFailed)
+            markerStore.recordCooldown(target: target, failureClass: .other)
         } catch {
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .other, reason: Self.redactedReason(for: error))
         }
@@ -317,8 +317,8 @@ struct AutoUpdater: Sendable {
             return "signed_policy_persist_failed"
         case AutoUpdateError.observerUnavailable:
             return "rollback_observer_unavailable"
-        case AutoUpdateError.unsupportedInstallTopology:
-            return "unsupported_install_topology"
+        case AutoUpdateError.other(let reason):
+            return reason
         default:
             return String(describing: error).prefix(64).description
         }
@@ -362,7 +362,7 @@ struct AutoUpdater: Sendable {
         let plist = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
         guard FileManager.default.fileExists(atPath: plist.path) else {
-            throw AutoUpdateError.unsupportedInstallTopology
+            throw AutoUpdateError.other("unsupported_install_topology")
         }
         let domain = "gui/\(getuid())"
         try runProcess("/bin/launchctl", arguments: ["bootout", domain, "live.streamvc.macprovider"], allowFailure: true)

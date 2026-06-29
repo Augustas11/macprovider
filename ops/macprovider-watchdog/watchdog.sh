@@ -514,8 +514,10 @@ try:
     try:
         restore(marker)
     except Exception as exc:
-        failure_class = "unsupported_install_topology" if str(exc).startswith("unsupported_install_topology") else "rollback_backup_corrupt"
-        event("failure", "rollback", failure_class, str(exc), marker)
+        unsupported_topology = str(exc).startswith("unsupported_install_topology")
+        failure_class = "other" if unsupported_topology else "rollback_backup_corrupt"
+        reason = "unsupported_install_topology" if unsupported_topology else str(exc)
+        event("failure", "rollback", failure_class, reason, marker)
         quarantine(str(exc), marker)
 except Exception as exc:
     log(f"recovery_error={exc}")

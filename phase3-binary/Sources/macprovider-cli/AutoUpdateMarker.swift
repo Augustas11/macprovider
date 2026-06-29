@@ -410,9 +410,9 @@ struct AutoUpdateMarkerStore: Sendable {
                 targetVersion: marker?.targetVersion ?? "<unknown>",
                 phase: .swap,
                 outcome: .failure,
-                reason: String(describing: error).prefix(128).description,
+                reason: "signed_policy_persist_failed",
                 attempt: 1,
-                failureClass: .signedPolicyPersistFailed
+                failureClass: .other
             ))
             SessionAutoupdateGate.shared.disable(reason: "signed_policy_persist_failed")
             throw AutoUpdateSignedPolicyPersistError(underlying: String(describing: error).prefix(128).description)
