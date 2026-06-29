@@ -10,13 +10,15 @@ final class StreamingIdleTimeoutValidatesBufferTests: XCTestCase {
 
         let result = try ModelRuntime.synthesizeIdleTimeoutResultOrThrow(
             accumulator: accumulator,
-            request: request
+            request: request,
+            modelHash: String(repeating: "a", count: 64)
         )
 
         XCTAssertEqual(result.content, #"{"age":37}"#)
         XCTAssertEqual(result.finishReason, "stop")
         XCTAssertEqual(result.promptTokens, 0)
         XCTAssertEqual(result.completionTokens, 0)
+        XCTAssertEqual(result.modelHashObserved, String(repeating: "a", count: 64))
     }
 
     func testIdleBreachValidatesBufferAndThrowsWhenInvalid() throws {
@@ -26,7 +28,8 @@ final class StreamingIdleTimeoutValidatesBufferTests: XCTestCase {
 
         XCTAssertThrowsError(try ModelRuntime.synthesizeIdleTimeoutResultOrThrow(
             accumulator: accumulator,
-            request: request
+            request: request,
+            modelHash: nil
         )) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 504)
@@ -48,7 +51,8 @@ final class StreamingIdleTimeoutValidatesBufferTests: XCTestCase {
             onIdleTimeout: {
                 try ModelRuntime.synthesizeIdleTimeoutResultOrThrow(
                     accumulator: accumulator,
-                    request: request
+                    request: request,
+                    modelHash: nil
                 )
             },
             operation: { idleCancellation in
@@ -88,7 +92,8 @@ final class StreamingIdleTimeoutValidatesBufferTests: XCTestCase {
                 onIdleTimeout: {
                     try ModelRuntime.synthesizeIdleTimeoutResultOrThrow(
                         accumulator: accumulator,
-                        request: request
+                        request: request,
+                        modelHash: nil
                     )
                 },
                 operation: { _ in
@@ -101,5 +106,63 @@ final class StreamingIdleTimeoutValidatesBufferTests: XCTestCase {
             retryable: false
         )
         XCTAssertFalse(drainToken.isFired)
+    }
+
+    // AC-V2-9 buffer-as-of-close: if the operation task fails to mark
+    // markOperationStopped() within the bounded wait budget after idle
+    // cancellation fires, the watcher MUST fail closed with
+    // provider_timeout rather than read a possibly-stale accumulator
+    // snapshot. Tests the (C) decision in r3-IMPL absorption (lane
+    // A-r3-M-1).
+    func testIdleBreachFailsClosedWhenOperationStopBudgetExhausted() async throws {
+        let request = try streamingRequest(responseFormat: integerAgeResponseFormat())
+        let accumulator = StructuredStreamingContentAccumulator(enabled: true)
+        XCTAssertNil(accumulator.append(#"{"age":37}"#))
+        let idleState = StructuredStreamingIdleState(enabled: true)
+        let onIdleCalled = OnIdleCalledFlag()
+
+        await XCTAssertStreamingAPIError(
+            try await ModelRuntime.withStructuredStreamingIdleTimeout(
+                idleState: idleState,
+                timeout: 0.001,
+                pollNanoseconds: 1_000_000,
+                onIdleTimeout: {
+                    onIdleCalled.fire()
+                    return try ModelRuntime.synthesizeIdleTimeoutResultOrThrow(
+                        accumulator: accumulator,
+                        request: request,
+                        modelHash: nil
+                    )
+                },
+                operation: { idleCancellation in
+                    // Simulate a hung operation: never markOperationStopped,
+                    // never return. Must yield to idle cancellation but
+                    // refuse to stop within the 100ms budget.
+                    while !idleCancellation.isFired {
+                        try await Task.sleep(nanoseconds: 1_000_000)
+                    }
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                    return CompletionResult(content: "late", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                }
+            ),
+            status: 504,
+            code: "provider_timeout",
+            retryable: false
+        )
+        XCTAssertFalse(onIdleCalled.isFired, "onIdleTimeout must NOT fire when operation-stop budget exhausted; otherwise the watcher would read a possibly-stale accumulator snapshot and emit buyer-visible success on a buffer the spec says is in-flux.")
+    }
+}
+
+private final class OnIdleCalledFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired_ = false
+    func fire() {
+        lock.lock()
+        fired_ = true
+        lock.unlock()
+    }
+    var isFired: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return fired_
     }
 }

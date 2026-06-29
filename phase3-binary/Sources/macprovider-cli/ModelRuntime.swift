@@ -685,7 +685,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 onIdleTimeout: {
                     try Self.synthesizeIdleTimeoutResultOrThrow(
                         accumulator: structuredAccumulator,
-                        request: request
+                        request: request,
+                        modelHash: snapshot.modelHash
                     )
                 }
             ) { idleCancellation in
@@ -1138,7 +1139,8 @@ actor ModelRuntime: ModelRuntimeServing {
 
     static func synthesizeIdleTimeoutResultOrThrow(
         accumulator: StructuredStreamingContentAccumulator,
-        request: ChatCompletionRequest
+        request: ChatCompletionRequest,
+        modelHash: String?
     ) throws -> CompletionResult {
         let content = accumulator.content
         let synthetic = CompletionResult(
@@ -1148,7 +1150,7 @@ actor ModelRuntime: ModelRuntimeServing {
             completionTokens: 0,
             ttftMilliseconds: 0,
             toolCalls: nil,
-            modelHashObserved: nil
+            modelHashObserved: validObservedModelHash(modelHash)
         )
         do {
             return try validateStructuredStreamingCompletion(
@@ -1199,7 +1201,17 @@ actor ModelRuntime: ModelRuntimeServing {
                     if idleState.hasTimedOut(timeout: timeout) {
                         idleState.markTimedOut()
                         idleCancellation.fire()
-                        await Self.waitForStructuredStreamingOperationStopped(idleState)
+                        // AC-V2-9 buffer-as-of-close: if the operation
+                        // task does not stop within the wait budget we
+                        // cannot guarantee a clean snapshot ("close"
+                        // event happened, but the accumulator may
+                        // still be in flux). Fail closed with
+                        // provider_timeout rather than emit a possibly-
+                        // stale validation result.
+                        let stoppedCleanly = await Self.waitForStructuredStreamingOperationStopped(idleState)
+                        if !stoppedCleanly {
+                            throw Self.structuredStreamingProviderTimeoutError()
+                        }
                         return .idle(try onIdleTimeout())
                     }
                 }
@@ -1231,12 +1243,13 @@ actor ModelRuntime: ModelRuntimeServing {
         _ idleState: StructuredStreamingIdleState,
         maxNanoseconds: UInt64 = 100_000_000,
         pollNanoseconds: UInt64 = 10_000_000
-    ) async {
+    ) async -> Bool {
         var waited: UInt64 = 0
         while !idleState.operationStopped && waited < maxNanoseconds {
             try? await Task.sleep(nanoseconds: pollNanoseconds)
             waited += pollNanoseconds
         }
+        return idleState.operationStopped
     }
 
     private static func waitForStructuredStreamingIdleFinish(
