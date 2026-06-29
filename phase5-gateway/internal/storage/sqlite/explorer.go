@@ -333,20 +333,39 @@ func (s *Store) ExplorerSessionDetail(ctx context.Context, accountID, requestID 
 }
 
 // explorerAccountIDsForRequest returns the distinct account_id set
-// for a given request_id across all three session-detail tables
-// (usage_events, quota_reservations, concurrency_reservations). All
-// three are keyed by (account_id, request_id) and can independently
-// carry rows for cross-account collisions, so the ambiguity check
-// must union them. ISS-196 R2 architect HIGH.
+// for a given request_id across ALL five account-keyed session-detail
+// tables (usage_events, quota_reservations, concurrency_reservations,
+// feedback_events, audit_events). All five are keyed by
+// (account_id, request_id) and can independently carry rows for
+// cross-account collisions, so the ambiguity check must union them.
+// ISS-196 R2 architect HIGH originally identified the first three;
+// ISS-212 R2 security MEDIUM extended the union to feedback_events
+// and audit_events — buyer-attachable feedback can otherwise
+// cross-pollinate a 200 response on the unscoped path without
+// triggering 409.
 func (s *Store) explorerAccountIDsForRequest(ctx context.Context, requestID string) ([]string, error) {
+	// Filter empty-string account_id from every branch:
+	// - audit_events.account_id is `TEXT NOT NULL DEFAULT ''`; many
+	//   gateway audit insert paths (OAuth callbacks, admin actions,
+	//   etc.) write rows without an account_id, which would otherwise
+	//   appear here as a bogus matched account `""`.
+	// - usage_events / quota_reservations / concurrency_reservations /
+	//   feedback_events all carry account_id NOT NULL but in
+	//   practice always non-empty; the filter is defensive against
+	//   future writers that might fall back to empty string.
+	// ISS-212 R3 code MEDIUM.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT account_id FROM (
-			SELECT account_id FROM usage_events WHERE request_id = ?
+			SELECT account_id FROM usage_events WHERE request_id = ? AND account_id != ''
 			UNION
-			SELECT account_id FROM quota_reservations WHERE request_id = ?
+			SELECT account_id FROM quota_reservations WHERE request_id = ? AND account_id != ''
 			UNION
-			SELECT account_id FROM concurrency_reservations WHERE request_id = ?
-		) ORDER BY account_id`, requestID, requestID, requestID)
+			SELECT account_id FROM concurrency_reservations WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM feedback_events WHERE request_id = ? AND account_id != ''
+			UNION
+			SELECT account_id FROM audit_events WHERE request_id = ? AND account_id != ''
+		) ORDER BY account_id`, requestID, requestID, requestID, requestID, requestID)
 	if err != nil {
 		return nil, err
 	}

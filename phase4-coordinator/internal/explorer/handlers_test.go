@@ -120,23 +120,120 @@ func TestAC07_SessionDetailIncludesLocalAndGatewayData(t *testing.T) {
 	}
 }
 
-func TestSessionDetailGatewayOnlyReturnsEmptyLocalArrays(t *testing.T) {
-	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+// TestSessionDetailGatewayProxyUsesExternalRequestIDAndAccountID pins
+// the ISS-212 v0.3 §5.6 security contract: when the coordinator
+// resolves the path-segment as an internal request_id and the
+// resolved request_log row carries an external_request_id and
+// account_id, the gateway proxy URL MUST be
+// /admin/explorer/sessions/{external_request_id}?account_id=<account_id>.
+// Forwarding the coordinator-internal id risks the gateway
+// interpreting it as a buyer-supplied X-Request-ID and returning a
+// wrong-account 200 (ISS-212 R3 security MEDIUM).
+func TestSessionDetailGatewayProxyUsesExternalRequestIDAndAccountID(t *testing.T) {
+	h, db := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO request_log (ts_utc, request_id, external_request_id, account_id, model, latency_ms, routing_ms, status, stream)
+		 VALUES (?, ?, ?, ?, ?, 0, 0, ?, 0)`,
+		fixedExplorerTime().Format(time.RFC3339Nano), "coord-internal-uuid-aaaa", "buyer-supplied-X", "acct_A", "llama", http.StatusOK); err != nil {
+		t.Fatalf("seed request_log: %v", err)
+	}
+	// Use RequestURI (not URL.Path) so a buggy implementation that
+	// path-escapes the `?` is caught here, not silently rendered
+	// as a decoded path that looks correct in the test.
+	var capturedRequestURI string
+	var capturedRawPath string
+	var capturedRawQuery string
 	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		capturedRawPath = r.URL.EscapedPath()
+		capturedRawQuery = r.URL.RawQuery
+		capturedRequestURI = capturedRawPath
+		if capturedRawQuery != "" {
+			capturedRequestURI += "?" + capturedRawQuery
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"request_id":"req_gateway_only","usage_event":{"request_id":"req_gateway_only"},"partial":false,"error":null}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"request_id":"buyer-supplied-X","partial":false,"error":null}`)),
 		}, nil
 	})}
-	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/req_gateway_only", "operator-key")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/coord-internal-uuid-aaaa", "operator-key")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	for _, want := range []string{`"attempts":[]`, `"ledger_rows":[]`, `"provider_identity_snapshots":[]`, `"req_gateway_only"`} {
-		if !strings.Contains(resp.Body.String(), want) {
-			t.Fatalf("gateway-only detail missing %q: %s", want, resp.Body.String())
-		}
+	// Wire-level assertions — the `?` MUST be a real query separator,
+	// not a path-escaped `%3F`. Catching the R4 false-positive class:
+	// a regression that drops account_id into URL.Path would have
+	// URL.EscapedPath include `%3Faccount_id%3Dacct_A` and
+	// URL.RawQuery be empty.
+	wantPath := "/admin/explorer/sessions/buyer-supplied-X"
+	wantQuery := "account_id=acct_A"
+	if capturedRawPath != wantPath {
+		t.Fatalf("gateway proxy escaped path = %q, want %q (issue #212 v0.3 §5.6: external_request_id in path)", capturedRawPath, wantPath)
+	}
+	if capturedRawQuery != wantQuery {
+		t.Fatalf("gateway proxy raw query = %q, want %q (issue #212 v0.3 §5.6: account_id MUST be a real query parameter, not path-escaped)", capturedRawQuery, wantQuery)
+	}
+	if capturedRequestURI != wantPath+"?"+wantQuery {
+		t.Fatalf("gateway proxy request-URI = %q, want %q", capturedRequestURI, wantPath+"?"+wantQuery)
+	}
+}
+
+// TestSessionDetailGatewayProxySkippedOnIncompleteIdentity pins the
+// ISS-212 R4 security MEDIUM: when the coordinator-resolved row
+// lacks either external_request_id or account_id (legacy /
+// pre-v0.9.1-gateway / direct-legacy-buyer rows), the coordinator
+// MUST NOT proxy to the gateway — forwarding with a partial key
+// would risk a wrong-account 200 embed. The gateway section is
+// marked `gateway_identity_unavailable`.
+func TestSessionDetailGatewayProxySkippedOnIncompleteIdentity(t *testing.T) {
+	h, db := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	// Seed a row with internal id but NULL account_id (legacy shape).
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO request_log (ts_utc, request_id, external_request_id, account_id, model, latency_ms, routing_ms, status, stream)
+		 VALUES (?, ?, ?, NULL, ?, 0, 0, ?, 0)`,
+		fixedExplorerTime().Format(time.RFC3339Nano), "coord-internal-uuid-legacy", "buyer-X", "llama", http.StatusOK); err != nil {
+		t.Fatalf("seed request_log: %v", err)
+	}
+	gatewayCalled := false
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gatewayCalled = true
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/coord-internal-uuid-legacy", "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if gatewayCalled {
+		t.Fatalf("gateway MUST NOT be proxied when account_id is NULL (issue #212 v0.3 §5.6 both-or-nothing)")
+	}
+	if !strings.Contains(resp.Body.String(), `"gateway_identity_unavailable"`) {
+		t.Fatalf("response missing gateway_identity_unavailable marker: %s", resp.Body.String())
+	}
+}
+
+// TestSessionDetailNoCoordinatorRowReturns404 pins the SPEC-007 v0.3
+// §5.6 internal-id-only contract: the path-segment is the
+// coordinator-internal request_id. When SessionDetail returns
+// ErrNoRows (no coordinator row matches), the handler MUST return
+// 404 — it MUST NOT fall back to proxying the raw path-segment to
+// the gateway, which would silently let operators trigger the
+// path-segment-overload class deferred to v0.4 (and risk a
+// wrong-account 200 embed). Pre-v0.3 behavior allowed the
+// gateway-only fallback; that path was removed in v0.3 per ISS-212
+// R5 code MEDIUM.
+func TestSessionDetailNoCoordinatorRowReturns404(t *testing.T) {
+	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	gatewayCalled := false
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gatewayCalled = true
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/no-such-internal-id", "operator-key")
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s, want 404", resp.Code, resp.Body.String())
+	}
+	if gatewayCalled {
+		t.Fatalf("gateway proxy fired despite no coordinator row (issue #212 v0.3 §5.6: path-segment is internal-id only)")
 	}
 }
 
@@ -884,7 +981,20 @@ func newTestExplorer(t *testing.T, mutate func(*config.Config)) (*Handler, *sql.
 	if err != nil {
 		t.Fatalf("billing.NewStore: %v", err)
 	}
-	if err := reqStore.Insert(context.Background(), requestlog.Row{TSUtc: fixedExplorerTime(), RequestID: "req_seed", Model: "llama", Status: http.StatusOK}); err != nil {
+	// SPEC-007 v0.3 §5.6 both-or-nothing: the default fixture row
+	// MUST carry both external_request_id and account_id so the
+	// gateway-proxy path is exercised by existing tests (e.g.
+	// TestAC07_SessionDetailIncludesLocalAndGatewayData). Legacy /
+	// incomplete-identity rows are exercised by their own targeted
+	// tests (e.g. TestSessionDetailGatewayProxySkippedOnIncompleteIdentity).
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc:             fixedExplorerTime(),
+		RequestID:         "req_seed",
+		ExternalRequestID: "buyer_seed_X",
+		AccountID:         "acct_seed",
+		Model:             "llama",
+		Status:            http.StatusOK,
+	}); err != nil {
 		t.Fatalf("request log insert: %v", err)
 	}
 	if _, err := reqStore.DB().ExecContext(context.Background(), `
