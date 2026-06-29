@@ -319,6 +319,29 @@ def binary_path_without_pending():
         return candidate
     return shutil.which("macprovider-cli") or ""
 
+def known_binary_dir():
+    configured = os.environ.get("MACPROVIDER_BINARY_DIR", "")
+    if configured:
+        return os.path.realpath(configured)
+    plist_path = os.path.expanduser("~/Library/LaunchAgents/live.streamvc.macprovider.plist")
+    try:
+        result = subprocess.run(
+            ["/usr/libexec/PlistBuddy", "-c", "Print ProgramArguments:0", plist_path],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return os.path.realpath(os.path.dirname(result.stdout.strip()))
+    except Exception:
+        pass
+    binary = binary_path_without_pending()
+    if binary:
+        return os.path.realpath(os.path.dirname(binary))
+    return ""
+
 def scan_without_pending():
     binary = binary_path_without_pending()
     if not binary:
@@ -366,9 +389,14 @@ def quarantine(reason, marker=None):
     dest = os.path.join(root, f"pending-quarantined-{stamp}.json")
     try:
         os.replace(pending, dest)
-        event("failure", "rollback", "rollback_backup_corrupt", reason, marker)
+        log(f"pending_marker_quarantined={dest} reason={reason}")
     except FileNotFoundError:
         pass
+
+def marker_deadline_expired(marker):
+    raw_deadline = str(marker["marker_deadline"])
+    deadline = datetime.datetime.strptime(raw_deadline, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    return datetime.datetime.now(datetime.timezone.utc) >= deadline
 
 def lock_is_held_by_other_process():
     os.makedirs(root, mode=0o700, exist_ok=True)
@@ -393,11 +421,14 @@ def restore(marker):
     expected_backup = os.path.join(os.path.dirname(target), f".macprovider-cli.rollback-{update_id}")
     if backup != expected_backup:
         raise RuntimeError("backup_path_derivation_mismatch")
-    trusted_dir = os.path.realpath(os.path.dirname(target))
+    trusted_dir = known_binary_dir()
+    if not trusted_dir:
+        raise RuntimeError("unsupported_install_topology:binary_dir_unknown")
+    target_parent = os.path.realpath(os.path.dirname(target))
+    backup_parent = os.path.realpath(os.path.dirname(backup))
+    if target_parent != trusted_dir or backup_parent != trusted_dir:
+        raise RuntimeError("unsupported_install_topology:path_outside_binary_dir")
     for checked in (target, backup):
-        parent = os.path.realpath(os.path.dirname(checked))
-        if parent != trusted_dir:
-            raise RuntimeError("path_outside_trusted_binary_dir")
         cursor = checked
         while os.path.realpath(os.path.dirname(cursor)) == trusted_dir and cursor != trusted_dir:
             reject_path(cursor, must_exist=os.path.exists(cursor))
@@ -426,9 +457,13 @@ def restore(marker):
         os.unlink(pending)
     except FileNotFoundError:
         pass
-    event("failure", "rollback", classify_post_start_failure(), "restored_prior_binary", marker)
+    try:
+        os.unlink(lock_path)
+    except FileNotFoundError:
+        pass
+    event("failure", "rollback", classify_post_start_failure(marker), "restored_prior_binary", marker)
 
-def classify_post_start_failure():
+def classify_post_start_failure(marker):
     try:
         printed = subprocess.run(["launchctl", "print", f"gui/{uid}/{label}"], check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5).stdout.lower()
         if "last exit status" in printed and not re.search(r"last exit status\s*=\s*0", printed):
@@ -445,6 +480,9 @@ def classify_post_start_failure():
                 return "post_start_health_failed"
         except Exception:
             return "post_start_health_failed"
+    current_version = current_binary_version(marker["target_path"])
+    if current_version and current_version != str(marker["target_version"]):
+        return "post_start_rejoin_timeout"
     return "post_start_rejoin_timeout"
 
 try:
@@ -458,11 +496,8 @@ try:
     try:
         marker = read_marker()
     except Exception as exc:
-        event("failure", "rollback", "orphaned_pending_marker", f"marker_malformed:{exc}", None)
-        try:
-            os.unlink(pending)
-        except FileNotFoundError:
-            pass
+        event("failure", "rollback", "orphaned_pending_marker", "marker_invalid", None)
+        quarantine(f"marker_invalid:{exc}", None)
         try:
             os.unlink(lock_path)
         except FileNotFoundError:
@@ -470,10 +505,14 @@ try:
         sys.exit(0)
     if process_success_sentinel(marker):
         sys.exit(0)
+    if not marker_deadline_expired(marker):
+        log("pending_marker_still_inside_post_start_window")
+        sys.exit(0)
     try:
         restore(marker)
     except Exception as exc:
-        event("failure", "rollback", "rollback_backup_corrupt", str(exc), marker)
+        failure_class = "unsupported_install_topology" if str(exc).startswith("unsupported_install_topology") else "rollback_backup_corrupt"
+        event("failure", "rollback", failure_class, str(exc), marker)
         quarantine(str(exc), marker)
 except Exception as exc:
     log(f"recovery_error={exc}")

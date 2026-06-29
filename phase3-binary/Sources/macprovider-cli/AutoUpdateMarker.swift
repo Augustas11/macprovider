@@ -44,6 +44,12 @@ enum AutoUpdateMarkerError: Error, CustomStringConvertible, Equatable {
     }
 }
 
+enum AutoUpdateOrphanRecoveryOutcome: Equatable {
+    case restored(AutoUpdatePendingMarker)
+    case markerInvalid
+    case backupCorrupt(AutoUpdatePendingMarker, String)
+}
+
 final class AutoUpdateLock: @unchecked Sendable {
     let fd: Int32
     let path: URL
@@ -115,6 +121,17 @@ struct AutoUpdateMarkerStore: Sendable {
         }
         fchmod(fd, S_IRUSR | S_IWUSR)
         return AutoUpdateLock(fd: fd, path: lockURL)
+    }
+
+    func updateLockIsLive() -> Bool {
+        let fd = open(lockURL.path, O_RDWR | O_NOFOLLOW)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+            _ = flock(fd, LOCK_UN)
+            return false
+        }
+        return errno == EWOULDBLOCK
     }
 
     func rollbackBackupPath(binaryURL: URL, updateID: String) -> URL {
@@ -247,22 +264,93 @@ struct AutoUpdateMarkerStore: Sendable {
             updateID: marker.updateID,
             targetVersion: marker.targetVersion
         )
+        clearPending()
+        try? fileManager.removeItem(atPath: marker.backupPath)
+        removeLockFile()
     }
 
     func finalizeSuccessfulUpdate(_ marker: AutoUpdatePendingMarker) throws {
         try validateMarker(marker)
-        let binaryURL = URL(fileURLWithPath: marker.targetPath)
-        clearPending()
-        try? fileManager.removeItem(atPath: marker.backupPath)
-        try? fileManager.removeItem(at: lockURL)
-        try? fileManager.removeItem(at: successSentinelPath(binaryURL: binaryURL, updateID: marker.updateID))
+        finalizeSuccessfulUpdate(
+            updateID: marker.updateID,
+            binaryURL: URL(fileURLWithPath: marker.targetPath)
+        )
     }
 
-    func orphanPendingMarker(target: String?, failureClass: AutoUpdateFailureClass = .orphanedPendingMarker) {
+    func finalizeSuccessfulUpdate(updateID: String, binaryURL: URL) {
+        try? fileManager.removeItem(at: successSentinelPath(binaryURL: binaryURL, updateID: updateID))
+    }
+
+    func clearPendingAndLock(target: String?, failureClass: AutoUpdateFailureClass = .orphanedPendingMarker) {
         clearPending()
         if let target {
             recordCooldown(target: target, failureClass: failureClass)
         }
+        removeLockFile()
+    }
+
+    func recoverOrphanedMarker(_ marker: AutoUpdatePendingMarker) -> AutoUpdateOrphanRecoveryOutcome {
+        do {
+            try validateMarker(marker)
+        } catch {
+            quarantinePendingMarker()
+            removeBackupIfSafe(marker.backupPath)
+            removeLockFile()
+            return .markerInvalid
+        }
+        do {
+            try validateBackup(marker)
+        } catch {
+            quarantinePendingMarker()
+            removeLockFile()
+            return .backupCorrupt(marker, "backup_missing_or_hash_mismatch")
+        }
+        do {
+            try restoreBackup(marker)
+            clearPending()
+            try? fileManager.removeItem(atPath: marker.backupPath)
+            recordCooldown(target: marker.targetVersion, failureClass: .orphanedPendingMarker)
+            removeLockFile()
+            return .restored(marker)
+        } catch {
+            quarantinePendingMarker()
+            removeLockFile()
+            return .backupCorrupt(marker, String(describing: error))
+        }
+    }
+
+    func recoverInvalidPendingMarker() {
+        quarantinePendingMarker()
+        removeLockFile()
+    }
+
+    private func quarantinePendingMarker() {
+        guard fileManager.fileExists(atPath: pendingURL.path) else { return }
+        let stamp = ISO8601DateFormatter.autoupdate
+            .string(from: Date())
+            .replacingOccurrences(of: ":", with: "")
+        let destination = root.appendingPathComponent("pending-quarantined-\(stamp).json")
+        if fileManager.fileExists(atPath: destination.path) {
+            let fallback = root.appendingPathComponent("pending-quarantined-\(stamp)-\(UUID().uuidString).json")
+            try? fileManager.moveItem(at: pendingURL, to: fallback)
+        } else {
+            try? fileManager.moveItem(at: pendingURL, to: destination)
+        }
+        fsyncDirectory(root)
+    }
+
+    private func removeBackupIfSafe(_ path: String) {
+        guard isCanonicalAbsolutePath(path) else { return }
+        let url = URL(fileURLWithPath: path)
+        do {
+            _ = try regularFileStatNoFollow(url)
+            try fileManager.removeItem(at: url)
+        } catch {
+            return
+        }
+    }
+
+    private func removeLockFile() {
         try? fileManager.removeItem(at: lockURL)
     }
 

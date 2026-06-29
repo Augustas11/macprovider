@@ -161,6 +161,9 @@ struct AutoUpdater: Sendable {
             }
             try await ensureEligible(phase: .backup)
             try await preserveMarkerAndSwap(updateID: updateID, target: target, newBinary: prepared.newBinary, tracker: commitTracker)
+            if let signedPolicy = prepared.signedPolicy {
+                markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
+            }
             await record(updateID: updateID, target: target, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1)
             try await ensureEligible(phase: .restart)
             try restartLaunchd()
@@ -176,7 +179,7 @@ struct AutoUpdater: Sendable {
                     try? markerStore.restoreBackup(marker)
                 }
                 if commitTracker.committedMarker || commitTracker.committedBackup {
-                    markerStore.orphanPendingMarker(target: nil)
+                    markerStore.clearPendingAndLock(target: nil)
                     try? FileManager.default.removeItem(atPath: marker.backupPath)
                 }
             }

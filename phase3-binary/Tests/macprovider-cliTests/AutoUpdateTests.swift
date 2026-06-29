@@ -46,6 +46,36 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertFalse(String(data: data, encoding: .utf8)!.contains("token=secret"))
     }
 
+    func testEventPayloadTooLargeFallsBackToMinimalStablePayload() {
+        let event = AutoUpdateEvent(
+            updateID: UUID().uuidString.lowercased(),
+            currentVersion: String(repeating: "1", count: 5000),
+            targetVersion: "1.7.0",
+            phase: .rollback,
+            outcome: .failure,
+            reason: String(repeating: "oversized", count: 1200),
+            attempt: 1,
+            failureClass: .orphanedPendingMarker,
+            inflightRequests: 42,
+            recommendedBinaryVersionSHA256: String(repeating: "a", count: 5000),
+            extraMetadata: ["blob": String(repeating: "x", count: 5000)],
+            attemptHistory: [String(repeating: "y", count: 5000)],
+            releaseURL: "https://github.com/Augustas11/macprovider/releases/download/v1.7.0/a.tar.gz?token=secret"
+        )
+
+        let object = event.wireObject()
+        let data = try! JSONSerialization.data(withJSONObject: object, options: [])
+
+        XCTAssertLessThanOrEqual(data.count, AutoUpdateEvent.maxWireBytes)
+        XCTAssertEqual(object["reason"] as? String, "event_payload_too_large")
+        XCTAssertEqual(object["failure_class"] as? String, AutoUpdateFailureClass.eventPayloadTooLarge.rawValue)
+        XCTAssertNil(object["extra_metadata"])
+        XCTAssertNil(object["attempt_history"])
+        XCTAssertNil(object["release_url"])
+        XCTAssertNil(object["inflight_requests"])
+        XCTAssertNil(object["recommended_binary_version_sha256"])
+    }
+
     func testAutoupdateOptOutReadsLegacyAndSpecSources() throws {
         let yaml = """
         coordinator_url: wss://example.invalid/ws/provider
@@ -117,11 +147,19 @@ final class AutoUpdateTests: XCTestCase {
         )
         try store.writePending(marker)
 
+        XCTAssertFalse(store.updateLockIsLive())
+        do {
+            let lock = try store.acquireLock()
+            XCTAssertTrue(store.updateLockIsLive())
+            withExtendedLifetime(lock) {}
+        }
+        XCTAssertFalse(store.updateLockIsLive())
+
         try store.completeSuccessfulUpdate(marker)
 
-        XCTAssertTrue(FileManager.default.fileExists(atPath: store.pendingURL.path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.successSentinelPath(binaryURL: binary, updateID: marker.updateID).path))
 
         try store.finalizeSuccessfulUpdate(marker)
@@ -130,6 +168,68 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.successSentinelPath(binaryURL: binary, updateID: marker.updateID).path))
+    }
+
+    func testOrphanPendingMarkerWithValidBackupRestoresBeforeCleanup() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, binary, backup) = try makePendingMarkerFixture(store: store, fixture: fixture, backupContents: "old", targetContents: "new")
+
+        let outcome = store.recoverOrphanedMarker(marker)
+
+        XCTAssertEqual(outcome, .restored(marker))
+        XCTAssertEqual(try String(contentsOf: binary), "old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertEqual(store.cooldown(target: marker.targetVersion, failureClass: .orphanedPendingMarker)?.attempt, 1)
+    }
+
+    func testOrphanPendingMarkerWithMissingOrCorruptBackupQuarantinesWithoutRestore() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, binary, backup) = try makePendingMarkerFixture(store: store, fixture: fixture, backupContents: "wrong", targetContents: "new")
+
+        let outcome = store.recoverOrphanedMarker(marker)
+
+        guard case .backupCorrupt(let recovered, _) = outcome else {
+            return XCTFail("expected backupCorrupt, got \(outcome)")
+        }
+        XCTAssertEqual(recovered, marker)
+        XCTAssertEqual(try String(contentsOf: binary), "new")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        let quarantined = try FileManager.default.contentsOfDirectory(atPath: store.root.path)
+            .filter { $0.hasPrefix("pending-quarantined-") && $0.hasSuffix(".json") }
+        XCTAssertEqual(quarantined.count, 1)
+        XCTAssertNil(store.cooldown(target: marker.targetVersion, failureClass: .orphanedPendingMarker))
+    }
+
+    func testSuccessCleanupIsIdempotentAcrossCrashSteps() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, binary, backup) = try makePendingMarkerFixture(store: store, fixture: fixture, backupContents: "old", targetContents: "new")
+        let sentinel = store.successSentinelPath(binaryURL: binary, updateID: marker.updateID)
+
+        try store.writeSuccessSentinel(binaryURL: binary, updateID: marker.updateID, targetVersion: marker.targetVersion)
+        try store.completeSuccessfulUpdate(marker)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path))
+
+        try store.writePending(marker)
+        try Data("old".utf8).write(to: backup)
+        FileManager.default.createFile(atPath: store.lockURL.path, contents: Data(), attributes: [.posixPermissions: 0o600])
+        store.clearPending()
+        try store.completeSuccessfulUpdate(marker)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path))
+
+        try store.finalizeSuccessfulUpdate(marker)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sentinel.path))
     }
 
     func testMarkerValidationRejectsUppercaseShaAndNonCanonicalVersion() throws {
@@ -239,6 +339,34 @@ final class AutoUpdateTests: XCTestCase {
         let release = try await update.resolveReleaseByTags(normalizedTarget: "1.7.0")
 
         XCTAssertEqual(release.tagName, "1.7.0")
+    }
+
+    private func makePendingMarkerFixture(
+        store: AutoUpdateMarkerStore,
+        fixture: TempHome,
+        backupContents: String,
+        targetContents: String
+    ) throws -> (AutoUpdatePendingMarker, URL, URL) {
+        try store.ensureTrustedRoot()
+        FileManager.default.createFile(atPath: store.lockURL.path, contents: Data(), attributes: [.posixPermissions: 0o600])
+        let binaryDir = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binaryDir, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let binary = binaryDir.appendingPathComponent("macprovider-cli")
+        let backup = binaryDir.appendingPathComponent(".macprovider-cli.rollback-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        try Data(targetContents.utf8).write(to: binary)
+        try Data(backupContents.utf8).write(to: backup)
+        let marker = AutoUpdatePendingMarker(
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            targetVersion: "1.7.0",
+            targetPath: binary.path,
+            backupPath: backup.path,
+            size: 3,
+            mode: 0o755,
+            sha256: AutoUpdateEvent.sha256Hex("old"),
+            markerDeadline: ISO8601DateFormatter.autoupdateTest.string(from: Date().addingTimeInterval(300))
+        )
+        try store.writePending(marker)
+        return (marker, binary, backup)
     }
 }
 

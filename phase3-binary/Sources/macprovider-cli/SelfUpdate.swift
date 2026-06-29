@@ -56,6 +56,7 @@ struct SelfUpdate {
         let prepared = try await prepareValidatedUpdate(from: release)
         defer { prepared.cleanup() }
         try await applyValidatedUpdate(newBinary: prepared.newBinary)
+        persistSignedPolicyIfPresent(prepared.signedPolicy)
         print("Update complete. Restart macprovider-cli to use v\(latest).")
     }
 
@@ -64,6 +65,7 @@ struct SelfUpdate {
         let prepared = try await prepareValidatedUpdate(from: release)
         defer { prepared.cleanup() }
         try await applyValidatedUpdate(newBinary: prepared.newBinary)
+        persistSignedPolicyIfPresent(prepared.signedPolicy)
     }
 
     func resolveReleaseByTags(normalizedTarget: String) async throws -> GitHubRelease {
@@ -97,9 +99,6 @@ struct SelfUpdate {
             try await download(from: checksums.browserDownloadURL, to: checksumsURL)
             try await download(from: checksumsSignature.browserDownloadURL, to: checksumsSignatureURL)
             try verifyChecksumSignature(checksumsURL: checksumsURL, signatureURL: checksumsSignatureURL, tempDir: tempDir)
-            if let signedPolicy = release.signedPolicy {
-                markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
-            }
             let checksumsText = try String(contentsOf: checksumsURL, encoding: .utf8)
             let expectedSHA = try Self.expectedSHA256(for: tarball.name, in: checksumsText)
             try await download(from: tarball.browserDownloadURL, to: tarballURL)
@@ -116,7 +115,7 @@ struct SelfUpdate {
             let newBinary = try Self.findBinary(in: extractDir)
 
             try runProcess(newBinary.path, arguments: ["self-test"])
-            return PreparedSelfUpdate(tempDir: tempDir, newBinary: newBinary)
+            return PreparedSelfUpdate(tempDir: tempDir, newBinary: newBinary, signedPolicy: release.signedPolicy)
         } catch {
             try? FileManager.default.removeItem(at: tempDir)
             throw error
@@ -125,6 +124,11 @@ struct SelfUpdate {
 
     func applyValidatedUpdateForTest(newBinary: URL) async throws {
         try await applyValidatedUpdate(newBinary: newBinary)
+    }
+
+    func persistSignedPolicyIfPresent(_ signedPolicy: GitHubSignedPolicy?) {
+        guard let signedPolicy else { return }
+        markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
     }
 
     func resolvedReleasesAPIURLForTest() -> String {
@@ -413,6 +417,7 @@ struct SelfUpdate {
 struct PreparedSelfUpdate {
     let tempDir: URL
     let newBinary: URL
+    let signedPolicy: GitHubSignedPolicy?
 
     func cleanup() {
         try? FileManager.default.removeItem(at: tempDir)

@@ -135,15 +135,23 @@ struct AutoUpdateEvent: Sendable {
         if Self.encodedByteCount(object) <= Self.maxWireBytes {
             return object
         }
+        object.removeValue(forKey: "inflight_requests")
+        if Self.encodedByteCount(object) <= Self.maxWireBytes {
+            return object
+        }
+        object.removeValue(forKey: "recommended_binary_version_sha256")
+        if Self.encodedByteCount(object) <= Self.maxWireBytes {
+            return object
+        }
         object["reason"] = "\(phase.rawValue)_\(outcome.rawValue)"
         if Self.encodedByteCount(object) <= Self.maxWireBytes {
             return object
         }
         return [
             "event": "provider_autoupdate",
-            "update_id": updateID,
-            "current_version": currentVersion,
-            "target_version": targetVersion,
+            "update_id": Self.boundedRequiredField(updateID),
+            "current_version": Self.boundedRequiredField(currentVersion),
+            "target_version": Self.boundedRequiredField(targetVersion),
             "source": source.rawValue,
             "phase": AutoUpdatePhase.eligibility.rawValue,
             "outcome": AutoUpdateOutcome.failure.rawValue,
@@ -194,6 +202,13 @@ struct AutoUpdateEvent: Sendable {
 
     private static func encodedByteCount(_ object: [String: Any]) -> Int {
         (try? JSONSerialization.data(withJSONObject: object, options: [])).map(\.count) ?? Int.max
+    }
+
+    private static func boundedRequiredField(_ value: String) -> String {
+        if value.utf8.count <= 128 {
+            return value
+        }
+        return "sha256:\(sha256Hex(value))"
     }
 
     private static func format(_ date: Date) -> String {

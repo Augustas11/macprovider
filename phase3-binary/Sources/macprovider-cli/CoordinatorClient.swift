@@ -224,6 +224,7 @@ actor CoordinatorClient {
     private var autoupdateCoordinatorPayloadIsV2 = false
     private var autoupdateAssignedProviderTokenAdopted = false
     private var autoupdateDemotionReason: String?
+    private var autoupdateDisabledForSessionReason: String?
     private var autoupdateDrainExtensions = false
     private var autoupdateAttemptedTargets = Set<String>()
     private var webSocket: ProviderWebSocketTask?
@@ -327,6 +328,7 @@ actor CoordinatorClient {
         autoupdateCoordinatorPayloadIsV2 = false
         autoupdateAssignedProviderTokenAdopted = false
         autoupdateDemotionReason = "coordinator_disconnected"
+        autoupdateDisabledForSessionReason = nil
         autoupdateTrustState = AutoUpdateTrustState(
             v2Accepted: false,
             tier: nil,
@@ -1306,27 +1308,32 @@ actor CoordinatorClient {
         sleepAssertion?.stop()
         sleepAssertion = sleepAssertionFactory()
         startHeartbeat(intervalSeconds: interval)
-        await completeSuccessfulAutoupdateIfPending()
+        let completedAutoupdate = await completeSuccessfulAutoupdateIfPending()
         try await sendStateUpdate(state: nil, reason: reason)
+        if let completedAutoupdate {
+            try? AutoUpdateMarkerStore().finalizeSuccessfulUpdate(completedAutoupdate)
+        }
         if let recommended = payload["recommended_binary_version"] as? String {
             let trust = currentAutoupdateTrustState()
-            if let parsed = try? AutoUpdateRecommendation.validate(recommended),
-               SelfUpdate.compareSemver(Self.binaryVersion, parsed.normalized) == .orderedAscending,
-               !trust.isEligible
-            {
-                print("A newer version is available (v\(parsed.normalized)). Run 'macprovider-cli update' to upgrade.")
+            guard trust.isEligible else {
+                let parsed = try? AutoUpdateRecommendation.validate(recommended)
+                if let parsed,
+                   SelfUpdate.compareSemver(Self.binaryVersion, parsed.normalized) == .orderedAscending
+                {
+                    print("A newer version is available (v\(parsed.normalized)). Run 'macprovider-cli update' to upgrade.")
+                }
                 await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
                     updateID: UUID().uuidString.lowercased(),
                     currentVersion: Self.binaryVersion,
-                    targetVersion: parsed.normalized,
+                    targetVersion: parsed?.normalized ?? "<notify-only>",
                     phase: .eligibility,
                     outcome: .skipped,
                     reason: trust.lossReason,
                     attempt: 1
                 ))
-            } else {
-                await runAutoupdateIfEligible(recommended)
+                return
             }
+            await runAutoupdateIfEligible(recommended)
         }
     }
 
@@ -1344,12 +1351,12 @@ actor CoordinatorClient {
         }
     }
 
-    private func completeSuccessfulAutoupdateIfPending() async {
+    private func completeSuccessfulAutoupdateIfPending() async -> AutoUpdatePendingMarker? {
         let markerStore = AutoUpdateMarkerStore()
         guard let marker = try? markerStore.readPending(),
               marker.targetVersion == Self.binaryVersion
         else {
-            return
+            return nil
         }
         do {
             try markerStore.completeSuccessfulUpdate(marker)
@@ -1362,7 +1369,7 @@ actor CoordinatorClient {
                 reason: "post_start_rejoin_succeeded",
                 attempt: 1
             ))
-            try markerStore.finalizeSuccessfulUpdate(marker)
+            return marker
         } catch {
             await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
                 updateID: marker.updateID,
@@ -1374,6 +1381,7 @@ actor CoordinatorClient {
                 attempt: 1,
                 failureClass: .other
             ))
+            return nil
         }
     }
 
@@ -1385,14 +1393,14 @@ actor CoordinatorClient {
         do {
             pending = try markerStore.readPending()
         } catch {
-            markerStore.orphanPendingMarker(target: nil)
+            markerStore.recoverInvalidPendingMarker()
             await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
                 updateID: UUID().uuidString.lowercased(),
                 currentVersion: Self.binaryVersion,
                 targetVersion: "<invalid>",
                 phase: .rollback,
                 outcome: .failure,
-                reason: "orphaned_pending_marker_malformed",
+                reason: "marker_invalid",
                 attempt: 1,
                 failureClass: .orphanedPendingMarker
             ))
@@ -1402,17 +1410,12 @@ actor CoordinatorClient {
             do {
                 let payload = try markerStore.readSuccessSentinel(sentinel)
                 if payload.binaryVersion == Self.binaryVersion {
-                    let marker = pending ?? AutoUpdatePendingMarker(
-                        updateID: payload.updateID,
-                        targetVersion: Self.binaryVersion,
-                        targetPath: binaryURL.path,
-                        backupPath: markerStore.rollbackBackupPath(binaryURL: binaryURL, updateID: payload.updateID).path,
-                        size: 0,
-                        mode: 0o755,
-                        sha256: String(repeating: "0", count: 64),
-                        markerDeadline: Self.autoupdateTimestamp(Date().addingTimeInterval(300))
-                    )
-                    try? markerStore.finalizeSuccessfulUpdate(marker)
+                    if let pending {
+                        try? markerStore.completeSuccessfulUpdate(pending)
+                        try? markerStore.finalizeSuccessfulUpdate(pending)
+                    } else {
+                        markerStore.finalizeSuccessfulUpdate(updateID: payload.updateID, binaryURL: binaryURL)
+                    }
                     await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
                         updateID: payload.updateID,
                         currentVersion: Self.binaryVersion,
@@ -1440,18 +1443,47 @@ actor CoordinatorClient {
             }
         }
         if let marker = pending {
-            if !FileManager.default.fileExists(atPath: markerStore.lockURL.path) {
-                markerStore.orphanPendingMarker(target: marker.targetVersion)
-                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                    updateID: marker.updateID,
-                    currentVersion: Self.binaryVersion,
-                    targetVersion: marker.targetVersion,
-                    phase: .rollback,
-                    outcome: .failure,
-                    reason: "orphaned_pending_marker_recovered",
-                    attempt: 1,
-                    failureClass: .orphanedPendingMarker
-                ))
+            guard Self.autoupdateMarkerDeadlineExpired(marker.markerDeadline) else {
+                return
+            }
+            if !markerStore.updateLockIsLive() {
+                let outcome = markerStore.recoverOrphanedMarker(marker)
+                switch outcome {
+                case .restored(let recovered):
+                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                        updateID: recovered.updateID,
+                        currentVersion: Self.binaryVersion,
+                        targetVersion: recovered.targetVersion,
+                        phase: .rollback,
+                        outcome: .failure,
+                        reason: "orphaned_pending_marker_recovered",
+                        attempt: 1,
+                        failureClass: .orphanedPendingMarker
+                    ))
+                case .markerInvalid:
+                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                        updateID: UUID().uuidString.lowercased(),
+                        currentVersion: Self.binaryVersion,
+                        targetVersion: "<invalid>",
+                        phase: .rollback,
+                        outcome: .failure,
+                        reason: "marker_invalid",
+                        attempt: 1,
+                        failureClass: .orphanedPendingMarker
+                    ))
+                case let .backupCorrupt(recovered, reason):
+                    autoupdateDisabledForSessionReason = "rollback_backup_corrupt"
+                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                        updateID: recovered.updateID,
+                        currentVersion: Self.binaryVersion,
+                        targetVersion: recovered.targetVersion,
+                        phase: .rollback,
+                        outcome: .failure,
+                        reason: reason,
+                        attempt: 1,
+                        failureClass: .rollbackBackupCorrupt
+                    ))
+                }
             }
         } else {
             for backup in markerStore.rollbackBackups(in: binaryDir) {
@@ -1788,6 +1820,20 @@ actor CoordinatorClient {
     }
 
     private func currentAutoupdateTrustState() -> AutoUpdateTrustState {
+        if let reason = autoupdateDisabledForSessionReason {
+            return AutoUpdateTrustState(
+                v2Accepted: false,
+                tier: nil,
+                encryptedLegValid: false,
+                attestationRequired: false,
+                attestationSatisfied: false,
+                tokenConfigured: providerToken?.isEmpty == false,
+                tokenValidated: false,
+                bearerlessDuplicate: false,
+                connected: false,
+                stableReason: reason
+            )
+        }
         guard !autoupdateCoordinatorPayload.isEmpty else {
             return AutoUpdateTrustState(
                 v2Accepted: false,
@@ -1887,6 +1933,16 @@ actor CoordinatorClient {
         formatter.formatOptions = [.withInternetDateTime]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         return formatter.string(from: date)
+    }
+
+    private static func autoupdateMarkerDeadlineExpired(_ raw: String) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        guard let deadline = formatter.date(from: raw) else {
+            return true
+        }
+        return Date() >= deadline
     }
 
     private func autoupdateDrain(target: String) async throws -> Bool {
