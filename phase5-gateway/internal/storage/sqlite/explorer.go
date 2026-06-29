@@ -302,13 +302,15 @@ func (s *Store) ExplorerSessionDetail(ctx context.Context, accountID, requestID 
 		if len(accountIDs) > 1 {
 			cap := storage.ExplorerMatchedAccountIDsCap
 			if len(accountIDs) > cap {
-				// #231 SPEC-007 v0.4: the bounded probe returned
-				// cap+1 entries — enough to flag truncation. Re-issue
-				// an unbounded scan to populate the FULL forensic
-				// list for the audit_events emit. This second query
-				// fires only on the rare 409 truncation path so the
-				// steady-state cost is zero.
-				full, ferr := s.explorerAccountIDsForRequestUnbounded(ctx, requestID)
+				// #231 SPEC-007 v0.4 + R1 SEC HIGH closure: the
+				// bounded probe returned cap+1 entries — enough to
+				// flag truncation. Re-issue a BOUNDED forensic scan
+				// (capped at ExplorerForensicMatchedAccountIDsCap+1)
+				// so the unbounded collision-flood DoS class can't
+				// hit the request path. Cap+1 lets the handler
+				// detect "more than the forensic cap" and set the
+				// payload's forensic_truncated_at flag.
+				full, ferr := s.explorerAccountIDsForRequestForensic(ctx, requestID, storage.ExplorerForensicMatchedAccountIDsCap)
 				if ferr != nil {
 					// Forensic emit is best-effort — degrade
 					// gracefully to the bounded probe rather than
@@ -370,13 +372,18 @@ func (s *Store) ExplorerSessionDetail(ctx context.Context, accountID, requestID 
 // and audit_events — buyer-attachable feedback can otherwise
 // cross-pollinate a 200 response on the unscoped path without
 // triggering 409.
-// explorerAccountIDsForRequestUnbounded returns the FULL distinct
-// account_id set without the cap+1 bound — used by #231 SPEC-007
-// v0.4 §6.4 audit_events forensic emit on the truncation path. Only
-// runs when explorerAccountIDsForRequest already detected
-// overflow, so the unbounded scan cost is paid at most once per
-// 409 truncation response.
-func (s *Store) explorerAccountIDsForRequestUnbounded(ctx context.Context, requestID string) ([]string, error) {
+// explorerAccountIDsForRequestForensic returns a BOUNDED forensic
+// account_id sample — used by #231 SPEC-007 v0.4 §6.4 audit_events
+// emit on the truncation path. The cap is the runtime
+// ExplorerForensicMatchedAccountIDsCap +1 (passed in to keep this
+// storage helper independent of the router package) so the caller
+// can detect "more rows than the forensic cap" and flag the
+// payload accordingly. Bounding the SELECT here closes the R1 SEC
+// HIGH collision-flood DoS: an attacker who creates N>>cap
+// collisions can no longer drive an unbounded scan/materialization
+// in the request path.
+func (s *Store) explorerAccountIDsForRequestForensic(ctx context.Context, requestID string, forensicCap int) ([]string, error) {
+	limit := forensicCap + 1
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT account_id FROM (
 			SELECT account_id FROM usage_events WHERE request_id = ? AND account_id != ''
@@ -388,7 +395,7 @@ func (s *Store) explorerAccountIDsForRequestUnbounded(ctx context.Context, reque
 			SELECT account_id FROM feedback_events WHERE request_id = ? AND account_id != ''
 			UNION
 			SELECT account_id FROM audit_events WHERE request_id = ? AND account_id != ''
-		) ORDER BY account_id`, requestID, requestID, requestID, requestID, requestID)
+		) ORDER BY account_id LIMIT ?`, requestID, requestID, requestID, requestID, requestID, limit)
 	if err != nil {
 		return nil, err
 	}

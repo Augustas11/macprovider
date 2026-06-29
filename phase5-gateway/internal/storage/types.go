@@ -363,8 +363,8 @@ type ExplorerSessionDetail struct {
 	// untruncated full list is emitted to audit_events for forensic
 	// retrieval — never silently dropped.
 	MatchedAccountIDs           []string `json:"matched_account_ids,omitempty"`
-	MatchedAccountIDsTruncated  bool     `json:"matched_account_ids_truncated,omitempty"`
-	MatchedAccountIDsUntrimmed  []string `json:"-"` // full list for the audit_events emit; never sent over the wire.
+	MatchedAccountIDsTruncated  bool     `json:"matched_account_ids_truncated"` // #231 R1 arch LOW: explicit presence required by SPEC §6.4 contract — `omitempty` would drop `false` and break clients that branch on field presence.
+	MatchedAccountIDsUntrimmed  []string `json:"-"`                              // full list for the audit_events emit; never sent over the wire.
 	Partial                     bool     `json:"partial"`
 	Error                       any      `json:"error"`
 }
@@ -373,6 +373,15 @@ type ExplorerSessionDetail struct {
 // number of entries returned in the 409 ambiguity response body
 // (#231). The 11th row triggers the truncation flag.
 const ExplorerMatchedAccountIDsCap = 10
+
+// ExplorerForensicMatchedAccountIDsCap bounds the size of the FULL
+// forensic account_id sample emitted to audit_events on the
+// truncation path. R1 SEC HIGH closure: caps both the SQL scan AND
+// the audit row so a malicious cross-account-collision attacker
+// cannot drive an unbounded scan/materialization in the request
+// path. When more accounts than the cap exist, the audit payload's
+// `forensic_truncated_at` field surfaces the partial capture.
+const ExplorerForensicMatchedAccountIDsCap = 100
 
 type ExplorerUsageEvent struct {
 	RequestID        string    `json:"request_id"`

@@ -2,8 +2,8 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
+
 
 const (
 	explorerDefaultLimit      = 50
@@ -109,12 +110,18 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 	if !typed {
 		// Fire-and-forget — do not block the request path on audit
 		// emit failure, but surface in audit_events when it works.
+		// json.Marshal-safe payload (R1 SEC MEDIUM closure).
+		payloadJSON, _ := json.Marshal(map[string]any{
+			"endpoint":    "GET /admin/explorer/sessions",
+			"severity":    "WARN",
+			"deprecation": "v0.5 will reject untyped with 400 session_id_untyped — use ext_<external_request_id>",
+		})
 		_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
 			EventID:   mustID("audit"),
 			RequestID: requestID,
 			Actor:     "explorer",
 			Type:      "payout_explorer_path_segment_untyped",
-			Payload:   `{"endpoint":"GET /admin/explorer/sessions","severity":"WARN"}`,
+			Payload:   string(payloadJSON),
 			CreatedAt: s.now(),
 		})
 	}
@@ -140,23 +147,45 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 				"matched_account_ids":           out.MatchedAccountIDs,
 				"matched_account_ids_truncated": out.MatchedAccountIDsTruncated,
 			}
-			// #231 v0.4: when truncation fired, emit the FULL
-			// account_id list to audit_events for forensic
-			// retrieval. The 409 body never carries more than the
-			// cap so a collision-flood attack cannot inflate
-			// operator log noise via the JSON response.
+			// #231 v0.4: when truncation fired, emit a bounded
+			// sample of the FULL account_id list to audit_events
+			// for forensic retrieval. The forensic emit is capped
+			// at storage.ExplorerForensicMatchedAccountIDsCap so neither
+			// the 409 response NOR the audit row can be flooded by
+			// a malicious cross-account-collision attacker (R1
+			// SEC HIGH closure). When the unbounded SELECT returns
+			// MORE than the forensic cap, `forensic_truncated_at`
+			// is set in the payload to surface the partial capture.
 			if out.MatchedAccountIDsTruncated {
-				_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
-					EventID:   mustID("audit"),
-					RequestID: requestID,
-					Actor:     "explorer",
-					Type:      "explorer_matched_account_ids_truncated",
-					Payload: fmt.Sprintf(
-						`{"matched_account_ids":[%s],"cap":%d,"severity":"WARN"}`,
-						quotedCSV(out.MatchedAccountIDsUntrimmed), storage.ExplorerMatchedAccountIDsCap,
-					),
-					CreatedAt: s.now(),
-				})
+				forensic := out.MatchedAccountIDsUntrimmed
+				var forensicTruncatedAt int
+				if len(forensic) > storage.ExplorerForensicMatchedAccountIDsCap {
+					forensicTruncatedAt = storage.ExplorerForensicMatchedAccountIDsCap
+					forensic = forensic[:storage.ExplorerForensicMatchedAccountIDsCap]
+				}
+				payload := map[string]any{
+					"matched_account_ids":  forensic,
+					"cap":                  storage.ExplorerMatchedAccountIDsCap,
+					"forensic_cap":         storage.ExplorerForensicMatchedAccountIDsCap,
+					"severity":             "WARN",
+				}
+				if forensicTruncatedAt > 0 {
+					payload["forensic_truncated_at"] = forensicTruncatedAt
+				}
+				// json.Marshal is a stdlib JSON encoder — closes R1
+				// CODE M2 / SEC MEDIUM (hand-rolled quotedCSV was
+				// not C0-safe).
+				payloadJSON, jerr := json.Marshal(payload)
+				if jerr == nil {
+					_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
+						EventID:   mustID("audit"),
+						RequestID: requestID,
+						Actor:     "explorer",
+						Type:      "explorer_matched_account_ids_truncated",
+						Payload:   string(payloadJSON),
+						CreatedAt: s.now(),
+					})
+				}
 			}
 			writeJSON(w, http.StatusConflict, body)
 			return
@@ -182,42 +211,6 @@ func parseTypedSegment(raw, prefix string) (string, bool) {
 	return raw, false
 }
 
-// quotedCSV emits a comma-separated list of JSON-quoted strings.
-// Used by #231 audit_events forensic emit; avoids pulling in a full
-// json.Marshal for a known-shape inline payload.
-func quotedCSV(in []string) string {
-	if len(in) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for i, s := range in {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteByte('"')
-		// Escape minimal JSON specials. account_id values are
-		// gateway-internal opaque strings (currently alphanumeric +
-		// underscore / dash via OAuth subject derivation) so this
-		// minimal escape is sufficient for forensic capture.
-		for _, r := range s {
-			switch r {
-			case '"', '\\':
-				b.WriteByte('\\')
-				b.WriteRune(r)
-			case '\n':
-				b.WriteString(`\n`)
-			case '\r':
-				b.WriteString(`\r`)
-			case '\t':
-				b.WriteString(`\t`)
-			default:
-				b.WriteRune(r)
-			}
-		}
-		b.WriteByte('"')
-	}
-	return b.String()
-}
 
 func (s *Server) handleExplorerActivity(w http.ResponseWriter, r *http.Request) {
 	if !s.explorerAllowed(w, r) {

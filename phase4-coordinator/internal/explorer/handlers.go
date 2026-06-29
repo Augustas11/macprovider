@@ -572,13 +572,23 @@ func (h *Handler) authorized(r *http.Request) bool {
 // `int_<request_id>` form. v0.5 will reject untyped with 400.
 // Same stdlib-JSON shape as logBearerAccepted; single journald
 // filter (`event=payout_explorer_path_segment_untyped`) catches
-// every untyped call.
+// every untyped call. Uses json.Marshal for the payload so
+// arbitrary characters in request_id/remote_addr don't break the
+// JSON shape (R1 SEC MEDIUM closure: Go's `%q` is not JSON-safe).
 func (h *Handler) logPathSegmentUntyped(r *http.Request, requestID string) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	stdLog.Printf(`{"event":"payout_explorer_path_segment_untyped","severity":"WARN","endpoint":"GET /admin/explorer/sessions","request_id":%q,"remote_addr":%q,"deprecation":"v0.5 will reject untyped with 400 session_id_untyped — use int_<request_id>"}`, requestID, host)
+	payload, _ := json.Marshal(map[string]any{
+		"event":       "payout_explorer_path_segment_untyped",
+		"severity":    "WARN",
+		"endpoint":    "GET /admin/explorer/sessions",
+		"request_id":  requestID,
+		"remote_addr": host,
+		"deprecation": "v0.5 will reject untyped with 400 session_id_untyped — use int_<request_id>",
+	})
+	stdLog.Println(string(payload))
 }
 
 // logBearerAccepted is the audit-log line the operator watches during
