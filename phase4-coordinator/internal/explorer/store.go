@@ -250,11 +250,17 @@ func (Store) Overview(ctx context.Context, q ReadDB, from, to time.Time) (map[st
 	if err != nil {
 		return nil, err
 	}
+	// R3 fix (SEC-M2): payable totals (current_window_provider_credits,
+	// total_gross_credits, total_provider_credits) must mirror the
+	// SPEC-005 v0.4 §11 payable predicate (lrc.quarantined=0). Without
+	// this filter, quarantined and force-voided rows inflate the
+	// explorer overview totals, which then disagree with the
+	// /admin/ledger/summary numbers operators read.
 	ledgerRows, err := queryMaps(ctx, q, `
-		SELECT COALESCE(SUM(CASE WHEN lrc.ts_utc >= ? AND lrc.ts_utc < ? THEN lrc.provider_credits ELSE 0 END), 0) AS current_window_provider_credits,
-		       COALESCE(SUM(lrc.gross_credits), 0) AS total_gross_credits,
-		       COALESCE(SUM(lrc.provider_credits), 0) AS total_provider_credits,
-		       COALESCE(SUM(loc.operator_credits), 0) AS total_operator_credits,
+		SELECT COALESCE(SUM(CASE WHEN lrc.quarantined=0 AND lrc.ts_utc >= ? AND lrc.ts_utc < ? THEN lrc.provider_credits ELSE 0 END), 0) AS current_window_provider_credits,
+		       COALESCE(SUM(CASE WHEN lrc.quarantined=0 THEN lrc.gross_credits ELSE 0 END), 0) AS total_gross_credits,
+		       COALESCE(SUM(CASE WHEN lrc.quarantined=0 THEN lrc.provider_credits ELSE 0 END), 0) AS total_provider_credits,
+		       COALESCE(SUM(CASE WHEN lrc.quarantined=0 THEN loc.operator_credits ELSE 0 END), 0) AS total_operator_credits,
 		       COALESCE((SELECT COUNT(*) FROM ledger_payout_ready WHERE status = 'ready'), 0) AS pending_payout_count,
 		       COALESCE((SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE status = 'ready'), 0) AS pending_payout_credits,
 		       -- SPEC-005 v0.4 §11.6.5 OPEN_PREDICATE: surface only

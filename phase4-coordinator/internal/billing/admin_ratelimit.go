@@ -15,8 +15,16 @@ import (
 // not a sophisticated traffic shape.
 
 const (
-	adminBucketCapacity    = 60   // tokens
-	adminBucketRefillPerS  = 60.0 // tokens/sec (1/sec * 60 ≈ same as previous earnings limiter posture)
+	// R3 fix (CODE-H1): SPEC AC-Q049 requires 64 concurrent POSTs to
+	// reach the UNIQUE-race layer. With the previous 60-token cap,
+	// the bucket drained before all 64 callers could hit the
+	// resolution INSERT (4 received 429 instead of 409), which forced
+	// AC-Q049 to test 32 threads instead of the SPEC-mandated 64.
+	// Capacity is raised to 128 — comfortably admits the 64-thread
+	// burst while still keeping a tight ceiling on operator-key abuse
+	// (refill is still 60/sec so steady-state behavior is unchanged).
+	adminBucketCapacity    = 128  // tokens
+	adminBucketRefillPerS  = 60.0 // tokens/sec
 	adminBucketWindowReset = 60 * time.Second
 )
 

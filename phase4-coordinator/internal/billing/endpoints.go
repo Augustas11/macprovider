@@ -104,6 +104,16 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// "matched route + bad id" so we can emit 400 (not 404) per
 	// §11.6.1.1.
 	if m := matchQuarantinePath(r.URL.Path); m.matched {
+		// R3 fix (SEC-M1): when the route-layer flag is disabled the
+		// endpoint must be byte-indistinguishable from a non-existent
+		// route — return 404 universally BEFORE method or id-shape
+		// checks. Otherwise GET / PUT / bad-id requests leak route
+		// existence via 405 / 400 even when the operator has not
+		// turned the surface on.
+		if !h.store.ForceVoidEnabled() {
+			writeError(w, http.StatusNotFound, "not_found", "not found")
+			return
+		}
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 			return

@@ -320,6 +320,44 @@ func TestACQ045_ReaderSideNarrowing(t *testing.T) {
 	if got := summary["total_provider_credits"]; got != 100 {
 		t.Fatalf("total_provider_credits=%d want 100 (force-void does NOT add to payable set)", got)
 	}
+	// R3 fix (CODE-M1): SPEC AC-Q045 also requires hitting
+	// `/providers/{id}/earnings`. Force-voided rows must NOT appear
+	// in the provider earnings response. Verify against each of the
+	// three providers in the fixture: p-q045 (payable) sees 100,
+	// p-q045-b (open quarantined) sees 0, p-q045-c (force-voided)
+	// sees 0.
+	earningsTokens := fakeTokens{
+		"t-a": "p-q045",
+		"t-b": "p-q045-b",
+		"t-c": "p-q045-c",
+	}
+	earningsHandler := store.HandlersWithQuarantineGate("operator", earningsTokens, true, 60, true)
+	hitEarnings := func(t *testing.T, providerID, token string) int64 {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/providers/"+providerID+"/earnings", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		earningsHandler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("/providers/%s/earnings status=%d body=%s", providerID, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			TotalCredits int64 `json:"total_credits"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp.TotalCredits
+	}
+	if got := hitEarnings(t, "p-q045", "t-a"); got != 100 {
+		t.Fatalf("/providers/p-q045/earnings total=%d want 100", got)
+	}
+	if got := hitEarnings(t, "p-q045-b", "t-b"); got != 0 {
+		t.Fatalf("/providers/p-q045-b/earnings total=%d want 0 (open quarantined excluded)", got)
+	}
+	if got := hitEarnings(t, "p-q045-c", "t-c"); got != 0 {
+		t.Fatalf("/providers/p-q045-c/earnings total=%d want 0 (force-voided excluded)", got)
+	}
 }
 
 // AC-Q047: same-transaction audit atomicity — drop audit_log before
@@ -503,15 +541,16 @@ func TestForceVoidNoNestedQueryDeadlock(t *testing.T) {
 }
 
 // AC-Q049: concurrent POSTs against the same id — exactly one 200
-// + (N-1) × 409; one resolution row; one audit row.
-// N is intentionally < adminBucketCapacity so this AC tests the
-// UNIQUE-constraint race, not the rate-limit bucket (which is
-// tested separately).
+// + (N-1) × 409; one resolution row; one audit row. SPEC says
+// "Fire 64 parallel POST" and "All 64 responses count against the
+// /admin/* rate-limit bucket". N=64 < adminBucketCapacity=128 so
+// no 429 is expected — the bucket admits all 64, and the AC tests
+// the UNIQUE-constraint race only.
 func TestACQ049_ConcurrentUNIQUEConflict(t *testing.T) {
 	store := quarantineFixture(t)
 	id := insertQuarantinedCredit(t, store, "p-q049")
 	handler := store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true)
-	const N = 32
+	const N = 64
 	var wg sync.WaitGroup
 	var ok200 int64
 	var ok409 int64
@@ -589,6 +628,25 @@ func TestACQ053_ReloadEmitsFlagChangedAuditAndFlipTakesEffect(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='billing_config_flag_changed'`); got != 1 {
 		t.Fatalf("reload-no-change emitted spurious audit row: got %d total", got)
+	}
+	// R3 fix (CODE-M2): SPEC AC-Q053 third leg — reload back to
+	// false. Must emit a SECOND billing_config_flag_changed audit
+	// row and a fresh POST against a DIFFERENT quarantined row must
+	// return the byte-identical 404 envelope.
+	if err := store.SetForceVoidEnabled(context.Background(), false, "sighup"); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='billing_config_flag_changed'`); got != 2 {
+		t.Fatalf("flag-change audit rows=%d want 2 after true→false flip", got)
+	}
+	id2 := insertQuarantinedCredit(t, store, "p-q053c")
+	req3 := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/"+itoa(id2)+"/force-void", strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+	req3.Header.Set("Authorization", "Bearer operator")
+	req3.Header.Set("Content-Type", "application/json")
+	w3 := httptest.NewRecorder()
+	handler.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusNotFound {
+		t.Fatalf("post-back-to-disabled status=%d body=%s want 404", w3.Code, w3.Body.String())
 	}
 }
 
@@ -875,6 +933,135 @@ func TestProviderRollupPayableIndependentOfFilter(t *testing.T) {
 	}
 	t.Run("default", func(t *testing.T) { check(t, "", 100, 1) })
 	t.Run("include_quarantined_true", func(t *testing.T) { check(t, "?include_quarantined=true", 100, 1) })
+}
+
+// R3 (SEC-M1): when the route-layer flag is DISABLED the entire
+// quarantine endpoint surface MUST be byte-indistinguishable from a
+// non-existent route. Method-not-allowed, bad-id, and force-void
+// POSTs all must return 404 (not 405/400) while the flag is off so
+// the surface is not discoverable.
+func TestQuarantineRouteHidesShapeWhenDisabled(t *testing.T) {
+	store := quarantineFixture(t)
+	// flag explicitly false
+	handler := store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, false)
+	id := insertQuarantinedCredit(t, store, "p-hide")
+	cases := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"get_well_formed_id", http.MethodGet, "/admin/ledger/quarantine/" + itoa(id) + "/force-void"},
+		{"put_well_formed_id", http.MethodPut, "/admin/ledger/quarantine/" + itoa(id) + "/force-void"},
+		{"delete_well_formed_id", http.MethodDelete, "/admin/ledger/quarantine/" + itoa(id) + "/force-void"},
+		{"post_bad_id", http.MethodPost, "/admin/ledger/quarantine/notanid/force-void"},
+		{"post_well_formed_id", http.MethodPost, "/admin/ledger/quarantine/" + itoa(id) + "/force-void"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(c.method, c.path, strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+			req.Header.Set("Authorization", "Bearer operator")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("status=%d body=%s want 404 (route must be invisible while flag disabled)", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// R3 (ARCH-H1): Store.ReloadBillingConfig must atomically commit the
+// config snapshot row AND the billing_config_flag_changed audit row
+// (when the flag is actually changing), or neither. If the audit
+// INSERT fails the snapshot must NOT be written and the in-memory
+// flag must remain at its prior value.
+func TestReloadBillingConfigAtomicAuditAndSnapshot(t *testing.T) {
+	store := quarantineFixture(t)
+	if store.ForceVoidEnabled() {
+		t.Fatal("precondition: forceVoidEnabled must start false")
+	}
+	cfg := RewardsConfig{
+		ProviderShare:    0.90,
+		GlobalMultiplier: 1.0,
+		RateCard: map[string]RateCardEntry{
+			"default": {PromptCreditsPerMtok: 500000, CompletionCreditsPerMtok: 1000000},
+		},
+	}
+	// Successful reload that flips the flag false→true: must write
+	// one snapshot row + one audit row + publish the atomic.
+	now := time.Now().UTC()
+	snapID, err := store.ReloadBillingConfig(context.Background(), cfg, true, "sighup", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapID == 0 {
+		t.Fatal("snapshot id is zero")
+	}
+	if !store.ForceVoidEnabled() {
+		t.Fatal("flag did not publish after successful reload")
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_config_snapshots`); got != 1 {
+		t.Fatalf("snapshots=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='billing_config_flag_changed'`); got != 1 {
+		t.Fatalf("flag-change audit rows=%d want 1", got)
+	}
+
+	// Drop audit_log so the flag-change INSERT fails; flag is
+	// currently true, attempt to flip to false. Both snapshot and
+	// audit must roll back; the in-memory flag must remain true.
+	if _, err := store.db.Exec(`DROP TABLE audit_log`); err != nil {
+		t.Fatal(err)
+	}
+	preSnapshots := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_config_snapshots`)
+	if _, err := store.ReloadBillingConfig(context.Background(), cfg, false, "sighup", now.Add(time.Second)); err == nil {
+		t.Fatal("expected error from ReloadBillingConfig when audit_log is missing")
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_config_snapshots`); got != preSnapshots {
+		t.Fatalf("snapshots=%d want %d (atomic rollback required when audit insert fails)", got, preSnapshots)
+	}
+	if !store.ForceVoidEnabled() {
+		t.Fatal("flag flipped to false despite atomic audit failure — race regression")
+	}
+
+	// Recreate audit_log; reload should now succeed and flip to false.
+	createAuditLogForTest(t, store.db)
+	if _, err := store.ReloadBillingConfig(context.Background(), cfg, false, "sighup", now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if store.ForceVoidEnabled() {
+		t.Fatal("flag did not flip false after successful reload")
+	}
+}
+
+// R3 (also ARCH-H1): same-value reload through ReloadBillingConfig
+// writes a NEW snapshot row but does NOT emit a billing_config_flag_changed
+// audit row (SPEC §11.6.4 "reload-no-change" rule). Validates that
+// our atomic-tx path preserves the no-change semantics.
+func TestReloadBillingConfigSameValueNoFlagAudit(t *testing.T) {
+	store := quarantineFixture(t)
+	cfg := RewardsConfig{
+		ProviderShare:    0.90,
+		GlobalMultiplier: 1.0,
+		RateCard:         map[string]RateCardEntry{"default": {PromptCreditsPerMtok: 500000, CompletionCreditsPerMtok: 1000000}},
+	}
+	now := time.Now().UTC()
+	if _, err := store.ReloadBillingConfig(context.Background(), cfg, true, "sighup", now); err != nil {
+		t.Fatal(err)
+	}
+	auditAfterFirst := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='billing_config_flag_changed'`)
+	// Same value, must NOT emit a second audit row.
+	if _, err := store.ReloadBillingConfig(context.Background(), cfg, true, "sighup", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='billing_config_flag_changed'`); got != auditAfterFirst {
+		t.Fatalf("same-value reload emitted spurious audit row: count=%d want %d", got, auditAfterFirst)
+	}
+	// But snapshot row should still be inserted (snapshot is
+	// per-reload, independent of flag-flip).
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_config_snapshots`); got != 2 {
+		t.Fatalf("snapshots=%d want 2 (each reload writes a snapshot)", got)
+	}
 }
 
 // R2 (ARCH-H1): if the flag-change audit COMMIT fails, the route-layer

@@ -889,20 +889,20 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 	wsServer.SetTier2Config(cfg.Tier2)
 	buyerServer.SetTier2Config(cfg.Tier2)
 	if len(billingStores) > 0 && billingStores[0] != nil {
-		snapshotID, err := billingStores[0].InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
+		// R3 fix (ARCH-H1): snapshot + flag-change audit + in-memory
+		// publish are now ONE atomic operation in
+		// billing.Store.ReloadBillingConfig. If COMMIT fails, the
+		// snapshot is not written, the flag-change audit is not
+		// written, and the force-void flag stays at its prior value.
+		// Only AFTER COMMIT do we publish the rewards / settlement
+		// in-memory configs that depend on the snapshot id.
+		snapshotID, err := billingStores[0].ReloadBillingConfig(context.Background(), cfg.Rewards, cfg.Billing.QuarantineResolutionForceVoidEnabled, "sighup", time.Now().UTC())
 		if err != nil {
-			logger.Error().Err(err).Msg("billing config snapshot reload rejected")
+			logger.Error().Err(err).Msg("billing config reload rejected (snapshot + flag audit atomic)")
 			return
 		}
 		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID)
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
-		// SPEC-005 v0.4 §11.6.4 + §13.2 — emit
-		// `billing_config_flag_changed` audit event on actual flips
-		// of the route-layer flag. No-op when value is unchanged.
-		if err := billingStores[0].SetForceVoidEnabled(context.Background(), cfg.Billing.QuarantineResolutionForceVoidEnabled, "sighup"); err != nil {
-			logger.Error().Err(err).Msg("billing force-void flag reload failed")
-			return
-		}
 		logger.Info().
 			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
 			Str("event", "spec005_v0_4_route_layer_flag_reload").
