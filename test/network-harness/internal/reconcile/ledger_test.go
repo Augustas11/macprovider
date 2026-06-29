@@ -11,11 +11,41 @@
 package reconcile
 
 import (
+	"database/sql"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/augstar/macprovider-network-harness/internal/buyer"
+	"github.com/augstar/macprovider-network-harness/internal/scenario"
+
+	_ "modernc.org/sqlite"
 )
+
+// TestSnapshotWindow_NoBackwardPad is the regression test for the
+// "false-positive orphan when scenarios run back-to-back" bug. The
+// snapshot window MUST start exactly at the harness's startUTC,
+// never earlier — backward padding pulls tail rows from a prior
+// scenario into the next scenario's query, surfacing already-matched
+// rows as orphans in the second scenario's leftover pool.
+//
+// The forward pad (endUTC + 30s) stays, because gateway settlement
+// can legitimately lag the harness's observation of the response.
+func TestSnapshotWindow_NoBackwardPad(t *testing.T) {
+	start := time.Date(2026, 6, 29, 13, 7, 47, 0, time.UTC)
+	end := time.Date(2026, 6, 29, 13, 8, 35, 0, time.UTC)
+	winStart, winEnd := snapshotWindow(start, end)
+	if !winStart.Equal(start) {
+		t.Errorf("winStart must equal startUTC (no backward pad), got %v vs %v", winStart, start)
+	}
+	if !winEnd.After(end) {
+		t.Errorf("winEnd must extend past endUTC (forward pad), got %v vs %v", winEnd, end)
+	}
+	if got := winEnd.Sub(end); got != 90*time.Second {
+		t.Errorf("forward pad must be 90s, got %v", got)
+	}
+}
 
 // TestComputePerPairDrift_CleanMatches: identical token counts → zero
 // drift across every signal.
@@ -921,5 +951,343 @@ func TestComputePerPairDrift_NetVsOverbillRelationship(t *testing.T) {
 	}
 	if len(r.OverbilledPairs) != 2 {
 		t.Errorf("want 2 overbilled pairs, got %d", len(r.OverbilledPairs))
+	}
+}
+
+// --- DB fixtures for the snapshot-window integration tests ----------
+
+// newTestGatewayDB creates an empty usage_events table in a fresh
+// temp SQLite file and returns its path. Schema is the read-side
+// projection of the production phase5-gateway DDL — only columns the
+// reconciler actually SELECTs.
+func newTestGatewayDB(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open gateway db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE usage_events (
+		request_id        TEXT NOT NULL,
+		account_id        TEXT NOT NULL DEFAULT '',
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		outcome           TEXT NOT NULL,
+		created_at        TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create usage_events: %v", err)
+	}
+	return path
+}
+
+func insertGwRow(t *testing.T, path, requestID, accountID string, completionTokens int64, outcome string, createdAt time.Time) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open gateway db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(
+		`INSERT INTO usage_events(request_id, account_id, completion_tokens, outcome, created_at) VALUES (?, ?, ?, ?, ?)`,
+		requestID, accountID, completionTokens, outcome, createdAt.UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatalf("insert gw row: %v", err)
+	}
+}
+
+// newTestCoordDB creates an empty request_log table in a fresh temp
+// SQLite file and returns its path. Same read-side projection rule
+// as newTestGatewayDB.
+func newTestCoordDB(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "coord.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open coord db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE request_log (
+		request_id          TEXT NOT NULL,
+		external_request_id TEXT NULL,
+		account_id          TEXT NULL,
+		model               TEXT NOT NULL DEFAULT '',
+		completion_tokens   INTEGER NULL,
+		status              INTEGER NOT NULL,
+		ts_utc              TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create request_log: %v", err)
+	}
+	return path
+}
+
+func insertCoordRow(t *testing.T, path, requestID, externalRequestID, accountID, model string, completionTokens int64, status int, ts time.Time) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open coord db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(
+		`INSERT INTO request_log(request_id, external_request_id, account_id, model, completion_tokens, status, ts_utc) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		requestID, externalRequestID, accountID, model, completionTokens, status, ts.UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatalf("insert coord row: %v", err)
+	}
+}
+
+func makeScenario(coordPath, gwPath string) *scenario.Scenario {
+	return &scenario.Scenario{
+		Target: scenario.Target{
+			CoordinatorDBPath: coordPath,
+			GatewayDBPath:     gwPath,
+		},
+	}
+}
+
+// TestRun_IDRecoveryRescuesClockSkewedRows asserts the HIGH-1 fix
+// from the 3-lane codex audit on #243: when a gateway row's
+// `created_at` lands just before `startUTC` (clock-skew or scheduling
+// jitter), the by-ID recovery pass MUST still pull the row in so the
+// matcher pairs it with the harness result and it does NOT show up
+// as unmatched.
+//
+// Without the by-ID recovery, the row is dropped by the SQL
+// `created_at >= startUTC` predicate and the harness sees a false-
+// negative "harness success unmatched" billing-gap signal.
+func TestRun_IDRecoveryRescuesClockSkewedRows(t *testing.T) {
+	gwPath := newTestGatewayDB(t)
+	coordPath := newTestCoordDB(t)
+
+	startUTC := time.Date(2026, 6, 29, 14, 0, 0, 0, time.UTC)
+	endUTC := startUTC.Add(10 * time.Second)
+
+	// Gateway row stamped 5s BEFORE the harness's startUTC (simulates
+	// gateway clock trailing harness). Without by-ID recovery this row
+	// is invisible to the snapshot-window query.
+	insertGwRow(t, gwPath, "req-skewed-1", "acct-A", 12, "ok", startUTC.Add(-5*time.Second))
+
+	// Coord row also stamped just before startUTC, joined back to the
+	// harness id via external_request_id.
+	insertCoordRow(t, coordPath, "coord-internal-1", "req-skewed-1", "acct-A", "test-model", 12, 200, startUTC.Add(-4*time.Second))
+
+	results := []buyer.Result{{
+		RequestID:                "req-skewed-1",
+		Model:                    "test-model",
+		Outcome:                  "ok",
+		CompletionTokensReceived: 12,
+		StartUTC:                 startUTC.Add(time.Second),
+		EndUTC:                   startUTC.Add(2 * time.Second),
+	}}
+
+	sc := makeScenario(coordPath, gwPath)
+	r, err := Run(sc, results, startUTC, endUTC)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(r.UnmatchedSuccesses) != 0 {
+		t.Errorf("clock-skewed harness-owned row must NOT appear as unmatched, got %v", r.UnmatchedSuccesses)
+	}
+	if len(r.MatchedSuccesses) != 1 {
+		t.Fatalf("want 1 matched pair, got %d (matched=%v)", len(r.MatchedSuccesses), r.MatchedSuccesses)
+	}
+	if got := r.MatchedSuccesses[0].GatewayCompletionTokens; got != 12 {
+		t.Errorf("matched gateway tokens: want 12, got %d", got)
+	}
+	if got := r.MatchedSuccesses[0].CoordinatorCompletionTokens; got != 12 {
+		t.Errorf("matched coord tokens: want 12, got %d", got)
+	}
+	if len(r.UnmatchedGatewayOKRows) != 0 {
+		t.Errorf("by-ID-recovered row must not appear as gateway orphan, got %v", r.UnmatchedGatewayOKRows)
+	}
+}
+
+// TestRun_NoDoubleCountingAcrossAdjacentScenarios asserts the #243
+// no-double-counting contract: a gateway row stamped inside scenario
+// N's window MUST NOT surface as an orphan in scenario N+1's
+// reconcile, even when N+1 starts immediately after N ends. This is
+// the end-to-end behavioral test the R1 code-lane MEDIUM finding
+// asked for — the existing TestSnapshotWindow_NoBackwardPad only
+// asserts the helper's arithmetic.
+func TestRun_NoDoubleCountingAcrossAdjacentScenarios(t *testing.T) {
+	gwPath := newTestGatewayDB(t)
+	coordPath := newTestCoordDB(t)
+
+	scn1Start := time.Date(2026, 6, 29, 14, 0, 0, 0, time.UTC)
+	scn1End := scn1Start.Add(10 * time.Second)
+	scn2Start := scn1End // back-to-back, like 02→03 in the v0.3 baseline run
+	scn2End := scn2Start.Add(10 * time.Second)
+
+	// Scenario 1's row, stamped 8s in (well inside scenario 1's window).
+	insertGwRow(t, gwPath, "req-scn1", "acct-A", 7, "ok", scn1Start.Add(8*time.Second))
+	insertCoordRow(t, coordPath, "coord-scn1", "req-scn1", "acct-A", "test-model", 7, 200, scn1Start.Add(8*time.Second))
+
+	// Scenario 1 has the harness result for req-scn1. Run it: should
+	// reconcile cleanly with one matched pair.
+	scn1Results := []buyer.Result{{
+		RequestID:                "req-scn1",
+		Model:                    "test-model",
+		Outcome:                  "ok",
+		CompletionTokensReceived: 7,
+		StartUTC:                 scn1Start.Add(7 * time.Second),
+		EndUTC:                   scn1Start.Add(9 * time.Second),
+	}}
+	sc := makeScenario(coordPath, gwPath)
+	r1, err := Run(sc, scn1Results, scn1Start, scn1End)
+	if err != nil {
+		t.Fatalf("scenario 1 Run: %v", err)
+	}
+	if len(r1.MatchedSuccesses) != 1 {
+		t.Fatalf("scn1 want 1 matched pair, got %d", len(r1.MatchedSuccesses))
+	}
+	if len(r1.UnmatchedGatewayOKRows) != 0 {
+		t.Errorf("scn1 unexpected gateway orphans: %v", r1.UnmatchedGatewayOKRows)
+	}
+
+	// Scenario 2: no harness result for req-scn1 (different scenario).
+	// Pre-fix, the backward pad pulled scn1's tail row into scn2's
+	// window and surfaced req-scn1 as a false-positive orphan in scn2.
+	// Post-fix, scn2's window starts at scn2Start = scn1End, so the
+	// scn1 row at scn1Start+8s is outside scn2's pull AND not in scn2's
+	// harness IDs → must not appear.
+	scn2Results := []buyer.Result{} // empty: simulates a scenario where no harness fires against this row
+	r2, err := Run(sc, scn2Results, scn2Start, scn2End)
+	if err != nil {
+		t.Fatalf("scenario 2 Run: %v", err)
+	}
+	if len(r2.UnmatchedGatewayOKRows) != 0 {
+		t.Errorf("scenario 2 must not see scenario 1's gateway row as orphan, got %v", r2.UnmatchedGatewayOKRows)
+	}
+	if len(r2.UnmatchedCoordinator2xxRows) != 0 {
+		t.Errorf("scenario 2 must not see scenario 1's coord row as orphan, got %v", r2.UnmatchedCoordinator2xxRows)
+	}
+}
+
+// TestSnapshotWindow_BoundaryNanoseconds locks the inclusive nature
+// of the snapshot window bounds in SQL: a row stamped exactly at
+// startUTC is included; a row stamped 1ns before is excluded; a row
+// at endUTC+30s is included; a row 1ns past the pad is excluded.
+// LOW finding from the R1 security lane: the test should anchor the
+// `>=` / `<=` semantics so future "tighten the bound" edits cannot
+// silently flip exact-boundary behavior.
+//
+// Sub-second component is 9-significant-digits so time.RFC3339Nano
+// emits a uniform 9-digit fraction across all boundary timestamps;
+// SQL string comparison of variable-length trimmed fractions is a
+// separate pre-existing harness quirk, out of scope for #243.
+func TestSnapshotWindow_BoundaryNanoseconds(t *testing.T) {
+	gwPath := newTestGatewayDB(t)
+	coordPath := newTestCoordDB(t)
+	startUTC := time.Date(2026, 6, 29, 14, 0, 0, 123_456_789, time.UTC)
+	endUTC := startUTC.Add(10 * time.Second)
+
+	// Four rows: one each at start-1ns (excl), start (incl), end+90s
+	// (incl), end+90s+1ns (excl). No harness results → none get
+	// id-rescued. Orphans tell us which rows the snapshot query saw.
+	insertGwRow(t, gwPath, "before-window", "acct-A", 1, "ok", startUTC.Add(-time.Nanosecond))
+	insertGwRow(t, gwPath, "at-start", "acct-A", 1, "ok", startUTC)
+	insertGwRow(t, gwPath, "at-end-pad", "acct-A", 1, "ok", endUTC.Add(90*time.Second))
+	insertGwRow(t, gwPath, "past-end-pad", "acct-A", 1, "ok", endUTC.Add(90*time.Second).Add(time.Nanosecond))
+
+	sc := makeScenario(coordPath, gwPath)
+	r, err := Run(sc, nil, startUTC, endUTC)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := map[string]bool{}
+	for _, id := range r.UnmatchedGatewayOKRows {
+		got[id] = true
+	}
+	if got["before-window"] {
+		t.Errorf("row 1ns before startUTC must be excluded, got it as orphan")
+	}
+	if !got["at-start"] {
+		t.Errorf("row at startUTC must be included (inclusive lower bound)")
+	}
+	if !got["at-end-pad"] {
+		t.Errorf("row at endUTC+30s must be included (inclusive upper bound)")
+	}
+	if got["past-end-pad"] {
+		t.Errorf("row 1ns past endUTC+30s must be excluded")
+	}
+}
+
+// TestRun_LateSettlement_ExactIDMatchesPastFuzzyWindow asserts the
+// #243 R3 fix: a gateway row whose `created_at` is 76s after the
+// harness's `EndUTC` (within live v0.3 baseline lag) MUST still
+// match by exact request_id, because the snapshot pad + quiesce
+// were widened to 90s but the FUZZY matchWindow stayed at 60s as a
+// defensive guard against accidental token+timestamp false-positives.
+// Without the exactMatchSettleWindow split, this row would be in the
+// snapshot pool but rejected by the matcher, surfacing as a false-
+// positive UnmatchedSuccesses + orphan gateway row.
+//
+// 3-of-3 R3 codex audit lanes converged on this finding before the
+// fix landed. The test pins the contract so future "tighten the
+// match window" edits cannot silently re-open the bug.
+func TestRun_LateSettlement_ExactIDMatchesPastFuzzyWindow(t *testing.T) {
+	gwPath := newTestGatewayDB(t)
+	coordPath := newTestCoordDB(t)
+
+	startUTC := time.Date(2026, 6, 29, 14, 0, 0, 0, time.UTC)
+	harnessEnd := startUTC.Add(2 * time.Second)
+	endUTC := startUTC.Add(10 * time.Second)
+
+	// Gateway settles 76s after the harness's observed end (live
+	// v0.3 max lag). Inside the 90s snapshot pad, OUTSIDE the 60s
+	// fuzzy matchWindow.
+	gwCreated := harnessEnd.Add(76 * time.Second)
+	insertGwRow(t, gwPath, "req-late-76s", "acct-A", 18, "ok", gwCreated)
+	// Coord settles at a similar lag from harness start.
+	insertCoordRow(t, coordPath, "coord-late-1", "req-late-76s", "acct-A", "test-model", 18, 200, startUTC.Add(75*time.Second))
+
+	results := []buyer.Result{{
+		RequestID:                "req-late-76s",
+		Model:                    "test-model",
+		Outcome:                  "ok",
+		CompletionTokensReceived: 18,
+		StartUTC:                 startUTC.Add(time.Second),
+		EndUTC:                   harnessEnd,
+	}}
+
+	sc := makeScenario(coordPath, gwPath)
+	r, err := Run(sc, results, startUTC, endUTC)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(r.UnmatchedSuccesses) != 0 {
+		t.Errorf("76s-late harness-owned row must match by exact id, got unmatched=%v", r.UnmatchedSuccesses)
+	}
+	if len(r.MatchedSuccesses) != 1 {
+		t.Fatalf("want 1 matched pair, got %d", len(r.MatchedSuccesses))
+	}
+	if got := r.MatchedSuccesses[0].GatewayCompletionTokens; got != 18 {
+		t.Errorf("matched gateway tokens: want 18, got %d", got)
+	}
+	if got := r.MatchedSuccesses[0].CoordinatorCompletionTokens; got != 18 {
+		t.Errorf("matched coord tokens: want 18, got %d", got)
+	}
+	if len(r.UnmatchedGatewayOKRows) != 0 {
+		t.Errorf("late settle row must not appear as gateway orphan, got %v", r.UnmatchedGatewayOKRows)
+	}
+}
+
+// TestHarnessRequestIDs_DedupAndFilter pins the helper that feeds the
+// by-ID recovery pass: empty strings are filtered, duplicates are
+// collapsed, original order is preserved. Cheap unit test.
+func TestHarnessRequestIDs_DedupAndFilter(t *testing.T) {
+	results := []buyer.Result{
+		{RequestID: "a"},
+		{RequestID: ""},
+		{RequestID: "b"},
+		{RequestID: "a"}, // duplicate
+		{RequestID: "c"},
+	}
+	got := harnessRequestIDs(results)
+	want := []string{"a", "b", "c"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("want %v, got %v", want, got)
+	}
+	if harnessRequestIDs(nil) != nil {
+		t.Errorf("nil input must return nil")
 	}
 }

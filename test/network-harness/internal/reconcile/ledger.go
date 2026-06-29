@@ -44,13 +44,34 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// matchWindow is the per-request temporal tolerance for accepting a
-// candidate row as a match for a harness observation. Used by both
-// exact-id and fuzzy paths so they cannot silently diverge. The
-// reconciler's SQL snapshot pads the run window by 30s; this tighter
-// per-request window further constrains which rows are eligible.
+// SnapshotForwardPad is the canonical forward pad applied to the
+// reconciler's SQL snapshot window AND the runner's pre-snapshot
+// quiesce sleep (cmd/harness/main.go). They MUST share the same
+// value: the runner sleeps long enough for settlements to land, and
+// the snapshot extends to the same horizon so those settlements are
+// in the pulled rows. Exported so cmd/harness can reference it
+// directly instead of redeclaring.
+const SnapshotForwardPad = 90 * time.Second
+
+// matchWindow is the per-request temporal tolerance applied by the
+// FUZZY matching path as a defense against accidental
+// token+timestamp false-positives across the run. Exact-ID matches
+// have their own wider tolerance (exactMatchSettleWindow) because
+// the request_id + account consensus already discriminate strongly,
+// and gateway settlements can lag the harness's observation by tens
+// of seconds (live v0.3 max: 76s).
 const matchWindow = 60 * time.Second
 const matchWindowMs = int64(matchWindow / time.Millisecond)
+
+// exactMatchSettleWindow is the temporal tolerance applied when a
+// row matches a harness result by request_id AND passes the account-
+// consensus guard. Sized to compose with SnapshotForwardPad so any
+// row inside the snapshot is also matchable. Without this split a
+// 76s-late gateway settlement would be pulled into the snapshot but
+// rejected by the matcher's tighter 60s window, surfacing as a
+// false-positive UnmatchedSuccesses signal (#243 R3 finding).
+const exactMatchSettleWindow = SnapshotForwardPad
+const exactMatchSettleWindowMs = int64(exactMatchSettleWindow / time.Millisecond)
 
 // Match-method labels persisted on MatchedPair. Kept as private
 // typed-string consts so tests and future helpers can reference them
@@ -223,14 +244,38 @@ type MatchedPair struct {
 	GatewayLagMs                int64  `json:"gateway_lag_ms"`
 }
 
+// snapshotWindow returns the SQL query bounds for a reconcile run.
+// Forward-only pad: gateway settlement happens AFTER the harness
+// observes the response, so the upper bound extends `endUTC` forward
+// to catch settlement lag (inference duration + async settle path).
+// The lower bound stays at `startUTC` — gateway can never CAUSALLY
+// settle before the harness sends. Backward pad pre-fix pulled tail
+// rows from a prior scenario's window into the next scenario's
+// reconcile, surfacing already-matched rows as false-positive
+// orphans (#243).
+//
+// The forward pad is sized to v0.3 baseline live data (gateway
+// settlement lag 26–76s) plus headroom, and matches the runner's
+// pre-snapshot quiesce sleep at cmd/harness/main.go so all
+// settlements for this scenario have landed before the snapshot is
+// pulled. Quiesce + forward-pad composition closes the late-
+// settlement leak fully (was issue #248, fixed inline here).
+//
+// Clock-skew on the lower bound: a gateway whose clock trails the
+// harness can write `created_at < startUTC` for a row the harness
+// owns, dropping it from the time-window query. Run() handles this
+// via a separate by-ID recovery pass (queryGatewayByIDs /
+// queryCoordinatorByIDs) for harness-owned request IDs, bypassing
+// the time bound entirely. So the lower bound's wall-clock vs
+// causal divergence is moot for harness-owned rows.
+func snapshotWindow(startUTC, endUTC time.Time) (time.Time, time.Time) {
+	return startUTC, endUTC.Add(SnapshotForwardPad)
+}
+
 // Run pulls coordinator + gateway SQLite (locally or via SSH snapshot)
 // and reconciles harness results against rows in the run window.
 func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Time) (*Result, error) {
-	// Generous pad — gateway settlement can lag coord write-back by
-	// a few seconds (the inference duration).
-	pad := 30 * time.Second
-	winStart := startUTC.Add(-pad)
-	winEnd := endUTC.Add(pad)
+	winStart, winEnd := snapshotWindow(startUTC, endUTC)
 
 	r := &Result{
 		WindowStartUTC:  winStart,
@@ -265,6 +310,27 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 	gwRows, gwHasAcct, err := queryGateway(gwPath, winStart, winEnd)
 	if err != nil {
 		return r, fmt.Errorf("gateway query: %w", err)
+	}
+
+	// ID-recovery pass for harness-owned request IDs whose timestamps
+	// landed outside the forward-only snapshot window. Surfaced by the
+	// 3-lane codex audit on #243 (security/code HIGH-1): a gateway/coord
+	// clock skewed slightly behind the harness's startUTC would drop
+	// legitimate rows from the time-window query. By-ID recovery is
+	// safe to merge directly — these rows can never be cross-scenario
+	// orphans (the harness issued the ID this scenario).
+	harnessIDs := harnessRequestIDs(results)
+	if len(harnessIDs) > 0 {
+		extraGw, err := queryGatewayByIDs(gwPath, harnessIDs)
+		if err != nil {
+			return r, fmt.Errorf("gateway id-recovery: %w", err)
+		}
+		gwRows = mergeGwByID(gwRows, extraGw)
+		extraCoord, err := queryCoordinatorByIDs(coordPath, harnessIDs)
+		if err != nil {
+			return r, fmt.Errorf("coordinator id-recovery: %w", err)
+		}
+		coordRows = mergeCoordByID(coordRows, extraCoord)
 	}
 	r.GatewayHasAccountID = gwHasAcct
 	r.CoordHasAccountID = coordHasAcct
@@ -674,7 +740,7 @@ func pickExactGwByRequestID(pool *[]gwRow, h buyer.Result, requireAccountID stri
 		if g.RequestID != h.RequestID {
 			continue
 		}
-		if absInt64(g.CreatedAt.Sub(h.EndUTC).Milliseconds()) > matchWindowMs {
+		if absInt64(g.CreatedAt.Sub(h.EndUTC).Milliseconds()) > exactMatchSettleWindowMs {
 			continue
 		}
 		if !rowAccountIDMatches(g.AccountID, requireAccountID, schemaHasAccountID) {
@@ -706,7 +772,7 @@ func pickExactCoordByRequestID(pool *[]coordRow, h buyer.Result, requireAccountI
 		if c.ExternalRequestID != h.RequestID {
 			continue
 		}
-		if absInt64(c.TsUTC.Sub(h.StartUTC).Milliseconds()) > matchWindowMs {
+		if absInt64(c.TsUTC.Sub(h.StartUTC).Milliseconds()) > exactMatchSettleWindowMs {
 			continue
 		}
 		if !rowAccountIDMatches(c.AccountID, requireAccountID, schemaHasAccountID) {
@@ -997,6 +1063,178 @@ func queryGateway(path string, start, end time.Time) ([]gwRow, bool, error) {
 		out = append(out, g)
 	}
 	return out, hasAcct, rows.Err()
+}
+
+// harnessRequestIDs extracts the unique non-empty request IDs the
+// harness recorded from gateway responses. Used by the by-ID recovery
+// pass to bypass the forward-only snapshot window for rows the harness
+// definitively owns (clock-skew mitigation; see snapshotWindow).
+func harnessRequestIDs(results []buyer.Result) []string {
+	if len(results) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(results))
+	out := make([]string, 0, len(results))
+	for _, res := range results {
+		if res.RequestID == "" || seen[res.RequestID] {
+			continue
+		}
+		seen[res.RequestID] = true
+		out = append(out, res.RequestID)
+	}
+	return out
+}
+
+// queryGatewayByIDs returns gateway rows whose request_id is in the
+// supplied set, regardless of created_at. Companion to queryGateway
+// for the by-ID recovery pass.
+func queryGatewayByIDs(path string, ids []string) ([]gwRow, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	db, err := openRO(path)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	hasAcct, err := columnExists(db, "usage_events", "account_id")
+	if err != nil {
+		return nil, fmt.Errorf("probe usage_events.account_id: %w", err)
+	}
+	acctExpr := "''"
+	if hasAcct {
+		acctExpr = "COALESCE(account_id, '')"
+	}
+	placeholders, args := inClause(ids)
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT request_id, %s, completion_tokens, outcome, created_at
+		FROM usage_events
+		WHERE request_id IN (%s)
+	`, acctExpr, placeholders), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []gwRow
+	for rows.Next() {
+		var g gwRow
+		var ts string
+		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.CompletionTokens, &g.Outcome, &ts); err != nil {
+			return nil, err
+		}
+		g.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// queryCoordinatorByIDs returns coord rows whose external_request_id
+// is in the supplied set, regardless of ts_utc. Companion to
+// queryCoordinator for the by-ID recovery pass. Returns no rows when
+// the coord schema pre-dates external_request_id (legacy snapshot,
+// no cross-service id to filter on).
+func queryCoordinatorByIDs(path string, ids []string) ([]coordRow, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	db, err := openRO(path)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	hasExt, err := columnExists(db, "request_log", "external_request_id")
+	if err != nil {
+		return nil, fmt.Errorf("probe request_log.external_request_id: %w", err)
+	}
+	if !hasExt {
+		return nil, nil
+	}
+	hasAcct, err := columnExists(db, "request_log", "account_id")
+	if err != nil {
+		return nil, fmt.Errorf("probe request_log.account_id: %w", err)
+	}
+	acctExpr := "''"
+	if hasAcct {
+		acctExpr = "COALESCE(account_id, '')"
+	}
+	placeholders, args := inClause(ids)
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT request_id, COALESCE(external_request_id, ''), %s, model, COALESCE(completion_tokens, 0), status, ts_utc
+		FROM request_log
+		WHERE external_request_id IN (%s)
+	`, acctExpr, placeholders), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []coordRow
+	for rows.Next() {
+		var c coordRow
+		var ts string
+		if err := rows.Scan(&c.RequestID, &c.ExternalRequestID, &c.AccountID, &c.Model, &c.CompletionTokens, &c.Status, &ts); err != nil {
+			return nil, err
+		}
+		c.TsUTC, _ = time.Parse(time.RFC3339Nano, ts)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// inClause builds a `?, ?, ?` placeholder list and the matching args
+// slice for an `IN (...)` SQL clause. Caller guarantees ids is non-
+// empty (queryGatewayByIDs / queryCoordinatorByIDs short-circuit).
+func inClause(ids []string) (string, []any) {
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return placeholders, args
+}
+
+// mergeGwByID appends rows from b that are not already present in a,
+// keyed on (account_id, request_id) — gateway's composite PK shape.
+// Falls back to request_id alone when account_id is empty (legacy
+// snapshot). Stable order: existing a-rows kept in place, novel
+// b-rows appended.
+func mergeGwByID(a, b []gwRow) []gwRow {
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]bool, len(a)+len(b))
+	for _, r := range a {
+		seen[r.AccountID+"|"+r.RequestID] = true
+	}
+	for _, r := range b {
+		k := r.AccountID + "|" + r.RequestID
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		a = append(a, r)
+	}
+	return a
+}
+
+// mergeCoordByID appends rows from b that are not already present in
+// a, keyed on the coord-internal request_id (the PK of request_log).
+func mergeCoordByID(a, b []coordRow) []coordRow {
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]bool, len(a)+len(b))
+	for _, r := range a {
+		seen[r.RequestID] = true
+	}
+	for _, r := range b {
+		if seen[r.RequestID] {
+			continue
+		}
+		seen[r.RequestID] = true
+		a = append(a, r)
+	}
+	return a
 }
 
 func openRO(path string) (*sql.DB, error) {
