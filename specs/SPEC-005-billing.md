@@ -1458,6 +1458,8 @@ ledger table. Per-codepoint reject classes:
    - U+1D173..U+1D17A (musical-notation format chars)
    - U+E0000 (reserved; tag identifier)
    - U+E0001 (LANGUAGE TAG)
+   - U+E0002..U+E001F (reserved tag range between LANGUAGE TAG
+     and TAG SPACE; DICP=Yes per Unicode 16.0)
    - U+E0020..U+E007F (tag chars — also in #6)
    - U+E0080..U+E00FF (reserved tag range — also in #6)
    - U+E0100..U+E01EF (variation selectors supplement)
