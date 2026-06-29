@@ -343,3 +343,57 @@ func bytesOf(value byte, count int) []byte {
 	}
 	return out
 }
+
+// TestParseHelloRejectsControlCharsInRequiredStrings pins SPEC-002
+// v1.5.1 R-2 / issue #197 R4 security: provider-supplied required
+// strings on a hello (provider_id, hostname, model_id, binary_version)
+// MUST be rejected at parse time when they contain control characters
+// (C0, DEL, C1) so they cannot inject terminal-CSI sequences into
+// structured logs or close-frame reason strings. JSON `` decodes
+// to U+009B and is valid UTF-8 but would otherwise pass the parser.
+func TestParseHelloRejectsControlCharsInRequiredStrings(t *testing.T) {
+	base := map[string]any{
+		"type":                    "hello",
+		"version":                 1,
+		"tier":                    1,
+		"provider_id":             "p-ok",
+		"hostname":                "h-ok",
+		"model_id":                "m-ok",
+		"model_params_b":          7.0,
+		"ram_gb":                  16,
+		"max_context_tokens":      50000,
+		"max_concurrency":         1,
+		"throughput_tps_estimate": 19.8,
+		"binary_version":          "0.1.0",
+		"attestation":             nil,
+	}
+	for _, field := range []string{"provider_id", "hostname", "model_id", "binary_version"} {
+		for name, bad := range map[string]string{
+			"c0_null":      "p-\x00",
+			"c0_lf":        "p-\n",
+			"c1_csi_utf8":  "p-",
+			"c1_low_utf8":  "p-",
+			"c1_high_utf8": "p-",
+			"del":          "p-\x7f",
+		} {
+			t.Run(field+"/"+name, func(t *testing.T) {
+				payload := make(map[string]any, len(base))
+				for k, v := range base {
+					payload[k] = v
+				}
+				payload[field] = bad
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+				_, badField, err := ParseHello(raw)
+				if err == nil {
+					t.Fatalf("ParseHello accepted %s=%q", field, bad)
+				}
+				if badField != field {
+					t.Fatalf("badField=%q, want %q", badField, field)
+				}
+			})
+		}
+	}
+}

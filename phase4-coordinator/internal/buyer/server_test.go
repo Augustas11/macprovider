@@ -1259,6 +1259,14 @@ func TestRequestLogExternalRequestIDRejectsMalformedHeader(t *testing.T) {
 		"control_lf":   "req-\nabc",
 		"del_char":     "req-\x7fabc",
 		"over_128":     strings.Repeat("a", 129),
+		// SPEC-002 v1.5.1 R-2 / issue #197 R1 security + code lanes:
+		// raw C1 bytes must be rejected at byte level (rune iteration
+		// would decode 0x80-0x9f to utf8.RuneError and accept them).
+		"c1_low":             "req-\x80abc",
+		"c1_csi":             "req-\x9babc",
+		"c1_high":            "req-\x9fabc",
+		"invalid_utf8_lead":  "req-\xc3abc",
+		"invalid_utf8_alone": "req-\xff",
 	} {
 		t.Run(name, func(t *testing.T) {
 			reqLog, dbPath := openBuyerRequestLog(t)
@@ -1281,6 +1289,53 @@ func TestRequestLogExternalRequestIDRejectsMalformedHeader(t *testing.T) {
 					rows[0].ExternalRequestID)
 			}
 		})
+	}
+}
+
+// TestRequestLogModelFieldSanitized pins SPEC-002 v1.5.1 R3 security:
+// buyer-supplied `model` JSON value must be sanitized before persisting
+// to request_log.model. JSON tolerates `""` (valid UTF-8 for
+// U+009B CSI), so a buyer can land C1 codepoints in the model column
+// unless we sanitize on the way in. The sanitizer strips C1 codepoints
+// so the persisted value loses them (and the model lookup naturally
+// fails because no provider serves a malformed model name).
+func TestRequestLogModelFieldSanitized(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRequestLog(reqLog))
+
+	// model contains valid UTF-8 for U+009B (CSI). The sanitizer
+	// strips C1 codepoints → "modelabc" lands in request_log; lookup
+	// then 404s because no provider serves that name. The key
+	// assertion is that the persisted column does not contain raw
+	// or escaped C1.
+	body := []byte("{\"model\":\"model\xc2\x9babc\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")
+	rr := postChat(t, server, body, nil)
+	if rr.Code == http.StatusOK {
+		t.Fatalf("expected 4xx for C1-bearing model; got status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	// The unknown-model buyer-failure path writes a 4xx request_log
+	// row via logBuyerFailure. That row's model column MUST contain
+	// the SANITIZED value (C1 stripped, "modelabc") - proving the
+	// sanitizer is on the persistence path even for buyer-failure
+	// rows, not just success rows.
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d, want 1 buyer-failure row: %#v", len(rows), rows)
+	}
+	row := rows[0]
+	if strings.ContainsRune(row.Model, 0x9b) {
+		t.Fatalf("request_log.model contains C1 codepoint U+009B: %q", row.Model)
+	}
+	if row.Model != "modelabc" {
+		t.Fatalf("request_log.model = %q, want %q (C1 stripped)", row.Model, "modelabc")
 	}
 }
 

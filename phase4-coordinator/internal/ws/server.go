@@ -1577,7 +1577,15 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 	case "drain_status":
 		s.handleDrainStatus(conn, providerID, assignedID, payload)
 	default:
-		s.log.Warn().Str("provider_id", providerID).Str("type", envelope.Type).Msg("unknown provider message type")
+		// SPEC-002 v1.5.1 R-2 / issue #197 R5 security: envelope.Type
+		// is provider-controlled and reaches structured logs only on
+		// this unknown-message path. Reject control characters before
+		// logging to defeat terminal-CSI log injection.
+		safeType := envelope.Type
+		if containsControlChar(safeType) {
+			safeType = "[redacted_control_chars]"
+		}
+		s.log.Warn().Str("provider_id", providerID).Str("type", safeType).Msg("unknown provider message type")
 	}
 }
 

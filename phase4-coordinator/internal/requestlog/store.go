@@ -67,6 +67,27 @@ type Row struct {
 	Retried             int
 }
 
+// OpenStoreReadOnly opens the request-log DB without running ALTER
+// TABLE migrations or any other schema-mutating DDL. SPEC-002 v1.5.1
+// R-2 / issue #197 R2 code: the `coordinator migrate-indexes --check`
+// path MUST be read-only — running the daemon's migrate() inside
+// --check would silently advance a legacy DB to "unindexed" before
+// reporting state, defeating the operator's ability to inspect the
+// pre-migration state. `MigrationState` is the only supported
+// operation on a read-only store.
+func OpenStoreReadOnly(dbPath string) (*Store, error) {
+	if dbPath == "" {
+		return nil, fmt.Errorf("db path is required")
+	}
+	db, err := sql.Open("sqlite", sqliteutil.ReadOnlyDSN(dbPath))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return &Store{db: db}, nil
+}
+
 func OpenStore(dbPath string) (*Store, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("db path is required")
@@ -427,6 +448,124 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 	return s.requireColumns(ctx, []string{"id", "ts_utc", "request_id", "model"})
 }
 
+// MigrationKeyState reports the migration state of a single
+// composite reconciliation key (SPEC-002 v1.5.1 R-2):
+//   - legacy: required column absent.
+//   - unindexed: column present but the partial-NULL composite
+//     index has not been built yet ("rollout incomplete").
+//   - indexed: column present AND index present.
+type MigrationKeyState struct {
+	Key            string `json:"key"`
+	ColumnNames    []string `json:"column_names"`
+	ColumnsPresent bool   `json:"columns_present"`
+	IndexName      string `json:"index_name"`
+	IndexPresent   bool   `json:"index_present"`
+	State          string `json:"state"`
+}
+
+// MigrationStatus is the aggregate migration state across every
+// composite reconciliation key on request_log. Aggregate rule:
+//   - "legacy" if ANY key has columns absent.
+//   - "indexed" only if EVERY key is indexed.
+//   - "unindexed" otherwise (columns present everywhere; one or more
+//     indexes still missing).
+//
+// SPEC-002 v1.5.1 R-2 names "legacy" | "unindexed" | "indexed" as the
+// canonical migration_state enum; tooling MUST use these strings rather
+// than inventing private vocabulary.
+type MigrationStatus struct {
+	Aggregate string              `json:"migration_state"`
+	Keys      []MigrationKeyState `json:"keys"`
+}
+
+// migrationKeyDefs is the registry of composite reconciliation keys on
+// request_log. Order is normative — the JSON output of `migrate-indexes
+// --check --format json` enumerates entries in this order, and the
+// `key` strings are stable contract. Append-only: future SPEC versions
+// add composite reconciliation keys by appending new entries and MUST
+// NOT rename existing key strings. Consumers MUST match by `key` and
+// tolerate additional entries. Same registry drives `MigrationState`
+// (read) and `MigrateIndexes` (build) — DDL and index name live here
+// to prevent drift.
+//
+// MUST be non-empty: an empty registry is an implementation error, NOT
+// an `indexed` deployment.
+var migrationKeyDefs = []struct {
+	Key       string
+	Columns   []string
+	IndexName string
+	DDL       string
+}{
+	{
+		// SPEC-002 v1.4.2 R-2.
+		Key:       "external_request_id",
+		Columns:   []string{"external_request_id"},
+		IndexName: "idx_request_log_external_request_id",
+		DDL:       `CREATE INDEX idx_request_log_external_request_id ON request_log(external_request_id) WHERE external_request_id IS NOT NULL`,
+	},
+	{
+		// SPEC-002 v1.5.0 / issue #211.
+		Key:       "account_external_request_id",
+		Columns:   []string{"account_id", "external_request_id"},
+		IndexName: "idx_request_log_account_external_request_id",
+		DDL:       `CREATE INDEX idx_request_log_account_external_request_id ON request_log(account_id, external_request_id) WHERE account_id IS NOT NULL AND external_request_id IS NOT NULL`,
+	},
+}
+
+// MigrationState introspects PRAGMA table_info(request_log) and
+// sqlite_master and returns the migration state per composite key plus
+// the aggregate. Read-only — safe to call concurrently with daemon
+// inserts. SPEC-002 v1.5.1 R-2: reconciliation tooling MUST use this
+// (or the equivalent direct introspection) to decide join strategy,
+// and MUST report the "unindexed" state distinctly rather than falling
+// back to fuzzy match.
+func (s *Store) MigrationState(ctx context.Context) (MigrationStatus, error) {
+	cols, err := s.columns(ctx)
+	if err != nil {
+		return MigrationStatus{}, err
+	}
+	out := MigrationStatus{Aggregate: "indexed"}
+	for _, def := range migrationKeyDefs {
+		ks := MigrationKeyState{
+			Key:         def.Key,
+			ColumnNames: append([]string{}, def.Columns...),
+			IndexName:   def.IndexName,
+		}
+		ks.ColumnsPresent = true
+		for _, c := range def.Columns {
+			if !cols[c] {
+				ks.ColumnsPresent = false
+				break
+			}
+		}
+		var existing string
+		switch err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND name=?`, def.IndexName).Scan(&existing); err {
+		case nil:
+			ks.IndexPresent = true
+		case sql.ErrNoRows:
+			ks.IndexPresent = false
+		default:
+			return MigrationStatus{}, err
+		}
+		switch {
+		case !ks.ColumnsPresent:
+			ks.State = "legacy"
+		case !ks.IndexPresent:
+			ks.State = "unindexed"
+		default:
+			ks.State = "indexed"
+		}
+		out.Keys = append(out.Keys, ks)
+		switch {
+		case ks.State == "legacy":
+			out.Aggregate = "legacy"
+		case ks.State == "unindexed" && out.Aggregate != "legacy":
+			out.Aggregate = "unindexed"
+		}
+	}
+	return out, nil
+}
+
 // MigrateIndexes builds the request_log indexes whose underlying
 // columns ensureColumns has already added.
 //
@@ -443,29 +582,12 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 // calls are cheap: a sqlite_master point lookup decides whether the
 // DDL runs at all.
 func (s *Store) MigrateIndexes(ctx context.Context) error {
-	// SPEC-002 v1.4.2 R-2: reconciliation scans join gateway
-	// usage_events to request_log on external_request_id; the
-	// partial-NULL index keeps the index small (legacy rows have
-	// NULL and are not indexed).
-	indexes := []struct {
-		name string
-		ddl  string
-	}{
-		{
-			name: "idx_request_log_external_request_id",
-			ddl:  `CREATE INDEX idx_request_log_external_request_id ON request_log(external_request_id) WHERE external_request_id IS NOT NULL`,
-		},
-		// SPEC-002 v1.5.0 / issue #211: composite reconciliation-key
-		// index. Partial-NULL keeps the index small (legacy rows
-		// have NULL on either column and are not indexed).
-		{
-			name: "idx_request_log_account_external_request_id",
-			ddl:  `CREATE INDEX idx_request_log_account_external_request_id ON request_log(account_id, external_request_id) WHERE account_id IS NOT NULL AND external_request_id IS NOT NULL`,
-		},
-	}
-	for _, ix := range indexes {
+	// SPEC-002 v1.5.1 R-2 / issue #197: iterate the shared
+	// migrationKeyDefs registry so MigrateIndexes and MigrationState
+	// cannot drift on index names.
+	for _, def := range migrationKeyDefs {
 		var existing string
-		switch err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND name=?`, ix.name).Scan(&existing); err {
+		switch err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND name=?`, def.IndexName).Scan(&existing); err {
 		case nil:
 			continue
 		case sql.ErrNoRows:
@@ -473,7 +595,7 @@ func (s *Store) MigrateIndexes(ctx context.Context) error {
 		default:
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, ix.ddl); err != nil {
+		if _, err := s.db.ExecContext(ctx, def.DDL); err != nil {
 			return err
 		}
 	}
