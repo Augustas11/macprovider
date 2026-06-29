@@ -165,7 +165,11 @@ func TestSessionDetailGatewayProxyUsesExternalRequestIDAndAccountID(t *testing.T
 	// a regression that drops account_id into URL.Path would have
 	// URL.EscapedPath include `%3Faccount_id%3Dacct_A` and
 	// URL.RawQuery be empty.
-	wantPath := "/admin/explorer/sessions/buyer-supplied-X"
+	// #231 SPEC-007 v0.4: coordinator proxy URL uses the typed
+	// `ext_<external_request_id>` form so the gateway's
+	// path-segment-typing deprecation audit doesn't fire on every
+	// operator-driven session-detail navigation.
+	wantPath := "/admin/explorer/sessions/ext_buyer-supplied-X"
 	wantQuery := "account_id=acct_A"
 	if capturedRawPath != wantPath {
 		t.Fatalf("gateway proxy escaped path = %q, want %q (issue #212 v0.3 §5.6: external_request_id in path)", capturedRawPath, wantPath)

@@ -110,9 +110,15 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 		// Fire-and-forget — do not block the request path on audit
 		// emit failure, but surface in audit_events when it works.
 		// json.Marshal-safe payload (R1 SEC MEDIUM closure).
+		// #231 R5 code LOW closure: include request_id + ts_utc in
+		// the payload so a journald-only consumer (no audit_events
+		// row column join) can still see the full event shape per
+		// SPEC §6.4.
 		payloadJSON, _ := json.Marshal(map[string]any{
 			"endpoint":    "GET /admin/explorer/sessions",
+			"request_id":  requestID,
 			"severity":    "WARN",
+			"ts_utc":      s.now().UTC().Format(time.RFC3339Nano),
 			"deprecation": "v0.5 will reject untyped with 400 session_id_untyped — use ext_<external_request_id>",
 		})
 		_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
@@ -147,14 +153,14 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 				"matched_account_ids_truncated": out.MatchedAccountIDsTruncated,
 			}
 			// #231 v0.4: when truncation fired, emit a bounded
-			// sample of the FULL account_id list to audit_events
-			// for forensic retrieval. The forensic emit is capped
-			// at storage.ExplorerForensicMatchedAccountIDsCap so neither
-			// the 409 response NOR the audit row can be flooded by
-			// a malicious cross-account-collision attacker (R1
-			// SEC HIGH closure). When the unbounded SELECT returns
-			// MORE than the forensic cap, `forensic_truncated_at`
-			// is set in the payload to surface the partial capture.
+			// forensic sample of the matched account_id set to
+			// audit_events for post-hoc investigation. The sample
+			// is capped at storage.ExplorerForensicMatchedAccountIDsCap
+			// so neither the 409 response NOR the audit row can be
+			// flooded by a malicious cross-account-collision
+			// attacker (R1 SEC HIGH closure). When the bounded
+			// forensic SELECT returns MORE rows than the cap,
+			// `forensic_truncated_at` surfaces the partial capture.
 			if out.MatchedAccountIDsTruncated {
 				forensic := out.MatchedAccountIDsForensicSample
 				var forensicTruncatedAt int

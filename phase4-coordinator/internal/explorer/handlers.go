@@ -224,7 +224,13 @@ func (h *Handler) handleSessionDetail(ctx context.Context, w http.ResponseWriter
 		// "gateway_identity_unavailable" rather than forwarded.
 		external, account := firstAttemptWithBothFields(detail)
 		if external != "" && account != "" {
-			gwPath := "/admin/explorer/sessions/" + url.PathEscape(external)
+			// #231 SPEC-007 v0.4 (R5 code LOW closure): the gateway
+			// accepts `ext_<external_request_id>` as the typed
+			// path-segment form (v0.5 will reject bare-id). Send
+			// the typed prefix so the coordinator-driven proxy
+			// doesn't trigger the gateway's untyped-deprecation
+			// audit on every operator click.
+			gwPath := "/admin/explorer/sessions/ext_" + url.PathEscape(external)
 			vs := url.Values{}
 			vs.Set("account_id", account)
 			gwQuery := vs.Encode()
@@ -580,12 +586,15 @@ func (h *Handler) logPathSegmentUntyped(r *http.Request, requestID string) {
 	if err != nil {
 		host = r.RemoteAddr
 	}
+	// #231 R5 code LOW closure: include ts_utc so journald
+	// consumers see the full SPEC §5.6 event shape.
 	payload, _ := json.Marshal(map[string]any{
 		"event":       "payout_explorer_path_segment_untyped",
 		"severity":    "WARN",
 		"endpoint":    "GET /admin/explorer/sessions",
 		"request_id":  requestID,
 		"remote_addr": host,
+		"ts_utc":      time.Now().UTC().Format(time.RFC3339Nano),
 		"deprecation": "v0.5 will reject untyped with 400 session_id_untyped — use int_<request_id>",
 	})
 	stdLog.Println(string(payload))
