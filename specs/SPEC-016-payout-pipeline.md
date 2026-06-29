@@ -1,6 +1,6 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.21 (2026-06-25, draft — codex round-21 fix pass on v0.1.20. Round 21 returned NEEDS FIX PASS 0/1/1/1 against v0.1.20: MAJOR-1 stale `[2, 50]` confirmation_blocks bound at §4.3 step 7 + BUILD prompt; MEDIUM-1 ambiguous IMPL test (4) wording in §4.8b; LOW-1 two-RPC re-poll budget undercounted RPC calls in §4.7. All three absorbed. Pending codex round-22 confirmation. Full r20 findings: `specs/SPEC-016-r20-audit.md`; r21 closure narrative: `specs/SPEC-016-r21-audit.md`.)
+**Version:** 0.1.22 (2026-06-29, draft — IMPL follow-up advisories from PR #164 audit cycle absorbed; see issue #165. Two §7.1 events added: `payout_stale_outbox_backlog` (WARN) for §4.7 step 5 producer LIMIT suppression, and `payout_rpc_chronic_outage` (PAGE) for the two-RPC discipline chronic-single-side-failure gap. No normative SPEC text changes elsewhere — IMPL ships under v0.1.21 contract with these two new event rows.) PRIOR: 0.1.21 (2026-06-25, draft — codex round-21 fix pass on v0.1.20. Round 21 returned NEEDS FIX PASS 0/1/1/1 against v0.1.20: MAJOR-1 stale `[2, 50]` confirmation_blocks bound at §4.3 step 7 + BUILD prompt; MEDIUM-1 ambiguous IMPL test (4) wording in §4.8b; LOW-1 two-RPC re-poll budget undercounted RPC calls in §4.7. All three absorbed. Pending codex round-22 confirmation. Full r20 findings: `specs/SPEC-016-r20-audit.md`; r21 closure narrative: `specs/SPEC-016-r21-audit.md`.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -23,6 +23,32 @@ git-history-only). The change-log entries below are one-liners per
 version pointing at the corresponding audit file. Per
 [[feedback-spec-audit-file-convention]], audit narrative does NOT
 live in this SPEC body.
+
+**v0.1.22 (2026-06-29, draft — issue #165 IMPL follow-up):**
+Absorbs the two LOW arch advisories deferred from the PR #164 FULL
+audit cycle (see [[tracking-issue-scope-control]]). §7.1 gains two
+event rows:
+- `payout_stale_outbox_backlog` (severity=WARN) — emitted by the
+  §4.7 step 5 producer when the per-cycle candidate count exceeds
+  the operator-configured cap (sized from `payout.tuning.max_rows_per_run`).
+  Fields: `run_id, limit, total_candidates, ts_utc`. A
+  `total_candidates = -1` sentinel signals the operator that the
+  exact backlog count query failed (degraded observability), not
+  that there is no backlog.
+- `payout_rpc_chronic_outage` (severity=PAGE) — emitted by the
+  per-cycle chronic-outage tracker when one RPC's error rate
+  exceeds the threshold over the sliding window. Fields:
+  `rpc_label, window_seconds, sample_count, error_count,
+  error_rate, threshold, ts_utc`. Defaults: 10-minute window,
+  50% threshold, 10 minimum samples, 10-minute PAGE cooldown
+  per label. Closes the silent-degradation gap where ONE chronic
+  RPC failure produces no operator event (the disagreement
+  detector at §4.4 only fires when BOTH RPCs return AND disagree).
+IMPL surface: `phase4-coordinator/internal/payout/orphans.go`
+(LIMIT + backlog gauge) and `phase4-coordinator/internal/payout/chronic.go`
+(sliding-window tracker + `TrackingRPCClient` wrapper). No prose
+elsewhere in the SPEC changes — these events extend the §7.1 table
+under the v0.1.21 contract.
 
 **v0.1.21 (2026-06-25, draft — codex round-21 fix pass on
 v0.1.20):** Round 21 returned NEEDS FIX PASS 0/1/1/1. Fixes:
@@ -3751,6 +3777,8 @@ operator-key endpoints log actor=operator_key):
 | `payout_cancel_self_transfer_confirmed` (severity=INFO; NEW v0.1.14; v0.1.15 clarifies transition-only emission) | `run_id, payout_id, attempt_seq, nonce, tx_hash, block_number, gas_used_native_wei, ts_utc` |
 | `payout_cancel_self_transfer_reconfirm_stale` (severity=PAGE; NEW v0.1.15; v0.1.17 adds `event_id`) | `event_id (=cancel_reconfirm_stale_outbox.id), run_id, payout_id, attempt_seq, nonce, tx_hash, last_seen_block, updated_at_utc, ts_utc` |
 | `payout_stale_outbox_reaped` (severity=WARN; NEW v0.1.17) | `event_id (=cancel_reconfirm_stale_outbox.id), payout_id, attempt_seq, stale_started_at_utc, reap_lag_seconds, ts_utc` |
+| `payout_stale_outbox_backlog` (severity=WARN; NEW v0.1.22) | `run_id, limit, total_candidates, ts_utc` |
+| `payout_rpc_chronic_outage` (severity=PAGE; NEW v0.1.22) | `rpc_label, window_seconds, sample_count, error_count, error_rate, threshold, ts_utc` |
 
 ### 7.1.1 Where these events live
 

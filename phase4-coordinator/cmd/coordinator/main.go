@@ -729,17 +729,24 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 	// Step 4 r2 [arch:r2-4.2] MAJOR closure: pin is now func() string
 	// reading the live TuningProvider snapshot so SIGHUP SPKI rotations
 	// take effect at the next TLS handshake (not just accepted and logged).
+	// #165 A2: chronic-outage tracker wraps both RPC clients so every
+	// JSON-RPC call records success/failure into a sliding-window
+	// detector. Runner evaluates per cycle and emits
+	// payout_rpc_chronic_outage PAGE if either RPC's per-label error
+	// rate crosses the threshold. Tracker uses SPEC defaults (10min
+	// window / 50% threshold / 10 minSamples / 10min PAGE cooldown).
+	chronicTracker := payout.NewChronicOutageTracker(logger, nil)
 	rpcs := payout.TwoRPCs{
-		Primary: payout.NewHTTPRPCClient(
+		Primary: payout.NewTrackingRPCClient(payout.NewHTTPRPCClient(
 			cfg.Payout.Security.RPCURLPrimary, "primary",
 			func() string { return tuningProvider.Snapshot().RPCURLPrimaryPinSPKI },
 			20*time.Second,
-		),
-		Secondary: payout.NewHTTPRPCClient(
+		), chronicTracker),
+		Secondary: payout.NewTrackingRPCClient(payout.NewHTTPRPCClient(
 			cfg.Payout.Security.RPCURLSecondary, "secondary",
 			func() string { return tuningProvider.Snapshot().RPCURLSecondaryPinSPKI },
 			20*time.Second,
-		),
+		), chronicTracker),
 	}
 	rpcCtx, rpcCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer rpcCancel()
@@ -817,6 +824,7 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		LowBalanceThreshold:   cfg.Payout.Tuning.LowBalanceThreshold,
 		LowNativeThreshold:    cfg.Payout.Tuning.LowNativeThreshold,
 		Tuning:                tuningProvider,
+		ChronicOutage:         chronicTracker,
 	}, state)
 	if err != nil {
 		// Release the lease on construction failure so the next

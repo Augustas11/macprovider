@@ -88,6 +88,13 @@ type RunnerOptions struct {
 	// is documented as a known limitation requiring restart.
 	Tuning *TuningProvider
 
+	// ChronicOutageTracker, when non-nil, is evaluated once per
+	// RunOnce cycle to emit payout_rpc_chronic_outage PAGE when a
+	// single RPC has been failing for longer than the tracker's
+	// window. #165 A2 closes the silent-degradation gap in the
+	// two-RPC discipline.
+	ChronicOutage *ChronicOutageTracker
+
 	// Test/instrumentation hooks. Production wiring leaves these nil.
 	SleepAfterPostCommitLeaseReread time.Duration
 	NowFn                           func() time.Time
@@ -480,8 +487,11 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 	// already does this (reaper.go:58); the stale-cancel threshold
 	// 3 × run_interval must be live-read on both paths so a SIGHUP
 	// run_interval change takes effect without a restart.
+	// #165 A1: LIMIT bound on candidate scan + backlog gauge. Sized
+	// from snap.MaxRowsPerRun so the stale-cancel producer matches
+	// the §4.3 step 1 cap (bounded by the same operator config).
 	if produced, err := ProduceStaleOutboxRows(ctx, r.opts.DB, r.opts.Logger,
-		r.opts.RPCs, runID, now, snap.RunInterval,
+		r.opts.RPCs, runID, now, snap.RunInterval, snap.MaxRowsPerRun,
 	); err != nil {
 		r.opts.Logger.Warn().Err(err).
 			Str("event", "payout_stale_outbox_producer_failed").Send()
@@ -498,6 +508,12 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 	// Failure here is observability-only — degraded telemetry is
 	// preferred over a money-path stall on transient RPC error.
 	r.emitBalanceAlerts(ctx, runID, now, snap)
+
+	// #165 A2: chronic single-RPC outage detector. Runs once per
+	// cycle after the §6.2 alerts so the sliding-window includes
+	// the freshest RPC calls. Observability-only — never blocks
+	// the cycle.
+	r.opts.ChronicOutage.Evaluate(ctx, now)
 
 	// §4.3 step 1: SELECT ready rows.
 	hotWallet := r.opts.Security.HotWalletAddress

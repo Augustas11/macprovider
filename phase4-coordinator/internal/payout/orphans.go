@@ -383,10 +383,19 @@ func (s *OrphansService) emitOrphanResolved(orphanID int64, resolution, reason s
 // a zero-value TwoRPCs (i.e. nil clients) disables the producer
 // entirely and returns (0, nil); tests use this path to avoid
 // wiring mock RPCs when the producer is not under test.
+//
+// limit bounds the per-cycle candidate scan (#165 A1: derived from
+// snap.MaxRowsPerRun). When the candidate set is larger than limit,
+// the producer scans the oldest limit rows by updated_at_utc ASC and
+// emits a payout_stale_outbox_backlog WARN with the actual candidate
+// count so operators can see when the LIMIT is suppressing rows.
+// Subsequent cycles continue draining the backlog. A limit <= 0 is
+// treated as "no cap" (back-compat for any caller wiring a zero-value
+// MaxRowsPerRun before the snapshot bound check fires).
 func ProduceStaleOutboxRows(
 	ctx context.Context, db *sql.DB, log zerolog.Logger,
 	rpcs TwoRPCs, runID string,
-	now time.Time, runInterval time.Duration,
+	now time.Time, runInterval time.Duration, limit int,
 ) (int, error) {
 	if rpcs.Primary == nil || rpcs.Secondary == nil {
 		// Producer disabled — typically a test path. The reaper
@@ -394,7 +403,13 @@ func ProduceStaleOutboxRows(
 		return 0, nil
 	}
 	cutoff := now.Add(-3 * runInterval).UTC().Format(time.RFC3339Nano)
-	rows, err := db.QueryContext(ctx, `
+	// #165 A1: LIMIT+1 peek. If the SELECT returns exactly limit+1
+	// rows we know there is at least one suppressed row; the precise
+	// candidate count is then queried via COUNT(*) for the backlog
+	// gauge. Steady-state (no backlog) costs one query; backlog cost
+	// is one extra COUNT(*) — acceptable because the gauge fires
+	// exactly when the operator wants to see it.
+	query := `
 SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
   FROM payout_attempts
  WHERE is_cancel_self_transfer = 1
@@ -404,7 +419,18 @@ SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
    AND cancel_reconfirm_stale_paged_at_utc IS NULL
    AND abandoned_at_utc IS NULL
    AND updated_at_utc < ?
- ORDER BY updated_at_utc ASC`, cutoff)
+ ORDER BY updated_at_utc ASC`
+	var (
+		rows  *sql.Rows
+		err   error
+		probe int
+	)
+	if limit > 0 {
+		probe = limit + 1
+		rows, err = db.QueryContext(ctx, query+" LIMIT ?", cutoff, probe)
+	} else {
+		rows, err = db.QueryContext(ctx, query, cutoff)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("ProduceStaleOutboxRows: SELECT: %w", err)
 	}
@@ -427,6 +453,39 @@ SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
 		candidates = append(candidates, c)
 	}
 	rows.Close()
+
+	// #165 A1: backlog detection. If LIMIT+1 was the probe size and
+	// we got back probe rows, at least one candidate was suppressed
+	// this cycle. Query the exact backlog count so the gauge surfaces
+	// an actionable number, then drop the overflow row so production
+	// stays bounded by limit.
+	if limit > 0 && len(candidates) == probe {
+		var total int
+		if err := db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+  FROM payout_attempts
+ WHERE is_cancel_self_transfer = 1
+   AND raw_signed_tx IS NOT NULL
+   AND broadcast_at_utc IS NOT NULL
+   AND confirmed_at_utc IS NULL
+   AND cancel_reconfirm_stale_paged_at_utc IS NULL
+   AND abandoned_at_utc IS NULL
+   AND updated_at_utc < ?`, cutoff).Scan(&total); err != nil {
+			// COUNT failure is observability-only; degrade to a
+			// limit-hit signal (total=-1 sentinel) rather than
+			// stalling the producer.
+			total = -1
+		}
+		log.Warn().
+			Str("event", "payout_stale_outbox_backlog").
+			Str("run_id", runID).
+			Int("limit", limit).
+			Int("total_candidates", total).
+			Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
+			Str("severity", "WARN").
+			Send()
+		candidates = candidates[:limit]
+	}
 
 	produced := 0
 	staleStarted := now.UTC().Format(time.RFC3339Nano)
