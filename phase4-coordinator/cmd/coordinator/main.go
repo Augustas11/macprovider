@@ -1451,6 +1451,8 @@ func startPayoutSIGHUPListener(
 							log.Warn().
 								Str("event", "payout_spki_drain_skipped_unsupported_client").
 								Str("rpc_label", "primary").
+								Str("severity", "WARN").
+								Str("ts_utc", time.Now().UTC().Format(time.RFC3339Nano)).
 								Msg("SPKI pin rotated but primary RPC client does not implement CloseIdleConnections — pooled TLS conns survive the rotation")
 						}
 						if rpc, ok := rpcs.Secondary.(idleCloser); ok {
@@ -1459,6 +1461,8 @@ func startPayoutSIGHUPListener(
 							log.Warn().
 								Str("event", "payout_spki_drain_skipped_unsupported_client").
 								Str("rpc_label", "secondary").
+								Str("severity", "WARN").
+								Str("ts_utc", time.Now().UTC().Format(time.RFC3339Nano)).
 								Msg("SPKI pin rotated but secondary RPC client does not implement CloseIdleConnections — pooled TLS conns survive the rotation")
 						}
 						break

@@ -151,7 +151,8 @@ coordinator):
 
 Required WARN-class events (also verified per §9 item 6):
 
-- `payout_stale_outbox_backlog` (NEW v0.1.22 — §4.7 step 5 production capped)
+- `payout_stale_outbox_backlog` (NEW v0.1.22 — §4.7 step 5 production capped; escalates to PAGE when `scan_ceiling_hit=true`)
+- `payout_spki_drain_skipped_unsupported_client` (NEW v0.1.22 — verify SEPARATE synthetic alert per `rpc_label` value: `primary` AND `secondary`)
 - `payout_stale_outbox_reaped`
 - `payout_flag_audit_reaped`
 - `payout_low_balance` / `payout_low_native_balance`

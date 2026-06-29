@@ -487,9 +487,11 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 	// already does this (reaper.go:58); the stale-cancel threshold
 	// 3 × run_interval must be live-read on both paths so a SIGHUP
 	// run_interval change takes effect without a restart.
-	// #165 A1: LIMIT bound on candidate scan + backlog gauge. Sized
-	// from snap.MaxRowsPerRun so the stale-cancel producer matches
-	// the §4.3 step 1 cap (bounded by the same operator config).
+	// #165 A1: cap on PRODUCED outbox rows (NOT scanned candidates)
+	// sized from snap.MaxRowsPerRun so the stale-cancel producer
+	// matches the §4.3 step 1 cap (bounded by the same operator
+	// config). The scan inside ProduceStaleOutboxRows is keyset-
+	// paginated so memory stays bounded regardless of backlog depth.
 	if produced, err := ProduceStaleOutboxRows(ctx, r.opts.DB, r.opts.Logger,
 		r.opts.RPCs, runID, now, snap.RunInterval, snap.MaxRowsPerRun,
 	); err != nil {

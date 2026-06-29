@@ -203,6 +203,69 @@ func TestProduceStaleOutboxRows_NonActionableRowsDoNotConsumeLimit(t *testing.T)
 	}
 }
 
+// TestProduceStaleOutboxRows_LargeNonActionablePrefixDoesNotStarve
+// pins the R3 audit closure: a >1000 non-actionable prefix MUST NOT
+// block a single actionable row from PAGEing. This regression
+// guards against any future reintroduction of a hidden
+// scan-prefix cap. The test seeds 1100 reconfirmable rows
+// (primary-sees-receipt → skip) followed by 1 truly stale row.
+// With limit=1 the producer MUST find + PAGE the one stale row
+// in this cycle.
+func TestProduceStaleOutboxRows_LargeNonActionablePrefixDoesNotStarve(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large-prefix regression in -short mode")
+	}
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+	const prefixSize = 1100 // > 1000 to defeat any rumored prefix cap.
+	primary.receiptFn = func(_ context.Context, txHash string) (*Receipt, error) {
+		// The truly-stale row has tx_hash "0xstaleACTIONABLE";
+		// every other row is reconfirmable.
+		if txHash == "0xstaleactionable" {
+			return nil, nil
+		}
+		return &Receipt{Status: 1, BlockNumber: 100}, nil
+	}
+	secondary.receiptFn = func(_ context.Context, _ string) (*Receipt, error) { return nil, nil }
+	rpcs := TwoRPCs{Primary: primary, Secondary: secondary}
+	runInterval := time.Minute
+
+	for i := 0; i < prefixSize; i++ {
+		_ = seedDistinctStaleCancelRow(t, db, runInterval, i)
+	}
+	// Seed the actionable row last so it sorts after the prefix
+	// (oldest-first ordering uses updated_at_utc, all are
+	// identical, then payout_id ASC — so a later-inserted row
+	// gets a larger payout_id and sorts last).
+	providerID := "p-actionable"
+	payoutID := insertReadyRow(t, db, providerID, "settle:"+providerID)
+	old := time.Now().Add(-4 * runInterval).UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO payout_attempts
+  (payout_id, attempt_seq, chain, from_address, to_address,
+   amount_base_units, nonce, raw_signed_tx, tx_hash,
+   broadcast_at_utc, is_cancel_self_transfer, updated_at_utc)
+VALUES (?, 1, 'base-mainnet', '0x', '0x', 1, ?, X'02', ?,
+        ?, 1, ?)`,
+		payoutID, int64(prefixSize)+1000, "0xstaleactionable", old, old,
+	); err != nil {
+		t.Fatalf("insert actionable: %v", err)
+	}
+
+	produced, err := ProduceStaleOutboxRows(
+		context.Background(), db, zerolog.Nop(),
+		rpcs, "run-large-prefix", time.Now(), runInterval, 1,
+	)
+	if err != nil {
+		t.Fatalf("ProduceStaleOutboxRows: %v", err)
+	}
+	if produced != 1 {
+		t.Errorf("produced=%d, want 1 — large non-actionable prefix must not starve stale rows", produced)
+	}
+}
+
 func TestProduceStaleOutboxRows_NoBacklogEventWhenWithinLimit(t *testing.T) {
 	db := openTestDB(t)
 	seedBootstrapForTest(t, db)
