@@ -1499,6 +1499,148 @@ func TestStreamingReceiptHeaderStripped(t *testing.T) {
 	}
 }
 
+// TestProviderAttributionHeadersEmitted asserts the gateway surfaces
+// the coord-internal provider peer id (X-MacProvider-Provider) under
+// the public X-Provider-Id header on the buyer-facing response, for
+// BOTH non-streaming and streaming paths. Required for harness B5/B6
+// verdicts (slot utilization, per-provider earnings) which were
+// SKIP-ing on every benchmark run because there was no per-request
+// provider attribution surface. The internal-prefixed header is
+// still stripped, and the session-assigned-token X-MacProvider-Route
+// is NOT surfaced (auth-shaped value, deliberately not leaked).
+func TestProviderAttributionHeadersEmitted(t *testing.T) {
+	const peerID = "m4-air-augstar"
+	const routeToken = "session-route-token-do-not-leak"
+
+	t.Run("non-streaming", func(t *testing.T) {
+		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			h := http.Header{}
+			h.Set("Content-Type", "application/json")
+			h.Set("X-MacProvider-Provider", peerID)
+			h.Set("X-MacProvider-Route", routeToken)
+			return responseWithBody(http.StatusOK, h, `{"id":"chatcmpl","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+		})}
+		h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+			cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		}, WithHTTPClient(client))
+		fullKey := createAccountAndKey(t, store, cfg, "acct_attr_nonstream")
+
+		resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		if got := resp.Header().Get("X-Provider-Id"); got != peerID {
+			t.Errorf("non-streaming X-Provider-Id = %q, want %q", got, peerID)
+		}
+		if got := resp.Header().Get("X-MacProvider-Provider"); got != "" {
+			t.Errorf("non-streaming buyer response leaked internal X-MacProvider-Provider = %q", got)
+		}
+		if got := resp.Header().Get("X-MacProvider-Route"); got != "" {
+			t.Errorf("non-streaming buyer response leaked X-MacProvider-Route = %q (session token must not be exposed)", got)
+		}
+		if got := resp.Header().Get("X-Provider-Assigned-Id"); got != "" {
+			t.Errorf("non-streaming response surfaced X-Provider-Assigned-Id = %q (route token is not for buyers)", got)
+		}
+	})
+
+	t.Run("streaming", func(t *testing.T) {
+		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"ok"}}]}`
+			h := http.Header{}
+			h.Set("Content-Type", "text/event-stream; charset=utf-8")
+			h.Set("X-MacProvider-Provider", peerID)
+			h.Set("X-MacProvider-Route", routeToken)
+			return responseWithBody(http.StatusOK, h, payload+"\n\ndata: [DONE]\n\n"), nil
+		})}
+		h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+			cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		}, WithHTTPClient(client))
+		fullKey := createAccountAndKey(t, store, cfg, "acct_attr_stream")
+
+		resp := postChat(t, h, fullKey, `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		if got := resp.Header().Get("X-Provider-Id"); got != peerID {
+			t.Errorf("streaming X-Provider-Id = %q, want %q", got, peerID)
+		}
+		if got := resp.Header().Get("X-MacProvider-Provider"); got != "" {
+			t.Errorf("streaming buyer response leaked internal X-MacProvider-Provider = %q", got)
+		}
+		if got := resp.Header().Get("X-MacProvider-Route"); got != "" {
+			t.Errorf("streaming buyer response leaked X-MacProvider-Route = %q", got)
+		}
+		if got := resp.Header().Get("X-Provider-Assigned-Id"); got != "" {
+			t.Errorf("streaming response surfaced X-Provider-Assigned-Id = %q", got)
+		}
+	})
+
+	t.Run("provider-selected-error-attributed", func(t *testing.T) {
+		// PR #250 R1 code MEDIUM: provider-SELECTED errors (null-usage
+		// 5xx via passThroughReceiptEligibleProviderError) must also
+		// surface attribution. Coord sets X-MacProvider-Provider on
+		// selected-provider non-200 responses (phase4-coordinator
+		// server.go:1886 + :1909) so B5/B6 can attribute per-Mac
+		// failures, not just successes.
+		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			h := http.Header{}
+			h.Set("Content-Type", "application/json")
+			h.Set("X-MacProvider-Provider", peerID)
+			h.Set("X-MacProvider-Route", routeToken)
+			return responseWithBody(http.StatusBadGateway, h, `{"error":{"message":"model not loaded","type":"api_error","param":null,"code":"error_model_not_loaded"}}`), nil
+		})}
+		h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+			cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		}, WithHTTPClient(client))
+		fullKey := createAccountAndKey(t, store, cfg, "acct_attr_provider_err")
+
+		resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+		if resp.Code != http.StatusBadGateway {
+			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		if got := resp.Header().Get("X-Provider-Id"); got != peerID {
+			t.Errorf("provider-selected error X-Provider-Id = %q, want %q", got, peerID)
+		}
+		if got := resp.Header().Get("X-MacProvider-Provider"); got != "" {
+			t.Errorf("provider-selected error leaked internal X-MacProvider-Provider = %q", got)
+		}
+		if got := resp.Header().Get("X-MacProvider-Route"); got != "" {
+			t.Errorf("provider-selected error leaked X-MacProvider-Route = %q", got)
+		}
+		if got := resp.Header().Get("X-Provider-Assigned-Id"); got != "" {
+			t.Errorf("provider-selected error surfaced X-Provider-Assigned-Id = %q", got)
+		}
+	})
+
+	t.Run("empty-source-suppresses-output", func(t *testing.T) {
+		// Coord paths that don't carry provider attribution (policy
+		// errors, cold-start 503s without a peer selected) must not
+		// produce a sentinel `X-Provider-Id: ""` on the buyer
+		// response.
+		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return responseWithBody(http.StatusOK, http.Header{
+				"Content-Type": []string{"application/json"},
+			}, `{"id":"chatcmpl","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+		})}
+		h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+			cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		}, WithHTTPClient(client))
+		fullKey := createAccountAndKey(t, store, cfg, "acct_attr_empty")
+
+		resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		if _, present := resp.Header()["X-Provider-Id"]; present {
+			t.Errorf("X-Provider-Id must not be set when source is missing, got %q", resp.Header().Get("X-Provider-Id"))
+		}
+	})
+}
+
 func TestProviderPinningHeadersStripped(t *testing.T) {
 	var captured http.Header
 	failing := false
