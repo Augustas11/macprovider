@@ -314,10 +314,15 @@ func (s *Store) ExplorerSessionDetail(ctx context.Context, accountID, requestID 
 				if ferr != nil {
 					// Forensic emit is best-effort — degrade
 					// gracefully to the bounded probe rather than
-					// failing the 409 response.
+					// failing the 409 response. #231 R2 CODE
+					// MEDIUM closure: surface the degradation via
+					// the audit payload so operators can tell a
+					// partial sample apart from a real
+					// "exactly cap+1 accounts" result.
 					full = accountIDs
+					out.MatchedAccountIDsForensicDegraded = true
 				}
-				out.MatchedAccountIDsUntrimmed = full
+				out.MatchedAccountIDsForensicSample = full
 				out.MatchedAccountIDs = accountIDs[:cap]
 				out.MatchedAccountIDsTruncated = true
 			} else {

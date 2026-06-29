@@ -157,7 +157,7 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 			// MORE than the forensic cap, `forensic_truncated_at`
 			// is set in the payload to surface the partial capture.
 			if out.MatchedAccountIDsTruncated {
-				forensic := out.MatchedAccountIDsUntrimmed
+				forensic := out.MatchedAccountIDsForensicSample
 				var forensicTruncatedAt int
 				if len(forensic) > storage.ExplorerForensicMatchedAccountIDsCap {
 					forensicTruncatedAt = storage.ExplorerForensicMatchedAccountIDsCap
@@ -171,6 +171,16 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 				}
 				if forensicTruncatedAt > 0 {
 					payload["forensic_truncated_at"] = forensicTruncatedAt
+				}
+				// #231 R2 CODE MEDIUM closure: when the forensic
+				// SELECT failed and storage fell back to the
+				// response probe, surface the source so operators
+				// can tell a partial sample apart from a real
+				// "exactly cap+1 accounts" result.
+				if out.MatchedAccountIDsForensicDegraded {
+					payload["forensic_source"] = "response_probe"
+				} else {
+					payload["forensic_source"] = "forensic_select"
 				}
 				// json.Marshal is a stdlib JSON encoder — closes R1
 				// CODE M2 / SEC MEDIUM (hand-rolled quotedCSV was

@@ -363,8 +363,14 @@ type ExplorerSessionDetail struct {
 	// untruncated full list is emitted to audit_events for forensic
 	// retrieval — never silently dropped.
 	MatchedAccountIDs           []string `json:"matched_account_ids,omitempty"`
-	MatchedAccountIDsTruncated  bool     `json:"matched_account_ids_truncated"` // #231 R1 arch LOW: explicit presence required by SPEC §6.4 contract — `omitempty` would drop `false` and break clients that branch on field presence.
-	MatchedAccountIDsUntrimmed  []string `json:"-"`                              // full list for the audit_events emit; never sent over the wire.
+	MatchedAccountIDsTruncated  bool     `json:"matched_account_ids_truncated"`  // #231 R1 arch LOW: explicit presence required by SPEC §6.4 contract — `omitempty` would drop `false` and break clients that branch on field presence.
+	MatchedAccountIDsForensicSample []string `json:"-"`                          // #231 R2: bounded forensic sample (cap ExplorerForensicMatchedAccountIDsCap+1) for the audit_events emit; never sent over the wire. Renamed from MatchedAccountIDsUntrimmed in R2 — the list is bounded, not "untrimmed", and the audit payload surfaces partial capture via forensic_truncated_at.
+	// MatchedAccountIDsForensicDegraded is true when the forensic
+	// SELECT failed and the slice fell back to the bounded ambiguity
+	// probe. Surface in audit payload as `forensic_source =
+	// "response_probe"` so an operator can tell the partial sample
+	// apart from a genuine "exactly 11 accounts" result.
+	MatchedAccountIDsForensicDegraded bool `json:"-"`
 	Partial                     bool     `json:"partial"`
 	Error                       any      `json:"error"`
 }
