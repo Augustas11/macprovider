@@ -1,8 +1,8 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.2.3 (2026-06-29, r3-absorption draft for audit)
+**Version:** 0.2.4 (2026-06-29, LOCKED)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
-**Status:** DRAFT — audit loop pending.
+**Status:** LOCKED — r4 defensive audit returned 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes (4 codex + 2 Claude blind-spot).
 
 ## Quick orientation
 
@@ -1577,24 +1577,45 @@ v0.2 audit lanes should additionally probe:
 
 ## 12. Document metadata
 
-**Version:** 0.2.3 (2026-06-29, r3-absorption draft for audit)
+**Version:** 0.2.4 (2026-06-29, LOCKED)
 
-**Status:** DRAFT — audit loop pending.
+**Status:** LOCKED — r4 defensive audit returned 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes.
+
+Audit trajectory:
+- r1: 1C + 9H + 9M → absorbed in v0.2.1.
+- r2: 1C + 3H + 5M → absorbed in v0.2.2.
+- r3: 0C + 3H + 3M → absorbed in v0.2.3 (wall-clock authority rewrite + NaN/Infinity envelope split).
+- r4 defensive: 0C + 0H + 0M across all 6 lanes. LOCK satisfied.
 
 Precondition: SPEC-018 v0.2.4 LOCKED at `7e50832` via PR #202, with
 implementation shipped at `c77313a` via PR #209
 (`specs/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
 commit anchors).
 
-Successor: TBD. Expected next step is the 4-round 6-lane v0.2 audit loop:
-Codex architect, code, security, and product-design lanes plus Claude critic
-and Claude narrative lanes. Lock bar: 0 CRITICAL + 0 HIGH + 0 MEDIUM across all
-6 lanes.
+Successor: SPEC-019 v0.2 IMPL — same playbook as v0.1.5 IMPL (PR #225).
+Streaming structured output, gateway-owned wall-clock authority, numeric
+bounds + $schema, Cline + Vercel AI SDK + openai-python streaming
+fixtures.
 
 Drafting scope: no implementation code, no SPEC-018 edits, no SPEC-015 schema
 change, no new HTTP endpoint.
 
 ### Change log
+
+- **v0.2.4 (2026-06-29, LOCKED):** r4 defensive audit returned **READY TO
+  LOCK** from all 6 lanes (architect, code, security, product-design codex
+  + critic, narrative Claude blind-spot) at 0 CRITICAL + 0 HIGH + 0 MEDIUM
+  against v0.2.3 anchor `568e110`. Each lane independently verified the r3
+  wall-clock authority rewrite landed cleanly: SPEC-006 §17.5 / `:2605`
+  cite resolves; `server.go:2386` is the streaming SSE site; gateway-owned
+  wall-clock + provider-owned idle authorities are consistent across
+  AC-V2-9 / §5 / §7 / §8; no MUST-verb subject ambiguity; no new phantom
+  citations. Grep guards (`§3221`, `:3221`, `server.go:1722`,
+  `inference_timeout`) all = 0 hits. No SPEC text changes between v0.2.3
+  and v0.2.4 LOCKED — only the version header, §12 metadata, and this
+  change-log entry move. Audit trajectory: r1 (1C+9H+9M) → r2 (1C+3H+5M)
+  → r3 (0C+3H+3M) → r4 (0/0/0). Lock narrative:
+  `specs/SPEC-019-v0_2-r4-audit.md`. Successor: SPEC-019 v0.2 IMPL.
 
 - **v0.2.3 (2026-06-29, r3-absorption draft for audit):** Absorbs the r3 audit
   findings from `specs/SPEC-019-v0_2-r3-audit.md` (0C + 3H + 3M across 3
