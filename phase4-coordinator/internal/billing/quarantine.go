@@ -321,6 +321,15 @@ func decodeForceVoidBody(w http.ResponseWriter, r *http.Request) (forceVoidBody,
 		}
 		return body, false
 	}
+	// R2 fix (SEC-M1 / CODE-H2): MaxBytesReader is set to
+	// maxBodyBytes+1 above so a body of exactly 4097 bytes returns
+	// without a MaxBytesError, but SPEC §11.6.1.1 rejects bodies
+	// strictly greater than 4 KiB. Explicit post-read length check
+	// closes the off-by-one for chunked / unknown-length requests.
+	if len(raw) > maxBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "body exceeds 4 KiB")
+		return body, false
+	}
 	// SPEC §11.6.3 rule 1: UTF-8 well-formedness BEFORE any
 	// JSON-induced normalization (json.Unmarshal silently replaces
 	// invalid UTF-8 with U+FFFD).
@@ -370,12 +379,19 @@ func decodeForceVoidBody(w http.ResponseWriter, r *http.Request) (forceVoidBody,
 		}
 		rawFields[key] = val
 	}
-	// Closing `}` and EOF.
-	if _, err := dec.Token(); err != nil {
+	// Closing `}`.
+	if tok, err := dec.Token(); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+		return body, false
+	} else if d, ok := tok.(json.Delim); !ok || d != '}' {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
 		return body, false
 	}
-	if dec.More() {
+	// R2 fix (CODE-H3): dec.More() only reports remaining elements
+	// inside the current array/object; once we've consumed the
+	// top-level `}` we must explicitly require io.EOF, otherwise
+	// `{...} {}` or `{...} 42` would be accepted.
+	if _, err := dec.Token(); err != io.EOF {
 		writeError(w, http.StatusBadRequest, "bad_request", "body must contain a single JSON object")
 		return body, false
 	}

@@ -27,7 +27,11 @@ type Store struct {
 	// every request (no re-wire of the HTTP handler on reload).
 	// SetForceVoidEnabled is the only writer and emits the
 	// billing_config_flag_changed audit event on actual flips.
-	forceVoidEnabled atomic.Bool
+	// forceVoidReloadMu serializes writes so that the (audit, publish)
+	// pair is atomic and the published value is durable in audit_log
+	// before any handler can observe it (R2 fix for flag-flip race).
+	forceVoidReloadMu sync.Mutex
+	forceVoidEnabled  atomic.Bool
 }
 
 func NewStore(db *sql.DB) (*Store, error) {
@@ -380,7 +384,14 @@ func (s *Store) ForceVoidEnabled() bool {
 // "startup" callers MUST pass a zero-value old (we infer first-time
 // init from changed == false on the swap).
 func (s *Store) SetForceVoidEnabled(ctx context.Context, newValue bool, reloadSource string) error {
-	oldValue := s.forceVoidEnabled.Swap(newValue)
+	// Serialize so that the (audit insert, publish) pair is atomic:
+	// no other reloader can change the value between our Load() and
+	// Store(), and no handler can observe a value whose audit row has
+	// not been committed yet (R2: ARCH-H1 / SEC-M2 / CODE-H4 fix).
+	s.forceVoidReloadMu.Lock()
+	defer s.forceVoidReloadMu.Unlock()
+
+	oldValue := s.forceVoidEnabled.Load()
 	if oldValue == newValue {
 		return nil
 	}
@@ -390,6 +401,7 @@ func (s *Store) SetForceVoidEnabled(ctx context.Context, newValue bool, reloadSo
 	// `ledger_config_snapshots` row already captures the initial
 	// state."
 	if reloadSource == "startup" {
+		s.forceVoidEnabled.Store(newValue)
 		return nil
 	}
 	payload := map[string]any{
@@ -419,7 +431,14 @@ VALUES (?, 'billing_config_flag_changed', NULL, ?)`, now, string(payloadJSON)); 
 		return fmt.Errorf("insert flag-change audit: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		// Audit row may or may not be durable; assume not. Leave the
+		// route flag unchanged and surface the error so the operator
+		// can re-attempt.
 		return fmt.Errorf("commit flag-change audit: %w", err)
 	}
+	// Audit is durable: publish the new value. No handler could
+	// observe newValue before this point because the only reader is
+	// h.store.ForceVoidEnabled() which reads s.forceVoidEnabled.
+	s.forceVoidEnabled.Store(newValue)
 	return nil
 }

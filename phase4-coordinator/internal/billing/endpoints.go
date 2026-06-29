@@ -192,9 +192,16 @@ func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
 	cursor := r.URL.Query().Get("cursor")
 	includeQuarantined := r.URL.Query().Get("include_quarantined") == "true"
 	current := currentMondayUTC(time.Now().UTC()).Format(time.RFC3339Nano)
-	quarantineFilter := "AND quarantined=0"
-	if includeQuarantined {
-		quarantineFilter = ""
+	// R2 fix (CODE-H4): payable aggregates ALWAYS exclude quarantined
+	// rows (CASE on lrc.quarantined=0); quarantined_count ALWAYS uses
+	// OPEN_PREDICATE (quarantined=1 AND no resolution row).
+	// include_quarantined now controls only whether providers that
+	// have ONLY quarantined credits appear in the listing, via a
+	// HAVING clause on payable-row count. The aggregate columns no
+	// longer change shape based on the query parameter.
+	havingClause := ""
+	if !includeQuarantined {
+		havingClause = " HAVING SUM(CASE WHEN lrc.quarantined=0 THEN 1 ELSE 0 END) > 0 "
 	}
 	// Single grouped LEFT JOIN — the prior shape was outer-aggregate +
 	// per-row h.sum(...) on ledger_payout_ready, which (a) deadlocked at
@@ -211,8 +218,8 @@ func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
 	// page, which is strictly cheaper than the per-provider sum loop.
 	rows, err := h.store.db.QueryContext(ctx, `
 SELECT lrc.provider_id,
-       SUM(lrc.provider_credits),
-       SUM(CASE WHEN lrc.ts_utc >= ? THEN lrc.provider_credits ELSE 0 END),
+       SUM(CASE WHEN lrc.quarantined=0 THEN lrc.provider_credits ELSE 0 END),
+       SUM(CASE WHEN lrc.quarantined=0 AND lrc.ts_utc >= ? THEN lrc.provider_credits ELSE 0 END),
        MAX(lrc.ts_utc),
        SUM(CASE WHEN lrc.fault_flag != 'none' THEN 1 ELSE 0 END),
        SUM(CASE WHEN lrc.quarantined=1 AND NOT EXISTS (
@@ -227,8 +234,8 @@ SELECT lrc.provider_id,
          WHERE status = 'ready'
          GROUP BY provider_id
   ) pp ON pp.provider_id = lrc.provider_id
- WHERE lrc.provider_id > ? `+quarantineFilter+`
- GROUP BY lrc.provider_id
+ WHERE lrc.provider_id > ?
+ GROUP BY lrc.provider_id`+havingClause+`
  ORDER BY lrc.provider_id
  LIMIT ?`, current, cursor, limit+1)
 	if err != nil {

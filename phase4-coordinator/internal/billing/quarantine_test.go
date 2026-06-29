@@ -691,3 +691,220 @@ func TestForceVoidChargesAdminBucket(t *testing.T) {
 		t.Fatalf("force-void POSTs should consume the same bucket; got 0 × 429 after draining via /summary")
 	}
 }
+
+// R2 (CODE-H2 / SEC-M1): body cap is strictly > 4 KiB → 413. A body of
+// exactly 4096 bytes is accepted (and rejected later for unrelated
+// schema issues); 4097 bytes is 413 regardless of validation outcome.
+func TestForceVoidBodyCapOffByOne(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-cap")
+	// Build a 4097-byte body whose JSON is otherwise valid. Pad the
+	// reason value with ASCII 'a' so it remains a syntactically valid
+	// JSON object whose top-level length is 4097.
+	prefix := `{"operator_id":"alice","reason":"`
+	suffix := `"}`
+	padLen := 4097 - len(prefix) - len(suffix)
+	body := prefix + strings.Repeat("a", padLen) + suffix
+	if len(body) != 4097 {
+		t.Fatalf("test body construction wrong: len=%d want 4097", len(body))
+	}
+	w := doForceVoid(t, store, true, id, body, "application/json")
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d want 413 (body=4097 must exceed cap)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "request_too_large") {
+		t.Fatalf("body=%s does not contain request_too_large", w.Body.String())
+	}
+	// Sanity: a 4096-byte body passes the cap (downstream may still
+	// reject for schema reasons, but NOT with 413).
+	padLen4096 := 4096 - len(prefix) - len(suffix)
+	body4096 := prefix + strings.Repeat("a", padLen4096) + suffix
+	if len(body4096) != 4096 {
+		t.Fatalf("4096 body construction wrong: len=%d", len(body4096))
+	}
+	w2 := doForceVoid(t, store, true, id, body4096, "application/json")
+	if w2.Code == http.StatusRequestEntityTooLarge {
+		t.Fatalf("4096-byte body wrongly returned 413; should pass cap")
+	}
+}
+
+// R2 (CODE-H3): the decoder must require io.EOF after the closing `}`.
+// `{...} {}` or `{...} 42` must be 400 bad_request, not accepted.
+func TestForceVoidRejectsExtraTopLevelJSON(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-extra")
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"trailing_object", `{"operator_id":"alice","reason":"x"} {}`},
+		{"trailing_number", `{"operator_id":"alice","reason":"x"} 42`},
+		{"trailing_string", `{"operator_id":"alice","reason":"x"} "extra"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := doForceVoid(t, store, true, id, c.body, "application/json")
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s want 400", w.Code, w.Body.String())
+			}
+		})
+	}
+	// Sanity: no resolution / audit rows from the rejected calls.
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_quarantine_resolutions`); got != 0 {
+		t.Fatalf("rejected calls leaked %d resolution rows", got)
+	}
+}
+
+// R2 (CODE-H2 also): invalid UTF-8 in the raw body is rejected as
+// 422 invalid_utf8 BEFORE the JSON parser would silently normalize
+// to U+FFFD.
+func TestForceVoidRejectsInvalidUTF8RawBody(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-utf8")
+	// Lone 0xFF byte inside the JSON string is invalid UTF-8.
+	body := "{\"operator_id\":\"alice\",\"reason\":\"hi\xffx\"}"
+	w := doForceVoid(t, store, true, id, body, "application/json")
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s want 422", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_utf8") {
+		t.Fatalf("body=%s does not contain invalid_utf8", w.Body.String())
+	}
+}
+
+// R2 (CODE-M1): JSON strictness — duplicate top-level key returns 400.
+func TestForceVoidRejectsDuplicateTopLevelKey(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-dup")
+	body := `{"operator_id":"alice","operator_id":"bob","reason":"x"}`
+	w := doForceVoid(t, store, true, id, body, "application/json")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s want 400", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "duplicate") {
+		t.Fatalf("body=%s does not contain duplicate-key error", w.Body.String())
+	}
+}
+
+// R2 (CODE-M1): JSON strictness — unknown top-level key returns 400.
+func TestForceVoidRejectsUnknownTopLevelKey(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-unk")
+	body := `{"operator_id":"alice","reason":"x","extra":"nope"}`
+	w := doForceVoid(t, store, true, id, body, "application/json")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s want 400", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "unknown") {
+		t.Fatalf("body=%s does not contain unknown-key error", w.Body.String())
+	}
+}
+
+// R2 (CODE-H4): /admin/ledger/providers payable totals are computed
+// from non-quarantined rows ONLY, regardless of include_quarantined.
+// quarantined_count uses OPEN_PREDICATE independent of the row filter.
+// Fixture: one provider with three credit rows — payable (100),
+// open-quarantined (200), force-voided (300). Default response and
+// include_quarantined=true must agree on payable=100, open=1, and
+// must NOT report payable=600 or quarantined_count=0.
+func TestProviderRollupPayableIndependentOfFilter(t *testing.T) {
+	store := quarantineFixture(t)
+	now := time.Now().UTC()
+	insertCredit(t, store.db, "p-rollup", now, 100) // payable row
+	// open-quarantined row (200)
+	openReq := "openq-" + now.Format("150405.000000000")
+	insertCreditWithRequest(t, store.db, openReq, "p-rollup", now, 200)
+	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET quarantined=1 WHERE request_id=?`, openReq); err != nil {
+		t.Fatal(err)
+	}
+	// force-voided row (300)
+	voidedReq := "voidedq-" + now.Format("150405.000000000")
+	insertCreditWithRequest(t, store.db, voidedReq, "p-rollup", now, 300)
+	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET quarantined=1 WHERE request_id=?`, voidedReq); err != nil {
+		t.Fatal(err)
+	}
+	var voidedID int64
+	if err := store.db.QueryRow(`SELECT id FROM ledger_request_credits WHERE request_id=?`, voidedReq).Scan(&voidedID); err != nil {
+		t.Fatal(err)
+	}
+	w := doForceVoid(t, store, true, voidedID, `{"operator_id":"alice","reason":"x"}`, "application/json")
+	if w.Code != http.StatusOK {
+		t.Fatalf("force-void prep: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	check := func(t *testing.T, query string, wantPayable, wantOpenQ int64) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/admin/ledger/providers"+query, nil)
+		req.Header.Set("Authorization", "Bearer operator")
+		rec := httptest.NewRecorder()
+		store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Providers []struct {
+				ProviderID           string `json:"provider_id"`
+				TotalProviderCredits int64  `json:"total_provider_credits"`
+				QuarantinedCount     int64  `json:"quarantined_count"`
+			} `json:"providers"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			payable, openq int64
+			seen           bool
+		}
+		for _, p := range resp.Providers {
+			if p.ProviderID == "p-rollup" {
+				got.payable = p.TotalProviderCredits
+				got.openq = p.QuarantinedCount
+				got.seen = true
+				break
+			}
+		}
+		if !got.seen {
+			t.Fatalf("provider p-rollup missing from response %s", rec.Body.String())
+		}
+		if got.payable != wantPayable {
+			t.Fatalf("total_provider_credits=%d want %d (payable excludes quarantined+voided)", got.payable, wantPayable)
+		}
+		if got.openq != wantOpenQ {
+			t.Fatalf("quarantined_count=%d want %d (OPEN_PREDICATE only)", got.openq, wantOpenQ)
+		}
+	}
+	t.Run("default", func(t *testing.T) { check(t, "", 100, 1) })
+	t.Run("include_quarantined_true", func(t *testing.T) { check(t, "?include_quarantined=true", 100, 1) })
+}
+
+// R2 (ARCH-H1): if the flag-change audit COMMIT fails, the route-layer
+// flag MUST remain at the prior value. Otherwise a SIGHUP could
+// publish an enable/disable with no durable audit trail.
+func TestSetForceVoidEnabledRollsBackOnAuditFailure(t *testing.T) {
+	store := quarantineFixture(t)
+	// Start at false (constructor default).
+	if store.ForceVoidEnabled() {
+		t.Fatal("precondition: forceVoidEnabled must start false")
+	}
+	// Drop audit_log so the INSERT inside SetForceVoidEnabled fails.
+	if _, err := store.db.Exec(`DROP TABLE audit_log`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetForceVoidEnabled(context.Background(), true, "sighup"); err == nil {
+		t.Fatal("expected error from SetForceVoidEnabled when audit_log is missing")
+	}
+	if store.ForceVoidEnabled() {
+		t.Fatal("forceVoidEnabled flipped to true despite audit failure — race regression")
+	}
+	// Recreate audit_log; the same call now succeeds and publishes.
+	createAuditLogForTest(t, store.db)
+	if err := store.SetForceVoidEnabled(context.Background(), true, "sighup"); err != nil {
+		t.Fatal(err)
+	}
+	if !store.ForceVoidEnabled() {
+		t.Fatal("forceVoidEnabled did not publish after successful audit commit")
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='billing_config_flag_changed'`); got != 1 {
+		t.Fatalf("audit row count=%d want 1 (only the successful flip emits)", got)
+	}
+}
