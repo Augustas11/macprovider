@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -150,7 +151,12 @@ func cmdRun(args []string) error {
 	if sc.Benchmark.Enabled {
 		var pricing *benchmark.Pricing
 		if sc.Benchmark.PricingSource != "" {
-			p, perr := benchmark.LoadPricing(sc.Benchmark.PricingSource)
+			// Resolve local pricing paths relative to the scenario YAML
+			// dir, so `pricing_source: specs/PRICING.json` works regardless
+			// of harness invocation CWD. SSH specs ("host:/path") and
+			// absolute paths pass through unchanged.
+			pricingPath := resolvePricingPath(sc.Benchmark.PricingSource, scenarioPath)
+			p, perr := benchmark.LoadPricing(pricingPath)
 			if perr != nil {
 				log.Printf("benchmark: pricing load failed (%v) — B6 will SKIP", perr)
 			} else {
@@ -260,4 +266,22 @@ func logBenchmarkSummary(b *benchmark.Result) {
 	for _, v := range b.Verdicts {
 		log.Printf("benchmark %s [%s]: %s — %s", v.ID, v.Status, v.Title, v.Detail)
 	}
+}
+
+// resolvePricingPath canonicalizes a pricing_source value:
+//   - SSH spec ("host:/path") and absolute paths pass through unchanged
+//   - relative local paths are resolved against the scenario YAML's directory
+//
+// This matches the principle of least surprise: a scenario authored with
+// `pricing_source: specs/PRICING.json` works whether the harness is
+// invoked from the repo root or from anywhere else.
+func resolvePricingPath(source, scenarioPath string) string {
+	// SSH spec: "host:/path" — has a colon but is not an absolute path.
+	if !filepath.IsAbs(source) && strings.Contains(source, ":") {
+		return source
+	}
+	if filepath.IsAbs(source) {
+		return source
+	}
+	return filepath.Join(filepath.Dir(scenarioPath), source)
 }

@@ -1,0 +1,55 @@
+{
+  "_schema_version": "v0.1",
+  "_status": "DRAFT — non-binding, benchmark-only",
+  "_purpose": [
+    "This file gives the B6 (earnings/hr) benchmark verdict a number to score against.",
+    "It is NOT the production rate card. The coordinator's rewards.rate_card config",
+    "is not configured on Pearl as of 2026-06-29 — billing currently emits zero credits.",
+    "When real settlement pricing lands, scenario 10 should point at the operator-curated",
+    "manifest instead of this file (or this file's contents should be lifted into one)."
+  ],
+  "_calibration": [
+    "Rates calibrated against the v0.1 B6 thresholds (≥$0.30/hr bare-min, ≥$1.00/hr target",
+    "per provider) and observed sustained TPS of ~14 tok/s on M4 Air (Qwen3-32B-4bit).",
+    "At 14 tok/s × 3600s = 50,400 completion tokens/hr × $0.02/1k = $1.00/hr.",
+    "So 7B-class completion @ $0.02/1k is the 'just clears target' anchor.",
+    "Smaller models priced proportionally lower; 32B-class higher."
+  ],
+  "_competitive_reference": {
+    "openai_gpt4o_mini": {"prompt_per_1k": 0.00015, "completion_per_1k": 0.0006},
+    "openai_gpt4o":      {"prompt_per_1k": 0.00250, "completion_per_1k": 0.0100},
+    "anthropic_haiku":   {"prompt_per_1k": 0.00025, "completion_per_1k": 0.00125}
+  },
+  "_revisit_when": [
+    "Fleet sustained TPS shifts materially (>2× current 14 tok/s) — rates can drop.",
+    "Real production rate card lands in coordinator.yaml rewards.rate_card.",
+    "Network adds tier-2 attested providers with higher-end hw (M4 Max, M2 Ultra)."
+  ],
+  "issued_at": "2026-06-29",
+  "models": [
+    {
+      "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "_class": "3B",
+      "price_per_1k_prompt_tokens": 0.003,
+      "price_per_1k_completion_tokens": 0.008
+    },
+    {
+      "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+      "_class": "7B",
+      "price_per_1k_prompt_tokens": 0.007,
+      "price_per_1k_completion_tokens": 0.020
+    },
+    {
+      "model": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+      "_class": "7B-coder",
+      "price_per_1k_prompt_tokens": 0.007,
+      "price_per_1k_completion_tokens": 0.020
+    },
+    {
+      "model": "mlx-community/Qwen3-32B-4bit",
+      "_class": "32B",
+      "price_per_1k_prompt_tokens": 0.015,
+      "price_per_1k_completion_tokens": 0.040
+    }
+  ]
+}

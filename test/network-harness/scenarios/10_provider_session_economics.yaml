@@ -46,7 +46,11 @@ silent_hang_threshold: 15s
 benchmark:
   enabled: true
   invariants: [B5, B6]
-  pricing_source: pearl:/opt/macprovider/tier2-catalog.json
+  # In-repo placeholder pricing manifest (DRAFT — not production rates).
+  # See the file header for calibration rationale. When real settlement
+  # pricing lands in coordinator.yaml rewards.rate_card, point this at
+  # the operator-curated manifest instead. Harness must run from repo root.
+  pricing_source: ../../../specs/BENCHMARK_PRICING_v0.1.json
 
 prompts:
   - model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
