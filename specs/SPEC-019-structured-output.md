@@ -1,6 +1,6 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.2.1 (2026-06-29, r1-absorption draft for audit)
+**Version:** 0.2.2 (2026-06-29, r2-absorption draft for audit)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
 **Status:** DRAFT — audit loop pending.
 
@@ -375,7 +375,15 @@ test. This leverages the existing provider WS status allow-list precedent at
 coordinator writer site at
 `phase4-coordinator/internal/buyer/server.go:5150-5170`, and the affected
 gateway normalization site at
-`phase5-gateway/internal/router/chat_proxy.go:493-531`.
+`phase5-gateway/internal/router/chat_proxy.go:482-557`, the full
+`forwardLine` closure, and the gateway positive-settlement site at
+`phase5-gateway/internal/router/chat_proxy.go:625-629`
+(`settleReported("ok")` and `settleAfterCommit(..., "ok", ...)`). Test:
+gateway MUST emit no `usage_events` row with `outcome:"ok"` for a stream whose
+terminal SSE frame carries `error.code` in `{malformed_json_response,
+json_schema_validation_failed}`. The gateway MUST also NOT remap the terminal
+frame to `stream_malformed` via the `!hasChoices` parse branch at
+`phase5-gateway/internal/router/chat_proxy.go:533`.
 
 AC-V2-4. A streaming output whose concatenated content is valid JSON matching
 `response_format.json_schema.schema` reaches the normal `data: [DONE]`
@@ -426,18 +434,31 @@ whitespace classification
 condition: the buyer sees 200 success with empty content, or the error is
 `retryable:true`.
 
-AC-V2-9. Streaming validation timeout: the timeout source is provider-side idle
-inactivity, defined as no buyer-visible `content` delta emitted for N seconds.
-The concrete N value is deferred to a future v0.2.x and MUST be aligned with
-SPEC-006 idle semantics. On idle timeout, the provider closes upstream
-generation, runs end-of-stream validation on the buffer as of close, and emits a
-terminal SSE error frame using the existing `inference_timeout` code with
-retryability per SPEC-006 timeout semantics. Settlement remains
-`FaultBreakerQualifying` per §8. The fixture set MUST include a stream that
-hits provider idle timeout. Fail condition: coordinator WS deadline, gateway
-read timeout, or an unbounded connection becomes the normative timeout source;
-incomplete streaming output is treated as successful structured output; or the
-request earns provider-positive credits.
+AC-V2-9. Streaming validation timeout: the timeout sources are provider-side
+idle inactivity and wall-clock total deadline. Provider-side idle inactivity is
+defined as no buyer-visible `content` delta emitted for N seconds. The concrete
+N value is deferred to a future v0.2.x and MUST be aligned with SPEC-006 idle
+semantics. On idle timeout, the provider closes upstream generation, runs
+end-of-stream validation on the buffer as of close, and emits a terminal SSE
+error frame using the existing `provider_timeout` code (SPEC-006 §3221 /
+`specs/SPEC-006-buyer-api.md:3221`, emitted at
+`phase4-coordinator/internal/buyer/server.go:1722`) with retryability per
+SPEC-006 timeout semantics. Settlement remains `FaultBreakerQualifying` per §8.
+Wall-clock total deadline: the streaming structured-output request also fails
+closed when the wall-clock duration since request acceptance exceeds the
+existing SPEC-006 per-request deadline (`coordinator_request_seconds: 300` in
+SPEC-006 §15.2 / `specs/SPEC-006-buyer-api.md:2433-2435`). On wall-clock
+breach, the provider closes upstream generation, runs end-of-stream validation
+on the buffer as of close, emits the same terminal SSE error frame using
+`provider_timeout`, and settles `FaultBreakerQualifying`. Idle and wall-clock
+conditions independently trigger the same terminal frame; whichever fires first
+wins. Provider MAY implement either via a single combined watcher or two
+independent watchers, but the buyer-visible terminal frame is identical. The
+fixture set MUST include streams that hit provider idle timeout and wall-clock
+deadline. Fail condition: coordinator WS deadline, gateway read timeout, or an
+unbounded connection becomes the normative timeout source; incomplete streaming
+output is treated as successful structured output; or the request earns
+provider-positive credits.
 
 AC-V2-9b. Streaming content byte cap: when the post-stop-token-filter
 buyer-visible `content` delta concatenation exceeds the SPEC-019 v0.2 cap of
@@ -473,8 +494,13 @@ and same-node inverted bounds where both are present and `minimum > maximum`.
 All rejects use `json_schema_unsupported_keyword`, with `error.param` pointing
 to the offending keyword path such as
 `response_format.json_schema.schema.properties.X.multipleOf`. Fixtures MUST
-cover each invalid case at both provider and coordinator. Fail condition:
-invalid bound operands reach inference or use a new buyer-visible error code.
+cover each invalid case at both provider and coordinator. Per RFC 8259 §6, the
+JSON `number` production excludes the literals `NaN`, `Infinity`, `+Infinity`,
+and `-Infinity`. All four MUST reject as non-JSON-numbers via
+`json_schema_unsupported_keyword` with `error.param` pointing at the offending
+node. Negative fixtures MUST cover these four literals in addition to strings,
+booleans, null, arrays, and objects. Fail condition: invalid bound operands
+reach inference or use a new buyer-visible error code.
 
 AC-V2-11. `$schema` at the top-level
 `response_format.json_schema.schema` object MUST be accepted with any JSON
@@ -503,16 +529,20 @@ second.
 Fail condition: SDK-side schema rewriting is still needed to pass
 pre-inference validation.
 
-AC-V2-13. Partial-content negative streaming fixture: a streaming
-structured-output request whose final concatenated buffer fails validation MUST
-be observable as partial buyer-visible content deltas followed by a terminal SSE
-error frame with `error.code` in `{malformed_json_response,
-json_schema_validation_failed}`. The fixture, preferably Cline or Vercel, MUST
-assert that partial content deltas reached the buyer parser, the final object
-parse fails with no partial-success path, and the fixture README documents that
-pre-validation deltas are provisional, not final. Fail condition: buyer tooling
-treats partial deltas as successful structured output after terminal validation
-failure.
+AC-V2-13. Partial-content negative streaming fixture set: the fixture set MUST
+include **both** a Cline partial-content-then-terminal-error stream **AND** a
+Vercel AI SDK partial-content-then-terminal-error stream. Both fixtures MUST:
+
+- emit partial assistant content deltas visible to the buyer's parser,
+- terminate with a SSE error frame whose `error.code` is in
+  `{malformed_json_response, json_schema_validation_failed}`,
+- assert that final SDK-side object parsing fails, with no partial-success path,
+- document the contract that partial deltas pre-validation are provisional, not
+  final.
+
+Fail condition: buyer tooling treats partial deltas as successful structured
+output after terminal validation failure, or only one of the Cline / Vercel
+negative streaming fixtures is present.
 
 AC-V2-14. Composite-render streaming invariant: for `stream:true + tools +
 json_schema`, empty-tool-history and non-empty-tool-history fixtures MUST assert
@@ -984,13 +1014,22 @@ provider-positive credits. Partial validator state MUST be discarded as in the
 v0.1 rule.
 
 Provider idle timeout is the normative streaming-validation timeout source in
-v0.2.1. If no buyer-visible `content` delta is emitted for N seconds, where N is
+v0.2.2. If no buyer-visible `content` delta is emitted for N seconds, where N is
 deferred to a future v0.2.x aligned with SPEC-006 idle semantics, the provider
 MUST close upstream generation, run end-of-stream validation over the
 post-stop-token-filter concatenated `content` buffer as of close, and emit a
-terminal SSE error frame using the existing `inference_timeout` code with
-retryability per SPEC-006 timeout semantics. Coordinator WS deadlines and
-gateway upstream-read deadlines remain transport safety mechanisms, not the
+terminal SSE error frame using the existing `provider_timeout` code (SPEC-006
+§3221 / `specs/SPEC-006-buyer-api.md:3221`, emitted at
+`phase4-coordinator/internal/buyer/server.go:1722`) with retryability per
+SPEC-006 timeout semantics. v0.2.2 also binds a wall-clock total deadline to
+the existing SPEC-006 per-request deadline (`coordinator_request_seconds: 300`
+in SPEC-006 §15.2 / `specs/SPEC-006-buyer-api.md:2433-2435`): when wall-clock
+duration since request acceptance exceeds that deadline, the provider closes
+upstream generation, validates the buffer as of close, emits the same terminal
+SSE error frame using `provider_timeout`, and settles
+`FaultBreakerQualifying`. Idle and wall-clock conditions independently trigger
+the same terminal frame; whichever fires first wins. Coordinator WS deadlines
+and gateway upstream-read deadlines remain transport safety mechanisms, not the
 normative structured-output validation-timeout authority.
 
 ### SPEC-019 error codes
@@ -1026,7 +1065,10 @@ HTTP and terminal-SSE error-envelope codes in v0.2. The coordinator retryability
 table currently marks the two streaming reject codes false and the two
 post-inference structured-output codes retryable
 (`phase4-coordinator/internal/buyer/server.go:59-73`); v0.2 removes the former
-from active request validation while preserving the latter.
+from active request validation while preserving the latter. v0.2.2 streaming
+idle and wall-clock timeout breaches reuse SPEC-006 `provider_timeout`
+(SPEC-006 §3221 / `specs/SPEC-006-buyer-api.md:3221`) as the source-of-truth
+timeout code; no SPEC-019-owned timeout error code is added.
 
 Minimum terminal error envelope:
 
@@ -1200,8 +1242,10 @@ error frames to `api_error`, `stream_malformed`, generic
 by SPEC-018 v0.2.4 §10d.0. The gateway MUST recognize these terminal SSE error
 frames as final structured-output failures, forward them verbatim through
 `[DONE]`, and skip gateway-side positive / ok settlement. The affected gateway
-normalization site is
-`phase5-gateway/internal/router/chat_proxy.go:493-531`.
+normalization site is the full `forwardLine` closure at
+`phase5-gateway/internal/router/chat_proxy.go:482-557`; the positive-settlement
+site that MUST be skipped after forwarding these terminal SSE error frames is
+`phase5-gateway/internal/router/chat_proxy.go:625-629`.
 
 Provider-to-coordinator WS streaming terminal validation failure MUST close the
 WS stream with `inference_response_end.status` in `{malformed_json_response,
@@ -1266,7 +1310,12 @@ coordinator terminal SSE writer MUST include `request_id` and
 `error.code` in `{malformed_json_response, json_schema_validation_failed}` as
 final structured-output failures, forward them verbatim through `[DONE]`, and
 skip gateway-side positive / ok settlement; it MUST NOT remap them to
-`stream_malformed` or any other code. Streaming idle timeout and
+`stream_malformed` or any other code. In particular, the gateway-side
+`settleReported("ok")` / `settleAfterCommit(..., "ok", ...)` positive-settle
+site at `phase5-gateway/internal/router/chat_proxy.go:625-629` MUST be skipped
+after forwarding a terminal SSE error frame with `error.code` in
+`{malformed_json_response, json_schema_validation_failed}`. Streaming idle
+timeout, wall-clock timeout, and
 SPEC-019 streaming content-cap failure also settle `FaultBreakerQualifying`.
 
 ## 9. Forward-compatibility invariants
@@ -1327,7 +1376,7 @@ excluded from cap accounting or receipt prompt-hash binding.
 
 ## 10. Deferred to v0.2 / v0.3
 
-Deferred after v0.2.1:
+Deferred after v0.2.2:
 
 - v0.2.x or v0.3: transparent gateway-side decompression of
   `Content-Encoding: gzip` / `deflate` / `br` request bodies with a
@@ -1340,9 +1389,9 @@ Deferred after v0.2.1:
 - v0.2.x or v0.3: partial-JSON-prefix tolerant streaming validation. v0.2.0
   ships end-of-stream validation over the concatenated content buffer.
 - v0.2.x: concrete provider idle inactivity duration N for structured-output
-  streaming timeout, aligned with SPEC-006 idle semantics. v0.2.1 defines the
-  authority and terminal `inference_timeout` behavior but intentionally defers
-  the numeric value.
+  streaming timeout, aligned with SPEC-006 idle semantics. v0.2.2 defines the
+  authority, wall-clock deadline pairing, and terminal `provider_timeout`
+  behavior but intentionally defers the idle numeric value.
 
 Deferred to v0.3 or later:
 
@@ -1378,6 +1427,14 @@ three-layer streaming validation bridge, provider-idle timeout authority,
 numeric-bound operand rules, SPEC-019-owned streaming `content` cap, Cline and
 Vercel captured-body fixture requirements, and the `$schema` cap/hash
 clarification. The concrete idle duration N remains deferred to v0.2.x.
+
+**v0.2.2 amendment**: r2 absorption substitutes SPEC-006 `provider_timeout` for
+the prior timeout-code placeholder, adds wall-clock total deadline closure using
+the existing SPEC-006 per-request deadline, widens gateway pass-through and
+positive-settlement citations, requires both Cline and Vercel partial-content
+negative streaming fixtures, and adds RFC 8259 §6 NaN / Infinity numeric-bound
+reject coverage. It does not add a SPEC-015 schema change, SPEC-018 edit, new
+HTTP endpoint, or new error code.
 
 Historical v0.1.5 deferred text retained for audit traceability, superseded by
 the v0.2.0 active deferred list above:
@@ -1450,10 +1507,20 @@ v0.2 audit lanes should additionally probe:
 14. Whether `[DONE]` remains the right transport close marker for both success
     and failure paths when the failure is semantically terminal-error rather
     than successful completion.
+15. Whether the SPEC-006 per-request deadline value
+    (`coordinator_request_seconds: 300`, SPEC-006 §15.2 /
+    `specs/SPEC-006-buyer-api.md:2433-2435`) is fit-for-purpose for structured
+    streaming, or whether v0.2.x should pin a separate wall-clock value.
+16. v0.1.5 LOCKED retryable drift for `response_byte_cap_exceeded`: §5
+    error-code table marks `retryable: true`, but IMPL
+    `phase4-coordinator/internal/buyer/server.go:56` marks `false`. This is
+    pre-existing v0.1.5 LOCKED drift and out of v0.2 amendment scope. AC-V2-9b
+    does not explicitly bind retryable and inherits IMPL semantics. Reconcile
+    in v0.3.
 
 ## 12. Document metadata
 
-**Version:** 0.2.1 (2026-06-29, r1-absorption draft for audit)
+**Version:** 0.2.2 (2026-06-29, r2-absorption draft for audit)
 
 **Status:** DRAFT — audit loop pending.
 
@@ -1472,13 +1539,27 @@ change, no new HTTP endpoint.
 
 ### Change log
 
+- **v0.2.2 (2026-06-29, r2-absorption draft for audit):** Absorbs the r2 audit
+  findings from `specs/SPEC-019-v0_2-r2-audit.md` (1C + 3H + 5M across 4 lanes;
+  lanes A and F READY TO LOCK) while keeping v0.1.5 locked text immutable.
+  T-r2-1 replaces the prior timeout-code placeholder with SPEC-006
+  `provider_timeout` and records no new error code; T-r2-2 widens gateway
+  streaming pass-through citations, names the positive-settlement site, and
+  adds the no-`outcome:"ok"` / no-`stream_malformed` IMPL test obligation;
+  T-r2-3 makes the partial-content negative fixture set conjunctive across
+  Cline and Vercel. S-r2-1 adds the wall-clock total deadline paired with idle
+  timeout; S-r2-2 records the locked `response_byte_cap_exceeded` retryability
+  drift as a §11 deferral only; S-r2-3 adds RFC 8259 §6 NaN / Infinity
+  rejection coverage for numeric-bound operands. No SPEC-015 schema change, no
+  SPEC-018 edits, no new HTTP endpoint, and no new error codes.
+
 - **v0.2.1 (2026-06-29, r1-absorption draft for audit):** Absorbs the r1 audit
   findings from `specs/SPEC-019-v0_2-r1-audit.md` (1C + 9H + 9M across 5 lanes;
   lane F READY TO LOCK) while keeping v0.1.5 locked text immutable. Convergent
   themes closed: T-1 specifies the provider WS -> coordinator SSE -> gateway SSE
   pass-through and settlement bridge for terminal streaming validation failures;
   T-2 binds streaming timeout authority to provider-side idle inactivity and
-  reuses `inference_timeout`; T-3 adds numeric-bound operand validity and
+  reuses `provider_timeout`; T-3 adds numeric-bound operand validity and
   inverted-bound rejects using `json_schema_unsupported_keyword`; T-4 adds
   numeric-bound type-conditional negative fixtures. Singular findings closed:
   S-1 defines the SPEC-019 streaming concatenated-`content` cap at `2_097_152`
