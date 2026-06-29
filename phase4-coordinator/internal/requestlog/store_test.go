@@ -7,6 +7,7 @@ import (
 	"math"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -746,6 +747,317 @@ func TestMigrationStateReportsPerKeyStatesAndAggregate(t *testing.T) {
 	if !sawLegacy || !sawUnindexed {
 		t.Fatalf("expected one legacy + one unindexed key; got %#v", status.Keys)
 	}
+}
+
+// TestInsertPopulatesMonotonicAttemptN pins SPEC-002 v1.5.2 / issue
+// #168: the writer MUST assign attempt_n monotonically within each
+// (account_id, request_id) group at INSERT time, race-free under the
+// SetMaxOpenConns(1) discipline.
+func TestInsertPopulatesMonotonicAttemptN(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Now().UTC()
+
+	for i := 0; i < 3; i++ {
+		if err := store.Insert(ctx, Row{
+			TSUtc:     ts.Add(time.Duration(i) * time.Second),
+			RequestID: "req-acct-A",
+			AccountID: "acct-A",
+			Model:     "model-a",
+			Status:    200,
+			BuyerIP:   "127.0.0.1",
+		}); err != nil {
+			t.Fatalf("insert row %d: %v", i, err)
+		}
+	}
+	rows, err := store.db.QueryContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id='req-acct-A' AND account_id='acct-A' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	var got []int
+	for rows.Next() {
+		var n sql.NullInt64
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !n.Valid {
+			t.Fatalf("attempt_n is NULL on a v1.5.2 write; want monotonic int")
+		}
+		got = append(got, int(n.Int64))
+	}
+	if want := []int{0, 1, 2}; !slicesEqualInt(got, want) {
+		t.Fatalf("attempt_n sequence = %v, want %v", got, want)
+	}
+
+	if err := store.Insert(ctx, Row{
+		TSUtc:     ts.Add(10 * time.Second),
+		RequestID: "req-acct-B",
+		AccountID: "acct-B",
+		Model:     "model-a",
+		Status:    200,
+		BuyerIP:   "127.0.0.1",
+	}); err != nil {
+		t.Fatalf("insert acct-B: %v", err)
+	}
+	var bN sql.NullInt64
+	if err := store.db.QueryRowContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id='req-acct-B' AND account_id='acct-B'`).Scan(&bN); err != nil {
+		t.Fatalf("acct-B scan: %v", err)
+	}
+	if !bN.Valid || bN.Int64 != 0 {
+		t.Fatalf("acct-B attempt_n = %v, want 0 (new group)", bN)
+	}
+
+	// Same request_id with EMPTY account_id is a SEPARATE group from
+	// acct-A (the v1.5.0 IS-clustering rule: NULL clusters with NULL
+	// only). attempt_n should start fresh at 0.
+	if err := store.Insert(ctx, Row{
+		TSUtc:     ts.Add(20 * time.Second),
+		RequestID: "req-acct-A",
+		AccountID: "",
+		Model:     "model-a",
+		Status:    200,
+		BuyerIP:   "127.0.0.1",
+	}); err != nil {
+		t.Fatalf("insert NULL-account: %v", err)
+	}
+	var nullN sql.NullInt64
+	if err := store.db.QueryRowContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id='req-acct-A' AND account_id IS NULL`).Scan(&nullN); err != nil {
+		t.Fatalf("NULL-account scan: %v", err)
+	}
+	if !nullN.Valid || nullN.Int64 != 0 {
+		t.Fatalf("NULL-account attempt_n = %v, want 0 (separate group from acct-A)", nullN)
+	}
+}
+
+// TestBackfillAttemptNPopulatesLegacyNullRows pins the v0.3.1 → v0.3.3
+// migration path: legacy rows with NULL attempt_n receive monotonic
+// values byte-identical to the read-time fallback derivation.
+func TestBackfillAttemptNPopulatesLegacyNullRows(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Now().UTC()
+
+	for i := 0; i < 3; i++ {
+		if err := store.Insert(ctx, Row{
+			TSUtc:     ts.Add(time.Duration(i) * time.Second),
+			RequestID: "req-legacy",
+			AccountID: "acct-L",
+			Model:     "model-a",
+			Status:    200,
+			BuyerIP:   "127.0.0.1",
+		}); err != nil {
+			t.Fatalf("insert legacy row %d: %v", i, err)
+		}
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE request_log SET attempt_n = NULL WHERE request_id = 'req-legacy'`); err != nil {
+		t.Fatalf("null out: %v", err)
+	}
+
+	status, err := store.AttemptNState(ctx)
+	if err != nil {
+		t.Fatalf("AttemptNState: %v", err)
+	}
+	if status.MigrationState != "populating" || status.NullCount != 3 {
+		t.Fatalf("pre-backfill state=%+v, want populating with 3 NULL rows", status)
+	}
+
+	updated, err := store.BackfillAttemptN(ctx)
+	if err != nil {
+		t.Fatalf("BackfillAttemptN: %v", err)
+	}
+	if updated != 3 {
+		t.Fatalf("updated=%d, want 3", updated)
+	}
+
+	rows, err := store.db.QueryContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id = 'req-legacy' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query post-backfill: %v", err)
+	}
+	defer rows.Close()
+	var got []int
+	for rows.Next() {
+		var n sql.NullInt64
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !n.Valid {
+			t.Fatalf("attempt_n still NULL after backfill")
+		}
+		got = append(got, int(n.Int64))
+	}
+	if want := []int{0, 1, 2}; !slicesEqualInt(got, want) {
+		t.Fatalf("backfilled attempt_n = %v, want %v", got, want)
+	}
+
+	status, err = store.AttemptNState(ctx)
+	if err != nil {
+		t.Fatalf("AttemptNState post-backfill: %v", err)
+	}
+	if status.MigrationState != "populated" || status.NullCount != 0 {
+		t.Fatalf("post-backfill state=%+v, want populated/0", status)
+	}
+
+	updated2, err := store.BackfillAttemptN(ctx)
+	if err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	if updated2 != 0 {
+		t.Fatalf("second backfill updated=%d, want 0 (idempotent)", updated2)
+	}
+}
+
+// TestBackfillAttemptNHandlesMixedRolloutState pins SPEC-002 v1.5.2
+// behavior under the realistic rollout window: some rows have non-NULL
+// attempt_n (written under v1.5.2), some have NULL (written under
+// v1.5.1 OR during a brief v1.5.2 → v1.5.1 rollback). BackfillAttemptN
+// MUST assign correct monotonic ordinals to the NULL rows so the
+// combined sequence is the canonical id-ASC ordering. R1 code MEDIUM.
+func TestBackfillAttemptNHandlesMixedRolloutState(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Now().UTC()
+
+	// Insert 3 rows; null out only rows 1 and 2 (keep row 0's
+	// persisted attempt_n=0). Simulates "row 0 written under v1.5.2,
+	// then v1.5.1 rollback wrote rows 1+2 with NULL".
+	for i := 0; i < 3; i++ {
+		if err := store.Insert(ctx, Row{
+			TSUtc:     ts.Add(time.Duration(i) * time.Second),
+			RequestID: "req-mixed",
+			AccountID: "acct-M",
+			Model:     "model-a",
+			Status:    200,
+			BuyerIP:   "127.0.0.1",
+		}); err != nil {
+			t.Fatalf("insert row %d: %v", i, err)
+		}
+	}
+	// Null out the last 2 rows to simulate a partial-rollout mix.
+	if _, err := store.db.ExecContext(ctx, `
+UPDATE request_log SET attempt_n = NULL
+ WHERE request_id = 'req-mixed'
+   AND id IN (SELECT id FROM request_log WHERE request_id='req-mixed' ORDER BY id LIMIT 2 OFFSET 1)
+`); err != nil {
+		t.Fatalf("null out: %v", err)
+	}
+
+	updated, err := store.BackfillAttemptN(ctx)
+	if err != nil {
+		t.Fatalf("BackfillAttemptN: %v", err)
+	}
+	if updated != 2 {
+		t.Fatalf("updated=%d, want 2 (only the NULL rows)", updated)
+	}
+
+	// Verify final sequence is [0, 1, 2] — backfilled rows received
+	// ordinals 1 and 2 respectively, preserving the existing row 0=0.
+	rows, err := store.db.QueryContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id = 'req-mixed' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	var got []int
+	for rows.Next() {
+		var n sql.NullInt64
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !n.Valid {
+			t.Fatalf("row still NULL after mixed-state backfill")
+		}
+		got = append(got, int(n.Int64))
+	}
+	if want := []int{0, 1, 2}; !slicesEqualInt(got, want) {
+		t.Fatalf("post-backfill sequence = %v, want %v", got, want)
+	}
+}
+
+// TestInsertConcurrentSameGroupProducesMonotonicAttemptN proves the
+// R1 code CRITICAL fix: Store.Insert is now race-free when multiple
+// goroutines insert into the same (account_id, request_id) group.
+// Prior to the fix, COUNT and INSERT were two distinct *sql.DB calls
+// that could each acquire a fresh connection from the pool, even
+// under SetMaxOpenConns(1), interleaving such that two goroutines
+// would both see count=0 and both INSERT attempt_n=0. The fix pins
+// a single *sql.Conn around the pair.
+func TestInsertConcurrentSameGroupProducesMonotonicAttemptN(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Now().UTC()
+
+	const N = 16
+	var wg sync.WaitGroup
+	errCh := make(chan error, N)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := store.Insert(ctx, Row{
+				TSUtc:     ts.Add(time.Duration(i) * time.Millisecond),
+				RequestID: "req-race",
+				AccountID: "acct-R",
+				Model:     "model-a",
+				Status:    200,
+				BuyerIP:   "127.0.0.1",
+			}); err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent insert: %v", err)
+	}
+
+	// Every row in the group MUST have a distinct attempt_n in the
+	// range [0, N-1]. If the race were present, two rows would share
+	// the same attempt_n.
+	rows, err := store.db.QueryContext(ctx, `SELECT attempt_n FROM request_log WHERE request_id='req-race' ORDER BY attempt_n`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	seen := map[int]bool{}
+	for rows.Next() {
+		var n sql.NullInt64
+		if err := rows.Scan(&n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !n.Valid {
+			t.Fatalf("attempt_n NULL on concurrent insert")
+		}
+		v := int(n.Int64)
+		if seen[v] {
+			t.Fatalf("duplicate attempt_n=%d under concurrent insert (race not closed)", v)
+		}
+		seen[v] = true
+	}
+	if len(seen) != N {
+		t.Fatalf("got %d distinct attempt_n values; want %d (rows missing)", len(seen), N)
+	}
+	for i := 0; i < N; i++ {
+		if !seen[i] {
+			t.Fatalf("attempt_n=%d missing from concurrent insert results", i)
+		}
+	}
+}
+
+func slicesEqualInt(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestOpenStoreCapsPoolAtOneConn pins the SetMaxOpenConns(1) +

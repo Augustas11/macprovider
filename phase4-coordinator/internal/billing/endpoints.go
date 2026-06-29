@@ -313,7 +313,10 @@ func (h *handler) buyerEquivalentCredits(ctx context.Context, from, to time.Time
 	// preserving pre-v1.5.0 behavior.
 	rows, err := h.store.db.QueryContext(ctx, `
 SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_tokens, rl.status, rl.error_code,
-       COALESCE((
+       -- SPEC-002 v1.5.2 / SPEC-005 v0.3.3 (issue #168): prefer
+       -- persisted rl.attempt_n when non-NULL; fall back to v0.3.1
+       -- id-ASC derivation for legacy NULL rows during rollout.
+       COALESCE(rl.attempt_n, (
          SELECT COUNT(*) - 1 FROM request_log prior
           WHERE prior.account_id IS rl.account_id
             AND prior.request_id = rl.request_id

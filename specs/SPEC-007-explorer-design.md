@@ -190,9 +190,8 @@ summaries.  - Join to SPEC-005 ledger rows on coordinator-internal `request_id`.
 
 Gaps:
 
-- **[GAP]** No coordinator-side `key_id`.  - **[GAP]** No stored
-`attempt_n`; SPEC-005 derives attempt order from
-  `(request_id, id)`.
+- **[GAP]** No coordinator-side `key_id`.
+- **[GAP-CLOSED]** Stored `attempt_n` added in SPEC-002 v1.5.2 / issue #168 — monotonic ordinal populated at INSERT time within `(account_id, request_id)` groups. SPEC-005 v0.3.3 reads it directly when non-NULL; legacy NULL rows fall back to byte-identical id-ASC derivation.
 - **[GAP]** No durable in-flight request table.  - **[GAP]** No request body digest or response byte count.
 
 ### 2.4 Coordinator provider token table
@@ -565,8 +564,9 @@ quarantined flag.  - quarantine reason.  - quota reservation status.  - gateway 
 
 Gaps:
 
-- **[GAP]** Attempt number is derived unless stored later.  - **[GAP]** Account ID requires gateway join.  - **[GAP]**
-In-flight request visibility requires new live state.
+- **[GAP-CLOSED]** Attempt number is stored as `request_log.attempt_n` (SPEC-002 v1.5.2 / issue #168) — monotonic ordinal populated at INSERT time within `(account_id, request_id)` groups.
+- **[GAP]** Account ID requires gateway join.
+- **[GAP]** In-flight request visibility requires new live state.
 
 ### 3.5 Buyers
 

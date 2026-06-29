@@ -228,8 +228,8 @@ func TestWriteHotPath_DuplicateRequestIDWithoutRetryQuarantinesAttempt(t *testin
 // the same coordinator-internal request_id ever recur across rows
 // belonging to different accounts (UUID v4 collision, retry-loop
 // bug, future schema change), RecoverLedger MUST derive attempt_n
-// and same_request_count by scoping (account_id, request_id), not
-// request_id alone. Note that internal request_id is server-minted
+// by scoping (account_id, request_id), not request_id alone.
+// Note that internal request_id is server-minted
 // (uuid.NewString() per buyer request) — this is NOT the actual
 // #211 buyer-supplied collision class on external_request_id; it's
 // defense-in-depth against any future internal-id recurrence.
@@ -360,16 +360,26 @@ func TestWriteHotPath_AttemptOneWithoutRetriedEvidenceIsQuarantined(t *testing.T
 	}
 }
 
-func TestWriteHotPath_ThirdDerivedAttemptIsAlwaysQuarantined(t *testing.T) {
+// TestWriteHotPath_ThirdDerivedAttemptIsCreditedUnderMonotonicAttemptN
+// pins SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168): with persisted
+// monotonic attempt_n, row 3+ is no longer quarantined. The prior
+// v0.3.1 "row 3+ MUST quarantine until SPEC-002 gains monotonic
+// attempt_n" rule is satisfied by the persisted column. Test was
+// previously TestWriteHotPath_ThirdDerivedAttemptIsAlwaysQuarantined.
+func TestWriteHotPath_ThirdDerivedAttemptIsCreditedUnderMonotonicAttemptN(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)
 	row.RequestID = "third-attempt"
 	input.RequestID = row.RequestID
+	// Row 1 receives attempt_n=0, retried=0 — credited.
 	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
 		t.Fatal(err)
 	}
+	// Row 2 receives attempt_n=1; carry retried=1 so it doesn't trip
+	// the legitimate-retry-without-marker quarantine class.
 	input2 := input
 	row2 := row
+	row2.Retried = 1
 	input2.AttemptN = 1
 	input2.ProviderID = "provider-b"
 	input2.ProviderAssignedID = "assigned-b"
@@ -377,8 +387,11 @@ func TestWriteHotPath_ThirdDerivedAttemptIsAlwaysQuarantined(t *testing.T) {
 	if err := store.WriteHotPath(context.Background(), reqStore, row2, input2); err != nil {
 		t.Fatal(err)
 	}
+	// Row 3 receives attempt_n=2. Under v0.3.3 this is credited
+	// normally (was quarantined under v0.3.1).
 	input3 := input
 	row3 := row
+	row3.Retried = 1
 	input3.AttemptN = 2
 	input3.ProviderID = "provider-c"
 	input3.ProviderAssignedID = "assigned-c"
@@ -386,11 +399,13 @@ func TestWriteHotPath_ThirdDerivedAttemptIsAlwaysQuarantined(t *testing.T) {
 	if err := store.WriteHotPath(context.Background(), reqStore, row3, input3); err != nil {
 		t.Fatal(err)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND attempt_n = 2 AND quarantined = 1 AND quarantine_reason = 'ambiguous_attempt_n'`, row.RequestID); got != 1 {
-		t.Fatalf("third attempt quarantine rows=%d want 1", got)
+	// v0.3.3 contract: third attempt has NO quarantine row and HAS a
+	// non-quarantined credit row.
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND attempt_n = 2 AND quarantined = 1`, row.RequestID); got != 0 {
+		t.Fatalf("third attempt quarantine rows=%d want 0 (v0.3.3 credits row 3+)", got)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_operator_credits WHERE request_id = ? AND attempt_n = 2`, row.RequestID); got != 0 {
-		t.Fatalf("operator rows for third attempt=%d want 0", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND attempt_n = 2 AND quarantined = 0`, row.RequestID); got != 1 {
+		t.Fatalf("third attempt credited rows=%d want 1", got)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_provider_identity_snapshots WHERE request_id = ? AND attempt_n = 2 AND provider_assigned_id = 'assigned-c'`, row.RequestID); got != 1 {
 		t.Fatalf("third attempt identity snapshots=%d want 1", got)
@@ -659,45 +674,59 @@ func TestRecoverLedger_QuarantinesExistingFailoverAttemptWithoutRetriedFlag(t *t
 	}
 }
 
-func TestRecoverLedger_QuarantinesExistingThirdAttempt(t *testing.T) {
+// TestRecoverLedger_CreditsExistingThirdAttemptUnderMonotonicAttemptN
+// pins SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168) on the recovery
+// path: row 3+ with persisted monotonic attempt_n is reconciled normally
+// (not quarantined). Test was previously
+// TestRecoverLedger_QuarantinesExistingThirdAttempt under the v0.3.1
+// "row 3+ MUST quarantine" rule. Seeding uses WriteHotPath so the
+// pre-existing credits are byte-correct under the active rate card,
+// letting RecoverLedger's reconciliation pass without a
+// credit-mismatch quarantine.
+func TestRecoverLedger_CreditsExistingThirdAttemptUnderMonotonicAttemptN(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
-	cfg := testRewards()
-	if _, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC()); err != nil {
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "recover-third"
+	input.RequestID = row.RequestID
+	// First attempt (attempt_n=0).
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
 		t.Fatal(err)
 	}
-	ts := time.Unix(200, 0).UTC()
-	prompt, completion := int64(1000), int64(1000)
-	for _, assignedID := range []string{"assigned-a", "assigned-b", "assigned-c"} {
-		if err := reqStore.Insert(context.Background(), requestlog.Row{
-			TSUtc: ts, RequestID: "recover-third", Model: "model-a", ProviderAssignedID: assignedID,
-			PromptTokens: &prompt, CompletionTokens: &completion, Status: 200, BuyerIP: "127.0.0.1",
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := store.db.Exec(`INSERT INTO ledger_provider_identity_snapshots (request_id, attempt_n, provider_assigned_id, provider_id, resolved_from, created_at_utc) VALUES ('recover-third', 2, 'assigned-c', 'provider-c', 'pool_entry', ?)`, ts.Format(time.RFC3339Nano)); err != nil {
+	// Second attempt (attempt_n=1, retried=1 to avoid the legitimate-
+	// retry-without-marker quarantine class).
+	input2 := input
+	row2 := row
+	row2.Retried = 1
+	input2.AttemptN = 1
+	input2.ProviderID = "provider-b"
+	input2.ProviderAssignedID = "assigned-b"
+	row2.ProviderAssignedID = "assigned-b"
+	if err := store.WriteHotPath(context.Background(), reqStore, row2, input2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`
-INSERT INTO ledger_request_credits (
-    request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
-    status, stream, usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
-    global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
-    fault_flag, recovery_source, created_at_utc
-) VALUES ('recover-third', 2, 'provider-c', 'assigned-c', ?, 'model-a', 200, 0,
-          'provider_reported', 1, 1, 1000000, 500, 9000, 500, 'none', 'hot_path', ?)`,
-		ts.Format(time.RFC3339Nano), ts.Format(time.RFC3339Nano)); err != nil {
+	// Third attempt (attempt_n=2). Under v0.3.3 this is credited
+	// normally; under v0.3.1 it would have been quarantined.
+	input3 := input
+	row3 := row
+	row3.Retried = 1
+	input3.AttemptN = 2
+	input3.ProviderID = "provider-c"
+	input3.ProviderAssignedID = "assigned-c"
+	row3.ProviderAssignedID = "assigned-c"
+	if err := store.WriteHotPath(context.Background(), reqStore, row3, input3); err != nil {
 		t.Fatal(err)
 	}
-	in := RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "nightly_reconcile"}
+	// Now drive recovery over the same window.
+	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "nightly_reconcile"}
 	if err := store.RecoverLedger(context.Background(), in); err != nil {
 		t.Fatal(err)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'recover-third' AND attempt_n = 2 AND quarantined = 1 AND quarantine_reason = 'ambiguous_attempt_n'`); got != 1 {
-		t.Fatalf("third attempt quarantine rows=%d want 1", got)
+	// v0.3.3 contract: row 3+ is NOT quarantined post-recovery.
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'recover-third' AND attempt_n = 2 AND quarantined = 1`); got != 0 {
+		t.Fatalf("third attempt quarantine rows=%d want 0 (v0.3.3 credits row 3+)", got)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'recover-third' AND attempt_n = 2`); got != 1 {
-		t.Fatalf("third attempt rows=%d want 1", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'recover-third' AND attempt_n = 2 AND quarantined = 0`); got != 1 {
+		t.Fatalf("third attempt credited rows=%d want 1", got)
 	}
 }
 

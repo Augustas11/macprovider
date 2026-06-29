@@ -1,7 +1,72 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.3.2 (2026-06-29, SPEC-002 v1.5.1 per-key migration-state dependency — issue #197)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.1, SPEC-003 v0.7, SPEC-004 v0.3.1, SPEC-006 v0.9.1
+**Version:** 0.3.3 (2026-06-29, monotonic `attempt_n` column promotion — issue #168)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.2, SPEC-003 v0.7, SPEC-004 v0.3.1, SPEC-006 v0.9.1
+
+**Change log v0.3.3 (2026-06-29, issue #168 — SPEC-002 v1.5.2 monotonic `attempt_n` adoption, closes §OQ-1):**
+- Dependency bump: SPEC-002 v1.5.1 → v1.5.2 to absorb the new
+  `request_log.attempt_n` column (zero-based monotonic ordinal
+  populated at INSERT time by the writer, scoped to
+  `(account_id, request_id)` under SQLite `IS`).
+- **Row-mapping rule promotion.** §8.2 / §10.4 / §15.2 attempt-
+  ordinal derivation MUST prefer `request_log.attempt_n` exact match
+  when non-NULL. When NULL (legacy pre-SPEC-002-v1.5.2 row OR
+  rollback window), the derivation falls back to the v0.3.1 id-ASC
+  arithmetic within the same `(account_id, request_id)` group under
+  SQLite `IS` clustering. Both paths produce byte-identical ordinals
+  because the writer's INSERT-time COUNT and the fallback's read-time
+  COUNT compute the same value over the same row set; v0.3.3 just
+  persists it.
+- **Quarantine rule narrowing.** v0.3.1's "row 3+ MUST be quarantined
+  until SPEC-002 gains monotonic `attempt_n`" rule is satisfied as of
+  SPEC-002 v1.5.2 — both via the persisted `attempt_n` column AND via
+  the byte-identical id-ASC fallback derivation. Row 3+ in BOTH the
+  v1.5.2 write path and the legacy NULL-`attempt_n` fallback path
+  receives a stable `attempt_n=2, 3, ...` ordinal and is credited
+  normally on a fresh reconciliation pass.
+
+  The only remaining steady-state quarantine class is `attempt_n=1`
+  with `retried=0` — legitimate retry without an explicit `retried`
+  marker. Cannot be safely distinguished from a buggy duplicate
+  insert; quarantined for operator review per §OQ-5 (issue #169).
+- **Pre-existing quarantine rows are immutable.** Quarantine rows
+  written under the v0.3.1 row-3+ rule BEFORE the SPEC-005 v0.3.3
+  IMPL deploy remain in their existing quarantined=1 state. The
+  ledger schema constrains `quarantined` to a `0 → 1` monotonic
+  transition; SPEC-005 v0.3.3 does NOT introduce an unquarantine
+  flow. **Operator action is required to resolve these legacy
+  quarantines** — the SPEC-005 §OQ-5 force-credit / force-void admin
+  surface (issue #169) is the natural counterpart. v0.3.3 closes the
+  quarantine **CREATION** class for row 3+; resolution of pre-existing
+  quarantines is out of scope and tracked in #169. **Operators MUST
+  NOT execute direct `UPDATE ledger_request_credits SET quarantined=0`
+  SQL** — that violates the monotonic-quarantine schema invariant,
+  bypasses the §OQ-5 audit-log requirement, and risks crediting a row
+  that was legitimately quarantined for a non-row-3+ reason. The
+  current quarantine reason strings (per `internal/billing/recovery.go`
+  and `internal/billing/settlement.go`) include: `ambiguous_attempt_n`
+  (the row-3+ class — only attempts before v0.3.3 IMPL are now
+  affected), `missing_request_log`, `missing_provider_identity`,
+  `missing_config_snapshot`, `invalid_usage_tokens`,
+  `reconciliation_mismatch`, `operator_split_mismatch`, and
+  `conflicting_settlement_id` — only the first should ever be
+  candidates for an unquarantine flow; the others reflect real
+  invariant violations and MUST stay quarantined. Wait for #169.
+- **Acceptance.** On a backfilled deployment (`attempt_n` populated
+  everywhere) the quarantine count from the row-3+ class drops to
+  zero on a fresh nightly reconciliation pass. The v0.3.1 fallback
+  path and the v0.3.3 `attempt_n` path remain valid in IMPL code
+  during the migration window (no big-bang).
+- **Cross-spec.** Closes the SPEC-005 §OQ-1 long-tail item. The
+  §OQ-5 admin surface (force-credit / force-void) remains a
+  separate open item for the legitimate-retry-without-marker
+  ambiguity class (issue #169).
+- No new SPEC-002 indexes; `attempt_n` is a per-row ordinal, not a
+  join key. The SPEC-002 v1.5.1 per-key migration-state machine is
+  unchanged. SPEC-002 v1.5.2 adds a parallel **per-column** migration
+  state (`legacy | populating | populated`) for `attempt_n`,
+  observable via the new `coordinator backfill-attempt-n --check
+  --format json` subcommand.
 
 **Change log v0.3.2 (2026-06-29, issue #197 — SPEC-002 v1.5.1 dependency bump + per-key migration-state contract):**
 - Dependency bump: SPEC-002 v1.5.0 → v1.5.1 to absorb the per-key
@@ -127,7 +192,7 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 - usage object has prompt_tokens, completion_tokens, total_tokens.
 - cancel usage is authoritative for v1.2.4+ providers.
 - SPEC-005 MUST NOT require new provider fields.
-**SPEC-002 v1.5.1:**
+**SPEC-002 v1.5.2:**
 - coordinator owns request_log and provider auth.
 - request_log is read-only to SPEC-005.
 - request_log carries deterministic `error_code` for SPEC-001 null-usage errors.
@@ -135,6 +200,7 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 - per-key migration state `legacy | unindexed | indexed` is exposed by `coordinator migrate-indexes --check --format json`. SPEC-005 reconciliation tooling that performs **closing-the-books joins** between coordinator `request_log` and gateway `usage_events` / `audit_events` MUST consume this state and fail closed on any depended-on key in state `legacy` or `unindexed` (v0.3.2 / issue #197).
 - each provider attempt for a repeated request_id has its own request_log row.
 - request_log carries `account_id` (v1.5.0 / issue #211). The composite `(account_id, request_id)` is the grouping key for attempt-ordinal derivation; SQLite `IS` semantics preserve the pre-v1.5.0 grouping for legacy NULL-`account_id` rows.
+- request_log carries `attempt_n` (v1.5.2 / issue #168). Zero-based monotonic ordinal populated at INSERT time by the writer within the same `(account_id, request_id)` group. SPEC-005 v0.3.3 reads this directly when non-NULL; falls back to id-ASC derivation when NULL (legacy / rollout window). Both paths produce byte-identical ordinals.
 - FR-P11a supplies fault categories.
 - FR-P12 supplies provider bearer-token auth.
 - FR-R3 distinguishes stable provider_id from assigned_id.
@@ -282,12 +348,11 @@ Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 
 SPEC-005 reads request_id, ts_utc, model, provider_assigned_id, prompt_tokens, completion_tokens, total_tokens, status, stream, error, error_code, provider_header, retried, and (v0.3.1) account_id.
 SPEC-005 never changes these columns.
-The D10 attempt_n need remains a future SPEC-002 patch candidate.
-Until attempt_n exists, v0.3.1 derives attempt ordinal by grouping rows that share the same `(account_id, request_id)` under SQLite `IS` semantics, then ordering each group by request_log.id ASC. Under `IS` a NULL-`account_id` row clusters with NULL-`account_id` rows only — it does NOT cluster with non-NULL rows that happen to share `request_id`. This preserves the pre-v0.3.1 intra-NULL grouping for legacy rows while keeping all three IMPL sites (hotpath.go, recovery.go, endpoints.go admin reconcile) consistent.
-Row 1 becomes attempt_n=0.
-Row 2 becomes attempt_n=1 only when request_log.retried indicates an explicit retry.
-Row 3+ MUST be quarantined until SPEC-002 gains monotonic attempt_n.
-If rows cannot be ordered uniquely within their `(account_id, request_id)` group, all ambiguous rows MUST be quarantined.
+**SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168):** the D10 `attempt_n` need is satisfied by `request_log.attempt_n` (monotonic, populated at INSERT time within each `(account_id, request_id)` group under SQLite `IS`). SPEC-005 reads `attempt_n` directly when non-NULL; falls back to the legacy id-ASC derivation when NULL (rollout window). Both paths produce byte-identical ordinals.
+
+Legacy fallback (NULL `attempt_n` only — pre-v1.5.2 rows OR rollback window): group rows that share the same `(account_id, request_id)` under SQLite `IS`, then order each group by `request_log.id ASC`. Under `IS` a NULL-`account_id` row clusters with NULL-`account_id` rows only — it does NOT cluster with non-NULL rows that happen to share `request_id`. Row 1 becomes `attempt_n=0`. Row 2 becomes `attempt_n=1` only when `request_log.retried` indicates an explicit retry. **Row 3+ in the fallback path is also assigned a stable monotonic ordinal (`attempt_n=2, 3, ...`) and is credited normally** — the prior v0.3.1 "row 3+ MUST be quarantined" rule is satisfied by the deterministic id-ASC derivation. Quarantining is reserved for the legitimate-retry-without-explicit-marker class (`attempt_n=1` with `retried=0`).
+
+If rows cannot be ordered uniquely within their `(account_id, request_id)` group (a SQLite invariant violation; should never occur because `id INTEGER PRIMARY KEY AUTOINCREMENT` is strictly monotonic), all ambiguous rows MUST be quarantined.
 SPEC-005 resolves stable provider_id through `ledger_provider_identity_snapshots`; it MUST NOT require ALTER request_log.
 
 ### 4.3 Table `ledger_request_credits`
@@ -692,11 +757,9 @@ Stable provider_id is the economic identity.
 
 ### 8.2 Derivation
 
-When SPEC-002 exposes attempt_n, copy it exactly.
-Until then, derive the fallback ordinal by grouping rows that share the same `(account_id, request_id)` under SQLite `IS` semantics, then ordering each group by request_log.id ASC. NULL-`account_id` rows cluster with NULL-`account_id` rows only; they do NOT cluster with non-NULL rows that happen to share `request_id`.
-The first ordered row uses attempt_n=0.
-The second ordered row uses attempt_n=1 only when request_log.retried indicates an explicit retry.
-The third and later ordered rows MUST be quarantined until SPEC-002 gains monotonic attempt_n.
+**SPEC-005 v0.3.3 (issue #168): prefer the persisted `request_log.attempt_n` exact match when non-NULL.** SPEC-002 v1.5.2 populates `attempt_n` monotonically at INSERT time within the same `(account_id, request_id)` group; the value is the canonical ordinal and MUST be copied directly into the ledger row.
+For legacy NULL-`attempt_n` rows (pre-SPEC-002-v1.5.2 OR rollback window), the fallback derivation is unchanged from v0.3.1: group rows by `(account_id, request_id)` under SQLite `IS`, order each group by `request_log.id ASC`. NULL-`account_id` rows cluster with NULL-`account_id` rows only. The first ordered row uses `attempt_n=0`; the second uses `attempt_n=1` only when `request_log.retried` indicates an explicit retry. The fallback arithmetic is byte-identical to the writer's INSERT-time COUNT, so backfilled and derivation-time ordinals match exactly.
+**Quarantine rules (v0.3.3):** the v0.3.1 "row 3+ MUST be quarantined" rule is satisfied in BOTH paths — the persisted monotonic `attempt_n` path AND the byte-identical id-ASC fallback path. Row 3+ in either path receives a stable `attempt_n=2, 3, ...` ordinal and is credited normally. The only remaining quarantine class is `attempt_n=1` with `retried=0` (legitimate retry without explicit marker) — operator resolution via SPEC-005 §OQ-5 force-credit / force-void (issue #169).
 If request_log.id cannot produce a unique order within an `(account_id, request_id)` group, all ambiguous rows in that group MUST be quarantined.
 Stable provider_id MUST be copied from `ledger_provider_identity_snapshots` when request_log only supplies provider_assigned_id.
 
@@ -709,7 +772,7 @@ No attempt may borrow tokens from another attempt.
 
 ### 8.4 Cross-spec patch
 
-SPEC-002 needs an attempt_n column or equivalent monotonic attempt ordinal.
+SPEC-002 needs an attempt_n column or equivalent monotonic attempt ordinal. **Closed in SPEC-002 v1.5.2 / SPEC-005 v0.3.3 (issue #168) — see §15.2 below.**
 SPEC-005 does not apply that patch.
 The operator must gate that patch in audit or v0.2 work.
 
@@ -797,7 +860,7 @@ If no config snapshot or provider identity snapshot can be selected for a provid
 
 Absent request_log join quarantines ledger rows.
 Inconsistent immutable math quarantines ledger rows.
-Ambiguous attempt_n fallback quarantines rows.
+Ambiguous `attempt_n=1` with `retried=0` (legitimate retry without explicit marker) quarantines rows. (v0.3.3: row 3+ is no longer in this class — see §15.2.)
 Quarantine is review, not deletion.
 Quarantined rows are exposed in admin endpoints.
 
@@ -1062,12 +1125,15 @@ Use byte-estimation fallback only when usage is absent.
 Use the same estimate as SPEC-006 v0.9.1 section  17.7 buyer debit: `ceil(bytes_emitted_so_far / 4)`.
 Set usage_source=byte_estimated.
 
-### 15.2 attempt_n fallback
+### 15.2 attempt_n derivation
 
-Before the SPEC-002 monotonic attempt_n patch, rows are grouped by `(account_id, request_id)` (using SQLite `IS` so legacy NULL-account_id rows cluster identically to pre-v0.3.1 behavior) and ordered within each group by request_log.id ASC. (v0.3.1 / SPEC-002 v1.5.0 / issue #211.)
-No-retry and one explicit retry are supported before SPEC-002 patch.
-Row 3+, non-explicit retry row 2, and non-unique ordering within an `(account_id, request_id)` group are quarantined.
-section  20 surfaces the patch.
+**SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168) — current rule:** the canonical attempt ordinal is `request_log.attempt_n` (populated at INSERT time by the writer as `COUNT(*) FROM request_log WHERE account_id IS ? AND request_id = ?` within the same writer transaction). Read-side consumers (SPEC-005 §8.2, §10.4, §15.2 itself) MUST copy `request_log.attempt_n` directly when non-NULL.
+
+**Legacy fallback (v0.3.1 / SPEC-002 v1.5.0 / issue #211) — retained for the v1.5.2 rollout window:** when `request_log.attempt_n IS NULL` (pre-v1.5.2 row OR rollback window), rows are grouped by `(account_id, request_id)` (using SQLite `IS` so legacy NULL-`account_id` rows cluster identically to pre-v0.3.1 behavior) and ordered within each group by `request_log.id ASC`. The first ordered row maps to `attempt_n=0`; the second to `attempt_n=1` only with explicit `retried` semantics; the third and later receive `attempt_n=2, 3, ...` from the same deterministic id-ASC arithmetic and are credited normally — byte-identical to what the writer would have persisted under v1.5.2.
+
+**Migration acceptance:** on a backfilled deployment (operator has run `backfill-attempt-n` and `--check` reports `populated`), the legacy fallback path is unreachable in steady state but remains in IMPL code as a defense against future schema-rollback windows. Both paths produce byte-identical ordinals because the writer's INSERT-time COUNT and the fallback's read-time COUNT compute the same value over the same row set.
+
+The only steady-state quarantine class under v0.3.3 is `attempt_n=1` with `retried=0` (legitimate retry without explicit marker), resolved via the SPEC-005 §OQ-5 admin surface (issue #169).
 
 ### 15.3 Unknown models
 
@@ -1218,7 +1284,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 **Traceability verification:** Parse section  2 and locate D10; then locate at least one later normative reference.
 **Behavior verification:** Seed two rows that share the same `(account_id, request_id)` group, ordered by request_log.id ASC, plus matching provider identity snapshots. (Legacy fixtures may use NULL `account_id` on both rows; SQLite `IS` clusters NULLs.)
-**Expected:** D10 exists in section  2, is enforced outside section  2, rows receive distinct attempt_n/provider_id keys, row 2 is accepted only with explicit retried semantics, and row 3+ or ambiguous ordering is quarantined.
+**Expected:** D10 exists in section  2, is enforced outside section  2, rows receive distinct `attempt_n`/`provider_id` keys (`attempt_n=0, 1, 2, ...` monotonically from `request_log.attempt_n` when populated, or from the byte-identical id-ASC fallback when NULL), row 2 is accepted only with explicit `retried` semantics (else quarantined), and row 3+ is credited normally under SPEC-005 v0.3.3 / SPEC-002 v1.5.2.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -1331,8 +1397,8 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### AC-ATTEMPT-FALLBACK: retried fallback limit
 
-**Verification:** Fixture three rows before attempt_n patch, all sharing the same `(account_id, request_id)` group under SQLite `IS` clustering (legacy NULL-`account_id` fixtures cluster identically among themselves).
-**Expected:** Within each `(account_id, request_id)` group, `request_log.id ASC` assigns row 1 to attempt_n=0; row 2 becomes attempt_n=1 only with explicit retried semantics; row 3+ is quarantined.
+**Verification:** Fixture three rows sharing the same `(account_id, request_id)` group under SQLite `IS` clustering (legacy NULL-`account_id` fixtures cluster identically among themselves). One fixture variant pre-populates `request_log.attempt_n` (post-v1.5.2 schema); a second variant leaves `attempt_n` NULL to exercise the id-ASC fallback derivation.
+**Expected:** Both fixtures produce identical ordinals: row 1 → `attempt_n=0`; row 2 → `attempt_n=1` accepted only with explicit `retried` semantics (else quarantined as legitimate-retry-without-marker); row 3 → `attempt_n=2` credited normally (per SPEC-005 v0.3.3 / SPEC-002 v1.5.2). The persisted-attempt_n path and the id-ASC fallback path are byte-identical.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -1525,8 +1591,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### OQ-1: SPEC-002 attempt_n patch
 
-SPEC-005 v0.3.1 permits the quarantining fallback: rows are grouped by `(account_id, request_id)` (SQLite `IS` for the NULL-NULL legacy case) and ordered within each group by request_log.id ASC; row 1 maps to attempt_n=0, row 2 maps to attempt_n=1 only with explicit retried semantics, and row 3+ or ambiguous ordering within a group is quarantined.
-A future SPEC-002 monotonic attempt_n remains a cross-spec patch candidate, not a SPEC-005 v0.3 launch blocker.
+**RESOLVED in SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168, 2026-06-29).** `request_log.attempt_n` is now the canonical monotonic ordinal, populated at INSERT time within `(account_id, request_id)` groups under SQLite `IS`. SPEC-005 reads it directly when non-NULL; falls back to the byte-identical id-ASC derivation when NULL (rollout window). Row 3+ is credited normally; the only steady-state quarantine class is `attempt_n=1` with `retried=0`, deferred to §OQ-5 admin surface (issue #169).
 
 ### OQ-2: Rounding rule acceptance
 
@@ -2327,7 +2392,7 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 
 - Claim: Multi-provider attribution encoded.
 - Setup: Parse section  2 and later D10 references; seed rows sharing the same `(account_id, request_id)` group, ordered by request_log.id ASC, plus identity snapshots. (Legacy fixtures may use NULL account_id; SQLite `IS NULL` clusters NULLs identically to the v0.3 pre-account-scope behavior.)
-- Oracle: D10 exists in section  2, is enforced outside section  2, rows receive distinct attempt_n/provider_id keys, row 2 requires explicit retry semantics, and row 3+ or ambiguous order within an `(account_id, request_id)` group quarantines.
+- Oracle: D10 exists in section  2, is enforced outside section  2, rows receive distinct `attempt_n`/`provider_id` keys (monotonic 0, 1, 2, ... from `request_log.attempt_n` when populated, byte-identical id-ASC fallback when NULL), row 2 requires explicit `retried` semantics (else quarantined), and row 3+ is credited normally under SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168).
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
@@ -2454,8 +2519,8 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 ### AC-ATTEMPT-FALLBACK fixture detail
 
 - Claim: retried fallback limit.
-- Setup: Fixture three rows before attempt_n patch, all sharing the same `(account_id, request_id)` group under SQLite `IS` clustering.
-- Oracle: Ambiguous row within an `(account_id, request_id)` group is quarantined.
+- Setup: Fixture three rows sharing the same `(account_id, request_id)` group under SQLite `IS` clustering. One variant uses persisted `request_log.attempt_n=0,1,2` (post-v1.5.2); a second variant leaves `attempt_n` NULL to exercise the id-ASC fallback. Set `retried=1` on row 2 to avoid the legitimate-retry-without-marker quarantine class.
+- Oracle: Both variants produce identical credit rows for `attempt_n=0, 1, 2`. Row 3 (`attempt_n=2`) is credited normally under SPEC-005 v0.3.3 / SPEC-002 v1.5.2 — the v0.3.1 row-3+ quarantine is satisfied by both the persisted column and the byte-identical fallback derivation. The only quarantine class that remains is `attempt_n=1` with `retried=0`.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
