@@ -407,10 +407,37 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	if !s.settleBeforeResponse(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok") {
 		return
 	}
+	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+// emitProviderAttribution surfaces the provider peer id under a public
+// buyer-facing header name (X-Provider-Id) on the gateway response.
+//
+// Required by harness B5/B6 verdicts (slot utilization, per-provider
+// earnings) and any downstream buyer that wants per-request provider
+// attribution. The internal `X-MacProvider-Provider` header carrying
+// the peer id is stripped by copyCleanHeaders /
+// copyReceiptEligibleHeaders via isMacProviderHeader, so this MUST
+// run BEFORE the copy/strip — and emit under a different prefix so it
+// survives the strip.
+//
+// Only the peer id is surfaced. The companion `X-MacProvider-Route`
+// header on coord responses carries a session-assigned routing token
+// (auth-shaped, not a pure identifier) and is deliberately NOT
+// emitted to buyers.
+//
+// Empty source values produce no output header (avoids leaking
+// "X-Provider-Id: " sentinels on coord paths that don't carry
+// provider attribution — coordinator policy errors, cold-start 503s
+// without a peer selected, etc.).
+func emitProviderAttribution(dst, src http.Header) {
+	if v := src.Get("X-MacProvider-Provider"); v != "" {
+		dst.Set("X-Provider-Id", v)
+	}
 }
 
 func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, cancelUpstream func(), upstreamCtx context.Context, structuredStreaming bool, reservationWindow string) {
@@ -456,6 +483,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
+	emitProviderAttribution(w.Header(), resp.Header)
 	copyCleanHeaders(w.Header(), resp.Header)
 	w.Header().Set("X-MacProvider-Gateway-FirstByte-Unix-Ms", strconv.FormatInt(s.now().UnixMilli(), 10))
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
