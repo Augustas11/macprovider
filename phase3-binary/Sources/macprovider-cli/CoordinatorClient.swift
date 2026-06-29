@@ -1308,10 +1308,12 @@ actor CoordinatorClient {
         sleepAssertion?.stop()
         sleepAssertion = sleepAssertionFactory()
         startHeartbeat(intervalSeconds: interval)
-        let completedAutoupdate = await completeSuccessfulAutoupdateIfPending()
+        let completedAutoupdate = await pendingSuccessfulAutoupdate()
         try await sendStateUpdate(state: nil, reason: reason)
         if let completedAutoupdate {
-            try? AutoUpdateMarkerStore().finalizeSuccessfulUpdate(completedAutoupdate)
+            let markerStore = AutoUpdateMarkerStore()
+            try? markerStore.completeSuccessfulUpdate(completedAutoupdate)
+            try? markerStore.finalizeSuccessfulUpdate(completedAutoupdate)
         }
         if let recommended = payload["recommended_binary_version"] as? String {
             let trust = currentAutoupdateTrustState()
@@ -1351,43 +1353,34 @@ actor CoordinatorClient {
         }
     }
 
-    private func completeSuccessfulAutoupdateIfPending() async -> AutoUpdatePendingMarker? {
-        let markerStore = AutoUpdateMarkerStore()
+    private func pendingSuccessfulAutoupdate(markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore()) async -> AutoUpdatePendingMarker? {
         guard let marker = try? markerStore.readPending(),
               marker.targetVersion == Self.binaryVersion
         else {
             return nil
         }
-        do {
-            try markerStore.completeSuccessfulUpdate(marker)
-            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                updateID: marker.updateID,
-                currentVersion: Self.binaryVersion,
-                targetVersion: marker.targetVersion,
-                phase: .postStart,
-                outcome: .success,
-                reason: "post_start_rejoin_succeeded",
-                attempt: 1
-            ))
-            return marker
-        } catch {
-            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                updateID: marker.updateID,
-                currentVersion: Self.binaryVersion,
-                targetVersion: marker.targetVersion,
-                phase: .postStart,
-                outcome: .failure,
-                reason: "post_start_success_cleanup_failed: \(error)",
-                attempt: 1,
-                failureClass: .other
-            ))
-            return nil
-        }
+        await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+            updateID: marker.updateID,
+            currentVersion: Self.binaryVersion,
+            targetVersion: marker.targetVersion,
+            phase: .postStart,
+            outcome: .success,
+            reason: "post_start_rejoin_succeeded",
+            attempt: 1
+        ))
+        return marker
     }
 
     private func runStartupAutoupdateRecovery() async {
-        let markerStore = AutoUpdateMarkerStore()
         guard let binaryURL = Bundle.main.executableURL else { return }
+        await runStartupAutoupdateRecovery(binaryURL: binaryURL, markerStore: AutoUpdateMarkerStore())
+    }
+
+    func runStartupAutoupdateRecoveryForTest(binaryURL: URL, markerStore: AutoUpdateMarkerStore) async {
+        await runStartupAutoupdateRecovery(binaryURL: binaryURL, markerStore: markerStore)
+    }
+
+    private func runStartupAutoupdateRecovery(binaryURL: URL, markerStore: AutoUpdateMarkerStore) async {
         let binaryDir = binaryURL.deletingLastPathComponent()
         let pending: AutoUpdatePendingMarker?
         do {
@@ -1407,39 +1400,64 @@ actor CoordinatorClient {
             return
         }
         for sentinel in markerStore.successSentinels(in: binaryDir) {
+            let payload: (updateID: String, binaryVersion: String)
             do {
-                let payload = try markerStore.readSuccessSentinel(sentinel)
-                if payload.binaryVersion == Self.binaryVersion {
-                    if let pending {
-                        try? markerStore.completeSuccessfulUpdate(pending)
-                        try? markerStore.finalizeSuccessfulUpdate(pending)
-                    } else {
-                        markerStore.finalizeSuccessfulUpdate(updateID: payload.updateID, binaryURL: binaryURL)
-                    }
-                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                        updateID: payload.updateID,
-                        currentVersion: Self.binaryVersion,
-                        targetVersion: Self.binaryVersion,
-                        phase: .postStart,
-                        outcome: .success,
-                        reason: "success_sentinel_cleanup_completed",
-                        attempt: 1
-                    ))
-                } else {
-                    try? FileManager.default.removeItem(at: sentinel)
-                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-                        updateID: payload.updateID,
-                        currentVersion: Self.binaryVersion,
-                        targetVersion: payload.binaryVersion,
-                        phase: .postStart,
-                        outcome: .failure,
-                        reason: "success_sentinel_version_mismatch",
-                        attempt: 1,
-                        failureClass: .orphanedSuccessSentinel
-                    ))
-                }
+                payload = try markerStore.readSuccessSentinel(sentinel)
             } catch {
                 try? FileManager.default.removeItem(at: sentinel)
+                continue
+            }
+            guard payload.binaryVersion == Self.binaryVersion else {
+                await recordOrphanedSuccessSentinel(
+                    updateID: payload.updateID,
+                    targetVersion: payload.binaryVersion,
+                    reason: "binary_version_mismatch",
+                    sentinel: sentinel
+                )
+                continue
+            }
+            guard let pending else {
+                await recordOrphanedSuccessSentinel(
+                    updateID: payload.updateID,
+                    targetVersion: payload.binaryVersion,
+                    reason: "no_matching_pending",
+                    sentinel: sentinel
+                )
+                continue
+            }
+            guard pending.updateID == payload.updateID else {
+                await recordOrphanedSuccessSentinel(
+                    updateID: payload.updateID,
+                    targetVersion: payload.binaryVersion,
+                    reason: "update_id_mismatch",
+                    sentinel: sentinel
+                )
+                continue
+            }
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: payload.updateID,
+                currentVersion: Self.binaryVersion,
+                targetVersion: pending.targetVersion,
+                phase: .postStart,
+                outcome: .success,
+                reason: "post_start_rejoin_succeeded",
+                attempt: 1
+            ))
+            do {
+                try await sendStateUpdate(state: nil, reason: "autoupdate_post_start_success")
+                try markerStore.completeSuccessfulUpdate(pending)
+                try markerStore.finalizeSuccessfulUpdate(pending)
+            } catch {
+                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                    updateID: payload.updateID,
+                    currentVersion: Self.binaryVersion,
+                    targetVersion: pending.targetVersion,
+                    phase: .postStart,
+                    outcome: .failure,
+                    reason: "post_start_success_publish_or_cleanup_failed",
+                    attempt: 1,
+                    failureClass: .other
+                ))
             }
         }
         if let marker = pending {
@@ -1490,6 +1508,20 @@ actor CoordinatorClient {
                 try? FileManager.default.removeItem(at: backup)
             }
         }
+    }
+
+    private func recordOrphanedSuccessSentinel(updateID: String, targetVersion: String, reason: String, sentinel: URL) async {
+        try? FileManager.default.removeItem(at: sentinel)
+        await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+            updateID: updateID,
+            currentVersion: Self.binaryVersion,
+            targetVersion: targetVersion,
+            phase: .postStart,
+            outcome: .failure,
+            reason: reason,
+            attempt: 1,
+            failureClass: .orphanedSuccessSentinel
+        ))
     }
 
     // Provider WS keepalive fix. The coordinator advertises heartbeat_interval_s

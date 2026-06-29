@@ -293,6 +293,71 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(event?["reason"] as? String, "tier_demoted")
     }
 
+    func testTrustLossBetweenAuthAndSwapAbortsAutoupdate() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let binaryDir = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binaryDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let binary = binaryDir.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: binary)
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let trustCalls = AutoUpdateCounter()
+        await AutoUpdateEventStore.shared.clear()
+        SessionAutoupdateGate.shared.resetForTest()
+        defer { SessionAutoupdateGate.shared.resetForTest() }
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: status,
+            markerStore: store,
+            trustProvider: {
+                if trustCalls.incrementAndGet() == 1 {
+                    return AutoUpdateTrustState(
+                        v2Accepted: true,
+                        tier: "pinned",
+                        encryptedLegValid: true,
+                        attestationRequired: false,
+                        attestationSatisfied: true,
+                        tokenConfigured: true,
+                        tokenValidated: true,
+                        bearerlessDuplicate: false,
+                        connected: true
+                    )
+                }
+                return AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "provisional",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: true,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true,
+                    stableReason: "tier_demoted"
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        await updater.handleCoordinatorRecommendation("1.7.0")
+
+        XCTAssertEqual(try String(contentsOf: binary), "old-binary")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["failure_class"] as? String, AutoUpdateFailureClass.trustStateLost.rawValue)
+        XCTAssertEqual(event?["reason"] as? String, "tier_demoted")
+    }
+
     func testAutoupdateReasonRedactionUsesStableCodes() {
         let errors: [Error] = [
             UpdateError.invalidURL("https://example.com/update?token=secret"),
@@ -308,16 +373,16 @@ final class AutoUpdateTests: XCTestCase {
         }
     }
 
-    func testSignedPolicyPersistenceIsMonotonic() throws {
+    func testSignedPolicyPersistenceIsMonotonic() async throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
         try store.ensureTrustedRoot()
-        store.updateSignedPolicy(minimum: "1.7.0", revoked: ["1.6.1"])
-        store.updateSignedPolicy(minimum: "1.6.0", revoked: [])
+        try await store.updateSignedPolicy(minimum: "1.7.0", revoked: ["1.6.1"])
+        try await store.updateSignedPolicy(minimum: "1.6.0", revoked: [])
         var policy = store.effectivePolicy()
         XCTAssertEqual(policy.minimum, "1.7.0")
         XCTAssertTrue(policy.revoked.contains("1.6.1"))
-        store.updateSignedPolicy(minimum: "1.8.0", revoked: ["1.7.1"])
+        try await store.updateSignedPolicy(minimum: "1.8.0", revoked: ["1.7.1"])
         policy = store.effectivePolicy()
         XCTAssertEqual(policy.minimum, "1.8.0")
         XCTAssertTrue(policy.revoked.contains("1.6.1"))
@@ -390,6 +455,18 @@ private final class TempHome {
 
     deinit {
         try? FileManager.default.removeItem(at: url)
+    }
+}
+
+private final class AutoUpdateCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func incrementAndGet() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+        return value
     }
 }
 

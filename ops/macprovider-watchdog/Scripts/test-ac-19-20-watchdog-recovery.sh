@@ -24,11 +24,27 @@ chmod 700 "$HOME_DIR" "$HOME_DIR/.local" "$HOME_DIR/.local/share" "$HOME_DIR/.lo
 cat > "$FAKE_BIN/launchctl" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = "print" ]; then
-  printf 'pid = 123\nlast exit status = 0\n'
+  case "${TEST_LAUNCHCTL_PRINT:-healthy}" in
+    crash)
+      printf 'pid = 123\nlast exit status = 7\n'
+      ;;
+    missing_pid)
+      printf 'last exit status = 0\n'
+      ;;
+    *)
+      printf 'pid = 123\nlast exit status = 0\n'
+      ;;
+  esac
 fi
 exit 0
 SH
 chmod 700 "$FAKE_BIN/launchctl"
+
+cat > "$FAKE_BIN/curl" <<'SH'
+#!/usr/bin/env bash
+exit "${TEST_CURL_EXIT:-0}"
+SH
+chmod 700 "$FAKE_BIN/curl"
 
 write_fixture() {
   local backup_body="$1"
@@ -81,6 +97,19 @@ run_watchdog_tick() {
   bash "$WATCHDOG"
 }
 
+run_watchdog_tick_with_health() {
+  HOME="$HOME_DIR" \
+  PATH="$FAKE_BIN:$PATH" \
+  MACPROVIDER_AUTOUPDATE_STATE_ROOT="$STATE_ROOT" \
+  MACPROVIDER_BINARY_DIR="$BIN_DIR" \
+  MACPROVIDER_CONFIG_PATH="$TMP_ROOT/missing-config.yaml" \
+  MACPROVIDER_CURL="$FAKE_BIN/curl" \
+  MACPROVIDER_HEALTHCHECK_URL="http://127.0.0.1:9/healthz" \
+  MACPROVIDER_LOG_DIR="$LOG_DIR" \
+  MACPROVIDER_WATCHDOG_STATE_DIR="$WATCHDOG_STATE" \
+  bash "$WATCHDOG"
+}
+
 write_fixture $'old-version\n' $'new-version\n'
 run_watchdog_tick
 
@@ -116,4 +145,37 @@ if ! grep -q '"failure_class":"rollback_backup_corrupt"' "$LOG_DIR/watchdog.log"
   exit 1
 fi
 
-echo "AC-19/20 watchdog recovery PASS"
+rm -f "$STATE_ROOT"/pending-quarantined-*.json "$LOG_DIR/watchdog.log"
+write_fixture $'old-version\n' $'new-version\n'
+TEST_LAUNCHCTL_PRINT=crash run_watchdog_tick
+if ! grep -q '"failure_class":"post_start_crash"' "$LOG_DIR/watchdog.log"; then
+  echo "AC-10 FAIL: post_start_crash event missing" >&2
+  exit 1
+fi
+
+rm -f "$STATE_ROOT"/pending-quarantined-*.json "$LOG_DIR/watchdog.log"
+write_fixture $'old-version\n' $'new-version\n'
+TEST_CURL_EXIT=22 run_watchdog_tick_with_health
+if ! grep -q '"failure_class":"post_start_health_failed"' "$LOG_DIR/watchdog.log"; then
+  echo "AC-10 FAIL: post_start_health_failed event missing" >&2
+  exit 1
+fi
+
+rm -f "$STATE_ROOT"/pending-quarantined-*.json "$LOG_DIR/watchdog.log"
+write_fixture $'old-version\n' $'new-version\n'
+cat > "$TARGET" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  echo "macprovider-cli 1.6.0"
+  exit 0
+fi
+exit 0
+SH
+chmod 700 "$TARGET"
+run_watchdog_tick
+if ! grep -q '"failure_class":"post_start_rejoin_timeout"' "$LOG_DIR/watchdog.log"; then
+  echo "AC-10 FAIL: post_start_rejoin_timeout event missing" >&2
+  exit 1
+fi
+
+echo "AC-10/19/20 watchdog recovery PASS"

@@ -56,7 +56,7 @@ struct SelfUpdate {
         let prepared = try await prepareValidatedUpdate(from: release)
         defer { prepared.cleanup() }
         try await applyValidatedUpdate(newBinary: prepared.newBinary)
-        persistSignedPolicyIfPresent(prepared.signedPolicy)
+        try await persistSignedPolicyIfPresent(prepared.signedPolicy)
         print("Update complete. Restart macprovider-cli to use v\(latest).")
     }
 
@@ -65,7 +65,7 @@ struct SelfUpdate {
         let prepared = try await prepareValidatedUpdate(from: release)
         defer { prepared.cleanup() }
         try await applyValidatedUpdate(newBinary: prepared.newBinary)
-        persistSignedPolicyIfPresent(prepared.signedPolicy)
+        try await persistSignedPolicyIfPresent(prepared.signedPolicy)
     }
 
     func resolveReleaseByTags(normalizedTarget: String) async throws -> GitHubRelease {
@@ -126,9 +126,9 @@ struct SelfUpdate {
         try await applyValidatedUpdate(newBinary: newBinary)
     }
 
-    func persistSignedPolicyIfPresent(_ signedPolicy: GitHubSignedPolicy?) {
+    func persistSignedPolicyIfPresent(_ signedPolicy: GitHubSignedPolicy?) async throws {
         guard let signedPolicy else { return }
-        markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
+        try await markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
     }
 
     func resolvedReleasesAPIURLForTest() -> String {

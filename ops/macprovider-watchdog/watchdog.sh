@@ -247,7 +247,9 @@ def validate_marker_strict(marker):
     except ValueError:
         raise RuntimeError("marker_deadline_invalid")
     now = datetime.datetime.now(datetime.timezone.utc)
-    if deadline < now - datetime.timedelta(seconds=300) or deadline > now + datetime.timedelta(hours=24):
+    post_start_window = 60
+    future_tolerance = post_start_window + 30 * 60
+    if deadline < now - datetime.timedelta(seconds=300) or deadline > now + datetime.timedelta(seconds=future_tolerance):
         raise RuntimeError("marker_deadline_out_of_bounds")
 
 def current_binary_version(path):
@@ -259,21 +261,39 @@ def current_binary_version(path):
     match = re.search(r"([0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z.-]+)?)", output)
     return match.group(1) if match else ""
 
+def read_success_sentinel(path):
+    reject_path(path)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        payload = json.loads(os.read(fd, 65536).decode("utf-8"))
+    finally:
+        os.close(fd)
+    update_id = str(payload.get("update_id", ""))
+    if not re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", update_id):
+        raise RuntimeError("sentinel_update_id_invalid")
+    return {
+        "update_id": update_id,
+        "binary_version": str(payload.get("binary_version", "")),
+    }
+
 def process_success_sentinel(marker):
     binary_dir = os.path.dirname(marker["target_path"])
-    sentinel = os.path.join(binary_dir, f".macprovider-cli.success-{marker['update_id']}")
-    if not os.path.exists(sentinel):
-        return False
-    try:
-        reject_path(sentinel)
-        fd = os.open(sentinel, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    for name in os.listdir(binary_dir):
+        if not name.startswith(".macprovider-cli.success-"):
+            continue
+        sentinel = os.path.join(binary_dir, name)
         try:
-            payload = json.loads(os.read(fd, 65536).decode("utf-8"))
-        finally:
-            os.close(fd)
-        sentinel_version = str(payload.get("binary_version", ""))
-        current_version = current_binary_version(marker["target_path"])
-        if sentinel_version and sentinel_version == current_version:
+            payload = read_success_sentinel(sentinel)
+            sentinel_version = payload["binary_version"]
+            current_version = current_binary_version(marker["target_path"])
+            if not sentinel_version or sentinel_version != current_version:
+                event("failure", "post_start", "orphaned_success_sentinel", "binary_version_mismatch", {"update_id": payload["update_id"], "target_version": sentinel_version})
+                os.unlink(sentinel)
+                continue
+            if payload["update_id"] != str(marker["update_id"]):
+                event("failure", "post_start", "orphaned_success_sentinel", "update_id_mismatch", {"update_id": payload["update_id"], "target_version": sentinel_version})
+                os.unlink(sentinel)
+                continue
             try:
                 os.unlink(pending)
             except FileNotFoundError:
@@ -289,16 +309,13 @@ def process_success_sentinel(marker):
             os.unlink(sentinel)
             event("success", "post_start", None, "success_sentinel_cleanup_completed", marker)
             return True
-        event("failure", "post_start", "orphaned_success_sentinel", "success_sentinel_version_mismatch", marker)
-        os.unlink(sentinel)
-        return False
-    except Exception as exc:
-        event("failure", "post_start", "orphaned_success_sentinel", str(exc), marker)
-        try:
-            os.unlink(sentinel)
-        except FileNotFoundError:
-            pass
-        return False
+        except Exception as exc:
+            event("failure", "post_start", "orphaned_success_sentinel", str(exc), marker)
+            try:
+                os.unlink(sentinel)
+            except FileNotFoundError:
+                pass
+    return False
 
 def sha256(path):
     h = hashlib.sha256()
@@ -351,30 +368,15 @@ def scan_without_pending():
         path = os.path.join(binary_dir, name)
         if name.startswith(".macprovider-cli.success-"):
             try:
-                reject_path(path)
-                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                try:
-                    payload = json.loads(os.read(fd, 65536).decode("utf-8"))
-                finally:
-                    os.close(fd)
-                sentinel_version = str(payload.get("binary_version", ""))
+                payload = read_success_sentinel(path)
+                sentinel_version = payload["binary_version"]
                 current_version = current_binary_version(binary)
                 if sentinel_version and sentinel_version == current_version:
-                    update_id = str(payload.get("update_id", ""))
-                    backup = os.path.join(binary_dir, f".macprovider-cli.rollback-{update_id}")
-                    try:
-                        os.unlink(backup)
-                    except FileNotFoundError:
-                        pass
-                    try:
-                        os.unlink(lock_path)
-                    except FileNotFoundError:
-                        pass
                     os.unlink(path)
-                    event("success", "post_start", None, "success_sentinel_cleanup_completed", {"update_id": update_id, "target_version": current_version})
+                    event("failure", "post_start", "orphaned_success_sentinel", "no_matching_pending", {"update_id": payload["update_id"], "target_version": current_version})
                 else:
                     os.unlink(path)
-                    event("failure", "post_start", "orphaned_success_sentinel", "success_sentinel_version_mismatch", {"update_id": str(payload.get("update_id", "")), "target_version": sentinel_version})
+                    event("failure", "post_start", "orphaned_success_sentinel", "binary_version_mismatch", {"update_id": payload["update_id"], "target_version": sentinel_version})
             except Exception as exc:
                 log(f"success_sentinel_scan_error={exc}")
         elif name.startswith(".macprovider-cli.rollback-"):
@@ -475,7 +477,8 @@ def classify_post_start_failure(marker):
     health_url = os.environ.get("MACPROVIDER_HEALTHCHECK_URL", "")
     if health_url:
         try:
-            probe = subprocess.run(["/usr/bin/curl", "-fsS", "--max-time", "2", health_url], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            curl = os.environ.get("MACPROVIDER_CURL", "/usr/bin/curl")
+            probe = subprocess.run([curl, "-fsS", "--max-time", "2", health_url], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if probe.returncode != 0:
                 return "post_start_health_failed"
         except Exception:

@@ -81,6 +81,10 @@ struct AutoUpdater: Sendable {
     func handleCoordinatorRecommendation(_ rawRecommended: String) async {
         let updateID = UUID().uuidString.lowercased()
         let entryTrust = await trustProvider()
+        guard !SessionAutoupdateGate.shared.isDisabled else {
+            await record(updateID: updateID, target: "<session-disabled>", phase: .eligibility, outcome: .skipped, reason: "signed_policy_persist_failed", attempt: 1)
+            return
+        }
         guard entryTrust.isEligible else {
             await record(updateID: updateID, target: "<notify-only>", phase: .eligibility, outcome: .skipped, reason: entryTrust.lossReason, attempt: 1)
             return
@@ -162,7 +166,7 @@ struct AutoUpdater: Sendable {
             try await ensureEligible(phase: .backup)
             try await preserveMarkerAndSwap(updateID: updateID, target: target, newBinary: prepared.newBinary, tracker: commitTracker)
             if let signedPolicy = prepared.signedPolicy {
-                markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
+                try await markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
             }
             await record(updateID: updateID, target: target, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1)
             try await ensureEligible(phase: .restart)
@@ -184,6 +188,8 @@ struct AutoUpdater: Sendable {
                 }
             }
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .trustStateLost, reason: reason)
+        } catch is AutoUpdateSignedPolicyPersistError {
+            markerStore.recordCooldown(target: target, failureClass: .signedPolicyPersistFailed)
         } catch {
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .other, reason: Self.redactedReason(for: error))
         }
@@ -307,6 +313,8 @@ struct AutoUpdater: Sendable {
             return "insufficient_disk_space"
         case AutoUpdateError.trustStateLost(let reason):
             return reason
+        case is AutoUpdateSignedPolicyPersistError:
+            return "signed_policy_persist_failed"
         case AutoUpdateError.observerUnavailable:
             return "rollback_observer_unavailable"
         case AutoUpdateError.unsupportedInstallTopology:

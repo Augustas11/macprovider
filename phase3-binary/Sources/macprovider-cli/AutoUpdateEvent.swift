@@ -51,6 +51,7 @@ enum AutoUpdateFailureClass: String, CaseIterable, Sendable {
     case selfTestFailed = "self_test_failed"
     case drainTimeout = "drain_timeout"
     case trustStateLost = "trust_state_lost"
+    case signedPolicyPersistFailed = "signed_policy_persist_failed"
     case postStartCrash = "post_start_crash"
     case postStartHealthFailed = "post_start_health_failed"
     case postStartRejoinTimeout = "post_start_rejoin_timeout"

@@ -44,6 +44,39 @@ enum AutoUpdateMarkerError: Error, CustomStringConvertible, Equatable {
     }
 }
 
+struct AutoUpdateSignedPolicyPersistError: Error, CustomStringConvertible {
+    let underlying: String
+
+    var description: String {
+        "signed policy persist failed: \(underlying)"
+    }
+}
+
+final class SessionAutoupdateGate: @unchecked Sendable {
+    static let shared = SessionAutoupdateGate()
+
+    private let lock = NSLock()
+    private var disabledReason: String?
+
+    var isDisabled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return disabledReason != nil
+    }
+
+    func disable(reason: String) {
+        lock.lock()
+        disabledReason = reason
+        lock.unlock()
+    }
+
+    func resetForTest() {
+        lock.lock()
+        disabledReason = nil
+        lock.unlock()
+    }
+}
+
 enum AutoUpdateOrphanRecoveryOutcome: Equatable {
     case restored(AutoUpdatePendingMarker)
     case markerInvalid
@@ -354,15 +387,35 @@ struct AutoUpdateMarkerStore: Sendable {
         try? fileManager.removeItem(at: lockURL)
     }
 
-    func updateSignedPolicy(minimum: String?, revoked: [String]) {
+    func updateSignedPolicy(minimum: String?, revoked: [String]) async throws {
         var policy = (try? readPolicy()) ?? SignedPolicy()
         if let minimum, !minimum.isEmpty,
            policy.persistedMinimum.isEmpty || SelfUpdate.compareSemver(policy.persistedMinimum, minimum) == .orderedAscending {
             policy.persistedMinimum = minimum
         }
         policy.persistedRevoked.formUnion(revoked)
-        if let data = try? JSONEncoder().encode(policy) {
-            try? atomicWrite(data: data, finalURL: policyURL, mode: S_IRUSR | S_IWUSR)
+        do {
+            let data = try JSONEncoder().encode(policy)
+            try atomicWrite(data: data, finalURL: policyURL, mode: S_IRUSR | S_IWUSR)
+        } catch {
+            if let marker = try? readPending(),
+               fileManager.fileExists(atPath: marker.backupPath)
+            {
+                try? restoreBackup(marker)
+            }
+            let marker = try? readPending()
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: marker?.updateID ?? UUID().uuidString.lowercased(),
+                currentVersion: "",
+                targetVersion: marker?.targetVersion ?? "<unknown>",
+                phase: .swap,
+                outcome: .failure,
+                reason: String(describing: error).prefix(128).description,
+                attempt: 1,
+                failureClass: .signedPolicyPersistFailed
+            ))
+            SessionAutoupdateGate.shared.disable(reason: "signed_policy_persist_failed")
+            throw AutoUpdateSignedPolicyPersistError(underlying: String(describing: error).prefix(128).description)
         }
     }
 
@@ -404,8 +457,10 @@ struct AutoUpdateMarkerStore: Sendable {
             throw AutoUpdateMarkerError.invalidMarker
         }
         let now = Date()
+        let postStartWindowSeconds: TimeInterval = 60
+        let futureToleranceSeconds: TimeInterval = postStartWindowSeconds + 30 * 60
         guard deadline > now.addingTimeInterval(-300),
-              deadline < now.addingTimeInterval(24 * 60 * 60)
+              deadline <= now.addingTimeInterval(futureToleranceSeconds)
         else {
             throw AutoUpdateMarkerError.invalidMarker
         }
