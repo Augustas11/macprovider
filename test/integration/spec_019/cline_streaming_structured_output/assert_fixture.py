@@ -3,6 +3,16 @@ import json
 from pathlib import Path
 
 root = Path(__file__).parent
+pins = json.loads((root / "pinned_versions.json").read_text())
+lock_text = ""
+for lock_name in ["package-lock.json", "bun.lockb"]:
+    lock_path = root / lock_name
+    if lock_path.exists():
+        lock_text += lock_path.read_text(errors="ignore")
+assert lock_text
+for value in pins.values():
+    assert value in lock_text, value
+
 body = json.loads((root / "captured_request_body.json").read_text())
 assert body["stream"] is True
 rf = body["response_format"]
@@ -12,6 +22,10 @@ assert rf["json_schema"]["strict"] is True
 schema = rf["json_schema"]["schema"]
 assert schema["type"] == "object"
 assert schema["properties"]["age"]["type"] == "integer"
+assert schema["required"] == ["name", "age"]
+assert schema["additionalProperties"] is False
+assert schema["properties"]["age"]["minimum"] == 0
+assert schema["properties"]["age"]["maximum"] == 120
 
 content = ""
 for line in (root / "sample_stream.sse").read_text().splitlines():

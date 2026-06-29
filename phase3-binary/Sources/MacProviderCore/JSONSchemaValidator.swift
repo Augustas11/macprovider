@@ -1,8 +1,11 @@
 import Foundation
 
 public enum JSONSchemaValidator {
+    // AC-V2-10/10a/10b (SPEC-019 v0.2.4): strict JSON Schema subset with
+    // numeric bounds enforced before inference and against model output.
     public static let maxSchemaBytes = 16_384
     public static let maxDepth = 32
+    private static let minimumSupportedMultipleOf = 1e-300
 
     private static let allowedKeywords: Set<String> = [
         "type",
@@ -157,6 +160,8 @@ public enum JSONSchemaValidator {
         }
     }
 
+    // AC-V2-10a/10b (SPEC-019 v0.2.4): numeric-bound operands must be
+    // finite and safely enforceable; denormal multipleOf is unsupported.
     private static func validateNumericBounds(in object: [String: JSONValue], type: String, pointer: String) throws {
         let boundKeywords = ["minimum", "maximum", "multipleOf"]
         let present = boundKeywords.filter { object[$0] != nil }
@@ -166,8 +171,13 @@ public enum JSONSchemaValidator {
         }
         let minimum = try numericBoundValue(object["minimum"], keyword: "minimum", pointer: pointer)
         let maximum = try numericBoundValue(object["maximum"], keyword: "maximum", pointer: pointer)
-        if let multipleOf = try numericBoundValue(object["multipleOf"], keyword: "multipleOf", pointer: pointer), multipleOf <= 0 {
-            throw unsupportedKeyword("multipleOf", pointer: pointer)
+        if let multipleOf = try numericBoundValue(object["multipleOf"], keyword: "multipleOf", pointer: pointer) {
+            guard multipleOf.isFinite,
+                  multipleOf > 0,
+                  multipleOf > minimumSupportedMultipleOf,
+                  multipleOf >= .leastNormalMagnitude else {
+                throw unsupportedKeyword("multipleOf", pointer: pointer)
+            }
         }
         if let minimum, let maximum, minimum > maximum {
             throw unsupportedKeyword("minimum", pointer: pointer)
@@ -248,13 +258,34 @@ public enum JSONSchemaValidator {
             throw validationError("Structured output is above maximum at \(pointerOrRoot(pointer))", pointer: pointer)
         }
         if let multipleOf = try numericBoundValue(schemaObject["multipleOf"], keyword: "multipleOf", pointer: pointer) {
+            if let numericInt = exactIntegerValue(numeric),
+               let multipleOfInt = exactIntegerValue(multipleOf),
+               multipleOfInt != 0 {
+                if numericInt % multipleOfInt != 0 {
+                    throw validationError("Structured output is not a multipleOf value at \(pointerOrRoot(pointer))", pointer: pointer)
+                }
+                return
+            }
             let quotient = numeric / multipleOf
+            guard quotient.isFinite, abs(quotient) <= 1e15 else {
+                throw validationError("Structured output is not a multipleOf value at \(pointerOrRoot(pointer))", pointer: pointer)
+            }
             let nearest = quotient.rounded()
             let tolerance = max(1e-12, abs(quotient) * 1e-12)
             if abs(quotient - nearest) > tolerance {
                 throw validationError("Structured output is not a multipleOf value at \(pointerOrRoot(pointer))", pointer: pointer)
             }
         }
+    }
+
+    private static func exactIntegerValue(_ value: Double) -> Int64? {
+        guard value.isFinite,
+              value.truncatingRemainder(dividingBy: 1) == 0,
+              value >= Double(Int64.min),
+              value <= Double(Int64.max) else {
+            return nil
+        }
+        return Int64(value)
     }
 
     private static func numericInstanceValue(_ value: JSONValue) -> Double? {

@@ -3895,6 +3895,8 @@ func jsonSchemaScalarConforms(raw json.RawMessage, typ string) bool {
 }
 
 func validateJSONSchemaNumericBounds(node map[string]json.RawMessage, typ string) *schemaValidationError {
+	// AC-V2-10a/10b (SPEC-019 v0.2.4): numeric-bound operands must be
+	// finite and safely enforceable before provider inference.
 	keywords := []string{"minimum", "maximum", "multipleOf"}
 	var present []string
 	for _, keyword := range keywords {
@@ -3920,8 +3922,10 @@ func validateJSONSchemaNumericBounds(node map[string]json.RawMessage, typ string
 	if errKeyword != "" {
 		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", errKeyword + " must be a JSON number"}
 	}
-	if hasMultipleOf && multipleOf <= 0 {
-		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "multipleOf must be greater than zero"}
+	const leastNormalFloat64 = 2.2250738585072014e-308
+	const minimumSupportedMultipleOf = 1e-300
+	if hasMultipleOf && (multipleOf <= 0 || math.IsInf(multipleOf, 0) || math.IsNaN(multipleOf) || multipleOf <= minimumSupportedMultipleOf || multipleOf < leastNormalFloat64) {
+		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "multipleOf must be a normal positive number"}
 	}
 	if hasMinimum && hasMaximum && minimum > maximum {
 		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "minimum must be less than or equal to maximum"}
@@ -5020,7 +5024,7 @@ func spec001StatusFromBody(body []byte) string {
 
 func spec001EndStatus(status string) string {
 	switch status {
-	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed":
+	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
 		return status
 	default:
 		return ""
@@ -5028,7 +5032,16 @@ func spec001EndStatus(status string) string {
 }
 
 func isSpec019ProviderDetailCode(code string) bool {
-	return code == "malformed_json_response" || code == "json_schema_validation_failed"
+	// AC-V2-3a + AC-V2-9 + AC-V2-9b (SPEC-019 v0.2.4 §5): these
+	// four terminal structured-output codes are the canonical table.
+	// Asymmetry across provider WS, coordinator SSE, and gateway SSE
+	// allow-lists is a money-path violation.
+	switch code {
+	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
+		return true
+	default:
+		return false
+	}
 }
 
 func isSpec019TerminalSSEErrorCode(code string) bool {

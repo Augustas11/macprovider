@@ -1,0 +1,10 @@
+[
+  {
+    "role": "system",
+    "content": "<|im_start|>system\nRespond with JSON matching schema person_tool_result before any other text.<|im_end|>"
+  },
+  {
+    "role": "user",
+    "content": "<|im_start|>user\nReturn Ada and call lookup_age if needed.<|im_end|>"
+  }
+]

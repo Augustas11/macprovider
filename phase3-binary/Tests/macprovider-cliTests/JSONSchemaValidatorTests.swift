@@ -57,6 +57,52 @@ final class JSONSchemaValidatorTests: XCTestCase {
         XCTAssertAPIError(try JSONSchemaValidator.validateSchemaShape(schema: .object(["type": .string("number"), "minimum": .int(5), "maximum": .int(4)])), status: 400, code: "json_schema_unsupported_keyword")
     }
 
+    func testMultipleOfDenormalOperandRejectedBeforeInference() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .double(1e-300),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateSchemaShape(schema: schema), status: 400, code: "json_schema_unsupported_keyword")
+    }
+
+    func testMultipleOfFractionalFallbackAcceptsExactMultiple() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .double(0.5),
+        ])
+
+        XCTAssertNoThrow(try JSONSchemaValidator.validateSchemaShape(schema: schema))
+        XCTAssertNoThrow(try JSONSchemaValidator.validateInstance(.double(1.5), against: schema))
+    }
+
+    func testMultipleOfFractionalFallbackRejectsNonMultiple() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .double(0.5),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(1.3), against: schema), status: 502, code: "json_schema_validation_failed")
+    }
+
+    func testMultipleOfIntegerPathRejectsFloatingDrift() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .int(1),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(1.0000000001), against: schema), status: 502, code: "json_schema_validation_failed")
+    }
+
+    func testMultipleOfLargeQuotientFailsClosed() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .double(0.5),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(1e16), against: schema), status: 502, code: "json_schema_validation_failed")
+    }
+
     func testStrictObjectRequiresAdditionalPropertiesFalseAtEachObject() throws {
         var nested: [String: JSONValue] = [
             "type": .object([

@@ -63,6 +63,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// outcome, so the flaky-provider failure mode can be diagnosed without
 	// re-instrumenting the binary.
 	start := s.now()
+	// AC-V2-9: gateway-side first-byte-of-request is the SPEC-019 v0.2
+	// wall-clock zero-point. The 300s budget (`coordinator_request_seconds`
+	// by convention) measures from this point to provider terminal SSE frame
+	// emission. Pre-upstream gateway time counts against the budget.
+	upCtx, cancelUpstream := context.WithTimeout(r.Context(), s.cfg.CoordinatorTimeout())
+	defer cancelUpstream()
 	sw := &statusWriter{ResponseWriter: w, statusCode: 0}
 	w = sw
 	// Issue #190 R1 security HIGH: chat-completion responses now
@@ -236,8 +242,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.ReleaseConcurrency(context.Background(), subject.AccountID, requestID(r), s.now())
 	}()
 
-	upCtx, cancelUpstream := context.WithTimeout(r.Context(), s.cfg.CoordinatorTimeout())
-	defer cancelUpstream()
 	upReq, err := http.NewRequestWithContext(upCtx, http.MethodPost, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
@@ -254,7 +258,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// coordinator request_log on this shared id. Earlier code minted a
 	// fresh UUID here, breaking that join.
 	upReq.Header.Set("X-Request-ID", requestID(r))
-	upReq.Header.Set("X-MacProvider-Gateway-FirstByte-Unix-Ms", strconv.FormatInt(s.now().UnixMilli(), 10))
+	upReq.Header.Set("X-MacProvider-Gateway-FirstByte-Unix-Ms", strconv.FormatInt(start.UnixMilli(), 10))
 	// SPEC-006 v0.9.1 / SPEC-002 v1.5.0 / issue #211: forward the
 	// gateway's authenticated account id on EVERY forwarded buyer
 	// request — bearer-authenticated and demo subjects alike, both on
@@ -1074,8 +1078,12 @@ func terminalSSEErrorCode(data string) string {
 }
 
 func isSpec019TerminalSSEErrorCode(code string) bool {
+	// AC-V2-3a + AC-V2-9 + AC-V2-9b (SPEC-019 v0.2.4 §5): these
+	// four terminal structured-output codes are the canonical table.
+	// Asymmetry across provider WS, coordinator SSE, and gateway SSE
+	// allow-lists is a money-path violation.
 	switch code {
-	case "malformed_json_response", "json_schema_validation_failed":
+	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
 		return true
 	default:
 		return false
@@ -1160,6 +1168,8 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
 }
 
 func writeStructuredOutputTimeoutSSE(w http.ResponseWriter, requestID string) {
+	// AC-V2-9 (SPEC-019 v0.2.4 §10): gateway wall-clock timeout emits
+	// provider_timeout with refund-only settlement semantics.
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	payload, _ := json.Marshal(map[string]any{
 		"error": map[string]any{

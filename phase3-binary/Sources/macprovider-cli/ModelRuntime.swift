@@ -78,6 +78,8 @@ final class StructuredStreamingContentAccumulator: @unchecked Sendable {
             return capError
         }
         let nextBytes = bytes + delta.utf8.count
+        // AC-V2-9b (SPEC-019 v0.2.4 §6): 2 MiB streaming content cap on
+        // post-stop-token-filter buyer-visible content delta concatenation.
         guard nextBytes <= ModelRuntime.structuredStreamingValidationBufferByteCap else {
             let error = APIError(
                 status: 502,
@@ -193,7 +195,13 @@ public struct WarmSwapDisabledError: Error, CustomStringConvertible {
 public struct DrainCancelledError: Error { }
 
 actor ModelRuntime: ModelRuntimeServing {
+    // AC-V2-9b (LOCKED): SPEC-019 v0.2.4 §6 normative 2 MiB streaming
+    // content cap. Byte domain is post-stop-token-filter buyer-visible
+    // content delta concatenation.
     static let structuredStreamingValidationBufferByteCap = 2_097_152
+
+    // AC-V2-9 N placeholder: SPEC-019 v0.2.4 §10 defers the concrete
+    // idle-timeout value to v0.2.x; 60 is the IMPL placeholder.
     static let structuredStreamingIdleTimeoutSeconds: TimeInterval = 60
 
     private var state: SwapState = .ready
@@ -654,7 +662,30 @@ actor ModelRuntime: ModelRuntimeServing {
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
         return try await Self.withDrainCancellation(drainCancelled) {
-            try await Self.withStructuredStreamingIdleTimeout(drainCancelled, idleState: idleState) {
+            try await Self.withStructuredStreamingIdleTimeout(
+                idleState: idleState,
+                onIdleTimeout: {
+                    let content = structuredAccumulator.content
+                    let synthetic = CompletionResult(
+                        content: content,
+                        finishReason: "stop",
+                        promptTokens: 0,
+                        completionTokens: 0,
+                        ttftMilliseconds: 0,
+                        toolCalls: nil,
+                        modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
+                    )
+                    do {
+                        return try Self.validateStructuredStreamingCompletion(
+                            synthetic,
+                            request: request,
+                            buyerVisibleContent: content
+                        )
+                    } catch {
+                        throw Self.structuredStreamingProviderTimeoutError()
+                    }
+                }
+            ) {
                 try await inferenceGate.withPermit {
                 try drainCancelled.check()
                 try Task.checkCancellation()
@@ -1082,7 +1113,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
-    private static func validateStructuredStreamingCompletion(
+    static func validateStructuredStreamingCompletion(
         _ completion: CompletionResult,
         request: ChatCompletionRequest,
         buyerVisibleContent: String
@@ -1102,9 +1133,13 @@ actor ModelRuntime: ModelRuntimeServing {
         return try validateStructuredCompletion(visibleCompletion, request: request)
     }
 
-    private static func withStructuredStreamingIdleTimeout<T: Sendable>(
-        _ token: DrainCancelToken,
+    // AC-V2-9 (SPEC-019 v0.2.4 §10): provider-idle breach validates the
+    // buyer-visible buffer-as-of-close before emitting provider_timeout.
+    static func withStructuredStreamingIdleTimeout<T: Sendable>(
         idleState: StructuredStreamingIdleState,
+        timeout: TimeInterval = structuredStreamingIdleTimeoutSeconds,
+        pollNanoseconds: UInt64 = 100_000_000,
+        onIdleTimeout: @escaping @Sendable () throws -> T,
         operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         guard idleState.enabled else {
@@ -1116,11 +1151,10 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             group.addTask {
                 while !idleState.isFinished {
-                    try await Task.sleep(nanoseconds: 100_000_000)
-                    if idleState.hasTimedOut(timeout: structuredStreamingIdleTimeoutSeconds) {
+                    try await Task.sleep(nanoseconds: pollNanoseconds)
+                    if idleState.hasTimedOut(timeout: timeout) {
                         idleState.markTimedOut()
-                        token.fire()
-                        throw structuredStreamingProviderTimeoutError()
+                        return try onIdleTimeout()
                     }
                 }
                 throw DrainCancelledError()
