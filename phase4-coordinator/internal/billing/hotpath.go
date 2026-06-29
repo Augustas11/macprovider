@@ -51,8 +51,28 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		committed = err == nil
 		return err
 	}
+	// SPEC-002 v1.5.0 / issue #211 money-path defense-in-depth:
+	// scope the AttemptN-derivation COUNT by (account_id, request_id)
+	// using SQLite `IS` semantics so all three sites (this one,
+	// recovery.go, endpoints.go admin-reconcile) compute the same
+	// attempt ordinal for any given row. Note that request_log.request_id
+	// is coordinator-internal (server-minted UUID v4); the buyer-
+	// supplied #211 collision class lives on external_request_id and
+	// is addressed by the composite (account_id, external_request_id)
+	// reconciliation key. This account scoping is defense-in-depth:
+	// if a UUID v4 collision or retry-loop bug ever causes the same
+	// internal request_id to recur across accounts, each account's
+	// attempt sequence is computed within its own scope. NULL-
+	// account_id legacy rows cluster with NULL-account_id legacy
+	// rows only (NULL = NULL under `IS`). For an empty in-memory
+	// AccountID, pass an explicit nil so SQLite matches IS NULL.
+	var accountIDArg any
+	if reqRow.AccountID != "" {
+		accountIDArg = reqRow.AccountID
+	}
 	var requestCount int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log WHERE request_id = ?`, in.RequestID).Scan(&requestCount); err == nil && requestCount > 0 {
+	countErr := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log WHERE account_id IS ? AND request_id = ?`, accountIDArg, in.RequestID).Scan(&requestCount)
+	if countErr == nil && requestCount > 0 {
 		if derived := requestCount - 1; derived > in.AttemptN {
 			if in.AttemptN != derived {
 				in.AttemptN = derived

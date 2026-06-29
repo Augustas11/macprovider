@@ -1559,6 +1559,18 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	if got := captured.Get("X-Request-ID"); got != "55555555-5555-4555-8555-555555555555" {
 		t.Fatalf("forwarded X-Request-ID = %q, want buyer-supplied value preserved", got)
 	}
+	// SPEC-006 v0.9.1 + SPEC-002 v1.5.0 + issue #211: the gateway MUST
+	// forward X-MacProvider-Account on EVERY forwarded buyer request
+	// (not just the sticky-routing conditional path). The composite
+	// (account_id, external_request_id) is the reconciliation key
+	// joining gateway usage_events to coordinator request_log; without
+	// the header on the hot non-sticky path the coordinator could not
+	// attribute the row to the gateway account, reopening the
+	// cross-account request_id-collision class on the coordinator
+	// audit-trail side. This test exercises the non-sticky bearer path.
+	if got := captured.Get("X-MacProvider-Account"); got != "acct_strip_success" {
+		t.Fatalf("forwarded X-MacProvider-Account = %q, want %q (issue #211: non-sticky hot path must forward account id)", got, "acct_strip_success")
+	}
 	if got := captured.Get("X-MacProvider-Retry"); got != "1" {
 		t.Fatalf("forwarded retry = %q, want 1", got)
 	}
@@ -1757,14 +1769,30 @@ func TestStickyConversationIgnoredForDemoTraffic(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
+	// SPEC-006 v0.9.1 / issue #211: sticky's distinguishing header is
+	// X-MacProvider-Internal-Conv; it MUST remain suppressed on demo
+	// traffic. That's the test's name and core intent.
 	if got := captured.Get("X-MacProvider-Internal-Conv"); got != "" {
 		t.Fatalf("demo internal conversation forwarded: %q", got)
 	}
-	if got := captured.Get("X-MacProvider-Account"); got != "" {
-		t.Fatalf("demo account forwarded: %q", got)
+	// SPEC-006 v0.9.1 / issue #211: X-MacProvider-Account is now
+	// forwarded unconditionally (including for demo subjects) so
+	// coordinator request_log.account_id can hold "demo:<ip>" and
+	// the reconciliation key (account_id, external_request_id) is
+	// well-defined for demo rows too. The coordinator gates the
+	// header behind the upstream Authorization bearer
+	// (hasInternalRoutingHeader / internalBearerAuthorized in
+	// phase4-coordinator/internal/buyer/server.go), so the bearer
+	// is also now sent on every forward — including demo. This is
+	// a SPEC-006 v0.9.1 contract change relative to pre-v0.9.1
+	// behavior where Authorization was sticky-gated. Sticky-only
+	// state (X-MacProvider-Internal-Conv) is still suppressed for
+	// demo; that's what this test's name still guards.
+	if got := captured.Get("X-MacProvider-Account"); got != "demo:1.2.3.4" {
+		t.Fatalf("demo account header = %q, want %q", got, "demo:1.2.3.4")
 	}
-	if got := captured.Get("Authorization"); got != "" {
-		t.Fatalf("demo coordinator auth forwarded: %q", got)
+	if got := captured.Get("Authorization"); got == "" {
+		t.Fatalf("demo coordinator Authorization missing — SPEC-006 v0.9.1 / issue #211 requires it whenever X-MacProvider-Account is forwarded")
 	}
 	if got := captured.Get("X-Demo-Token"); got != "" {
 		t.Fatalf("demo token forwarded: %q", got)
