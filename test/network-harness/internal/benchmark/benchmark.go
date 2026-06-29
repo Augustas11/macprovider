@@ -1,0 +1,606 @@
+// Package benchmark implements the phase-B network performance suite
+// defined in specs/SPEC-NETWORK-BENCHMARK-v0.1.md.
+//
+// Where phase-A invariants (I1-I4) are pass/fail correctness gates
+// ("the network does not lie"), the benchmark invariants (B1-B6) are
+// quantitative performance verdicts:
+//
+//   B1  TTFT p50 within target
+//   B2  Streaming TPS p50 within target
+//   B3  Tail ratio (p99/p50) bounded
+//   B4  Error rate per 1000 requests bounded
+//   B5  Provider slot utilization reasonable
+//   B6  Earnings/hr viable at current tier-2 pricing
+//
+// Each verdict carries a Status (PASS / WARN / FAIL / SKIP), the
+// measured value, the target and bare-min thresholds, and a one-line
+// detail string for the artifact bundle. B5 + B6 SKIP when the
+// underlying data source is unavailable (no DB snapshot, no pricing
+// manifest) — they never falsely PASS.
+package benchmark
+
+import (
+	"fmt"
+	"math"
+	"sort"
+	"time"
+
+	"github.com/augstar/macprovider-network-harness/internal/buyer"
+	"github.com/augstar/macprovider-network-harness/internal/metrics"
+	"github.com/augstar/macprovider-network-harness/internal/reconcile"
+	"github.com/augstar/macprovider-network-harness/internal/scenario"
+)
+
+// Status is the verdict for one B-invariant.
+type Status string
+
+const (
+	StatusPass Status = "PASS"
+	StatusWarn Status = "WARN"
+	StatusFail Status = "FAIL"
+	StatusSkip Status = "SKIP"
+)
+
+// Verdict is one B-invariant's outcome.
+type Verdict struct {
+	ID      string  `json:"id"`
+	Title   string  `json:"title"`
+	Status  Status  `json:"status"`
+	Value   float64 `json:"value"`
+	Target  float64 `json:"target,omitempty"`
+	BareMin float64 `json:"bare_min,omitempty"`
+	Unit    string  `json:"unit"`
+	Detail  string  `json:"detail"`
+}
+
+// Histogram is the subset of percentiles benchmark verdicts assert on.
+// Distinct from metrics.Histogram because benchmark sources its own
+// derivations (e.g. streaming-only TPS rather than wall-time TPS).
+type Histogram struct {
+	Count int     `json:"count"`
+	P50   float64 `json:"p50"`
+	P95   float64 `json:"p95"`
+	P99   float64 `json:"p99"`
+	Mean  float64 `json:"mean"`
+	Max   float64 `json:"max"`
+}
+
+// BuyerMetrics is the buyer-side cross-section per spec §5.
+type BuyerMetrics struct {
+	TTFTMs          Histogram      `json:"ttft_ms"`
+	StreamingTPS    Histogram      `json:"streaming_tps"`
+	WallTimeMs      Histogram      `json:"wall_time_ms"`
+	TailRatioP99P50 float64        `json:"tail_ratio_p99_p50"`
+	ErrorRatePer1k  float64        `json:"error_rate_per_1k"`
+	TotalRequests   int            `json:"total_requests"`
+	SuccessCount    int            `json:"success_count"`
+	Non2xxBreakdown map[string]int `json:"non_2xx_breakdown"`
+}
+
+// PerProvider is the provider-side cross-section per spec §5.
+type PerProvider struct {
+	ProviderID       string  `json:"provider_id"`
+	RequestsAdmitted int     `json:"requests_admitted"`
+	TokensDelivered  int64   `json:"tokens_delivered"`
+	BusySeconds      float64 `json:"busy_seconds"`
+	SlotUtilPct      float64 `json:"slot_util_pct"`
+	EarningsUSDPerHr float64 `json:"earnings_usd_per_hr"`
+	SessionDurationS float64 `json:"session_duration_s"`
+}
+
+// ProviderAggregate is the cross-fleet rollup.
+type ProviderAggregate struct {
+	SlotUtilPct      float64 `json:"slot_util_pct"`
+	EarningsUSDPerHr float64 `json:"earnings_usd_per_hr"`
+	TokensDelivered  int64   `json:"tokens_delivered"`
+	ProvidersSeen    int     `json:"providers_seen"`
+}
+
+// ProviderMetrics is the per-provider + aggregate rollup.
+type ProviderMetrics struct {
+	PerProvider []PerProvider     `json:"per_provider"`
+	Aggregate   ProviderAggregate `json:"aggregate"`
+
+	// AttributionMissing is true when the gateway did not echo a
+	// provider-id header on any successful request, so per-provider
+	// breakdown could not be computed. B5/B6 SKIP in that state.
+	AttributionMissing bool `json:"attribution_missing"`
+}
+
+// Summary is the top-level artifact emitted as benchmark_summary.json.
+type Summary struct {
+	Scenario        string          `json:"scenario"`
+	ScenarioVersion string          `json:"scenario_version"`
+	RunID           string          `json:"run_id"`
+	DurationSeconds float64         `json:"duration_seconds"`
+	BuyerMetrics    BuyerMetrics    `json:"buyer_metrics"`
+	ProviderMetrics ProviderMetrics `json:"provider_metrics"`
+	PricingSource   string          `json:"pricing_source,omitempty"`
+}
+
+// Result bundles the summary with its per-invariant verdicts.
+// Emitted as benchmark_verdict.json (verdicts) + benchmark_summary.json
+// (summary).
+type Result struct {
+	Summary  *Summary  `json:"summary"`
+	Verdicts []Verdict `json:"verdicts"`
+}
+
+// AnyFailed reports whether any non-skipped verdict is FAIL.
+func (r *Result) AnyFailed() bool {
+	for _, v := range r.Verdicts {
+		if v.Status == StatusFail {
+			return true
+		}
+	}
+	return false
+}
+
+// Thresholds for v0.1 (from spec §3.3). Keeping them as exported
+// constants makes future tuning visible and testable.
+const (
+	TTFTp50TargetMs  = 800.0
+	TTFTp50BareMinMs = 2000.0
+
+	StreamingTPSp50Target  = 30.0
+	StreamingTPSp50BareMin = 15.0
+
+	TailRatioTarget  = 3.0
+	TailRatioBareMin = 5.0
+
+	ErrorRateTargetPer1k  = 5.0
+	ErrorRateBareMinPer1k = 25.0
+
+	SlotUtilTargetPct  = 40.0
+	SlotUtilBareMinPct = 15.0
+
+	EarningsTargetUSDPerHr  = 1.00
+	EarningsBareMinUSDPerHr = 0.30
+)
+
+// Evaluate computes the benchmark summary and per-invariant verdicts.
+// pricing is nil when no pricing manifest was loaded; verdicts that
+// depend on it (B6) will SKIP.
+//
+// windowSeconds is the actual wall-clock duration of the run (meta
+// EndUTC - StartUTC), used for rate-type derivations. Passing 0
+// degrades B5 + B6 to SKIP.
+func Evaluate(
+	sc *scenario.Scenario,
+	results []buyer.Result,
+	mSummary *metrics.Summary,
+	ledger *reconcile.Result,
+	pricing *Pricing,
+	runID string,
+	windowSeconds float64,
+) *Result {
+	requested := sc.Benchmark.Invariants
+	if len(requested) == 0 {
+		return &Result{Summary: nil, Verdicts: nil}
+	}
+
+	buyerMetrics := computeBuyerMetrics(results)
+	providerMetrics := computeProviderMetrics(results, sc.Benchmark.ProviderSlots, windowSeconds, pricing)
+
+	summary := &Summary{
+		Scenario:        sc.Name,
+		ScenarioVersion: "v0.1",
+		RunID:           runID,
+		DurationSeconds: windowSeconds,
+		BuyerMetrics:    buyerMetrics,
+		ProviderMetrics: providerMetrics,
+	}
+	if pricing != nil {
+		summary.PricingSource = pricing.Source
+	}
+
+	verdicts := make([]Verdict, 0, len(requested))
+	for _, id := range requested {
+		switch id {
+		case "B1":
+			verdicts = append(verdicts, evalB1(buyerMetrics))
+		case "B2":
+			verdicts = append(verdicts, evalB2(buyerMetrics, results))
+		case "B3":
+			verdicts = append(verdicts, evalB3(buyerMetrics))
+		case "B4":
+			verdicts = append(verdicts, evalB4(buyerMetrics))
+		case "B5":
+			verdicts = append(verdicts, evalB5(providerMetrics, windowSeconds))
+		case "B6":
+			verdicts = append(verdicts, evalB6(providerMetrics, pricing, windowSeconds))
+		default:
+			verdicts = append(verdicts, Verdict{
+				ID:     id,
+				Title:  "unknown",
+				Status: StatusSkip,
+				Detail: fmt.Sprintf("unknown invariant id %q", id),
+			})
+		}
+	}
+	_ = ledger // reserved for future B-invariants that need DB-side data
+	return &Result{Summary: summary, Verdicts: verdicts}
+}
+
+// --- buyer-side compute -----------------------------------------------------
+
+func computeBuyerMetrics(results []buyer.Result) BuyerMetrics {
+	var ttfts, walls, tps []float64
+	non2xx := map[string]int{}
+	success := 0
+	non2xxCount := 0
+	for _, r := range results {
+		if r.HTTPStatus >= 400 || r.Outcome != "ok" {
+			non2xxCount++
+			key := fmt.Sprintf("%d", r.HTTPStatus)
+			if r.HTTPStatus == 0 {
+				key = r.Outcome
+				if key == "" {
+					key = "unknown"
+				}
+			}
+			non2xx[key]++
+			continue
+		}
+		success++
+		if r.TTFTMillis > 0 {
+			ttfts = append(ttfts, float64(r.TTFTMillis))
+		}
+		if r.TotalMillis > 0 {
+			walls = append(walls, float64(r.TotalMillis))
+		}
+		// Streaming TPS = tokens / (last_byte - first_byte). The harness
+		// captures LastByteUTC + an effective first-byte timestamp via
+		// (StartUTC + TTFTMillis). We approximate first-byte from those
+		// because there's no explicit FirstByteUTC field.
+		if r.Stream && r.CompletionTokensReceived > 0 && r.TTFTMillis > 0 && !r.LastByteUTC.IsZero() {
+			firstByte := r.StartUTC.Add(time.Duration(r.TTFTMillis) * time.Millisecond)
+			streamDur := r.LastByteUTC.Sub(firstByte).Seconds()
+			if streamDur > 0 {
+				tps = append(tps, float64(r.CompletionTokensReceived)/streamDur)
+			}
+		}
+	}
+
+	bm := BuyerMetrics{
+		TTFTMs:          newHistogram(ttfts),
+		StreamingTPS:    newHistogram(tps),
+		WallTimeMs:      newHistogram(walls),
+		TotalRequests:   len(results),
+		SuccessCount:    success,
+		Non2xxBreakdown: non2xx,
+	}
+	if bm.TTFTMs.P50 > 0 {
+		bm.TailRatioP99P50 = bm.TTFTMs.P99 / bm.TTFTMs.P50
+	}
+	if bm.TotalRequests > 0 {
+		bm.ErrorRatePer1k = 1000.0 * float64(non2xxCount) / float64(bm.TotalRequests)
+	}
+	return bm
+}
+
+// --- provider-side compute --------------------------------------------------
+
+func computeProviderMetrics(results []buyer.Result, providerSlots int, windowSeconds float64, pricing *Pricing) ProviderMetrics {
+	type acc struct {
+		Requests    int
+		Tokens      int64
+		Busy        float64
+		Earnings    float64
+		FirstSeen   time.Time
+		LastSeen    time.Time
+		PromptTok   int64
+	}
+	perID := map[string]*acc{}
+	attributionFound := false
+	for _, r := range results {
+		if r.Outcome != "ok" {
+			continue
+		}
+		pid := r.RouteProviderID
+		if pid == "" {
+			continue
+		}
+		attributionFound = true
+		a := perID[pid]
+		if a == nil {
+			a = &acc{FirstSeen: r.StartUTC, LastSeen: r.EndUTC}
+			perID[pid] = a
+		}
+		a.Requests++
+		a.Tokens += r.CompletionTokensReceived
+		a.PromptTok += r.PromptTokensReported
+		dur := r.EndUTC.Sub(r.StartUTC).Seconds()
+		if dur > 0 {
+			a.Busy += dur
+		}
+		if r.StartUTC.Before(a.FirstSeen) {
+			a.FirstSeen = r.StartUTC
+		}
+		if r.EndUTC.After(a.LastSeen) {
+			a.LastSeen = r.EndUTC
+		}
+		if pricing != nil {
+			a.Earnings += pricing.EarningsFor(r.Model, r.PromptTokensReported, r.CompletionTokensReceived)
+		}
+	}
+
+	pm := ProviderMetrics{}
+	if !attributionFound {
+		pm.AttributionMissing = true
+		return pm
+	}
+
+	// Stable ordering for the artifact: by descending requests.
+	ids := make([]string, 0, len(perID))
+	for id := range perID {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		ai, aj := perID[ids[i]], perID[ids[j]]
+		if ai.Requests != aj.Requests {
+			return ai.Requests > aj.Requests
+		}
+		return ids[i] < ids[j]
+	})
+
+	var totalBusy float64
+	var totalEarnings float64
+	var totalTokens int64
+	for _, id := range ids {
+		a := perID[id]
+		var utilPct float64
+		if windowSeconds > 0 && providerSlots > 0 {
+			utilPct = 100.0 * a.Busy / (float64(providerSlots) * windowSeconds)
+		}
+		var earningsPerHr float64
+		if windowSeconds > 0 && a.Earnings > 0 {
+			earningsPerHr = 3600.0 * a.Earnings / windowSeconds
+		}
+		pm.PerProvider = append(pm.PerProvider, PerProvider{
+			ProviderID:       id,
+			RequestsAdmitted: a.Requests,
+			TokensDelivered:  a.Tokens,
+			BusySeconds:      a.Busy,
+			SlotUtilPct:      utilPct,
+			EarningsUSDPerHr: earningsPerHr,
+			SessionDurationS: a.LastSeen.Sub(a.FirstSeen).Seconds(),
+		})
+		totalBusy += a.Busy
+		totalEarnings += a.Earnings
+		totalTokens += a.Tokens
+	}
+
+	if windowSeconds > 0 && providerSlots > 0 && len(perID) > 0 {
+		pm.Aggregate.SlotUtilPct = 100.0 * totalBusy / (float64(providerSlots) * windowSeconds * float64(len(perID)))
+	}
+	if windowSeconds > 0 && totalEarnings > 0 {
+		pm.Aggregate.EarningsUSDPerHr = 3600.0 * totalEarnings / windowSeconds
+	}
+	pm.Aggregate.TokensDelivered = totalTokens
+	pm.Aggregate.ProvidersSeen = len(perID)
+	return pm
+}
+
+// --- B-invariant evaluators -------------------------------------------------
+
+func evalB1(bm BuyerMetrics) Verdict {
+	v := Verdict{ID: "B1", Title: "TTFT p50 within target", Unit: "ms",
+		Target: TTFTp50TargetMs, BareMin: TTFTp50BareMinMs}
+	if bm.TTFTMs.Count == 0 {
+		v.Status = StatusSkip
+		v.Detail = "no streaming-success samples with TTFT > 0"
+		return v
+	}
+	v.Value = bm.TTFTMs.P50
+	switch {
+	case v.Value <= TTFTp50TargetMs:
+		v.Status = StatusPass
+		v.Detail = fmt.Sprintf("TTFT p50 %.0fms ≤ target %.0fms (n=%d)", v.Value, v.Target, bm.TTFTMs.Count)
+	case v.Value <= TTFTp50BareMinMs:
+		v.Status = StatusWarn
+		v.Detail = fmt.Sprintf("TTFT p50 %.0fms over target %.0fms but ≤ bare-min %.0fms (n=%d)", v.Value, v.Target, v.BareMin, bm.TTFTMs.Count)
+	default:
+		v.Status = StatusFail
+		v.Detail = fmt.Sprintf("TTFT p50 %.0fms exceeds bare-min %.0fms (n=%d)", v.Value, v.BareMin, bm.TTFTMs.Count)
+	}
+	return v
+}
+
+func evalB2(bm BuyerMetrics, results []buyer.Result) Verdict {
+	v := Verdict{ID: "B2", Title: "streaming TPS p50 within target", Unit: "tok/s",
+		Target: StreamingTPSp50Target, BareMin: StreamingTPSp50BareMin}
+	if bm.StreamingTPS.Count == 0 {
+		v.Status = StatusSkip
+		// Distinguish "no streaming scenario" from "no usable samples".
+		anyStream := false
+		for _, r := range results {
+			if r.Stream {
+				anyStream = true
+				break
+			}
+		}
+		if !anyStream {
+			v.Detail = "scenario is non-streaming — streaming TPS not applicable"
+		} else {
+			v.Detail = "no streaming-success samples with measurable post-TTFT duration"
+		}
+		return v
+	}
+	v.Value = bm.StreamingTPS.P50
+	switch {
+	case v.Value >= StreamingTPSp50Target:
+		v.Status = StatusPass
+		v.Detail = fmt.Sprintf("streaming TPS p50 %.1f tok/s ≥ target %.0f tok/s (n=%d)", v.Value, v.Target, bm.StreamingTPS.Count)
+	case v.Value >= StreamingTPSp50BareMin:
+		v.Status = StatusWarn
+		v.Detail = fmt.Sprintf("streaming TPS p50 %.1f tok/s under target %.0f tok/s but ≥ bare-min %.0f tok/s (n=%d)", v.Value, v.Target, v.BareMin, bm.StreamingTPS.Count)
+	default:
+		v.Status = StatusFail
+		v.Detail = fmt.Sprintf("streaming TPS p50 %.1f tok/s under bare-min %.0f tok/s (n=%d)", v.Value, v.BareMin, bm.StreamingTPS.Count)
+	}
+	return v
+}
+
+func evalB3(bm BuyerMetrics) Verdict {
+	v := Verdict{ID: "B3", Title: "TTFT tail ratio p99/p50 bounded", Unit: "ratio",
+		Target: TailRatioTarget, BareMin: TailRatioBareMin}
+	if bm.TTFTMs.Count == 0 || bm.TTFTMs.P50 == 0 {
+		v.Status = StatusSkip
+		v.Detail = "no TTFT distribution to score"
+		return v
+	}
+	v.Value = bm.TailRatioP99P50
+	switch {
+	case v.Value <= TailRatioTarget:
+		v.Status = StatusPass
+		v.Detail = fmt.Sprintf("tail ratio %.2f ≤ target %.1f (p50=%.0fms p99=%.0fms)", v.Value, v.Target, bm.TTFTMs.P50, bm.TTFTMs.P99)
+	case v.Value <= TailRatioBareMin:
+		v.Status = StatusWarn
+		v.Detail = fmt.Sprintf("tail ratio %.2f over target %.1f but ≤ bare-min %.1f", v.Value, v.Target, v.BareMin)
+	default:
+		v.Status = StatusFail
+		v.Detail = fmt.Sprintf("tail ratio %.2f exceeds bare-min %.1f", v.Value, v.BareMin)
+	}
+	return v
+}
+
+func evalB4(bm BuyerMetrics) Verdict {
+	v := Verdict{ID: "B4", Title: "error rate per 1000 requests bounded", Unit: "errors/1000",
+		Target: ErrorRateTargetPer1k, BareMin: ErrorRateBareMinPer1k}
+	if bm.TotalRequests == 0 {
+		v.Status = StatusSkip
+		v.Detail = "no requests fired"
+		return v
+	}
+	v.Value = bm.ErrorRatePer1k
+	switch {
+	case v.Value <= ErrorRateTargetPer1k:
+		v.Status = StatusPass
+		v.Detail = fmt.Sprintf("%.1f errors/1k ≤ target %.0f (%d non-2xx of %d)", v.Value, v.Target, bm.TotalRequests-bm.SuccessCount, bm.TotalRequests)
+	case v.Value <= ErrorRateBareMinPer1k:
+		v.Status = StatusWarn
+		v.Detail = fmt.Sprintf("%.1f errors/1k over target %.0f but ≤ bare-min %.0f — likely scenario-tuning (overload), not network", v.Value, v.Target, v.BareMin)
+	default:
+		v.Status = StatusFail
+		v.Detail = fmt.Sprintf("%.1f errors/1k exceeds bare-min %.0f — scenario re-tuning or real saturation", v.Value, v.BareMin)
+	}
+	return v
+}
+
+func evalB5(pm ProviderMetrics, windowSeconds float64) Verdict {
+	v := Verdict{ID: "B5", Title: "provider slot utilization reasonable", Unit: "%",
+		Target: SlotUtilTargetPct, BareMin: SlotUtilBareMinPct}
+	if pm.AttributionMissing {
+		v.Status = StatusSkip
+		v.Detail = "gateway did not expose X-Provider-Id headers — per-provider attribution unavailable"
+		return v
+	}
+	if windowSeconds <= 0 {
+		v.Status = StatusSkip
+		v.Detail = "window duration is zero"
+		return v
+	}
+	v.Value = pm.Aggregate.SlotUtilPct
+	switch {
+	case v.Value >= SlotUtilTargetPct:
+		v.Status = StatusPass
+		v.Detail = fmt.Sprintf("aggregate slot util %.1f%% ≥ target %.0f%% across %d providers", v.Value, v.Target, pm.Aggregate.ProvidersSeen)
+	case v.Value >= SlotUtilBareMinPct:
+		v.Status = StatusWarn
+		v.Detail = fmt.Sprintf("aggregate slot util %.1f%% over bare-min %.0f%% but under target %.0f%% (%d providers)", v.Value, v.BareMin, v.Target, pm.Aggregate.ProvidersSeen)
+	default:
+		v.Status = StatusFail
+		v.Detail = fmt.Sprintf("aggregate slot util %.1f%% under bare-min %.0f%% — providers idle most of the window", v.Value, v.BareMin)
+	}
+	return v
+}
+
+func evalB6(pm ProviderMetrics, pricing *Pricing, windowSeconds float64) Verdict {
+	v := Verdict{ID: "B6", Title: "earnings/hr viable at current tier-2 pricing", Unit: "USD/hr",
+		Target: EarningsTargetUSDPerHr, BareMin: EarningsBareMinUSDPerHr}
+	if pricing == nil {
+		v.Status = StatusSkip
+		v.Detail = "pricing manifest not loaded — set benchmark.pricing_source"
+		return v
+	}
+	if pm.AttributionMissing {
+		v.Status = StatusSkip
+		v.Detail = "per-provider attribution unavailable (no X-Provider-Id header)"
+		return v
+	}
+	if windowSeconds <= 0 {
+		v.Status = StatusSkip
+		v.Detail = "window duration is zero"
+		return v
+	}
+	if pm.Aggregate.TokensDelivered == 0 {
+		v.Status = StatusSkip
+		v.Detail = "no completion tokens delivered in window"
+		return v
+	}
+	// B6 measures per-provider median earnings/hr: a single high-earner
+	// shouldn't mask a fleet that's losing money. Take the median across
+	// providers seen.
+	earnings := make([]float64, 0, len(pm.PerProvider))
+	for _, p := range pm.PerProvider {
+		earnings = append(earnings, p.EarningsUSDPerHr)
+	}
+	median := percentile(earnings, 0.50)
+	v.Value = median
+	switch {
+	case v.Value >= EarningsTargetUSDPerHr:
+		v.Status = StatusPass
+		v.Detail = fmt.Sprintf("per-provider median earnings $%.2f/hr ≥ target $%.2f/hr (%d providers, aggregate $%.2f/hr)", v.Value, v.Target, pm.Aggregate.ProvidersSeen, pm.Aggregate.EarningsUSDPerHr)
+	case v.Value >= EarningsBareMinUSDPerHr:
+		v.Status = StatusWarn
+		v.Detail = fmt.Sprintf("per-provider median earnings $%.2f/hr over bare-min $%.2f/hr but under target $%.2f/hr", v.Value, v.BareMin, v.Target)
+	default:
+		v.Status = StatusFail
+		v.Detail = fmt.Sprintf("per-provider median earnings $%.2f/hr under bare-min $%.2f/hr — not M-series viable at current pricing", v.Value, v.BareMin)
+	}
+	return v
+}
+
+// --- helpers ---------------------------------------------------------------
+
+func newHistogram(xs []float64) Histogram {
+	h := Histogram{Count: len(xs)}
+	if len(xs) == 0 {
+		return h
+	}
+	sorted := append([]float64(nil), xs...)
+	sort.Float64s(sorted)
+	sum := 0.0
+	for _, v := range sorted {
+		sum += v
+	}
+	h.Mean = sum / float64(len(sorted))
+	h.P50 = percentile(sorted, 0.50)
+	h.P95 = percentile(sorted, 0.95)
+	h.P99 = percentile(sorted, 0.99)
+	h.Max = sorted[len(sorted)-1]
+	return h
+}
+
+// percentile returns the nearest-rank percentile from a sorted-or-unsorted
+// slice (sorts if not already sorted). q is in [0,1].
+func percentile(xs []float64, q float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	// Detect already-sorted to avoid double work in newHistogram.
+	sorted := xs
+	if !sort.Float64sAreSorted(xs) {
+		sorted = append([]float64(nil), xs...)
+		sort.Float64s(sorted)
+	}
+	idx := int(math.Ceil(q*float64(len(sorted)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}

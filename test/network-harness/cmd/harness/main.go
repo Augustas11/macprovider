@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-network-harness/internal/artifact"
+	"github.com/augstar/macprovider-network-harness/internal/benchmark"
 	"github.com/augstar/macprovider-network-harness/internal/buyer"
 	"github.com/augstar/macprovider-network-harness/internal/chaos"
 	"github.com/augstar/macprovider-network-harness/internal/invariants"
@@ -145,6 +146,25 @@ func cmdRun(args []string) error {
 
 	inv := invariants.Evaluate(sc, results, summary, ledger)
 
+	var bench *benchmark.Result
+	if sc.Benchmark.Enabled {
+		var pricing *benchmark.Pricing
+		if sc.Benchmark.PricingSource != "" {
+			p, perr := benchmark.LoadPricing(sc.Benchmark.PricingSource)
+			if perr != nil {
+				log.Printf("benchmark: pricing load failed (%v) — B6 will SKIP", perr)
+			} else {
+				pricing = p
+				if len(p.Notes) > 0 {
+					log.Printf("benchmark: pricing loaded with %d skipped entries", len(p.Notes))
+				}
+			}
+		}
+		windowSec := meta.EndUTC.Sub(meta.StartUTC).Seconds()
+		runID := meta.StartUTC.Format("20060102T150405Z")
+		bench = benchmark.Evaluate(sc, results, summary, ledger, pricing, runID, windowSec)
+	}
+
 	var chaosResults []chaos.EventResult
 	if chaosRunner != nil {
 		chaosResults = chaosRunner.Results()
@@ -157,6 +177,7 @@ func cmdRun(args []string) error {
 		Summary:      summary,
 		Reconcile:    ledger,
 		Invariants:   inv,
+		Benchmark:    bench,
 		Meta:         meta,
 		ChaosEvents:  chaosResults,
 	}
@@ -166,6 +187,9 @@ func cmdRun(args []string) error {
 
 	log.Printf("artifact bundle written to %s", filepath.Clean(*outDir))
 	logInvariantSummary(inv)
+	if bench != nil {
+		logBenchmarkSummary(bench)
+	}
 
 	if inv.AnyFailed() {
 		os.Exit(10)
@@ -227,4 +251,13 @@ func logInvariantSummary(inv *invariants.Result) {
 		return
 	}
 	log.Printf("HARD INVARIANT FAILURE — triage %s", time.Now().UTC().Format(time.RFC3339))
+}
+
+// logBenchmarkSummary mirrors logInvariantSummary for the B-invariants.
+// Unlike I1-I4, FAIL does not change the process exit code in v0.1 —
+// the benchmark suite reports, it does not gate. Triage decides.
+func logBenchmarkSummary(b *benchmark.Result) {
+	for _, v := range b.Verdicts {
+		log.Printf("benchmark %s [%s]: %s — %s", v.ID, v.Status, v.Title, v.Detail)
+	}
 }

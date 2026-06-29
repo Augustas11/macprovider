@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/augstar/macprovider-network-harness/internal/benchmark"
 	"github.com/augstar/macprovider-network-harness/internal/buyer"
 	"github.com/augstar/macprovider-network-harness/internal/chaos"
 	"github.com/augstar/macprovider-network-harness/internal/invariants"
@@ -26,6 +27,7 @@ type Bundle struct {
 	Summary      *metrics.Summary
 	Reconcile    *reconcile.Result
 	Invariants   *invariants.Result
+	Benchmark    *benchmark.Result
 	Meta         *runmeta.Meta
 	ChaosEvents  []chaos.EventResult
 }
@@ -58,6 +60,14 @@ func (b *Bundle) Write(outDir string) error {
 	}
 	if err := writeJSON(filepath.Join(outDir, "invariants.json"), b.Invariants); err != nil {
 		return err
+	}
+	if b.Benchmark != nil && b.Benchmark.Summary != nil {
+		if err := writeJSON(filepath.Join(outDir, "benchmark_summary.json"), b.Benchmark.Summary); err != nil {
+			return err
+		}
+		if err := writeJSON(filepath.Join(outDir, "benchmark_verdict.json"), b.Benchmark.Verdicts); err != nil {
+			return err
+		}
 	}
 	if len(b.ChaosEvents) > 0 {
 		if err := writeJSON(filepath.Join(outDir, "chaos_events.json"), b.ChaosEvents); err != nil {
