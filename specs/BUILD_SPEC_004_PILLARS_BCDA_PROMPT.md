@@ -152,25 +152,32 @@ Never edit in the canonical checkout (user memory
    auth, FR-P5 / FR-P8a / FR-P11a normative sections.
 
 3. `/Users/augstar/macprovider-poc/specs/SPEC-006-buyer-api.md`
-   v0.8.1 — `routing_internal.conversation_key` derivation +
+   v0.9.1 — `routing_internal.conversation_key` derivation +
    transport (Pillar A binding source). If §22 PG-9 production
    launch gate is satisfied (per `docs/OPEN_QUESTIONS.md` 2026-06-26
    triage) the gateway-side wiring already exists.
 
 4. `/Users/augstar/macprovider-poc/phase4-coordinator/internal/buyer/server.go`
-   — current `selectProvider` / `selectProviderExcluding` /
-   `forwardRequest` / `forwardChatRequest` paths. Read end-to-end
-   before refactoring.
+   — current `selectProvider` / `selectProviderExcluding` plus
+   the `forwardStreamSequence` / `forwardWSNonStreamSequence` /
+   `forwardHTTPSequence` dispatch helpers (the exact set on
+   `origin/main` — verify with `grep -n "^func .*forward" server.go`).
+   Read end-to-end before refactoring.
 
-5. `/Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/registry.go`
-   + `provider.go` — provider state machine, candidate filters,
-   FR-P11a breaker / recovery primitives. SPEC-004 REUSES these;
+5. `/Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/provider.go`
+   — Registry type + provider state machine + candidate filters
+   + FR-P11a breaker / recovery primitives. There is NO
+   `pool/registry.go` on origin/main; the Registry currently
+   lives in `provider.go`. SPEC-004 REUSES these primitives;
    no parallel router.
 
-6. SPEC-005 v0.4 `request_log` schema (`phase4-coordinator/internal/requestlog/`).
+6. SPEC-005 v0.3.3+ `request_log` schema (`phase4-coordinator/internal/requestlog/`).
    Verify `retried INTEGER NOT NULL DEFAULT 0` column exists. If
    missing, that's a SPEC-002 migration prerequisite — surface
-   before any pillar IMPL.
+   before any pillar IMPL. (The current SPEC-005 header on
+   origin/main is v0.3.3; check before starting Pillar D since
+   SPEC-005 v0.4 partial-OQ-5 work landed independently and may
+   bump the header.)
 
 ## Phase order (FOUR PRs, in this order)
 
@@ -199,11 +206,14 @@ in Phase B regardless of `tiebreak_epsilon` value.
 - `internal/config/config.go` — reconcile (NOT add) `Routing`
   substruct: ensure `TiebreakEpsilon float64` (default `0.0`) +
   `TiebreakRandomize bool` (default `false`) fields exist with
-  validation (epsilon >= 0; randomize=true → return validation
-  error `spec_004_randomize_not_yet_implemented` until Phase D).
-  Some `routing.*` fields already exist on origin/main with
-  potentially stale defaults — verify against SPEC-004 §5 BEFORE
-  adding new fields.
+  validation `epsilon >= 0`. `randomize=true` is a VALID config
+  per SPEC-004 §5 (it defines exact-tie-only random cohort when
+  epsilon=0); do NOT add a Phase-B validation error for it.
+  Phase B accepts the flag in config but leaves the active
+  selection path unchanged — the runtime randomization wiring
+  lands in Phase D per FR-SR-16. Some `routing.*` fields already
+  exist on origin/main with potentially stale defaults — verify
+  against SPEC-004 §5 BEFORE adding new fields.
 - `internal/routing/` (NEW package) — `Candidate` struct,
   `effectiveThroughput(provider)` helper, `inEpsilonCohort(epsilon,
   metric)` helper. NOT yet wired into the selection path.
@@ -290,6 +300,15 @@ in `internal/routing/retry.go`:
    retries (FR-SR-14).** Sharing attempt-counter plumbing with F-4
    one-shot failover is FORBIDDEN. Phase D MUST add a separate
    counter for the SPEC-004 retry path; F-4 must not touch it.
+6. **Per-request breaker fault cap (FR-SR-14).** A single buyer
+   request MUST NOT push more than
+   `min(routing.max_providers_faulted_per_request, routing.max_retries)`
+   distinct providers across the FR-P11a breaker threshold. Once
+   the per-request cap is reached, the coordinator MUST abort
+   further retries and return the current buyer-visible error.
+   Phase D MUST emit a regression test that drives N+1 retries
+   into N pre-commit failures and asserts the (N+1)-th attempt is
+   skipped (no new breaker fault charged).
 
 **Hostile-body invariant (FR-SR-7a).** The request body's top-level
 `model` field is BUYER input. The coordinator MUST reject
@@ -329,7 +348,9 @@ FR-SR-16 (randomized tiebreak), FR-SR-17
   exclusion + buyer-cancel attribution (FR-P11a C2).
 - `internal/buyer/server.go` — `/v1/chat/completions` wires class
   resolution + retry loop + dispatch rewrite.
-- `internal/buyer/models.go` (or `/v1/models` handler) — additive
+- `internal/buyer/server.go::handleModels` (the existing
+  `/v1/models` handler — on `origin/main` there is no separate
+  `models.go` file; extend the handler in place) — additive
   class entry shape per FR-SR-10.
 
 **ACs proven:** AC-SR-5 (class routes to right provider; body
@@ -338,7 +359,9 @@ assertion on the wire), AC-SR-6 (empty class 503), AC-SR-7
 AC-SR-9 (no retry post-commit / buyer-cancel), AC-SR-10 (no
 double-emit), AC-SR-11 (retry budget), AC-SR-12 (randomized
 distribution under sufficient mock-load), AC-SR-13 (log
-explainability), AC-SR-16 (retry budget + cancel attribution).
+explainability), AC-SR-14 (per-request breaker fault cap — assert
+the `min(max_providers_faulted_per_request, max_retries)` ceiling
+is honored), AC-SR-16 (retry budget + cancel attribution).
 
 **Audit lenses:** code (does FR-SR-7a rewrite at EVERY dispatch
 path — write the assertForwardedModel helper from SPEC-004 §test-
