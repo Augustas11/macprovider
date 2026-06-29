@@ -14,6 +14,9 @@ public enum JSONSchemaValidator {
         "additionalProperties",
         "title",
         "description",
+        "minimum",
+        "maximum",
+        "multipleOf",
     ]
 
     public static func validateSchemaShape(schema: JSONValue) throws {
@@ -62,7 +65,7 @@ public enum JSONSchemaValidator {
         guard case .object(let object) = schema else {
             throw APIError(status: 400, message: "Schema node must be an object", code: "json_schema_unsupported_keyword", param: pointer)
         }
-        for key in object.keys where !allowedKeywords.contains(key) {
+        for key in object.keys where !allowedKeywords.contains(key) && !(pointer.isEmpty && key == "$schema") {
             throw APIError(status: 400, message: "Unsupported JSON Schema keyword '\(key)' at \(pointerOrRoot(pointer))", code: "json_schema_unsupported_keyword", param: append(pointer, key))
         }
         guard case .string(let type)? = object["type"],
@@ -72,6 +75,7 @@ public enum JSONSchemaValidator {
         }
 
         try validateConstAndEnum(in: object, type: type, pointer: pointer)
+        try validateNumericBounds(in: object, type: type, pointer: pointer)
 
         switch type {
         case "object":
@@ -153,6 +157,35 @@ public enum JSONSchemaValidator {
         }
     }
 
+    private static func validateNumericBounds(in object: [String: JSONValue], type: String, pointer: String) throws {
+        let boundKeywords = ["minimum", "maximum", "multipleOf"]
+        let present = boundKeywords.filter { object[$0] != nil }
+        guard !present.isEmpty else { return }
+        guard type == "number" || type == "integer" else {
+            throw unsupportedKeyword(present[0], pointer: pointer)
+        }
+        let minimum = try numericBoundValue(object["minimum"], keyword: "minimum", pointer: pointer)
+        let maximum = try numericBoundValue(object["maximum"], keyword: "maximum", pointer: pointer)
+        if let multipleOf = try numericBoundValue(object["multipleOf"], keyword: "multipleOf", pointer: pointer), multipleOf <= 0 {
+            throw unsupportedKeyword("multipleOf", pointer: pointer)
+        }
+        if let minimum, let maximum, minimum > maximum {
+            throw unsupportedKeyword("minimum", pointer: pointer)
+        }
+    }
+
+    private static func numericBoundValue(_ value: JSONValue?, keyword: String, pointer: String) throws -> Double? {
+        guard let value else { return nil }
+        switch value {
+        case .int(let int):
+            return Double(int)
+        case .double(let double):
+            return double
+        default:
+            throw unsupportedKeyword(keyword, pointer: pointer)
+        }
+    }
+
     private static func validateInstanceNode(_ instance: JSONValue, schema: JSONValue, pointer: String) throws {
         guard case .object(let schemaObject) = schema,
               case .string(let type)? = schemaObject["type"]
@@ -168,6 +201,7 @@ public enum JSONSchemaValidator {
         if let rawEnum = schemaObject["enum"], case .array(let allowed) = rawEnum, !allowed.contains(where: { jsonValueEqualsRaw(instance, $0) }) {
             throw validationError("Structured output enum mismatch at \(pointerOrRoot(pointer))", pointer: pointer)
         }
+        try validateNumericInstance(instance, schemaObject: schemaObject, type: type, pointer: pointer)
 
         switch (type, instance) {
         case ("object", .object(let object)):
@@ -200,6 +234,37 @@ public enum JSONSchemaValidator {
             }
         default:
             return
+        }
+    }
+
+    private static func validateNumericInstance(_ instance: JSONValue, schemaObject: [String: JSONValue], type: String, pointer: String) throws {
+        guard type == "number" || type == "integer", let numeric = numericInstanceValue(instance) else {
+            return
+        }
+        if let minimum = try numericBoundValue(schemaObject["minimum"], keyword: "minimum", pointer: pointer), numeric < minimum {
+            throw validationError("Structured output is below minimum at \(pointerOrRoot(pointer))", pointer: pointer)
+        }
+        if let maximum = try numericBoundValue(schemaObject["maximum"], keyword: "maximum", pointer: pointer), numeric > maximum {
+            throw validationError("Structured output is above maximum at \(pointerOrRoot(pointer))", pointer: pointer)
+        }
+        if let multipleOf = try numericBoundValue(schemaObject["multipleOf"], keyword: "multipleOf", pointer: pointer) {
+            let quotient = numeric / multipleOf
+            let nearest = quotient.rounded()
+            let tolerance = max(1e-12, abs(quotient) * 1e-12)
+            if abs(quotient - nearest) > tolerance {
+                throw validationError("Structured output is not a multipleOf value at \(pointerOrRoot(pointer))", pointer: pointer)
+            }
+        }
+    }
+
+    private static func numericInstanceValue(_ value: JSONValue) -> Double? {
+        switch value {
+        case .int(let int):
+            return Double(int)
+        case .double(let double):
+            return double
+        default:
+            return nil
         }
     }
 

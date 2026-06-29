@@ -14,22 +14,14 @@ func TestValidateChatRequestAcceptsJSONSchemaResponseFormat(t *testing.T) {
 	}
 }
 
-func TestValidateChatRequestRejectsStreamingStructuredOutput(t *testing.T) {
+func TestValidateChatRequestAcceptsStreamingStructuredOutput(t *testing.T) {
 	for _, typ := range []string{"json_object", "json_schema"} {
 		body := strings.Replace(validStructuredOutputRequest(true), `"json_schema"`, `"`+typ+`"`, 1)
 		if typ == "json_object" {
 			body = `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true,"response_format":{"type":"json_object"}}`
 		}
-		_, status, code, _ := validateChatRequest([]byte(body))
-		if status != http.StatusBadRequest {
-			t.Fatalf("%s status=%d code=%s", typ, status, code)
-		}
-		want := "streaming_json_schema_unsupported"
-		if typ == "json_object" {
-			want = "streaming_json_object_unsupported"
-		}
-		if code != want {
-			t.Fatalf("%s code=%s want %s", typ, code, want)
+		if _, status, code, msg := validateChatRequest([]byte(body)); status != 0 {
+			t.Fatalf("%s status=%d code=%s msg=%s", typ, status, code, msg)
 		}
 	}
 }
@@ -77,11 +69,36 @@ func TestValidateResponseFormatSchemaCapsAndSubset(t *testing.T) {
 }
 
 func TestValidateResponseFormatRejectsUnsupportedKeywords(t *testing.T) {
-	keywords := []string{"oneOf", "anyOf", "allOf", "not", "$ref", "$defs", "pattern", "format", "minimum", "maximum", "multipleOf", "minItems", "maxItems", "uniqueItems", "$schema"}
+	keywords := []string{"oneOf", "anyOf", "allOf", "not", "$ref", "$defs", "pattern", "format", "minItems", "maxItems", "uniqueItems"}
 	for _, keyword := range keywords {
 		t.Run(keyword, func(t *testing.T) {
 			body := strings.Replace(validStructuredOutputRequest(false), `"additionalProperties":false`, `"additionalProperties":false,"`+keyword+`":[]`, 1)
 			_, status, code, msg := validateChatRequest([]byte(body))
+			if status != http.StatusBadRequest || code != "json_schema_unsupported_keyword" {
+				t.Fatalf("status=%d code=%s msg=%s", status, code, msg)
+			}
+		})
+	}
+}
+
+func TestValidateResponseFormatAcceptsTopLevelSchemaAndNumericBounds(t *testing.T) {
+	schema := `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"age":{"type":"integer","minimum":0,"maximum":10,"multipleOf":2}},"required":["age"],"additionalProperties":false}`
+	if _, status, code, msg := validateChatRequest([]byte(requestWithSchema(schema))); status != 0 {
+		t.Fatalf("status=%d code=%s msg=%s", status, code, msg)
+	}
+}
+
+func TestValidateResponseFormatRejectsInvalidNumericBounds(t *testing.T) {
+	cases := []string{
+		`{"type":"string","minimum":0}`,
+		`{"type":"number","multipleOf":0}`,
+		`{"type":"number","minimum":"0"}`,
+		`{"type":"number","minimum":5,"maximum":4}`,
+		`{"type":"object","properties":{"age":{"type":"integer","$schema":"nested"}},"required":["age"],"additionalProperties":false}`,
+	}
+	for _, schema := range cases {
+		t.Run(schema, func(t *testing.T) {
+			_, status, code, msg := validateChatRequest([]byte(requestWithSchema(schema)))
 			if status != http.StatusBadRequest || code != "json_schema_unsupported_keyword" {
 				t.Fatalf("status=%d code=%s msg=%s", status, code, msg)
 			}

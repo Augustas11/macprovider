@@ -70,6 +70,7 @@ var spec018RetryableByCode = map[string]bool{
 	"json_schema_too_deep":                                    false,
 	"json_schema_too_large":                                   false,
 	"request_content_encoding_unsupported":                    false,
+	"provider_timeout":                                        false,
 	"malformed_json_response":                                 true,
 	"json_schema_validation_failed":                           true,
 	"request_body_too_large":                                  false,
@@ -2344,7 +2345,11 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				}
 			}
 			if end.Status != "complete" && end.Status != "cancelled" {
-				writeSSEError(w, "Provider failed during streaming", "provider_error")
+				if isSpec019ProviderDetailCode(end.Status) {
+					writeSSEError(w, endErrorMessage(end), end.Status, requestID)
+				} else {
+					writeSSEError(w, "Provider failed during streaming", "provider_error")
+				}
 				if toolFinal.toolOpened && s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
@@ -2384,7 +2389,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 					return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 				}
 				commit()
-				writeSSEError(w, "Provider timed out during streaming", "provider_timeout")
+				writeSSEError(w, "Provider timed out during streaming", "provider_timeout", requestID)
 				if flusher != nil {
 					flusher.Flush()
 				}
@@ -2569,6 +2574,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	flusher, _ := w.(http.Flusher)
 	var promptTok, completionTok *int64
 	bytesEmitted := 0
+	terminalSSEErrorCode := ""
 	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
 		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, Error: message, FaultFlag: faultFlag}
 		if completionTok == nil {
@@ -2621,6 +2627,10 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				if openedAt, ok := toolCallOpenFromSSELine(line); ok {
 					providerToolCallOpen = openedAt
 				}
+			}
+			if code := terminalSSEErrorCodeFromLine(line); isSpec019TerminalSSEErrorCode(code) {
+				terminalSSEErrorCode = code
+				sawCommitWorthyDataLine = true
 			}
 			status := inspectCommitWorthyDataLine(line)
 			if status == commitLineMalformedToolCalls {
@@ -2699,6 +2709,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if p, c := tokenPointersFromSSE(line); p != nil || c != nil {
 				promptTok, completionTok = p, c
 			}
+			if code := terminalSSEErrorCodeFromLine(line); isSpec019TerminalSSEErrorCode(code) {
+				terminalSSEErrorCode = code
+			}
 			if observeErr := toolFinal.observeLine(line); observeErr != nil {
 				s.log.Warn().Err(observeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider failed tool-call final-close validation")
 				if s.streamingDowngrade != nil {
@@ -2723,6 +2736,11 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			continue
 		}
 		if err == io.EOF {
+			if terminalSSEErrorCode != "" {
+				attempt := progressAttempt("Provider emitted terminal structured-output streaming error", billing.FaultBreakerQualifying)
+				attempt.ErrorCode = terminalSSEErrorCode
+				return wsForwardComplete, http.StatusOK, attempt
+			}
 			if !toolFinal.finalCloseOK() {
 				s.log.Warn().Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider closed before tool-call final-close conditions")
 				if s.streamingDowngrade != nil {
@@ -3678,14 +3696,8 @@ func validateResponseFormatSchema(raw json.RawMessage, stream bool) (int, string
 	case "", "text":
 		return 0, "", ""
 	case "json_object":
-		if stream {
-			return http.StatusBadRequest, "streaming_json_object_unsupported", "v0.1.0 does not stream structured `json_object` output; resend with `stream:false`."
-		}
 		return 0, "", ""
 	case "json_schema":
-		if stream {
-			return http.StatusBadRequest, "streaming_json_schema_unsupported", "v0.1.0 does not stream structured `json_schema` output; resend with `stream:false`."
-		}
 	default:
 		return http.StatusBadRequest, "invalid_request", "Invalid response_format"
 	}
@@ -3736,9 +3748,9 @@ func validateJSONSchemaRaw(raw json.RawMessage, pointer string, depth int) *sche
 	if err := json.Unmarshal(raw, &node); err != nil {
 		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "Schema node must be an object"}
 	}
-	allowed := map[string]bool{"type": true, "properties": true, "required": true, "items": true, "enum": true, "const": true, "additionalProperties": true, "title": true, "description": true}
+	allowed := map[string]bool{"type": true, "properties": true, "required": true, "items": true, "enum": true, "const": true, "additionalProperties": true, "title": true, "description": true, "minimum": true, "maximum": true, "multipleOf": true}
 	for key := range node {
-		if !allowed[key] {
+		if !allowed[key] && !(pointer == "" && key == "$schema") {
 			return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "Unsupported JSON Schema keyword " + key}
 		}
 	}
@@ -3759,6 +3771,9 @@ func validateJSONSchemaRaw(raw json.RawMessage, pointer string, depth int) *sche
 				return &schemaValidationError{http.StatusBadRequest, "json_schema_invalid_const_or_enum_type", "enum value does not conform to schema type"}
 			}
 		}
+	}
+	if err := validateJSONSchemaNumericBounds(node, typ); err != nil {
+		return err
 	}
 	switch typ {
 	case "object":
@@ -3877,6 +3892,67 @@ func jsonSchemaScalarConforms(raw json.RawMessage, typ string) bool {
 	default:
 		return false
 	}
+}
+
+func validateJSONSchemaNumericBounds(node map[string]json.RawMessage, typ string) *schemaValidationError {
+	keywords := []string{"minimum", "maximum", "multipleOf"}
+	var present []string
+	for _, keyword := range keywords {
+		if _, ok := node[keyword]; ok {
+			present = append(present, keyword)
+		}
+	}
+	if len(present) == 0 {
+		return nil
+	}
+	if typ != "number" && typ != "integer" {
+		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", present[0] + " is only allowed on number or integer schemas"}
+	}
+	minimum, hasMinimum, errKeyword := jsonSchemaNumberOperand(node, "minimum")
+	if errKeyword != "" {
+		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", errKeyword + " must be a JSON number"}
+	}
+	maximum, hasMaximum, errKeyword := jsonSchemaNumberOperand(node, "maximum")
+	if errKeyword != "" {
+		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", errKeyword + " must be a JSON number"}
+	}
+	multipleOf, hasMultipleOf, errKeyword := jsonSchemaNumberOperand(node, "multipleOf")
+	if errKeyword != "" {
+		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", errKeyword + " must be a JSON number"}
+	}
+	if hasMultipleOf && multipleOf <= 0 {
+		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "multipleOf must be greater than zero"}
+	}
+	if hasMinimum && hasMaximum && minimum > maximum {
+		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "minimum must be less than or equal to maximum"}
+	}
+	return nil
+}
+
+func jsonSchemaNumberOperand(node map[string]json.RawMessage, keyword string) (float64, bool, string) {
+	raw, ok := node[keyword]
+	if !ok {
+		return 0, false, ""
+	}
+	var value any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&value); err != nil {
+		return 0, true, keyword
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return 0, true, keyword
+	}
+	jsonNumber, ok := value.(json.Number)
+	if !ok {
+		return 0, true, keyword
+	}
+	number, err := jsonNumber.Float64()
+	if err != nil || math.IsInf(number, 0) || math.IsNaN(number) {
+		return 0, true, keyword
+	}
+	return number, true, ""
 }
 
 func validateMessages(messages []chatMessage) (int, string, string) {
@@ -4955,6 +5031,15 @@ func isSpec019ProviderDetailCode(code string) bool {
 	return code == "malformed_json_response" || code == "json_schema_validation_failed"
 }
 
+func isSpec019TerminalSSEErrorCode(code string) bool {
+	switch code {
+	case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
+		return true
+	default:
+		return false
+	}
+}
+
 func endErrorMessage(end providerws.InferenceResponseEnd) string {
 	if spec001EndStatus(end.Status) != "" {
 		return end.Status
@@ -5121,6 +5206,26 @@ func finishReasonFromSSE(data string) string {
 	return ""
 }
 
+func terminalSSEErrorCodeFromLine(line []byte) string {
+	text := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(text, "data:") {
+		return ""
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(text, "data:"))
+	if payload == "" || payload == "[DONE]" {
+		return ""
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(payload), &envelope); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(envelope.Error.Code)
+}
+
 func writeWSEndError(w http.ResponseWriter, end providerws.InferenceResponseEnd) {
 	switch end.Status {
 	case "error_context_exceeded":
@@ -5176,6 +5281,10 @@ func writeSSEError(w http.ResponseWriter, message, code string, requestID ...str
 	if len(requestID) > 0 && strings.TrimSpace(requestID[0]) != "" {
 		id = requestID[0]
 	}
+	settlementRan := code == "malformed_json_response" ||
+		code == "json_schema_validation_failed" ||
+		code == "provider_timeout" ||
+		code == "response_byte_cap_exceeded"
 	payload, _ := json.Marshal(map[string]any{
 		"error": map[string]any{
 			"message":        message,
@@ -5185,7 +5294,7 @@ func writeSSEError(w http.ResponseWriter, message, code string, requestID ...str
 			"retryable":      spec018Retryable(code),
 			"request_id":     id,
 			"inference_ran":  true,
-			"settlement_ran": false,
+			"settlement_ran": settlementRan,
 		},
 	})
 	_, _ = w.Write([]byte("data: "))
@@ -5206,6 +5315,8 @@ func spec018ErrorType(code, fallback string) string {
 		return "upstream_provider_error"
 	case "malformed_json_response", "json_schema_validation_failed":
 		return "upstream_provider_error"
+	case "provider_timeout":
+		return "api_error"
 	case "provider_stream_downgraded":
 		return "api_error"
 	default:

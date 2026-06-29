@@ -1,0 +1,5 @@
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"{\"name\":\"Ada\","},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"\"age\":37}"},"finish_reason":"stop"}]}
+
+data: [DONE]

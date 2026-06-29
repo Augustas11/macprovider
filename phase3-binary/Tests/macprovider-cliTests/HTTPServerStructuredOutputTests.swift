@@ -3,12 +3,9 @@ import XCTest
 @testable import macprovider_cli
 
 final class HTTPServerStructuredOutputTests: XCTestCase {
-    func testStreamingStructuredOutputRejected() throws {
-        var request = try Self.request(responseFormat: ["type": "json_object"], stream: true)
-        XCTAssertAPIError(try RouterHandler.validateStructuredStreamingUnsupported(request), status: 400, code: "streaming_json_object_unsupported", param: "stream")
-
-        request = try Self.request(responseFormat: Self.jsonSchemaResponseFormat(), stream: true)
-        XCTAssertAPIError(try RouterHandler.validateStructuredStreamingUnsupported(request), status: 400, code: "streaming_json_schema_unsupported", param: "stream")
+    func testStreamingStructuredOutputAcceptedByRequestParser() throws {
+        XCTAssertNoThrow(try Self.request(responseFormat: ["type": "json_object"], stream: true))
+        XCTAssertNoThrow(try Self.request(responseFormat: Self.jsonSchemaResponseFormat(), stream: true))
     }
 
     func testContentEncodingGate() throws {

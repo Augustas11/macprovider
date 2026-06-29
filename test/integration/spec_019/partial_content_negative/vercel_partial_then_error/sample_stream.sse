@@ -1,0 +1,3 @@
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"{\"name\":\"Ada\""},"finish_reason":null}]}
+
+data: {"error":{"type":"upstream_provider_error","code":"malformed_json_response","message":"Model output was not valid JSON","param":"","settlement_ran":true},"request_id":"req-vercel-partial","inference_ran":true}

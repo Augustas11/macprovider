@@ -288,6 +288,7 @@ public struct APIError: Error, Sendable {
         "request_content_encoding_unsupported": false,
         "malformed_json_response": true,
         "json_schema_validation_failed": true,
+        "provider_timeout": false,
         "request_body_too_large": false,
         "tool_result_too_large": false,
         "tool_results_aggregate_too_large": false,

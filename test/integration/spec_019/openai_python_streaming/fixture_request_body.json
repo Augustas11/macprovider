@@ -1,0 +1,33 @@
+{
+  "model": "fixture-model",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Return a person named Ada aged 37."
+    }
+  ],
+  "stream": true,
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "person-v1",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "age": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "age"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

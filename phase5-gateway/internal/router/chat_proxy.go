@@ -24,11 +24,12 @@ import (
 )
 
 type chatRequest struct {
-	Model     string            `json:"model"`
-	Messages  []json.RawMessage `json:"messages"`
-	MaxTokens *int64            `json:"max_tokens"`
-	N         *int              `json:"n"`
-	Stream    bool              `json:"stream"`
+	Model          string            `json:"model"`
+	Messages       []json.RawMessage `json:"messages"`
+	MaxTokens      *int64            `json:"max_tokens"`
+	N              *int              `json:"n"`
+	Stream         bool              `json:"stream"`
+	ResponseFormat json.RawMessage   `json:"response_format"`
 }
 
 type tokenUsage struct {
@@ -41,6 +42,19 @@ type usageSubject struct {
 	AccountID     string
 	DemoIdentity  string
 	DemoTokenHash string
+}
+
+func (c chatRequest) hasStructuredOutput() bool {
+	if len(c.ResponseFormat) == 0 || bytes.Equal(bytes.TrimSpace(c.ResponseFormat), []byte("null")) {
+		return false
+	}
+	var rf struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(c.ResponseFormat, &rf); err != nil {
+		return false
+	}
+	return rf.Type == "json_schema" || rf.Type == "json_object"
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -283,27 +297,35 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	resp, err := s.client.Do(upReq)
-	if err != nil {
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
-		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
-		return
-	}
-	defer resp.Body.Close()
-
 	promptEstimate := estimatePromptTokens(body)
 	// Validation cap uses promptCapTokens (with chat-template headroom)
 	// — generous enough to admit valid provider tokenization. Billed
 	// quantities (settle paths below) keep using the bare
 	// promptEstimate so error-path settlement does not over-charge.
 	maxUsageTokens := promptCapTokens(body) + maxTokens
+	structuredStreaming := chat.Stream && chat.hasStructuredOutput()
+	resp, err := s.client.Do(upReq)
+	if err != nil {
+		if structuredStreaming && errors.Is(upCtx.Err(), context.DeadlineExceeded) {
+			if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout") {
+				return
+			}
+			writeStructuredOutputTimeoutSSE(w, requestID(r))
+			return
+		}
+		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
+		return
+	}
+	defer resp.Body.Close()
+
 	if chat.Stream {
 		// ISS-187 R1 architect/code MAJOR: thread the reservation
 		// window through to forwardStreamingChat so the SPEC-006 §
 		// 17.7 fallback usage_events insert in settleAfterCommit
 		// uses the SAME window_date as the original reservation
 		// (avoids drift for streams that cross UTC midnight).
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, cancelUpstream, window)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, cancelUpstream, upCtx, structuredStreaming, window)
 		return
 	}
 	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens)
@@ -387,7 +409,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	_, _ = w.Write(body)
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, cancelUpstream func(), reservationWindow string) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, cancelUpstream func(), upstreamCtx context.Context, structuredStreaming bool, reservationWindow string) {
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
@@ -421,10 +443,6 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
-			return
-		}
-		if coordinatorStructuredOutputStreamingReject(resp.StatusCode, body) {
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 			return
 		}
@@ -463,6 +481,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	var emitted int64
 	var reported *tokenUsage
 	invalidReportedUsage := false
+	terminalStructuredErrorCode := ""
+	refundTerminalStructuredError := func() {
+		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+	}
 	settleReported := func(outcome string) {
 		usage := *reported
 		observedCompletion := estimateStreamingCompletionTokens(emitted, maxTokens)
@@ -492,7 +514,30 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		text := strings.TrimRight(string(line), "\r\n")
 		if data, ok := sseDataValue(text); ok {
-			if data != "[DONE]" {
+			if data == "[DONE]" {
+				if terminalStructuredErrorCode != "" {
+					if _, err := w.Write(line); err != nil {
+						slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+					refundTerminalStructuredError()
+					return false
+				}
+			} else {
+				if code := terminalSSEErrorCode(data); isSpec019TerminalSSEErrorCode(code) {
+					terminalStructuredErrorCode = code
+					if _, err := w.Write(line); err != nil {
+						slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+						refundTerminalStructuredError()
+						return false
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+					return true
+				}
 				deltaBytes, hasChoices, parseOK := streamingCompletionDeltaBytes(data)
 				if !parseOK {
 					slog.Warn("streaming gateway estimate saw malformed chunk; truncating stream", "request_id", requestID(r))
@@ -607,6 +652,14 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		// that lands, a buyer retrying after this envelope MAY incur
 		// a fresh reservation if the coordinator's idempotency-cache
 		// response isn't refund-honored on the gateway side.
+		if structuredStreaming && errors.Is(upstreamCtx.Err(), context.DeadlineExceeded) {
+			writeStructuredOutputTimeoutSSE(w, requestID(r))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "provider_timeout", reservationWindow)
+			return
+		}
 		writeProviderDisconnectedSSE(w)
 		if flusher != nil {
 			flusher.Flush()
@@ -620,6 +673,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, maxTokens, cancelCoordinator, reservationWindow)
+		return
+	}
+	if terminalStructuredErrorCode != "" {
+		refundTerminalStructuredError()
 		return
 	}
 	if reported != nil && !invalidReportedUsage {
@@ -648,18 +705,6 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 func isNullUsageProviderError(body []byte) bool {
 	switch openAIErrorCode(body) {
 	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed":
-		return true
-	default:
-		return false
-	}
-}
-
-func coordinatorStructuredOutputStreamingReject(status int, body []byte) bool {
-	if status != http.StatusBadRequest {
-		return false
-	}
-	switch openAIErrorCode(body) {
-	case "streaming_json_schema_unsupported", "streaming_json_object_unsupported":
 		return true
 	default:
 		return false
@@ -1004,6 +1049,27 @@ func sseDataValue(line string) (string, bool) {
 	return value, true
 }
 
+func terminalSSEErrorCode(data string) string {
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(data), &envelope); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(envelope.Error.Code)
+}
+
+func isSpec019TerminalSSEErrorCode(code string) bool {
+	switch code {
+	case "malformed_json_response", "json_schema_validation_failed":
+		return true
+	default:
+		return false
+	}
+}
+
 func demoTokenHash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
@@ -1076,6 +1142,25 @@ func (sw *statusWriter) Flush() {
 // are centralized and resistant to drift.
 func writeSSEError(w http.ResponseWriter, message, errType, code string) {
 	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": errType, "code": code}})
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(payload)
+	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+}
+
+func writeStructuredOutputTimeoutSSE(w http.ResponseWriter, requestID string) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	payload, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message":        "Provider timed out during structured-output streaming",
+			"type":           "api_error",
+			"param":          nil,
+			"code":           "provider_timeout",
+			"retryable":      false,
+			"request_id":     requestID,
+			"inference_ran":  true,
+			"settlement_ran": true,
+		},
+	})
 	_, _ = w.Write([]byte("data: "))
 	_, _ = w.Write(payload)
 	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))

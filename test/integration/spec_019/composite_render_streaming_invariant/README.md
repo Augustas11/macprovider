@@ -1,0 +1,12 @@
+AC-V2-14 composite-render streaming invariant fixture.
+
+The fixture compares the schema-adjusted system-position composition for
+`stream:false` and `stream:true` requests with tools plus `json_schema`.
+The only allowed request-body difference is the `stream` boolean; the rendered
+message/tool composite must stay byte-equivalent.
+
+Run:
+
+```sh
+python3 assert_fixture.py
+```

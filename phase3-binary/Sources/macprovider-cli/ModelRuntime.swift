@@ -46,6 +46,105 @@ struct StreamToolCallDelta: Sendable {
     }
 }
 
+final class StructuredStreamingContentAccumulator: @unchecked Sendable {
+    private let enabled: Bool
+    private let lock = NSLock()
+    private var bytes = 0
+    private var contentValue = ""
+    private var capError: APIError?
+
+    init(enabled: Bool) {
+        self.enabled = enabled
+    }
+
+    var content: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return contentValue
+    }
+
+    var error: APIError? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capError
+    }
+
+    @discardableResult
+    func append(_ delta: String) -> APIError? {
+        guard enabled else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        if let capError {
+            return capError
+        }
+        let nextBytes = bytes + delta.utf8.count
+        guard nextBytes <= ModelRuntime.structuredStreamingValidationBufferByteCap else {
+            let error = APIError(
+                status: 502,
+                message: "Structured streaming content exceeded 2097152 bytes",
+                type: "upstream_provider_error",
+                code: "response_byte_cap_exceeded",
+                inferenceRan: true,
+                settlementRan: true
+            )
+            capError = error
+            return error
+        }
+        bytes = nextBytes
+        contentValue += delta
+        return nil
+    }
+}
+
+final class StructuredStreamingIdleState: @unchecked Sendable {
+    let enabled: Bool
+    private let lock = NSLock()
+    private var lastContentAt = Date()
+    private var finishedValue = false
+    private var timedOutValue = false
+
+    init(enabled: Bool) {
+        self.enabled = enabled
+    }
+
+    func noteContent() {
+        guard enabled else { return }
+        lock.lock()
+        lastContentAt = Date()
+        lock.unlock()
+    }
+
+    var isFinished: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finishedValue
+    }
+
+    var timedOut: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return timedOutValue
+    }
+
+    func hasTimedOut(timeout: TimeInterval) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !finishedValue && Date().timeIntervalSince(lastContentAt) >= timeout
+    }
+
+    func markTimedOut() {
+        lock.lock()
+        timedOutValue = true
+        lock.unlock()
+    }
+
+    func markFinished() {
+        lock.lock()
+        finishedValue = true
+        lock.unlock()
+    }
+}
+
 extension ModelRuntimeServing {
     func currentSnapshot() async -> RuntimeSnapshot {
         RuntimeSnapshot(state: .ready, container: nil, modelID: nil, modelHash: nil)
@@ -94,6 +193,9 @@ public struct WarmSwapDisabledError: Error, CustomStringConvertible {
 public struct DrainCancelledError: Error { }
 
 actor ModelRuntime: ModelRuntimeServing {
+    static let structuredStreamingValidationBufferByteCap = 2_097_152
+    static let structuredStreamingIdleTimeoutSeconds: TimeInterval = 60
+
     private var state: SwapState = .ready
     private var targetModelID: String?
     private var currentModelID: String?
@@ -524,14 +626,24 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async throws -> CompletionResult {
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
+        let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
+        let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
         if let testCompletion {
             let completion = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
             }.withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
             if !completion.content.isEmpty {
+                if let error = structuredAccumulator.append(completion.content) {
+                    throw error
+                }
+                idleState.noteContent()
                 onChunk(.content(completion.content))
             }
-            return completion
+            return try Self.validateStructuredStreamingCompletion(
+                completion,
+                request: request,
+                buyerVisibleContent: structuredAccumulator.content
+            )
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -542,7 +654,8 @@ actor ModelRuntime: ModelRuntimeServing {
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
         return try await Self.withDrainCancellation(drainCancelled) {
-            try await inferenceGate.withPermit {
+            try await Self.withStructuredStreamingIdleTimeout(drainCancelled, idleState: idleState) {
+                try await inferenceGate.withPermit {
                 try drainCancelled.check()
                 try Task.checkCancellation()
                 return try await container.perform { context in
@@ -587,6 +700,10 @@ actor ModelRuntime: ModelRuntimeServing {
 
                         let delta = Self.delta(from: emittedText, to: candidate.text)
                         if !delta.isEmpty {
+                            if structuredAccumulator.append(delta) != nil {
+                                return .stop
+                            }
+                            idleState.noteContent()
                             emittedText = candidate.text
                             onChunk(.content(delta))
                         }
@@ -612,10 +729,21 @@ actor ModelRuntime: ModelRuntimeServing {
                             onChunk(event)
                         }
                         if parsed.toolCalls.isEmpty, !parsed.content.isEmpty {
+                            if let error = structuredAccumulator.append(parsed.content) {
+                                throw error
+                            }
+                            idleState.noteContent()
                             onChunk(.content(parsed.content))
                         }
                     } else if !finalDelta.isEmpty {
+                        if let error = structuredAccumulator.append(finalDelta) {
+                            throw error
+                        }
+                        idleState.noteContent()
                         onChunk(.content(finalDelta))
+                    }
+                    if let error = structuredAccumulator.error {
+                        throw error
                     }
 
                     let finishReason: String
@@ -631,7 +759,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         finishReason = "stop"
                     }
 
-                    return CompletionResult(
+                    let completion = CompletionResult(
                         content: parsed.content,
                         finishReason: finishReason,
                         promptTokens: result.promptTokenCount,
@@ -639,7 +767,13 @@ actor ModelRuntime: ModelRuntimeServing {
                         toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                         modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
                     )
+                    return try Self.validateStructuredStreamingCompletion(
+                        completion,
+                        request: request,
+                        buyerVisibleContent: structuredAccumulator.content
+                    )
                 }
+            }
             }
         }
     }
@@ -896,6 +1030,15 @@ actor ModelRuntime: ModelRuntimeServing {
         return ("", parsed.toolCalls)
     }
 
+    private static func requiresStructuredValidation(_ responseFormat: ResponseFormat) -> Bool {
+        switch responseFormat {
+        case .text:
+            return false
+        case .jsonObject, .jsonSchema:
+            return true
+        }
+    }
+
     private static func userInput(for request: ChatCompletionRequest) throws -> UserInput {
         let structuredMessages = try StructuredOutputRenderer.prependResponseFormatInstruction(
             to: request.messages,
@@ -937,6 +1080,79 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             return completion
         }
+    }
+
+    private static func validateStructuredStreamingCompletion(
+        _ completion: CompletionResult,
+        request: ChatCompletionRequest,
+        buyerVisibleContent: String
+    ) throws -> CompletionResult {
+        guard requiresStructuredValidation(request.responseFormat), completion.toolCalls?.isEmpty != false else {
+            return completion
+        }
+        let visibleCompletion = CompletionResult(
+            content: buyerVisibleContent,
+            finishReason: completion.finishReason,
+            promptTokens: completion.promptTokens,
+            completionTokens: completion.completionTokens,
+            ttftMilliseconds: completion.ttftMilliseconds,
+            toolCalls: completion.toolCalls,
+            modelHashObserved: completion.modelHashObserved
+        )
+        return try validateStructuredCompletion(visibleCompletion, request: request)
+    }
+
+    private static func withStructuredStreamingIdleTimeout<T: Sendable>(
+        _ token: DrainCancelToken,
+        idleState: StructuredStreamingIdleState,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        guard idleState.enabled else {
+            return try await operation()
+        }
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                while !idleState.isFinished {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                    if idleState.hasTimedOut(timeout: structuredStreamingIdleTimeoutSeconds) {
+                        idleState.markTimedOut()
+                        token.fire()
+                        throw structuredStreamingProviderTimeoutError()
+                    }
+                }
+                throw DrainCancelledError()
+            }
+            do {
+                guard let result = try await group.next() else {
+                    throw DrainCancelledError()
+                }
+                idleState.markFinished()
+                group.cancelAll()
+                return result
+            } catch is DrainCancelledError where idleState.timedOut {
+                idleState.markFinished()
+                group.cancelAll()
+                throw structuredStreamingProviderTimeoutError()
+            } catch {
+                idleState.markFinished()
+                group.cancelAll()
+                throw error
+            }
+        }
+    }
+
+    private static func structuredStreamingProviderTimeoutError() -> APIError {
+        APIError(
+            status: 504,
+            message: "Provider emitted no buyer-visible structured-output content delta within 60 seconds",
+            type: "upstream_provider_error",
+            code: "provider_timeout",
+            inferenceRan: true,
+            settlementRan: true
+        )
     }
 
     private static func parseStructuredJSONContent(_ content: String, requireObjectOrArray: Bool) throws -> MacProviderCore.JSONValue {
