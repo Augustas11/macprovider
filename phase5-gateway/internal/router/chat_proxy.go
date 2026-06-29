@@ -635,6 +635,18 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
+		// SPEC-019 v0.2 AC-V2-3a: if the provider already sent a
+		// terminal SPEC-019 SSE error frame (forwarded verbatim to
+		// the buyer above), an upstream read failure here MUST NOT
+		// emit a SECOND terminal frame on top. The buyer-visible
+		// terminal state is already correct; refund and return.
+		// Skipping this guard would double-write (provider_timeout
+		// or provider_disconnected) over the already-forwarded
+		// SPEC-019 error and emit a positive usage_events outcome.
+		if terminalStructuredErrorCode != "" {
+			refundTerminalStructuredError()
+			return
+		}
 		// SPEC-002 § FR-B6 / issue #186: an unexpected read error on
 		// the coordinator-side stream (not EOF, not buyer cancel) is
 		// the mid-stream provider-disconnect surface. The buyer MUST

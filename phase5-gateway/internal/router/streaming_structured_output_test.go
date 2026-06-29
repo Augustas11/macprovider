@@ -3,6 +3,7 @@ package router
 import (
 	"database/sql"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -10,6 +11,30 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/config"
 	_ "modernc.org/sqlite"
 )
+
+// errAfterReader returns the given bytes once, then a non-EOF error
+// on subsequent reads. Used to simulate an upstream mid-stream
+// read failure after the buyer-visible terminal frame already
+// arrived (distinct from clean EOF or context-deadline-exceeded).
+type errAfterReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (r *errAfterReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	if len(r.data) == 0 {
+		r.done = true
+	}
+	return n, nil
+}
+
+func (r *errAfterReader) Close() error { return nil }
 
 func TestStreamingStructuredOutputTerminalSSEErrorPassesThroughWithoutOKSettlement(t *testing.T) {
 	body := `data: {"choices":[{"delta":{"content":"{\"age\":\""}}]}`
@@ -63,6 +88,49 @@ func TestStreamingStructuredOutputGatewayTimeoutEmitsProviderTimeout(t *testing.
 	if outcome != "provider_timeout" {
 		t.Fatalf("usage outcome=%s want provider_timeout", outcome)
 	}
+}
+
+// Pre-audit guard: if the provider already sent a terminal SPEC-019
+// SSE error frame and the upstream connection then drops mid-stream
+// (read failure, not timeout, not [DONE]), the gateway MUST NOT
+// double-write a second terminal frame (provider_disconnected /
+// stream_truncated). Refund-only.
+func TestStreamingStructuredOutputUpstreamReadErrorAfterTerminalFrameRefundsOnly(t *testing.T) {
+	terminal := `data: {"error":{"message":"bad age","type":"upstream_provider_error","param":"/age","code":"json_schema_validation_failed","retryable":true,"request_id":"req-downstream","inference_ran":true,"settlement_ran":true}}`
+	// Send terminal frame, then return io.ErrUnexpectedEOF on the
+	// next read — simulates upstream connection abort after the
+	// buyer-visible terminal frame arrived. NOT context-deadline-
+	// exceeded; exercises the SPEC-002 FR-B6 disconnect path.
+	stream := terminal + "\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}},
+			Body:       &errAfterReader{data: []byte(stream), err: io.ErrUnexpectedEOF},
+		}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	accountID := "acct_stream_structured_error_read_fail"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, structuredStreamingRequestBody(), nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), terminal) {
+		t.Fatalf("terminal frame not forwarded: %s", resp.Body.String())
+	}
+	if strings.Contains(resp.Body.String(), "provider_disconnected") {
+		t.Fatalf("gateway double-wrote provider_disconnected after terminal frame: %s", resp.Body.String())
+	}
+	if strings.Contains(resp.Body.String(), "stream_truncated") {
+		t.Fatalf("gateway double-wrote stream_truncated after terminal frame: %s", resp.Body.String())
+	}
+	assertNoUsageOutcome(t, dbPath, accountID, "ok")
+	assertNoUsageOutcome(t, dbPath, accountID, "stream_truncated")
+	assertNoUsageOutcome(t, dbPath, accountID, "provider_disconnected")
 }
 
 func structuredStreamingRequestBody() string {
