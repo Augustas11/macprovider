@@ -1,0 +1,61 @@
+# 10_provider_session_economics.yaml — benchmark, phase B.
+#
+# Goal: measure the provider-side economics at a low-load steady
+# rate. Fires 1 short request every 5s for 10 min (~120 requests).
+# Enough load to keep providers warm + collect billable tokens;
+# light enough that providers aren't slot-contended.
+#
+# Computes earnings/hr by joining coordinator request_log against
+# the live tier-2 pricing manifest at /opt/macprovider/tier2-catalog.json.
+#
+# Cost estimate (120 × 32 max_tokens): order of $0.05.
+name: provider_session_economics
+description: |
+  Low-load steady ping (1 req / 5s for 10 min). Measures provider-side
+  requests/min, slot util, earnings/hr at current tier-2 pricing.
+  Benchmark — B5 (slot util), B6 (earnings/hr).
+
+expected_shape: |
+  Phase B benchmark — provider economics first-look:
+   - 120 requests over 10 min.
+   - Each provider should serve roughly half (with stickiness off).
+   - Slot util ≥ 15% (bare-min), aspirational ≥ 40% target.
+   - Earnings/hr ≥ $0.30/hr (bare-min M-series) per provider, target
+     ≥ $1.00/hr — at current Pearl tier-2 pricing.
+   - Session continuity: 0 WS disconnects expected over 10 min.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 1
+  stream: false
+  pattern: interval
+  interval_ms: 5000
+  requests_per_buyer: 120
+
+duration: 660s
+request_timeout: 30s
+silent_hang_threshold: 15s
+
+benchmark:
+  enabled: true
+  invariants: [B5, B6]
+  # In-repo placeholder pricing manifest (DRAFT — not production rates).
+  # See the file header for calibration rationale. When real settlement
+  # pricing lands in coordinator.yaml rewards.rate_card, point this at
+  # the operator-curated manifest instead. Harness must run from repo root.
+  pricing_source: ../../../specs/BENCHMARK_PRICING_v0.1.json
+
+prompts:
+  - model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+    user: "Reply with one short sentence."
+    max_tokens: 32
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Reply with one short sentence."
+    max_tokens: 32

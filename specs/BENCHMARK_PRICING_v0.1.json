@@ -1,0 +1,72 @@
+{
+  "_schema_version": "v0.1",
+  "_status": "MIRRORS PRODUCTION — derived from coord defaults",
+  "_purpose": [
+    "Per-model provider-net USD/1k token rates used by the B6 (earnings/hr)",
+    "benchmark verdict. Values mirror Pearl coordinator config defaults; this",
+    "file is NOT a source of truth — it is a snapshot for offline reproducibility.",
+    "When operators tune coordinator config (global_multiplier, usd_per_million_credits,",
+    "rate_card), this file MUST be re-derived. Issue #223 tracks the path to sourcing",
+    "B6 pricing directly from coord config so this file becomes unnecessary."
+  ],
+  "_derivation": [
+    "Source values (phase4-coordinator/internal/config/config.go:528-537 + stats/rollup):",
+    "  rate_card.default.prompt_credits_per_mtok     = 500,000",
+    "  rate_card.default.completion_credits_per_mtok = 1,000,000",
+    "  global_multiplier                             = 1.0",
+    "  provider_share                                = 0.90",
+    "  stats.rollup.usd_per_million_credits          = 1.0",
+    "",
+    "Provider-net USD per 1k completion tokens:",
+    "  = 1000 × completion_credits_per_mtok / 1,000,000",
+    "    × global_multiplier × provider_share",
+    "    × usd_per_million_credits / 1,000,000",
+    "  = 1000 × 1,000,000 / 1e6 × 1.0 × 0.90 × 1.0 / 1e6",
+    "  = $0.0009 per 1k completion (= 900 credits × $1.0 / Mcredit)",
+    "Provider-net USD per 1k prompt tokens:",
+    "  = $0.00045 (half of completion, per 500k/1M rate split)",
+    "",
+    "All models use the 'default' rate card entry because the production config",
+    "has no per-model rate_card overrides — every Qwen / Llama / Mistral variant",
+    "earns the same USD/token. Per-model entries below are identical until the",
+    "rate_card config grows per-model rows."
+  ],
+  "_economic_viability_note": [
+    "At default rates × 14 tok/s sustained (M-series fleet baseline 2026-06-28):",
+    "  earnings/hr ≈ 50,400 completion tokens × $0.0009/1k ≈ $0.045/hr",
+    "This is BELOW the B6 bare-min of $0.30/hr. Issue #222 tracks the gap.",
+    "B6 will FAIL with these rates — that is the honest signal, not a bug."
+  ],
+  "_competitive_reference": {
+    "openai_gpt4o_mini": {"prompt_per_1k": 0.00015, "completion_per_1k": 0.0006},
+    "openai_gpt4o":      {"prompt_per_1k": 0.00250, "completion_per_1k": 0.0100},
+    "anthropic_haiku":   {"prompt_per_1k": 0.00025, "completion_per_1k": 0.00125}
+  },
+  "issued_at": "2026-06-29",
+  "models": [
+    {
+      "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
+      "_class": "default-rate (no per-model override)",
+      "price_per_1k_prompt_tokens": 0.00045,
+      "price_per_1k_completion_tokens": 0.0009
+    },
+    {
+      "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+      "_class": "default-rate (no per-model override)",
+      "price_per_1k_prompt_tokens": 0.00045,
+      "price_per_1k_completion_tokens": 0.0009
+    },
+    {
+      "model": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+      "_class": "default-rate (no per-model override)",
+      "price_per_1k_prompt_tokens": 0.00045,
+      "price_per_1k_completion_tokens": 0.0009
+    },
+    {
+      "model": "mlx-community/Qwen3-32B-4bit",
+      "_class": "default-rate (no per-model override)",
+      "price_per_1k_prompt_tokens": 0.00045,
+      "price_per_1k_completion_tokens": 0.0009
+    }
+  ]
+}

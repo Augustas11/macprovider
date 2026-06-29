@@ -1,0 +1,56 @@
+# 02_capacity_contention.yaml — single model, 10 concurrent buyers,
+# burst pattern. Stresses provider capacity beyond SPEC-001 FR-25's
+# default max_concurrency=1 per provider.
+#
+# Live network has total_slots=1 per model right now (per /v1/models).
+# A 10-buyer burst will saturate. Surfaces the coordinator's
+# capacity-exhaustion error path.
+#
+# What we want to learn (phase A, descriptive — recorded only):
+#  - Does coordinator queue, fail-fast with 503 no_provider_available,
+#    or reject with preflight_rejected 503?
+#  - What's the latency tail when SlotsFree saturates?
+#  - Are 5xx responses billing-settled (I2 catches orphans)?
+#
+# What gets asserted (the 4 hard invariants): all 4 run.
+#
+# Cost estimate (10 requests x 32 max_tokens, some will 5xx): order of cents.
+name: capacity_contention
+description: |
+  10 buyers fire simultaneously at t=0 for the same model. Forces the
+  coordinator's capacity-exhaustion path to surface. Phase B will
+  codify whether observed behavior (queue / fail-fast / preflight
+  reject) is the beta contract.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - Some subset succeeds (those that fit in available slots).
+   - Others fail with one of: no_provider_available | preflight_rejected
+     | provisional_quota_exceeded.
+   - error_taxonomy reveals which code dominates.
+   - I2 fails-loud if any 5xx response lacks a request-id echo.
+   - PHASE B TRIAGE: which code IS the contract? Today's code path can
+     hit 3 different 503s depending on race ordering.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 10
+  stream: false
+  pattern: burst
+  requests_per_buyer: 1
+
+duration: 120s
+request_timeout: 60s
+silent_hang_threshold: 30s
+
+prompts:
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Reply with exactly the word: contend."
+    max_tokens: 32

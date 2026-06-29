@@ -1,0 +1,51 @@
+# 04_wrong_model.yaml — buyer requests a model nobody serves. Negative
+# path: verifies the network fails cleanly with a defined error code and
+# does NOT charge the buyer for tokens never delivered.
+#
+# What we want to learn (phase A, descriptive — recorded only):
+#  - Per SPEC-002 v1.4.1 FR-B1, no_provider_available 503 is the expected
+#    code when no provider matches.
+#  - Is the request settled in usage_events with 0 tokens, or omitted?
+#  - PHASE B TRIAGE: contract should pin 503 vs 404 for unmatched models.
+#
+# What gets asserted (the 4 hard invariants):
+#  - I1 reconciles (any settlement should match, zero token rows for the
+#    no-match case).
+#  - I2 is the load-bearing check — 5xx without request id = bypass risk.
+#  - I3, I4 run.
+#
+# Cost estimate: effectively $0 (no token generation).
+name: wrong_model
+description: |
+  3 buyers each fire one request for a model id no provider advertises.
+  Validates the negative path: clean error, no charge, no orphan settlement.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - All 3 should return 5xx (most likely 503 no_provider_available).
+   - All 3 appear in error_taxonomy under a single code.
+   - Zero tokens billed.
+   - I2 fails if the gateway returns 5xx without echoing a request id.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 3
+  stream: false
+  pattern: constant
+  requests_per_buyer: 1
+
+duration: 60s
+request_timeout: 30s
+silent_hang_threshold: 30s
+
+prompts:
+  - model: nonexistent-model-9000-test-only
+    user: "This should never reach a provider."
+    max_tokens: 16
