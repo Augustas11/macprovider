@@ -93,6 +93,15 @@ func checkI1(ledger *reconcile.Result) Check {
 		c.Detail = "reconciliation skipped: target.coordinator_db_path / _ssh not configured"
 		return c
 	}
+	// Fail-closed: reconcile.Run errored. Even if every drift signal
+	// below would be zero, the audit pipeline must NOT silently pass
+	// when reconciliation didn't actually run. R3 audit code HIGH.
+	if ledger.ReconcileError != "" {
+		c.Passed = false
+		c.EvidenceCount = 1
+		c.Detail = "reconcile errored: " + ledger.ReconcileError
+		return c
+	}
 
 	// I1 reads matched-pair drift produced by the reconciler under
 	// drift_basis="per_matched_pair_v2" (#226 + #229 R2). Five signals:
@@ -110,6 +119,11 @@ func checkI1(ledger *reconcile.Result) Check {
 	unmatchedGwOK := len(ledger.UnmatchedGatewayOKRows)
 	unmatchedCoord2xx := len(ledger.UnmatchedCoordinator2xxRows)
 	coordMissingOK := len(ledger.MatchedCoordMissing)
+	// Ambiguity — ≥2 exact-id candidates within window+account after
+	// the matcher's filters. Hard I1 signal (PK collision evidence
+	// across accounts, or duplicate settlements within one account).
+	ambiguousGw := len(ledger.AmbiguousExactGatewayIDs)
+	ambiguousCoord := len(ledger.AmbiguousExactCoordIDs)
 
 	driftSignals := 0
 	if unmatched > 0 {
@@ -128,6 +142,12 @@ func checkI1(ledger *reconcile.Result) Check {
 		driftSignals++
 	}
 	if absGwCoordMismatch > 0 {
+		driftSignals++
+	}
+	if ambiguousGw > 0 {
+		driftSignals++
+	}
+	if ambiguousCoord > 0 {
 		driftSignals++
 	}
 
@@ -159,6 +179,12 @@ func checkI1(ledger *reconcile.Result) Check {
 	if absGwCoordMismatch > 0 {
 		parts = append(parts, fmt.Sprintf("gateway-coord ledger mismatch %d tokens across %d pair(s)", absGwCoordMismatch, len(ledger.GatewayCoordMismatchedPairs)))
 	}
+	if ambiguousGw > 0 {
+		parts = append(parts, fmt.Sprintf("%d gateway exact-id ambiguities (id collision within window+account)", ambiguousGw))
+	}
+	if ambiguousCoord > 0 {
+		parts = append(parts, fmt.Sprintf("%d coord exact-id ambiguities", ambiguousCoord))
+	}
 	c.Detail = strings.Join(parts, "; ")
 	c.OffendingIDs = append(c.OffendingIDs, ledger.UnmatchedSuccesses...)
 	c.OffendingIDs = append(c.OffendingIDs, ledger.UnmatchedGatewayOKRows...)
@@ -166,6 +192,8 @@ func checkI1(ledger *reconcile.Result) Check {
 	c.OffendingIDs = append(c.OffendingIDs, ledger.OverbilledPairs...)
 	c.OffendingIDs = append(c.OffendingIDs, ledger.MatchedCoordMissing...)
 	c.OffendingIDs = append(c.OffendingIDs, ledger.GatewayCoordMismatchedPairs...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.AmbiguousExactGatewayIDs...)
+	c.OffendingIDs = append(c.OffendingIDs, ledger.AmbiguousExactCoordIDs...)
 	return c
 }
 

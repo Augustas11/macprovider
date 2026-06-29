@@ -1,12 +1,25 @@
 // Package reconcile compares the harness's per-request observations
 // against the coordinator's request_log and the gateway's usage_events.
 //
-// IMPORTANT: gateway and coordinator each generate their OWN request_id
-// (verified live 2026-06-27 — gateway returns UUID X to buyer, coord
-// writes UUID Y in request_log; X and Y never overlap). Correlation by
-// request_id is therefore impossible across the two sides. We instead
-// correlate by (model, completion_tokens, ts ± window) and report
-// drift at both per-request and aggregate level.
+// Cross-service request_id semantics:
+//   - Gateway's usage_events.request_id is the gateway-issued PK.
+//     The gateway echoes it back to the buyer via the X-Request-Id
+//     response header, so the harness records it as
+//     buyer.Result.RequestID (loadgen.go:199).
+//   - Coordinator's request_log.request_id is INTERNAL and not
+//     correlatable across services. The gateway-issued id is
+//     persisted on coord side as
+//     request_log.external_request_id (phase4-coordinator/internal/
+//     requestlog/store.go:38-46).
+//
+// matchPairs uses exact id correlation when available:
+//   - gateway: buyer.Result.RequestID == gateway.usage_events.request_id
+//   - coord:   buyer.Result.RequestID == coord.request_log.external_request_id
+//
+// Falls back to fuzzy (completion_tokens, ts ± window) match when no
+// exact-id candidate is found, or when an exact-id hit is ambiguous
+// (multiple candidates from the gateway's composite
+// `(account_id, request_id)` PK; #229 R3).
 //
 // Phase A goals (what I1 actually catches):
 //   - "harness success but gateway/coord has no matching row" — billing
@@ -29,6 +42,22 @@ import (
 	"github.com/augstar/macprovider-network-harness/internal/scenario"
 
 	_ "modernc.org/sqlite"
+)
+
+// matchWindow is the per-request temporal tolerance for accepting a
+// candidate row as a match for a harness observation. Used by both
+// exact-id and fuzzy paths so they cannot silently diverge. The
+// reconciler's SQL snapshot pads the run window by 30s; this tighter
+// per-request window further constrains which rows are eligible.
+const matchWindow = 60 * time.Second
+const matchWindowMs = int64(matchWindow / time.Millisecond)
+
+// Match-method labels persisted on MatchedPair. Kept as private
+// typed-string consts so tests and future helpers can reference them
+// without retyping the literal.
+const (
+	methodExactID = "exact_id"
+	methodFuzzy   = "fuzzy_token_ts"
 )
 
 type Result struct {
@@ -132,22 +161,65 @@ type Result struct {
 	AbsGatewayCoordinatorMismatchTokens int64    `json:"abs_gateway_coordinator_mismatch_tokens"`
 	GatewayCoordMismatchedPairs         []string `json:"gateway_coord_mismatched_pairs,omitempty"`
 
+	// HarnessAccountID is the account_id consensus from the first
+	// exact-id gateway hit. The harness is one buyer = one account, but
+	// the gateway/coord DBs contain rows for every buyer; the consensus
+	// pins the matcher to that account and prevents a foreign-account
+	// row from consuming a match by id collision alone. Empty when no
+	// row carried a non-empty account_id (legacy snapshot).
+	HarnessAccountID string `json:"harness_account_id,omitempty"`
+
+	// Schema flags from the snapshot's PRAGMA table_info probe.
+	// When true, queryGateway / queryCoordinator confirmed the
+	// column exists, so the matcher must treat per-row blanks as
+	// missing data rather than "legacy noop". When false, the column
+	// is absent from the whole snapshot (pre-migration) — the matcher
+	// relaxes the account constraint to maintain rollout compatibility.
+	GatewayHasAccountID bool `json:"gateway_has_account_id,omitempty"`
+	CoordHasAccountID   bool `json:"coord_has_account_id,omitempty"`
+
+	// ReconcileError records a fatal error during reconciliation when
+	// the harness configured DBs but couldn't reach them or query them.
+	// I1 hard-fails when this is non-empty even if every other drift
+	// signal is zero — the audit pipeline must not silently pass when
+	// it didn't actually reconcile. Distinct from `Notes`, which is
+	// soft-signal triage detail.
+	ReconcileError string `json:"reconcile_error,omitempty"`
+
+	// AmbiguousExactGatewayIDs holds harness request_ids where the
+	// gateway exact-id pool returned ≥2 candidates after window +
+	// account filters. Treated as a HARD I1 signal — the matcher does
+	// NOT fall back to unrestricted fuzzy on ambiguity. Either the
+	// gateway echoed a colliding id (PK collision across accounts) or
+	// the snapshot somehow contains two settled rows for the same id;
+	// both demand triage rather than silent attribution.
+	AmbiguousExactGatewayIDs []string `json:"ambiguous_exact_gateway_ids,omitempty"`
+	AmbiguousExactCoordIDs   []string `json:"ambiguous_exact_coord_ids,omitempty"`
+
 	// Notes records discoveries that don't fit a drift count but matter
 	// for triage — e.g. extra rows attributable to background traffic.
 	Notes []string `json:"notes,omitempty"`
 }
 
-// MatchedPair records a fuzzy match between a harness request and the
-// gateway+coordinator rows it most likely produced. Phase B triage uses
-// these to spot patterns (large ts gaps, persistent token drift, etc.).
+// MatchedPair records a matched pair (harness ↔ gateway[, coord]).
+// matchPairs tries exact-id correlation first and falls back to a
+// token+ts fuzzy heuristic; GatewayMatchMethod / CoordinatorMatchMethod
+// record which path produced each side. Phase B triage uses these to
+// spot patterns (a run dominated by fuzzy matches signals a
+// header-propagation issue; a `gateway_lag_ms` outlier on a fuzzy match
+// signals attribution drift).
 type MatchedPair struct {
 	HarnessRequestID            string `json:"harness_request_id"`
 	HarnessCompletionTokens     int64  `json:"harness_completion_tokens"`
 	GatewayRequestID            string `json:"gateway_request_id"`
+	GatewayAccountID            string `json:"gateway_account_id,omitempty"`
 	GatewayCompletionTokens     int64  `json:"gateway_completion_tokens"`
 	GatewayOutcome              string `json:"gateway_outcome"` // "ok" or SPEC-006 §17.7 fallback name; distinguishes coord-missing severity
+	GatewayMatchMethod          string `json:"gateway_match_method,omitempty"` // "exact_id" | "fuzzy_token_ts"
 	CoordinatorRequestID        string `json:"coordinator_request_id,omitempty"`
+	CoordinatorAccountID        string `json:"coordinator_account_id,omitempty"`
 	CoordinatorCompletionTokens int64  `json:"coordinator_completion_tokens"`
+	CoordinatorMatchMethod      string `json:"coordinator_match_method,omitempty"` // "exact_id" | "fuzzy_token_ts"
 	GatewayLagMs                int64  `json:"gateway_lag_ms"`
 }
 
@@ -186,14 +258,16 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 	}
 	defer cleanupG()
 
-	coordRows, err := queryCoordinator(coordPath, winStart, winEnd)
+	coordRows, coordHasAcct, err := queryCoordinator(coordPath, winStart, winEnd)
 	if err != nil {
 		return r, fmt.Errorf("coordinator query: %w", err)
 	}
-	gwRows, err := queryGateway(gwPath, winStart, winEnd)
+	gwRows, gwHasAcct, err := queryGateway(gwPath, winStart, winEnd)
 	if err != nil {
 		return r, fmt.Errorf("gateway query: %w", err)
 	}
+	r.GatewayHasAccountID = gwHasAcct
+	r.CoordHasAccountID = coordHasAcct
 
 	r.CoordinatorRows = len(coordRows)
 	for _, c := range coordRows {
@@ -222,7 +296,7 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 	}
 
 	r.DriftBasis = "per_matched_pair_v2"
-	leftoverGw, leftoverCoord := matchByFuzzy(r, results, gwRows, coordRows)
+	leftoverGw, leftoverCoord := matchPairs(r, results, gwRows, coordRows)
 	computePerPairDrift(r)
 	collectUnmatchedGatewayOK(r, leftoverGw)
 	collectUnmatchedCoord2xx(r, leftoverCoord)
@@ -317,14 +391,14 @@ func computePerPairDrift(r *Result) {
 }
 
 // collectUnmatchedGatewayOK lists gateway rows with outcome="ok" that
-// matchByFuzzy did NOT consume into a MatchedSuccesses pair. These are
+// matchPairs did NOT consume into a MatchedSuccesses pair. These are
 // either orphan gateway settlements (real bugs — gateway billed for a
 // request the harness never fired) or concurrent background traffic
 // from other buyers. Triage decides. Fallback-outcome leftovers are
 // EXCLUDED because they are noisy on a live network where streams can
 // truncate without involving the harness.
 //
-// IMPORTANT: this takes the leftover gwPool returned by matchByFuzzy,
+// IMPORTANT: this takes the leftover gwPool returned by matchPairs,
 // not the original gwRows. The pool is identity-tracked by slice
 // position, NOT by request_id, so we never accidentally mark a duplicate
 // (account_id, request_id) row consumed (#229 R3 security HIGH).
@@ -338,7 +412,7 @@ func collectUnmatchedGatewayOK(r *Result, leftoverGw []gwRow) {
 }
 
 // collectUnmatchedCoord2xx surfaces coord request_log rows with 2xx
-// status that matchByFuzzy did NOT consume. Symmetric with the
+// status that matchPairs did NOT consume. Symmetric with the
 // gateway-ok orphan path: a coord row representing a settled request
 // with no harness/gateway counterpart is either orphan/leaked or
 // concurrent buyer traffic. I1 must fail on these — without this
@@ -353,24 +427,41 @@ func collectUnmatchedCoord2xx(r *Result, leftoverCoord []coordRow) {
 	}
 }
 
-// matchByFuzzy pairs each harness success with the most likely gateway
-// row by (model, completion_tokens, ts proximity) and then with the
-// most likely coordinator row by (model, completion_tokens, ts proximity).
-// Once a row is consumed by a match, it's removed from the pool so the
-// next harness request can't re-match the same DB row.
+// matchPairs pairs each harness success with the gateway row (and
+// where applicable a coordinator row) it actually produced. Strategy
+// per side, in order:
+//   1. exact id — gateway request_id == harness id, or coord
+//      external_request_id == harness id. Requires a single
+//      settlement-complete candidate inside the per-request 60s window
+//      and matching account_id (when schema has the column).
+//   2. fuzzy (token+ts) — the legacy heuristic, used ONLY when exact-id
+//      yields zero candidates (exactPickNone).
 //
-// Returns the leftover gateway pool — rows that did NOT consume into a
-// match. Callers use this to detect orphan/leaked settlement rows
-// directly from row identity, NOT from request_id (which the gateway
-// schema does not guarantee globally unique under the composite PK
-// `(account_id, request_id)`; #229 R3 security HIGH).
-func matchByFuzzy(r *Result, results []buyer.Result, gwRows []gwRow, coordRows []coordRow) ([]gwRow, []coordRow) {
+// Ambiguity (≥2 surviving exact-id candidates) is NOT a fuzzy
+// fallback — it's a hard signal recorded in r.AmbiguousExactGatewayIDs
+// / r.AmbiguousExactCoordIDs, and the harness row is left unmatched.
+// Without this gate, R2 fuzzy fallback could still pick an unrelated
+// row by token+ts coincidence (R2 audit security HIGH).
+//
+// Each MatchedPair records which strategy ran for each side
+// (GatewayMatchMethod / CoordinatorMatchMethod). Once a row is consumed
+// by a match, it's removed from the pool so the next harness request
+// can't re-match the same row.
+//
+// Returns the leftover gateway and coordinator pools — rows that did
+// NOT consume into a match. Callers use the leftover pools to detect
+// orphan/leaked settlement rows via slice identity, NOT request_id
+// (gateway PK is composite `(account_id, request_id)`; #229 R3
+// security HIGH).
+func matchPairs(r *Result, results []buyer.Result, gwRows []gwRow, coordRows []coordRow) ([]gwRow, []coordRow) {
 	gwPool := make([]gwRow, len(gwRows))
 	copy(gwPool, gwRows)
 	coordPool := make([]coordRow, len(coordRows))
 	copy(coordPool, coordRows)
 
-	// Walk harness successes in the order they completed.
+	// Walk harness successes in the order they completed. We sort once
+	// and reuse the ordering across both passes to keep pair attribution
+	// deterministic.
 	type harnessIdx struct {
 		idx int
 		res buyer.Result
@@ -385,55 +476,281 @@ func matchByFuzzy(r *Result, results []buyer.Result, gwRows []gwRow, coordRows [
 		return ordered[i].res.EndUTC.Before(ordered[j].res.EndUTC)
 	})
 
+	// Two-pass matching: exact-only first to establish consensus,
+	// fuzzy second over deferred items.
+	deferredResults := make([]buyer.Result, 0, len(ordered))
 	for _, h := range ordered {
-		gwIdx := pickClosestGw(&gwPool, h.res)
-		pair := MatchedPair{
-			HarnessRequestID:        h.res.RequestID,
-			HarnessCompletionTokens: h.res.CompletionTokensReceived,
-		}
-		if gwIdx >= 0 {
-			g := gwPool[gwIdx]
-			pair.GatewayRequestID = g.RequestID
-			pair.GatewayCompletionTokens = g.CompletionTokens
-			pair.GatewayOutcome = g.Outcome
-			pair.GatewayLagMs = g.CreatedAt.Sub(h.res.StartUTC).Milliseconds()
-			gwPool = append(gwPool[:gwIdx], gwPool[gwIdx+1:]...)
-		} else {
-			r.UnmatchedSuccesses = append(r.UnmatchedSuccesses, h.res.RequestID)
-			continue
-		}
-		// Only attempt a coord match when the gateway settled as "ok".
-		// SPEC-006 §17.7 fallback outcomes (stream_truncated, etc.)
-		// legitimately lack a coord row (provider died mid-stream), so
-		// pulling one in would (a) consume a coord row that a later
-		// real "ok" pair needs, and (b) misattribute a token mismatch
-		// to a fallback pair where coord disagreement is expected.
-		// This avoids the false I1 failure mode flagged on PR #229 R4.
-		if isGatewayOKOutcome(pair.GatewayOutcome) {
-			if coordIdx := pickClosestCoord(&coordPool, h.res); coordIdx >= 0 {
-				c := coordPool[coordIdx]
-				pair.CoordinatorRequestID = c.RequestID
-				pair.CoordinatorCompletionTokens = c.CompletionTokens
-				coordPool = append(coordPool[:coordIdx], coordPool[coordIdx+1:]...)
-			}
-		}
-		r.MatchedSuccesses = append(r.MatchedSuccesses, pair)
+		deferredResults = append(deferredResults, h.res)
 	}
+	stillDeferred := matchExactPass(r, deferredResults, &gwPool, &coordPool)
+	matchFuzzyPass(r, stillDeferred, &gwPool, &coordPool)
 	return gwPool, coordPool
 }
 
-func pickClosestGw(pool *[]gwRow, h buyer.Result) int {
+// exactPickStatus distinguishes "no exact candidate" from "ambiguous"
+// so the caller can decide between fuzzy fallback and skipping the row
+// with a hard signal.
+type exactPickStatus int
+
+const (
+	// exactPickNone — no exact-id candidate survived the filters.
+	// Caller should fall back to fuzzy.
+	exactPickNone exactPickStatus = iota
+	// exactPickFound — exactly one candidate survived. Use it.
+	exactPickFound
+	// exactPickAmbiguous — ≥2 candidates survived (same id, same
+	// window, same account constraint). Caller MUST NOT fuzzy-pick;
+	// emit ambiguity signal and leave the row unmatched.
+	exactPickAmbiguous
+)
+
+// matchExactPass is pass 1 of matchPairs: walk every harness success
+// and try ONLY pickExactGw / pickExactCoord. Successful exact-id hits
+// build MatchedPairs immediately and pin r.HarnessAccountID. Ambiguity
+// surfaces as a hard signal and marks the row unmatched. Items with no
+// exact-id candidate are returned for pass 2 to fuzzy-fallback.
+//
+// Pass 1 deliberately avoids fuzzy because, on a modern account-aware
+// snapshot, fuzzy without consensus could consume a foreign-account
+// row by token-proximity coincidence and pin consensus to the wrong
+// account (R5 audit code/architect HIGH).
+func matchExactPass(r *Result, ordered []buyer.Result, gwPool *[]gwRow, coordPool *[]coordRow) []buyer.Result {
+	var deferred []buyer.Result
+	for _, h := range ordered {
+		gwIdx, gwStatus := pickExactGwByRequestID(gwPool, h, r.HarnessAccountID, r.GatewayHasAccountID)
+		if gwStatus == exactPickAmbiguous {
+			r.AmbiguousExactGatewayIDs = append(r.AmbiguousExactGatewayIDs, h.RequestID)
+			r.UnmatchedSuccesses = append(r.UnmatchedSuccesses, h.RequestID)
+			continue
+		}
+		if gwStatus != exactPickFound {
+			deferred = append(deferred, h)
+			continue
+		}
+		g := (*gwPool)[gwIdx]
+		pair := MatchedPair{
+			HarnessRequestID:        h.RequestID,
+			HarnessCompletionTokens: h.CompletionTokensReceived,
+			GatewayMatchMethod:      methodExactID,
+			GatewayRequestID:        g.RequestID,
+			GatewayAccountID:        g.AccountID,
+			GatewayCompletionTokens: g.CompletionTokens,
+			GatewayOutcome:          g.Outcome,
+			GatewayLagMs:            g.CreatedAt.Sub(h.StartUTC).Milliseconds(),
+		}
+		*gwPool = append((*gwPool)[:gwIdx], (*gwPool)[gwIdx+1:]...)
+		// Pin consensus from the first exact-id hit with a non-empty
+		// account_id. Legacy snapshots (account_id absent) leave it
+		// empty — the schema flag in rowAccountIDMatches makes that a
+		// noop on the constraint.
+		if r.HarnessAccountID == "" && g.AccountID != "" {
+			r.HarnessAccountID = g.AccountID
+		}
+		attachCoord(r, &pair, h, coordPool, true /* exactOnly: pass 1 also gates coord to exact-id */)
+		r.MatchedSuccesses = append(r.MatchedSuccesses, pair)
+	}
+	return deferred
+}
+
+// matchFuzzyPass is pass 2 of matchPairs: walk items that pass 1
+// deferred and try the fuzzy heuristic. Consensus (r.HarnessAccountID)
+// is now whatever pass 1 established. pickClosestGw / pickClosestCoord
+// enforce account equality through rowAccountIDMatches, AND refuse to
+// match entirely on a modern snapshot with no consensus (every
+// deferred item then surfaces in UnmatchedSuccesses).
+func matchFuzzyPass(r *Result, deferred []buyer.Result, gwPool *[]gwRow, coordPool *[]coordRow) {
+	for _, h := range deferred {
+		gwIdx := pickClosestGw(gwPool, h, r.HarnessAccountID, r.GatewayHasAccountID)
+		if gwIdx < 0 {
+			r.UnmatchedSuccesses = append(r.UnmatchedSuccesses, h.RequestID)
+			continue
+		}
+		g := (*gwPool)[gwIdx]
+		pair := MatchedPair{
+			HarnessRequestID:        h.RequestID,
+			HarnessCompletionTokens: h.CompletionTokensReceived,
+			GatewayMatchMethod:      methodFuzzy,
+			GatewayRequestID:        g.RequestID,
+			GatewayAccountID:        g.AccountID,
+			GatewayCompletionTokens: g.CompletionTokens,
+			GatewayOutcome:          g.Outcome,
+			GatewayLagMs:            g.CreatedAt.Sub(h.StartUTC).Milliseconds(),
+		}
+		*gwPool = append((*gwPool)[:gwIdx], (*gwPool)[gwIdx+1:]...)
+		attachCoord(r, &pair, h, coordPool, false /* allow fuzzy on coord */)
+		r.MatchedSuccesses = append(r.MatchedSuccesses, pair)
+	}
+}
+
+// attachCoord populates the coord side of a pair from the coordPool
+// when the gateway settled as "ok" (SPEC-006 §17.7 fallback outcomes
+// legitimately lack a coord row — PR #229 R4). On pass 1 (exactOnly),
+// only the exact-id picker runs; on pass 2, fuzzy fallback is allowed.
+func attachCoord(r *Result, pair *MatchedPair, h buyer.Result, coordPool *[]coordRow, exactOnly bool) {
+	if !isGatewayOKOutcome(pair.GatewayOutcome) {
+		return
+	}
+	coordIdx, coordStatus := pickExactCoordByRequestID(coordPool, h, r.HarnessAccountID, r.CoordHasAccountID)
+	if coordStatus == exactPickAmbiguous {
+		r.AmbiguousExactCoordIDs = append(r.AmbiguousExactCoordIDs, h.RequestID)
+		// Leave coord fields empty — computePerPairDrift will surface in MatchedCoordMissing.
+		return
+	}
+	if coordStatus == exactPickFound {
+		c := (*coordPool)[coordIdx]
+		pair.CoordinatorRequestID = c.RequestID
+		pair.CoordinatorAccountID = c.AccountID
+		pair.CoordinatorCompletionTokens = c.CompletionTokens
+		pair.CoordinatorMatchMethod = methodExactID
+		*coordPool = append((*coordPool)[:coordIdx], (*coordPool)[coordIdx+1:]...)
+		return
+	}
+	if exactOnly {
+		return
+	}
+	if fuzzyIdx := pickClosestCoord(coordPool, h, r.HarnessAccountID, r.CoordHasAccountID); fuzzyIdx >= 0 {
+		c := (*coordPool)[fuzzyIdx]
+		pair.CoordinatorRequestID = c.RequestID
+		pair.CoordinatorAccountID = c.AccountID
+		pair.CoordinatorCompletionTokens = c.CompletionTokens
+		pair.CoordinatorMatchMethod = methodFuzzy
+		*coordPool = append((*coordPool)[:fuzzyIdx], (*coordPool)[fuzzyIdx+1:]...)
+	}
+}
+
+// rowAccountIDMatches centralizes the schema-aware account check used
+// by every picker. Logic, in priority order:
+//   1. schema lacks the column → legacy snapshot, constraint is a
+//      global noop (rollout compatibility). Accept regardless of
+//      consensus state.
+//   2. schema has the column but the row value is empty (NULL/blank)
+//      → unconditionally REJECT, EVEN ON BOOTSTRAP (no consensus yet).
+//      We cannot prove this row belongs to the harness's buyer; the
+//      first match would otherwise pin consensus to a phantom account
+//      and corrupt every subsequent match (R4 audit security HIGH).
+//   3. consensus not yet pinned → accept (the first non-empty row's
+//      account_id becomes the consensus in matchPairs).
+//   4. consensus pinned → require equality with the row's account_id.
+//
+// This shape ensures that on modern (account_id-present) snapshots, an
+// attacker cannot bootstrap consensus through a NULL-account row.
+func rowAccountIDMatches(rowAcct, requireAccountID string, schemaHasAccountID bool) bool {
+	if !schemaHasAccountID {
+		return true
+	}
+	if rowAcct == "" {
+		return false
+	}
+	if requireAccountID == "" {
+		return true
+	}
+	return rowAcct == requireAccountID
+}
+
+// pickExactGwByRequestID returns (idx, status) for the gateway pool.
+// A candidate must:
+//   - have a non-empty harness id,
+//   - be settlement-complete,
+//   - carry the harness's RequestID,
+//   - fall inside the per-request matchWindow (defense against stale /
+//     cross-window id collisions even when the SQL snapshot is wider),
+//   - have a matching account_id when the harness's account consensus
+//     is established (defense against cross-account id collisions on a
+//     shared gateway; gateway PK is composite (account_id, request_id)
+//     per ISS-196).
+//
+// One survivor → exactPickFound.  Two or more → exactPickAmbiguous
+// (caller must NOT fall back to unrestricted fuzzy).  None →
+// exactPickNone (caller falls back to fuzzy).
+func pickExactGwByRequestID(pool *[]gwRow, h buyer.Result, requireAccountID string, schemaHasAccountID bool) (int, exactPickStatus) {
+	if h.RequestID == "" {
+		return -1, exactPickNone
+	}
+	hit := -1
+	for i, g := range *pool {
+		if !isSettlementComplete(g.Outcome) {
+			continue
+		}
+		if g.RequestID != h.RequestID {
+			continue
+		}
+		if absInt64(g.CreatedAt.Sub(h.EndUTC).Milliseconds()) > matchWindowMs {
+			continue
+		}
+		if !rowAccountIDMatches(g.AccountID, requireAccountID, schemaHasAccountID) {
+			continue
+		}
+		if hit >= 0 {
+			return -1, exactPickAmbiguous
+		}
+		hit = i
+	}
+	if hit < 0 {
+		return -1, exactPickNone
+	}
+	return hit, exactPickFound
+}
+
+// pickExactCoordByRequestID is the coord-side analog. The id join is on
+// external_request_id (NOT internal request_id); account_id is
+// enforced symmetrically.
+func pickExactCoordByRequestID(pool *[]coordRow, h buyer.Result, requireAccountID string, schemaHasAccountID bool) (int, exactPickStatus) {
+	if h.RequestID == "" {
+		return -1, exactPickNone
+	}
+	hit := -1
+	for i, c := range *pool {
+		if c.Status < 200 || c.Status >= 300 {
+			continue
+		}
+		if c.ExternalRequestID != h.RequestID {
+			continue
+		}
+		if absInt64(c.TsUTC.Sub(h.StartUTC).Milliseconds()) > matchWindowMs {
+			continue
+		}
+		if !rowAccountIDMatches(c.AccountID, requireAccountID, schemaHasAccountID) {
+			continue
+		}
+		if hit >= 0 {
+			return -1, exactPickAmbiguous
+		}
+		hit = i
+	}
+	if hit < 0 {
+		return -1, exactPickNone
+	}
+	return hit, exactPickFound
+}
+
+// pickClosestGw is the fuzzy fallback when exact-id yielded
+// exactPickNone. It enforces the same window + account constraints as
+// the exact picker so cross-account/cross-window rows can't sneak in
+// via the heuristic.
+//
+// On a modern (account_id-aware) snapshot with no consensus pinned,
+// pickClosestGw refuses to match — a token+ts heuristic without
+// account anchoring could otherwise consume a foreign-account row
+// and corrupt every downstream pair (R5 audit code/architect HIGH).
+// Items refused here surface in UnmatchedSuccesses upstream.
+func pickClosestGw(pool *[]gwRow, h buyer.Result, requireAccountID string, schemaHasAccountID bool) int {
+	if schemaHasAccountID && requireAccountID == "" {
+		return -1
+	}
 	best := -1
 	bestScore := int64(-1)
 	for i, g := range *pool {
 		if !isSettlementComplete(g.Outcome) {
 			continue
 		}
+		if !rowAccountIDMatches(g.AccountID, requireAccountID, schemaHasAccountID) {
+			continue
+		}
 		// Model is not in usage_events on gateway side (verified live
 		// 2026-06-27 — only request_id + tokens + outcome). We match
 		// only by (completion_tokens, ts proximity).
 		dt := absInt64(g.CreatedAt.Sub(h.EndUTC).Milliseconds())
-		if dt > 60_000 {
+		if dt > matchWindowMs {
 			continue
 		}
 		tokenDiff := absInt64(g.CompletionTokens - h.CompletionTokensReceived)
@@ -447,18 +764,27 @@ func pickClosestGw(pool *[]gwRow, h buyer.Result) int {
 	return best
 }
 
-func pickClosestCoord(pool *[]coordRow, h buyer.Result) int {
+// pickClosestCoord is the coord fuzzy fallback, with the same
+// account + window constraints as pickClosestGw — including the
+// modern-schema-no-consensus refuse.
+func pickClosestCoord(pool *[]coordRow, h buyer.Result, requireAccountID string, schemaHasAccountID bool) int {
+	if schemaHasAccountID && requireAccountID == "" {
+		return -1
+	}
 	best := -1
 	bestScore := int64(-1)
 	for i, c := range *pool {
 		if c.Status < 200 || c.Status >= 300 {
 			continue
 		}
+		if !rowAccountIDMatches(c.AccountID, requireAccountID, schemaHasAccountID) {
+			continue
+		}
 		if c.Model != "" && h.Model != "" && c.Model != h.Model {
 			continue
 		}
 		dt := absInt64(c.TsUTC.Sub(h.StartUTC).Milliseconds())
-		if dt > 60_000 {
+		if dt > matchWindowMs {
 			continue
 		}
 		tokenDiff := absInt64(c.CompletionTokens - h.CompletionTokensReceived)
@@ -512,7 +838,21 @@ func isSettlementComplete(outcome string) bool {
 }
 
 type coordRow struct {
-	RequestID        string
+	// RequestID is the coordinator's internal id; it is NEVER equal to
+	// the inbound X-Request-ID and is unsafe to join across services
+	// (phase4-coordinator/internal/requestlog/store.go:34-46). For
+	// cross-service correlation use ExternalRequestID, the
+	// gateway-issued id that the coord echoes from
+	// X-Request-ID on the inbound request.
+	RequestID         string
+	ExternalRequestID string
+	// AccountID is the buyer's stable account identifier. Per SPEC-002
+	// the reconciliation join key is (account_id, external_request_id);
+	// matching on external_request_id alone can hit a cross-account row
+	// on a shared gateway/coord. Empty string means the source DB
+	// pre-dates the column (legacy snapshot) — the matcher treats that
+	// as a noop on the account constraint.
+	AccountID        string
 	Model            string
 	CompletionTokens int64
 	Status           int
@@ -520,66 +860,143 @@ type coordRow struct {
 }
 
 type gwRow struct {
-	RequestID        string
+	RequestID string
+	// AccountID is the buyer's stable account identifier. usage_events
+	// PK is composite (account_id, request_id); matching on request_id
+	// alone can hit a cross-account row on a shared gateway. Empty
+	// string means the snapshot pre-dates the column (legacy / partial
+	// migration), in which case the matcher treats it as a noop.
+	AccountID        string
 	CompletionTokens int64
 	Outcome          string
 	CreatedAt        time.Time
 }
 
-func queryCoordinator(path string, start, end time.Time) ([]coordRow, error) {
+// queryCoordinator returns coordinator rows + a schema flag reporting
+// whether the request_log.account_id column exists in this snapshot.
+// Callers thread the flag through the matcher: column present → blank
+// per-row account_ids are real data (NULL = unknown buyer; matcher
+// skips), column absent → constraint is a global noop.
+func queryCoordinator(path string, start, end time.Time) ([]coordRow, bool, error) {
 	db, err := openRO(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer db.Close()
-	rows, err := db.Query(`
-		SELECT request_id, model, COALESCE(completion_tokens, 0), status, ts_utc
+	// SELECT external_request_id and account_id when the columns exist.
+	// Schema flags are returned to the matcher so it can distinguish
+	// "column absent globally" (legacy snapshot → relax constraint)
+	// from "column present but this row's value is NULL/blank"
+	// (real missing data → matcher must NOT cross-account-match).
+	hasExt, err := columnExists(db, "request_log", "external_request_id")
+	if err != nil {
+		return nil, false, fmt.Errorf("probe request_log.external_request_id: %w", err)
+	}
+	hasAcct, err := columnExists(db, "request_log", "account_id")
+	if err != nil {
+		return nil, false, fmt.Errorf("probe request_log.account_id: %w", err)
+	}
+	extExpr := "''"
+	if hasExt {
+		extExpr = "COALESCE(external_request_id, '')"
+	}
+	acctExpr := "''"
+	if hasAcct {
+		acctExpr = "COALESCE(account_id, '')"
+	}
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT request_id, %s, %s, model, COALESCE(completion_tokens, 0), status, ts_utc
 		FROM request_log
 		WHERE ts_utc >= ? AND ts_utc <= ?
-	`, start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
+	`, extExpr, acctExpr), start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []coordRow
 	for rows.Next() {
 		var c coordRow
 		var ts string
-		if err := rows.Scan(&c.RequestID, &c.Model, &c.CompletionTokens, &c.Status, &ts); err != nil {
-			return nil, err
+		if err := rows.Scan(&c.RequestID, &c.ExternalRequestID, &c.AccountID, &c.Model, &c.CompletionTokens, &c.Status, &ts); err != nil {
+			return nil, false, err
 		}
 		c.TsUTC, _ = time.Parse(time.RFC3339Nano, ts)
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	return out, hasAcct, rows.Err()
 }
 
-func queryGateway(path string, start, end time.Time) ([]gwRow, error) {
+// columnExists reports whether a column exists on a table via
+// PRAGMA table_info, used by the reconcile queries to stay
+// backward-compatible with older coord/gateway schemas that lack
+// account_id and/or external_request_id (added by ALTER TABLE
+// migrations).
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			typ     string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// queryGateway returns gateway usage_events rows + a schema flag
+// reporting whether the usage_events.account_id column exists in the
+// snapshot. Same shape as queryCoordinator.
+func queryGateway(path string, start, end time.Time) ([]gwRow, bool, error) {
 	db, err := openRO(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer db.Close()
-	rows, err := db.Query(`
-		SELECT request_id, completion_tokens, outcome, created_at
+	// SELECT account_id alongside request_id when the column exists.
+	// usage_events PK is composite (account_id, request_id) per
+	// ISS-196; older snapshots pre-date the migration. Same
+	// schema-tolerance shape as queryCoordinator.
+	hasAcct, err := columnExists(db, "usage_events", "account_id")
+	if err != nil {
+		return nil, false, fmt.Errorf("probe usage_events.account_id: %w", err)
+	}
+	acctExpr := "''"
+	if hasAcct {
+		acctExpr = "COALESCE(account_id, '')"
+	}
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT request_id, %s, completion_tokens, outcome, created_at
 		FROM usage_events
 		WHERE created_at >= ? AND created_at <= ?
-	`, start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
+	`, acctExpr), start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []gwRow
 	for rows.Next() {
 		var g gwRow
 		var ts string
-		if err := rows.Scan(&g.RequestID, &g.CompletionTokens, &g.Outcome, &ts); err != nil {
-			return nil, err
+		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.CompletionTokens, &g.Outcome, &ts); err != nil {
+			return nil, false, err
 		}
 		g.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
 		out = append(out, g)
 	}
-	return out, rows.Err()
+	return out, hasAcct, rows.Err()
 }
 
 func openRO(path string) (*sql.DB, error) {

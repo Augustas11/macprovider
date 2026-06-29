@@ -154,6 +154,60 @@ func TestCheckI1_NetZeroButHiddenOverbill_Fails(t *testing.T) {
 	}
 }
 
+// TestCheckI1_ReconcileError_Fails is the R3 audit code HIGH
+// regression: when reconcile.Run errored, the harness sets
+// ReconcileError. I1 must hard-fail on that signal independently of
+// the drift counters, otherwise a snapshot-failure run with zero
+// successes (and zero per-pair signals) would pass green.
+func TestCheckI1_ReconcileError_Fails(t *testing.T) {
+	ledger := &reconcile.Result{
+		ReconcileError: "coordinator query: no such column: account_id",
+	}
+	c := checkI1(ledger)
+	if c.Passed {
+		t.Fatal("reconcile error must fail I1 closed")
+	}
+	if c.Skipped {
+		t.Fatal("reconcile error must FAIL, not SKIP — fail-closed money-path gate")
+	}
+	if !strings.Contains(c.Detail, "reconcile errored") {
+		t.Errorf("detail should call out reconcile error: %s", c.Detail)
+	}
+}
+
+// TestCheckI1_AmbiguousExactGatewayIDs_Fails is the R2 audit HIGH
+// regression: ambiguous exact-id MUST fail I1, not silently fall to
+// fuzzy. Even one ambiguous id is hard evidence of cross-account PK
+// collision or duplicate settlement.
+func TestCheckI1_AmbiguousExactGatewayIDs_Fails(t *testing.T) {
+	ledger := &reconcile.Result{
+		AmbiguousExactGatewayIDs: []string{"AMBIG_GW"},
+	}
+	c := checkI1(ledger)
+	if c.Passed {
+		t.Fatal("ambiguous exact-id must fail I1")
+	}
+	if !contains(c.OffendingIDs, "AMBIG_GW") {
+		t.Errorf("offending ids should include ambiguous id, got %v", c.OffendingIDs)
+	}
+	if !strings.Contains(c.Detail, "ambiguities") {
+		t.Errorf("detail should call out ambiguity, got: %s", c.Detail)
+	}
+}
+
+func TestCheckI1_AmbiguousExactCoordIDs_Fails(t *testing.T) {
+	ledger := &reconcile.Result{
+		AmbiguousExactCoordIDs: []string{"AMBIG_COORD"},
+	}
+	c := checkI1(ledger)
+	if c.Passed {
+		t.Fatal("ambiguous coord exact-id must fail I1")
+	}
+	if !contains(c.OffendingIDs, "AMBIG_COORD") {
+		t.Errorf("offending should include ambiguous coord id, got %v", c.OffendingIDs)
+	}
+}
+
 func contains(s []string, want string) bool {
 	for _, v := range s {
 		if v == want {

@@ -162,7 +162,7 @@ func TestComputePerPairDrift_UnderbillNotFlagged(t *testing.T) {
 }
 
 // TestCollectUnmatchedGatewayOK takes a leftover gateway pool (what
-// matchByFuzzy did NOT consume) and surfaces only the "ok"-outcome
+// matchPairs did NOT consume) and surfaces only the "ok"-outcome
 // rows. Fallback outcomes and not-ok are noise on a live network.
 func TestCollectUnmatchedGatewayOK(t *testing.T) {
 	now := time.Now()
@@ -232,12 +232,12 @@ func TestCollectUnmatchedCoord2xx_R5HIGH(t *testing.T) {
 	}
 }
 
-// TestMatchByFuzzy_FallbackDoesntStealCoord_R4HIGH is the regression
+// TestMatchPairs_FallbackDoesntStealCoord_R4HIGH is the regression
 // for the R4 audit finding: a fallback gateway row paired with a
 // harness success could consume a nearby coord row that a later "ok"
 // pair needed, producing a false MatchedCoordMissing on the ok pair.
 // The fix: only call pickClosestCoord when the gateway outcome is "ok".
-func TestMatchByFuzzy_FallbackDoesntStealCoord_R4HIGH(t *testing.T) {
+func TestMatchPairs_FallbackDoesntStealCoord_R4HIGH(t *testing.T) {
 	now := time.Now()
 	// 2 harness successes, both with 8 tokens. Gateway has one fallback
 	// row (stream_truncated, 8 tokens, earlier) and one ok row (8 tokens,
@@ -255,7 +255,7 @@ func TestMatchByFuzzy_FallbackDoesntStealCoord_R4HIGH(t *testing.T) {
 		{Outcome: "ok", CompletionTokensReceived: 8, EndUTC: now.Add(time.Millisecond), StartUTC: now.Add(time.Millisecond), RequestID: "h_ok"},
 	}
 	r := &Result{}
-	matchByFuzzy(r, results, gwRows, coordRows)
+	matchPairs(r, results, gwRows, coordRows)
 	if len(r.MatchedSuccesses) != 2 {
 		t.Fatalf("want 2 pairs, got %d", len(r.MatchedSuccesses))
 	}
@@ -280,14 +280,14 @@ func TestMatchByFuzzy_FallbackDoesntStealCoord_R4HIGH(t *testing.T) {
 	}
 }
 
-// TestMatchByFuzzy_DuplicateRequestID_R3HIGH is the regression for the
+// TestMatchPairs_DuplicateRequestID_R3HIGH is the regression for the
 // R3 security HIGH: gateway PK is (account_id, request_id), so the
 // same request_id can legitimately appear twice across accounts. The
 // pre-R3 collectUnmatchedGatewayOK used request_id matching against
 // MatchedSuccesses, which would mark BOTH rows consumed when only one
-// was actually paired. R3 changed matchByFuzzy to return the leftover
+// was actually paired. R3 changed matchPairs to return the leftover
 // pool directly, so identity is per-slice-element, not per-request_id.
-func TestMatchByFuzzy_DuplicateRequestID_R3HIGH(t *testing.T) {
+func TestMatchPairs_DuplicateRequestID_R3HIGH(t *testing.T) {
 	now := time.Now()
 	gwRows := []gwRow{
 		{RequestID: "X", Outcome: "ok", CompletionTokens: 10, CreatedAt: now},
@@ -298,7 +298,7 @@ func TestMatchByFuzzy_DuplicateRequestID_R3HIGH(t *testing.T) {
 		{Outcome: "ok", CompletionTokensReceived: 10, EndUTC: now, RequestID: "h1"},
 	}
 	r := &Result{}
-	leftover, _ := matchByFuzzy(r, results, gwRows, nil)
+	leftover, _ := matchPairs(r, results, gwRows, nil)
 	if len(r.MatchedSuccesses) != 1 {
 		t.Fatalf("want 1 matched pair, got %d", len(r.MatchedSuccesses))
 	}
@@ -308,6 +308,531 @@ func TestMatchByFuzzy_DuplicateRequestID_R3HIGH(t *testing.T) {
 	collectUnmatchedGatewayOK(r, leftover)
 	if len(r.UnmatchedGatewayOKRows) != 1 {
 		t.Errorf("duplicate-request_id: orphan must be detected via leftover pool, got %v", r.UnmatchedGatewayOKRows)
+	}
+}
+
+// TestMatchPairs_ExactIDWinsOverFuzzy is the regression for the v0.3
+// scenario-07 finding: harness SSE parser undercounted 2 of 39 requests
+// to 0 tokens, and pickClosestGw's tokenDiff*100_000 + dt scoring
+// snapped the harness 0-token rows onto a different gateway row that
+// happened to have low tokens, leaving the gateway-OK rows to drift
+// 55+s onto wrong harness requests. Cross-check showed pair 1's matched
+// gateway_request_id literally equaled pair 3's harness_request_id. The
+// fix prefers exact request_id (gateway echoes it via X-Request-Id
+// response header, loadgen.go:199) before falling back to token+ts
+// fuzzy.
+func TestMatchPairs_ExactIDWinsOverFuzzy(t *testing.T) {
+	now := time.Now()
+	// Harness h_A undercounted to 0 tokens (SSE parser missed deltas).
+	// Gateway row for h_A is "gw_A" with 36 tokens. Another gateway row
+	// "gw_B" with 0 tokens exists for a different harness request h_B.
+	// Pre-fix: pickClosestGw would snap h_A onto gw_B (exact 0=0 match);
+	// post-fix: exact request_id match snaps h_A onto gw_A.
+	gwRows := []gwRow{
+		{RequestID: "gw_A", Outcome: "ok", CompletionTokens: 36, CreatedAt: now},
+		{RequestID: "gw_B", Outcome: "ok", CompletionTokens: 0, CreatedAt: now.Add(time.Millisecond)},
+	}
+	results := []buyer.Result{
+		{Outcome: "ok", CompletionTokensReceived: 0, EndUTC: now, StartUTC: now, RequestID: "gw_A"},
+		{Outcome: "ok", CompletionTokensReceived: 0, EndUTC: now.Add(time.Millisecond), StartUTC: now.Add(time.Millisecond), RequestID: "gw_B"},
+	}
+	r := &Result{}
+	matchPairs(r, results, gwRows, nil)
+	if len(r.MatchedSuccesses) != 2 {
+		t.Fatalf("want 2 pairs, got %d", len(r.MatchedSuccesses))
+	}
+	for _, p := range r.MatchedSuccesses {
+		if p.HarnessRequestID != p.GatewayRequestID {
+			t.Errorf("exact-id match failed: harness=%s gateway=%s", p.HarnessRequestID, p.GatewayRequestID)
+		}
+	}
+}
+
+// TestMatchPairs_ExactIDPrefersOverFallback: when a harness request's
+// exact gateway counterpart is a fallback row (e.g. stream_truncated),
+// the matcher must still prefer the exact-id row over fuzzing onto a
+// different OK row that happens to have a closer token count. Without
+// this, the production #226 shape causes phantom OK pairs.
+func TestMatchPairs_ExactIDPrefersOverFallback(t *testing.T) {
+	now := time.Now()
+	gwRows := []gwRow{
+		{RequestID: "h1", Outcome: "stream_truncated", CompletionTokens: 64, CreatedAt: now},
+		{RequestID: "h2", Outcome: "ok", CompletionTokens: 0, CreatedAt: now.Add(time.Millisecond)},
+	}
+	results := []buyer.Result{
+		{Outcome: "ok", CompletionTokensReceived: 0, EndUTC: now, StartUTC: now, RequestID: "h1"},
+	}
+	r := &Result{}
+	matchPairs(r, results, gwRows, nil)
+	if len(r.MatchedSuccesses) != 1 {
+		t.Fatalf("want 1 pair, got %d", len(r.MatchedSuccesses))
+	}
+	p := r.MatchedSuccesses[0]
+	if p.GatewayRequestID != "h1" {
+		t.Errorf("want exact-id match h1 (fallback) over fuzz to h2 (ok), got gw=%s outcome=%s", p.GatewayRequestID, p.GatewayOutcome)
+	}
+	if p.GatewayOutcome != "stream_truncated" {
+		t.Errorf("want fallback outcome preserved, got %s", p.GatewayOutcome)
+	}
+}
+
+// TestMatchPairs_FallsBackToFuzzyWhenNoExact: legacy gateways that
+// don't echo X-Request-Id (or rows missing from the snapshot window)
+// must still match via the token+ts heuristic.
+func TestMatchPairs_FallsBackToFuzzyWhenNoExact(t *testing.T) {
+	now := time.Now()
+	gwRows := []gwRow{
+		{RequestID: "legacy_gw_uuid", Outcome: "ok", CompletionTokens: 10, CreatedAt: now},
+	}
+	results := []buyer.Result{
+		{Outcome: "ok", CompletionTokensReceived: 10, EndUTC: now, StartUTC: now, RequestID: "harness_native_id"},
+	}
+	r := &Result{}
+	matchPairs(r, results, gwRows, nil)
+	if len(r.MatchedSuccesses) != 1 || r.MatchedSuccesses[0].GatewayRequestID != "legacy_gw_uuid" {
+		t.Errorf("fuzzy fallback should still match when no exact id, got %+v", r.MatchedSuccesses)
+	}
+}
+
+// TestPickExactGwByRequestID_SkipsIncompleteSettlement: in-flight row
+// (no outcome) must not match by exact-id.
+func TestPickExactGwByRequestID_SkipsIncompleteSettlement(t *testing.T) {
+	now := time.Now()
+	pool := []gwRow{
+		{RequestID: "x", Outcome: "", CompletionTokens: 0, CreatedAt: now},
+		{RequestID: "x", Outcome: "ok", CompletionTokens: 8, CreatedAt: now},
+	}
+	idx, status := pickExactGwByRequestID(&pool, buyer.Result{RequestID: "x", EndUTC: now}, "", false)
+	if status != exactPickFound || idx != 1 {
+		t.Errorf("want (1, found), got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactGwByRequestID_EmptyIDReturnsNone: defensive — empty
+// harness id → exactPickNone (caller falls back to fuzzy).
+func TestPickExactGwByRequestID_EmptyIDReturnsNone(t *testing.T) {
+	now := time.Now()
+	pool := []gwRow{{RequestID: "", Outcome: "ok", CompletionTokens: 0, CreatedAt: now}}
+	idx, status := pickExactGwByRequestID(&pool, buyer.Result{RequestID: "", EndUTC: now}, "", false)
+	if status != exactPickNone || idx != -1 {
+		t.Errorf("want (-1, none), got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactCoordByRequestID_SkipsNon2xx + joins on external_request_id.
+func TestPickExactCoordByRequestID_SkipsNon2xx(t *testing.T) {
+	now := time.Now()
+	pool := []coordRow{
+		{RequestID: "coord-internal-1", ExternalRequestID: "x", Status: 503, CompletionTokens: 0, TsUTC: now},
+		{RequestID: "coord-internal-2", ExternalRequestID: "x", Status: 200, CompletionTokens: 8, TsUTC: now},
+	}
+	idx, status := pickExactCoordByRequestID(&pool, buyer.Result{RequestID: "x", StartUTC: now}, "", false)
+	if status != exactPickFound || idx != 1 {
+		t.Errorf("want (1, found), got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactCoordByRequestID_JoinsOnExternalIDNotInternalID is the
+// regression for the R1 code-lane HIGH: coord.request_id is internal
+// and NEVER equals the inbound X-Request-ID. Cross-service join key is
+// external_request_id (phase4-coordinator/internal/requestlog/store.go:34-46).
+func TestPickExactCoordByRequestID_JoinsOnExternalIDNotInternalID(t *testing.T) {
+	now := time.Now()
+	pool := []coordRow{
+		{RequestID: "harness-id", ExternalRequestID: "different-external", Status: 200, CompletionTokens: 8, TsUTC: now},
+		{RequestID: "coord-internal", ExternalRequestID: "harness-id", Status: 200, CompletionTokens: 16, TsUTC: now},
+	}
+	idx, status := pickExactCoordByRequestID(&pool, buyer.Result{RequestID: "harness-id", StartUTC: now}, "", false)
+	if status != exactPickFound || idx != 1 {
+		t.Errorf("must join on ExternalRequestID — want (1, found), got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactGwByRequestID_RejectsAmbiguity is the regression for the
+// R1 security HIGH: gateway PK is (account_id, request_id); ambiguity
+// must surface as a distinct status (exactPickAmbiguous), NOT silently
+// fall back to fuzzy which would let an unrelated row consume the
+// match (R2 audit HIGH).
+func TestPickExactGwByRequestID_RejectsAmbiguity(t *testing.T) {
+	now := time.Now()
+	pool := []gwRow{
+		{RequestID: "x", Outcome: "ok", CompletionTokens: 10, CreatedAt: now},
+		{RequestID: "x", Outcome: "ok", CompletionTokens: 999, CreatedAt: now},
+	}
+	idx, status := pickExactGwByRequestID(&pool, buyer.Result{RequestID: "x", EndUTC: now}, "", false)
+	if status != exactPickAmbiguous || idx != -1 {
+		t.Errorf("want (-1, ambiguous), got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactCoordByRequestID_RejectsAmbiguity: same on coord side.
+func TestPickExactCoordByRequestID_RejectsAmbiguity(t *testing.T) {
+	now := time.Now()
+	pool := []coordRow{
+		{RequestID: "c1", ExternalRequestID: "x", Status: 200, CompletionTokens: 8, TsUTC: now},
+		{RequestID: "c2", ExternalRequestID: "x", Status: 200, CompletionTokens: 999, TsUTC: now},
+	}
+	idx, status := pickExactCoordByRequestID(&pool, buyer.Result{RequestID: "x", StartUTC: now}, "", false)
+	if status != exactPickAmbiguous || idx != -1 {
+		t.Errorf("want (-1, ambiguous), got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactGwByRequestID_EnforcesTimeWindow — stale row rejected.
+func TestPickExactGwByRequestID_EnforcesTimeWindow(t *testing.T) {
+	now := time.Now()
+	stale := now.Add(-2 * time.Minute)
+	pool := []gwRow{
+		{RequestID: "x", Outcome: "ok", CompletionTokens: 10, CreatedAt: stale},
+	}
+	idx, status := pickExactGwByRequestID(&pool, buyer.Result{RequestID: "x", EndUTC: now}, "", false)
+	if status != exactPickNone || idx != -1 {
+		t.Errorf("stale row must be rejected — want (-1, none), got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactCoordByRequestID_EnforcesTimeWindow: same on coord.
+func TestPickExactCoordByRequestID_EnforcesTimeWindow(t *testing.T) {
+	now := time.Now()
+	stale := now.Add(-2 * time.Minute)
+	pool := []coordRow{
+		{RequestID: "c1", ExternalRequestID: "x", Status: 200, CompletionTokens: 8, TsUTC: stale},
+	}
+	idx, status := pickExactCoordByRequestID(&pool, buyer.Result{RequestID: "x", StartUTC: now}, "", false)
+	if status != exactPickNone || idx != -1 {
+		t.Errorf("stale coord row must be rejected — want (-1, none), got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactGwByRequestID_EnforcesAccountConsensus is the regression
+// for the R2 code/security HIGH: the gateway PK is composite
+// `(account_id, request_id)`. On a shared gateway, a row from a
+// foreign account can carry the same request_id; the matcher must
+// reject it when a consensus account_id is established.
+func TestPickExactGwByRequestID_EnforcesAccountConsensus(t *testing.T) {
+	now := time.Now()
+	pool := []gwRow{
+		{RequestID: "x", Outcome: "ok", AccountID: "other_account", CompletionTokens: 10, CreatedAt: now},
+		{RequestID: "x", Outcome: "ok", AccountID: "harness_account", CompletionTokens: 20, CreatedAt: now},
+	}
+	idx, status := pickExactGwByRequestID(&pool, buyer.Result{RequestID: "x", EndUTC: now}, "harness_account", true)
+	if status != exactPickFound || idx != 1 {
+		t.Errorf("want (1, found) for harness_account, got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactGwByRequestID_LegacyNoColumnIsNoop: a pre-migration
+// snapshot (schemaHasAccountID=false) → constraint is a global noop,
+// even with consensus set. Row's empty AccountID is meaningless
+// because the column isn't real on this snapshot. Verifies the
+// rollout-safety leg of rowAccountIDMatches (R4).
+func TestPickExactGwByRequestID_LegacyNoColumnIsNoop(t *testing.T) {
+	now := time.Now()
+	pool := []gwRow{
+		{RequestID: "x", Outcome: "ok", AccountID: "", CompletionTokens: 10, CreatedAt: now},
+	}
+	idx, status := pickExactGwByRequestID(&pool, buyer.Result{RequestID: "x", EndUTC: now}, "harness_account", false /* legacy snapshot */)
+	if status != exactPickFound || idx != 0 {
+		t.Errorf("legacy snapshot (no account_id column) → constraint noop — want (0, found), got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactGwByRequestID_ModernEmptyAccountRejectedAtBootstrap is
+// the R4 audit security/architect HIGH regression: even before
+// consensus is pinned (requireAccountID == ""), a modern-schema
+// blank-account row MUST be rejected. R4 had the empty-consensus
+// shortcut first, so the bootstrap row could be a phantom-account
+// match that then pinned the wrong consensus for the rest of the run.
+func TestPickExactGwByRequestID_ModernEmptyAccountRejectedAtBootstrap(t *testing.T) {
+	now := time.Now()
+	pool := []gwRow{
+		{RequestID: "x", Outcome: "ok", AccountID: "", CompletionTokens: 10, CreatedAt: now},
+	}
+	idx, status := pickExactGwByRequestID(&pool, buyer.Result{RequestID: "x", EndUTC: now}, "" /* bootstrap — no consensus yet */, true /* modern */)
+	if status != exactPickNone || idx != -1 {
+		t.Errorf("modern schema + blank account row at bootstrap → must be rejected — want (-1, none), got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactGwByRequestID_ModernSchemaEmptyAccountIsRejected is the
+// R3 audit security HIGH regression: when the schema HAS the
+// account_id column but the row's value is empty (real NULL/blank),
+// the matcher cannot prove same buyer → MUST skip the row. Earlier
+// (R3) wrongly treated this as a noop.
+func TestPickExactGwByRequestID_ModernSchemaEmptyAccountIsRejected(t *testing.T) {
+	now := time.Now()
+	pool := []gwRow{
+		{RequestID: "x", Outcome: "ok", AccountID: "", CompletionTokens: 10, CreatedAt: now},
+	}
+	idx, status := pickExactGwByRequestID(&pool, buyer.Result{RequestID: "x", EndUTC: now}, "harness_account", true /* modern snapshot */)
+	if status != exactPickNone || idx != -1 {
+		t.Errorf("modern snapshot + empty row account_id → must skip — want (-1, none), got (%d, %v)", idx, status)
+	}
+}
+
+// TestPickExactCoordByRequestID_EnforcesAccountConsensus: same on coord.
+func TestPickExactCoordByRequestID_EnforcesAccountConsensus(t *testing.T) {
+	now := time.Now()
+	pool := []coordRow{
+		{ExternalRequestID: "x", AccountID: "other", Status: 200, CompletionTokens: 10, TsUTC: now},
+		{ExternalRequestID: "x", AccountID: "harness_account", Status: 200, CompletionTokens: 20, TsUTC: now},
+	}
+	idx, status := pickExactCoordByRequestID(&pool, buyer.Result{RequestID: "x", StartUTC: now}, "harness_account", true)
+	if status != exactPickFound || idx != 1 {
+		t.Errorf("want (1, found) for harness_account, got (%d, %v)", idx, status)
+	}
+}
+
+// TestMatchPairs_AmbiguityDoesNotConsumeViaFuzzy is the R2-HIGH
+// regression: when exact-id is ambiguous (≥2 candidates), the matcher
+// must NOT fall through to unrestricted fuzzy where an unrelated row
+// could consume the match. The harness row stays unmatched, the
+// ambiguity surfaces as a hard signal, and the candidate rows stay
+// in the leftover pool.
+func TestMatchPairs_AmbiguityDoesNotConsumeViaFuzzy(t *testing.T) {
+	now := time.Now()
+	gwRows := []gwRow{
+		// Two same-id candidates (cross-account collision on a shared gw).
+		{RequestID: "h1", Outcome: "ok", AccountID: "A", CompletionTokens: 8, CreatedAt: now},
+		{RequestID: "h1", Outcome: "ok", AccountID: "B", CompletionTokens: 999, CreatedAt: now},
+		// An unrelated row whose token count would be a "good" fuzzy
+		// hit for the harness row. Pre-fix, fuzzy fallback would have
+		// consumed THIS row after the ambiguous exact-id reject.
+		{RequestID: "unrelated", Outcome: "ok", AccountID: "C", CompletionTokens: 8, CreatedAt: now},
+	}
+	results := []buyer.Result{
+		{Outcome: "ok", CompletionTokensReceived: 8, EndUTC: now, StartUTC: now, RequestID: "h1"},
+	}
+	r := &Result{}
+	leftover, _ := matchPairs(r, results, gwRows, nil)
+	if len(r.AmbiguousExactGatewayIDs) != 1 || r.AmbiguousExactGatewayIDs[0] != "h1" {
+		t.Errorf("want ambiguous id surfaced, got %v", r.AmbiguousExactGatewayIDs)
+	}
+	if len(r.UnmatchedSuccesses) != 1 {
+		t.Errorf("ambiguous harness row must stay unmatched, got %v", r.UnmatchedSuccesses)
+	}
+	if len(r.MatchedSuccesses) != 0 {
+		t.Errorf("no pairs should match, got %d", len(r.MatchedSuccesses))
+	}
+	if len(leftover) != 3 {
+		t.Errorf("all 3 gateway rows must stay in leftover, got %d", len(leftover))
+	}
+}
+
+// TestMatchPairs_AccountConsensusPinnedFromFirstExactID: the first
+// exact-id gateway hit pins r.HarnessAccountID; subsequent matches
+// reject foreign-account rows even when they have a matching id.
+func TestMatchPairs_AccountConsensusPinnedFromFirstExactID(t *testing.T) {
+	now := time.Now()
+	gwRows := []gwRow{
+		// First harness request pins consensus to "acct_harness".
+		{RequestID: "h1", Outcome: "ok", AccountID: "acct_harness", CompletionTokens: 10, CreatedAt: now},
+		// Second harness id matches a foreign-account row only.
+		{RequestID: "h2", Outcome: "ok", AccountID: "acct_other", CompletionTokens: 10, CreatedAt: now.Add(time.Millisecond)},
+	}
+	results := []buyer.Result{
+		{Outcome: "ok", CompletionTokensReceived: 10, EndUTC: now, StartUTC: now, RequestID: "h1"},
+		{Outcome: "ok", CompletionTokensReceived: 10, EndUTC: now.Add(time.Millisecond), StartUTC: now.Add(time.Millisecond), RequestID: "h2"},
+	}
+	r := &Result{GatewayHasAccountID: true}
+	matchPairs(r, results, gwRows, nil)
+	if r.HarnessAccountID != "acct_harness" {
+		t.Errorf("want consensus pinned to acct_harness, got %q", r.HarnessAccountID)
+	}
+	if len(r.MatchedSuccesses) != 1 || r.MatchedSuccesses[0].HarnessRequestID != "h1" {
+		t.Errorf("only h1 should match (h2's only candidate is foreign-account), got %d pairs", len(r.MatchedSuccesses))
+	}
+	if len(r.UnmatchedSuccesses) != 1 || r.UnmatchedSuccesses[0] != "h2" {
+		t.Errorf("h2 must be unmatched, got %v", r.UnmatchedSuccesses)
+	}
+}
+
+// TestMatchPairs_FuzzyRefusedOnModernSchemaWithoutConsensus is the
+// R5-HIGH regression: with the two-pass matcher (R6), fuzzy fallback
+// must NEVER run on a modern (account_id-aware) snapshot when
+// consensus is empty. Pre-R6, the first harness row with no exact
+// gateway counterpart could fuzzy-match a foreign-account row by
+// token-proximity and pin consensus to the wrong account.
+//
+// Setup: harness has a single result with a harness-prefix RequestID
+// the gateway didn't echo. The gateway has ONE row from a foreign
+// account with a matching token count. On modern schema, fuzzy must
+// refuse — the harness row stays unmatched, consensus stays empty.
+func TestMatchPairs_FuzzyRefusedOnModernSchemaWithoutConsensus(t *testing.T) {
+	now := time.Now()
+	gwRows := []gwRow{
+		{RequestID: "foreign_uuid", Outcome: "ok", AccountID: "acct_attacker", CompletionTokens: 8, CreatedAt: now},
+	}
+	results := []buyer.Result{
+		{Outcome: "ok", CompletionTokensReceived: 8, EndUTC: now, StartUTC: now, RequestID: "harness-prefix-id"},
+	}
+	r := &Result{GatewayHasAccountID: true}
+	leftover, _ := matchPairs(r, results, gwRows, nil)
+	if r.HarnessAccountID != "" {
+		t.Errorf("consensus must remain empty (no exact-id hit pinned it), got %q", r.HarnessAccountID)
+	}
+	if len(r.MatchedSuccesses) != 0 {
+		t.Errorf("no fuzzy match should occur — got %d pairs", len(r.MatchedSuccesses))
+	}
+	if len(r.UnmatchedSuccesses) != 1 || r.UnmatchedSuccesses[0] != "harness-prefix-id" {
+		t.Errorf("harness row must be unmatched, got %v", r.UnmatchedSuccesses)
+	}
+	if len(leftover) != 1 {
+		t.Errorf("foreign-account row stays in leftover (orphan signal), got %d", len(leftover))
+	}
+}
+
+// TestMatchPairs_TwoPassOrderRescuesEarlyDeferral verifies the
+// two-pass shape rescues an early harness row whose exact-id failed:
+// pass 1 defers it; a later harness row's exact-id pins consensus;
+// pass 2 then fuzzy-matches the deferred row.
+//
+// Without the second pass, harness rows would be processed in
+// arrival order with no chance to rescue early items once consensus
+// is later established.
+func TestMatchPairs_TwoPassOrderRescuesEarlyDeferral(t *testing.T) {
+	t0 := time.Now()
+	t1 := t0.Add(10 * time.Millisecond)
+	gwRows := []gwRow{
+		// Will be fuzzy-matched to h_early — same account, same tokens, close ts.
+		{RequestID: "gw_unrelated_uuid", Outcome: "ok", AccountID: "acct_harness", CompletionTokens: 8, CreatedAt: t0},
+		// Exact match for h_late — pins consensus.
+		{RequestID: "h_late", Outcome: "ok", AccountID: "acct_harness", CompletionTokens: 16, CreatedAt: t1},
+	}
+	results := []buyer.Result{
+		// h_early ordered first by EndUTC. Pass 1: no exact-id candidate
+		// (gateway row's request_id is different) → deferred.
+		{Outcome: "ok", CompletionTokensReceived: 8, EndUTC: t0, StartUTC: t0, RequestID: "harness-prefix-early"},
+		// h_late comes second. Pass 1: exact-id match → consensus pinned.
+		{Outcome: "ok", CompletionTokensReceived: 16, EndUTC: t1, StartUTC: t1, RequestID: "h_late"},
+	}
+	r := &Result{GatewayHasAccountID: true}
+	matchPairs(r, results, gwRows, nil)
+	if r.HarnessAccountID != "acct_harness" {
+		t.Errorf("want consensus acct_harness, got %q", r.HarnessAccountID)
+	}
+	if len(r.MatchedSuccesses) != 2 {
+		t.Fatalf("want both pairs matched (early via pass-2 fuzzy, late via pass-1 exact), got %d", len(r.MatchedSuccesses))
+	}
+	methods := map[string]string{}
+	for _, p := range r.MatchedSuccesses {
+		methods[p.HarnessRequestID] = p.GatewayMatchMethod
+	}
+	if methods["h_late"] != methodExactID {
+		t.Errorf("h_late should be exact_id, got %q", methods["h_late"])
+	}
+	if methods["harness-prefix-early"] != methodFuzzy {
+		t.Errorf("harness-prefix-early should be rescued via fuzzy pass 2, got %q", methods["harness-prefix-early"])
+	}
+}
+
+// TestMatchPairs_RecordsMatchMethod: every matched pair records which
+// strategy resolved each side. Architect-lane R1 LOW.
+func TestMatchPairs_RecordsMatchMethod(t *testing.T) {
+	now := time.Now()
+	gwRows := []gwRow{
+		{RequestID: "h_exact", Outcome: "ok", CompletionTokens: 10, CreatedAt: now},
+		{RequestID: "different_id", Outcome: "ok", CompletionTokens: 8, CreatedAt: now.Add(time.Millisecond)},
+	}
+	coordRows := []coordRow{
+		{RequestID: "c1", ExternalRequestID: "h_exact", Status: 200, CompletionTokens: 10, TsUTC: now},
+	}
+	results := []buyer.Result{
+		// First resolves to gateway via exact id, coord via exact id.
+		{Outcome: "ok", CompletionTokensReceived: 10, EndUTC: now, StartUTC: now, RequestID: "h_exact"},
+		// Second has no exact-id counterpart on gateway → fuzzy. No coord
+		// counterpart either → coord method stays empty.
+		{Outcome: "ok", CompletionTokensReceived: 8, EndUTC: now.Add(time.Millisecond), StartUTC: now.Add(time.Millisecond), RequestID: "h_fuzzy"},
+	}
+	r := &Result{}
+	matchPairs(r, results, gwRows, coordRows)
+	if len(r.MatchedSuccesses) != 2 {
+		t.Fatalf("want 2 pairs, got %d", len(r.MatchedSuccesses))
+	}
+	for _, p := range r.MatchedSuccesses {
+		switch p.HarnessRequestID {
+		case "h_exact":
+			if p.GatewayMatchMethod != "exact_id" {
+				t.Errorf("h_exact gateway method: want exact_id, got %q", p.GatewayMatchMethod)
+			}
+			if p.CoordinatorMatchMethod != "exact_id" {
+				t.Errorf("h_exact coord method: want exact_id, got %q", p.CoordinatorMatchMethod)
+			}
+		case "h_fuzzy":
+			if p.GatewayMatchMethod != "fuzzy_token_ts" {
+				t.Errorf("h_fuzzy gateway method: want fuzzy_token_ts, got %q", p.GatewayMatchMethod)
+			}
+			// No coord candidate at all → method empty (no attempt path).
+			if p.CoordinatorMatchMethod != "" {
+				t.Errorf("h_fuzzy no-coord-candidate: want empty, got %q", p.CoordinatorMatchMethod)
+			}
+		}
+	}
+}
+
+// TestMatchPairs_MixedExactAndFuzzyPool integrates both strategies in a
+// single pool: one harness request consumes via exact-id, the next via
+// fuzzy fallback from the remaining rows. Architect-lane R1 LOW.
+func TestMatchPairs_MixedExactAndFuzzyPool(t *testing.T) {
+	now := time.Now()
+	gwRows := []gwRow{
+		{RequestID: "h_exact", Outcome: "ok", CompletionTokens: 5, CreatedAt: now},
+		// fuzzy candidate for h2 (no matching id, but token=7 matches harness)
+		{RequestID: "different_id", Outcome: "ok", CompletionTokens: 7, CreatedAt: now.Add(time.Millisecond)},
+	}
+	results := []buyer.Result{
+		{Outcome: "ok", CompletionTokensReceived: 5, EndUTC: now, StartUTC: now, RequestID: "h_exact"},
+		{Outcome: "ok", CompletionTokensReceived: 7, EndUTC: now.Add(time.Millisecond), StartUTC: now.Add(time.Millisecond), RequestID: "h2"},
+	}
+	r := &Result{}
+	leftover, _ := matchPairs(r, results, gwRows, nil)
+	if len(r.MatchedSuccesses) != 2 {
+		t.Fatalf("want 2 pairs, got %d", len(r.MatchedSuccesses))
+	}
+	if len(leftover) != 0 {
+		t.Errorf("both rows should be consumed, got leftover %d", len(leftover))
+	}
+	for _, p := range r.MatchedSuccesses {
+		if p.HarnessRequestID == "h_exact" && p.GatewayMatchMethod != "exact_id" {
+			t.Errorf("h_exact: want exact_id, got %q", p.GatewayMatchMethod)
+		}
+		if p.HarnessRequestID == "h2" && p.GatewayMatchMethod != "fuzzy_token_ts" {
+			t.Errorf("h2: want fuzzy_token_ts, got %q", p.GatewayMatchMethod)
+		}
+	}
+}
+
+// TestMatchPairs_FallbackExactMatchEndToEnd is the R1 code-lane LOW:
+// a harness OK whose exact gateway match is a fallback outcome must
+// (a) match by exact id, (b) NOT count as gateway overbill,
+// (c) NOT trigger MatchedCoordMissing, (d) NOT leak into
+// UnmatchedGatewayOKRows.
+func TestMatchPairs_FallbackExactMatchEndToEnd(t *testing.T) {
+	now := time.Now()
+	gwRows := []gwRow{
+		{RequestID: "h1", Outcome: "stream_truncated", CompletionTokens: 64, CreatedAt: now},
+	}
+	results := []buyer.Result{
+		{Outcome: "ok", CompletionTokensReceived: 8, EndUTC: now, StartUTC: now, RequestID: "h1"},
+	}
+	r := &Result{}
+	leftoverGw, _ := matchPairs(r, results, gwRows, nil)
+	computePerPairDrift(r)
+	collectUnmatchedGatewayOK(r, leftoverGw)
+	if len(r.MatchedSuccesses) != 1 {
+		t.Fatalf("want 1 matched pair, got %d", len(r.MatchedSuccesses))
+	}
+	if r.MatchedSuccesses[0].GatewayMatchMethod != "exact_id" {
+		t.Errorf("want exact_id match on fallback row, got %q", r.MatchedSuccesses[0].GatewayMatchMethod)
+	}
+	if r.GatewayOverbillVsHarnessTokens != 0 {
+		t.Errorf("fallback exact-match must not count as overbill, got %d", r.GatewayOverbillVsHarnessTokens)
+	}
+	if len(r.MatchedCoordMissing) != 0 {
+		t.Errorf("fallback pair must not trigger coord-missing, got %v", r.MatchedCoordMissing)
+	}
+	if len(r.UnmatchedGatewayOKRows) != 0 {
+		t.Errorf("fallback row consumed → no orphan, got %v", r.UnmatchedGatewayOKRows)
 	}
 }
 

@@ -137,9 +137,23 @@ func cmdRun(args []string) error {
 	hasRemoteDBs := sc.Target.CoordinatorDBSSH != "" && sc.Target.GatewayDBSSH != ""
 	switch {
 	case hasLocalDBs || hasRemoteDBs:
+		// Money-path gate: when DBs are configured, the harness asked
+		// for reconciliation. If reconcile.Run errors (DB schema
+		// mismatch, snapshot fetch failure, etc.) we must NOT silently
+		// produce a partial artifact and let invariants run with
+		// ledger=nil — checkI1 would then SKIP, producing a green
+		// run that hides drift. The sentinel ledger sets ReconcileError,
+		// which checkI1 treats as a hard fail signal independent of
+		// the per-pair drift signals.
 		ledger, err = reconcile.Run(sc, results, meta.StartUTC, meta.EndUTC)
 		if err != nil {
-			log.Printf("reconcile: %v (continuing with partial artifact)", err)
+			log.Printf("reconcile: %v (failing I1 closed)", err)
+			ledger = &reconcile.Result{
+				DriftBasis:     "per_matched_pair_v2",
+				WindowStartUTC: meta.StartUTC,
+				WindowEndUTC:   meta.EndUTC,
+				ReconcileError: err.Error(),
+			}
 		}
 	default:
 		log.Printf("reconcile: skipped (no coordinator_db_path/_ssh and gateway_db_path/_ssh in target)")

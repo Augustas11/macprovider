@@ -106,15 +106,21 @@ func TestReceiptKeysReturnsPreviousKeyInGraceWindow(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	current := bytes.Repeat([]byte{0x42}, 32)
 	previous := bytes.Repeat([]byte{0x43}, 32)
-	rotatedAt := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	expiresAt := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
-	registerReceiptKeyProvider(registry, "p1", current, &pool.ReceiptPubkeyPrevious{
+	// Anchor times to `frozen` and register via the time-aware
+	// RegisterAt to keep the test independent of real wall clock.
+	// Originally rotatedAt/expiresAt were hardcoded calendar dates and
+	// registerReceiptKeyProvider() called time.Now() internally; once
+	// real time passed expiresAt the registry filtered the previous
+	// key at registration time, before server.now ever ran (#240).
+	frozen := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	rotatedAt := frozen.Add(-24 * time.Hour)    // 1 day before frozen
+	expiresAt := frozen.Add(6 * 24 * time.Hour) // 6 days after frozen — in grace window
+	registerReceiptKeyProviderAt(registry, "p1", current, &pool.ReceiptPubkeyPrevious{
 		Pubkey:    previous,
 		RotatedAt: rotatedAt,
 		ExpiresAt: expiresAt,
-	})
+	}, frozen)
 	server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
-	frozen := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 	server.now = func() time.Time { return frozen }
 
 	rr := serveReceiptKeys(server, "p1", "198.51.100.2:12345")
@@ -301,6 +307,39 @@ func serveReceiptKeys(server *Server, providerID, remoteAddr string) *httptest.R
 	rr := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rr, req)
 	return rr
+}
+
+// registerReceiptKeyProviderAt is the time-aware variant of
+// registerReceiptKeyProvider for tests that need a controlled clock
+// (e.g. grace-window assertions whose expiresAt would otherwise drift
+// past wall-clock time — #240).
+func registerReceiptKeyProviderAt(registry *pool.Registry, providerID string, receiptPubkey []byte, prev *pool.ReceiptPubkeyPrevious, now time.Time) {
+	assignedID := providerID + "-session"
+	registry.RegisterAt(&pool.Provider{
+		ProviderID:            providerID,
+		AssignedID:            assignedID,
+		Hostname:              providerID + ".local",
+		ModelID:               "model-a",
+		ModelParamsB:          7,
+		RAMGB:                 16,
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 20,
+		EndpointURL:           "https://" + providerID + ".example",
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       now,
+		LastActivityAt:        now,
+		ConnectedAt:           now,
+		BinaryVersion:         "0.1.0",
+		ReceiptPubkey:         append([]byte(nil), receiptPubkey...),
+		ReceiptPubkeyPrev:     cloneTestReceiptPubkeyPrevious(prev),
+	}, nil, now)
+	slotsFree := 1
+	registry.ApplyStateUpdate(providerID, assignedID, pool.StateUpdate{State: pool.StateReady, SlotsFree: &slotsFree, At: now})
 }
 
 func registerReceiptKeyProvider(registry *pool.Registry, providerID string, receiptPubkey []byte, prev *pool.ReceiptPubkeyPrevious) {
