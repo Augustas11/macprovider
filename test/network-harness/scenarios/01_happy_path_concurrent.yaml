@@ -1,0 +1,57 @@
+# 01_happy_path_concurrent.yaml — the network shape we're shipping into
+# beta. Live network has 2 providers serving 2 different models:
+#   mlx-community/Qwen2.5-Coder-7B-Instruct-4bit (provider 1, hash-verified)
+#   mlx-community/Qwen3-32B-4bit                 (provider 2, uncatalogued — this Mac)
+# 5 concurrent buyers each fire 2 requests, prompts rotate across both models.
+#
+# What we want to learn (phase A, descriptive — recorded only):
+#  - Does route_distribution show BOTH providers receiving requests?
+#  - When a buyer asks for model A, does it land on a model-A provider
+#    (not silently re-routed to model B)?
+#  - Are TTFT and tokens/sec consistent across providers, or wildly different?
+#  - Does error_taxonomy reveal any unexpected failure modes?
+#
+# What gets asserted (the 4 hard invariants): all 4 run.
+#
+# Cost estimate (10 requests x 64 max_tokens): order of cents.
+name: happy_path_concurrent
+description: |
+  5 concurrent buyers, each sends 2 sequential non-streaming requests,
+  prompts rotate across the two live models. Validates the "beta day 1"
+  shape: low concurrency, two models, two providers.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - 10 total requests (5 buyers x 2 each).
+   - All should return HTTP 200.
+   - route_distribution should show both providers.
+   - Latency_ms p95 comfortably under request_timeout.
+   - PHASE B TRIAGE: if Qwen3-32B p95 is materially higher (it's a much
+     larger model on Apple Silicon), document that as expected; if
+     unexpectedly slow, dig into provider-side throughput_tps drift.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 5
+  stream: false
+  pattern: constant
+  requests_per_buyer: 2
+
+duration: 180s
+request_timeout: 90s
+silent_hang_threshold: 30s
+
+prompts:
+  - model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+    user: "Reply with exactly the word: alpha."
+    max_tokens: 16
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Reply with exactly the word: bravo."
+    max_tokens: 16

@@ -526,7 +526,7 @@ actor InferenceRelay {
         }
     }
 
-    private static func errorEndFrame(requestID: String, error: APIError, chunksSent: Int) -> [String: Any] {
+    static func errorEndFrame(requestID: String, error: APIError, chunksSent: Int) -> [String: Any] {
         let status: String
         switch error.code {
         case "model_not_loaded", "model_not_found":
@@ -535,16 +535,22 @@ actor InferenceRelay {
             status = "error_context_exceeded"
         case "queue_full":
             status = "error_queue_full"
+        case "malformed_json_response", "json_schema_validation_failed":
+            status = error.code
         default:
             status = "error_internal"
         }
-        return [
+        var frame: [String: Any] = [
             "type": "inference_response_end",
             "request_id": requestID,
             "status": status,
             "chunks_sent": chunksSent,
             "error": error.message,
         ]
+        if error.code == "malformed_json_response" || error.code == "json_schema_validation_failed" {
+            frame["retryable"] = (error.envelope["error"] as? [String: Any])?["retryable"] as? Bool
+        }
+        return frame
     }
 
     private static func sendChunk(

@@ -43,6 +43,8 @@ const (
 	maxToolCallArgumentsBytes         = 1_048_576
 	maxToolCallArgumentsResponseBytes = 2_097_152
 	maxToolCallArgumentsDepth         = 32
+	maxJSONSchemaBytes                = 16_384
+	maxJSONSchemaDepth                = 32
 	maxToolResultBytes                = 256 * 1024
 	maxToolResultsAggregateBytes      = 1_048_576
 	maxChatMessages                   = 256
@@ -50,22 +52,37 @@ const (
 )
 
 var spec018RetryableByCode = map[string]bool{
-	"byte_cap_exceeded":                       false,
-	"response_byte_cap_exceeded":              false,
-	"malformed_tool_call_final_json":          true,
-	"provider_stream_downgraded":              true,
-	"request_body_too_large":                  false,
-	"tool_result_too_large":                   false,
-	"tool_results_aggregate_too_large":        false,
-	"tool_call_arguments_too_large":           false,
-	"tool_call_arguments_aggregate_too_large": false,
-	"messages_too_long":                       false,
-	"too_many_tool_calls":                     false,
-	"invalid_tool_call_id":                    false,
-	"tool_call_id_not_found":                  false,
-	"duplicate_tool_call_id":                  false,
-	"tool_call_result_out_of_order":           false,
-	"unsupported_modelID_for_multi_turn":      false,
+	"byte_cap_exceeded":                                       false,
+	"response_byte_cap_exceeded":                              false,
+	"malformed_tool_call_final_json":                          true,
+	"provider_stream_downgraded":                              true,
+	"json_schema_missing_name":                                false,
+	"json_schema_missing_schema":                              false,
+	"json_schema_invalid_name":                                false,
+	"json_schema_non_strict_unsupported":                      false,
+	"streaming_json_schema_unsupported":                       false,
+	"streaming_json_object_unsupported":                       false,
+	"json_schema_unsupported_keyword":                         false,
+	"json_schema_strict_requires_additional_properties_false": false,
+	"json_schema_strict_requires_all_properties_required":     false,
+	"json_schema_invalid_const_or_enum_type":                  false,
+	"json_schema_too_deep":                                    false,
+	"json_schema_too_large":                                   false,
+	"request_content_encoding_unsupported":                    false,
+	"malformed_json_response":                                 true,
+	"json_schema_validation_failed":                           true,
+	"request_body_too_large":                                  false,
+	"tool_result_too_large":                                   false,
+	"tool_results_aggregate_too_large":                        false,
+	"tool_call_arguments_too_large":                           false,
+	"tool_call_arguments_aggregate_too_large":                 false,
+	"messages_too_long":                                       false,
+	"too_many_tool_calls":                                     false,
+	"invalid_tool_call_id":                                    false,
+	"tool_call_id_not_found":                                  false,
+	"duplicate_tool_call_id":                                  false,
+	"tool_call_result_out_of_order":                           false,
+	"unsupported_modelID_for_multi_turn":                      false,
 }
 
 func spec018Retryable(code string) bool {
@@ -1320,6 +1337,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// preserving the pre-refactor closure's "latest value at fire time"
 	// semantics for what used to be captured outer-scope variables.
 	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID)
+	if !contentEncodingSupported(r.Header.Values("Content-Encoding")) {
+		msg := "v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding` header; compressed request bodies are deferred to v0.2 per §10."
+		rec.logBuyerFailure(http.StatusUnsupportedMediaType, msg)
+		writeErrorWithParam(w, http.StatusUnsupportedMediaType, "request_content_encoding_unsupported", msg, "Content-Encoding")
+		return
+	}
 	maxBodyBytes := s.maxChatBodyBytes
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
@@ -1847,6 +1870,24 @@ func (s *Server) forwardHTTPSequence(
 				respBody, _ = readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 				_ = resp.Body.Close()
 				attempt.ErrorCode = nullUsageProviderErrorCode(respBody)
+				if isSpec019ProviderDetailCode(attempt.ErrorCode) {
+					if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, status, nil, nil, http.StatusText(status), attempt.ErrorCode, state.explicitRetries, nil, billing.FaultBreakerQualifying); err != nil {
+						cancelAttempt()
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+						return dispatchedAttempt{}, false
+					}
+					copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
+					w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+					if w.Header().Get("Content-Type") == "" {
+						w.Header().Set("Content-Type", "application/json")
+					}
+					w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
+					w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
+					w.WriteHeader(status)
+					_, _ = w.Write(respBody)
+					cancelAttempt()
+					return dispatchedAttempt{}, false
+				}
 				// Receipt-bearing null-usage early-return (Round-1
 				// audit H1). Only short-circuit when the retry budget
 				// is genuinely exhausted; otherwise fall through so
@@ -2094,7 +2135,11 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: end.Status}
 				}
 				writeWSEndError(w, end)
-				return wsForwardFailed, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
+				attempt := requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
+				if isSpec019ProviderDetailCode(attempt.ErrorCode) {
+					attempt.FaultFlag = billing.FaultBreakerQualifying
+				}
+				return wsForwardFailed, attempt
 			}
 			if s.zeroTokenFault(end, finishReasonFromChatResponse(body.Bytes())) {
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
@@ -3447,7 +3492,12 @@ func validateChatRequest(body []byte) (chatRequest, int, string, string) {
 	if err := json.Unmarshal(messagesRaw, &req.Messages); err != nil || len(req.Messages) == 0 {
 		return req, http.StatusBadRequest, "invalid_request", "Invalid messages"
 	}
-	if status, code, msg := validateOptionalFields(raw); status != 0 {
+	if v, ok := raw["stream"]; ok {
+		if err := json.Unmarshal(v, &req.Stream); err != nil {
+			return req, http.StatusBadRequest, "invalid_request", "Invalid stream"
+		}
+	}
+	if status, code, msg := validateOptionalFields(raw, req.Stream); status != 0 {
 		return req, status, code, msg
 	}
 	if status, code, msg := validateMessages(req.Messages); status != 0 {
@@ -3455,11 +3505,6 @@ func validateChatRequest(body []byte) (chatRequest, int, string, string) {
 	}
 	if status, code, msg := validateTools(raw, req.Messages); status != 0 {
 		return req, status, code, msg
-	}
-	if v, ok := raw["stream"]; ok {
-		if err := json.Unmarshal(v, &req.Stream); err != nil {
-			return req, http.StatusBadRequest, "invalid_request", "Invalid stream"
-		}
 	}
 	return req, 0, "", ""
 }
@@ -3582,7 +3627,7 @@ func jsonValueStart(raw []byte, keyEnd int) (int, error) {
 	return i, nil
 }
 
-func validateOptionalFields(raw map[string]json.RawMessage) (int, string, string) {
+func validateOptionalFields(raw map[string]json.RawMessage, stream bool) (int, string, string) {
 	if v, ok := raw["max_tokens"]; ok {
 		var n int
 		if err := json.Unmarshal(v, &n); err != nil || n <= 0 {
@@ -3613,14 +3658,224 @@ func validateOptionalFields(raw map[string]json.RawMessage) (int, string, string
 		}
 	}
 	if v, ok := raw["response_format"]; ok {
-		var rf struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(v, &rf); err != nil || (rf.Type != "" && rf.Type != "text" && rf.Type != "json_object") {
-			return http.StatusBadRequest, "invalid_request", "Invalid response_format"
+		if status, code, msg := validateResponseFormatSchema(v, stream); status != 0 {
+			return status, code, msg
 		}
 	}
 	return 0, "", ""
+}
+
+func validateResponseFormatSchema(raw json.RawMessage, stream bool) (int, string, string) {
+	var rf struct {
+		Type       string          `json:"type"`
+		JSONSchema json.RawMessage `json:"json_schema"`
+	}
+	if err := json.Unmarshal(raw, &rf); err != nil {
+		return http.StatusBadRequest, "invalid_request", "Invalid response_format"
+	}
+	switch rf.Type {
+	case "", "text":
+		return 0, "", ""
+	case "json_object":
+		if stream {
+			return http.StatusBadRequest, "streaming_json_object_unsupported", "v0.1.0 does not stream structured `json_object` output; resend with `stream:false`."
+		}
+		return 0, "", ""
+	case "json_schema":
+		if stream {
+			return http.StatusBadRequest, "streaming_json_schema_unsupported", "v0.1.0 does not stream structured `json_schema` output; resend with `stream:false`."
+		}
+	default:
+		return http.StatusBadRequest, "invalid_request", "Invalid response_format"
+	}
+	var spec map[string]json.RawMessage
+	if len(rf.JSONSchema) == 0 || json.Unmarshal(rf.JSONSchema, &spec) != nil {
+		return http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema must be an object"
+	}
+	var name string
+	if rawName, ok := spec["name"]; !ok || json.Unmarshal(rawName, &name) != nil {
+		return http.StatusBadRequest, "json_schema_missing_name", "response_format.json_schema.name is required"
+	}
+	if !validJSONSchemaName(name) {
+		return http.StatusBadRequest, "json_schema_invalid_name", "response_format.json_schema.name must match ^[A-Za-z0-9_-]{1,64}$"
+	}
+	if rawStrict, ok := spec["strict"]; ok {
+		var strict bool
+		if err := json.Unmarshal(rawStrict, &strict); err != nil {
+			return http.StatusBadRequest, "invalid_request", "response_format.json_schema.strict must be boolean"
+		}
+		if !strict {
+			return http.StatusBadRequest, "json_schema_non_strict_unsupported", "Non-strict structured output is unsupported in SPEC-019 v0.1.0"
+		}
+	}
+	rawSchema, ok := spec["schema"]
+	if !ok || len(bytes.TrimSpace(rawSchema)) == 0 || bytes.Equal(bytes.TrimSpace(rawSchema), []byte("null")) {
+		return http.StatusBadRequest, "json_schema_missing_schema", "response_format.json_schema.schema is required"
+	}
+	if len(rawSchema) > maxJSONSchemaBytes {
+		return http.StatusRequestEntityTooLarge, "json_schema_too_large", "response_format.json_schema.schema exceeds 16384 bytes"
+	}
+	if err := validateJSONSchemaRaw(rawSchema, "", 1); err != nil {
+		return err.status, err.code, err.message
+	}
+	return 0, "", ""
+}
+
+type schemaValidationError struct {
+	status  int
+	code    string
+	message string
+}
+
+func validateJSONSchemaRaw(raw json.RawMessage, pointer string, depth int) *schemaValidationError {
+	if depth > maxJSONSchemaDepth {
+		return &schemaValidationError{http.StatusBadRequest, "json_schema_too_deep", "response_format.json_schema.schema exceeds maximum depth"}
+	}
+	var node map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &node); err != nil {
+		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "Schema node must be an object"}
+	}
+	allowed := map[string]bool{"type": true, "properties": true, "required": true, "items": true, "enum": true, "const": true, "additionalProperties": true, "title": true, "description": true}
+	for key := range node {
+		if !allowed[key] {
+			return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "Unsupported JSON Schema keyword " + key}
+		}
+	}
+	var typ string
+	if rawType, ok := node["type"]; !ok || json.Unmarshal(rawType, &typ) != nil || !allowedJSONSchemaType(typ) {
+		return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "Schema node must declare an allowed type"}
+	}
+	if rawConst, ok := node["const"]; ok && !jsonSchemaScalarConforms(rawConst, typ) {
+		return &schemaValidationError{http.StatusBadRequest, "json_schema_invalid_const_or_enum_type", "const value does not conform to schema type"}
+	}
+	if rawEnum, ok := node["enum"]; ok {
+		var values []json.RawMessage
+		if err := json.Unmarshal(rawEnum, &values); err != nil {
+			return &schemaValidationError{http.StatusBadRequest, "json_schema_invalid_const_or_enum_type", "enum must be an array"}
+		}
+		for _, value := range values {
+			if !jsonSchemaScalarConforms(value, typ) {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_invalid_const_or_enum_type", "enum value does not conform to schema type"}
+			}
+		}
+	}
+	switch typ {
+	case "object":
+		var addl bool
+		if rawAddl, ok := node["additionalProperties"]; !ok || json.Unmarshal(rawAddl, &addl) != nil || addl {
+			return &schemaValidationError{http.StatusBadRequest, "json_schema_strict_requires_additional_properties_false", "Strict object schemas require additionalProperties:false"}
+		}
+		if _, ok := node["items"]; ok {
+			return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "items is only allowed on array schemas"}
+		}
+		properties := map[string]json.RawMessage{}
+		if rawProps, ok := node["properties"]; ok {
+			if err := json.Unmarshal(rawProps, &properties); err != nil {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "properties must be an object"}
+			}
+		}
+		requiredSet := map[string]bool{}
+		if rawRequired, ok := node["required"]; ok {
+			var required []string
+			if err := json.Unmarshal(rawRequired, &required); err != nil {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_strict_requires_all_properties_required", "required must be an array of strings"}
+			}
+			for _, key := range required {
+				if _, ok := properties[key]; !ok || requiredSet[key] {
+					return &schemaValidationError{http.StatusBadRequest, "json_schema_strict_requires_all_properties_required", "required entries must uniquely name properties"}
+				}
+				requiredSet[key] = true
+			}
+		}
+		for key, child := range properties {
+			if !requiredSet[key] {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_strict_requires_all_properties_required", "Strict object schemas require every property to be listed in required"}
+			}
+			if err := validateJSONSchemaRaw(child, pointer+"/"+key, depth+1); err != nil {
+				return err
+			}
+		}
+	case "array":
+		child, ok := node["items"]
+		if !ok {
+			return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "Array schemas require items schema"}
+		}
+		for _, keyword := range []string{"properties", "required", "additionalProperties"} {
+			if _, ok := node[keyword]; ok {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", "Object-only schema keyword used on array schema"}
+			}
+		}
+		if err := validateJSONSchemaRaw(child, pointer+"/items", depth+1); err != nil {
+			return err
+		}
+	default:
+		for _, keyword := range []string{"properties", "required", "items", "additionalProperties"} {
+			if _, ok := node[keyword]; ok {
+				return &schemaValidationError{http.StatusBadRequest, "json_schema_unsupported_keyword", keyword + " is not allowed on scalar schemas"}
+			}
+		}
+	}
+	return nil
+}
+
+func validJSONSchemaName(name string) bool {
+	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		b := name[i]
+		if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '_' || b == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func allowedJSONSchemaType(typ string) bool {
+	switch typ {
+	case "object", "array", "string", "number", "integer", "boolean", "null":
+		return true
+	default:
+		return false
+	}
+}
+
+func jsonSchemaScalarConforms(raw json.RawMessage, typ string) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] == '{' || trimmed[0] == '[' {
+		return false
+	}
+	var value any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&value); err != nil {
+		return false
+	}
+	switch typ {
+	case "string":
+		_, ok := value.(string)
+		return ok
+	case "boolean":
+		_, ok := value.(bool)
+		return ok
+	case "null":
+		return value == nil
+	case "number":
+		_, ok := value.(json.Number)
+		return ok
+	case "integer":
+		n, ok := value.(json.Number)
+		if !ok {
+			return false
+		}
+		_, err := strconv.ParseInt(n.String(), 10, 64)
+		return err == nil && !strings.ContainsAny(n.String(), ".eE")
+	case "object", "array":
+		return false
+	default:
+		return false
+	}
 }
 
 func validateMessages(messages []chatMessage) (int, string, string) {
@@ -4688,11 +4943,15 @@ func spec001StatusFromBody(body []byte) string {
 
 func spec001EndStatus(status string) string {
 	switch status {
-	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal":
+	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal", "malformed_json_response", "json_schema_validation_failed":
 		return status
 	default:
 		return ""
 	}
+}
+
+func isSpec019ProviderDetailCode(code string) bool {
+	return code == "malformed_json_response" || code == "json_schema_validation_failed"
 }
 
 func endErrorMessage(end providerws.InferenceResponseEnd) string {
@@ -4844,11 +5103,37 @@ func writeWSEndError(w http.ResponseWriter, end providerws.InferenceResponseEnd)
 		writeError(w, wsEndHTTPStatus(end.Status), "context_exceeds_capacity", "Request exceeds provider context capacity")
 	case "error_model_not_loaded", "error_queue_full":
 		writeError(w, wsEndHTTPStatus(end.Status), "no_provider_available", "Selected provider is not reachable")
+	case "malformed_json_response", "json_schema_validation_failed":
+		writeProviderStructuredOutputError(w, wsEndHTTPStatus(end.Status), end.Status, end.Error, end.Retryable)
 	case "cancelled":
 		return
 	default:
 		writeError(w, wsEndHTTPStatus(end.Status), "provider_error", "Selected provider failed; buyer should retry")
 	}
+}
+
+func writeProviderStructuredOutputError(w http.ResponseWriter, status int, code, message string, retryable *bool) {
+	if message == "" {
+		message = http.StatusText(status)
+	}
+	retry := spec018Retryable(code)
+	if retryable != nil {
+		retry = *retryable
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"message":        message,
+			"type":           spec018ErrorType(code, errorType(status)),
+			"param":          nil,
+			"code":           code,
+			"retryable":      retry,
+			"request_id":     nil,
+			"inference_ran":  true,
+			"settlement_ran": true,
+		},
+	})
 }
 
 func wsEndHTTPStatus(status string) int {
@@ -4894,6 +5179,8 @@ func spec018ErrorType(code, fallback string) string {
 		"tool_call_result_out_of_order", "unsupported_modelID_for_multi_turn":
 		return "invalid_request_error"
 	case "byte_cap_exceeded", "response_byte_cap_exceeded", "malformed_tool_call_final_json":
+		return "upstream_provider_error"
+	case "malformed_json_response", "json_schema_validation_failed":
 		return "upstream_provider_error"
 	case "provider_stream_downgraded":
 		return "api_error"
@@ -5036,6 +5323,10 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeErrorTyped(w, status, errorType(status), code, message)
 }
 
+func writeErrorWithParam(w http.ResponseWriter, status int, code, message, param string) {
+	writeErrorTypedParam(w, status, errorType(status), code, message, param)
+}
+
 func writeRouteError(w http.ResponseWriter, err *routeError) {
 	if err.typ != "" {
 		writeErrorTyped(w, err.status, err.typ, err.code, err.message)
@@ -5045,16 +5336,24 @@ func writeRouteError(w http.ResponseWriter, err *routeError) {
 }
 
 func writeErrorTyped(w http.ResponseWriter, status int, typ, code, message string) {
+	writeErrorTypedParam(w, status, typ, code, message, "")
+}
+
+func writeErrorTypedParam(w http.ResponseWriter, status int, typ, code, message, param string) {
 	w.Header().Set("Content-Type", "application/json")
 	if status == http.StatusTooManyRequests && code == "provisional_quota_exceeded" {
 		w.Header().Set("Retry-After", "3600")
+	}
+	var paramValue any
+	if param != "" {
+		paramValue = param
 	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]any{
 			"message":        message,
 			"type":           typ,
-			"param":          nil,
+			"param":          paramValue,
 			"code":           code,
 			"retryable":      spec018Retryable(code),
 			"request_id":     nil,
@@ -5062,6 +5361,20 @@ func writeErrorTyped(w http.ResponseWriter, status int, typ, code, message strin
 			"settlement_ran": false,
 		},
 	})
+}
+
+func contentEncodingSupported(values []string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	normalized := strings.ToLower(strings.Join(values, ","))
+	normalized = strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, normalized)
+	return normalized == "identity"
 }
 
 func readLimitedBody(r io.Reader, maxBytes int64) ([]byte, error) {

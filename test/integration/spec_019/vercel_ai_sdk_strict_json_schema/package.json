@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "2.0.38",
+    "zod": "^4.0.0"
+  }
+}

@@ -786,6 +786,21 @@ func writeError(w http.ResponseWriter, status int, typ, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "param": nil, "code": code}})
 }
 
+func writeSpec019PreflightError(w http.ResponseWriter, status int, code, message, param string) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]any{
+			"message":        message,
+			"type":           "invalid_request_error",
+			"param":          param,
+			"code":           code,
+			"retryable":      false,
+			"request_id":     nil,
+			"inference_ran":  false,
+			"settlement_ran": false,
+		},
+	})
+}
+
 func copyCleanHeaders(dst, src http.Header) {
 	copyCleanHeadersWithReceipt(dst, src, false)
 }
@@ -899,7 +914,6 @@ func setConcurrencyRateLimitHeaders(w http.ResponseWriter, limit, remaining int,
 // quickly once an in-flight request completes. Bounded so future
 // changes can not accidentally produce huge values.
 const concurrencyRetryAfterSeconds = 1
-
 
 func resetUnix(windowDate string) int64 {
 	t, err := time.Parse("2006-01-02", windowDate)

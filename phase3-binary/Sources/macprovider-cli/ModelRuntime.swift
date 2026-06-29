@@ -397,7 +397,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         try await inferenceGate.withPermit {
             return try await container.perform { context in
-                let input = UserInput(chat: try ToolPromptRenderer.renderMessages(request.messages, modelID: request.model), tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
+                let input = try Self.userInput(for: request)
                 let lmInput = try await context.processor.prepare(input: input)
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             }
@@ -434,7 +434,7 @@ actor ModelRuntime: ModelRuntimeServing {
             let result = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
             }
-            return (result.withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash)), snapshot)
+            return (try Self.validateStructuredCompletion(result, request: request).withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash)), snapshot)
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -451,7 +451,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let input = UserInput(chat: try ToolPromptRenderer.renderMessages(request.messages, modelID: request.model), tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
+                    let input = try Self.userInput(for: request)
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = GenerateParameters(
@@ -474,6 +474,17 @@ actor ModelRuntime: ModelRuntimeServing {
                     try drainCancelled.check()
                     try Task.checkCancellation()
 
+                    guard result.output.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+                        throw APIError(
+                            status: 502,
+                            message: "Model response exceeded 2097152 bytes",
+                            type: "upstream_provider_error",
+                            code: "response_byte_cap_exceeded",
+                            inferenceRan: true,
+                            settlementRan: true
+                        )
+                    }
+
                     let filtered = Self.applyOutputFilters(
                         result.output,
                         stopTokenFilter: stopTokenFilter,
@@ -490,7 +501,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         finishReason = "stop"
                     }
 
-                    return CompletionResult(
+                    return try Self.validateStructuredCompletion(CompletionResult(
                         content: parsed.content,
                         finishReason: finishReason,
                         promptTokens: result.promptTokenCount,
@@ -498,7 +509,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt),
                         toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                         modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
-                    )
+                    ), request: request)
                 }
             }
         }
@@ -537,7 +548,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let input = UserInput(chat: try ToolPromptRenderer.renderMessages(request.messages, modelID: request.model), tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
+                    let input = try Self.userInput(for: request)
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = GenerateParameters(
@@ -883,6 +894,105 @@ actor ModelRuntime: ModelRuntimeServing {
             return (text, [])
         }
         return ("", parsed.toolCalls)
+    }
+
+    private static func userInput(for request: ChatCompletionRequest) throws -> UserInput {
+        let structuredMessages = try StructuredOutputRenderer.prependResponseFormatInstruction(
+            to: request.messages,
+            responseFormat: request.responseFormat,
+            modelID: request.model
+        )
+        return UserInput(
+            chat: try ToolPromptRenderer.renderMessages(structuredMessages, modelID: request.model),
+            tools: Self.mlxToolsForTemplate(from: request.promptSource.tools)
+        )
+    }
+
+    private static func validateStructuredCompletion(_ completion: CompletionResult, request: ChatCompletionRequest) throws -> CompletionResult {
+        if completion.toolCalls?.isEmpty == false {
+            return completion
+        }
+        switch request.responseFormat {
+        case .text:
+            return completion
+        case .jsonObject:
+            _ = try parseStructuredJSONContent(completion.content, requireObjectOrArray: true)
+            return completion
+        case .jsonSchema(let spec):
+            let parsed = try parseStructuredJSONContent(completion.content, requireObjectOrArray: false)
+            do {
+                try JSONSchemaValidator.validateInstance(parsed, against: spec.schema)
+            } catch let error as APIError {
+                throw error
+            } catch {
+                throw APIError(
+                    status: 502,
+                    message: "Schema validation aborted before completion",
+                    type: "upstream_provider_error",
+                    code: "json_schema_validation_failed",
+                    param: "",
+                    inferenceRan: true,
+                    settlementRan: true
+                )
+            }
+            return completion
+        }
+    }
+
+    private static func parseStructuredJSONContent(_ content: String, requireObjectOrArray: Bool) throws -> MacProviderCore.JSONValue {
+        // Whitespace-only output is classified as empty per SPEC-019 §5
+        // empty-content override; this prevents `retryable:true` on
+        // deterministic whitespace-emit failures.
+        guard !content.filter({ !Self.isASCIIStructuredOutputWhitespace($0) }).isEmpty else {
+            throw APIError(
+                status: 502,
+                message: "Model emitted zero tokens for the requested schema; adjust `temperature` / `seed` (for stochastic models), or modify the prompt or schema before retrying — automatic same-request retry will not succeed. If you intended free-form prose, send response_format: {\"type\":\"text\"} or omit the field. Per SPEC-019 v0.1.0, json_object now enforces top-level JSON; this is a breaking change from earlier versions where json_object was a silent no-op.",
+                type: "upstream_provider_error",
+                code: "malformed_json_response",
+                param: "",
+                retryable: false,
+                inferenceRan: true,
+                settlementRan: true
+            )
+        }
+        let parsed: MacProviderCore.JSONValue
+        do {
+            parsed = try StrictJSONParser.parse(content)
+        } catch let error as APIError {
+            throw error
+        } catch {
+            throw APIError(
+                status: 502,
+                message: "Model output was not valid JSON for the requested response_format. If you intended free-form prose, send response_format: {\"type\":\"text\"} or omit the field. Per SPEC-019 v0.1.0, json_object now enforces top-level JSON; this is a breaking change from earlier versions where json_object was a silent no-op.",
+                type: "upstream_provider_error",
+                code: "malformed_json_response",
+                param: "",
+                inferenceRan: true,
+                settlementRan: true
+            )
+        }
+        if requireObjectOrArray {
+            do {
+                try JSONSchemaValidator.validateJSONObjectOrArray(parsed)
+            } catch let error as APIError where error.code == "malformed_json_response" {
+                throw error
+            } catch let error as APIError where error.code == "json_schema_validation_failed" {
+                throw APIError(
+                    status: 502,
+                    message: "Model output JSON exceeds the structured-output depth limit",
+                    type: "upstream_provider_error",
+                    code: "json_schema_validation_failed",
+                    param: error.param ?? "",
+                    inferenceRan: true,
+                    settlementRan: true
+                )
+            }
+        }
+        return parsed
+    }
+
+    private static func isASCIIStructuredOutputWhitespace(_ character: Character) -> Bool {
+        character == " " || character == "\t" || character == "\n" || character == "\r"
     }
 
     static func mlxToolsForTemplate(from value: MacProviderCore.JSONValue?) -> [[String: Any]]? {
