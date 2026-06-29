@@ -427,7 +427,14 @@ pause state through runtime config.
 Available joins:
 
 - `request_id` joins coordinator request/ledger rows to gateway usage,
-  quota, feedback, and audit rows.
+  quota, feedback, and audit rows. **Caveat (post #196):** on the
+  gateway side `request_id` alone is only a logical join key — the
+  physical identity of `usage_events`, `quota_reservations`, and
+  `concurrency_reservations` is the composite `(account_id,
+  request_id)`. The same buyer-supplied `X-Request-ID` MAY appear in
+  rows belonging to different accounts and any join that reconciles
+  gateway rows MUST scope by `(account_id, request_id)` to avoid
+  cross-account contamination. See SPEC-007 § 6.4 v0.2.1 addendum.
 - `provider_id` joins live pool state to provider tokens and ledger rows.  - `account_id` joins gateway accounts,
 identities, keys, usage, quota,
   concurrency, feedback, and audit rows.
@@ -438,6 +445,9 @@ Gaps:
 - **[GAP]** No shared durable `session_id` across gateway, coordinator,
   and provider.
 - **[GAP]** No coordinator-side buyer identity.  - **[GAP]** Demo usage is not tied to a stable account.
+- **[GAP]** Coordinator `request_log` still keys reconciliation by
+  buyer-supplied `external_request_id` alone (no `account_id`
+  scope). Tracked in issue #211.
 
 ## 3. What the operator wants to see
 
@@ -690,6 +700,16 @@ Filters:
 `limit` - `cursor`
 
 `GET /admin/explorer/sessions/{request_id}`
+
+Optional query parameters:
+
+- `account_id` - disambiguator for cross-account `request_id`
+  collisions. Gateway-owned session rows are physically keyed by
+  `(account_id, request_id)` (see SPEC-007 § 6.4 v0.2.1 addendum
+  and #196); `request_id` alone is a logical join key. When the
+  unscoped lookup matches rows from more than one account the
+  endpoint returns `409 ambiguous_request_id` and the operator UI
+  re-issues the request with one of the returned account IDs.
 
 Returns:
 

@@ -1,13 +1,14 @@
 # SPEC-007 - Internal Operator Protocol Explorer
 Dependency lines: depends on `specs/SPEC-002-coordinator.md`, `specs/SPEC-005-billing.md`, `specs/SPEC-006-buyer-api.md`, `specs/SPEC-007-explorer-design.md`, and `specs/SPEC-007-operator-decisions.md`.
 Normative language in this document uses RFC 2119 meanings for MUST, MUST NOT, SHOULD,
-SHOULD NOT, and MAY. SPEC-007 v0.2 defines an internal, read-only,
+SHOULD NOT, and MAY. SPEC-007 v0.2.1 defines an internal, read-only,
 single-operator explorer for the Mac Provider protocol. The explorer is an operator
 cockpit. It is not a public explorer. It is not a control plane. It is not a
 settlement mutator. It is not a parallel analytics store.
 ## 1. Change log
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| v0.2.1 | 2026-06-29 | docs (ISS-212) | Addendum to §6.4 `GET /admin/explorer/sessions/{request_id}` to reflect the gateway composite-PK schema landed in #196: clarified that `(account_id, request_id)` is the physical identity for `usage_events`, `quota_reservations`, and `concurrency_reservations`, and `request_id` alone is only a logical join key; documented the optional `?account_id=<id>` disambiguation query parameter; documented the `409 ambiguous_request_id` response shape with `matched_account_ids[]`; documented the supporting `idx_usage_request ON usage_events(request_id)` index; added §6.1 endpoint-specific-exception note for the OpenAI-compatible 409 envelope; added §6.4 forbidden-fields block; paired update to SPEC-007-explorer-design.md §4.2 and §2.8. Three-lane codex audit findings + R2 disposition in `specs/SPEC-007-r0-2-1-audit.md` (tracking issue follow-ups: bounded `matched_account_ids` + untrusted-input discipline; ambiguity union over feedback/audit). Doc-only; no normative protocol change beyond what #196 already shipped. |
 | triage 2026-06-26 | 2026-06-26 | docs/OPEN_QUESTIONS.md | M-3 through M-12 (deferred-to-v0.3 audit findings) closed as unrecoverable — the underlying audit document was never persisted to the repo and the findings list is not reconstructible from history. If operator-explorer concerns recur, run a fresh audit cycle and number anew. No version bump; no normative change. |
 | v0.2 | 2026-06-01 | operator | resolved B-1 by dropping the explorer bearer env knob and pinning bearer source to `auth.operator_key`; resolved B-2 by making SPEC-005 payout mutation a future payout-rail contract; resolved B-3 with D15 shared gateway admin bearer; resolved M-1 with exact `email` and prefix `email_prefix` semantics; resolved M-2 with per-endpoint window knobs. Deferred to v0.3: M-3 through M-12. Future infra follow-up: coordinator `env:` resolution for `auth.operator_key`. |
 | v0.1 | 2026-06-01 | operator | initial draft against locked decisions D1-D14 |
@@ -1085,6 +1086,15 @@ Allowed common errors:
 - 405 `method_not_allowed`.
 - 408 `query_timeout`.
 - 500 `internal_error`.
+Endpoint-specific error exceptions:
+- § 6.4 `GET /admin/explorer/sessions/{request_id}` MAY return
+  `409 ambiguous_request_id` with an OpenAI-compatible error shape
+  (`error.type`, `error.code`, `error.message`) plus top-level
+  `request_id` and `matched_account_ids` fields. This exception
+  predates and is shaped to match the gateway's OpenAI-compatible
+  error surface so that operator UIs can render a disambiguation
+  picker. The common-envelope `source` and `retryable` fields are
+  omitted on this response.
 Default gateway query timeout is 1500 milliseconds. Maximum gateway query timeout is 5000 milliseconds.
 ### 6.2 `GET /admin/explorer/buyers`
 Method and path:
@@ -1243,16 +1253,66 @@ Method and path:
 - `GET /admin/explorer/sessions/{request_id}`.
 Purpose:
 - Return gateway-owned request context for a completed request.
+Identity model:
+- The physical identity of a gateway-owned request row is the composite
+  `(account_id, request_id)` (see #196). `request_id` alone is a
+  logical join key; the same buyer-supplied `X-Request-ID` MAY appear
+  in `usage_events` rows belonging to different accounts. Operators
+  MUST treat `request_id` as account-scoped when reconciling against
+  gateway storage.
 Path parameters:
 - `request_id`: required string.
 Headers:
 - `Authorization: Bearer <coordinator.operator_key>` is required.
 Query parameters:
-- None.
+- `account_id`: optional string. When supplied, the handler scopes all
+  sub-queries (`usage_events`, `quota_reservations`,
+  `concurrency_reservations`, `feedback_events`, `audit_events`) by
+  `(account_id, request_id)`. When omitted, the handler performs an
+  unscoped lookup; if the unscoped lookup matches rows in more than one
+  account it MUST return `409 ambiguous_request_id` (see ambiguity
+  contract below).
 Window contract:
-- No time window is required because `request_id` is indexed in relevant tables.
+- No time window is required.
+  - For the **scoped path** (`?account_id=` supplied) all child
+    tables use the composite PK `(account_id, request_id)` and the
+    lookup is index-bounded.
+  - For the **unscoped path** (`?account_id=` omitted) only
+    `usage_events` carries a request-id-leading auxiliary index
+    (`idx_usage_request ON usage_events(request_id)`); reservation
+    and event tables (`quota_reservations`,
+    `concurrency_reservations`, `feedback_events`, `audit_events`)
+    are looked up by `request_id` against their composite PK and
+    auxiliary indexes, which can scan a wider range. Operators
+    SHOULD prefer the scoped path when an `account_id` is already
+    known.
 Cursor contract:
 - None.
+Ambiguity contract:
+- If `account_id` is omitted and the unscoped lookup matches rows
+  from more than one `account_id`, the handler MUST respond
+  `409 Conflict` with the following body shape:
+  ```json
+  {
+    "error": {
+      "type": "invalid_request_error",
+      "code": "ambiguous_request_id",
+      "message": "request_id matches multiple accounts; supply ?account_id= to disambiguate"
+    },
+    "request_id": "<request_id>",
+    "matched_account_ids": ["acct_A", "acct_B"]
+  }
+  ```
+- `matched_account_ids` MUST be the set of distinct `account_id`
+  values observed for `request_id` across the three account-keyed
+  source-of-truth tables for a session: `usage_events`,
+  `quota_reservations`, and `concurrency_reservations`. The
+  composite-PK schema permits the same `request_id` to legitimately
+  appear in any of these tables for distinct accounts, so each is
+  considered an ambiguity-bearing source. Clients SHOULD re-issue
+  the request with one of the returned account IDs as the
+  `?account_id=` query parameter. The handler MUST NOT 409 when
+  `account_id` is supplied.
 Response fields:
 - `request_id`: string.
 - `usage_event.request_id`: string.
@@ -1276,11 +1336,18 @@ Response fields:
 - `feedback_events[]`: array.
 - `audit_events[]`: array.
 Underlying gateway tables:
-- `usage_events`.
+- `usage_events` (primary key `(account_id, request_id)`; auxiliary
+  index `idx_usage_request ON usage_events(request_id)` supports the
+  unscoped lookup path).
 - `quota_reservations`.
 - `concurrency_reservations`.
 - `feedback_events`.
 - `audit_events`.
+Forbidden fields:
+- `api_keys.key_hash` MUST NOT be returned.
+- `demo_usage_events.demo_token_hash` MUST NOT be returned.
+- Any OAuth state / refresh-token / one-time-code material MUST NOT
+  be returned.
 ### 6.5 `GET /admin/explorer/activity`
 Method and path:
 - `GET /admin/explorer/activity`.
