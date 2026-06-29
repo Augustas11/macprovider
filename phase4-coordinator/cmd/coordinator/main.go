@@ -1432,20 +1432,34 @@ func startPayoutSIGHUPListener(
 				// connection alive after operators believe the new pin is
 				// active. Called only on accepted reloads where the pin key
 				// actually changed; no-op for non-SPKI reload cycles.
-				// #165 R1 code/arch HIGH (convergent): assert on a
-				// CloseIdleConnections-shaped interface so the SPKI
-				// reload drain still fires through the chronic-outage
-				// TrackingRPCClient wrapper. Both *payout.HTTPRPCClient
-				// and *trackingRPC implement this method.
+				// #165 R1/R2 code/arch HIGH+MEDIUM (convergent): assert
+				// on a CloseIdleConnections-shaped interface so the
+				// SPKI reload drain still fires through the chronic-
+				// outage TrackingRPCClient wrapper. Both
+				// *payout.HTTPRPCClient and *trackingRPC implement
+				// this method. The miss-branch logs at WARN so a
+				// future RPCClient implementation that lacks the
+				// method is operator-visible at SPKI rotation time
+				// (rather than silently failing to drain).
 				type idleCloser interface{ CloseIdleConnections() }
 				for _, k := range changedKeys {
 					if k == "payout.tuning.rpc_url_primary_pin_spki" ||
 						k == "payout.tuning.rpc_url_secondary_pin_spki" {
 						if rpc, ok := rpcs.Primary.(idleCloser); ok {
 							rpc.CloseIdleConnections()
+						} else {
+							log.Warn().
+								Str("event", "payout_spki_drain_skipped_unsupported_client").
+								Str("rpc_label", "primary").
+								Msg("SPKI pin rotated but primary RPC client does not implement CloseIdleConnections — pooled TLS conns survive the rotation")
 						}
 						if rpc, ok := rpcs.Secondary.(idleCloser); ok {
 							rpc.CloseIdleConnections()
+						} else {
+							log.Warn().
+								Str("event", "payout_spki_drain_skipped_unsupported_client").
+								Str("rpc_label", "secondary").
+								Msg("SPKI pin rotated but secondary RPC client does not implement CloseIdleConnections — pooled TLS conns survive the rotation")
 						}
 						break
 					}

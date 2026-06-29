@@ -29,12 +29,18 @@ Absorbs the two LOW arch advisories deferred from the PR #164 FULL
 audit cycle (see [[tracking-issue-scope-control]]). §7.1 gains two
 event rows:
 - `payout_stale_outbox_backlog` (severity=WARN) — emitted by the
-  §4.7 step 5 producer when the per-cycle candidate count exceeds
-  the operator-configured cap (sized from `payout.tuning.max_rows_per_run`).
-  Fields: `run_id, limit, total_candidates, ts_utc`. A
+  §4.7 step 5 producer when this cycle's PRODUCED outbox row count
+  hit the operator-configured cap (sized from
+  `payout.tuning.max_rows_per_run`) before the candidate set was
+  exhausted, so a backlog remains for future cycles to drain.
+  Repeats every runner cycle while the backlog persists — operators
+  see the gauge per cycle until queue depth falls below cap.
+  Fields: `run_id, limit, produced, total_candidates, ts_utc`.
+  `total_candidates` is the REMAINING un-paged backlog AFTER this
+  cycle's production completes (NOT pre-cycle count). A
   `total_candidates = -1` sentinel signals the operator that the
-  exact backlog count query failed (degraded observability), not
-  that there is no backlog.
+  count query itself failed (degraded observability, NOT that there
+  is no backlog).
 - `payout_rpc_chronic_outage` (severity=PAGE) — emitted by the
   per-cycle chronic-outage tracker when one RPC's error rate
   exceeds the threshold over the sliding window. Fields:
@@ -55,16 +61,21 @@ stale-cancel producer's per-cycle PAGE production is capped by
 rows*, NOT *scanned candidates* — non-actionable candidates
 (missing `tx_hash`, transient RPC error, at-least-one-RPC-still-
 sees-receipt) do not consume the budget; the scan continues past
-them within an internal scan ceiling (1000 rows, well above any
-realistic backlog) so persistent non-actionable rows cannot
-indefinitely suppress truly stale cancels from PAGEing. When the
-production cap is hit before the scan exhausts, the producer emits
+them so persistent non-actionable rows cannot indefinitely suppress
+truly stale cancels from PAGEing. The SELECT scan is bounded by the
+predicate (is_cancel_self_transfer=1 AND un-paged AND stale-cutoff);
+in normal operation this set is small (<<1000), and a pathological
+backlog is itself the operator's signal via the WARN gauge AND the
+chronic-outage PAGE at §4.4 (`payout_rpc_chronic_outage`) when the
+root cause is RPC failure. When the production cap is hit before
+the candidate set is exhausted, the producer emits
 `payout_stale_outbox_backlog` WARN with `run_id, limit, produced,
-total_candidates, scan_cap_hit, ts_utc`. `total_candidates` is the
-*remaining* un-paged candidates AFTER this cycle's production
-completes (i.e. backlog awaiting future cycles); a value of -1 is
-the sentinel emitted when the count query itself fails (degraded
-observability, NOT zero backlog). Operators sizing
+total_candidates, ts_utc`, and repeats every cycle until backlog
+drains under cap. `total_candidates` is the *remaining* un-paged
+candidates AFTER this cycle's production completes (i.e. backlog
+awaiting future cycles); a value of -1 is the sentinel emitted when
+the count query itself fails (degraded observability, NOT zero
+backlog). Operators sizing
 `max_rows_per_run` MUST recognize it as a SHARED budget across §4.3
 step-1 ready-row payment work AND §4.7 step-5 stale-cancel PAGE
 production; lowering the cap reduces both. The cap's normative
@@ -3811,7 +3822,7 @@ operator-key endpoints log actor=operator_key):
 | `payout_cancel_self_transfer_confirmed` (severity=INFO; NEW v0.1.14; v0.1.15 clarifies transition-only emission) | `run_id, payout_id, attempt_seq, nonce, tx_hash, block_number, gas_used_native_wei, ts_utc` |
 | `payout_cancel_self_transfer_reconfirm_stale` (severity=PAGE; NEW v0.1.15; v0.1.17 adds `event_id`) | `event_id (=cancel_reconfirm_stale_outbox.id), run_id, payout_id, attempt_seq, nonce, tx_hash, last_seen_block, updated_at_utc, ts_utc` |
 | `payout_stale_outbox_reaped` (severity=WARN; NEW v0.1.17) | `event_id (=cancel_reconfirm_stale_outbox.id), payout_id, attempt_seq, stale_started_at_utc, reap_lag_seconds, ts_utc` |
-| `payout_stale_outbox_backlog` (severity=WARN; NEW v0.1.22) | `run_id, limit, produced, total_candidates, scan_cap_hit, ts_utc` |
+| `payout_stale_outbox_backlog` (severity=WARN; NEW v0.1.22) | `run_id, limit, produced, total_candidates, ts_utc` |
 | `payout_rpc_chronic_outage` (severity=PAGE; NEW v0.1.22) | `rpc_label, window_seconds, sample_count, error_count, error_rate, threshold, ts_utc` |
 
 ### 7.1.1 Where these events live

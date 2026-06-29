@@ -403,24 +403,23 @@ func ProduceStaleOutboxRows(
 		return 0, nil
 	}
 	cutoff := now.Add(-3 * runInterval).UTC().Format(time.RFC3339Nano)
-	// #165 R1 SECURITY HIGH closure: the previous LIMIT+1 peek capped
-	// the SCANNED candidate set, which is the wrong authority. Loop
-	// branches at lines below skip rows with empty tx_hash, with RPC
-	// errors, or with at-least-one-RPC-still-seeing-the-receipt —
-	// these skipped rows persist in the candidate set across cycles
-	// (no UPDATE fires, so updated_at_utc is unchanged and they sort
-	// identically). With a LIMIT-bounded scan, the first `limit`
-	// non-actionable rows would permanently consume the scan budget
-	// and indefinitely suppress truly stale cancels from becoming
-	// payout_cancel_self_transfer_reconfirm_stale PAGE events
-	// (denial-of-detection).
+	// #165 R1+R2 SECURITY HIGH closure: bound the PRODUCED outbox row
+	// count, NOT the scanned candidate set. The non-actionable skip
+	// branches (empty tx_hash, RPC error, one-RPC-still-sees-receipt)
+	// persist in the candidate set across cycles (updated_at_utc
+	// doesn't advance on skip), so any ceiling on scanned rows
+	// reintroduces prefix-starvation denial-of-detection — non-
+	// actionable rows at the front of the order would permanently
+	// block truly stale cancels from PAGEing.
 	//
-	// The correct contract is: bound the PRODUCED outbox row count,
-	// not the scan. The hard scan cap below (staleOutboxScanCap)
-	// keeps memory bounded in the pathological-backlog case; in
-	// normal operation the candidate set is small (cancel rows +
-	// un-paged + stale-cutoff) and the scan cap is never hit.
-	const staleOutboxScanCap = 1000
+	// The SELECT scan is bounded by the WHERE predicate
+	// (is_cancel_self_transfer=1 AND un-paged AND stale-cutoff). In
+	// normal operation this set is tiny (<<1000); in pathological
+	// backlog it can grow but A2's payout_rpc_chronic_outage PAGE
+	// fires on the chronic-RPC root cause and §7.4 chain-balance
+	// drift catches anything more sinister. Memory cost per row is
+	// ~bytes-of-tx-hash + ~50, so even 100k rows = ~10MB — still
+	// well under the runner's process budget.
 	rows, err := db.QueryContext(ctx, `
 SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
   FROM payout_attempts
@@ -431,8 +430,7 @@ SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
    AND cancel_reconfirm_stale_paged_at_utc IS NULL
    AND abandoned_at_utc IS NULL
    AND updated_at_utc < ?
- ORDER BY updated_at_utc ASC
- LIMIT ?`, cutoff, staleOutboxScanCap)
+ ORDER BY updated_at_utc ASC`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("ProduceStaleOutboxRows: SELECT: %w", err)
 	}
@@ -605,13 +603,14 @@ SELECT id FROM cancel_reconfirm_stale_outbox
 
 	// #165 A1 backlog gauge. Emit payout_stale_outbox_backlog WARN
 	// when production was capped before the candidate set was
-	// exhausted (limit > 0 AND produced == limit AND we broke early)
-	// OR when the scan itself was capped at staleOutboxScanCap
-	// (indicates pathological backlog). The exact backlog count is
-	// queried only on the slow path so steady-state cost is zero.
-	scanCapHit := len(candidates) == staleOutboxScanCap
+	// exhausted (limit > 0 AND produced == limit AND we broke early).
+	// The event repeats every runner cycle while backlog persists —
+	// intentionally, so the operator sees the gauge each cycle until
+	// the queue drains under cap. The exact backlog count (remaining
+	// un-paged candidates AFTER this cycle's production) is queried
+	// only on the slow path so steady-state cost is zero.
 	productionCapped := limit > 0 && produced >= limit && !scannedAll
-	if productionCapped || scanCapHit {
+	if productionCapped {
 		var total int
 		if err := db.QueryRowContext(ctx, `
 SELECT COUNT(*)
@@ -634,7 +633,6 @@ SELECT COUNT(*)
 			Int("limit", limit).
 			Int("produced", produced).
 			Int("total_candidates", total).
-			Bool("scan_cap_hit", scanCapHit).
 			Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
 			Str("severity", "WARN").
 			Send()

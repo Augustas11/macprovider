@@ -148,9 +148,6 @@ func TestProduceStaleOutboxRows_EmitsBacklogGaugeWhenLimitHit(t *testing.T) {
 	if found["severity"] != "WARN" {
 		t.Errorf("backlog.severity=%v, want WARN", found["severity"])
 	}
-	if found["scan_cap_hit"] != false {
-		t.Errorf("backlog.scan_cap_hit=%v, want false", found["scan_cap_hit"])
-	}
 }
 
 // TestProduceStaleOutboxRows_NonActionableRowsDoNotConsumeLimit pins
