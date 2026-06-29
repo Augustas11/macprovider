@@ -44,7 +44,7 @@ VALUES (?, 1, 'base-mainnet', '0x', '0x', 1, ?, X'02', ?,
 // payout_stale_outbox_backlog WARN with the precise candidate count
 // when the candidate set exceeds the limit.
 
-func TestProduceStaleOutboxRows_LimitBoundsCandidateScan(t *testing.T) {
+func TestProduceStaleOutboxRows_LimitBoundsProducedRows(t *testing.T) {
 	db := openTestDB(t)
 	seedBootstrapForTest(t, db)
 	primary := &mockRPCClient{label: "primary"}
@@ -133,14 +133,76 @@ func TestProduceStaleOutboxRows_EmitsBacklogGaugeWhenLimitHit(t *testing.T) {
 	if v, _ := found["limit"].(float64); int(v) != 2 {
 		t.Errorf("backlog.limit=%v, want 2", found["limit"])
 	}
-	if v, _ := found["total_candidates"].(float64); int(v) != 4 {
-		t.Errorf("backlog.total_candidates=%v, want 4 (exact backlog count)", found["total_candidates"])
+	// total_candidates is the post-production REMAINING backlog
+	// (rows still un-paged after this cycle), not the pre-cycle
+	// count: 4 seeded, 2 paged this cycle → 2 remaining.
+	if v, _ := found["total_candidates"].(float64); int(v) != 2 {
+		t.Errorf("backlog.total_candidates=%v, want 2 (remaining un-paged)", found["total_candidates"])
+	}
+	if v, _ := found["produced"].(float64); int(v) != 2 {
+		t.Errorf("backlog.produced=%v, want 2 (produced == limit)", found["produced"])
 	}
 	if found["run_id"] != "run-backlog" {
 		t.Errorf("backlog.run_id=%v, want run-backlog", found["run_id"])
 	}
 	if found["severity"] != "WARN" {
 		t.Errorf("backlog.severity=%v, want WARN", found["severity"])
+	}
+	if found["scan_cap_hit"] != false {
+		t.Errorf("backlog.scan_cap_hit=%v, want false", found["scan_cap_hit"])
+	}
+}
+
+// TestProduceStaleOutboxRows_NonActionableRowsDoNotConsumeLimit pins
+// the #165 R1 SECURITY HIGH closure: non-actionable candidates
+// (e.g. at-least-one-RPC sees the receipt) MUST be skipped without
+// consuming the limit budget. Without this, the first `limit`
+// non-actionable rows in oldest-first order would permanently block
+// truly stale cancels from PAGEing (denial of detection).
+func TestProduceStaleOutboxRows_NonActionableRowsDoNotConsumeLimit(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+	// Per-tx classification: rows 0..2 reconfirmable (primary sees
+	// receipt → skip), rows 3..5 truly stale (both miss → produce).
+	primary.receiptFn = func(_ context.Context, txHash string) (*Receipt, error) {
+		// Reconfirmable: any tx hash starting "0xstale0", "0xstale1", "0xstale2".
+		if strings.HasPrefix(txHash, "0xstale0") || strings.HasPrefix(txHash, "0xstale1") || strings.HasPrefix(txHash, "0xstale2") {
+			return &Receipt{Status: 1, BlockNumber: 100}, nil
+		}
+		return nil, nil
+	}
+	secondary.receiptFn = func(_ context.Context, _ string) (*Receipt, error) { return nil, nil }
+	rpcs := TwoRPCs{Primary: primary, Secondary: secondary}
+	runInterval := time.Minute
+
+	for i := 0; i < 6; i++ {
+		_ = seedDistinctStaleCancelRow(t, db, runInterval, i)
+	}
+
+	// Limit=2. If LIMIT bounded the SCAN, rows 0..1 (reconfirmable)
+	// would consume the budget and rows 3..5 (truly stale) would
+	// never PAGE this cycle. With limit bounding PRODUCTION, we
+	// expect produced=2 (the first two of rows 3..5).
+	produced, err := ProduceStaleOutboxRows(
+		context.Background(), db, zerolog.Nop(),
+		rpcs, "run-skip", time.Now(), runInterval, 2,
+	)
+	if err != nil {
+		t.Fatalf("ProduceStaleOutboxRows: %v", err)
+	}
+	if produced != 2 {
+		t.Errorf("produced=%d, want 2 — truly stale rows must PAGE despite earlier non-actionable rows", produced)
+	}
+	// Confirm the produced rows are from the truly-stale set
+	// (rows 3,4 — first two of the actionable trio).
+	var outboxCount int
+	_ = db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM cancel_reconfirm_stale_outbox WHERE tx_hash LIKE '0xstale3%' OR tx_hash LIKE '0xstale4%'`,
+	).Scan(&outboxCount)
+	if outboxCount != 2 {
+		t.Errorf("outbox rows for truly-stale=%d, want 2 (denial-of-detection regression)", outboxCount)
 	}
 }
 

@@ -46,9 +46,43 @@ event rows:
   detector at §4.4 only fires when BOTH RPCs return AND disagree).
 IMPL surface: `phase4-coordinator/internal/payout/orphans.go`
 (LIMIT + backlog gauge) and `phase4-coordinator/internal/payout/chronic.go`
-(sliding-window tracker + `TrackingRPCClient` wrapper). No prose
-elsewhere in the SPEC changes — these events extend the §7.1 table
-under the v0.1.21 contract.
+(sliding-window tracker + `TrackingRPCClient` wrapper).
+
+**§4.7 step 5 production cap (NORMATIVE in v0.1.22).** The
+stale-cancel producer's per-cycle PAGE production is capped by
+`payout.tuning.max_rows_per_run` (the same operator config the
+§4.3 step 1 ready-row scan uses). The cap bounds *produced outbox
+rows*, NOT *scanned candidates* — non-actionable candidates
+(missing `tx_hash`, transient RPC error, at-least-one-RPC-still-
+sees-receipt) do not consume the budget; the scan continues past
+them within an internal scan ceiling (1000 rows, well above any
+realistic backlog) so persistent non-actionable rows cannot
+indefinitely suppress truly stale cancels from PAGEing. When the
+production cap is hit before the scan exhausts, the producer emits
+`payout_stale_outbox_backlog` WARN with `run_id, limit, produced,
+total_candidates, scan_cap_hit, ts_utc`. `total_candidates` is the
+*remaining* un-paged candidates AFTER this cycle's production
+completes (i.e. backlog awaiting future cycles); a value of -1 is
+the sentinel emitted when the count query itself fails (degraded
+observability, NOT zero backlog). Operators sizing
+`max_rows_per_run` MUST recognize it as a SHARED budget across §4.3
+step-1 ready-row payment work AND §4.7 step-5 stale-cancel PAGE
+production; lowering the cap reduces both. The cap's normative
+bound remains `[1, 500]` per §payout.tuning.
+
+**§4.4 two-RPC discipline gap closure (NORMATIVE in v0.1.22).** The
+§4.4 disagreement detector fires only when BOTH RPCs return AND
+disagree. A chronic single-RPC failure (network partition, vendor
+outage) is silently swallowed by the runner's degrade-and-retry
+behavior. The `payout_rpc_chronic_outage` PAGE closes that gap:
+every RPC call through the production `TrackingRPCClient` wrapper
+records success/failure into the `ChronicOutageTracker`; an
+independent goroutine ticker drives Evaluate at `min(window/2,
+1min)` (decoupled from `payout.tuning.run_interval` so detection
+stays responsive when operators run the cycle at the [5m, 24h]
+upper bound). The wrapper covers every `RPCClient` interface method
+including `CloseIdleConnections()` so SIGHUP SPKI pin rotation
+still drains pooled TLS connections through the wrapper.
 
 **v0.1.21 (2026-06-25, draft — codex round-21 fix pass on
 v0.1.20):** Round 21 returned NEEDS FIX PASS 0/1/1/1. Fixes:
@@ -3777,7 +3811,7 @@ operator-key endpoints log actor=operator_key):
 | `payout_cancel_self_transfer_confirmed` (severity=INFO; NEW v0.1.14; v0.1.15 clarifies transition-only emission) | `run_id, payout_id, attempt_seq, nonce, tx_hash, block_number, gas_used_native_wei, ts_utc` |
 | `payout_cancel_self_transfer_reconfirm_stale` (severity=PAGE; NEW v0.1.15; v0.1.17 adds `event_id`) | `event_id (=cancel_reconfirm_stale_outbox.id), run_id, payout_id, attempt_seq, nonce, tx_hash, last_seen_block, updated_at_utc, ts_utc` |
 | `payout_stale_outbox_reaped` (severity=WARN; NEW v0.1.17) | `event_id (=cancel_reconfirm_stale_outbox.id), payout_id, attempt_seq, stale_started_at_utc, reap_lag_seconds, ts_utc` |
-| `payout_stale_outbox_backlog` (severity=WARN; NEW v0.1.22) | `run_id, limit, total_candidates, ts_utc` |
+| `payout_stale_outbox_backlog` (severity=WARN; NEW v0.1.22) | `run_id, limit, produced, total_candidates, scan_cap_hit, ts_utc` |
 | `payout_rpc_chronic_outage` (severity=PAGE; NEW v0.1.22) | `rpc_label, window_seconds, sample_count, error_count, error_rate, threshold, ts_utc` |
 
 ### 7.1.1 Where these events live
@@ -4423,6 +4457,8 @@ discharged:
    - `payout_cancel_self_transfer_confirmed` (INFO — NEW v0.1.14; OPTIONAL for the alert filter, INFO not PAGE/WARN, but include if operator wants per-cancel visibility)
    - `payout_cancel_self_transfer_reconfirm_stale` (PAGE — NEW v0.1.15)
    - `payout_stale_outbox_reaped` (WARN — NEW v0.1.17)
+   - `payout_stale_outbox_backlog` (WARN — NEW v0.1.22; A1: §4.7 step 5 production capped before candidate set exhausted)
+   - `payout_rpc_chronic_outage` (PAGE — NEW v0.1.22; A2: per-RPC sliding-window error rate crossed threshold)
    - `provider_payout_address_change_rejected` (WARN)
    - `provider_payout_address_rejected_unknown_provider` (WARN)
 

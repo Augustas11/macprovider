@@ -353,6 +353,15 @@ func main() {
 		if payoutS2.chainWorker != nil {
 			payoutS2.chainWorker.Start(shutdownCtx)
 		}
+		// #165 R1 architect HIGH closure: drive the chronic-outage
+		// Evaluate on a window-internal cadence independent of the
+		// runner ticker. RunInterval can be up to 24h per §6.5 but
+		// the tracker window defaults to 10min, so per-cycle Evaluate
+		// would prune samples before observing them. Run() ticks at
+		// min(window/2, 1min).
+		if payoutS2.chronic != nil {
+			go payoutS2.chronic.Run(shutdownCtx)
+		}
 		// Step 4 §6.5 SIGHUP-only payout.tuning.* reload. Reading
 		// the YAML on SIGHUP MUST NOT touch payout.security.* (the
 		// loader is read-only on the security namespace); the
@@ -628,6 +637,7 @@ type payoutStep2 struct {
 	chainWorker *payout.ChainBalanceWorker // Step 4 §7.4
 	tuning      *payout.TuningProvider     // Step 4 §6.5 SIGHUP-reloadable
 	rpcs        payout.TwoRPCs             // Step 4 r3 [sec:r3-1] SPKI pin rotation: CloseIdleConnections on SIGHUP
+	chronic     *payout.ChronicOutageTracker // #165 A2 — per-RPC sliding-window error tracker; Run() goroutine drives Evaluate
 	stop        func(context.Context)      // calls Stop on every component then Release
 }
 
@@ -1010,6 +1020,7 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		chainWorker: chainWorker,
 		tuning:      tuningProvider,
 		rpcs:        rpcs,
+		chronic:     chronicTracker,
 		stop: func(stopCtx context.Context) {
 			// Codex Step 3 r1 [arch:3.1] MAJOR closure: shutdown
 			// ordering is runner → poller → reaper → Release.
@@ -1421,13 +1432,19 @@ func startPayoutSIGHUPListener(
 				// connection alive after operators believe the new pin is
 				// active. Called only on accepted reloads where the pin key
 				// actually changed; no-op for non-SPKI reload cycles.
+				// #165 R1 code/arch HIGH (convergent): assert on a
+				// CloseIdleConnections-shaped interface so the SPKI
+				// reload drain still fires through the chronic-outage
+				// TrackingRPCClient wrapper. Both *payout.HTTPRPCClient
+				// and *trackingRPC implement this method.
+				type idleCloser interface{ CloseIdleConnections() }
 				for _, k := range changedKeys {
 					if k == "payout.tuning.rpc_url_primary_pin_spki" ||
 						k == "payout.tuning.rpc_url_secondary_pin_spki" {
-						if rpc, ok := rpcs.Primary.(*payout.HTTPRPCClient); ok {
+						if rpc, ok := rpcs.Primary.(idleCloser); ok {
 							rpc.CloseIdleConnections()
 						}
-						if rpc, ok := rpcs.Secondary.(*payout.HTTPRPCClient); ok {
+						if rpc, ok := rpcs.Secondary.(idleCloser); ok {
 							rpc.CloseIdleConnections()
 						}
 						break

@@ -403,13 +403,25 @@ func ProduceStaleOutboxRows(
 		return 0, nil
 	}
 	cutoff := now.Add(-3 * runInterval).UTC().Format(time.RFC3339Nano)
-	// #165 A1: LIMIT+1 peek. If the SELECT returns exactly limit+1
-	// rows we know there is at least one suppressed row; the precise
-	// candidate count is then queried via COUNT(*) for the backlog
-	// gauge. Steady-state (no backlog) costs one query; backlog cost
-	// is one extra COUNT(*) — acceptable because the gauge fires
-	// exactly when the operator wants to see it.
-	query := `
+	// #165 R1 SECURITY HIGH closure: the previous LIMIT+1 peek capped
+	// the SCANNED candidate set, which is the wrong authority. Loop
+	// branches at lines below skip rows with empty tx_hash, with RPC
+	// errors, or with at-least-one-RPC-still-seeing-the-receipt —
+	// these skipped rows persist in the candidate set across cycles
+	// (no UPDATE fires, so updated_at_utc is unchanged and they sort
+	// identically). With a LIMIT-bounded scan, the first `limit`
+	// non-actionable rows would permanently consume the scan budget
+	// and indefinitely suppress truly stale cancels from becoming
+	// payout_cancel_self_transfer_reconfirm_stale PAGE events
+	// (denial-of-detection).
+	//
+	// The correct contract is: bound the PRODUCED outbox row count,
+	// not the scan. The hard scan cap below (staleOutboxScanCap)
+	// keeps memory bounded in the pathological-backlog case; in
+	// normal operation the candidate set is small (cancel rows +
+	// un-paged + stale-cutoff) and the scan cap is never hit.
+	const staleOutboxScanCap = 1000
+	rows, err := db.QueryContext(ctx, `
 SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
   FROM payout_attempts
  WHERE is_cancel_self_transfer = 1
@@ -419,18 +431,8 @@ SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
    AND cancel_reconfirm_stale_paged_at_utc IS NULL
    AND abandoned_at_utc IS NULL
    AND updated_at_utc < ?
- ORDER BY updated_at_utc ASC`
-	var (
-		rows  *sql.Rows
-		err   error
-		probe int
-	)
-	if limit > 0 {
-		probe = limit + 1
-		rows, err = db.QueryContext(ctx, query+" LIMIT ?", cutoff, probe)
-	} else {
-		rows, err = db.QueryContext(ctx, query, cutoff)
-	}
+ ORDER BY updated_at_utc ASC
+ LIMIT ?`, cutoff, staleOutboxScanCap)
 	if err != nil {
 		return 0, fmt.Errorf("ProduceStaleOutboxRows: SELECT: %w", err)
 	}
@@ -454,44 +456,19 @@ SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
 	}
 	rows.Close()
 
-	// #165 A1: backlog detection. If LIMIT+1 was the probe size and
-	// we got back probe rows, at least one candidate was suppressed
-	// this cycle. Query the exact backlog count so the gauge surfaces
-	// an actionable number, then drop the overflow row so production
-	// stays bounded by limit.
-	if limit > 0 && len(candidates) == probe {
-		var total int
-		if err := db.QueryRowContext(ctx, `
-SELECT COUNT(*)
-  FROM payout_attempts
- WHERE is_cancel_self_transfer = 1
-   AND raw_signed_tx IS NOT NULL
-   AND broadcast_at_utc IS NOT NULL
-   AND confirmed_at_utc IS NULL
-   AND cancel_reconfirm_stale_paged_at_utc IS NULL
-   AND abandoned_at_utc IS NULL
-   AND updated_at_utc < ?`, cutoff).Scan(&total); err != nil {
-			// COUNT failure is observability-only; degrade to a
-			// limit-hit signal (total=-1 sentinel) rather than
-			// stalling the producer.
-			total = -1
-		}
-		log.Warn().
-			Str("event", "payout_stale_outbox_backlog").
-			Str("run_id", runID).
-			Int("limit", limit).
-			Int("total_candidates", total).
-			Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
-			Str("severity", "WARN").
-			Send()
-		candidates = candidates[:limit]
-	}
-
 	produced := 0
+	scannedAll := true
 	staleStarted := now.UTC().Format(time.RFC3339Nano)
 	for _, c := range candidates {
 		if ctx.Err() != nil {
 			return produced, ctx.Err()
+		}
+		// #165 R1 SEC HIGH closure: cap on PRODUCED rows, not
+		// candidates. Non-actionable skip branches below do NOT
+		// consume the limit budget.
+		if limit > 0 && produced >= limit {
+			scannedAll = false
+			break
 		}
 		// Codex Step 3 r2 [arch:r2-3.2-A] MAJOR closure: SPEC §4.7
 		// requires BOTH RPCs to still return "not found" before
@@ -624,6 +601,43 @@ SELECT id FROM cancel_reconfirm_stale_outbox
 				})
 			}
 		}
+	}
+
+	// #165 A1 backlog gauge. Emit payout_stale_outbox_backlog WARN
+	// when production was capped before the candidate set was
+	// exhausted (limit > 0 AND produced == limit AND we broke early)
+	// OR when the scan itself was capped at staleOutboxScanCap
+	// (indicates pathological backlog). The exact backlog count is
+	// queried only on the slow path so steady-state cost is zero.
+	scanCapHit := len(candidates) == staleOutboxScanCap
+	productionCapped := limit > 0 && produced >= limit && !scannedAll
+	if productionCapped || scanCapHit {
+		var total int
+		if err := db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+  FROM payout_attempts
+ WHERE is_cancel_self_transfer = 1
+   AND raw_signed_tx IS NOT NULL
+   AND broadcast_at_utc IS NOT NULL
+   AND confirmed_at_utc IS NULL
+   AND cancel_reconfirm_stale_paged_at_utc IS NULL
+   AND abandoned_at_utc IS NULL
+   AND updated_at_utc < ?`, cutoff).Scan(&total); err != nil {
+			// COUNT failure is observability-only; degrade to a
+			// cap-hit signal (total=-1 sentinel) rather than
+			// stalling the producer.
+			total = -1
+		}
+		log.Warn().
+			Str("event", "payout_stale_outbox_backlog").
+			Str("run_id", runID).
+			Int("limit", limit).
+			Int("produced", produced).
+			Int("total_candidates", total).
+			Bool("scan_cap_hit", scanCapHit).
+			Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
+			Str("severity", "WARN").
+			Send()
 	}
 	return produced, nil
 }

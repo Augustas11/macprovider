@@ -111,19 +111,67 @@ func (t *ChronicOutageTracker) Record(label string, isErr bool) {
 	st.samples = append(st.samples, chronicSample{ts: t.nowFn(), isErr: isErr})
 }
 
+// Run drives Evaluate on a fixed cadence independent of the
+// runner's RunInterval. Closes #165 R1 architect HIGH: the runner
+// cycle ticker can fire at intervals up to 24h ([5m, 24h] per the
+// SPEC §6.5 RunInterval bound), but the tracker window defaults to
+// 10 minutes, so per-cycle Evaluate would prune EVERY prior cycle's
+// samples before observing them. An independent ticker at
+// `min(window/2, 1*time.Minute)` keeps the detector responsive
+// regardless of cycle cadence.
+//
+// Run returns when ctx is cancelled. Safe to call from a dedicated
+// goroutine launched at startup.
+func (t *ChronicOutageTracker) Run(ctx context.Context) {
+	if t == nil {
+		return
+	}
+	tick := t.window / 2
+	if tick > time.Minute {
+		tick = time.Minute
+	}
+	if tick < 10*time.Second {
+		tick = 10 * time.Second
+	}
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t.Evaluate(ctx, t.nowFn())
+		}
+	}
+}
+
 // Evaluate prunes stale samples, checks every label's window, and
 // emits payout_rpc_chronic_outage for any label that crossed the
 // threshold and is outside its cooldown. Returns the labels that
 // emitted this call; useful for tests + per-cycle telemetry counts.
-// Safe to call from the runner cycle loop.
+// Safe to call from the runner cycle loop AND from the independent
+// Run() ticker concurrently — the per-label mutex serializes both
+// readers and writers.
 func (t *ChronicOutageTracker) Evaluate(_ context.Context, now time.Time) []string {
 	if t == nil {
 		return nil
 	}
+	// #165 R1 sec/arch LOW closure: collect emit decisions under
+	// lock, release, then write the log lines. Holding the per-
+	// tracker mutex across zerolog.Send() (which can block on
+	// stdout/journald backpressure) would stall every RPC caller
+	// that's recording samples in parallel.
+	type pageDecision struct {
+		label      string
+		samples    int
+		errs       int
+		rate       float64
+		windowSecs int
+		threshold  float64
+	}
+	var decisions []pageDecision
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	cutoff := now.Add(-t.window)
-	var paged []string
 	for label, st := range t.states {
 		// Prune. Samples are append-only and ts is monotonic per
 		// label, so a single linear scan suffices.
@@ -151,18 +199,31 @@ func (t *ChronicOutageTracker) Evaluate(_ context.Context, now time.Time) []stri
 			continue
 		}
 		st.lastPagedAt = now
+		decisions = append(decisions, pageDecision{
+			label:      label,
+			samples:    len(st.samples),
+			errs:       errs,
+			rate:       rate,
+			windowSecs: int(t.window.Seconds()),
+			threshold:  t.threshold,
+		})
+	}
+	t.mu.Unlock()
+
+	paged := make([]string, 0, len(decisions))
+	for _, d := range decisions {
 		t.log.Error().
 			Str("event", "payout_rpc_chronic_outage").
-			Str("rpc_label", label).
-			Int("window_seconds", int(t.window.Seconds())).
-			Int("sample_count", len(st.samples)).
-			Int("error_count", errs).
-			Float64("error_rate", rate).
-			Float64("threshold", t.threshold).
+			Str("rpc_label", d.label).
+			Int("window_seconds", d.windowSecs).
+			Int("sample_count", d.samples).
+			Int("error_count", d.errs).
+			Float64("error_rate", d.rate).
+			Float64("threshold", d.threshold).
 			Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
 			Str("severity", "PAGE").
 			Send()
-		paged = append(paged, label)
+		paged = append(paged, d.label)
 	}
 	return paged
 }
@@ -244,4 +305,19 @@ func (t *trackingRPC) NativeBalance(ctx context.Context, address string) (uint64
 	v, err := t.inner.NativeBalance(ctx, address)
 	t.record(err)
 	return v, err
+}
+
+// CloseIdleConnections forwards to the inner client when it
+// implements the SPKI-reload contract. Closes the R1 code/arch HIGH:
+// without this delegate, the SIGHUP handler's
+// `rpcs.Primary.(*HTTPRPCClient)` type assertion fails through the
+// wrapper and accepted SPKI pin rotations stop draining pooled TLS
+// connections. The handler still asserts on this interface (not on
+// *HTTPRPCClient) so the unwrap is observed even through the
+// wrapper.
+func (t *trackingRPC) CloseIdleConnections() {
+	type idleCloser interface{ CloseIdleConnections() }
+	if c, ok := t.inner.(idleCloser); ok {
+		c.CloseIdleConnections()
+	}
 }
