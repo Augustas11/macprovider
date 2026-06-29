@@ -4,18 +4,26 @@
 # 100 short streaming requests sequenced so each completes before the
 # next fires — gives a clean TTFT signal uncontaminated by queue wait.
 #
-# Pacing math (2026-06-28 baseline):
-#   B=1 buyer, wall ≈ 1.5s (TTFT ~300ms + 8 tokens @ ~14 tok/s).
-#   Pearl AccountConcurrency N=3.
-#   mean_active = B × wall / interval = 1 × 1.5 / 1.5 = 1.0 → well under N.
-# The initial v0.1 run used interval=500ms → mean_active=3.0 → 72% 503s.
-# 1500ms is the tightest interval that keeps the success path clean
-# without bloating wall-clock (100 × 1.5s = 150s, fits 180s duration).
+# Pacing math (2026-06-29 e2e measurement):
+#   B=1 buyer, wall_p50=2535ms (much higher than the 06-28 estimate of
+#   1500ms — even single short-stream completion takes 2.5s of WS routing
+#   + provider inference). wall_p95 inferred ~3000ms.
+#   Pearl AccountConcurrency N=3, margin 0.5 → N_eff=2.5.
+#
+#   At interval=1500ms (the 06-28 retune), mean_active at observed
+#   wall_p50 = 1 × 2.535 / 1.5 = 1.69. Under N_eff but not by much, and
+#   the 2026-06-29 run still saw 39% non-2xx. That residual rate is
+#   provider-pool instability at low load (file separately), not pure
+#   overload — but bumping interval to 2000ms gives more margin.
+#
+#   interval ≥ B × wall_p95 / N_eff = 1 × 3000 / 2.5 = 1200ms (theory)
+#   Set 2000ms for belt + suspenders, mean_active at p95 = 1.5 (under N_eff).
+#   100 × 2s = 200s firing window, fits 240s duration.
 #
 # Cost estimate (100 × 8 max_tokens): negligible.
 name: streaming_ttft_distribution
 description: |
-  100 sequential short streaming requests (max_tokens=8), 1500ms gap.
+  100 sequential short streaming requests (max_tokens=8), 2000ms gap.
   Characterizes the TTFT histogram; enough samples for stable
   percentiles. Benchmark — B1, B3.
 
@@ -39,10 +47,10 @@ buyers:
   count: 1
   stream: true
   pattern: interval
-  interval_ms: 1500
+  interval_ms: 2000
   requests_per_buyer: 100
 
-duration: 180s
+duration: 240s
 request_timeout: 30s
 silent_hang_threshold: 15s
 
