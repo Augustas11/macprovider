@@ -50,6 +50,28 @@ struct SelfUpdate {
             return
         }
 
+        let prepared = try await prepareValidatedUpdate(from: release)
+        defer { prepared.cleanup() }
+        try await applyValidatedUpdate(newBinary: prepared.newBinary)
+        print("Update complete. Restart macprovider-cli to use v\(latest).")
+    }
+
+    func runByTag(tag: String) async throws {
+        let release = try await releaseByTag(tag)
+        let prepared = try await prepareValidatedUpdate(from: release)
+        defer { prepared.cleanup() }
+        try await applyValidatedUpdate(newBinary: prepared.newBinary)
+    }
+
+    func resolveReleaseByTags(normalizedTarget: String) async throws -> GitHubRelease {
+        do {
+            return try await releaseByTag("v\(normalizedTarget)")
+        } catch UpdateError.releaseNotFound {
+            return try await releaseByTag(normalizedTarget)
+        }
+    }
+
+    func prepareValidatedUpdate(from release: GitHubRelease) async throws -> PreparedSelfUpdate {
         guard let tarball = release.assets.first(where: { $0.name.hasSuffix("darwin-arm64.tar.gz") }),
               let checksums = release.assets.first(where: { $0.name == "checksums.txt" }),
               let checksumsSignature = release.assets.first(where: { $0.name == "checksums.txt.sig" })
@@ -60,37 +82,39 @@ struct SelfUpdate {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("macprovider-update-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer {
+
+        do {
+            try validateDownloadURL(tarball.browserDownloadURL)
+            try validateDownloadURL(checksums.browserDownloadURL)
+            try validateDownloadURL(checksumsSignature.browserDownloadURL)
+
+            let tarballURL = tempDir.appendingPathComponent(tarball.name)
+            let checksumsURL = tempDir.appendingPathComponent(checksums.name)
+            let checksumsSignatureURL = tempDir.appendingPathComponent(checksumsSignature.name)
+            try await download(from: checksums.browserDownloadURL, to: checksumsURL)
+            try await download(from: checksumsSignature.browserDownloadURL, to: checksumsSignatureURL)
+            try verifyChecksumSignature(checksumsURL: checksumsURL, signatureURL: checksumsSignatureURL, tempDir: tempDir)
+            let checksumsText = try String(contentsOf: checksumsURL, encoding: .utf8)
+            let expectedSHA = try Self.expectedSHA256(for: tarball.name, in: checksumsText)
+            try await download(from: tarball.browserDownloadURL, to: tarballURL)
+            try validateFreeSpace(for: tempDir, requiredForKnownTarballAt: tarballURL)
+            let actualSHA = try Self.sha256(file: tarballURL)
+            guard actualSHA.lowercased() == expectedSHA.lowercased() else {
+                throw UpdateError.checksumMismatch(expected: expectedSHA, actual: actualSHA)
+            }
+
+            let extractDir = tempDir.appendingPathComponent("extract", isDirectory: true)
+            try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+            try validateTarball(tarballURL)
+            try runProcess("/usr/bin/tar", arguments: ["-xzf", tarballURL.path, "-C", extractDir.path])
+            let newBinary = try Self.findBinary(in: extractDir)
+
+            try runProcess(newBinary.path, arguments: ["self-test"])
+            return PreparedSelfUpdate(tempDir: tempDir, newBinary: newBinary)
+        } catch {
             try? FileManager.default.removeItem(at: tempDir)
+            throw error
         }
-
-        try validateDownloadURL(tarball.browserDownloadURL)
-        try validateDownloadURL(checksums.browserDownloadURL)
-        try validateDownloadURL(checksumsSignature.browserDownloadURL)
-
-        let tarballURL = tempDir.appendingPathComponent(tarball.name)
-        let checksumsURL = tempDir.appendingPathComponent(checksums.name)
-        let checksumsSignatureURL = tempDir.appendingPathComponent(checksumsSignature.name)
-        try await download(from: checksums.browserDownloadURL, to: checksumsURL)
-        try await download(from: checksumsSignature.browserDownloadURL, to: checksumsSignatureURL)
-        try verifyChecksumSignature(checksumsURL: checksumsURL, signatureURL: checksumsSignatureURL, tempDir: tempDir)
-        let checksumsText = try String(contentsOf: checksumsURL, encoding: .utf8)
-        let expectedSHA = try Self.expectedSHA256(for: tarball.name, in: checksumsText)
-        try await download(from: tarball.browserDownloadURL, to: tarballURL)
-        let actualSHA = try Self.sha256(file: tarballURL)
-        guard actualSHA.lowercased() == expectedSHA.lowercased() else {
-            throw UpdateError.checksumMismatch(expected: expectedSHA, actual: actualSHA)
-        }
-
-        let extractDir = tempDir.appendingPathComponent("extract", isDirectory: true)
-        try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
-        try validateTarball(tarballURL)
-        try runProcess("/usr/bin/tar", arguments: ["-xzf", tarballURL.path, "-C", extractDir.path])
-        let newBinary = try Self.findBinary(in: extractDir)
-
-        try runProcess(newBinary.path, arguments: ["self-test"])
-        try await applyValidatedUpdate(newBinary: newBinary)
-        print("Update complete. Restart macprovider-cli to use v\(latest).")
     }
 
     func applyValidatedUpdateForTest(newBinary: URL) async throws {
@@ -146,6 +170,45 @@ struct SelfUpdate {
             throw UpdateError.httpStatus(http.statusCode)
         }
         return try JSONDecoder().decode(GitHubRelease.self, from: data)
+    }
+
+    private func releaseByTag(_ tag: String) async throws -> GitHubRelease {
+        guard let url = releaseTagURL(tag: tag) else {
+            throw UpdateError.invalidURL(releasesAPIURL)
+        }
+        try validateReleaseAPIURL(url)
+        var request = URLRequest(url: url)
+        request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
+        request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 404 {
+                throw UpdateError.releaseNotFound
+            }
+            if !(200 ..< 300).contains(http.statusCode) {
+                throw UpdateError.httpStatus(http.statusCode)
+            }
+        }
+        return try JSONDecoder().decode(GitHubRelease.self, from: data)
+    }
+
+    private func releaseTagURL(tag: String) -> URL? {
+        guard var components = URLComponents(string: releasesAPIURL) else {
+            return nil
+        }
+        let escapedTag = tag.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? tag
+        if components.path.hasSuffix("/releases/latest") {
+            components.path = String(components.path.dropLast("/latest".count)) + "/tags/\(escapedTag)"
+        } else if components.path.contains("/releases/tags/") {
+            let prefix = components.path.split(separator: "/").dropLast().joined(separator: "/")
+            components.path = "/" + prefix + "/\(escapedTag)"
+        } else {
+            components.path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/tags/\(escapedTag)"
+            if !components.path.hasPrefix("/") {
+                components.path = "/" + components.path
+            }
+        }
+        return components.url
     }
 
     private func fetchText(from url: URL) async throws -> String {
@@ -256,6 +319,16 @@ struct SelfUpdate {
         }
     }
 
+    private func validateFreeSpace(for directory: URL, requiredForKnownTarballAt tarball: URL?) throws {
+        let attrs = try FileManager.default.attributesOfFileSystem(forPath: directory.path)
+        let free = (attrs[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
+        let tarballSize = tarball.flatMap { (try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? NSNumber)?.int64Value } ?? 0
+        let required = max(512 * 1024 * 1024, tarballSize * 3)
+        guard free >= required else {
+            throw UpdateError.insufficientDiskSpace(required: required, available: free)
+        }
+    }
+
     private func verifyChecksumSignature(checksumsURL: URL, signatureURL: URL, tempDir _: URL) throws {
         do {
             let publicKey = try P256.Signing.PublicKey(pemRepresentation: Self.checksumPublicKeyPEM)
@@ -331,7 +404,16 @@ struct SelfUpdate {
     }
 }
 
-private struct GitHubRelease: Decodable {
+struct PreparedSelfUpdate {
+    let tempDir: URL
+    let newBinary: URL
+
+    func cleanup() {
+        try? FileManager.default.removeItem(at: tempDir)
+    }
+}
+
+struct GitHubRelease: Decodable {
     let tagName: String
     let assets: [GitHubAsset]
 
@@ -341,7 +423,7 @@ private struct GitHubRelease: Decodable {
     }
 }
 
-private struct GitHubAsset: Decodable {
+struct GitHubAsset: Decodable {
     let name: String
     let browserDownloadURL: URL
 
@@ -354,6 +436,7 @@ private struct GitHubAsset: Decodable {
 enum UpdateError: Error, CustomStringConvertible {
     case invalidURL(String)
     case httpStatus(Int)
+    case releaseNotFound
     case missingAsset
     case checksumMissing(String)
     case checksumMismatch(expected: String, actual: String)
@@ -365,6 +448,7 @@ enum UpdateError: Error, CustomStringConvertible {
     case untrustedDownloadURL(String)
     case untrustedReleaseAPIURL(String)
     case unsafeArchiveEntry(String)
+    case insufficientDiskSpace(required: Int64, available: Int64)
 
     var description: String {
         switch self {
@@ -372,6 +456,8 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Invalid release API URL: \(url)"
         case .httpStatus(let status):
             return "GitHub API returned HTTP \(status)"
+        case .releaseNotFound:
+            return "GitHub release tag not found"
         case .missingAsset:
             return "Release is missing darwin-arm64 tarball, checksums.txt, or checksums.txt.sig"
         case .checksumMissing(let filename):
@@ -394,6 +480,8 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Untrusted release API URL: \(url)"
         case .unsafeArchiveEntry(let entry):
             return "Release archive contains unsafe entry: \(entry)"
+        case let .insufficientDiskSpace(required, available):
+            return "Insufficient disk space: required \(required), available \(available)"
         }
     }
 }

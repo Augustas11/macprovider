@@ -24,6 +24,7 @@ public struct AppConfig: Equatable, Sendable {
     public var endpointURL: String?
     public var wsTunneledMode: Bool?
     public var autoUpdateEnabled: Bool?
+    public var autoupdateEnabled: Bool?
     public var configPath: String
     public var logLevel: LogLevel
     public var logFormat: LogFormat
@@ -69,6 +70,7 @@ public struct AppConfig: Equatable, Sendable {
             endpointURL: nil,
             wsTunneledMode: nil,
             autoUpdateEnabled: nil,
+            autoupdateEnabled: nil,
             configPath: configPath,
             logLevel: .info,
             logFormat: .json,
@@ -239,6 +241,9 @@ public enum ConfigLoader {
         try assign(&config.endpointURL, from: dict, key: "endpoint_url", expected: "string")
         try assign(&config.wsTunneledMode, from: dict, key: "ws_tunneled_mode", expected: "boolean")
         try assign(&config.autoUpdateEnabled, from: dict, key: "auto_update_enabled", expected: "boolean")
+        if let nested = dict["autoupdate"] as? [String: Any] {
+            try assign(&config.autoupdateEnabled, from: nested, key: "enabled", expected: "boolean")
+        }
         try assign(&config.logFormat, from: dict, key: "log_format", expected: "json or text")
         try assign(&config.logFile, from: dict, key: "log_file", expected: "string")
         try assign(&config.maxContextOverride, from: dict, key: "max_context_override", expected: "integer")
@@ -271,6 +276,7 @@ public enum ConfigLoader {
         try assign(&config.endpointURL, from: environment, env: "MACPROVIDER_ENDPOINT_URL", expected: "string")
         try assign(&config.wsTunneledMode, from: environment, env: "MACPROVIDER_WS_TUNNELED_MODE", expected: "boolean")
         try assign(&config.autoUpdateEnabled, from: environment, env: "MACPROVIDER_AUTO_UPDATE_ENABLED", expected: "boolean")
+        try assign(&config.autoupdateEnabled, from: environment, env: "MACPROVIDER_AUTOUPDATE", expected: "boolean")
         try assign(&config.logLevel, from: environment, env: "MACPROVIDER_LOG_LEVEL", expected: "valid log level")
         try assign(&config.logFormat, from: environment, env: "MACPROVIDER_LOG_FORMAT", expected: "json or text")
         try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")

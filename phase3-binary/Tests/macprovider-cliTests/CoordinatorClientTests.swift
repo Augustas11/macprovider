@@ -1388,7 +1388,7 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNil(proof["provider_receipt_public_key"])
     }
 
-    func testBinaryVersion_AdvertisesSPEC001V16AcrossHandshakeFrames() async throws {
+    func testBinaryVersion_AdvertisesSPEC020V17AcrossHandshakeFrames() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
             modelID: "model-a",
@@ -1401,10 +1401,10 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.6.1")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.6.1")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.6.1")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.6.1")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.7.0")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.7.0")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.7.0")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.7.0")
     }
 
     func testAuthInitialDefaultsToSingleEntryCatalog() async throws {

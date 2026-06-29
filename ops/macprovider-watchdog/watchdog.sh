@@ -118,7 +118,235 @@ kick_provider() {
 
 now_epoch() { date -u +%s; }
 
+autoupdate_recovery_tick() {
+  AUTUPDATE_STATE_ROOT="${MACPROVIDER_AUTOUPDATE_STATE_ROOT:-$HOME/.local/share/macprovider/autoupdate}" \
+  MACPROVIDER_LABEL="$LABEL" \
+  LOG_PATH="$LOG_PATH" \
+  python3 <<'PY'
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+
+root = os.environ["AUTUPDATE_STATE_ROOT"]
+label = os.environ["MACPROVIDER_LABEL"]
+log_path = os.environ["LOG_PATH"]
+pending = os.path.join(root, "pending.json")
+lock_path = os.path.join(root, "update.lock")
+uid = os.getuid()
+
+def ts():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def log(message):
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(f"[{ts()}] autoupdate {message}\n")
+
+def event(outcome, phase, failure_class, reason, marker=None):
+    payload = {
+        "event": "provider_autoupdate_watchdog",
+        "source": "coordinator",
+        "outcome": outcome,
+        "phase": phase,
+        "reason": reason,
+        "timestamp": ts(),
+    }
+    if failure_class:
+        payload["failure_class"] = failure_class
+    if marker:
+        payload["update_id"] = marker.get("update_id", "")
+        payload["target_version"] = marker.get("target_version", "")
+    log(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+def reject_path(path, must_exist=True):
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        if must_exist:
+            raise
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        raise RuntimeError(f"symlink_rejected:{path}")
+    if st.st_uid != uid:
+        raise RuntimeError(f"owner_rejected:{path}")
+    if st.st_nlink != 1 and not stat.S_ISDIR(st.st_mode):
+        raise RuntimeError(f"hardlink_rejected:{path}")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError(f"writable_rejected:{path}")
+    return st
+
+def verify_root():
+    current = root
+    parts = []
+    while True:
+        parts.append(current)
+        parent = os.path.dirname(current)
+        if parent == current or current == os.path.expanduser("~"):
+            break
+        current = parent
+    for path in reversed(parts):
+        if os.path.exists(path):
+            st = reject_path(path)
+            if not stat.S_ISDIR(st.st_mode):
+                raise RuntimeError(f"not_directory:{path}")
+
+def read_marker():
+    fd = os.open(pending, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        raw = os.read(fd, 65536)
+    finally:
+        os.close(fd)
+    marker = json.loads(raw.decode("utf-8"))
+    required = {"update_id", "target_version", "target_path", "backup_path", "size", "mode", "sha256", "marker_deadline"}
+    if not required.issubset(marker.keys()):
+        raise RuntimeError("marker_missing_required_fields")
+    return marker
+
+def current_binary_version(path):
+    try:
+        result = subprocess.run([path, "--version"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+    except Exception:
+        return ""
+    output = f"{result.stdout}\n{result.stderr}"
+    match = re.search(r"([0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z.-]+)?)", output)
+    return match.group(1) if match else ""
+
+def process_success_sentinel(marker):
+    binary_dir = os.path.dirname(marker["target_path"])
+    sentinel = os.path.join(binary_dir, f".macprovider-cli.success-{marker['update_id']}")
+    if not os.path.exists(sentinel):
+        return False
+    try:
+        reject_path(sentinel)
+        fd = os.open(sentinel, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            payload = json.loads(os.read(fd, 65536).decode("utf-8"))
+        finally:
+            os.close(fd)
+        sentinel_version = str(payload.get("binary_version", ""))
+        current_version = current_binary_version(marker["target_path"])
+        if sentinel_version and sentinel_version == current_version:
+            try:
+                os.unlink(pending)
+            except FileNotFoundError:
+                pass
+            try:
+                os.unlink(marker["backup_path"])
+            except FileNotFoundError:
+                pass
+            try:
+                os.unlink(lock_path)
+            except FileNotFoundError:
+                pass
+            os.unlink(sentinel)
+            event("success", "post_start", None, "success_sentinel_cleanup_completed", marker)
+            return True
+        event("failure", "post_start", "orphaned_success_sentinel", "success_sentinel_version_mismatch", marker)
+        os.unlink(sentinel)
+        return False
+    except Exception as exc:
+        event("failure", "post_start", "orphaned_success_sentinel", str(exc), marker)
+        try:
+            os.unlink(sentinel)
+        except FileNotFoundError:
+            pass
+        return False
+
+def sha256(path):
+    h = hashlib.sha256()
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    finally:
+        os.close(fd)
+    return h.hexdigest()
+
+def quarantine(reason, marker=None):
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    dest = os.path.join(root, f"pending-quarantined-{stamp}.json")
+    try:
+        os.replace(pending, dest)
+        event("failure", "rollback", "rollback_backup_corrupt", reason, marker)
+    except FileNotFoundError:
+        pass
+
+def lock_is_held_by_other_process():
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return False
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+def restore(marker):
+    backup = marker["backup_path"]
+    target = marker["target_path"]
+    backup_st = reject_path(backup)
+    reject_path(os.path.dirname(target))
+    if not os.path.isabs(target) or target.endswith("/"):
+        raise RuntimeError("target_path_invalid")
+    if backup_st.st_size != int(marker["size"]):
+        raise RuntimeError("backup_size_mismatch")
+    if sha256(backup) != str(marker["sha256"]).lower():
+        raise RuntimeError("backup_sha256_mismatch")
+    os.chmod(backup, int(marker["mode"]))
+    os.replace(backup, target)
+    dir_fd = os.open(os.path.dirname(target), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+    try:
+        subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", os.path.expanduser("~/Library/LaunchAgents/live.streamvc.macprovider.plist")], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:
+        log(f"launchctl_restore_warning={exc}")
+    try:
+        os.unlink(pending)
+    except FileNotFoundError:
+        pass
+    event("failure", "rollback", "orphaned_pending_marker", "restored_prior_binary", marker)
+
+try:
+    if not os.path.exists(pending):
+        sys.exit(0)
+    verify_root()
+    reject_path(pending)
+    if lock_is_held_by_other_process():
+        sys.exit(0)
+    marker = read_marker()
+    if process_success_sentinel(marker):
+        sys.exit(0)
+    try:
+        restore(marker)
+    except Exception as exc:
+        event("failure", "rollback", "rollback_backup_corrupt", str(exc), marker)
+        quarantine(str(exc), marker)
+except Exception as exc:
+    log(f"recovery_error={exc}")
+PY
+}
+
 main() {
+  autoupdate_recovery_tick
   pid="$(read_provider_id || true)"
   if [ -z "$pid" ]; then
     # Provider not yet installed / configured. Stay silent; if the
