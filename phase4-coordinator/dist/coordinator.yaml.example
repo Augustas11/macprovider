@@ -112,6 +112,14 @@ logging:
   level: "info"
   format: "json"
 
+# SPEC-005 v0.4 §11.5 launch-gate item 10. Quarantine resolution
+# `/admin/ledger/quarantine/{id}/force-void` admin surface is
+# default-OFF — operators MUST flip this flag deliberately after
+# verifying §13.2 reload + audit semantics. SIGHUP-driven flips
+# emit a `billing_config_flag_changed` audit row.
+billing:
+  quarantine_resolution_force_void_enabled: false
+
 tier2:
   # SPEC-008 catalog-based hash verification. Operator-controlled,
   # observation-only by default per beta/DECISION_CRITERIA Entry 80.
