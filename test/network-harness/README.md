@@ -179,7 +179,7 @@ but do not change the harness exit code (I1-I4 still gate via exit 10).
 benchmark:
   enabled: true
   invariants: [B1, B2, B3, B4, B5, B6]
-  pricing_source: ../../../specs/BENCHMARK_PRICING_v0.1.json   # only needed for B6
+  pricing_source: pearl:/opt/macprovider/coordinator.yaml      # only needed for B6 (or .json fallback)
   provider_slots: 3                                             # default 3 (Pearl AccountConcurrency)
 ```
 
@@ -199,11 +199,23 @@ sleeps `inter_pair_idle_seconds` before the cold request, then fires
 the warm request immediately. The harness tags results with
 `phase: cold|warm` so B7 can compute the p50 ratio.
 
-Pricing manifests are loaded via local path or `host:/path` SSH spec.
-The loader accepts three JSON shapes: an array of `{model, price_per_1k_*}`,
-a `{models: [...]}` wrapper, or a map `{model_id: {...}}`. Unknown models
-encountered in results are recorded but contribute zero earnings — B6
-reflects only priced traffic.
+Pricing sources are loaded via local path or `host:/path` SSH spec.
+The loader distinguishes by extension:
+
+- **`*.yaml` / `*.yml`** — coordinator config file. Derives provider-net
+  USD/1k rates from `rewards.rate_card × global_multiplier ×
+  provider_share × stats.rollup.usd_per_million_credits` — the exact
+  formula coord uses to settle. **Recommended** for production runs
+  (issue #223 fix): pricing tracks the live coordinator. Unset coord
+  fields fall back to the defaults in
+  `phase4-coordinator/internal/config/config.go:528`. Unknown models
+  fall back to the `default` rate-card entry, matching coord's
+  `RateFor` behavior.
+- **`*.json`** — frozen pricing manifest. Three accepted shapes
+  (array of `{model, price_per_1k_*}`, `{models: [...]}` wrapper, or
+  `{model_id: {...}}` map). Useful for offline reproducibility or
+  bench-against-hypothetical-rates analysis. Unknown models contribute
+  zero earnings and are recorded in `UnknownModels` for triage.
 
 ## Scenarios committed
 

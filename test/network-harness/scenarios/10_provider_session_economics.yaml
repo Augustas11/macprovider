@@ -46,11 +46,15 @@ silent_hang_threshold: 15s
 benchmark:
   enabled: true
   invariants: [B5, B6]
-  # In-repo placeholder pricing manifest (DRAFT — not production rates).
-  # See the file header for calibration rationale. When real settlement
-  # pricing lands in coordinator.yaml rewards.rate_card, point this at
-  # the operator-curated manifest instead. Harness must run from repo root.
-  pricing_source: ../../../specs/BENCHMARK_PRICING_v0.1.json
+  # Source pricing directly from the live coordinator config (issue #223).
+  # The loader detects the .yaml extension and derives provider-net USD/1k
+  # rates from rewards.rate_card × global_multiplier × provider_share ×
+  # stats.rollup.usd_per_million_credits — the exact math the coord uses
+  # to settle. No more parallel manifest drift.
+  #
+  # For offline / no-Pearl-SSH runs, fall back to the in-repo manifest:
+  #   pricing_source: ../../../specs/BENCHMARK_PRICING_v0.1.json
+  pricing_source: pearl:/opt/macprovider/coordinator.yaml
 
 prompts:
   - model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
