@@ -1,0 +1,32 @@
+{
+  "model": "fixture-model",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Return an age."
+    }
+  ],
+  "stream": true,
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "age_object",
+      "strict": true,
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "age": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "age"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

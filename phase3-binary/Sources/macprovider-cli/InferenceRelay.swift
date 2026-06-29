@@ -535,7 +535,11 @@ actor InferenceRelay {
             status = "error_context_exceeded"
         case "queue_full":
             status = "error_queue_full"
-        case "malformed_json_response", "json_schema_validation_failed":
+        // AC-V2-3a + AC-V2-9 + AC-V2-9b (SPEC-019 v0.2.4 §5): these
+        // four terminal structured-output codes are the canonical table.
+        // Asymmetry across provider WS, coordinator SSE, and gateway SSE
+        // allow-lists is a money-path violation.
+        case "malformed_json_response", "json_schema_validation_failed", "response_byte_cap_exceeded", "provider_timeout":
             status = error.code
         default:
             status = "error_internal"
@@ -547,7 +551,10 @@ actor InferenceRelay {
             "chunks_sent": chunksSent,
             "error": error.message,
         ]
-        if error.code == "malformed_json_response" || error.code == "json_schema_validation_failed" {
+        if error.code == "malformed_json_response" ||
+            error.code == "json_schema_validation_failed" ||
+            error.code == "response_byte_cap_exceeded" ||
+            error.code == "provider_timeout" {
             frame["retryable"] = (error.envelope["error"] as? [String: Any])?["retryable"] as? Bool
         }
         return frame

@@ -7,12 +7,145 @@ final class JSONSchemaValidatorTests: XCTestCase {
     }
 
     func testUnsupportedKeywordsAreRejected() throws {
-        let keywords = ["oneOf", "anyOf", "allOf", "not", "$ref", "$defs", "pattern", "format", "minimum", "maximum", "multipleOf", "minItems", "maxItems", "uniqueItems", "$schema"]
+        let keywords = ["oneOf", "anyOf", "allOf", "not", "$ref", "$defs", "pattern", "format", "minItems", "maxItems", "uniqueItems"]
         for keyword in keywords {
             var schema = Self.personSchemaObject()
             schema[keyword] = .array([])
             XCTAssertAPIError(try JSONSchemaValidator.validateSchemaShape(schema: .object(schema)), status: 400, code: "json_schema_unsupported_keyword", keyword)
         }
+    }
+
+    func testTopLevelSchemaKeywordAcceptedButNestedRejected() throws {
+        var schema = Self.personSchemaObject()
+        schema["$schema"] = .string("https://json-schema.org/draft/2020-12/schema")
+        XCTAssertNoThrow(try JSONSchemaValidator.validateSchemaShape(schema: .object(schema)))
+
+        var child = Self.personSchemaObject()
+        child["properties"] = .object(["age": .object(["type": .string("integer"), "$schema": .string("nested")])])
+        child["required"] = .array([.string("age")])
+        XCTAssertAPIError(try JSONSchemaValidator.validateSchemaShape(schema: .object(child)), status: 400, code: "json_schema_unsupported_keyword")
+    }
+
+    func testNumericBoundsAcceptedAndEnforcedOnNumericTypes() throws {
+        let schema: JSONValue = .object([
+            "type": .string("integer"),
+            "minimum": .int(2),
+            "maximum": .int(10),
+            "multipleOf": .int(2),
+        ])
+        XCTAssertNoThrow(try JSONSchemaValidator.validateSchemaShape(schema: schema))
+        XCTAssertNoThrow(try JSONSchemaValidator.validateInstance(.int(8), against: schema))
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.int(11), against: schema), status: 502, code: "json_schema_validation_failed")
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.int(3), against: schema), status: 502, code: "json_schema_validation_failed")
+    }
+
+    func testNumericBoundsRejectNonNumericTypesAndInvalidOperands() throws {
+        for typ in ["string", "boolean", "null", "array", "object"] {
+            var schema: [String: JSONValue] = ["type": .string(typ), "minimum": .int(0)]
+            if typ == "array" {
+                schema["items"] = .object(["type": .string("string")])
+            }
+            if typ == "object" {
+                schema["properties"] = .object([:])
+                schema["required"] = .array([])
+                schema["additionalProperties"] = .bool(false)
+            }
+            XCTAssertAPIError(try JSONSchemaValidator.validateSchemaShape(schema: .object(schema)), status: 400, code: "json_schema_unsupported_keyword", typ)
+        }
+        XCTAssertAPIError(try JSONSchemaValidator.validateSchemaShape(schema: .object(["type": .string("number"), "multipleOf": .int(0)])), status: 400, code: "json_schema_unsupported_keyword")
+        XCTAssertAPIError(try JSONSchemaValidator.validateSchemaShape(schema: .object(["type": .string("number"), "maximum": .string("10")])), status: 400, code: "json_schema_unsupported_keyword")
+        XCTAssertAPIError(try JSONSchemaValidator.validateSchemaShape(schema: .object(["type": .string("number"), "minimum": .int(5), "maximum": .int(4)])), status: 400, code: "json_schema_unsupported_keyword")
+    }
+
+    func testMultipleOfDenormalOperandRejectedBeforeInference() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .double(1e-300),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateSchemaShape(schema: schema), status: 400, code: "json_schema_unsupported_keyword")
+    }
+
+    func testMultipleOfFractionalFallbackAcceptsExactMultiple() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .double(0.5),
+        ])
+
+        XCTAssertNoThrow(try JSONSchemaValidator.validateSchemaShape(schema: schema))
+        XCTAssertNoThrow(try JSONSchemaValidator.validateInstance(.double(1.5), against: schema))
+    }
+
+    func testMultipleOfFractionalFallbackRejectsNonMultiple() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .double(0.5),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(1.3), against: schema), status: 502, code: "json_schema_validation_failed")
+    }
+
+    func testMultipleOfFPFallbackRejectsFloatingDrift() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .int(1),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(1.0000000001), against: schema), status: 502, code: "json_schema_validation_failed")
+    }
+
+    func testMultipleOfLargeQuotientFailsClosed() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .double(0.5),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(1e16), against: schema), status: 502, code: "json_schema_validation_failed")
+    }
+
+    func testValidateNumericInstanceAcceptsInt64MaxAgainstMultipleOfOne() throws {
+        let schema: JSONValue = .object([
+            "type": .string("integer"),
+            "multipleOf": .int(1),
+        ])
+
+        XCTAssertNoThrow(try JSONSchemaValidator.validateInstance(.int(Int.max), against: schema))
+    }
+
+    func testValidateNumericInstanceAcceptsInt64MinAgainstMultipleOfOne() throws {
+        let schema: JSONValue = .object([
+            "type": .string("integer"),
+            "multipleOf": .int(1),
+        ])
+
+        XCTAssertNoThrow(try JSONSchemaValidator.validateInstance(.int(Int.min), against: schema))
+    }
+
+    func testValidateNumericInstanceRejectsAboveInt64Max() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .int(1),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(Double(Int64.max)), against: schema), status: 502, code: "json_schema_validation_failed")
+    }
+
+    func testMultipleOfIntegerPathAcceptsNegativeIntegers() throws {
+        let schema: JSONValue = .object([
+            "type": .string("integer"),
+            "multipleOf": .int(2),
+        ])
+
+        XCTAssertNoThrow(try JSONSchemaValidator.validateInstance(.int(-100), against: schema))
+    }
+
+    func testMultipleOfIntegerPathRejectsNegativeOffMultiple() throws {
+        let schema: JSONValue = .object([
+            "type": .string("integer"),
+            "multipleOf": .int(2),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.int(-101), against: schema), status: 502, code: "json_schema_validation_failed")
     }
 
     func testStrictObjectRequiresAdditionalPropertiesFalseAtEachObject() throws {

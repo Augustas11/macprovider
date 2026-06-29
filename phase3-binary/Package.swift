@@ -74,6 +74,13 @@ let package = Package(
                 .copy("Fixtures/SPEC015_v03_jcs/README.md"),
                 .copy("Fixtures/SPEC019"),
             ]
+        ),
+        .testTarget(
+            name: "MacProviderCoreTests",
+            dependencies: [
+                "MacProviderCore",
+            ],
+            path: "Tests/MacProviderCoreTests"
         )
     ]
 )

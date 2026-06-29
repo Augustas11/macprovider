@@ -1,3 +1,4 @@
+import Foundation
 import MacProviderCore
 import XCTest
 @testable import macprovider_cli
@@ -78,6 +79,39 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
         )
     }
 
+    func testStreamingJsonSchemaValidatesBuyerVisibleDeltasBeforeSuccess() async throws {
+        let runtime = Self.runtimeReturning(CompletionResult(content: #"{"name":"Ada","age":"old"}"#, finishReason: "stop", promptTokens: 1, completionTokens: 2))
+        let request = try Self.request(responseFormat: Self.jsonSchemaResponseFormat(), stream: true)
+        let handle = try await runtime.acquireRequestHandle(request)
+        let visible = LockedString()
+
+        await XCTAssertAsyncAPIError(
+            try await runtime.stream(request, with: handle) { chunk in
+                if case .content(let text) = chunk {
+                    visible.append(text)
+                }
+            },
+            status: 502,
+            code: "json_schema_validation_failed",
+            retryable: true,
+            param: "/age"
+        )
+        XCTAssertEqual(visible.value, #"{"name":"Ada","age":"old"}"#)
+    }
+
+    func testStreamingJsonObjectWhitespaceOnlyIsTerminalMalformedJSON() async throws {
+        let runtime = Self.runtimeReturning(CompletionResult(content: " \n\t", finishReason: "stop", promptTokens: 1, completionTokens: 1))
+        let request = try Self.request(responseFormat: ["type": "json_object"], stream: true)
+        let handle = try await runtime.acquireRequestHandle(request)
+
+        await XCTAssertAsyncAPIError(
+            try await runtime.stream(request, with: handle) { _ in },
+            status: 502,
+            code: "malformed_json_response",
+            retryable: false
+        )
+    }
+
     func testJsonObjectRequiresObjectOrArray() async throws {
         let runtime = Self.runtimeReturning(CompletionResult(content: #""scalar""#, finishReason: "stop", promptTokens: 1, completionTokens: 1))
 
@@ -124,11 +158,12 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
         )
     }
 
-    private static func request(responseFormat: [String: Any]) throws -> ChatCompletionRequest {
+    private static func request(responseFormat: [String: Any], stream: Bool = false) throws -> ChatCompletionRequest {
         let body: [String: Any] = [
             "model": "fixture-model",
             "messages": [["role": "user", "content": "Return a person"]],
             "response_format": responseFormat,
+            "stream": stream,
         ]
         return try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
     }
@@ -225,5 +260,22 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
         } catch {
             XCTFail("unexpected error \(error)", file: file, line: line)
         }
+    }
+}
+
+private final class LockedString: @unchecked Sendable {
+    private let lock = NSLock()
+    private var text = ""
+
+    var value: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return text
+    }
+
+    func append(_ value: String) {
+        lock.lock()
+        text += value
+        lock.unlock()
     }
 }

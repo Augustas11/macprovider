@@ -1,0 +1,72 @@
+{
+  "model": "fixture-model",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Return Ada and call lookup_age if needed."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "call_lookup_age_ada",
+          "type": "function",
+          "function": {
+            "name": "lookup_age",
+            "arguments": "{\"name\":\"Ada\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_lookup_age_ada",
+      "content": "{\"age\":37}"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "lookup_age",
+        "description": "Lookup an age by name.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "stream": true,
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "person_tool_result",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "age": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "age"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

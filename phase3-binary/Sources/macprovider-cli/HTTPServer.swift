@@ -217,8 +217,6 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 try request.validateModelMatches(modelID)
             }
 
-            try Self.validateStructuredStreamingUnsupported(request)
-
             if request.stream {
                 ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .streamingRequest)
                 handleStreamingChatCompletions(
@@ -450,28 +448,6 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private static func isASCIIContentEncodingWhitespace(_ character: Character) -> Bool {
         character == " " || character == "\t" || character == "\n" || character == "\r"
-    }
-
-    static func validateStructuredStreamingUnsupported(_ request: ChatCompletionRequest) throws {
-        guard request.stream else { return }
-        switch request.responseFormat {
-        case .jsonSchema:
-            throw APIError(
-                status: 400,
-                message: "v0.1.0 does not stream structured `json_schema` output; resend with `stream:false`.",
-                code: "streaming_json_schema_unsupported",
-                param: "stream"
-            )
-        case .jsonObject:
-            throw APIError(
-                status: 400,
-                message: "v0.1.0 does not stream structured `json_object` output; resend with `stream:false`.",
-                code: "streaming_json_object_unsupported",
-                param: "stream"
-            )
-        case .text:
-            return
-        }
     }
 
     private func handleStreamingChatCompletions(
