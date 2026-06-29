@@ -85,7 +85,20 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
             try await runtime.complete(Self.request(responseFormat: ["type": "json_object"])),
             status: 502,
             code: "malformed_json_response",
-            retryable: true
+            retryable: true,
+            messageContains: #"response_format: {"type":"text"}"#
+        )
+    }
+
+    func testJsonObjectScalarMessageIncludesMigrationHint() async throws {
+        let runtime = Self.runtimeReturning(CompletionResult(content: #"true"#, finishReason: "stop", promptTokens: 1, completionTokens: 1))
+
+        await XCTAssertAsyncAPIError(
+            try await runtime.complete(Self.request(responseFormat: ["type": "json_object"])),
+            status: 502,
+            code: "malformed_json_response",
+            retryable: true,
+            messageContains: "omit the field"
         )
     }
 
@@ -188,6 +201,7 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
         status: Int,
         code: String,
         retryable: Bool,
+        messageContains: String? = nil,
         param: String? = nil,
         file: StaticString = #filePath,
         line: UInt = #line
@@ -202,6 +216,9 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
             XCTAssertEqual(error.settlementRan, true, file: file, line: line)
             let envelope = error.envelope["error"] as? [String: Any]
             XCTAssertEqual(envelope?["retryable"] as? Bool, retryable, file: file, line: line)
+            if let messageContains {
+                XCTAssertTrue(error.message.contains(messageContains), "message \(String(reflecting: error.message)) did not contain \(String(reflecting: messageContains))", file: file, line: line)
+            }
             if let param {
                 XCTAssertEqual(error.param, param, file: file, line: line)
             }

@@ -45,7 +45,7 @@ public enum JSONSchemaValidator {
         default:
             throw APIError(
                 status: 502,
-                message: "response_format json_object requires a top-level object or array",
+                message: #"response_format json_object requires a top-level object or array. If you intended free-form prose, send response_format: {"type":"text"} or omit the field. Per SPEC-019 v0.1.0, json_object now enforces top-level JSON; this is a breaking change from earlier versions where json_object was a silent no-op."#,
                 type: "upstream_provider_error",
                 code: "malformed_json_response",
                 param: "",
