@@ -20,24 +20,33 @@ FR-SR-7 + FR-SR-7a). Each PR runs the locked three-lane codex
 audit (code / security / architect) to 0 CRITICAL / 0 HIGH / 0
 MEDIUM before merge.
 
-**Locked-spec dependencies (DO NOT contradict).**
-- SPEC-001 v1.3 (binary protocol; no provider-facing changes from
+**Locked-spec dependencies (DO NOT contradict).** Versions below
+reflect current `origin/main` headers as of the BUILD prompt
+landing. Verify against each spec file's line 3 before starting an
+IMPL session.
+
+- SPEC-001 v1.6 (binary protocol; no provider-facing changes from
   SPEC-004 — see §6 "Provider protocol")
 - SPEC-002 v1.5.2 (coordinator base routing — SPEC-004 LAYERS on top,
   does not replace, per SPEC-004 §3)
 - SPEC-004 v0.3.1 (THE FILE BEING IMPLEMENTED — read every section
-  before writing any line of Go)
-- SPEC-005 v0.4 (billing — `request_log.retried` semantics per
-  FR-SR-14 are SPEC-005's read contract; do not bypass)
-- SPEC-006 v0.8.1 (`routing_internal.conversation_key` derivation;
-  Pillar A consumes this header from gateway)
+  before writing any line of Go; SPEC-004's own change-log cites
+  older dependency versions, which are historical)
+- SPEC-005 v0.3.3 (billing — `request_log.retried` semantics per
+  FR-SR-14 are SPEC-005's read contract; do not bypass; check
+  current SPEC-005 header before starting Pillar D since the v0.4
+  amendment for quarantine resolution may have landed by then)
+- SPEC-006 v0.9.1 (`routing_internal.conversation_key` derivation;
+  Pillar A consumes this gateway-derived field — NOT a buyer header)
 
-Spec-text-only changes ALLOWED: the IMPL PRs MAY add additive
-cross-cite paragraphs to SPEC-002 / SPEC-006 where the implementation
-discovers a normative gap (e.g. "SPEC-006 v0.8 owns the
-`X-MacProvider-Conversation` HMAC derivation" — if missing in
-SPEC-006 v0.8, ADD the paragraph as part of the SPEC-004 IMPL PR).
-SPEC-004 v0.3.1 itself stays byte-identical.
+Spec-text changes: the IMPL PRs MUST surface any discovered
+normative gap (e.g. SPEC-006 not specifying a behavior Pillar A
+needs) as a separate FOLLOW-UP ISSUE filed against the appropriate
+spec. The IMPL PRs MUST NOT inline additive paragraphs to SPEC-002
+/ SPEC-006 mid-cycle — that creates a spec churn surface this
+build cycle is not authorized for. Exception: if the operator
+explicitly authorizes a separate spec-text PR before the IMPL PR
+opens, that's fine. SPEC-004 v0.3.1 itself stays byte-identical.
 
 Run in **Claude Code**, **Codex CLI**, or another LLM IDE session.
 Expected duration: ~4–6 weeks across the four pillars + audit loops
@@ -57,8 +66,9 @@ single PR.
 
 You will edit (in priority order):
   /Users/augstar/macprovider-poc/phase4-coordinator/internal/buyer/server.go
-  /Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/registry.go
   /Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/provider.go
+    (the pool Registry type currently lives in `provider.go`; do NOT
+     look for `pool/registry.go` — it does not exist on origin/main)
   /Users/augstar/macprovider-poc/phase4-coordinator/internal/config/config.go
   /Users/augstar/macprovider-poc/phase4-coordinator/internal/routing/   (NEW package, see Phase B-1)
   /Users/augstar/macprovider-poc/phase4-coordinator/internal/routing/sticky/  (NEW package, Pillar A only)
@@ -168,29 +178,45 @@ Never edit in the canonical checkout (user memory
 
 **Branch:** `feat/spec-004-pillar-b`
 **Config keys added:** `routing.tiebreak_epsilon` (default `0.0`)
-**SPEC-004 rules implemented:** FR-SR-1 default-preservation, the
+**SPEC-004 rules implemented:** FR-SR-1 default-preservation; the
 `effective_throughput = throughput_tps_estimate * tier_weight`
-computation (referenced from FR-SR-8 `fast` objective and §3 step
-6), default-utilization-mode tiebreak (FR-SR-16 first bullet:
-"candidates with `slots_free` equal to the best candidate and
-effective throughput within `routing.tiebreak_epsilon` of the best
-effective throughput"). NO randomized tiebreak in this PR;
+helper (referenced from FR-SR-8 `fast` objective and §3 step 6);
+the helper data structures for FR-SR-16 (epsilon-cohort
+identification). NO randomized tiebreak active in this PR;
 `tiebreak_randomize` parsing lands here but `true` is unimplemented
 and validated as a runtime error if set.
 
-**Files touched:**
-- `internal/config/config.go` — add `Routing` substruct with
-  `TiebreakEpsilon float64` + `TiebreakRandomize bool` + validation
-  (epsilon >= 0; randomize=true → return validation error
-  "spec_004_randomize_not_yet_implemented" until Phase D).
-- `internal/routing/` (NEW package) — `Candidate` struct,
-  `effectiveThroughput(provider)`, `tieBreak(epsilon, mode)` helper.
-- `internal/buyer/server.go` — `selectProvider` calls
-  `routing.TieBreak` BEFORE the existing `connected_at` fallback.
+**Critical default-preservation invariant.** Per SPEC-004 FR-SR-16:
+"When `routing.tiebreak_randomize` is false, SPEC-002 deterministic
+ordering is unchanged." Phase B MUST NOT change the comparator that
+runs when `tiebreak_randomize=false` (the default). The
+`effective_throughput` helper exists as a building block for Phase
+D; Phase B does NOT install it as part of the active selection
+path. The candidate-set order remains SPEC-002 v1.3.3 byte-identical
+in Phase B regardless of `tiebreak_epsilon` value.
 
-**ACs proven (write tests):** AC-SR-1 (default-config regression),
-AC-SR-4 partial (hard pins unchanged), AC-SR-14 partial (composition
-gates).
+**Files touched:**
+- `internal/config/config.go` — reconcile (NOT add) `Routing`
+  substruct: ensure `TiebreakEpsilon float64` (default `0.0`) +
+  `TiebreakRandomize bool` (default `false`) fields exist with
+  validation (epsilon >= 0; randomize=true → return validation
+  error `spec_004_randomize_not_yet_implemented` until Phase D).
+  Some `routing.*` fields already exist on origin/main with
+  potentially stale defaults — verify against SPEC-004 §5 BEFORE
+  adding new fields.
+- `internal/routing/` (NEW package) — `Candidate` struct,
+  `effectiveThroughput(provider)` helper, `inEpsilonCohort(epsilon,
+  metric)` helper. NOT yet wired into the selection path.
+- `internal/buyer/server.go` — NO change to `selectProvider`
+  candidate-ordering in Phase B; only ensure the helpers are
+  importable from the new `routing` package.
+
+**ACs proven (write tests):** AC-SR-1 (default-config regression
+— this is the LOAD-BEARING test for Phase B; it MUST pass after
+Phase B lands and prove the candidate order is byte-identical
+for two same-model providers with identical metrics and different
+`connected_at`). AC-SR-4 partial (hard pins unchanged). AC-SR-14
+partial (composition gates).
 
 **Audit lenses:** code (does the tiebreak code preserve SPEC-002
 ordering at epsilon=0?), security (does an oversized epsilon ever
@@ -231,24 +257,64 @@ in Phase A/D?).
 ### Phase D: model-class aliases + objectives + dispatch rewrite
 
 **Branch:** `feat/spec-004-pillar-d`
-**Config keys added:** `routing.model_classes` (default empty map),
-`routing.max_retries` (default 0), `routing.retry_per_attempt_timeout_s`
-(default 60), `routing.max_providers_faulted_per_request` (default 2),
+**Config keys reconciled / added:** `routing.model_classes` (default
+empty map), `routing.max_retries` (default 0; if already present
+on origin/main with a different default, RECONCILE to 0),
+`routing.retry_per_attempt_timeout_s` (default 60),
+`routing.max_providers_faulted_per_request` (default 2 per
+SPEC-004 §5; verify against `config.Default()` — origin/main has
+a non-zero default but it may not match SPEC-004 §5; reconcile),
 `routing.tiebreak_randomize` (default false — Phase D enables it
 with the FR-SR-16 randomized epsilon cohort; FR-SR-17 audit
 explainability fields mandatory).
 
+**Retry invariants (top of Phase D — implement these FIRST).**
+Before writing the retry loop, encode these as Go-level invariants
+in `internal/routing/retry.go`:
+1. **`max_retries=0` short-circuits the loop.** Per FR-SR-11: if
+   `routing.max_retries == 0` OR `X-MacProvider-Retry` is missing
+   or false-like, the coordinator MUST NOT enter the retry loop
+   even once. The first attempt's result is the buyer-visible
+   result; `request_log.retried = 0`. Write a regression test that
+   sends `X-MacProvider-Retry: 1` with `max_retries: 0` and
+   asserts a single provider attempt + `retried=0`.
+2. **Never retry after commit (FR-SR-13).** Once response bytes
+   are committed to the buyer, the request is terminal.
+3. **Never double-emit (FR-SR-14).** A buyer request produces
+   AT MOST one terminal buyer-visible response.
+4. **Never double-count success (FR-SR-14).** Only the final
+   successful provider attempt writes the `ledger_request_credits`
+   success row; failed attempts are logged but do NOT produce
+   duplicate buyer completions.
+5. **`request_log.retried` increments ONLY on explicit SPEC-004
+   retries (FR-SR-14).** Sharing attempt-counter plumbing with F-4
+   one-shot failover is FORBIDDEN. Phase D MUST add a separate
+   counter for the SPEC-004 retry path; F-4 must not touch it.
+
+**Hostile-body invariant (FR-SR-7a).** The request body's top-level
+`model` field is BUYER input. The coordinator MUST reject
+duplicate or non-canonical case variants (e.g., a body containing
+both `model` and `Model`) with HTTP 400 `invalid_request` BEFORE
+candidate selection or alias resolution. This is a SECURITY
+boundary: the coordinator's parsed `model` MUST match what the
+provider observes after dispatch rewrite.
+
 **SPEC-004 rules implemented:** FR-SR-7 (alias resolution),
 FR-SR-7a (dispatch-time `model` field rewrite at EVERY dispatch
-path — WS streaming, WS non-streaming, HTTP streaming, HTTP
-non-streaming), FR-SR-7c (1 MiB body cap — already enforced in
-v0.3.1 code per `phase4-coordinator/internal/config/config.go:112`;
-verify operator override hooks land), FR-SR-8 objectives (`fast`,
-`accurate`, `balanced` with the v0.2 normative score formula),
-FR-SR-9 (empty-class 503 with `no_provider_available` envelope),
-FR-SR-10 (`/v1/models` advertises classes additively),
-FR-SR-11 / FR-SR-12 / FR-SR-13 / FR-SR-14 / FR-SR-15 (retry
-mechanics + budget), FR-SR-16 (randomized tiebreak), FR-SR-17
+path — see §11 implementation hand-off; current dispatch is split
+across `forwardStreamSequence`, `forwardWSNonStreamSequence`,
+`forwardHTTPSequence`, and the streaming helpers; verify the
+function set against current `server.go` before starting Phase D),
+FR-SR-7c (1 MiB body cap — already enforced in v0.3.1 code; the
+operator-tunable override knob is OUT OF SCOPE for Pillar D —
+Phase D verifies the existing 1 MiB cap remains enforced and does
+NOT relax it or add a new knob; that's a separate config-extension
+PR if/when needed), FR-SR-8 objectives (`fast`, `accurate`,
+`balanced` with the v0.2 normative score formula), FR-SR-9
+(empty-class 503 with `no_provider_available` envelope), FR-SR-10
+(`/v1/models` advertises classes additively), FR-SR-11 / FR-SR-12
+/ FR-SR-13 / FR-SR-14 / FR-SR-15 (retry mechanics + budget),
+FR-SR-16 (randomized tiebreak), FR-SR-17
 (reproducibility-of-randomized-decision logging).
 
 **Files touched:**
@@ -281,12 +347,26 @@ let an attacker game a single-component spike to dominate
 selection?), architect (does Pillar D's surface area force a v0.4
 SPEC bump, or stay v0.3.1-compliant?).
 
-### Phase A: sticky affinity (SPEC-006 v0.8 PG-9 dependent)
+### Phase A: sticky affinity (SPEC-006 v0.9.1 dependent)
 
 **Branch:** `feat/spec-004-pillar-a`
 **Config keys added:** `routing.sticky_enabled` (default false),
 `routing.sticky_ttl_s` (default 1800), `routing.sticky_max_entries`
 (default 10000).
+
+**Sticky source invariant (Phase A — implement this FIRST).** The
+sticky-affinity key MUST come ONLY from gateway-authenticated
+internal metadata, specifically the gateway-derived
+`routing_internal.conversation_key` field. This is NOT a buyer
+header. Pillar A MUST NOT read any `X-MacProvider-Conversation`
+(or similarly-named) buyer-supplied request header. Per SPEC-004
+FR-SR-2: values that do not begin with `conv:` MUST be REJECTED or
+treated as absent for sticky purposes. Treat any direct-buyer-
+traffic path (i.e. requests arriving without the gateway's
+authenticated forwarding) as carrying NO conversation key. This
+is a SECURITY boundary: accepting buyer-supplied sticky keys
+would let a hostile buyer pin themselves to a specific provider
+or steal another buyer's sticky session.
 
 **SPEC-004 rules implemented:** FR-SR-2 (sticky keying on
 `routing_internal.conversation_key`; reject values not in
@@ -368,6 +448,18 @@ A pillar is "done" only when ALL of these are true:
 - [ ] Local `main` is reset to `origin/main`; pillar branch deleted.
 - [ ] AC-SR-1 default-config regression test still passes — verify
       with `go test -count=1 -run TestSPEC004DefaultConfigRegression ./...`.
+- [ ] **Pillar D additional money-path gate:** focused requestlog +
+      billing reconciliation tests pass — assert (a) explicit
+      `X-MacProvider-Retry` increments `request_log.retried`,
+      (b) F-4 one-shot failover does NOT increment it, (c) the
+      `attempt_n` monotonic ordinal (SPEC-002 v1.5.2) writes
+      correctly under retry, (d) the SPEC-005 quarantine path
+      behaves identically pre/post-Pillar-D.
+- [ ] **Pillar A additional money-path gate:** verify the
+      gateway-authenticated `routing_internal.conversation_key` path
+      is the ONLY input to the sticky map; assert with a direct-
+      buyer-traffic test that an `X-MacProvider-Conversation`
+      header (or similar) DOES NOT populate the map.
 - [ ] Issue #170 has a comment naming the pillar PR + audit-rounds-
       to-convergence count.
 
@@ -389,17 +481,35 @@ remains operator-owned).
 - **Estimated wall-clock.** 4–6 weeks across the four pillars per the
   issue #170 estimate. The Pillar D session is the longest (most
   R-rules, most ACs, most dispatch paths).
-- **Composition with SPEC-005 / SPEC-007.** Pillar D's retry rules
-  write `request_log.retried`; SPEC-005 v0.4 §15.2 reads that column
-  via the `attempt_n` patch path. Pillar A's `routing_decision` log
-  surface composes with SPEC-007 v0.4 explorer; no schema change
-  needed in v0.3.1 IMPL.
-- **What changes if FR-SR-7c body cap operator-override lands.**
-  The 1 MiB cap is already enforced in code (per the SPEC-004
-  v0.3.1 §FR-SR-7c "_RESOLVED 2026-06-26_" note). If a future PR
-  adds the operator-tunable knob (`routing.request_body_bytes` or
-  equivalent), the BUILD prompt is unchanged — that's a separate
-  config-extension PR that doesn't touch any pillar.
+- **Composition with SPEC-005.** Pillar D's retry rules write
+  `request_log.retried`; SPEC-005 §15.2 reads that column via the
+  `attempt_n` patch path. SPEC-002 v1.5.2's monotonic `attempt_n`
+  column is the canonical ordinal — verify it remains correct
+  under SPEC-004 retry attempts (the Phase D money-path gate test
+  list above pins this).
+- **Composition with SPEC-007.** SPEC-007 explorer reads
+  `request_log` + ledger rows + gateway `audit_events`; it does
+  NOT consume `routing_decision` structured logs. Pillar A's
+  `routing_decision` log surface lands in the coordinator log
+  stream and is operator-visible there; integration into SPEC-007
+  explorer is OUT OF SCOPE for this IMPL cycle and requires a
+  separate durable-event contract (deferred).
+- **Composition with SPEC-008 / SPEC-010.** No SPEC-008 hash-
+  verification behavior changes. SPEC-008 §5.7 hash block is
+  unaffected (per SPEC-010 v1.5 §6.3). SPEC-010 cold-supported-
+  model behavior is unchanged. The FR-SR-10 `/v1/models` class
+  entries MUST be ADDITIVE only — they MUST NOT alter Tier-2 hash
+  disclosure, alter concrete-model entry fields, or change how
+  `model_hash` flows through the heartbeat/auth-frame contracts.
+- **FR-SR-7c body cap is OUT OF SCOPE for Pillar D.** The 1 MiB
+  cap is already enforced in code as `Limits.MaxChatRequestBodyBytes`
+  in `phase4-coordinator/internal/config/config.go` (see SPEC-004
+  v0.3.1 §FR-SR-7c "_RESOLVED 2026-06-26_" note for the exact
+  closure). Pillar D MUST verify this cap remains enforced and
+  MUST NOT add a new operator-tunable knob or relax the existing
+  default in any pillar PR. If/when an operator-tunable knob is
+  desired, it ships as a separate config-extension PR outside this
+  build cycle.
 - **What happens if SPEC-006 v0.8 PG-9 turns out incomplete.** Per
   SPEC-004 FR-SR-2 last paragraph: "Pillar A implementation MUST
   NOT begin until SPEC-006 v0.8 lands the conversation-key
