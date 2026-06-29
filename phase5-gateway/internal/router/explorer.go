@@ -12,7 +12,6 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
-
 const (
 	explorerDefaultLimit      = 50
 	explorerMaxLimit          = 200
@@ -164,10 +163,10 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 					forensic = forensic[:storage.ExplorerForensicMatchedAccountIDsCap]
 				}
 				payload := map[string]any{
-					"matched_account_ids":  forensic,
-					"cap":                  storage.ExplorerMatchedAccountIDsCap,
-					"forensic_cap":         storage.ExplorerForensicMatchedAccountIDsCap,
-					"severity":             "WARN",
+					"matched_account_ids": forensic,
+					"cap":                 storage.ExplorerMatchedAccountIDsCap,
+					"forensic_cap":        storage.ExplorerForensicMatchedAccountIDsCap,
+					"severity":            "WARN",
 				}
 				if forensicTruncatedAt > 0 {
 					payload["forensic_truncated_at"] = forensicTruncatedAt
@@ -220,7 +219,6 @@ func parseTypedSegment(raw, prefix string) (string, bool) {
 	}
 	return raw, false
 }
-
 
 func (s *Server) handleExplorerActivity(w http.ResponseWriter, r *http.Request) {
 	if !s.explorerAllowed(w, r) {

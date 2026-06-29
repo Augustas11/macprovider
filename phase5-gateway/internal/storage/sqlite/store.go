@@ -91,6 +91,8 @@ func (s *Store) Ping(ctx context.Context) error {
 //   v1 — original schema.
 //   v2 — issue #196: usage_events PK (account_id, request_id).
 //   v3 — issue #210: demo_usage_events PK (demo_token_hash, request_id).
+//   v4 — issue #231: idx_quota_request + idx_concurrency_request so
+//        the §6.4 ambiguity probe stops full-scanning those tables.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -101,7 +103,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 3
+const maxKnownSchemaVersion = 4
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -154,6 +156,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(4, ?)", now); err != nil {
 		return err
 	}
 	return nil

@@ -164,6 +164,12 @@ CREATE TABLE IF NOT EXISTS quota_reservations (
 
 CREATE INDEX IF NOT EXISTS idx_quota_active_account_date ON quota_reservations(account_id, window_date, status);
 CREATE INDEX IF NOT EXISTS idx_quota_expires_at ON quota_reservations(expires_at);
+-- #231 R3 SEC MEDIUM closure: request_id-leading index so the
+-- §6.4 explorerAccountIDsForRequest ambiguity probe uses an index
+-- lookup instead of a full table scan on quota_reservations.
+-- Composite PK is (account_id, request_id); without this auxiliary
+-- index the ambiguity SELECT goes to SCAN under EXPLAIN QUERY PLAN.
+CREATE INDEX IF NOT EXISTS idx_quota_request ON quota_reservations(request_id);
 
 CREATE TABLE IF NOT EXISTS concurrency_reservations (
 	account_id TEXT NOT NULL,
@@ -176,6 +182,9 @@ CREATE TABLE IF NOT EXISTS concurrency_reservations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_concurrency_active_account ON concurrency_reservations(account_id, status, expires_at);
+-- #231 R3 SEC MEDIUM closure: matches idx_quota_request — covers the
+-- §6.4 ambiguity probe's concurrency_reservations branch.
+CREATE INDEX IF NOT EXISTS idx_concurrency_request ON concurrency_reservations(request_id);
 
 CREATE TABLE IF NOT EXISTS feedback_events (
 	event_id TEXT PRIMARY KEY,
