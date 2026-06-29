@@ -56,8 +56,62 @@ final class ChatCompletionRequestTests: XCTestCase {
         }
     }
 
-    private func makeRequest(model: String) throws -> ChatCompletionRequest {
-        let body: [String: Any] = [
+    func testJsonSchemaResponseFormatIsAccepted() throws {
+        let request = try makeRequest(model: "m", responseFormat: Self.jsonSchemaResponseFormat())
+        if case .jsonSchema(let spec) = request.responseFormat {
+            XCTAssertEqual(spec.name, "person-v1")
+        } else {
+            XCTFail("expected json_schema response format")
+        }
+    }
+
+    func testJsonSchemaRequestValidationErrors() throws {
+        var missingName = Self.jsonSchemaObject()
+        missingName.removeValue(forKey: "name")
+        XCTAssertAPIError(try makeRequest(model: "m", responseFormat: ["type": "json_schema", "json_schema": missingName]), status: 400, code: "json_schema_missing_name")
+
+        var missingSchema = Self.jsonSchemaObject()
+        missingSchema.removeValue(forKey: "schema")
+        XCTAssertAPIError(try makeRequest(model: "m", responseFormat: ["type": "json_schema", "json_schema": missingSchema]), status: 400, code: "json_schema_missing_schema")
+
+        var strictFalse = Self.jsonSchemaObject()
+        strictFalse["strict"] = false
+        XCTAssertAPIError(try makeRequest(model: "m", responseFormat: ["type": "json_schema", "json_schema": strictFalse]), status: 400, code: "json_schema_non_strict_unsupported")
+    }
+
+    func testJsonSchemaNameRegex() throws {
+        for invalid in [String(repeating: "a", count: 65), "café", "good\nSYSTEM", "good.evil", "valid<script>"] {
+            var spec = Self.jsonSchemaObject()
+            spec["name"] = invalid
+            XCTAssertAPIError(try makeRequest(model: "m", responseFormat: ["type": "json_schema", "json_schema": spec]), status: 400, code: "json_schema_invalid_name", invalid)
+        }
+        var dashed = Self.jsonSchemaObject()
+        dashed["name"] = "person-v1"
+        XCTAssertNoThrow(try makeRequest(model: "m", responseFormat: ["type": "json_schema", "json_schema": dashed]))
+    }
+
+    func testJsonSchemaByteCapBoundary() throws {
+        let baseOverhead = try Self.schemaWithTitle("").deterministicJSONString().utf8.count
+        let exactTitle = String(repeating: "x", count: JSONSchemaValidator.maxSchemaBytes - baseOverhead)
+        var exact = Self.jsonSchemaObject()
+        exact["schema"] = Self.schemaWithTitle(exactTitle).jsonObject
+        XCTAssertNoThrow(try makeRequest(model: "m", responseFormat: ["type": "json_schema", "json_schema": exact]))
+
+        var tooLarge = Self.jsonSchemaObject()
+        tooLarge["schema"] = Self.schemaWithTitle(exactTitle + "x").jsonObject
+        XCTAssertAPIError(try makeRequest(model: "m", responseFormat: ["type": "json_schema", "json_schema": tooLarge]), status: 413, code: "json_schema_too_large")
+    }
+
+    func testJsonSchemaRawByteCapCountsWhitespace() throws {
+        let padding = String(repeating: " ", count: JSONSchemaValidator.maxSchemaBytes)
+        let raw = """
+        {"model":"m","messages":[{"role":"user","content":"hello"}],"response_format":{"type":"json_schema","json_schema":{"name":"person_v1","strict":true,"schema":{\(padding)"type":"object","properties":{},"required":[],"additionalProperties":false}}}}
+        """
+        XCTAssertAPIError(try ChatCompletionRequest.parse(data: Data(raw.utf8)), status: 413, code: "json_schema_too_large")
+    }
+
+    private func makeRequest(model: String, responseFormat: [String: Any]? = nil) throws -> ChatCompletionRequest {
+        var body: [String: Any] = [
             "model": model,
             "messages": [
                 [
@@ -66,7 +120,55 @@ final class ChatCompletionRequestTests: XCTestCase {
                 ]
             ],
         ]
+        if let responseFormat {
+            body["response_format"] = responseFormat
+        }
         let data = try JSONSerialization.data(withJSONObject: body)
         return try ChatCompletionRequest.parse(data: data)
+    }
+
+    private static func jsonSchemaResponseFormat() -> [String: Any] {
+        ["type": "json_schema", "json_schema": jsonSchemaObject()]
+    }
+
+    private static func jsonSchemaObject() -> [String: Any] {
+        [
+            "name": "person-v1",
+            "strict": true,
+            "schema": [
+                "type": "object",
+                "properties": [
+                    "name": ["type": "string"],
+                    "age": ["type": "number"],
+                ],
+                "required": ["name", "age"],
+                "additionalProperties": false,
+            ],
+        ]
+    }
+
+    private static func schemaWithTitle(_ title: String) -> JSONValue {
+        .object([
+            "type": .string("object"),
+            "properties": .object([:]),
+            "required": .array([]),
+            "additionalProperties": .bool(false),
+            "title": .string(title),
+        ])
+    }
+
+    private func XCTAssertAPIError(
+        _ expression: @autoclosure () throws -> ChatCompletionRequest,
+        status: Int,
+        code: String,
+        _ message: String = "",
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertThrowsError(try expression(), message, file: file, line: line) { error in
+            let apiError = error as? APIError
+            XCTAssertEqual(apiError?.status, status, file: file, line: line)
+            XCTAssertEqual(apiError?.code, code, file: file, line: line)
+        }
     }
 }

@@ -210,11 +210,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         var parsedRequest: ChatCompletionRequest?
 
         do {
+            try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
             let request = try ChatCompletionRequest.parse(data: data)
             parsedRequest = request
             if !warmSwapEnabled {
                 try request.validateModelMatches(modelID)
             }
+
+            try Self.validateStructuredStreamingUnsupported(request)
 
             if request.stream {
                 ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .streamingRequest)
@@ -427,6 +430,43 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 context: context,
                 APIError(status: 400, message: "Invalid request", code: "invalid_request")
             )
+        }
+    }
+
+    static func validateContentEncoding(_ values: [String]) throws {
+        guard !values.isEmpty else { return }
+        let normalized = values.joined(separator: ",")
+            .filter { !$0.isWhitespace }
+            .lowercased()
+        guard normalized.isEmpty || normalized == "identity" else {
+            throw APIError(
+                status: 415,
+                message: "v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding` header; compressed request bodies are deferred to v0.2 per §10.",
+                code: "request_content_encoding_unsupported",
+                param: "Content-Encoding"
+            )
+        }
+    }
+
+    static func validateStructuredStreamingUnsupported(_ request: ChatCompletionRequest) throws {
+        guard request.stream else { return }
+        switch request.responseFormat {
+        case .jsonSchema:
+            throw APIError(
+                status: 400,
+                message: "v0.1.0 does not stream structured `json_schema` output; resend with `stream:false`.",
+                code: "streaming_json_schema_unsupported",
+                param: "stream"
+            )
+        case .jsonObject:
+            throw APIError(
+                status: 400,
+                message: "v0.1.0 does not stream structured `json_object` output; resend with `stream:false`.",
+                code: "streaming_json_object_unsupported",
+                param: "stream"
+            )
+        case .text:
+            return
         }
     }
 
