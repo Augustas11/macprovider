@@ -106,15 +106,22 @@ func TestReceiptKeysReturnsPreviousKeyInGraceWindow(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	current := bytes.Repeat([]byte{0x42}, 32)
 	previous := bytes.Repeat([]byte{0x43}, 32)
-	rotatedAt := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
-	expiresAt := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
+	// `Registry.Register` (called by `registerReceiptKeyProvider`) uses
+	// real `time.Now()` internally to gate `activeReceiptPubkeyPrev`
+	// at `phase4-coordinator/internal/pool/provider.go:550`. The test's
+	// `server.now` override only takes effect AFTER Register completes,
+	// so `expiresAt` MUST stay in the real-wall-clock future or the
+	// registry drops the previous key before the test can observe it.
+	// Use 2099 so this test never time-bombs again.
+	rotatedAt := time.Date(2099, 6, 22, 12, 0, 0, 0, time.UTC)
+	expiresAt := time.Date(2099, 6, 29, 12, 0, 0, 0, time.UTC)
 	registerReceiptKeyProvider(registry, "p1", current, &pool.ReceiptPubkeyPrevious{
 		Pubkey:    previous,
 		RotatedAt: rotatedAt,
 		ExpiresAt: expiresAt,
 	})
 	server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
-	frozen := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	frozen := time.Date(2099, 6, 23, 12, 0, 0, 0, time.UTC)
 	server.now = func() time.Time { return frozen }
 
 	rr := serveReceiptKeys(server, "p1", "198.51.100.2:12345")
