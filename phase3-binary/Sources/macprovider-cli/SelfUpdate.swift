@@ -18,11 +18,13 @@ struct SelfUpdate {
     private let drainBeforeReplace: (() async throws -> Void)?
     private let replaceBinary: ((URL) throws -> Void)?
     private let restartLaunchd: (() throws -> Void)?
+    private let markerStore: AutoUpdateMarkerStore
 
     init(
         currentVersion: String,
         releasesAPIURL: String?,
         session: URLSession = .shared,
+        markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
         drainBeforeReplace: (() async throws -> Void)? = nil,
         replaceBinary: ((URL) throws -> Void)? = nil,
         restartLaunchd: (() throws -> Void)? = nil
@@ -30,6 +32,7 @@ struct SelfUpdate {
         self.currentVersion = currentVersion
         self.releasesAPIURL = releasesAPIURL ?? Self.defaultReleasesAPIURL
         self.session = session
+        self.markerStore = markerStore
         self.drainBeforeReplace = drainBeforeReplace
         self.replaceBinary = replaceBinary
         self.restartLaunchd = restartLaunchd
@@ -94,6 +97,9 @@ struct SelfUpdate {
             try await download(from: checksums.browserDownloadURL, to: checksumsURL)
             try await download(from: checksumsSignature.browserDownloadURL, to: checksumsSignatureURL)
             try verifyChecksumSignature(checksumsURL: checksumsURL, signatureURL: checksumsSignatureURL, tempDir: tempDir)
+            if let signedPolicy = release.signedPolicy {
+                markerStore.updateSignedPolicy(minimum: signedPolicy.minimum, revoked: signedPolicy.revoked)
+            }
             let checksumsText = try String(contentsOf: checksumsURL, encoding: .utf8)
             let expectedSHA = try Self.expectedSHA256(for: tarball.name, in: checksumsText)
             try await download(from: tarball.browserDownloadURL, to: tarballURL)
@@ -416,11 +422,51 @@ struct PreparedSelfUpdate {
 struct GitHubRelease: Decodable {
     let tagName: String
     let assets: [GitHubAsset]
+    let body: String?
+    let signedPolicy: GitHubSignedPolicy?
 
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
         case assets
+        case body
+        case signedPolicyMinimum = "signed_policy_minimum"
+        case signedPolicyRevoked = "signed_policy_revoked"
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        tagName = try container.decode(String.self, forKey: .tagName)
+        assets = try container.decode([GitHubAsset].self, forKey: .assets)
+        body = try container.decodeIfPresent(String.self, forKey: .body)
+        let directMinimum = try container.decodeIfPresent(String.self, forKey: .signedPolicyMinimum)
+        let directRevoked = try container.decodeIfPresent([String].self, forKey: .signedPolicyRevoked)
+        if directMinimum != nil || directRevoked != nil {
+            signedPolicy = GitHubSignedPolicy(minimum: directMinimum, revoked: directRevoked ?? [])
+        } else {
+            signedPolicy = Self.extractSignedPolicy(from: body)
+        }
+    }
+
+    private static func extractSignedPolicy(from body: String?) -> GitHubSignedPolicy? {
+        guard let body,
+              let range = body.range(of: #"```json\s*(\{[\s\S]*?"signed_policy_[\s\S]*?\})\s*```"#, options: .regularExpression)
+        else { return nil }
+        let block = String(body[range])
+            .replacingOccurrences(of: #"^```json\s*"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s*```$"#, with: "", options: .regularExpression)
+        guard let data = block.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return GitHubSignedPolicy(
+            minimum: object["signed_policy_minimum"] as? String,
+            revoked: object["signed_policy_revoked"] as? [String] ?? []
+        )
+    }
+}
+
+struct GitHubSignedPolicy: Equatable {
+    let minimum: String?
+    let revoked: [String]
 }
 
 struct GitHubAsset: Decodable {

@@ -24,6 +24,31 @@ struct AutoUpdateTrustState: Sendable {
     let tokenValidated: Bool
     let bearerlessDuplicate: Bool
     let connected: Bool
+    let stableReason: String?
+
+    init(
+        v2Accepted: Bool,
+        tier: String?,
+        encryptedLegValid: Bool,
+        attestationRequired: Bool,
+        attestationSatisfied: Bool,
+        tokenConfigured: Bool,
+        tokenValidated: Bool,
+        bearerlessDuplicate: Bool,
+        connected: Bool,
+        stableReason: String? = nil
+    ) {
+        self.v2Accepted = v2Accepted
+        self.tier = tier
+        self.encryptedLegValid = encryptedLegValid
+        self.attestationRequired = attestationRequired
+        self.attestationSatisfied = attestationSatisfied
+        self.tokenConfigured = tokenConfigured
+        self.tokenValidated = tokenValidated
+        self.bearerlessDuplicate = bearerlessDuplicate
+        self.connected = connected
+        self.stableReason = stableReason
+    }
 
     var verdict: AutoUpdateTrustVerdict {
         guard connected else { return .coordinatorDisconnected }
@@ -38,6 +63,10 @@ struct AutoUpdateTrustState: Sendable {
 
     var isEligible: Bool {
         verdict == .eligible
+    }
+
+    var lossReason: String {
+        stableReason ?? verdict.rawValue
     }
 
     static func fromCoordinatorPayload(

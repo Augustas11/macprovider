@@ -148,6 +148,7 @@ struct AutoUpdateMarkerStore: Sendable {
     }
 
     func writePending(_ marker: AutoUpdatePendingMarker) throws {
+        try validateMarker(marker)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(marker)
@@ -156,9 +157,10 @@ struct AutoUpdateMarkerStore: Sendable {
 
     func readPending() throws -> AutoUpdatePendingMarker? {
         guard fileManager.fileExists(atPath: pendingURL.path) else { return nil }
-        try rejectSymlinkOrHardLink(pendingURL)
-        let data = try Data(contentsOf: pendingURL)
-        return try JSONDecoder().decode(AutoUpdatePendingMarker.self, from: data)
+        let data = try readRegularFileNoFollow(pendingURL)
+        let marker = try JSONDecoder().decode(AutoUpdatePendingMarker.self, from: data)
+        try validateMarker(marker)
+        return marker
     }
 
     func clearPending() {
@@ -176,11 +178,11 @@ struct AutoUpdateMarkerStore: Sendable {
     }
 
     func validateBackup(_ marker: AutoUpdatePendingMarker) throws {
+        try validateMarker(marker)
         let backupURL = URL(fileURLWithPath: marker.backupPath)
-        try rejectSymlinkOrHardLink(backupURL)
-        let attrs = try fileManager.attributesOfItem(atPath: backupURL.path)
-        guard (attrs[.size] as? NSNumber)?.intValue == marker.size,
-              try Self.sha256(file: backupURL).lowercased() == marker.sha256.lowercased()
+        let st = try regularFileStatNoFollow(backupURL)
+        guard st.st_size == marker.size,
+              try Self.sha256(file: backupURL) == marker.sha256
         else {
             throw AutoUpdateMarkerError.backupCorrupt
         }
@@ -238,16 +240,30 @@ struct AutoUpdateMarkerStore: Sendable {
     }
 
     func completeSuccessfulUpdate(_ marker: AutoUpdatePendingMarker) throws {
+        try validateMarker(marker)
         let binaryURL = URL(fileURLWithPath: marker.targetPath)
         try writeSuccessSentinel(
             binaryURL: binaryURL,
             updateID: marker.updateID,
             targetVersion: marker.targetVersion
         )
+    }
+
+    func finalizeSuccessfulUpdate(_ marker: AutoUpdatePendingMarker) throws {
+        try validateMarker(marker)
+        let binaryURL = URL(fileURLWithPath: marker.targetPath)
         clearPending()
         try? fileManager.removeItem(atPath: marker.backupPath)
         try? fileManager.removeItem(at: lockURL)
         try? fileManager.removeItem(at: successSentinelPath(binaryURL: binaryURL, updateID: marker.updateID))
+    }
+
+    func orphanPendingMarker(target: String?, failureClass: AutoUpdateFailureClass = .orphanedPendingMarker) {
+        clearPending()
+        if let target {
+            recordCooldown(target: target, failureClass: failureClass)
+        }
+        try? fileManager.removeItem(at: lockURL)
     }
 
     func updateSignedPolicy(minimum: String?, revoked: [String]) {
@@ -268,6 +284,69 @@ struct AutoUpdateMarkerStore: Sendable {
             value?.isEmpty == false ? value : nil
         }.max { SelfUpdate.compareSemver($0, $1) == .orderedAscending }
         return (minimum, policy.persistedRevoked.union(localRevoked))
+    }
+
+    func validateMarker(_ pending: AutoUpdatePendingMarker) throws {
+        let uuidV4 = #"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"#
+        guard pending.updateID.range(of: uuidV4, options: .regularExpression) != nil else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        guard let normalized = try? AutoUpdateRecommendation.validate(pending.targetVersion).normalized,
+              normalized == pending.targetVersion
+        else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        guard isCanonicalAbsolutePath(pending.targetPath),
+              isCanonicalAbsolutePath(pending.backupPath)
+        else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        guard pending.size >= 0, pending.size <= 1024 * 1024 * 1024 else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        guard (0 ... 0o7777).contains(pending.mode) else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        guard pending.sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        guard let deadline = ISO8601DateFormatter.autoupdate.date(from: pending.markerDeadline),
+              pending.markerDeadline.hasSuffix("Z")
+        else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        let now = Date()
+        guard deadline > now.addingTimeInterval(-300),
+              deadline < now.addingTimeInterval(24 * 60 * 60)
+        else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+    }
+
+    func successSentinels(in binaryDirectory: URL) -> [URL] {
+        guard let contents = try? fileManager.contentsOfDirectory(at: binaryDirectory, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        return contents.filter { $0.lastPathComponent.hasPrefix(".macprovider-cli.success-") }
+    }
+
+    func rollbackBackups(in binaryDirectory: URL) -> [URL] {
+        guard let contents = try? fileManager.contentsOfDirectory(at: binaryDirectory, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        return contents.filter { $0.lastPathComponent.hasPrefix(".macprovider-cli.rollback-") }
+    }
+
+    func readSuccessSentinel(_ url: URL) throws -> (updateID: String, binaryVersion: String) {
+        let data = try readRegularFileNoFollow(url)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let updateID = object["update_id"] as? String,
+              let binaryVersion = object["binary_version"] as? String,
+              updateID.range(of: #"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"#, options: .regularExpression) != nil
+        else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        return (updateID, binaryVersion)
     }
 
     private func ensureTrustedDirectory(_ url: URL) throws {
@@ -291,6 +370,7 @@ struct AutoUpdateMarkerStore: Sendable {
         if (attrs[.posixPermissions] as? NSNumber)?.intValue != 0o700 {
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
         }
+        try rejectWritableACL(url)
     }
 
     private func rejectUnexpectedMountCrossing() throws {
@@ -314,7 +394,8 @@ struct AutoUpdateMarkerStore: Sendable {
         }
     }
 
-    private func atomicCopyNoFollow(from source: URL, to finalURL: URL, mode: Int) throws {
+    func atomicCopyNoFollow(from source: URL, to finalURL: URL, mode: Int) throws {
+        try validateTrustedBinaryDirectory(finalURL.deletingLastPathComponent())
         let input = open(source.path, O_RDONLY | O_NOFOLLOW)
         guard input >= 0 else { throw AutoUpdateMarkerError.openFailed(source.path, errno) }
         defer { close(input) }
@@ -355,6 +436,94 @@ struct AutoUpdateMarkerStore: Sendable {
             throw AutoUpdateMarkerError.writeFailed(finalURL.path, errnoValue)
         }
         fsyncDirectory(finalURL.deletingLastPathComponent())
+    }
+
+    func validateTrustedBinaryDirectory(_ url: URL) throws {
+        var st = stat()
+        guard lstat(url.path, &st) == 0 else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("binary_dir_lstat_failed")
+        }
+        guard (st.st_mode & S_IFMT) == S_IFDIR,
+              (st.st_mode & S_IFMT) != S_IFLNK,
+              st.st_uid == getuid(),
+              (st.st_mode & (S_IWGRP | S_IWOTH)) == 0
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("binary_dir_untrusted")
+        }
+        try rejectWritableACL(url)
+    }
+
+    private func isCanonicalAbsolutePath(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), !path.hasSuffix("/") else { return false }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        return !parts.contains { $0 == "." || $0 == ".." }
+    }
+
+    private func regularFileStatNoFollow(_ url: URL) throws -> stat {
+        var st = stat()
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { throw AutoUpdateMarkerError.openFailed(url.path, errno) }
+        defer { close(fd) }
+        guard fstat(fd, &st) == 0 else {
+            throw AutoUpdateMarkerError.openFailed(url.path, errno)
+        }
+        guard (st.st_mode & S_IFMT) == S_IFREG,
+              st.st_uid == getuid(),
+              st.st_nlink == 1
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("regular_file_invalid")
+        }
+        return st
+    }
+
+    private func readRegularFileNoFollow(_ url: URL) throws -> Data {
+        var st = stat()
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { throw AutoUpdateMarkerError.openFailed(url.path, errno) }
+        defer { close(fd) }
+        guard fstat(fd, &st) == 0 else {
+            throw AutoUpdateMarkerError.openFailed(url.path, errno)
+        }
+        guard (st.st_mode & S_IFMT) == S_IFREG,
+              st.st_uid == getuid(),
+              st.st_nlink == 1
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("regular_file_invalid")
+        }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let n = read(fd, &buffer, buffer.count)
+            if n < 0 {
+                throw AutoUpdateMarkerError.openFailed(url.path, errno)
+            }
+            if n == 0 { break }
+            data.append(buffer, count: n)
+        }
+        return data
+    }
+
+    private func rejectWritableACL(_ url: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ls")
+        process.arguments = ["-led", url.path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return }
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let currentUser = NSUserName()
+        for line in output.split(separator: "\n").map(String.init) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.range(of: #"^[0-9]+:"#, options: .regularExpression) != nil else { continue }
+            let lower = trimmed.lowercased()
+            guard lower.contains("write") || lower.contains("append") || lower.contains("add_file") else { continue }
+            guard lower.contains("user:\(currentUser.lowercased()) ") || lower.contains("user:\(currentUser.lowercased()):") else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("acl_write_grant")
+            }
+        }
     }
 
     private func atomicWrite(data: Data, finalURL: URL, mode: mode_t) throws {
@@ -407,7 +576,26 @@ struct AutoUpdateMarkerStore: Sendable {
     }
 
     static func sha256(file: URL) throws -> String {
-        let data = try Data(contentsOf: file)
+        let fd = open(file.path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { throw AutoUpdateMarkerError.openFailed(file.path, errno) }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG,
+              st.st_nlink == 1
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("regular_file_invalid")
+        }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1024 * 1024)
+        while true {
+            let n = read(fd, &buffer, buffer.count)
+            if n < 0 {
+                throw AutoUpdateMarkerError.openFailed(file.path, errno)
+            }
+            if n == 0 { break }
+            data.append(buffer, count: n)
+        }
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }

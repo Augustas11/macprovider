@@ -35,6 +35,7 @@ enum AutoUpdatePhase: String, CaseIterable, Sendable {
 
 enum AutoUpdateFailureClass: String, CaseIterable, Sendable {
     case rollbackObserverUnavailable = "rollback_observer_unavailable"
+    case unsupportedInstallTopology = "unsupported_install_topology"
     case targetReleaseNotFound = "target_release_not_found"
     case releaseAssetMissing = "release_asset_missing"
     case recommendedVersionInvalid = "recommended_version_invalid"
@@ -213,11 +214,30 @@ struct AutoUpdateEvent: Sendable {
 
     private static func redact(_ value: String) -> String {
         var redacted = value
+        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
+            let range = NSRange(redacted.startIndex ..< redacted.endIndex, in: redacted)
+            for match in detector.matches(in: redacted, options: [], range: range).reversed() {
+                guard let url = match.url, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { continue }
+                components.path = ""
+                components.query = nil
+                components.fragment = nil
+                components.user = nil
+                components.password = nil
+                if let hostOnly = components.string,
+                   let swiftRange = Range(match.range, in: redacted)
+                {
+                    redacted.replaceSubrange(swiftRange, with: hostOnly)
+                }
+            }
+        }
         let patterns = [
             #"(?i)authorization:\s*bearer\s+[A-Za-z0-9._~+/=-]+"#,
             #"(?i)(token|password|secret|credential)=([^&\s]+)"#,
-            #"/Users/[^/\s]+"#,
+            #"/Users/[^ \n\t:]+"#,
+            #"/private/(tmp|var)/[^ \n\t:]+"#,
+            #"/tmp/[^ \n\t:]+"#,
             #"file://[^ \n\t]+"#,
+            #"\b[0-9a-fA-F]{17,}\b"#,
             #"-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----"#,
         ]
         for pattern in patterns {

@@ -84,9 +84,17 @@ final class AutoUpdateTests: XCTestCase {
         let second = try XCTUnwrap(store.cooldown(target: "1.7.0", failureClass: .targetReleaseNotFound))
         XCTAssertEqual(second.attempt, 2)
         XCTAssertGreaterThan(second.until.timeIntervalSince(first.until), 250)
+        store.recordCooldown(target: "1.7.0", failureClass: .targetReleaseNotFound)
+        let third = try XCTUnwrap(store.cooldown(target: "1.7.0", failureClass: .targetReleaseNotFound))
+        XCTAssertEqual(third.attempt, 3)
+        XCTAssertGreaterThan(third.until.timeIntervalSinceNow, 1_000)
+        store.recordCooldown(target: "1.7.0", failureClass: .targetReleaseNotFound)
+        let fourth = try XCTUnwrap(store.cooldown(target: "1.7.0", failureClass: .targetReleaseNotFound))
+        XCTAssertEqual(fourth.attempt, 4)
+        XCTAssertLessThan(fourth.until.timeIntervalSinceNow, 3_700)
     }
 
-    func testSuccessCleanupWritesSentinelThenClearsPendingBackupAndLock() throws {
+    func testSuccessCleanupLeavesSentinelUntilFinalize() throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
         try store.ensureTrustedRoot()
@@ -105,16 +113,115 @@ final class AutoUpdateTests: XCTestCase {
             size: 3,
             mode: 0o755,
             sha256: AutoUpdateEvent.sha256Hex("old"),
-            markerDeadline: "2026-06-29T15:06:00Z"
+            markerDeadline: ISO8601DateFormatter.autoupdateTest.string(from: Date().addingTimeInterval(300))
         )
         try store.writePending(marker)
 
         try store.completeSuccessfulUpdate(marker)
 
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.successSentinelPath(binaryURL: binary, updateID: marker.updateID).path))
+
+        try store.finalizeSuccessfulUpdate(marker)
+
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.successSentinelPath(binaryURL: binary, updateID: marker.updateID).path))
+    }
+
+    func testMarkerValidationRejectsUppercaseShaAndNonCanonicalVersion() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let binary = fixture.url.appendingPathComponent("bin/macprovider-cli")
+        try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let marker = AutoUpdatePendingMarker(
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            targetVersion: "v1.7.0",
+            targetPath: binary.path,
+            backupPath: binary.deletingLastPathComponent().appendingPathComponent(".macprovider-cli.rollback-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee").path,
+            size: 0,
+            mode: 0o755,
+            sha256: String(repeating: "A", count: 64),
+            markerDeadline: ISO8601DateFormatter.autoupdateTest.string(from: Date().addingTimeInterval(300))
+        )
+        XCTAssertThrowsError(try store.validateMarker(marker))
+    }
+
+    func testNotifyOnlyTrustDoesNotCreateAutoupdateState() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: status,
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "provisional",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: false,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true,
+                    stableReason: "tier_demoted"
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            currentBinaryURL: { nil },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        await updater.handleCoordinatorRecommendation("1.7.0")
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.root.path))
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["reason"] as? String, "tier_demoted")
+    }
+
+    func testAutoupdateReasonRedactionUsesStableCodes() {
+        let errors: [Error] = [
+            UpdateError.invalidURL("https://example.com/update?token=secret"),
+            UpdateError.checksumMismatch(expected: String(repeating: "a", count: 64), actual: String(repeating: "b", count: 64)),
+            UpdateError.unsafeArchiveEntry("/Users/example/.ssh/id_rsa"),
+            UpdateError.processFailed("/tmp/macprovider-cli", 1),
+        ]
+        for error in errors {
+            let reason = AutoUpdater.redactedReason(for: error)
+            XCTAssertFalse(reason.contains("https://"))
+            XCTAssertFalse(reason.contains("/tmp/"))
+            XCTAssertFalse(reason.range(of: #"[0-9a-fA-F]{17,}"#, options: .regularExpression) != nil)
+        }
+    }
+
+    func testSignedPolicyPersistenceIsMonotonic() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        store.updateSignedPolicy(minimum: "1.7.0", revoked: ["1.6.1"])
+        store.updateSignedPolicy(minimum: "1.6.0", revoked: [])
+        var policy = store.effectivePolicy()
+        XCTAssertEqual(policy.minimum, "1.7.0")
+        XCTAssertTrue(policy.revoked.contains("1.6.1"))
+        store.updateSignedPolicy(minimum: "1.8.0", revoked: ["1.7.1"])
+        policy = store.effectivePolicy()
+        XCTAssertEqual(policy.minimum, "1.8.0")
+        XCTAssertTrue(policy.revoked.contains("1.6.1"))
+        XCTAssertTrue(policy.revoked.contains("1.7.1"))
     }
 
     func testSelfUpdateResolvesReleaseByVTagThenBareTag() async throws {
@@ -133,6 +240,15 @@ final class AutoUpdateTests: XCTestCase {
 
         XCTAssertEqual(release.tagName, "1.7.0")
     }
+}
+
+private extension ISO8601DateFormatter {
+    static let autoupdateTest: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
 }
 
 private final class TempHome {

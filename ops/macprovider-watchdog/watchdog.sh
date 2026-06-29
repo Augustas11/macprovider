@@ -128,7 +128,9 @@ import fcntl
 import hashlib
 import json
 import os
+import pwd
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -140,6 +142,7 @@ log_path = os.environ["LOG_PATH"]
 pending = os.path.join(root, "pending.json")
 lock_path = os.path.join(root, "update.lock")
 uid = os.getuid()
+provider_user = pwd.getpwuid(uid).pw_name
 
 def ts():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -179,6 +182,16 @@ def reject_path(path, must_exist=True):
         raise RuntimeError(f"hardlink_rejected:{path}")
     if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise RuntimeError(f"writable_rejected:{path}")
+    try:
+        acl = subprocess.run(["/bin/ls", "-le", path], check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        for line in acl.stdout.splitlines():
+            stripped = line.strip().lower()
+            if not re.match(r"^[0-9]+:", stripped):
+                continue
+            if ("write" in stripped or "append" in stripped or "add_file" in stripped) and f"user:{provider_user.lower()}" not in stripped:
+                raise RuntimeError(f"acl_write_rejected:{path}")
+    except FileNotFoundError:
+        pass
     return st
 
 def verify_root():
@@ -203,10 +216,39 @@ def read_marker():
     finally:
         os.close(fd)
     marker = json.loads(raw.decode("utf-8"))
+    validate_marker_strict(marker)
+    return marker
+
+def validate_marker_strict(marker):
     required = {"update_id", "target_version", "target_path", "backup_path", "size", "mode", "sha256", "marker_deadline"}
     if not required.issubset(marker.keys()):
         raise RuntimeError("marker_missing_required_fields")
-    return marker
+    if not re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", str(marker["update_id"])):
+        raise RuntimeError("marker_update_id_invalid")
+    if not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+$", str(marker["target_version"])):
+        raise RuntimeError("marker_target_version_invalid")
+    for key in ("target_path", "backup_path"):
+        value = str(marker[key])
+        if not os.path.isabs(value) or value.endswith("/") or "/../" in value or "/./" in value:
+            raise RuntimeError(f"marker_{key}_invalid")
+    size = int(marker["size"])
+    mode = int(marker["mode"])
+    if size < 0 or size > 1024 * 1024 * 1024:
+        raise RuntimeError("marker_size_invalid")
+    if mode < 0 or mode > 0o7777:
+        raise RuntimeError("marker_mode_invalid")
+    if not re.match(r"^[0-9a-f]{64}$", str(marker["sha256"])):
+        raise RuntimeError("marker_sha256_invalid")
+    raw_deadline = str(marker["marker_deadline"])
+    if not raw_deadline.endswith("Z"):
+        raise RuntimeError("marker_deadline_invalid")
+    try:
+        deadline = datetime.datetime.strptime(raw_deadline, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    except ValueError:
+        raise RuntimeError("marker_deadline_invalid")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if deadline < now - datetime.timedelta(seconds=300) or deadline > now + datetime.timedelta(hours=24):
+        raise RuntimeError("marker_deadline_out_of_bounds")
 
 def current_binary_version(path):
     try:
@@ -271,6 +313,54 @@ def sha256(path):
         os.close(fd)
     return h.hexdigest()
 
+def binary_path_without_pending():
+    candidate = os.environ.get("MACPROVIDER_BINARY_PATH", "")
+    if candidate:
+        return candidate
+    return shutil.which("macprovider-cli") or ""
+
+def scan_without_pending():
+    binary = binary_path_without_pending()
+    if not binary:
+        return
+    binary_dir = os.path.dirname(binary)
+    for name in os.listdir(binary_dir):
+        path = os.path.join(binary_dir, name)
+        if name.startswith(".macprovider-cli.success-"):
+            try:
+                reject_path(path)
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    payload = json.loads(os.read(fd, 65536).decode("utf-8"))
+                finally:
+                    os.close(fd)
+                sentinel_version = str(payload.get("binary_version", ""))
+                current_version = current_binary_version(binary)
+                if sentinel_version and sentinel_version == current_version:
+                    update_id = str(payload.get("update_id", ""))
+                    backup = os.path.join(binary_dir, f".macprovider-cli.rollback-{update_id}")
+                    try:
+                        os.unlink(backup)
+                    except FileNotFoundError:
+                        pass
+                    try:
+                        os.unlink(lock_path)
+                    except FileNotFoundError:
+                        pass
+                    os.unlink(path)
+                    event("success", "post_start", None, "success_sentinel_cleanup_completed", {"update_id": update_id, "target_version": current_version})
+                else:
+                    os.unlink(path)
+                    event("failure", "post_start", "orphaned_success_sentinel", "success_sentinel_version_mismatch", {"update_id": str(payload.get("update_id", "")), "target_version": sentinel_version})
+            except Exception as exc:
+                log(f"success_sentinel_scan_error={exc}")
+        elif name.startswith(".macprovider-cli.rollback-"):
+            try:
+                os.unlink(path)
+                log(f"deleted_stale_backup={path}")
+            except FileNotFoundError:
+                pass
+
 def quarantine(reason, marker=None):
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     dest = os.path.join(root, f"pending-quarantined-{stamp}.json")
@@ -299,13 +389,26 @@ def lock_is_held_by_other_process():
 def restore(marker):
     backup = marker["backup_path"]
     target = marker["target_path"]
+    update_id = marker["update_id"]
+    expected_backup = os.path.join(os.path.dirname(target), f".macprovider-cli.rollback-{update_id}")
+    if backup != expected_backup:
+        raise RuntimeError("backup_path_derivation_mismatch")
+    trusted_dir = os.path.realpath(os.path.dirname(target))
+    for checked in (target, backup):
+        parent = os.path.realpath(os.path.dirname(checked))
+        if parent != trusted_dir:
+            raise RuntimeError("path_outside_trusted_binary_dir")
+        cursor = checked
+        while os.path.realpath(os.path.dirname(cursor)) == trusted_dir and cursor != trusted_dir:
+            reject_path(cursor, must_exist=os.path.exists(cursor))
+            break
     backup_st = reject_path(backup)
     reject_path(os.path.dirname(target))
     if not os.path.isabs(target) or target.endswith("/"):
         raise RuntimeError("target_path_invalid")
     if backup_st.st_size != int(marker["size"]):
         raise RuntimeError("backup_size_mismatch")
-    if sha256(backup) != str(marker["sha256"]).lower():
+    if sha256(backup) != str(marker["sha256"]):
         raise RuntimeError("backup_sha256_mismatch")
     os.chmod(backup, int(marker["mode"]))
     os.replace(backup, target)
@@ -323,16 +426,48 @@ def restore(marker):
         os.unlink(pending)
     except FileNotFoundError:
         pass
-    event("failure", "rollback", "orphaned_pending_marker", "restored_prior_binary", marker)
+    event("failure", "rollback", classify_post_start_failure(), "restored_prior_binary", marker)
+
+def classify_post_start_failure():
+    try:
+        printed = subprocess.run(["launchctl", "print", f"gui/{uid}/{label}"], check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5).stdout.lower()
+        if "last exit status" in printed and not re.search(r"last exit status\s*=\s*0", printed):
+            return "post_start_crash"
+        if "pid =" not in printed:
+            return "post_start_crash"
+    except Exception:
+        return "post_start_crash"
+    health_url = os.environ.get("MACPROVIDER_HEALTHCHECK_URL", "")
+    if health_url:
+        try:
+            probe = subprocess.run(["/usr/bin/curl", "-fsS", "--max-time", "2", health_url], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if probe.returncode != 0:
+                return "post_start_health_failed"
+        except Exception:
+            return "post_start_health_failed"
+    return "post_start_rejoin_timeout"
 
 try:
     if not os.path.exists(pending):
+        scan_without_pending()
         sys.exit(0)
     verify_root()
     reject_path(pending)
     if lock_is_held_by_other_process():
         sys.exit(0)
-    marker = read_marker()
+    try:
+        marker = read_marker()
+    except Exception as exc:
+        event("failure", "rollback", "orphaned_pending_marker", f"marker_malformed:{exc}", None)
+        try:
+            os.unlink(pending)
+        except FileNotFoundError:
+            pass
+        try:
+            os.unlink(lock_path)
+        except FileNotFoundError:
+            pass
+        sys.exit(0)
     if process_success_sentinel(marker):
         sys.exit(0)
     try:
