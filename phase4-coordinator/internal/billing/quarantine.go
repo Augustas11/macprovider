@@ -405,12 +405,20 @@ func decodeForceVoidBody(w http.ResponseWriter, r *http.Request) (forceVoidBody,
 		writeValidationError(w, "missing_field", "reason is required")
 		return body, false
 	}
+	// R5 fix (CODE-M1): wrong field TYPES are body-shape errors, not
+	// value-content validation errors. Mapping them to 400 bad_request
+	// (rather than 422 bad_operator_id / unsanitized_reason) is the
+	// semantically correct posture: the body's JSON structure is
+	// malformed, not the operator's chosen identity. 422 is reserved
+	// for cases where the JSON shape is valid but the field value is
+	// rejected by the §11.6.3 sanitizer (control chars, charset,
+	// length, etc.).
 	if err := json.Unmarshal(opRaw, &body.OperatorID); err != nil {
-		writeValidationError(w, "bad_operator_id", "operator_id must be a JSON string")
+		writeError(w, http.StatusBadRequest, "bad_request", "operator_id must be a JSON string")
 		return body, false
 	}
 	if err := json.Unmarshal(reasonRaw, &body.Reason); err != nil {
-		writeValidationError(w, "unsanitized_reason", "reason must be a JSON string")
+		writeError(w, http.StatusBadRequest, "bad_request", "reason must be a JSON string")
 		return body, false
 	}
 	// Defense-in-depth: even though we pre-validated raw body UTF-8,

@@ -904,6 +904,44 @@ func TestForceVoidRejectsDuplicateTopLevelKey(t *testing.T) {
 	}
 }
 
+// R5 (CODE-M1): wrong JSON field TYPES are body-shape errors → 400
+// bad_request, not 422 validation. operator_id=42 (number) and
+// reason=null both fail json.Unmarshal into string; both must
+// surface as 400 with code=bad_request so 422 stays reserved for
+// the §11.6.3 sanitizer's value-content rejections.
+func TestForceVoidWrongFieldTypeIsBadRequest(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-type")
+	// Note: JSON null coerces to "" via json.Unmarshal into string, so
+	// null arms fall through to the §11.6.3 sanitizer and surface as
+	// 422 bad_operator_id / empty_reason — a legitimate
+	// value-content rejection, NOT a type mismatch. Only true type
+	// mismatches (number, bool, object, array) reach the bad_request
+	// path below.
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"operator_id_number", `{"operator_id":42,"reason":"x"}`},
+		{"operator_id_bool", `{"operator_id":true,"reason":"x"}`},
+		{"operator_id_object", `{"operator_id":{"k":"v"},"reason":"x"}`},
+		{"reason_number", `{"operator_id":"alice","reason":99}`},
+		{"reason_array", `{"operator_id":"alice","reason":["x"]}`},
+		{"reason_object", `{"operator_id":"alice","reason":{"k":"v"}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := doForceVoid(t, store, true, id, c.body, "application/json")
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s want 400", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), `"code":"bad_request"`) {
+				t.Fatalf("body=%s does not contain bad_request envelope", w.Body.String())
+			}
+		})
+	}
+}
+
 // R2 (CODE-M1): JSON strictness — unknown top-level key returns 400.
 func TestForceVoidRejectsUnknownTopLevelKey(t *testing.T) {
 	store := quarantineFixture(t)
