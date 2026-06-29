@@ -181,7 +181,7 @@ func TestStructuredOutputProviderDetailErrorsPassThroughWithoutRetryWS(t *testin
 				t.Fatalf("response json: %v body=%s", err, rr.Body.String())
 			}
 			if envelope.Error.Message != "structured output failed" ||
-				envelope.Error.Type != "upstream_error" ||
+				envelope.Error.Type != "upstream_provider_error" ||
 				envelope.Error.Code != code ||
 				!envelope.Error.Retryable ||
 				!envelope.Error.InferenceRan ||

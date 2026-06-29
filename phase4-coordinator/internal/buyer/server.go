@@ -5180,6 +5180,8 @@ func spec018ErrorType(code, fallback string) string {
 		return "invalid_request_error"
 	case "byte_cap_exceeded", "response_byte_cap_exceeded", "malformed_tool_call_final_json":
 		return "upstream_provider_error"
+	case "malformed_json_response", "json_schema_validation_failed":
+		return "upstream_provider_error"
 	case "provider_stream_downgraded":
 		return "api_error"
 	default:
