@@ -113,7 +113,18 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	if in.FaultFlag == "" {
 		in.FaultFlag = FaultNone
 	}
-	if in.AttemptN > 1 || (in.AttemptN == 1 && reqRow.Retried == 0) {
+	// SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168) quarantine rule:
+	// with persisted monotonic attempt_n, row 3+ (attempt_n >= 2) is
+	// credited normally — the v0.3.1 "row 3+ MUST quarantine until
+	// SPEC-002 gains monotonic attempt_n" rule is now satisfied. The
+	// remaining quarantine class is attempt_n==1 with retried==0:
+	// legitimate-retry-without-explicit-marker that cannot be safely
+	// distinguished from a buggy duplicate INSERT. This narrowing is
+	// safe in the hot path because reqRow.AttemptN here is the value
+	// just persisted by InsertExec (v1.5.2 always writes a non-NULL
+	// value); the in.AttemptN was already aligned to the persisted
+	// value by the post-INSERT COUNT-1 derivation above.
+	if in.AttemptN == 1 && reqRow.Retried == 0 {
 		result := ComputeCredits(
 			in.PromptTokens,
 			in.CompletionTokens,

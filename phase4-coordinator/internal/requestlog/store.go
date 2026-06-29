@@ -22,6 +22,7 @@ var ErrIdempotencyConflict = errors.New("idempotency key body hash mismatch")
 
 type execer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 type Row struct {
@@ -49,9 +50,9 @@ type Row struct {
 	// across two accounts cannot be attributed back to the correct
 	// gateway account (issue #211, follow-up to #196). Empty for
 	// direct legacy buyer calls without the header.
-	AccountID         string
-	Model             string
-	ProviderAssignedID string
+	AccountID           string
+	Model               string
+	ProviderAssignedID  string
 	PromptTokens        *int64
 	CompletionTokens    *int64
 	EstimatedCompTokens *int64
@@ -65,6 +66,19 @@ type Row struct {
 	PrefHeader          string
 	ProviderHeader      string
 	Retried             int
+	// AttemptN is the zero-based monotonic attempt ordinal within the
+	// same (AccountID, RequestID) group under SQLite IS semantics
+	// (SPEC-002 v1.5.2 / issue #168). Populated at INSERT time by the
+	// writer; populated value is N where N is the count of rows
+	// already in the group at insert time. Persisted as
+	// request_log.attempt_n. nil on legacy pre-v1.5.2 rows.
+	//
+	// Callers MUST leave AttemptN nil on the input Row; InsertExec
+	// computes the value transactionally and writes it. Reading code
+	// (billing hot path / recovery / admin reconcile) reads it back
+	// via SELECT and falls back to the legacy id-ASC derivation when
+	// the persisted value is NULL.
+	AttemptN *int
 }
 
 // OpenStoreReadOnly opens the request-log DB without running ALTER
@@ -168,7 +182,8 @@ CREATE TABLE IF NOT EXISTS request_log (
     error_code           TEXT    NULL,
     pref_header          TEXT    NULL,
     provider_header      TEXT    NULL,
-    retried              INTEGER NOT NULL DEFAULT 0
+    retried              INTEGER NOT NULL DEFAULT 0,
+    attempt_n            INTEGER NULL
 );
 CREATE INDEX IF NOT EXISTS idx_request_log_ts_utc
     ON request_log(ts_utc);
@@ -202,7 +217,25 @@ CREATE INDEX IF NOT EXISTS idx_request_idempotency_request
 }
 
 func (s *Store) Insert(ctx context.Context, row Row) error {
-	return insert(ctx, s.db, row)
+	// SPEC-002 v1.5.2 / issue #168 / R1 code CRITICAL fix: the
+	// monotonic attempt_n derivation reads COUNT(*) and then INSERTs.
+	// SetMaxOpenConns(1) caps the POOL at one open connection but does
+	// NOT keep two adjacent operations on the same *sql.DB on the same
+	// underlying connection — `database/sql` is free to release and
+	// re-acquire between calls. Without explicit pinning, two goroutines
+	// could each see count=N, then each INSERT attempt_n=N, producing
+	// a duplicate ordinal in the same (account_id, request_id) group.
+	//
+	// Pinning a single *sql.Conn around the COUNT+INSERT pair gives
+	// the same-connection guarantee that hotpath's BEGIN IMMEDIATE
+	// path has by construction. Under SetMaxOpenConns(1) the pool
+	// will block other writers until Close() releases.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return insert(ctx, conn, row)
 }
 
 func (s *Store) ReserveIdempotencyKey(ctx context.Context, key, bodySHA256, requestID string, now time.Time) (string, bool, error) {
@@ -338,9 +371,17 @@ func (s *Store) InsertTx(ctx context.Context, tx *sql.Tx, row Row) error {
 	return insert(ctx, tx, row)
 }
 
-func (s *Store) InsertExec(ctx context.Context, db interface {
+// InsertQuerier is the minimum interface insert() needs: it must support
+// both ExecContext (for the INSERT) and QueryRowContext (for the
+// SPEC-002 v1.5.2 attempt_n monotonic derivation, run in the same
+// connection / transaction as the INSERT). *sql.DB, *sql.Conn, and
+// *sql.Tx all satisfy it.
+type InsertQuerier interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, row Row) error {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *Store) InsertExec(ctx context.Context, db InsertQuerier, row Row) error {
 	if db == nil {
 		return fmt.Errorf("db is required")
 	}
@@ -353,6 +394,39 @@ func insert(ctx context.Context, db execer, row Row) error {
 		if *row.PromptTokens >= 0 && *row.CompletionTokens >= 0 && *row.PromptTokens <= math.MaxInt64-*row.CompletionTokens {
 			totalTokens = sql.NullInt64{Int64: *row.PromptTokens + *row.CompletionTokens, Valid: true}
 		}
+	}
+	// SPEC-002 v1.5.2 / issue #168: monotonic attempt_n derivation at
+	// INSERT time. Compute the count of rows already in the same
+	// (account_id, request_id) group under SQLite IS semantics; the
+	// new row receives that count as its attempt_n. Because the
+	// request-log pool is capped at one writer connection
+	// (SetMaxOpenConns(1), issue #21 / ARCH-3), running the COUNT and
+	// INSERT through the same `db` (which is either *sql.DB, *sql.Conn,
+	// or *sql.Tx) is race-free in the sense that no other writer can
+	// interleave a competing INSERT. This is the same arithmetic the
+	// v0.3.1 read-time fallback derivation produces, persisted at
+	// write time.
+	//
+	// Callers SHOULD leave row.AttemptN nil to invoke this derivation.
+	// If a caller supplies a non-nil row.AttemptN, the supplied value is
+	// used verbatim and the derivation is skipped — this is the path
+	// the backfill subcommand takes (it knows the ordinal from id-ASC
+	// fallback and writes it directly).
+	attemptN := row.AttemptN
+	if attemptN == nil {
+		var accountIDArg any
+		if row.AccountID != "" {
+			accountIDArg = row.AccountID
+		}
+		var existing int
+		err := db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM request_log WHERE account_id IS ? AND request_id = ?`,
+			accountIDArg, row.RequestID,
+		).Scan(&existing)
+		if err != nil {
+			return err
+		}
+		attemptN = &existing
 	}
 	_, err := db.ExecContext(ctx, `
 INSERT INTO request_log (
@@ -375,8 +449,9 @@ INSERT INTO request_log (
     error_code,
     pref_header,
     provider_header,
-    retried
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    retried,
+    attempt_n
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.TSUtc.UTC().Format(time.RFC3339Nano),
 		row.RequestID,
 		nullString(row.ExternalRequestID),
@@ -397,6 +472,7 @@ INSERT INTO request_log (
 		nullString(row.PrefHeader),
 		nullString(row.ProviderHeader),
 		row.Retried,
+		*attemptN,
 	)
 	return err
 }
@@ -437,6 +513,14 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		// X-Request-ID across two accounts cannot be attributed back
 		// to the correct gateway account.
 		{name: "account_id", sql: `ALTER TABLE request_log ADD COLUMN account_id TEXT NULL`},
+		// SPEC-002 v1.5.2 / issue #168: monotonic attempt ordinal
+		// populated at INSERT time. Per-row property, no join-key
+		// index — no migrate-indexes counterpart. Legacy rows scan
+		// as NULL until the operator runs `coordinator
+		// backfill-attempt-n`; SPEC-005 v0.3.3 read-side falls
+		// back to id-ASC derivation for NULL rows during the
+		// rollout window.
+		{name: "attempt_n", sql: `ALTER TABLE request_log ADD COLUMN attempt_n INTEGER NULL`},
 	} {
 		if cols[migration.name] {
 			continue
@@ -455,12 +539,12 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 //     index has not been built yet ("rollout incomplete").
 //   - indexed: column present AND index present.
 type MigrationKeyState struct {
-	Key            string `json:"key"`
+	Key            string   `json:"key"`
 	ColumnNames    []string `json:"column_names"`
-	ColumnsPresent bool   `json:"columns_present"`
-	IndexName      string `json:"index_name"`
-	IndexPresent   bool   `json:"index_present"`
-	State          string `json:"state"`
+	ColumnsPresent bool     `json:"columns_present"`
+	IndexName      string   `json:"index_name"`
+	IndexPresent   bool     `json:"index_present"`
+	State          string   `json:"state"`
 }
 
 // MigrationStatus is the aggregate migration state across every
@@ -564,6 +648,153 @@ func (s *Store) MigrationState(ctx context.Context) (MigrationStatus, error) {
 		}
 	}
 	return out, nil
+}
+
+// AttemptNStatus reports the per-column migration state of
+// request_log.attempt_n (SPEC-002 v1.5.2 / issue #168). Parallel to
+// the per-key MigrationState but PER-COLUMN — attempt_n has no
+// composite index, only a row-population dimension.
+//
+// States:
+//   - legacy: column absent (pre-v1.5.2 schema)
+//   - populating: column present, some rows still carry NULL (pre-
+//     v1.5.2 rows awaiting backfill, OR a rollback window)
+//   - populated: column present, zero NULL rows
+type AttemptNStatus struct {
+	MigrationState string `json:"migration_state"`
+	NullCount      int64  `json:"null_count"`
+	TotalCount     int64  `json:"total_count"`
+}
+
+// AttemptNState introspects the schema and row distribution to report
+// the current state without mutating. Safe to call on a read-only
+// store.
+func (s *Store) AttemptNState(ctx context.Context) (AttemptNStatus, error) {
+	cols, err := s.columns(ctx)
+	if err != nil {
+		return AttemptNStatus{}, err
+	}
+	if !cols["attempt_n"] {
+		return AttemptNStatus{MigrationState: "legacy"}, nil
+	}
+	var total, nullCount int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log`).Scan(&total); err != nil {
+		return AttemptNStatus{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log WHERE attempt_n IS NULL`).Scan(&nullCount); err != nil {
+		return AttemptNStatus{}, err
+	}
+	state := "populated"
+	if nullCount > 0 {
+		state = "populating"
+	}
+	return AttemptNStatus{
+		MigrationState: state,
+		NullCount:      nullCount,
+		TotalCount:     total,
+	}, nil
+}
+
+// BackfillAttemptN walks legacy NULL-attempt_n rows in id-ASC order
+// within each (account_id, request_id) group under SQLite IS
+// semantics and assigns attempt_n monotonically. Idempotent: rows
+// with non-NULL attempt_n are skipped.
+//
+// Implementation: a single UPDATE that uses a window function over
+// existing legacy rows. The arithmetic is byte-identical to the
+// v0.3.1 read-time fallback derivation (COUNT(*) - 1 over rows with
+// id <= self in the same group, ordered by id ASC).
+//
+// Intentionally NOT invoked from the daemon path: SQLite has no
+// concurrent UPDATE, and the request-log store caps the pool at one
+// writer connection (issue #21 / ARCH-3), so running this inside the
+// daemon would starve the 6s-timeout INSERT hot path.
+func (s *Store) BackfillAttemptN(ctx context.Context) (int64, error) {
+	// Verify the column exists before we update. ensureColumns runs
+	// at OpenStore time so this should always be true; the explicit
+	// check converts a confusing SQL error into an actionable one for
+	// operators who somehow bypass ensureColumns.
+	cols, err := s.columns(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if !cols["attempt_n"] {
+		return 0, fmt.Errorf("request_log.attempt_n column absent; daemon migration has not run")
+	}
+	// SQLite ROW_NUMBER() OVER PARTITION BY assigns the in-group
+	// ordinal. We compute it over ALL request_log rows so the value
+	// matches what the v0.3.1 fallback would produce (which counts
+	// ALL rows in the group, including any future v1.5.2-written
+	// rows that already have non-NULL attempt_n). Then we filter the
+	// UPDATE target to attempt_n IS NULL so steady-state v1.5.2 rows
+	// are left untouched.
+	res, err := s.db.ExecContext(ctx, `
+WITH ranked AS (
+  SELECT id,
+         (ROW_NUMBER() OVER (
+            PARTITION BY account_id, request_id
+            ORDER BY id ASC
+          ) - 1) AS new_attempt_n
+    FROM request_log
+)
+UPDATE request_log
+   SET attempt_n = (SELECT new_attempt_n FROM ranked WHERE ranked.id = request_log.id)
+ WHERE attempt_n IS NULL`)
+	if err != nil {
+		return 0, err
+	}
+	updated, _ := res.RowsAffected()
+	return updated, nil
+}
+
+// BackfillAttemptNDryRun is the preflight sibling of BackfillAttemptN.
+// It runs the same UPDATE inside a transaction, captures the
+// rows-that-would-be-affected count, then ROLLBACKs so no rows are
+// mutated. SPEC-002 v1.5.2 R3 security MEDIUM (issue #168): gives the
+// operator a concrete wall-clock measurement against the 6s hot-path
+// INSERT timeout before they commit to a live backfill.
+//
+// Like BackfillAttemptN, this acquires the writer connection for the
+// duration of the UPDATE — so a dry-run still blocks hot-path INSERTs
+// for the same duration as a live run. The benefit is observability:
+// operators see exactly how long the UPDATE takes against their
+// production corpus without persisting the result.
+func (s *Store) BackfillAttemptNDryRun(ctx context.Context) (int64, error) {
+	cols, err := s.columns(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if !cols["attempt_n"] {
+		return 0, fmt.Errorf("request_log.attempt_n column absent; daemon migration has not run")
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return 0, err
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	}()
+	res, err := conn.ExecContext(ctx, `
+WITH ranked AS (
+  SELECT id,
+         (ROW_NUMBER() OVER (
+            PARTITION BY account_id, request_id
+            ORDER BY id ASC
+          ) - 1) AS new_attempt_n
+    FROM request_log
+)
+UPDATE request_log
+   SET attempt_n = (SELECT new_attempt_n FROM ranked WHERE ranked.id = request_log.id)
+ WHERE attempt_n IS NULL`)
+	if err != nil {
+		return 0, err
+	}
+	updated, _ := res.RowsAffected()
+	return updated, nil
 }
 
 // MigrateIndexes builds the request_log indexes whose underlying

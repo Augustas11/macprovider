@@ -79,7 +79,12 @@ UPDATE ledger_request_credits
           AND lpis.attempt_n = ledger_request_credits.attempt_n
           AND lpis.provider_id = ledger_request_credits.provider_id
         WHERE rl.request_id = ledger_request_credits.request_id
-          AND COALESCE((
+          -- SPEC-002 v1.5.2 / SPEC-005 v0.3.3 (issue #168): prefer
+          -- the persisted monotonic rl.attempt_n exact match when
+          -- non-NULL; fall back to the v0.3.1 id-ASC derivation for
+          -- legacy NULL rows during the rollout window. Both paths
+          -- compute identical ordinals.
+          AND COALESCE(rl.attempt_n, (
               SELECT COUNT(*) - 1 FROM request_log prior
                WHERE prior.account_id IS rl.account_id
                  AND prior.request_id = rl.request_id
@@ -95,17 +100,16 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
        rl.prompt_tokens, rl.completion_tokens, rl.estimated_completion_tokens,
        rl.status, rl.stream, rl.error_code,
        rl.retried,
-       COALESCE((
+       -- SPEC-002 v1.5.2 / SPEC-005 v0.3.3 (issue #168): prefer
+       -- persisted rl.attempt_n when non-NULL; fall back to the
+       -- v0.3.1 id-ASC derivation for legacy NULL rows during the
+       -- rollout window. Both paths compute identical ordinals.
+       COALESCE(rl.attempt_n, (
          SELECT COUNT(*) - 1 FROM request_log prior
           WHERE prior.account_id IS rl.account_id
             AND prior.request_id = rl.request_id
             AND prior.id <= rl.id
-       ), 0) AS attempt_n,
-       COALESCE((
-         SELECT COUNT(*) FROM request_log same
-          WHERE same.account_id IS rl.account_id
-            AND same.request_id = rl.request_id
-       ), 0) AS same_request_count
+       ), 0) AS attempt_n
   FROM request_log rl
  WHERE rl.ts_utc >= ? AND rl.ts_utc < ?
    AND rl.provider_assigned_id IS NOT NULL
@@ -125,8 +129,8 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
 		var tsText, requestID, model, assignedID string
 		var errorCode sql.NullString
 		var prompt, completion, estimated sql.NullInt64
-		var status, stream, retried, attemptN, sameRequestCount int
-		if err := rows.Scan(&rlID, &tsText, &requestID, &model, &assignedID, &prompt, &completion, &estimated, &status, &stream, &errorCode, &retried, &attemptN, &sameRequestCount); err != nil {
+		var status, stream, retried, attemptN int
+		if err := rows.Scan(&rlID, &tsText, &requestID, &model, &assignedID, &prompt, &completion, &estimated, &status, &stream, &errorCode, &retried, &attemptN); err != nil {
 			return err
 		}
 		scanned++
@@ -154,7 +158,16 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
 			quarantined += affected
 			continue
 		}
-		ambiguousAttempt := attemptN > 1 || (attemptN == 1 && retried == 0) || sameRequestCount > 2
+		// SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168) quarantine
+		// rule: with persisted monotonic attempt_n (or its byte-
+		// identical id-ASC fallback for legacy NULL rows), row 3+
+		// receives a stable distinct ordinal and is credited normally.
+		// The v0.3.1 "attemptN > 1 || sameRequestCount > 2" trigger is
+		// removed. The only remaining quarantine class is
+		// attempt_n == 1 with retried == 0 — legitimate-retry-
+		// without-explicit-marker that cannot be safely
+		// distinguished from a buggy duplicate INSERT.
+		ambiguousAttempt := attemptN == 1 && retried == 0
 		var providerID string
 		err = tx.QueryRowContext(ctx, `
 SELECT provider_id FROM ledger_provider_identity_snapshots
@@ -230,26 +243,14 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			ProviderShareBps:    share,
 		}
 		result := ComputeCredits(pp, cp, ep, usageFor(errorCode.String, ep), FaultNone, input.RateEntry, multiplier, share)
-		if attemptN > 1 {
-			affected, err := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, "ambiguous_attempt_n", now)
-			if err != nil {
-				return err
-			}
-			if affected == 0 {
-				exists, err := ledgerRowExistsForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID)
-				if err != nil {
-					return err
-				}
-				if !exists {
-					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, pp, cp, errorCode.String, in.Source, "ambiguous_attempt_n", now); err != nil {
-						return err
-					}
-					quarantined++
-				}
-			}
-			quarantined += affected
-			continue
-		}
+		// SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168): the v0.3.1
+		// "attemptN > 1 unconditionally quarantines" branch is removed.
+		// With persisted monotonic attempt_n (or its byte-identical
+		// id-ASC fallback for legacy NULL rows), row 3+ has a stable
+		// distinct ordinal and is credited normally. The ambiguousAttempt
+		// flag above already captures the remaining quarantine class
+		// (attempt_n==1 with retried==0) and was applied earlier in the
+		// branch that resolved provider identity.
 		actualGross, expectedGross, exists, mismatch, err := reconcileExistingCreditTx(ctx, tx, input, result, now)
 		if err != nil {
 			return err

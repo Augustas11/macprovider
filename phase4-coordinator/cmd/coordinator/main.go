@@ -78,6 +78,8 @@ func main() {
 			os.Exit(runVisibility(os.Args[2:]))
 		case "migrate-indexes":
 			os.Exit(runMigrateIndexes(os.Args[2:]))
+		case "backfill-attempt-n":
+			os.Exit(runBackfillAttemptN(os.Args[2:]))
 		}
 		// Round-1 CODE H1 fix: a non-flag first positional that
 		// is NEITHER a known daemon flag NOR a known CLI verb is
@@ -94,6 +96,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "  coordinator partner-keys <issue|revoke|list> [flags]")
 			fmt.Fprintln(os.Stderr, "  coordinator visibility revert --id <pid> --reason TEXT")
 			fmt.Fprintln(os.Stderr, "  coordinator migrate-indexes --config <path>  (one-shot operator migration)")
+			fmt.Fprintln(os.Stderr, "  coordinator backfill-attempt-n --config <path>  (one-shot attempt_n backfill)")
 			os.Exit(2)
 		}
 	}

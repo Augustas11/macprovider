@@ -1,7 +1,111 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.5.1 (2026-06-29, R-2 normative clarifications — issue #197)
+**Version:** 1.5.2 (2026-06-29, monotonic `attempt_n` column — issue #168)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.5.2 (2026-06-29, issue #168 — monotonic `attempt_n` column on `request_log`):**
+- **New column.** `request_log` gains `attempt_n INTEGER NULL` (zero-based
+  monotonic attempt ordinal). NULL on legacy rows written before
+  v1.5.2; non-NULL on all v1.5.2+ writes. Existing reconciliation
+  contracts (SPEC-005 v0.3+, SPEC-007 v0.3+) continue to work in the
+  rollout window because the read-side prefers the persisted
+  `attempt_n` when non-NULL and falls back to the v0.3.1 id-ASC
+  derivation when NULL.
+- **Write-time population semantics.** At `request_log` INSERT,
+  `attempt_n` MUST be assigned monotonically as `COUNT(*) FROM
+  request_log WHERE account_id IS ? AND request_id = ?` over the
+  rows already in the same `(account_id, request_id)` group under
+  SQLite `IS` semantics, computed in the same writer transaction.
+  Because the request-log store caps the pool at one writer
+  connection (`SetMaxOpenConns(1)` per the v1.4.2 R-2 + #21 / ARCH-3
+  discipline), this read-then-insert is race-free. The first row in
+  any group receives `attempt_n=0`; the n-th row receives
+  `attempt_n=n-1`. This is the same arithmetic the prior v0.3.1
+  read-time derivation produced; v1.5.2 just persists it at write
+  time so the value is stable across audit, reconciliation, and
+  replay.
+- **Read-side discipline.** SPEC-005 v0.3.3+ MUST consume
+  `request_log.attempt_n` directly when non-NULL. When NULL (legacy
+  pre-v1.5.2 row OR rollback window), the read-side falls back to
+  the v0.3.1 id-ASC derivation within the same
+  `(account_id, request_id)` group. The fallback is exactly the
+  arithmetic the writer would have produced, so a backfilled row and
+  a derivation-time row are byte-identical.
+- **Backfill subcommand.** A new operator subcommand
+  `coordinator backfill-attempt-n` walks legacy rows in id-ASC order
+  within each `(account_id, request_id)` group and assigns
+  `attempt_n` monotonically (the same arithmetic the v0.3.1 fallback
+  produces, executed once as a one-shot DDL-class operation rather
+  than per-read). Idempotent: rows that already have non-NULL
+  `attempt_n` are skipped. Read-only `--check --format=text|json`
+  reports a count of NULL vs populated rows so operators can verify
+  completion before they consider the migration done.
+- **Migration state machine.** Three observable states, parallel to
+  the v1.5.1 per-key state machine but PER-COLUMN (no index, since
+  `attempt_n` is a per-row ordinal, not a join key):
+  - `legacy` — column absent. Read-side MUST fall back to id-ASC
+    derivation; SPEC-005 v0.3.3 fallback rules apply (row 3+ credited
+    normally via the byte-identical id-ASC arithmetic; only
+    `attempt_n=1` with `retried=0` quarantined as the legitimate-
+    retry-without-marker class).
+  - `populating` — column present, some rows have NULL `attempt_n`
+    (either pre-v1.5.2 rows awaiting backfill OR a rollback window
+    where the v1.5.2 binary briefly ran then reverted). Read-side
+    prefers persisted `attempt_n` on non-NULL rows, falls back to
+    id-ASC derivation on NULL rows. Both paths produce byte-
+    identical ordinals because the writer derivation matches the
+    fallback derivation.
+  - `populated` — column present, zero NULL rows. Steady-state.
+  Tooling MAY check state via `backfill-attempt-n --check --format
+  json` which returns `{"migration_state": "legacy|populating|
+  populated", "null_count": N, "total_count": M}`.
+- **No race with the v1.5.0 AttemptN derivation.** The v1.5.0
+  AttemptN scoping in `hotpath.go` / `recovery.go` /
+  `endpoints.go` (defense-in-depth COUNT-based derivation
+  scoped by `(account_id, request_id) IS`) remains correct on
+  legacy rows. v1.5.2 writes populate `attempt_n` BEFORE the
+  derivation point so the derivation simply prefers the
+  persisted column when non-NULL — same arithmetic either
+  way.
+- **Quarantine rule change (cross-spec, see SPEC-005 v0.3.3).**
+  With persisted monotonic `attempt_n`, the v0.3.1 "row 3+ MUST
+  be quarantined until SPEC-002 gains monotonic attempt_n" rule
+  is satisfied in BOTH paths — the persisted monotonic `attempt_n`
+  path AND the byte-identical id-ASC fallback path. Row 3+ in either
+  path receives a stable `attempt_n=2, 3, ...` ordinal and is credited
+  normally (subject to the existing `retried` flag and identity-
+  snapshot rules). Quarantining is reserved for one genuine ambiguity
+  class: `attempt_n=1` with `retried=0` (legitimate retry without an
+  explicit `retried` marker — see SPEC-005 §OQ-5, issue #169).
+- **Deploy ordering.** Coordinator v1.5.2 MUST be deployed before
+  any out-of-process tooling that reads `attempt_n` directly. The
+  ALTER TABLE runs at daemon startup; the operator runs
+  `coordinator backfill-attempt-n` once per deployment. During the
+  `populating` window (column present, some NULL rows), the read-side
+  discipline above keeps every consumer correct.
+- **Backfill live-safety.** `coordinator backfill-attempt-n` SHOULD
+  run during a maintenance window (the same window as
+  `migrate-indexes` is the natural choice). It MAY run live against
+  a running daemon — the request-log writer-connection cap from
+  issue #21 / ARCH-3 serializes the backfill UPDATE against new
+  hot-path INSERTs, preserving correctness — but operators MUST
+  accept that the backfill UPDATE will hold the writer lock for the
+  duration of its scan, potentially exceeding the 6s INSERT timeout
+  on the hot path and triggering buyer-visible 503s. The
+  recommended sequence is: take the deploy briefly offline, run
+  `backfill-attempt-n`, then restore traffic.
+  **Preflight wall-clock measurement.** `coordinator
+  backfill-attempt-n --dry-run` executes the same UPDATE inside a
+  transaction and ROLLBACKs without persisting; it reports the
+  rows-that-would-be-updated count plus the wall-clock elapsed
+  time on the operator's actual production corpus. Operators MUST
+  use this dry-run to measure against the 6s hot-path INSERT budget
+  BEFORE deciding whether to run a live backfill — the dry-run
+  itself holds the writer lock for the same duration as a live run
+  would, but is observability-only (no row mutation). The CLI emits
+  a WARNING if dry-run elapsed exceeds 4 seconds (75% of the 6s
+  budget). A dry-run that warns means the operator SHOULD use a
+  maintenance window; a clean dry-run authorizes a live backfill.
 
 **Change log v1.5.1 (2026-06-29, issue #197 — R-2 normative clarifications + sanitizer hardening):**
 - **`external_request_id` UUID-tolerance clause.** Formalizes the
@@ -1548,11 +1652,14 @@ Every buyer request is logged to the `request_log` table in SQLite:
 | `pref_header` | TEXT | Value of X-MacProvider-Pref if present |
 | `provider_header` | TEXT | Value of X-MacProvider-Provider if present |
 | `retried` | INTEGER | Always 0 in v1 (no coordinator-managed retry). Column reserved for SPEC-004 / SPEC-006 retry policies. |
+| `attempt_n` | INTEGER NULL | (v1.5.2) Zero-based monotonic attempt ordinal within the same `(account_id, request_id)` group under SQLite `IS` semantics. Populated at INSERT time by the writer via `COUNT(*) FROM request_log WHERE account_id IS ? AND request_id = ?` in the same transaction. NULL only on legacy rows written before v1.5.2 (or written during a v1.5.2 → v1.5.1 rollback window); SPEC-005 v0.3.3 read-side falls back to id-ASC derivation for NULL rows during the migration window. Backfilled by the operator subcommand `coordinator backfill-attempt-n`. |
 
 Token counts are extracted from the provider's response `usage` field.
 For streaming responses, they come from the usage chunk (SPEC-001 FR-7).
 
-Each provider attempt for a given `request_id` MUST produce its own `request_log` row. The only uniqueness constraint is on (`id`). `request_id` MAY recur across rows when SPEC-004 retry logic produces multiple attempts within a single account. Note that `request_log.request_id` is coordinator-internal (server-minted UUID v4 per buyer request — see `requestIDForBuyerRequest()`); it is NOT the inbound `X-Request-ID` (which is persisted as `external_request_id`). The cross-account collision class motivating #211 lives on `external_request_id`, not on internal `request_id`. The `retried` column counts additional explicit-retry attempts beyond the first per SPEC-004 v0.3.1; the row order within a single `(account_id, request_id)` group is determined by `id ASC` under SQLite `IS` clustering — account scoping here is defense-in-depth so that if a UUID v4 collision or future schema change ever causes the same internal `request_id` to appear in rows from different accounts, each account's attempt sequence is computed within its own scope. This contract is load-bearing for SPEC-005 v0.3.1 multi-attempt attribution.
+Each provider attempt for a given `request_id` MUST produce its own `request_log` row. The only uniqueness constraint is on (`id`). `request_id` MAY recur across rows when SPEC-004 retry logic produces multiple attempts within a single account. Note that `request_log.request_id` is coordinator-internal (server-minted UUID v4 per buyer request — see `requestIDForBuyerRequest()`); it is NOT the inbound `X-Request-ID` (which is persisted as `external_request_id`). The cross-account collision class motivating #211 lives on `external_request_id`, not on internal `request_id`. The `retried` column counts additional explicit-retry attempts beyond the first per SPEC-004 v0.3.1.
+
+**Attempt ordinal (v1.5.2).** The canonical attempt ordinal within a single `(account_id, request_id)` group is `request_log.attempt_n` — a zero-based monotonic integer populated at INSERT time by the writer (`COUNT(*) FROM request_log WHERE account_id IS ? AND request_id = ?` in the same transaction; the single-writer pool cap from #21 / ARCH-3 makes this race-free). For legacy NULL-`attempt_n` rows (written pre-v1.5.2 or during a rollback window), the read-side falls back to id-ASC derivation within the same `(account_id, request_id)` group under SQLite `IS` clustering — the same arithmetic the writer would have produced, so backfilled and derivation-time ordinals are byte-identical. Account scoping is defense-in-depth so that if a UUID v4 collision or future schema change ever causes the same internal `request_id` to appear in rows from different accounts, each account's attempt sequence is computed within its own scope. This contract is load-bearing for SPEC-005 v0.3.3 multi-attempt attribution.
 
 `request_id` MUST be indexed. Any service in the request path that fails to propagate `X-Request-ID` degrades cross-layer debuggability; new buyer/request log surfaces MUST include X-Request-ID propagation.
 
@@ -1568,7 +1675,7 @@ CREATE INDEX idx_request_log_account_external_request_id ON request_log(account_
 
 The `idx_request_log_ts_utc` index supports SPEC-005 v0.3 reconciliation scans (24h startup, 7d nightly, ad-hoc admin ranges) at 10K-provider scale. The composite `(request_id, id)` index supports the SPEC-005 § 8.2 attempt-ordinal fallback and SPEC-004 multi-attempt log queries. The partial-NULL `external_request_id` and `(account_id, external_request_id)` indexes support closing-the-books reconciliation joins to gateway `usage_events` and `audit_events` (whether run as out-of-process harnesses or via a future coordinator-hosted reconciliation endpoint).
 
-Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`, `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL` (v1.4.2 R-2), and `ALTER TABLE request_log ADD COLUMN account_id TEXT NULL` (v1.5.0), and create the four indexes above. The two partial-NULL reconciliation indexes are built via `coordinator migrate-indexes`, NOT from daemon startup.
+Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`, `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL` (v1.4.2 R-2), `ALTER TABLE request_log ADD COLUMN account_id TEXT NULL` (v1.5.0), and `ALTER TABLE request_log ADD COLUMN attempt_n INTEGER NULL` (v1.5.2), and create the four indexes above. The two partial-NULL reconciliation indexes are built via `coordinator migrate-indexes`, NOT from daemon startup. The `attempt_n` column requires no index (it is a per-row ordinal, not a join key); the operator backfill subcommand `coordinator backfill-attempt-n` populates legacy NULL rows once per deployment.
 
 **Per-key migration-state machine (v1.5.1).** Because ALTER TABLE migrations run at daemon startup but the partial-NULL composite indexes are built only by the operator subcommand `coordinator migrate-indexes`, each composite reconciliation key on `request_log` has its OWN three-state migration:
 
@@ -1603,7 +1710,7 @@ In-scope tooling MUST fail closed when it observes state `unindexed` (or `legacy
 
 **Deploy ordering (v1.5.0).** Coordinator MUST be deployed first; it accepts and persists `X-MacProvider-Account` whether or not the gateway sends it. Gateway then deploys with the unconditional header. Auditor tooling MUST detect the boundary at row granularity (not schema granularity): rows with NULL `account_id` are either (a) pre-v1.5.0-coordinator rows, (b) v1.5.0-coordinator rows from a pre-v0.9.1 gateway, or (c) v1.5.0-coordinator rows written during a v1.4.x rollback window where the column existed but the writer didn't populate it. In all three cases the join MUST fall back to the prior `external_request_id`-only key and accept the documented ambiguity. Tooling MUST NOT use `PRAGMA table_info(request_log)` column-presence as a switch — that would misclassify rollback-window rows as scoped-ready. Use `account_id IS NOT NULL` as the per-row gate instead.
 
-**Money-path: AttemptN derivation defense-in-depth (v1.5.0).** `internal/billing/hotpath.go`, `internal/billing/recovery.go`, and `internal/billing/endpoints.go` admin-reconcile all derive `AttemptN` from a COUNT over `request_log` rows sharing the same internal `request_id`. **Note on identity:** `request_log.request_id` is the coordinator-internal billing id (server-minted UUID v4 per buyer request — see `requestIDForBuyerRequest()`), NOT the inbound `X-Request-ID` (which is persisted as `external_request_id`). The buyer-supplied collision class motivating #211 lives on `external_request_id` and is fully addressed by the composite `(account_id, external_request_id)` reconciliation key; it does NOT naturally manifest as collisions on internal `request_id`. Account-scoping the AttemptN derivation by `(account_id, request_id)` using SQLite `IS` semantics is therefore defense-in-depth — it ensures that if a UUID v4 collision, a misconfigured retry path, or any future schema-level change ever causes the same internal `request_id` to appear in `request_log` rows belonging to different accounts, each account's first attempt is correctly counted within its own scope rather than silently quarantined by `ambiguous_attempt_n`. All three sites MUST use identical `IS` semantics so the same row gets the same `AttemptN` derivation regardless of which path scans it. The pre-v1.5.0 same-account multi-attempt grouping (legacy NULL-`account_id` rows cluster among themselves) is preserved exactly.
+**Money-path: AttemptN read-side discipline (v1.5.2; supersedes v1.5.0 derivation rule).** `internal/billing/hotpath.go`, `internal/billing/recovery.go`, and `internal/billing/endpoints.go` admin-reconcile MUST read `request_log.attempt_n` (SPEC-002 v1.5.2 monotonic ordinal, populated at INSERT time) when non-NULL. For legacy NULL-`attempt_n` rows (pre-v1.5.2 OR rollback window), the read-side falls back to the v1.5.0 COUNT-based derivation over `request_log` rows sharing the same `(account_id, request_id)` group — same arithmetic the writer would have persisted, so backfilled and derivation-time ordinals are byte-identical. **Note on identity:** `request_log.request_id` is the coordinator-internal billing id (server-minted UUID v4 per buyer request — see `requestIDForBuyerRequest()`), NOT the inbound `X-Request-ID` (which is persisted as `external_request_id`). The buyer-supplied collision class motivating #211 lives on `external_request_id` and is fully addressed by the composite `(account_id, external_request_id)` reconciliation key; it does NOT naturally manifest as collisions on internal `request_id`. Account-scoping the AttemptN derivation (whether persisted at INSERT time under v1.5.2 OR computed at read time under the v1.5.0 fallback) by `(account_id, request_id)` using SQLite `IS` semantics is defense-in-depth — it ensures that if a UUID v4 collision, a misconfigured retry path, or any future schema-level change ever causes the same internal `request_id` to appear in `request_log` rows belonging to different accounts, each account's first attempt is correctly counted within its own scope. All three sites MUST use identical `IS` semantics so the same row gets the same `AttemptN` regardless of which path scans it. The pre-v1.5.0 same-account multi-attempt grouping (legacy NULL-`account_id` rows cluster among themselves) is preserved exactly. **Quarantine class (v0.3.3): only `attempt_n=1` with `retried=0` is quarantined — see SPEC-005 v0.3.3 §15.2; the v0.3.1 "row 3+ MUST quarantine" rule is satisfied in both the persisted and fallback paths.**
 
 ### Routing logic
 
