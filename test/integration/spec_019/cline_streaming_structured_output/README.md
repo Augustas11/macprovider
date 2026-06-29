@@ -1,5 +1,7 @@
 AC-V2-5 Cline streaming structured-output fixture.
 
+Static fixture; see `../KNOWN_GAPS.md`.
+
 Upstream Cline pin:
 
 - Repository: https://github.com/cline/cline

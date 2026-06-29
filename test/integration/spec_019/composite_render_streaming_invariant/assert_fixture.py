@@ -8,6 +8,8 @@ for stem in [
     "qwen3_rendered_messages",
     "llama33_rendered_messages",
     "tool_history_rendered_messages",
+    "qwen3_tool_history_rendered_messages",
+    "llama33_tool_history_rendered_messages",
 ]:
     non_streaming = (root / f"non_streaming_{stem}.json").read_bytes()
     streaming = (root / f"streaming_{stem}.json").read_bytes()

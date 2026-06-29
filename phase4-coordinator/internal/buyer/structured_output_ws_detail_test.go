@@ -5,6 +5,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/augstar/macprovider-coordinator/internal/pool"
+	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
 func TestSpec019ProviderWSDetailCodesSurviveToSSE(t *testing.T) {
@@ -42,5 +45,60 @@ func TestSpec019ProviderWSDetailCodesSurviveToSSE(t *testing.T) {
 				t.Fatalf("SSE settlement_ran=false for %q", code)
 			}
 		})
+	}
+}
+
+func TestForwardWSStreamingMapsResponseByteCapExceededToSSE(t *testing.T) {
+	assertForwardWSStreamingMapsDetailCodeToSSE(t, "response_byte_cap_exceeded")
+}
+
+func TestForwardWSStreamingMapsProviderTimeoutToSSE(t *testing.T) {
+	assertForwardWSStreamingMapsDetailCodeToSSE(t, "provider_timeout")
+}
+
+func assertForwardWSStreamingMapsDetailCodeToSSE(t *testing.T, code string) {
+	t.Helper()
+	requestID := "req-structured"
+	chunks := make(chan providerws.InferenceResponseChunk, 1)
+	done := make(chan providerws.InferenceResponseEnd, 1)
+	errs := make(chan error, 1)
+	chunks <- providerws.InferenceResponseChunk{
+		Type:      "inference_response_chunk",
+		RequestID: requestID,
+		Seq:       0,
+		Data:      "data: {\"choices\":[{\"delta\":{\"content\":\"prefix\"}}]}\n\n",
+	}
+	close(chunks)
+	done <- providerws.InferenceResponseEnd{
+		Type:       "inference_response_end",
+		RequestID:  requestID,
+		Status:     code,
+		ChunksSent: 1,
+	}
+
+	server := &Server{}
+	provider := pool.Provider{ProviderID: "provider-a", AssignedID: "session-a"}
+	relay := &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+
+	result, attempt := server.forwardWSStreaming(rr, req, requestID, provider, relay)
+	if result != wsForwardComplete {
+		t.Fatalf("result=%q, want %q", result, wsForwardComplete)
+	}
+	if attempt.ErrorCode != code {
+		t.Fatalf("attempt error code=%q, want %q", attempt.ErrorCode, code)
+	}
+
+	body := rr.Body.String()
+	for _, want := range []string{
+		`"code":"` + code + `"`,
+		`"settlement_ran":true`,
+		`"request_id":"` + requestID + `"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("SSE body missing %s: %s", want, body)
+		}
 	}
 }

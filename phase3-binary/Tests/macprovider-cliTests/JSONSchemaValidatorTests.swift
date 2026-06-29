@@ -85,7 +85,7 @@ final class JSONSchemaValidatorTests: XCTestCase {
         XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(1.3), against: schema), status: 502, code: "json_schema_validation_failed")
     }
 
-    func testMultipleOfIntegerPathRejectsFloatingDrift() throws {
+    func testMultipleOfFPFallbackRejectsFloatingDrift() throws {
         let schema: JSONValue = .object([
             "type": .string("number"),
             "multipleOf": .int(1),
@@ -101,6 +101,51 @@ final class JSONSchemaValidatorTests: XCTestCase {
         ])
 
         XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(1e16), against: schema), status: 502, code: "json_schema_validation_failed")
+    }
+
+    func testValidateNumericInstanceAcceptsInt64MaxAgainstMultipleOfOne() throws {
+        let schema: JSONValue = .object([
+            "type": .string("integer"),
+            "multipleOf": .int(1),
+        ])
+
+        XCTAssertNoThrow(try JSONSchemaValidator.validateInstance(.int(Int.max), against: schema))
+    }
+
+    func testValidateNumericInstanceAcceptsInt64MinAgainstMultipleOfOne() throws {
+        let schema: JSONValue = .object([
+            "type": .string("integer"),
+            "multipleOf": .int(1),
+        ])
+
+        XCTAssertNoThrow(try JSONSchemaValidator.validateInstance(.int(Int.min), against: schema))
+    }
+
+    func testValidateNumericInstanceRejectsAboveInt64Max() throws {
+        let schema: JSONValue = .object([
+            "type": .string("number"),
+            "multipleOf": .int(1),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.double(Double(Int64.max)), against: schema), status: 502, code: "json_schema_validation_failed")
+    }
+
+    func testMultipleOfIntegerPathAcceptsNegativeIntegers() throws {
+        let schema: JSONValue = .object([
+            "type": .string("integer"),
+            "multipleOf": .int(2),
+        ])
+
+        XCTAssertNoThrow(try JSONSchemaValidator.validateInstance(.int(-100), against: schema))
+    }
+
+    func testMultipleOfIntegerPathRejectsNegativeOffMultiple() throws {
+        let schema: JSONValue = .object([
+            "type": .string("integer"),
+            "multipleOf": .int(2),
+        ])
+
+        XCTAssertAPIError(try JSONSchemaValidator.validateInstance(.int(-101), against: schema), status: 502, code: "json_schema_validation_failed")
     }
 
     func testStrictObjectRequiresAdditionalPropertiesFalseAtEachObject() throws {

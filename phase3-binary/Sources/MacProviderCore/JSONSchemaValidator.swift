@@ -174,8 +174,7 @@ public enum JSONSchemaValidator {
         if let multipleOf = try numericBoundValue(object["multipleOf"], keyword: "multipleOf", pointer: pointer) {
             guard multipleOf.isFinite,
                   multipleOf > 0,
-                  multipleOf > minimumSupportedMultipleOf,
-                  multipleOf >= .leastNormalMagnitude else {
+                  multipleOf > minimumSupportedMultipleOf else {
                 throw unsupportedKeyword("multipleOf", pointer: pointer)
             }
         }
@@ -258,7 +257,7 @@ public enum JSONSchemaValidator {
             throw validationError("Structured output is above maximum at \(pointerOrRoot(pointer))", pointer: pointer)
         }
         if let multipleOf = try numericBoundValue(schemaObject["multipleOf"], keyword: "multipleOf", pointer: pointer) {
-            if let numericInt = exactIntegerValue(numeric),
+            if let numericInt = exactIntegerInstanceValue(instance),
                let multipleOfInt = exactIntegerValue(multipleOf),
                multipleOfInt != 0 {
                 if numericInt % multipleOfInt != 0 {
@@ -280,12 +279,19 @@ public enum JSONSchemaValidator {
 
     private static func exactIntegerValue(_ value: Double) -> Int64? {
         guard value.isFinite,
-              value.truncatingRemainder(dividingBy: 1) == 0,
-              value >= Double(Int64.min),
-              value <= Double(Int64.max) else {
+              value.truncatingRemainder(dividingBy: 1) == 0 else { return nil }
+        return Int64(exactly: value)
+    }
+
+    private static func exactIntegerInstanceValue(_ value: JSONValue) -> Int64? {
+        switch value {
+        case .int(let int):
+            return Int64(exactly: int)
+        case .double(let double):
+            return exactIntegerValue(double)
+        default:
             return nil
         }
-        return Int64(value)
     }
 
     private static func numericInstanceValue(_ value: JSONValue) -> Double? {

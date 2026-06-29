@@ -1,5 +1,7 @@
 AC-V2-12 Vercel AI SDK `z.number().int()` streaming fixture.
 
+Static fixture; see `../KNOWN_GAPS.md`.
+
 Pinned package versions are in `package.json`.
 
 Logical Zod schema:

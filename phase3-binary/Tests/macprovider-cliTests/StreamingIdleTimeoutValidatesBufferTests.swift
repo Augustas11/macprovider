@@ -3,23 +3,14 @@ import XCTest
 @testable import macprovider_cli
 
 final class StreamingIdleTimeoutValidatesBufferTests: XCTestCase {
-    func testStructuredStreamingIdleTimeoutValidBufferReturnsSuccess() async throws {
+    func testIdleBreachValidatesBufferAndReturnsSuccessWhenValid() throws {
         let request = try streamingRequest(responseFormat: integerAgeResponseFormat())
         let accumulator = StructuredStreamingContentAccumulator(enabled: true)
         XCTAssertNil(accumulator.append(#"{"age":37}"#))
-        let idleState = StructuredStreamingIdleState(enabled: true)
 
-        let result = try await ModelRuntime.withStructuredStreamingIdleTimeout(
-            idleState: idleState,
-            timeout: 0.001,
-            pollNanoseconds: 1_000_000,
-            onIdleTimeout: {
-                try Self.validatedBufferResult(accumulator: accumulator, request: request)
-            },
-            operation: {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-                return CompletionResult(content: "late", finishReason: "stop", promptTokens: 1, completionTokens: 1)
-            }
+        let result = try ModelRuntime.synthesizeIdleTimeoutResultOrThrow(
+            accumulator: accumulator,
+            request: request
         )
 
         XCTAssertEqual(result.content, #"{"age":37}"#)
@@ -28,7 +19,61 @@ final class StreamingIdleTimeoutValidatesBufferTests: XCTestCase {
         XCTAssertEqual(result.completionTokens, 0)
     }
 
-    func testStructuredStreamingIdleTimeoutInvalidBufferThrowsProviderTimeout() async throws {
+    func testIdleBreachValidatesBufferAndThrowsWhenInvalid() throws {
+        let request = try streamingRequest(responseFormat: integerAgeResponseFormat())
+        let accumulator = StructuredStreamingContentAccumulator(enabled: true)
+        XCTAssertNil(accumulator.append(#"{"age":"old"}"#))
+
+        XCTAssertThrowsError(try ModelRuntime.synthesizeIdleTimeoutResultOrThrow(
+            accumulator: accumulator,
+            request: request
+        )) { error in
+            let apiError = error as? APIError
+            XCTAssertEqual(apiError?.status, 504)
+            XCTAssertEqual(apiError?.code, "provider_timeout")
+            let envelope = apiError?.envelope["error"] as? [String: Any]
+            XCTAssertEqual(envelope?["retryable"] as? Bool, false)
+        }
+    }
+
+    func testIdleBreachReadsBufferAfterOperationStopped() async throws {
+        let request = try streamingRequest(responseFormat: integerAgeResponseFormat())
+        let accumulator = StructuredStreamingContentAccumulator(enabled: true)
+        let idleState = StructuredStreamingIdleState(enabled: true)
+
+        let result = try await ModelRuntime.withStructuredStreamingIdleTimeout(
+            idleState: idleState,
+            timeout: 0.005,
+            pollNanoseconds: 1_000_000,
+            onIdleTimeout: {
+                try ModelRuntime.synthesizeIdleTimeoutResultOrThrow(
+                    accumulator: accumulator,
+                    request: request
+                )
+            },
+            operation: { idleCancellation in
+                for delta in [#"{"#, #""age""#, #":37}"#] {
+                    XCTAssertNil(accumulator.append(delta))
+                    idleState.noteContent()
+                    try await Task.sleep(nanoseconds: 1_000_000)
+                }
+                while !idleCancellation.isFired {
+                    try await Task.sleep(nanoseconds: 1_000_000)
+                }
+                try await Task.sleep(nanoseconds: 20_000_000)
+                if !idleCancellation.isFired {
+                    XCTAssertNil(accumulator.append(#"{"age":38}"#))
+                    idleState.noteContent()
+                }
+                return CompletionResult(content: "late", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            }
+        )
+
+        XCTAssertEqual(result.content, #"{"age":37}"#)
+        XCTAssertEqual(accumulator.content, #"{"age":37}"#)
+    }
+
+    func testStructuredStreamingIdleTimeoutInvalidBufferDoesNotFireDrainToken() async throws {
         let request = try streamingRequest(responseFormat: integerAgeResponseFormat())
         let accumulator = StructuredStreamingContentAccumulator(enabled: true)
         XCTAssertNil(accumulator.append(#"{"age":"old"}"#))
@@ -41,20 +86,12 @@ final class StreamingIdleTimeoutValidatesBufferTests: XCTestCase {
                 timeout: 0.001,
                 pollNanoseconds: 1_000_000,
                 onIdleTimeout: {
-                    do {
-                        return try Self.validatedBufferResult(accumulator: accumulator, request: request)
-                    } catch {
-                        throw APIError(
-                            status: 504,
-                            message: "Provider emitted no buyer-visible structured-output content delta within 60 seconds",
-                            type: "upstream_provider_error",
-                            code: "provider_timeout",
-                            inferenceRan: true,
-                            settlementRan: true
-                        )
-                    }
+                    try ModelRuntime.synthesizeIdleTimeoutResultOrThrow(
+                        accumulator: accumulator,
+                        request: request
+                    )
                 },
-                operation: {
+                operation: { _ in
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                     return CompletionResult(content: "late", finishReason: "stop", promptTokens: 1, completionTokens: 1)
                 }
@@ -64,23 +101,5 @@ final class StreamingIdleTimeoutValidatesBufferTests: XCTestCase {
             retryable: false
         )
         XCTAssertFalse(drainToken.isFired)
-    }
-
-    private static func validatedBufferResult(
-        accumulator: StructuredStreamingContentAccumulator,
-        request: ChatCompletionRequest
-    ) throws -> CompletionResult {
-        let content = accumulator.content
-        return try ModelRuntime.validateStructuredStreamingCompletion(
-            CompletionResult(
-                content: content,
-                finishReason: "stop",
-                promptTokens: 0,
-                completionTokens: 0,
-                ttftMilliseconds: 0
-            ),
-            request: request,
-            buyerVisibleContent: content
-        )
     }
 }

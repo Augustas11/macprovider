@@ -104,6 +104,7 @@ final class StructuredStreamingIdleState: @unchecked Sendable {
     private var lastContentAt = Date()
     private var finishedValue = false
     private var timedOutValue = false
+    private var operationStoppedValue = false
 
     init(enabled: Bool) {
         self.enabled = enabled
@@ -128,6 +129,12 @@ final class StructuredStreamingIdleState: @unchecked Sendable {
         return timedOutValue
     }
 
+    var operationStopped: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return operationStoppedValue
+    }
+
     func hasTimedOut(timeout: TimeInterval) -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -145,6 +152,17 @@ final class StructuredStreamingIdleState: @unchecked Sendable {
         finishedValue = true
         lock.unlock()
     }
+
+    func markOperationStopped() {
+        lock.lock()
+        operationStoppedValue = true
+        lock.unlock()
+    }
+}
+
+private enum StructuredStreamingIdleRaceResult<T: Sendable>: Sendable {
+    case operation(T)
+    case idle(T)
 }
 
 extension ModelRuntimeServing {
@@ -665,27 +683,12 @@ actor ModelRuntime: ModelRuntimeServing {
             try await Self.withStructuredStreamingIdleTimeout(
                 idleState: idleState,
                 onIdleTimeout: {
-                    let content = structuredAccumulator.content
-                    let synthetic = CompletionResult(
-                        content: content,
-                        finishReason: "stop",
-                        promptTokens: 0,
-                        completionTokens: 0,
-                        ttftMilliseconds: 0,
-                        toolCalls: nil,
-                        modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
+                    try Self.synthesizeIdleTimeoutResultOrThrow(
+                        accumulator: structuredAccumulator,
+                        request: request
                     )
-                    do {
-                        return try Self.validateStructuredStreamingCompletion(
-                            synthetic,
-                            request: request,
-                            buyerVisibleContent: content
-                        )
-                    } catch {
-                        throw Self.structuredStreamingProviderTimeoutError()
-                    }
                 }
-            ) {
+            ) { idleCancellation in
                 try await inferenceGate.withPermit {
                 try drainCancelled.check()
                 try Task.checkCancellation()
@@ -709,7 +712,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
                     let streamToolsIncrementally = Self.hasEnabledTools(request.promptSource.tools)
                     let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
-                        if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
+                        if Task.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
                             return .stop
                         }
                         let decoded = context.tokenizer.decode(tokens: tokens)
@@ -1133,6 +1136,31 @@ actor ModelRuntime: ModelRuntimeServing {
         return try validateStructuredCompletion(visibleCompletion, request: request)
     }
 
+    static func synthesizeIdleTimeoutResultOrThrow(
+        accumulator: StructuredStreamingContentAccumulator,
+        request: ChatCompletionRequest
+    ) throws -> CompletionResult {
+        let content = accumulator.content
+        let synthetic = CompletionResult(
+            content: content,
+            finishReason: "stop",
+            promptTokens: 0,
+            completionTokens: 0,
+            ttftMilliseconds: 0,
+            toolCalls: nil,
+            modelHashObserved: nil
+        )
+        do {
+            return try validateStructuredStreamingCompletion(
+                synthetic,
+                request: request,
+                buyerVisibleContent: content
+            )
+        } catch {
+            throw structuredStreamingProviderTimeoutError()
+        }
+    }
+
     // AC-V2-9 (SPEC-019 v0.2.4 §10): provider-idle breach validates the
     // buyer-visible buffer-as-of-close before emitting provider_timeout.
     static func withStructuredStreamingIdleTimeout<T: Sendable>(
@@ -1140,41 +1168,83 @@ actor ModelRuntime: ModelRuntimeServing {
         timeout: TimeInterval = structuredStreamingIdleTimeoutSeconds,
         pollNanoseconds: UInt64 = 100_000_000,
         onIdleTimeout: @escaping @Sendable () throws -> T,
-        operation: @escaping @Sendable () async throws -> T
+        operation: @escaping @Sendable (_ idleCancellation: DrainCancelToken) async throws -> T
     ) async throws -> T {
         guard idleState.enabled else {
-            return try await operation()
+            return try await operation(DrainCancelToken())
         }
-        return try await withThrowingTaskGroup(of: T.self) { group in
+        let idleCancellation = DrainCancelToken()
+        return try await withThrowingTaskGroup(of: StructuredStreamingIdleRaceResult<T>.self) { group in
             group.addTask {
-                try await operation()
+                do {
+                    let result = try await operation(idleCancellation)
+                    idleState.markOperationStopped()
+                    if idleState.timedOut {
+                        await Self.waitForStructuredStreamingIdleFinish(idleState)
+                        throw DrainCancelledError()
+                    }
+                    return .operation(result)
+                } catch {
+                    idleState.markOperationStopped()
+                    if idleState.timedOut {
+                        await Self.waitForStructuredStreamingIdleFinish(idleState)
+                        throw DrainCancelledError()
+                    }
+                    throw error
+                }
             }
             group.addTask {
                 while !idleState.isFinished {
                     try await Task.sleep(nanoseconds: pollNanoseconds)
                     if idleState.hasTimedOut(timeout: timeout) {
                         idleState.markTimedOut()
-                        return try onIdleTimeout()
+                        idleCancellation.fire()
+                        await Self.waitForStructuredStreamingOperationStopped(idleState)
+                        return .idle(try onIdleTimeout())
                     }
                 }
                 throw DrainCancelledError()
             }
             do {
-                guard let result = try await group.next() else {
-                    throw DrainCancelledError()
+                while let result = try await group.next() {
+                    switch result {
+                    case .operation(let value):
+                        idleState.markFinished()
+                        group.cancelAll()
+                        return value
+                    case .idle(let value):
+                        idleState.markFinished()
+                        group.cancelAll()
+                        return value
+                    }
                 }
-                idleState.markFinished()
-                group.cancelAll()
-                return result
-            } catch is DrainCancelledError where idleState.timedOut {
-                idleState.markFinished()
-                group.cancelAll()
-                throw structuredStreamingProviderTimeoutError()
+                throw DrainCancelledError()
             } catch {
                 idleState.markFinished()
                 group.cancelAll()
                 throw error
             }
+        }
+    }
+
+    private static func waitForStructuredStreamingOperationStopped(
+        _ idleState: StructuredStreamingIdleState,
+        maxNanoseconds: UInt64 = 100_000_000,
+        pollNanoseconds: UInt64 = 10_000_000
+    ) async {
+        var waited: UInt64 = 0
+        while !idleState.operationStopped && waited < maxNanoseconds {
+            try? await Task.sleep(nanoseconds: pollNanoseconds)
+            waited += pollNanoseconds
+        }
+    }
+
+    private static func waitForStructuredStreamingIdleFinish(
+        _ idleState: StructuredStreamingIdleState,
+        pollNanoseconds: UInt64 = 10_000_000
+    ) async {
+        while !idleState.isFinished {
+            try? await Task.sleep(nanoseconds: pollNanoseconds)
         }
     }
 
