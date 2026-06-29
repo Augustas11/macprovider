@@ -58,4 +58,10 @@ type Result struct {
 	// was parsed (non-streaming). False + Outcome=ok is suspicious and
 	// I4 may flag it.
 	SawTerminator bool `json:"saw_terminator"`
+
+	// Phase tags requests fired under the cold_warm_pairs pattern:
+	// "cold" for the first request after each idle gap, "warm" for the
+	// immediately-following request in the same pair. Empty for all
+	// other patterns. Drives the B7 (TTFT cold/warm ratio) verdict.
+	Phase string `json:"phase,omitempty"`
 }

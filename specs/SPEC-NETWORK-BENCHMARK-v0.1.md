@@ -123,6 +123,7 @@ single bad run doesn't trip the alert).
 | B4 | Error rate bounded | ≤ 5/1000 |
 | B5 | Slot util reasonable | ≥ 15% over 5-min window |
 | B6 | Earnings/hr viable | ≥ $0.30/hr at current pricing |
+| B7 | Cold/warm TTFT ratio bounded | cold p50 / warm p50 ≤ 2.0 (scenario 08) |
 
 Like I1-I4, each invariant produces a structured verdict (PASS / WARN /
 FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
@@ -136,11 +137,13 @@ FAIL + supporting evidence). Unlike I1-I4, WARN does not block the run.
 - **Invariants**: B1, B2, B3, B4, B5.
 
 ### 4.2 `08_cold_warm_compare`
-- **What**: Fire 1 request, wait 60s for provider to go idle, fire
-  another. Repeat 10 times.
+- **What**: 10 pairs of (cold, warm) requests under the `cold_warm_pairs`
+  buyer pattern. Each pair sleeps `inter_pair_idle_seconds` (60s default)
+  before firing the "cold" request, then fires the "warm" request
+  immediately after.
 - **Measures**: TTFT cold (post-idle) vs TTFT warm (immediately after).
-  Reports both distributions and the cold-warm gap.
-- **Invariants**: B1 (cold p50 ≤ 2× warm p50).
+  Reports both distributions, the cold-warm gap, and the p50 ratio.
+- **Invariants**: B1 (aggregate TTFT vs target), B7 (cold/warm ratio).
 
 ### 4.3 `09_streaming_ttft_distribution`
 - **What**: 100 short streaming requests, max_tokens=8, sequential

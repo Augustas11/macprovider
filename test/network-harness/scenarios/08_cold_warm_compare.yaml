@@ -18,13 +18,14 @@ name: cold_warm_compare
 description: |
   10 pairs of (cold-request, warm-request). Idle 60s between pairs.
   Measures TTFT distribution split by cold vs warm.
-  Benchmark scenario — uses B1 (cold p50 ≤ 2× warm p50).
+  Benchmark scenario — B1 (aggregate TTFT p50) + B7 (cold/warm ratio).
 
 expected_shape: |
   Phase B benchmark:
    - 20 total requests, 10 "cold" (post-idle), 10 "warm" (back-to-back).
    - TTFT cold > TTFT warm. The ratio quantifies the cold penalty.
-   - B1 fires WARN if cold/warm > 2×, FAIL if > 5×.
+   - B1 scores the aggregate TTFT distribution.
+   - B7 scores the cold/warm p50 ratio: PASS ≤ 2×, WARN ≤ 5×, FAIL > 5×.
 
 target:
   gateway_url: https://api.streamvc.live
@@ -47,7 +48,7 @@ silent_hang_threshold: 30s
 
 benchmark:
   enabled: true
-  invariants: [B1]
+  invariants: [B1, B7]
 
 prompts:
   - model: mlx-community/Qwen3-32B-4bit

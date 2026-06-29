@@ -75,6 +75,20 @@ type BuyerMetrics struct {
 	TotalRequests   int            `json:"total_requests"`
 	SuccessCount    int            `json:"success_count"`
 	Non2xxBreakdown map[string]int `json:"non_2xx_breakdown"`
+
+	// ColdWarm — populated only when results carry phase tags
+	// (cold_warm_pairs pattern). Captures the side-by-side TTFT
+	// distributions used by B7. Both Count fields are 0 when phase
+	// data is absent.
+	ColdWarm ColdWarmMetrics `json:"cold_warm,omitempty"`
+}
+
+// ColdWarmMetrics is the cold-vs-warm TTFT cross-section. Cold = first
+// request after each idle gap; warm = the immediately-following request.
+type ColdWarmMetrics struct {
+	ColdTTFTMs  Histogram `json:"cold_ttft_ms"`
+	WarmTTFTMs  Histogram `json:"warm_ttft_ms"`
+	RatioP50    float64   `json:"ratio_p50"`
 }
 
 // PerProvider is the provider-side cross-section per spec §5.
@@ -156,6 +170,14 @@ const (
 
 	EarningsTargetUSDPerHr  = 1.00
 	EarningsBareMinUSDPerHr = 0.30
+
+	// B7 (cold/warm TTFT ratio) thresholds for scenario 08. Cold = first
+	// request after an idle gap; warm = immediately-following request.
+	// A ratio of 2× means cold TTFT is twice the warm TTFT; "good"
+	// networks keep this small because the cold-start penalty visibly
+	// hurts buyer-perceived p50 on bursty workloads.
+	ColdWarmRatioTarget  = 2.0
+	ColdWarmRatioBareMin = 5.0
 )
 
 // Evaluate computes the benchmark summary and per-invariant verdicts.
@@ -209,6 +231,8 @@ func Evaluate(
 			verdicts = append(verdicts, evalB5(providerMetrics, windowSeconds))
 		case "B6":
 			verdicts = append(verdicts, evalB6(providerMetrics, pricing, windowSeconds))
+		case "B7":
+			verdicts = append(verdicts, evalB7(buyerMetrics))
 		default:
 			verdicts = append(verdicts, Verdict{
 				ID:     id,
@@ -226,6 +250,7 @@ func Evaluate(
 
 func computeBuyerMetrics(results []buyer.Result) BuyerMetrics {
 	var ttfts, walls, tps []float64
+	var coldTTFTs, warmTTFTs []float64
 	non2xx := map[string]int{}
 	success := 0
 	non2xxCount := 0
@@ -245,6 +270,12 @@ func computeBuyerMetrics(results []buyer.Result) BuyerMetrics {
 		success++
 		if r.TTFTMillis > 0 {
 			ttfts = append(ttfts, float64(r.TTFTMillis))
+			switch r.Phase {
+			case "cold":
+				coldTTFTs = append(coldTTFTs, float64(r.TTFTMillis))
+			case "warm":
+				warmTTFTs = append(warmTTFTs, float64(r.TTFTMillis))
+			}
 		}
 		if r.TotalMillis > 0 {
 			walls = append(walls, float64(r.TotalMillis))
@@ -275,6 +306,13 @@ func computeBuyerMetrics(results []buyer.Result) BuyerMetrics {
 	}
 	if bm.TotalRequests > 0 {
 		bm.ErrorRatePer1k = 1000.0 * float64(non2xxCount) / float64(bm.TotalRequests)
+	}
+	if len(coldTTFTs) > 0 || len(warmTTFTs) > 0 {
+		bm.ColdWarm.ColdTTFTMs = newHistogram(coldTTFTs)
+		bm.ColdWarm.WarmTTFTMs = newHistogram(warmTTFTs)
+		if bm.ColdWarm.WarmTTFTMs.P50 > 0 {
+			bm.ColdWarm.RatioP50 = bm.ColdWarm.ColdTTFTMs.P50 / bm.ColdWarm.WarmTTFTMs.P50
+		}
 	}
 	return bm
 }
@@ -558,6 +596,40 @@ func evalB6(pm ProviderMetrics, pricing *Pricing, windowSeconds float64) Verdict
 	default:
 		v.Status = StatusFail
 		v.Detail = fmt.Sprintf("per-provider median earnings $%.2f/hr under bare-min $%.2f/hr — not M-series viable at current pricing", v.Value, v.BareMin)
+	}
+	return v
+}
+
+// evalB7 scores the TTFT cold/warm ratio. Cold p50 should not exceed
+// warm p50 by more than 2× (target) or 5× (bare-min). SKIP when phase
+// data is missing — e.g. when the scenario didn't use the cold_warm_pairs
+// pattern.
+func evalB7(bm BuyerMetrics) Verdict {
+	v := Verdict{ID: "B7", Title: "TTFT cold/warm ratio bounded", Unit: "ratio",
+		Target: ColdWarmRatioTarget, BareMin: ColdWarmRatioBareMin}
+	cold := bm.ColdWarm.ColdTTFTMs
+	warm := bm.ColdWarm.WarmTTFTMs
+	if cold.Count == 0 && warm.Count == 0 {
+		v.Status = StatusSkip
+		v.Detail = "no phase-tagged results — scenario did not use cold_warm_pairs pattern"
+		return v
+	}
+	if cold.Count == 0 || warm.Count == 0 || warm.P50 == 0 {
+		v.Status = StatusSkip
+		v.Detail = fmt.Sprintf("incomplete cold/warm sample (cold=%d warm=%d) — cannot compute ratio", cold.Count, warm.Count)
+		return v
+	}
+	v.Value = bm.ColdWarm.RatioP50
+	switch {
+	case v.Value <= ColdWarmRatioTarget:
+		v.Status = StatusPass
+		v.Detail = fmt.Sprintf("cold/warm p50 ratio %.2f ≤ target %.1f (cold p50=%.0fms warm p50=%.0fms, n_cold=%d n_warm=%d)", v.Value, v.Target, cold.P50, warm.P50, cold.Count, warm.Count)
+	case v.Value <= ColdWarmRatioBareMin:
+		v.Status = StatusWarn
+		v.Detail = fmt.Sprintf("cold/warm p50 ratio %.2f over target %.1f but ≤ bare-min %.1f (cold p50=%.0fms warm p50=%.0fms)", v.Value, v.Target, v.BareMin, cold.P50, warm.P50)
+	default:
+		v.Status = StatusFail
+		v.Detail = fmt.Sprintf("cold/warm p50 ratio %.2f exceeds bare-min %.1f — cold-start penalty hurts buyer-perceived latency", v.Value, v.BareMin)
 	}
 	return v
 }

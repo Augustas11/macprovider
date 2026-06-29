@@ -436,3 +436,127 @@ func TestEvaluate_NoBenchmark(t *testing.T) {
 		t.Fatalf("empty invariants list should produce empty result, got %+v", res)
 	}
 }
+
+// B7 (cold/warm TTFT ratio) tests --------------------------------------
+
+func makePhasedResult(ttftMs int64, phase string) buyer.Result {
+	r := makeResult(ttftMs, 1500, 64, true, "p1", "m", 200)
+	r.Phase = phase
+	return r
+}
+
+func TestB7_ColdWarm_Skip_NoPhase(t *testing.T) {
+	results := []buyer.Result{makeResult(300, 1000, 64, true, "p1", "m", 200)}
+	res := Evaluate(sc("B7"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B7 expected SKIP without phase data, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB7_ColdWarm_Pass(t *testing.T) {
+	// cold p50 = 400, warm p50 = 250 → ratio = 1.6 → PASS (≤2.0)
+	var results []buyer.Result
+	for i := 0; i < 10; i++ {
+		results = append(results, makePhasedResult(400, "cold"))
+		results = append(results, makePhasedResult(250, "warm"))
+	}
+	res := Evaluate(sc("B7"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusPass {
+		t.Fatalf("B7 expected PASS at ratio 1.6, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB7_ColdWarm_Warn(t *testing.T) {
+	// cold p50 = 900, warm p50 = 300 → ratio = 3.0 → WARN (>2.0, ≤5.0)
+	var results []buyer.Result
+	for i := 0; i < 10; i++ {
+		results = append(results, makePhasedResult(900, "cold"))
+		results = append(results, makePhasedResult(300, "warm"))
+	}
+	res := Evaluate(sc("B7"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusWarn {
+		t.Fatalf("B7 expected WARN at ratio 3.0, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB7_ColdWarm_Fail(t *testing.T) {
+	// cold p50 = 3000, warm p50 = 300 → ratio = 10.0 → FAIL (>5.0)
+	var results []buyer.Result
+	for i := 0; i < 10; i++ {
+		results = append(results, makePhasedResult(3000, "cold"))
+		results = append(results, makePhasedResult(300, "warm"))
+	}
+	res := Evaluate(sc("B7"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusFail {
+		t.Fatalf("B7 expected FAIL at ratio 10.0, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestB7_ColdWarm_Skip_OnlyOneSide(t *testing.T) {
+	// All cold, no warm → SKIP (ratio undefined)
+	var results []buyer.Result
+	for i := 0; i < 5; i++ {
+		results = append(results, makePhasedResult(400, "cold"))
+	}
+	res := Evaluate(sc("B7"), results, nil, nil, nil, "test", 60)
+	if got := res.Verdicts[0].Status; got != StatusSkip {
+		t.Fatalf("B7 expected SKIP with only one phase, got %s: %s", got, res.Verdicts[0].Detail)
+	}
+}
+
+func TestComputeBuyerMetrics_ColdWarmPopulated(t *testing.T) {
+	var results []buyer.Result
+	for i := 0; i < 10; i++ {
+		results = append(results, makePhasedResult(500, "cold"))
+		results = append(results, makePhasedResult(200, "warm"))
+	}
+	bm := computeBuyerMetrics(results)
+	if bm.ColdWarm.ColdTTFTMs.Count != 10 {
+		t.Fatalf("want 10 cold samples, got %d", bm.ColdWarm.ColdTTFTMs.Count)
+	}
+	if bm.ColdWarm.WarmTTFTMs.Count != 10 {
+		t.Fatalf("want 10 warm samples, got %d", bm.ColdWarm.WarmTTFTMs.Count)
+	}
+	if bm.ColdWarm.RatioP50 != 2.5 {
+		t.Fatalf("want ratio 2.5, got %v", bm.ColdWarm.RatioP50)
+	}
+}
+
+// Scenario schema validation for cold_warm_pairs ----------------------
+
+func TestSchema_ColdWarmPairs_Validate(t *testing.T) {
+	// requests_per_buyer must be even, ≥2; inter_pair_idle_seconds > 0
+	cases := []struct {
+		name              string
+		reqs              int
+		idleSec           int
+		wantErr           bool
+	}{
+		{"valid 10 pairs", 20, 60, false},
+		{"odd reqs", 21, 60, true},
+		{"zero reqs", 0, 60, true},
+		{"zero idle", 20, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &scenario.Scenario{
+				Name: "x",
+				Target: scenario.Target{
+					GatewayURL: "https://x", BuyerToken: "tk",
+				},
+				Duration: 60_000_000_000,
+				Buyers: scenario.Buyers{
+					Count:                1,
+					Pattern:              "cold_warm_pairs",
+					RequestsPerBuyer:     tc.reqs,
+					InterPairIdleSeconds: tc.idleSec,
+				},
+				Prompts: []scenario.Prompt{{Model: "m", User: "hi"}},
+			}
+			err := s.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate err=%v, wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+}

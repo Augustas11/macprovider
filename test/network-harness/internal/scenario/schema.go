@@ -141,14 +141,25 @@ type Buyers struct {
 	Stream bool `yaml:"stream"`
 
 	// Pattern selects how requests are paced across the fleet.
-	//   "constant"     — every buyer fires back-to-back, no inter-request delay
-	//   "interval"     — every buyer waits IntervalMs between requests
-	//   "ramp"         — buyers come online linearly across RampDuration
-	//   "burst"        — all buyers fire one request at t=0, no follow-ups
-	Pattern        string        `yaml:"pattern"`
-	IntervalMs     int           `yaml:"interval_ms"`
-	RampDuration   time.Duration `yaml:"ramp_duration"`
-	RequestsPerBuyer int         `yaml:"requests_per_buyer"`
+	//   "constant"          — every buyer fires back-to-back, no inter-request delay
+	//   "interval"          — every buyer waits IntervalMs between requests
+	//   "ramp"              — buyers come online linearly across RampDuration
+	//   "burst"             — all buyers fire one request at t=0, no follow-ups
+	//   "cold_warm_pairs"   — per-buyer (idle, cold, warm) pairs for scenario 08;
+	//                         each pair sleeps InterPairIdleSeconds, fires one
+	//                         "cold" request, then immediately fires one "warm"
+	//                         request. RequestsPerBuyer MUST be even (= 2 × pairs).
+	Pattern          string        `yaml:"pattern"`
+	IntervalMs       int           `yaml:"interval_ms"`
+	RampDuration     time.Duration `yaml:"ramp_duration"`
+	RequestsPerBuyer int           `yaml:"requests_per_buyer"`
+
+	// InterPairIdleSeconds is the sleep before each (cold, warm) pair
+	// under pattern=cold_warm_pairs. Required when that pattern is set.
+	// 60s matches the spec §4.2 reference design — long enough for the
+	// provider to drop in-flight state but short enough for 10 pairs to
+	// fit in ~15min wall-clock.
+	InterPairIdleSeconds int `yaml:"inter_pair_idle_seconds"`
 }
 
 // Prompt is one item in the rotating prompt pool. Buyers pick by index
@@ -242,15 +253,23 @@ func (s *Scenario) Validate() error {
 		}
 	}
 	switch s.Buyers.Pattern {
-	case "constant", "interval", "ramp", "burst":
+	case "constant", "interval", "ramp", "burst", "cold_warm_pairs":
 	default:
-		return fmt.Errorf("buyers.pattern must be one of constant|interval|ramp|burst (got %q)", s.Buyers.Pattern)
+		return fmt.Errorf("buyers.pattern must be one of constant|interval|ramp|burst|cold_warm_pairs (got %q)", s.Buyers.Pattern)
 	}
 	if s.Buyers.Pattern == "interval" && s.Buyers.IntervalMs <= 0 {
 		return fmt.Errorf("buyers.interval_ms must be > 0 when pattern=interval")
 	}
 	if s.Buyers.Pattern == "ramp" && s.Buyers.RampDuration <= 0 {
 		return fmt.Errorf("buyers.ramp_duration must be > 0 when pattern=ramp")
+	}
+	if s.Buyers.Pattern == "cold_warm_pairs" {
+		if s.Buyers.InterPairIdleSeconds <= 0 {
+			return fmt.Errorf("buyers.inter_pair_idle_seconds must be > 0 when pattern=cold_warm_pairs")
+		}
+		if s.Buyers.RequestsPerBuyer < 2 || s.Buyers.RequestsPerBuyer%2 != 0 {
+			return fmt.Errorf("buyers.requests_per_buyer must be an even number ≥ 2 when pattern=cold_warm_pairs (got %d)", s.Buyers.RequestsPerBuyer)
+		}
 	}
 	if s.Duration <= 0 && s.Buyers.Pattern != "burst" {
 		return fmt.Errorf("duration must be > 0 unless pattern=burst")
@@ -259,10 +278,10 @@ func (s *Scenario) Validate() error {
 		if len(s.Benchmark.Invariants) == 0 {
 			return fmt.Errorf("benchmark.invariants must list at least one B-ID when benchmark.enabled=true")
 		}
-		known := map[string]bool{"B1": true, "B2": true, "B3": true, "B4": true, "B5": true, "B6": true}
+		known := map[string]bool{"B1": true, "B2": true, "B3": true, "B4": true, "B5": true, "B6": true, "B7": true}
 		for _, id := range s.Benchmark.Invariants {
 			if !known[id] {
-				return fmt.Errorf("benchmark.invariants: unknown id %q (known: B1-B6)", id)
+				return fmt.Errorf("benchmark.invariants: unknown id %q (known: B1-B7)", id)
 			}
 		}
 		if s.Benchmark.ProviderSlots < 1 {

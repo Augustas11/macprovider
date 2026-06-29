@@ -83,8 +83,28 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 					return
 				}
 
+				// cold_warm_pairs: each (cold, warm) pair is two consecutive
+				// requests. Even reqIdx > 0 → idle before firing the next
+				// "cold". Odd reqIdx → fire immediately as "warm". The first
+				// cold (reqIdx=0) fires without a leading idle since the
+				// provider is in its natural state when the scenario starts.
+				if sc.Buyers.Pattern == "cold_warm_pairs" && reqIdx > 0 && reqIdx%2 == 0 {
+					select {
+					case <-time.After(time.Duration(sc.Buyers.InterPairIdleSeconds) * time.Second):
+					case <-ctx.Done():
+						return
+					}
+				}
+
 				prompt := sc.PromptFor(buyerIdx, reqIdx)
 				res := fireOnce(ctx, client, sc, prompt, buyerIdx, reqIdx)
+				if sc.Buyers.Pattern == "cold_warm_pairs" {
+					if reqIdx%2 == 0 {
+						res.Phase = "cold"
+					} else {
+						res.Phase = "warm"
+					}
+				}
 
 				mu.Lock()
 				results = append(results, res)

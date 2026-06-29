@@ -168,7 +168,7 @@ For phase-B triage, the artifact bundle is the input. Read
 `ledger_reconcile.json` for billing drift; `per_request.jsonl` for any
 case the summaries elide.
 
-## Phase-B benchmark suite (B1-B6)
+## Phase-B benchmark suite (B1-B7)
 
 Scenarios that declare a `benchmark:` block evaluate the network-
 performance invariants from `specs/SPEC-NETWORK-BENCHMARK-v0.1.md`
@@ -179,8 +179,8 @@ but do not change the harness exit code (I1-I4 still gate via exit 10).
 benchmark:
   enabled: true
   invariants: [B1, B2, B3, B4, B5, B6]
-  pricing_source: pearl:/opt/macprovider/tier2-catalog.json   # only needed for B6
-  provider_slots: 3                                            # default 3 (Pearl AccountConcurrency)
+  pricing_source: ../../../specs/BENCHMARK_PRICING_v0.1.json   # only needed for B6
+  provider_slots: 3                                             # default 3 (Pearl AccountConcurrency)
 ```
 
 | ID | Title | PASS target | Bare-min | SKIP when |
@@ -191,6 +191,13 @@ benchmark:
 | B4 | Error rate /1000 | ≤ 5 | ≤ 25 | 0 requests |
 | B5 | Slot utilization % | ≥ 40 | ≥ 15 | no X-Provider-Id attribution |
 | B6 | Earnings $/hr | ≥ $1.00 | ≥ $0.30 | no pricing manifest or attribution |
+| B7 | Cold/warm TTFT ratio | ≤ 2.0 | ≤ 5.0 | scenario didn't use cold_warm_pairs |
+
+The `cold_warm_pairs` buyer pattern (used by scenario 08) fires
+`requests_per_buyer / 2` pairs of (cold, warm) requests. Each pair
+sleeps `inter_pair_idle_seconds` before the cold request, then fires
+the warm request immediately. The harness tags results with
+`phase: cold|warm` so B7 can compute the p50 ratio.
 
 Pricing manifests are loaded via local path or `host:/path` SSH spec.
 The loader accepts three JSON shapes: an array of `{model, price_per_1k_*}`,
