@@ -32,10 +32,13 @@ func TestSmokeBenchmarkPricingV01(t *testing.T) {
 			t.Errorf("model missing from BENCHMARK_PRICING_v0.1.json: %s", m)
 		}
 	}
-	// Math sanity: Qwen3-32B at 14 tok/s × 3600s = 50,400 completion tokens/hr
-	// × $0.04/1k = $2.02/hr → well over $1.00 target.
+	// Math sanity: provider-net rates derived from coord defaults
+	// (rate_card 500k/1M credits per Mtok × multiplier 1.0 × share 0.90 ×
+	// $1.0/Mcredit) yield $0.0009 per 1k completion tokens. At 14 tok/s
+	// sustained × 3600s = 50,400 tokens/hr → ~$0.045/hr.
+	// This is BELOW B6 bare-min ($0.30/hr) — see issue #222.
 	earnings := p.EarningsFor("mlx-community/Qwen3-32B-4bit", 0, 50400)
-	if earnings < 1.50 || earnings > 2.50 {
-		t.Errorf("expected ~$2.02 earnings for 50400 completion tokens, got $%.4f", earnings)
+	if earnings < 0.040 || earnings > 0.050 {
+		t.Errorf("expected ~$0.045 earnings for 50400 completion tokens at default rates, got $%.4f", earnings)
 	}
 }
