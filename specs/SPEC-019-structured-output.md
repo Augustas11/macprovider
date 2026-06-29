@@ -1,6 +1,6 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.2.0 (2026-06-29, draft for audit)
+**Version:** 0.2.1 (2026-06-29, r1-absorption draft for audit)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
 **Status:** DRAFT — audit loop pending.
 
@@ -358,7 +358,24 @@ SSE error frame matching SPEC-018 v0.2.4 §10d.4 minimum envelope fields
 `FaultBreakerQualifying` with zero provider-positive credits. Fail condition:
 the failure is normalized to `api_error`, returns a plain HTTP 502 after bytes
 were already streamed, emits a success terminal only, or records
-provider-positive settlement.
+provider-positive settlement. Terminal SSE error frames for structured-output
+validation failures MUST populate `request_id` and `settlement_ran:true`.
+
+AC-V2-3a. Three-layer streaming validation pass-through: provider terminal
+validation failure on the provider-to-coordinator WS path closes the stream with
+`inference_response_end.status` in `{malformed_json_response,
+json_schema_validation_failed}`, preserves retryability, and omits a receipt;
+the coordinator SSE writer emits the terminal error frame with
+`settlement_ran:true`; and the gateway forwards that terminal SSE error frame
+verbatim through `[DONE]` without gateway-side positive / ok settlement and
+without remapping to `stream_malformed` or any other code. Provider,
+coordinator, and gateway behavior MUST each be enforced by a fixture or unit
+test. This leverages the existing provider WS status allow-list precedent at
+`phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:529`, the
+coordinator writer site at
+`phase4-coordinator/internal/buyer/server.go:5150-5170`, and the affected
+gateway normalization site at
+`phase5-gateway/internal/router/chat_proxy.go:493-531`.
 
 AC-V2-4. A streaming output whose concatenated content is valid JSON matching
 `response_format.json_schema.schema` reaches the normal `data: [DONE]`
@@ -366,14 +383,19 @@ terminal and emits no terminal SSE error frame. Fail condition: successful
 structured streaming is downgraded to non-streaming, or success emits both an
 error frame and `[DONE]`.
 
-AC-V2-5. Cline live-fixture: `@ai-sdk/openai-compatible@2.0.38` with
-`supportsStructuredOutputs:true` against the macprovider streaming endpoint
-parses to the expected object. The existing v0.1 fixture pins
-`@ai-sdk/openai-compatible` at `2.0.38`
-(`test/integration/spec_019/vercel_ai_sdk_strict_json_schema/package.json:1-6`)
-and documents the `supportsStructuredOutputs:true` capture path
-(`test/integration/spec_019/vercel_ai_sdk_strict_json_schema/README.md:3-6`);
-v0.2 adds the streaming live fixture rather than a request-body-only fixture.
+AC-V2-5. Cline live-fixture: the fixture MUST pin the exact Cline upstream
+commit under test and the exact `ai` SDK plus `@ai-sdk/openai-compatible`
+package versions pinned by that commit. It MUST invoke the same AI SDK
+streaming primitive used by Cline's active OpenAI-compatible call path on that
+commit; source inspection of Cline HEAD
+`4175677e712e429e1847964f4cd4884077c4ef66` found the active path using
+`streamText(...)` in `sdk/packages/llms/src/providers/ai-sdk.ts` with
+`ai@6.0.208` and `@ai-sdk/openai-compatible@2.0.51` in `bun.lock`, but the
+release fixture README is the normative place to pin the final accepted commit
+and versions. The fixture MUST capture the outbound POST body bytes and assert
+`stream:true` plus the exact `response_format.json_schema` fields in that body
+before asserting parsed output. Fail condition: a synthetic helper, stale Cline
+dependency, uncaptured request body, or parsed-output-only assertion passes.
 
 AC-V2-6. openai-python streaming fixture mirrors AC-15's successful
 `json_schema` contract with `stream=True`: the fixture accumulates streamed
@@ -404,14 +426,27 @@ whitespace classification
 condition: the buyer sees 200 success with empty content, or the error is
 `retryable:true`.
 
-AC-V2-9. Streaming validation timeout: if the stream cannot reach a complete
-terminal state for the final validation buffer, including a long connection
-that never reaches the provider/coordinator terminal marker, the request fails
-closed and settles `FaultBreakerQualifying`. This follows SPEC-018 v0.2.4's
-missing-terminal-marker final-close posture
-(`specs/SPEC-018-agentic-tool-calling.md:864`). Fail condition: incomplete
-streaming output is treated as successful structured output or earns
-provider-positive credits.
+AC-V2-9. Streaming validation timeout: the timeout source is provider-side idle
+inactivity, defined as no buyer-visible `content` delta emitted for N seconds.
+The concrete N value is deferred to a future v0.2.x and MUST be aligned with
+SPEC-006 idle semantics. On idle timeout, the provider closes upstream
+generation, runs end-of-stream validation on the buffer as of close, and emits a
+terminal SSE error frame using the existing `inference_timeout` code with
+retryability per SPEC-006 timeout semantics. Settlement remains
+`FaultBreakerQualifying` per §8. The fixture set MUST include a stream that
+hits provider idle timeout. Fail condition: coordinator WS deadline, gateway
+read timeout, or an unbounded connection becomes the normative timeout source;
+incomplete streaming output is treated as successful structured output; or the
+request earns provider-positive credits.
+
+AC-V2-9b. Streaming content byte cap: when the post-stop-token-filter
+buyer-visible `content` delta concatenation exceeds the SPEC-019 v0.2 cap of
+`2_097_152` bytes, the provider closes upstream generation and emits a terminal
+SSE error frame using `response_byte_cap_exceeded`, with `inference_ran:true`,
+`settlement_ran:true`, `FaultBreakerQualifying`, and no success receipt. The
+fixture MUST cover the inclusive boundary and cap+1 failure. Fail condition:
+over-cap streaming content is truncated and validated, settles provider-positive
+credits, or invents a new error code.
 
 AC-V2-10. Numeric bounds `minimum`, `maximum`, and `multipleOf` MUST be accepted
 on `number` and `integer` schema nodes. The pre-inference
@@ -422,12 +457,33 @@ Fail condition: the current unknown-keyword reject path
 `phase4-coordinator/internal/buyer/server.go:3738-3742`) still rejects any of
 the three keywords.
 
+AC-V2-10a. Numeric-bound type gate: any of `minimum`, `maximum`, or
+`multipleOf` on a schema node whose `type` is not `number` or `integer` MUST
+reject pre-inference at provider and coordinator with
+`json_schema_unsupported_keyword` and `error.param` carrying the JSON pointer of
+the offending node. Negative fixtures MUST cover `string`, `boolean`, `null`,
+`array`, and `object` nodes carrying a numeric-bound keyword. Fail condition:
+adding the three keywords to a global allow-list permits numeric bounds on
+non-numeric schema nodes.
+
+AC-V2-10b. Numeric-bound value validity: provider and coordinator
+pre-inference validation MUST reject `multipleOf` values that are `0`,
+negative, or non-number; `minimum` / `maximum` values that are not JSON numbers;
+and same-node inverted bounds where both are present and `minimum > maximum`.
+All rejects use `json_schema_unsupported_keyword`, with `error.param` pointing
+to the offending keyword path such as
+`response_format.json_schema.schema.properties.X.multipleOf`. Fixtures MUST
+cover each invalid case at both provider and coordinator. Fail condition:
+invalid bound operands reach inference or use a new buyer-visible error code.
+
 AC-V2-11. `$schema` at the top-level
 `response_format.json_schema.schema` object MUST be accepted with any JSON
-value and ignored for validation-time meta-schema selection. `$schema` remains
+value and ignored for validation-time meta-schema selection. Top-level
+`$schema` bytes still count toward `json_schema_max_bytes = 16_384` and are
+JCS-canonicalized into the receipt `prompt_hash` per §9. `$schema` remains
 rejected at nested schema nodes. Fail condition: the v0.1 fixture-side
-normalization that strips top-level `$schema` is still required for an otherwise
-valid request
+normalization that strips top-level `$schema` is still required for an
+otherwise valid request
 (`test/integration/spec_019/vercel_ai_sdk_strict_json_schema/README.md:14-20`).
 
 AC-V2-12. Vercel Zod paired fixture with `z.number().int()` is accepted
@@ -437,8 +493,35 @@ closes the v0.1 AC-31 deferral where `.int()` was replaced by `z.number()` and
 top-level `$schema` was stripped; the existing fixture documents that
 normalization step
 (`test/integration/spec_019/vercel_ai_sdk_strict_json_schema/README.md:8-20`).
+The fixture MUST commit the captured request body bytes containing the actual
+Vercel/Zod emission for `z.number().int()`, with no SDK-side rewrite step in
+the fixture pipeline. Expected shape, subject to replacement by the actual
+captured body if it differs, is top-level `$schema` plus
+`{"type":"integer","minimum":-9007199254740991,"maximum":9007199254740991}` on
+the integer property. The assertion order is captured body first, parsed output
+second.
 Fail condition: SDK-side schema rewriting is still needed to pass
 pre-inference validation.
+
+AC-V2-13. Partial-content negative streaming fixture: a streaming
+structured-output request whose final concatenated buffer fails validation MUST
+be observable as partial buyer-visible content deltas followed by a terminal SSE
+error frame with `error.code` in `{malformed_json_response,
+json_schema_validation_failed}`. The fixture, preferably Cline or Vercel, MUST
+assert that partial content deltas reached the buyer parser, the final object
+parse fails with no partial-success path, and the fixture README documents that
+pre-validation deltas are provisional, not final. Fail condition: buyer tooling
+treats partial deltas as successful structured output after terminal validation
+failure.
+
+AC-V2-14. Composite-render streaming invariant: for `stream:true + tools +
+json_schema`, empty-tool-history and non-empty-tool-history fixtures MUST assert
+byte-equivalent system-position composition through the existing
+schema-adjusted `ChatMessage` -> `ToolPromptRenderer.renderMessages(...)` ->
+`UserInput` order for Qwen3 and Llama-3.3. This is the streaming extension of
+AC-22a / AC-22b without modifying the v0.1.5 locked AC body. Fail condition:
+streaming render order diverges from the non-streaming composite-render
+fixtures, or the schema instruction moves relative to the tool prompt template.
 
 ### Family rendering
 
@@ -639,6 +722,11 @@ four places:
   validate against the SPEC-019 subset, not against the URI or value named by
   `$schema`.
 
+Top-level `$schema` bytes count toward `json_schema_max_bytes = 16_384` and are
+JCS-canonicalized into the receipt `prompt_hash` per §9. '`$schema` is ignored'
+refers only to validation-time meta-schema selection -- `$schema` bytes are NOT
+excluded from cap accounting or receipt prompt-hash binding.
+
 The v0.2 rejected-keyword list is otherwise unchanged. `oneOf`, `anyOf`,
 `allOf`, `not`, `$ref`, `$defs`, `definitions`, `pattern`, `format`,
 `exclusiveMinimum`, `exclusiveMaximum`, `minLength`, `maxLength`, `minItems`,
@@ -652,6 +740,20 @@ Pre-inference subset checking acknowledges `minimum`, `maximum`, and
 `multipleOf` as valid keywords but does not satisfy the output constraint by
 itself. The runtime validator MUST enforce these keywords against the decoded
 model output when validating `json_schema` responses.
+
+Pre-inference numeric-bound validation is type-conditional and value-checked.
+`minimum`, `maximum`, and `multipleOf` are supported only on schema nodes whose
+`type` is `number` or `integer`; use on any other node type rejects before
+inference with HTTP 400 `json_schema_unsupported_keyword`. `multipleOf` values
+MUST be JSON numbers greater than `0`; `0`, negative values, and non-number JSON
+values reject before inference. `minimum` and `maximum` values MUST be JSON
+numbers; strings, `null`, booleans, arrays, and objects reject before inference.
+When both `minimum` and `maximum` are present on the same schema node,
+`minimum <= maximum` is required; inverted bounds reject before inference. All
+rejects in this paragraph use the existing `json_schema_unsupported_keyword`
+code with `error.param` pointing at the offending keyword path, such as
+`response_format.json_schema.schema.properties.X.multipleOf`; v0.2 does not add
+a numeric-bound-specific error code.
 
 The schema root MAY be any allowed `type`, including array or scalar. If the
 root is an object, it MUST include `additionalProperties:false` under
@@ -881,6 +983,16 @@ streaming validation MUST become a terminal SSE error frame with
 provider-positive credits. Partial validator state MUST be discarded as in the
 v0.1 rule.
 
+Provider idle timeout is the normative streaming-validation timeout source in
+v0.2.1. If no buyer-visible `content` delta is emitted for N seconds, where N is
+deferred to a future v0.2.x aligned with SPEC-006 idle semantics, the provider
+MUST close upstream generation, run end-of-stream validation over the
+post-stop-token-filter concatenated `content` buffer as of close, and emit a
+terminal SSE error frame using the existing `inference_timeout` code with
+retryability per SPEC-006 timeout semantics. Coordinator WS deadlines and
+gateway upstream-read deadlines remain transport safety mechanisms, not the
+normative structured-output validation-timeout authority.
+
 ### SPEC-019 error codes
 
 | Code | HTTP | Phase | Retryable | Notes |
@@ -888,8 +1000,8 @@ v0.1 rule.
 | `json_schema_missing_name` | 400 | pre-inference request validation | false | Missing `response_format.json_schema.name`. |
 | `json_schema_missing_schema` | 400 | pre-inference request validation | false | Missing `response_format.json_schema.schema`. |
 | `json_schema_non_strict_unsupported` | 400 | pre-inference request validation | false | `strict:false` unsupported in SPEC-019 v0.1.0. |
-| `streaming_json_schema_unsupported` | 400 | pre-inference request validation | false | `json_schema` with `stream:true`. |
-| `streaming_json_object_unsupported` | 400 | pre-inference request validation | false | `json_object` with `stream:true`. |
+| `streaming_json_schema_unsupported` | 400 | pre-inference request validation | false | v0.1.x-only migration code for `json_schema` with `stream:true`; deleted from active v0.2. |
+| `streaming_json_object_unsupported` | 400 | pre-inference request validation | false | v0.1.x-only migration code for `json_object` with `stream:true`; deleted from active v0.2. |
 | `json_schema_unsupported_keyword` | 400 | pre-inference request validation | false | Unsupported schema keyword. |
 | `json_schema_strict_requires_additional_properties_false` | 400 | pre-inference request validation | false | Object schema lacks `additionalProperties:false`. |
 | `json_schema_strict_requires_all_properties_required` | 400 | pre-inference request validation | false | Strict object properties not all required. |
@@ -986,10 +1098,17 @@ constant (`phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:4-6`,
 public depth constant).
 
 v0.2 does not change SPEC-019 schema-size or schema-depth caps. For streaming
-structured output, the response-side accumulation cap reuses SPEC-018 v0.2.4
-§10d.7's `2_097_152`-byte response cap and inclusive byte-counting posture
-(`specs/SPEC-018-agentic-tool-calling.md:963-975`). Structured-output parsing
-and validation do not run on over-cap output.
+structured output, SPEC-019 v0.2 defines a concatenated-`content` cap of
+`2_097_152` bytes. The byte domain is the post-stop-token-filter,
+buyer-visible SSE `content` delta concatenation, counted as UTF-8 bytes with an
+inclusive boundary. The value intentionally matches the SPEC-018 v0.2.4
+response cap value, but this is a SPEC-019-defined cap for assistant `content`,
+not a reuse of SPEC-018's `tool_calls[].function.arguments` cap. If the cap is
+exceeded, the provider MUST close upstream generation and emit a terminal SSE
+error frame using the existing `response_byte_cap_exceeded` code with
+`inference_ran:true`, `settlement_ran:true`, no success receipt, and
+`FaultBreakerQualifying`. Structured-output parsing and validation do not run on
+over-cap output.
 
 ## 7. Coordinator / gateway behavior
 
@@ -1075,9 +1194,25 @@ receipt-eligible provider error pass-through helper, and
 normalization MUST also pass through terminal SSE error frames whose
 `error.code` is `malformed_json_response` or
 `json_schema_validation_failed`. The gateway MUST NOT remap these terminal SSE
-error frames to `api_error` or generic `upstream_provider_error`, and MUST NOT
-drop the structured `retryable`, `request_id`, `inference_ran`, or
-`settlement_ran` fields required by SPEC-018 v0.2.4 §10d.0. The coordinator
+error frames to `api_error`, `stream_malformed`, generic
+`upstream_provider_error`, or any other code, and MUST NOT drop the structured
+`retryable`, `request_id`, `inference_ran`, or `settlement_ran` fields required
+by SPEC-018 v0.2.4 §10d.0. The gateway MUST recognize these terminal SSE error
+frames as final structured-output failures, forward them verbatim through
+`[DONE]`, and skip gateway-side positive / ok settlement. The affected gateway
+normalization site is
+`phase5-gateway/internal/router/chat_proxy.go:493-531`.
+
+Provider-to-coordinator WS streaming terminal validation failure MUST close the
+WS stream with `inference_response_end.status` in `{malformed_json_response,
+json_schema_validation_failed}`, preserve retryability, and omit a receipt. This
+requirement leverages the existing WS end-status allow-list precedent at
+`phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:529`.
+
+Coordinator terminal v0.2 SSE error frames for SPEC-019 streaming validation
+failure MUST populate `request_id` and `settlement_ran:true`. The writer site
+requiring SPEC-019-specific handling is
+`phase4-coordinator/internal/buyer/server.go:5150-5170`. The coordinator
 already recognizes those two codes as SPEC-019 provider detail codes
 (`phase4-coordinator/internal/buyer/server.go:4944-4955`) and has an
 OpenAI-style SSE error writer with the required minimum fields for terminal
@@ -1123,6 +1258,16 @@ billing formula returns before positive-credit calculation for
 (`phase4-coordinator/internal/billing/formula.go:112-114`). For v0.2,
 `streaming_json_schema_unsupported` and `streaming_json_object_unsupported` are
 not pre-inference failure modes because structured streaming is accepted.
+Provider-to-coordinator WS terminal validation failure MUST carry
+`inference_response_end.status` in `{malformed_json_response,
+json_schema_validation_failed}`, preserve retryability, and omit a receipt. The
+coordinator terminal SSE writer MUST include `request_id` and
+`settlement_ran:true`. The gateway MUST treat terminal SSE error frames with
+`error.code` in `{malformed_json_response, json_schema_validation_failed}` as
+final structured-output failures, forward them verbatim through `[DONE]`, and
+skip gateway-side positive / ok settlement; it MUST NOT remap them to
+`stream_malformed` or any other code. Streaming idle timeout and
+SPEC-019 streaming content-cap failure also settle `FaultBreakerQualifying`.
 
 ## 9. Forward-compatibility invariants
 
@@ -1175,10 +1320,14 @@ from default behavior.
 structured output. `response_format` remains bound into the prompt hash through
 the existing JCS canonical prompt object
 (`phase3-binary/Sources/macprovider-cli/PromptCanonicalizer.swift:5-16`).
+Top-level `$schema` bytes count toward `json_schema_max_bytes = 16_384` and are
+JCS-canonicalized into the receipt `prompt_hash` per §9. '`$schema` is ignored'
+refers only to validation-time meta-schema selection -- `$schema` bytes are NOT
+excluded from cap accounting or receipt prompt-hash binding.
 
 ## 10. Deferred to v0.2 / v0.3
 
-Deferred after v0.2.0:
+Deferred after v0.2.1:
 
 - v0.2.x or v0.3: transparent gateway-side decompression of
   `Content-Encoding: gzip` / `deflate` / `br` request bodies with a
@@ -1190,6 +1339,10 @@ Deferred after v0.2.0:
   `$schema`.
 - v0.2.x or v0.3: partial-JSON-prefix tolerant streaming validation. v0.2.0
   ships end-of-stream validation over the concatenated content buffer.
+- v0.2.x: concrete provider idle inactivity duration N for structured-output
+  streaming timeout, aligned with SPEC-006 idle semantics. v0.2.1 defines the
+  authority and terminal `inference_timeout` behavior but intentionally defers
+  the numeric value.
 
 Deferred to v0.3 or later:
 
@@ -1218,6 +1371,13 @@ non-stream).
 streaming path, streaming structured output, and §3 numeric-bound plus
 top-level `$schema` acceptance are no longer deferred. They are the v0.2.0
 deliverables. Partial-JSON-prefix tolerant validation remains deferred.
+
+**v0.2.1 amendment**: r1 absorption tightens the v0.2 deliverables without
+adding a new endpoint, SPEC-015 schema change, or SPEC-018 edit. It defines the
+three-layer streaming validation bridge, provider-idle timeout authority,
+numeric-bound operand rules, SPEC-019-owned streaming `content` cap, Cline and
+Vercel captured-body fixture requirements, and the `$schema` cap/hash
+clarification. The concrete idle duration N remains deferred to v0.2.x.
 
 Historical v0.1.5 deferred text retained for audit traceability, superseded by
 the v0.2.0 active deferred list above:
@@ -1293,7 +1453,7 @@ v0.2 audit lanes should additionally probe:
 
 ## 12. Document metadata
 
-**Version:** 0.2.0 (2026-06-29, draft for audit)
+**Version:** 0.2.1 (2026-06-29, r1-absorption draft for audit)
 
 **Status:** DRAFT — audit loop pending.
 
@@ -1311,6 +1471,24 @@ Drafting scope: no implementation code, no SPEC-018 edits, no SPEC-015 schema
 change, no new HTTP endpoint.
 
 ### Change log
+
+- **v0.2.1 (2026-06-29, r1-absorption draft for audit):** Absorbs the r1 audit
+  findings from `specs/SPEC-019-v0_2-r1-audit.md` (1C + 9H + 9M across 5 lanes;
+  lane F READY TO LOCK) while keeping v0.1.5 locked text immutable. Convergent
+  themes closed: T-1 specifies the provider WS -> coordinator SSE -> gateway SSE
+  pass-through and settlement bridge for terminal streaming validation failures;
+  T-2 binds streaming timeout authority to provider-side idle inactivity and
+  reuses `inference_timeout`; T-3 adds numeric-bound operand validity and
+  inverted-bound rejects using `json_schema_unsupported_keyword`; T-4 adds
+  numeric-bound type-conditional negative fixtures. Singular findings closed:
+  S-1 defines the SPEC-019 streaming concatenated-`content` cap at `2_097_152`
+  bytes; S-2 annotates deleted v0.1.x streaming reject codes in the error table;
+  S-3 requires Cline commit/version pinning plus captured outbound POST bytes;
+  S-4 adds the partial-content-then-terminal-error negative fixture; S-5 requires
+  captured Vercel/Zod `z.number().int()` request bytes; S-6 clarifies `$schema`
+  cap accounting and receipt `prompt_hash` binding; S-7 adds the streaming
+  composite-render invariant as AC-V2-14. No SPEC-015 schema change, no SPEC-018
+  edits, and no new HTTP endpoint.
 
 - **v0.2.0 (2026-06-29, draft for audit):** v0.2 amendment on top of
   locked v0.1.5 for the narrow Cline drop-in structured-output build.
