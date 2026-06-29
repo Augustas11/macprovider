@@ -63,7 +63,12 @@ type Result struct {
 	MatchedSuccesses   []MatchedPair `json:"matched_successes"`
 	UnmatchedSuccesses []string      `json:"unmatched_successes"`
 
-	// Drift signals (signed differences, positive = side has more).
+	// Drift signals — summed across MATCHED PAIRS only (not aggregate
+	// totals across populations of different sizes). Issue #226 fix:
+	// when most gateway settlements classify as SPEC-006 §17.7 fallback
+	// outcomes, aggregate-sum drift is population-mismatched and
+	// spuriously non-zero. Per-pair drift is the honest signal.
+	// Positive = side has more tokens than its counterpart in matched pairs.
 	GatewayMinusCoordinatorTokens int64 `json:"gateway_minus_coordinator_tokens"`
 	GatewayMinusHarnessTokens     int64 `json:"gateway_minus_harness_tokens"`
 
@@ -155,10 +160,8 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 		}
 	}
 
-	r.GatewayMinusCoordinatorTokens = r.GatewayCompletionTokens - r.CoordinatorCompletionTokens
-	r.GatewayMinusHarnessTokens = r.GatewayCompletionTokens - r.HarnessCompletionTokens
-
 	matchByFuzzy(r, results, gwRows, coordRows)
+	computePerPairDrift(r)
 
 	// Background-traffic note: extra rows beyond the harness's count
 	// likely belong to other buyers on the live network. Recorded as a
@@ -169,6 +172,31 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 			fmt.Sprintf("gateway has %d more rows than harness fired — likely concurrent live traffic", extraGw))
 	}
 	return r, nil
+}
+
+// computePerPairDrift sums the token deltas across matched (harness,
+// gateway, coord) triples. Replaces the earlier aggregate-sum approach
+// which subtracted gateway-ok-only token totals from full-harness-ok
+// totals — a population-mismatch that produced spurious non-zero drift
+// whenever the gateway settled most successful streams as SPEC-006
+// §17.7 fallback outcomes (stream_truncated, stream_output_exceeded,
+// upstream_error). See issue #226 for the 2026-06-29 production trip.
+//
+// Drift definitions (positive = side has more in matched pairs):
+//   - GatewayMinusHarnessTokens: Σ(gateway - harness) over matched pairs
+//   - GatewayMinusCoordinatorTokens: Σ(gateway - coord) over pairs with
+//     a coord-side match (some matches lack a coord row, e.g. when the
+//     coord 2xx for the request fell outside the SQL window).
+//
+// Unmatched harness successes are NOT counted here — they show up
+// independently as r.UnmatchedSuccesses, which I1 inspects separately.
+func computePerPairDrift(r *Result) {
+	for _, p := range r.MatchedSuccesses {
+		r.GatewayMinusHarnessTokens += p.GatewayCompletionTokens - p.HarnessCompletionTokens
+		if p.CoordinatorRequestID != "" {
+			r.GatewayMinusCoordinatorTokens += p.GatewayCompletionTokens - p.CoordinatorCompletionTokens
+		}
+	}
 }
 
 // matchByFuzzy pairs each harness success with the most likely gateway
