@@ -231,6 +231,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// fresh UUID here, breaking that join.
 	upReq.Header.Set("X-Request-ID", requestID(r))
 	upReq.Header.Set("X-MacProvider-Gateway-FirstByte-Unix-Ms", strconv.FormatInt(s.now().UnixMilli(), 10))
+	// SPEC-006 v0.9.1 / SPEC-002 v1.5.0 / issue #211: forward the
+	// gateway's authenticated account id on EVERY forwarded buyer
+	// request — bearer-authenticated and demo subjects alike, both on
+	// the sticky and non-sticky paths. The coordinator persists this
+	// into request_log.account_id; the composite
+	// (account_id, external_request_id) is the reconciliation key
+	// joining gateway usage_events to coordinator request_log (the
+	// composite-PK addendum from #196). Earlier code emitted this
+	// header only inside the sticky-routing conditional below, leaving
+	// the non-sticky hot path account-blind and reopening the
+	// cross-account request_id-collision class on the coordinator
+	// audit-trail side.
+	//
+	// The coordinator treats X-MacProvider-Account as an internal-
+	// routing header (see hasInternalRoutingHeader / selectProviderExcluding
+	// in phase4-coordinator/internal/buyer/server.go) gated by the
+	// gateway-service-token Authorization bearer. To avoid the
+	// coordinator rejecting every non-sticky chat with 400
+	// invalid_request, the upstream Authorization bearer is hoisted
+	// alongside the account header — same pair the sticky path
+	// already sends. M3-2 / SECU-4: prefer ServiceToken when set;
+	// falls back to OperatorKey so a not-yet-upgraded coordinator
+	// keeps accepting us. ISS-211 R1 security audit HIGH.
+	if subject.AccountID != "" {
+		upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
+		upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
+	}
 	if s.cfg.Routing.StickyEnabled && !authn.Demo {
 		if tag := strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")); tag != "" {
 			if !validConversationTag(tag) {
@@ -239,11 +266,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if metadata, ok := s.coordinatorRoutingMetadata(upCtx); ok && metadata.Sticky.Enabled && metadata.Sticky.TTLSeconds == s.cfg.Routing.StickyTTLS {
-				// M3-2 / SECU-4: prefer ServiceToken when set; falls back to
-				// OperatorKey so a not-yet-upgraded coordinator keeps
-				// accepting us on the hot sticky-routing path.
-				upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
-				upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
+				// Authorization + X-MacProvider-Account already set
+				// unconditionally above (SPEC-006 v0.9.1). The sticky
+				// path's distinguishing header is X-MacProvider-Internal-Conv.
 				upReq.Header.Set("X-MacProvider-Internal-Conv", s.deriveConversationKey(subject.AccountID, tag))
 			}
 		}

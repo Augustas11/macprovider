@@ -224,6 +224,85 @@ func TestWriteHotPath_DuplicateRequestIDWithoutRetryQuarantinesAttempt(t *testin
 	}
 }
 
+// SPEC-002 v1.5.0 / issue #211 money-path regression: when two
+// request_log rows collide on request_id but carry distinct
+// account_id values (the post-#196 cross-account X-Request-ID
+// collision scenario), RecoverLedger MUST derive attempt_n and
+// same_request_count by scoping (account_id, request_id), not
+// request_id alone. Without the scope, two accounts' first
+// attempts would be ambiguously quarantined during nightly
+// reconciliation. ISS-211 R1 architect HIGH.
+func TestRecoverLedger_AccountScopedRequestIDCollisionDoesNotQuarantine(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "buyer-controlled-duplicate-recovery"
+	input.RequestID = row.RequestID
+	row.AccountID = "acct_A"
+	// Use the hot-path-failure fallback so RecoverLedger does the
+	// derivation work (rather than hotpath.go's in-line check).
+	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	input2 := input
+	row2 := row
+	input2.ProviderID = "provider-b"
+	input2.ProviderAssignedID = "assigned-b"
+	row2.ProviderAssignedID = "assigned-b"
+	row2.AccountID = "acct_B"
+	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row2, input2); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'ambiguous_attempt_n'`, row.RequestID); got != 0 {
+		t.Fatalf("cross-account request_id collision quarantined rows after recovery=%d, want 0 (issue #211 architect HIGH regression)", got)
+	}
+	// Both accounts' rows should have produced a clean credit row.
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 0`, row.RequestID); got != 2 {
+		t.Fatalf("non-quarantined ledger rows for cross-account collision=%d, want 2 (one per account)", got)
+	}
+}
+
+// SPEC-002 v1.5.0 / issue #211 money-path regression: when two writes
+// collide on request_id but carry distinct account_id values (the
+// post-#196 cross-account X-Request-ID collision scenario), the
+// AttemptN-derivation COUNT in hotpath.go MUST scope by
+// (account_id, request_id) and NOT trip the `ambiguous_attempt_n`
+// zero-credit path that would fire under the unscoped COUNT. The
+// parallel adjacent test
+// TestWriteHotPath_DuplicateRequestIDWithoutRetryQuarantinesAttempt
+// covers the unscoped (legacy) case where both rows have empty
+// account_id and the quarantine fires by design.
+func TestWriteHotPath_AccountScopedRequestIDCollisionDoesNotQuarantine(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "buyer-controlled-duplicate"
+	input.RequestID = row.RequestID
+	row.AccountID = "acct_A"
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	input2 := input
+	row2 := row
+	input2.ProviderID = "provider-b"
+	input2.ProviderAssignedID = "assigned-b"
+	row2.ProviderAssignedID = "assigned-b"
+	row2.AccountID = "acct_B" // different account, same request_id
+	if err := store.WriteHotPath(context.Background(), reqStore, row2, input2); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-#211 (unscoped COUNT): would have counted 2 rows for the
+	// same request_id, derived AttemptN=1, and quarantined the second
+	// row as `ambiguous_attempt_n` → zero credit for acct_B. With the
+	// account-scoped count, acct_B sees only its own one row and the
+	// derived AttemptN matches input.AttemptN, so no quarantine fires.
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'ambiguous_attempt_n'`, row.RequestID); got != 0 {
+		t.Fatalf("cross-account request_id collision quarantined rows=%d, want 0 (issue #211 regression)", got)
+	}
+}
+
 func TestWriteHotPath_DerivedBillingAttemptAllowedWhenAttemptMatches(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)

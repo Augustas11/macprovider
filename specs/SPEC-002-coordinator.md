@@ -1,7 +1,81 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.4.1 (2026-06-26, SPEC-003 v0.8.3 FR-C9.4 `/poolz` `auth_state` field absorbed; gateway aggregation rule for non-routable sessions added — issue #82 item 1)
+**Version:** 1.5.0 (2026-06-29, account-scoped reconciliation key — issue #211 follow-up to #196)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.5.0 (2026-06-29, issue #211 — coordinator-side counterpart to #196 composite-PK):**
+- `request_log` gains an `account_id TEXT NULL` column. The
+  reconciliation key joining gateway `usage_events` to coordinator
+  `request_log` is now the composite `(account_id, external_request_id)`,
+  not `external_request_id` alone. After #196 a buyer-supplied
+  `X-Request-ID` MAY legitimately appear in `usage_events` rows
+  belonging to distinct accounts; under the v1.4.2-shipped key
+  (`external_request_id` only) the coordinator could not attribute a
+  `request_log` row to the correct gateway account.
+- **Gateway forward contract.** Gateway MUST send
+  `X-MacProvider-Account: <subject.AccountID>` on every forwarded
+  buyer request (including the non-sticky routing path; the prior
+  conditional emit on the sticky path only is insufficient for
+  reconciliation). The coordinator MUST persist this header value
+  into `request_log.account_id` for every row written for that
+  request. Absent header MUST be tolerated (legacy gateway, demo
+  traffic, direct legacy buyer calls); the column carries NULL in
+  that case and reconciliation degrades to the prior
+  `external_request_id`-only key with the documented ambiguity.
+  Because `selectProviderExcluding` already treats
+  `X-MacProvider-Account` as an internal-routing header (see
+  `hasInternalRoutingHeader` / `internalBearerAuthorized`),
+  v1.5.0 also requires the gateway to send the upstream
+  `Authorization: Bearer <UpstreamCoordinatorBearer>` together
+  with the account header on every forward; pre-v1.5.0 the
+  bearer was only set on the sticky path. The coordinator's
+  acceptance logic is unchanged — only the gateway's emission
+  envelope. See SPEC-006 v0.9.1 for the gateway-side rule.
+- **Money-path scope (hot path).** Coordinator queries that
+  attribute multiple `request_log` rows to a single logical request
+  (notably `internal/billing/hotpath.go` AttemptN derivation) MUST
+  scope by `(account_id, request_id)` when `account_id` is non-empty
+  on the incoming row, to prevent a cross-account collision from
+  inflating AttemptN and triggering the `ambiguous_attempt_n`
+  zero-credit path under the SPEC-005 v0.3 multi-attempt
+  attribution contract. Legacy rows with NULL `account_id` continue
+  to use the prior unscoped count.
+- **Index.** A new partial-NULL composite index
+  `idx_request_log_account_external_request_id ON request_log(account_id, external_request_id) WHERE account_id IS NOT NULL AND external_request_id IS NOT NULL`
+  supports reconciliation scans. Built by the operator-runbook
+  subcommand `coordinator migrate-indexes` (same pattern as the
+  v1.4.2 `idx_request_log_external_request_id` index), NOT from
+  daemon startup.
+- **Deploy ordering.** Coordinator MUST be deployed before gateway
+  begins sending the unconditional header so that even pre-gateway
+  rollout coordinator writes accept and persist the new column.
+  Coordinator without the column behaves as if `account_id` were
+  always NULL; downstream auditors detect this via column presence
+  in `PRAGMA table_info(request_log)`. See SPEC-002-coordinator §11
+  "Deploy ordering" subsection for the canonical sequence.
+- **Cross-spec.** SPEC-006 §6 gains a forward-header requirement
+  for `X-MacProvider-Account`. SPEC-007 §6.4 records the
+  gateway-side composite-PK addendum once issue #212 / PR #221
+  merges; the coordinator-side parallel is documented in this
+  v1.5.0 entry. The two PRs are merge-order independent — the
+  cross-pointers describe relative state, not a strict ordering.
+- **Explorer deferral.** Coordinator-side explorer queries
+  (`phase4-coordinator/internal/explorer/store.go`
+  `SessionDetail` / `RecentSessions`) still join `request_log`
+  by `request_id` alone and do not return `account_id` in
+  session output. This is intentionally deferred from v1.5.0 —
+  the reconciliation contract (the focus of issue #211) is
+  the key change-log item; explorer surface enrichment lands
+  in a separate SPEC-007 follow-up. Operators querying
+  `request_log` for cross-account audit MUST use direct SQL
+  with the composite key for the v1.5.0 window.
+- **Triage:** the in-flight "SPEC-002 v1.4.2 R-2" references in
+  `phase4-coordinator/internal/requestlog/store.go` and tests reflect
+  external_request_id work that never received a formal change-log
+  entry; that gap is the subject of issue #197 and is intentionally
+  NOT closed here. v1.5.0 builds on top of the v1.4.2 R-2 work as
+  shipped (column + index already present) and does not relitigate
+  it.
 
 **Change log v1.4.1 (2026-06-26, additive — issue #82 item 1):**
 - FR-O2 `/poolz` provider row gains the optional `auth_state` string
@@ -1288,7 +1362,9 @@ Every buyer request is logged to the `request_log` table in SQLite:
 |---|---|---|
 | `id` | INTEGER PK | Auto-increment |
 | `ts_utc` | TEXT | ISO 8601 timestamp |
-| `request_id` | TEXT | UUID v4 from inbound `X-Request-ID` when present, otherwise UUID assigned by coordinator |
+| `request_id` | TEXT | Coordinator-internal request/billing id (NOT the inbound `X-Request-ID`). On the non-pinned retry path multiple `request_log` rows for one logical buyer request share this value; pinned-client retries get distinct values. |
+| `external_request_id` | TEXT NULL | Inbound `X-Request-ID` header value. Shared across all `request_log` rows for one logical request and across the gateway's `usage_events.request_id` for the same logical request, enabling end-to-end billing reconciliation. NULL when the inbound request carried no `X-Request-ID`. (v1.4.2 R-2; formally documented here.) |
+| `account_id` | TEXT NULL | (v1.5.0) Gateway account id propagated via `X-MacProvider-Account` on the gateway → coordinator forward. NULL on legacy rows and on direct legacy buyer calls without the header. The composite `(account_id, external_request_id)` is the reconciliation key joining to gateway `usage_events`; `external_request_id` alone is a logical join key only. |
 | `model` | TEXT | Requested model |
 | `provider_assigned_id` | TEXT | Pool ID of serving provider (null if 503) |
 | `prompt_tokens` | INTEGER | From provider response usage (null if failed) |
@@ -1315,11 +1391,20 @@ Each provider attempt for a given `request_id` MUST produce its own `request_log
 ```sql
 CREATE INDEX idx_request_log_ts_utc ON request_log(ts_utc);
 CREATE INDEX idx_request_log_request_id_id ON request_log(request_id, id);
+-- v1.4.2 R-2 (external_request_id) + v1.5.0 (account-scoped reconciliation):
+CREATE INDEX idx_request_log_external_request_id ON request_log(external_request_id)
+    WHERE external_request_id IS NOT NULL;
+CREATE INDEX idx_request_log_account_external_request_id ON request_log(account_id, external_request_id)
+    WHERE account_id IS NOT NULL AND external_request_id IS NOT NULL;
 ```
 
-The `idx_request_log_ts_utc` index supports SPEC-005 v0.3 reconciliation scans (24h startup, 7d nightly, ad-hoc admin ranges) at 10K-provider scale. The composite `(request_id, id)` index supports the SPEC-005 § 8.2 attempt-ordinal fallback and SPEC-004 multi-attempt log queries.
+The `idx_request_log_ts_utc` index supports SPEC-005 v0.3 reconciliation scans (24h startup, 7d nightly, ad-hoc admin ranges) at 10K-provider scale. The composite `(request_id, id)` index supports the SPEC-005 § 8.2 attempt-ordinal fallback and SPEC-004 multi-attempt log queries. The partial-NULL `external_request_id` and `(account_id, external_request_id)` indexes support out-of-process reconciliation joins to gateway `usage_events`.
 
-Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL` and create the two indexes above.
+Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`, `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL` (v1.4.2 R-2), and `ALTER TABLE request_log ADD COLUMN account_id TEXT NULL` (v1.5.0), and create the four indexes above. The two partial-NULL reconciliation indexes are built via `coordinator migrate-indexes`, NOT from daemon startup.
+
+**Deploy ordering (v1.5.0).** Coordinator MUST be deployed first; it accepts and persists `X-MacProvider-Account` whether or not the gateway sends it. Gateway then deploys with the unconditional header. Auditor tooling MUST detect the boundary at row granularity (not schema granularity): rows with NULL `account_id` are either (a) pre-v1.5.0-coordinator rows, (b) v1.5.0-coordinator rows from a pre-v0.9.1 gateway, or (c) v1.5.0-coordinator rows written during a v1.4.x rollback window where the column existed but the writer didn't populate it. In all three cases the join MUST fall back to the prior `external_request_id`-only key and accept the documented ambiguity. Tooling MUST NOT use `PRAGMA table_info(request_log)` column-presence as a switch — that would misclassify rollback-window rows as scoped-ready. Use `account_id IS NOT NULL` as the per-row gate instead.
+
+**Money-path: AttemptN derivation (v1.5.0).** `internal/billing/hotpath.go` derives `AttemptN` from `SELECT COUNT(*) FROM request_log WHERE request_id = ?`. When the incoming row carries a non-empty `account_id`, the query MUST scope by `(account_id, request_id)`; otherwise a cross-account collision on `request_id` inflates the count, mis-derives `AttemptN`, and silently triggers the `ambiguous_attempt_n` zero-credit path documented in SPEC-005 v0.3 multi-attempt attribution. Legacy rows with NULL `account_id` continue to use the prior unscoped count for backwards compatibility.
 
 ### Routing logic
 
@@ -2236,11 +2321,16 @@ all four SPEC-001 v1.3 §6.7.3 matrix cells per SPEC-001 v1.3 R-6.7.7.
 Wire-compatible with SPEC-001 section 6.2. The harness (`beta/harness.py`)
 is the first buyer and generates SPEC-001-shaped requests.
 
-Coordinator MUST honor any inbound `X-Request-ID` header on buyer-facing `/v1/*` requests and include it in the `request_log` row. If absent, coordinator MAY generate its own UUID v4. The `request_log` schema includes an indexed `request_id` field for this cross-service correlation key.
+Coordinator MUST honor any inbound `X-Request-ID` header on buyer-facing `/v1/*` requests and persist it as `request_log.external_request_id` (v1.4.2 R-2). If absent, coordinator's internal `request_log.request_id` is generated locally as a UUID v4 and `external_request_id` is NULL. The `request_log` schema includes a partial-NULL `external_request_id` index for cross-service reconciliation.
 
 When forwarding work to a provider over the SPEC-001 § 6.6 `inference_request` message, coordinator MUST preserve the request ID it recorded for the buyer request. Providers MAY echo `X-Request-ID` back in usage reporting; this is OPTIONAL under SPEC-001 v1.2.4 and is filed as a SPEC-001 v1.2.3 candidate.
 
-Gateway-originated traffic from SPEC-006 v0.3 uses `X-Request-ID` as the join key between gateway `usage_events`, gateway `audit_events`, and coordinator `request_log`. Direct legacy buyer traffic without this header remains supported.
+**Gateway → coordinator forward contract (v1.5.0).** Gateway-originated traffic from SPEC-006 v0.3+ MUST send two correlation headers on every forwarded buyer request:
+
+- `X-Request-ID: <uuid>` — the buyer-visible request id (honored from the inbound buyer `X-Request-ID` when present, else minted by gateway middleware). Persisted into `request_log.external_request_id`.
+- `X-MacProvider-Account: <account_id>` — the gateway's authenticated subject account id, sourced from the gateway's bearer- or demo-auth subject. Persisted into `request_log.account_id`. MUST be sent unconditionally — earlier gateway code only emitted this header inside the sticky-routing conditional, leaving the non-sticky hot path account-blind. Empty / absent header is tolerated for backwards compatibility but degrades the reconciliation key to `external_request_id` alone for that row.
+
+The composite `(account_id, external_request_id)` is the reconciliation key joining coordinator `request_log` to gateway `usage_events` (and to gateway `audit_events`). `external_request_id` alone is a logical join key only — after #196 the same buyer-supplied `X-Request-ID` MAY appear in `usage_events` rows belonging to distinct accounts, so any reconciliation query that ignores `account_id` is ambiguous on cross-account collisions. Direct legacy buyer traffic without these headers remains supported and writes rows with NULL `account_id` and NULL `external_request_id`; such rows fall back to the prior `request_id`-only key.
 
 #### GET /v1/models
 
@@ -3443,11 +3533,27 @@ demultiplexing, SSE reassembly).
 
 **Source:** `specs/SPEC-CROSS-006-audit.md`, D-CROSS-3.
 
-**SPEC-002 v1.1.4 encoding:**
+**SPEC-002 v1.1.4 encoding (superseded by v1.4.2 R-2 + v1.5.0 below):**
 Coordinator honors inbound `X-Request-ID` on buyer `/v1/*` requests,
 records it in `request_log`, forwards it as the provider
 `inference_request.request_id`, MAY generate a UUID v4 for legacy direct
 traffic, and treats propagation gaps as audit findings.
+
+**SPEC-002 v1.4.2 R-2 + v1.5.0 encoding (current):**
+Coordinator persists the inbound `X-Request-ID` into
+`request_log.external_request_id` (v1.4.2 R-2) and the gateway-
+forwarded `X-MacProvider-Account` into `request_log.account_id`
+(v1.5.0). Coordinator-internal `request_log.request_id` is
+generated locally as a UUID v4 and is the value forwarded to the
+provider as `inference_request.request_id`. The composite
+`(account_id, external_request_id)` is the cross-service
+reconciliation key joining coordinator `request_log` to gateway
+`usage_events`; `external_request_id` alone is a logical join
+key only and is ambiguous on cross-account collisions after #196.
+Direct legacy traffic without either header writes rows with
+NULL on both columns and falls back to coordinator-internal
+correlation; propagation gaps on either header remain audit
+findings.
 
 ---
 

@@ -1,7 +1,37 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9 (2026-06-22, SPEC-015 v0.1.3 receipt response-header allowlist absorption)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.4, SPEC-003 v0.7, SPEC-004 v0.2
+**Version:** 0.9.1 (2026-06-29, ISS-211 normative forward-header addition: X-MacProvider-Account on the non-sticky routing path)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.0, SPEC-003 v0.7, SPEC-004 v0.2
+
+**Change log v0.9.1 (2026-06-29, issue #211):**
+- Gateway MUST forward `X-MacProvider-Account: <subject.AccountID>` on
+  every forwarded buyer request — both the sticky and non-sticky
+  routing paths. The pre-v0.9.1 gateway emitted this header only
+  inside the sticky-routing conditional, leaving the non-sticky hot
+  path account-blind; the coordinator could not attribute the
+  resulting `request_log` row to the gateway account, breaking the
+  composite `(account_id, external_request_id)` reconciliation key
+  introduced in SPEC-002 v1.5.0. Bearer subjects forward
+  `subject.AccountID = authn.Bearer.AccountID`; demo subjects
+  forward `subject.AccountID = "demo:" + authn.DemoPayload.IP`.
+- Gateway MUST pair `X-MacProvider-Account` with the upstream
+  `Authorization: Bearer <UpstreamCoordinatorBearer>` header on
+  every forward. The coordinator treats `X-MacProvider-Account` as
+  an internal-routing header (see
+  `phase4-coordinator/internal/buyer/server.go`
+  `hasInternalRoutingHeader` / `internalBearerAuthorized` /
+  `selectProviderExcluding`) and rejects buyer-port requests
+  carrying it without the gateway-service-token bearer with
+  `400 invalid_request`. Pre-v0.9.1 only the sticky path set the
+  bearer (because only the sticky path set the account header);
+  v0.9.1 hoists both together. Sticky-specific state — the
+  `X-MacProvider-Internal-Conv` conversation key — remains gated
+  by the sticky conditional and is still suppressed for demo
+  traffic. (Caught by the issue-#211 R1 security audit; without
+  this pairing every non-sticky chat would 400 against any
+  v0.9.x+-aware coordinator.)
+- Dependency bump SPEC-002 v1.3.4 → v1.5.0 to record the
+  coordinator-side composite-key contract.
 
 **Change log v0.9:**
 - SPEC-015 v0.1.3 absorption: adds `X-MacProvider-Receipt` to the
@@ -875,7 +905,11 @@ on all responses.
 
 The gateway MUST generate a UUID v4 `X-Request-ID` per buyer-incoming request and use it as the row key in `usage_events` and `audit_events`.
 
-The gateway MUST forward `X-Request-ID: <uuid>` to the coordinator on every forwarded buyer request. SPEC-002 v1.1.4 requires the coordinator to honor that ID in `request_log`; this is the cross-service join key for gateway usage/audit events and coordinator routing diagnostics.
+The gateway MUST forward `X-Request-ID: <uuid>` to the coordinator on every forwarded buyer request. SPEC-002 v1.1.4 requires the coordinator to honor that ID in `request_log.external_request_id`; SPEC-002 v1.5.0 adds the composite-key requirement below.
+
+The gateway MUST also forward `X-MacProvider-Account: <subject.AccountID>` on every forwarded buyer request — bearer-authenticated and demo subjects alike, both on the sticky and non-sticky routing paths. The coordinator persists this value into `request_log.account_id`. The composite `(account_id, external_request_id)` is the reconciliation key joining gateway `usage_events` to coordinator `request_log`; the gateway therefore MUST NOT gate `X-MacProvider-Account` on the sticky-routing conditional (pre-v0.9.1 gateways did, leaving the non-sticky hot path account-blind). See SPEC-002 v1.5.0 §7.2 for the coordinator-side contract and SPEC-007 §6.4 v0.2.1 for the gateway-side composite-PK addendum.
+
+The gateway MUST pair `X-MacProvider-Account` with the upstream `Authorization: Bearer <UpstreamCoordinatorBearer>` header on every forward. The coordinator's `selectProviderExcluding` treats `X-MacProvider-Account` as an internal-routing header and `400`s buyer-port requests carrying it without the gateway-service-token bearer. The bearer is therefore hoisted out of the sticky conditional alongside the account header; sticky-specific state (`X-MacProvider-Internal-Conv`) remains sticky-gated.
 
 The gateway MAY accept an inbound `X-Request-ID` only if it is a UUID v4 in 8-4-4-4-12 lowercase or uppercase hex format; otherwise it MUST generate its own.
 

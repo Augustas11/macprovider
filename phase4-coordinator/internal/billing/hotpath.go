@@ -51,8 +51,21 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		committed = err == nil
 		return err
 	}
+	// SPEC-002 v1.5.0 / issue #211 money-path scope: when the incoming
+	// row carries a non-empty account_id, scope the AttemptN-derivation
+	// COUNT by (account_id, request_id) so a cross-account collision on
+	// request_id (after #196) cannot inflate the count and silently
+	// trigger the `ambiguous_attempt_n` zero-credit path below. Legacy
+	// rows with empty account_id keep the prior unscoped behavior for
+	// backwards compatibility with pre-v1.5.0 traffic.
 	var requestCount int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log WHERE request_id = ?`, in.RequestID).Scan(&requestCount); err == nil && requestCount > 0 {
+	var countErr error
+	if reqRow.AccountID != "" {
+		countErr = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log WHERE account_id = ? AND request_id = ?`, reqRow.AccountID, in.RequestID).Scan(&requestCount)
+	} else {
+		countErr = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log WHERE request_id = ?`, in.RequestID).Scan(&requestCount)
+	}
+	if countErr == nil && requestCount > 0 {
 		if derived := requestCount - 1; derived > in.AttemptN {
 			if in.AttemptN != derived {
 				in.AttemptN = derived

@@ -46,6 +46,14 @@ INSERT INTO ledger_reconciliation_runs (
 	}()
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// SPEC-002 v1.5.0 / issue #211 money-path scope: the orphan-
+	// detection subquery and the `prior` / `same` counts below MUST
+	// scope by (account_id, request_id) so a cross-account collision
+	// on request_id (after #196) cannot misclassify legitimate first
+	// attempts as retries or mark them as ambiguous. SQLite `IS`
+	// compares NULL = NULL as true, so legacy rows where both sides
+	// have NULL account_id cluster together exactly as they did
+	// pre-v1.5.0 — backwards compatible.
 	orphanRes, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET quarantined = 1,
@@ -65,7 +73,9 @@ UPDATE ledger_request_credits
         WHERE rl.request_id = ledger_request_credits.request_id
           AND COALESCE((
               SELECT COUNT(*) - 1 FROM request_log prior
-               WHERE prior.request_id = rl.request_id AND prior.id <= rl.id
+               WHERE prior.account_id IS rl.account_id
+                 AND prior.request_id = rl.request_id
+                 AND prior.id <= rl.id
           ), 0) = ledger_request_credits.attempt_n
    )`, now, in.ScanFrom.UTC().Format(time.RFC3339Nano), in.ScanTo.UTC().Format(time.RFC3339Nano))
 	if err != nil {
@@ -79,11 +89,14 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
        rl.retried,
        COALESCE((
          SELECT COUNT(*) - 1 FROM request_log prior
-          WHERE prior.request_id = rl.request_id AND prior.id <= rl.id
+          WHERE prior.account_id IS rl.account_id
+            AND prior.request_id = rl.request_id
+            AND prior.id <= rl.id
        ), 0) AS attempt_n,
        COALESCE((
          SELECT COUNT(*) FROM request_log same
-          WHERE same.request_id = rl.request_id
+          WHERE same.account_id IS rl.account_id
+            AND same.request_id = rl.request_id
        ), 0) AS same_request_count
   FROM request_log rl
  WHERE rl.ts_utc >= ? AND rl.ts_utc < ?
