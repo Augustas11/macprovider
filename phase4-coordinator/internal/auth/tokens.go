@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	_ "modernc.org/sqlite"
 )
@@ -414,6 +415,11 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 	providerName = strings.TrimSpace(providerName)
 	if providerID == "" {
 		return TokenRecord{}, "", fmt.Errorf("provider id is required")
+	}
+	// Issue #274: gate every mint path on the canonical provider_id validator
+	// so the pool.Provider.SortKey "/" delimiter stays unambiguous.
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return TokenRecord{}, "", err
 	}
 	if providerName == "" {
 		return TokenRecord{}, "", fmt.Errorf("provider name is required")
@@ -836,6 +842,11 @@ func (s *Store) MintAdmissionTokenAndPairOT(ctx context.Context, providerID, pro
 	providerName = strings.TrimSpace(providerName)
 	if providerID == "" || providerName == "" {
 		return AdmissionPairMint{}, fmt.Errorf("provider id and name are required")
+	}
+	// Issue #274: gate every mint path on the canonical provider_id validator
+	// so the pool.Provider.SortKey "/" delimiter stays unambiguous.
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return AdmissionPairMint{}, err
 	}
 	providerToken, err := randomHex(32)
 	if err != nil {
