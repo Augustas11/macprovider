@@ -275,6 +275,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.loader = { targetModelID in
             let configuration = Self.configuration(for: targetModelID)
             let container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
+            await Self.applyWeightCastIfEnabled(to: container)
             let directory = configuration.modelDirectory()
             let modelHash = try? Self.modelWeightArtifactManifestHash(in: directory)
             return (container, targetModelID, modelHash)
@@ -291,6 +292,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let configuration = Self.configuration(for: modelID)
         let container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
+        await Self.applyWeightCastIfEnabled(to: container)
         self.currentContainer = container
 
         let directory = configuration.modelDirectory()
@@ -834,6 +836,17 @@ actor ModelRuntime: ModelRuntimeServing {
             return Double(result.generationTokenCount) / elapsed
         } catch {
             return 0.0
+        }
+    }
+
+    /// Apply the fp16→bf16 weight cast to a freshly loaded container if
+    /// the `MACPROVIDER_BF16_WEIGHTS` env flag is set. Default off; intended
+    /// for live evidence-gathering on M-series before flipping the default.
+    /// See `WeightCast.swift` and `specs/perf-mlx-compile-bf16-upgrade.md`
+    /// Phase 3.
+    private static func applyWeightCastIfEnabled(to container: ModelContainer) async {
+        await container.perform { context in
+            WeightCast.applyIfEnabled(to: context.model)
         }
     }
 
