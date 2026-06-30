@@ -100,13 +100,20 @@ implementation cannot satisfy a clause, STOP and post a comment on
 the in-flight PR with the conflict — do NOT silently relax the
 clause.
 
-**C2. SPEC-002 v1.3.3 default behavior is byte-identical with all
-SPEC-004 defaults.** Per FR-SR-1: with `sticky_enabled: false`, no
-`model_classes`, `max_retries: 0`, `tiebreak_randomize: false`,
-default `tiebreak_epsilon: 0.0`, the coordinator MUST select the
-same providers and return the same buyer-visible responses /
-headers as before SPEC-004 landed. The AC-SR-1 default-config
-regression test is non-negotiable.
+**C2. Current SPEC-002 v1.5.2 / origin/main default behavior is
+byte-identical with all SPEC-004 defaults.** Per FR-SR-1: with
+`sticky_enabled: false`, no `model_classes`, `max_retries: 0`,
+`tiebreak_randomize: false`, default `tiebreak_epsilon: 0.0`, the
+coordinator MUST select the same providers and return the same
+buyer-visible responses / headers as it does today on
+origin/main. The AC-SR-1 default-config regression test is non-
+negotiable. NOTE: SPEC-004's locked AC-SR-1 text historically
+cites SPEC-002 v1.3.3 ("exactly as SPEC-002 v1.3.3 does"); v1.5.2
+is a non-breaking superset of v1.3.3's provider-selection
+semantics (v1.5.2 added the monotonic `attempt_n` ordinal without
+changing selection order). When the AC-SR-1 test refers to
+SPEC-002 v1.3.3 selection, treat that as a stable behavioral
+contract that v1.5.2 preserves verbatim.
 
 **C3. Every pillar ships behind a default-off config key.** Per
 SPEC-004 §5: `routing.sticky_enabled: false`, `routing.model_classes: {}`,
@@ -219,8 +226,9 @@ ordering is unchanged." Phase B MUST NOT change the comparator that
 runs when `tiebreak_randomize=false` (the default). The
 `effective_throughput` helper exists as a building block for Phase
 D; Phase B does NOT install it as part of the active selection
-path. The candidate-set order remains SPEC-002 v1.3.3 byte-identical
-in Phase B regardless of `tiebreak_epsilon` value.
+path. The candidate-set order remains current-SPEC-002-v1.5.2
+(byte-identical to origin/main, which preserves v1.3.3 selection
+semantics) in Phase B regardless of `tiebreak_epsilon` value.
 
 **Files touched:**
 - `internal/config/config.go` — reconcile (NOT add) `Routing`
@@ -394,32 +402,61 @@ FR-SR-16 (randomized tiebreak), FR-SR-17
 - `internal/routing/retry.go` (NEW) — retry loop with budget +
   exclusion + buyer-cancel attribution (FR-P11a C2).
 - `internal/routing/log.go` (NEW) — `LogRoutingDecision(ctx, dec)`
-  emits the FR-SR-17 / SPEC-004 §7 reproducibility-of-randomized-
-  decision log row. Field list (REQUIRED — match SPEC-004 §7
-  verbatim, do not narrow):
+  emits the SPEC-004 §7 / FR-SR-17 routing-decision log row.
+  Field list (REQUIRED where applicable — match SPEC-004 §7
+  verbatim; an implementer narrowing this list is non-compliant):
+  - `event` (constant `"routing_decision"`)
   - `request_id` (coordinator-internal request id)
-  - `external_request_id` (the buyer-supplied `X-Request-ID`
-    header, empty if absent)
-  - `chosen_peer_id`
-  - `epsilon` (the active `routing.tiebreak_epsilon`)
-  - `epsilon_mode` (`relative` vs `absolute` per SPEC-004 §5)
-  - `cohort_size`
-  - `random_seed` (the per-request seed used; SPEC-004 §7
-    reproducibility contract — MUST be derivable from request id
-    + daily key, NEVER from `time.Now()` alone)
-  - `random_draw` (the cohort index chosen)
-  - `candidate_set`: the FULL epsilon-cohort candidate metadata
-    as a parallel array — for EACH candidate emit `provider_id`,
-    `assigned_id`, `objective_metric` (score driving the cohort),
-    `state`, `slots`, `effective_throughput`, `model_params`,
-    `connected_at`, `tier`. This is the SPEC-004 §7
-    explainability surface in full; narrower is non-compliant.
-  These fields are REQUIRED on every routing decision when
-  `tiebreak_randomize=true` is active; when randomization is
-  inactive, the log MAY be suppressed entirely (per SPEC-004 §7).
-  The call site lives in `internal/buyer/server.go::selectProvider`
-  (or its Phase B refactored equivalent) and fires AFTER candidate
-  selection, BEFORE dispatch.
+  - `x_request_id` (the buyer-supplied `X-Request-ID` header,
+    empty if absent)
+  - `requested_model` (the buyer's body-level `model` value,
+    pre-rewrite)
+  - `resolved_model_type` (`exact` or `class`)
+  - `resolved_class` (when `resolved_model_type=class`)
+  - `class_models` (when `resolved_model_type=class`)
+  - `objective` (`default` / `fast` / `accurate` / `balanced`)
+  - `hard_pin_type` (`none` / `provider` / `session`)
+  - `sticky_result` (`disabled` / `no_key` / `hit` / `miss` /
+    `updated` / `evicted`)
+  - `sticky_miss_reason` (when `sticky_result=miss`)
+  - `candidate_count_before_filters`
+  - `candidate_count_after_filters`
+  - `filtered_counts` (map keyed by reason: `model_mismatch`,
+    `not_ready`, `warming`, `breaker_held`, `busy`,
+    `context_too_small`, `quota_blocked`, `excluded_retry`)
+  - `candidate_set` (REQUIRED for randomized decisions, SHOULD
+    for class decisions): the FULL epsilon-cohort candidate
+    metadata as a parallel array — for EACH candidate emit
+    `provider_id`, `assigned_id`, `objective_metric` (score
+    driving the cohort), `state`, `slots`, `effective_throughput`,
+    `model_params`, `connected_at`, `tier`
+  - `tiebreak_mode` (`deterministic` or `random_epsilon`)
+  - `tiebreak_epsilon`
+  - `random_seed` (REQUIRED when randomized; per-request seed
+    derivable from `request_id` + daily key, NEVER from
+    `time.Now()` alone)
+  - `random_draw` (REQUIRED when randomized; cohort index chosen)
+  - `chosen_provider_id`
+  - `chosen_assigned_id`
+  - `attempt_index`
+  - `retry_count`
+  - `retry_reason`
+  - `retried` (whether `X-MacProvider-Retry` was honored on this
+    attempt; matches `request_log.retried` write contract)
+  - `preflight_result`
+  Pillar D's reproducibility requirement (SPEC-004 §7 closing
+  paragraph) is satisfied ONLY if the randomized candidate set,
+  metrics, epsilon, and selected provider are present in logs
+  for every randomized selection. Per SPEC-004 §7 "Every routed
+  request SHOULD produce a structured routing-decision log" — the
+  log is emitted on every selection, not only randomized ones;
+  fields not applicable to a given decision (e.g., `random_seed`
+  when `tiebreak_mode=deterministic`) MAY be omitted. The call
+  site lives in `internal/buyer/server.go::selectProvider` (or
+  its Phase B refactored equivalent) and fires AFTER candidate
+  selection, BEFORE dispatch (and at retry/preflight points so
+  `attempt_index` + `retry_*` + `preflight_result` are emitted
+  per-attempt).
 - `internal/buyer/server.go` — `/v1/chat/completions` wires class
   resolution + retry loop + dispatch rewrite, AND calls
   `LogRoutingDecision` per request when randomization is active.
@@ -502,15 +539,24 @@ update-on-retry-final-provider rule).
 **Files touched:**
 - `internal/routing/sticky/sticky.go` (NEW package) — `Map` type
   with TTL + LRU + mutex; `Lookup(conversationKey)`,
-  `Update(conversationKey, providerID, modelScope)`,
-  `InvalidateClass(className)`, `PurgeAccount(accountID)`.
-  `PurgeAccount` removes every entry attributable to the given
-  `account_id` and is the underlying primitive for SPEC-006's
-  `DELETE /v1/sticky` route. The sticky-package extraction MUST
-  NOT regress this primitive: `origin/main` already implements
-  `purgeStickyAccount` in `internal/buyer/server.go` behind the
-  internal `handleInternalStickyDelete` handler — preserve both
-  the handler and the route surface during the extraction.
+  `Update(conversationKey, accountID, providerID, modelScope)`,
+  `InvalidateClass(className)`, `PurgeAccount(accountID)`. Every
+  sticky entry MUST carry the authenticated `account_id` of the
+  buyer that produced the sticky write, because `PurgeAccount`
+  iterates by that field. The `accountID` argument to `Update`
+  MUST come from the same gateway-authenticated source the
+  conversation key comes from (e.g., the gateway-injected
+  `X-MacProvider-Account` header behind the gateway auth-frame),
+  NEVER from a direct-buyer header. `PurgeAccount` removes every
+  entry attributable to the given `account_id` and is the
+  underlying primitive for SPEC-006's `DELETE /v1/sticky` route.
+  The sticky-package extraction MUST NOT regress this primitive:
+  `origin/main` already implements `purgeStickyAccount` in
+  `internal/buyer/server.go` behind the internal
+  `handleInternalStickyDelete` handler with `AccountID:
+  headers.Get("X-MacProvider-Account")` attribution on
+  `stickyEntry` — preserve the handler, the route surface, AND
+  the per-entry `AccountID` field during the extraction.
 - `internal/buyer/server.go` — sticky lookup at §3 step 4 (after
   hard-pin precedence resolution per FR-SR-4); sticky update at
   §3 step 10 (post-commit per FR-SR-6). Preserve the existing
