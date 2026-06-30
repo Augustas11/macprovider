@@ -53,21 +53,32 @@ Source commit: `15f6323` (pre-R2 fix-pass). 5 lanes fired in parallel.
 | Adversarial verifier | 0/0/0/2 | confirmed R1-HIGH-1/2/3 + R1-MEDIUM-M5/M7 all genuinely fixed; 2 LOWs (no test for sticky_account_mismatch log; no rate-limit on warn) |
 | Product critic | 0/1/2/2 | **HIGH**: PR body still claimed sticky.Map "is not yet the production storage" (was true pre-fix, false now); MEDIUM: this file shipped with `<next commit>` placeholder + 5 "TBD" rows; MEDIUM: PILLAR_DA "Lesson logged (memory rule TBD)" wikilink unresolved |
 
-**Pre-R3 fix-pass (commit `TBD`)** absorbed all C/H/M from R2:
+**Pre-R3 fix-pass (commit `5b40e6a`)** absorbed all C/H/M from R2:
 - CODE-R2-M1: `Update` now also preserves `existing.AccountID` when incoming is empty (was the asymmetric edge case). New regression test `TestMap_UpdatePreservesExistingAccountIDWhenIncomingIsEmpty`.
 - Product-R2-H1: PR body refreshed — removed the stale "sticky-package wiring deferred" claim, added FULL-IMPL audit fleet section to the convergence table.
 - Product-R2-M1: this file's `<next commit>` substituted with `15f6323`; R2 tally rows populated (above).
-- Product-R2-M2: PILLAR_DA `(memory rule TBD)` line resolved (memory rule written or inlined).
+- Product-R2-M2: PILLAR_DA `(memory rule TBD)` line resolved — memory rule `feedback-audit-prompts-log-shape-backcompat` written.
 - LOW cleanups: candidate.go package doc updated to reflect landed D/A work + remaining deferred list.
 
 ## R3
 
-Source commit: TBD (next push after the R2 fix-pass above).
+Source commit: `5b40e6a` (pre-R3 fix-pass).
+
+Per the tightened [[feedback-skip-accepted-audit-lanes]] rule (any lane at C/H/M = 0 is locked unless the fix-pass touches its scope), only CODE codex + Product critic were re-fired on R3.
 
 | Lane | Tally | Notes |
 |------|-------|-------|
-| CODE codex | TBD | — |
-| SECURITY codex | sustained ACCEPT (likely skipped per accepted-lane rule unless R2 fix-pass touches a security boundary) | — |
-| ARCHITECT codex | sustained ACCEPT (likely skipped) | — |
-| Adversarial verifier | TBD | — |
-| Product critic | TBD | — |
+| CODE codex | **0/0/0/2** ✅ | no C/H/M — 2 LOWs: both-empty AccountID matrix gap; stale TBD placeholders in this file (resolved in commit `TBD2`) |
+| SECURITY codex | sustained R2 ACCEPT ✅ | skipped — R2 fix-pass did not touch a security boundary |
+| ARCHITECT codex | sustained R2 ACCEPT ✅ | skipped |
+| Adversarial verifier | sustained R2 0 C/H/M ✅ | skipped (initially fired, killed when the lane-skip rule was tightened) |
+| Product critic | 0/0/3/1 | 3 MEDIUMs all of the same artifact-hygiene class as R2-Product: PR body convergence table had TBD for R3 row; this file had `Pre-R3 fix-pass (commit TBD)` placeholder; consolidated tracking issue not yet filed |
+
+**Pre-merge fix-pass (commit `TBD2`)** absorbs all R3 Product MEDIUMs + the two CODE LOWs:
+- Product-R3-M1+M2: TBD placeholders in this file + PR body substituted with `5b40e6a`; R3 tally rows populated.
+- Product-R3-M3: consolidated tracking issue #266 filed; PR body links it.
+- CODE-R3-L1: `TestMap_UpdateAllowsRefreshWhenBothAccountIDsAreEmpty` added (closes both-empty matrix gap).
+- CODE-R3-L2: PR body + this file TBD substitution (same as Product-R3-M1+M2).
+
+**R4** (final pre-merge gate): only Product critic re-fires (CODE codex was 0/0/0/2 — LOW-only, sustained; all other lanes already sustained). Goal: Product = 0/0/0/0 (or LOW-only).
+

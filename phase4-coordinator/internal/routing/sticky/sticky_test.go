@@ -254,6 +254,34 @@ func TestMap_UpdatePreservesExistingAccountIDWhenIncomingIsEmpty(t *testing.T) {
 	}
 }
 
+func TestMap_UpdateAllowsRefreshWhenBothAccountIDsAreEmpty(t *testing.T) {
+	// Completes the AccountID-mismatch matrix: existing=empty +
+	// incoming=empty refresh is a legitimate no-op-attribution-wise
+	// path (e.g., legacy entry without X-MacProvider-Account being
+	// touched again by a request that also omits the header).
+	// MUST NOT return mismatch=true; provider/model refresh still
+	// applies. Per FULL-IMPL R3 CODE-L1 finding.
+	t.Parallel()
+	m := newTestMap(time.Hour, 10, newClock())
+	m.Update("conv:1", "", "prov-1", "model-A")
+	if mismatch := m.Update("conv:1", "", "prov-1-refreshed", "model-B"); mismatch {
+		t.Fatalf("both-empty refresh: want mismatch=false, got true")
+	}
+	res := m.Lookup("conv:1")
+	if !res.Hit {
+		t.Fatalf("both-empty refresh entry should remain")
+	}
+	if res.Entry.AccountID != "" {
+		t.Errorf("AccountID should remain empty; got %q", res.Entry.AccountID)
+	}
+	if res.Entry.ProviderID != "prov-1-refreshed" {
+		t.Errorf("ProviderID should refresh; got %q", res.Entry.ProviderID)
+	}
+	if res.Entry.ModelScope != "model-B" {
+		t.Errorf("ModelScope should refresh; got %q", res.Entry.ModelScope)
+	}
+}
+
 func TestMap_UpdateAllowsRefreshWhenExistingAccountIDIsEmpty(t *testing.T) {
 	// Refresh from empty AccountID to a real AccountID is allowed
 	// (legacy entry being upgraded). The mismatch guard only fires
