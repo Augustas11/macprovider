@@ -242,6 +242,17 @@ type MatchedPair struct {
 	CoordinatorCompletionTokens int64  `json:"coordinator_completion_tokens"`
 	CoordinatorMatchMethod      string `json:"coordinator_match_method,omitempty"` // "exact_id" | "fuzzy_token_ts"
 	GatewayLagMs                int64  `json:"gateway_lag_ms"`
+
+	// HarnessSawTerminator carries through buyer.Result.SawTerminator:
+	// true when the SSE stream ended with the explicit `data: [DONE]`
+	// marker (clean completion as the buyer saw it). Used by the fallback-
+	// overbill corroboration check at computePerPairDrift: a gateway
+	// settling a pair as a fallback outcome (stream_truncated etc.) WHILE
+	// the harness saw a clean terminator is the trust-gap signal #232
+	// surfaced — gateway claims truncation but buyer experience contradicts
+	// it. In that case the overbill exclusion is dropped and I1 flags the
+	// pair instead of silently suppressing the delta.
+	HarnessSawTerminator bool `json:"harness_saw_terminator"`
 }
 
 // snapshotWindow returns the SQL query bounds for a reconcile run.
@@ -411,17 +422,29 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 func computePerPairDrift(r *Result) {
 	for _, p := range r.MatchedSuccesses {
 		// Gateway vs Harness — fold the delta into the headline overbill
-		// signal ONLY for gateway "ok" pairs. SPEC-006 §17.7 fallback
-		// outcomes (stream_truncated etc.) have a known asymmetry: the
-		// gateway records the bytes it actually emitted before the upstream
-		// error, while the harness's SSE parser undercounts (F-8). The
-		// pre-existing #226 production scenario specifically had fallback
-		// gateway tokens >> harness tokens; if we counted those as overbill,
-		// I1 would false-fail on exactly the shape this PR is meant to fix
-		// (#229 R5 architect HIGH).
+		// signal for gateway "ok" pairs OR for fallback pairs where the
+		// harness contradicts the truncation claim (#232).
+		//
+		// SPEC-006 §17.7 fallback outcomes (stream_truncated etc.) have a
+		// known asymmetry: the gateway records the bytes it actually emitted
+		// before the upstream error, while the harness's SSE parser
+		// undercounts (F-8). The #229 R5 fix suppressed fallback pairs to
+		// stop false-failing I1 on the production #226 shape. But suppressing
+		// every fallback pair makes the gateway outcome label a trust gate:
+		// a buggy or attacker-controlled gateway that labels a real overbill
+		// as `stream_truncated` would hide it from I1 (#229 R6 security HIGH,
+		// tracked as #232).
+		//
+		// Resolution (#232): use the harness's own observation as a
+		// corroboration check. fallbackOverbillSuppressed() returns true
+		// only when the harness ALSO saw an incomplete stream (no
+		// `data: [DONE]` terminator). If the harness saw a clean terminator
+		// but the gateway claims a fallback, the truncation is uncorroborated
+		// and the overbill is fed into I1 — flagging exactly the malicious-
+		// shape scenario the audit raised.
 		dh := p.GatewayCompletionTokens - p.HarnessCompletionTokens
 		r.NetGatewayMinusHarnessTokens += dh
-		if dh > 0 && isGatewayOKOutcome(p.GatewayOutcome) {
+		if dh > 0 && !fallbackOverbillSuppressed(p) {
 			r.GatewayOverbillVsHarnessTokens += dh
 			r.OverbilledPairs = append(r.OverbilledPairs, p.HarnessRequestID)
 		}
@@ -440,16 +463,21 @@ func computePerPairDrift(r *Result) {
 		// can record the provider's full reported usage. Counting that as
 		// drift false-fails I1 in the #285 reproduction.
 		//
+		// #232: same harness-corroboration check applies here. The coord
+		// axis still uses the buyer's view as the trust anchor — if the
+		// harness saw a clean stream terminator, the gateway claiming a
+		// fallback outcome is uncorroborated and the drift signals fire.
+		//
 		// When a coord row is missing for a gateway-OK pair (i.e. the
 		// gateway settled cleanly but no coord trail), surface separately
 		// in MatchedCoordMissing rather than dropping the signal.
 		if p.CoordinatorRequestID != "" {
 			dc := p.GatewayCompletionTokens - p.CoordinatorCompletionTokens
 			r.NetGatewayMinusCoordinatorTokens += dc
-			if dc > 0 && isGatewayOKOutcome(p.GatewayOutcome) {
+			if dc > 0 && !fallbackOverbillSuppressed(p) {
 				r.GatewayOverbillVsCoordinatorTokens += dc
 			}
-			if dc != 0 && isGatewayOKOutcome(p.GatewayOutcome) {
+			if dc != 0 && !fallbackOverbillSuppressed(p) {
 				if dc < 0 {
 					r.AbsGatewayCoordinatorMismatchTokens += -dc
 				} else {
@@ -461,6 +489,29 @@ func computePerPairDrift(r *Result) {
 			r.MatchedCoordMissing = append(r.MatchedCoordMissing, p.HarnessRequestID)
 		}
 	}
+}
+
+// fallbackOverbillSuppressed returns true when the per-pair drift should
+// be excluded from I1's overbill/mismatch signals because the pair is a
+// SPEC-006 §17.7 streaming-fallback outcome AND the harness independently
+// corroborated the truncation by NOT seeing a clean `data: [DONE]`
+// terminator (#232).
+//
+//   - Gateway outcome "ok" → never suppressed; clean settlement, drift
+//     is real.
+//   - Gateway outcome fallback + harness SawTerminator=false → suppressed.
+//     Buyer experienced a real truncation, F-8 SSE-undercount expected,
+//     do not false-fail I1 on the production #226 shape.
+//   - Gateway outcome fallback + harness SawTerminator=true  → NOT
+//     suppressed. The buyer saw a clean stream complete but the gateway
+//     labeled the pair as truncated. The truncation claim is uncorroborated
+//     and the drift is fed into I1 — flagging exactly the trust-gap shape
+//     #229 R6 security HIGH (tracked as #232) raised.
+func fallbackOverbillSuppressed(p MatchedPair) bool {
+	if isGatewayOKOutcome(p.GatewayOutcome) {
+		return false
+	}
+	return !p.HarnessSawTerminator
 }
 
 // collectUnmatchedGatewayOK lists gateway rows with outcome="ok" that
@@ -604,6 +655,7 @@ func matchExactPass(r *Result, ordered []buyer.Result, gwPool *[]gwRow, coordPoo
 		pair := MatchedPair{
 			HarnessRequestID:        h.RequestID,
 			HarnessCompletionTokens: h.CompletionTokensReceived,
+			HarnessSawTerminator:    h.SawTerminator,
 			GatewayMatchMethod:      methodExactID,
 			GatewayRequestID:        g.RequestID,
 			GatewayAccountID:        g.AccountID,
@@ -642,6 +694,7 @@ func matchFuzzyPass(r *Result, deferred []buyer.Result, gwPool *[]gwRow, coordPo
 		pair := MatchedPair{
 			HarnessRequestID:        h.RequestID,
 			HarnessCompletionTokens: h.CompletionTokensReceived,
+			HarnessSawTerminator:    h.SawTerminator,
 			GatewayMatchMethod:      methodFuzzy,
 			GatewayRequestID:        g.RequestID,
 			GatewayAccountID:        g.AccountID,

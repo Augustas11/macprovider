@@ -223,15 +223,19 @@ func TestCollectUnmatchedGatewayOK_NoLeftovers(t *testing.T) {
 // streams as stream_output_exceeded with gateway tokens >> harness
 // tokens (F-8 SSE undercount). Pre-R5 this counted as gateway overbill
 // and false-failed I1 on exactly the shape #226 was filed to fix.
-// Post-R5, only OK-outcome overbill counts.
+// Post-R5 + #232: suppression applies when harness ALSO corroborates
+// the truncation (SawTerminator=false). HarnessSawTerminator defaults
+// to the zero value (false) here, matching the legitimate-fallback case.
 func TestComputePerPairDrift_FallbackPairsDontCountAsOverbill_R5HIGH(t *testing.T) {
 	r := &Result{
 		MatchedSuccesses: []MatchedPair{
 			// Fallback pair: gateway recorded 64 bytes' worth of tokens
-			// before the upstream error, harness's SSE parser only saw 8.
-			// Pre-R5: GatewayOverbillVsHarnessTokens += 56. R5: excluded.
+			// before the upstream error, harness's SSE parser only saw 8
+			// AND did not see the [DONE] terminator → corroborated
+			// truncation, suppression applies (the post-R5 + #232 happy
+			// path for legitimate F-8 cases).
 			{HarnessRequestID: "fallback_undercount", HarnessCompletionTokens: 8, GatewayCompletionTokens: 64,
-				GatewayOutcome: "stream_output_exceeded"},
+				GatewayOutcome: "stream_output_exceeded", HarnessSawTerminator: false},
 			// OK pair: clean billing.
 			{HarnessRequestID: "ok_clean", HarnessCompletionTokens: 32, GatewayCompletionTokens: 32, GatewayOutcome: "ok"},
 		},
@@ -242,6 +246,78 @@ func TestComputePerPairDrift_FallbackPairsDontCountAsOverbill_R5HIGH(t *testing.
 	}
 	if len(r.OverbilledPairs) != 0 {
 		t.Errorf("fallback pair must not appear in OverbilledPairs: %v", r.OverbilledPairs)
+	}
+}
+
+// TestComputePerPairDrift_FallbackOverbillFlagged_WhenHarnessSawTerminator_232:
+// the trust-gap scenario #232 was filed about. A gateway labels the
+// pair as a SPEC-006 §17.7 fallback outcome (claiming truncation) with
+// a large overbill (gateway=999, harness=8). But the harness saw the
+// clean `data: [DONE]` terminator, contradicting the truncation claim.
+// Without the #232 corroboration fix the overbill would be silently
+// suppressed by R5's outcome-only exclusion. With it, the overbill is
+// fed into I1's headline signal and the pair surfaces in OverbilledPairs.
+func TestComputePerPairDrift_FallbackOverbillFlagged_WhenHarnessSawTerminator_232(t *testing.T) {
+	r := &Result{
+		MatchedSuccesses: []MatchedPair{
+			// Malicious / buggy gateway shape: claims fallback, harness
+			// proved otherwise via terminator.
+			{HarnessRequestID: "trust_gap", HarnessCompletionTokens: 8, GatewayCompletionTokens: 999,
+				GatewayOutcome: "stream_truncated", HarnessSawTerminator: true,
+				CoordinatorRequestID: "coord_trust_gap", CoordinatorCompletionTokens: 8},
+		},
+	}
+	computePerPairDrift(r)
+
+	// Gateway-vs-harness axis: overbill of 991 must be flagged.
+	if r.GatewayOverbillVsHarnessTokens != 991 {
+		t.Errorf("trust-gap pair must flag harness-axis overbill 991, got %d", r.GatewayOverbillVsHarnessTokens)
+	}
+	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "trust_gap" {
+		t.Errorf("trust-gap pair must appear in OverbilledPairs, got %v", r.OverbilledPairs)
+	}
+
+	// Gateway-vs-coordinator axis: overbill of 991 must also surface.
+	if r.GatewayOverbillVsCoordinatorTokens != 991 {
+		t.Errorf("trust-gap pair must flag coord-axis overbill 991, got %d", r.GatewayOverbillVsCoordinatorTokens)
+	}
+	if r.AbsGatewayCoordinatorMismatchTokens != 991 {
+		t.Errorf("trust-gap pair must contribute |delta|=991 to coord mismatch, got %d", r.AbsGatewayCoordinatorMismatchTokens)
+	}
+	if len(r.GatewayCoordMismatchedPairs) != 1 || r.GatewayCoordMismatchedPairs[0] != "trust_gap" {
+		t.Errorf("trust-gap pair must appear in GatewayCoordMismatchedPairs, got %v", r.GatewayCoordMismatchedPairs)
+	}
+}
+
+// TestComputePerPairDrift_FallbackPairSuppressedWithoutTerminator_232:
+// the legitimate F-8 case: harness genuinely saw incomplete stream
+// (SawTerminator=false), gateway labels fallback, gateway tokens
+// exceed harness tokens. Suppression still applies (no behavior
+// change from R5 for the production happy path).
+func TestComputePerPairDrift_FallbackPairSuppressedWithoutTerminator_232(t *testing.T) {
+	r := &Result{
+		MatchedSuccesses: []MatchedPair{
+			{HarnessRequestID: "legit_truncation", HarnessCompletionTokens: 8, GatewayCompletionTokens: 64,
+				GatewayOutcome: "stream_output_exceeded", HarnessSawTerminator: false,
+				CoordinatorRequestID: "coord_legit", CoordinatorCompletionTokens: 80},
+		},
+	}
+	computePerPairDrift(r)
+
+	// Both axes: suppression preserves I1 from false-failing on the
+	// known F-8 production shape (#229 R5 architect HIGH).
+	if r.GatewayOverbillVsHarnessTokens != 0 {
+		t.Errorf("legit truncation must keep harness-axis suppression, got %d", r.GatewayOverbillVsHarnessTokens)
+	}
+	if r.GatewayOverbillVsCoordinatorTokens != 0 {
+		t.Errorf("legit truncation must keep coord-axis suppression, got %d", r.GatewayOverbillVsCoordinatorTokens)
+	}
+	if r.AbsGatewayCoordinatorMismatchTokens != 0 {
+		t.Errorf("legit truncation must keep coord-mismatch suppression, got %d", r.AbsGatewayCoordinatorMismatchTokens)
+	}
+	if len(r.OverbilledPairs) != 0 || len(r.GatewayCoordMismatchedPairs) != 0 {
+		t.Errorf("legit truncation must not surface in either pair list, got %v / %v",
+			r.OverbilledPairs, r.GatewayCoordMismatchedPairs)
 	}
 }
 
