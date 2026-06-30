@@ -96,11 +96,15 @@ type RejectedProvider struct {
 // Counts is the per-reason rejection vector; HashMismatches lists
 // the providers dropped specifically for hash mismatch / invalid
 // (server.go uses the first one's provider_id in the error
-// message).
+// message). PreQuotaCount is the number of providers that survived
+// every gate except quota — needed to distinguish "first loop dropped
+// everything" from "every first-loop survivor was quota-blocked"
+// when the caller picks 503-vs-429 envelopes.
 type FilterResult struct {
 	Eligible       []pool.Provider
 	Counts         map[RejectionReason]int
 	HashMismatches []RejectedProvider
+	PreQuotaCount  int
 }
 
 // EligibleCandidates applies SPEC-002 composition gates +
@@ -168,6 +172,7 @@ func EligibleCandidates(
 		}
 		preQuota = append(preQuota, p)
 	}
+	res.PreQuotaCount = len(preQuota)
 	// Second pass: quota gate. SPEC-002 contract is that quota
 	// rejection drives 429 provisional_quota_exceeded ONLY when
 	// every otherwise-eligible candidate is quota-blocked; server.go

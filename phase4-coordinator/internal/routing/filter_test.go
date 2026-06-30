@@ -171,6 +171,29 @@ func TestEligibleCandidates_QuotaBlocksAllReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestEligibleCandidates_PreQuotaCountTracksFirstLoopSurvivors(t *testing.T) {
+	// Server.go uses PreQuotaCount to distinguish:
+	//   - first loop dropped everything (PreQuotaCount=0) → 503 family
+	//   - first loop had survivors but all quota-blocked (Eligible=0, PreQuotaCount>0) → 429
+	t.Parallel()
+	providers := []pool.Provider{
+		mkProvider("model-mismatch"), // dropped before quota
+		mkProvider("quota-blocked-1"),
+		mkProvider("quota-blocked-2"),
+	}
+	checker := &stubChecker{
+		matches: map[string]bool{"model-mismatch": false},
+		quotaOK: map[string]bool{"quota-blocked-1": false, "quota-blocked-2": false},
+	}
+	res := routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+	if res.PreQuotaCount != 2 {
+		t.Fatalf("PreQuotaCount should count first-loop survivors only: want 2, got %d", res.PreQuotaCount)
+	}
+	if len(res.Eligible) != 0 {
+		t.Fatalf("Eligible: want 0 (all quota-blocked), got %d", len(res.Eligible))
+	}
+}
+
 func TestEligibleCandidates_EmptyInputEmptyResult(t *testing.T) {
 	t.Parallel()
 	res := routing.EligibleCandidates(nil, routing.NewExcluded(0), keyer, &stubChecker{})

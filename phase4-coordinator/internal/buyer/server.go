@@ -31,6 +31,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/go-chi/chi/v5"
@@ -4263,78 +4264,46 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "Pinned provider not in pool"}
 	}
 
-	candidates := make([]pool.Provider, 0, len(providers))
-	hasRoutableContextMiss := false
-	tier2HashRequiredExcluded := 0
-	tier2HashMismatchExcluded := []pool.Provider{}
-	tier2EncryptedLegExcluded := 0
-	tier2AttestationExcluded := 0
-	for _, p := range providers {
-		if _, skip := excluded[routeKey(p)]; skip {
-			continue
-		}
-		if !s.providerMatchesRequest(p, req.Model, class) || !p.RoutingEligible() {
-			continue
-		}
-		if p.MaxContextTokens < estimatedTokens {
-			hasRoutableContextMiss = true
-			continue
-		}
-		hashStatus := s.effectiveHashStatus(p, tier2Cfg)
-		if s.tier2ProviderExcludedStatus(hashStatus, tier2Cfg) {
-			if hashStatus == pool.HashStatusMismatch || hashStatus == pool.HashStatusInvalid {
-				p.HashStatus = hashStatus
-				tier2HashMismatchExcluded = append(tier2HashMismatchExcluded, p)
-			} else {
-				if tier2Cfg.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
-					tier2.LogHashRequiredProviderExcluded(s.log, p.ProviderID, p.AssignedID, p.ModelID, p.ModelHash, hashStatus)
-				}
-				tier2HashRequiredExcluded++
-			}
-			continue
-		}
-		if tier2Cfg.RequireEncryptedLeg && !p.EncryptedLeg {
-			tier2.LogEncryptedLegRequiredMissing(s.log, p.ProviderID, p.AssignedID, p.ModelID)
-			tier2EncryptedLegExcluded++
-			continue
-		}
-		if tier2Cfg.RequireAttestation && p.AttestationStatus != pool.AttestationStatusAttested {
-			tier2AttestationExcluded++
-			continue
-		}
-		candidates = append(candidates, p)
+	exSet := routing.NewExcluded(len(excluded))
+	for k := range excluded {
+		exSet.AddKey(k)
 	}
+	checker := &eligibilityCtx{
+		s:               s,
+		model:           req.Model,
+		class:           class,
+		estimatedTokens: estimatedTokens,
+		tier2Cfg:        tier2Cfg,
+	}
+	result := routing.EligibleCandidates(providers, exSet, routeKey, checker)
+	candidates := result.Eligible
 	if len(candidates) == 0 {
-		if hasRoutableContextMiss {
+		// PreQuotaCount distinguishes "first loop dropped everything"
+		// from "every first-loop survivor was quota-blocked". Quota
+		// is checked first because SPEC-002 reserves 429 for the
+		// every-otherwise-eligible-blocked case; once we know the
+		// first loop did produce survivors but all of them got quota-
+		// blocked, the envelope MUST be 429 not 503.
+		if result.PreQuotaCount > 0 && result.Counts[routing.ReasonQuotaBlocked] == result.PreQuotaCount {
+			return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "All otherwise eligible provisional providers are over request quota"}
+		}
+		if result.Counts[routing.ReasonContextTooSmall] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds provider context capacity"}
 		}
-		if tier2Cfg.RequireHashVerified && (tier2HashRequiredExcluded > 0 || len(tier2HashMismatchExcluded) > 0) {
+		if tier2Cfg.RequireHashVerified && (result.Counts[routing.ReasonTier2HashRequired] > 0 || len(result.HashMismatches) > 0) {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_hash_verified_required", message: "No hash-verified provider available for model `" + req.Model + "`.", typ: "server_error"}
 		}
-		if len(tier2HashMismatchExcluded) > 0 {
-			providerID := tier2HashMismatchExcluded[0].ProviderID
+		if len(result.HashMismatches) > 0 {
+			providerID := result.HashMismatches[0].Provider.ProviderID
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_hash_mismatch", message: "Provider `" + providerID + "` hash verification failed; excluded from pool.", typ: "server_error"}
 		}
-		if tier2EncryptedLegExcluded > 0 {
+		if result.Counts[routing.ReasonTier2EncryptedLeg] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_encrypted_leg_required", message: "No encrypted provider leg available for model `" + req.Model + "`.", typ: "server_error"}
 		}
-		if tier2AttestationExcluded > 0 {
+		if result.Counts[routing.ReasonTier2Attestation] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_attestation_required", message: "No attested provider available for model `" + req.Model + "`.", typ: "server_error"}
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
-	}
-	preQuotaCandidates := candidates
-	candidates = candidates[:0]
-	quotaBlocked := 0
-	for _, candidate := range preQuotaCandidates {
-		if s.checkQuota(candidate) {
-			candidates = append(candidates, candidate)
-		} else {
-			quotaBlocked++
-		}
-	}
-	if len(candidates) == 0 && quotaBlocked > 0 && quotaBlocked == len(preQuotaCandidates) {
-		return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "All otherwise eligible provisional providers are over request quota"}
 	}
 	objective := s.objectiveForRequest(headers, class)
 	s.sortCandidates(candidates, objective)
@@ -4907,6 +4876,62 @@ func (s *Server) effectiveHashStatus(p pool.Provider, cfg config.Tier2Config) po
 
 func (s *Server) checkQuota(provider pool.Provider) bool {
 	return s.admission == nil || s.admission.CheckQuota(provider)
+}
+
+// eligibilityCtx adapts buyer.Server's per-request state to the
+// routing.EligibilityChecker interface so routing.EligibleCandidates
+// can apply SPEC-002 + SPEC-004 FR-SR-18 composition gates without
+// importing buyer-internal types. Phase C step 2 wiring.
+type eligibilityCtx struct {
+	s               *Server
+	model           string
+	class           *config.ModelClassConfig
+	estimatedTokens int
+	tier2Cfg        config.Tier2Config
+}
+
+// ProviderMatchesRequest combines the model/class match and the
+// SPEC-002 FR-P5 RoutingEligible() state check. The pre-Phase-C
+// inline loop combined these two with `||` short-circuit
+// (`!matches || !eligible → continue`), so the new helper reports
+// either failure as ReasonModelMismatch to preserve byte identity.
+func (c *eligibilityCtx) ProviderMatchesRequest(p pool.Provider) bool {
+	return c.s.providerMatchesRequest(p, c.model, c.class) && p.RoutingEligible()
+}
+
+func (c *eligibilityCtx) ProviderContextSufficient(p pool.Provider) bool {
+	return p.MaxContextTokens >= c.estimatedTokens
+}
+
+// Tier2Decision mirrors the inline tier2 branch in the pre-Phase-C
+// loop: hash status first (mismatch / invalid vs required), then
+// encrypted-leg requirement, then attestation requirement. Logging
+// side effects (LogHashRequiredProviderExcluded /
+// LogEncryptedLegRequiredMissing) are preserved verbatim so the
+// audit trail does not regress.
+func (c *eligibilityCtx) Tier2Decision(p pool.Provider) (routing.RejectionReason, pool.HashStatus) {
+	hashStatus := c.s.effectiveHashStatus(p, c.tier2Cfg)
+	if c.s.tier2ProviderExcludedStatus(hashStatus, c.tier2Cfg) {
+		if hashStatus == pool.HashStatusMismatch || hashStatus == pool.HashStatusInvalid {
+			return routing.ReasonTier2HashMismatch, hashStatus
+		}
+		if c.tier2Cfg.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
+			tier2.LogHashRequiredProviderExcluded(c.s.log, p.ProviderID, p.AssignedID, p.ModelID, p.ModelHash, hashStatus)
+		}
+		return routing.ReasonTier2HashRequired, hashStatus
+	}
+	if c.tier2Cfg.RequireEncryptedLeg && !p.EncryptedLeg {
+		tier2.LogEncryptedLegRequiredMissing(c.s.log, p.ProviderID, p.AssignedID, p.ModelID)
+		return routing.ReasonTier2EncryptedLeg, hashStatus
+	}
+	if c.tier2Cfg.RequireAttestation && p.AttestationStatus != pool.AttestationStatusAttested {
+		return routing.ReasonTier2Attestation, hashStatus
+	}
+	return 0, hashStatus
+}
+
+func (c *eligibilityCtx) QuotaPermits(p pool.Provider) bool {
+	return c.s.checkQuota(p)
 }
 
 func (s *Server) effectiveThroughput(provider pool.Provider) float64 {
