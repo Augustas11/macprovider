@@ -4411,43 +4411,17 @@ func (s *Server) sortCandidates(candidates []pool.Provider, objective string) {
 	}
 }
 
+// balancedScores adapts routing.BalancedScores (which returns an
+// indexed slice — the canonical SPEC-004 FR-SR-8 normative formula
+// home) to the buyer-internal routeKey-shape map the rest of
+// selectProvider consumes.
 func balancedScores(candidates []pool.Provider) map[string]float64 {
-	tps := make([]float64, len(candidates))
-	params := make([]float64, len(candidates))
-	ctx := make([]float64, len(candidates))
-	slots := make([]float64, len(candidates))
+	indexed := routing.BalancedScores(candidates)
+	out := make(map[string]float64, len(candidates))
 	for i, p := range candidates {
-		tps[i] = p.ThroughputTPSEstimate
-		params[i] = p.ModelParamsB
-		ctx[i] = float64(p.MaxContextTokens)
-		if p.SlotsTotal > 0 {
-			slots[i] = float64(p.SlotsFree) / float64(p.SlotsTotal)
-		}
-	}
-	out := map[string]float64{}
-	for i, p := range candidates {
-		out[routeKey(p)] = 0.4*norm(tps, i) + 0.3*norm(params, i) + 0.2*norm(ctx, i) + 0.1*norm(slots, i)
+		out[routeKey(p)] = indexed[i]
 	}
 	return out
-}
-
-func norm(values []float64, idx int) float64 {
-	if len(values) == 0 {
-		return 1
-	}
-	minV, maxV := values[0], values[0]
-	for _, v := range values[1:] {
-		if v < minV {
-			minV = v
-		}
-		if v > maxV {
-			maxV = v
-		}
-	}
-	if maxV == minV {
-		return 1
-	}
-	return (values[idx] - minV) / (maxV - minV)
 }
 
 func (s *Server) applyRandomTiebreak(requestID string, candidates []pool.Provider, objective string) ([]pool.Provider, int64, float64, string) {
@@ -4670,30 +4644,39 @@ func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider
 		chosen = candidates[0].ProviderID
 	}
 	scores := s.routingScores(candidates, objective)
-	set := make([]map[string]any, 0, len(candidates))
+	weights := routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
+	set := make([]routing.CandidateLogEntry, 0, len(candidates))
+	var chosenAssignedID string
 	for _, p := range candidates {
-		set = append(set, map[string]any{
-			"provider_id":    p.ProviderID,
-			"assigned_id":    p.AssignedID,
-			"state":          string(p.State),
-			"slots_free":     p.SlotsFree,
-			"slots_total":    p.SlotsTotal,
-			"throughput_tps": s.effectiveThroughput(p),
-			"metric":         scores[routeKey(p)],
-		})
+		set = append(set, routing.ProviderToCandidateLogEntry(p, scores[routeKey(p)], weights))
+		if p.ProviderID == chosen && chosenAssignedID == "" {
+			chosenAssignedID = p.AssignedID
+		}
 	}
-	s.log.Info().
-		Str("event", "routing_decision").
-		Str("request_id", requestID).
-		Str("objective", objective).
-		Interface("candidate_set", set).
-		Int("candidate_count", len(candidates)).
-		Float64("epsilon", s.tiebreakEpsilon).
-		Int64("seed", seed).
-		Float64("draw", draw).
-		Str("chosen_provider_id", chosen).
-		Str("reason", reason).
-		Msg("routing decision")
+	// reason "deterministic" / "randomized" maps to SPEC-004 §7's
+	// tiebreak_mode ("deterministic" / "random_epsilon"). Other reason
+	// values (e.g. sticky-tiebreak-specific labels) fall through to
+	// the empty-mode case (LogRoutingDecision omits the field).
+	tiebreakMode := ""
+	switch reason {
+	case "deterministic":
+		tiebreakMode = "deterministic"
+	case "randomized":
+		tiebreakMode = "random_epsilon"
+	}
+	routing.LogRoutingDecision(s.log, routing.Decision{
+		RequestID:                   requestID,
+		Objective:                   objective,
+		CandidateCountBeforeFilters: len(candidates),
+		CandidateCountAfterFilters:  len(candidates),
+		CandidateSet:                set,
+		TiebreakMode:                tiebreakMode,
+		TiebreakEpsilon:             s.tiebreakEpsilon,
+		RandomSeed:                  seed,
+		RandomDraw:                  draw,
+		ChosenProviderID:            chosen,
+		ChosenAssignedID:            chosenAssignedID,
+	})
 }
 
 func modelClassMembers(class *config.ModelClassConfig) []string {
