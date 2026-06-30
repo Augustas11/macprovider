@@ -4501,7 +4501,10 @@ func (s *Server) stickyLookup(key string) (sticky.Entry, bool, string) {
 // implementation has the refresh-path-FIRST guard that the old
 // inline code lacked (preventing eviction of unrelated entries
 // when refreshing an existing key at MaxEntries — adversarial /
-// FULL-IMPL SEC R1 HIGH finding fix).
+// FULL-IMPL SEC R1 HIGH finding fix). Update also rejects refreshes
+// where the supplied accountID differs from the existing entry's
+// AccountID (FULL-IMPL adversarial-M5 fix); we log a
+// sticky_account_mismatch audit event for ops visibility.
 func (s *Server) stickyStore(headers http.Header, provider pool.Provider, modelScope string) {
 	if !s.stickyEnabled || hasPinnedRoute(headers) {
 		return
@@ -4510,7 +4513,15 @@ func (s *Server) stickyStore(headers http.Header, provider pool.Provider, modelS
 	if !strings.HasPrefix(key, "conv:") {
 		return
 	}
-	s.stickyMap.Update(key, headers.Get("X-MacProvider-Account"), provider.ProviderID, modelScope)
+	accountID := headers.Get("X-MacProvider-Account")
+	mismatch := s.stickyMap.Update(key, accountID, provider.ProviderID, modelScope)
+	if mismatch {
+		s.log.Warn().
+			Str("event", "sticky_account_mismatch").
+			Str("provider_id", provider.ProviderID).
+			Str("model_scope", modelScope).
+			Msg("sticky.Map.Update refused refresh: account_id mismatch (existing entry attribution preserved)")
+	}
 }
 
 // purgeStickyAccount delegates to routing/sticky.Map.PurgeAccount.

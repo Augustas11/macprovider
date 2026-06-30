@@ -113,7 +113,18 @@ func (m *Map) Lookup(conversationKey string) LookupResult {
 // for that check; this method treats accountID as an opaque
 // attribution field that PurgeAccount uses for SPEC-006
 // `DELETE /v1/sticky` matching.
-func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) {
+//
+// Refresh-with-different-accountID is REJECTED (returns the
+// boolean `mismatch=true` and leaves the existing entry intact).
+// This closes the FULL-IMPL R1 adversarial-M5 finding: previously
+// a refresh silently overwrote AccountID, opening a cross-account
+// attribution corruption vector (attacker reuses a victim's
+// conversationKey, then a later PurgeAccount by the attacker
+// wipes the victim's sticky slot; or the legitimate caller's
+// PurgeAccount no longer matches after attribution reattribution).
+// Buyers SHOULD ensure conversation_key uniqueness per account at
+// the gateway; this is defense-in-depth.
+func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) (mismatch bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
@@ -122,6 +133,12 @@ func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) 
 	// This also preserves CreatedAt per FR-SR-6 before any eviction
 	// loop could accidentally drop the entry being refreshed.
 	if existing, ok := m.entries[conversationKey]; ok {
+		// AccountID-mismatch guard: refusing the refresh is the
+		// safe-default action. Caller MAY log a sticky_account_
+		// mismatch event on observing this return value.
+		if existing.AccountID != "" && accountID != "" && existing.AccountID != accountID {
+			return true
+		}
 		m.entries[conversationKey] = Entry{
 			ConversationKey: conversationKey,
 			ProviderID:      providerID,
@@ -130,7 +147,7 @@ func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) 
 			CreatedAt:       existing.CreatedAt,
 			LastUsedAt:      now,
 		}
-		return
+		return false
 	}
 	// Insert path: cap-eviction only when adding a NEW key would
 	// push len past maxEntries.
@@ -161,6 +178,7 @@ func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) 
 		CreatedAt:       now,
 		LastUsedAt:      now,
 	}
+	return false
 }
 
 // PurgeAccount removes every entry attributable to accountID and
@@ -168,7 +186,18 @@ func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) 
 // `DELETE /v1/sticky` ("MUST purge all sticky entries attributable
 // to the caller's account_id"). Buyer-side handler is responsible
 // for authenticating the caller's account_id before invoking this.
+//
+// Defense-in-depth: empty accountID short-circuits to 0 removed.
+// Iterating with accountID == "" would otherwise wipe every entry
+// whose AccountID happens to be empty (e.g. legacy entries written
+// before the X-MacProvider-Account header was required). The
+// buyer-side handler already gates on accountID != "" before
+// invoking this, but the primitive's own guard prevents a future
+// caller from silently wiping the map.
 func (m *Map) PurgeAccount(accountID string) int {
+	if accountID == "" {
+		return 0
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	removed := 0

@@ -176,6 +176,70 @@ func TestMap_PurgeAccountUnknownAccountReturnsZero(t *testing.T) {
 	}
 }
 
+func TestMap_PurgeAccountEmptyAccountReturnsZero(t *testing.T) {
+	// Defense-in-depth: PurgeAccount("") MUST NOT wipe entries with
+	// empty AccountID. The buyer-side handler guards on accountID != ""
+	// before invoking, but the primitive's own guard prevents a
+	// future caller from silently wiping the map. Adversarial / FULL-
+	// IMPL R1 finding M7.
+	t.Parallel()
+	m := newTestMap(time.Hour, 10, newClock())
+	// Force-write entries with empty AccountID via direct Update
+	// (simulates legacy entries pre-X-MacProvider-Account-required).
+	m.Update("conv:1", "", "prov-1", "model-A")
+	m.Update("conv:2", "", "prov-2", "model-A")
+	if removed := m.PurgeAccount(""); removed != 0 {
+		t.Errorf("PurgeAccount(empty): want 0 (defense-in-depth), got %d", removed)
+	}
+	if m.Len() != 2 {
+		t.Errorf("entries with empty AccountID MUST survive PurgeAccount(empty); Len=%d", m.Len())
+	}
+}
+
+func TestMap_UpdateRejectsAccountIDMismatchOnRefresh(t *testing.T) {
+	// Adversarial / FULL-IMPL R1 finding M5: pre-fix, sticky.Map.Update
+	// silently overwrote AccountID on refresh, opening a cross-account
+	// attribution corruption vector. Post-fix: refresh with mismatched
+	// accountID returns mismatch=true AND leaves the existing entry
+	// intact.
+	t.Parallel()
+	m := newTestMap(time.Hour, 10, newClock())
+	if mismatch := m.Update("conv:1", "acc-A", "prov-1", "model-A"); mismatch {
+		t.Fatalf("initial Update: want mismatch=false, got true")
+	}
+	// Hostile attempt: same conv key, different accountID.
+	if mismatch := m.Update("conv:1", "acc-ATTACKER", "prov-2", "model-A"); !mismatch {
+		t.Fatalf("refresh-with-different-accountID: want mismatch=true, got false")
+	}
+	// Verify the existing entry was NOT clobbered.
+	res := m.Lookup("conv:1")
+	if !res.Hit {
+		t.Fatalf("entry should remain after mismatch refusal; got missReason=%q", res.MissReason)
+	}
+	if res.Entry.AccountID != "acc-A" {
+		t.Errorf("AccountID MUST be preserved (acc-A); got %q", res.Entry.AccountID)
+	}
+	if res.Entry.ProviderID != "prov-1" {
+		t.Errorf("ProviderID MUST be preserved (prov-1); got %q", res.Entry.ProviderID)
+	}
+}
+
+func TestMap_UpdateAllowsRefreshWhenExistingAccountIDIsEmpty(t *testing.T) {
+	// Refresh from empty AccountID to a real AccountID is allowed
+	// (legacy entry being upgraded). The mismatch guard only fires
+	// when BOTH sides are non-empty AND differ.
+	t.Parallel()
+	m := newTestMap(time.Hour, 10, newClock())
+	m.Update("conv:1", "", "prov-1", "model-A")
+	if mismatch := m.Update("conv:1", "acc-A", "prov-1", "model-A"); mismatch {
+		t.Fatalf("refresh from empty AccountID: want mismatch=false (upgrade allowed), got true")
+	}
+	res := m.Lookup("conv:1")
+	if res.Entry.AccountID != "acc-A" {
+		t.Errorf("AccountID should be upgraded to acc-A; got %q", res.Entry.AccountID)
+	}
+}
+
 func TestMap_InvalidateClassRemovesOnlyMatchingModelScope(t *testing.T) {
 	t.Parallel()
 	m := newTestMap(time.Hour, 10, newClock())
