@@ -28,6 +28,45 @@ VPS_USER="${VPS_USER:-root}"
 DOMAIN="${DOMAIN:-coordinator.streamvc.live}"
 EMAIL="${EMAIL:-augstar@gmail.com}"
 
+# Issue #244 R1 SEC HIGH-1 / CODE MED-2 / ARCH HIGH-2 — validate operator-
+# overridable values up front so they cannot inject shell metacharacters
+# or argument boundaries into the SSH command strings below, AND so an
+# overridden $DOMAIN that doesn't match the baked-in vhost template's
+# server_name is rejected fail-closed rather than installing a TLS vhost
+# for the wrong hostname.
+_validate_dns_name() {
+  local v="$1" label="$2"
+  if ! printf '%s' "$v" | grep -Eq '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$'; then
+    echo "aborting deploy: $label is not a valid DNS name: '$v'" >&2
+    exit 1
+  fi
+}
+_validate_dns_name "$DOMAIN"        DOMAIN
+_validate_dns_name "${STATS_DOMAIN:-stats.streamvc.live}" STATS_DOMAIN
+
+# Email validator — RFC-conformant pre-validation is overkill; we just
+# need to reject metacharacters that would split a shell arg.
+if ! printf '%s' "$EMAIL" | grep -Eq '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
+  echo "aborting deploy: EMAIL is not a valid address: '$EMAIL'" >&2
+  exit 1
+fi
+
+# R1 ARCH HIGH-2 — the baked-in vhost templates hardcode
+# server_name=coordinator.streamvc.live and the matching certbot live
+# paths. Refuse if $DOMAIN was overridden to something else; otherwise
+# we'd issue a cert for the override domain while installing a vhost
+# with a non-matching server_name.
+if [ "$DOMAIN" != "coordinator.streamvc.live" ]; then
+  echo "aborting deploy: DOMAIN override ($DOMAIN) does not match the baked-in vhost template" >&2
+  echo "  dist/nginx-coordinator.streamvc.live.conf has server_name=coordinator.streamvc.live hardcoded." >&2
+  echo "  Edit the conf file in lockstep, or remove the DOMAIN env override." >&2
+  exit 1
+fi
+if [ "${STATS_DOMAIN:-stats.streamvc.live}" != "stats.streamvc.live" ]; then
+  echo "aborting deploy: STATS_DOMAIN override (${STATS_DOMAIN}) does not match the baked-in vhost template" >&2
+  exit 1
+fi
+
 DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
 BINARY="$DIST_DIR/coordinator-linux-amd64"
 CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
@@ -60,6 +99,26 @@ CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}
 for f in "$BINARY" "$CLI_BINARY" "$CONFIG" "$SERVICE" "$NGINX_SITE" \
          "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
+done
+
+# Issue #244 R1 SEC LOW-1 / ARCH LOW-1 / CODE INFO — replace the
+# defensive sed (which would silently re-rewrite commented cert
+# directives) with a pre-upload assertion that the dist vhosts ship
+# with ACTIVE ssl_certificate + ssl_certificate_key directives. This
+# makes the dist conf files the single source of truth; the deploy
+# script no longer "fixes up" the templates. If the assertion ever
+# fails, the operator must edit the dist conf in place — there is no
+# silent rewrite.
+for f in "$NGINX_SITE" "$NGINX_STATS_SITE"; do
+  if ! grep -Eq '^[[:space:]]*ssl_certificate[[:space:]]+/etc/letsencrypt' "$f"; then
+    echo "aborting deploy: $f is missing an active 'ssl_certificate /etc/letsencrypt/...' directive" >&2
+    echo "  Edit the file to uncomment the cert path; the deploy script no longer rewrites it." >&2
+    exit 1
+  fi
+  if ! grep -Eq '^[[:space:]]*ssl_certificate_key[[:space:]]+/etc/letsencrypt' "$f"; then
+    echo "aborting deploy: $f is missing an active 'ssl_certificate_key /etc/letsencrypt/...' directive" >&2
+    exit 1
+  fi
 done
 
 SSH="ssh -i $SSH_KEY -o ConnectTimeout=10 -p 22 $VPS_USER@$VPS_HOST"
@@ -390,28 +449,79 @@ STATS_DOMAIN="${STATS_DOMAIN:-stats.streamvc.live}"
 
 # Classify domains by cert presence on the remote host (#244). One SSH
 # round-trip; output is one line per domain, prefixed HAVE or NEED.
-log "step 4b/9: classify domains by cert presence"
+#
+# R1 SEC MEDIUM-2 / CODE MEDIUM-1 / ARCH MEDIUM-1: HAVE means BOTH
+# fullchain.pem AND privkey.pem exist, AND openssl reports the cert is
+# not within 24h of expiry. Anything else → NEED, so certbot reissues.
+#
+# R1 SEC MEDIUM-1 / ARCH MEDIUM-2: strict HAVE/NEED parsing — fail
+# closed if the remote response is malformed or missing a domain.
+log "step 4b/9: classify domains by cert presence (validity-checked)"
 DOMAINS_ALL=("$DOMAIN" "$STATS_DOMAIN")
 DOMAINS_HAVE_CERT=()
 DOMAINS_NEED_CERT=()
-CERT_STATUS=$($SSH "set -e
-  for d in ${DOMAINS_ALL[*]}; do
-    if [ -f /etc/letsencrypt/live/\$d/fullchain.pem ]; then
-      echo \"HAVE \$d\"
-    else
-      echo \"NEED \$d\"
+# Pass domains via positional args, single-quote remote bash for safety.
+CERT_STATUS=$($SSH "bash -s -- '$DOMAIN' '$STATS_DOMAIN'" <<'REMOTE_PROBE'
+set -e
+have_openssl=1
+command -v openssl >/dev/null 2>&1 || have_openssl=0
+for d in "$@"; do
+  full="/etc/letsencrypt/live/$d/fullchain.pem"
+  priv="/etc/letsencrypt/live/$d/privkey.pem"
+  if [ ! -f "$full" ] || [ ! -f "$priv" ]; then
+    echo "NEED $d"
+    continue
+  fi
+  if [ "$have_openssl" = 1 ]; then
+    # Reissue if cert is within 24h of expiry. Lets certbot's own renew
+    # job (typically <30d window) coexist with deploy-time reissuance.
+    if ! openssl x509 -checkend 86400 -noout -in "$full" >/dev/null 2>&1; then
+      echo "NEED $d"
+      continue
     fi
-  done
-") || { echo "cert-status probe failed" >&2; exit 1; }
+  fi
+  echo "HAVE $d"
+done
+REMOTE_PROBE
+) || { echo "cert-status probe failed" >&2; exit 1; }
+
+# Strict parsing — every expected domain must appear exactly once with
+# HAVE or NEED. Anything else is fatal (R1 SEC MED-1 / ARCH MED-1).
+declare -A _STATUS_SEEN
 while IFS= read -r line; do
   [ -z "$line" ] && continue
   status="${line%% *}"
   domain="${line##* }"
   case "$status" in
+    HAVE|NEED) ;;
+    *) echo "aborting deploy: malformed cert-status line: '$line'" >&2; exit 1 ;;
+  esac
+  # Reject unexpected domains.
+  expected=0
+  for d in "${DOMAINS_ALL[@]}"; do
+    [ "$d" = "$domain" ] && expected=1 && break
+  done
+  if [ "$expected" -ne 1 ]; then
+    echo "aborting deploy: unexpected domain in cert-status: '$domain'" >&2
+    exit 1
+  fi
+  if [ -n "${_STATUS_SEEN[$domain]:-}" ]; then
+    echo "aborting deploy: duplicate cert-status line for: '$domain'" >&2
+    exit 1
+  fi
+  _STATUS_SEEN[$domain]=1
+  case "$status" in
     HAVE) DOMAINS_HAVE_CERT+=("$domain") ;;
     NEED) DOMAINS_NEED_CERT+=("$domain") ;;
   esac
 done <<< "$CERT_STATUS"
+# Coverage check — every expected domain accounted for.
+for d in "${DOMAINS_ALL[@]}"; do
+  if [ -z "${_STATUS_SEEN[$d]:-}" ]; then
+    echo "aborting deploy: cert-status missing for domain: '$d'" >&2
+    exit 1
+  fi
+done
 log "  cert status: have=[${DOMAINS_HAVE_CERT[*]:-none}] need=[${DOMAINS_NEED_CERT[*]:-none}]"
 
 log "step 5/9: install port-80 ACME-stub for domains needing cert issuance"
@@ -477,6 +587,10 @@ $SSH "set -e
 
 # Install the full TLS vhost ONLY for domains with a valid cert. Domains
 # where certbot failed keep the ACME stub from step 5 (HTTP-80 only).
+#
+# The dist/ confs now ship with uncommented ssl_certificate lines (#244
+# fix (a)), and the file-load assertion at the top of this script
+# refuses to deploy if they get re-commented. No in-place sed surgery.
 for d in "${DOMAINS_FULL_TLS[@]}"; do
   case "$d" in
     "$DOMAIN")        src="/tmp/nginx-coordinator-full.conf" ;;
@@ -485,9 +599,6 @@ for d in "${DOMAINS_FULL_TLS[@]}"; do
   esac
   $SSH "set -e
     install -o root -g root -m 0644 $src /etc/nginx/sites-available/$d
-    # Defensive no-op uncomment (the dist/ confs now ship uncommented, #244).
-    sed -i 's|# ssl_certificate /etc/letsencrypt|ssl_certificate /etc/letsencrypt|g' /etc/nginx/sites-available/$d
-    sed -i 's|# ssl_certificate_key /etc/letsencrypt|ssl_certificate_key /etc/letsencrypt|g' /etc/nginx/sites-available/$d
     ln -sf /etc/nginx/sites-available/$d /etc/nginx/sites-enabled/$d
   "
 done
@@ -505,6 +616,40 @@ $SSH "set -e
 if [ ${#DOMAINS_ISSUED_FAIL[@]} -gt 0 ]; then
   log "  WARN: certbot failed for [${DOMAINS_ISSUED_FAIL[*]}] — those domains served the ACME stub during this deploy"
   log "  Check DNS A records (dig +short <domain>), then re-run this script to retry issuance."
+fi
+
+# R1 CODE HIGH-1 / SEC HIGH-2 / ARCH HIGH-1 (3-of-3 convergent) — fail
+# closed BEFORE step 6c/7/8 if the primary $DOMAIN failed cert issuance
+# this run. Step 8's curl https://$DOMAIN/healthz would otherwise hard-
+# exit 1 first, masking the cert-failure contract.
+#
+# R1 SEC MED-3 / ARCH MED-2 — opt-in strict mode for non-primary
+# domains. Default WARN-only matches the issue intent (stats. NXDOMAIN
+# must not break primary deploy); STATS_REQUIRED=1 promotes any non-
+# primary failure to a fail-closed exit so operators with strict
+# uptime SLOs can enforce it.
+_primary_failed=0
+_nonprimary_failed=0
+for d in "${DOMAINS_ISSUED_FAIL[@]}"; do
+  if [ "$d" = "$DOMAIN" ]; then
+    _primary_failed=1
+  else
+    _nonprimary_failed=1
+  fi
+done
+if [ "$_primary_failed" -eq 1 ]; then
+  echo "" >&2
+  echo "  ABORT-EXIT: primary domain $DOMAIN failed cert issuance during this deploy." >&2
+  echo "             ACME stub is in place; HTTPS is unavailable on $DOMAIN until" >&2
+  echo "             DNS/certbot is fixed and this script is re-run." >&2
+  echo "             Coordinator binary NOT restarted — old binary still serving." >&2
+  exit 9
+fi
+if [ "$_nonprimary_failed" -eq 1 ] && [ "${STATS_REQUIRED:-0}" = "1" ]; then
+  echo "" >&2
+  echo "  ABORT-EXIT: STATS_REQUIRED=1 set and a non-primary domain failed cert" >&2
+  echo "             issuance ([${DOMAINS_ISSUED_FAIL[*]}]). Refusing to restart." >&2
+  exit 9
 fi
 
 log "step 6c/9: pre-restart safeguard (late connected-provider check)"
@@ -631,17 +776,3 @@ echo "Next steps:"
 echo "  - Stage 3: restart M4 phase3-binary with --coordinator wss://$DOMAIN/ws/provider"
 echo "  - Verify: providers should appear in /poolz (auth: bearer operator_key from coordinator.yaml)"
 echo "  - End-to-end: run harness against https://$DOMAIN"
-
-# Issue #244: per-domain certbot is fail-soft, but if the PRIMARY $DOMAIN
-# itself failed issuance we still exit non-zero so CI / operator wrappers
-# notice. Non-primary failures (e.g. stats.streamvc.live NXDOMAIN) are
-# WARN-only — step 8 verification of $DOMAIN/healthz already succeeded.
-for d in "${DOMAINS_ISSUED_FAIL[@]:-}"; do
-  if [ "$d" = "$DOMAIN" ]; then
-    echo "" >&2
-    echo "  ABORT-EXIT: primary domain $DOMAIN failed cert issuance during this deploy." >&2
-    echo "             ACME stub is in place; HTTPS is unavailable on $DOMAIN until" >&2
-    echo "             DNS/certbot is fixed and this script is re-run." >&2
-    exit 9
-  fi
-done
