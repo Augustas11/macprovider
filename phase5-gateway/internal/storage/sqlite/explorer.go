@@ -885,7 +885,15 @@ func nullableTime(v string) *time.Time {
 // available indexes:
 //   - account_id != ""  AND request_id != ""  → composite PK
 //   - account_id == ""  AND request_id != ""  → idx_*_request
-//   - account_id != ""  AND request_id == ""  → idx_*_account_*
+//   - account_id != ""  AND request_id == ""  → varies by table:
+//     usage_events / quota_reservations / concurrency_reservations
+//     have account-leading indexes (idx_usage_account_date,
+//     idx_quota_active_account_date, idx_concurrency_account_*);
+//     feedback_events / audit_events plan through
+//     idx_*_created_at with an account filter (the bounded
+//     created_at window is what keeps this path tractable for
+//     buyer-detail; measure first before adding an account-leading
+//     index on those two tables).
 //   - both empty (rare) → no WHERE clause (LIMIT-bounded)
 func explorerDetailWhere(accountID, requestID string, from, to time.Time) (string, []any) {
 	var clauses []string
