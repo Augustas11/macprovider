@@ -1288,16 +1288,23 @@ normalization site is the full `forwardLine` closure at
 site that MUST be skipped after forwarding these terminal SSE error frames is
 `phase5-gateway/internal/router/chat_proxy.go:625-629`.
 
-These v0.2 terminal SSE error frames inherit SPEC-006 §17.7.1 (#232): the
-envelope MUST be a standalone data frame (no `choices`, no `usage` tokens),
-MUST be the LAST data frame before `[DONE]` or EOF, and MUST NOT be followed
-by additional content frames. The harness reconciler's buyer-side
-corroboration check uses §17.7.1's shape, position, and code-vs-outcome
-relationships to suppress F-8 SSE-undercount false positives without
-trusting the gateway's outcome label alone. `malformed_json_response` and
-`json_schema_validation_failed` are valid `error.code` values for §17.7.1
-purposes; SPEC-019 maps each one to its corresponding `usage_events.outcome`
-per §10d.
+These v0.2 terminal SSE error frames inherit the SHAPE and POSITION clauses
+of SPEC-006 §17.7.1 (#232): the envelope MUST be a standalone data frame
+(no `choices`, no `usage` tokens), MUST be the LAST data frame before
+`[DONE]` or EOF, MUST NOT be followed by additional content frames, and
+MUST be on a line starting at column 0 with no leading whitespace per the
+SSE spec.
+
+The code-vs-outcome MAPPING clause of §17.7.1 applies ONLY when the gateway
+itself writes a non-`"ok"` `usage_events` row at the same time the envelope
+is emitted. Forwarded v0.2 structured-output terminal frames where the
+gateway PASSES THROUGH the provider's envelope and SKIPS positive/ok
+settlement (no gateway `usage_events` row) do not trigger the mapping
+check — there is no settlement row to match against. `malformed_json_response`
+and `json_schema_validation_failed` are valid `error.code` values for the
+shape/position contract regardless. When SPEC-019 paths DO settle a non-ok
+gateway `usage_events` row, the mapping is `error.code = usage_events.outcome`
+by default, with any divergence added to the §17.7.1 mapping-exception list.
 
 Provider-to-coordinator WS streaming terminal validation failure MUST close the
 WS stream with `inference_response_end.status` in `{malformed_json_response,

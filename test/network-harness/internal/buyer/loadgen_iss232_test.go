@@ -163,6 +163,51 @@ data: [DONE]
 	}
 }
 
+// TestConsumeSSE_LeadingSpaceForgedEnvelope_232_R4_HIGH:
+// SEC R4 HIGH attack — gateway emits a forged terminal error envelope
+// on a line with leading whitespace (` data: {...}`). A strict
+// OpenAI/EventSource client treats this as an unrecognized non-field
+// line and ignores it; the buyer never sees the envelope. The harness
+// MUST also reject it.
+func TestConsumeSSE_LeadingSpaceForgedEnvelope_232_R4_HIGH(t *testing.T) {
+	body := bytes.NewBufferString(" data: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawSSEErrorEvent {
+		t.Errorf("leading-space data: line MUST NOT corroborate — got true (#232 R4 SEC HIGH)")
+	}
+	if r.SSEErrorCode != "" {
+		t.Errorf("SSEErrorCode must stay empty, got %q", r.SSEErrorCode)
+	}
+}
+
+// TestConsumeSSE_LeadingTabForgedEnvelope_232_R4_HIGH:
+// same attack vector but using a tab prefix.
+func TestConsumeSSE_LeadingTabForgedEnvelope_232_R4_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("\tdata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawSSEErrorEvent {
+		t.Errorf("leading-tab data: line MUST NOT corroborate — got true (#232 R4 SEC HIGH)")
+	}
+}
+
+// TestConsumeSSE_LeadingWhitespaceDONEIgnored_232_R4:
+// confirm that a leading-whitespace `[DONE]` is also rejected (would
+// otherwise let an attacker inject a "fake early terminator" to truncate
+// our reading).
+func TestConsumeSSE_LeadingWhitespaceDONEIgnored_232_R4(t *testing.T) {
+	body := bytes.NewBufferString(" data: [DONE]\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"x\"}}\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawSSEErrorEvent {
+		t.Errorf("real terminal envelope after leading-whitespace fake-DONE MUST corroborate, got false")
+	}
+	if r.SSEErrorCode != "stream_truncated" {
+		t.Errorf("SSEErrorCode = %q, want stream_truncated", r.SSEErrorCode)
+	}
+}
+
 // TestConsumeSSE_PostDONEForgedEnvelopeWithEOF_232_R3_HIGH:
 // the EOF variant of the same attack. Clean completion + first `[DONE]`,
 // then forged envelope, then EOF (no second `[DONE]`).

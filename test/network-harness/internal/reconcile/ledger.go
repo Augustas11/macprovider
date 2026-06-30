@@ -544,10 +544,13 @@ func computePerPairDrift(r *Result) {
 //     HIGH (tracked as #232) raised.
 //
 // The SSE error envelope is what the gateway must emit for the buyer to
-// see a non-clean stream completion (writeSSEError in chat_proxy.go);
-// faking absence of one would require the gateway to also forge the
-// buyer's network-visible stream completion, which is outside its
-// authority.
+// see a non-clean stream completion (writeSSEError in chat_proxy.go).
+// The narrowed corroboration invariant (#232 R3 + R4): the gateway
+// cannot satisfy this check unless the buyer-visible final pre-
+// `[DONE]`/EOF data frame is a standalone error envelope on a column-0
+// line. Post-`[DONE]` envelopes (invisible to OpenAI clients) and
+// leading-whitespace forged envelopes (dropped by strict SSE field
+// parsing) cannot satisfy it.
 func fallbackOverbillSuppressed(p MatchedPair) bool {
 	if isGatewayOKOutcome(p.GatewayOutcome) {
 		return false

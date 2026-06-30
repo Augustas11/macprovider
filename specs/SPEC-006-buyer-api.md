@@ -2698,9 +2698,11 @@ data: {"error": {"message": "...", "type": "...", "code": "<error-code>"}}
 Constraints on the envelope:
 
 1. The envelope MUST be a STANDALONE SSE data frame. No `choices` field. No `usage` field with non-zero token counts.
-2. `error.code` MUST be non-empty. The relationship between `error.code` and `usage_events.outcome` is:
-   - DEFAULT: `error.code` SHOULD equal the settled `usage_events.outcome` value (e.g., `stream_truncated` / `stream_malformed` / `stream_output_exceeded` / `upstream_error` / `provider_timeout`).
-   - NAMED MAPPING EXCEPTION: `error.code = "provider_disconnected"` corresponds to `usage_events.outcome = "stream_truncated"`. Reference: `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go:1282`, which calls `writeSSEError(..., "server_error", "provider_disconnected")` for the SPEC-002 FR-B6 envelope while the gateway settles as `stream_truncated`. Future code-vs-outcome divergences MUST be added to this list as named mappings, not as silent drift.
+2. `error.code` MUST be non-empty. The relationship between `error.code` and `usage_events.outcome` is normatively bound:
+   - DEFAULT: `error.code` MUST equal the settled `usage_events.outcome` value (e.g., `stream_truncated` / `stream_malformed` / `stream_output_exceeded` / `upstream_error` / `provider_timeout` / `response_byte_cap_exceeded`).
+   - NAMED MAPPING EXCEPTIONS — each entry below is a named gateway divergence that this clause permits explicitly:
+     - `error.code = "provider_disconnected"` ↔ `usage_events.outcome = "stream_truncated"`. Reference: `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go:1282`, which calls `writeSSEError(..., "server_error", "provider_disconnected")` for the SPEC-002 FR-B6 envelope while the gateway settles as `stream_truncated`.
+   - Any future divergence MUST be added to this list as a named mapping (with reference implementation citation) BEFORE the divergent code path ships. Unlisted divergences MUST be treated by the harness as uncorroborated overbill candidates.
 3. The envelope MUST be the LAST data frame on the stream before `[DONE]` or EOF. Content frames MUST NOT follow the envelope. Additional data frames sent AFTER `[DONE]` are invisible to OpenAI-style clients; the harness MUST stop reading at the first `[DONE]` and MUST NOT count post-`[DONE]` content (envelope or otherwise) as part of buyer-side corroboration evidence. (#232 R3 SEC HIGH.)
 4. Reference implementations: `writeSSEError`, `writeStructuredOutputTimeoutSSE`, `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`.
 

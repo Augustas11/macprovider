@@ -66,9 +66,13 @@ type Result struct {
 	// writeStructuredOutputTimeoutSSE helpers in chat_proxy.go.
 	//
 	// Used by the reconciler (#232) to corroborate fallback outcome
-	// labels — the gateway's outcome label alone is a trust gate, but a
-	// terminal error envelope is something the gateway cannot fake
-	// without actually telling the buyer the stream failed.
+	// labels — the gateway's outcome label alone is a trust gate, but
+	// satisfying this bit requires the gateway to actually present the
+	// buyer with a standalone terminal error envelope as the LAST data
+	// frame before `[DONE]` or EOF. Post-`[DONE]` envelopes are
+	// invisible to OpenAI-style clients (and to this parser per #232
+	// R3) and do not corroborate. Leading-whitespace forged envelopes
+	// are dropped by the strict SSE field-line parser per #232 R4.
 	//
 	// Tightening (#232 R2 SEC HIGH): position-aware. An attacker who
 	// injects `"error":{"code":"..."}` into a normal-looking content

@@ -284,9 +284,29 @@ func consumeSSE(body io.Reader, res *Result) {
 				firstByte = false
 			}
 			res.BytesReceived += int64(len(line))
-			trimmed := bytes.TrimSpace(line)
-			if bytes.HasPrefix(trimmed, []byte("data:")) {
-				payload := bytes.TrimSpace(trimmed[len("data:"):])
+			// #232 R4 SEC HIGH — strict SSE field parsing. The HTML5
+			// SSE spec requires field lines to start at column 0; any
+			// leading whitespace (space, tab) makes the line an
+			// unrecognized non-field line that a strict client (and
+			// browser EventSource) ignores. Trimming leading whitespace
+			// before the `data:` prefix check accepted `\tdata: ...` /
+			// ` data: ...` shapes — a malicious gateway could emit a
+			// forged terminal envelope on a leading-whitespace line and
+			// have the harness corroborate while the buyer's strict
+			// parser dropped the line.
+			//
+			// We strip ONLY the trailing CR/LF, then require `data:` at
+			// column 0. After the colon, the spec allows at most one
+			// optional space before the value.
+			fieldLine := line
+			for len(fieldLine) > 0 && (fieldLine[len(fieldLine)-1] == '\n' || fieldLine[len(fieldLine)-1] == '\r') {
+				fieldLine = fieldLine[:len(fieldLine)-1]
+			}
+			if bytes.HasPrefix(fieldLine, []byte("data:")) {
+				payload := fieldLine[len("data:"):]
+				if len(payload) > 0 && payload[0] == ' ' {
+					payload = payload[1:]
+				}
 				if bytes.Equal(payload, []byte("[DONE]")) {
 					// #232 R3 SEC HIGH — first `[DONE]` is terminal.
 					// Anything the gateway emits after this point is
