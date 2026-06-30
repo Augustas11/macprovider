@@ -82,21 +82,54 @@ final class ProviderStatusTests: XCTestCase {
                        ["nominal->serious", "serious->critical", "critical->fair"])
     }
 
-    func testSnapshotResetWindowReadsAllFieldsInOneActorTurn() async {
-        // Regression: thermal-gate `await` must happen BEFORE reading window
-        // metrics, otherwise a `finishRequest` running during the suspension
-        // races against the read-then-reset of `windowRequests`/etc.
-        let gate = ThermalGate(stateProvider: FixedThermalProvider(state: .nominal))
+    func testSnapshotResetWindowSurvivesReentrancyDuringThermalGateAwait() async {
+        // Regression for the round-1 finding: `snapshot(resetWindow:)` must
+        // resolve the thermal-gate `await` BEFORE reading any window state.
+        // We force the race by giving the gate a 50ms artificial delay
+        // inside `isThrottled()`, then letting `finishRequest` enter the
+        // actor while snapshot is suspended. If the await were AFTER the
+        // window reads, the finish would be silently dropped on reset.
+        let gate = ThermalGate(
+            stateProvider: FixedThermalProvider(state: .nominal),
+            isThrottledArtificialDelayNanos: 50_000_000
+        )
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity(), thermalGate: gate)
 
-        let start = await status.beginRequest(requestID: "r-1")
-        await status.finishRequest(startedAt: start, completion: nil, failed: false, requestID: "r-1")
+        let begin = await status.beginRequest(requestID: "r-1")
+        let snapshotTask = Task { await status.snapshot(resetWindow: true) }
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        await status.finishRequest(startedAt: begin, completion: nil, failed: false, requestID: "r-1")
 
-        let snap = await status.snapshot(resetWindow: true)
-        XCTAssertEqual(snap.requestsServedSinceLast, 1, "the served-since-last counter must include the completed request")
+        let snap = await snapshotTask.value
+        XCTAssertEqual(snap.requestsServedSinceLast, 1,
+                       "finishRequest landing during snapshot's await must be visible AND consumed by reset")
 
         let after = await status.snapshot(resetWindow: false)
-        XCTAssertEqual(after.requestsServedSinceLast, 0, "window must reset cleanly after the previous snapshot")
+        XCTAssertEqual(after.requestsServedSinceLast, 0, "window must reset cleanly after reentrant finishRequest")
+    }
+
+    func testRapidThermalTransitionsAllReachTheGate() async {
+        // Regression: notifications captured at the edge feed a single
+        // ordered drain task, so a rapid `.serious → .fair` doesn't drop
+        // the throttled interval and its log line.
+        let provider = MutableThermalProvider(initial: .nominal)
+        let gate = ThermalGate(stateProvider: provider)
+        let recorder = TransitionRecorder()
+        await gate.setTransitionLogger { old, new in recorder.record(old: old, new: new) }
+        await gate.startObserving()
+
+        provider.set(.serious)
+        NotificationCenter.default.post(name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
+        provider.set(.fair)
+        NotificationCenter.default.post(name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
+
+        let deadline = Date().addingTimeInterval(2.0)
+        while recorder.count < 2, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let labels = recorder.transitions.map { "\($0.0.label)->\($0.1.label)" }
+        XCTAssertEqual(labels, ["nominal->serious", "serious->fair"],
+                       "both transitions must be observed in FIFO order, including the throttled interval")
     }
 
     func testShouldThrottleThreshold() {
@@ -110,6 +143,23 @@ final class ProviderStatusTests: XCTestCase {
 private struct FixedThermalProvider: ThermalStateProviding {
     let state: ProcessInfo.ThermalState
     func currentThermalState() -> ProcessInfo.ThermalState { state }
+}
+
+private final class MutableThermalProvider: ThermalStateProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var state: ProcessInfo.ThermalState
+
+    init(initial: ProcessInfo.ThermalState) { self.state = initial }
+
+    func set(_ next: ProcessInfo.ThermalState) {
+        lock.lock(); defer { lock.unlock() }
+        state = next
+    }
+
+    func currentThermalState() -> ProcessInfo.ThermalState {
+        lock.lock(); defer { lock.unlock() }
+        return state
+    }
 }
 
 private final class TransitionRecorder: @unchecked Sendable {
