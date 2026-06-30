@@ -6,20 +6,21 @@ import (
 )
 
 // stickyMismatchLimiter throttles the `sticky_account_mismatch`
-// warn-log emitted from stickyStore. Issue #266 deferred operational-
+// warn-log emitted from stickyStore. Issue #266 T1 operational-
 // hygiene item: the warn fires on every cross-account refresh refusal,
 // which a hostile or buggy gateway client could drive at arbitrary
 // rate. The limiter caps emission to one warn per conversation_key
 // per window.
 //
 // Bounded by maxEntries so a runaway gateway cannot cause unbounded
-// memory growth keyed on conv-id values it controls. When at capacity
-// AND a brand-new key arrives, the oldest entry (by lastWarnAt) is
-// evicted before insertion. The eviction is O(n) per cap-bound insert,
-// which is acceptable because maxEntries is bounded by the existing
-// sticky-map MaxEntries config (default 10000) and inserts at the cap
-// are themselves rate-limited by the hostile-traffic budget the
-// caller is trying to defend against.
+// memory growth keyed on conv-id values it controls. When the entries
+// table is at capacity AND a brand-new key arrives, `allow` first
+// sweeps every entry that has aged past the window; if that frees a
+// slot, the new key takes it. If the sweep frees nothing (every
+// existing entry is still within-window), `allow` DENIES the new
+// key — no legitimate in-window entry is evicted. This bounds the
+// aggregate per-window warn rate to MaxEntries across all unique
+// keys under hostile unique-key rotation. R1 CODE audit MEDIUM fix.
 type stickyMismatchLimiter struct {
 	mu         sync.Mutex
 	window     time.Duration

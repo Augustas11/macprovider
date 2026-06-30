@@ -77,11 +77,44 @@ rename in Tranche 2" guidance.
   `TestStickyMismatchLimiter_ExpiredEntriesSweptToFreeCap` (pins
   the sweep-then-allow path).
 
-## R2 — pending
+## R2 — 2026-06-30
 
-Per [[feedback-skip-accepted-audit-lanes]]: SECURITY lane sustained
-0/0/0/0 at R1; SKIP R2 for SECURITY (no new attack surface added
-in R1 fix-pass — fixes touched correctness of existing surface,
-not new boundaries).
+Commit audited: `efa8ef6` (R1 fix-pass). SECURITY lane skipped per
+[[feedback-skip-accepted-audit-lanes]] (locked at R1 0/0/0/0).
 
-Fire CODE + ARCH only at R2. Target: 0 C/H/M.
+| Lane | C | H | M | L | Status |
+|------|---|---|---|---|--------|
+| CODE | 0 | 0 | 0 | 2 | ✅ ACCEPT |
+| SECURITY | — | — | — | — | sustained R1 (skipped) |
+| ARCHITECT | 0 | 0 | 0 | 3 | ✅ ACCEPT |
+
+**All three lanes at C/H/M = 0. Merge bar met.**
+
+### R2 findings absorbed
+
+**CODE-L1 / ARCH-L1** — stickyMismatchLimiter package doc still
+described pre-fix "evict oldest before insertion" behavior. Rewritten
+to describe sweep-expired-then-deny-at-cap.
+
+**CODE-L2** — `forwardState.dailyKey` comment claimed the daily-key
+is "recorded in the log" but no `daily_key` field exists. Reworded
+to clarify: dailyKey survives via the request_log row's start
+timestamp, which downstream auditors feed back into
+`seedForRequestWithKey` alongside per-attempt request_id to reproduce
+the seed.
+
+**ARCH-L2** (reloadTier2Config rename) — accepted with rationale for
+Tranche 1; deferred to Tranche 2.
+
+**ARCH-L3** (retry log shape divergence) — accepted with rationale;
+consumers distinguish retry rows via `attempt_index` / `retry_count` /
+`retry_reason`.
+
+Plus: gofmt cleanup on the 6 touched files.
+
+## Convergence
+
+R1 → R2 absorbed 2 MEDIUM + 5 LOW; R2 absorbed 2 LOW; total 9
+findings closed across 2 rounds. SECURITY locked at R1 0/0/0/0.
+Final bar: 0 CRITICAL / 0 HIGH / 0 MEDIUM across all three lanes.
+Ready for PR + merge.

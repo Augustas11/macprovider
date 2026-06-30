@@ -71,17 +71,21 @@ type forwardState struct {
 	provider pool.Provider
 
 	// dailyKey is the UTC YYYY-MM-DD bucket snapshot captured ONCE at
-	// request start (handleChatCompletions) and reused by every
-	// retry attempt's seedForRequest derivation. This preserves
+	// request start (handleChatCompletions, derived from startedAt
+	// for atomic snapshot at the UTC-midnight boundary) and reused by
+	// every retry attempt's seedForRequest derivation. This preserves
 	// FR-SR-17 reproducibility for requests that span UTC midnight:
-	// every retry attempt within a logical request shares the same
-	// daily-key bucket, so a routing-decision log entry can be
-	// replayed against the dailyKey recorded in the log alongside
-	// each attempt's request_id. (Each retry attempt's request_id
-	// IS distinct — advanceToNextProvider rolls a fresh uuid per
-	// advance — but the dailyKey component is sticky to the request,
-	// not to wall-clock time at the per-attempt derivation point.)
-	// Issue #266 T1 safety/correctness item.
+	// the daily-key component of (request_id, daily_key) → seed stays
+	// sticky to the request, not to wall-clock time at the per-attempt
+	// derivation point. (Each retry attempt's request_id IS distinct
+	// — advanceToNextProvider rolls a fresh uuid per advance — so the
+	// per-attempt seed values differ; what survives midnight is the
+	// daily-key bucket each derivation consumes.) The bucket value
+	// is NOT emitted as its own log field; downstream auditors
+	// reproduce the seed by reading the request_log row's start
+	// timestamp (which uses the same UTC date) and feeding it back
+	// through seedForRequestWithKey alongside the per-attempt
+	// request_id. Issue #266 T1 safety/correctness item.
 	dailyKey string
 
 	// estimatedTokens is the prompt-token estimate captured ONCE at

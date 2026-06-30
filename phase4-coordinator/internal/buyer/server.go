@@ -94,24 +94,24 @@ func spec018Retryable(code string) bool {
 }
 
 type Server struct {
-	pool                   *pool.Registry
-	log                    zerolog.Logger
-	createdAt              int64
-	preflight              PreflightFunc
-	preflightThreshold     int
-	preflightTimeout       time.Duration
-	recoveryBackoff        time.Duration
-	recoveryMaxRetries     int
-	recoveryProbe          bool
-	breakerThreshold       int
-	breakerWindow          time.Duration
-	relay                  RelayFunc
-	admission              *providerws.AdmissionManager
-	requestTimeout         time.Duration
-	failoverEnabled        bool
-	failoverTimeout        time.Duration
-	tiebreakRandomize bool
-	tiebreakEpsilon   float64
+	pool               *pool.Registry
+	log                zerolog.Logger
+	createdAt          int64
+	preflight          PreflightFunc
+	preflightThreshold int
+	preflightTimeout   time.Duration
+	recoveryBackoff    time.Duration
+	recoveryMaxRetries int
+	recoveryProbe      bool
+	breakerThreshold   int
+	breakerWindow      time.Duration
+	relay              RelayFunc
+	admission          *providerws.AdmissionManager
+	requestTimeout     time.Duration
+	failoverEnabled    bool
+	failoverTimeout    time.Duration
+	tiebreakRandomize  bool
+	tiebreakEpsilon    float64
 	// routingMu guards modelClasses, which is hot-swapped on SIGHUP
 	// when routing.model_classes shape changes (issue #266 T1).
 	// Pre-SIGHUP readers (handleModels iteration at modelEntry build;
@@ -131,25 +131,25 @@ type Server struct {
 	// warn-log per conversation_key to defend against hostile-gateway
 	// log flooding. Issue #266 T1 operational-hygiene item.
 	stickyMismatchLimiter *stickyMismatchLimiter
-	internalAuthKey        string
-	gatewayServiceToken    string
-	tier2Mu                sync.RWMutex
-	tier2                  config.Tier2Config
-	reqLog                 requestLogInserter
-	reqLogStore            *requestlog.Store
-	provisionalWeight      float64
-	maxChatBodyBytes       int64
-	recovering             sync.Map
-	poolCheckMu            sync.Mutex
-	poolCheckLast          map[string]time.Time
-	poolCheckMaxEntries    int
-	poolCheckTTL           time.Duration
-	receiptKeysMu          sync.Mutex
-	receiptKeysLimiters    map[string]receiptKeysBucket
-	receiptKeysMaxEntries  int
-	receiptKeysTTL         time.Duration
-	streamingDowngrade     *streamingDowngradeStore
-	streamingTiming        *streamingTimingCollector
+	internalAuthKey       string
+	gatewayServiceToken   string
+	tier2Mu               sync.RWMutex
+	tier2                 config.Tier2Config
+	reqLog                requestLogInserter
+	reqLogStore           *requestlog.Store
+	provisionalWeight     float64
+	maxChatBodyBytes      int64
+	recovering            sync.Map
+	poolCheckMu           sync.Mutex
+	poolCheckLast         map[string]time.Time
+	poolCheckMaxEntries   int
+	poolCheckTTL          time.Duration
+	receiptKeysMu         sync.Mutex
+	receiptKeysLimiters   map[string]receiptKeysBucket
+	receiptKeysMaxEntries int
+	receiptKeysTTL        time.Duration
+	streamingDowngrade    *streamingDowngradeStore
+	streamingTiming       *streamingTimingCollector
 	// trustedProxies is the parsed CIDR set whose X-Forwarded-For /
 	// X-Real-IP headers the rate-limit keying honors. Pre-parsed at
 	// construction (config.go TrustedProxyPrefixes) so the hot path
@@ -1654,9 +1654,9 @@ func (s *Server) forwardStreamSequence(
 				state.provider.ProviderID,
 				"retry_"+itoa(state.explicitRetries),
 				retryDecisionAttrs{
-					AttemptIndex: state.explicitRetries + 1,
-					RetryCount:   state.explicitRetries,
-					Retried:      state.explicitRetries,
+					AttemptIndex:    state.explicitRetries + 1,
+					RetryCount:      state.explicitRetries,
+					Retried:         state.explicitRetries,
 					RetryReason:     "streaming_advance",
 					PreflightResult: s.preflightLabel(state.estimatedTokens),
 				},
@@ -1800,9 +1800,9 @@ func (s *Server) forwardWSNonStreamSequence(
 				state.provider.ProviderID,
 				"retry_"+itoa(state.explicitRetries),
 				retryDecisionAttrs{
-					AttemptIndex: state.explicitRetries + 1,
-					RetryCount:   state.explicitRetries,
-					Retried:      state.explicitRetries,
+					AttemptIndex:    state.explicitRetries + 1,
+					RetryCount:      state.explicitRetries,
+					Retried:         state.explicitRetries,
 					RetryReason:     "ws_advance",
 					PreflightResult: s.preflightLabel(state.estimatedTokens),
 				},
@@ -2043,9 +2043,9 @@ func (s *Server) forwardHTTPSequence(
 				state.provider.ProviderID,
 				"retry_"+itoa(state.explicitRetries),
 				retryDecisionAttrs{
-					AttemptIndex: state.explicitRetries + 1,
-					RetryCount:   state.explicitRetries,
-					Retried:      state.explicitRetries,
+					AttemptIndex:    state.explicitRetries + 1,
+					RetryCount:      state.explicitRetries,
+					Retried:         state.explicitRetries,
 					RetryReason:     "http_advance",
 					PreflightResult: s.preflightLabel(state.estimatedTokens),
 				},
