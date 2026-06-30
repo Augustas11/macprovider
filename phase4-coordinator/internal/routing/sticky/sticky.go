@@ -25,6 +25,7 @@
 package sticky
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -229,16 +230,25 @@ func (m *Map) PurgeAccount(accountID string) int {
 // the buyer-side SIGHUP-driven config-reload path will call when
 // `routing.model_classes` changes shape.
 //
-// Phase A ships the primitive; the SIGHUP-trigger wiring lands in
-// a subsequent commit when the config-reload path is plumbed to
-// detect class changes (out of Phase A scope per BUILD prompt
-// §Phase A files-touched list).
+// Phase A shipped the primitive; the SIGHUP-trigger wiring lands in
+// issue #266 Tranche 1 (buyer.Server.SetRoutingClasses) which calls
+// this on every routing.model_classes class whose membership shape
+// changed.
+//
+// className comparison is case-INSENSITIVE because the upstream
+// class-resolution path (buyer.Server.resolveModelClass) matches
+// class names via strings.EqualFold. A class configured as
+// "MLX-Fast" can therefore land sticky entries whose ModelScope is
+// "mlx-fast" / "MLX-FAST" / etc. (the buyer-supplied request model
+// string). A case-sensitive purge here would leak those entries
+// past the operator's SIGHUP reconfig — the iss#266 R1 ARCHITECT
+// audit MEDIUM finding.
 func (m *Map) InvalidateClass(className string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	removed := 0
 	for key, entry := range m.entries {
-		if entry.ModelScope == className {
+		if strings.EqualFold(entry.ModelScope, className) {
 			delete(m.entries, key)
 			removed++
 		}

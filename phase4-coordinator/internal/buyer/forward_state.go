@@ -74,10 +74,23 @@ type forwardState struct {
 	// request start (handleChatCompletions) and reused by every
 	// retry attempt's seedForRequest derivation. This preserves
 	// FR-SR-17 reproducibility for requests that span UTC midnight:
-	// a retry that re-rolls at 00:01 UTC must produce the SAME seed
-	// as the first attempt that fired at 23:59 UTC, since the
-	// request_id is identical and the daily-key MUST be sticky to
-	// the request, not to wall-clock time at the per-attempt
-	// derivation point. Issue #266 deferred safety/correctness item.
+	// every retry attempt within a logical request shares the same
+	// daily-key bucket, so a routing-decision log entry can be
+	// replayed against the dailyKey recorded in the log alongside
+	// each attempt's request_id. (Each retry attempt's request_id
+	// IS distinct — advanceToNextProvider rolls a fresh uuid per
+	// advance — but the dailyKey component is sticky to the request,
+	// not to wall-clock time at the per-attempt derivation point.)
+	// Issue #266 T1 safety/correctness item.
 	dailyKey string
+
+	// estimatedTokens is the prompt-token estimate captured ONCE at
+	// request start. The retry routing-decision log's PreflightResult
+	// field is derived from this (vs s.preflightThreshold + whether
+	// s.preflight is wired): when preflight ran, the just-selected
+	// provider was accepted by it (else selectProviderExcluding would
+	// have returned an error before afterAdvance fired); when
+	// preflight was skipped (low estimate OR no preflight func), the
+	// label is "not_applicable". Issue #266 T1 R1 audit MEDIUM fix.
+	estimatedTokens int
 }

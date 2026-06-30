@@ -1351,12 +1351,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	state := &forwardState{
 		routingDone:   startedAt,
 		faultedRoutes: map[string]struct{}{},
-		// Snapshot the UTC daily-key bucket ONCE at request entry so
-		// every retry attempt's seedForRequest derivation reuses it.
+		// Snapshot the UTC daily-key bucket from startedAt (NOT a
+		// second s.now() call) so the request-start timestamp and the
+		// routing-seed bucket agree on the exact UTC-midnight boundary.
 		// Without this, a long-running retry that crosses UTC midnight
 		// produces a different seed than the first attempt, breaking
-		// FR-SR-17 reproducibility for the request. Issue #266 T1.
-		dailyKey: s.now().UTC().Format("2006-01-02"),
+		// FR-SR-17 reproducibility for the request. Issue #266 T1,
+		// R1 ARCHITECT audit LOW fix (atomic snapshot).
+		dailyKey: startedAt.UTC().Format("2006-01-02"),
+		// estimatedTokens is populated below once the body is read +
+		// validated; retry-path PreflightResult derivation reads it.
 	}
 	// M3-10 (ARCH-6 close-out): the previously-inline logRowWithBilling
 	// closure now lives as *billingRecorder. setModel / setStream /
@@ -1458,6 +1462,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	shouldLogAttempt := func(attempt requestLogAttempt) bool {
 		return attempt.Status != 0 || attempt.PromptTokens != nil || attempt.CompletionTokens != nil || attempt.EstimatedCompTokens != nil || attempt.Error != "" || attempt.ErrorCode != ""
 	}
+	// Snapshot prompt-token estimate so retry-path logRoutingDecisionRetry
+	// can derive PreflightResult ("accepted" vs "not_applicable") without
+	// re-tokenising req.raw on each advance. Issue #266 T1 R1 audit
+	// MEDIUM fix.
+	state.estimatedTokens = estimateTokens(req.raw)
 	provider, routeErr := s.selectProvider(routingRequestID, req, r.Header, state.dailyKey)
 	if routeErr != nil {
 		state.routingDone = s.now()
@@ -1538,8 +1547,11 @@ func (s *Server) forwardStreamSequence(
 	//   - committed early-exit (renderCommitted): post-first-chunk
 	//     disconnect / cancelled get final-OK semantics with
 	//     stream_terminal logging (WS-tunneled disconnect only).
-	//   - logRoutingDecision fires after every successful advance (HTTP
-	//     non-streaming also emits this; WS-non-streaming does NOT).
+	//   - logRoutingDecisionRetry fires after every successful advance
+	//     across ALL three transports (streaming + HTTP + WS-non-
+	//     streaming) per issue #266 T1 — the pre-#266 asymmetry where
+	//     WS-non-streaming skipped the emission was the SPEC-004 §7
+	//     audit-explainability gap closed in this PR.
 	cbs := transportCallbacks{
 		dispatch: func(w http.ResponseWriter, r *http.Request, req chatRequest, requestID, _ string, _ time.Time, state *forwardState, rec *billingRecorder) (dispatchedAttempt, bool) {
 			dispatchBody, err := dispatchBodyForProvider(req, state.provider)
@@ -1645,7 +1657,8 @@ func (s *Server) forwardStreamSequence(
 					AttemptIndex: state.explicitRetries + 1,
 					RetryCount:   state.explicitRetries,
 					Retried:      state.explicitRetries,
-					RetryReason:  "streaming_advance",
+					RetryReason:     "streaming_advance",
+					PreflightResult: s.preflightLabel(state.estimatedTokens),
 				},
 			)
 			return false
@@ -1790,7 +1803,8 @@ func (s *Server) forwardWSNonStreamSequence(
 					AttemptIndex: state.explicitRetries + 1,
 					RetryCount:   state.explicitRetries,
 					Retried:      state.explicitRetries,
-					RetryReason:  "ws_advance",
+					RetryReason:     "ws_advance",
+					PreflightResult: s.preflightLabel(state.estimatedTokens),
 				},
 			)
 			return !state.provider.IsWSTunneled()
@@ -2032,7 +2046,8 @@ func (s *Server) forwardHTTPSequence(
 					AttemptIndex: state.explicitRetries + 1,
 					RetryCount:   state.explicitRetries,
 					Retried:      state.explicitRetries,
-					RetryReason:  "http_advance",
+					RetryReason:     "http_advance",
+					PreflightResult: s.preflightLabel(state.estimatedTokens),
 				},
 			)
 			return false
@@ -4456,9 +4471,13 @@ func (s *Server) SetRoutingClasses(next map[string]config.ModelClassConfig) (cha
 
 // diffModelClasses returns the names of classes whose membership
 // shape differs between prev and next. Includes: classes added in
-// next, classes removed from prev, classes whose Objective or member
-// set (Models OR Members, normalised) changed. The returned slice is
-// sorted ascending so caller log output is deterministic.
+// next, classes removed from prev, classes whose Objective changed,
+// classes whose Models OR Members slices differ ELEMENT-WISE
+// (ordered comparison — `[a,b]` and `[b,a]` are treated as DIFFERENT
+// because the upstream cloneModelClasses preserves operator-config
+// ordering and the BUILD prompt's class-membership semantics
+// reference the YAML-declared order). The returned slice is sorted
+// ascending so caller log output is deterministic.
 func diffModelClasses(prev, next map[string]config.ModelClassConfig) []string {
 	seen := make(map[string]struct{}, len(prev)+len(next))
 	var changed []string
@@ -4932,6 +4951,23 @@ type retryDecisionAttrs struct {
 	Retried         int    // count of additional provider attempts beyond first
 	RetryReason     string // why this retry fired (e.g. "stream_timeout", "queue_full")
 	PreflightResult string // last preflight check result, if any
+}
+
+// preflightLabel returns the SPEC-004 §7 PreflightResult label for a
+// retry-attempt's routing-decision log. At afterAdvance time the
+// just-selected provider has already PASSED preflight inside
+// selectProviderExcluding (else selectProviderExcluding would have
+// returned a routeError and afterAdvance would not fire). So the
+// label is deterministic from request-time preflight-applicability:
+// "accepted" when preflight actually ran, "not_applicable" when it
+// was skipped because the estimate was below the threshold OR no
+// preflight function was wired. Issue #266 T1 R1 audit MEDIUM fix
+// (PreflightResult was previously empty on retries).
+func (s *Server) preflightLabel(estimatedTokens int) string {
+	if s.preflight == nil || estimatedTokens <= s.preflightThreshold {
+		return "not_applicable"
+	}
+	return "accepted"
 }
 
 // logRoutingDecisionRetry emits the SPEC-004 §7 routing-decision log

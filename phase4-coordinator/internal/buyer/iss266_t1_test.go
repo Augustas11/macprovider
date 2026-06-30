@@ -130,6 +130,33 @@ func TestSetRoutingClasses_InvalidatesStickyEntriesForChangedClasses(t *testing.
 	}
 }
 
+func TestSetRoutingClasses_InvalidateClassIsCaseInsensitive(t *testing.T) {
+	// R1 ARCHITECT audit MEDIUM fix: resolveModelClass uses EqualFold,
+	// so a class configured as "MLX-Fast" matches buyer model "mlx-fast",
+	// and stickyStore lands the entry with ModelScope="mlx-fast".
+	// InvalidateClass must purge those entries despite the case
+	// mismatch with the operator-configured class name.
+	s := newIss266Server(t, zerolog.Nop())
+	s.SetRoutingClasses(map[string]config.ModelClassConfig{
+		"MLX-Fast": {Objective: "fast", Models: []string{"qwen3-32b"}},
+	})
+	s.stickyMap.Update("conv:1", "acct1", "prov-A", "mlx-fast") // lower-case scope
+	s.stickyMap.Update("conv:2", "acct2", "prov-B", "MLX-FAST") // upper-case scope
+	s.stickyMap.Update("conv:3", "acct3", "prov-C", "OTHER")    // unrelated
+	if got := s.stickyMap.Len(); got != 3 {
+		t.Fatalf("setup: expected 3 entries, got %d", got)
+	}
+	_, invalidated := s.SetRoutingClasses(map[string]config.ModelClassConfig{
+		"MLX-Fast": {Objective: "fast", Models: []string{"qwen3-32b", "phi-14b"}},
+	})
+	if invalidated != 2 {
+		t.Fatalf("expected 2 case-variant entries invalidated, got %d", invalidated)
+	}
+	if got := s.stickyMap.Len(); got != 1 {
+		t.Fatalf("expected only 'OTHER' entry to survive, got len=%d", got)
+	}
+}
+
 func TestSetRoutingClasses_NoChangeIsNoOp(t *testing.T) {
 	s := newIss266Server(t, zerolog.Nop())
 	s.SetRoutingClasses(map[string]config.ModelClassConfig{
@@ -203,6 +230,37 @@ func TestLogRoutingDecisionRetry_EmitsPerAttemptFields(t *testing.T) {
 	// Legacy back-compat — pre-issue-#266 consumers key off "reason".
 	if got := row["reason"]; got != "retry_2" {
 		t.Fatalf("expected legacy reason=retry_2 preserved, got %v", got)
+	}
+}
+
+func TestPreflightLabel_NotApplicableWhenPreflightSkipped(t *testing.T) {
+	// R1 ARCH/CODE audit MEDIUM fix: PreflightResult must be populated
+	// on retry logs. When preflight isn't wired OR estimate is below
+	// threshold, the label is "not_applicable".
+	s := newIss266Server(t, zerolog.Nop())
+	s.preflight = nil
+	if got := s.preflightLabel(10000); got != "not_applicable" {
+		t.Fatalf("nil preflight → expected not_applicable, got %q", got)
+	}
+	s.preflight = func(p pool.Provider, _ string, _ int, _ time.Duration) (PreflightResult, bool, error) {
+		return PreflightResult{Accepted: true}, true, nil
+	}
+	s.preflightThreshold = 4096
+	if got := s.preflightLabel(100); got != "not_applicable" {
+		t.Fatalf("below-threshold estimate → expected not_applicable, got %q", got)
+	}
+}
+
+func TestPreflightLabel_AcceptedWhenPreflightRan(t *testing.T) {
+	s := newIss266Server(t, zerolog.Nop())
+	s.preflight = func(p pool.Provider, _ string, _ int, _ time.Duration) (PreflightResult, bool, error) {
+		return PreflightResult{Accepted: true}, true, nil
+	}
+	s.preflightThreshold = 4096
+	// At-threshold estimate triggers preflight path (test the > comparison
+	// vs >= depending on preflightCandidate's actual semantics).
+	if got := s.preflightLabel(10000); got != "accepted" {
+		t.Fatalf("above-threshold + preflight wired → expected accepted, got %q", got)
 	}
 }
 
@@ -313,21 +371,50 @@ func TestStickyMismatchLimiter_PerKeyIndependent(t *testing.T) {
 	}
 }
 
-func TestStickyMismatchLimiter_BoundedByMaxEntries(t *testing.T) {
+func TestStickyMismatchLimiter_AtCapAllInWindowDeniesNewKey(t *testing.T) {
+	// R1 CODE audit MEDIUM fix: at-cap with all entries within-window,
+	// allow() must DENY brand-new keys rather than evict legitimate
+	// ones. Bounds the per-window aggregate warn rate to MaxEntries
+	// under hostile unique-key rotation.
 	l := newStickyMismatchLimiter(time.Hour, 2)
+	base := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return base }
+	if !l.allow("conv:a") {
+		t.Fatalf("conv:a (cap available) must allow")
+	}
+	l.now = func() time.Time { return base.Add(1 * time.Second) }
+	if !l.allow("conv:b") {
+		t.Fatalf("conv:b (cap available) must allow")
+	}
+	l.now = func() time.Time { return base.Add(2 * time.Second) }
+	if l.allow("conv:c") {
+		t.Fatalf("conv:c (at cap, no expired) MUST be denied")
+	}
+	if got := l.lenLocked(); got != 2 {
+		t.Fatalf("denied insert must not grow map; got len=%d want 2", got)
+	}
+	// conv:a is still tracked and still within-window — it stays denied.
+	l.now = func() time.Time { return base.Add(3 * time.Second) }
+	if l.allow("conv:a") {
+		t.Fatalf("conv:a still within-window MUST be denied")
+	}
+}
+
+func TestStickyMismatchLimiter_ExpiredEntriesSweptToFreeCap(t *testing.T) {
+	// Once an existing entry expires past the window, a new key can
+	// take its slot. Verifies the sweep-before-deny path runs.
+	l := newStickyMismatchLimiter(time.Minute, 2)
 	base := time.Unix(1_700_000_000, 0)
 	l.now = func() time.Time { return base }
 	l.allow("conv:a")
 	l.now = func() time.Time { return base.Add(1 * time.Second) }
 	l.allow("conv:b")
-	l.now = func() time.Time { return base.Add(2 * time.Second) }
-	l.allow("conv:c") // evicts oldest (conv:a) because cap=2 and all in-window
-	if got := l.lenLocked(); got != 2 {
-		t.Fatalf("expected at-cap len=2, got %d", got)
+	// Advance past window — both prior entries expire.
+	l.now = func() time.Time { return base.Add(2 * time.Minute) }
+	if !l.allow("conv:c") {
+		t.Fatalf("conv:c must allow once prior entries expire")
 	}
-	// conv:a was evicted, so it should allow again on the next call.
-	l.now = func() time.Time { return base.Add(3 * time.Second) }
-	if !l.allow("conv:a") {
-		t.Fatalf("conv:a was evicted — must allow again")
+	if got := l.lenLocked(); got != 1 {
+		t.Fatalf("expected sweep to drop expired entries; got len=%d want 1", got)
 	}
 }

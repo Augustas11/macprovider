@@ -49,6 +49,17 @@ func newStickyMismatchLimiter(window time.Duration, maxEntries int) *stickyMisma
 // since the prior allow. Empty key falls back to a single shared
 // bucket so an unkeyed caller still gets throttled (defensive — the
 // real caller always has a non-empty key).
+//
+// Cap-bound hostile-rotation defence: when the entries table is at
+// MaxEntries AND every entry is still within-window, allow() DENIES
+// the brand-new key (returns false). This bounds the per-second
+// warn rate under unique-key-rotation pressure to the rate of
+// expirations — i.e., at steady state, at most MaxEntries warns
+// per window across all unique keys. Without this guard, a hostile
+// gateway rotating unique conv-keys faster than `window` could
+// drive one warn per request (each new key falls through the
+// at-cap eviction path and emits its first warn). Issue #266 T1
+// R1 CODE audit MEDIUM finding.
 func (l *stickyMismatchLimiter) allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -61,39 +72,29 @@ func (l *stickyMismatchLimiter) allow(key string) bool {
 		return true
 	}
 	if len(l.entries) >= l.maxEntries {
-		l.evictOldestLocked(now)
+		l.sweepExpiredLocked(now)
+		if len(l.entries) >= l.maxEntries {
+			// Cap still full after sweep — every existing entry is
+			// within-window. Deny the new key rather than evicting a
+			// legitimate one; aggregate warn rate stays bounded to
+			// MaxEntries per window across all unique keys. R1 CODE
+			// audit MEDIUM fix.
+			return false
+		}
 	}
 	l.entries[key] = now
 	return true
 }
 
-func (l *stickyMismatchLimiter) evictOldestLocked(now time.Time) {
-	// First sweep: drop every entry older than window (expired —
-	// future calls would allow regardless). This keeps the map
-	// trim under sustained pressure without paying full O(n) every
-	// time at the cap.
+// sweepExpiredLocked drops every entry older than the window. This
+// is the only path that removes entries: callers at-cap with an
+// all-within-window map are explicitly DENIED rather than evicting
+// a legitimate in-window entry. Caller must hold l.mu.
+func (l *stickyMismatchLimiter) sweepExpiredLocked(now time.Time) {
 	for k, last := range l.entries {
 		if now.Sub(last) >= l.window {
 			delete(l.entries, k)
 		}
-	}
-	if len(l.entries) < l.maxEntries {
-		return
-	}
-	// Sweep did not free space (every entry is within-window).
-	// Evict the single oldest to make room.
-	var oldestKey string
-	var oldestAt time.Time
-	first := true
-	for k, last := range l.entries {
-		if first || last.Before(oldestAt) {
-			oldestKey = k
-			oldestAt = last
-			first = false
-		}
-	}
-	if oldestKey != "" {
-		delete(l.entries, oldestKey)
 	}
 }
 
