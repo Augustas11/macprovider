@@ -521,9 +521,31 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		usage := *reported
 		observedCompletion := estimateStreamingCompletionTokens(emitted, maxTokens)
 		if observedCompletion > usage.CompletionTokens {
-			// Provider under-reported relative to streamed bytes. Use the
-			// gateway estimate so the provider isn't under-billed for content
-			// that was actually streamed.
+			// Issue #278: the gateway byte estimator can run slightly higher
+			// than the provider's tokenizer on normal English output. Clamp
+			// upward-estimator inflation when the gap sits inside the same
+			// safe window as the downward #255 clamp.
+			//
+			// Outside the window — below floor (benign tokenizer noise) OR
+			// above ceiling (too large to be tokenizer noise; likely stream
+			// truncation or zero-report fraud where the provider's usage chunk
+			// under-reports content actually generated) — trust the gateway's
+			// byte-derived estimate.
+			overshoot := observedCompletion - usage.CompletionTokens
+			if overshoot > clampFloorTokens && overshoot <= clampCeilingTokens {
+				slog.Info("streaming gateway clamped under-reported completion tokens; gateway estimate higher",
+					"request_id", requestID(r),
+					"account_id", subject.AccountID,
+					"reported", usage.CompletionTokens,
+					"observed", observedCompletion,
+					"overshoot", overshoot,
+					"window_floor", clampFloorTokens,
+					"window_ceiling", clampCeilingTokens,
+					"outcome", outcome,
+				)
+				s.settleAfterCommit(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome, reservationWindow)
+				return
+			}
 			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
 			return
 		}
