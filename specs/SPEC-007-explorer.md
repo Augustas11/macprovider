@@ -2582,61 +2582,61 @@ Verification:
 - Assert no duplicate `request_log_id`.
 - Assert no seeded row older than the first page boundary is skipped.
 ### AC-7: session detail joins request, ledger, and gateway under the composite key
-Verification (v0.3 — path-segment is coordinator-internal `request_id`):
+Verification (v0.5 — typed path-segments `int_` / `ext_`, #245):
 - Seed one row in coordinator `request_log` with internal
   `request_id = R_int`, `external_request_id = X`, `account_id = "acct_A"`.
 - Seed matching `ledger_request_credits` keyed by `R_int`.
 - Seed matching `ledger_operator_credits` keyed by `R_int`.
 - Seed gateway `usage_events` with `(account_id, request_id) =
   ("acct_A", X)`. Coordinator-internal joins use `R_int`; the
-  gateway proxy MUST forward `external_request_id` (`X`) +
+  gateway proxy MUST forward the typed
+  `ext_<external_request_id>` (`ext_X`) +
   `?account_id=acct_A` so the gateway-side composite-PK lookup
   returns the matching account's row.
-- Request `GET /admin/explorer/sessions/R_int`.
+- Request `GET /admin/explorer/sessions/int_R_int`.
 - Assert response contains coordinator attempt fields.
 - Assert response contains ledger credit fields.
 - Assert response contains gateway usage fields, scoped to
   `account_id = "acct_A"`.
-- **Gateway-proxy URL sub-case (v0.3 §5.6 security contract):**
+- **Gateway-proxy URL sub-case (v0.5 §5.6 security contract):**
   inspect the outbound gateway HTTP request and assert the path
-  is `/admin/explorer/sessions/X?account_id=acct_A` — NOT
-  `/admin/explorer/sessions/R_int`. Forwarding the internal id
-  risks the gateway interpreting it as an external_request_id
+  is `/admin/explorer/sessions/ext_X?account_id=acct_A` — NOT
+  `/admin/explorer/sessions/int_R_int`. Forwarding the internal
+  id risks the gateway interpreting it as an external_request_id
   and returning unrelated single-account data.
-- **Cross-account isolation sub-case (v0.3 gateway-proxy
+- **Cross-account isolation sub-case (v0.5 gateway-proxy
   guarantee):**
   - Additionally seed a second coordinator `request_log` row with
     internal `request_id = R_int2`, `external_request_id = X`,
     `account_id = "acct_B"`, plus a matching gateway
     `usage_events` row with `(account_id, request_id) =
     ("acct_B", X)`.
-  - Request `GET /admin/explorer/sessions/R_int2`.
+  - Request `GET /admin/explorer/sessions/int_R_int2`.
   - Assert the gateway-proxy URL is
-    `/admin/explorer/sessions/X?account_id=acct_B` and the
+    `/admin/explorer/sessions/ext_X?account_id=acct_B` and the
     response contains only `acct_B`'s gateway data; `acct_A`'s
     rows MUST NOT appear.
 - **Legacy NULL-account "no proxy" sub-case (both-or-nothing):**
   - Seed a coordinator `request_log` row with NULL `account_id`
     + non-empty `external_request_id` (pre-v0.9.1 gateway shape).
-  - Request the session detail; assert the coordinator-side
-    detail (attempts/ledger/snapshots) is returned with
-    `gateway: {"error": {"code": "gateway_identity_unavailable"}}`.
-    The coordinator MUST NOT proxy to the gateway because
-    `account_id` is missing — the both-or-nothing contract
-    treats this as an expected legacy-identity-limit, not a
-    gateway failure.
+  - Request the session detail (`int_<id>`); assert the
+    coordinator-side detail (attempts/ledger/snapshots) is
+    returned with `gateway: {"error": {"code":
+    "gateway_identity_unavailable"}}`. The coordinator MUST NOT
+    proxy to the gateway because `account_id` is missing — the
+    both-or-nothing contract treats this as an expected
+    legacy-identity-limit, not a gateway failure.
   - Repeat for a row with non-NULL `account_id` but empty
     `external_request_id` (direct legacy buyer call with no
     inbound X-Request-ID): assert the same
     `gateway_identity_unavailable` outcome.
-
-**Deferred to v0.4 (not required by AC-7 in v0.3):**
-- Operator pasting `external_request_id` directly into the path
-  segment and 409 `ambiguous_request_id` on cross-account
-  collision when no `?account_id=` is supplied. The 409 contract
-  for the gateway-side endpoint (§6.4) is normative in v0.3; the
-  coordinator-side path-segment overload that would expose it is
-  v0.4 work.
+- **Untyped-rejection sub-case (v0.5 break, #245):** request
+  `GET /admin/explorer/sessions/R_int` (no `int_` prefix).
+  Assert the coordinator returns
+  `400 invalid_request_error` with `code: session_id_untyped`
+  and does NOT reach SQL. The same untyped-rejection contract
+  applies to the gateway-side `§6.4` endpoint with the `ext_`
+  prefix.
 ### AC-8: provider list reflects live pool
 Verification:
 - Start coordinator with two live providers in registry.

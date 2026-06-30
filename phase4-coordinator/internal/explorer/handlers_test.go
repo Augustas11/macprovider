@@ -121,14 +121,15 @@ func TestAC07_SessionDetailIncludesLocalAndGatewayData(t *testing.T) {
 }
 
 // TestSessionDetailGatewayProxyUsesExternalRequestIDAndAccountID pins
-// the ISS-212 v0.3 §5.6 security contract: when the coordinator
-// resolves the path-segment as an internal request_id and the
-// resolved request_log row carries an external_request_id and
-// account_id, the gateway proxy URL MUST be
-// /admin/explorer/sessions/{external_request_id}?account_id=<account_id>.
+// the §5.6 security contract: when the coordinator resolves the
+// path-segment as an internal request_id and the resolved
+// request_log row carries an external_request_id and account_id,
+// the gateway proxy URL MUST be
+// /admin/explorer/sessions/ext_<external_request_id>?account_id=<account_id>.
 // Forwarding the coordinator-internal id risks the gateway
 // interpreting it as a buyer-supplied X-Request-ID and returning a
-// wrong-account 200 (ISS-212 R3 security MEDIUM).
+// wrong-account 200 (ISS-212 R3 security MEDIUM). SPEC-007 v0.5
+// (#245) made the ext_ prefix mandatory.
 func TestSessionDetailGatewayProxyUsesExternalRequestIDAndAccountID(t *testing.T) {
 	h, db := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
 	if _, err := db.ExecContext(context.Background(),

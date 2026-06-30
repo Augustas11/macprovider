@@ -104,7 +104,15 @@ func TestExplorerSessionDetail_UntypedReturns400(t *testing.T) {
 // (parseTypedSegment rejects empty stripped IDs).
 func TestExplorerSessionDetail_EmptyExtPrefixReturns400(t *testing.T) {
 	h, _, _, cfg := newTestHarness(t, fakeOAuth{})
-	assertStatus(t, h, http.MethodGet,
+	resp := assertStatus(t, h, http.MethodGet,
 		"/admin/explorer/sessions/ext_",
 		cfg.Coordinator.OperatorKey, "", "", http.StatusBadRequest)
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	errBody, _ := body["error"].(map[string]any)
+	if code, _ := errBody["code"].(string); code != "session_id_untyped" {
+		t.Errorf("error.code=%q, want session_id_untyped; body=%s", code, resp.Body.String())
+	}
 }

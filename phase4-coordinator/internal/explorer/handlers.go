@@ -182,14 +182,24 @@ func (h *Handler) handleSessionDetail(ctx context.Context, w http.ResponseWriter
 		writeExplorerError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
-	// SPEC-007 v0.5 (#245): path-segment MUST carry an `int_` prefix.
-	// Untyped (legacy bare-UUID) calls return 400 session_id_untyped.
+	// SPEC-007 v0.5 §5.6 (#245): path-segment MUST carry an `int_`
+	// prefix. Untyped (legacy bare-UUID) calls return
+	// 400 invalid_request_error + session_id_untyped. Envelope shape
+	// matches the gateway §6.4 emit so dashboard/runbook matchers
+	// behave the same across both phases (R1 SEC LOW-1 closure).
 	// The v0.4 deprecation-window log emit is removed; that path is
 	// no longer reachable.
 	stripped, ok := strings.CutPrefix(requestID, "int_")
 	if !ok || stripped == "" {
-		writeExplorerError(w, http.StatusBadRequest, "session_id_untyped",
-			"path-segment must be int_<request_id> — bare ids rejected per SPEC-007 v0.5")
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": map[string]any{
+				"type":      "invalid_request_error",
+				"code":      "session_id_untyped",
+				"message":   "path-segment must be int_<request_id> — bare ids rejected per SPEC-007 v0.5",
+				"source":    "coordinator",
+				"retryable": false,
+			},
+		})
 		return
 	}
 	requestID = stripped
@@ -225,12 +235,10 @@ func (h *Handler) handleSessionDetail(ctx context.Context, w http.ResponseWriter
 		// "gateway_identity_unavailable" rather than forwarded.
 		external, account := firstAttemptWithBothFields(detail)
 		if external != "" && account != "" {
-			// #231 SPEC-007 v0.4 (R5 code LOW closure): the gateway
-			// accepts `ext_<external_request_id>` as the typed
-			// path-segment form (v0.5 will reject bare-id). Send
-			// the typed prefix so the coordinator-driven proxy
-			// doesn't trigger the gateway's untyped-deprecation
-			// audit on every operator click.
+			// SPEC-007 §6.4 v0.5 (#245): the gateway REQUIRES the typed
+			// `ext_<external_request_id>` path-segment form. Untyped
+			// calls return 400 session_id_untyped — so the coordinator
+			// MUST send the typed prefix on every proxy.
 			gwPath := "/admin/explorer/sessions/ext_" + url.PathEscape(external)
 			vs := url.Values{}
 			vs.Set("account_id", account)

@@ -112,7 +112,7 @@ function cell(k, v, row) {
 
 function linkFor(k, v, _row) {
   if (!v) return null;
-  // SPEC-007 v0.5 (#245): coordinator-internal request_id MUST be emitted with the `int_` prefix.
+  // SPEC-007 §5.6 v0.5 (#245): coordinator-internal request_id MUST be emitted with the `int_` prefix.
   if (k === "request_id") return action("sessions",    `/admin/explorer/sessions/int_${encodeURIComponent(v)}`, v);
   if (k === "account_id") return action("buyers",      `/admin/explorer/buyers/${encodeURIComponent(v)}`, v);
   if (k === "provider_id") return action("providers",  `/admin/explorer/providers/${encodeURIComponent(v)}`, v);

@@ -2,13 +2,10 @@ package explorer
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/augstar/macprovider-coordinator/internal/config"
 )
 
 // TestSessionDetail_IntPrefixIsStripped pins SPEC-007 v0.4 §5.6
@@ -50,6 +47,12 @@ func TestSessionDetail_UntypedReturns400(t *testing.T) {
 	if !strings.Contains(body, `"code":"session_id_untyped"`) {
 		t.Errorf("expected session_id_untyped code; body=%s", body)
 	}
+	// R1 SEC LOW-1: envelope MUST carry type=invalid_request_error so
+	// dashboard / runbook matchers behave the same across coordinator
+	// (§5.6) and gateway (§6.4).
+	if !strings.Contains(body, `"type":"invalid_request_error"`) {
+		t.Errorf("expected type=invalid_request_error; body=%s", body)
+	}
 }
 
 // TestSessionDetail_EmptyIntPrefixReturns400 pins that
@@ -67,6 +70,3 @@ func TestSessionDetail_EmptyIntPrefixReturns400(t *testing.T) {
 	}
 }
 
-// ensure unused-import guard
-var _ = io.Discard
-var _ = config.Config{}
