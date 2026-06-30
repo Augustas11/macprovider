@@ -276,6 +276,39 @@ func TestConsumeSSE_EnvelopeThenBlankLineThenEOF_232_R5(t *testing.T) {
 	}
 }
 
+// TestConsumeSSE_EnvelopeImmediatelyBeforeDONENoBlankLine_232_R6_HIGH:
+// SEC R6 HIGH-1 attack vector. Per HTML5/SSE spec, consecutive `data:`
+// lines without an intervening blank line form ONE event with data
+// concatenated by `\n`. So `data: {error}\ndata: [DONE]\n\n` is NOT
+// a dispatched envelope + terminator — it is ONE event whose data is
+// `{error}\n[DONE]`. Spec-compliant clients dispatch that one merged
+// event, which is neither a clean `[DONE]` (so no termination) nor a
+// standalone envelope (so no corroboration). The harness must require
+// envelopeDispatched on the `[DONE]` path too.
+func TestConsumeSSE_EnvelopeImmediatelyBeforeDONENoBlankLine_232_R6_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("data: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawSSEErrorEvent {
+		t.Errorf("envelope+immediate-[DONE] (no blank-line dispatch) MUST NOT corroborate — got true (#232 R6 SEC HIGH)")
+	}
+}
+
+// TestConsumeSSE_EnvelopeBlankLineDONE_232_R6:
+// happy-path control: envelope + blank line + [DONE] DOES corroborate
+// (event was dispatched between envelope and terminator).
+func TestConsumeSSE_EnvelopeBlankLineDONE_232_R6(t *testing.T) {
+	body := bytes.NewBufferString("data: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"legit\"}}\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawSSEErrorEvent {
+		t.Errorf("envelope+blank-line+[DONE] must corroborate")
+	}
+	if r.SSEErrorCode != "stream_truncated" {
+		t.Errorf("SSEErrorCode = %q, want stream_truncated", r.SSEErrorCode)
+	}
+}
+
 // TestConsumeSSE_PostDONEForgedEnvelopeWithEOF_232_R3_HIGH:
 // the EOF variant of the same attack. Clean completion + first `[DONE]`,
 // then forged envelope, then EOF (no second `[DONE]`).

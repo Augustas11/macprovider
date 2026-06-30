@@ -353,15 +353,19 @@ func consumeSSE(body io.Reader, res *Result) {
 					// then forge a terminal error envelope post-`[DONE]`
 					// to satisfy the corroboration check.
 					//
-					// `[DONE]` itself is on its own data line, which
-					// implies the preceding event (the standalone error
-					// envelope, if present) was fully buffered and the
-					// gateway moved to the terminator. We treat the
-					// `[DONE]` line as event-completing for the envelope
-					// without requiring an explicit intervening blank
-					// line; this matches OpenAI clients.
+					// #232 R6 SEC HIGH — `[DONE]` path also requires
+					// `envelopeDispatched`. Per HTML5/SSE spec, multiple
+					// consecutive `data:` lines without an intervening
+					// blank line form ONE event with concatenated data.
+					// So `data: {forged}\ndata: [DONE]\n\n` is NOT a
+					// dispatch-then-terminate pair — it's one event
+					// whose data is `{forged}\n[DONE]`, which is neither
+					// a clean terminator nor a standalone envelope to
+					// spec-compliant clients. The harness must require
+					// a blank-line dispatch between the envelope and
+					// `[DONE]` to match buyer-visible behavior.
 					res.SawTerminator = true
-					if lastWasErrorEnvelope {
+					if lastWasErrorEnvelope && envelopeDispatched {
 						res.SawSSEErrorEvent = true
 						res.SSEErrorCode = lastErrorCode
 					}

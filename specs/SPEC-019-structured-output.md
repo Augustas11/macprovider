@@ -1306,11 +1306,15 @@ itself writes a non-`"ok"` `usage_events` row at the same time the envelope
 is emitted. Forwarded v0.2 structured-output terminal frames where the
 gateway PASSES THROUGH the provider's envelope and SKIPS positive/ok
 settlement (no gateway `usage_events` row) do not trigger the mapping
-check — there is no settlement row to match against. `malformed_json_response`
-and `json_schema_validation_failed` are valid `error.code` values for the
+check — there is no settlement row to match against. All four v0.2
+terminal codes — `malformed_json_response`, `json_schema_validation_failed`,
+`response_byte_cap_exceeded`, and the provider/coordinator pass-through
+variant of `provider_timeout` — are valid `error.code` values for the
 shape/position contract regardless. When SPEC-019 paths DO settle a non-ok
-gateway `usage_events` row, the mapping is `error.code = usage_events.outcome`
-by default, with any divergence added to the §17.7.1 mapping-exception list.
+gateway `usage_events` row (e.g. the gateway-owned wall-clock
+`provider_timeout` written by `writeStructuredOutputTimeoutSSE`), the
+mapping is `error.code = usage_events.outcome` by default, with any
+divergence added to the §17.7.1 mapping-exception list.
 
 Provider-to-coordinator WS streaming terminal validation failure MUST close the
 WS stream with `inference_response_end.status` in `{malformed_json_response,

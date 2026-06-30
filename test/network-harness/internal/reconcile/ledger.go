@@ -555,7 +555,46 @@ func fallbackOverbillSuppressed(p MatchedPair) bool {
 	if isGatewayOKOutcome(p.GatewayOutcome) {
 		return false
 	}
-	return p.HarnessSawSSEErrorEvent
+	if !p.HarnessSawSSEErrorEvent {
+		return false
+	}
+	// #232 R6 SEC + ARCH convergent HIGH — enforce the SPEC-006 §17.7.1
+	// code/outcome mapping clause. The harness MUST refuse to suppress
+	// unless the buyer-visible `error.code` agrees with the gateway's
+	// `usage_events.outcome` (either by default equality OR by a named
+	// mapping exception). An unlisted mismatch (e.g. buyer code
+	// `provider_timeout` against outcome `stream_truncated`) is
+	// uncorroborated by SPEC; suppressing it would re-open the trust
+	// gap #232 is closing.
+	return sseErrorCorroboratesOutcome(p.HarnessSSEErrorCode, p.GatewayOutcome)
+}
+
+// sseErrorCorroboratesOutcome implements the SPEC-006 §17.7.1 code/
+// outcome mapping check. It returns true when the buyer-visible
+// `error.code` agrees with the gateway's `usage_events.outcome`, either
+// because they are byte-identical (the default rule) or because the
+// pair is on the named-mapping-exception list. Any unlisted mismatch
+// returns false.
+//
+// Empty `code` returns false defensively — the parser only sets
+// HarnessSSEErrorCode when a standalone envelope was dispatched, so an
+// empty code alongside HarnessSawSSEErrorEvent=true would be a parser
+// bug; refuse to suppress.
+//
+// Future named-mapping exceptions added to SPEC-006 §17.7.1 MUST also
+// be added here as additional case branches.
+func sseErrorCorroboratesOutcome(code, outcome string) bool {
+	if code == "" {
+		return false
+	}
+	if code == outcome {
+		return true
+	}
+	// Named mapping exception per SPEC-006 §17.7.1:
+	if code == "provider_disconnected" && outcome == "stream_truncated" {
+		return true
+	}
+	return false
 }
 
 // collectUnmatchedGatewayOK lists gateway rows with outcome="ok" that
@@ -1015,7 +1054,14 @@ func isSettlementComplete(outcome string) bool {
 		"stream_malformed",
 		"stream_output_exceeded",
 		"upstream_error",
-		"provider_timeout":
+		"provider_timeout",
+		// `client_disconnect` and `invalid_provider_usage` are gateway-
+		// settled outcomes for non-success paths (client-disconnect
+		// surface vs malformed-provider-usage detection). Adding both
+		// keeps the reconciler from surfacing these rows as
+		// unmatched/incomplete. (#232 R6 CODE LOW.)
+		"client_disconnect",
+		"invalid_provider_usage":
 		return true
 	}
 	return false
