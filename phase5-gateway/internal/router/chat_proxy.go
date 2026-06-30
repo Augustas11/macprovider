@@ -519,62 +519,32 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	}
 	settleReported := func(outcome string) {
 		usage := *reported
+		observedRawCompletion := estimateTokensFromBytes(emitted)
 		observedCompletion := estimateStreamingCompletionTokens(emitted, maxTokens)
-		if observedCompletion > usage.CompletionTokens {
-			// Issue #278: the gateway byte estimator can run slightly higher
-			// than the provider's tokenizer on normal English output. Clamp
-			// upward-estimator inflation when the gap sits inside the same
-			// safe window as the downward #255 clamp.
-			//
-			// Outside the window — below floor (benign tokenizer noise) OR
-			// above ceiling (too large to be tokenizer noise; likely stream
-			// truncation or zero-report fraud where the provider's usage chunk
-			// under-reports content actually generated) — trust the gateway's
-			// byte-derived estimate.
-			overshoot := observedCompletion - usage.CompletionTokens
-			if overshoot > clampFloorTokens && overshoot <= clampCeilingTokens {
-				slog.Info("streaming gateway clamped under-reported completion tokens; gateway estimate higher",
+		maxCompletion := maxStreamingCompletionTokens(maxTokens)
+		if usage.CompletionTokens > maxCompletion {
+			outcome = "stream_output_exceeded"
+			if observedRawCompletion < usage.CompletionTokens {
+				slog.Warn("streaming provider usage reported over max_tokens without matching emitted output; falling back to gateway estimate",
 					"request_id", requestID(r),
 					"account_id", subject.AccountID,
 					"reported", usage.CompletionTokens,
-					"observed", observedCompletion,
-					"overshoot", overshoot,
-					"window_floor", clampFloorTokens,
-					"window_ceiling", clampCeilingTokens,
-					"outcome", outcome,
+					"observed", observedRawCompletion,
+					"max_completion_tokens", maxCompletion,
 				)
-				s.settleAfterCommit(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome, reservationWindow)
+				s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
 				return
 			}
-			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
-			return
 		}
-		// Issue #255: provider may report MORE completion tokens than were
-		// streamed as delta.content — e.g. a tokenizer counts EOS or
-		// chat-template stop tokens that never reach the buyer as content.
-		// Surfaced on Qwen2.5-Coder-7B-Instruct-4bit with consistent
-		// +4..+7 over-reports vs both harness and coord (which agree).
-		// Clamp downward when the over-report sits inside the safe window
-		// (see clampWindow). Outside the window — too small (benign noise)
-		// or too large (gateway byte-estimate undercounts dense content;
-		// clamping would under-bill the provider) — trust the provider.
-		// R1 security HIGH: keep usage.PromptTokens (provider's authoritative
-		// prompt count); usageFromJSON already proved prompt+completion ≤
-		// maxUsageTokens, so substituting the smaller observedCompletion
-		// can only lower the total.
-		overshoot := usage.CompletionTokens - observedCompletion
-		if overshoot > clampFloorTokens && overshoot <= clampCeilingTokens {
-			slog.Info("streaming gateway clamped over-reported completion tokens",
+		if providerUsageImplausiblyUnderreports(observedCompletion, usage.CompletionTokens) {
+			slog.Warn("streaming provider usage implausibly under-reported completion tokens; falling back to gateway estimate",
 				"request_id", requestID(r),
 				"account_id", subject.AccountID,
 				"reported", usage.CompletionTokens,
 				"observed", observedCompletion,
-				"overshoot", overshoot,
-				"window_floor", clampFloorTokens,
-				"window_ceiling", clampCeilingTokens,
 				"outcome", outcome,
 			)
-			s.settleAfterCommit(r, subject, usage.PromptTokens, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
+			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
 			return
 		}
 		s.settleAfterCommit(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome, reservationWindow)
@@ -638,8 +608,12 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				if deltaBytes > 0 {
 					projectedCompletion := estimateTokensFromBytes(emitted + deltaBytes)
 					maxCompletion := maxStreamingCompletionTokens(maxTokens)
-					if projectedCompletion > maxCompletion {
-						slog.Warn("streaming gateway estimate exceeded request maximum; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", projectedCompletion, "max_completion_tokens", maxCompletion)
+					hardByteCeiling := maxCompletion * 8
+					if hardByteCeiling < 1 {
+						hardByteCeiling = 1
+					}
+					if emitted+deltaBytes > hardByteCeiling {
+						slog.Warn("streaming gateway estimate exceeded hard byte ceiling; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", projectedCompletion, "max_completion_tokens", maxCompletion, "emitted_bytes", emitted+deltaBytes, "hard_byte_ceiling", hardByteCeiling)
 						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
 						if flusher != nil {
 							flusher.Flush()
@@ -650,7 +624,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					}
 					emitted += deltaBytes
 				}
-				if usage, ok, err := usageFromJSON([]byte(data), maxUsageTokens, maxTokens); ok {
+				if usage, ok, err := usageFromJSON([]byte(data), maxUsageTokens, maxTokens, true); ok {
 					if err != nil {
 						invalidReportedUsage = true
 						reported = nil
@@ -780,7 +754,12 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		settleReported("ok")
 		return
 	}
-	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "ok", reservationWindow)
+	completion := estimateStreamingCompletionTokens(emitted, maxTokens)
+	outcome := "ok"
+	if estimateTokensFromBytes(emitted) > maxStreamingCompletionTokens(maxTokens) {
+		outcome = "stream_output_exceeded"
+	}
+	s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
 }
 
 func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
@@ -1066,67 +1045,21 @@ func estimateStreamingCompletionTokens(emitted, maxTokens int64) int64 {
 	return completion
 }
 
-// Shared clamp window for the streaming completion-token symmetric
-// clamp: downward over-report (#255) AND upward estimator inflation
-// (#278). Pure absolute bounds — no percentage scaling, no
-// direction-specific tuning. The two directions are intentionally
-// symmetric and MUST stay so; do not tune one side independently
-// without a fresh 3-lane audit on both.
-//
-// Let `o` be the absolute disagreement between provider's reported
-// `usage.completion_tokens` and the gateway's byte-derived estimate.
-// The clamp fires iff `clampFloorTokens < o <= clampCeilingTokens` in
-// either direction:
-//
-//   - Downward (reported > observed; #255): clamp DOWN to observed,
-//     token_source = "gateway_estimated". The provider over-reported
-//     by a small amount; gateway's byte count wins.
-//
-//   - Upward   (observed > reported; #278): clamp UP to reported,
-//     token_source = "provider_reported". The gateway's byte
-//     estimator inflated above the provider's tokenizer (e.g.
-//     ceil(N/4) overshoots on English where ~4.3-4.7 bytes/token);
-//     provider's tokenizer is authoritative on its own output for
-//     small disagreements. Surfaced by v0.4 scenario 07 (4 of 40
-//     successful streaming pairs over-billed by +6 to +9 tokens).
-//
-// Outside the window neither direction clamps (the existing
-// authority wins):
-//
-//   - Below `clampFloorTokens` (≤ 2 tokens, either direction): benign
-//     tokenizer noise (EOS / chat-template stop tokens not in delta
-//     content; or sub-byte rounding in ceil(N/4)). Downward keeps
-//     `provider_reported`; upward keeps `gateway_estimated`.
-//
-//   - Above `clampCeilingTokens` (> 20 tokens): too large to be
-//     tokenizer noise. Downward: byte estimate unreliable on dense
-//     content (CJK / code / short tokens where 1 token < 4 bytes);
-//     trust the provider. Upward: stream truncation or zero-report
-//     fraud — provider's usage chunk plausibly under-reports content
-//     actually generated; trust the byte estimator.
-//
-// Earlier rounds tried a percentage formula but R2 audits caught a
-// false-positive class: a legitimate moderate-density report
-// (e.g. observed=225 byte-tokens, reported=300 actual tokens) sat
-// inside the percentage window and got clamped, under-billing the
-// provider. Pure absolute bounds eliminate that class — any overshoot
-// > 20 tokens is trusted as density mismatch / truncation.
-//
-// Cost (symmetric in both directions): an adversarial provider can
-// systematically over- or under-report by up to 20 tokens per
-// request. Bounded and small per-request; logged each time the clamp
-// fires for audit visibility. Closing the residual skim surfaces
-// requires a tokenizer-grounded observation (replacing the byte
-// heuristic) — out of scope for #255 and #278.
-const (
-	clampFloorTokens   int64 = 2
-	clampCeilingTokens int64 = 20
-)
-
-// clampWindow returns the (floor, ceiling] bounds as a tuple for
-// callers that want both at once (e.g. log lines, tests).
-func clampWindow() (floor, ceiling int64) {
-	return clampFloorTokens, clampCeilingTokens
+func providerUsageImplausiblyUnderreports(observed, reported int64) bool {
+	if observed <= reported {
+		return false
+	}
+	gap := observed - reported
+	if gap <= 20 {
+		return false
+	}
+	if reported == 0 {
+		return true
+	}
+	if observed > math.MaxInt64/2 || reported > math.MaxInt64/3 {
+		return false
+	}
+	return observed*2 > reported*3
 }
 
 func maxStreamingCompletionTokens(maxTokens int64) int64 {
@@ -1371,12 +1304,11 @@ func parseChatRequest(body []byte) (chatRequest, error) {
 // (computed from promptCapTokens(body) + maxTokens at the call site
 // so the chat-template headroom is included).
 //
-// maxCompletion — independent ceiling on completion_tokens (=
-// buyer's max_tokens). Without this separate check, a malicious
-// provider could spend the prompt-cap headroom as inflated
-// completion tokens, over-billing the buyer above the requested
-// max_tokens. R1 CODE HIGH #1 (2026-06-28).
-func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64) (tokenUsage, bool, error) {
+// maxCompletion is enforced for non-streaming responses. Streaming
+// callers can allow completion_tokens above max_tokens so a provider
+// usage chunk can settle as stream_output_exceeded instead of being
+// treated as malformed usage.
+func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowCompletionOverMax ...bool) (tokenUsage, bool, error) {
 	var envelope struct {
 		Usage json.RawMessage `json:"usage"`
 	}
@@ -1409,7 +1341,7 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64) (tokenUsage
 	if usage.PromptTokens > math.MaxInt64-usage.CompletionTokens {
 		return tokenUsage{}, true, fmt.Errorf("usage token total overflows int64")
 	}
-	if usage.CompletionTokens > maxCompletion {
+	if len(allowCompletionOverMax) == 0 && usage.CompletionTokens > maxCompletion {
 		return tokenUsage{}, true, fmt.Errorf("usage completion_tokens exceeds request max_tokens")
 	}
 	sum := usage.PromptTokens + usage.CompletionTokens
