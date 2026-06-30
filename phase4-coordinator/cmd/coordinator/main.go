@@ -919,6 +919,19 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 	}
 	updated := wsServer.RefreshTier2HashStatuses()
 	logger.Info().Int("provider_hash_statuses_updated", updated).Msg("tier2 config reloaded")
+	// Issue #266 T1 — wire SPEC-004 FR-SR-5 paragraph 2 ("invalidate
+	// on class reconfig"): swap the buyer-server's routing.model_classes
+	// snapshot and purge sticky-affinity entries for any class whose
+	// membership shape changed. Default-OFF posture preserved: when
+	// model_classes is unset / unchanged the call returns 0 changes.
+	changed, invalidated := buyerServer.SetRoutingClasses(cfg.Routing.ModelClasses)
+	if len(changed) > 0 {
+		logger.Info().
+			Strs("changed_classes", changed).
+			Int("sticky_entries_invalidated", invalidated).
+			Str("event", "spec004_fr_sr_5_class_reload").
+			Msg("routing.model_classes reload: shape changed; sticky entries invalidated")
+	}
 }
 
 func tier2StartupFieldsChanged(startup, next config.Tier2Config) bool {

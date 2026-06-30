@@ -69,4 +69,15 @@ type forwardState struct {
 	// advance (failover or retry). The three forwardFn closures read
 	// state.provider to drive their dispatch.
 	provider pool.Provider
+
+	// dailyKey is the UTC YYYY-MM-DD bucket snapshot captured ONCE at
+	// request start (handleChatCompletions) and reused by every
+	// retry attempt's seedForRequest derivation. This preserves
+	// FR-SR-17 reproducibility for requests that span UTC midnight:
+	// a retry that re-rolls at 00:01 UTC must produce the SAME seed
+	// as the first attempt that fired at 23:59 UTC, since the
+	// request_id is identical and the daily-key MUST be sticky to
+	// the request, not to wall-clock time at the per-attempt
+	// derivation point. Issue #266 deferred safety/correctness item.
+	dailyKey string
 }

@@ -110,8 +110,15 @@ type Server struct {
 	requestTimeout         time.Duration
 	failoverEnabled        bool
 	failoverTimeout        time.Duration
-	tiebreakRandomize      bool
-	tiebreakEpsilon        float64
+	tiebreakRandomize bool
+	tiebreakEpsilon   float64
+	// routingMu guards modelClasses, which is hot-swapped on SIGHUP
+	// when routing.model_classes shape changes (issue #266 T1).
+	// Pre-SIGHUP readers (handleModels iteration at modelEntry build;
+	// resolveModelClass per-request hot path) MUST take a read lock
+	// or use the snapshot accessors below — never read s.modelClasses
+	// directly outside the routingMu critical section.
+	routingMu              sync.RWMutex
 	modelClasses           map[string]config.ModelClassConfig
 	maxRetries             int
 	retryPerAttemptTimeout time.Duration
@@ -120,6 +127,10 @@ type Server struct {
 	stickyTTL              time.Duration
 	stickyMaxEntries       int
 	stickyMap              *sticky.Map
+	// stickyMismatchLimiter throttles the sticky_account_mismatch
+	// warn-log per conversation_key to defend against hostile-gateway
+	// log flooding. Issue #266 T1 operational-hygiene item.
+	stickyMismatchLimiter *stickyMismatchLimiter
 	internalAuthKey        string
 	gatewayServiceToken    string
 	tier2Mu                sync.RWMutex
@@ -264,7 +275,9 @@ func WithRoutingConfig(cfg config.RoutingConfig) Option {
 	return func(s *Server) {
 		s.tiebreakRandomize = cfg.TiebreakRandomize
 		s.tiebreakEpsilon = cfg.TiebreakEpsilon
+		s.routingMu.Lock()
 		s.modelClasses = cloneModelClasses(cfg.ModelClasses)
+		s.routingMu.Unlock()
 		s.maxRetries = cfg.MaxRetries
 		if cfg.RetryPerAttemptTimeoutS > 0 {
 			s.retryPerAttemptTimeout = time.Duration(cfg.RetryPerAttemptTimeoutS) * time.Second
@@ -480,6 +493,11 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		MaxEntries: s.stickyMaxEntries,
 		Now:        s.now,
 	})
+	// stickyMismatchLimiter capacity mirrors stickyMap so a hostile
+	// gateway cannot grow the limiter map beyond the affinity map's
+	// own bound. 1-minute window matches the SPEC-004 §7 operational-
+	// hygiene budget for cross-account refresh warns.
+	s.stickyMismatchLimiter = newStickyMismatchLimiter(time.Minute, s.stickyMaxEntries)
 	return s
 }
 
@@ -1213,7 +1231,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	for _, entry := range models {
 		data = append(data, entry)
 	}
-	for name, class := range s.modelClasses {
+	for name, class := range s.snapshotModelClasses() {
 		data = append(data, modelEntry{
 			ID: name, Object: "model", Created: s.createdAt, OwnedBy: "macprovider",
 			Objective: class.Objective, Members: append([]string(nil), modelClassMembers(&class)...),
@@ -1333,6 +1351,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	state := &forwardState{
 		routingDone:   startedAt,
 		faultedRoutes: map[string]struct{}{},
+		// Snapshot the UTC daily-key bucket ONCE at request entry so
+		// every retry attempt's seedForRequest derivation reuses it.
+		// Without this, a long-running retry that crosses UTC midnight
+		// produces a different seed than the first attempt, breaking
+		// FR-SR-17 reproducibility for the request. Issue #266 T1.
+		dailyKey: s.now().UTC().Format("2006-01-02"),
 	}
 	// M3-10 (ARCH-6 close-out): the previously-inline logRowWithBilling
 	// closure now lives as *billingRecorder. setModel / setStream /
@@ -1434,7 +1458,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	shouldLogAttempt := func(attempt requestLogAttempt) bool {
 		return attempt.Status != 0 || attempt.PromptTokens != nil || attempt.CompletionTokens != nil || attempt.EstimatedCompTokens != nil || attempt.Error != "" || attempt.ErrorCode != ""
 	}
-	provider, routeErr := s.selectProvider(routingRequestID, req, r.Header)
+	provider, routeErr := s.selectProvider(routingRequestID, req, r.Header, state.dailyKey)
 	if routeErr != nil {
 		state.routingDone = s.now()
 		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", 0)
@@ -1611,7 +1635,19 @@ func (s *Server) forwardStreamSequence(
 			logAttempt(state.provider, dispatched.tr.status, dispatched.tr.attempt, state.explicitRetries)
 		},
 		afterAdvance: func(state *forwardState, nextRouteID string) bool {
-			s.logRoutingDecision(nextRouteID, []pool.Provider{state.provider}, "retry", 0, 0, "retry_"+itoa(state.explicitRetries), state.provider.ProviderID)
+			s.logRoutingDecisionRetry(
+				nextRouteID,
+				[]pool.Provider{state.provider},
+				"retry",
+				state.provider.ProviderID,
+				"retry_"+itoa(state.explicitRetries),
+				retryDecisionAttrs{
+					AttemptIndex: state.explicitRetries + 1,
+					RetryCount:   state.explicitRetries,
+					Retried:      state.explicitRetries,
+					RetryReason:  "streaming_advance",
+				},
+			)
 			return false
 		},
 	}
@@ -1734,10 +1770,29 @@ func (s *Server) forwardWSNonStreamSequence(
 			}
 			logAttempt(state.provider, status, dispatched.tr.attempt, state.explicitRetries)
 		},
-		afterAdvance: func(state *forwardState, _ string) bool {
+		afterAdvance: func(state *forwardState, nextRouteID string) bool {
 			// WS-non-streaming-only signal: if advance landed on a non-WS
 			// provider, the caller (handleChatCompletions) drives the
 			// HTTP loop on state.provider. WS targets continue the loop.
+			//
+			// Issue #266 T1: WS-non-streaming previously skipped the
+			// per-retry routing-decision log emitted by the streaming /
+			// HTTP afterAdvance callbacks; emit it here too for parity
+			// (FR-SR-17 audit-explainability surface is per-attempt,
+			// not per-transport).
+			s.logRoutingDecisionRetry(
+				nextRouteID,
+				[]pool.Provider{state.provider},
+				"retry",
+				state.provider.ProviderID,
+				"retry_"+itoa(state.explicitRetries),
+				retryDecisionAttrs{
+					AttemptIndex: state.explicitRetries + 1,
+					RetryCount:   state.explicitRetries,
+					Retried:      state.explicitRetries,
+					RetryReason:  "ws_advance",
+				},
+			)
 			return !state.provider.IsWSTunneled()
 		},
 	}
@@ -1967,7 +2022,19 @@ func (s *Server) forwardHTTPSequence(
 			rec.logProviderRow(state.provider, dispatched.tr.status, nil, nil, errMsg, extra.errorCode, state.explicitRetries)
 		},
 		afterAdvance: func(state *forwardState, nextRouteID string) bool {
-			s.logRoutingDecision(nextRouteID, []pool.Provider{state.provider}, "retry", 0, 0, "retry_"+itoa(state.explicitRetries), state.provider.ProviderID)
+			s.logRoutingDecisionRetry(
+				nextRouteID,
+				[]pool.Provider{state.provider},
+				"retry",
+				state.provider.ProviderID,
+				"retry_"+itoa(state.explicitRetries),
+				retryDecisionAttrs{
+					AttemptIndex: state.explicitRetries + 1,
+					RetryCount:   state.explicitRetries,
+					Retried:      state.explicitRetries,
+					RetryReason:  "http_advance",
+				},
+			)
 			return false
 		},
 	}
@@ -2001,7 +2068,7 @@ func (s *Server) advanceToNextProvider(
 	rec *billingRecorder,
 ) (nextRouteID string, ok bool) {
 	nextRouteID = uuid.NewString()
-	picked, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
+	picked, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded, state.dailyKey)
 	if routeErr != nil {
 		state.routingDone = s.now()
 		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", state.explicitRetries)
@@ -4165,11 +4232,11 @@ type routeError struct {
 	typ     string
 }
 
-func (s *Server) selectProvider(requestID string, req chatRequest, headers http.Header) (pool.Provider, *routeError) {
-	return s.selectProviderExcluding(requestID, req, headers, nil)
+func (s *Server) selectProvider(requestID string, req chatRequest, headers http.Header, dailyKey string) (pool.Provider, *routeError) {
+	return s.selectProviderExcluding(requestID, req, headers, nil, dailyKey)
 }
 
-func (s *Server) failoverCandidate(requestID string, req chatRequest, headers http.Header, failed pool.Provider, excluded map[string]struct{}) (pool.Provider, bool) {
+func (s *Server) failoverCandidate(requestID string, req chatRequest, headers http.Header, failed pool.Provider, excluded map[string]struct{}, dailyKey string) (pool.Provider, bool) {
 	if !s.failoverEnabled || hasPinnedRoute(headers) {
 		return pool.Provider{}, false
 	}
@@ -4180,7 +4247,7 @@ func (s *Server) failoverCandidate(requestID string, req chatRequest, headers ht
 	failoverHeaders := headers.Clone()
 	failoverHeaders.Del("X-MacProvider-Provider")
 	failoverHeaders.Del("X-MacProvider-Session")
-	next, routeErr := s.selectProviderExcluding(requestID, req, failoverHeaders, excluded)
+	next, routeErr := s.selectProviderExcluding(requestID, req, failoverHeaders, excluded, dailyKey)
 	if routeErr != nil {
 		return pool.Provider{}, false
 	}
@@ -4225,7 +4292,7 @@ func (s *Server) recordBreakerFault(provider pool.Provider, fault breakerFault, 
 	}
 }
 
-func (s *Server) selectProviderExcluding(requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}) (pool.Provider, *routeError) {
+func (s *Server) selectProviderExcluding(requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}, dailyKey string) (pool.Provider, *routeError) {
 	providers := s.pool.Snapshot()
 	estimatedTokens := estimateTokens(req.raw)
 	class := s.classForRequest(req.Model, providers)
@@ -4308,7 +4375,7 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 	objective := s.objectiveForRequest(headers, class)
 	s.sortCandidates(candidates, objective)
 	candidates = s.applySticky(requestID, headers, req.Model, class, candidates)
-	candidates, seed, draw, reason := s.applyRandomTiebreak(requestID, candidates, objective)
+	candidates, seed, draw, reason := s.applyRandomTiebreak(requestID, candidates, objective, dailyKey)
 	// Thread real pre-filter pool size + per-reason rejection counts
 	// into the SPEC-004 §7 routing-decision log per the FULL-IMPL
 	// audit CODE-M2 finding (previously both counts were the
@@ -4334,6 +4401,8 @@ func cloneModelClasses(in map[string]config.ModelClassConfig) map[string]config.
 }
 
 func (s *Server) resolveModelClass(model string) *config.ModelClassConfig {
+	s.routingMu.RLock()
+	defer s.routingMu.RUnlock()
 	for name, class := range s.modelClasses {
 		if strings.EqualFold(name, model) {
 			cp := config.ModelClassConfig{Objective: class.Objective, Members: append([]string(nil), class.Members...), Models: append([]string(nil), class.Models...)}
@@ -4341,6 +4410,104 @@ func (s *Server) resolveModelClass(model string) *config.ModelClassConfig {
 		}
 	}
 	return nil
+}
+
+// snapshotModelClasses returns a read-only clone of the current
+// routing.model_classes config. Callers iterate the returned map
+// without holding routingMu. Used by handleModels (catalog list)
+// and by SetRoutingClasses for diff computation.
+func (s *Server) snapshotModelClasses() map[string]config.ModelClassConfig {
+	s.routingMu.RLock()
+	defer s.routingMu.RUnlock()
+	return cloneModelClasses(s.modelClasses)
+}
+
+// SetRoutingClasses atomically swaps the routing.model_classes config
+// and calls sticky.Map.InvalidateClass for each class whose membership
+// shape changed (added, removed, or members differ). Returns the list
+// of changed class names + the total number of sticky entries
+// invalidated. Empty / nil input is treated as "no classes" — a full
+// reset of any prior classes counts as shape changes for those.
+//
+// Issue #266 T1 — wires the SIGHUP-trigger half of FR-SR-5 paragraph 2
+// ("invalidate on class reconfig"). The InvalidateClass primitive
+// shipped with PR #263; PR #170 deferred the trigger wiring.
+//
+// Safe to call concurrently with hot-path readers (resolveModelClass,
+// snapshotModelClasses); they take routingMu.RLock while this method
+// holds the write lock.
+func (s *Server) SetRoutingClasses(next map[string]config.ModelClassConfig) (changedClasses []string, invalidated int) {
+	cloned := cloneModelClasses(next)
+	s.routingMu.Lock()
+	prev := s.modelClasses
+	changed := diffModelClasses(prev, cloned)
+	s.modelClasses = cloned
+	s.routingMu.Unlock()
+	if len(changed) == 0 {
+		return nil, 0
+	}
+	if s.stickyMap != nil {
+		for _, name := range changed {
+			invalidated += s.stickyMap.InvalidateClass(name)
+		}
+	}
+	return changed, invalidated
+}
+
+// diffModelClasses returns the names of classes whose membership
+// shape differs between prev and next. Includes: classes added in
+// next, classes removed from prev, classes whose Objective or member
+// set (Models OR Members, normalised) changed. The returned slice is
+// sorted ascending so caller log output is deterministic.
+func diffModelClasses(prev, next map[string]config.ModelClassConfig) []string {
+	seen := make(map[string]struct{}, len(prev)+len(next))
+	var changed []string
+	for name, prevClass := range prev {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		nextClass, ok := next[name]
+		if !ok || !modelClassEqual(prevClass, nextClass) {
+			changed = append(changed, name)
+		}
+	}
+	for name := range next {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		if _, ok := prev[name]; !ok {
+			changed = append(changed, name)
+		}
+	}
+	sort.Strings(changed)
+	return changed
+}
+
+func modelClassEqual(a, b config.ModelClassConfig) bool {
+	if a.Objective != b.Objective {
+		return false
+	}
+	if !stringSliceEqual(a.Models, b.Models) {
+		return false
+	}
+	if !stringSliceEqual(a.Members, b.Members) {
+		return false
+	}
+	return true
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) classForRequest(model string, providers []pool.Provider) *config.ModelClassConfig {
@@ -4430,7 +4597,7 @@ func balancedScores(candidates []pool.Provider) map[string]float64 {
 	return out
 }
 
-func (s *Server) applyRandomTiebreak(requestID string, candidates []pool.Provider, objective string) ([]pool.Provider, int64, float64, string) {
+func (s *Server) applyRandomTiebreak(requestID string, candidates []pool.Provider, objective, dailyKey string) ([]pool.Provider, int64, float64, string) {
 	if !s.tiebreakRandomize || len(candidates) < 2 {
 		return candidates, 0, 0, "deterministic"
 	}
@@ -4444,7 +4611,16 @@ func (s *Server) applyRandomTiebreak(requestID string, candidates []pool.Provide
 	if cohortEnd < 2 {
 		return candidates, 0, 0, "deterministic"
 	}
-	seed := seedForRequest(requestID)
+	// dailyKey is the per-request UTC bucket snapshotted in
+	// forwardState.dailyKey at request entry; threaded here so retries
+	// that span UTC midnight reproduce the first-attempt seed.
+	// Empty string falls back to defaultDailyKey() — defensive guard
+	// for callers (admin paths, future entry points) that don't yet
+	// carry forwardState. Issue #266 T1.
+	if dailyKey == "" {
+		dailyKey = defaultDailyKey()
+	}
+	seed := seedForRequestWithKey(requestID, dailyKey)
 	rng := mrand.New(mrand.NewSource(seed))
 	draw := rng.Float64()
 	pick := int(draw * float64(cohortEnd))
@@ -4515,7 +4691,13 @@ func (s *Server) stickyStore(headers http.Header, provider pool.Provider, modelS
 	}
 	accountID := headers.Get("X-MacProvider-Account")
 	mismatch := s.stickyMap.Update(key, accountID, provider.ProviderID, modelScope)
-	if mismatch {
+	if mismatch && s.stickyMismatchLimiter.allow(key) {
+		// Rate-limited per-conversation_key (1 warn / minute / key,
+		// bounded entry table). Suppressed warns are dropped, NOT
+		// downgraded — under hostile-gateway pressure we don't want
+		// even Info-level noise. The audit-event purpose is satisfied
+		// by the throttled emission; cross-account refresh refusal
+		// remains structurally rejected by sticky.Map.Update.
 		s.log.Warn().
 			Str("event", "sticky_account_mismatch").
 			Str("provider_id", provider.ProviderID).
@@ -4736,6 +4918,60 @@ func (s *Server) logRoutingDecisionFull(requestID string, preFilterCount int, fi
 
 func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string) {
 	s.logRoutingDecisionFull(requestID, 0, nil, candidates, objective, seed, draw, reason, chosen)
+}
+
+// retryDecisionAttrs carries the per-attempt FR-SR-17 / SPEC-004 §7
+// retry/preflight metadata threaded into the routing-decision log
+// when the request is on a retry attempt past the first. Each field
+// corresponds to a `routing.Decision` field of the same name. Issue
+// #266 T1 — closes the "FR-SR-17 reproducibility log half-empty on
+// retries" gap noted in PR #263's deferred follow-ups.
+type retryDecisionAttrs struct {
+	AttemptIndex    int    // 1-indexed attempt number (1 = first attempt)
+	RetryCount      int    // count of explicit retries (state.explicitRetries)
+	Retried         int    // count of additional provider attempts beyond first
+	RetryReason     string // why this retry fired (e.g. "stream_timeout", "queue_full")
+	PreflightResult string // last preflight check result, if any
+}
+
+// logRoutingDecisionRetry emits the SPEC-004 §7 routing-decision log
+// for a retry-attempt's post-advance provider selection, populating
+// the per-attempt FR-SR-17 fields. `chosen` is the newly-selected
+// provider for this attempt; `candidates` is the single-provider
+// slice the existing retry-log call sites pass to keep the schema
+// consistent. legacyReason is the back-compat `reason` string the
+// pre-issue-#266 retry log used (e.g. "retry_2"), so log consumers
+// keying off the legacy field keep working.
+func (s *Server) logRoutingDecisionRetry(requestID string, candidates []pool.Provider, objective string, chosen string, legacyReason string, attrs retryDecisionAttrs) {
+	if chosen == "" && len(candidates) > 0 {
+		chosen = candidates[0].ProviderID
+	}
+	scores := s.routingScores(candidates, objective)
+	weights := routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
+	set := make([]routing.CandidateLogEntry, 0, len(candidates))
+	var chosenAssignedID string
+	for _, p := range candidates {
+		set = append(set, routing.ProviderToCandidateLogEntry(p, scores[routeKey(p)], weights))
+		if p.ProviderID == chosen && chosenAssignedID == "" {
+			chosenAssignedID = p.AssignedID
+		}
+	}
+	routing.LogRoutingDecision(s.log, routing.Decision{
+		RequestID:                   requestID,
+		Objective:                   objective,
+		CandidateCountBeforeFilters: len(candidates),
+		CandidateCountAfterFilters:  len(candidates),
+		CandidateSet:                set,
+		TiebreakEpsilon:             s.tiebreakEpsilon,
+		ChosenProviderID:            chosen,
+		ChosenAssignedID:            chosenAssignedID,
+		AttemptIndex:                attrs.AttemptIndex,
+		RetryCount:                  attrs.RetryCount,
+		Retried:                     attrs.Retried,
+		RetryReason:                 attrs.RetryReason,
+		PreflightResult:             attrs.PreflightResult,
+		LegacyReason:                legacyReason,
+	})
 }
 
 func modelClassMembers(class *config.ModelClassConfig) []string {
