@@ -182,16 +182,17 @@ func (h *Handler) handleSessionDetail(ctx context.Context, w http.ResponseWriter
 		writeExplorerError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
-	// #231 SPEC-007 v0.4 path-segment typing (deprecation window):
-	// accept `int_<request_id>` prefix as the typed coordinator form.
-	// Untyped (bare-UUID) segments still resolve as the coordinator-
-	// internal request_id (v0.3 behavior) but emit a deprecation log
-	// row so operators see the upcoming v0.5 break.
-	if stripped, ok := strings.CutPrefix(requestID, "int_"); ok && stripped != "" {
-		requestID = stripped
-	} else {
-		h.logPathSegmentUntyped(r, requestID)
+	// SPEC-007 v0.5 (#245): path-segment MUST carry an `int_` prefix.
+	// Untyped (legacy bare-UUID) calls return 400 session_id_untyped.
+	// The v0.4 deprecation-window log emit is removed; that path is
+	// no longer reachable.
+	stripped, ok := strings.CutPrefix(requestID, "int_")
+	if !ok || stripped == "" {
+		writeExplorerError(w, http.StatusBadRequest, "session_id_untyped",
+			"path-segment must be int_<request_id> — bare ids rejected per SPEC-007 v0.5")
+		return
 	}
+	requestID = stripped
 	detail, err := h.store.SessionDetail(ctx, h.db, requestID)
 	if err != nil {
 		// ISS-212 v0.3 §5.6: path-segment is coordinator-internal
@@ -570,34 +571,6 @@ func (h *Handler) authorized(r *http.Request) bool {
 	}
 	h.logBearerAccepted(r, "operator_key")
 	return true
-}
-
-// logPathSegmentUntyped emits the #231 SPEC-007 v0.4 deprecation
-// WARN when /admin/explorer/sessions/{request_id} is called with a
-// bare-UUID (legacy v0.3) path segment instead of the typed
-// `int_<request_id>` form. v0.5 will reject untyped with 400.
-// Same stdlib-JSON shape as logBearerAccepted; single journald
-// filter (`event=payout_explorer_path_segment_untyped`) catches
-// every untyped call. Uses json.Marshal for the payload so
-// arbitrary characters in request_id/remote_addr don't break the
-// JSON shape (R1 SEC MEDIUM closure: Go's `%q` is not JSON-safe).
-func (h *Handler) logPathSegmentUntyped(r *http.Request, requestID string) {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	// #231 R5 code LOW closure: include ts_utc so journald
-	// consumers see the full SPEC §5.6 event shape.
-	payload, _ := json.Marshal(map[string]any{
-		"event":       "payout_explorer_path_segment_untyped",
-		"severity":    "WARN",
-		"endpoint":    "GET /admin/explorer/sessions",
-		"request_id":  requestID,
-		"remote_addr": host,
-		"ts_utc":      time.Now().UTC().Format(time.RFC3339Nano),
-		"deprecation": "v0.5 will reject untyped with 400 session_id_untyped — use int_<request_id>",
-	})
-	stdLog.Println(string(payload))
 }
 
 // logBearerAccepted is the audit-log line the operator watches during

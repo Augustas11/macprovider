@@ -34,8 +34,9 @@ func TestExplorerSessionDetail_409CapAndTruncationFlag(t *testing.T) {
 		}
 	}
 
+	// SPEC-007 v0.5 (#245): path-segment MUST carry the ext_ prefix.
 	resp := assertStatus(t, h, http.MethodGet,
-		"/admin/explorer/sessions/"+sharedRequestID,
+		"/admin/explorer/sessions/ext_"+sharedRequestID,
 		cfg.Coordinator.OperatorKey, "", "", http.StatusConflict)
 
 	var body map[string]any
@@ -53,7 +54,7 @@ func TestExplorerSessionDetail_409CapAndTruncationFlag(t *testing.T) {
 	// Re-issue the same 409 and confirm the cap holds across calls
 	// (no leftover state from the first invocation).
 	resp2 := assertStatus(t, h, http.MethodGet,
-		"/admin/explorer/sessions/"+sharedRequestID,
+		"/admin/explorer/sessions/ext_"+sharedRequestID,
 		cfg.Coordinator.OperatorKey, "", "", http.StatusConflict)
 	var body2 map[string]any
 	if err := json.Unmarshal(resp2.Body.Bytes(), &body2); err != nil {
@@ -69,15 +70,41 @@ func TestExplorerSessionDetail_409CapAndTruncationFlag(t *testing.T) {
 // typed-prefix contract: `ext_<external_request_id>` strips to the
 // underlying id before SQL lookup. Smoke-tested via the
 // not-found path (no rows seeded) — a successful 404 confirms the
-// prefix strip ran AND the unscoped lookup resolved against the
-// expected bare id.
+// prefix is treated as typed (otherwise the v0.5 untyped guard
+// would have returned 400 instead of 404).
 func TestExplorerSessionDetail_ExtPrefixIsParsed(t *testing.T) {
 	h, _, _, cfg := newTestHarness(t, fakeOAuth{})
-	// Both should produce a 404 (no rows): the typed form proves the
-	// prefix is stripped. If the prefix were NOT stripped, the
-	// storage would look up `ext_<id>` literally — same result, so
-	// we differentiate via the deprecation-audit emit instead.
 	assertStatus(t, h, http.MethodGet,
 		"/admin/explorer/sessions/ext_no-such-id",
 		cfg.Coordinator.OperatorKey, "", "", http.StatusNotFound)
+}
+
+// TestExplorerSessionDetail_UntypedReturns400 pins SPEC-007 v0.5
+// §6.4 (#245): untyped (legacy bare-id) path-segments MUST be
+// rejected with 400 session_id_untyped. Replaces the v0.4
+// deprecation-audit test (which asserted untyped was accepted with
+// a WARN audit_events row).
+func TestExplorerSessionDetail_UntypedReturns400(t *testing.T) {
+	h, _, _, cfg := newTestHarness(t, fakeOAuth{})
+	resp := assertStatus(t, h, http.MethodGet,
+		"/admin/explorer/sessions/untyped-bare-id",
+		cfg.Coordinator.OperatorKey, "", "", http.StatusBadRequest)
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	errBody, _ := body["error"].(map[string]any)
+	if code, _ := errBody["code"].(string); code != "session_id_untyped" {
+		t.Errorf("error.code=%q, want session_id_untyped; body=%s", code, resp.Body.String())
+	}
+}
+
+// TestExplorerSessionDetail_EmptyExtPrefixReturns400 pins that the
+// `ext_` prefix with an empty stripped value is treated as untyped
+// (parseTypedSegment rejects empty stripped IDs).
+func TestExplorerSessionDetail_EmptyExtPrefixReturns400(t *testing.T) {
+	h, _, _, cfg := newTestHarness(t, fakeOAuth{})
+	assertStatus(t, h, http.MethodGet,
+		"/admin/explorer/sessions/ext_",
+		cfg.Coordinator.OperatorKey, "", "", http.StatusBadRequest)
 }

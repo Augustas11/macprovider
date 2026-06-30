@@ -100,35 +100,15 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotFound, "invalid_request_error", "not_found", "Explorer resource not found")
 		return
 	}
-	// #231 SPEC-007 v0.4 path-segment typing (deprecation window):
-	// accept `ext_<external_request_id>` prefix as the typed gateway
-	// form. Untyped (bare-id) segments are still resolved AS the
-	// external_request_id (v0.3 behavior) but emit a deprecation
-	// audit row so operators see the upcoming v0.5 break.
+	// SPEC-007 v0.5 (#245): path-segment MUST carry an `ext_` prefix.
+	// Untyped (legacy bare-id) calls return 400 session_id_untyped.
+	// The v0.4 deprecation-window audit emit is removed; that path is
+	// no longer reachable.
 	requestID, typed := parseTypedSegment(rawSegment, "ext_")
 	if !typed {
-		// Fire-and-forget — do not block the request path on audit
-		// emit failure, but surface in audit_events when it works.
-		// json.Marshal-safe payload (R1 SEC MEDIUM closure).
-		// #231 R5 code LOW closure: include request_id + ts_utc in
-		// the payload so a journald-only consumer (no audit_events
-		// row column join) can still see the full event shape per
-		// SPEC §6.4.
-		payloadJSON, _ := json.Marshal(map[string]any{
-			"endpoint":    "GET /admin/explorer/sessions",
-			"request_id":  requestID,
-			"severity":    "WARN",
-			"ts_utc":      s.now().UTC().Format(time.RFC3339Nano),
-			"deprecation": "v0.5 will reject untyped with 400 session_id_untyped — use ext_<external_request_id>",
-		})
-		_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
-			EventID:   mustID("audit"),
-			RequestID: requestID,
-			Actor:     "explorer",
-			Type:      "payout_explorer_path_segment_untyped",
-			Payload:   string(payloadJSON),
-			CreatedAt: s.now(),
-		})
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "session_id_untyped",
+			"path-segment must be ext_<external_request_id> — bare ids rejected per SPEC-007 v0.5")
+		return
 	}
 	// Issue #196: a request_id can now legitimately match rows in
 	// multiple accounts under the composite-PK schema. Operators

@@ -109,7 +109,7 @@ func TestAC07_SessionDetailIncludesLocalAndGatewayData(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader(`{"request_id":"req_seed","gateway_marker":true,"partial":false,"error":null}`)),
 		}, nil
 	})}
-	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/req_seed", "operator-key")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_req_seed", "operator-key")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
@@ -156,7 +156,7 @@ func TestSessionDetailGatewayProxyUsesExternalRequestIDAndAccountID(t *testing.T
 			Body:       io.NopCloser(strings.NewReader(`{"request_id":"buyer-supplied-X","partial":false,"error":null}`)),
 		}, nil
 	})}
-	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/coord-internal-uuid-aaaa", "operator-key")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_coord-internal-uuid-aaaa", "operator-key")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
@@ -203,7 +203,7 @@ func TestSessionDetailGatewayProxySkippedOnIncompleteIdentity(t *testing.T) {
 		gatewayCalled = true
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 	})}
-	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/coord-internal-uuid-legacy", "operator-key")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_coord-internal-uuid-legacy", "operator-key")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
@@ -232,7 +232,7 @@ func TestSessionDetailNoCoordinatorRowReturns404(t *testing.T) {
 		gatewayCalled = true
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 	})}
-	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/no-such-internal-id", "operator-key")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_no-such-internal-id", "operator-key")
 	if resp.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s, want 404", resp.Code, resp.Body.String())
 	}
@@ -807,7 +807,7 @@ func TestDashboardCrossViewLinkWiring(t *testing.T) {
 	raw := readStatic(t, "static/js/dashboard.js")
 	for _, want := range []string{
 		`dataset.view`,
-		`/admin/explorer/sessions/${encodeURIComponent(v)}`,
+		`/admin/explorer/sessions/int_${encodeURIComponent(v)}`,
 		`/admin/explorer/buyers/${encodeURIComponent(v)}`,
 		`/admin/explorer/providers/${encodeURIComponent(v)}`,
 		`/admin/explorer/settlements/${encodeURIComponent(v)}`,
@@ -896,7 +896,7 @@ func TestAC25_CoreExplorerRoutesTraverseSuccessfully(t *testing.T) {
 	for _, path := range []string{
 		"/admin/explorer/overview?include_gateway=false",
 		"/admin/explorer/sessions",
-		"/admin/explorer/sessions/req_seed",
+		"/admin/explorer/sessions/int_req_seed",
 		"/admin/explorer/buyers",
 		"/admin/explorer/providers",
 		"/admin/explorer/providers/provider_seed",
