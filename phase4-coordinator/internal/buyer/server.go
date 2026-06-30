@@ -1885,7 +1885,7 @@ func (s *Server) forwardHTTPSequence(
 			upstreamURL := state.provider.EndpointURL + "/v1/chat/completions"
 			attemptCtx := r.Context()
 			cancelAttempt := func() {}
-			retryRequested := s.maxRetries > 0 && retryHeaderLimit(r.Header.Get("X-MacProvider-Retry")) > 0
+			retryRequested := s.maxRetries > 0 && routing.RetryHeaderLimit(r.Header.Get("X-MacProvider-Retry")) > 0
 			if retryRequested && s.retryPerAttemptTimeout > 0 {
 				attemptCtx, cancelAttempt = context.WithTimeout(r.Context(), s.retryPerAttemptTimeout)
 			}
@@ -2098,7 +2098,7 @@ func (s *Server) advanceToNextProvider(
 }
 
 func (s *Server) attemptTimeout(r *http.Request) time.Duration {
-	if s.maxRetries > 0 && retryHeaderLimit(r.Header.Get("X-MacProvider-Retry")) > 0 && s.retryPerAttemptTimeout > 0 {
+	if s.maxRetries > 0 && routing.RetryHeaderLimit(r.Header.Get("X-MacProvider-Retry")) > 0 && s.retryPerAttemptTimeout > 0 {
 		return s.retryPerAttemptTimeout
 	}
 	return s.requestTimeout
@@ -3647,86 +3647,13 @@ func countTopLevelField(body []byte, field string) (int, bool, error) {
 	return count, nonCanonical, nil
 }
 
+// dispatchBodyForProvider delegates to routing.RewriteModel. The
+// pre-PR JSON-surgical model-field rewrite moved into the routing
+// package as part of issue #266 T2; this wrapper preserves the
+// chatRequest-typed call sites in forward*Sequence without leaking
+// the buyer-internal chatRequest type past the package boundary.
 func dispatchBodyForProvider(req chatRequest, provider pool.Provider) ([]byte, error) {
-	if modelIDEqual(req.Model, provider.ModelID) {
-		return append([]byte(nil), req.raw...), nil
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(req.raw))
-	token, err := dec.Token()
-	if err != nil {
-		return nil, err
-	}
-	if delim, ok := token.(json.Delim); !ok || delim != '{' {
-		return nil, errors.New("chat request body is not a JSON object")
-	}
-	type replacement struct {
-		start int
-		end   int
-	}
-	var replacements []replacement
-	for dec.More() {
-		keyToken, err := dec.Token()
-		if err != nil {
-			return nil, err
-		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return nil, errors.New("chat request body contains a non-string object key")
-		}
-		keyEnd := int(dec.InputOffset())
-		valueStart, err := jsonValueStart(req.raw, keyEnd)
-		if err != nil {
-			return nil, err
-		}
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return nil, err
-		}
-		if key == "model" {
-			replacements = append(replacements, replacement{start: valueStart, end: int(dec.InputOffset())})
-		} else if strings.EqualFold(key, "model") {
-			return nil, errors.New("chat request body contains non-canonical model field")
-		}
-	}
-	if _, err := dec.Token(); err != nil {
-		return nil, err
-	}
-	if len(replacements) == 0 {
-		return nil, errors.New("chat request body missing model field")
-	}
-	if len(replacements) > 1 {
-		return nil, errors.New("chat request body contains duplicate model fields")
-	}
-	model, err := json.Marshal(provider.ModelID)
-	if err != nil {
-		return nil, err
-	}
-	out := append([]byte(nil), req.raw...)
-	r := replacements[0]
-	next := make([]byte, 0, len(out)-(r.end-r.start)+len(model))
-	next = append(next, out[:r.start]...)
-	next = append(next, model...)
-	next = append(next, out[r.end:]...)
-	return next, nil
-}
-
-func jsonValueStart(raw []byte, keyEnd int) (int, error) {
-	i := keyEnd
-	for i < len(raw) && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\r' || raw[i] == '\t') {
-		i++
-	}
-	if i >= len(raw) || raw[i] != ':' {
-		return 0, errors.New("chat request body object key missing colon")
-	}
-	i++
-	for i < len(raw) && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\r' || raw[i] == '\t') {
-		i++
-	}
-	if i >= len(raw) {
-		return 0, errors.New("chat request body object key missing value")
-	}
-	return i, nil
+	return routing.RewriteModel(req.raw, req.Model, provider.ModelID)
 }
 
 func validateOptionalFields(raw map[string]json.RawMessage, stream bool) (int, string, string) {
@@ -4562,58 +4489,13 @@ func (s *Server) objectiveForRequest(headers http.Header, class *config.ModelCla
 	}
 }
 
+// sortCandidates delegates to routing.SortCandidates. The pre-PR
+// inline 4-branch comparator moved into the routing package as part
+// of issue #266 T2 (deferred Pillar D refactor). Weights are derived
+// from the Server's per-provisional-tier downweight so the sort
+// honours SPEC-002 v1.1 §5 Step 2.5 the same way it did before.
 func (s *Server) sortCandidates(candidates []pool.Provider, objective string) {
-	switch objective {
-	case "fast":
-		sort.SliceStable(candidates, func(i, j int) bool {
-			ti := s.effectiveThroughput(candidates[i])
-			tj := s.effectiveThroughput(candidates[j])
-			if ti == tj {
-				return candidates[i].SlotsFree < candidates[j].SlotsFree
-			}
-			return ti > tj
-		})
-	case "accurate":
-		sort.SliceStable(candidates, func(i, j int) bool {
-			if candidates[i].ModelParamsB == candidates[j].ModelParamsB {
-				ti := s.effectiveThroughput(candidates[i])
-				tj := s.effectiveThroughput(candidates[j])
-				if ti != tj {
-					return ti > tj
-				}
-				return candidates[i].SlotsFree < candidates[j].SlotsFree
-			}
-			return candidates[i].ModelParamsB > candidates[j].ModelParamsB
-		})
-	case "balanced":
-		scores := balancedScores(candidates)
-		sort.SliceStable(candidates, func(i, j int) bool {
-			if scores[routeKey(candidates[i])] == scores[routeKey(candidates[j])] {
-				return candidates[i].SlotsFree < candidates[j].SlotsFree
-			}
-			return scores[routeKey(candidates[i])] > scores[routeKey(candidates[j])]
-		})
-	default:
-		sort.SliceStable(candidates, func(i, j int) bool {
-			if candidates[i].SlotsFree == candidates[j].SlotsFree {
-				return s.effectiveThroughput(candidates[i]) > s.effectiveThroughput(candidates[j])
-			}
-			return candidates[i].SlotsFree < candidates[j].SlotsFree
-		})
-	}
-}
-
-// balancedScores adapts routing.BalancedScores (which returns an
-// indexed slice — the canonical SPEC-004 FR-SR-8 normative formula
-// home) to the buyer-internal routeKey-shape map the rest of
-// selectProvider consumes.
-func balancedScores(candidates []pool.Provider) map[string]float64 {
-	indexed := routing.BalancedScores(candidates)
-	out := make(map[string]float64, len(candidates))
-	for i, p := range candidates {
-		out[routeKey(p)] = indexed[i]
-	}
-	return out
+	routing.SortCandidates(candidates, routing.Objective(objective), routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight})
 }
 
 func (s *Server) applyRandomTiebreak(requestID string, candidates []pool.Provider, objective, dailyKey string) ([]pool.Provider, int64, float64, string) {
@@ -4736,60 +4618,35 @@ func (s *Server) purgeStickyAccount(accountID string) int {
 	return s.stickyMap.PurgeAccount(accountID)
 }
 
+// shouldRetry delegates to routing.ShouldRetry. The pure-policy
+// gate moved out of buyer in #266 T2; this wrapper threads the
+// Server's per-request inputs (headers, clock, operator-config caps)
+// into the explicit ShouldRetryInput so the routing package can be
+// unit-tested without spinning up a buyer.Server.
 func (s *Server) shouldRetry(r *http.Request, startedAt time.Time, explicitRetries, faultedProviders, status int, err error) bool {
-	requestedRetries := retryHeaderLimit(r.Header.Get("X-MacProvider-Retry"))
-	if s.maxRetries <= 0 || requestedRetries <= 0 || hasPinnedRoute(r.Header) {
-		return false
-	}
-	if r.Context().Err() != nil {
-		return false
-	}
-	if explicitRetries >= min(s.maxRetries, requestedRetries) {
-		return false
-	}
-	if s.maxFaultedPerRequest > 0 && faultedProviders >= s.maxFaultedPerRequest {
-		return false
-	}
-	if s.requestTimeout > 0 && s.now().Sub(startedAt)+s.retryPerAttemptTimeout > s.requestTimeout {
-		return false
-	}
-	if err != nil {
-		return true
-	}
-	return status == http.StatusBadGateway || status == http.StatusGatewayTimeout
+	return routing.ShouldRetry(routing.ShouldRetryInput{
+		MaxRetries:             s.maxRetries,
+		RequestedRetries:       routing.RetryHeaderLimit(r.Header.Get("X-MacProvider-Retry")),
+		HasPinnedRoute:         hasPinnedRoute(r.Header),
+		ContextErr:             r.Context().Err(),
+		ExplicitRetries:        explicitRetries,
+		FaultedProviders:       faultedProviders,
+		MaxFaultedPerRequest:   s.maxFaultedPerRequest,
+		Now:                    s.now(),
+		StartedAt:              startedAt,
+		RequestTimeout:         s.requestTimeout,
+		RetryPerAttemptTimeout: s.retryPerAttemptTimeout,
+		Status:                 status,
+		Err:                    err,
+	})
 }
 
+// routingScores delegates to routing.ObjectiveScores. Moved out of
+// buyer in #266 T2; the result is keyed by ProviderID+/+AssignedID
+// (matching buyer.routeKey) so callers that look up per-candidate
+// scores via routeKey(p) continue to work unchanged.
 func (s *Server) routingScores(candidates []pool.Provider, objective string) map[string]float64 {
-	if objective == "balanced" {
-		return balancedScores(candidates)
-	}
-	out := map[string]float64{}
-	for _, p := range candidates {
-		switch objective {
-		case "fast":
-			out[routeKey(p)] = s.effectiveThroughput(p)
-		case "accurate":
-			out[routeKey(p)] = p.ModelParamsB
-		default:
-			out[routeKey(p)] = s.effectiveThroughput(p)
-		}
-	}
-	return out
-}
-
-func retryHeaderLimit(value string) int {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0
-	}
-	if strings.EqualFold(value, "true") {
-		return int(^uint(0) >> 1)
-	}
-	var n int
-	if _, err := fmt.Sscanf(value, "%d", &n); err != nil || n <= 0 {
-		return 0
-	}
-	return n
+	return routing.ObjectiveScores(candidates, routing.Objective(objective), routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight})
 }
 
 // inEpsilonCohort delegates to routing.InEpsilonCohort so the
@@ -4802,7 +4659,7 @@ func (s *Server) inEpsilonCohort(top, candidate pool.Provider, objective string,
 	weights := routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
 	var scoreFn func(pool.Provider) float64
 	if objective == "balanced" {
-		scores := balancedScores(candidates)
+		scores := routing.KeyedBalancedScores(candidates)
 		scoreFn = func(p pool.Provider) float64 { return scores[routeKey(p)] }
 	}
 	return routing.InEpsilonCohort(top, candidate, routing.Objective(objective), s.tiebreakEpsilon, weights, scoreFn)
@@ -5246,14 +5103,6 @@ func (c *eligibilityCtx) Tier2Decision(p pool.Provider) (routing.RejectionReason
 
 func (c *eligibilityCtx) QuotaPermits(p pool.Provider) bool {
 	return c.s.checkQuota(p)
-}
-
-func (s *Server) effectiveThroughput(provider pool.Provider) float64 {
-	weight := 1.0
-	if provider.Tier == pool.TierProvisional {
-		weight = s.provisionalWeight
-	}
-	return provider.ThroughputTPSEstimate * weight
 }
 
 func modelIDEqual(a, b string) bool {
