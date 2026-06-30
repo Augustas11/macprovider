@@ -1,6 +1,10 @@
 package billing
 
-import "math"
+import (
+	"log/slog"
+	"math"
+	"strings"
+)
 
 const (
 	UsageProviderReported = "provider_reported"
@@ -36,11 +40,57 @@ func RateFor(rateCard map[string]RateCardEntry, model string) RateCardEntry {
 		if entry, ok := rateCard[model]; ok {
 			return entry
 		}
+		normalized := normalizeModelKey(model)
+		if normalized != model {
+			if entry, ok := rateCard[normalized]; ok {
+				slog.Info("rate_card_normalized", "event", "rate_card_normalized", "requested", model, "normalized", normalized, "matched", normalized)
+				return entry
+			}
+		}
 		if entry, ok := rateCard["default"]; ok {
+			if normalized != model {
+				slog.Info("rate_card_normalized", "event", "rate_card_normalized", "requested", model, "normalized", normalized, "matched", "default")
+			}
 			return entry
+		}
+		if normalized != model {
+			slog.Info("rate_card_normalized", "event", "rate_card_normalized", "requested", model, "normalized", normalized, "matched", "")
 		}
 	}
 	return RateCardEntry{}
+}
+
+func normalizeModelKey(model string) string {
+	key := strings.ToLower(strings.TrimSpace(model))
+	namespace := ""
+	if slash := strings.IndexByte(key, '/'); slash >= 0 {
+		namespace = key[:slash]
+		if knownModelNamespace(namespace) {
+			key = key[slash+1:]
+		}
+	}
+	for _, suffix := range []string{"-mxfp4-q8", "-4bit", "-8bit"} {
+		key = strings.TrimSuffix(key, suffix)
+	}
+	switch {
+	case namespace == "meta-llama" && strings.HasPrefix(key, "llama-"):
+		return "meta-llama/" + key
+	case strings.HasPrefix(key, "meta-llama-"):
+		return "meta-llama/" + strings.TrimPrefix(key, "meta-")
+	case strings.HasPrefix(key, "gpt-oss-"):
+		return "openai/" + key
+	default:
+		return key
+	}
+}
+
+func knownModelNamespace(namespace string) bool {
+	switch namespace {
+	case "mlx-community", "openai", "google", "meta-llama", "nvidia", "qwen":
+		return true
+	default:
+		return false
+	}
 }
 
 func ParseMultiplierPPM(v float64) int64 {
