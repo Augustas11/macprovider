@@ -1,0 +1,49 @@
+# smoke_llama_31_8b.yaml — dense small (8B) test for SCN-226 series.
+# Diagnostic value: completes the 4-model gateway-billing-accounting matrix:
+#   - Qwen3-32B dense (legacy, in prod): I1 PASS
+#   - gpt-oss-20b MoE (new): I1 FAIL "no ok rows, all fallback"
+#   - Qwen3-Coder MoE (new): I1 FAIL "no ok rows, all fallback"
+#   - Qwen2.5-Coder-32B dense (new): I1 FAIL "12-token gateway/coord drift"
+#   - Llama-3.1-8B dense (new, small): unknown
+# Answers whether gateway accounting hits ANY new model row or has selective
+# tokenizer support keyed by model family.
+
+name: smoke_llama_31_8b
+description: |
+  Live-network smoke for SCN-226-Llama-3.1-8B. One buyer, two streaming
+  general-prompt completions against mlx-community/Meta-Llama-3.1-8B-Instruct-4bit.
+  Tests whether the smallest 8B dense row passes or fails gateway billing
+  reconciliation.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - Both requests should return HTTP 200 (8B is fast, less contention).
+   - Route should hit augustass-macbook-air (current bench setup).
+   - Network-delivered TPS expected ~25 tok/s.
+   - I1 outcome diagnostic: see file header for matrix completion.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 1
+  stream: true
+  pattern: constant
+  requests_per_buyer: 2
+
+duration: 180s
+request_timeout: 90s
+silent_hang_threshold: 30s
+
+prompts:
+  - model: mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+    user: "Describe a unique kind of weather in two sentences."
+    max_tokens: 128
+  - model: mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+    user: "Write a single concise paragraph about a yellow finch."
+    max_tokens: 128
