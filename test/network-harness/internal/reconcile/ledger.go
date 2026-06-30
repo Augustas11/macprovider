@@ -270,6 +270,15 @@ type MatchedPair struct {
 	// truncation — the gateway cannot fake it without telling the buyer
 	// the stream failed.
 	HarnessSawSSEErrorEvent bool `json:"harness_saw_sse_error_event"`
+
+	// HarnessSSEErrorCode carries the `error.code` value from the
+	// terminal SSE error envelope, when one was observed. Empty when
+	// HarnessSawSSEErrorEvent is false. Triage uses this to cross-check
+	// the buyer-visible code against the gateway's `outcome` column —
+	// a mismatch (e.g. buyer saw `provider_disconnected` but gateway
+	// settled `stream_truncated`) is not currently an I1 signal but is
+	// useful evidence in `ledger_reconcile.json`. (#232 R2 ARCH LOW.)
+	HarnessSSEErrorCode string `json:"harness_sse_error_code,omitempty"`
 }
 
 // snapshotWindow returns the SQL query bounds for a reconcile run.
@@ -482,9 +491,10 @@ func computePerPairDrift(r *Result) {
 		// can record the provider's full reported usage. Counting that as
 		// drift false-fails I1 in the #285 reproduction.
 		//
-		// #232: same harness-corroboration check applies here. The coord
-		// axis still uses the buyer's view as the trust anchor — if the
-		// harness saw a clean stream terminator, the gateway claiming a
+		// #232: same buyer-corroboration check applies here. The coord
+		// axis uses the buyer's view as the trust anchor — if the buyer
+		// did NOT receive the gateway's terminal SSE error envelope
+		// (HarnessSawSSEErrorEvent=false), the gateway claiming a
 		// fallback outcome is uncorroborated and the drift signals fire.
 		//
 		// When a coord row is missing for a gateway-OK pair (i.e. the
@@ -686,6 +696,7 @@ func matchExactPass(r *Result, ordered []buyer.Result, gwPool *[]gwRow, coordPoo
 			HarnessRequestID:        h.RequestID,
 			HarnessCompletionTokens: h.CompletionTokensReceived,
 			HarnessSawSSEErrorEvent: h.SawSSEErrorEvent,
+			HarnessSSEErrorCode:     h.SSEErrorCode,
 			GatewayMatchMethod:      methodExactID,
 			GatewayRequestID:        g.RequestID,
 			GatewayAccountID:        g.AccountID,
@@ -725,6 +736,7 @@ func matchFuzzyPass(r *Result, deferred []buyer.Result, gwPool *[]gwRow, coordPo
 			HarnessRequestID:        h.RequestID,
 			HarnessCompletionTokens: h.CompletionTokensReceived,
 			HarnessSawSSEErrorEvent: h.SawSSEErrorEvent,
+			HarnessSSEErrorCode:     h.SSEErrorCode,
 			GatewayMatchMethod:      methodFuzzy,
 			GatewayRequestID:        g.RequestID,
 			GatewayAccountID:        g.AccountID,

@@ -2685,6 +2685,25 @@ SPEC-001 null-usage errors are distinguished from 502/504 with 0 completion (whi
 
 The client-disconnect rows intentionally prefer provider-reported actuals and preserve deterministic estimation as a backward-compatibility fallback for pre-v1.2.4 providers.
 
+#### 17.7.1 Buyer-visible terminal SSE error envelope contract (#232)
+
+Streaming fallback settlements that write a `usage_events.outcome` value other than `"ok"` (e.g. `stream_truncated`, `stream_malformed`, `stream_output_exceeded`, `upstream_error`, `provider_disconnected`, `provider_timeout`) MUST emit a buyer-visible OpenAI-style terminal SSE error envelope to the byte stream BEFORE the closing `data: [DONE]` frame (or before EOF for paths that cannot emit `[DONE]`):
+
+```text
+data: {"error": {"message": "...", "type": "...", "code": "<outcome-code>"}}
+```
+
+Constraints on the envelope:
+
+1. The envelope MUST be a STANDALONE SSE data frame. No `choices` field. No `usage` field with non-zero token counts.
+2. `error.code` MUST be non-empty and SHOULD match one of the SPEC-006 § 17.7 fallback outcome names so triage can cross-check the buyer-visible code against the `usage_events.outcome` column.
+3. The envelope MUST be the LAST data frame on the stream before `[DONE]` or EOF. Content frames MUST NOT follow the envelope.
+4. Reference implementations: `writeSSEError` and `writeStructuredOutputTimeoutSSE` in `phase5-gateway/internal/router/chat_proxy.go`.
+
+This contract is what the harness reconciler relies on to corroborate the gateway's `usage_events.outcome` label when suppressing fallback pairs from the I1 overbill check (`GatewayOverbillVsHarnessTokens` / `GatewayOverbillVsCoordinatorTokens` / `AbsGatewayCoordinatorMismatchTokens`). Without this clause the gateway's outcome label is a trust gate: a buggy or attacker-controlled gateway could label a real overbill as `stream_truncated` to hide it from I1 (#229 R6 security HIGH → #232).
+
+A fallback row whose buyer never saw the standalone terminal envelope MUST be flagged by the harness as an uncorroborated overbill. Money-path implementations that intentionally settle as a fallback outcome without emitting the envelope (e.g. a future code path that closes the stream silently) MUST be explicitly opted out of this corroboration contract in the SPEC before shipping.
+
 ### 17.8 Kill-switch failure mode
 
 Kill-switch responses MUST be 503.

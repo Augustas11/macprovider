@@ -261,11 +261,19 @@ func isSSE(resp *http.Response) bool {
 }
 
 // consumeSSE reads the SSE stream, recording TTFT, byte count, token
-// count parsed from each chunk's usage field if present, and the
-// "[DONE]" terminator. Errors mid-stream are recorded but do not panic.
+// count parsed from each chunk's usage field if present, the "[DONE]"
+// terminator, and (#232) whether the FINAL data chunk before terminator
+// or EOF was a standalone error envelope. Errors mid-stream are
+// recorded but do not panic.
 func consumeSSE(body io.Reader, res *Result) {
 	reader := bufio.NewReader(body)
 	firstByte := true
+	// #232 R2 SEC HIGH: track the most-recent data chunk's classification
+	// so that an attacker who injects an error envelope MID-stream and
+	// then keeps emitting content cannot trigger SawSSEErrorEvent. Only
+	// the LAST data chunk before [DONE] or EOF flips the bit.
+	var lastErrorCode string
+	lastWasErrorEnvelope := false
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -281,13 +289,32 @@ func consumeSSE(body io.Reader, res *Result) {
 				payload := bytes.TrimSpace(trimmed[len("data:"):])
 				if bytes.Equal(payload, []byte("[DONE]")) {
 					res.SawTerminator = true
+					if lastWasErrorEnvelope {
+						res.SawSSEErrorEvent = true
+						res.SSEErrorCode = lastErrorCode
+					}
 				} else {
-					parseChunkTokens(payload, res)
+					code, isStandalone := parseChunkTokens(payload, res)
+					if isStandalone {
+						lastErrorCode = code
+						lastWasErrorEnvelope = true
+					} else {
+						lastWasErrorEnvelope = false
+						lastErrorCode = ""
+					}
 				}
 			}
 		}
 		if err != nil {
 			if err == io.EOF {
+				// EOF without [DONE] — still classify as corroborated if
+				// the final chunk was a standalone error envelope. The
+				// gateway is permitted to close without [DONE] on some
+				// disconnect paths.
+				if lastWasErrorEnvelope {
+					res.SawSSEErrorEvent = true
+					res.SSEErrorCode = lastErrorCode
+				}
 				return
 			}
 			// Mid-stream read failure. Phase A records the outcome; I4
@@ -328,10 +355,25 @@ type chunkPayload struct {
 	} `json:"error,omitempty"`
 }
 
-func parseChunkTokens(payload []byte, res *Result) {
+// parseChunkTokens decodes a single SSE chunk's `data:` payload and
+// updates `res` with any token counts the chunk carried. It returns
+// the chunk's classification for #232 corroboration tracking:
+//
+//   - code: the non-empty `error.code` value if the chunk is a
+//     STANDALONE error envelope; "" otherwise.
+//   - isStandaloneError: true ONLY if the chunk has a non-empty
+//     `error.code` AND no `choices` AND no `usage` tokens.
+//
+// The caller in consumeSSE tracks whether the LAST data chunk before
+// `[DONE]`/EOF was a standalone error envelope; only that position
+// flips `Result.SawSSEErrorEvent`. This makes the corroboration bit
+// position-aware so that injecting `"error":{"code":"..."}` into a
+// content-bearing chunk or before more content chunks does not
+// satisfy the buyer-corroboration check. (#232 R2 SEC HIGH.)
+func parseChunkTokens(payload []byte, res *Result) (code string, isStandaloneError bool) {
 	var c chunkPayload
 	if err := json.Unmarshal(payload, &c); err != nil {
-		return
+		return "", false
 	}
 	if c.Usage.CompletionTokens > 0 {
 		res.CompletionTokensReceived = c.Usage.CompletionTokens
@@ -339,14 +381,17 @@ func parseChunkTokens(payload []byte, res *Result) {
 	if c.Usage.PromptTokens > 0 {
 		res.PromptTokensReported = c.Usage.PromptTokens
 	}
-	// #232: any chunk carrying an error envelope flags buyer-side
-	// corroboration of a fallback path. Gateway writeSSEError always
-	// includes top-level "error" with non-empty `code` so we anchor on
-	// code; an empty/nil error envelope (defensive: chunks that have
-	// the field but with no code) is treated as not corroborating.
-	if c.Error != nil && c.Error.Code != "" {
-		res.SawSSEErrorEvent = true
+	// Standalone terminal-envelope shape: error.code present AND no
+	// choices AND no usage tokens. Both writeSSEError and
+	// writeStructuredOutputTimeoutSSE emit chunks of this exact shape
+	// — see phase5-gateway/internal/router/chat_proxy.go:1239 / :1256.
+	if c.Error != nil && c.Error.Code != "" &&
+		len(c.Choices) == 0 &&
+		c.Usage.CompletionTokens == 0 &&
+		c.Usage.PromptTokens == 0 {
+		return c.Error.Code, true
 	}
+	return "", false
 }
 
 func consumeJSON(body io.Reader, res *Result) {

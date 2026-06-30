@@ -59,20 +59,39 @@ type Result struct {
 	// I4 may flag it.
 	SawTerminator bool `json:"saw_terminator"`
 
-	// SawSSEErrorEvent is true when any SSE chunk in the stream carried
-	// an `error` field (the OpenAI-style envelope the gateway emits for
-	// fallback paths — see phase5-gateway/internal/router/chat_proxy.go
-	// writeSSEError). This is the buyer-side evidence of truncation /
-	// upstream failure / max-tokens overflow used by the reconciler
-	// (#232) to corroborate fallback outcome labels — the gateway's
-	// outcome label alone is a trust gate, but `SawSSEErrorEvent=true`
-	// is something the gateway cannot fake without actually telling the
-	// buyer the stream failed.
+	// SawSSEErrorEvent is true when the SSE stream's final data chunk
+	// before `[DONE]` (or EOF) was a STANDALONE terminal error envelope
+	// — `{"error": {"code": "...", ...}}` with no `choices` and no
+	// `usage` tokens. This shape matches the gateway's writeSSEError and
+	// writeStructuredOutputTimeoutSSE helpers in chat_proxy.go.
+	//
+	// Used by the reconciler (#232) to corroborate fallback outcome
+	// labels — the gateway's outcome label alone is a trust gate, but a
+	// terminal error envelope is something the gateway cannot fake
+	// without actually telling the buyer the stream failed.
+	//
+	// Tightening (#232 R2 SEC HIGH): position-aware. An attacker who
+	// injects `"error":{"code":"..."}` into a normal-looking content
+	// chunk (with `choices`/`usage`) does NOT flip this bit — that's
+	// not a standalone envelope. An attacker who emits a standalone
+	// error envelope but then continues with content chunks does NOT
+	// flip this bit either — the LAST data chunk before the terminator
+	// must be the envelope. Either bypass requires the gateway to
+	// present the buyer with a stream that actually ends in a visible
+	// failure event.
 	//
 	// Streaming-only. Non-streaming responses never set this; for those,
 	// the gateway returns HTTP 4xx/5xx instead of an SSE error envelope,
 	// and HTTPStatus + Outcome handle the classification.
 	SawSSEErrorEvent bool `json:"saw_sse_error_event"`
+
+	// SSEErrorCode carries the `error.code` value the gateway sent in
+	// the terminal error envelope (e.g. "stream_truncated",
+	// "stream_output_exceeded", "stream_malformed", "provider_timeout",
+	// "provider_disconnected"). Empty when SawSSEErrorEvent is false.
+	// Triage cross-checks the buyer-visible code against the gateway's
+	// `outcome` column in usage_events. (#232 R2 ARCH LOW.)
+	SSEErrorCode string `json:"sse_error_code,omitempty"`
 
 	// Phase tags requests fired under the cold_warm_pairs pattern:
 	// "cold" for the first request after each idle gap, "warm" for the
