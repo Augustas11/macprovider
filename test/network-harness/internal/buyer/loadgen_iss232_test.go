@@ -208,6 +208,74 @@ func TestConsumeSSE_LeadingWhitespaceDONEIgnored_232_R4(t *testing.T) {
 	}
 }
 
+// TestConsumeSSE_BOMPrefixedDONEThenForgedEnvelope_232_R5_HIGH:
+// SEC R5 HIGH-1 attack — gateway prefixes the [DONE] terminator with a
+// UTF-8 BOM. Spec-compliant clients (EventSource, OpenAI Python/Node)
+// strip the BOM at stream start and treat the line as `data: [DONE]`,
+// terminating there. The harness must also strip the BOM so the forged
+// envelope after the BOM-DONE is invisible to corroboration.
+func TestConsumeSSE_BOMPrefixedDONEThenForgedEnvelope_232_R5_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("\xEF\xBB\xBFdata: [DONE]\n\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawTerminator {
+		t.Errorf("BOM-stripped [DONE] must flip SawTerminator")
+	}
+	if r.SawSSEErrorEvent {
+		t.Errorf("post-BOM-DONE forged envelope MUST NOT corroborate — got true (#232 R5 SEC HIGH)")
+	}
+	if r.SSEErrorCode != "" {
+		t.Errorf("SSEErrorCode must stay empty, got %q", r.SSEErrorCode)
+	}
+}
+
+// TestConsumeSSE_BOMPrefixedLegitimateEnvelopeStillWorks_232_R5:
+// confirm BOM stripping doesn't break the happy path — a real
+// terminal error envelope after a BOM-prefixed first line still
+// corroborates.
+func TestConsumeSSE_BOMPrefixedLegitimateEnvelopeStillWorks_232_R5(t *testing.T) {
+	body := bytes.NewBufferString("\xEF\xBB\xBFdata: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"legit\"}}\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawSSEErrorEvent {
+		t.Errorf("legit envelope after BOM-prefixed content must corroborate")
+	}
+	if r.SSEErrorCode != "stream_truncated" {
+		t.Errorf("SSEErrorCode = %q, want stream_truncated", r.SSEErrorCode)
+	}
+}
+
+// TestConsumeSSE_EnvelopeThenEOFNoBlankLine_232_R5_HIGH:
+// SEC R5 HIGH-2 attack — gateway emits a standalone envelope without
+// the trailing blank-line that completes the SSE event, then EOFs.
+// Spec-compliant clients DISCARD the pending event because it was
+// never dispatched. The harness must not corroborate this case.
+func TestConsumeSSE_EnvelopeThenEOFNoBlankLine_232_R5_HIGH(t *testing.T) {
+	// Single `\n` after envelope, then EOF — no blank-line dispatch.
+	body := bytes.NewBufferString("data: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawSSEErrorEvent {
+		t.Errorf("envelope without blank-line dispatch + EOF MUST NOT corroborate — got true (#232 R5 SEC HIGH-2)")
+	}
+}
+
+// TestConsumeSSE_EnvelopeThenBlankLineThenEOF_232_R5:
+// happy path confirmation: envelope + blank line + EOF (no [DONE])
+// still corroborates because the blank line dispatched the event
+// before EOF.
+func TestConsumeSSE_EnvelopeThenBlankLineThenEOF_232_R5(t *testing.T) {
+	body := bytes.NewBufferString("data: {\"error\":{\"code\":\"provider_disconnected\",\"type\":\"server_error\",\"message\":\"x\"}}\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawSSEErrorEvent {
+		t.Errorf("envelope + blank-line + EOF must corroborate")
+	}
+	if r.SSEErrorCode != "provider_disconnected" {
+		t.Errorf("SSEErrorCode = %q, want provider_disconnected", r.SSEErrorCode)
+	}
+}
+
 // TestConsumeSSE_PostDONEForgedEnvelopeWithEOF_232_R3_HIGH:
 // the EOF variant of the same attack. Clean completion + first `[DONE]`,
 // then forged envelope, then EOF (no second `[DONE]`).

@@ -1003,13 +1003,19 @@ func isGatewayOKOutcome(outcome string) bool {
 //
 // Source enumeration: phase5-gateway/internal/router/chat_proxy.go
 // settleAfterCommit() / settleBeforeResponse() call sites.
+//
+// `provider_timeout` was added in #232 R5 ARCH MED — SPEC-019 v0.2.4 §10
+// gateway wall-clock timeout writes `usage_events.outcome=provider_timeout`
+// for structured streaming; prior to this addition the reconciler treated
+// those rows as incomplete and surfaced them as unmatched.
 func isSettlementComplete(outcome string) bool {
 	switch outcome {
 	case "ok",
 		"stream_truncated",
 		"stream_malformed",
 		"stream_output_exceeded",
-		"upstream_error":
+		"upstream_error",
+		"provider_timeout":
 		return true
 	}
 	return false

@@ -1275,8 +1275,14 @@ receipt-eligible provider error pass-through helper, and
 
 **v0.2 streaming pass-through allow-list amendment**: SPEC-006 gateway
 normalization MUST also pass through terminal SSE error frames whose
-`error.code` is `malformed_json_response` or
-`json_schema_validation_failed`. The gateway MUST NOT remap these terminal SSE
+`error.code` is one of:
+
+- `malformed_json_response` (coordinator/provider-emitted)
+- `json_schema_validation_failed` (coordinator/provider-emitted)
+- `response_byte_cap_exceeded` (coordinator/provider-emitted; pass-through, no gateway `usage_events` row written — refund-only)
+- `provider_timeout` (TWO emission paths: provider/coordinator-emitted pass-through with no gateway row, AND gateway-owned wall-clock timeout written by `writeStructuredOutputTimeoutSSE` with `usage_events.outcome=provider_timeout`)
+
+The gateway MUST NOT remap these terminal SSE
 error frames to `api_error`, `stream_malformed`, generic
 `upstream_provider_error`, or any other code, and MUST NOT drop the structured
 `retryable`, `request_id`, `inference_ran`, or `settlement_ran` fields required

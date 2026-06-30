@@ -268,12 +268,23 @@ func isSSE(resp *http.Response) bool {
 func consumeSSE(body io.Reader, res *Result) {
 	reader := bufio.NewReader(body)
 	firstByte := true
+	bomConsumed := false
 	// #232 R2 SEC HIGH: track the most-recent data chunk's classification
 	// so that an attacker who injects an error envelope MID-stream and
 	// then keeps emitting content cannot trigger SawSSEErrorEvent. Only
 	// the LAST data chunk before [DONE] or EOF flips the bit.
+	//
+	// #232 R5 SEC HIGH-2: track whether a blank-line event terminator
+	// followed the last data chunk. Per the HTML5/SSE spec, an event is
+	// not dispatched to the client until a blank line follows the
+	// preceding data/field lines. EOF without that blank line means the
+	// pending event is DISCARDED by spec-compliant clients (OpenAI
+	// Python/Node decoders included). The harness must mirror that: the
+	// EOF corroboration path only fires when a blank line was seen
+	// AFTER the standalone envelope.
 	var lastErrorCode string
 	lastWasErrorEnvelope := false
+	envelopeDispatched := false
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -284,6 +295,21 @@ func consumeSSE(body io.Reader, res *Result) {
 				firstByte = false
 			}
 			res.BytesReceived += int64(len(line))
+			// #232 R5 SEC HIGH-1: strip a leading UTF-8 BOM (U+FEFF =
+			// EF BB BF) at stream start. Per the WHATWG SSE spec the
+			// BOM is removed before line parsing. Without this strip a
+			// malicious gateway could prefix a `data: [DONE]`
+			// terminator with the BOM, making strict EventSource-style
+			// clients terminate there while this harness's column-0
+			// check rejected the line and kept reading past it into a
+			// forged envelope.
+			workLine := line
+			if !bomConsumed {
+				bomConsumed = true
+				if len(workLine) >= 3 && workLine[0] == 0xEF && workLine[1] == 0xBB && workLine[2] == 0xBF {
+					workLine = workLine[3:]
+				}
+			}
 			// #232 R4 SEC HIGH — strict SSE field parsing. The HTML5
 			// SSE spec requires field lines to start at column 0; any
 			// leading whitespace (space, tab) makes the line an
@@ -298,9 +324,19 @@ func consumeSSE(body io.Reader, res *Result) {
 			// We strip ONLY the trailing CR/LF, then require `data:` at
 			// column 0. After the colon, the spec allows at most one
 			// optional space before the value.
-			fieldLine := line
+			fieldLine := workLine
 			for len(fieldLine) > 0 && (fieldLine[len(fieldLine)-1] == '\n' || fieldLine[len(fieldLine)-1] == '\r') {
 				fieldLine = fieldLine[:len(fieldLine)-1]
+			}
+			// #232 R5 SEC HIGH-2 — track blank-line dispatch. An empty
+			// line completes the SSE event that preceded it; only
+			// after dispatch can the buyer-visible envelope corroborate
+			// an EOF-terminated stream.
+			if len(fieldLine) == 0 {
+				if lastWasErrorEnvelope {
+					envelopeDispatched = true
+				}
+				continue
 			}
 			if bytes.HasPrefix(fieldLine, []byte("data:")) {
 				payload := fieldLine[len("data:"):]
@@ -316,6 +352,14 @@ func consumeSSE(body io.Reader, res *Result) {
 					// present a buyer-visible clean completion and
 					// then forge a terminal error envelope post-`[DONE]`
 					// to satisfy the corroboration check.
+					//
+					// `[DONE]` itself is on its own data line, which
+					// implies the preceding event (the standalone error
+					// envelope, if present) was fully buffered and the
+					// gateway moved to the terminator. We treat the
+					// `[DONE]` line as event-completing for the envelope
+					// without requiring an explicit intervening blank
+					// line; this matches OpenAI clients.
 					res.SawTerminator = true
 					if lastWasErrorEnvelope {
 						res.SawSSEErrorEvent = true
@@ -327,19 +371,23 @@ func consumeSSE(body io.Reader, res *Result) {
 				if isStandalone {
 					lastErrorCode = code
 					lastWasErrorEnvelope = true
+					envelopeDispatched = false
 				} else {
 					lastWasErrorEnvelope = false
 					lastErrorCode = ""
+					envelopeDispatched = false
 				}
 			}
 		}
 		if err != nil {
 			if err == io.EOF {
-				// EOF without [DONE] — still classify as corroborated if
-				// the final chunk was a standalone error envelope. The
-				// gateway is permitted to close without [DONE] on some
-				// disconnect paths.
-				if lastWasErrorEnvelope {
+				// EOF without [DONE]: corroborate ONLY if the last data
+				// chunk was a standalone error envelope AND a blank
+				// line followed it (the event was dispatched per SSE
+				// spec). A `data: {forged}` followed by EOF without the
+				// blank-line terminator is discarded by spec-compliant
+				// clients and MUST NOT corroborate.
+				if lastWasErrorEnvelope && envelopeDispatched {
 					res.SawSSEErrorEvent = true
 					res.SSEErrorCode = lastErrorCode
 				}
