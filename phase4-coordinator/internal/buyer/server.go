@@ -4682,9 +4682,14 @@ func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider
 		}
 	}
 	// reason "deterministic" / "randomized" maps to SPEC-004 §7's
-	// tiebreak_mode ("deterministic" / "random_epsilon"). Other reason
-	// values (e.g. sticky-tiebreak-specific labels) fall through to
-	// the empty-mode case (LogRoutingDecision omits the field).
+	// tiebreak_mode ("deterministic" / "random_epsilon"). Other
+	// reason values are sticky-tiebreak / failure labels (e.g.
+	// "sticky_miss_not_found", "sticky_miss_expired",
+	// "sticky_miss_provider_not_candidate"); those have no SPEC-004
+	// §7 tiebreak_mode equivalent so TiebreakMode stays empty (and
+	// LogRoutingDecision omits the new field) while LegacyReason
+	// preserves the pre-Phase-D `reason` field for downstream
+	// consumers + the integration test contract.
 	tiebreakMode := ""
 	switch reason {
 	case "deterministic":
@@ -4704,6 +4709,7 @@ func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider
 		RandomDraw:                  draw,
 		ChosenProviderID:            chosen,
 		ChosenAssignedID:            chosenAssignedID,
+		LegacyReason:                reason,
 	})
 }
 
