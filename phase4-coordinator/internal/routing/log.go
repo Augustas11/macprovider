@@ -46,12 +46,30 @@ type Decision struct {
 	RetryReason                 string
 	Retried                     int // count of additional provider attempts beyond the first per SPEC-004 §7 + request_log.retried column write contract
 	PreflightResult             string
+
+	// Legacy top-level aliases emitted alongside the new SPEC-004
+	// §7 names so pre-Phase-D log consumers keep working during
+	// the migration window. Callers MAY populate these explicitly
+	// or LogRoutingDecision derives them from the new fields when
+	// LegacyCandidateCount == 0 and LegacyEpsilon == 0 (i.e., the
+	// caller did not specifically need a different value).
+	LegacyCandidateCount int     // pre-Phase-D 'candidate_count'
+	LegacyEpsilon        float64 // pre-Phase-D 'epsilon'
+	LegacySeed           int64   // pre-Phase-D 'seed'
+	LegacyDraw           float64 // pre-Phase-D 'draw'
+	LegacyReason         string  // pre-Phase-D 'reason' ('deterministic' / 'randomized')
 }
 
 // CandidateLogEntry is the per-candidate metadata in
 // Decision.CandidateSet — SPEC-004 §7 explainability surface.
 // Every field name matches SPEC-004 §7 verbatim so log consumers
 // parse a stable shape.
+//
+// Legacy aliases (slots_free, slots_total, throughput_tps, metric)
+// are emitted alongside the new SPEC-004 §7 names so pre-Phase-D
+// log consumers (explorer, dashboards, alerts) continue to work
+// during the migration window. A future consumer-migration commit
+// can drop the legacy aliases once downstream code updates.
 type CandidateLogEntry struct {
 	ProviderID          string  `json:"provider_id"`
 	AssignedID          string  `json:"assigned_id"`
@@ -62,6 +80,14 @@ type CandidateLogEntry struct {
 	ModelParams         float64 `json:"model_params"`
 	ConnectedAt         string  `json:"connected_at"`
 	Tier                string  `json:"tier"`
+	// Legacy aliases — pre-Phase-D shape, preserved for
+	// downstream-consumer migration window. Same value as Slots
+	// (slots_free), p.SlotsTotal (slots_total),
+	// EffectiveThroughput (throughput_tps), ObjectiveMetric (metric).
+	SlotsFree     int     `json:"slots_free"`
+	SlotsTotal    int     `json:"slots_total"`
+	ThroughputTPS float64 `json:"throughput_tps"`
+	Metric        float64 `json:"metric"`
 }
 
 // LogRoutingDecision emits one zerolog Info row with the SPEC-004
@@ -134,6 +160,43 @@ func LogRoutingDecision(log zerolog.Logger, d Decision) {
 	if d.PreflightResult != "" {
 		event = event.Str("preflight_result", d.PreflightResult)
 	}
+	// Legacy aliases — emitted alongside the new SPEC-004 §7 names
+	// so pre-Phase-D consumers keep working. Default-derive from the
+	// new fields when caller did not explicitly populate the legacy
+	// values (zero-value sentinels).
+	legacyCount := d.LegacyCandidateCount
+	if legacyCount == 0 {
+		legacyCount = d.CandidateCountAfterFilters
+	}
+	event = event.Int("candidate_count", legacyCount)
+	legacyEpsilon := d.LegacyEpsilon
+	if legacyEpsilon == 0 {
+		legacyEpsilon = d.TiebreakEpsilon
+	}
+	event = event.Float64("epsilon", legacyEpsilon)
+	legacySeed := d.LegacySeed
+	if legacySeed == 0 {
+		legacySeed = d.RandomSeed
+	}
+	event = event.Int64("seed", legacySeed)
+	legacyDraw := d.LegacyDraw
+	if legacyDraw == 0 {
+		legacyDraw = d.RandomDraw
+	}
+	event = event.Float64("draw", legacyDraw)
+	legacyReason := d.LegacyReason
+	if legacyReason == "" {
+		// Map back from SPEC-004 §7 tiebreak_mode to legacy reason.
+		switch d.TiebreakMode {
+		case "random_epsilon":
+			legacyReason = "randomized"
+		case "deterministic":
+			legacyReason = "deterministic"
+		}
+	}
+	if legacyReason != "" {
+		event = event.Str("reason", legacyReason)
+	}
 	event.Msg("routing decision")
 }
 
@@ -142,16 +205,26 @@ func LogRoutingDecision(log zerolog.Logger, d Decision) {
 // + SPEC-004 canonical fields. Caller supplies the objective-driven
 // score (caller computes it because the routing helpers only know
 // pure metric formulas, not per-objective dispatch).
+//
+// Both SPEC-004 §7 fields AND legacy pre-Phase-D aliases
+// (slots_free, slots_total, throughput_tps, metric) are populated
+// so the log row is a STRICT SUPERSET of the pre-Phase-D shape.
 func ProviderToCandidateLogEntry(p pool.Provider, objectiveMetric float64, weights Weights) CandidateLogEntry {
+	eff := EffectiveThroughput(p, weights)
 	return CandidateLogEntry{
 		ProviderID:          p.ProviderID,
 		AssignedID:          p.AssignedID,
 		ObjectiveMetric:     objectiveMetric,
 		State:               string(p.State),
 		Slots:               p.SlotsFree,
-		EffectiveThroughput: EffectiveThroughput(p, weights),
+		EffectiveThroughput: eff,
 		ModelParams:         p.ModelParamsB,
 		ConnectedAt:         p.ConnectedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		Tier:                string(p.Tier),
+		// Legacy aliases for pre-Phase-D consumers.
+		SlotsFree:     p.SlotsFree,
+		SlotsTotal:    p.SlotsTotal,
+		ThroughputTPS: eff,
+		Metric:        objectiveMetric,
 	}
 }

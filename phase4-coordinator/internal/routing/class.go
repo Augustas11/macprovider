@@ -24,9 +24,15 @@ import "github.com/augstar/macprovider-coordinator/internal/pool"
 // without forcing routing/ to know buyer-internal key derivation.
 //
 // Per SPEC FR-SR-8 last paragraph the coordinator MUST log the
-// component values and final score; callers SHOULD use
-// BalancedScoreComponents when they need the individual norm()
-// values for the SPEC-004 §7 routing-decision log surface.
+// individual component values (norm(tps) / norm(params) /
+// norm(ctx) / norm(slots)) alongside the final score. Phase D
+// step 1 + 2 land the canonical log surface (routing.Decision /
+// LogRoutingDecision) and the score formula here; surfacing the
+// individual component values into the routing-decision log is a
+// follow-up extraction tracked under Phase D's "objective.go +
+// per-component logging" deferred work (see commit c2d7e73). A
+// future BalancedScoreComponents helper would return the four
+// norm values per candidate; not exposed in this PR.
 func BalancedScores(candidates []pool.Provider) []float64 {
 	scores := make([]float64, len(candidates))
 	if len(candidates) == 0 {

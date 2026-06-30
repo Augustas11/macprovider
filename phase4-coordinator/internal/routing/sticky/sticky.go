@@ -117,6 +117,23 @@ func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
+	// Refresh path FIRST: if the conversationKey already exists, we
+	// are not growing the map and MUST NOT evict an unrelated entry.
+	// This also preserves CreatedAt per FR-SR-6 before any eviction
+	// loop could accidentally drop the entry being refreshed.
+	if existing, ok := m.entries[conversationKey]; ok {
+		m.entries[conversationKey] = Entry{
+			ConversationKey: conversationKey,
+			ProviderID:      providerID,
+			AccountID:       accountID,
+			ModelScope:      modelScope,
+			CreatedAt:       existing.CreatedAt,
+			LastUsedAt:      now,
+		}
+		return
+	}
+	// Insert path: cap-eviction only when adding a NEW key would
+	// push len past maxEntries.
 	if len(m.entries) >= m.maxEntries {
 		// Pass 1: drop TTL-expired entries (cheap and may free a slot).
 		var oldestKey string
@@ -136,16 +153,12 @@ func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) 
 			delete(m.entries, oldestKey)
 		}
 	}
-	created := now
-	if existing, ok := m.entries[conversationKey]; ok {
-		created = existing.CreatedAt
-	}
 	m.entries[conversationKey] = Entry{
 		ConversationKey: conversationKey,
 		ProviderID:      providerID,
 		AccountID:       accountID,
 		ModelScope:      modelScope,
-		CreatedAt:       created,
+		CreatedAt:       now,
 		LastUsedAt:      now,
 	}
 }

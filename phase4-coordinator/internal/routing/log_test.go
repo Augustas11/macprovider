@@ -68,6 +68,77 @@ func TestLogRoutingDecision_OmitsEmptyOptionalScalars(t *testing.T) {
 	}
 }
 
+func TestLogRoutingDecision_EmitsLegacyAliasesAlongsideSpec004Names(t *testing.T) {
+	// Pre-Phase-D consumers parse 'candidate_count', 'epsilon',
+	// 'seed', 'draw', 'reason' at the top level. The log row MUST
+	// emit these alongside the new SPEC-004 §7 names
+	// (candidate_count_after_filters, tiebreak_epsilon, random_seed,
+	// random_draw, tiebreak_mode) so consumers keep working during
+	// the migration window. Per D+A R1 audit CODE-H1.
+	t.Parallel()
+	log, buf := newCapturingLogger()
+	routing.LogRoutingDecision(log, routing.Decision{
+		RequestID:                  "req-1",
+		CandidateCountAfterFilters: 3,
+		TiebreakEpsilon:            0.05,
+		RandomSeed:                 12345,
+		RandomDraw:                 0.42,
+		TiebreakMode:               "random_epsilon",
+	})
+	row := decode(t, buf.Bytes())
+	if row["candidate_count"] != float64(3) {
+		t.Errorf("legacy candidate_count: want 3, got %v", row["candidate_count"])
+	}
+	if row["epsilon"] != 0.05 {
+		t.Errorf("legacy epsilon: want 0.05, got %v", row["epsilon"])
+	}
+	if row["seed"] != float64(12345) {
+		t.Errorf("legacy seed: want 12345, got %v", row["seed"])
+	}
+	if row["draw"] != 0.42 {
+		t.Errorf("legacy draw: want 0.42, got %v", row["draw"])
+	}
+	if row["reason"] != "randomized" {
+		t.Errorf("legacy reason: want randomized (mapped from random_epsilon), got %v", row["reason"])
+	}
+	// And the new SPEC-004 §7 names alongside.
+	if row["tiebreak_mode"] != "random_epsilon" {
+		t.Errorf("new tiebreak_mode: want random_epsilon, got %v", row["tiebreak_mode"])
+	}
+	if row["random_seed"] != float64(12345) {
+		t.Errorf("new random_seed: want 12345, got %v", row["random_seed"])
+	}
+}
+
+func TestProviderToCandidateLogEntry_PreservesLegacyAliases(t *testing.T) {
+	// Per D+A R1 audit SEC-L1: pre-Phase-D consumers parsed
+	// slots_free / slots_total / throughput_tps / metric per
+	// candidate. Strict-superset preservation required.
+	t.Parallel()
+	p := pool.Provider{
+		ProviderID:            "p-1",
+		ThroughputTPSEstimate: 100,
+		SlotsFree:             3,
+		SlotsTotal:            5,
+		Tier:                  pool.TierPinned,
+		ConnectedAt:           time.Date(2026, 6, 30, 12, 0, 0, 0, time.UTC),
+	}
+	w := routing.DefaultWeights()
+	entry := routing.ProviderToCandidateLogEntry(p, 0.85, w)
+	if entry.SlotsFree != 3 {
+		t.Errorf("legacy slots_free: want 3, got %d", entry.SlotsFree)
+	}
+	if entry.SlotsTotal != 5 {
+		t.Errorf("legacy slots_total: want 5, got %d", entry.SlotsTotal)
+	}
+	if entry.ThroughputTPS != 100 {
+		t.Errorf("legacy throughput_tps: want 100, got %v", entry.ThroughputTPS)
+	}
+	if entry.Metric != 0.85 {
+		t.Errorf("legacy metric: want 0.85, got %v", entry.Metric)
+	}
+}
+
 func TestLogRoutingDecision_EmitsFullSpec004Section7Fields(t *testing.T) {
 	t.Parallel()
 	log, buf := newCapturingLogger()

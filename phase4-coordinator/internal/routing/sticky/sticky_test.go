@@ -239,6 +239,28 @@ func TestMap_ConcurrentMixedOperationsNoRaceNoOvergrow(t *testing.T) {
 	}
 }
 
+func TestMap_RefreshAtCapDoesNotEvictUnrelatedEntries(t *testing.T) {
+	// Regression for the D+A R1 ARCH-M1 bug: when refreshing an
+	// existing conversationKey at MaxEntries, the eviction loop
+	// MUST NOT fire — the map size is unchanged. Pre-fix, an at-cap
+	// refresh could drop an unrelated LRU entry.
+	t.Parallel()
+	clock := newClock()
+	m := newTestMap(time.Hour, 2, clock)
+	m.Update("conv:1", "acc", "prov-1", "model-A") // LRU
+	clock.Advance(time.Second)
+	m.Update("conv:2", "acc", "prov-2", "model-A")
+	clock.Advance(time.Second)
+	// Refresh conv:2 (already present at cap). conv:1 (LRU) MUST survive.
+	m.Update("conv:2", "acc", "prov-2-refreshed", "model-A")
+	if r := m.Lookup("conv:1"); !r.Hit {
+		t.Fatalf("conv:1 (LRU) MUST survive refresh of conv:2 at cap; missReason=%q", r.MissReason)
+	}
+	if r := m.Lookup("conv:2"); !r.Hit || r.Entry.ProviderID != "prov-2-refreshed" {
+		t.Fatalf("conv:2 refresh: want hit + new ProviderID, got %+v", r)
+	}
+}
+
 func TestMap_UpdatePreservesCreatedAtOnRefresh(t *testing.T) {
 	// CreatedAt MUST be preserved across re-Updates of the same key
 	// (refresh-on-success per FR-SR-6); only LastUsedAt advances.

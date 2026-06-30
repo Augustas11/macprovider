@@ -4633,8 +4633,36 @@ func withinRelativeEpsilon(top, candidate, epsilon float64) bool {
 	return math.Abs(top-candidate) <= denom*epsilon
 }
 
+// seedForRequest derives the FR-SR-17 reproducibility seed from
+// requestID + a daily key bucket per SPEC-004 §7 / BUILD prompt
+// Phase D log-block contract:
+//
+//	"random_seed: per-request seed derivable from request_id +
+//	 daily key, NEVER from time.Now() alone"
+//
+// The daily key bucket is the current UTC date (YYYY-MM-DD), which
+// makes the seed:
+//  1. Deterministically reproducible across the same UTC day for
+//     the same requestID (audit replay possible within that
+//     window), AND
+//  2. Rotated daily so the seed space does not leak provider-
+//     selection patterns across days.
+//
+// dailyKeyFn is injectable for tests; production callers go through
+// the variadic-free seedForRequest wrapper which uses
+// defaultDailyKey (UTC date).
 func seedForRequest(requestID string) int64 {
+	return seedForRequestWithKey(requestID, defaultDailyKey())
+}
+
+func defaultDailyKey() string {
+	return time.Now().UTC().Format("2006-01-02")
+}
+
+func seedForRequestWithKey(requestID, dailyKey string) int64 {
 	h := fnv.New64a()
+	_, _ = h.Write([]byte(dailyKey))
+	_, _ = h.Write([]byte("|"))
 	_, _ = h.Write([]byte(requestID))
 	return int64(h.Sum64())
 }
