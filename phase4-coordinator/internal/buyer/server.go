@@ -32,6 +32,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
+	"github.com/augstar/macprovider-coordinator/internal/routing/sticky"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/go-chi/chi/v5"
@@ -118,8 +119,7 @@ type Server struct {
 	stickyEnabled          bool
 	stickyTTL              time.Duration
 	stickyMaxEntries       int
-	sticky                 map[string]stickyEntry
-	stickyMu               sync.Mutex
+	stickyMap              *sticky.Map
 	internalAuthKey        string
 	gatewayServiceToken    string
 	tier2Mu                sync.RWMutex
@@ -151,15 +151,6 @@ type Server struct {
 	billingSnapshotID int64
 	now               func() time.Time
 	version           string
-}
-
-type stickyEntry struct {
-	ConversationKey string
-	ProviderID      string
-	AccountID       string
-	ModelScope      string
-	CreatedAt       time.Time
-	LastUsedAt      time.Time
 }
 
 type receiptKeysBucket struct {
@@ -455,7 +446,6 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		retryPerAttemptTimeout: 60 * time.Second,
 		stickyTTL:              30 * time.Minute,
 		stickyMaxEntries:       10000,
-		sticky:                 map[string]stickyEntry{},
 		modelClasses:           map[string]config.ModelClassConfig{},
 		provisionalWeight:      0.3,
 		maxChatBodyBytes:       config.Default().Limits.MaxChatRequestBodyBytes,
@@ -480,6 +470,16 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 	for _, opt := range opts {
 		opt(s)
 	}
+	// Initialize sticky.Map AFTER options have applied final
+	// stickyTTL/stickyMaxEntries (WithBuyerConfig may override
+	// defaults). Always construct it; sticky path callers gate
+	// reads/writes on s.stickyEnabled, but Lookup/Update/Purge
+	// on a constructed map are no-ops when keys never land.
+	s.stickyMap = sticky.NewMap(sticky.Options{
+		TTL:        s.stickyTTL,
+		MaxEntries: s.stickyMaxEntries,
+		Now:        s.now,
+	})
 	return s
 }
 
@@ -4309,7 +4309,13 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 	s.sortCandidates(candidates, objective)
 	candidates = s.applySticky(requestID, headers, req.Model, class, candidates)
 	candidates, seed, draw, reason := s.applyRandomTiebreak(requestID, candidates, objective)
-	s.logRoutingDecision(requestID, candidates, objective, seed, draw, reason, "")
+	// Thread real pre-filter pool size + per-reason rejection counts
+	// into the SPEC-004 §7 routing-decision log per the FULL-IMPL
+	// audit CODE-M2 finding (previously both counts were the
+	// post-filter slice length, and filtered_counts was always
+	// omitted). routeKeyedFilterCounts converts routing.RejectionReason
+	// enum keys to SPEC-004 §7 stringly names.
+	s.logRoutingDecisionFull(requestID, len(providers), routeKeyedFilterCounts(result.Counts), candidates, objective, seed, draw, reason, "")
 	for _, candidate := range candidates {
 		provider, routeErr := s.preflightCandidate(candidate, requestID, estimatedTokens)
 		if routeErr == nil {
@@ -4483,23 +4489,19 @@ func (s *Server) applySticky(requestID string, headers http.Header, model string
 	return candidates
 }
 
-func (s *Server) stickyLookup(key string) (stickyEntry, bool, string) {
-	s.stickyMu.Lock()
-	defer s.stickyMu.Unlock()
-	entry, ok := s.sticky[key]
-	if !ok {
-		return stickyEntry{}, false, "not_found"
-	}
-	now := s.now()
-	if now.Sub(entry.LastUsedAt) > s.stickyTTL {
-		delete(s.sticky, key)
-		return stickyEntry{}, false, "expired"
-	}
-	entry.LastUsedAt = now
-	s.sticky[key] = entry
-	return entry, true, ""
+// stickyLookup delegates to routing/sticky.Map.Lookup. Returns the
+// sticky.Entry, a hit boolean, and the FR-SR-3 miss reason
+// ("not_found" / "expired") matching the pre-Phase-A inline path.
+func (s *Server) stickyLookup(key string) (sticky.Entry, bool, string) {
+	res := s.stickyMap.Lookup(key)
+	return res.Entry, res.Hit, res.MissReason
 }
 
+// stickyStore delegates to routing/sticky.Map.Update. The Update
+// implementation has the refresh-path-FIRST guard that the old
+// inline code lacked (preventing eviction of unrelated entries
+// when refreshing an existing key at MaxEntries — adversarial /
+// FULL-IMPL SEC R1 HIGH finding fix).
 func (s *Server) stickyStore(headers http.Header, provider pool.Provider, modelScope string) {
 	if !s.stickyEnabled || hasPinnedRoute(headers) {
 		return
@@ -4508,44 +4510,18 @@ func (s *Server) stickyStore(headers http.Header, provider pool.Provider, modelS
 	if !strings.HasPrefix(key, "conv:") {
 		return
 	}
-	now := s.now()
-	s.stickyMu.Lock()
-	defer s.stickyMu.Unlock()
-	if len(s.sticky) >= s.stickyMaxEntries {
-		var oldestKey string
-		var oldest time.Time
-		for k, entry := range s.sticky {
-			if now.Sub(entry.LastUsedAt) > s.stickyTTL {
-				delete(s.sticky, k)
-				continue
-			}
-			if oldestKey == "" || entry.LastUsedAt.Before(oldest) {
-				oldestKey = k
-				oldest = entry.LastUsedAt
-			}
-		}
-		if len(s.sticky) >= s.stickyMaxEntries && oldestKey != "" {
-			delete(s.sticky, oldestKey)
-		}
-	}
-	created := now
-	if existing, ok := s.sticky[key]; ok {
-		created = existing.CreatedAt
-	}
-	s.sticky[key] = stickyEntry{ConversationKey: key, ProviderID: provider.ProviderID, AccountID: headers.Get("X-MacProvider-Account"), ModelScope: modelScope, CreatedAt: created, LastUsedAt: now}
+	s.stickyMap.Update(key, headers.Get("X-MacProvider-Account"), provider.ProviderID, modelScope)
 }
 
+// purgeStickyAccount delegates to routing/sticky.Map.PurgeAccount.
+// Guards against accidental empty-accountID purge (which would
+// wipe every entry with an unset AccountID) per the adversarial
+// FULL-IMPL R1 finding.
 func (s *Server) purgeStickyAccount(accountID string) int {
-	s.stickyMu.Lock()
-	defer s.stickyMu.Unlock()
-	removed := 0
-	for key, entry := range s.sticky {
-		if entry.AccountID == accountID {
-			delete(s.sticky, key)
-			removed++
-		}
+	if accountID == "" {
+		return 0
 	}
-	return removed
+	return s.stickyMap.PurgeAccount(accountID)
 }
 
 func (s *Server) shouldRetry(r *http.Request, startedAt time.Time, explicitRetries, faultedProviders, status int, err error) bool {
@@ -4604,33 +4580,20 @@ func retryHeaderLimit(value string) int {
 	return n
 }
 
+// inEpsilonCohort delegates to routing.InEpsilonCohort so the
+// hot-path epsilon check picks up the fail-closed NaN/±Inf guard
+// from routing.WithinRelativeEpsilon. Prior to the FULL-IMPL audit
+// fix-pass, server.go had its own inline `withinRelativeEpsilon`
+// WITHOUT the non-finite guard — a buggy heartbeat with +Inf
+// throughput could bypass the cohort filter via +Inf == +Inf.
 func (s *Server) inEpsilonCohort(top, candidate pool.Provider, objective string, candidates []pool.Provider) bool {
-	switch objective {
-	case "accurate":
-		return withinRelativeEpsilon(top.ModelParamsB, candidate.ModelParamsB, s.tiebreakEpsilon)
-	case "balanced":
+	weights := routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
+	var scoreFn func(pool.Provider) float64
+	if objective == "balanced" {
 		scores := balancedScores(candidates)
-		return withinRelativeEpsilon(scores[routeKey(top)], scores[routeKey(candidate)], s.tiebreakEpsilon)
-	default:
-		if objective == "default" && top.SlotsFree != candidate.SlotsFree {
-			return false
-		}
-		return withinRelativeEpsilon(s.effectiveThroughput(top), s.effectiveThroughput(candidate), s.tiebreakEpsilon)
+		scoreFn = func(p pool.Provider) float64 { return scores[routeKey(p)] }
 	}
-}
-
-func withinRelativeEpsilon(top, candidate, epsilon float64) bool {
-	if top == candidate {
-		return true
-	}
-	if epsilon <= 0 {
-		return false
-	}
-	denom := math.Abs(top)
-	if denom == 0 {
-		return math.Abs(candidate) <= epsilon
-	}
-	return math.Abs(top-candidate) <= denom*epsilon
+	return routing.InEpsilonCohort(top, candidate, routing.Objective(objective), s.tiebreakEpsilon, weights, scoreFn)
 }
 
 // seedForRequest derives the FR-SR-17 reproducibility seed from
@@ -4667,7 +4630,58 @@ func seedForRequestWithKey(requestID, dailyKey string) int64 {
 	return int64(h.Sum64())
 }
 
-func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string) {
+// routeKeyedFilterCounts maps routing.RejectionReason enum keys to
+// the SPEC-004 §7 'filtered_counts' string keys (model_mismatch,
+// context_too_small, breaker_held, busy, quota_blocked, etc.).
+// Returns nil when the input is empty so LogRoutingDecision omits
+// the field per its "empty optional" contract.
+func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]int {
+	if len(counts) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(counts))
+	for k, v := range counts {
+		var key string
+		switch k {
+		case routing.ReasonExcluded:
+			key = "excluded_retry"
+		case routing.ReasonModelMismatch:
+			// ProviderMatchesRequest combines model/class + FR-P5
+			// state. Pre-Phase-C the inline loop conflated both
+			// rejections; SPEC-004 §7 names them separately
+			// (model_mismatch / not_ready). The combined reason
+			// maps to model_mismatch here since the spec does not
+			// require splitting and the pre-Phase-C log did the
+			// same.
+			key = "model_mismatch"
+		case routing.ReasonContextTooSmall:
+			key = "context_too_small"
+		case routing.ReasonTier2HashMismatch:
+			key = "tier2_hash_mismatch"
+		case routing.ReasonTier2HashRequired:
+			key = "tier2_hash_required"
+		case routing.ReasonTier2EncryptedLeg:
+			key = "tier2_encrypted_leg"
+		case routing.ReasonTier2Attestation:
+			key = "tier2_attestation"
+		case routing.ReasonQuotaBlocked:
+			key = "quota_blocked"
+		default:
+			key = "other"
+		}
+		out[key] += v
+	}
+	return out
+}
+
+// logRoutingDecisionFull is the post-Phase-D / FULL-IMPL fix-pass
+// surface: like logRoutingDecision but additionally threads the
+// real pre-filter pool size and per-reason rejection counts into
+// the SPEC-004 §7 routing-decision log. The sticky-path / retry-
+// path callers that don't have a FilterResult continue to use
+// logRoutingDecision (which delegates here with 0 / nil for the
+// new fields, matching the pre-Phase-D shape).
+func (s *Server) logRoutingDecisionFull(requestID string, preFilterCount int, filteredCounts map[string]int, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string) {
 	if chosen == "" && len(candidates) > 0 {
 		chosen = candidates[0].ProviderID
 	}
@@ -4681,15 +4695,6 @@ func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider
 			chosenAssignedID = p.AssignedID
 		}
 	}
-	// reason "deterministic" / "randomized" maps to SPEC-004 §7's
-	// tiebreak_mode ("deterministic" / "random_epsilon"). Other
-	// reason values are sticky-tiebreak / failure labels (e.g.
-	// "sticky_miss_not_found", "sticky_miss_expired",
-	// "sticky_miss_provider_not_candidate"); those have no SPEC-004
-	// §7 tiebreak_mode equivalent so TiebreakMode stays empty (and
-	// LogRoutingDecision omits the new field) while LegacyReason
-	// preserves the pre-Phase-D `reason` field for downstream
-	// consumers + the integration test contract.
 	tiebreakMode := ""
 	switch reason {
 	case "deterministic":
@@ -4697,11 +4702,16 @@ func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider
 	case "randomized":
 		tiebreakMode = "random_epsilon"
 	}
+	beforeCount := preFilterCount
+	if beforeCount == 0 {
+		beforeCount = len(candidates)
+	}
 	routing.LogRoutingDecision(s.log, routing.Decision{
 		RequestID:                   requestID,
 		Objective:                   objective,
-		CandidateCountBeforeFilters: len(candidates),
+		CandidateCountBeforeFilters: beforeCount,
 		CandidateCountAfterFilters:  len(candidates),
+		FilteredCounts:              filteredCounts,
 		CandidateSet:                set,
 		TiebreakMode:                tiebreakMode,
 		TiebreakEpsilon:             s.tiebreakEpsilon,
@@ -4711,6 +4721,10 @@ func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider
 		ChosenAssignedID:            chosenAssignedID,
 		LegacyReason:                reason,
 	})
+}
+
+func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string) {
+	s.logRoutingDecisionFull(requestID, 0, nil, candidates, objective, seed, draw, reason, chosen)
 }
 
 func modelClassMembers(class *config.ModelClassConfig) []string {
