@@ -296,8 +296,8 @@ func TestApplyRandomTiebreak_UsesProvidedDailyKey(t *testing.T) {
 	}
 	candA := []pool.Provider{mk("p1", 100), mk("p2", 100)}
 	candB := []pool.Provider{mk("p1", 100), mk("p2", 100)}
-	_, seedDayA, _, reasonA := s.applyRandomTiebreak("req-K", candA, "fast", "2026-06-30")
-	_, seedDayB, _, reasonB := s.applyRandomTiebreak("req-K", candB, "fast", "2026-07-01")
+	_, seedDayA, _, reasonA := s.applyRandomTiebreak("req-K", candA, "fast", "2026-06-30", nil)
+	_, seedDayB, _, reasonB := s.applyRandomTiebreak("req-K", candB, "fast", "2026-07-01", nil)
 	if reasonA != "randomized" || reasonB != "randomized" {
 		t.Fatalf("expected randomized cohort both days, got %q / %q", reasonA, reasonB)
 	}
@@ -317,7 +317,7 @@ func TestApplyRandomTiebreak_EmptyDailyKeyFallsBackToDefault(t *testing.T) {
 		return pool.Provider{ProviderID: id, AssignedID: id, State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1, ThroughputTPSEstimate: tps}
 	}
 	candidates := []pool.Provider{mk("p1", 100), mk("p2", 100)}
-	_, seed, _, reason := s.applyRandomTiebreak("req-K", candidates, "fast", "")
+	_, seed, _, reason := s.applyRandomTiebreak("req-K", candidates, "fast", "", nil)
 	if reason != "randomized" {
 		t.Fatalf("expected randomized cohort, got %q", reason)
 	}

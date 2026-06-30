@@ -228,6 +228,22 @@ func (p Provider) IsWSTunneled() bool {
 	return p.InferencePath == InferencePathWSTunneled && !p.HTTPForwardingOnly
 }
 
+// SortKey returns the stable per-provider identity string used by
+// the routing pipeline as a map key (e.g. for `excluded` sets, per-
+// candidate score maps, and faulted-route tracking). The format is
+// `<ProviderID>/<AssignedID>` so two providers that share a model+
+// endpoint but were issued different AssignedIDs by the session
+// manager remain distinct.
+//
+// Centralised here in #266 T3a — pre-T3a both `buyer.routeKey` and
+// `routing.providerSortKey` derived the same string in parallel,
+// and `startRecoveryProbe` had its own inline concat. A single
+// pool method eliminates the divergence trap (R1 ARCH-L1 audit
+// finding on PR #273).
+func (p Provider) SortKey() string {
+	return p.ProviderID + "/" + p.AssignedID
+}
+
 type Registry struct {
 	mu        sync.RWMutex
 	providers map[string]*Provider
