@@ -14,6 +14,22 @@ import (
 
 var providerIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 
+// ValidateProviderID is the canonical validator for ProviderID across every
+// registration path. Issue #274: WS self-serve registration previously
+// accepted any non-empty / non-control-char string, while configured pinned
+// providers were already gated on providerIDPattern. The "/" delimiter used
+// by pool.Provider.SortKey (ProviderID + "/" + AssignedID) is only
+// unambiguous when no ProviderID contains "/" — so every code path that
+// onboards a provider (configured pinned, WS Hello, WS auth_request
+// initial/proof, admission IssueToken, MintAdmissionTokenAndPairOT) MUST
+// funnel through this helper to keep that invariant.
+func ValidateProviderID(s string) error {
+	if !providerIDPattern.MatchString(s) {
+		return fmt.Errorf("invalid provider_id %q", s)
+	}
+	return nil
+}
+
 // minAuditLogRetentionDays is the compliance floor for audit_log retention.
 // Operators may not set audit_log_retention_days below this value.
 const minAuditLogRetentionDays = 90
@@ -1021,8 +1037,8 @@ func (c Config) Validate() error {
 	}
 	seen := map[string]struct{}{}
 	for _, p := range c.Providers {
-		if !providerIDPattern.MatchString(p.ProviderID) {
-			return fmt.Errorf("invalid provider_id %q", p.ProviderID)
+		if err := ValidateProviderID(p.ProviderID); err != nil {
+			return err
 		}
 		if _, ok := seen[p.ProviderID]; ok {
 			return fmt.Errorf("duplicate provider_id %q", p.ProviderID)

@@ -240,6 +240,14 @@ func (p Provider) IsWSTunneled() bool {
 // and `startRecoveryProbe` had its own inline concat. A single
 // pool method eliminates the divergence trap (R1 ARCH-L1 audit
 // finding on PR #273).
+//
+// PRECONDITION: ProviderID MUST NOT contain "/", otherwise the
+// delimiter is ambiguous and two different (ProviderID, AssignedID)
+// pairs could collide on the same key. The invariant is enforced at
+// every registration site by `config.ValidateProviderID` (issue
+// #274). AssignedID is a coordinator-issued UUID and similarly may
+// not contain "/"; if the AssignedID format ever changes, this
+// docstring AND the key encoding must be revisited.
 func (p Provider) SortKey() string {
 	return p.ProviderID + "/" + p.AssignedID
 }

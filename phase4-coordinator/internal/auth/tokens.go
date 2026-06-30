@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	_ "modernc.org/sqlite"
 )
@@ -410,11 +411,15 @@ func (s *Store) ensureProviderIDColumn(ctx context.Context) error {
 }
 
 func (s *Store) IssueToken(ctx context.Context, providerID, providerName string) (TokenRecord, string, error) {
-	providerID = strings.TrimSpace(providerID)
-	providerName = strings.TrimSpace(providerName)
-	if providerID == "" {
-		return TokenRecord{}, "", fmt.Errorf("provider id is required")
+	// Issue #274 R1 CODE LOW-1: validate the RAW provider_id before any
+	// normalization so admission paths apply the same gate semantics as WS
+	// paths (which validate as-received). Leading/trailing whitespace is
+	// already disallowed by providerIDPattern, so this also rejects
+	// `" m4-anon "`-style inputs symmetrically.
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return TokenRecord{}, "", err
 	}
+	providerName = strings.TrimSpace(providerName)
 	if providerName == "" {
 		return TokenRecord{}, "", fmt.Errorf("provider name is required")
 	}
@@ -832,9 +837,14 @@ func (s *Store) HasOwnership(ctx context.Context, providerID string) (bool, erro
 }
 
 func (s *Store) MintAdmissionTokenAndPairOT(ctx context.Context, providerID, providerName string, now time.Time) (AdmissionPairMint, error) {
-	providerID = strings.TrimSpace(providerID)
+	// Issue #274 R1 CODE LOW-1: validate the RAW provider_id before any
+	// normalization so admission paths apply the same gate semantics as WS
+	// paths.
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return AdmissionPairMint{}, err
+	}
 	providerName = strings.TrimSpace(providerName)
-	if providerID == "" || providerName == "" {
+	if providerName == "" {
 		return AdmissionPairMint{}, fmt.Errorf("provider id and name are required")
 	}
 	providerToken, err := randomHex(32)

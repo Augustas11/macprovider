@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+
+	"github.com/augstar/macprovider-coordinator/internal/config"
 )
 
 type Hello struct {
@@ -285,6 +287,12 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	if err := requireString(raw, "provider_id", &h.ProviderID); err != nil {
 		return Hello{}, err.Field, err
 	}
+	// Issue #274: gate WS self-serve registration on the same
+	// providerIDPattern that pinned-provider config validation enforces, so
+	// the "/" delimiter inside pool.Provider.SortKey stays unambiguous.
+	if err := config.ValidateProviderID(h.ProviderID); err != nil {
+		return Hello{}, "provider_id", err
+	}
 	if err := requireString(raw, "hostname", &h.Hostname); err != nil {
 		return Hello{}, err.Field, err
 	}
@@ -389,6 +397,10 @@ func ParseAuthRequest(payload []byte) (AuthRequest, Spec010Presence, string, err
 func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequest, Spec010Presence, string, error) {
 	if err := requireString(raw, "provider_id", &req.ProviderID); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
+	}
+	// Issue #274: see ParseHello comment — same canonical validator.
+	if err := config.ValidateProviderID(req.ProviderID); err != nil {
+		return AuthRequest{}, Spec010Presence{}, "provider_id", err
 	}
 	if err := requireString(raw, "hostname", &req.Hostname); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
@@ -523,6 +535,10 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 	}
 	if err := requireString(raw, "provider_id", &req.ProviderID); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
+	}
+	// Issue #274: see ParseHello comment — same canonical validator.
+	if err := config.ValidateProviderID(req.ProviderID); err != nil {
+		return AuthRequest{}, Spec010Presence{}, "provider_id", err
 	}
 	if token, ok := raw["attestation_token"]; ok {
 		req.AttestationToken = token
