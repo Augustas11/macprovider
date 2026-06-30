@@ -124,7 +124,7 @@ tier2:
   # SPEC-008 catalog-based hash verification. Operator-controlled,
   # observation-only by default per beta/DECISION_CRITERIA Entry 80.
   # Uncomment + populate to enable.
-  #   catalog_path: "/etc/macprovider/catalog.signed.json"
+  #   catalog_path: "/opt/macprovider/tier2-catalog.json"     # deploy-pearl-vps.sh requires this exact path (#244)
   #   catalog_public_key: "<43-char base64url-unpadded ed25519 pubkey>"
   #   require_hash_verified: false
   #

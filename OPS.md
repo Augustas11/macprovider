@@ -68,9 +68,13 @@ sudo -u macprovider bash deploy-pearl-vps.sh        # safe path
 
 Post-restart: the script polls `/healthz` and asserts the deployed `version`
 field matches the freshly built binary (M0-5 phase 2 provenance check). A
-mismatch implies the systemd unit started a stale binary; the script exits
-non-zero and the operator's responsibility is to investigate **before**
-declaring success.
+mismatch emits a `WARN provenance mismatch` line and the script CONTINUES
+to `DONE`. A MISSING version field (predates PR #18) emits a
+`CRITICAL provenance MISSING` line and also continues unless
+`STRICT_PROVENANCE=1` is set (in which case the script exits 7). The
+operator's responsibility is to scan the script output for `WARN` /
+`CRITICAL provenance` lines **before** declaring success — fail-loud
+exit is opt-in via `STRICT_PROVENANCE=1`.
 
 Observed timing from the first M0-5/M1-6 production deploy (2026-06-11,
 v1.3.0-24-g87b3a6b -> v1.3.1-5-gba04cd4): there is no retry loop. Step 7
@@ -110,10 +114,15 @@ curl -s http://127.0.0.1:9443/healthz   # confirm OK + version reflects .prev
 
 Confirmed by the first M0-5/M1-6 production deploy (2026-06-11): both
 services maintain a single `.prev` artifact that is overwritten on each
-deploy, owned `macprovider:macprovider`, mode `0755`:
+deploy. The coordinator deploy script (#244 R4+R5) now installs the
+coordinator binary + .prev as `root:macprovider 0750` (was
+`macprovider:macprovider 0755`) so a compromised daemon UID can no
+longer rewrite the previous binary. The gateway deploy script has
+NOT yet been hardened the same way — `gateway.prev` is still
+`macprovider:macprovider 0755` until a parallel fix lands.
 
-- `/opt/macprovider/coordinator.prev`
-- `/opt/macprovider/gateway.prev`
+- `/opt/macprovider/coordinator.prev` — `root:macprovider 0750`
+- `/opt/macprovider/gateway.prev` — `macprovider:macprovider 0755` (TODO: harden in parallel PR)
 
 For the coordinator, the deploy script additionally writes a timestamped
 config backup at `/opt/macprovider/coordinator.yaml.bak-<UTC>` (UTC stamp
@@ -177,11 +186,12 @@ quota table, which has no BEFORE-DELETE trigger.
 
 ```bash
 ssh pearl
-# Install scripts to /usr/local/sbin (root-owned parent dir). The
-# /opt/macprovider parent is owned by macprovider:macprovider per the
-# coordinator deploy — installing the root-run archive scripts there would
-# let a compromised macprovider user substitute the script before the next
-# timer fires (audit-iter-2 security HIGH).
+# Install scripts to /usr/local/sbin (root-owned parent dir). Issue #244
+# R4+R5 tightened /opt/macprovider to root:macprovider 0750 (was
+# macprovider:macprovider 0755), so installing root-run scripts there
+# would now actually be safe — but /usr/local/sbin is the conventional
+# location for operator-installed root scripts, and the original
+# audit-iter-2 reasoning (defense in depth) still applies.
 sudo install -o root -g root -m 0755 archive-rotate.sh /usr/local/sbin/macprovider-archive-rotate.sh
 sudo install -o root -g root -m 0755 archive-restore.sh /usr/local/sbin/macprovider-archive-restore.sh
 sudo install -o root -g root -m 0644 macprovider-archive-rotate.service /etc/systemd/system/
