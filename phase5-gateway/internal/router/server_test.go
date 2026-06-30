@@ -3560,264 +3560,312 @@ func TestStreamingUnderreportedUsageWithHighProviderPromptFallsBackToGatewayEsti
 	}
 }
 
-// TestStreamingProviderReportedOverbillClampedToObserved pins the
-// issue #255 fix: when the provider's WS `usage` frame reports MORE
-// completion tokens than were actually streamed as delta.content
-// (e.g. the tokenizer counts EOS or chat-template stop tokens), the
-// gateway clamps the bill DOWN to the observed value — but ONLY when
-// the overshoot sits inside the pure-absolute clamp window
-// `(clampFloorTokens=2, clampCeilingTokens=20]`.
-//
-// Outside the window — below floor (benign tokenizer noise) OR above
-// ceiling (too large to be tokenizer noise; gateway's byte-estimate
-// is unreliable on dense content where 1 token < 4 bytes, clamping
-// would under-bill the provider for legitimate work) — the gateway
-// trusts the provider's count.
-//
-// R2 security + architect convergence (HIGH): an earlier percentage-
-// based ceiling (50% × observed) still left a moderate-density
-// under-bill class — e.g. observed=225 byte-tokens with legitimate
-// reported=300 actual tokens fell INSIDE the percentage window and
-// got clamped. Switching to pure absolute (≤ 20 tokens) eliminates
-// that false-positive class.
-//
-// Live surfacing: scenario 07 of the v0.3 rerun (2026-06-29) caught
-// +4 / +5 / +7 over-bills on Qwen2.5-Coder-7B-Instruct-4bit hitting
-// air5, all reproducible by the "clamp fires" cases below.
-func TestStreamingProviderReportedOverbillClampedToObserved(t *testing.T) {
-	type tc struct {
-		name              string
-		contentBytes      int   // bytes of delta.content streamed
-		reportedPromptTok int64 // provider's usage.prompt_tokens
-		reportedCompTok   int64 // provider's usage.completion_tokens
-		wantClamp         bool  // true → source=gateway_estimated, comp=observed
-		wantBilledCompTk  int64 // expected completion_tokens in usage_events row
-		wantBilledPromptT int64 // expected prompt_tokens in usage_events row
-	}
-	cases := []tc{
-		// Exact / within-floor: trust provider
-		{name: "exact_match_trusts_provider", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 10, wantClamp: false, wantBilledCompTk: 10, wantBilledPromptT: 7},
-		{name: "1_token_overshoot_within_floor_trusts_provider", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 11, wantClamp: false, wantBilledCompTk: 11, wantBilledPromptT: 7},
-		{name: "2_token_overshoot_at_floor_trusts_provider", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 12, wantClamp: false, wantBilledCompTk: 12, wantBilledPromptT: 7},
-		// In-window clamp: small over-report → clamp; preserve provider prompt
-		{name: "3_token_overshoot_in_window_clamps", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 13, wantClamp: true, wantBilledCompTk: 10, wantBilledPromptT: 7},
-		{name: "iss255_pattern_4_token_overshoot_clamps", contentBytes: 152, reportedPromptTok: 40, reportedCompTok: 42, wantClamp: true, wantBilledCompTk: 38, wantBilledPromptT: 40},
-		{name: "iss255_pattern_5_token_overshoot_clamps", contentBytes: 204, reportedPromptTok: 40, reportedCompTok: 56, wantClamp: true, wantBilledCompTk: 51, wantBilledPromptT: 40},
-		{name: "iss255_pattern_7_token_overshoot_clamps", contentBytes: 152, reportedPromptTok: 40, reportedCompTok: 45, wantClamp: true, wantBilledCompTk: 38, wantBilledPromptT: 40},
-		// At-ceiling-exact: still clamps (closed upper bound).
-		{name: "20_token_overshoot_at_ceiling_clamps", contentBytes: 400, reportedPromptTok: 13, reportedCompTok: 120, wantClamp: true, wantBilledCompTk: 100, wantBilledPromptT: 13},
-		// Just-above-ceiling: trusts provider — density mismatch territory.
-		{name: "21_token_overshoot_just_above_ceiling_trusts_provider", contentBytes: 400, reportedPromptTok: 13, reportedCompTok: 121, wantClamp: false, wantBilledCompTk: 121, wantBilledPromptT: 13},
-		// R2 security + architect convergence (HIGH): moderate-density
-		// scenarios that the old 50%-percentage formula clamped, now
-		// trusted. Example: 900 bytes of CJK-like content with a legit
-		// provider report of 300 tokens — observed=225, overshoot=75,
-		// pure-absolute ceiling=20 → 75 > 20 → trust provider.
-		{name: "moderate_density_33pct_overshoot_trusts_provider", contentBytes: 900, reportedPromptTok: 13, reportedCompTok: 300, wantClamp: false, wantBilledCompTk: 300, wantBilledPromptT: 13},
-		// Extreme density mismatch (4x): trust provider.
-		{name: "dense_content_4x_density_mismatch_trusts_provider", contentBytes: 800, reportedPromptTok: 13, reportedCompTok: 800, wantClamp: false, wantBilledCompTk: 800, wantBilledPromptT: 13},
-		// Tiny observed: floor=2, overshoot in (2, 20] → clamps if
-		// overshoot is e.g. 4. Pure-absolute makes this consistent.
-		{name: "tiny_observed_overshoot_in_absolute_window_clamps", contentBytes: 8, reportedPromptTok: 7, reportedCompTok: 6, wantClamp: true, wantBilledCompTk: 2, wantBilledPromptT: 7}, // observed=2, reported=6, overshoot=4 → clamp
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			output := strings.Repeat("x", c.contentBytes)
-			usageFrame := fmt.Sprintf(`data: {"id":"chatcmpl","usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d},"choices":[{"delta":{},"finish_reason":"stop"}]}`, c.reportedPromptTok, c.reportedCompTok, c.reportedPromptTok+c.reportedCompTok)
-			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				payload := strings.Join([]string{
-					`data: {"id":"chatcmpl","choices":[{"delta":{"content":"` + output + `"}}]}`,
-					usageFrame,
-					`data: [DONE]`,
-					``,
-				}, "\n\n")
-				return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload), nil
-			})}
-			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
-				cfg.Coordinator.BuyerURL = "http://coordinator.test"
-			}, WithHTTPClient(client))
-			accountID := "acct_iss255_" + c.name
-			fullKey := createAccountAndKey(t, store, cfg, accountID)
+func TestSettleFromUsage_Qwen3_32B_Legacy_Baseline(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_qwen3_32b",
+		model:          "mlx-community/Qwen3-32B-4bit",
+		contentBytes:   128,
+		reportedPrompt: 12,
+		reportedComp:   32,
+		maxTokens:      128,
+		wantOutcome:    "ok",
+		wantSource:     "provider_reported",
+		wantCompletion: 32,
+		wantPrompt:     12,
+	})
+}
 
-			body := fmt.Sprintf(`{"model":"llama","stream":true,"max_tokens":%d,"messages":[{"role":"user","content":"ok"}]}`, c.wantBilledCompTk+200)
-			resp := postChat(t, h, fullKey, body, nil)
-			if resp.Code != http.StatusOK {
-				t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
-			}
-			outcome, source, billedComp, billedPrompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
-			if outcome != "ok" {
-				t.Fatalf("outcome = %q, want ok", outcome)
-			}
-			wantSource := "provider_reported"
-			if c.wantClamp {
-				wantSource = "gateway_estimated"
-			}
-			if source != wantSource {
-				t.Errorf("token_source = %q, want %q (clamp=%v: reported=%d observed=%d/%dB window=(%d,%d])",
-					source, wantSource, c.wantClamp, c.reportedCompTok, c.contentBytes/4, c.contentBytes, clampFloorTokens, clampCeilingTokens)
-			}
-			if billedComp != c.wantBilledCompTk {
-				t.Errorf("billed completion_tokens = %d, want %d", billedComp, c.wantBilledCompTk)
-			}
-			if billedPrompt != c.wantBilledPromptT {
-				t.Errorf("billed prompt_tokens = %d, want %d (R1 HIGH: must preserve provider's prompt count)", billedPrompt, c.wantBilledPromptT)
-			}
-		})
+func TestSettleFromUsage_Llama_31_8B_NoOverbill(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_llama_31_8b",
+		model:          "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+		contentBytes:   372,
+		reportedPrompt: 46,
+		reportedComp:   69,
+		maxTokens:      128,
+		wantOutcome:    "ok",
+		wantSource:     "provider_reported",
+		wantCompletion: 69,
+		wantPrompt:     46,
+	})
+}
+
+func TestSettleFromUsage_Qwen25_Coder_32B_NoDownclamp(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_qwen25_coder_32b",
+		model:          "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit",
+		contentBytes:   464,
+		reportedPrompt: 42,
+		reportedComp:   128,
+		maxTokens:      128,
+		wantOutcome:    "ok",
+		wantSource:     "provider_reported",
+		wantCompletion: 128,
+		wantPrompt:     42,
+	})
+}
+
+func TestSettleFromUsage_GptOss_20B_NoMidStreamByteCap(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_gpt_oss_20b",
+		model:          "mlx-community/gpt-oss-20b-MXFP4-Q8",
+		contentBytes:   640,
+		chunks:         5,
+		reportedPrompt: 42,
+		reportedComp:   128,
+		maxTokens:      128,
+		wantOutcome:    "ok",
+		wantSource:     "provider_reported",
+		wantCompletion: 128,
+		wantPrompt:     42,
+	})
+}
+
+func TestSettleFromUsage_Qwen3Coder_30B_A3B_NoMidStreamByteCap(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_qwen3_coder_30b_a3b",
+		model:          "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+		contentBytes:   640,
+		chunks:         4,
+		reportedPrompt: 52,
+		reportedComp:   128,
+		maxTokens:      128,
+		wantOutcome:    "ok",
+		wantSource:     "provider_reported",
+		wantCompletion: 128,
+		wantPrompt:     52,
+	})
+}
+
+func TestSettleFromUsage_NoUsageChunk_FallsBackToByteEstimate(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_no_chunk",
+		model:          "llama",
+		contentBytes:   120,
+		noUsage:        true,
+		maxTokens:      128,
+		wantOutcome:    "ok",
+		wantSource:     "gateway_estimated",
+		wantCompletion: 30,
+	})
+}
+
+func TestSettleFromUsage_InvalidUsageChunk_FallsBackToByteEstimate(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_invalid_chunk",
+		model:          "llama",
+		contentBytes:   120,
+		invalidUsage:   true,
+		maxTokens:      128,
+		wantOutcome:    "ok",
+		wantSource:     "gateway_estimated",
+		wantCompletion: 30,
+	})
+}
+
+func TestSettleFromUsage_TruncatedStream_WithPartialUsage(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_truncated_partial",
+		model:          "llama",
+		contentBytes:   120,
+		reportedPrompt: 12,
+		reportedComp:   42,
+		maxTokens:      128,
+		streamErr:      errors.New("forced upstream stream failure"),
+		wantOutcome:    "stream_truncated",
+		wantSource:     "provider_reported",
+		wantCompletion: 42,
+		wantPrompt:     12,
+	})
+}
+
+func TestSettleFromUsage_RealStreamOutputExceeded_ProviderReports(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_real_output_exceeded",
+		model:          "llama",
+		contentBytes:   800,
+		reportedPrompt: 12,
+		reportedComp:   200,
+		maxTokens:      128,
+		wantOutcome:    "stream_output_exceeded",
+		wantSource:     "provider_reported",
+		wantCompletion: 200,
+		wantPrompt:     12,
+	})
+}
+
+func TestSettleFromUsage_OverMaxWithoutObservedOutput_FallsBackToByteCap(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_overmax_spoof",
+		model:          "llama",
+		contentBytes:   640,
+		reportedPrompt: 12,
+		reportedComp:   200,
+		maxTokens:      128,
+		wantOutcome:    "stream_output_exceeded",
+		wantSource:     "gateway_estimated",
+		wantCompletion: 128,
+	})
+}
+
+func TestSettleFromUsage_TruncatedOverMaxWithoutObservedOutput_FallsBackToByteCap(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_truncated_overmax_spoof",
+		model:          "llama",
+		contentBytes:   640,
+		reportedPrompt: 12,
+		reportedComp:   200,
+		maxTokens:      128,
+		streamErr:      errors.New("forced upstream stream failure"),
+		wantOutcome:    "stream_output_exceeded",
+		wantSource:     "gateway_estimated",
+		wantCompletion: 128,
+	})
+}
+
+func TestSettleFromUsage_RunawayByteStream_HardCap(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_runaway_hard_cap",
+		model:          "llama",
+		contentBytes:   128*8*4 + 1,
+		noUsage:        true,
+		maxTokens:      128,
+		wantOutcome:    "stream_output_exceeded",
+		wantSource:     "gateway_estimated",
+		wantCompletion: 128,
+	})
+}
+
+func TestSettleFromUsage_ClientDisconnectOverMaxWithoutObservedOutput_FallsBackToByteCap(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_client_disconnect_overmax_spoof",
+		model:          "llama",
+		contentBytes:   640,
+		reportedPrompt: 12,
+		reportedComp:   200,
+		maxTokens:      128,
+		failWriteAt:    3,
+		wantOutcome:    "stream_output_exceeded",
+		wantSource:     "gateway_estimated",
+		wantCompletion: 128,
+	})
+}
+
+func TestSettleFromUsage_ClientDisconnect_WithUsage(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_client_disconnect",
+		model:          "llama",
+		contentBytes:   120,
+		reportedPrompt: 12,
+		reportedComp:   42,
+		maxTokens:      128,
+		failWriteAt:    3,
+		wantOutcome:    "client_disconnect",
+		wantSource:     "provider_reported",
+		wantCompletion: 42,
+		wantPrompt:     12,
+	})
+}
+
+func TestSettleFromUsage_MalformedSSEChunk(t *testing.T) {
+	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
+		accountID:      "acct_usage_malformed_sse",
+		model:          "llama",
+		contentBytes:   120,
+		malformed:      true,
+		maxTokens:      128,
+		wantOutcome:    "stream_malformed",
+		wantSource:     "gateway_estimated",
+		wantCompletion: 30,
+	})
+}
+
+type streamingUsageSettlementCase struct {
+	accountID      string
+	model          string
+	contentBytes   int
+	chunks         int
+	reportedPrompt int64
+	reportedComp   int64
+	noUsage        bool
+	invalidUsage   bool
+	malformed      bool
+	streamErr      error
+	failWriteAt    int
+	maxTokens      int64
+	wantOutcome    string
+	wantSource     string
+	wantCompletion int64
+	wantPrompt     int64
+}
+
+func runStreamingUsageSettlementCase(t *testing.T, c streamingUsageSettlementCase) {
+	t.Helper()
+	body := fmt.Sprintf(`{"model":%q,"stream":true,"max_tokens":%d,"messages":[{"role":"user","content":"ok"}]}`, c.model, c.maxTokens)
+	payload := streamingUsagePayload(c)
+	ctx := context.Background()
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
+		if c.streamErr != nil {
+			pr, pw := io.Pipe()
+			go func() {
+				_, _ = pw.Write([]byte(payload))
+				_ = pw.CloseWithError(c.streamErr)
+			}()
+			return &http.Response{StatusCode: http.StatusOK, Header: header, Body: pr}, nil
+		}
+		return responseWithBody(http.StatusOK, header, payload), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, c.accountID)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	var resp http.ResponseWriter = recorder
+	if c.failWriteAt > 0 {
+		resp = &failingResponseWriter{ResponseWriter: recorder, failAt: c.failWriteAt}
+	}
+	h.ServeHTTP(resp, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, c.accountID)
+	if outcome != c.wantOutcome || source != c.wantSource || completion != c.wantCompletion {
+		t.Fatalf("usage row outcome/source/completion = %s/%s/%d, want %s/%s/%d; body=%s", outcome, source, completion, c.wantOutcome, c.wantSource, c.wantCompletion, recorder.Body.String())
+	}
+	if c.wantSource == "provider_reported" && prompt != c.wantPrompt {
+		t.Fatalf("usage row prompt_tokens = %d, want %d", prompt, c.wantPrompt)
 	}
 }
 
-// TestStreamingProviderReportedUnderbillClampedToReported pins the
-// issue #278 symmetric fix: when the gateway's byte-derived estimate
-// runs slightly ABOVE the provider's WS usage frame, the gateway clamps
-// back to the provider's authoritative tokenizer count — but ONLY when
-// the upward overshoot sits inside the same pure-absolute window
-// `(clampFloorTokens=2, clampCeilingTokens=20]` used by the #255/#262
-// downward clamp.
-//
-// Outside the window — below floor (benign tokenizer noise) OR above
-// ceiling (too large to be tokenizer noise; likely stream truncation or
-// zero-report fraud) — the gateway keeps the byte estimate.
-func TestStreamingProviderReportedUnderbillClampedToReported(t *testing.T) {
-	type tc struct {
-		name              string
-		contentBytes      int   // bytes of delta.content streamed
-		reportedPromptTok int64 // provider's usage.prompt_tokens
-		reportedCompTok   int64 // provider's usage.completion_tokens
-		wantClamp         bool  // true -> source=provider_reported, comp=reported
-		wantSource        string
-		wantBilledCompTk  int64 // expected completion_tokens in usage_events row
+func streamingUsagePayload(c streamingUsageSettlementCase) string {
+	output := strings.Repeat("x", c.contentBytes)
+	chunks := c.chunks
+	if chunks <= 0 {
+		chunks = 1
 	}
-	cases := []tc{
-		// Exact / within-floor: keep current gateway-estimate behavior when observed > reported.
-		{name: "exact_match_trusts_provider", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 10, wantClamp: false, wantSource: "provider_reported", wantBilledCompTk: 10},
-		{name: "1_token_overshoot_within_floor_trusts_gateway_estimate", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 9, wantClamp: false, wantSource: "gateway_estimated", wantBilledCompTk: 10},
-		{name: "2_token_overshoot_at_floor_trusts_gateway_estimate", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 8, wantClamp: false, wantSource: "gateway_estimated", wantBilledCompTk: 10},
-		// In-window clamp: small upward estimator inflation -> clamp; preserve provider prompt.
-		{name: "3_token_overshoot_in_window_clamps", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 7, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 7},
-		{name: "5_token_overshoot_in_window_clamps", contentBytes: 60, reportedPromptTok: 11, reportedCompTok: 10, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 10},
-		{name: "9_token_overshoot_in_window_clamps", contentBytes: 76, reportedPromptTok: 13, reportedCompTok: 10, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 10},
-		{name: "15_token_overshoot_in_window_clamps", contentBytes: 100, reportedPromptTok: 17, reportedCompTok: 10, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 10},
-		{name: "20_token_overshoot_at_ceiling_clamps", contentBytes: 400, reportedPromptTok: 19, reportedCompTok: 80, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 80},
-		// Zero-report boundary (R2 SECURITY LOW): a hostile provider may
-		// report 0 completion tokens. At the ceiling boundary the clamp
-		// fires and bills 0 (bounded ≤ 20-token underbill, same as the
-		// symmetric over-report risk accepted in #262). Just above the
-		// ceiling the gateway estimator wins, protecting against
-		// stream-truncation / zero-report fraud with no per-request bound.
-		{name: "zero_report_at_ceiling_clamps_to_zero", contentBytes: 80, reportedPromptTok: 19, reportedCompTok: 0, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 0},
-		{name: "zero_report_just_above_ceiling_trusts_gateway_estimate", contentBytes: 84, reportedPromptTok: 19, reportedCompTok: 0, wantClamp: false, wantSource: "gateway_estimated", wantBilledCompTk: 21},
-		// v0.4 scenario-07 patterns: English Qwen3-32B output where ceil(bytes/4) ran high.
-		{name: "v04_scenario07_reported_55_observed_64_clamps", contentBytes: 256, reportedPromptTok: 23, reportedCompTok: 55, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 55},
-		{name: "v04_scenario07_reported_33_observed_42_clamps", contentBytes: 168, reportedPromptTok: 29, reportedCompTok: 33, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 33},
-		{name: "v04_scenario07_reported_34_observed_41_clamps", contentBytes: 164, reportedPromptTok: 31, reportedCompTok: 34, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 34},
-		{name: "v04_scenario07_reported_46_observed_52_clamps", contentBytes: 208, reportedPromptTok: 37, reportedCompTok: 46, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 46},
-		// Above ceiling: keep gateway estimate to protect stream-truncation / zero-report fraud cases.
-		{name: "21_token_overshoot_just_above_ceiling_trusts_gateway_estimate", contentBytes: 400, reportedPromptTok: 19, reportedCompTok: 79, wantClamp: false, wantSource: "gateway_estimated", wantBilledCompTk: 100},
-		{name: "100_token_overshoot_large_trusts_gateway_estimate", contentBytes: 600, reportedPromptTok: 19, reportedCompTok: 50, wantClamp: false, wantSource: "gateway_estimated", wantBilledCompTk: 150},
+	parts := make([]string, 0, chunks+3)
+	for i := 0; i < chunks; i++ {
+		start := i * len(output) / chunks
+		end := (i + 1) * len(output) / chunks
+		parts = append(parts, `data: {"id":"chatcmpl","choices":[{"delta":{"content":"`+output[start:end]+`"},"finish_reason":null}]}`)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			output := strings.Repeat("x", c.contentBytes)
-			usageFrame := fmt.Sprintf(`data: {"id":"chatcmpl","usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d},"choices":[{"delta":{},"finish_reason":"stop"}]}`, c.reportedPromptTok, c.reportedCompTok, c.reportedPromptTok+c.reportedCompTok)
-			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				payload := strings.Join([]string{
-					`data: {"id":"chatcmpl","choices":[{"delta":{"content":"` + output + `"}}]}`,
-					usageFrame,
-					`data: [DONE]`,
-					``,
-				}, "\n\n")
-				return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload), nil
-			})}
-			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
-				cfg.Coordinator.BuyerURL = "http://coordinator.test"
-			}, WithHTTPClient(client))
-			accountID := "acct_iss278_" + c.name
-			fullKey := createAccountAndKey(t, store, cfg, accountID)
-
-			observed := estimateTokensFromBytes(int64(c.contentBytes))
-			body := fmt.Sprintf(`{"model":"llama","stream":true,"max_tokens":%d,"messages":[{"role":"user","content":"ok"}]}`, observed+200)
-			resp := postChat(t, h, fullKey, body, nil)
-			if resp.Code != http.StatusOK {
-				t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
-			}
-			outcome, source, billedComp, billedPrompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
-			if outcome != "ok" {
-				t.Fatalf("outcome = %q, want ok", outcome)
-			}
-			if source != c.wantSource {
-				t.Errorf("token_source = %q, want %q (clamp=%v: reported=%d observed=%d/%dB window=(%d,%d])",
-					source, c.wantSource, c.wantClamp, c.reportedCompTok, observed, c.contentBytes, clampFloorTokens, clampCeilingTokens)
-			}
-			if billedComp != c.wantBilledCompTk {
-				t.Errorf("billed completion_tokens = %d, want %d", billedComp, c.wantBilledCompTk)
-			}
-			wantPrompt := estimatePromptTokens([]byte(body))
-			if c.wantSource == "provider_reported" {
-				wantPrompt = c.reportedPromptTok
-			}
-			if billedPrompt != wantPrompt {
-				t.Errorf("billed prompt_tokens = %d, want %d", billedPrompt, wantPrompt)
-			}
-		})
+	switch {
+	case c.malformed:
+		parts = append(parts, `data: not-json`)
+	case c.invalidUsage:
+		parts = append(parts, `data: {"id":"chatcmpl","usage":{"prompt_tokens":0,"completion_tokens":-5,"total_tokens":-5},"choices":[{"delta":{},"finish_reason":"stop"}]}`)
+	case !c.noUsage:
+		parts = append(parts, fmt.Sprintf(`data: {"id":"chatcmpl","usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d},"choices":[{"delta":{},"finish_reason":"stop"}]}`, c.reportedPrompt, c.reportedComp, c.reportedPrompt+c.reportedComp))
 	}
-}
-
-// TestClampWindow pins the issue #255 pure-absolute window:
-//
-//	(clampFloorTokens=2, clampCeilingTokens=20]
-//
-// An over-report `o` clamps iff `2 < o <= 20`. Below floor → trust
-// provider (benign tokenizer noise). Above ceiling → trust provider
-// (gateway byte-estimate is unreliable on dense content; clamping
-// would risk under-billing).
-func TestClampWindow(t *testing.T) {
-	floor, ceiling := clampWindow()
-	if floor != 2 {
-		t.Errorf("clampFloorTokens = %d, want 2", floor)
+	if !c.malformed && c.streamErr == nil {
+		parts = append(parts, `data: [DONE]`, ``)
 	}
-	if ceiling != 20 {
-		t.Errorf("clampCeilingTokens = %d, want 20", ceiling)
-	}
-	// Anti-regression: window does not scale with observed value.
-	// (Earlier versions used max(2, ceil(5% × observed)) for floor
-	// and floor(50% × observed) for ceiling; both led to false-
-	// positive under-bills on moderate-density content.)
-	if clampCeilingTokens <= clampFloorTokens {
-		t.Errorf("clampCeilingTokens (%d) must be > clampFloorTokens (%d)", clampCeilingTokens, clampFloorTokens)
-	}
-}
-
-func TestClampWindowSymmetric(t *testing.T) {
-	floor, ceiling := clampWindow()
-	for _, c := range []struct {
-		name      string
-		reported  int64
-		observed  int64
-		wantClamp bool
-	}{
-		{name: "downward_floor", reported: 12, observed: 10, wantClamp: false},
-		{name: "downward_in_window", reported: 13, observed: 10, wantClamp: true},
-		{name: "downward_ceiling", reported: 30, observed: 10, wantClamp: true},
-		{name: "downward_above_ceiling", reported: 31, observed: 10, wantClamp: false},
-		{name: "upward_floor", reported: 8, observed: 10, wantClamp: false},
-		{name: "upward_in_window", reported: 7, observed: 10, wantClamp: true},
-		{name: "upward_ceiling", reported: 10, observed: 30, wantClamp: true},
-		{name: "upward_above_ceiling", reported: 10, observed: 31, wantClamp: false},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			var overshoot int64
-			if c.reported > c.observed {
-				overshoot = c.reported - c.observed
-			} else {
-				overshoot = c.observed - c.reported
-			}
-			gotClamp := overshoot > floor && overshoot <= ceiling
-			if gotClamp != c.wantClamp {
-				t.Errorf("symmetric clamp for reported=%d observed=%d overshoot=%d = %v, want %v (window=(%d,%d])",
-					c.reported, c.observed, overshoot, gotClamp, c.wantClamp, floor, ceiling)
-			}
-		})
-	}
+	return strings.Join(parts, "\n\n")
 }
 
 func usageEventOutcomeAndTokens(t *testing.T, dbPath, accountID string) (outcome, source string, completion, prompt int64) {
@@ -4324,6 +4372,58 @@ func (r cancelingReadCloser) Read(_ []byte) (int, error) {
 
 func (r cancelingReadCloser) Close() error {
 	return nil
+}
+
+type failingResponseWriter struct {
+	http.ResponseWriter
+	writes int
+	failAt int
+}
+
+func (w *failingResponseWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes >= w.failAt {
+		return 0, errors.New("forced buyer write failure")
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+type cancelAfterChunksReadCloser struct {
+	chunks [][]byte
+	cancel func()
+	done   bool
+}
+
+func (r *cancelAfterChunksReadCloser) Read(p []byte) (int, error) {
+	if len(r.chunks) > 0 {
+		n := copy(p, r.chunks[0])
+		r.chunks[0] = r.chunks[0][n:]
+		if len(r.chunks[0]) == 0 {
+			r.chunks = r.chunks[1:]
+		}
+		return n, nil
+	}
+	if !r.done {
+		r.done = true
+		r.cancel()
+		return 0, context.Canceled
+	}
+	return 0, io.EOF
+}
+
+func (r *cancelAfterChunksReadCloser) Close() error {
+	return nil
+}
+
+func splitSSEPayloadChunks(payload string) [][]byte {
+	frames := strings.SplitAfter(payload, "\n\n")
+	chunks := make([][]byte, 0, len(frames))
+	for _, frame := range frames {
+		if frame != "" {
+			chunks = append(chunks, []byte(frame))
+		}
+	}
+	return chunks
 }
 
 func responseWithBody(status int, header http.Header, body string) *http.Response {
