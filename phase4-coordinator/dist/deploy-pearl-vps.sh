@@ -131,21 +131,21 @@ done
 # one hostname and install a vhost for another.
 _assert_vhost_template() {
   local f="$1" expected_host="$2"
-  if ! grep -Eq '^[[:space:]]*ssl_certificate[[:space:]]+/etc/letsencrypt' "$f"; then
-    echo "aborting deploy: $f is missing an active 'ssl_certificate /etc/letsencrypt/...' directive" >&2
-    echo "  Edit the file to uncomment the cert path; the deploy script no longer rewrites it." >&2
+  local host_esc="${expected_host//./\\.}"
+  # R3 ARCH MED: anchor the active cert directives to the EXPECTED
+  # hostname's letsencrypt path — not just any letsencrypt path. A
+  # wrong active cert + commented expected cert would otherwise pass.
+  if ! grep -Eq "^[[:space:]]*ssl_certificate[[:space:]]+/etc/letsencrypt/live/${host_esc}/fullchain\\.pem;" "$f"; then
+    echo "aborting deploy: $f is missing an active 'ssl_certificate /etc/letsencrypt/live/$expected_host/fullchain.pem;' directive" >&2
+    echo "  Edit the file to uncomment the cert path for this hostname; the deploy script no longer rewrites it." >&2
     exit 1
   fi
-  if ! grep -Eq '^[[:space:]]*ssl_certificate_key[[:space:]]+/etc/letsencrypt' "$f"; then
-    echo "aborting deploy: $f is missing an active 'ssl_certificate_key /etc/letsencrypt/...' directive" >&2
+  if ! grep -Eq "^[[:space:]]*ssl_certificate_key[[:space:]]+/etc/letsencrypt/live/${host_esc}/privkey\\.pem;" "$f"; then
+    echo "aborting deploy: $f is missing an active 'ssl_certificate_key /etc/letsencrypt/live/$expected_host/privkey.pem;' directive" >&2
     exit 1
   fi
-  if ! grep -Eq "^[[:space:]]*server_name[[:space:]]+${expected_host//./\\.}[[:space:]]*;" "$f"; then
+  if ! grep -Eq "^[[:space:]]*server_name[[:space:]]+${host_esc}[[:space:]]*;" "$f"; then
     echo "aborting deploy: $f does not contain server_name $expected_host;" >&2
-    exit 1
-  fi
-  if ! grep -Fq "/etc/letsencrypt/live/$expected_host/" "$f"; then
-    echo "aborting deploy: $f does not reference /etc/letsencrypt/live/$expected_host/" >&2
     exit 1
   fi
 }
@@ -224,12 +224,13 @@ bash "$DIST_DIR/test/check_nginx_catalog_routes_test.sh" || {
 CATALOG_REMOTE_PATH="$(yaml_tier2_value catalog_path)"
 CATALOG_PUBLIC_KEY="$(yaml_tier2_value catalog_public_key)"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
-  # Issue #244 R2 SEC HIGH-2 — validate catalog_path against a strict
-  # absolute-path pattern BEFORE it flows into single-quoted SSH command
-  # strings below. Otherwise a poisoned coordinator.yaml could break out
-  # of the quote and execute arbitrary commands on Pearl as root.
-  # Allowed: absolute path, alnum + dot + dash + underscore + slash; no
-  # `..` segments, no quotes, no shell metacharacters, no whitespace.
+  # Issue #244 R2 SEC HIGH-2 + R3 SEC HIGH-1 — validate catalog_path
+  # against an ALLOWLIST of acceptable destinations, not just a shell-
+  # safe pattern. A regex-valid path can still chown privileged
+  # filesystem locations (`install -d -o macprovider ...` re-owns an
+  # existing dir on each invocation), so we require the path to live
+  # under /opt/macprovider/ — the SPEC-documented location. Other
+  # destinations are refused fail-closed.
   if ! printf '%s' "$CATALOG_REMOTE_PATH" | grep -Eq '^/[a-zA-Z0-9_./-]+$'; then
     echo "aborting deploy: tier2.catalog_path contains unsafe characters: '$CATALOG_REMOTE_PATH'" >&2
     echo "  Allowed: absolute path of [a-zA-Z0-9_./-] only." >&2
@@ -237,6 +238,15 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   fi
   case "$CATALOG_REMOTE_PATH" in
     *..*|*//*) echo "aborting deploy: tier2.catalog_path must not contain '..' or '//'" >&2; exit 5 ;;
+  esac
+  case "$CATALOG_REMOTE_PATH" in
+    /opt/macprovider/*) ;;
+    *)
+      echo "aborting deploy: tier2.catalog_path must live under /opt/macprovider/" >&2
+      echo "  Got: '$CATALOG_REMOTE_PATH'. Other locations refused so a poisoned" >&2
+      echo "  config cannot re-chown privileged system directories (e.g. /etc/macprovider)." >&2
+      exit 5
+      ;;
   esac
   if [ -z "$CATALOG_PUBLIC_KEY" ]; then
     echo "aborting deploy: tier2.catalog_path is set but tier2.catalog_public_key is empty" >&2
@@ -504,24 +514,29 @@ fi
 # hostname (round-4 ARCH r2 H1 / CODE r2 C1 fix).
 STATS_DOMAIN="${STATS_DOMAIN:-stats.streamvc.live}"
 
-# Classify domains by cert + vhost state on the remote host (#244).
-# One SSH round-trip; one line per domain: "<STATE> <DOMAIN> vhost=<0|1>".
+# Classify domains by cert state on the remote host (#244 R1+R2+R3).
+# One SSH round-trip; one line per domain: "<STATE> <DOMAIN>".
 #
-# Three states (R2 CODE HIGH / SEC HIGH split):
-#   HAVE    fullchain.pem + privkey.pem both present AND openssl says
-#           cert is valid for >24h. No certbot needed, no stub needed,
-#           full TLS vhost reinstalled idempotently in step 6b.
-#   RENEW   files present but cert <24h to expiry. certbot needed, but
-#           the existing full TLS vhost is STILL VALID right now — do
-#           NOT clobber it with an ACME stub. If certbot fails, the
-#           soon-expiring cert keeps serving until next deploy.
-#   MISSING files absent (or one is). First-ever issuance for this
-#           domain. Stub needed ONLY if no vhost is currently enabled
-#           (otherwise the existing port-80 location already serves
-#           /.well-known/acme-challenge/).
-#
-# vhost=1 means /etc/nginx/sites-enabled/<d> currently exists. Used to
-# decide whether a MISSING domain also gets the stub install.
+# Four states (R3 ARCH MED + CODE MED + SEC HIGH convergent refinement):
+#   HAVE     fullchain.pem + privkey.pem present AND cert is valid for
+#            >24h. No certbot, no stub. Full TLS vhost reinstalled
+#            idempotently in step 6b.
+#   RENEW    files present, cert valid RIGHT NOW (>0 seconds) but
+#            <24h to expiry. certbot needed; existing full TLS vhost
+#            is kept in place during certbot — if certbot fails, the
+#            soon-expiring cert keeps serving until next deploy
+#            (instead of being replaced with an HTTP-only stub).
+#   EXPIRED  files present but cert is already expired or malformed
+#            (openssl -checkend 0 reports invalid). Existing vhost
+#            would serve a broken cert, so treat as MISSING: install
+#            stub + run certbot, do NOT preserve the broken vhost.
+#   MISSING  fullchain.pem or privkey.pem absent. First-ever issuance.
+#            Always install stub before certbot (R3 ARCH+CODE MED:
+#            vhost=1 was an over-coarse proxy for "ACME-ready" — a
+#            stale enabled vhost can lack /.well-known/acme-challenge/
+#            and block issuance. Always-stub for first-issuance is
+#            cheap and idempotent; the stub gets overwritten in 6b
+#            on certbot success).
 #
 # R2 ARCH/SEC/CODE convergent MED: missing openssl is FATAL (no silent
 # file-presence fallback). step 2 above explicitly apt-installs openssl.
@@ -529,11 +544,15 @@ STATS_DOMAIN="${STATS_DOMAIN:-stats.streamvc.live}"
 # R2 CODE HIGH-1: no `declare -A` (bash 3.2 compatibility for the
 # operator Mac — default /usr/bin/env bash is 3.2.57). Track "seen"
 # via parallel array + linear scan; only 2 domains, no perf concern.
-log "step 4b/9: classify domains by cert state + vhost presence"
+log "step 4b/9: classify domains by cert state"
 DOMAINS_ALL=("$DOMAIN" "$STATS_DOMAIN")
 DOMAINS_HAVE_CERT=()
 DOMAINS_NEED_CERT=()
 DOMAINS_NEED_STUB=()
+# Track per-domain "what state was this in BEFORE certbot" so failure
+# messaging at end-of-step-6b can give the operator the truth (R3 LOW).
+DOMAINS_STATE_KEYS=()
+DOMAINS_STATE_VALS=()
 # Pass domains via positional args; single-quoted remote heredoc for safety.
 CERT_STATUS=$($SSH "bash -s -- '$DOMAIN' '$STATS_DOMAIN'" <<'REMOTE_PROBE'
 set -e
@@ -544,40 +563,38 @@ fi
 for d in "$@"; do
   full="/etc/letsencrypt/live/$d/fullchain.pem"
   priv="/etc/letsencrypt/live/$d/privkey.pem"
-  vhost=0
-  [ -e "/etc/nginx/sites-enabled/$d" ] && vhost=1
   if [ -f "$full" ] && [ -f "$priv" ]; then
-    if openssl x509 -checkend 86400 -noout -in "$full" >/dev/null 2>&1; then
-      echo "HAVE $d vhost=$vhost"
+    # R3 ARCH MED: split RENEW (still valid right now) from EXPIRED
+    # (already expired or malformed). EXPIRED behaves like MISSING.
+    if ! openssl x509 -checkend 0 -noout -in "$full" >/dev/null 2>&1; then
+      echo "EXPIRED $d"
+    elif openssl x509 -checkend 86400 -noout -in "$full" >/dev/null 2>&1; then
+      echo "HAVE $d"
     else
-      echo "RENEW $d vhost=$vhost"
+      echo "RENEW $d"
     fi
   else
-    echo "MISSING $d vhost=$vhost"
+    echo "MISSING $d"
   fi
 done
 REMOTE_PROBE
 ) || { echo "cert-status probe failed (see ABORT line above)" >&2; exit 1; }
 
-# Strict parsing (R2 CODE LOW): use `read -r` to enforce exactly three
-# fields per line — "<STATE> <DOMAIN> vhost=<0|1>". Anything else fatal.
-# bash 3.2-compatible (no associative arrays).
-_seen=()  # parallel array, linear scan
+# Strict parsing (R2 CODE LOW): use `read -r` to enforce exactly two
+# fields per line — "<STATE> <DOMAIN>". Anything else fatal. R3 dropped
+# the vhost flag (R3 ARCH+CODE convergent MED): MISSING/EXPIRED always
+# install the stub for safety; the flag was over-coarse.
+_seen=()  # parallel array, linear scan (bash 3.2 — no `declare -A`)
 while IFS= read -r line; do
   [ -z "$line" ] && continue
-  read -r status domain vhost_field extra <<<"$line"
+  read -r status domain extra <<<"$line"
   if [ -n "$extra" ]; then
     echo "aborting deploy: malformed cert-status line (extra field): '$line'" >&2
     exit 1
   fi
   case "$status" in
-    HAVE|RENEW|MISSING) ;;
+    HAVE|RENEW|EXPIRED|MISSING) ;;
     *) echo "aborting deploy: unknown cert-status state: '$status' in '$line'" >&2; exit 1 ;;
-  esac
-  case "$vhost_field" in
-    vhost=0) vhost_enabled=0 ;;
-    vhost=1) vhost_enabled=1 ;;
-    *) echo "aborting deploy: malformed vhost field: '$vhost_field'" >&2; exit 1 ;;
   esac
   # Reject unexpected domains.
   expected=0
@@ -596,25 +613,27 @@ while IFS= read -r line; do
     fi
   done
   _seen+=("$domain")
+  DOMAINS_STATE_KEYS+=("$domain")
+  DOMAINS_STATE_VALS+=("$status")
   case "$status" in
     HAVE)
       DOMAINS_HAVE_CERT+=("$domain")
       ;;
     RENEW)
-      # Existing cert still valid right now; need certbot to refresh,
-      # but do NOT install the stub — existing full vhost stays in
-      # place so a certbot failure leaves the soon-expiring cert
-      # serving instead of replacing it with an HTTP-only stub.
+      # Currently-valid cert; need certbot to refresh, but do NOT
+      # install the stub — existing vhost stays in place so a certbot
+      # failure leaves the soon-expiring cert serving instead of
+      # replacing it with an HTTP-only stub.
       DOMAINS_NEED_CERT+=("$domain")
       ;;
-    MISSING)
+    EXPIRED|MISSING)
+      # No usable cert today: stub install is safe (no working TLS
+      # vhost to clobber) and needed (so certbot webroot has a
+      # /.well-known/acme-challenge/ listener). Always install the
+      # stub, regardless of whether some other vhost happens to be
+      # enabled at this hostname.
       DOMAINS_NEED_CERT+=("$domain")
-      # Install the stub ONLY if no vhost is enabled yet. If a vhost
-      # is already enabled (e.g. a stub left from a prior failed
-      # deploy), reinstalling it would just churn nginx.
-      if [ "$vhost_enabled" -eq 0 ]; then
-        DOMAINS_NEED_STUB+=("$domain")
-      fi
+      DOMAINS_NEED_STUB+=("$domain")
       ;;
   esac
 done <<< "$CERT_STATUS"
@@ -631,11 +650,11 @@ for d in "${DOMAINS_ALL[@]}"; do
 done
 log "  cert status: have=[${DOMAINS_HAVE_CERT[*]:-none}] need_cert=[${DOMAINS_NEED_CERT[*]:-none}] need_stub=[${DOMAINS_NEED_STUB[*]:-none}]"
 
-log "step 5/9: install port-80 ACME-stub for MISSING-cert domains without an existing vhost"
-# R2 CODE HIGH / SEC HIGH: only install the stub for domains in
-# DOMAINS_NEED_STUB (MISSING + vhost=0). Domains in RENEW or
-# MISSING+vhost=1 keep their existing port-80 server block, which
-# already routes /.well-known/acme-challenge/ to /var/www/html.
+log "step 5/9: install port-80 ACME-stub for EXPIRED + MISSING domains"
+# R3 CODE+ARCH MED: install the stub for EXPIRED + MISSING (no usable
+# cert today). RENEW domains keep their existing vhost so a certbot
+# failure leaves the soon-expiring cert serving instead of an HTTP-
+# only stub. HAVE domains are untouched.
 if [ ${#DOMAINS_NEED_STUB[@]} -eq 0 ]; then
   log "  no first-time-issuance domains — skipping stub install (preserves existing vhosts)"
 else
@@ -682,7 +701,19 @@ else
       log "    ok: cert issued for $d"
     else
       DOMAINS_ISSUED_FAIL+=("$d")
-      log "    WARN: certbot failed for $d — leaving ACME stub in place; continuing deploy"
+      # R3 CODE+ARCH LOW: state-aware messaging so the operator knows
+      # which fallback applies to this specific failed domain.
+      prior_state=""
+      i=0
+      for k in ${DOMAINS_STATE_KEYS[@]+"${DOMAINS_STATE_KEYS[@]}"}; do
+        if [ "$k" = "$d" ]; then prior_state="${DOMAINS_STATE_VALS[$i]}"; break; fi
+        i=$((i+1))
+      done
+      case "$prior_state" in
+        RENEW)            log "    WARN: certbot failed for $d (was RENEW) — existing full TLS vhost left in place; soon-expiring cert keeps serving until next deploy" ;;
+        EXPIRED|MISSING)  log "    WARN: certbot failed for $d (was $prior_state) — ACME stub left in place; HTTPS unavailable for $d until next deploy" ;;
+        *)                log "    WARN: certbot failed for $d (state=$prior_state) — continuing deploy" ;;
+      esac
     fi
   done
 fi
@@ -726,7 +757,7 @@ $SSH "set -e
 "
 
 if [ ${#DOMAINS_ISSUED_FAIL[@]} -gt 0 ]; then
-  log "  WARN: certbot failed for [${DOMAINS_ISSUED_FAIL[*]}] — those domains served the ACME stub during this deploy"
+  log "  WARN: certbot failed for [${DOMAINS_ISSUED_FAIL[*]}] (state-aware fallback per-domain logged above)"
   log "  Check DNS A records (dig +short <domain>), then re-run this script to retry issuance."
 fi
 
@@ -877,6 +908,23 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     exit 1
   fi
   echo "  catalog OK: $(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print("catalog_id=%s models=%d" % (c.get("catalog_id"), len(c.get("models", []))))' /tmp/macprovider-catalog-current.json)"
+fi
+
+# R3 ARCH MED: explicit smoke check on STATS_DOMAIN so a degraded stats
+# hostname is loud at end-of-deploy rather than buried in a step-6b WARN
+# that an operator skimming output might miss. WARN-only by default
+# (matches STATS_REQUIRED=0 default and the #244 intent); promoted to
+# fail-closed when STATS_REQUIRED=1 is set.
+echo "  GET https://$STATS_DOMAIN/ -> expect any HTTPS response (TLS handshake check)"
+STATS_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$STATS_DOMAIN/" 2>/dev/null || echo "000")
+if [ "$STATS_STATUS" = "000" ]; then
+  echo "  WARN: $STATS_DOMAIN HTTPS unreachable (TLS handshake failed)" >&2
+  if [ "${STATS_REQUIRED:-0}" = "1" ]; then
+    echo "  STATS_REQUIRED=1 set — aborting." >&2
+    exit 9
+  fi
+else
+  echo "  ok: $STATS_DOMAIN HTTPS responded (status=$STATS_STATUS)"
 fi
 
 log "step 9/9: tail the coordinator journal for sanity"
