@@ -4316,9 +4316,19 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 	}
 	objective := s.objectiveForRequest(headers, class)
 	// #266 T3c: sortCandidates surfaces the balanced-score cache so
-	// applySticky / applyRandomTiebreak / logRoutingDecisionFull
+	// applySticky / applyRandomTiebreak / logRoutingDecisionFullWithCache
 	// reuse it instead of recomputing the FR-SR-8 normative formula
 	// at every epsilon comparison + log emission.
+	//
+	// Cache-lifecycle invariant: after EligibleCandidates returns,
+	// no code path BELOW this line adds or removes candidates from
+	// the `candidates` slice — only the ORDER changes (sort,
+	// sticky-swap, tiebreak-swap). The cache is keyed by
+	// pool.Provider.SortKey() which is stable across slice
+	// reordering, so every downstream lookup (inEpsilonCohort,
+	// applySticky's sticky-path log emitters,
+	// logRoutingDecisionFullWithCache) finds the same value the
+	// sort built. T3 R1 ARCHITECT-L2 audit clarification.
 	balancedCache := s.sortCandidates(candidates, objective)
 	candidates = s.applySticky(requestID, headers, req.Model, class, candidates, balancedCache)
 	candidates, seed, draw, reason := s.applyRandomTiebreak(requestID, candidates, objective, dailyKey, balancedCache)
@@ -4553,7 +4563,7 @@ func (s *Server) applySticky(requestID string, headers http.Header, model string
 	}
 	entry, ok, reason := s.stickyLookup(key)
 	if !ok {
-		s.logRoutingDecision(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss_"+reason, "")
+		s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss_"+reason, "", balancedCache)
 		return candidates
 	}
 	for i, candidate := range candidates {
@@ -4564,14 +4574,14 @@ func (s *Server) applySticky(requestID string, headers http.Header, model string
 			return candidates
 		}
 		if !s.inEpsilonCohort(candidates[0], candidate, s.objectiveForRequest(headers, class), candidates, balancedCache) {
-			s.logRoutingDecision(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_outside_epsilon", candidate.ProviderID)
+			s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_outside_epsilon", candidate.ProviderID, balancedCache)
 			return candidates
 		}
 		candidates[0], candidates[i] = candidates[i], candidates[0]
-		s.logRoutingDecision(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_hit", candidate.ProviderID)
+		s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_hit", candidate.ProviderID, balancedCache)
 		return candidates
 	}
-	s.logRoutingDecision(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss_provider_not_candidate", "")
+	s.logRoutingDecisionWithCache(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss_provider_not_candidate", "", balancedCache)
 	return candidates
 }
 
@@ -4827,6 +4837,16 @@ func (s *Server) logRoutingDecisionFullWithCache(requestID string, preFilterCoun
 
 func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string) {
 	s.logRoutingDecisionFull(requestID, 0, nil, candidates, objective, seed, draw, reason, chosen)
+}
+
+// logRoutingDecisionWithCache is the cache-aware logRoutingDecision —
+// the sticky-path log emitters (hit / outside-epsilon / miss) thread
+// the balanced-score cache through it so the FR-SR-8 normative
+// formula doesn't recompute at every sticky log emission under
+// balanced+sticky enabled. Issue #266 T3 R1 CODE audit LOW fix
+// (closes the perf-cache integration gap in applySticky).
+func (s *Server) logRoutingDecisionWithCache(requestID string, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string, balancedCache map[string]float64) {
+	s.logRoutingDecisionFullWithCache(requestID, 0, nil, candidates, objective, seed, draw, reason, chosen, balancedCache)
 }
 
 // retryDecisionAttrs carries the per-attempt FR-SR-17 / SPEC-004 §7

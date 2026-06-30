@@ -5165,12 +5165,15 @@ func TestStickyAccountMismatchEmitsWarnLog(t *testing.T) {
 }
 
 // TestSPEC004DefaultConfigRegression_EmptyPool — AC-SR-1 expansion
-// per issue #266 T3d. With NO providers registered, the default
-// pipeline must surface the canonical "no provider" envelope: 503
-// no_provider_available. Behaviour identical pre- and post-#266 T3
-// because no flag is flipped on; the test pins the contract so a
-// future smart-router change can't silently mask the empty-pool
-// case under a different error code.
+// per issue #266 T3d. With NO providers registered, the buyer's
+// upstream `pool.ModelKnown` gate fires BEFORE the smart-router
+// pipeline, so the canonical envelope is 404 model_not_found with
+// the invalid_request_error type. (The 503 no_provider_available
+// envelope is reserved for "model exists in pool but no candidate
+// passed filtering"; see the AllReadyButCapacityZero test below.)
+// The test pins the contract so a future smart-router change can't
+// silently mask the empty-pool case under a different status or
+// error code.
 func TestSPEC004DefaultConfigRegression_EmptyPool(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := buyer.NewServer(
@@ -5181,8 +5184,9 @@ func TestSPEC004DefaultConfigRegression_EmptyPool(t *testing.T) {
 	)
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
 	if rr.Code != http.StatusNotFound {
-		t.Fatalf("empty pool: expected 404 (model_not_found — coordinator filters before routing); got %d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("empty pool: expected 404; got %d body=%s", rr.Code, rr.Body.String())
 	}
+	assertOpenAIErrorEnvelope(t, rr, "model_not_found", "invalid_request_error")
 }
 
 // TestSPEC004DefaultConfigRegression_AllReadyButCapacityZero — AC-SR-1
@@ -5219,8 +5223,9 @@ func TestSPEC004DefaultConfigRegression_AllReadyButCapacityZero(t *testing.T) {
 	)
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
 	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("all-capacity-zero: expected 503 no_provider_available; got %d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("all-capacity-zero: expected 503; got %d body=%s", rr.Code, rr.Body.String())
 	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
 }
 
 // TestSPEC004DefaultConfigRegression_ContextTooSmall — AC-SR-1
@@ -5249,8 +5254,9 @@ func TestSPEC004DefaultConfigRegression_ContextTooSmall(t *testing.T) {
 	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"` + longPrompt + `"}]}`)
 	rr := postChat(t, server, body, http.Header{})
 	if rr.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("context-too-small: expected 413 context_exceeds_capacity; got %d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("context-too-small: expected 413; got %d body=%s", rr.Code, rr.Body.String())
 	}
+	assertOpenAIErrorEnvelope(t, rr, "context_exceeds_capacity", "invalid_request_error")
 }
 
 // registerBearerlessDuplicate registers a provider in the AuthBearerlessDuplicate
