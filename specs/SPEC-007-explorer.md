@@ -122,7 +122,7 @@ operator browser
        -> HTTPS proxy to gateway /admin/explorer/* with Authorization: Bearer <coordinator.operator_key>
             -> gateway SQLite reads
 ```
-The operator browser MUST call only the coordinator origin. The operator browser MUST NOT call gateway admin endpoints directly. The coordinator MUST NOT proxy mutating gateway admin endpoints. The coordinator MUST NOT perform verb or query translation for pass-through gateway explorer proxy paths. **Exemption (v0.3 / §5.6):** the session-detail endpoint MAY translate its inbound path-segment (coordinator-internal `request_id`) into the gateway-side composite key — `GET /admin/explorer/sessions/<external_request_id>?account_id=<account_id>` — derived from the resolved `request_log` row. This is the both-or-nothing safety contract required to avoid embedding wrong-account gateway data; the translation is a SPEC-007 v0.3 requirement, not a verb/query-translation violation.
+The operator browser MUST call only the coordinator origin. The operator browser MUST NOT call gateway admin endpoints directly. The coordinator MUST NOT proxy mutating gateway admin endpoints. The coordinator MUST NOT perform verb or query translation for pass-through gateway explorer proxy paths. **Exemption (§5.6):** the session-detail endpoint MAY translate its inbound `int_`-prefixed path-segment (coordinator-internal `request_id`) into the gateway-side composite key — `GET /admin/explorer/sessions/ext_<external_request_id>?account_id=<account_id>` — derived from the resolved `request_log` row. The typed `ext_` prefix is mandatory per §6.4 v0.5. This is the both-or-nothing safety contract required to avoid embedding wrong-account gateway data; the translation is a SPEC-007 requirement, not a verb/query-translation violation.
 ### 4.3 Process model
 SPEC-007 MUST NOT introduce a new long-lived service. SPEC-007 MUST NOT introduce a new public DNS target. SPEC-007 MUST NOT introduce a new Vercel project.
 The explorer consists of:
@@ -594,7 +594,7 @@ Underlying coordinator sources (intra-coordinator joins by internal `request_id`
 - `ledger_operator_credits` by `request_id` and `request_credit_id`.
 - `ledger_provider_identity_snapshots` by `request_id`.
 Underlying gateway endpoint:
-- `GET /admin/explorer/sessions/{external_request_id}?account_id=<account_id>`
+- `GET /admin/explorer/sessions/ext_<external_request_id>?account_id=<account_id>` (typed `ext_` prefix required per §6.4 v0.5)
   (coordinator forwards the resolved row's `external_request_id`
   and `account_id`; see Identity model above for the security
   rationale). When either field is missing on the resolved row,
