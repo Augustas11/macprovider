@@ -223,31 +223,26 @@ bash "$DIST_DIR/test/check_nginx_catalog_routes_test.sh" || {
 
 CATALOG_REMOTE_PATH="$(yaml_tier2_value catalog_path)"
 CATALOG_PUBLIC_KEY="$(yaml_tier2_value catalog_public_key)"
+# Issue #244 R2 SEC HIGH-2 + R3 SEC HIGH-1 + R4 CODE HIGH-1 + R4 SEC
+# HIGH-1: the catalog destination is HARDCODED, not operator-controlled.
+# Earlier rounds tried regex-validation then prefix-allowlist; both still
+# permitted attacks: trailing slash → `dirname` yields `/opt` →
+# `install -d` re-chowns `/opt`; macprovider-writable parent →
+# attacker plants a symlink at the destination → root `install` follows
+# it. Single fixed path under a root-owned dir (see step 3 below)
+# closes both classes. coordinator.yaml MUST set catalog_path to this
+# exact value or deploy refuses.
+CATALOG_REMOTE_PATH_CANONICAL="/opt/macprovider/tier2-catalog.json"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
-  # Issue #244 R2 SEC HIGH-2 + R3 SEC HIGH-1 — validate catalog_path
-  # against an ALLOWLIST of acceptable destinations, not just a shell-
-  # safe pattern. A regex-valid path can still chown privileged
-  # filesystem locations (`install -d -o macprovider ...` re-owns an
-  # existing dir on each invocation), so we require the path to live
-  # under /opt/macprovider/ — the SPEC-documented location. Other
-  # destinations are refused fail-closed.
-  if ! printf '%s' "$CATALOG_REMOTE_PATH" | grep -Eq '^/[a-zA-Z0-9_./-]+$'; then
-    echo "aborting deploy: tier2.catalog_path contains unsafe characters: '$CATALOG_REMOTE_PATH'" >&2
-    echo "  Allowed: absolute path of [a-zA-Z0-9_./-] only." >&2
+  if [ "$CATALOG_REMOTE_PATH" != "$CATALOG_REMOTE_PATH_CANONICAL" ]; then
+    echo "aborting deploy: tier2.catalog_path must be exactly '$CATALOG_REMOTE_PATH_CANONICAL'" >&2
+    echo "  Got: '$CATALOG_REMOTE_PATH'." >&2
+    echo "  This is hardcoded as a single defense-in-depth path: the parent" >&2
+    echo "  dir /opt/macprovider/ is root-owned 0750 so a same-uid attacker" >&2
+    echo "  cannot plant a symlink at the destination, AND no dynamic" >&2
+    echo "  dirname-derived directory can be re-chowned by the deploy." >&2
     exit 5
   fi
-  case "$CATALOG_REMOTE_PATH" in
-    *..*|*//*) echo "aborting deploy: tier2.catalog_path must not contain '..' or '//'" >&2; exit 5 ;;
-  esac
-  case "$CATALOG_REMOTE_PATH" in
-    /opt/macprovider/*) ;;
-    *)
-      echo "aborting deploy: tier2.catalog_path must live under /opt/macprovider/" >&2
-      echo "  Got: '$CATALOG_REMOTE_PATH'. Other locations refused so a poisoned" >&2
-      echo "  config cannot re-chown privileged system directories (e.g. /etc/macprovider)." >&2
-      exit 5
-      ;;
-  esac
   if [ -z "$CATALOG_PUBLIC_KEY" ]; then
     echo "aborting deploy: tier2.catalog_path is set but tier2.catalog_public_key is empty" >&2
     exit 5
@@ -383,7 +378,14 @@ log "step 3/9: create macprovider system user + dirs"
 #     coordinator.env itself ships mode 0640 root:macprovider (LOW-fix).
 $SSH 'set -e
   id macprovider >/dev/null 2>&1 || useradd --system --home /opt/macprovider --shell /usr/sbin/nologin macprovider
-  install -d -o macprovider -g macprovider -m 0755 /opt/macprovider
+  # Issue #244 R4 SEC HIGH-1 — /opt/macprovider is root-owned 0750 so
+  # the macprovider user (or anything running as it) cannot plant a
+  # symlink at the catalog destination that a later root-owned
+  # `install` would follow. macprovider group keeps r-x to enter the
+  # dir and read files within it. Files inside (coordinator binary,
+  # config, catalog) are still installed mode-set to macprovider so
+  # the daemon can read them.
+  install -d -o root -g macprovider -m 0750 /opt/macprovider
   install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider
   install -d -o macprovider -g macprovider -m 0750 /var/log/macprovider
   install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider-monitor
@@ -458,47 +460,59 @@ $SSH "set -e
   rm -f /tmp/coordinator-linux-amd64 /tmp/coordinator-cli-linux-amd64 /tmp/coordinator.yaml /tmp/macprovider-coordinator.service
 "
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
-  CATALOG_REMOTE_DIR="$(dirname "$CATALOG_REMOTE_PATH")"
+  # R4: no more `install -d` on a dynamic dirname. /opt/macprovider is
+  # created in step 3 as root-owned 0750; root writes the catalog file
+  # into it. The destination is the hardcoded canonical path validated
+  # at startup; no operator-controlled value reaches the SSH command.
   $SSH "set -e
-    install -d -o macprovider -g macprovider -m 0755 '$CATALOG_REMOTE_DIR'
-    install -o macprovider -g macprovider -m 0644 /tmp/tier2-catalog.json '$CATALOG_REMOTE_PATH'
+    install -o macprovider -g macprovider -m 0644 /tmp/tier2-catalog.json $CATALOG_REMOTE_PATH_CANONICAL
     rm -f /tmp/tier2-catalog.json
   "
 fi
 
-# nginx + Let's Encrypt strategy (issue #244 R1+R2 — TLS-safety hardening):
+# nginx + Let's Encrypt strategy (issue #244 R1+R2+R3+R4 — TLS-safety hardening):
 #
-# Domain classification (step 4b) produces three states + a vhost flag:
-#   HAVE    cert valid >24h         → no stub, no certbot, full vhost
-#   RENEW   cert <24h to expiry     → certbot needed; KEEP existing vhost
-#                                     (failure leaves soon-expiring cert
-#                                     serving, not an HTTP-only stub)
-#   MISSING fullchain.pem absent    → certbot needed; install stub ONLY
-#                                     if no vhost is currently enabled
-#                                     for this domain
+# Domain classification (step 4b) produces FOUR states:
+#   HAVE    fullchain.pem + privkey.pem present, openssl -checkend
+#           86400 valid → no stub, no certbot, full vhost reinstalled
+#           idempotently in step 6b.
+#   RENEW   files present, cert valid RIGHT NOW (openssl -checkend 0
+#           valid) but <24h to expiry → certbot needed, but the
+#           existing full TLS vhost is left in place. A certbot
+#           failure leaves the soon-expiring cert serving until next
+#           deploy (instead of being replaced with an HTTP-only stub).
+#   EXPIRED files present but cert is already invalid (openssl
+#           -checkend 0 fails) → treat like MISSING. Existing vhost
+#           would serve a broken cert; install stub + run certbot
+#           instead.
+#   MISSING fullchain.pem or privkey.pem absent → install stub + run
+#           certbot. (Always-stub: dropped the R2 vhost-flag gate
+#           after R3 audit showed a stale enabled vhost could lack
+#           /.well-known/acme-challenge/ and block first issuance.)
 #
 #   step 5   -> install the port-80 ACME-stub ONLY for DOMAINS_NEED_STUB
-#               (= MISSING ∩ vhost=0). Production vhosts (HAVE, RENEW,
-#               MISSING+vhost=1) are untouched. This is the load-bearing
-#               change vs. the original bug: a downstream certbot
-#               failure on stats. cannot leave coordinator. HTTPS broken
-#               because we never clobbered its vhost in the first place.
+#               (= EXPIRED ∪ MISSING). HAVE + RENEW production vhosts
+#               are untouched. This is the load-bearing change vs. the
+#               original bug: a downstream certbot failure cannot leave
+#               another domain's working TLS vhost broken because we
+#               never clobbered it in the first place.
 #   step 6   -> per-domain certbot certonly --webroot, FAIL-SOFT. A
 #               failure on ANY single domain (e.g. NXDOMAIN) is logged
-#               and recorded but does not abort the deploy.
+#               and recorded but does not abort the deploy. State-aware
+#               messaging tells the operator the per-domain fallback.
 #   step 6b  -> install the full TLS vhost ONLY for DOMAINS_FULL_TLS
-#               (= HAVE ∪ ISSUED_OK). Domains where certbot failed AND
-#               had no prior valid cert keep the ACME stub. RENEW
-#               domains whose certbot failed keep their existing full
-#               TLS vhost with the soon-to-expire cert (operator gets a
-#               window to retry without HTTPS interruption).
-#               nginx -t + reload runs ONCE at the end so any single
-#               bad file aborts the batch atomically.
+#               (= HAVE ∪ ISSUED_OK). EXPIRED/MISSING domains that
+#               certbot failed for keep the ACME stub. RENEW domains
+#               that certbot failed for keep their existing full TLS
+#               vhost with the soon-to-expire cert. nginx -t + reload
+#               runs ONCE at the end so any single bad file aborts the
+#               batch atomically.
 #
 # Primary-domain failure (DOMAIN ∈ ISSUED_FAIL) triggers exit-9
 # immediately after step 6b — before the connected-provider re-check,
-# binary restart, and verify steps. Non-primary failure defaults to
-# WARN-only (issue #244 intent) unless STATS_REQUIRED=1 is set.
+# binary restart, and verify steps — with state-aware abort messaging.
+# Non-primary failure defaults to WARN-only (issue #244 intent) unless
+# STATS_REQUIRED=1 is set.
 #
 # This sequence is idempotent and never mutates a working production
 # vhost when there is nothing to change. Earlier versions wrote the
@@ -506,7 +520,7 @@ fi
 # config (corrupted brace balance). Both removed in #244 R1; the dist/
 # nginx confs now ship with active ssl_certificate directives and the
 # pre-upload assertion at the top of this script refuses to deploy
-# unless they remain active.
+# unless they remain active and bound to the expected hostname.
 
 # SPEC-017 v0.1.8 Step 4.B — stats.streamvc.live is a first-class
 # public hostname per SPEC §7.1; deploy applies the SAME ACME
@@ -664,8 +678,9 @@ else
       cat > /etc/nginx/sites-available/\$d <<NGINX_STUB
 # Stub site — replaced by the full TLS config after Let's Encrypt cert
 # is obtained. Only handles HTTP-01 challenge + redirect to https.
-# (Issue #244 R2: only installed for first-issuance domains with no
-# vhost yet enabled — RENEW + MISSING+vhost=1 cases reuse existing.)
+# (Issue #244 R3: installed for EXPIRED + MISSING; RENEW keeps its
+# existing TLS vhost so a certbot failure leaves the soon-expiring
+# cert serving instead of an HTTP-only stub.)
 server {
     listen 80;
     listen [::]:80;
@@ -781,10 +796,32 @@ for d in ${DOMAINS_ISSUED_FAIL[@]+"${DOMAINS_ISSUED_FAIL[@]}"}; do
   fi
 done
 if [ "$_primary_failed" -eq 1 ]; then
+  # R4 ARCH MED-1: state-aware abort. For RENEW the existing TLS vhost
+  # is kept and the soon-expiring cert is still serving; for EXPIRED/
+  # MISSING the ACME stub is in place and HTTPS is gone.
+  primary_prior_state=""
+  i=0
+  for k in ${DOMAINS_STATE_KEYS[@]+"${DOMAINS_STATE_KEYS[@]}"}; do
+    if [ "$k" = "$DOMAIN" ]; then primary_prior_state="${DOMAINS_STATE_VALS[$i]}"; break; fi
+    i=$((i+1))
+  done
   echo "" >&2
   echo "  ABORT-EXIT: primary domain $DOMAIN failed cert issuance during this deploy." >&2
-  echo "             ACME stub is in place; HTTPS is unavailable on $DOMAIN until" >&2
-  echo "             DNS/certbot is fixed and this script is re-run." >&2
+  case "$primary_prior_state" in
+    RENEW)
+      echo "             Prior state was RENEW — existing TLS vhost left in place;" >&2
+      echo "             soon-expiring cert keeps serving until next deploy." >&2
+      echo "             Fix DNS/certbot and re-run; do not wait beyond cert expiry." >&2
+      ;;
+    EXPIRED|MISSING)
+      echo "             Prior state was $primary_prior_state — ACME stub is in place;" >&2
+      echo "             HTTPS is unavailable on $DOMAIN until DNS/certbot is fixed" >&2
+      echo "             and this script is re-run." >&2
+      ;;
+    *)
+      echo "             Prior state was $primary_prior_state — re-run after fixing DNS/certbot." >&2
+      ;;
+  esac
   echo "             Coordinator binary NOT restarted — old binary still serving." >&2
   exit 9
 fi
@@ -910,21 +947,36 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   echo "  catalog OK: $(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print("catalog_id=%s models=%d" % (c.get("catalog_id"), len(c.get("models", []))))' /tmp/macprovider-catalog-current.json)"
 fi
 
-# R3 ARCH MED: explicit smoke check on STATS_DOMAIN so a degraded stats
-# hostname is loud at end-of-deploy rather than buried in a step-6b WARN
-# that an operator skimming output might miss. WARN-only by default
-# (matches STATS_REQUIRED=0 default and the #244 intent); promoted to
-# fail-closed when STATS_REQUIRED=1 is set.
-echo "  GET https://$STATS_DOMAIN/ -> expect any HTTPS response (TLS handshake check)"
-STATS_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$STATS_DOMAIN/" 2>/dev/null || echo "000")
-if [ "$STATS_STATUS" = "000" ]; then
-  echo "  WARN: $STATS_DOMAIN HTTPS unreachable (TLS handshake failed)" >&2
+# R3 ARCH MED + R4 ARCH MED: smoke check on STATS_DOMAIN — hit the
+# SPEC-017 stats API surface (/v1/stats/health) explicitly, not just
+# `/`. The health route is designed to return 200 even under degraded
+# state, so a non-200 means the route itself is broken (not a backend
+# issue).
+#
+# R4 CODE/SEC convergent HIGH — DON'T use `STATS=$(curl ... || echo 000)`:
+# curl prints `000` to stdout AND exits non-zero on TLS/DNS failure, so
+# the `|| echo 000` appends another `000`, producing `STATS=000000` and
+# silently passing the `[ "$STATS" = "000" ]` failure branch. Split
+# assignment from fallback via `if ! VAR=$(...); then VAR=000; fi`.
+#
+# WARN-only by default (matches STATS_REQUIRED=0 default and #244
+# intent); promoted to fail-closed when STATS_REQUIRED=1.
+echo "  GET https://$STATS_DOMAIN/v1/stats/health -> expect 200"
+if ! STATS_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$STATS_DOMAIN/v1/stats/health" 2>/dev/null); then
+  STATS_STATUS="000"
+fi
+if [ "$STATS_STATUS" != "200" ]; then
+  if [ "$STATS_STATUS" = "000" ]; then
+    echo "  WARN: $STATS_DOMAIN /v1/stats/health unreachable (TLS handshake or DNS failed)" >&2
+  else
+    echo "  WARN: $STATS_DOMAIN /v1/stats/health returned status=$STATS_STATUS (expected 200)" >&2
+  fi
   if [ "${STATS_REQUIRED:-0}" = "1" ]; then
     echo "  STATS_REQUIRED=1 set — aborting." >&2
     exit 9
   fi
 else
-  echo "  ok: $STATS_DOMAIN HTTPS responded (status=$STATS_STATUS)"
+  echo "  ok: $STATS_DOMAIN /v1/stats/health responded 200"
 fi
 
 log "step 9/9: tail the coordinator journal for sanity"
