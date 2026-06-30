@@ -5,8 +5,9 @@ the coordinator. SPEC-004 v0.3.1 is locked and READ-ONLY; this prompt
 drives the **implementation cycle** that consumes it.
 
 - **SPEC-004 v0.3.1** (Smart Router, LOCKED — `specs/SPEC-004-smart-router.md`)
-- **SPEC-006 v0.8** prerequisite for Pillar A (LOCKED; PG-9 in §22
-  satisfies the gate per `docs/OPEN_QUESTIONS.md` 2026-06-26 triage)
+- **SPEC-006 v0.9.1** prerequisite for Pillar A (LOCKED on
+  `origin/main`; v0.9.1 preserves the v0.8 PG-9 gate that satisfies
+  the prerequisite per `docs/OPEN_QUESTIONS.md` 2026-06-26 triage)
 
 **One-line scope summary.** Ship Pillar B (smart-router weighting +
 deterministic tiebreak), Pillar C (breaker composition + recovery
@@ -393,20 +394,32 @@ FR-SR-16 (randomized tiebreak), FR-SR-17
 - `internal/routing/retry.go` (NEW) — retry loop with budget +
   exclusion + buyer-cancel attribution (FR-P11a C2).
 - `internal/routing/log.go` (NEW) — `LogRoutingDecision(ctx, dec)`
-  emits the FR-SR-17 reproducibility-of-randomized-decision log
-  row. Fields (every field below is REQUIRED on every routing
-  decision when `tiebreak_randomize=true` is active, suppressed-
-  with-zero when not): `candidate_set` (ordered list of
-  `peer_id`s post-filter pre-sort), `objective_metric_per_candidate`
-  (parallel array of the score driving the cohort), `epsilon`
-  (the active `routing.tiebreak_epsilon`), `cohort_size`,
-  `random_seed` (the per-request seed used; SPEC-004 §7
-  reproducibility contract — MUST be derivable from request id +
-  daily key, NEVER from `time.Now()` alone), `random_draw` (the
-  cohort index chosen), `chosen_peer_id`. The call site lives in
-  `internal/buyer/server.go::selectProvider` (or its Phase B
-  refactored equivalent) and fires AFTER candidate selection,
-  BEFORE dispatch.
+  emits the FR-SR-17 / SPEC-004 §7 reproducibility-of-randomized-
+  decision log row. Field list (REQUIRED — match SPEC-004 §7
+  verbatim, do not narrow):
+  - `request_id` (coordinator-internal request id)
+  - `external_request_id` (the buyer-supplied `X-Request-ID`
+    header, empty if absent)
+  - `chosen_peer_id`
+  - `epsilon` (the active `routing.tiebreak_epsilon`)
+  - `epsilon_mode` (`relative` vs `absolute` per SPEC-004 §5)
+  - `cohort_size`
+  - `random_seed` (the per-request seed used; SPEC-004 §7
+    reproducibility contract — MUST be derivable from request id
+    + daily key, NEVER from `time.Now()` alone)
+  - `random_draw` (the cohort index chosen)
+  - `candidate_set`: the FULL epsilon-cohort candidate metadata
+    as a parallel array — for EACH candidate emit `provider_id`,
+    `assigned_id`, `objective_metric` (score driving the cohort),
+    `state`, `slots`, `effective_throughput`, `model_params`,
+    `connected_at`, `tier`. This is the SPEC-004 §7
+    explainability surface in full; narrower is non-compliant.
+  These fields are REQUIRED on every routing decision when
+  `tiebreak_randomize=true` is active; when randomization is
+  inactive, the log MAY be suppressed entirely (per SPEC-004 §7).
+  The call site lives in `internal/buyer/server.go::selectProvider`
+  (or its Phase B refactored equivalent) and fires AFTER candidate
+  selection, BEFORE dispatch.
 - `internal/buyer/server.go` — `/v1/chat/completions` wires class
   resolution + retry loop + dispatch rewrite, AND calls
   `LogRoutingDecision` per request when randomization is active.
@@ -490,10 +503,22 @@ update-on-retry-final-provider rule).
 - `internal/routing/sticky/sticky.go` (NEW package) — `Map` type
   with TTL + LRU + mutex; `Lookup(conversationKey)`,
   `Update(conversationKey, providerID, modelScope)`,
-  `InvalidateClass(className)`.
+  `InvalidateClass(className)`, `PurgeAccount(accountID)`.
+  `PurgeAccount` removes every entry attributable to the given
+  `account_id` and is the underlying primitive for SPEC-006's
+  `DELETE /v1/sticky` route. The sticky-package extraction MUST
+  NOT regress this primitive: `origin/main` already implements
+  `purgeStickyAccount` in `internal/buyer/server.go` behind the
+  internal `handleInternalStickyDelete` handler — preserve both
+  the handler and the route surface during the extraction.
 - `internal/buyer/server.go` — sticky lookup at §3 step 4 (after
   hard-pin precedence resolution per FR-SR-4); sticky update at
-  §3 step 10 (post-commit per FR-SR-6).
+  §3 step 10 (post-commit per FR-SR-6). Preserve the existing
+  `handleInternalStickyDelete` handler and its route registration;
+  it now calls `sticky.Map.PurgeAccount(accountID)` instead of
+  the inline `purgeStickyAccount` helper. Account-scoped purge
+  regression tests (per SPEC-006 `DELETE /v1/sticky` contract)
+  remain gating.
 - `internal/routing/promote.go` (NEW or extension of `class.go`) —
   promote sticky hit to position 0 ONLY when inside
   `tiebreak_epsilon` cohort (FR-SR-3 second paragraph).
@@ -573,7 +598,7 @@ For each pillar PR:
 
 ## Pillar-completion checklist (gate to next pillar)
 
-A pillar is "done" only when ALL of these are true:
+### Common gates (apply to EVERY pillar PR — B, C, D, A)
 
 - [ ] All SPEC-004 R-rules in the pillar's scope (listed above per
       phase) have an AC test asserting them.
@@ -583,20 +608,50 @@ A pillar is "done" only when ALL of these are true:
 - [ ] Local `main` is reset to `origin/main`; pillar branch deleted.
 - [ ] AC-SR-1 default-config regression test still passes — verify
       with `go test -count=1 -run TestSPEC004DefaultConfigRegression ./...`.
-- [ ] **Pillar D additional money-path gate:** focused requestlog +
-      billing reconciliation tests pass — assert (a) explicit
-      `X-MacProvider-Retry` increments `request_log.retried`,
-      (b) F-4 one-shot failover does NOT increment it, (c) the
-      `attempt_n` monotonic ordinal (SPEC-002 v1.5.2) writes
-      correctly under retry, (d) the SPEC-005 quarantine path
-      behaves identically pre/post-Pillar-D.
-- [ ] **Pillar A additional money-path gate:** verify the
-      gateway-authenticated `routing_internal.conversation_key` path
-      is the ONLY input to the sticky map; assert with a direct-
-      buyer-traffic test that an `X-MacProvider-Conversation`
-      header (or similar) DOES NOT populate the map.
 - [ ] Issue #170 has a comment naming the pillar PR + audit-rounds-
       to-convergence count.
+
+### Additional Pillar D gates (apply ONLY to the Pillar D PR)
+
+- [ ] Focused requestlog + billing reconciliation tests pass —
+      assert (a) explicit `X-MacProvider-Retry` increments
+      `request_log.retried`, (b) F-4 one-shot failover does NOT
+      increment it, (c) the `attempt_n` monotonic ordinal
+      (SPEC-002 v1.5.2) writes correctly under retry, (d) the
+      SPEC-005 v0.4 quarantine surface is preserved verbatim —
+      specifically: NO writes to `ledger_quarantine_resolutions`
+      from any Pillar D code path; NO `POST /admin/ledger/quarantine/
+      {id}/force-void` route additions or modifications; NO new
+      `billing_config_flag_changed` audit emissions; AC-Q042 / AC-Q045-
+      style assertions (base row `quarantined` column unchanged
+      across retry rows; provider rollup `payable` totals use
+      `CASE WHEN quarantined=0`; `quarantined_count` uses the
+      `OPEN_PREDICATE` `quarantined=1 AND NOT EXISTS (resolution row)`)
+      hold byte-identical pre/post-Pillar-D for the same fixtures.
+
+### Additional Pillar A gates (apply ONLY to the Pillar A PR)
+
+- [ ] **Sticky source authority (SPEC-006 internal header
+      boundary).** The coordinator MUST NEVER accept
+      `X-MacProvider-Internal-Conv` from direct buyer traffic —
+      that header is gateway-injected only. Add explicit Phase A
+      gate tests covering: (a) a direct-buyer request carrying
+      `X-MacProvider-Internal-Conv: conv:<opaque>` with NO valid
+      gateway auth-frame MUST NOT populate the sticky map and
+      MUST NOT produce a sticky hit on a subsequent request;
+      (b) malformed internal conv values (no `conv:` prefix,
+      empty opaque, non-UTF-8) under valid gateway auth are
+      rejected/treated-as-absent per FR-SR-2; (c) the
+      well-formed `routing_internal.conversation_key` path under
+      valid gateway auth is the ONLY input that populates the
+      sticky map.
+- [ ] **Account-scoped purge regression** (SPEC-006
+      `DELETE /v1/sticky` contract). Calling `DELETE /v1/sticky`
+      with a valid account_id MUST purge every sticky entry
+      attributable to that account_id. The sticky-package
+      extraction MUST NOT regress the existing
+      `handleInternalStickyDelete` / `purgeStickyAccount` surface
+      on `origin/main`.
 
 When all four pillars ship, close issue #170 with a final comment
 linking the four PR URLs and the operator green-light note (Phase 2
