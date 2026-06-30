@@ -351,30 +351,80 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   "
 fi
 
-# nginx + Let's Encrypt strategy:
-#   step 5  -> install a port-80-only STUB nginx site (ACME challenge + redirect).
-#              No port 443 block, no ssl_certificate references, nginx -t passes.
-#   step 6  -> certbot certonly --webroot (skipped if cert already present).
-#   step 6b -> install the full TLS site, uncomment the ssl_certificate lines
-#              that point at /etc/letsencrypt/live/<DOMAIN>/, reload.
+# nginx + Let's Encrypt strategy (issue #244 — TLS-safety hardening):
+#   step 5   -> for each domain that does NOT yet have a cert, install a
+#               port-80 ACME-stub site. Domains that ALREADY have a cert
+#               keep their existing full TLS vhost untouched until step
+#               6b reinstalls it from $DIST_DIR. This is the load-bearing
+#               change: we never clobber a working production vhost with
+#               the stub, so a downstream failure (certbot, nginx -t)
+#               cannot leave production HTTPS broken.
+#   step 6   -> per-domain certbot certonly --webroot, FAIL-SOFT. A
+#               failure on ANY single domain (e.g. NXDOMAIN on a newly-
+#               added subdomain) is logged + recorded but does not abort
+#               the deploy. Domains with a pre-existing cert are not
+#               revisited.
+#   step 6b  -> install the full TLS vhost ONLY for domains that have a
+#               valid cert at this point (pre-existing OR successfully
+#               issued in step 6). Domains where certbot failed keep the
+#               port-80 ACME-stub for the operator to retry without a
+#               full redeploy. nginx -t + reload runs ONCE at the end so
+#               any single bad file aborts the batch atomically.
 #
-# This sequence is idempotent and never mutates the user-authored nginx site
-# config in place — earlier versions used in-place sed surgery on the full
-# config and corrupted brace balance on first run.
+# This sequence is idempotent and never mutates a working production
+# vhost when there is nothing to change. Earlier versions used in-place
+# sed surgery on the full config (corrupted brace balance) AND wrote the
+# stub over the full vhost (issue #244: certbot failure on stats. left
+# coordinator. HTTPS broken until manual recovery).
+#
+# Note: dist/nginx-{coordinator,stats}.streamvc.live.conf now ship with
+# uncommented ssl_certificate lines (#244 fix (a)). The sed
+# `s|# ssl_certificate|ssl_certificate|g` calls below are kept as
+# defensive no-ops in case an old in-repo copy gets re-introduced.
 
 # SPEC-017 v0.1.8 Step 4.B — stats.streamvc.live is a first-class
 # public hostname per SPEC §7.1; deploy applies the SAME ACME
-# stub + certbot + uncomment pipeline used for the coordinator
+# stub + certbot + full-vhost pipeline used for the coordinator
 # hostname (round-4 ARCH r2 H1 / CODE r2 C1 fix).
 STATS_DOMAIN="${STATS_DOMAIN:-stats.streamvc.live}"
 
-log "step 5/9: install port-80 stub nginx sites (for ACME challenge) for both hostnames"
-$SSH "set -e
-  install -d -o www-data -g www-data -m 0755 /var/www/html
-  for d in $DOMAIN $STATS_DOMAIN; do
-    cat > /etc/nginx/sites-available/\$d <<NGINX_STUB
+# Classify domains by cert presence on the remote host (#244). One SSH
+# round-trip; output is one line per domain, prefixed HAVE or NEED.
+log "step 4b/9: classify domains by cert presence"
+DOMAINS_ALL=("$DOMAIN" "$STATS_DOMAIN")
+DOMAINS_HAVE_CERT=()
+DOMAINS_NEED_CERT=()
+CERT_STATUS=$($SSH "set -e
+  for d in ${DOMAINS_ALL[*]}; do
+    if [ -f /etc/letsencrypt/live/\$d/fullchain.pem ]; then
+      echo \"HAVE \$d\"
+    else
+      echo \"NEED \$d\"
+    fi
+  done
+") || { echo "cert-status probe failed" >&2; exit 1; }
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  status="${line%% *}"
+  domain="${line##* }"
+  case "$status" in
+    HAVE) DOMAINS_HAVE_CERT+=("$domain") ;;
+    NEED) DOMAINS_NEED_CERT+=("$domain") ;;
+  esac
+done <<< "$CERT_STATUS"
+log "  cert status: have=[${DOMAINS_HAVE_CERT[*]:-none}] need=[${DOMAINS_NEED_CERT[*]:-none}]"
+
+log "step 5/9: install port-80 ACME-stub for domains needing cert issuance"
+if [ ${#DOMAINS_NEED_CERT[@]} -eq 0 ]; then
+  log "  all certs present — skipping stub install (preserves existing full TLS vhosts)"
+else
+  $SSH "set -e
+    install -d -o www-data -g www-data -m 0755 /var/www/html
+    for d in ${DOMAINS_NEED_CERT[*]}; do
+      cat > /etc/nginx/sites-available/\$d <<NGINX_STUB
 # Stub site — replaced by the full TLS config after Let's Encrypt cert
 # is obtained. Only handles HTTP-01 challenge + redirect to https.
+# (Issue #244: only installed for domains that don't yet have a cert.)
 server {
     listen 80;
     listen [::]:80;
@@ -387,58 +437,75 @@ server {
     }
 }
 NGINX_STUB
-    ln -sf /etc/nginx/sites-available/\$d /etc/nginx/sites-enabled/\$d
-  done
-  nginx -t
-  systemctl reload nginx
-"
+      ln -sf /etc/nginx/sites-available/\$d /etc/nginx/sites-enabled/\$d
+    done
+    nginx -t
+    systemctl reload nginx
+  "
+fi
 
-log "step 6/9: obtain Let's Encrypt certs via certbot webroot for both hostnames (idempotent)"
-$SSH "set -e
-  for d in $DOMAIN $STATS_DOMAIN; do
-    if [ -f /etc/letsencrypt/live/\$d/fullchain.pem ]; then
-      echo \"  cert already present at /etc/letsencrypt/live/\$d/ — skipping issuance\"
+log "step 6/9: obtain Let's Encrypt certs (per-domain, fail-soft)"
+# Per-domain loop on the LOCAL side so the operator-visible WARN line
+# is interleaved with each attempt; remote certbot invocations are
+# allowed to fail without aborting the script (#244 fix (c)).
+DOMAINS_ISSUED_OK=()
+DOMAINS_ISSUED_FAIL=()
+if [ ${#DOMAINS_NEED_CERT[@]} -eq 0 ]; then
+  log "  no domains need issuance — skipping certbot"
+else
+  for d in "${DOMAINS_NEED_CERT[@]}"; do
+    log "  certbot certonly --webroot -d $d"
+    if $SSH "certbot certonly --webroot -w /var/www/html -d $d --non-interactive --agree-tos --email $EMAIL"; then
+      DOMAINS_ISSUED_OK+=("$d")
+      log "    ok: cert issued for $d"
     else
-      certbot certonly --webroot -w /var/www/html -d \$d \\
-        --non-interactive --agree-tos --email $EMAIL
+      DOMAINS_ISSUED_FAIL+=("$d")
+      log "    WARN: certbot failed for $d — leaving ACME stub in place; continuing deploy"
     fi
   done
-"
+fi
 
-log "step 6b/9: install SPEC-017 nginx artifacts + full TLS site"
+# Final set of domains that should get a full TLS vhost installed.
+DOMAINS_FULL_TLS=("${DOMAINS_HAVE_CERT[@]}" "${DOMAINS_ISSUED_OK[@]}")
+log "step 6b/9: install nginx artifacts + full TLS vhost for [${DOMAINS_FULL_TLS[*]:-none}]"
+# Shared http-context snippets always go in — no cert dependency.
 $SSH "set -e
-  # SPEC-017 Step 4.B — install the shared http-context snippet
-  # FIRST so the coordinator vhost's /v1/stats/* allow-through
-  # block has its limit_req_zone / proxy_cache_path / log_format
-  # names declared. Then install the stats vhost so
-  # stats.streamvc.live serves the same handler from a dedicated
-  # hostname.
   install -o root -g root -m 0644 /tmp/nginx-stats-shared.conf /etc/nginx/conf.d/stats-shared.conf
   install -o root -g root -m 0644 /tmp/nginx-stats-security-headers.conf /etc/nginx/conf.d/stats-security-headers.conf
-  install -o root -g root -m 0644 /tmp/nginx-stats.streamvc.live.conf /etc/nginx/sites-available/$STATS_DOMAIN
-  ln -sf /etc/nginx/sites-available/$STATS_DOMAIN /etc/nginx/sites-enabled/$STATS_DOMAIN
-  rm -f /tmp/nginx-stats-shared.conf /tmp/nginx-stats-security-headers.conf /tmp/nginx-stats.streamvc.live.conf
+  rm -f /tmp/nginx-stats-shared.conf /tmp/nginx-stats-security-headers.conf
+"
 
-  # Round-4 ARCH H1 / CODE C1 fix — uncomment the stats vhost
-  # ssl_certificate lines now that the certbot run above produced
-  # /etc/letsencrypt/live/$STATS_DOMAIN/. Without this step the
-  # newly-enabled \`listen 443 ssl\` server has commented-out cert
-  # directives and the nginx -t below fails closed.
-  sed -i 's|# ssl_certificate /etc/letsencrypt|ssl_certificate /etc/letsencrypt|g' /etc/nginx/sites-available/$STATS_DOMAIN
-  sed -i 's|# ssl_certificate_key /etc/letsencrypt|ssl_certificate_key /etc/letsencrypt|g' /etc/nginx/sites-available/$STATS_DOMAIN
+# Install the full TLS vhost ONLY for domains with a valid cert. Domains
+# where certbot failed keep the ACME stub from step 5 (HTTP-80 only).
+for d in "${DOMAINS_FULL_TLS[@]}"; do
+  case "$d" in
+    "$DOMAIN")        src="/tmp/nginx-coordinator-full.conf" ;;
+    "$STATS_DOMAIN")  src="/tmp/nginx-stats.streamvc.live.conf" ;;
+    *) echo "  unknown domain in DOMAINS_FULL_TLS: $d (skipping)" >&2; continue ;;
+  esac
+  $SSH "set -e
+    install -o root -g root -m 0644 $src /etc/nginx/sites-available/$d
+    # Defensive no-op uncomment (the dist/ confs now ship uncommented, #244).
+    sed -i 's|# ssl_certificate /etc/letsencrypt|ssl_certificate /etc/letsencrypt|g' /etc/nginx/sites-available/$d
+    sed -i 's|# ssl_certificate_key /etc/letsencrypt|ssl_certificate_key /etc/letsencrypt|g' /etc/nginx/sites-available/$d
+    ln -sf /etc/nginx/sites-available/$d /etc/nginx/sites-enabled/$d
+  "
+done
 
-  install -o root -g root -m 0644 /tmp/nginx-coordinator-full.conf /etc/nginx/sites-available/$DOMAIN
-  rm -f /tmp/nginx-coordinator-full.conf
-  # The full site config ships with ssl_certificate lines commented; the
-  # cert exists now so uncomment them. (Idempotent: re-running this on an
-  # already-uncommented file is a no-op.)
-  sed -i 's|# ssl_certificate /etc/letsencrypt|ssl_certificate /etc/letsencrypt|g' /etc/nginx/sites-available/$DOMAIN
-  sed -i 's|# ssl_certificate_key /etc/letsencrypt|ssl_certificate_key /etc/letsencrypt|g' /etc/nginx/sites-available/$DOMAIN
-  # Clean up the .full backup file from the broken v1 deploy if present.
+# Clean up uploaded templates + validate + reload exactly once at the end
+# so a single bad file aborts the whole batch atomically. Clean up the
+# stale .full backup file from the broken-v1 deploy if present.
+$SSH "set -e
+  rm -f /tmp/nginx-coordinator-full.conf /tmp/nginx-stats.streamvc.live.conf
   rm -f /etc/nginx/sites-available/$DOMAIN.full
   nginx -t
   systemctl reload nginx
 "
+
+if [ ${#DOMAINS_ISSUED_FAIL[@]} -gt 0 ]; then
+  log "  WARN: certbot failed for [${DOMAINS_ISSUED_FAIL[*]}] — those domains served the ACME stub during this deploy"
+  log "  Check DNS A records (dig +short <domain>), then re-run this script to retry issuance."
+fi
 
 log "step 6c/9: pre-restart safeguard (late connected-provider check)"
 # Coordinator restart triggers SPEC-001 § 6.5 drain on all connected
@@ -564,3 +631,17 @@ echo "Next steps:"
 echo "  - Stage 3: restart M4 phase3-binary with --coordinator wss://$DOMAIN/ws/provider"
 echo "  - Verify: providers should appear in /poolz (auth: bearer operator_key from coordinator.yaml)"
 echo "  - End-to-end: run harness against https://$DOMAIN"
+
+# Issue #244: per-domain certbot is fail-soft, but if the PRIMARY $DOMAIN
+# itself failed issuance we still exit non-zero so CI / operator wrappers
+# notice. Non-primary failures (e.g. stats.streamvc.live NXDOMAIN) are
+# WARN-only — step 8 verification of $DOMAIN/healthz already succeeded.
+for d in "${DOMAINS_ISSUED_FAIL[@]:-}"; do
+  if [ "$d" = "$DOMAIN" ]; then
+    echo "" >&2
+    echo "  ABORT-EXIT: primary domain $DOMAIN failed cert issuance during this deploy." >&2
+    echo "             ACME stub is in place; HTTPS is unavailable on $DOMAIN until" >&2
+    echo "             DNS/certbot is fixed and this script is re-run." >&2
+    exit 9
+  fi
+done
