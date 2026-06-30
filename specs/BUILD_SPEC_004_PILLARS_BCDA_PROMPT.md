@@ -441,8 +441,10 @@ FR-SR-16 (randomized tiebreak), FR-SR-17
   - `attempt_index`
   - `retry_count`
   - `retry_reason`
-  - `retried` (whether `X-MacProvider-Retry` was honored on this
-    attempt; matches `request_log.retried` write contract)
+  - `retried` (integer count of additional provider attempts
+    beyond the first caused by explicit SPEC-004 retry; same
+    value semantics as the `request_log.retried` column write
+    contract — NOT a boolean)
   - `preflight_result`
   Pillar D's reproducibility requirement (SPEC-004 §7 closing
   paragraph) is satisfied ONLY if the randomized candidate set,
@@ -459,7 +461,12 @@ FR-SR-16 (randomized tiebreak), FR-SR-17
   per-attempt).
 - `internal/buyer/server.go` — `/v1/chat/completions` wires class
   resolution + retry loop + dispatch rewrite, AND calls
-  `LogRoutingDecision` per request when randomization is active.
+  `LogRoutingDecision` for EVERY selection attempt — including
+  per-attempt retry / preflight outcomes — not only randomized
+  decisions (matches SPEC-004 §7's "Every routed request SHOULD
+  produce a structured routing-decision log" + the per-attempt
+  `attempt_index` / `retry_*` / `preflight_result` field
+  contract above).
 - `internal/buyer/server.go::handleModels` (the existing
   `/v1/models` handler — on `origin/main` there is no separate
   `models.go` file; extend the handler in place) — additive
@@ -559,12 +566,17 @@ update-on-retry-final-provider rule).
   the per-entry `AccountID` field during the extraction.
 - `internal/buyer/server.go` — sticky lookup at §3 step 4 (after
   hard-pin precedence resolution per FR-SR-4); sticky update at
-  §3 step 10 (post-commit per FR-SR-6). Preserve the existing
-  `handleInternalStickyDelete` handler and its route registration;
-  it now calls `sticky.Map.PurgeAccount(accountID)` instead of
-  the inline `purgeStickyAccount` helper. Account-scoped purge
-  regression tests (per SPEC-006 `DELETE /v1/sticky` contract)
-  remain gating.
+  §3 step 10 (post-commit per FR-SR-6). The post-commit sticky
+  update MUST call
+  `Update(conversationKey, accountID, providerID, modelScope)`
+  with `accountID` sourced ONLY from the gateway-authenticated
+  `X-MacProvider-Account` internal header (after internal-bearer
+  validation — see SPEC-006), NEVER from unauthenticated direct-
+  buyer traffic. Preserve the existing `handleInternalStickyDelete`
+  handler and its route registration; it now calls
+  `sticky.Map.PurgeAccount(accountID)` instead of the inline
+  `purgeStickyAccount` helper. Account-scoped purge regression
+  tests (per SPEC-006 `DELETE /v1/sticky` contract) remain gating.
 - `internal/routing/promote.go` (NEW or extension of `class.go`) —
   promote sticky hit to position 0 ONLY when inside
   `tiebreak_epsilon` cohort (FR-SR-3 second paragraph).
