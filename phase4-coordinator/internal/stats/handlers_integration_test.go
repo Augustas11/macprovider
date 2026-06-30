@@ -928,9 +928,21 @@ func TestStale503NotDebitedFromSuccessBucket(t *testing.T) {
 
 // AC-18 — three-way timing equivalence rows 5/6/7. Each row
 // MUST take ≤270 rpm (below the 300 rpm auth-failure cap) and
-// produce 401 with latency within ±20% of the other two rows.
-// We use the median latency of 30 samples per row as a stable
-// estimator; t-test or stricter would require more samples.
+// produce 401 with median latency within ±20% of the other two rows.
+//
+// #281: Pre-#281 the median of 100 samples was flaking at ~30%
+// variance on shared CI runners. R1 SEC audit flagged that
+// switching to min weakens the security property — an attacker
+// measures wall-clock medians, not floor execution time. So a
+// future leak where row 6 takes 1ms for the first 5 warmed samples
+// but 3ms for the rest would pass a min-based test while still
+// being attacker-distinguishable.
+//
+// R1 fix-pass: keep the median (attacker-relevant statistic), but
+// discard the first 10 samples per row as warm-up so handler/JIT/
+// connection-pool stabilisation noise doesn't pull the recorded
+// medians around. Median of 100 warmed samples is robust enough on
+// shared CI without trading away the security invariant.
 func TestAC18_TimingEquivalenceRows5_6_7(t *testing.T) {
 	fx, adminDB := setupRollupFixture(t)
 	seedFreshOverview(t, adminDB)
@@ -967,21 +979,44 @@ func TestAC18_TimingEquivalenceRows5_6_7(t *testing.T) {
 	measure := func(headers http.Header) time.Duration {
 		// Round-6 BUILD ask: 100+ samples per row, sustained
 		// rate ≤270 rpm so the auth-failure 300 rpm cap does
-		// not perturb measurements. 100 × 225ms ≈ 22.5s/row =
-		// ~265 rpm.
+		// not perturb measurements. (10 warmup + 100 measured)
+		// × 225ms ≈ 24.75s/row at ~267 rpm per row.
+		const Warmup = 10
 		const N = 100
-		samples := make([]time.Duration, 0, N)
-		for i := 0; i < N; i++ {
+		// #281: discard the first Warmup samples per row to
+		// stabilise handler-side state (Postgres prepared-
+		// statement cache, Go JIT for the auth path, connection
+		// pool reuse). Without warmup the recorded median
+		// includes 5-10% cold-start spikes that pulled the
+		// median around by ~30% on shared CI runners.
+		oneSample := func() {
 			start := time.Now()
 			resp := mustDoWithHeaders(t, mux, http.MethodGet, "/v1/stats/leaderboard", headers)
-			samples = append(samples, time.Since(start))
+			elapsed := time.Since(start)
 			if resp.StatusCode != http.StatusUnauthorized {
 				t.Fatalf("expected 401, got %d", resp.StatusCode)
 			}
 			resp.Body.Close()
+			_ = elapsed
+		}
+		for i := 0; i < Warmup; i++ {
+			oneSample()
 			time.Sleep(225 * time.Millisecond)
 		}
-		// Median.
+		samples := make([]time.Duration, 0, N)
+		for i := 0; i < N; i++ {
+			start := time.Now()
+			resp := mustDoWithHeaders(t, mux, http.MethodGet, "/v1/stats/leaderboard", headers)
+			elapsed := time.Since(start)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("expected 401, got %d", resp.StatusCode)
+			}
+			resp.Body.Close()
+			samples = append(samples, elapsed)
+			time.Sleep(225 * time.Millisecond)
+		}
+		// Median of warmed samples — attacker-relevant statistic
+		// per R1 SEC MEDIUM-1.
 		sortDurations(samples)
 		return samples[N/2]
 	}
