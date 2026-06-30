@@ -82,13 +82,18 @@ cp "$DIST_DIR/nginx-snippets/stats-shared.conf"           "$TMP/conf.d/stats-sha
 cp "$DIST_DIR/nginx-snippets/stats-security-headers.conf" "$TMP/conf.d/stats-security-headers.conf"
 
 # Build a test-only stats vhost: strip TLS, rewrite proxy_pass to
-# the host-side upstream mock.
+# the host-side upstream mock. Issue #244: dist confs now ship with
+# UNCOMMENTED ssl_certificate / ssl_certificate_key directives, so the
+# sed must explicitly drop them here (the test container has no certs
+# and listens on plain HTTP via the listen-port rewrites below).
 UPSTREAM_PORT=18444
 sed \
   -e 's|listen 443 ssl http2;|listen 18080;|' \
   -e 's|listen \[::\]:443 ssl http2;||' \
   -e 's|listen 80;|listen 18081;|' \
   -e 's|listen \[::\]:80;||' \
+  -e 's|ssl_certificate .*||' \
+  -e 's|ssl_certificate_key .*||' \
   -e 's|ssl_protocols .*||' \
   -e 's|ssl_prefer_server_ciphers .*||' \
   -e "s|http://127.0.0.1:8444|http://host.docker.internal:${UPSTREAM_PORT}|g" \
