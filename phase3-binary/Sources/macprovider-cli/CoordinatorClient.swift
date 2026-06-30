@@ -165,10 +165,11 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 actor CoordinatorClient {
     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
 
-    static let binaryVersion = "1.6.1"
+    static let binaryVersion = "1.7.0"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
+    private let appConfig: AppConfig
     private let providerStatus: ProviderStatus
     private let drainTimeoutSeconds: Int
     private let providerID: String
@@ -208,6 +209,24 @@ actor CoordinatorClient {
     private let pairingController: PairingController
     private var inferenceRelay: InferenceRelay?
     private var tier2Session: Tier2ProviderSession?
+    private var autoupdateTrustState = AutoUpdateTrustState(
+        v2Accepted: false,
+        tier: nil,
+        encryptedLegValid: false,
+        attestationRequired: false,
+        attestationSatisfied: false,
+        tokenConfigured: false,
+        tokenValidated: false,
+        bearerlessDuplicate: false,
+        connected: false
+    )
+    private var autoupdateCoordinatorPayload: [String: Any] = [:]
+    private var autoupdateCoordinatorPayloadIsV2 = false
+    private var autoupdateAssignedProviderTokenAdopted = false
+    private var autoupdateDemotionReason: String?
+    private var autoupdateDisabledForSessionReason: String?
+    private var autoupdateDrainExtensions = false
+    private var autoupdateAttemptedTargets = Set<String>()
     private var webSocket: ProviderWebSocketTask?
     private var runTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
@@ -249,6 +268,7 @@ actor CoordinatorClient {
             return nil
         }
         self.coordinatorURL = url
+        self.appConfig = config
         self.providerStatus = providerStatus
         self.drainTimeoutSeconds = config.drainTimeoutSeconds
         // SPEC-001 v1.1.2 / SPEC-002 v1.0.4 F-2: provider_id is the operator-issued
@@ -283,7 +303,8 @@ actor CoordinatorClient {
         self.watchdogExitHook = watchdogExitHook
     }
 
-    func start() {
+    func start() async {
+        await runStartupAutoupdateRecovery()
         startReconnectTask()
         if warmSwapEnabled, swapHeartbeatTask == nil {
             swapHeartbeatTask = Task { [weak self] in
@@ -303,6 +324,22 @@ actor CoordinatorClient {
         inferenceRelay = nil
         tier2Session = nil
         webSocket?.cancel(with: .goingAway, reason: nil)
+        autoupdateCoordinatorPayload = [:]
+        autoupdateCoordinatorPayloadIsV2 = false
+        autoupdateAssignedProviderTokenAdopted = false
+        autoupdateDemotionReason = "coordinator_disconnected"
+        autoupdateDisabledForSessionReason = nil
+        autoupdateTrustState = AutoUpdateTrustState(
+            v2Accepted: false,
+            tier: nil,
+            encryptedLegValid: false,
+            attestationRequired: false,
+            attestationSatisfied: false,
+            tokenConfigured: false,
+            tokenValidated: false,
+            bearerlessDuplicate: false,
+            connected: false
+        )
         await providerStatus.setCoordinatorSession(connected: false)
         runTask = nil
         heartbeatTask = nil
@@ -728,10 +765,17 @@ actor CoordinatorClient {
             tier2Session: session,
             receiptBuilder: receiptBuilder,
             receiptProviderID: providerID,
+            demoteAutoupdateTrust: { [weak self] reason in
+                await self?.markAutoupdateTrustDemoted(reason: reason)
+            },
             sendFrame: { payload in
                 try await Self.send(payload, to: socket)
             }
         )
+    }
+
+    private func markAutoupdateTrustDemoted(reason: String) {
+        autoupdateDemotionReason = reason
     }
 
     private func runAuthenticatedSocketThenReconnect(_ socket: ProviderWebSocketTask) async {
@@ -887,6 +931,21 @@ actor CoordinatorClient {
         tier2Session = nil
         webSocket?.cancel(with: .goingAway, reason: nil)
         webSocket = nil
+        autoupdateCoordinatorPayload = [:]
+        autoupdateCoordinatorPayloadIsV2 = false
+        autoupdateAssignedProviderTokenAdopted = false
+        autoupdateDemotionReason = "coordinator_disconnected"
+        autoupdateTrustState = AutoUpdateTrustState(
+            v2Accepted: false,
+            tier: nil,
+            encryptedLegValid: false,
+            attestationRequired: false,
+            attestationSatisfied: false,
+            tokenConfigured: false,
+            tokenValidated: false,
+            bearerlessDuplicate: false,
+            connected: false
+        )
         await providerStatus.setCoordinatorSession(connected: false)
     }
 
@@ -1103,6 +1162,7 @@ actor CoordinatorClient {
 
     private func acceptAuthResponse(_ response: [String: Any], session: Tier2ProviderSession) async throws {
         try validateAcceptedAuthResponse(response, session: session)
+        tier2Session = session
         try await acceptCoordinatorSession(response, reason: "coordinator auth_response accepted")
     }
 
@@ -1153,13 +1213,13 @@ actor CoordinatorClient {
     /// scratch and the legitimate provider can mint cleanly. The
     /// asymmetry "coordinator has token / binary doesn't" never appears
     /// in this design.
-    private func adoptAssignedProviderTokenIfPresent(_ payload: [String: Any]) async {
+    private func adoptAssignedProviderTokenIfPresent(_ payload: [String: Any]) async -> Bool {
         guard let assigned = payload["assigned_provider_token"] as? String else {
-            return
+            return false
         }
         let trimmed = assigned.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return
+            return false
         }
         let path = configPath
         let result: Result<Void, Error> = await Task.detached(priority: .utility) {
@@ -1174,8 +1234,10 @@ actor CoordinatorClient {
         case .success:
             self.providerToken = trimmed
             Self.emitTokenPersistEvent(event: "provider_token_persisted", path: path, error: nil)
+            return true
         case .failure(let error):
             Self.emitTokenPersistEvent(event: "provider_token_persist_failed", path: path, error: error)
+            return false
         }
     }
 
@@ -1209,7 +1271,7 @@ actor CoordinatorClient {
         // and v2 (auth_response) ack paths since both funnel here.
         // Awaited so that persist-before-adopt holds: see
         // adoptAssignedProviderTokenIfPresent doc-comment.
-        await adoptAssignedProviderTokenIfPresent(payload)
+        let assignedProviderTokenAdopted = await adoptAssignedProviderTokenIfPresent(payload)
         do {
             try pairingController.handlePairingMaterial(
                 pairOT: payload["pair_ot"] as? String,
@@ -1220,6 +1282,20 @@ actor CoordinatorClient {
             Self.emitClaimURLHandoffEvent(error: error)
         }
         let interval = max(Self.intValue(payload["heartbeat_interval_s"]) ?? 30, 1)
+        let isV2 = payload["type"] as? String == "auth_response" && payload["status"] as? String == "accepted"
+        autoupdateCoordinatorPayload = payload
+        autoupdateCoordinatorPayloadIsV2 = isV2
+        autoupdateAssignedProviderTokenAdopted = assignedProviderTokenAdopted
+        autoupdateDemotionReason = nil
+        autoupdateTrustState = AutoUpdateTrustState.fromCoordinatorPayload(
+            payload,
+            isV2: isV2,
+            session: tier2Session,
+            providerToken: providerToken,
+            assignedProviderTokenAdopted: assignedProviderTokenAdopted
+        )
+        autoupdateDrainExtensions = payload["autoupdate_drain_extensions"] as? Bool == true
+        autoupdateAttemptedTargets.removeAll()
         await providerStatus.setCoordinatorSession(
             connected: true,
             assignedID: payload["assigned_id"] as? String,
@@ -1229,15 +1305,38 @@ actor CoordinatorClient {
         if let tier = payload["tier"] as? String {
             print("Coordinator tier: \(tier)")
         }
-        if let recommended = payload["recommended_binary_version"] as? String,
-           Self.compareSemver(Self.binaryVersion, recommended) == .orderedAscending
-        {
-            print("A newer version is available (v\(recommended)). Run 'macprovider-cli update' to upgrade.")
-        }
         sleepAssertion?.stop()
         sleepAssertion = sleepAssertionFactory()
         startHeartbeat(intervalSeconds: interval)
+        let completedAutoupdate = await pendingSuccessfulAutoupdate()
         try await sendStateUpdate(state: nil, reason: reason)
+        if let completedAutoupdate {
+            let markerStore = AutoUpdateMarkerStore()
+            try? markerStore.completeSuccessfulUpdate(completedAutoupdate)
+            try? markerStore.finalizeSuccessfulUpdate(completedAutoupdate)
+        }
+        if let recommended = payload["recommended_binary_version"] as? String {
+            let trust = currentAutoupdateTrustState()
+            guard trust.isEligible else {
+                let parsed = try? AutoUpdateRecommendation.validate(recommended)
+                if let parsed,
+                   SelfUpdate.compareSemver(Self.binaryVersion, parsed.normalized) == .orderedAscending
+                {
+                    print("A newer version is available (v\(parsed.normalized)). Run 'macprovider-cli update' to upgrade.")
+                }
+                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                    updateID: UUID().uuidString.lowercased(),
+                    currentVersion: Self.binaryVersion,
+                    targetVersion: parsed?.normalized ?? "<notify-only>",
+                    phase: .eligibility,
+                    outcome: .skipped,
+                    reason: trust.lossReason,
+                    attempt: 1
+                ))
+                return
+            }
+            await runAutoupdateIfEligible(recommended)
+        }
     }
 
     private static func emitClaimURLHandoffEvent(error: Error) {
@@ -1252,6 +1351,177 @@ actor CoordinatorClient {
         } catch {
             FileHandle.standardError.write(Data("{\"event\":\"claim_url_handoff_failed\"}\n".utf8))
         }
+    }
+
+    private func pendingSuccessfulAutoupdate(markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore()) async -> AutoUpdatePendingMarker? {
+        guard let marker = try? markerStore.readPending(),
+              marker.targetVersion == Self.binaryVersion
+        else {
+            return nil
+        }
+        await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+            updateID: marker.updateID,
+            currentVersion: Self.binaryVersion,
+            targetVersion: marker.targetVersion,
+            phase: .postStart,
+            outcome: .success,
+            reason: "post_start_rejoin_succeeded",
+            attempt: 1
+        ))
+        return marker
+    }
+
+    private func runStartupAutoupdateRecovery() async {
+        guard let binaryURL = Bundle.main.executableURL else { return }
+        await runStartupAutoupdateRecovery(binaryURL: binaryURL, markerStore: AutoUpdateMarkerStore())
+    }
+
+    func runStartupAutoupdateRecoveryForTest(binaryURL: URL, markerStore: AutoUpdateMarkerStore) async {
+        await runStartupAutoupdateRecovery(binaryURL: binaryURL, markerStore: markerStore)
+    }
+
+    private func runStartupAutoupdateRecovery(binaryURL: URL, markerStore: AutoUpdateMarkerStore) async {
+        let binaryDir = binaryURL.deletingLastPathComponent()
+        let pending: AutoUpdatePendingMarker?
+        do {
+            pending = try markerStore.readPending()
+        } catch {
+            markerStore.recoverInvalidPendingMarker()
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: UUID().uuidString.lowercased(),
+                currentVersion: Self.binaryVersion,
+                targetVersion: "<invalid>",
+                phase: .rollback,
+                outcome: .failure,
+                reason: "marker_invalid",
+                attempt: 1,
+                failureClass: .orphanedPendingMarker
+            ))
+            return
+        }
+        for sentinel in markerStore.successSentinels(in: binaryDir) {
+            let payload: (updateID: String, binaryVersion: String)
+            do {
+                payload = try markerStore.readSuccessSentinel(sentinel)
+            } catch {
+                try? FileManager.default.removeItem(at: sentinel)
+                continue
+            }
+            guard payload.binaryVersion == Self.binaryVersion else {
+                await recordOrphanedSuccessSentinel(
+                    updateID: payload.updateID,
+                    targetVersion: payload.binaryVersion,
+                    reason: "binary_version_mismatch",
+                    sentinel: sentinel
+                )
+                continue
+            }
+            guard let pending else {
+                await recordOrphanedSuccessSentinel(
+                    updateID: payload.updateID,
+                    targetVersion: payload.binaryVersion,
+                    reason: "no_matching_pending",
+                    sentinel: sentinel
+                )
+                continue
+            }
+            guard pending.updateID == payload.updateID else {
+                await recordOrphanedSuccessSentinel(
+                    updateID: payload.updateID,
+                    targetVersion: payload.binaryVersion,
+                    reason: "update_id_mismatch",
+                    sentinel: sentinel
+                )
+                continue
+            }
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: payload.updateID,
+                currentVersion: Self.binaryVersion,
+                targetVersion: pending.targetVersion,
+                phase: .postStart,
+                outcome: .success,
+                reason: "post_start_rejoin_succeeded",
+                attempt: 1
+            ))
+            do {
+                try await sendStateUpdate(state: nil, reason: "autoupdate_post_start_success")
+                try markerStore.completeSuccessfulUpdate(pending)
+                try markerStore.finalizeSuccessfulUpdate(pending)
+            } catch {
+                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                    updateID: payload.updateID,
+                    currentVersion: Self.binaryVersion,
+                    targetVersion: pending.targetVersion,
+                    phase: .postStart,
+                    outcome: .failure,
+                    reason: "post_start_success_publish_or_cleanup_failed",
+                    attempt: 1,
+                    failureClass: .other
+                ))
+            }
+        }
+        if let marker = pending {
+            guard Self.autoupdateMarkerDeadlineExpired(marker.markerDeadline) else {
+                return
+            }
+            if !markerStore.updateLockIsLive() {
+                let outcome = markerStore.recoverOrphanedMarker(marker)
+                switch outcome {
+                case .restored(let recovered):
+                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                        updateID: recovered.updateID,
+                        currentVersion: Self.binaryVersion,
+                        targetVersion: recovered.targetVersion,
+                        phase: .rollback,
+                        outcome: .failure,
+                        reason: "orphaned_pending_marker_recovered",
+                        attempt: 1,
+                        failureClass: .orphanedPendingMarker
+                    ))
+                case .markerInvalid:
+                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                        updateID: UUID().uuidString.lowercased(),
+                        currentVersion: Self.binaryVersion,
+                        targetVersion: "<invalid>",
+                        phase: .rollback,
+                        outcome: .failure,
+                        reason: "marker_invalid",
+                        attempt: 1,
+                        failureClass: .orphanedPendingMarker
+                    ))
+                case let .backupCorrupt(recovered, reason):
+                    autoupdateDisabledForSessionReason = "rollback_backup_corrupt"
+                    await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                        updateID: recovered.updateID,
+                        currentVersion: Self.binaryVersion,
+                        targetVersion: recovered.targetVersion,
+                        phase: .rollback,
+                        outcome: .failure,
+                        reason: reason,
+                        attempt: 1,
+                        failureClass: .rollbackBackupCorrupt
+                    ))
+                }
+            }
+        } else {
+            for backup in markerStore.rollbackBackups(in: binaryDir) {
+                try? FileManager.default.removeItem(at: backup)
+            }
+        }
+    }
+
+    private func recordOrphanedSuccessSentinel(updateID: String, targetVersion: String, reason: String, sentinel: URL) async {
+        try? FileManager.default.removeItem(at: sentinel)
+        await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+            updateID: updateID,
+            currentVersion: Self.binaryVersion,
+            targetVersion: targetVersion,
+            phase: .postStart,
+            outcome: .failure,
+            reason: reason,
+            attempt: 1,
+            failureClass: .orphanedSuccessSentinel
+        ))
     }
 
     // Provider WS keepalive fix. The coordinator advertises heartbeat_interval_s
@@ -1541,6 +1811,205 @@ actor CoordinatorClient {
         await providerStatus.setState(.ready)
     }
 
+    private func runAutoupdateIfEligible(_ recommended: String) async {
+        if let parsed = try? AutoUpdateRecommendation.validate(recommended) {
+            let trust = currentAutoupdateTrustState()
+            guard trust.isEligible else {
+                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                    updateID: UUID().uuidString.lowercased(),
+                    currentVersion: Self.binaryVersion,
+                    targetVersion: parsed.normalized,
+                    phase: .eligibility,
+                    outcome: .skipped,
+                    reason: trust.lossReason,
+                    attempt: 1
+                ))
+                return
+            }
+            guard !autoupdateAttemptedTargets.contains(parsed.normalized) else {
+                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                    updateID: UUID().uuidString.lowercased(),
+                    currentVersion: Self.binaryVersion,
+                    targetVersion: parsed.normalized,
+                    phase: .cooldown,
+                    outcome: .skipped,
+                    reason: "already_attempted_this_session",
+                    attempt: 1
+                ))
+                return
+            }
+            autoupdateAttemptedTargets.insert(parsed.normalized)
+        }
+        let updater = AutoUpdater(
+            config: appConfig,
+            currentVersion: Self.binaryVersion,
+            providerStatus: providerStatus,
+            trustProvider: { await self.currentAutoupdateTrustState() },
+            drain: { target in try await self.autoupdateDrain(target: target) },
+            sendReady: { try await self.sendStateUpdate(state: .ready, reason: "autoupdate_timeout_skipped_ready") }
+        )
+        await updater.handleCoordinatorRecommendation(recommended)
+    }
+
+    private func currentAutoupdateTrustState() -> AutoUpdateTrustState {
+        if let reason = autoupdateDisabledForSessionReason {
+            return AutoUpdateTrustState(
+                v2Accepted: false,
+                tier: nil,
+                encryptedLegValid: false,
+                attestationRequired: false,
+                attestationSatisfied: false,
+                tokenConfigured: providerToken?.isEmpty == false,
+                tokenValidated: false,
+                bearerlessDuplicate: false,
+                connected: false,
+                stableReason: reason
+            )
+        }
+        guard !autoupdateCoordinatorPayload.isEmpty else {
+            return AutoUpdateTrustState(
+                v2Accepted: false,
+                tier: nil,
+                encryptedLegValid: false,
+                attestationRequired: false,
+                attestationSatisfied: false,
+                tokenConfigured: providerToken?.isEmpty == false,
+                tokenValidated: providerToken?.isEmpty == false,
+                bearerlessDuplicate: false,
+                connected: false,
+                stableReason: autoupdateDemotionReason ?? "coordinator_disconnected"
+            )
+        }
+        var state = AutoUpdateTrustState.fromCoordinatorPayload(
+            autoupdateCoordinatorPayload,
+            isV2: autoupdateCoordinatorPayloadIsV2,
+            session: tier2Session,
+            providerToken: providerToken,
+            assignedProviderTokenAdopted: autoupdateAssignedProviderTokenAdopted
+        )
+        if let reason = autoupdateDemotionReason {
+            switch reason {
+            case "encrypted_leg_invalidated":
+                state = AutoUpdateTrustState(
+                    v2Accepted: state.v2Accepted,
+                    tier: state.tier,
+                    encryptedLegValid: false,
+                    attestationRequired: state.attestationRequired,
+                    attestationSatisfied: state.attestationSatisfied,
+                    tokenConfigured: state.tokenConfigured,
+                    tokenValidated: state.tokenValidated,
+                    bearerlessDuplicate: state.bearerlessDuplicate,
+                    connected: state.connected,
+                    stableReason: reason
+                )
+            case "tier_demoted":
+                state = AutoUpdateTrustState(
+                    v2Accepted: state.v2Accepted,
+                    tier: "provisional",
+                    encryptedLegValid: state.encryptedLegValid,
+                    attestationRequired: state.attestationRequired,
+                    attestationSatisfied: state.attestationSatisfied,
+                    tokenConfigured: state.tokenConfigured,
+                    tokenValidated: state.tokenValidated,
+                    bearerlessDuplicate: state.bearerlessDuplicate,
+                    connected: state.connected,
+                    stableReason: reason
+                )
+            case "token_revoked":
+                state = AutoUpdateTrustState(
+                    v2Accepted: state.v2Accepted,
+                    tier: state.tier,
+                    encryptedLegValid: state.encryptedLegValid,
+                    attestationRequired: state.attestationRequired,
+                    attestationSatisfied: state.attestationSatisfied,
+                    tokenConfigured: true,
+                    tokenValidated: false,
+                    bearerlessDuplicate: state.bearerlessDuplicate,
+                    connected: state.connected,
+                    stableReason: reason
+                )
+            case "attestation_state_degraded":
+                state = AutoUpdateTrustState(
+                    v2Accepted: state.v2Accepted,
+                    tier: state.tier,
+                    encryptedLegValid: state.encryptedLegValid,
+                    attestationRequired: true,
+                    attestationSatisfied: false,
+                    tokenConfigured: state.tokenConfigured,
+                    tokenValidated: state.tokenValidated,
+                    bearerlessDuplicate: state.bearerlessDuplicate,
+                    connected: state.connected,
+                    stableReason: reason
+                )
+            default:
+                state = AutoUpdateTrustState(
+                    v2Accepted: state.v2Accepted,
+                    tier: state.tier,
+                    encryptedLegValid: state.encryptedLegValid,
+                    attestationRequired: state.attestationRequired,
+                    attestationSatisfied: state.attestationSatisfied,
+                    tokenConfigured: state.tokenConfigured,
+                    tokenValidated: state.tokenValidated,
+                    bearerlessDuplicate: state.bearerlessDuplicate,
+                    connected: false,
+                    stableReason: reason
+                )
+            }
+        }
+        autoupdateTrustState = state
+        return state
+    }
+
+    private static func autoupdateTimestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: date)
+    }
+
+    private static func autoupdateMarkerDeadlineExpired(_ raw: String) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        guard let deadline = formatter.date(from: raw) else {
+            return true
+        }
+        return Date() >= deadline
+    }
+
+    private func autoupdateDrain(target: String) async throws -> Bool {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        heartbeatWatchdogTask?.cancel()
+        heartbeatWatchdogTask = nil
+        try await sendStateUpdate(state: .draining, reason: "autoupdate_to_\(target)")
+        try await sendDrainStatus(phase: "starting")
+        try await sendDrainStatus(phase: "in_progress")
+        let softDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 120)
+        if softDrained {
+            try await sendDrainStatus(phase: "complete")
+            return true
+        }
+        let snapshot = await providerStatus.snapshot()
+        await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+            updateID: UUID().uuidString.lowercased(),
+            currentVersion: Self.binaryVersion,
+            targetVersion: target,
+            phase: .drain,
+            outcome: .inProgress,
+            reason: "soft_drain_timeout",
+            attempt: 1,
+            inflightRequests: snapshot.requestsInFlight
+        ))
+        let hardDrained = await providerStatus.waitUntilDrained(timeoutSeconds: 30)
+        if hardDrained {
+            try await sendDrainStatus(phase: "complete")
+            return true
+        }
+        try await sendDrainStatus(phase: autoupdateDrainExtensions ? "timeout_skipped" : "complete")
+        return false
+    }
+
     // resetWindow=true rolls the since-last metrics window (the coordinator-
     // interval heartbeat). Intermediate keepalive heartbeats (sent on the short
     // sub-interval tick to keep the connection alive) pass resetWindow=false so
@@ -1571,6 +2040,9 @@ actor CoordinatorClient {
             }
             payload["loading"] = runtimeSnapshot.state == .loading || runtimeSnapshot.state == .draining
         }
+        if let event = await AutoUpdateEventStore.shared.lastWireObject() {
+            payload["last_autoupdate_event"] = event
+        }
         try await send(payload)
     }
 
@@ -1579,7 +2051,7 @@ actor CoordinatorClient {
             await providerStatus.setState(newState)
         }
         let snapshot = await providerStatus.snapshot()
-        try await send([
+        var payload: [String: Any] = [
             "type": "state_update",
             "state": snapshot.status.rawValue,
             "reason": reason,
@@ -1591,7 +2063,11 @@ actor CoordinatorClient {
                 "avg_latency_ms_since_last": nullableNumber(snapshot.avgLatencyMSSinceLast),
                 "throughput_tps_since_last": nullableNumber(snapshot.throughputTPSSinceLast),
             ],
-        ])
+        ]
+        if let event = await AutoUpdateEventStore.shared.lastWireObject() {
+            payload["last_autoupdate_event"] = event
+        }
+        try await send(payload)
     }
 
     private func sendDrainStatus(phase: String) async throws {
@@ -1805,17 +2281,6 @@ actor CoordinatorClient {
         return value
     }
 
-    private static func compareSemver(_ lhs: String, _ rhs: String) -> ComparisonResult {
-        let left = lhs.trimmingCharacters(in: CharacterSet(charactersIn: "vV")).split(separator: ".").map { Int($0) ?? 0 }
-        let right = rhs.trimmingCharacters(in: CharacterSet(charactersIn: "vV")).split(separator: ".").map { Int($0) ?? 0 }
-        for index in 0 ..< max(left.count, right.count) {
-            let l = index < left.count ? left[index] : 0
-            let r = index < right.count ? right[index] : 0
-            if l < r { return .orderedAscending }
-            if l > r { return .orderedDescending }
-        }
-        return .orderedSame
-    }
 }
 
 extension CoordinatorClient: ReceiptKeyRotatingCoordinatorClient {}
