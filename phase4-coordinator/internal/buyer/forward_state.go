@@ -69,4 +69,32 @@ type forwardState struct {
 	// advance (failover or retry). The three forwardFn closures read
 	// state.provider to drive their dispatch.
 	provider pool.Provider
+
+	// dailyKey is the UTC YYYY-MM-DD bucket snapshot captured ONCE at
+	// request start (handleChatCompletions, derived from startedAt
+	// for atomic snapshot at the UTC-midnight boundary) and reused by
+	// every retry attempt's seedForRequest derivation. This preserves
+	// FR-SR-17 reproducibility for requests that span UTC midnight:
+	// the daily-key component of (request_id, daily_key) → seed stays
+	// sticky to the request, not to wall-clock time at the per-attempt
+	// derivation point. (Each retry attempt's request_id IS distinct
+	// — advanceToNextProvider rolls a fresh uuid per advance — so the
+	// per-attempt seed values differ; what survives midnight is the
+	// daily-key bucket each derivation consumes.) The bucket value
+	// is NOT emitted as its own log field; downstream auditors
+	// reproduce the seed by reading the request_log row's start
+	// timestamp (which uses the same UTC date) and feeding it back
+	// through seedForRequestWithKey alongside the per-attempt
+	// request_id. Issue #266 T1 safety/correctness item.
+	dailyKey string
+
+	// estimatedTokens is the prompt-token estimate captured ONCE at
+	// request start. The retry routing-decision log's PreflightResult
+	// field is derived from this (vs s.preflightThreshold + whether
+	// s.preflight is wired): when preflight ran, the just-selected
+	// provider was accepted by it (else selectProviderExcluding would
+	// have returned an error before afterAdvance fired); when
+	// preflight was skipped (low estimate OR no preflight func), the
+	// label is "not_applicable". Issue #266 T1 R1 audit MEDIUM fix.
+	estimatedTokens int
 }

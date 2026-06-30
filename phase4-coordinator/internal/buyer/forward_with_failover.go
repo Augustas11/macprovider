@@ -136,7 +136,7 @@ func (s *Server) forwardWithFailover(
 		// failover callbacks nil.
 		if tr.failoverEligible && tx.onFailoverHit != nil && tx.onFailoverMiss != nil {
 			if !failoverAttempted && !hasPinnedRoute(r.Header) {
-				next, hit := s.failoverCandidate(uuid.NewString(), req, r.Header, state.provider, excluded)
+				next, hit := s.failoverCandidate(uuid.NewString(), req, r.Header, state.provider, excluded, state.dailyKey)
 				if hit {
 					tx.onFailoverHit(originalRequestID, requestID, dispatched, state, next)
 					failoverAttempted = true
@@ -190,10 +190,12 @@ func (s *Server) forwardWithFailover(
 		// afterAdvance — WS-non-streaming returns true (caller falls
 		// through to the HTTP loop on state.provider) when the new
 		// provider is not WS-tunneled. Streaming + HTTP return false
-		// here; streaming's callback additionally emits the
-		// logRoutingDecision row that the HTTP path ALSO emits but the
-		// WS-non-streaming path does NOT. That asymmetry is preserved
-		// by leaving the routing-log call in the callback.
+		// here. Per issue #266 T1, ALL THREE transports now emit the
+		// per-attempt SPEC-004 §7 routing-decision log via
+		// logRoutingDecisionRetry inside their afterAdvance callback —
+		// the pre-#266 asymmetry where WS-non-streaming skipped the
+		// emission was the FR-SR-17 audit-explainability gap closed
+		// here.
 		if tx.afterAdvance != nil {
 			if fallThrough := tx.afterAdvance(state, nextRouteID); fallThrough {
 				return true
