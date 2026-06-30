@@ -158,13 +158,23 @@ SCP="scp -i $SSH_KEY -P 22"
 log() { printf "\n[deploy] %s\n" "$*"; }
 
 yaml_tier2_value() {
-  local key="$1"
-  awk -v key="$key" '
-    /^[[:space:]]*tier2:[[:space:]]*$/ { in_tier2=1; next }
-    in_tier2 && /^[^[:space:]#][^:]*:/ { exit }
-    in_tier2 {
+  yaml_block_value tier2 "$1"
+}
+
+# R5 ARCH MED: generic top-level-block value reader so callers can
+# query e.g. `stats.enabled` in addition to `tier2.catalog_path`. Same
+# scoping rule: read keys until the next top-level block.
+yaml_block_value() {
+  local block="$1" key="$2"
+  awk -v block="$block" -v key="$key" '
+    BEGIN { in_block=0 }
+    {
       line=$0
       sub(/[[:space:]]+#.*$/, "", line)
+    }
+    line ~ "^[[:space:]]*" block ":[[:space:]]*$" { in_block=1; next }
+    in_block && line ~ /^[^[:space:]#][^:]*:/ { exit }
+    in_block {
       if (line ~ "^[[:space:]]*" key ":[[:space:]]*") {
         sub("^[[:space:]]*" key ":[[:space:]]*", "", line)
         gsub(/^"|"$/, "", line)
@@ -176,6 +186,19 @@ yaml_tier2_value() {
     }
   ' "$CONFIG"
 }
+
+# R5 ARCH M1 — early coherence check: if the operator set
+# STATS_REQUIRED=1 but coordinator.yaml has stats.enabled=false (or
+# unset), the deploy would restart the binary then exit 9 in step 8.
+# Catch it BEFORE any SSH mutation.
+if [ "${STATS_REQUIRED:-0}" = "1" ]; then
+  _stats_enabled_pre="$(yaml_block_value stats enabled)"
+  if [ "$_stats_enabled_pre" != "true" ]; then
+    echo "aborting deploy: STATS_REQUIRED=1 but stats.enabled is not true in $CONFIG ('$_stats_enabled_pre')." >&2
+    echo "  Either set stats.enabled: true in coordinator.yaml, or drop STATS_REQUIRED=1." >&2
+    exit 5
+  fi
+fi
 
 log "step 0/9: pre-deploy config-drift + C2 cross-check"
 # Fail closed before touching the VPS if the config to be deployed has a
@@ -257,7 +280,16 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     exit 5
   fi
   TMP_CATALOG_PUBKEY="$(mktemp)"
-  trap 'rm -f "${TMP_CATALOG_PUBKEY:-}"' EXIT
+  # Cleanup trap covers BOTH the local pubkey file AND the remote
+  # per-deploy staging dir created later in step 4 (#244 R5). If
+  # DEPLOY_TMP is unset (deploy failed before mktemp -d), the
+  # remote rm-rf is a no-op.
+  trap '
+    rm -f "${TMP_CATALOG_PUBKEY:-}"
+    if [ -n "${DEPLOY_TMP:-}" ]; then
+      $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
+    fi
+  ' EXIT
   printf '%s\n' "$CATALOG_PUBLIC_KEY" > "$TMP_CATALOG_PUBKEY"
   go run "$DIST_DIR/../../scripts/sign-catalog.go" verify -public-key "$TMP_CATALOG_PUBKEY" "$CATALOG_SOURCE" >/dev/null || {
     echo "aborting deploy: signed catalog does not verify against tier2.catalog_public_key" >&2
@@ -408,28 +440,49 @@ log "step 4/9: upload binary + config + nginx site (with rollback snapshot)"
 # back into /opt/macprovider/coordinator on rollback.
 # See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the swap-back steps.
 $SSH 'if [ -x /opt/macprovider/coordinator ]; then
-        install -o macprovider -g macprovider -m 0755 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
+        # R5 SEC MED: ownership matches the deploy artifacts — root:macprovider 0750.
+        install -o root -g macprovider -m 0750 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
         echo "  snapshot saved at /opt/macprovider/coordinator.prev"
       else
         echo "  no live binary at /opt/macprovider/coordinator — first deploy"
       fi'
 
-$SCP "$BINARY" "$VPS_USER@$VPS_HOST:/tmp/coordinator-linux-amd64"
-$SCP "$CLI_BINARY" "$VPS_USER@$VPS_HOST:/tmp/coordinator-cli-linux-amd64"
-$SCP "$CONFIG" "$VPS_USER@$VPS_HOST:/tmp/coordinator.yaml"
-$SCP "$SERVICE" "$VPS_USER@$VPS_HOST:/tmp/macprovider-coordinator.service"
-$SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-coordinator-full.conf"
+# Issue #244 R5 SEC CRITICAL — stage uploaded artifacts into a fresh
+# per-deploy root-owned 0700 directory instead of predictable /tmp/X
+# names. Otherwise any local user (including a compromised macprovider
+# UID) can race the SCP/install window and substitute their own
+# systemd unit, binary, or nginx config — which root then installs.
+# `mktemp -d` returns a fresh dir with mode 0700 owned by the SSH
+# user (root). The wider /tmp permissions (1777) don't matter because
+# the fresh subdir denies traversal.
+DEPLOY_TMP=$($SSH 'umask 077 && mktemp -d -t macprovider-deploy.XXXXXXXX') || {
+  echo "failed to create remote staging directory" >&2; exit 1;
+}
+case "$DEPLOY_TMP" in
+  /tmp/macprovider-deploy.*) ;;
+  *)
+    echo "aborting deploy: mktemp produced unexpected path: '$DEPLOY_TMP'" >&2
+    exit 1
+    ;;
+esac
+log "  staging dir: $DEPLOY_TMP (root:root 0700)"
+
+$SCP "$BINARY"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-linux-amd64"
+$SCP "$CLI_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-cli-linux-amd64"
+$SCP "$CONFIG"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.yaml"
+$SCP "$SERVICE"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/macprovider-coordinator.service"
+$SCP "$NGINX_SITE"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-coordinator-full.conf"
 # SPEC-017 v0.1.8 Step 4.B artifacts (snippet must land at
 # /etc/nginx/conf.d/ so the http-context declarations are visible
 # to BOTH the coordinator vhost (for /v1/stats/* allow-through)
 # and the stats vhost. Installation step below is wired BEFORE
 # the coordinator vhost full-TLS install so `nginx -t` does not
 # trip on missing zone names.).
-$SCP "$NGINX_STATS_SHARED"     "$VPS_USER@$VPS_HOST:/tmp/nginx-stats-shared.conf"
-$SCP "$NGINX_STATS_SECHEADERS" "$VPS_USER@$VPS_HOST:/tmp/nginx-stats-security-headers.conf"
-$SCP "$NGINX_STATS_SITE"       "$VPS_USER@$VPS_HOST:/tmp/nginx-stats.streamvc.live.conf"
+$SCP "$NGINX_STATS_SHARED"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats-shared.conf"
+$SCP "$NGINX_STATS_SECHEADERS" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats-security-headers.conf"
+$SCP "$NGINX_STATS_SITE"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats.streamvc.live.conf"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
-  $SCP "$CATALOG_SOURCE" "$VPS_USER@$VPS_HOST:/tmp/tier2-catalog.json"
+  $SCP "$CATALOG_SOURCE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
 fi
 
 # M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
@@ -440,24 +493,26 @@ fi
 # at /opt/macprovider/coordinator.yaml.bak-<UTC>.
 BACKUP_TS=$(date -u +%Y%m%dT%H%M%SZ)
 $SSH "if [ -f /opt/macprovider/coordinator.yaml ]; then
-        install -o macprovider -g macprovider -m 0600 /opt/macprovider/coordinator.yaml /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS
+        install -o root -g macprovider -m 0640 /opt/macprovider/coordinator.yaml /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS
         echo '  remote-config backup saved at /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS'
       else
         echo '  no live coordinator.yaml — first deploy, skipping backup'
       fi"
 
 $SSH "set -e
-  install -o macprovider -g macprovider -m 0755 /tmp/coordinator-linux-amd64 /opt/macprovider/coordinator
+  # R5 SEC MED — deploy artifacts owned root:macprovider with group-read
+  # rather than macprovider:macprovider. This prevents a compromised
+  # macprovider UID from persistently rewriting its own executable /
+  # config / cli. The daemon runs as macprovider; group=macprovider +
+  # mode 0750 (binary/cli) and 0640 (config) give it the needed
+  # read/execute access.
+  install -o root -g macprovider -m 0750 $DEPLOY_TMP/coordinator-linux-amd64 /opt/macprovider/coordinator
   # coordinator-cli is the operator-facing token-management tool. It's
-  # invoked manually (not under systemd) so it does NOT get a .prev
-  # snapshot — re-deploy is the rollback. Owned macprovider:macprovider
-  # so the operator runs it via 'sudo -u macprovider' for the same DB
-  # file-ownership posture as the daemon (the auth Store opens
-  # coordinator.db with the daemon's uid).
-  install -o macprovider -g macprovider -m 0755 /tmp/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli
-  install -o macprovider -g macprovider -m 0600 /tmp/coordinator.yaml /opt/macprovider/coordinator.yaml
-  install -o root -g root -m 0644 /tmp/macprovider-coordinator.service /etc/systemd/system/macprovider-coordinator.service
-  rm -f /tmp/coordinator-linux-amd64 /tmp/coordinator-cli-linux-amd64 /tmp/coordinator.yaml /tmp/macprovider-coordinator.service
+  # invoked manually via 'sudo -u macprovider' so it does NOT get a
+  # .prev snapshot — re-deploy is the rollback.
+  install -o root -g macprovider -m 0750 $DEPLOY_TMP/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.yaml /opt/macprovider/coordinator.yaml
+  install -o root -g root       -m 0644 $DEPLOY_TMP/macprovider-coordinator.service /etc/systemd/system/macprovider-coordinator.service
 "
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   # R4: no more `install -d` on a dynamic dirname. /opt/macprovider is
@@ -465,8 +520,7 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   # into it. The destination is the hardcoded canonical path validated
   # at startup; no operator-controlled value reaches the SSH command.
   $SSH "set -e
-    install -o macprovider -g macprovider -m 0644 /tmp/tier2-catalog.json $CATALOG_REMOTE_PATH_CANONICAL
-    rm -f /tmp/tier2-catalog.json
+    install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json $CATALOG_REMOTE_PATH_CANONICAL
   "
 fi
 
@@ -738,9 +792,8 @@ DOMAINS_FULL_TLS=(${DOMAINS_HAVE_CERT[@]+"${DOMAINS_HAVE_CERT[@]}"} ${DOMAINS_IS
 log "step 6b/9: install nginx artifacts + full TLS vhost for [${DOMAINS_FULL_TLS[*]:-none}]"
 # Shared http-context snippets always go in — no cert dependency.
 $SSH "set -e
-  install -o root -g root -m 0644 /tmp/nginx-stats-shared.conf /etc/nginx/conf.d/stats-shared.conf
-  install -o root -g root -m 0644 /tmp/nginx-stats-security-headers.conf /etc/nginx/conf.d/stats-security-headers.conf
-  rm -f /tmp/nginx-stats-shared.conf /tmp/nginx-stats-security-headers.conf
+  install -o root -g root -m 0644 $DEPLOY_TMP/nginx-stats-shared.conf /etc/nginx/conf.d/stats-shared.conf
+  install -o root -g root -m 0644 $DEPLOY_TMP/nginx-stats-security-headers.conf /etc/nginx/conf.d/stats-security-headers.conf
 "
 
 # Install the full TLS vhost ONLY for domains with a valid cert. Domains
@@ -751,8 +804,8 @@ $SSH "set -e
 # refuses to deploy if they get re-commented. No in-place sed surgery.
 for d in ${DOMAINS_FULL_TLS[@]+"${DOMAINS_FULL_TLS[@]}"}; do
   case "$d" in
-    "$DOMAIN")        src="/tmp/nginx-coordinator-full.conf" ;;
-    "$STATS_DOMAIN")  src="/tmp/nginx-stats.streamvc.live.conf" ;;
+    "$DOMAIN")        src="$DEPLOY_TMP/nginx-coordinator-full.conf" ;;
+    "$STATS_DOMAIN")  src="$DEPLOY_TMP/nginx-stats.streamvc.live.conf" ;;
     *) echo "  unknown domain in DOMAINS_FULL_TLS: $d (skipping)" >&2; continue ;;
   esac
   $SSH "set -e
@@ -761,11 +814,11 @@ for d in ${DOMAINS_FULL_TLS[@]+"${DOMAINS_FULL_TLS[@]}"}; do
   "
 done
 
-# Clean up uploaded templates + validate + reload exactly once at the end
-# so a single bad file aborts the whole batch atomically. Clean up the
-# stale .full backup file from the broken-v1 deploy if present.
+# Clean up the per-deploy staging dir + the stale .full backup file
+# from the broken-v1 deploy if present. validate + reload exactly once
+# so a single bad file aborts the batch atomically.
 $SSH "set -e
-  rm -f /tmp/nginx-coordinator-full.conf /tmp/nginx-stats.streamvc.live.conf
+  rm -rf $DEPLOY_TMP
   rm -f /etc/nginx/sites-available/$DOMAIN.full
   nginx -t
   systemctl reload nginx
@@ -947,36 +1000,46 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   echo "  catalog OK: $(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print("catalog_id=%s models=%d" % (c.get("catalog_id"), len(c.get("models", []))))' /tmp/macprovider-catalog-current.json)"
 fi
 
-# R3 ARCH MED + R4 ARCH MED: smoke check on STATS_DOMAIN — hit the
-# SPEC-017 stats API surface (/v1/stats/health) explicitly, not just
-# `/`. The health route is designed to return 200 even under degraded
-# state, so a non-200 means the route itself is broken (not a backend
-# issue).
+# R3+R4+R5 stats smoke check on STATS_DOMAIN.
 #
-# R4 CODE/SEC convergent HIGH — DON'T use `STATS=$(curl ... || echo 000)`:
-# curl prints `000` to stdout AND exits non-zero on TLS/DNS failure, so
-# the `|| echo 000` appends another `000`, producing `STATS=000000` and
-# silently passing the `[ "$STATS" = "000" ]` failure branch. Split
-# assignment from fallback via `if ! VAR=$(...); then VAR=000; fi`.
-#
-# WARN-only by default (matches STATS_REQUIRED=0 default and #244
-# intent); promoted to fail-closed when STATS_REQUIRED=1.
-echo "  GET https://$STATS_DOMAIN/v1/stats/health -> expect 200"
-if ! STATS_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$STATS_DOMAIN/v1/stats/health" 2>/dev/null); then
-  STATS_STATUS="000"
-fi
-if [ "$STATS_STATUS" != "200" ]; then
-  if [ "$STATS_STATUS" = "000" ]; then
-    echo "  WARN: $STATS_DOMAIN /v1/stats/health unreachable (TLS handshake or DNS failed)" >&2
-  else
-    echo "  WARN: $STATS_DOMAIN /v1/stats/health returned status=$STATS_STATUS (expected 200)" >&2
+# R5 ARCH MED-1: coordinator's `stats.enabled` defaults FALSE — when
+# it's not set or set to false, /v1/stats/* routes don't exist. Hitting
+# them blind would flag a perfectly valid stats-disabled deploy as
+# degraded. Parse `stats.enabled` from the SAME coordinator.yaml we
+# just deployed; gate the smoke check on it.
+STATS_ENABLED_LOCAL="$(yaml_block_value stats enabled)"
+if [ "$STATS_ENABLED_LOCAL" = "true" ]; then
+  echo "  GET https://$STATS_DOMAIN/v1/stats/health -> expect 200"
+  # R4 CODE/SEC convergent HIGH — DON'T use `STATS=$(curl ... || echo 000)`:
+  # curl prints `000` to stdout AND exits non-zero on TLS/DNS failure, so
+  # the `|| echo 000` appends another `000` producing `STATS=000000` and
+  # silently passing the `[ "$STATS" = "000" ]` failure branch.
+  if ! STATS_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$STATS_DOMAIN/v1/stats/health" 2>/dev/null); then
+    STATS_STATUS="000"
   fi
-  if [ "${STATS_REQUIRED:-0}" = "1" ]; then
-    echo "  STATS_REQUIRED=1 set — aborting." >&2
-    exit 9
+  if [ "$STATS_STATUS" != "200" ]; then
+    if [ "$STATS_STATUS" = "000" ]; then
+      echo "  WARN: $STATS_DOMAIN /v1/stats/health unreachable (TLS handshake or DNS failed)" >&2
+    else
+      echo "  WARN: $STATS_DOMAIN /v1/stats/health returned status=$STATS_STATUS (expected 200)" >&2
+    fi
+    if [ "${STATS_REQUIRED:-0}" = "1" ]; then
+      echo "  STATS_REQUIRED=1 set — aborting." >&2
+      exit 9
+    fi
+  else
+    echo "  ok: $STATS_DOMAIN /v1/stats/health responded 200"
   fi
 else
-  echo "  ok: $STATS_DOMAIN /v1/stats/health responded 200"
+  # Stats disabled in deployed config. If STATS_REQUIRED=1, the operator
+  # explicitly asked for strict mode but disabled stats — that's
+  # incoherent; refuse. Otherwise just log and skip.
+  if [ "${STATS_REQUIRED:-0}" = "1" ]; then
+    echo "  ABORT: STATS_REQUIRED=1 but stats.enabled is not true in $CONFIG." >&2
+    echo "         Enable stats in coordinator.yaml or drop STATS_REQUIRED=1." >&2
+    exit 9
+  fi
+  echo "  stats.enabled is not true in $CONFIG — skipping $STATS_DOMAIN smoke check"
 fi
 
 log "step 9/9: tail the coordinator journal for sanity"

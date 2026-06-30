@@ -110,7 +110,9 @@ curl -s http://127.0.0.1:9443/healthz   # confirm OK + version reflects .prev
 
 Confirmed by the first M0-5/M1-6 production deploy (2026-06-11): both
 services maintain a single `.prev` artifact that is overwritten on each
-deploy, owned `macprovider:macprovider`, mode `0755`:
+deploy. Issue #244 R4+R5 tightened ownership to `root:macprovider 0750`
+(was `macprovider:macprovider 0755`) so a compromised daemon UID can no
+longer rewrite the previous binary:
 
 - `/opt/macprovider/coordinator.prev`
 - `/opt/macprovider/gateway.prev`
@@ -177,11 +179,12 @@ quota table, which has no BEFORE-DELETE trigger.
 
 ```bash
 ssh pearl
-# Install scripts to /usr/local/sbin (root-owned parent dir). The
-# /opt/macprovider parent is owned by macprovider:macprovider per the
-# coordinator deploy — installing the root-run archive scripts there would
-# let a compromised macprovider user substitute the script before the next
-# timer fires (audit-iter-2 security HIGH).
+# Install scripts to /usr/local/sbin (root-owned parent dir). Issue #244
+# R4+R5 tightened /opt/macprovider to root:macprovider 0750 (was
+# macprovider:macprovider 0755), so installing root-run scripts there
+# would now actually be safe — but /usr/local/sbin is the conventional
+# location for operator-installed root scripts, and the original
+# audit-iter-2 reasoning (defense in depth) still applies.
 sudo install -o root -g root -m 0755 archive-rotate.sh /usr/local/sbin/macprovider-archive-rotate.sh
 sudo install -o root -g root -m 0755 archive-restore.sh /usr/local/sbin/macprovider-archive-restore.sh
 sudo install -o root -g root -m 0644 macprovider-archive-rotate.service /etc/systemd/system/
