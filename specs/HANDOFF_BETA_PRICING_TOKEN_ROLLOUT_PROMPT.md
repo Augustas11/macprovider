@@ -43,16 +43,16 @@ the *why* before writing code.
 1. [beta/DECISION_CRITERIA.md](beta/DECISION_CRITERIA.md) — **Entry 92** at the tail
    is the locked v2 pricing + token design. Everything below implements it.
 2. [specs/RESEARCH_222_PRICING_PROMPT.md](specs/RESEARCH_222_PRICING_PROMPT.md) +
-   [.omc/artifacts/ask/codex-research-prompt-issue-222-beta-campaign-pricing-decision-run-2026-06-30T05-03-00-134Z.md](.omc/artifacts/ask/codex-research-prompt-issue-222-beta-campaign-pricing-decision-run-2026-06-30T05-03-00-134Z.md) —
+   [specs/RESEARCH_222_PRICING_MEMO.md](specs/RESEARCH_222_PRICING_MEMO.md) —
    v1 (rejected). Skim only; it's the strawman we replaced.
 3. [specs/RESEARCH_223_MLX_THROUGHPUT_ROADMAP_PROMPT.md](specs/RESEARCH_223_MLX_THROUGHPUT_ROADMAP_PROMPT.md) +
-   [.omc/artifacts/ask/codex-research-prompt-mlx-continuous-batching-speculative-decoding-2026-06-30T05-30-14-323Z.md](.omc/artifacts/ask/codex-research-prompt-mlx-continuous-batching-speculative-decoding-2026-06-30T05-30-14-323Z.md) —
+   [specs/RESEARCH_223_MLX_THROUGHPUT_ROADMAP_MEMO.md](specs/RESEARCH_223_MLX_THROUGHPUT_ROADMAP_MEMO.md) —
    12-month MLX engineering roadmap; per-cell tok/s targets.
 4. [specs/RESEARCH_224_PRICING_V2_PROMPT.md](specs/RESEARCH_224_PRICING_V2_PROMPT.md) +
-   [.omc/artifacts/ask/codex-research-prompt-issue-224-beta-pricing-v2-run-2026-06-30.md](.omc/artifacts/ask/codex-research-prompt-issue-224-beta-pricing-v2-run-2026-06-30.md) —
+   [specs/RESEARCH_224_PRICING_V2_MEMO.md](specs/RESEARCH_224_PRICING_V2_MEMO.md) —
    the primary v2 memo with hardware-tier design + token-ledger design + per-model rate-card YAML.
 5. [specs/RESEARCH_225_DARKBLOOM_COMPARISON_PROMPT.md](specs/RESEARCH_225_DARKBLOOM_COMPARISON_PROMPT.md) +
-   [.omc/artifacts/ask/codex-research-prompt-darkbloom-dev-comparison-pricing-tps-network-2026-06-30T05-44-42-602Z.md](.omc/artifacts/ask/codex-research-prompt-darkbloom-dev-comparison-pricing-tps-network-2026-06-30T05-44-42-602Z.md) —
+   [specs/RESEARCH_225_DARKBLOOM_COMPARISON_MEMO.md](specs/RESEARCH_225_DARKBLOOM_COMPARISON_MEMO.md) —
    competitor analysis. **CRITICAL**: darkbloom.dev = `Layr-Labs/d-inference`
    which is **clean-room restricted** per `CLAUDE.md`. NEVER inspect their source.
 6. [specs/RESEARCH_226_MOE_SELECTION_AND_MARKET_DEMAND_PROMPT.md](specs/RESEARCH_226_MOE_SELECTION_AND_MARKET_DEMAND_PROMPT.md) +
