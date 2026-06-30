@@ -1,7 +1,7 @@
 # AUDIT — Issue #245 — CODE lane
 
 ## Goal
-CODE-quality audit on commit `2743679` (branch `fix/iss245-spec007-v05-untyped-400`). Bar: 0 CRITICAL, 0 HIGH, 0 MEDIUM. LOW + INFO allowed.
+CODE-quality audit on commit `612c186` (R1 fix-pass on `2743679`) (branch `fix/iss245-spec007-v05-untyped-400`). Bar: 0 CRITICAL, 0 HIGH, 0 MEDIUM. LOW + INFO allowed.
 
 ## Scope (read these files only — do NOT propose changes outside)
 

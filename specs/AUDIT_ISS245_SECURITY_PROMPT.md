@@ -1,7 +1,7 @@
 # AUDIT — Issue #245 — SECURITY lane
 
 ## Goal
-Adversarial SECURITY audit on commit `2743679` (branch `fix/iss245-spec007-v05-untyped-400`). Bar: 0 CRITICAL, 0 HIGH, 0 MEDIUM. LOW + INFO allowed.
+Adversarial SECURITY audit on commit `612c186` (R1 fix-pass on `2743679`) (branch `fix/iss245-spec007-v05-untyped-400`). Bar: 0 CRITICAL, 0 HIGH, 0 MEDIUM. LOW + INFO allowed.
 
 ## Scope
 
