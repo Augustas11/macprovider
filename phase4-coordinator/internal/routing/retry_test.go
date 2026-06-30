@@ -56,6 +56,27 @@ func TestRetryHeaderLimit_GarbageReturnsZero(t *testing.T) {
 	}
 }
 
+func TestRetryHeaderLimit_TrailingJunkReturnsZero(t *testing.T) {
+	// R1 ARCHITECT audit LOW (PR #273) — pre-T3b Sscanf accepted
+	// "3abc" as N=3 (scanner stops at first non-digit). T3b switched
+	// to strconv.Atoi which requires whole-string match.
+	if got := routing.RetryHeaderLimit("3abc"); got != 0 {
+		t.Fatalf("'3abc' → 0 (whole-string match required); got %d", got)
+	}
+	if got := routing.RetryHeaderLimit("5xyz"); got != 0 {
+		t.Fatalf("'5xyz' → 0; got %d", got)
+	}
+	if got := routing.RetryHeaderLimit("1 hour"); got != 0 {
+		t.Fatalf("'1 hour' → 0 (post-trim has interior space); got %d", got)
+	}
+}
+
+func TestRetryHeaderLimit_LeadingWhitespaceTrimmed(t *testing.T) {
+	if got := routing.RetryHeaderLimit("  5  "); got != 5 {
+		t.Fatalf("'  5  ' → 5 (trimmed); got %d", got)
+	}
+}
+
 // TestShouldRetry pins each gate in the policy extracted into
 // routing/retry.go in #266 T2. Each case fails ONE gate so a
 // regression trips one targeted test.

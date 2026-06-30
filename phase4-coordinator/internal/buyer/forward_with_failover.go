@@ -118,8 +118,8 @@ func (s *Server) forwardWithFailover(
 		// Mark fault state — shared across all transports. The mutation
 		// order matches the pre-refactor inline blocks exactly:
 		// excluded → faultedRoutes → (markBusy MarkState if set).
-		excluded[routeKey(state.provider)] = struct{}{}
-		state.faultedRoutes[routeKey(state.provider)] = struct{}{}
+		excluded[state.provider.SortKey()] = struct{}{}
+		state.faultedRoutes[state.provider.SortKey()] = struct{}{}
 		if tr.markBusy {
 			s.pool.MarkState(state.provider.ProviderID, state.provider.AssignedID, pool.StateBusy)
 		}
@@ -185,7 +185,7 @@ func (s *Server) forwardWithFailover(
 		if !ok {
 			return false
 		}
-		excluded[routeKey(state.provider)] = struct{}{}
+		excluded[state.provider.SortKey()] = struct{}{}
 
 		// afterAdvance — WS-non-streaming returns true (caller falls
 		// through to the HTTP loop on state.provider) when the new

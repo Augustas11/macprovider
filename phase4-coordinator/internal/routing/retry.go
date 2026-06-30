@@ -1,26 +1,32 @@
 package routing
 
 import (
-	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // RetryHeaderLimit parses the `X-MacProvider-Retry` buyer header
-// into a per-request retry budget. Issue #266 T2 refactor —
-// byte-identical to pre-extraction `buyer.retryHeaderLimit`:
+// into a per-request retry budget.
 //
 //   - empty / whitespace-only → 0 (no retries requested)
 //   - "true" (case-insensitive) → math.MaxInt (buyer accepts any
 //     number of retries up to the operator-configured server cap)
-//   - positive integer N → N
-//   - any other shape (zero, negative, non-numeric) → 0
+//   - positive integer N (whole-string match) → N
+//   - any other shape (zero, negative, trailing junk like "3abc",
+//     non-numeric) → 0
 //
 // Returning 0 disables retry entirely for the request, even when
 // the operator's `routing.max_retries` is >0. The header is the
 // buyer's opt-in; the operator config is the cap.
+//
+// Pre-issue-#266-T3b implementation used `fmt.Sscanf("%d", &n)`
+// which accepted strings like "3abc" as N=3 (the scanner stops at
+// the first non-digit). Switched to `strconv.Atoi` which requires
+// a whole-string match — closes the R1 ARCHITECT audit LOW finding
+// on PR #273.
 func RetryHeaderLimit(value string) int {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -29,8 +35,8 @@ func RetryHeaderLimit(value string) int {
 	if strings.EqualFold(value, "true") {
 		return math.MaxInt
 	}
-	var n int
-	if _, err := fmt.Sscanf(value, "%d", &n); err != nil || n <= 0 {
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
 		return 0
 	}
 	return n

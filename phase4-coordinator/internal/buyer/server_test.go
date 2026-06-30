@@ -5083,6 +5083,182 @@ func TestDefaultConfigPreservesBaselineProviderSelection(t *testing.T) {
 	}
 }
 
+// TestStickyAccountMismatchEmitsWarnLog — issue #266 T3e HTTP-path
+// integration test for the sticky_account_mismatch warn emission
+// added in T1. Pre-T3 we had a unit test on sticky.Map.Update
+// confirming the boolean return, but no end-to-end coverage that
+// the buyer's HTTP path actually emits the Warn through the full
+// pipeline. Test sends two requests with the same conv-key but
+// different X-MacProvider-Account headers and asserts:
+//   - the second request emits exactly one sticky_account_mismatch
+//     log row with the correct provider_id + model_scope
+//   - the sticky entry's original AccountID attribution survives
+//     (no account_id leak under cross-account refresh attempt)
+func TestStickyAccountMismatchEmitsWarnLog(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 4, upstream.URL, 20)
+
+	var logBuf bytes.Buffer
+	server := buyer.NewServer(
+		registry,
+		zerolog.New(&logBuf),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			StickyEnabled:    true,
+			StickyTTLS:       1800,
+			StickyMaxEntries: 10000,
+		}),
+	)
+
+	// First request lands the sticky entry under acct_alice.
+	h1 := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"conv:t3e-mismatch"},
+		"X-MacProvider-Account":       []string{"acct_alice"},
+	}
+	rr1 := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), h1)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("seed request: status=%d body=%s", rr1.Code, rr1.Body.String())
+	}
+
+	// Pre-mismatch baseline: the warn log should NOT yet contain
+	// the mismatch event.
+	if strings.Contains(logBuf.String(), `"event":"sticky_account_mismatch"`) {
+		t.Fatalf("baseline: did not expect sticky_account_mismatch log yet; got %s", logBuf.String())
+	}
+	logBuf.Reset()
+
+	// Second request: SAME conv-key, DIFFERENT account.
+	h2 := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"conv:t3e-mismatch"},
+		"X-MacProvider-Account":       []string{"acct_mallory"},
+	}
+	rr2 := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), h2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("mismatch request: status=%d body=%s", rr2.Code, rr2.Body.String())
+	}
+
+	// Assert exactly ONE sticky_account_mismatch warn was emitted
+	// AND it carries the expected fields. The pre-T1 inline path
+	// emitted on EVERY mismatch; T1 added the per-conversation-key
+	// rate limiter (1/min/key) so a SINGLE warn per window is the
+	// correct post-T1 shape.
+	logOut := logBuf.String()
+	count := strings.Count(logOut, `"event":"sticky_account_mismatch"`)
+	if count != 1 {
+		t.Fatalf("expected exactly 1 sticky_account_mismatch log row; got %d in %s", count, logOut)
+	}
+	if !strings.Contains(logOut, `"provider_id":"p1"`) {
+		t.Fatalf("expected provider_id=p1 in warn; got %s", logOut)
+	}
+	if !strings.Contains(logOut, `"model_scope":"model-a"`) {
+		t.Fatalf("expected model_scope=model-a in warn; got %s", logOut)
+	}
+}
+
+// TestSPEC004DefaultConfigRegression_EmptyPool — AC-SR-1 expansion
+// per issue #266 T3d. With NO providers registered, the buyer's
+// upstream `pool.ModelKnown` gate fires BEFORE the smart-router
+// pipeline, so the canonical envelope is 404 model_not_found with
+// the invalid_request_error type. (The 503 no_provider_available
+// envelope is reserved for "model exists in pool but no candidate
+// passed filtering"; see the AllReadyButCapacityZero test below.)
+// The test pins the contract so a future smart-router change can't
+// silently mask the empty-pool case under a different status or
+// error code.
+func TestSPEC004DefaultConfigRegression_EmptyPool(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{PreflightTimeoutS: 5, RequestTimeoutS: 280, FailoverTimeoutS: 5}),
+	)
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("empty pool: expected 404; got %d body=%s", rr.Code, rr.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, rr, "model_not_found", "invalid_request_error")
+}
+
+// TestSPEC004DefaultConfigRegression_AllReadyButCapacityZero — AC-SR-1
+// expansion per #266 T3d. When every advertised provider is at zero
+// free slots (busy/full), the buyer envelope MUST be 503
+// no_provider_available — the SPEC-002 §F-4 composition contract
+// surfaces "every otherwise-eligible candidate was dropped by capacity"
+// as no_provider_available, NOT a model_not_found 404. Default-config
+// regression: the routing.EligibleCandidates extraction MUST preserve
+// the capacity gate.
+func TestSPEC004DefaultConfigRegression_AllReadyButCapacityZero(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "full1", EndpointURL: upstream.URL},
+		{ProviderID: "full2", EndpointURL: upstream.URL},
+	})
+	// SlotsTotal=1 then immediately update to SlotsFree=0 — both
+	// providers advertise model-a but neither has capacity.
+	registerWithEndpoint(registry, "full1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	registerWithEndpoint(registry, "full2", "s2", "model-a", pool.StateReady, 20000, 1, upstream.URL, 30)
+	zero := 0
+	registry.ApplyStateUpdate("full1", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	registry.ApplyStateUpdate("full2", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{PreflightTimeoutS: 5, RequestTimeoutS: 280, FailoverTimeoutS: 5}),
+	)
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("all-capacity-zero: expected 503; got %d body=%s", rr.Code, rr.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+}
+
+// TestSPEC004DefaultConfigRegression_ContextTooSmall — AC-SR-1
+// expansion per #266 T3d. When every candidate's MaxContextTokens
+// is strictly less than the request estimated tokens, the buyer
+// MUST surface 413 context_exceeds_capacity. Pre-T2 buyer
+// dispatch enforced this; the routing.EligibleCandidates extraction
+// MUST preserve it through the sort + tiebreak path.
+func TestSPEC004DefaultConfigRegression_ContextTooSmall(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "tiny", EndpointURL: upstream.URL}})
+	// Tiny max-context: 16 tokens is below the buyer's request estimate.
+	registerWithEndpoint(registry, "tiny", "s1", "model-a", pool.StateReady, 16, 1, upstream.URL, 10)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{PreflightTimeoutS: 5, RequestTimeoutS: 280, FailoverTimeoutS: 5}),
+	)
+	// Craft a prompt large enough to exceed 16 tokens with margin.
+	longPrompt := strings.Repeat("the quick brown fox jumps over the lazy dog ", 80)
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"` + longPrompt + `"}]}`)
+	rr := postChat(t, server, body, http.Header{})
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("context-too-small: expected 413; got %d body=%s", rr.Code, rr.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, rr, "context_exceeds_capacity", "invalid_request_error")
+}
+
 // registerBearerlessDuplicate registers a provider in the AuthBearerlessDuplicate
 // state — slot-holding, StateReady, but never routable per
 // pool.Provider.RoutingEligible(). Mirrors the v1.2.5 bearer-less reconnect case
