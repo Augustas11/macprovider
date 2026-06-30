@@ -301,8 +301,8 @@ func consumeSSE(body io.Reader, res *Result) {
 }
 
 // chunkPayload is a partial decode — we only need the bits relevant to
-// the invariants (token counts) and route attribution. Other fields are
-// preserved as-is by the SSE byte counter.
+// the invariants (token counts, terminal error envelope) and route
+// attribution. Other fields are preserved as-is by the SSE byte counter.
 type chunkPayload struct {
 	Usage struct {
 		PromptTokens     int64 `json:"prompt_tokens"`
@@ -316,6 +316,16 @@ type chunkPayload struct {
 			Content string `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
+	// Error is the OpenAI-style terminal error envelope the gateway
+	// emits on fallback paths via writeSSEError before `data: [DONE]`.
+	// Issue #232: presence of this field on any SSE chunk is the buyer-
+	// side corroboration the reconciler uses to verify the gateway's
+	// fallback outcome label.
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	} `json:"error,omitempty"`
 }
 
 func parseChunkTokens(payload []byte, res *Result) {
@@ -328,6 +338,14 @@ func parseChunkTokens(payload []byte, res *Result) {
 	}
 	if c.Usage.PromptTokens > 0 {
 		res.PromptTokensReported = c.Usage.PromptTokens
+	}
+	// #232: any chunk carrying an error envelope flags buyer-side
+	// corroboration of a fallback path. Gateway writeSSEError always
+	// includes top-level "error" with non-empty `code` so we anchor on
+	// code; an empty/nil error envelope (defensive: chunks that have
+	// the field but with no code) is treated as not corroborating.
+	if c.Error != nil && c.Error.Code != "" {
+		res.SawSSEErrorEvent = true
 	}
 }
 

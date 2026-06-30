@@ -110,9 +110,12 @@ func checkI1(ledger *reconcile.Result) Check {
 	//   - matched gateway-ok pairs with no coord row (suspicious; fallback
 	//     outcomes legitimately lack coord rows and are excluded upstream)
 	//   - gateway-vs-harness positive overbill across pairs (signed-safe;
-	//     underbill alone is allowed per streaming rounding semantics)
+	//     underbill alone is allowed per streaming rounding semantics;
+	//     fallback outcomes are suppressed ONLY when the buyer's stream
+	//     carried the gateway's terminal SSE error envelope per #232)
 	//   - gateway-vs-coord absolute mismatch (any direction; both are
-	//     settlement systems and MUST agree on per-pair token counts)
+	//     settlement systems and MUST agree on per-pair token counts;
+	//     same #232 corroboration gate applies)
 	gwOverbillVsHarness := ledger.GatewayOverbillVsHarnessTokens
 	absGwCoordMismatch := ledger.AbsGatewayCoordinatorMismatchTokens
 	unmatched := len(ledger.UnmatchedSuccesses)

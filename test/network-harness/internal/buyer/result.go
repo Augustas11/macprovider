@@ -59,6 +59,21 @@ type Result struct {
 	// I4 may flag it.
 	SawTerminator bool `json:"saw_terminator"`
 
+	// SawSSEErrorEvent is true when any SSE chunk in the stream carried
+	// an `error` field (the OpenAI-style envelope the gateway emits for
+	// fallback paths — see phase5-gateway/internal/router/chat_proxy.go
+	// writeSSEError). This is the buyer-side evidence of truncation /
+	// upstream failure / max-tokens overflow used by the reconciler
+	// (#232) to corroborate fallback outcome labels — the gateway's
+	// outcome label alone is a trust gate, but `SawSSEErrorEvent=true`
+	// is something the gateway cannot fake without actually telling the
+	// buyer the stream failed.
+	//
+	// Streaming-only. Non-streaming responses never set this; for those,
+	// the gateway returns HTTP 4xx/5xx instead of an SSE error envelope,
+	// and HTTPStatus + Outcome handle the classification.
+	SawSSEErrorEvent bool `json:"saw_sse_error_event"`
+
 	// Phase tags requests fired under the cold_warm_pairs pattern:
 	// "cold" for the first request after each idle gap, "warm" for the
 	// immediately-following request in the same pair. Empty for all

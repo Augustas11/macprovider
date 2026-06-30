@@ -47,8 +47,12 @@ These fail the run (exit 10) regardless of any contract:
     4. gateway-ok pairs with no coord row (`MatchedCoordMissing`;
        fallback outcomes legitimately lack coord rows and are excluded),
     5. positive gateway-vs-harness overbill across pairs
-       (`GatewayOverbillVsHarnessTokens` > 0; only "ok" outcomes — fallback
-       pairs are excluded per F-8 SSE-undercount artifact, see issue #232),
+       (`GatewayOverbillVsHarnessTokens` > 0; "ok" outcomes always count,
+       and fallback outcomes count unless the buyer ALSO received the
+       gateway's terminal SSE error envelope — the corroboration check
+       that closes the #232 trust gap. Pure fallback exclusion was the
+       R5 behavior and a `fallback` label alone is no longer a free
+       pass for gateway/coord overbill),
     6. absolute gateway-vs-coord mismatch across pairs
        (`AbsGatewayCoordinatorMismatchTokens` > 0; both directions, since
        gateway and coord are both settlement systems and must agree).

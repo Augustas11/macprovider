@@ -243,16 +243,33 @@ type MatchedPair struct {
 	CoordinatorMatchMethod      string `json:"coordinator_match_method,omitempty"` // "exact_id" | "fuzzy_token_ts"
 	GatewayLagMs                int64  `json:"gateway_lag_ms"`
 
-	// HarnessSawTerminator carries through buyer.Result.SawTerminator:
-	// true when the SSE stream ended with the explicit `data: [DONE]`
-	// marker (clean completion as the buyer saw it). Used by the fallback-
-	// overbill corroboration check at computePerPairDrift: a gateway
-	// settling a pair as a fallback outcome (stream_truncated etc.) WHILE
-	// the harness saw a clean terminator is the trust-gap signal #232
-	// surfaced — gateway claims truncation but buyer experience contradicts
-	// it. In that case the overbill exclusion is dropped and I1 flags the
-	// pair instead of silently suppressing the delta.
-	HarnessSawTerminator bool `json:"harness_saw_terminator"`
+	// HarnessSawSSEErrorEvent carries through buyer.Result.SawSSEErrorEvent:
+	// true when ANY SSE chunk in the buyer's stream carried an OpenAI-style
+	// terminal `error` envelope (the gateway emits one before `data: [DONE]`
+	// on every fallback path — see writeSSEError in chat_proxy.go). Used by
+	// the fallback-overbill corroboration check at computePerPairDrift to
+	// close the trust gap #232 raised:
+	//
+	//   - gateway "ok"              → never suppressed (clean settlement).
+	//   - fallback + SSE error seen → suppressed (gateway claim AND buyer
+	//                                 experience agree on truncation; the
+	//                                 F-8 SSE-undercount asymmetry the R5
+	//                                 fix targeted).
+	//   - fallback + no SSE error   → flagged (gateway claims truncation
+	//                                 but the buyer never saw an error
+	//                                 envelope; the gateway-mislabel /
+	//                                 trust-gap signal).
+	//
+	// Anchor choice rationale (#232 R1 SEC HIGH): an earlier draft used
+	// SawTerminator (whether the buyer saw `data: [DONE]`). That was
+	// wrong both ways: the gateway's legit fallback paths emit the error
+	// envelope FOLLOWED by `[DONE]`, so SawTerminator=true on every real
+	// truncation, and a buggy gateway can deliver a clean-looking 200
+	// stream WITHOUT `[DONE]` and label the row fallback to evade the
+	// check. The SSE error envelope is the actual buyer-side proof of
+	// truncation — the gateway cannot fake it without telling the buyer
+	// the stream failed.
+	HarnessSawSSEErrorEvent bool `json:"harness_saw_sse_error_event"`
 }
 
 // snapshotWindow returns the SQL query bounds for a reconcile run.
@@ -423,7 +440,7 @@ func computePerPairDrift(r *Result) {
 	for _, p := range r.MatchedSuccesses {
 		// Gateway vs Harness — fold the delta into the headline overbill
 		// signal for gateway "ok" pairs OR for fallback pairs where the
-		// harness contradicts the truncation claim (#232).
+		// buyer did NOT see the gateway's SSE error envelope (#232).
 		//
 		// SPEC-006 §17.7 fallback outcomes (stream_truncated etc.) have a
 		// known asymmetry: the gateway records the bytes it actually emitted
@@ -435,13 +452,15 @@ func computePerPairDrift(r *Result) {
 		// as `stream_truncated` would hide it from I1 (#229 R6 security HIGH,
 		// tracked as #232).
 		//
-		// Resolution (#232): use the harness's own observation as a
+		// Resolution (#232): use the buyer's own observation as a
 		// corroboration check. fallbackOverbillSuppressed() returns true
-		// only when the harness ALSO saw an incomplete stream (no
-		// `data: [DONE]` terminator). If the harness saw a clean terminator
-		// but the gateway claims a fallback, the truncation is uncorroborated
-		// and the overbill is fed into I1 — flagging exactly the malicious-
-		// shape scenario the audit raised.
+		// only when the buyer ALSO saw the gateway's terminal SSE error
+		// envelope (writeSSEError on every fallback path). If the gateway
+		// claims a fallback but the buyer never received an error envelope,
+		// the truncation is uncorroborated and the overbill is fed into I1
+		// — flagging exactly the trust-gap scenario the audit raised. See
+		// the helper docstring for why SawTerminator alone was the wrong
+		// anchor (#232 R1 SEC HIGH).
 		dh := p.GatewayCompletionTokens - p.HarnessCompletionTokens
 		r.NetGatewayMinusHarnessTokens += dh
 		if dh > 0 && !fallbackOverbillSuppressed(p) {
@@ -493,25 +512,36 @@ func computePerPairDrift(r *Result) {
 
 // fallbackOverbillSuppressed returns true when the per-pair drift should
 // be excluded from I1's overbill/mismatch signals because the pair is a
-// SPEC-006 §17.7 streaming-fallback outcome AND the harness independently
-// corroborated the truncation by NOT seeing a clean `data: [DONE]`
-// terminator (#232).
+// SPEC-006 §17.7 streaming-fallback outcome AND the buyer independently
+// corroborated the truncation by seeing the gateway's terminal SSE error
+// envelope (#232 R1 SEC HIGH: SawTerminator alone was the wrong anchor —
+// real truncation paths emit error + `[DONE]` so SawTerminator is always
+// true on legitimate fallbacks, and a malicious gateway can omit `[DONE]`
+// on a clean stream to forge the negative).
 //
 //   - Gateway outcome "ok" → never suppressed; clean settlement, drift
 //     is real.
-//   - Gateway outcome fallback + harness SawTerminator=false → suppressed.
-//     Buyer experienced a real truncation, F-8 SSE-undercount expected,
-//     do not false-fail I1 on the production #226 shape.
-//   - Gateway outcome fallback + harness SawTerminator=true  → NOT
-//     suppressed. The buyer saw a clean stream complete but the gateway
-//     labeled the pair as truncated. The truncation claim is uncorroborated
-//     and the drift is fed into I1 — flagging exactly the trust-gap shape
-//     #229 R6 security HIGH (tracked as #232) raised.
+//   - Gateway outcome fallback + buyer saw SSE error envelope → suppressed.
+//     The gateway's fallback claim is corroborated by the buyer; F-8 SSE-
+//     undercount asymmetry is expected; do not false-fail I1 on the
+//     production #226 shape (#229 R5 architect HIGH).
+//   - Gateway outcome fallback + buyer DID NOT see SSE error envelope →
+//     NOT suppressed. The gateway labeled the pair as a fallback but never
+//     told the buyer the stream failed via the OpenAI-style error
+//     envelope. The truncation claim is uncorroborated and the drift is
+//     fed into I1 — flagging exactly the trust-gap shape #229 R6 security
+//     HIGH (tracked as #232) raised.
+//
+// The SSE error envelope is what the gateway must emit for the buyer to
+// see a non-clean stream completion (writeSSEError in chat_proxy.go);
+// faking absence of one would require the gateway to also forge the
+// buyer's network-visible stream completion, which is outside its
+// authority.
 func fallbackOverbillSuppressed(p MatchedPair) bool {
 	if isGatewayOKOutcome(p.GatewayOutcome) {
 		return false
 	}
-	return !p.HarnessSawTerminator
+	return p.HarnessSawSSEErrorEvent
 }
 
 // collectUnmatchedGatewayOK lists gateway rows with outcome="ok" that
@@ -655,7 +685,7 @@ func matchExactPass(r *Result, ordered []buyer.Result, gwPool *[]gwRow, coordPoo
 		pair := MatchedPair{
 			HarnessRequestID:        h.RequestID,
 			HarnessCompletionTokens: h.CompletionTokensReceived,
-			HarnessSawTerminator:    h.SawTerminator,
+			HarnessSawSSEErrorEvent: h.SawSSEErrorEvent,
 			GatewayMatchMethod:      methodExactID,
 			GatewayRequestID:        g.RequestID,
 			GatewayAccountID:        g.AccountID,
@@ -694,7 +724,7 @@ func matchFuzzyPass(r *Result, deferred []buyer.Result, gwPool *[]gwRow, coordPo
 		pair := MatchedPair{
 			HarnessRequestID:        h.RequestID,
 			HarnessCompletionTokens: h.CompletionTokensReceived,
-			HarnessSawTerminator:    h.SawTerminator,
+			HarnessSawSSEErrorEvent: h.SawSSEErrorEvent,
 			GatewayMatchMethod:      methodFuzzy,
 			GatewayRequestID:        g.RequestID,
 			GatewayAccountID:        g.AccountID,
