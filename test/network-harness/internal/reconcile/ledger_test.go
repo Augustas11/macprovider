@@ -133,11 +133,11 @@ func TestComputePerPairDrift_ScenarioSevenShape(t *testing.T) {
 			outcome = "ok"
 		}
 		pairs[i] = MatchedPair{
-			HarnessRequestID:        "h",
-			HarnessCompletionTokens: n,
-			GatewayCompletionTokens: n,
-			GatewayOutcome:          outcome,
-			CoordinatorRequestID:    "c",
+			HarnessRequestID:            "h",
+			HarnessCompletionTokens:     n,
+			GatewayCompletionTokens:     n,
+			GatewayOutcome:              outcome,
+			CoordinatorRequestID:        "c",
 			CoordinatorCompletionTokens: n,
 		}
 	}
@@ -252,8 +252,8 @@ func TestCollectUnmatchedCoord2xx_R5HIGH(t *testing.T) {
 	now := time.Now()
 	leftoverCoord := []coordRow{
 		{RequestID: "ORPHAN_COORD", Status: 200, CompletionTokens: 8, TsUTC: now},
-		{RequestID: "coord_5xx", Status: 500, TsUTC: now},  // EXCLUDED (not 2xx)
-		{RequestID: "coord_4xx", Status: 404, TsUTC: now},  // EXCLUDED (not 2xx)
+		{RequestID: "coord_5xx", Status: 500, TsUTC: now}, // EXCLUDED (not 2xx)
+		{RequestID: "coord_4xx", Status: 404, TsUTC: now}, // EXCLUDED (not 2xx)
 	}
 	r := &Result{}
 	collectUnmatchedCoord2xx(r, leftoverCoord)
@@ -863,6 +863,127 @@ func TestMatchPairs_FallbackExactMatchEndToEnd(t *testing.T) {
 	}
 	if len(r.UnmatchedGatewayOKRows) != 0 {
 		t.Errorf("fallback row consumed → no orphan, got %v", r.UnmatchedGatewayOKRows)
+	}
+}
+
+// TestAttachCoord_PairsFallbackOutcomeWithCoord2xx is the F-3
+// reproduction for issue #285: stream_truncated via
+// finish_reason=length can still have a clean coord 2xx row. The coord
+// row must attach by exact external_request_id instead of leaking into
+// UnmatchedCoordinator2xxRows.
+func TestAttachCoord_PairsFallbackOutcomeWithCoord2xx(t *testing.T) {
+	now := time.Now()
+	results := []buyer.Result{
+		{RequestID: "h_trunc_1", Outcome: "ok", CompletionTokensReceived: 0, StartUTC: now, EndUTC: now},
+	}
+	gwRows := []gwRow{
+		{RequestID: "h_trunc_1", Outcome: "stream_truncated", CompletionTokens: 64, CreatedAt: now},
+	}
+	coordRows := []coordRow{
+		{RequestID: "h_trunc_1", ExternalRequestID: "h_trunc_1", Status: 200, CompletionTokens: 64, TsUTC: now},
+	}
+
+	r := &Result{}
+	_, leftoverCoord := matchPairs(r, results, gwRows, coordRows)
+	computePerPairDrift(r)
+	collectUnmatchedCoord2xx(r, leftoverCoord)
+
+	if len(r.MatchedSuccesses) != 1 {
+		t.Fatalf("want 1 matched pair, got %d", len(r.MatchedSuccesses))
+	}
+	if got := r.MatchedSuccesses[0].CoordinatorRequestID; got != "h_trunc_1" {
+		t.Errorf("fallback exact coord row should attach, got coord request_id %q", got)
+	}
+	if len(r.UnmatchedCoordinator2xxRows) != 0 {
+		t.Errorf("attached fallback coord row must not leak as unmatched, got %v", r.UnmatchedCoordinator2xxRows)
+	}
+	if r.GatewayOverbillVsCoordinatorTokens != 0 {
+		t.Errorf("fallback gw-coord overbill must be guarded, got %d", r.GatewayOverbillVsCoordinatorTokens)
+	}
+	if r.AbsGatewayCoordinatorMismatchTokens != 0 {
+		t.Errorf("fallback gw-coord mismatch must be guarded, got %d", r.AbsGatewayCoordinatorMismatchTokens)
+	}
+	if len(r.GatewayCoordMismatchedPairs) != 0 {
+		t.Errorf("fallback pair must not appear in gw-coord mismatch list, got %v", r.GatewayCoordMismatchedPairs)
+	}
+}
+
+// TestAttachCoord_FallbackWithoutCoord_NotFlaggedAsMissing covers the
+// provider-died-mid-stream shape: fallback gateway settlement may have
+// no coord trail and must not be reported as MatchedCoordMissing.
+func TestAttachCoord_FallbackWithoutCoord_NotFlaggedAsMissing(t *testing.T) {
+	now := time.Now()
+	results := []buyer.Result{
+		{RequestID: "h_upstream_error", Outcome: "ok", CompletionTokensReceived: 8, StartUTC: now, EndUTC: now},
+	}
+	gwRows := []gwRow{
+		{RequestID: "h_upstream_error", Outcome: "upstream_error", CompletionTokens: 8, CreatedAt: now},
+	}
+
+	r := &Result{}
+	matchPairs(r, results, gwRows, nil)
+	computePerPairDrift(r)
+
+	if len(r.MatchedSuccesses) != 1 {
+		t.Fatalf("want 1 matched pair, got %d", len(r.MatchedSuccesses))
+	}
+	if len(r.MatchedCoordMissing) != 0 {
+		t.Errorf("fallback pair without coord must not be flagged missing, got %v", r.MatchedCoordMissing)
+	}
+}
+
+// TestAttachCoord_OKOutcomeWithoutCoord_FlaggedAsMissing preserves the
+// existing I1 signal: gateway "ok" with no coord row remains suspicious.
+func TestAttachCoord_OKOutcomeWithoutCoord_FlaggedAsMissing(t *testing.T) {
+	now := time.Now()
+	results := []buyer.Result{
+		{RequestID: "h_ok_missing_coord", Outcome: "ok", CompletionTokensReceived: 8, StartUTC: now, EndUTC: now},
+	}
+	gwRows := []gwRow{
+		{RequestID: "h_ok_missing_coord", Outcome: "ok", CompletionTokens: 8, CreatedAt: now},
+	}
+
+	r := &Result{}
+	matchPairs(r, results, gwRows, nil)
+	computePerPairDrift(r)
+
+	if len(r.MatchedSuccesses) != 1 {
+		t.Fatalf("want 1 matched pair, got %d", len(r.MatchedSuccesses))
+	}
+	if len(r.MatchedCoordMissing) != 1 || r.MatchedCoordMissing[0] != "h_ok_missing_coord" {
+		t.Errorf("ok pair without coord must be flagged missing, got %v", r.MatchedCoordMissing)
+	}
+}
+
+// TestAttachCoord_OKOutcomeOverbillStillCounted proves the fallback
+// guard does not mask real gateway-vs-coord drift on clean OK pairs.
+func TestAttachCoord_OKOutcomeOverbillStillCounted(t *testing.T) {
+	now := time.Now()
+	results := []buyer.Result{
+		{RequestID: "h_ok_overbill", Outcome: "ok", CompletionTokensReceived: 64, StartUTC: now, EndUTC: now},
+	}
+	gwRows := []gwRow{
+		{RequestID: "h_ok_overbill", Outcome: "ok", CompletionTokens: 64, CreatedAt: now},
+	}
+	coordRows := []coordRow{
+		{RequestID: "coord_ok_overbill", ExternalRequestID: "h_ok_overbill", Status: 200, CompletionTokens: 59, TsUTC: now},
+	}
+
+	r := &Result{}
+	matchPairs(r, results, gwRows, coordRows)
+	computePerPairDrift(r)
+
+	if len(r.MatchedSuccesses) != 1 {
+		t.Fatalf("want 1 matched pair, got %d", len(r.MatchedSuccesses))
+	}
+	if r.GatewayOverbillVsCoordinatorTokens != 5 {
+		t.Errorf("ok pair overbill must count: want 5, got %d", r.GatewayOverbillVsCoordinatorTokens)
+	}
+	if r.AbsGatewayCoordinatorMismatchTokens != 5 {
+		t.Errorf("ok pair mismatch must count: want 5, got %d", r.AbsGatewayCoordinatorMismatchTokens)
+	}
+	if len(r.GatewayCoordMismatchedPairs) != 1 || r.GatewayCoordMismatchedPairs[0] != "h_ok_overbill" {
+		t.Errorf("ok pair mismatch list: want [h_ok_overbill], got %v", r.GatewayCoordMismatchedPairs)
 	}
 }
 

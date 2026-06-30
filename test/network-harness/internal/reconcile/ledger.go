@@ -235,7 +235,7 @@ type MatchedPair struct {
 	GatewayRequestID            string `json:"gateway_request_id"`
 	GatewayAccountID            string `json:"gateway_account_id,omitempty"`
 	GatewayCompletionTokens     int64  `json:"gateway_completion_tokens"`
-	GatewayOutcome              string `json:"gateway_outcome"` // "ok" or SPEC-006 §17.7 fallback name; distinguishes coord-missing severity
+	GatewayOutcome              string `json:"gateway_outcome"`                // "ok" or SPEC-006 §17.7 fallback name; distinguishes coord-missing severity
 	GatewayMatchMethod          string `json:"gateway_match_method,omitempty"` // "exact_id" | "fuzzy_token_ts"
 	CoordinatorRequestID        string `json:"coordinator_request_id,omitempty"`
 	CoordinatorAccountID        string `json:"coordinator_account_id,omitempty"`
@@ -427,11 +427,18 @@ func computePerPairDrift(r *Result) {
 		}
 
 		// Gateway vs Coordinator — only when a coord match exists.
-		// Coord and gateway are BOTH settlement systems for the same
-		// request, so any per-pair token disagreement (in either
-		// direction) is a ledger inconsistency that I1 must surface.
-		// AbsGatewayCoordinatorMismatchTokens uses |delta| to avoid
-		// signed-cancel across pairs (#229 R2 HIGH).
+		// For gateway "ok" pairs, coord and gateway are BOTH settlement
+		// systems for the same request, so any per-pair token disagreement
+		// (in either direction) is a ledger inconsistency that I1 must
+		// surface. AbsGatewayCoordinatorMismatchTokens uses |delta| to
+		// avoid signed-cancel across pairs (#229 R2 HIGH).
+		//
+		// Fallback pairs keep contributing to the signed net for triage,
+		// but are excluded from overbill/mismatch signals for the same
+		// fallback-unit asymmetry described on the gateway-vs-harness axis
+		// above: gateway counts emitted bytes before truncation, while coord
+		// can record the provider's full reported usage. Counting that as
+		// drift false-fails I1 in the #285 reproduction.
 		//
 		// When a coord row is missing for a gateway-OK pair (i.e. the
 		// gateway settled cleanly but no coord trail), surface separately
@@ -439,10 +446,10 @@ func computePerPairDrift(r *Result) {
 		if p.CoordinatorRequestID != "" {
 			dc := p.GatewayCompletionTokens - p.CoordinatorCompletionTokens
 			r.NetGatewayMinusCoordinatorTokens += dc
-			if dc > 0 {
+			if dc > 0 && isGatewayOKOutcome(p.GatewayOutcome) {
 				r.GatewayOverbillVsCoordinatorTokens += dc
 			}
-			if dc != 0 {
+			if dc != 0 && isGatewayOKOutcome(p.GatewayOutcome) {
 				if dc < 0 {
 					r.AbsGatewayCoordinatorMismatchTokens += -dc
 				} else {
@@ -496,12 +503,12 @@ func collectUnmatchedCoord2xx(r *Result, leftoverCoord []coordRow) {
 // matchPairs pairs each harness success with the gateway row (and
 // where applicable a coordinator row) it actually produced. Strategy
 // per side, in order:
-//   1. exact id — gateway request_id == harness id, or coord
-//      external_request_id == harness id. Requires a single
-//      settlement-complete candidate inside the per-request 60s window
-//      and matching account_id (when schema has the column).
-//   2. fuzzy (token+ts) — the legacy heuristic, used ONLY when exact-id
-//      yields zero candidates (exactPickNone).
+//  1. exact id — gateway request_id == harness id, or coord
+//     external_request_id == harness id. Requires a single
+//     settlement-complete candidate inside the per-request 60s window
+//     and matching account_id (when schema has the column).
+//  2. fuzzy (token+ts) — the legacy heuristic, used ONLY when exact-id
+//     yields zero candidates (exactPickNone).
 //
 // Ambiguity (≥2 surviving exact-id candidates) is NOT a fuzzy
 // fallback — it's a hard signal recorded in r.AmbiguousExactGatewayIDs
@@ -649,11 +656,14 @@ func matchFuzzyPass(r *Result, deferred []buyer.Result, gwPool *[]gwRow, coordPo
 }
 
 // attachCoord populates the coord side of a pair from the coordPool
-// when the gateway settled as "ok" (SPEC-006 §17.7 fallback outcomes
-// legitimately lack a coord row — PR #229 R4). On pass 1 (exactOnly),
-// only the exact-id picker runs; on pass 2, fuzzy fallback is allowed.
+// when the gateway settlement is complete. Fallback outcomes can have
+// exact coord rows (e.g. stream_truncated via finish_reason=length,
+// issue #285), but still legitimately lack coord rows when the provider
+// died mid-stream. On pass 1 (exactOnly), only the exact-id picker runs;
+// on pass 2, fuzzy fallback remains restricted to gateway "ok" pairs so
+// fallback rows cannot steal unrelated coord rows by token proximity.
 func attachCoord(r *Result, pair *MatchedPair, h buyer.Result, coordPool *[]coordRow, exactOnly bool) {
-	if !isGatewayOKOutcome(pair.GatewayOutcome) {
+	if !isSettlementComplete(pair.GatewayOutcome) {
 		return
 	}
 	coordIdx, coordStatus := pickExactCoordByRequestID(coordPool, h, r.HarnessAccountID, r.CoordHasAccountID)
@@ -674,6 +684,9 @@ func attachCoord(r *Result, pair *MatchedPair, h buyer.Result, coordPool *[]coor
 	if exactOnly {
 		return
 	}
+	if !isGatewayOKOutcome(pair.GatewayOutcome) {
+		return
+	}
 	if fuzzyIdx := pickClosestCoord(coordPool, h, r.HarnessAccountID, r.CoordHasAccountID); fuzzyIdx >= 0 {
 		c := (*coordPool)[fuzzyIdx]
 		pair.CoordinatorRequestID = c.RequestID
@@ -686,17 +699,17 @@ func attachCoord(r *Result, pair *MatchedPair, h buyer.Result, coordPool *[]coor
 
 // rowAccountIDMatches centralizes the schema-aware account check used
 // by every picker. Logic, in priority order:
-//   1. schema lacks the column → legacy snapshot, constraint is a
-//      global noop (rollout compatibility). Accept regardless of
-//      consensus state.
-//   2. schema has the column but the row value is empty (NULL/blank)
-//      → unconditionally REJECT, EVEN ON BOOTSTRAP (no consensus yet).
-//      We cannot prove this row belongs to the harness's buyer; the
-//      first match would otherwise pin consensus to a phantom account
-//      and corrupt every subsequent match (R4 audit security HIGH).
-//   3. consensus not yet pinned → accept (the first non-empty row's
-//      account_id becomes the consensus in matchPairs).
-//   4. consensus pinned → require equality with the row's account_id.
+//  1. schema lacks the column → legacy snapshot, constraint is a
+//     global noop (rollout compatibility). Accept regardless of
+//     consensus state.
+//  2. schema has the column but the row value is empty (NULL/blank)
+//     → unconditionally REJECT, EVEN ON BOOTSTRAP (no consensus yet).
+//     We cannot prove this row belongs to the harness's buyer; the
+//     first match would otherwise pin consensus to a phantom account
+//     and corrupt every subsequent match (R4 audit security HIGH).
+//  3. consensus not yet pinned → accept (the first non-empty row's
+//     account_id becomes the consensus in matchPairs).
+//  4. consensus pinned → require equality with the row's account_id.
 //
 // This shape ensures that on modern (account_id-present) snapshots, an
 // attacker cannot bootstrap consensus through a NULL-account row.
