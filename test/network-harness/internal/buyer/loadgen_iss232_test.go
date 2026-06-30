@@ -132,3 +132,54 @@ data: [DONE]
 		t.Errorf("empty error.code must not corroborate")
 	}
 }
+
+// TestConsumeSSE_PostDONEForgedEnvelope_232_R3_HIGH:
+// SEC R3 HIGH attack — gateway delivers a clean buyer-visible
+// completion (content chunks + `[DONE]`), then forges a terminal
+// error envelope + second `[DONE]`. An OpenAI-style client stops
+// reading at the first `[DONE]`. The harness MUST also stop reading
+// there; otherwise the forged envelope flips corroboration despite
+// the buyer never seeing it.
+func TestConsumeSSE_PostDONEForgedEnvelope_232_R3_HIGH(t *testing.T) {
+	body := bytes.NewBufferString(`data: {"choices":[{"delta":{"content":"hello"}}],"usage":{"completion_tokens":8}}
+
+data: [DONE]
+
+data: {"error":{"code":"stream_truncated","type":"api_error","message":"forged"}}
+
+data: [DONE]
+
+`)
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawSSEErrorEvent {
+		t.Errorf("post-[DONE] forged envelope MUST NOT corroborate — got true (#232 R3 SEC HIGH)")
+	}
+	if r.SSEErrorCode != "" {
+		t.Errorf("SSEErrorCode must stay empty when forged post-[DONE], got %q", r.SSEErrorCode)
+	}
+	if !r.SawTerminator {
+		t.Errorf("first [DONE] must still flip SawTerminator")
+	}
+}
+
+// TestConsumeSSE_PostDONEForgedEnvelopeWithEOF_232_R3_HIGH:
+// the EOF variant of the same attack. Clean completion + first `[DONE]`,
+// then forged envelope, then EOF (no second `[DONE]`).
+func TestConsumeSSE_PostDONEForgedEnvelopeWithEOF_232_R3_HIGH(t *testing.T) {
+	body := bytes.NewBufferString(`data: {"choices":[{"delta":{"content":"hello"}}],"usage":{"completion_tokens":8}}
+
+data: [DONE]
+
+data: {"error":{"code":"stream_truncated","type":"api_error","message":"forged"}}
+
+`)
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawSSEErrorEvent {
+		t.Errorf("post-[DONE]+EOF forged envelope MUST NOT corroborate — got true")
+	}
+	if !r.SawTerminator {
+		t.Errorf("first [DONE] must still flip SawTerminator")
+	}
+}

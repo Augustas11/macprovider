@@ -288,20 +288,28 @@ func consumeSSE(body io.Reader, res *Result) {
 			if bytes.HasPrefix(trimmed, []byte("data:")) {
 				payload := bytes.TrimSpace(trimmed[len("data:"):])
 				if bytes.Equal(payload, []byte("[DONE]")) {
+					// #232 R3 SEC HIGH — first `[DONE]` is terminal.
+					// Anything the gateway emits after this point is
+					// invisible to a normal OpenAI-style client (which
+					// also stops at `[DONE]`), so the harness MUST stop
+					// reading too. Otherwise a malicious gateway can
+					// present a buyer-visible clean completion and
+					// then forge a terminal error envelope post-`[DONE]`
+					// to satisfy the corroboration check.
 					res.SawTerminator = true
 					if lastWasErrorEnvelope {
 						res.SawSSEErrorEvent = true
 						res.SSEErrorCode = lastErrorCode
 					}
+					return
+				}
+				code, isStandalone := parseChunkTokens(payload, res)
+				if isStandalone {
+					lastErrorCode = code
+					lastWasErrorEnvelope = true
 				} else {
-					code, isStandalone := parseChunkTokens(payload, res)
-					if isStandalone {
-						lastErrorCode = code
-						lastWasErrorEnvelope = true
-					} else {
-						lastWasErrorEnvelope = false
-						lastErrorCode = ""
-					}
+					lastWasErrorEnvelope = false
+					lastErrorCode = ""
 				}
 			}
 		}
@@ -345,7 +353,8 @@ type chunkPayload struct {
 	} `json:"choices"`
 	// Error is the OpenAI-style terminal error envelope the gateway
 	// emits on fallback paths via writeSSEError before `data: [DONE]`.
-	// Issue #232: presence of this field on any SSE chunk is the buyer-
+	// Issue #232: presence of this field on the FINAL data chunk before
+	// `[DONE]`/EOF (and ONLY as a standalone envelope) is the buyer-
 	// side corroboration the reconciler uses to verify the gateway's
 	// fallback outcome label.
 	Error *struct {

@@ -244,9 +244,10 @@ type MatchedPair struct {
 	GatewayLagMs                int64  `json:"gateway_lag_ms"`
 
 	// HarnessSawSSEErrorEvent carries through buyer.Result.SawSSEErrorEvent:
-	// true when ANY SSE chunk in the buyer's stream carried an OpenAI-style
-	// terminal `error` envelope (the gateway emits one before `data: [DONE]`
-	// on every fallback path — see writeSSEError in chat_proxy.go). Used by
+	// true when the FINAL data chunk in the buyer's stream before `[DONE]`
+	// or EOF was a STANDALONE OpenAI-style terminal `error` envelope (no
+	// `choices`, no `usage` tokens) — the shape SPEC-006 §17.7.1 pins for
+	// every in-scope fallback path. Used by
 	// the fallback-overbill corroboration check at computePerPairDrift to
 	// close the trust gap #232 raised:
 	//
