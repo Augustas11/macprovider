@@ -163,6 +163,7 @@ The coordinator MUST serve a small static bundle under `/admin/explorer/`. The b
 ### 4.7 Read-only invariant
 Every `/admin/explorer/*` route MUST be side-effect-free. Every `/admin/explorer/*` route MUST use `GET`. Every non-`GET` request to `/admin/explorer/*` MUST return 405 or 404. Explorer handlers MUST NOT call mutating coordinator functions. Explorer handlers MUST NOT call mutating gateway functions. Explorer handlers MUST NOT insert, update, or delete rows. Explorer handlers MUST NOT trigger SPEC-005 reconciliation writes.
 ## 5. Read-only endpoint surface (coordinator)
+**Route-template notation:** In §5 and §6 the `{request_id}` route-template segment is the typed form per SPEC-007 v0.5 (#245) — `int_<request_id>` for coordinator endpoints (§5.6), `ext_<external_request_id>` for gateway endpoints (§6.4). Untyped (bare-id) calls return `400 invalid_request_error` + `code: session_id_untyped`. Inventory tables (§8, §12, §13) reuse the `{request_id}` placeholder for brevity; the typed-prefix requirement applies in every call site.
 ### 5.1 Common coordinator endpoint contract
 All coordinator explorer API endpoints live under `/admin/explorer/*`.
 All coordinator explorer API endpoints MUST require:
@@ -1356,9 +1357,9 @@ Underlying gateway tables:
 Forbidden fields:
 - `api_keys.key_hash` MUST NOT be returned.
 - `demo_usage_events.demo_token_hash` MUST NOT be returned.
-### 6.4 `GET /admin/explorer/sessions/{request_id}`
+### 6.4 `GET /admin/explorer/sessions/ext_{external_request_id}`
 Method and path:
-- `GET /admin/explorer/sessions/{request_id}`.
+- `GET /admin/explorer/sessions/ext_{external_request_id}`.
 Purpose:
 - Return gateway-owned request context for a completed request.
 Identity model:
