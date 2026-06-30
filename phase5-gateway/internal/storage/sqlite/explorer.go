@@ -702,15 +702,14 @@ func (s *Store) explorerBuyerRollup(ctx context.Context, from, to time.Time) (st
 }
 
 func (s *Store) explorerUsageEvents(ctx context.Context, accountID, requestID string, from, to time.Time, limit int) ([]storage.ExplorerUsageEvent, error) {
+	where, args := explorerDetailWhere(accountID, requestID, from, to)
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at
 		FROM usage_events
-		WHERE (? = '' OR account_id = ?)
-		  AND (? = '' OR request_id = ?)
-		  AND (? = '' OR created_at >= ?)
-		  AND (? = '' OR created_at < ?)
+		`+where+`
 		ORDER BY created_at DESC, request_id DESC
-		LIMIT ?`, accountID, accountID, requestID, requestID, timeParam(from), timeParam(from), timeParam(to), timeParam(to), limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -727,15 +726,14 @@ func (s *Store) explorerUsageEvents(ctx context.Context, accountID, requestID st
 }
 
 func (s *Store) explorerQuotaReservations(ctx context.Context, accountID, requestID string, from, to time.Time, limit int) ([]storage.ExplorerQuotaReservation, error) {
+	where, args := explorerDetailWhere(accountID, requestID, from, to)
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT account_id, request_id, window_date, reserved_tokens, settled_tokens, status, expires_at, created_at, settled_at
 		FROM quota_reservations
-		WHERE (? = '' OR account_id = ?)
-		  AND (? = '' OR request_id = ?)
-		  AND (? = '' OR created_at >= ?)
-		  AND (? = '' OR created_at < ?)
+		`+where+`
 		ORDER BY created_at DESC, request_id DESC
-		LIMIT ?`, accountID, accountID, requestID, requestID, timeParam(from), timeParam(from), timeParam(to), timeParam(to), limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -756,15 +754,14 @@ func (s *Store) explorerQuotaReservations(ctx context.Context, accountID, reques
 }
 
 func (s *Store) explorerConcurrencyReservations(ctx context.Context, accountID, requestID string, from, to time.Time, limit int) ([]storage.ExplorerConcurrencyReservation, error) {
+	where, args := explorerDetailWhere(accountID, requestID, from, to)
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT account_id, request_id, status, expires_at, created_at, released_at
 		FROM concurrency_reservations
-		WHERE (? = '' OR account_id = ?)
-		  AND (? = '' OR request_id = ?)
-		  AND (? = '' OR created_at >= ?)
-		  AND (? = '' OR created_at < ?)
+		`+where+`
 		ORDER BY created_at DESC, request_id DESC
-		LIMIT ?`, accountID, accountID, requestID, requestID, timeParam(from), timeParam(from), timeParam(to), timeParam(to), limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -785,15 +782,14 @@ func (s *Store) explorerConcurrencyReservations(ctx context.Context, accountID, 
 }
 
 func (s *Store) explorerFeedbackEvents(ctx context.Context, accountID, requestID string, from, to time.Time, limit int) ([]storage.ExplorerFeedbackEvent, error) {
+	where, args := explorerDetailWhere(accountID, requestID, from, to)
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT event_id, request_id, account_id, scope, rating, comment, created_at
 		FROM feedback_events
-		WHERE (? = '' OR account_id = ?)
-		  AND (? = '' OR request_id = ?)
-		  AND (? = '' OR created_at >= ?)
-		  AND (? = '' OR created_at < ?)
+		`+where+`
 		ORDER BY created_at DESC, event_id DESC
-		LIMIT ?`, accountID, accountID, requestID, requestID, timeParam(from), timeParam(from), timeParam(to), timeParam(to), limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -812,15 +808,14 @@ func (s *Store) explorerFeedbackEvents(ctx context.Context, accountID, requestID
 }
 
 func (s *Store) explorerAuditEvents(ctx context.Context, accountID, requestID string, from, to time.Time, limit int) ([]storage.ExplorerAuditEvent, error) {
+	where, args := explorerDetailWhere(accountID, requestID, from, to)
+	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT event_id, request_id, account_id, actor, event_type, payload_json, created_at
 		FROM audit_events
-		WHERE (? = '' OR account_id = ?)
-		  AND (? = '' OR request_id = ?)
-		  AND (? = '' OR created_at >= ?)
-		  AND (? = '' OR created_at < ?)
+		`+where+`
 		ORDER BY created_at DESC, event_id DESC
-		LIMIT ?`, accountID, accountID, requestID, requestID, timeParam(from), timeParam(from), timeParam(to), timeParam(to), limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -877,11 +872,44 @@ func nullableTime(v string) *time.Time {
 	return &t
 }
 
-func timeParam(t time.Time) string {
-	if t.IsZero() {
-		return ""
+// explorerDetailWhere builds the WHERE clause + arg slice for the
+// five session-detail helpers (usage_events, quota_reservations,
+// concurrency_reservations, feedback_events, audit_events). Issue
+// #246: the pre-#246 shape used `(? = '' OR col = ?)` predicates
+// so a single prepared statement could serve both scoped and
+// unscoped paths. SQLite cannot use a normal index plan against
+// such compound `OR` predicates and `EXPLAIN QUERY PLAN` reported
+// `SCAN` even with `idx_*_request` indexes in place. Branching
+// on parameter presence at the helper level produces concrete
+// `WHERE col = ?` predicates that SQLite can plan against the
+// available indexes:
+//   - account_id != ""  AND request_id != ""  → composite PK
+//   - account_id == ""  AND request_id != ""  → idx_*_request
+//   - account_id != ""  AND request_id == ""  → idx_*_account_*
+//   - both empty (rare) → no WHERE clause (LIMIT-bounded)
+func explorerDetailWhere(accountID, requestID string, from, to time.Time) (string, []any) {
+	var clauses []string
+	var args []any
+	if accountID != "" {
+		clauses = append(clauses, "account_id = ?")
+		args = append(args, accountID)
 	}
-	return encodeTime(t)
+	if requestID != "" {
+		clauses = append(clauses, "request_id = ?")
+		args = append(args, requestID)
+	}
+	if !from.IsZero() {
+		clauses = append(clauses, "created_at >= ?")
+		args = append(args, encodeTime(from))
+	}
+	if !to.IsZero() {
+		clauses = append(clauses, "created_at < ?")
+		args = append(args, encodeTime(to))
+	}
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return "WHERE " + strings.Join(clauses, " AND "), args
 }
 
 func encodeListID(id string) string {
