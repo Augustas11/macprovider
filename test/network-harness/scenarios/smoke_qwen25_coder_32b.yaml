@@ -1,0 +1,48 @@
+# smoke_qwen25_coder_32b.yaml — dense coding test for SCN-226 series.
+# Tests whether dense (non-MoE) new model rows fall into gateway fallback
+# bucket like the MoE ones, or whether the fallback bucketing is MoE-specific.
+# Per RESEARCH_227 this row gated to Tier-A/S only ($0.850/M); on M5 32GB it
+# fits in RAM but TPS is sub-floor for buyer UX.
+
+name: smoke_qwen25_coder_32b
+description: |
+  Live-network smoke for SCN-226-Qwen2.5-Coder-32B. One buyer, two streaming
+  code-generation completions against mlx-community/Qwen2.5-Coder-32B-Instruct-4bit.
+  Diagnostic value: does the gateway bucket dense Qwen2.5-Coder traffic as "ok"
+  or "fallback"? Answers whether the fallback-bucketing seen with MoE rows is
+  MoE-specific or affects all new model strings systematically.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - Both requests should return HTTP 200.
+   - Route should hit augustass-macbook-air (current bench setup).
+   - Network-delivered TPS expected ~5 tok/s (bandwidth-bound dense 32B).
+   - I1 outcome diagnostic: pass = gateway treats dense new model as ok;
+     fail with "fallback" rows = gateway has no new-model-row tokenizer
+     dictionary entry regardless of arch.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 1
+  stream: true
+  pattern: constant
+  requests_per_buyer: 2
+
+duration: 240s
+request_timeout: 120s
+silent_hang_threshold: 60s
+
+prompts:
+  - model: mlx-community/Qwen2.5-Coder-32B-Instruct-4bit
+    user: "Write a Python function that returns the nth Fibonacci number iteratively."
+    max_tokens: 128
+  - model: mlx-community/Qwen2.5-Coder-32B-Instruct-4bit
+    user: "Write a SQL query that returns the top 5 customers by total order value."
+    max_tokens: 128
