@@ -27,6 +27,11 @@ func TestIssueTokenRejectsInvalidProviderID_Iss274(t *testing.T) {
 		"colon":                          "m4:anon",
 		"unicode":                        "café",
 		"len_65":                         strings.Repeat("a", 65),
+		// R1 CODE LOW-1: admission paths must validate RAW input, so
+		// leading/trailing whitespace is rejected symmetrically with WS.
+		"leading_whitespace":  " m4-anon",
+		"trailing_whitespace": "m4-anon ",
+		"only_whitespace":     "   ",
 	}
 	for name, bad := range cases {
 		t.Run(name, func(t *testing.T) {
