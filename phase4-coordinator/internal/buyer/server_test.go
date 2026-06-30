@@ -4992,6 +4992,19 @@ func TestStickyMissesGracefullyWhenProviderIsRemoved(t *testing.T) {
 	}
 }
 
+// TestSPEC004DefaultConfigRegression is the BUILD-prompt-named alias
+// for the AC-SR-1 default-preservation regression. The Pillar-
+// completion checklist verifies Phase B with
+// `go test -count=1 -run TestSPEC004DefaultConfigRegression ./...`,
+// so the canonical byte-identity test MUST match that regex. Body
+// delegates to the load-bearing
+// TestDefaultConfigPreservesBaselineProviderSelection so both
+// callable names remain valid (downstream code, runbooks, prior CI
+// command references all continue to work).
+func TestSPEC004DefaultConfigRegression(t *testing.T) {
+	TestDefaultConfigPreservesBaselineProviderSelection(t)
+}
+
 // TestDefaultConfigPreservesBaselineProviderSelection is the FR-SR-1 +
 // AC-SR-1 default-preservation regression lock: with every SPEC-004 key at
 // its default (sticky off, retries off, randomize off, no model classes),

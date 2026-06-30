@@ -31,6 +31,8 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/routing"
+	"github.com/augstar/macprovider-coordinator/internal/routing/sticky"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/go-chi/chi/v5"
@@ -117,8 +119,7 @@ type Server struct {
 	stickyEnabled          bool
 	stickyTTL              time.Duration
 	stickyMaxEntries       int
-	sticky                 map[string]stickyEntry
-	stickyMu               sync.Mutex
+	stickyMap              *sticky.Map
 	internalAuthKey        string
 	gatewayServiceToken    string
 	tier2Mu                sync.RWMutex
@@ -150,15 +151,6 @@ type Server struct {
 	billingSnapshotID int64
 	now               func() time.Time
 	version           string
-}
-
-type stickyEntry struct {
-	ConversationKey string
-	ProviderID      string
-	AccountID       string
-	ModelScope      string
-	CreatedAt       time.Time
-	LastUsedAt      time.Time
 }
 
 type receiptKeysBucket struct {
@@ -454,7 +446,6 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		retryPerAttemptTimeout: 60 * time.Second,
 		stickyTTL:              30 * time.Minute,
 		stickyMaxEntries:       10000,
-		sticky:                 map[string]stickyEntry{},
 		modelClasses:           map[string]config.ModelClassConfig{},
 		provisionalWeight:      0.3,
 		maxChatBodyBytes:       config.Default().Limits.MaxChatRequestBodyBytes,
@@ -479,6 +470,16 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 	for _, opt := range opts {
 		opt(s)
 	}
+	// Initialize sticky.Map AFTER options have applied final
+	// stickyTTL/stickyMaxEntries (WithBuyerConfig may override
+	// defaults). Always construct it; sticky path callers gate
+	// reads/writes on s.stickyEnabled, but Lookup/Update/Purge
+	// on a constructed map are no-ops when keys never land.
+	s.stickyMap = sticky.NewMap(sticky.Options{
+		TTL:        s.stickyTTL,
+		MaxEntries: s.stickyMaxEntries,
+		Now:        s.now,
+	})
 	return s
 }
 
@@ -4263,84 +4264,58 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "Pinned provider not in pool"}
 	}
 
-	candidates := make([]pool.Provider, 0, len(providers))
-	hasRoutableContextMiss := false
-	tier2HashRequiredExcluded := 0
-	tier2HashMismatchExcluded := []pool.Provider{}
-	tier2EncryptedLegExcluded := 0
-	tier2AttestationExcluded := 0
-	for _, p := range providers {
-		if _, skip := excluded[routeKey(p)]; skip {
-			continue
-		}
-		if !s.providerMatchesRequest(p, req.Model, class) || !p.RoutingEligible() {
-			continue
-		}
-		if p.MaxContextTokens < estimatedTokens {
-			hasRoutableContextMiss = true
-			continue
-		}
-		hashStatus := s.effectiveHashStatus(p, tier2Cfg)
-		if s.tier2ProviderExcludedStatus(hashStatus, tier2Cfg) {
-			if hashStatus == pool.HashStatusMismatch || hashStatus == pool.HashStatusInvalid {
-				p.HashStatus = hashStatus
-				tier2HashMismatchExcluded = append(tier2HashMismatchExcluded, p)
-			} else {
-				if tier2Cfg.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
-					tier2.LogHashRequiredProviderExcluded(s.log, p.ProviderID, p.AssignedID, p.ModelID, p.ModelHash, hashStatus)
-				}
-				tier2HashRequiredExcluded++
-			}
-			continue
-		}
-		if tier2Cfg.RequireEncryptedLeg && !p.EncryptedLeg {
-			tier2.LogEncryptedLegRequiredMissing(s.log, p.ProviderID, p.AssignedID, p.ModelID)
-			tier2EncryptedLegExcluded++
-			continue
-		}
-		if tier2Cfg.RequireAttestation && p.AttestationStatus != pool.AttestationStatusAttested {
-			tier2AttestationExcluded++
-			continue
-		}
-		candidates = append(candidates, p)
+	exSet := routing.NewExcluded(len(excluded))
+	for k := range excluded {
+		exSet.AddKey(k)
 	}
+	checker := &eligibilityCtx{
+		s:               s,
+		model:           req.Model,
+		class:           class,
+		estimatedTokens: estimatedTokens,
+		tier2Cfg:        tier2Cfg,
+	}
+	result := routing.EligibleCandidates(providers, exSet, routeKey, checker)
+	candidates := result.Eligible
 	if len(candidates) == 0 {
-		if hasRoutableContextMiss {
+		// PreQuotaCount distinguishes "first loop dropped everything"
+		// from "every first-loop survivor was quota-blocked". Quota
+		// is checked first because SPEC-002 reserves 429 for the
+		// every-otherwise-eligible-blocked case; once we know the
+		// first loop did produce survivors but all of them got quota-
+		// blocked, the envelope MUST be 429 not 503.
+		if result.PreQuotaCount > 0 && result.Counts[routing.ReasonQuotaBlocked] == result.PreQuotaCount {
+			return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "All otherwise eligible provisional providers are over request quota"}
+		}
+		if result.Counts[routing.ReasonContextTooSmall] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds provider context capacity"}
 		}
-		if tier2Cfg.RequireHashVerified && (tier2HashRequiredExcluded > 0 || len(tier2HashMismatchExcluded) > 0) {
+		if tier2Cfg.RequireHashVerified && (result.Counts[routing.ReasonTier2HashRequired] > 0 || len(result.HashMismatches) > 0) {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_hash_verified_required", message: "No hash-verified provider available for model `" + req.Model + "`.", typ: "server_error"}
 		}
-		if len(tier2HashMismatchExcluded) > 0 {
-			providerID := tier2HashMismatchExcluded[0].ProviderID
+		if len(result.HashMismatches) > 0 {
+			providerID := result.HashMismatches[0].Provider.ProviderID
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_hash_mismatch", message: "Provider `" + providerID + "` hash verification failed; excluded from pool.", typ: "server_error"}
 		}
-		if tier2EncryptedLegExcluded > 0 {
+		if result.Counts[routing.ReasonTier2EncryptedLeg] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_encrypted_leg_required", message: "No encrypted provider leg available for model `" + req.Model + "`.", typ: "server_error"}
 		}
-		if tier2AttestationExcluded > 0 {
+		if result.Counts[routing.ReasonTier2Attestation] > 0 {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_attestation_required", message: "No attested provider available for model `" + req.Model + "`.", typ: "server_error"}
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
-	}
-	preQuotaCandidates := candidates
-	candidates = candidates[:0]
-	quotaBlocked := 0
-	for _, candidate := range preQuotaCandidates {
-		if s.checkQuota(candidate) {
-			candidates = append(candidates, candidate)
-		} else {
-			quotaBlocked++
-		}
-	}
-	if len(candidates) == 0 && quotaBlocked > 0 && quotaBlocked == len(preQuotaCandidates) {
-		return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "All otherwise eligible provisional providers are over request quota"}
 	}
 	objective := s.objectiveForRequest(headers, class)
 	s.sortCandidates(candidates, objective)
 	candidates = s.applySticky(requestID, headers, req.Model, class, candidates)
 	candidates, seed, draw, reason := s.applyRandomTiebreak(requestID, candidates, objective)
-	s.logRoutingDecision(requestID, candidates, objective, seed, draw, reason, "")
+	// Thread real pre-filter pool size + per-reason rejection counts
+	// into the SPEC-004 §7 routing-decision log per the FULL-IMPL
+	// audit CODE-M2 finding (previously both counts were the
+	// post-filter slice length, and filtered_counts was always
+	// omitted). routeKeyedFilterCounts converts routing.RejectionReason
+	// enum keys to SPEC-004 §7 stringly names.
+	s.logRoutingDecisionFull(requestID, len(providers), routeKeyedFilterCounts(result.Counts), candidates, objective, seed, draw, reason, "")
 	for _, candidate := range candidates {
 		provider, routeErr := s.preflightCandidate(candidate, requestID, estimatedTokens)
 		if routeErr == nil {
@@ -4442,43 +4417,17 @@ func (s *Server) sortCandidates(candidates []pool.Provider, objective string) {
 	}
 }
 
+// balancedScores adapts routing.BalancedScores (which returns an
+// indexed slice — the canonical SPEC-004 FR-SR-8 normative formula
+// home) to the buyer-internal routeKey-shape map the rest of
+// selectProvider consumes.
 func balancedScores(candidates []pool.Provider) map[string]float64 {
-	tps := make([]float64, len(candidates))
-	params := make([]float64, len(candidates))
-	ctx := make([]float64, len(candidates))
-	slots := make([]float64, len(candidates))
+	indexed := routing.BalancedScores(candidates)
+	out := make(map[string]float64, len(candidates))
 	for i, p := range candidates {
-		tps[i] = p.ThroughputTPSEstimate
-		params[i] = p.ModelParamsB
-		ctx[i] = float64(p.MaxContextTokens)
-		if p.SlotsTotal > 0 {
-			slots[i] = float64(p.SlotsFree) / float64(p.SlotsTotal)
-		}
-	}
-	out := map[string]float64{}
-	for i, p := range candidates {
-		out[routeKey(p)] = 0.4*norm(tps, i) + 0.3*norm(params, i) + 0.2*norm(ctx, i) + 0.1*norm(slots, i)
+		out[routeKey(p)] = indexed[i]
 	}
 	return out
-}
-
-func norm(values []float64, idx int) float64 {
-	if len(values) == 0 {
-		return 1
-	}
-	minV, maxV := values[0], values[0]
-	for _, v := range values[1:] {
-		if v < minV {
-			minV = v
-		}
-		if v > maxV {
-			maxV = v
-		}
-	}
-	if maxV == minV {
-		return 1
-	}
-	return (values[idx] - minV) / (maxV - minV)
 }
 
 func (s *Server) applyRandomTiebreak(requestID string, candidates []pool.Provider, objective string) ([]pool.Provider, int64, float64, string) {
@@ -4540,23 +4489,22 @@ func (s *Server) applySticky(requestID string, headers http.Header, model string
 	return candidates
 }
 
-func (s *Server) stickyLookup(key string) (stickyEntry, bool, string) {
-	s.stickyMu.Lock()
-	defer s.stickyMu.Unlock()
-	entry, ok := s.sticky[key]
-	if !ok {
-		return stickyEntry{}, false, "not_found"
-	}
-	now := s.now()
-	if now.Sub(entry.LastUsedAt) > s.stickyTTL {
-		delete(s.sticky, key)
-		return stickyEntry{}, false, "expired"
-	}
-	entry.LastUsedAt = now
-	s.sticky[key] = entry
-	return entry, true, ""
+// stickyLookup delegates to routing/sticky.Map.Lookup. Returns the
+// sticky.Entry, a hit boolean, and the FR-SR-3 miss reason
+// ("not_found" / "expired") matching the pre-Phase-A inline path.
+func (s *Server) stickyLookup(key string) (sticky.Entry, bool, string) {
+	res := s.stickyMap.Lookup(key)
+	return res.Entry, res.Hit, res.MissReason
 }
 
+// stickyStore delegates to routing/sticky.Map.Update. The Update
+// implementation has the refresh-path-FIRST guard that the old
+// inline code lacked (preventing eviction of unrelated entries
+// when refreshing an existing key at MaxEntries — adversarial /
+// FULL-IMPL SEC R1 HIGH finding fix). Update also rejects refreshes
+// where the supplied accountID differs from the existing entry's
+// AccountID (FULL-IMPL adversarial-M5 fix); we log a
+// sticky_account_mismatch audit event for ops visibility.
 func (s *Server) stickyStore(headers http.Header, provider pool.Provider, modelScope string) {
 	if !s.stickyEnabled || hasPinnedRoute(headers) {
 		return
@@ -4565,44 +4513,26 @@ func (s *Server) stickyStore(headers http.Header, provider pool.Provider, modelS
 	if !strings.HasPrefix(key, "conv:") {
 		return
 	}
-	now := s.now()
-	s.stickyMu.Lock()
-	defer s.stickyMu.Unlock()
-	if len(s.sticky) >= s.stickyMaxEntries {
-		var oldestKey string
-		var oldest time.Time
-		for k, entry := range s.sticky {
-			if now.Sub(entry.LastUsedAt) > s.stickyTTL {
-				delete(s.sticky, k)
-				continue
-			}
-			if oldestKey == "" || entry.LastUsedAt.Before(oldest) {
-				oldestKey = k
-				oldest = entry.LastUsedAt
-			}
-		}
-		if len(s.sticky) >= s.stickyMaxEntries && oldestKey != "" {
-			delete(s.sticky, oldestKey)
-		}
+	accountID := headers.Get("X-MacProvider-Account")
+	mismatch := s.stickyMap.Update(key, accountID, provider.ProviderID, modelScope)
+	if mismatch {
+		s.log.Warn().
+			Str("event", "sticky_account_mismatch").
+			Str("provider_id", provider.ProviderID).
+			Str("model_scope", modelScope).
+			Msg("sticky.Map.Update refused refresh: account_id mismatch (existing entry attribution preserved)")
 	}
-	created := now
-	if existing, ok := s.sticky[key]; ok {
-		created = existing.CreatedAt
-	}
-	s.sticky[key] = stickyEntry{ConversationKey: key, ProviderID: provider.ProviderID, AccountID: headers.Get("X-MacProvider-Account"), ModelScope: modelScope, CreatedAt: created, LastUsedAt: now}
 }
 
+// purgeStickyAccount delegates to routing/sticky.Map.PurgeAccount.
+// Guards against accidental empty-accountID purge (which would
+// wipe every entry with an unset AccountID) per the adversarial
+// FULL-IMPL R1 finding.
 func (s *Server) purgeStickyAccount(accountID string) int {
-	s.stickyMu.Lock()
-	defer s.stickyMu.Unlock()
-	removed := 0
-	for key, entry := range s.sticky {
-		if entry.AccountID == accountID {
-			delete(s.sticky, key)
-			removed++
-		}
+	if accountID == "" {
+		return 0
 	}
-	return removed
+	return s.stickyMap.PurgeAccount(accountID)
 }
 
 func (s *Server) shouldRetry(r *http.Request, startedAt time.Time, explicitRetries, faultedProviders, status int, err error) bool {
@@ -4661,70 +4591,151 @@ func retryHeaderLimit(value string) int {
 	return n
 }
 
+// inEpsilonCohort delegates to routing.InEpsilonCohort so the
+// hot-path epsilon check picks up the fail-closed NaN/±Inf guard
+// from routing.WithinRelativeEpsilon. Prior to the FULL-IMPL audit
+// fix-pass, server.go had its own inline `withinRelativeEpsilon`
+// WITHOUT the non-finite guard — a buggy heartbeat with +Inf
+// throughput could bypass the cohort filter via +Inf == +Inf.
 func (s *Server) inEpsilonCohort(top, candidate pool.Provider, objective string, candidates []pool.Provider) bool {
-	switch objective {
-	case "accurate":
-		return withinRelativeEpsilon(top.ModelParamsB, candidate.ModelParamsB, s.tiebreakEpsilon)
-	case "balanced":
+	weights := routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
+	var scoreFn func(pool.Provider) float64
+	if objective == "balanced" {
 		scores := balancedScores(candidates)
-		return withinRelativeEpsilon(scores[routeKey(top)], scores[routeKey(candidate)], s.tiebreakEpsilon)
-	default:
-		if objective == "default" && top.SlotsFree != candidate.SlotsFree {
-			return false
-		}
-		return withinRelativeEpsilon(s.effectiveThroughput(top), s.effectiveThroughput(candidate), s.tiebreakEpsilon)
+		scoreFn = func(p pool.Provider) float64 { return scores[routeKey(p)] }
 	}
+	return routing.InEpsilonCohort(top, candidate, routing.Objective(objective), s.tiebreakEpsilon, weights, scoreFn)
 }
 
-func withinRelativeEpsilon(top, candidate, epsilon float64) bool {
-	if top == candidate {
-		return true
-	}
-	if epsilon <= 0 {
-		return false
-	}
-	denom := math.Abs(top)
-	if denom == 0 {
-		return math.Abs(candidate) <= epsilon
-	}
-	return math.Abs(top-candidate) <= denom*epsilon
-}
-
+// seedForRequest derives the FR-SR-17 reproducibility seed from
+// requestID + a daily key bucket per SPEC-004 §7 / BUILD prompt
+// Phase D log-block contract:
+//
+//	"random_seed: per-request seed derivable from request_id +
+//	 daily key, NEVER from time.Now() alone"
+//
+// The daily key bucket is the current UTC date (YYYY-MM-DD), which
+// makes the seed:
+//  1. Deterministically reproducible across the same UTC day for
+//     the same requestID (audit replay possible within that
+//     window), AND
+//  2. Rotated daily so the seed space does not leak provider-
+//     selection patterns across days.
+//
+// dailyKeyFn is injectable for tests; production callers go through
+// the variadic-free seedForRequest wrapper which uses
+// defaultDailyKey (UTC date).
 func seedForRequest(requestID string) int64 {
+	return seedForRequestWithKey(requestID, defaultDailyKey())
+}
+
+func defaultDailyKey() string {
+	return time.Now().UTC().Format("2006-01-02")
+}
+
+func seedForRequestWithKey(requestID, dailyKey string) int64 {
 	h := fnv.New64a()
+	_, _ = h.Write([]byte(dailyKey))
+	_, _ = h.Write([]byte("|"))
 	_, _ = h.Write([]byte(requestID))
 	return int64(h.Sum64())
 }
 
-func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string) {
+// routeKeyedFilterCounts maps routing.RejectionReason enum keys to
+// the SPEC-004 §7 'filtered_counts' string keys (model_mismatch,
+// context_too_small, breaker_held, busy, quota_blocked, etc.).
+// Returns nil when the input is empty so LogRoutingDecision omits
+// the field per its "empty optional" contract.
+func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]int {
+	if len(counts) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(counts))
+	for k, v := range counts {
+		var key string
+		switch k {
+		case routing.ReasonExcluded:
+			key = "excluded_retry"
+		case routing.ReasonModelMismatch:
+			// ProviderMatchesRequest combines model/class + FR-P5
+			// state. Pre-Phase-C the inline loop conflated both
+			// rejections; SPEC-004 §7 names them separately
+			// (model_mismatch / not_ready). The combined reason
+			// maps to model_mismatch here since the spec does not
+			// require splitting and the pre-Phase-C log did the
+			// same.
+			key = "model_mismatch"
+		case routing.ReasonContextTooSmall:
+			key = "context_too_small"
+		case routing.ReasonTier2HashMismatch:
+			key = "tier2_hash_mismatch"
+		case routing.ReasonTier2HashRequired:
+			key = "tier2_hash_required"
+		case routing.ReasonTier2EncryptedLeg:
+			key = "tier2_encrypted_leg"
+		case routing.ReasonTier2Attestation:
+			key = "tier2_attestation"
+		case routing.ReasonQuotaBlocked:
+			key = "quota_blocked"
+		default:
+			key = "other"
+		}
+		out[key] += v
+	}
+	return out
+}
+
+// logRoutingDecisionFull is the post-Phase-D / FULL-IMPL fix-pass
+// surface: like logRoutingDecision but additionally threads the
+// real pre-filter pool size and per-reason rejection counts into
+// the SPEC-004 §7 routing-decision log. The sticky-path / retry-
+// path callers that don't have a FilterResult continue to use
+// logRoutingDecision (which delegates here with 0 / nil for the
+// new fields, matching the pre-Phase-D shape).
+func (s *Server) logRoutingDecisionFull(requestID string, preFilterCount int, filteredCounts map[string]int, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string) {
 	if chosen == "" && len(candidates) > 0 {
 		chosen = candidates[0].ProviderID
 	}
 	scores := s.routingScores(candidates, objective)
-	set := make([]map[string]any, 0, len(candidates))
+	weights := routing.Weights{Pinned: 1.0, Provisional: s.provisionalWeight}
+	set := make([]routing.CandidateLogEntry, 0, len(candidates))
+	var chosenAssignedID string
 	for _, p := range candidates {
-		set = append(set, map[string]any{
-			"provider_id":    p.ProviderID,
-			"assigned_id":    p.AssignedID,
-			"state":          string(p.State),
-			"slots_free":     p.SlotsFree,
-			"slots_total":    p.SlotsTotal,
-			"throughput_tps": s.effectiveThroughput(p),
-			"metric":         scores[routeKey(p)],
-		})
+		set = append(set, routing.ProviderToCandidateLogEntry(p, scores[routeKey(p)], weights))
+		if p.ProviderID == chosen && chosenAssignedID == "" {
+			chosenAssignedID = p.AssignedID
+		}
 	}
-	s.log.Info().
-		Str("event", "routing_decision").
-		Str("request_id", requestID).
-		Str("objective", objective).
-		Interface("candidate_set", set).
-		Int("candidate_count", len(candidates)).
-		Float64("epsilon", s.tiebreakEpsilon).
-		Int64("seed", seed).
-		Float64("draw", draw).
-		Str("chosen_provider_id", chosen).
-		Str("reason", reason).
-		Msg("routing decision")
+	tiebreakMode := ""
+	switch reason {
+	case "deterministic":
+		tiebreakMode = "deterministic"
+	case "randomized":
+		tiebreakMode = "random_epsilon"
+	}
+	beforeCount := preFilterCount
+	if beforeCount == 0 {
+		beforeCount = len(candidates)
+	}
+	routing.LogRoutingDecision(s.log, routing.Decision{
+		RequestID:                   requestID,
+		Objective:                   objective,
+		CandidateCountBeforeFilters: beforeCount,
+		CandidateCountAfterFilters:  len(candidates),
+		FilteredCounts:              filteredCounts,
+		CandidateSet:                set,
+		TiebreakMode:                tiebreakMode,
+		TiebreakEpsilon:             s.tiebreakEpsilon,
+		RandomSeed:                  seed,
+		RandomDraw:                  draw,
+		ChosenProviderID:            chosen,
+		ChosenAssignedID:            chosenAssignedID,
+		LegacyReason:                reason,
+	})
+}
+
+func (s *Server) logRoutingDecision(requestID string, candidates []pool.Provider, objective string, seed int64, draw float64, reason, chosen string) {
+	s.logRoutingDecisionFull(requestID, 0, nil, candidates, objective, seed, draw, reason, chosen)
 }
 
 func modelClassMembers(class *config.ModelClassConfig) []string {
@@ -4907,6 +4918,62 @@ func (s *Server) effectiveHashStatus(p pool.Provider, cfg config.Tier2Config) po
 
 func (s *Server) checkQuota(provider pool.Provider) bool {
 	return s.admission == nil || s.admission.CheckQuota(provider)
+}
+
+// eligibilityCtx adapts buyer.Server's per-request state to the
+// routing.EligibilityChecker interface so routing.EligibleCandidates
+// can apply SPEC-002 + SPEC-004 FR-SR-18 composition gates without
+// importing buyer-internal types. Phase C step 2 wiring.
+type eligibilityCtx struct {
+	s               *Server
+	model           string
+	class           *config.ModelClassConfig
+	estimatedTokens int
+	tier2Cfg        config.Tier2Config
+}
+
+// ProviderMatchesRequest combines the model/class match and the
+// SPEC-002 FR-P5 RoutingEligible() state check. The pre-Phase-C
+// inline loop combined these two with `||` short-circuit
+// (`!matches || !eligible → continue`), so the new helper reports
+// either failure as ReasonModelMismatch to preserve byte identity.
+func (c *eligibilityCtx) ProviderMatchesRequest(p pool.Provider) bool {
+	return c.s.providerMatchesRequest(p, c.model, c.class) && p.RoutingEligible()
+}
+
+func (c *eligibilityCtx) ProviderContextSufficient(p pool.Provider) bool {
+	return p.MaxContextTokens >= c.estimatedTokens
+}
+
+// Tier2Decision mirrors the inline tier2 branch in the pre-Phase-C
+// loop: hash status first (mismatch / invalid vs required), then
+// encrypted-leg requirement, then attestation requirement. Logging
+// side effects (LogHashRequiredProviderExcluded /
+// LogEncryptedLegRequiredMissing) are preserved verbatim so the
+// audit trail does not regress.
+func (c *eligibilityCtx) Tier2Decision(p pool.Provider) (routing.RejectionReason, pool.HashStatus) {
+	hashStatus := c.s.effectiveHashStatus(p, c.tier2Cfg)
+	if c.s.tier2ProviderExcludedStatus(hashStatus, c.tier2Cfg) {
+		if hashStatus == pool.HashStatusMismatch || hashStatus == pool.HashStatusInvalid {
+			return routing.ReasonTier2HashMismatch, hashStatus
+		}
+		if c.tier2Cfg.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
+			tier2.LogHashRequiredProviderExcluded(c.s.log, p.ProviderID, p.AssignedID, p.ModelID, p.ModelHash, hashStatus)
+		}
+		return routing.ReasonTier2HashRequired, hashStatus
+	}
+	if c.tier2Cfg.RequireEncryptedLeg && !p.EncryptedLeg {
+		tier2.LogEncryptedLegRequiredMissing(c.s.log, p.ProviderID, p.AssignedID, p.ModelID)
+		return routing.ReasonTier2EncryptedLeg, hashStatus
+	}
+	if c.tier2Cfg.RequireAttestation && p.AttestationStatus != pool.AttestationStatusAttested {
+		return routing.ReasonTier2Attestation, hashStatus
+	}
+	return 0, hashStatus
+}
+
+func (c *eligibilityCtx) QuotaPermits(p pool.Provider) bool {
+	return c.s.checkQuota(p)
 }
 
 func (s *Server) effectiveThroughput(provider pool.Provider) float64 {
