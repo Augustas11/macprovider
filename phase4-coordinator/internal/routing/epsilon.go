@@ -12,9 +12,20 @@ import (
 type Objective string
 
 const (
-	ObjectiveDefault  Objective = "default"
-	ObjectiveFast     Objective = "fast"
+	// ObjectiveDefault is SPEC-002's pre-SPEC-004 utilization mode:
+	// concentrate load on fewest slots_free, break throughput ties
+	// via effective throughput.
+	ObjectiveDefault Objective = "default"
+	// ObjectiveFast selects the highest effective throughput per
+	// SPEC-004 FR-SR-8 'fast' (throughput_tps_estimate * tier_weight).
+	ObjectiveFast Objective = "fast"
+	// ObjectiveAccurate selects the largest model_params_b per
+	// SPEC-004 FR-SR-8 'accurate'.
 	ObjectiveAccurate Objective = "accurate"
+	// ObjectiveBalanced selects the highest normalized score per
+	// SPEC-004 FR-SR-8 'balanced' (0.4*throughput + 0.3*params +
+	// 0.2*context + 0.1*slot-share). Phase D wires the score formula;
+	// Phase B leaves it caller-supplied via balancedScore.
 	ObjectiveBalanced Objective = "balanced"
 )
 
@@ -29,7 +40,17 @@ const (
 // exactly 0, falls back to absolute |candidate| <= epsilon so a
 // 0-metric reference never yields divide-by-zero. Negative metrics
 // are admitted by absolute distance scaled by |top|.
+//
+// Fail-closed on non-finite inputs: any NaN or ±Inf in top,
+// candidate, or epsilon returns false. A +Inf metric would
+// otherwise admit anything via +Inf <= +Inf, which is the wrong
+// posture for a cohort-membership predicate that drives provider
+// selection (money path).
 func WithinRelativeEpsilon(top, candidate, epsilon float64) bool {
+	if math.IsNaN(top) || math.IsNaN(candidate) || math.IsNaN(epsilon) ||
+		math.IsInf(top, 0) || math.IsInf(candidate, 0) || math.IsInf(epsilon, 0) {
+		return false
+	}
 	if top == candidate {
 		return true
 	}

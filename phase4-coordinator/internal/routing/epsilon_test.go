@@ -1,6 +1,7 @@
 package routing_test
 
 import (
+	"math"
 	"testing"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -73,6 +74,40 @@ func TestWithinRelativeEpsilon_NegativeMetricsScaledByAbsTop(t *testing.T) {
 	// |top|=100, denom=100, |top-cand|=|−100−(−95)|=5, 5 <= 100*0.05 = 5 → true.
 	if !routing.WithinRelativeEpsilon(-100, -95, 0.05) {
 		t.Fatalf("negative metrics within 5%%: want true")
+	}
+}
+
+func TestWithinRelativeEpsilon_FailsClosedOnNonFinite(t *testing.T) {
+	t.Parallel()
+	// Money-path money: +Inf metric MUST NOT admit anything via
+	// +Inf <= +Inf. NaN/-Inf same. Epsilon=+Inf must also fail-closed.
+	inf := math.Inf(1)
+	ninf := math.Inf(-1)
+	nan := math.NaN()
+	cases := []struct {
+		name             string
+		top, cand, eps   float64
+	}{
+		{"top +Inf", inf, 100, 0.05},
+		{"top -Inf", ninf, 100, 0.05},
+		{"top NaN", nan, 100, 0.05},
+		{"candidate +Inf", 100, inf, 0.05},
+		{"candidate -Inf", 100, ninf, 0.05},
+		{"candidate NaN", 100, nan, 0.05},
+		{"epsilon +Inf", 100, 99, inf},
+		{"epsilon -Inf", 100, 99, ninf},
+		{"epsilon NaN", 100, 99, nan},
+		{"both top and candidate +Inf", inf, inf, 0.05},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if routing.WithinRelativeEpsilon(tc.top, tc.cand, tc.eps) {
+				t.Fatalf("WithinRelativeEpsilon(%v, %v, %v): want false (non-finite fail-closed)",
+					tc.top, tc.cand, tc.eps)
+			}
+		})
 	}
 }
 
