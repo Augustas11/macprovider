@@ -244,6 +244,20 @@ bash "$DIST_DIR/test/check_nginx_catalog_routes_test.sh" || {
   echo "aborting deploy: nginx /catalog/ routes missing or misconfigured" >&2; exit 5;
 }
 
+# Issue #244 R6 (CODE+SEC+ARCH convergent MED) — register the EXIT
+# cleanup trap UNCONDITIONALLY, before any temp resource is created.
+# Earlier the trap was inside the `if [ -n "$CATALOG_REMOTE_PATH" ]`
+# branch, so a deploy with catalog disabled that failed mid-flight
+# could leave the remote $DEPLOY_TMP and local TMP_CATALOG_PUBKEY
+# behind. Both variables are guarded with `:-` so the trap is a
+# no-op when they are unset.
+trap '
+  rm -f "${TMP_CATALOG_PUBKEY:-}"
+  if [ -n "${DEPLOY_TMP:-}" ]; then
+    $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
+  fi
+' EXIT
+
 CATALOG_REMOTE_PATH="$(yaml_tier2_value catalog_path)"
 CATALOG_PUBLIC_KEY="$(yaml_tier2_value catalog_public_key)"
 # Issue #244 R2 SEC HIGH-2 + R3 SEC HIGH-1 + R4 CODE HIGH-1 + R4 SEC
@@ -280,16 +294,8 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     exit 5
   fi
   TMP_CATALOG_PUBKEY="$(mktemp)"
-  # Cleanup trap covers BOTH the local pubkey file AND the remote
-  # per-deploy staging dir created later in step 4 (#244 R5). If
-  # DEPLOY_TMP is unset (deploy failed before mktemp -d), the
-  # remote rm-rf is a no-op.
-  trap '
-    rm -f "${TMP_CATALOG_PUBKEY:-}"
-    if [ -n "${DEPLOY_TMP:-}" ]; then
-      $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
-    fi
-  ' EXIT
+  # Cleanup of TMP_CATALOG_PUBKEY happens in the unconditional EXIT
+  # trap registered above (#244 R6).
   printf '%s\n' "$CATALOG_PUBLIC_KEY" > "$TMP_CATALOG_PUBKEY"
   go run "$DIST_DIR/../../scripts/sign-catalog.go" verify -public-key "$TMP_CATALOG_PUBKEY" "$CATALOG_SOURCE" >/dev/null || {
     echo "aborting deploy: signed catalog does not verify against tier2.catalog_public_key" >&2
@@ -380,13 +386,20 @@ fi
 if [ "${FORCE_RESTART:-0}" = "1" ] && [ "${CONNECTED_COUNT_EARLY:-0}" -gt 0 ]; then
   TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   OP_HOST="${HOSTNAME:-unknown}"
+  # R6 SEC/CODE/ARCH convergent MED — write the tombstone via remote
+  # mktemp under umask 077 instead of predictable /tmp/last-deploy-
+  # bypass.json. Same threat model as R5's main /tmp staging fix:
+  # a same-host attacker could otherwise pre-place a FIFO/symlink at
+  # the predictable name and forge/clobber the audit tombstone or
+  # cause a deploy DoS.
   $SSH "set -e
         install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider 2>/dev/null || true
-        cat > /tmp/last-deploy-bypass.json <<EOF
+        _bypass_tmp=\$(umask 077 && mktemp)
+        cat > \"\$_bypass_tmp\" <<EOF
 {\"ts\":\"$TS_NOW\",\"service\":\"coordinator\",\"reason\":\"FORCE_RESTART=1\",\"step\":\"1c\",\"metric\":\"connected_providers\",\"value\":$CONNECTED_COUNT_EARLY,\"operator_host\":\"$OP_HOST\"}
 EOF
-        install -o macprovider -g macprovider -m 0640 /tmp/last-deploy-bypass.json /var/lib/macprovider/last-deploy-bypass.json
-        rm -f /tmp/last-deploy-bypass.json
+        install -o macprovider -g macprovider -m 0640 \"\$_bypass_tmp\" /var/lib/macprovider/last-deploy-bypass.json
+        rm -f \"\$_bypass_tmp\"
         logger -t macprovider-deploy \"FORCE_RESTART=1 used at step 1c; connected=$CONNECTED_COUNT_EARLY\""
   log "  AUDIT TRAIL: FORCE_RESTART=1 override written to /var/lib/macprovider/last-deploy-bypass.json"
 fi
@@ -920,13 +933,15 @@ fi
 if [ "${FORCE_RESTART:-0}" = "1" ] && [ "${CONNECTED_COUNT:-0}" -gt 0 ]; then
   TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   OP_HOST="${HOSTNAME:-unknown}"
+  # R6 — write via remote mktemp (see step 1c above for full rationale).
   $SSH "set -e
         install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider 2>/dev/null || true
-        cat > /tmp/last-deploy-bypass.json <<EOF
+        _bypass_tmp=\$(umask 077 && mktemp)
+        cat > \"\$_bypass_tmp\" <<EOF
 {\"ts\":\"$TS_NOW\",\"service\":\"coordinator\",\"reason\":\"FORCE_RESTART=1\",\"step\":\"6c\",\"metric\":\"connected_providers\",\"value\":$CONNECTED_COUNT,\"operator_host\":\"$OP_HOST\"}
 EOF
-        install -o macprovider -g macprovider -m 0640 /tmp/last-deploy-bypass.json /var/lib/macprovider/last-deploy-bypass.json
-        rm -f /tmp/last-deploy-bypass.json
+        install -o macprovider -g macprovider -m 0640 \"\$_bypass_tmp\" /var/lib/macprovider/last-deploy-bypass.json
+        rm -f \"\$_bypass_tmp\"
         logger -t macprovider-deploy \"FORCE_RESTART=1 used at step 6c; connected=$CONNECTED_COUNT\""
   log "  AUDIT TRAIL: FORCE_RESTART=1 override written to /var/lib/macprovider/last-deploy-bypass.json"
 fi

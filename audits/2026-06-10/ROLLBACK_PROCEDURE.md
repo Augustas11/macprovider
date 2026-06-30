@@ -27,7 +27,8 @@ ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 '
     exit 1
   fi
   mv /opt/macprovider/coordinator /opt/macprovider/coordinator.bad
-  install -o macprovider -g macprovider -m 0755 /opt/macprovider/coordinator.prev /opt/macprovider/coordinator
+  # #244 R4+R5: artifact ownership tightened to root:macprovider 0750
+  install -o root -g macprovider -m 0750 /opt/macprovider/coordinator.prev /opt/macprovider/coordinator
   systemctl restart macprovider-coordinator
   sleep 2
   systemctl is-active macprovider-coordinator
@@ -53,15 +54,14 @@ have the same known-good snapshot to fall back to. The "bad" binary
 goes to `coordinator.bad` rather than being deleted so a post-mortem
 can `strings` / `nm` / re-run it locally.
 
-We use `install -o macprovider -g macprovider -m 0755` rather than
-`cp -p` so the restored binary's ownership is set explicitly per
-invocation. A `cp -p` would propagate whatever owner/mode the
-`.prev` file happens to carry, which is normally fine — but if the
-`.prev` was ever recreated from a root-owned binary (the "rebuilding
-from scratch" path below, run incorrectly without `chown`), the next
-rollback would silently place a root-owned binary at the live path
-and break systemd's expectation that the service runs as
-`macprovider`.
+We use `install -o root -g macprovider -m 0750` rather than `cp -p` so
+the restored binary's ownership is set explicitly per invocation
+(#244 R4+R5: the new posture is root-owned, macprovider-group with
+group-execute — the daemon's User=macprovider is in the group so it
+can exec the binary, but cannot rewrite it). A `cp -p` would propagate
+whatever owner/mode the `.prev` file happens to carry, which would
+silently drift the live binary if `.prev` came from a snapshot built
+under different rules.
 
 ## When the fast path is wrong
 

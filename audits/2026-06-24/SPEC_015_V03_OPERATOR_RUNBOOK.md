@@ -123,11 +123,11 @@ TL;DR for the v0.3 IMPL bundle:
 ```bash
 # Restore the previous binary. The deploy script at
 # phase4-coordinator/dist/deploy-pearl-vps.sh step 4/9 snapshots the
-# pre-upload binary to /opt/macprovider/coordinator.prev with
-# `install -o macprovider -g macprovider -m 0755`. Swap in place:
+# pre-upload binary to /opt/macprovider/coordinator.prev. Issue #244
+# R4+R5 tightened ownership to `root:macprovider 0750`. Swap in place:
 ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 \
   'systemctl stop macprovider-coordinator && \
-   install -o macprovider -g macprovider -m 0755 \
+   install -o root -g macprovider -m 0750 \
      /opt/macprovider/coordinator.prev /opt/macprovider/coordinator && \
    systemctl start macprovider-coordinator'
 ```
