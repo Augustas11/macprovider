@@ -80,6 +80,73 @@ func TestParseHeartbeatAcceptsSPEC011Fields(t *testing.T) {
 	}
 }
 
+func TestParseHeartbeatAcceptsLastAutoupdateEventObject(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"last_autoupdate_event":{"event":"provider_autoupdate","phase":"download","outcome":"failure","failure_class":"target_release_not_found"}}`)
+
+	hb, _, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if !json.Valid(hb.LastAutoupdateEvent) || !strings.Contains(string(hb.LastAutoupdateEvent), "target_release_not_found") {
+		t.Fatalf("last_autoupdate_event = %s", hb.LastAutoupdateEvent)
+	}
+}
+
+func TestParseHeartbeatRejectsOversizedLastAutoupdateEvent(t *testing.T) {
+	large := `{"event":"provider_autoupdate","extra":"` + strings.Repeat("x", 4096) + `"}`
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"last_autoupdate_event":` + large + `}`)
+
+	_, _, field, err := ParseHeartbeat(payload)
+	if err == nil {
+		t.Fatal("ParseHeartbeat err = nil")
+	}
+	if field != "last_autoupdate_event" {
+		t.Fatalf("field = %q", field)
+	}
+}
+
+func TestParseStateUpdateAcceptsLastAutoupdateEvent(t *testing.T) {
+	payload := []byte(`{"type":"state_update","state":"draining","reason":"autoupdate_to_1.7.0","since":"2026-06-29T15:00:00Z","metrics_snapshot":{"slots_free":0,"slots_total":1},"last_autoupdate_event":{"event":"provider_autoupdate","phase":"drain","outcome":"in_progress"}}`)
+
+	update, field, err := ParseStateUpdate(payload)
+	if err != nil {
+		t.Fatalf("ParseStateUpdate field=%q err=%v", field, err)
+	}
+	if update.Reason != "autoupdate_to_1.7.0" {
+		t.Fatalf("reason = %q", update.Reason)
+	}
+	if !json.Valid(update.LastAutoupdateEvent) {
+		t.Fatalf("last_autoupdate_event invalid: %s", update.LastAutoupdateEvent)
+	}
+}
+
+func TestParseDrainStatusAcceptsAutoupdateTimeoutSkipped(t *testing.T) {
+	status, field, err := ParseDrainStatus([]byte(`{"type":"drain_status","phase":"timeout_skipped","inflight_requests":1,"estimated_drain_seconds":0}`))
+	if err != nil {
+		t.Fatalf("ParseDrainStatus field=%q err=%v", field, err)
+	}
+	if status.Phase != "timeout_skipped" {
+		t.Fatalf("phase = %q", status.Phase)
+	}
+}
+
+func TestAdmissionFramesAdvertiseAutoupdateDrainExtensions(t *testing.T) {
+	ackBytes, err := json.Marshal(HelloAck{Type: "hello_ack", AutoupdateDrainExtensions: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ackBytes), `"autoupdate_drain_extensions":true`) {
+		t.Fatalf("hello_ack = %s", ackBytes)
+	}
+	responseBytes, err := json.Marshal(AuthResponse{Type: "auth_response", Version: 2, Status: "accepted", AutoupdateDrainExtensions: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(responseBytes), `"autoupdate_drain_extensions":true`) {
+		t.Fatalf("auth_response = %s", responseBytes)
+	}
+}
+
 func TestParseHeartbeatRejectsModelHashWrongType(t *testing.T) {
 	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"model_hash":123}`)
 
@@ -349,7 +416,7 @@ func bytesOf(value byte, count int) []byte {
 // strings on a hello (provider_id, hostname, model_id, binary_version)
 // MUST be rejected at parse time when they contain control characters
 // (C0, DEL, C1) so they cannot inject terminal-CSI sequences into
-// structured logs or close-frame reason strings. JSON `` decodes
+// structured logs or close-frame reason strings. JSON “ decodes
 // to U+009B and is valid UTF-8 but would otherwise pass the parser.
 func TestParseHelloRejectsControlCharsInRequiredStrings(t *testing.T) {
 	base := map[string]any{

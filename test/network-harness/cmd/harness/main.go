@@ -137,6 +137,29 @@ func cmdRun(args []string) error {
 	hasRemoteDBs := sc.Target.CoordinatorDBSSH != "" && sc.Target.GatewayDBSSH != ""
 	switch {
 	case hasLocalDBs || hasRemoteDBs:
+		// Quiesce before snapshotting: gateway settlement can lag the
+		// harness's response observation by tens of seconds (v0.3
+		// baseline data: 26–76s). Sleep until endUTC +
+		// reconcile.SnapshotForwardPad before pulling the SQLite
+		// snapshot so late settlements have landed. The pad constant
+		// is shared with snapshotWindow's SQL upper bound and the
+		// exact-ID matcher tolerance — they must move together.
+		//
+		// Sleep is context-aware: SIGINT/SIGTERM during quiesce
+		// cancels promptly via the signal-notify context set up at
+		// the top of main().
+		quiesceTarget := meta.EndUTC.Add(reconcile.SnapshotForwardPad)
+		if d := time.Until(quiesceTarget); d > 0 {
+			log.Printf("scenario %q: quiescing %v for gateway settlement before reconcile", sc.Name, d.Round(time.Second))
+			timer := time.NewTimer(d)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				log.Printf("scenario %q: quiesce interrupted by context cancel", sc.Name)
+				return ctx.Err()
+			}
+		}
 		// Money-path gate: when DBs are configured, the harness asked
 		// for reconciliation. If reconcile.Run errors (DB schema
 		// mismatch, snapshot fetch failure, etc.) we must NOT silently

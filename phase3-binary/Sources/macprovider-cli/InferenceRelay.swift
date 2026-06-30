@@ -3,6 +3,7 @@ import MacProviderCore
 
 actor InferenceRelay {
     typealias SendFrame = @Sendable (sending [String: Any]) async throws -> Void
+    typealias TrustDemotion = @Sendable (_ reason: String) async -> Void
 
     private struct ActiveRequest {
         let task: Task<Void, Never>
@@ -19,6 +20,7 @@ actor InferenceRelay {
     private let tier2Session: Tier2ProviderSession?
     private let receiptBuilder: ReceiptBuilder?
     private let receiptProviderID: String?
+    private let demoteAutoupdateTrust: TrustDemotion?
     private var active: [String: ActiveRequest] = [:]
 
     init(
@@ -31,6 +33,7 @@ actor InferenceRelay {
         tier2Session: Tier2ProviderSession? = nil,
         receiptBuilder: ReceiptBuilder? = nil,
         receiptProviderID: String? = nil,
+        demoteAutoupdateTrust: TrustDemotion? = nil,
         sendFrame: @escaping SendFrame
     ) {
         self.modelRuntime = modelRuntime
@@ -42,6 +45,7 @@ actor InferenceRelay {
         self.tier2Session = tier2Session
         self.receiptBuilder = receiptBuilder
         self.receiptProviderID = receiptProviderID
+        self.demoteAutoupdateTrust = demoteAutoupdateTrust
         self.sendFrame = sendFrame
     }
 
@@ -61,6 +65,7 @@ actor InferenceRelay {
             do {
                 body = try tier2Session.openRequestBody(message: message, requestID: requestID, stream: stream)
             } catch {
+                await demoteAutoupdateTrust?("encrypted_leg_invalidated")
                 try await sendNAK(inReplyTo: requestID, code: "tier2_aead_decrypt_failed", message: "Encrypted inference_request failed authentication")
                 return
             }

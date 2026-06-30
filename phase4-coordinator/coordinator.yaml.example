@@ -176,6 +176,13 @@ settlement:
   recovery_grace_seconds: 30
   job_enabled: true
 
+# SPEC-005 v0.4 §11.5 launch-gate item 10. Quarantine resolution
+# `/admin/ledger/quarantine/{id}/force-void` admin surface is
+# default-OFF — operators MUST flip this flag deliberately after
+# verifying §13.2 reload + audit semantics.
+billing:
+  quarantine_resolution_force_void_enabled: false
+
 endpoints:
   provider_earnings:
     rate_limit_per_minute: 60

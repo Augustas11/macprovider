@@ -2,6 +2,7 @@ package pool
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -151,9 +152,10 @@ type Provider struct {
 	// count for this live session. Zero is omitted from generic Provider JSON
 	// to preserve L-1 default wire compatibility; /poolz adds the field
 	// explicitly for every provider.
-	CanaryFailCount     int        `json:"canary_fail_count,omitempty"`
-	CanaryLastCheckedAt *time.Time `json:"canary_last_checked_at,omitempty"`
-	CanaryLastFailedAt  *time.Time `json:"canary_last_failed_at,omitempty"`
+	CanaryFailCount     int             `json:"canary_fail_count,omitempty"`
+	CanaryLastCheckedAt *time.Time      `json:"canary_last_checked_at,omitempty"`
+	CanaryLastFailedAt  *time.Time      `json:"canary_last_failed_at,omitempty"`
+	LastAutoupdateEvent json.RawMessage `json:"last_autoupdate_event,omitempty"`
 
 	// SPEC-002 v1.3.5 §3.X.1 — populated from v2 auth_request initial-stage
 	// supported_models[] per SPEC-010 v1.5 R-3.3.1; nil for the L-1 baseline.
@@ -1143,9 +1145,10 @@ type HeartbeatUpdate struct {
 	// Loading is the value of the heartbeat's optional `loading` field; absent
 	// on the wire (= LoadingPresent false) is equivalent to false per SPEC-011
 	// v0.5 R-3.3.4.
-	Loading        bool
-	LoadingPresent bool
-	At             time.Time
+	Loading             bool
+	LoadingPresent      bool
+	LastAutoupdateEvent json.RawMessage
+	At                  time.Time
 }
 
 func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool) {
@@ -1198,6 +1201,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.SlotsFree = hb.SlotsFree
 	p.SlotsTotal = hb.SlotsTotal
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
+	if len(hb.LastAutoupdateEvent) > 0 {
+		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], hb.LastAutoupdateEvent...)
+	}
 	r.recordSeenModelLocked(p.ProviderID, hb.ModelID)
 	if hb.Status != "" && hb.Status != p.State {
 		if r.canApplyProviderStateLocked(p, hb.Status) {
@@ -1337,10 +1343,11 @@ func (r *Registry) ModelKnown(modelID string) bool {
 }
 
 type StateUpdate struct {
-	State      State
-	SlotsFree  *int
-	SlotsTotal *int
-	At         time.Time
+	State               State
+	SlotsFree           *int
+	SlotsTotal          *int
+	LastAutoupdateEvent json.RawMessage
+	At                  time.Time
 }
 
 func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateUpdate) (*Provider, bool) {
@@ -1358,6 +1365,9 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 	}
 	if update.SlotsTotal != nil {
 		p.SlotsTotal = *update.SlotsTotal
+	}
+	if len(update.LastAutoupdateEvent) > 0 {
+		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], update.LastAutoupdateEvent...)
 	}
 	at := update.At
 	if at.IsZero() {

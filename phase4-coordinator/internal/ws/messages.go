@@ -26,13 +26,14 @@ type Hello struct {
 }
 
 type HelloAck struct {
-	Type                     string `json:"type"`
-	CoordinatorVersion       int    `json:"coordinator_version"`
-	AssignedID               string `json:"assigned_id"`
-	HeartbeatIntervalS       int    `json:"heartbeat_interval_s"`
-	Tier                     string `json:"tier,omitempty"`
-	RecommendedBinaryVersion string `json:"recommended_binary_version,omitempty"`
-	RequiredBinaryVersion    string `json:"required_binary_version,omitempty"`
+	Type                      string `json:"type"`
+	CoordinatorVersion        int    `json:"coordinator_version"`
+	AssignedID                string `json:"assigned_id"`
+	HeartbeatIntervalS        int    `json:"heartbeat_interval_s"`
+	Tier                      string `json:"tier,omitempty"`
+	RecommendedBinaryVersion  string `json:"recommended_binary_version,omitempty"`
+	RequiredBinaryVersion     string `json:"required_binary_version,omitempty"`
+	AutoupdateDrainExtensions bool   `json:"autoupdate_drain_extensions,omitempty"`
 	// SPEC-003 v0.8 FR-C9.2 — populated only when a tokenless provisional
 	// provider was just self-minted on this connect. Binary persists to
 	// the top-level `provider_token` YAML key (FR-C9.3) so the next
@@ -95,16 +96,17 @@ type AuthChallenge struct {
 }
 
 type AuthResponse struct {
-	Type                     string             `json:"type"`
-	Version                  int                `json:"version"`
-	Status                   string             `json:"status"`
-	AssignedID               string             `json:"assigned_id,omitempty"`
-	HeartbeatIntervalS       int                `json:"heartbeat_interval_s,omitempty"`
-	Tier                     string             `json:"tier,omitempty"`
-	RecommendedBinaryVersion string             `json:"recommended_binary_version,omitempty"`
-	RequiredBinaryVersion    string             `json:"required_binary_version,omitempty"`
-	Tier2Session             *AuthTier2Session  `json:"tier2_session,omitempty"`
-	Error                    *AuthResponseError `json:"error,omitempty"`
+	Type                      string             `json:"type"`
+	Version                   int                `json:"version"`
+	Status                    string             `json:"status"`
+	AssignedID                string             `json:"assigned_id,omitempty"`
+	HeartbeatIntervalS        int                `json:"heartbeat_interval_s,omitempty"`
+	Tier                      string             `json:"tier,omitempty"`
+	RecommendedBinaryVersion  string             `json:"recommended_binary_version,omitempty"`
+	RequiredBinaryVersion     string             `json:"required_binary_version,omitempty"`
+	AutoupdateDrainExtensions bool               `json:"autoupdate_drain_extensions,omitempty"`
+	Tier2Session              *AuthTier2Session  `json:"tier2_session,omitempty"`
+	Error                     *AuthResponseError `json:"error,omitempty"`
 	// SPEC-003 v0.8 FR-C9.2 — populated only on proof-stage acceptance
 	// when a tokenless provisional provider was just self-minted on this
 	// connect. Never present on rejection-shaped responses.
@@ -150,21 +152,22 @@ type AuthModelHashSession struct {
 }
 
 type Heartbeat struct {
-	Type                    string  `json:"type"`
-	Status                  string  `json:"status"`
-	ModelID                 string  `json:"model_id"`
-	ModelParamsB            float64 `json:"model_params_b"`
-	RAMGB                   int     `json:"ram_gb"`
-	MaxContextTokens        int     `json:"max_context_tokens"`
-	MaxConcurrency          int     `json:"max_concurrency"`
-	SlotsFree               int     `json:"slots_free"`
-	SlotsTotal              int     `json:"slots_total"`
-	ThroughputTPSEstimate   float64 `json:"throughput_tps_estimate"`
-	RequestsServedSinceLast int     `json:"requests_served_since_last"`
-	AvgLatencyMSSinceLast   float64 `json:"avg_latency_ms_since_last"`
-	ThroughputTPSSinceLast  float64 `json:"throughput_tps_since_last"`
-	ModelHash               string  `json:"model_hash,omitempty"`
-	Loading                 bool    `json:"loading,omitempty"`
+	Type                    string          `json:"type"`
+	Status                  string          `json:"status"`
+	ModelID                 string          `json:"model_id"`
+	ModelParamsB            float64         `json:"model_params_b"`
+	RAMGB                   int             `json:"ram_gb"`
+	MaxContextTokens        int             `json:"max_context_tokens"`
+	MaxConcurrency          int             `json:"max_concurrency"`
+	SlotsFree               int             `json:"slots_free"`
+	SlotsTotal              int             `json:"slots_total"`
+	ThroughputTPSEstimate   float64         `json:"throughput_tps_estimate"`
+	RequestsServedSinceLast int             `json:"requests_served_since_last"`
+	AvgLatencyMSSinceLast   float64         `json:"avg_latency_ms_since_last"`
+	ThroughputTPSSinceLast  float64         `json:"throughput_tps_since_last"`
+	ModelHash               string          `json:"model_hash,omitempty"`
+	Loading                 bool            `json:"loading,omitempty"`
+	LastAutoupdateEvent     json.RawMessage `json:"last_autoupdate_event,omitempty"`
 }
 
 type HeartbeatPresence struct {
@@ -173,11 +176,12 @@ type HeartbeatPresence struct {
 }
 
 type StateUpdate struct {
-	Type            string          `json:"type"`
-	State           string          `json:"state"`
-	Reason          string          `json:"reason"`
-	Since           string          `json:"since"`
-	MetricsSnapshot MetricsSnapshot `json:"metrics_snapshot"`
+	Type                string          `json:"type"`
+	State               string          `json:"state"`
+	Reason              string          `json:"reason"`
+	Since               string          `json:"since"`
+	MetricsSnapshot     MetricsSnapshot `json:"metrics_snapshot"`
+	LastAutoupdateEvent json.RawMessage `json:"last_autoupdate_event,omitempty"`
 }
 
 type PreflightAck struct {
@@ -600,7 +604,7 @@ func requireString(raw map[string]json.RawMessage, field string, out *string) *f
 // (`<0x20`), DEL (`0x7f`), or C1 control (`0x80-0x9f`) codepoint.
 // SPEC-002 v1.5.1 R-2 / issue #197 R4-R5 security: provider-controlled
 // strings reaching structured logs or close-frame reason fields MUST
-// be rejected when they carry these codepoints. JSON `` decodes
+// be rejected when they carry these codepoints. JSON “ decodes
 // to U+009B and is valid UTF-8 but would otherwise inject a terminal
 // CSI sequence into log sinks.
 func containsControlChar(s string) bool {
@@ -704,6 +708,12 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 			return Heartbeat{}, presence, "loading", err
 		}
 	}
+	if v, ok := raw["last_autoupdate_event"]; ok && string(v) != "null" {
+		if !validAutoupdateEventObject(v) {
+			return Heartbeat{}, presence, "last_autoupdate_event", fieldError{Field: "last_autoupdate_event"}
+		}
+		hb.LastAutoupdateEvent = append([]byte(nil), v...)
+	}
 	return hb, presence, "", nil
 }
 
@@ -739,7 +749,24 @@ func ParseStateUpdate(payload []byte) (StateUpdate, string, error) {
 			return StateUpdate{}, "metrics_snapshot", err
 		}
 	}
+	if v, ok := raw["last_autoupdate_event"]; ok && string(v) != "null" {
+		if !validAutoupdateEventObject(v) {
+			return StateUpdate{}, "last_autoupdate_event", fieldError{Field: "last_autoupdate_event"}
+		}
+		update.LastAutoupdateEvent = append([]byte(nil), v...)
+	}
 	return update, "", nil
+}
+
+func validAutoupdateEventObject(raw json.RawMessage) bool {
+	if len(raw) == 0 || len(raw) > 4096 {
+		return false
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return false
+	}
+	return object != nil
 }
 
 func ParsePreflightAck(payload []byte) (PreflightAck, string, error) {
@@ -773,7 +800,7 @@ func ParseDrainStatus(payload []byte) (DrainStatus, string, error) {
 		return DrainStatus{}, "type", fmt.Errorf("expected drain_status, got %q", status.Type)
 	}
 	switch status.Phase {
-	case "starting", "in_progress", "complete":
+	case "starting", "in_progress", "complete", "timeout_skipped":
 	default:
 		return DrainStatus{}, "phase", fieldError{Field: "invalid phase"}
 	}

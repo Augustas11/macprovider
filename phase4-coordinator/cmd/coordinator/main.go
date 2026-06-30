@@ -166,6 +166,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing: %v\n", err)
 		os.Exit(1)
 	}
+	// R4 fix (CODE-M2): set the route-layer flag atomic BEFORE the
+	// startup snapshot so the snapshot's canonical hash captures the
+	// initial flag state (SPEC-005 v0.4 §11.6.4 / §13.2). The
+	// "startup" source suppresses the billing_config_flag_changed
+	// audit emit per SPEC §11.6.4 (no prior acknowledged value).
+	if err := billingStore.SetForceVoidEnabled(context.Background(), cfg.Billing.QuarantineResolutionForceVoidEnabled, "startup"); err != nil {
+		fmt.Fprintf(os.Stderr, "billing force-void flag init: %v\n", err)
+		os.Exit(1)
+	}
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
@@ -530,13 +539,25 @@ func main() {
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
-	billingHandler := billingStore.HandlersWithBridge(
+	// SPEC-005 v0.4 (issue #169) — `billing.quarantine_resolution_force_void_enabled`
+	// gates the §11.6 force-void endpoint at the route layer. Default
+	// false: endpoint returns HTTP 404 until the operator explicitly
+	// flips the flag via the existing config-reload primitive.
+	// The flag is held as an atomic on billingStore; SIGHUP reload
+	// calls billingStore.SetForceVoidEnabled which emits the
+	// `billing_config_flag_changed` audit event on real flips.
+	billingHandler := billingStore.HandlersWithQuarantineGate(
 		cfg.Auth.OperatorKey,
-		cfg.Auth.GatewayServiceToken,
 		tokenStore,
 		cfg.Auth.RequireProviderTokens,
 		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
+		cfg.Billing.QuarantineResolutionForceVoidEnabled,
 	)
+	// §11.5 launch-gate item 10 — operator-visible startup state.
+	logger.Info().
+		Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
+		Str("event", "spec005_v0_4_route_layer_flag_init").
+		Msg("quarantine force-void route-layer flag initialized")
 	providerMux.Handle("/admin/ledger/", billingHandler)
 	if cfg.Auth.RequireProviderTokens {
 		providerMux.Handle("/providers/", billingHandler)
@@ -877,13 +898,24 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 	wsServer.SetTier2Config(cfg.Tier2)
 	buyerServer.SetTier2Config(cfg.Tier2)
 	if len(billingStores) > 0 && billingStores[0] != nil {
-		snapshotID, err := billingStores[0].InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
+		// R3 fix (ARCH-H1): snapshot + flag-change audit + in-memory
+		// publish are now ONE atomic operation in
+		// billing.Store.ReloadBillingConfig. If COMMIT fails, the
+		// snapshot is not written, the flag-change audit is not
+		// written, and the force-void flag stays at its prior value.
+		// Only AFTER COMMIT do we publish the rewards / settlement
+		// in-memory configs that depend on the snapshot id.
+		snapshotID, err := billingStores[0].ReloadBillingConfig(context.Background(), cfg.Rewards, cfg.Billing.QuarantineResolutionForceVoidEnabled, "sighup", time.Now().UTC())
 		if err != nil {
-			logger.Error().Err(err).Msg("billing config snapshot reload rejected")
+			logger.Error().Err(err).Msg("billing config reload rejected (snapshot + flag audit atomic)")
 			return
 		}
 		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID)
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
+		logger.Info().
+			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
+			Str("event", "spec005_v0_4_route_layer_flag_reload").
+			Msg("quarantine force-void route-layer flag reloaded")
 	}
 	updated := wsServer.RefreshTier2HashStatuses()
 	logger.Info().Int("provider_hash_statuses_updated", updated).Msg("tier2 config reloaded")

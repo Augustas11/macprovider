@@ -506,6 +506,7 @@ final class CoordinatorClientTests: XCTestCase {
             modelHash: String(repeating: "a", count: 64)
         )
         let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: false)
+        await AutoUpdateEventStore.shared.clear()
 
         try await client.sendHeartbeatForTest()
         let frames = await recorder.frames
@@ -1023,6 +1024,85 @@ final class CoordinatorClientTests: XCTestCase {
         await client.stop()
     }
 
+    func testPreStagedSuccessSentinelMismatchDoesNotCleanupPendingOrBackup() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(targetVersion: CoordinatorClient.binaryVersion)
+        let mismatchedUpdateID = "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        try fixture.store.writeSuccessSentinel(
+            binaryURL: fixture.binary,
+            updateID: mismatchedUpdateID,
+            targetVersion: CoordinatorClient.binaryVersion
+        )
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(status: status, recorder: recorder)
+        await AutoUpdateEventStore.shared.clear()
+
+        await client.runStartupAutoupdateRecoveryForTest(binaryURL: fixture.binary, markerStore: fixture.store)
+
+        XCTAssertEqual(try String(contentsOf: fixture.binary), "new")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.lockURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.successSentinelPath(binaryURL: fixture.binary, updateID: mismatchedUpdateID).path))
+        let event = await AutoUpdateEventStore.shared.lastWireObject()
+        XCTAssertEqual(event?["failure_class"] as? String, AutoUpdateFailureClass.orphanedSuccessSentinel.rawValue)
+        XCTAssertEqual(event?["reason"] as? String, "update_id_mismatch")
+        let frames = await recorder.frames
+        XCTAssertTrue(frames.isEmpty)
+    }
+
+    func testSuccessFinalizeOnlyAfterCoordSendReturns() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(targetVersion: CoordinatorClient.binaryVersion)
+        try fixture.store.writeSuccessSentinel(
+            binaryURL: fixture.binary,
+            updateID: fixture.marker.updateID,
+            targetVersion: CoordinatorClient.binaryVersion
+        )
+        let sentinel = fixture.store.successSentinelPath(binaryURL: fixture.binary, updateID: fixture.marker.updateID)
+        let gate = SentinelSendGate(sentinel: sentinel)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            sendOverride: { frame in
+                if frame["type"] as? String == "state_update" {
+                    await gate.markSendStarted()
+                    await gate.waitForRelease()
+                    await gate.markSendReturned()
+                }
+            }
+        )
+        await AutoUpdateEventStore.shared.clear()
+
+        let recovery = Task {
+            await client.runStartupAutoupdateRecoveryForTest(binaryURL: fixture.binary, markerStore: fixture.store)
+        }
+        try await Self.waitUntil(timeoutNanoseconds: 1_000_000_000) {
+            await gate.started
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+
+        await gate.release()
+        await recovery.value
+
+        let sendEvents = await gate.events
+        XCTAssertEqual(sendEvents, ["send-start", "send-return"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sentinel.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+    }
+
     func testReceiptRotationRestoreTimeoutDoesNotHangAfterCandidateRejection() async throws {
         let committed = LockedBox(false)
         let status = ProviderStatus(
@@ -1388,7 +1468,7 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNil(proof["provider_receipt_public_key"])
     }
 
-    func testBinaryVersion_AdvertisesSPEC001V16AcrossHandshakeFrames() async throws {
+    func testBinaryVersion_AdvertisesSPEC020V17AcrossHandshakeFrames() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
             modelID: "model-a",
@@ -1401,10 +1481,10 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.6.1")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.6.1")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.6.1")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.6.1")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.7.0")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.7.0")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.7.0")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.7.0")
     }
 
     func testAuthInitialDefaultsToSingleEntryCatalog() async throws {
@@ -1820,6 +1900,32 @@ final class CoordinatorClientTests: XCTestCase {
         return dir
     }
 
+    private static func makeAutoupdateRecoveryFixture(targetVersion: String) throws -> (home: URL, store: AutoUpdateMarkerStore, marker: AutoUpdatePendingMarker, binary: URL, backup: URL) {
+        let home = try makeTemporaryDirectory(prefix: "coordinator-autoupdate-")
+        let store = AutoUpdateMarkerStore(homeDirectory: home)
+        try store.ensureTrustedRoot()
+        try Data().write(to: store.lockURL)
+        let binaryDir = home.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: binaryDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let updateID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        let binary = binaryDir.appendingPathComponent("macprovider-cli")
+        let backup = binaryDir.appendingPathComponent(".macprovider-cli.rollback-\(updateID)")
+        try Data("new".utf8).write(to: binary)
+        try Data("old".utf8).write(to: backup)
+        let marker = AutoUpdatePendingMarker(
+            updateID: updateID,
+            targetVersion: targetVersion,
+            targetPath: binary.path,
+            backupPath: backup.path,
+            size: 3,
+            mode: 0o755,
+            sha256: AutoUpdateEvent.sha256Hex("old"),
+            markerDeadline: ISO8601DateFormatter.coordinatorAutoupdateTest.string(from: Date().addingTimeInterval(300))
+        )
+        try store.writePending(marker)
+        return (home, store, marker, binary, backup)
+    }
+
     private static func minimalDERSequenceBase64URL() -> String {
         Data([0x30, 0x03, 0x02, 0x01, 0x05]).base64URLUnpadded()
     }
@@ -1927,6 +2033,46 @@ private actor CapturedWatchdogReason {
 private enum FakeTier2AuthOutcome: Sendable {
     case accepted
     case rejected(code: String, message: String)
+}
+
+private actor SentinelSendGate {
+    private let sentinel: URL
+    private(set) var started = false
+    private(set) var events: [String] = []
+    private var released = false
+
+    init(sentinel: URL) {
+        self.sentinel = sentinel
+    }
+
+    func markSendStarted() {
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path))
+        started = true
+        events.append("send-start")
+    }
+
+    func waitForRelease() async {
+        while !released {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func markSendReturned() {
+        events.append("send-return")
+    }
+
+    func release() {
+        released = true
+    }
+}
+
+private extension ISO8601DateFormatter {
+    static let coordinatorAutoupdateTest: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
 }
 
 private actor FakeTier2AuthResponder {

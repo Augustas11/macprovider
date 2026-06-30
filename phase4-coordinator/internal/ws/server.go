@@ -725,16 +725,17 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	releaseUnauth()
 
 	ack := HelloAck{
-		Type:                     "hello_ack",
-		CoordinatorVersion:       1,
-		AssignedID:               entry.AssignedID,
-		HeartbeatIntervalS:       int(s.cfg.HeartbeatInterval().Seconds()),
-		Tier:                     string(entry.Tier),
-		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
-		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
-		AssignedProviderToken:    assignedProviderToken,
-		PairOT:                   pairOT,
-		ClaimURL:                 claimURL,
+		Type:                      "hello_ack",
+		CoordinatorVersion:        1,
+		AssignedID:                entry.AssignedID,
+		HeartbeatIntervalS:        int(s.cfg.HeartbeatInterval().Seconds()),
+		Tier:                      string(entry.Tier),
+		RecommendedBinaryVersion:  s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		RequiredBinaryVersion:     s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
+		AutoupdateDrainExtensions: true,
+		AssignedProviderToken:     assignedProviderToken,
+		PairOT:                    pairOT,
+		ClaimURL:                  claimURL,
 	}
 	b, err := json.Marshal(ack)
 	if err != nil {
@@ -982,17 +983,18 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	}
 	releaseUnauth()
 	response := AuthResponse{
-		Type:                     "auth_response",
-		Version:                  2,
-		Status:                   "accepted",
-		AssignedID:               entry.AssignedID,
-		HeartbeatIntervalS:       int(s.cfg.HeartbeatInterval().Seconds()),
-		Tier:                     string(entry.Tier),
-		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
-		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
-		AssignedProviderToken:    assignedProviderToken,
-		PairOT:                   pairOT,
-		ClaimURL:                 claimURL,
+		Type:                      "auth_response",
+		Version:                   2,
+		Status:                    "accepted",
+		AssignedID:                entry.AssignedID,
+		HeartbeatIntervalS:        int(s.cfg.HeartbeatInterval().Seconds()),
+		Tier:                      string(entry.Tier),
+		RecommendedBinaryVersion:  s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		RequiredBinaryVersion:     s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
+		AutoupdateDrainExtensions: true,
+		AssignedProviderToken:     assignedProviderToken,
+		PairOT:                    pairOT,
+		ClaimURL:                  claimURL,
 		Tier2Session: &AuthTier2Session{
 			EncryptedLeg: AuthEncryptedLegSession{
 				Enabled:            true,
@@ -2361,6 +2363,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		ModelHashPresent:      presence.ModelHash,
 		Loading:               hb.Loading,
 		LoadingPresent:        presence.Loading,
+		LastAutoupdateEvent:   hb.LastAutoupdateEvent,
 		At:                    s.now(),
 	})
 	if !ok {
@@ -2406,10 +2409,11 @@ func (s *Server) handleStateUpdate(providerID, assignedID string, payload []byte
 		state = pool.StateDegraded
 	}
 	entry, ok := s.pool.ApplyStateUpdate(providerID, assignedID, pool.StateUpdate{
-		State:      state,
-		SlotsFree:  update.MetricsSnapshot.SlotsFree,
-		SlotsTotal: update.MetricsSnapshot.SlotsTotal,
-		At:         s.now(),
+		State:               state,
+		SlotsFree:           update.MetricsSnapshot.SlotsFree,
+		SlotsTotal:          update.MetricsSnapshot.SlotsTotal,
+		LastAutoupdateEvent: update.LastAutoupdateEvent,
+		At:                  s.now(),
 	})
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Msg("state_update for unknown provider")
