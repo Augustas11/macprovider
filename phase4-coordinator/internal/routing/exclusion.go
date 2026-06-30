@@ -20,6 +20,14 @@ type Excluded struct {
 
 // NewExcluded returns an empty exclusion set with capacity hint
 // based on the expected fault-cap for the current request.
+//
+// Callers initialize the set per buyer request and thread the same
+// instance through every selection attempt that follows a fault
+// (SPEC-002 F-4 dead-WS failover and SPEC-004 retry, sharing one
+// excluded-provider set per SPEC-004 FR-SR-19). The capacity hint
+// SHOULD be sized to `min(routing.max_providers_faulted_per_request,
+// routing.max_retries)` per SPEC-004 §5; it is advisory, not a
+// cap — Phase D's retry loop enforces the fault-cap via Excluded.Len.
 func NewExcluded(capacityHint int) Excluded {
 	return Excluded{keys: make(map[string]struct{}, capacityHint)}
 }

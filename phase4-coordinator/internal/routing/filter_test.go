@@ -194,6 +194,111 @@ func TestEligibleCandidates_PreQuotaCountTracksFirstLoopSurvivors(t *testing.T) 
 	}
 }
 
+// recordingChecker logs every (providerID, gate-name) pair as
+// EligibleCandidates invokes it, so tests can assert FR-SR-18
+// composition order (excluded → match/state → context → tier2 →
+// quota) is enforced for every provider AND a rejected provider
+// never reaches a later gate.
+type recordingChecker struct {
+	t            *testing.T
+	calls        []string // "providerID/gate"
+	matchFail    map[string]bool
+	contextFail  map[string]bool
+	tier2Reason  map[string]routing.RejectionReason
+	quotaFail    map[string]bool
+}
+
+func (r *recordingChecker) ProviderMatchesRequest(p pool.Provider) bool {
+	r.calls = append(r.calls, p.ProviderID+"/match")
+	return !r.matchFail[p.ProviderID]
+}
+func (r *recordingChecker) ProviderContextSufficient(p pool.Provider) bool {
+	r.calls = append(r.calls, p.ProviderID+"/context")
+	return !r.contextFail[p.ProviderID]
+}
+func (r *recordingChecker) Tier2Decision(p pool.Provider) (routing.RejectionReason, pool.HashStatus) {
+	r.calls = append(r.calls, p.ProviderID+"/tier2")
+	return r.tier2Reason[p.ProviderID], pool.HashStatus("")
+}
+func (r *recordingChecker) QuotaPermits(p pool.Provider) bool {
+	r.calls = append(r.calls, p.ProviderID+"/quota")
+	return !r.quotaFail[p.ProviderID]
+}
+
+func TestEligibleCandidates_OrderingExcludedShortCircuitsEverything(t *testing.T) {
+	t.Parallel()
+	providers := []pool.Provider{
+		{ProviderID: "excluded-x", AssignedID: "s1"},
+		{ProviderID: "match-fail-y", AssignedID: "s2"},
+		{ProviderID: "ok-z", AssignedID: "s3"},
+	}
+	ex := routing.NewExcluded(1)
+	ex.Add(providers[0], keyer)
+	checker := &recordingChecker{t: t, matchFail: map[string]bool{"match-fail-y": true}}
+	res := routing.EligibleCandidates(providers, ex, keyer, checker)
+	// Excluded provider MUST never reach match/context/tier2/quota.
+	for _, c := range checker.calls {
+		if c == "excluded-x/match" || c == "excluded-x/context" || c == "excluded-x/tier2" || c == "excluded-x/quota" {
+			t.Fatalf("excluded provider hit later gate: %q (full calls: %v)", c, checker.calls)
+		}
+	}
+	// match-fail-y reaches match but NOT context/tier2/quota.
+	for _, c := range checker.calls {
+		if c == "match-fail-y/context" || c == "match-fail-y/tier2" || c == "match-fail-y/quota" {
+			t.Fatalf("match-rejected provider hit later gate: %q", c)
+		}
+	}
+	if len(res.Eligible) != 1 || res.Eligible[0].ProviderID != "ok-z" {
+		t.Fatalf("want only ok-z eligible, got %+v", res.Eligible)
+	}
+}
+
+func TestEligibleCandidates_OrderingPerProviderSequence(t *testing.T) {
+	// For a provider that passes every gate, the call sequence MUST
+	// be exactly match → context → tier2 → quota. FR-SR-18 order.
+	t.Parallel()
+	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
+	checker := &recordingChecker{t: t}
+	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+	want := []string{"p/match", "p/context", "p/tier2", "p/quota"}
+	if len(checker.calls) != len(want) {
+		t.Fatalf("call count: want %d, got %d (calls=%v)", len(want), len(checker.calls), checker.calls)
+	}
+	for i := range want {
+		if checker.calls[i] != want[i] {
+			t.Errorf("call[%d]: want %q, got %q (full=%v)", i, want[i], checker.calls[i], checker.calls)
+		}
+	}
+}
+
+func TestEligibleCandidates_OrderingContextRejectStopsBeforeTier2AndQuota(t *testing.T) {
+	t.Parallel()
+	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
+	checker := &recordingChecker{t: t, contextFail: map[string]bool{"p": true}}
+	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+	want := []string{"p/match", "p/context"}
+	if len(checker.calls) != len(want) {
+		t.Fatalf("context-reject: want sequence %v, got %v", want, checker.calls)
+	}
+	for i := range want {
+		if checker.calls[i] != want[i] {
+			t.Errorf("call[%d]: want %q, got %q", i, want[i], checker.calls[i])
+		}
+	}
+}
+
+func TestEligibleCandidates_OrderingTier2RejectStopsBeforeQuota(t *testing.T) {
+	t.Parallel()
+	providers := []pool.Provider{{ProviderID: "p", AssignedID: "s"}}
+	checker := &recordingChecker{t: t, tier2Reason: map[string]routing.RejectionReason{"p": routing.ReasonTier2EncryptedLeg}}
+	routing.EligibleCandidates(providers, routing.NewExcluded(0), keyer, checker)
+	for _, c := range checker.calls {
+		if c == "p/quota" {
+			t.Fatalf("tier2-rejected provider must NOT reach quota gate; full calls: %v", checker.calls)
+		}
+	}
+}
+
 func TestEligibleCandidates_EmptyInputEmptyResult(t *testing.T) {
 	t.Parallel()
 	res := routing.EligibleCandidates(nil, routing.NewExcluded(0), keyer, &stubChecker{})
