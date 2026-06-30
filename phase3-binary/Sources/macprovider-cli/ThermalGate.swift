@@ -58,6 +58,15 @@ actor ThermalGate {
                 await self?.applyTransition(to: state)
             }
         }
+        // Reconcile any transition that happened between `init`'s initial
+        // read and observer registration — apply synchronously on the actor
+        // so callers awaiting startObserving see the reconciled state via
+        // `isThrottled()` / next snapshot, without racing the drain task.
+        // The observer is already registered above, so any real notification
+        // firing during this window is queued in the stream and processed
+        // idempotently (the `old != new` guard makes a duplicate yield a
+        // no-op).
+        applyTransition(to: provider.currentThermalState())
     }
 
     func setTransitionLogger(_ handler: @escaping @Sendable (ProcessInfo.ThermalState, ProcessInfo.ThermalState) -> Void) {

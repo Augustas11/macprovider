@@ -132,6 +132,27 @@ final class ProviderStatusTests: XCTestCase {
                        "both transitions must be observed in FIFO order, including the throttled interval")
     }
 
+    func testStartObservingReconcilesStateChangedBetweenInitAndStart() async {
+        // Regression: if thermal state changes between `init` and
+        // `startObserving()`, no NSNotification fires while we're listening.
+        // `startObserving()` must reconcile synchronously on the actor so
+        // an immediate `isThrottled()` reads the post-reconcile state with
+        // no polling.
+        let provider = MutableThermalProvider(initial: .nominal)
+        let gate = ThermalGate(stateProvider: provider)
+        let recorder = TransitionRecorder()
+        await gate.setTransitionLogger { old, new in recorder.record(old: old, new: new) }
+
+        provider.set(.serious)
+        await gate.startObserving()
+
+        let throttled = await gate.isThrottled()
+        XCTAssertTrue(throttled, "isThrottled must reflect the reconciled state immediately after startObserving returns — no polling")
+        XCTAssertEqual(recorder.transitions.map { "\($0.0.label)->\($0.1.label)" },
+                       ["nominal->serious"],
+                       "the missed-transition reconciliation must also fire the transition logger exactly once")
+    }
+
     func testShouldThrottleThreshold() {
         XCTAssertFalse(ThermalGate.shouldThrottle(.nominal))
         XCTAssertFalse(ThermalGate.shouldThrottle(.fair))
