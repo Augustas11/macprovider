@@ -446,11 +446,10 @@ $SSH 'set -e
 
 log "step 4/9: upload binary + config + nginx site (with rollback snapshot)"
 # Backup the live binary BEFORE the install so a rollback is one mv away.
-# Use install(1) instead of cp -p so ownership (macprovider:macprovider)
-# is explicit per-invocation rather than inherited from the source —
-# protects against a future "rebuild snapshot from scratch" recovery that
-# would otherwise drift the .prev to root:root and then propagate that
-# back into /opt/macprovider/coordinator on rollback.
+# Use install(1) instead of cp -p so ownership (#244 R4+R5: root:macprovider
+# 0750) is set explicitly per-invocation rather than inherited from the
+# source — protects against drift if the .prev was ever rebuilt from a
+# snapshot under different rules.
 # See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the swap-back steps.
 $SSH 'if [ -x /opt/macprovider/coordinator ]; then
         # R5 SEC MED: ownership matches the deploy artifacts — root:macprovider 0750.

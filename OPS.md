@@ -68,9 +68,13 @@ sudo -u macprovider bash deploy-pearl-vps.sh        # safe path
 
 Post-restart: the script polls `/healthz` and asserts the deployed `version`
 field matches the freshly built binary (M0-5 phase 2 provenance check). A
-mismatch implies the systemd unit started a stale binary; the script exits
-non-zero and the operator's responsibility is to investigate **before**
-declaring success.
+mismatch emits a `WARN provenance mismatch` line and the script CONTINUES
+to `DONE`. A MISSING version field (predates PR #18) emits a
+`CRITICAL provenance MISSING` line and also continues unless
+`STRICT_PROVENANCE=1` is set (in which case the script exits 7). The
+operator's responsibility is to scan the script output for `WARN` /
+`CRITICAL provenance` lines **before** declaring success — fail-loud
+exit is opt-in via `STRICT_PROVENANCE=1`.
 
 Observed timing from the first M0-5/M1-6 production deploy (2026-06-11,
 v1.3.0-24-g87b3a6b -> v1.3.1-5-gba04cd4): there is no retry loop. Step 7

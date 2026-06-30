@@ -120,12 +120,13 @@ about to be replaced. To populate it WITHOUT a new deploy:
 
 ```bash
 ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 '
-  install -o macprovider -g macprovider -m 0755 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
+  install -o root -g macprovider -m 0750 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
 '
 ```
 
 This makes the *current* binary the rollback target. Useful right
 before a risky maintenance window: take the snapshot when you know
 the system is healthy. Using `install(1)` (rather than `cp -p`)
-keeps ownership explicit even if the running binary on this VPS
-happens to be root-owned for any reason.
+keeps ownership explicit; the `root:macprovider 0750` posture (#244
+R4+R5) means the daemon's macprovider UID can read+execute the
+snapshot but cannot rewrite it.
