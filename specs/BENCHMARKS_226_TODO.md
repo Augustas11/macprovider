@@ -21,14 +21,33 @@ file, not here.
 
 | ID | Scenario | Decision gate | Status |
 |---|---|---|---|
-| `SCN-223-01` | Isolated M4 Air 24GB Qwen3-32B-4bit, verify model config/hash, re-measure single-stream sustained tok/s | Data-integrity: theoretical ceiling 6-7 vs observed 14 must reconcile. Every downstream cell in `RESEARCH_223` Part 2 assumes the bench is correctly attributed. | TODO |
-| `SCN-NEW-01` | Per-model rate-card key matching test against `phase4-coordinator/internal/billing/formula.go` model-string normalization | Silent-overcharge hazard: if buyer hits with `Qwen/Qwen3-32B-Instruct-MLX-4bit` and `rewards.rate_card` row keyed `qwen3-32b` doesn't match, lookup falls back to `default` ($1.00/M). Block Track B live config flip until verified. | TODO |
+| `SCN-223-01` | ~~Isolated M4 Air 24GB Qwen3-32B-4bit, verify model config/hash, re-measure single-stream sustained tok/s~~ **RESOLVED 2026-06-30 by code reading.** [test/network-harness/scenarios/07_sustained_throughput.yaml:68-74](test/network-harness/scenarios/07_sustained_throughput.yaml) shows scenario 07 alternates prompts between `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` AND `mlx-community/Qwen3-32B-4bit` across 2 providers (M4 Air + air5), each serving ~half per `expected_shape`. The "14-17 tok/s p50" in BENCHMARK_BASELINE is a **blended median across two model classes**, NOT isolated 32B. The 2026-06-28 baseline author's `Key finding: TTFT remains tight under concurrency. The TPS at 14 tok/s is hardware-bound (Qwen3-32B-4bit on M4 Air)` was an *unverified hypothesis* with an explicit followup TODO (`Phase-B follow-up should split TPS by provider+model`) that was never run. RESEARCH_222 / RESEARCH_223 inherited it as fact. **No anomaly: Track A's 6-7 tok/s theoretical ceiling for M4 Air × Qwen3-32B-4bit stands.** No hardware remeasurement needed for this scenario; the matrix is correct. Followup: see `SCN-NEW-05` to add per-model isolation to the harness so future baselines don't repeat the attribution error. | DONE-PASS (resolved by code reading) |
+| `SCN-NEW-01` | ~~Per-model rate-card key matching test against `phase4-coordinator/internal/billing/formula.go` model-string normalization~~ **DONE-FAIL 2026-06-30 by code reading — HAZARD CONFIRMED.** [phase4-coordinator/internal/billing/formula.go:34](phase4-coordinator/internal/billing/formula.go:34) `RateFor` does **zero normalization** — uses raw buyer model string for exact map lookup; falls through to `default` row on mismatch. Cross-check against [test/network-harness/scenarios/07_sustained_throughput.yaml:68-74](test/network-harness/scenarios/07_sustained_throughput.yaml) production buyer strings `mlx-community/Qwen3-32B-4bit` + `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` vs Track B Entry 92 rate-card keys `qwen3-32b` / `qwen-2.5-coder-32b` / etc. — **none of the proposed keys match the actual buyer strings.** Wave 1 hot reload would silently overcharge **100%** of traffic at `default: $1.00/M` instead of intended `$0.220/M` (32B) / `$0.027/M` (8B). This BLOCKS Wave 1 launch. Fix paths: (a) rewrite Entry 92 rate-card row keys to match exact production model strings — fragile, new variants silently overcharge; (b) **recommended**: land SPEC-005 v0.3 delta with class-aware lookup (regex / prefix matching) — already deferred-with-spec-delta-flag in RESEARCH_224. Companion failing-Go-test (`formula_test.go::TestRateForRealBuyerStrings`) goes in a separate PR (money-path code = 3-lane codex audit per [[feedback-three-lane-codex-audits]]). | DONE-FAIL (hazard confirmed; blocks Wave 1) |
 | `SCN-NEW-02` | Hardware-tier rejection telemetry: synthetic out-of-tier provider attempts 32B job; confirm rejection in audit-log + useful error code returned | Tier filter ships in next coordinator release per Track B; must observably enforce, not silently accept. | TODO |
 | `SCN-NEW-03` | End-to-end billing smoke at new rates: 1 test buyer + 1 M-Max provider, 1k completions through `qwen3-32b` row, confirm billing rows show $0.220/M (not $1.00 default) | Confirms rate-card row hot-reload (SIGHUP) actually applied; catches normalization mismatch in flight. | TODO |
+| `SCN-NEW-05` | Per-model isolated bench: fork [test/network-harness/scenarios/07_sustained_throughput.yaml](test/network-harness/scenarios/07_sustained_throughput.yaml) into `11_isolated_model_tps.yaml` that fires only ONE model per provider per run (single-model, single-provider) and reports per-(provider, model) TPS rather than blended p50. Run for {`Qwen3-32B-4bit` × M4 Air, `Qwen2.5-Coder-7B-Instruct-4bit` × M4 Air, `Qwen3-32B-4bit` × M4 Max once available} so future baselines have clean per-cell numbers. | Prevents the SCN-223-01 attribution error from recurring. Feeds RESEARCH_223 matrix verification. Not a launch blocker; data-quality investment. | TODO |
 
-**Decision gate**: all 4 P0 must return green before `/opt/macprovider/coordinator.yaml`
-gets Track B's rate-card rows in production. SCN-223-01 separately
-gates whether `RESEARCH_223` matrix needs to be re-built.
+**Decision gate**: status as of 2026-06-30 after first investigation pass:
+
+- SCN-223-01: **DONE-PASS** by code reading (no hardware needed)
+- SCN-NEW-01: **DONE-FAIL** by code reading — **Wave 1 BLOCKED**
+- SCN-NEW-02: TODO (needs Wave 2 tier filter to exist)
+- SCN-NEW-03: TODO (needs SCN-NEW-01 fix landed first or rewritten rate-card keys)
+- SCN-NEW-05: TODO (data quality follow-up; not a launch blocker)
+
+**New blocker**: Wave 1 hot reload cannot ship as designed because the
+current `RateFor` lookup is exact-string-match and Entry 92's proposed
+rate-card row keys don't match the buyer-side model strings observed
+in production scenarios. **Either rewrite Entry 92 keys to exact-match
+strings (fragile) OR land SPEC-005 v0.3 class-aware-lookup delta first
+(recommended).** This was foreseen and flagged in Entry 92 + RESEARCH_224
+but is now empirically confirmed by reading the actual code path.
+
+`SCN-223-01` separately gates whether `RESEARCH_223` matrix needs to
+be re-built — **answered NO**: matrix ceilings stand; only the inherited
+"observed 14 tok/s" narrative in RESEARCH_222 + RESEARCH_223 prose needs
+a correction note (the matrix cells themselves were already correct
+per bandwidth math).
 
 ### P1 — Track B v2 monitoring (run during 90-day beta cohort)
 
