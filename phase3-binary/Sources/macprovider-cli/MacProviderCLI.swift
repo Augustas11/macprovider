@@ -183,11 +183,24 @@ struct ServeCommand: AsyncParsableCommand {
             maxConcurrencyOverride: resolved.maxConcurrencyOverride ?? 1
         )
         let throughputEstimate = await modelRuntime.measureStartupThroughput()
+        let thermalGate = ThermalGate()
+        // `slots_free` in the log reflects the throttle-driven free-slot
+        // ceiling (configured `maxConcurrency` when unthrottled, 0 when
+        // throttled). The exact heartbeat value still subtracts in-flight
+        // requests; this log marker is for transition forensics.
+        let configuredSlots = capacityDefaults.maxConcurrency
+        await thermalGate.setTransitionLogger { old, new in
+            let throttled = ThermalGate.shouldThrottle(new)
+            let slots = throttled ? 0 : configuredSlots
+            print("event=thermal_state_changed from=\(old.label) to=\(new.label) throttled=\(throttled) slots_free=\(slots)")
+        }
+        await thermalGate.startObserving()
         let providerStatus = ProviderStatus(
             modelID: resolved.model,
             modelLoaded: await modelRuntime.isLoaded,
             capacity: capacityDefaults.withThroughputEstimate(throughputEstimate),
-            modelHash: await modelRuntime.loadedModelHash
+            modelHash: await modelRuntime.loadedModelHash,
+            thermalGate: thermalGate
         )
         await modelRuntime.setProviderStatus(providerStatus)
         let receiptKeyStore = KeychainReceiptKeyStore()
