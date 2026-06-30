@@ -236,6 +236,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private let inferenceGate: AsyncSemaphore
     private let maxBatch: Int
     private let warmSwapEnabled: Bool
+    private let receiptsEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     private var providerStatus: ProviderStatus?
     private var signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation] = [:]
@@ -263,7 +264,16 @@ actor ModelRuntime: ModelRuntimeServing {
         kvBitsOverride: Int? = nil,
         maxBatch: Int = 1,
         warmSwapEnabled: Bool = false,
-        swapDrainTimeoutSeconds: Int = 30
+        swapDrainTimeoutSeconds: Int = 30,
+        // When true, the SPEC-015 receipt-emission path is active for this
+        // runtime. Receipts bind buyer output to `model_hash`, which is the
+        // ON-DISK safetensors manifest hash — not the in-memory dtype. To
+        // avoid silently weakening the attestation contract (two providers
+        // reporting the same model_hash but serving fp16-vs-bf16-truncated
+        // weights), the bf16 weight cast is REFUSED when this is true,
+        // even if `MACPROVIDER_BF16_WEIGHTS=1`. The bench command, which
+        // never emits receipts, leaves this `false` and is unaffected.
+        receiptsEnabled: Bool = false
     ) async throws {
         self.currentModelID = modelID
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
@@ -272,10 +282,12 @@ actor ModelRuntime: ModelRuntimeServing {
         self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
+        self.receiptsEnabled = receiptsEnabled
+        let castGuard = receiptsEnabled
         self.loader = { targetModelID in
             let configuration = Self.configuration(for: targetModelID)
             let container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
-            await Self.applyWeightCastIfEnabled(to: container)
+            await Self.applyWeightCastIfEnabled(to: container, receiptsEnabled: castGuard)
             let directory = configuration.modelDirectory()
             let modelHash = try? Self.modelWeightArtifactManifestHash(in: directory)
             return (container, targetModelID, modelHash)
@@ -292,7 +304,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let configuration = Self.configuration(for: modelID)
         let container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
-        await Self.applyWeightCastIfEnabled(to: container)
+        await Self.applyWeightCastIfEnabled(to: container, receiptsEnabled: receiptsEnabled)
         self.currentContainer = container
 
         let directory = configuration.modelDirectory()
@@ -327,6 +339,9 @@ actor ModelRuntime: ModelRuntimeServing {
         self.maxBatch = max(1, maxBatch)
         self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
         self.warmSwapEnabled = warmSwapEnabled
+        // Test/mock init: receipts state is not exercised by tests today;
+        // default to false so the bf16-cast guard does not fire in tests.
+        self.receiptsEnabled = false
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.providerStatus = providerStatus
         self.loader = loader
@@ -844,7 +859,33 @@ actor ModelRuntime: ModelRuntimeServing {
     /// for live evidence-gathering on M-series before flipping the default.
     /// See `WeightCast.swift` and `specs/perf-mlx-compile-bf16-upgrade.md`
     /// Phase 3.
-    private static func applyWeightCastIfEnabled(to container: ModelContainer) async {
+    ///
+    /// **Receipts guard:** when `receiptsEnabled` is true, the cast is
+    /// refused even when the env flag is set. SPEC-015 receipts bind
+    /// buyer output to `model_hash`, which is the on-disk safetensors
+    /// manifest hash and does NOT capture in-memory precision changes.
+    /// Allowing the cast on a receipt-emitting provider would silently
+    /// weaken attestation (two providers reporting identical model_hash
+    /// while serving fp16 vs. bf16-truncated weights). The bench command
+    /// never emits receipts and is unaffected. To enable bf16 on a
+    /// receipt-emitting provider, the attestation contract must first be
+    /// extended to encode the precision transform (out of scope for this
+    /// PR per spec's "default OFF; flip default in a follow-up after live
+    /// evidence" gate).
+    private static func applyWeightCastIfEnabled(
+        to container: ModelContainer,
+        receiptsEnabled: Bool
+    ) async {
+        guard WeightCast.isEnabledByEnvironment() else { return }
+        if receiptsEnabled {
+            FileHandle.standardError.write(Data((
+                "event=bf16_weight_cast_skipped reason=receipts_enabled " +
+                "detail=MACPROVIDER_BF16_WEIGHTS=1 ignored to preserve " +
+                "SPEC-015 model_hash attestation; cast available via " +
+                "decode-bench subcommand or when receipts are off\n"
+            ).utf8))
+            return
+        }
         await container.perform { context in
             WeightCast.applyIfEnabled(to: context.model)
         }

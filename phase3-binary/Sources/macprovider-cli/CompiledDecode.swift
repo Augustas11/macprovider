@@ -68,6 +68,20 @@ private final class KVCacheUpdatableAdapter: Updatable {
 /// request. The compiled closure captures the specific cache array
 /// identity, so do not reuse one step across two different KV caches.
 /// Discard at end-of-request.
+///
+/// **Cache-state precondition (when `enabled: true`):** construct AFTER
+/// prefill has populated the KV cache. `KVCacheSimple.innerState()`
+/// returns `[]` for an empty cache and `[keys, values]` once
+/// `update(...)` has run. `MLX.compile()` reads the `inputs:` /
+/// `outputs:` state on every call; a step constructed against an empty
+/// cache and then used after prefill would see the state-array count
+/// change between calls, which risks silent recompile or — worse —
+/// reuse of a traced graph that never threaded the cache (decode
+/// reads stale KV state, producing wrong tokens). The initializer
+/// asserts this when `enabled == true`. The runtime wire-in (deferred
+/// to a follow-up PR) must construct the step AFTER prefill, not
+/// before. See `audits/2026-06-30/perf-mlx-compile-bf16-audit.md`
+/// ADV-1 for the underlying concern.
 final class CompiledDecodeStep {
     /// The original (uncompiled) per-token forward. Used (a) for
     /// correctness comparison in tests, and (b) as the no-op fallback
@@ -103,6 +117,16 @@ final class CompiledDecodeStep {
         self.enabled = enabled
 
         if enabled {
+            // Precondition (ADV-1): cache MUST have populated state when
+            // we construct the compiled wrapper. An empty `innerState()`
+            // would cause `MLX.compile()` to trace with a zero-length
+            // state array; once prefill populates `[keys, values]`, the
+            // compiled graph's state shape no longer matches subsequent
+            // calls, risking silent recompile or stale-state reads.
+            precondition(
+                cache.allSatisfy { !$0.innerState().isEmpty },
+                "CompiledDecodeStep requires a populated KV cache — construct AFTER prefill, not before. See `audits/2026-06-30/perf-mlx-compile-bf16-audit.md` ADV-1."
+            )
             let updatables: [any Updatable] = cache.map { KVCacheUpdatableAdapter($0) }
             // Same KV-cache arrays are read from AND written to by
             // `cache.update(...)` inside the model's attention layer.

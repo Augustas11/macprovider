@@ -172,7 +172,11 @@ struct ServeCommand: AsyncParsableCommand {
             kvBitsOverride: resolved.kvBitsOverride,
             maxBatch: resolved.maxConcurrencyOverride ?? 1,
             warmSwapEnabled: resolved.enableWarmSwap,
-            swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds
+            swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
+            // Plumbed to refuse the bf16 weight cast on receipt-emitting
+            // providers. See ModelRuntime.applyWeightCastIfEnabled for the
+            // attestation rationale.
+            receiptsEnabled: resolved.enableReceipts
         )
         // The serve runtime defaults `--max-batch` to 1 (the prior
         // single-slot behavior). Operators opting in via --max-batch >1

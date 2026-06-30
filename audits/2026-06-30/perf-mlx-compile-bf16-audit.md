@@ -85,8 +85,110 @@ Result:
 | security | ACCEPT — SEC-2 (R1) resolved, no new findings |
 | architect | (skipped — R1 ACCEPTed with LOW/NIT only) |
 
-## Convergence
+## Convergence (R2)
 
-All three lanes at **0 CRITICAL / 0 HIGH / 0 MEDIUM** after round 2.
-Per `[[feedback-build-audit-loop]]`, this clears the bar to push the
-branch and open the PR.
+All three codex lanes at **0 CRITICAL / 0 HIGH / 0 MEDIUM** after round 2.
+Per `[[feedback-build-audit-loop]]`, this cleared the bar to push the
+branch and open PR #265.
+
+## Round 3 — deep-pass audit (user-requested, post-PR)
+
+Triggered after the user asked for a heavier-weight pass: "full
+implementation 3-lane auditors + adversarial verification + product
+critique." Each lane re-ran against the FULL implementation rather
+than R2's narrowed delta-only scope.
+
+### Lanes run (R3)
+
+- **Codex CODE R3** — `specs/AUDIT_PERF_MLX_COMPILE_BF16_FULL_IMPL_PROMPT.md` with `LANE: CODE` suffix.
+- **Codex SECURITY R3** — same prompt with `LANE: SECURITY` suffix.
+- **Codex ARCHITECT R3** — same prompt with `LANE: ARCHITECT` suffix.
+- **Claude adversarial verification** — `critic` subagent, structured attack lens.
+- **Claude product critique** — `analyst` subagent, "should this exist in this shape" lens.
+
+### R3 findings
+
+| Lane | Critical | High | Medium | Low | Nit |
+|---|---|---|---|---|---|
+| codex code | 0 | 0 | 0 | 4 | 0 |
+| codex security | 0 | 0 | **1** | 1 | 0 |
+| codex architect | 0 | 0 | 0 | 5 | 0 |
+| claude adversarial | 0 | 0 | **1** | 4 | 0 |
+| claude product | n/a — RESHAPE / E2E_FIRST verdict (judgment, not severity) | | | | |
+
+### MEDIUMs (both fixed inline before R4)
+
+- **SEC-1 (codex security):** `MACPROVIDER_BF16_WEIGHTS=1` mutates
+  loaded weights in-memory, but `currentModelHash` is derived from
+  the on-disk safetensors manifest — so SPEC-015 receipts attest to
+  the wrong dtype when the cast runs. Two providers reporting the
+  same `model_hash` could be serving fp16 vs bf16-truncated weights;
+  individual receipts still verify (output_hash binds delivered bytes)
+  but the model-identity attestation contract weakens silently.
+  **Fix:** plumbed `receiptsEnabled: Bool` into `ModelRuntime`'s
+  primary `init` and through into `applyWeightCastIfEnabled(...)`.
+  When receipts are on, the cast is refused even with the env flag
+  set; a one-line stderr diagnostic surfaces the skip. `ServeCommand`
+  passes `resolved.enableReceipts`; `DecodeBenchCommand` and
+  `SelfTestCommand` use the default `false` so bench measurement is
+  unaffected. The test/mock `init` defaults to `false` since no test
+  exercises receipts state today.
+
+- **ADV-1 (claude adversarial):** `CompiledDecodeStep` constructed
+  with `enabled: true` against an empty cache would trace
+  `MLX.compile()` with a zero-length state array; once prefill
+  populates `[keys, values]`, the state-shape mismatch risks silent
+  recompile or — worse — reuse of the traced graph that never
+  threaded the cache (decode reads stale KV state, producing wrong
+  tokens). The adversarial agent explicitly noted "not blocking
+  this PR (no wire-in yet) — flag for the follow-up", but the fix
+  is cheap. **Fix:** added a precondition in `CompiledDecodeStep.init`
+  that asserts `cache.allSatisfy { !$0.innerState().isEmpty }` when
+  enabled, and expanded the class docstring to spell out the
+  "construct AFTER prefill" lifecycle requirement. Future wire-in
+  PR will be a compile-time-visible programmer-error guard, not a
+  runtime correctness gap.
+
+### LOWs / NITs / product judgments (tracked, not fixed)
+
+- Codex CODE/ARCHITECT/SECURITY LOWs are observability and ergonomics
+  suggestions (e.g. record `kvBits`/`maxContext`/`maxBatch`/load-time
+  in bench JSON, distinguish "cast did nothing" from "flag not picked
+  up", convert deferred items to tracking issues, soften pin-tag
+  drift risk). None block the PR.
+- Claude adversarial ADV-2..5 are similar observability + future-
+  proofing items.
+- Claude product critique recommended RESHAPE (move CompiledDecode
+  to draft follow-up PR, hide decode-bench from `--help`, consolidate
+  audit-docs density, file deferred items as GitHub issues, run e2e
+  before merge). These are PR-shape judgments rather than correctness
+  findings; the user will decide which to act on as part of the
+  merge-vs-e2e call.
+
+## Round 4 — verification of R3 fixes (touched lanes only)
+
+Per `[[feedback-skip-accepted-audit-lanes]]`, only codex CODE +
+SECURITY were re-fired (architect scope unchanged; adversarial +
+product not re-fired since their scopes either had non-blocking
+findings already addressed or were judgment-tier rather than
+severity-tier).
+
+Prompts:
+- `specs/AUDIT_PERF_MLX_COMPILE_BF16_R4_CODE_PROMPT.md`
+- `specs/AUDIT_PERF_MLX_COMPILE_BF16_R4_SECURITY_PROMPT.md`
+
+Result:
+
+| Lane | Verdict |
+|---|---|
+| codex code R4 | ACCEPT — SEC-1 + ADV-1 fixes correct, no new findings |
+| codex security R4 | ACCEPT — SEC-1 (R3) resolved, no new findings |
+
+## Final convergence
+
+All five audit sources at **0 CRITICAL / 0 HIGH / 0 MEDIUM** after R4.
+Tests: 683 pass (unchanged count; the SEC-1 fix is wire-in only, no
+new test required by spec — covered by the existing
+`WeightCastTests.testEnvFlagAcceptsCommonTruthyForms` for the env
+guard path and proven by codex re-audit for the receipts-skip path).
+
