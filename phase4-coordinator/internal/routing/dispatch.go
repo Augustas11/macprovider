@@ -24,7 +24,7 @@ import (
 //     preserved verbatim — billing keys off the raw body hash and
 //     must observe the same bytes the buyer sent.
 //
-// Errors:
+// Errors (rewrite path only — see "precondition" below):
 //   - body is not a JSON object
 //   - body contains a non-string object key
 //   - body has zero `model` fields
@@ -36,6 +36,21 @@ import (
 // scenarios where a buyer-trusted gateway might match on "model"
 // but a downstream provider might match on "Model"; rejecting at
 // the rewrite boundary keeps the canonical-name contract intact.
+//
+// **Precondition**: when `requestedModel` and `providerModelID`
+// compare equal under `strings.EqualFold`, the match-skip path
+// fires AND DOES NOT validate the JSON body shape (duplicate /
+// non-canonical / non-object checks all run only on the rewrite
+// branch). The match-skip path is byte-identical to the pre-#266
+// `buyer.dispatchBodyForProvider` behaviour; in the buyer flow
+// the body is already validated upstream by `validateChatRequest`
+// before reaching dispatch. **Callers outside the buyer pipeline
+// MUST run their own JSON-shape validation before invoking
+// `RewriteModel` if they need the dup/case/object checks** —
+// this helper alone is not sufficient to enforce them on the
+// match-skip path. Issue #266 T2 R1 SEC audit LOW (documented;
+// not changing the production flow because the validateChatRequest
+// upstream gate already covers it).
 func RewriteModel(rawBody []byte, requestedModel, providerModelID string) ([]byte, error) {
 	if strings.EqualFold(requestedModel, providerModelID) {
 		return append([]byte(nil), rawBody...), nil

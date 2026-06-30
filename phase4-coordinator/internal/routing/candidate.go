@@ -20,13 +20,24 @@
 // stickyStore / purgeStickyAccount delegate to sticky.Map and
 // the inline stickyEntry has been removed.
 //
-// Still deferred to follow-up commits (not in this PR): objective.go
-// sort-comparator extraction, dispatch.go RewriteModel extraction,
-// retry.go retry-loop extraction, InvalidateClass SIGHUP trigger
-// wiring, per-attempt FR-SR-17 log threading at retry/preflight
-// call sites, mid-request stable seed across UTC midnight,
-// BalancedScores compute caching, more AC-SR-1 byte-identity
-// scenarios.
+// Issue #266 Tranche 1 (PR #270) closed the operator-green-light
+// safety/correctness items: SIGHUP InvalidateClass wiring, per-
+// attempt FR-SR-17 log threading at retry/preflight call sites,
+// mid-request stable seed across UTC midnight,
+// sticky_account_mismatch warn-log rate-limit.
+//
+// Issue #266 Tranche 2 (this PR) closed the refactor-only
+// extractions: objective.go (SortCandidates + ObjectiveScores +
+// KeyedBalancedScores), dispatch.go (RewriteModel + jsonValueStart),
+// retry.go (RetryHeaderLimit + ShouldRetry + ShouldRetryInput).
+// Buyer-side `sortCandidates` / `routingScores` / `dispatchBodyForProvider`
+// / `shouldRetry` are now thin delegators.
+//
+// Still deferred to follow-up commits (not in this PR): BalancedScores
+// compute caching threaded through SortCandidates + epsilon + log
+// (deferred #266 Tranche 3), more AC-SR-1 byte-identity scenarios
+// (T3), HTTP-path integration test for `sticky_account_mismatch`
+// warn emission (T3).
 //
 // AC-SR-1 default-config regression (byte-identical selection vs
 // current SPEC-002 v1.5.2 origin/main behavior) is locked by
