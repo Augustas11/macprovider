@@ -521,7 +521,38 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		usage := *reported
 		observedCompletion := estimateStreamingCompletionTokens(emitted, maxTokens)
 		if observedCompletion > usage.CompletionTokens {
+			// Provider under-reported relative to streamed bytes. Use the
+			// gateway estimate so the provider isn't under-billed for content
+			// that was actually streamed.
 			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
+			return
+		}
+		// Issue #255: provider may report MORE completion tokens than were
+		// streamed as delta.content — e.g. a tokenizer counts EOS or
+		// chat-template stop tokens that never reach the buyer as content.
+		// Surfaced on Qwen2.5-Coder-7B-Instruct-4bit with consistent
+		// +4..+7 over-reports vs both harness and coord (which agree).
+		// Clamp downward when the over-report sits inside the safe window
+		// (see clampWindow). Outside the window — too small (benign noise)
+		// or too large (gateway byte-estimate undercounts dense content;
+		// clamping would under-bill the provider) — trust the provider.
+		// R1 security HIGH: keep usage.PromptTokens (provider's authoritative
+		// prompt count); usageFromJSON already proved prompt+completion ≤
+		// maxUsageTokens, so substituting the smaller observedCompletion
+		// can only lower the total.
+		overshoot := usage.CompletionTokens - observedCompletion
+		if overshoot > clampFloorTokens && overshoot <= clampCeilingTokens {
+			slog.Info("streaming gateway clamped over-reported completion tokens",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"reported", usage.CompletionTokens,
+				"observed", observedCompletion,
+				"overshoot", overshoot,
+				"window_floor", clampFloorTokens,
+				"window_ceiling", clampCeilingTokens,
+				"outcome", outcome,
+			)
+			s.settleAfterCommit(r, subject, usage.PromptTokens, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
 			return
 		}
 		s.settleAfterCommit(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome, reservationWindow)
@@ -1011,6 +1042,45 @@ func estimateStreamingCompletionTokens(emitted, maxTokens int64) int64 {
 		return maxTokens
 	}
 	return completion
+}
+
+// Clamp window for the streaming over-report fix (#255). Pure
+// absolute bounds — no percentage scaling.
+//
+// An over-report `o` (reported - observed) triggers the downward
+// clamp iff `clampFloorTokens < o <= clampCeilingTokens`.
+//
+// Pure-absolute shape (R2 security + architect HIGH convergence):
+//
+//   - Below `clampFloorTokens` (≤ 2 tokens): benign tokenizer noise
+//     (EOS / chat-template stop tokens that count as completion but
+//     never stream as delta content). Trust the provider.
+//
+//   - Above `clampCeilingTokens` (> 20 tokens): too large to be
+//     tokenizer noise. The gateway's byte-based estimate is
+//     unreliable on dense content (CJK, code, short tokens where
+//     1 token < 4 bytes); clamping here would under-bill a provider
+//     for legitimately-generated content. Trust the provider.
+//
+// Earlier rounds tried a percentage formula but R2 audits caught a
+// false-positive class: a legitimate moderate-density report
+// (e.g. observed=225 byte-tokens, reported=300 actual tokens) sat
+// inside the percentage window and got clamped, under-billing the
+// provider. Pure absolute bounds eliminate that class — any
+// overshoot > 20 tokens is trusted as density mismatch.
+//
+// Cost: an adversarial provider can systematically over-report by
+// up to 20 tokens per request. Bounded and small per-request; logged
+// each time the clamp fires for audit visibility.
+const (
+	clampFloorTokens   int64 = 2
+	clampCeilingTokens int64 = 20
+)
+
+// clampWindow returns the (floor, ceiling] bounds as a tuple for
+// callers that want both at once (e.g. log lines, tests).
+func clampWindow() (floor, ceiling int64) {
+	return clampFloorTokens, clampCeilingTokens
 }
 
 func maxStreamingCompletionTokens(maxTokens int64) int64 {

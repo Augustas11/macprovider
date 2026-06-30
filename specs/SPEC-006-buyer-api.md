@@ -1,7 +1,12 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.1 (2026-06-29, ISS-211 normative forward-header addition: X-MacProvider-Account on the non-sticky routing path)
+**Version:** 0.9.2 (2026-06-29, ISS-255 streaming over-report clamp policy)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.0, SPEC-003 v0.7, SPEC-004 v0.2
+
+**Change log v0.9.2 (2026-06-29, issue #255):**
+- § 7.2 streaming settlement now clamps provider-reported completion_tokens down to the gateway's byte-based observed value when the over-report falls inside the pure-absolute window `2 < overshoot ≤ 20` ("Streaming over-report clamp" subsection). Below 2 tokens: trusted as benign tokenizer noise. Above 20 tokens: trusted as density mismatch (byte-based observation is unreliable on dense content; clamping would risk under-billing). Clamped rows record `token_source = "gateway_estimated"` and preserve provider-reported `prompt_tokens`; gateway emits a structured log line carrying `request_id`, `account_id`, `reported`, `observed`, `overshoot`, `window_floor`, `window_ceiling`, `outcome` for audit triage.
+- § 17.7 settlement matrix row 200 and § AC-37 acceptance criteria updated to reference the new clamp policy.
+- Live surfacing: scenario 07 of the 2026-06-29 v0.3 baseline rerun caught +4 / +5 / +7 over-bills on `air5 × Qwen2.5-Coder-7B-Instruct-4bit`. Provider-side tokenizer counted EOS / chat-template stop tokens that never streamed as delta content.
 
 **Change log v0.9.1 (2026-06-29, issue #211):**
 - Gateway MUST forward `X-MacProvider-Account: <subject.AccountID>` on
@@ -1653,7 +1658,33 @@ Failed reservations MUST expire and be reclaimed by a reaper job within 24 hours
 
 For streaming requests (`stream: true`), the gateway MUST reserve `max_tokens` or the configured per-request cap, whichever is smaller, before forwarding.
 
-On SSE completion after a provider `[DONE]` chunk, settlement MUST adjust the reservation to actual usage as reported by the provider.
+On SSE completion after a provider `[DONE]` chunk, settlement MUST adjust the reservation to actual usage as reported by the provider, subject to the streaming over-report clamp policy below.
+
+#### Streaming over-report clamp (#255, issue dated 2026-06-29)
+
+The gateway MUST clamp the streaming completion_tokens settlement down to its own observed value whenever the provider's `usage.completion_tokens` exceeds the gateway's byte-based observation by an amount inside the pure-absolute clamp window:
+
+- Let `observed = ceil(bytes_emitted_so_far / 4)` (the existing § 7.2 disconnect-fallback heuristic).
+- Let `overshoot = reported - observed`.
+- Clamp iff `2 < overshoot ≤ 20`.
+
+Outside the window the gateway MUST trust the provider's reported completion_tokens:
+
+- `overshoot ≤ 2`: benign tokenizer noise (EOS / chat-template stop tokens that count as completion but never stream as delta content).
+- `overshoot > 20`: density mismatch — the gateway's byte-based estimate is unreliable on dense content (CJK, code, short-token text where 1 token < 4 bytes); clamping here would risk under-billing the provider for legitimately generated content.
+
+When the clamp fires, the usage event MUST record `token_source = "gateway_estimated"` (no new vocabulary), MUST preserve the provider's reported `prompt_tokens`, and the gateway SHOULD emit a structured log line carrying `request_id`, `account_id`, `reported`, `observed`, `overshoot`, `window_floor`, `window_ceiling`, and `outcome` for audit visibility.
+
+The pure-absolute window is a deliberate trade. A percentage-scaled ceiling (50% × observed in earlier drafts) was rejected because it still false-positive-clamped moderate-density legitimate reports (e.g. observed=225 byte-tokens with a legitimate 300-token actual count fell inside a percentage window and got clamped). The fixed 20-token ceiling caps the per-request false-positive under-bill at 20 tokens regardless of completion size, and trusts the provider for any overshoot large enough to plausibly reflect density divergence.
+
+Skim surfaces NOT closed by the clamp:
+
+- `overshoot ≤ 2`: trusted as benign tokenizer noise. A provider can systematically over-report by up to 2 tokens per request without triggering the clamp. Bounded; no structured-log emission.
+- `overshoot > 20`: trusted as density mismatch. A provider can over-report by any amount above 20 tokens (bounded only by the request's `max_tokens`) without triggering the clamp. Same adversarial exposure as the pre-#255 status quo for these reports. No structured-log emission.
+
+Only the `3 ≤ overshoot ≤ 20` band is both clamped and structured-log-visible for triage. Closing the residual skim surfaces requires a tokenizer-grounded observation (replacing the byte heuristic) — out of scope for #255.
+
+Existing § 7.2 upward correction (settle to gateway estimate when `observed > reported`) is unchanged.
 
 For streaming requests where the buyer disconnects mid-stream, the gateway settles the daily-quota reservation as follows:
 
@@ -2621,7 +2652,7 @@ The gateway MUST reserve quota before forwarding as defined in Section 7.2 and s
 
 | Status | Completion tokens | Quota debited | Rationale |
 |---|---:|---|---|
-| 200 | as reported | prompt + completion | Successful work performed |
+| 200 | as reported, subject to § 7.2 over-report clamp | prompt + completion | Successful work performed; streaming `completion_tokens` clamped down to gateway observed when over-report sits inside `2 < overshoot ≤ 20` (#255) |
 | 503 | 0 | none | No provider was reached; request never forwarded |
 | Context cancelled (buyer disconnects mid-reservation) | n/a | none; reservation refunded before return | Gateway MUST exit silently without writing a 500 to the dead connection |
 | Context cancelled (buyer disconnects at concurrency gate) | n/a | none; quota reservation refunded before return | Same as above |
@@ -3255,9 +3286,9 @@ Branches:
 Expected outcome:
 
 - Concurrent requests cannot oversubscribe the daily quota during the stream.
-- Successful stream returns HTTP 200 with `Content-Type: text/event-stream; charset=utf-8`, emits `data: {json}\n\n` chunks followed by `data: [DONE]`, and settles to provider-reported usage.
-- Branch A releases concurrency and records usage source as provider-reported.
-- Branch B releases concurrency and records usage source as gateway-estimated.
+- Successful stream returns HTTP 200 with `Content-Type: text/event-stream; charset=utf-8`, emits `data: {json}\n\n` chunks followed by `data: [DONE]`, and settles to provider-reported usage subject to the § 7.2 streaming over-report clamp (#255: completion_tokens are clamped down to the gateway's byte-based observed value when `2 < overshoot ≤ 20`, recorded as `gateway_estimated` source).
+- Branch A releases concurrency and records usage source as provider-reported when the clamp does NOT fire (overshoot ≤ 2 or > 20).
+- Branch B releases concurrency and records usage source as gateway-estimated, covering both the existing upward-correction case (observed > reported) AND the new #255 downward-clamp case (clamp window fires).
 - `/v1/usage` returns HTTP 200 with reservation released and daily token fields reflecting settlement.
 
 Verification command:

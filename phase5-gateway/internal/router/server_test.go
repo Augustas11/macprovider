@@ -2930,8 +2930,16 @@ func TestStreamingReadErrorAfterBuyerCancelSettlesClientDisconnect(t *testing.T)
 func TestStreamingCleanEOFSettlesOK(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"ok"}]}`
 	accountID := "acct_stream_ok"
+	// Content payload aligned with the reported completion_tokens so the
+	// gateway's byte-based observation matches the provider's tokenizer
+	// count and the trust-provider branch fires. Pre-#255 the fixture
+	// here was a 2-byte "ok" content + 4 reported completion_tokens —
+	// a tokenizer-mismatched fixture that exercised the trust-provider
+	// branch only because the old code lacked the downward clamp.
+	// With #255 the clamp catches that exact pattern, so the fixture
+	// now reflects what a real clean stream looks like.
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"ok"}}]}`
+		payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"0123456789abcdef"}}]}`
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload+"\n\ndata: [DONE]\n\n"), nil
 	})}
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
@@ -3550,6 +3558,150 @@ func TestStreamingUnderreportedUsageWithHighProviderPromptFallsBackToGatewayEsti
 	if quota["daily_tokens_reserved"].(float64) != 0 {
 		t.Fatalf("daily_tokens_reserved=%v want 0", quota["daily_tokens_reserved"])
 	}
+}
+
+// TestStreamingProviderReportedOverbillClampedToObserved pins the
+// issue #255 fix: when the provider's WS `usage` frame reports MORE
+// completion tokens than were actually streamed as delta.content
+// (e.g. the tokenizer counts EOS or chat-template stop tokens), the
+// gateway clamps the bill DOWN to the observed value — but ONLY when
+// the overshoot sits inside the pure-absolute clamp window
+// `(clampFloorTokens=2, clampCeilingTokens=20]`.
+//
+// Outside the window — below floor (benign tokenizer noise) OR above
+// ceiling (too large to be tokenizer noise; gateway's byte-estimate
+// is unreliable on dense content where 1 token < 4 bytes, clamping
+// would under-bill the provider for legitimate work) — the gateway
+// trusts the provider's count.
+//
+// R2 security + architect convergence (HIGH): an earlier percentage-
+// based ceiling (50% × observed) still left a moderate-density
+// under-bill class — e.g. observed=225 byte-tokens with legitimate
+// reported=300 actual tokens fell INSIDE the percentage window and
+// got clamped. Switching to pure absolute (≤ 20 tokens) eliminates
+// that false-positive class.
+//
+// Live surfacing: scenario 07 of the v0.3 rerun (2026-06-29) caught
+// +4 / +5 / +7 over-bills on Qwen2.5-Coder-7B-Instruct-4bit hitting
+// air5, all reproducible by the "clamp fires" cases below.
+func TestStreamingProviderReportedOverbillClampedToObserved(t *testing.T) {
+	type tc struct {
+		name              string
+		contentBytes      int   // bytes of delta.content streamed
+		reportedPromptTok int64 // provider's usage.prompt_tokens
+		reportedCompTok   int64 // provider's usage.completion_tokens
+		wantClamp         bool  // true → source=gateway_estimated, comp=observed
+		wantBilledCompTk  int64 // expected completion_tokens in usage_events row
+		wantBilledPromptT int64 // expected prompt_tokens in usage_events row
+	}
+	cases := []tc{
+		// Exact / within-floor: trust provider
+		{name: "exact_match_trusts_provider", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 10, wantClamp: false, wantBilledCompTk: 10, wantBilledPromptT: 7},
+		{name: "1_token_overshoot_within_floor_trusts_provider", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 11, wantClamp: false, wantBilledCompTk: 11, wantBilledPromptT: 7},
+		{name: "2_token_overshoot_at_floor_trusts_provider", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 12, wantClamp: false, wantBilledCompTk: 12, wantBilledPromptT: 7},
+		// In-window clamp: small over-report → clamp; preserve provider prompt
+		{name: "3_token_overshoot_in_window_clamps", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 13, wantClamp: true, wantBilledCompTk: 10, wantBilledPromptT: 7},
+		{name: "iss255_pattern_4_token_overshoot_clamps", contentBytes: 152, reportedPromptTok: 40, reportedCompTok: 42, wantClamp: true, wantBilledCompTk: 38, wantBilledPromptT: 40},
+		{name: "iss255_pattern_5_token_overshoot_clamps", contentBytes: 204, reportedPromptTok: 40, reportedCompTok: 56, wantClamp: true, wantBilledCompTk: 51, wantBilledPromptT: 40},
+		{name: "iss255_pattern_7_token_overshoot_clamps", contentBytes: 152, reportedPromptTok: 40, reportedCompTok: 45, wantClamp: true, wantBilledCompTk: 38, wantBilledPromptT: 40},
+		// At-ceiling-exact: still clamps (closed upper bound).
+		{name: "20_token_overshoot_at_ceiling_clamps", contentBytes: 400, reportedPromptTok: 13, reportedCompTok: 120, wantClamp: true, wantBilledCompTk: 100, wantBilledPromptT: 13},
+		// Just-above-ceiling: trusts provider — density mismatch territory.
+		{name: "21_token_overshoot_just_above_ceiling_trusts_provider", contentBytes: 400, reportedPromptTok: 13, reportedCompTok: 121, wantClamp: false, wantBilledCompTk: 121, wantBilledPromptT: 13},
+		// R2 security + architect convergence (HIGH): moderate-density
+		// scenarios that the old 50%-percentage formula clamped, now
+		// trusted. Example: 900 bytes of CJK-like content with a legit
+		// provider report of 300 tokens — observed=225, overshoot=75,
+		// pure-absolute ceiling=20 → 75 > 20 → trust provider.
+		{name: "moderate_density_33pct_overshoot_trusts_provider", contentBytes: 900, reportedPromptTok: 13, reportedCompTok: 300, wantClamp: false, wantBilledCompTk: 300, wantBilledPromptT: 13},
+		// Extreme density mismatch (4x): trust provider.
+		{name: "dense_content_4x_density_mismatch_trusts_provider", contentBytes: 800, reportedPromptTok: 13, reportedCompTok: 800, wantClamp: false, wantBilledCompTk: 800, wantBilledPromptT: 13},
+		// Tiny observed: floor=2, overshoot in (2, 20] → clamps if
+		// overshoot is e.g. 4. Pure-absolute makes this consistent.
+		{name: "tiny_observed_overshoot_in_absolute_window_clamps", contentBytes: 8, reportedPromptTok: 7, reportedCompTok: 6, wantClamp: true, wantBilledCompTk: 2, wantBilledPromptT: 7}, // observed=2, reported=6, overshoot=4 → clamp
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			output := strings.Repeat("x", c.contentBytes)
+			usageFrame := fmt.Sprintf(`data: {"id":"chatcmpl","usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d},"choices":[{"delta":{},"finish_reason":"stop"}]}`, c.reportedPromptTok, c.reportedCompTok, c.reportedPromptTok+c.reportedCompTok)
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				payload := strings.Join([]string{
+					`data: {"id":"chatcmpl","choices":[{"delta":{"content":"` + output + `"}}]}`,
+					usageFrame,
+					`data: [DONE]`,
+					``,
+				}, "\n\n")
+				return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload), nil
+			})}
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			accountID := "acct_iss255_" + c.name
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+			body := fmt.Sprintf(`{"model":"llama","stream":true,"max_tokens":%d,"messages":[{"role":"user","content":"ok"}]}`, c.wantBilledCompTk+200)
+			resp := postChat(t, h, fullKey, body, nil)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+			}
+			outcome, source, billedComp, billedPrompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
+			if outcome != "ok" {
+				t.Fatalf("outcome = %q, want ok", outcome)
+			}
+			wantSource := "provider_reported"
+			if c.wantClamp {
+				wantSource = "gateway_estimated"
+			}
+			if source != wantSource {
+				t.Errorf("token_source = %q, want %q (clamp=%v: reported=%d observed=%d/%dB window=(%d,%d])",
+					source, wantSource, c.wantClamp, c.reportedCompTok, c.contentBytes/4, c.contentBytes, clampFloorTokens, clampCeilingTokens)
+			}
+			if billedComp != c.wantBilledCompTk {
+				t.Errorf("billed completion_tokens = %d, want %d", billedComp, c.wantBilledCompTk)
+			}
+			if billedPrompt != c.wantBilledPromptT {
+				t.Errorf("billed prompt_tokens = %d, want %d (R1 HIGH: must preserve provider's prompt count)", billedPrompt, c.wantBilledPromptT)
+			}
+		})
+	}
+}
+
+// TestClampWindow pins the issue #255 pure-absolute window:
+//
+//	(clampFloorTokens=2, clampCeilingTokens=20]
+//
+// An over-report `o` clamps iff `2 < o <= 20`. Below floor → trust
+// provider (benign tokenizer noise). Above ceiling → trust provider
+// (gateway byte-estimate is unreliable on dense content; clamping
+// would risk under-billing).
+func TestClampWindow(t *testing.T) {
+	floor, ceiling := clampWindow()
+	if floor != 2 {
+		t.Errorf("clampFloorTokens = %d, want 2", floor)
+	}
+	if ceiling != 20 {
+		t.Errorf("clampCeilingTokens = %d, want 20", ceiling)
+	}
+	// Anti-regression: window does not scale with observed value.
+	// (Earlier versions used max(2, ceil(5% × observed)) for floor
+	// and floor(50% × observed) for ceiling; both led to false-
+	// positive under-bills on moderate-density content.)
+	if clampCeilingTokens <= clampFloorTokens {
+		t.Errorf("clampCeilingTokens (%d) must be > clampFloorTokens (%d)", clampCeilingTokens, clampFloorTokens)
+	}
+}
+
+func usageEventOutcomeAndTokens(t *testing.T, dbPath, accountID string) (outcome, source string, completion, prompt int64) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	if err := db.QueryRow(`SELECT outcome, token_source, completion_tokens, prompt_tokens FROM usage_events WHERE account_id = ? ORDER BY created_at DESC LIMIT 1`, accountID).Scan(&outcome, &source, &completion, &prompt); err != nil {
+		t.Fatalf("query usage row: %v", err)
+	}
+	return outcome, source, completion, prompt
 }
 
 func TestNotFoundReturnsOpenAIEnvelope(t *testing.T) {

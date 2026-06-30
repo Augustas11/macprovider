@@ -88,9 +88,11 @@ struct ProviderSnapshot: Sendable {
     let coordinatorTier: String?
     let recommendedBinaryVersion: String?
     let activeRequestIDCount: Int
+    let thermallyThrottled: Bool
 
     var slotsFree: Int {
-        max(0, capacity.maxConcurrency - requestsInFlight)
+        if thermallyThrottled { return 0 }
+        return max(0, capacity.maxConcurrency - requestsInFlight)
     }
 
     var slotsTotal: Int {
@@ -118,13 +120,15 @@ actor ProviderStatus {
     private var coordinatorTier: String?
     private var recommendedBinaryVersion: String?
     private var activeRequestIDs = Set<String>()
+    private let thermalGate: ThermalGate?
 
-    init(modelID: String?, modelLoaded: Bool, capacity: ProviderCapacity, modelHash: String? = nil) {
+    init(modelID: String?, modelLoaded: Bool, capacity: ProviderCapacity, modelHash: String? = nil, thermalGate: ThermalGate? = nil) {
         self.modelID = modelID
         self.modelHash = modelHash
         self.modelLoaded = modelLoaded
         self.capacity = capacity
         self.status = modelLoaded ? .ready : .unavailable
+        self.thermalGate = thermalGate
     }
 
     func beginRequest(requestID: String? = nil) -> Date {
@@ -177,11 +181,17 @@ actor ProviderStatus {
         }
     }
 
-    func snapshot(resetWindow: Bool = false) -> ProviderSnapshot {
+    func snapshot(resetWindow: Bool = false) async -> ProviderSnapshot {
+        // Resolve thermal state BEFORE reading any actor-isolated mutable
+        // state. Actors are reentrant across `await`, so a `finishRequest`
+        // running during the suspension could mutate `windowRequests` and
+        // friends between read and reset.
+        let throttled = await thermalGate?.isThrottled() ?? false
         let avgLatency = windowRequests > 0 ? windowLatencyMS / Double(windowRequests) : nil
         let throughput = windowGenerationSeconds > 0 ? Double(windowCompletionTokens) / windowGenerationSeconds : nil
+        let effectiveStatus: ProviderHealthState = (throttled && (status == .ready || status == .busy)) ? .busy : status
         let snapshot = ProviderSnapshot(
-            status: status,
+            status: effectiveStatus,
             modelID: modelID,
             modelHash: modelHash,
             modelLoaded: modelLoaded,
@@ -199,7 +209,8 @@ actor ProviderStatus {
             coordinatorAssignedID: coordinatorAssignedID,
             coordinatorTier: coordinatorTier,
             recommendedBinaryVersion: recommendedBinaryVersion,
-            activeRequestIDCount: activeRequestIDs.count
+            activeRequestIDCount: activeRequestIDs.count,
+            thermallyThrottled: throttled
         )
         if resetWindow {
             windowRequests = 0
