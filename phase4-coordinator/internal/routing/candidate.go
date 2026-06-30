@@ -1,23 +1,37 @@
 // Package routing holds SPEC-004 smart-router primitives — candidate
-// modeling, effective-throughput weighting, and epsilon-cohort
-// membership — extracted from internal/buyer/server.go so Phase C/D
-// can refactor the selection path against a single canonical home.
+// modeling, effective-throughput weighting, epsilon-cohort
+// membership, exclusion-set threading, and the eligibility-filter
+// pipeline — extracted from internal/buyer/server.go so each
+// SPEC-004 pillar (B helpers, C filter, D classes/objectives/retry,
+// A sticky) has a single canonical home.
 //
-// Phase B scope: this package exists as a scaffolding-only addition.
-// The active selection path in internal/buyer/server.go is NOT yet
-// wired through these functions; AC-SR-1 default-config regression
-// (byte-identical selection vs current SPEC-002 v1.5.2 origin/main
-// behavior) is the load-bearing test for Phase B and is preserved
-// because server.go is unchanged.
+// Phase B added Candidate / Weights / EffectiveThroughput /
+// Objective / WithinRelativeEpsilon / InEpsilonCohort.
+// Phase C added Excluded + EligibleCandidates + EligibilityChecker
+// and wired internal/buyer/server.go's selectProviderExcluding
+// through EligibleCandidates (filter -> sort -> tiebreak -> preflight).
+// Phase D (model classes + objectives + dispatch rewrite + retry
+// + randomized tiebreak + FR-SR-17 logging) and Phase A (sticky
+// affinity + bounded map + PurgeAccount) will land subsequently
+// and consume more of this package's surface.
+//
+// AC-SR-1 default-config regression (byte-identical selection vs
+// current SPEC-002 v1.5.2 origin/main behavior) is locked by
+// internal/buyer/server_test.go::TestDefaultConfigPreservesBaselineProviderSelection
+// (with alias TestSPEC004DefaultConfigRegression matching the
+// BUILD prompt's checklist command).
 package routing
 
 import "github.com/augstar/macprovider-coordinator/internal/pool"
 
 // Candidate wraps a pool.Provider with routing-evaluation metadata.
-// Phase B carries only the Provider; Phase C will add eligibility
-// state (post-filter status, exclusion reason, breaker hold) and
-// Phase D will add score caches (objective metric, balanced
-// component values).
+// Phase B / C carry only the Provider (the EligibilityChecker
+// interface in filter.go covers per-provider state queries instead
+// of caching them on Candidate). Phase D may add score caches
+// (objective metric, balanced-formula component values) here when
+// the runtime randomization wiring needs them; future additions
+// remain backward-compatible because the struct is opaque to
+// callers outside this package.
 type Candidate struct {
 	Provider pool.Provider
 }
