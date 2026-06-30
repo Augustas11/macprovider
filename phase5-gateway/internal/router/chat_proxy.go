@@ -1066,34 +1066,58 @@ func estimateStreamingCompletionTokens(emitted, maxTokens int64) int64 {
 	return completion
 }
 
-// Clamp window for the streaming over-report fix (#255). Pure
-// absolute bounds — no percentage scaling.
+// Shared clamp window for the streaming completion-token symmetric
+// clamp: downward over-report (#255) AND upward estimator inflation
+// (#278). Pure absolute bounds — no percentage scaling, no
+// direction-specific tuning. The two directions are intentionally
+// symmetric and MUST stay so; do not tune one side independently
+// without a fresh 3-lane audit on both.
 //
-// An over-report `o` (reported - observed) triggers the downward
-// clamp iff `clampFloorTokens < o <= clampCeilingTokens`.
+// Let `o` be the absolute disagreement between provider's reported
+// `usage.completion_tokens` and the gateway's byte-derived estimate.
+// The clamp fires iff `clampFloorTokens < o <= clampCeilingTokens` in
+// either direction:
 //
-// Pure-absolute shape (R2 security + architect HIGH convergence):
+//   - Downward (reported > observed; #255): clamp DOWN to observed,
+//     token_source = "gateway_estimated". The provider over-reported
+//     by a small amount; gateway's byte count wins.
 //
-//   - Below `clampFloorTokens` (≤ 2 tokens): benign tokenizer noise
-//     (EOS / chat-template stop tokens that count as completion but
-//     never stream as delta content). Trust the provider.
+//   - Upward   (observed > reported; #278): clamp UP to reported,
+//     token_source = "provider_reported". The gateway's byte
+//     estimator inflated above the provider's tokenizer (e.g.
+//     ceil(N/4) overshoots on English where ~4.3-4.7 bytes/token);
+//     provider's tokenizer is authoritative on its own output for
+//     small disagreements. Surfaced by v0.4 scenario 07 (4 of 40
+//     successful streaming pairs over-billed by +6 to +9 tokens).
+//
+// Outside the window neither direction clamps (the existing
+// authority wins):
+//
+//   - Below `clampFloorTokens` (≤ 2 tokens, either direction): benign
+//     tokenizer noise (EOS / chat-template stop tokens not in delta
+//     content; or sub-byte rounding in ceil(N/4)). Downward keeps
+//     `provider_reported`; upward keeps `gateway_estimated`.
 //
 //   - Above `clampCeilingTokens` (> 20 tokens): too large to be
-//     tokenizer noise. The gateway's byte-based estimate is
-//     unreliable on dense content (CJK, code, short tokens where
-//     1 token < 4 bytes); clamping here would under-bill a provider
-//     for legitimately-generated content. Trust the provider.
+//     tokenizer noise. Downward: byte estimate unreliable on dense
+//     content (CJK / code / short tokens where 1 token < 4 bytes);
+//     trust the provider. Upward: stream truncation or zero-report
+//     fraud — provider's usage chunk plausibly under-reports content
+//     actually generated; trust the byte estimator.
 //
 // Earlier rounds tried a percentage formula but R2 audits caught a
 // false-positive class: a legitimate moderate-density report
 // (e.g. observed=225 byte-tokens, reported=300 actual tokens) sat
 // inside the percentage window and got clamped, under-billing the
-// provider. Pure absolute bounds eliminate that class — any
-// overshoot > 20 tokens is trusted as density mismatch.
+// provider. Pure absolute bounds eliminate that class — any overshoot
+// > 20 tokens is trusted as density mismatch / truncation.
 //
-// Cost: an adversarial provider can systematically over-report by
-// up to 20 tokens per request. Bounded and small per-request; logged
-// each time the clamp fires for audit visibility.
+// Cost (symmetric in both directions): an adversarial provider can
+// systematically over- or under-report by up to 20 tokens per
+// request. Bounded and small per-request; logged each time the clamp
+// fires for audit visibility. Closing the residual skim surfaces
+// requires a tokenizer-grounded observation (replacing the byte
+// heuristic) — out of scope for #255 and #278.
 const (
 	clampFloorTokens   int64 = 2
 	clampCeilingTokens int64 = 20

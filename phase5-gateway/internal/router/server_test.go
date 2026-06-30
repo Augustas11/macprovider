@@ -3698,6 +3698,14 @@ func TestStreamingProviderReportedUnderbillClampedToReported(t *testing.T) {
 		{name: "9_token_overshoot_in_window_clamps", contentBytes: 76, reportedPromptTok: 13, reportedCompTok: 10, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 10},
 		{name: "15_token_overshoot_in_window_clamps", contentBytes: 100, reportedPromptTok: 17, reportedCompTok: 10, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 10},
 		{name: "20_token_overshoot_at_ceiling_clamps", contentBytes: 400, reportedPromptTok: 19, reportedCompTok: 80, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 80},
+		// Zero-report boundary (R2 SECURITY LOW): a hostile provider may
+		// report 0 completion tokens. At the ceiling boundary the clamp
+		// fires and bills 0 (bounded ≤ 20-token underbill, same as the
+		// symmetric over-report risk accepted in #262). Just above the
+		// ceiling the gateway estimator wins, protecting against
+		// stream-truncation / zero-report fraud with no per-request bound.
+		{name: "zero_report_at_ceiling_clamps_to_zero", contentBytes: 80, reportedPromptTok: 19, reportedCompTok: 0, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 0},
+		{name: "zero_report_just_above_ceiling_trusts_gateway_estimate", contentBytes: 84, reportedPromptTok: 19, reportedCompTok: 0, wantClamp: false, wantSource: "gateway_estimated", wantBilledCompTk: 21},
 		// v0.4 scenario-07 patterns: English Qwen3-32B output where ceil(bytes/4) ran high.
 		{name: "v04_scenario07_reported_55_observed_64_clamps", contentBytes: 256, reportedPromptTok: 23, reportedCompTok: 55, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 55},
 		{name: "v04_scenario07_reported_33_observed_42_clamps", contentBytes: 168, reportedPromptTok: 29, reportedCompTok: 33, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 33},
