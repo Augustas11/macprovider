@@ -2857,7 +2857,7 @@ func TestStreamingScannerErrorSettlesStreamTruncated(t *testing.T) {
 func TestStreamingProviderReportedUsageCannotUnderstateTruncatedOutput(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"large line"}]}`
 	accountID := "acct_stream_underreported_truncated"
-	output := strings.Repeat("x", 40)
+	output := strings.Repeat("x", 100)
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		pr, pw := io.Pipe()
 		go func() {
@@ -3482,7 +3482,7 @@ func TestStreamingInvalidUsageAfterValidFallsBackToGatewayEstimate(t *testing.T)
 func TestStreamingProviderReportedUsageCannotUnderstateObservedOutput(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"ok"}]}`
 	accountID := "acct_stream_underreported_usage"
-	output := strings.Repeat("x", 40)
+	output := strings.Repeat("x", 100)
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		payload := strings.Join([]string{
 			`data: {"id":"chatcmpl","choices":[{"delta":{"content":"` + output + `"}}]}`,
@@ -3520,9 +3520,9 @@ func TestStreamingProviderReportedUsageCannotUnderstateObservedOutput(t *testing
 }
 
 func TestStreamingUnderreportedUsageWithHighProviderPromptFallsBackToGatewayEstimate(t *testing.T) {
-	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"ok"}]}`
+	body := `{"model":"llama","stream":true,"max_tokens":50,"messages":[{"role":"user","content":"ok"}]}`
 	accountID := "acct_stream_underreported_high_prompt"
-	output := strings.Repeat("x", 40)
+	output := strings.Repeat("x", 100)
 	promptEstimate := estimatePromptTokens([]byte(body))
 	providerPrompt := promptEstimate + 19
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -3550,7 +3550,7 @@ func TestStreamingUnderreportedUsageWithHighProviderPromptFallsBackToGatewayEsti
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
-	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), 20)
+	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), 50)
 	wantUsed := float64(promptEstimate + wantCompletion)
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
@@ -3666,6 +3666,102 @@ func TestStreamingProviderReportedOverbillClampedToObserved(t *testing.T) {
 	}
 }
 
+// TestStreamingProviderReportedUnderbillClampedToReported pins the
+// issue #278 symmetric fix: when the gateway's byte-derived estimate
+// runs slightly ABOVE the provider's WS usage frame, the gateway clamps
+// back to the provider's authoritative tokenizer count — but ONLY when
+// the upward overshoot sits inside the same pure-absolute window
+// `(clampFloorTokens=2, clampCeilingTokens=20]` used by the #255/#262
+// downward clamp.
+//
+// Outside the window — below floor (benign tokenizer noise) OR above
+// ceiling (too large to be tokenizer noise; likely stream truncation or
+// zero-report fraud) — the gateway keeps the byte estimate.
+func TestStreamingProviderReportedUnderbillClampedToReported(t *testing.T) {
+	type tc struct {
+		name              string
+		contentBytes      int   // bytes of delta.content streamed
+		reportedPromptTok int64 // provider's usage.prompt_tokens
+		reportedCompTok   int64 // provider's usage.completion_tokens
+		wantClamp         bool  // true -> source=provider_reported, comp=reported
+		wantSource        string
+		wantBilledCompTk  int64 // expected completion_tokens in usage_events row
+	}
+	cases := []tc{
+		// Exact / within-floor: keep current gateway-estimate behavior when observed > reported.
+		{name: "exact_match_trusts_provider", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 10, wantClamp: false, wantSource: "provider_reported", wantBilledCompTk: 10},
+		{name: "1_token_overshoot_within_floor_trusts_gateway_estimate", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 9, wantClamp: false, wantSource: "gateway_estimated", wantBilledCompTk: 10},
+		{name: "2_token_overshoot_at_floor_trusts_gateway_estimate", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 8, wantClamp: false, wantSource: "gateway_estimated", wantBilledCompTk: 10},
+		// In-window clamp: small upward estimator inflation -> clamp; preserve provider prompt.
+		{name: "3_token_overshoot_in_window_clamps", contentBytes: 40, reportedPromptTok: 7, reportedCompTok: 7, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 7},
+		{name: "5_token_overshoot_in_window_clamps", contentBytes: 60, reportedPromptTok: 11, reportedCompTok: 10, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 10},
+		{name: "9_token_overshoot_in_window_clamps", contentBytes: 76, reportedPromptTok: 13, reportedCompTok: 10, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 10},
+		{name: "15_token_overshoot_in_window_clamps", contentBytes: 100, reportedPromptTok: 17, reportedCompTok: 10, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 10},
+		{name: "20_token_overshoot_at_ceiling_clamps", contentBytes: 400, reportedPromptTok: 19, reportedCompTok: 80, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 80},
+		// Zero-report boundary (R2 SECURITY LOW): a hostile provider may
+		// report 0 completion tokens. At the ceiling boundary the clamp
+		// fires and bills 0 (bounded ≤ 20-token underbill, same as the
+		// symmetric over-report risk accepted in #262). Just above the
+		// ceiling the gateway estimator wins, protecting against
+		// stream-truncation / zero-report fraud with no per-request bound.
+		{name: "zero_report_at_ceiling_clamps_to_zero", contentBytes: 80, reportedPromptTok: 19, reportedCompTok: 0, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 0},
+		{name: "zero_report_just_above_ceiling_trusts_gateway_estimate", contentBytes: 84, reportedPromptTok: 19, reportedCompTok: 0, wantClamp: false, wantSource: "gateway_estimated", wantBilledCompTk: 21},
+		// v0.4 scenario-07 patterns: English Qwen3-32B output where ceil(bytes/4) ran high.
+		{name: "v04_scenario07_reported_55_observed_64_clamps", contentBytes: 256, reportedPromptTok: 23, reportedCompTok: 55, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 55},
+		{name: "v04_scenario07_reported_33_observed_42_clamps", contentBytes: 168, reportedPromptTok: 29, reportedCompTok: 33, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 33},
+		{name: "v04_scenario07_reported_34_observed_41_clamps", contentBytes: 164, reportedPromptTok: 31, reportedCompTok: 34, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 34},
+		{name: "v04_scenario07_reported_46_observed_52_clamps", contentBytes: 208, reportedPromptTok: 37, reportedCompTok: 46, wantClamp: true, wantSource: "provider_reported", wantBilledCompTk: 46},
+		// Above ceiling: keep gateway estimate to protect stream-truncation / zero-report fraud cases.
+		{name: "21_token_overshoot_just_above_ceiling_trusts_gateway_estimate", contentBytes: 400, reportedPromptTok: 19, reportedCompTok: 79, wantClamp: false, wantSource: "gateway_estimated", wantBilledCompTk: 100},
+		{name: "100_token_overshoot_large_trusts_gateway_estimate", contentBytes: 600, reportedPromptTok: 19, reportedCompTok: 50, wantClamp: false, wantSource: "gateway_estimated", wantBilledCompTk: 150},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			output := strings.Repeat("x", c.contentBytes)
+			usageFrame := fmt.Sprintf(`data: {"id":"chatcmpl","usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d},"choices":[{"delta":{},"finish_reason":"stop"}]}`, c.reportedPromptTok, c.reportedCompTok, c.reportedPromptTok+c.reportedCompTok)
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				payload := strings.Join([]string{
+					`data: {"id":"chatcmpl","choices":[{"delta":{"content":"` + output + `"}}]}`,
+					usageFrame,
+					`data: [DONE]`,
+					``,
+				}, "\n\n")
+				return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload), nil
+			})}
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			accountID := "acct_iss278_" + c.name
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+			observed := estimateTokensFromBytes(int64(c.contentBytes))
+			body := fmt.Sprintf(`{"model":"llama","stream":true,"max_tokens":%d,"messages":[{"role":"user","content":"ok"}]}`, observed+200)
+			resp := postChat(t, h, fullKey, body, nil)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+			}
+			outcome, source, billedComp, billedPrompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
+			if outcome != "ok" {
+				t.Fatalf("outcome = %q, want ok", outcome)
+			}
+			if source != c.wantSource {
+				t.Errorf("token_source = %q, want %q (clamp=%v: reported=%d observed=%d/%dB window=(%d,%d])",
+					source, c.wantSource, c.wantClamp, c.reportedCompTok, observed, c.contentBytes, clampFloorTokens, clampCeilingTokens)
+			}
+			if billedComp != c.wantBilledCompTk {
+				t.Errorf("billed completion_tokens = %d, want %d", billedComp, c.wantBilledCompTk)
+			}
+			wantPrompt := estimatePromptTokens([]byte(body))
+			if c.wantSource == "provider_reported" {
+				wantPrompt = c.reportedPromptTok
+			}
+			if billedPrompt != wantPrompt {
+				t.Errorf("billed prompt_tokens = %d, want %d", billedPrompt, wantPrompt)
+			}
+		})
+	}
+}
+
 // TestClampWindow pins the issue #255 pure-absolute window:
 //
 //	(clampFloorTokens=2, clampCeilingTokens=20]
@@ -3688,6 +3784,39 @@ func TestClampWindow(t *testing.T) {
 	// positive under-bills on moderate-density content.)
 	if clampCeilingTokens <= clampFloorTokens {
 		t.Errorf("clampCeilingTokens (%d) must be > clampFloorTokens (%d)", clampCeilingTokens, clampFloorTokens)
+	}
+}
+
+func TestClampWindowSymmetric(t *testing.T) {
+	floor, ceiling := clampWindow()
+	for _, c := range []struct {
+		name      string
+		reported  int64
+		observed  int64
+		wantClamp bool
+	}{
+		{name: "downward_floor", reported: 12, observed: 10, wantClamp: false},
+		{name: "downward_in_window", reported: 13, observed: 10, wantClamp: true},
+		{name: "downward_ceiling", reported: 30, observed: 10, wantClamp: true},
+		{name: "downward_above_ceiling", reported: 31, observed: 10, wantClamp: false},
+		{name: "upward_floor", reported: 8, observed: 10, wantClamp: false},
+		{name: "upward_in_window", reported: 7, observed: 10, wantClamp: true},
+		{name: "upward_ceiling", reported: 10, observed: 30, wantClamp: true},
+		{name: "upward_above_ceiling", reported: 10, observed: 31, wantClamp: false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var overshoot int64
+			if c.reported > c.observed {
+				overshoot = c.reported - c.observed
+			} else {
+				overshoot = c.observed - c.reported
+			}
+			gotClamp := overshoot > floor && overshoot <= ceiling
+			if gotClamp != c.wantClamp {
+				t.Errorf("symmetric clamp for reported=%d observed=%d overshoot=%d = %v, want %v (window=(%d,%d])",
+					c.reported, c.observed, overshoot, gotClamp, c.wantClamp, floor, ceiling)
+			}
+		})
 	}
 }
 
