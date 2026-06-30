@@ -50,8 +50,10 @@ leaving LegacyReason empty for sticky cases. Fix: always populate
 `Decision.LegacyReason` with the caller-supplied reason string
 regardless of TiebreakMode mapping.
 
-**Lesson logged** in [[feedback-audit-prompts-log-shape-backcompat]]
-(memory rule TBD): audit prompts for log-shape refactors MUST include
-explicit "enumerate every pre-refactor field/value and prove it still
-emits" coverage — three-lane audits missing a back-compat regression
-that integration tests caught is signal for the discipline, not noise.
+**Lesson logged** as memory rule
+`feedback-audit-prompts-log-shape-backcompat` (in user-memory, not
+this repo): audit prompts for log-shape refactors MUST include
+explicit "enumerate every pre-refactor field/value and prove it
+still emits" coverage. Three-lane audits missing a back-compat
+regression that integration tests caught is signal for the
+discipline, not noise.

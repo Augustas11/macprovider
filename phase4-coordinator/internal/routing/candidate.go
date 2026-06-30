@@ -10,10 +10,23 @@
 // Phase C added Excluded + EligibleCandidates + EligibilityChecker
 // and wired internal/buyer/server.go's selectProviderExcluding
 // through EligibleCandidates (filter -> sort -> tiebreak -> preflight).
-// Phase D (model classes + objectives + dispatch rewrite + retry
-// + randomized tiebreak + FR-SR-17 logging) and Phase A (sticky
-// affinity + bounded map + PurgeAccount) will land subsequently
-// and consume more of this package's surface.
+// Phase D added BalancedScores (FR-SR-8 normative formula) +
+// Decision / LogRoutingDecision / CandidateLogEntry (SPEC-004 §7
+// routing-decision log surface with legacy aliases preserved for
+// pre-Phase-D consumers); server.go's logRoutingDecisionFull
+// delegates here.
+// Phase A added the sticky/ sub-package (Map / Lookup / Update /
+// PurgeAccount / InvalidateClass); server.go's stickyLookup /
+// stickyStore / purgeStickyAccount delegate to sticky.Map and
+// the inline stickyEntry has been removed.
+//
+// Still deferred to follow-up commits (not in this PR): objective.go
+// sort-comparator extraction, dispatch.go RewriteModel extraction,
+// retry.go retry-loop extraction, InvalidateClass SIGHUP trigger
+// wiring, per-attempt FR-SR-17 log threading at retry/preflight
+// call sites, mid-request stable seed across UTC midnight,
+// BalancedScores compute caching, more AC-SR-1 byte-identity
+// scenarios.
 //
 // AC-SR-1 default-config regression (byte-identical selection vs
 // current SPEC-002 v1.5.2 origin/main behavior) is locked by

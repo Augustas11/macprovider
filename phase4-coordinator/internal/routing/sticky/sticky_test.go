@@ -224,6 +224,36 @@ func TestMap_UpdateRejectsAccountIDMismatchOnRefresh(t *testing.T) {
 	}
 }
 
+func TestMap_UpdatePreservesExistingAccountIDWhenIncomingIsEmpty(t *testing.T) {
+	// FULL-IMPL R2 CODE-M1: a refresh with empty incoming accountID
+	// MUST NOT erase the existing entry's non-empty AccountID.
+	// Erasing would make the entry un-purgeable by the real account
+	// (PurgeAccount matches on equal AccountID strings, and the
+	// buyer-side guard already short-circuits PurgeAccount("")).
+	t.Parallel()
+	m := newTestMap(time.Hour, 10, newClock())
+	m.Update("conv:1", "acc-A", "prov-1", "model-A")
+	// Refresh with empty AccountID (e.g. a buyer follow-up that
+	// dropped the X-MacProvider-Account header).
+	if mismatch := m.Update("conv:1", "", "prov-1-refreshed", "model-A"); mismatch {
+		t.Fatalf("refresh with empty incoming AccountID: want mismatch=false, got true")
+	}
+	res := m.Lookup("conv:1")
+	if !res.Hit {
+		t.Fatalf("entry should remain after empty-incoming refresh")
+	}
+	if res.Entry.AccountID != "acc-A" {
+		t.Errorf("existing AccountID 'acc-A' MUST be preserved (not erased); got %q", res.Entry.AccountID)
+	}
+	if res.Entry.ProviderID != "prov-1-refreshed" {
+		t.Errorf("ProviderID should have been refreshed; got %q", res.Entry.ProviderID)
+	}
+	// And the real account can still purge it.
+	if removed := m.PurgeAccount("acc-A"); removed != 1 {
+		t.Errorf("acc-A PurgeAccount should remove the entry; got removed=%d", removed)
+	}
+}
+
 func TestMap_UpdateAllowsRefreshWhenExistingAccountIDIsEmpty(t *testing.T) {
 	// Refresh from empty AccountID to a real AccountID is allowed
 	// (legacy entry being upgraded). The mismatch guard only fires

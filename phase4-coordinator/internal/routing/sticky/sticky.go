@@ -139,10 +139,23 @@ func (m *Map) Update(conversationKey, accountID, providerID, modelScope string) 
 		if existing.AccountID != "" && accountID != "" && existing.AccountID != accountID {
 			return true
 		}
+		// Empty-incoming AccountID preservation: when the existing
+		// entry has a non-empty AccountID but the incoming one is
+		// empty (e.g., a buyer request that omitted the
+		// X-MacProvider-Account header on a follow-up), preserve
+		// the existing attribution rather than erase it. Erasing
+		// would make the entry un-purgeable by the real account
+		// later (PurgeAccount matches on equal AccountID strings;
+		// nothing matches "" once the buyer-side guard short-
+		// circuits empty PurgeAccount calls). FULL-IMPL R2 CODE-M1.
+		effectiveAccountID := accountID
+		if accountID == "" && existing.AccountID != "" {
+			effectiveAccountID = existing.AccountID
+		}
 		m.entries[conversationKey] = Entry{
 			ConversationKey: conversationKey,
 			ProviderID:      providerID,
-			AccountID:       accountID,
+			AccountID:       effectiveAccountID,
 			ModelScope:      modelScope,
 			CreatedAt:       existing.CreatedAt,
 			LastUsedAt:      now,
