@@ -1,13 +1,14 @@
 # SPEC-007 - Internal Operator Protocol Explorer
 Dependency lines: depends on `specs/SPEC-002-coordinator.md`, `specs/SPEC-005-billing.md`, `specs/SPEC-006-buyer-api.md`, `specs/SPEC-007-explorer-design.md`, and `specs/SPEC-007-operator-decisions.md`.
 Normative language in this document uses RFC 2119 meanings for MUST, MUST NOT, SHOULD,
-SHOULD NOT, and MAY. SPEC-007 v0.4 defines an internal, read-only,
+SHOULD NOT, and MAY. SPEC-007 v0.5 defines an internal, read-only,
 single-operator explorer for the Mac Provider protocol. The explorer is an operator
 cockpit. It is not a public explorer. It is not a control plane. It is not a
 settlement mutator. It is not a parallel analytics store.
 ## 1. Change log
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| v0.5 | 2026-06-30 | docs+impl (ISS-245) | Closes the v0.4 deprecation window per the v0.4 §5.6 + §6.4 commitments. **Trigger:** issue #245's option (2) — operator UI cutover — satisfied by this PR's dashboard.js change (the only first-party operator UI). Telemetry-quiet (14d) and 90-day cutoff triggers did NOT fire — the dashboard cutover IS the cutover. **§5.6 + §6.4 (path-segment typing, break mode):** the `{request_id}` path-segment MUST carry a typed prefix — `int_<coordinator-internal request_id>` for §5.6, `ext_<external_request_id>` for §6.4. Untyped (legacy bare-id) calls are rejected with `400 invalid_request_error` + `code: session_id_untyped`. The v0.4 `payout_explorer_path_segment_untyped` audit/log emit is removed because the path is no longer reachable. **IMPL:** `phase5-gateway/internal/router/explorer.go::handleExplorerSessionDetail` and `phase4-coordinator/internal/explorer/handlers.go::handleSessionDetail` return 400 when `parseTypedSegment` reports `typed=false` (gateway) or `strings.CutPrefix("int_")` returns `ok=false || stripped==""` (coordinator). `Handler.logPathSegmentUntyped` deleted (no longer reachable). `phase4-coordinator/internal/explorer/static/js/dashboard.js` `linkFor` emits `/admin/explorer/sessions/int_${encodeURIComponent(v)}` for both `request_id` columns and `link_target: session:` rows so coordinator-dashboard navigations match the new typed-prefix contract. **Tests:** `TestSessionDetail_UntypedReturns400` + `TestSessionDetail_EmptyIntPrefixReturns400` (coordinator) and `TestExplorerSessionDetail_UntypedReturns400` + `TestExplorerSessionDetail_EmptyExtPrefixReturns400` (gateway) replace the v0.4 deprecation-emit tests. Pre-v0.5 callers that still pass bare ids will receive 400 — operators MUST migrate to typed prefixes (the coordinator dashboard already emits them as of v0.5). |
 | v0.4 | 2026-06-29 | docs+impl (ISS-231) | Closes the v0.3 R2 architect lane deferrals from PR #221. **§6.4 v0.4 audit payload:** when truncation fires the gateway emits a bounded forensic sample (cap `N_forensic=100`, scan probed at `N_forensic+1`) to `audit_events` — NOT an unbounded list (closes R1 SEC HIGH collision-flood DoS; an operator-runbook offline-query is the recovery path when a deeper sample is needed). **R1 audit deferrals** (filed as separate follow-ups, not blocking v0.4): (a) SPEC-007 centralized event table — A future SPEC-007 vN.M+1 should add a §-level event registry analogous to SPEC-016 §7.1 so BetterStack alert filters catch new event names by convention. (b) `payout_explorer_path_segment_untyped` channel asymmetry — gateway emits to audit_events DB rows; coordinator emits to journald JSON via stdlib log. Runbook should reflect both. (c) Near-cap 409 audit — only the truncated 409 path emits an audit row; 2–9 account ambiguities are still visible only via the response. The v0.5 break (#245) is the natural place to revisit. **R4 SEC MEDIUM deferred to #246**: the five session-detail fetch helpers (usage_events / quota_reservations / concurrency_reservations / feedback_events / audit_events) use an optional-predicate `(? = '' OR request_id = ?)` shape so the same prepared statement serves both scoped and unscoped paths. SQLite plans this as `SCAN`. Tracked at #246 (not blocking v0.4 — the ambiguity probe AND scoped-path are now indexed; the unscoped 200 path is auth-gated and not a hot path). **R1 closures absorbed in v0.4:** bounded forensic SELECT at N_forensic=100+1 entries (closes SEC HIGH collision-flood DoS class — the unbounded variant was the wrong primitive); `json.Marshal` for ALL audit/log JSON payloads (closes SEC MEDIUM hand-rolled escape gap — C0 controls and U+2028/U+2029 are now correctly handled); `omitempty` dropped from `MatchedAccountIDsTruncated` DTO so a future direct serialization keeps the field present (closes ARCH LOW); cap=10 documented as a security invariant, not an operator knob (closes ARCH LOW); v0.5 break filed as issue #245 with concrete trigger conditions (closes ARCH MEDIUM-2). **§6.4 (gateway session-detail):** `matched_account_ids` MUST be capped at N=10 entries in the 409 ambiguity response; the SQL UNION carries `LIMIT 11` so the handler detects overflow without inflating the row set. When the underlying union produces >10 distinct account_ids the response MUST include `"matched_account_ids_truncated": true` and the gateway MUST emit an `audit_events` row at WARN with a bounded forensic sample (post-hoc investigation; bound N_forensic=100 per §6.4). Bounds operator log noise + protects the 409 response body against malicious collision floods. **§5.6 + §6.4 (path-segment typing, deprecation-window mode):** the `{request_id}` path-segment MAY now carry a typed prefix — `int_<coordinator-internal request_id>` for §5.6, `ext_<external_request_id>` for §6.4. Untyped (legacy bare-id) calls remain accepted in v0.4 BUT both handlers MUST emit a `payout_explorer_path_segment_untyped` audit row (severity=WARN, fields: `endpoint, request_id, ts_utc`) to surface the deprecation. **v0.5 (tracked at #245) will reject untyped with `400 session_id_untyped`.** Typed-prefix mode closes the path-segment-overload class properly — pre-v0.3 lookup-order disambiguation is no longer the contract authority. **IMPL:** `phase5-gateway/internal/storage/sqlite/explorer.go::explorerAccountIDsForRequest` gains `LIMIT 11`; gateway 409 handler computes the truncation flag + emits the WARN audit row; gateway + coordinator session-detail handlers parse the typed prefix when present and emit deprecation WARN when untyped. **Tests:** `TestExplorerAccountIDsForRequest_CapAt10WithTruncationFlag`, `TestExplorerSessionDetail_TypedPrefixIsParsedCorrectly`, `TestExplorerSessionDetail_UntypedEmitsDeprecationAudit` pin the new contracts. Three-lane codex audit findings in `specs/SPEC-007-v0-4-audit.md`. |
 | v0.3 | 2026-06-29 | docs+impl (ISS-212) | Composite-PK addendum reflecting the gateway PK schema landed in #196 + the coordinator-side composite reconciliation key landed in #211 (PR #224 / SPEC-002 v1.5.0). **§6.4 (gateway session-detail):** `(account_id, request_id)` is the physical identity for `usage_events`, `quota_reservations`, `concurrency_reservations`, `feedback_events`, and `audit_events`; `request_id` alone is only a logical join key. Optional `?account_id=` disambiguation query parameter; `409 ambiguous_request_id` response with `matched_account_ids[]` computed over ALL FIVE account-keyed session-detail tables (R2: extended from the three reservation/usage tables to include feedback_events and audit_events — buyer-attachable feedback would otherwise cross-pollinate a 200 response). Window-contract split between scoped/unscoped paths; `idx_usage_request` supports the unscoped path. Forbidden-fields block. **§6.1:** endpoint-specific error-exception note covering §6.4's OpenAI-compatible 409 envelope. **§5.6 (coordinator session-detail):** path-segment is the coordinator-internal `request_id` only in v0.3 (path-segment overload deferred to v0.4). Both-or-nothing gateway-proxy rule: the coordinator MUST forward `external_request_id` + `?account_id=` (NOT the internal id) when proxying, and MUST NOT proxy when either field is missing on the resolved row — incomplete-identity rows return `gateway: {"error": {"code": "gateway_identity_unavailable"}}` with `partial=false` and full coordinator-side detail. Unknown coordinator-internal `request_id` returns 404 regardless of gateway data. §14.7.1 added to document the new identity-unavailable failure mode; UI MUST distinguish it from `gateway_unavailable`. **§7.5 (cross-component join keys):** rewritten to split intra-coordinator joins (on internal `request_id`) from cross-service joins (on the composite `(account_id, external_request_id)` ⇔ `(account_id, request_id)`). **AC-7:** updated to seed coordinator rows carrying composite identity, assert gateway proxy uses `external_request_id` + `?account_id=` (not the internal id), exercise the cross-account isolation case (two coordinator rows with the same external_request_id route to different accounts), and exercise the legacy NULL-account "no proxy → gateway_identity_unavailable" sub-case. **IMPL:** `phase5-gateway/internal/storage/sqlite/explorer.go` `explorerAccountIDsForRequest` extended to union all five tables; new regression `TestExplorerSessionDetailAmbiguityExtendedToFeedbackAndAudit` pins the feedback/audit cross-pollination guard. **Paired:** SPEC-007-explorer-design.md §2.8 GAP-closed pointer updated to SPEC-002 v1.5.0 / #211. Three-lane codex audit findings + dispositions in `specs/SPEC-007-v0-3-audit.md`. |
 | triage 2026-06-26 | 2026-06-26 | docs/OPEN_QUESTIONS.md | M-3 through M-12 (deferred-to-v0.3 audit findings) closed as unrecoverable — the underlying audit document was never persisted to the repo and the findings list is not reconstructible from history. If operator-explorer concerns recur, run a fresh audit cycle and number anew. No version bump; no normative change. |
@@ -121,7 +122,7 @@ operator browser
        -> HTTPS proxy to gateway /admin/explorer/* with Authorization: Bearer <coordinator.operator_key>
             -> gateway SQLite reads
 ```
-The operator browser MUST call only the coordinator origin. The operator browser MUST NOT call gateway admin endpoints directly. The coordinator MUST NOT proxy mutating gateway admin endpoints. The coordinator MUST NOT perform verb or query translation for pass-through gateway explorer proxy paths. **Exemption (v0.3 / §5.6):** the session-detail endpoint MAY translate its inbound path-segment (coordinator-internal `request_id`) into the gateway-side composite key — `GET /admin/explorer/sessions/<external_request_id>?account_id=<account_id>` — derived from the resolved `request_log` row. This is the both-or-nothing safety contract required to avoid embedding wrong-account gateway data; the translation is a SPEC-007 v0.3 requirement, not a verb/query-translation violation.
+The operator browser MUST call only the coordinator origin. The operator browser MUST NOT call gateway admin endpoints directly. The coordinator MUST NOT proxy mutating gateway admin endpoints. The coordinator MUST NOT perform verb or query translation for pass-through gateway explorer proxy paths. **Exemption (§5.6):** the session-detail endpoint MAY translate its inbound `int_`-prefixed path-segment (coordinator-internal `request_id`) into the gateway-side composite key — `GET /admin/explorer/sessions/ext_<external_request_id>?account_id=<account_id>` — derived from the resolved `request_log` row. The typed `ext_` prefix is mandatory per §6.4 v0.5. This is the both-or-nothing safety contract required to avoid embedding wrong-account gateway data; the translation is a SPEC-007 requirement, not a verb/query-translation violation.
 ### 4.3 Process model
 SPEC-007 MUST NOT introduce a new long-lived service. SPEC-007 MUST NOT introduce a new public DNS target. SPEC-007 MUST NOT introduce a new Vercel project.
 The explorer consists of:
@@ -162,6 +163,7 @@ The coordinator MUST serve a small static bundle under `/admin/explorer/`. The b
 ### 4.7 Read-only invariant
 Every `/admin/explorer/*` route MUST be side-effect-free. Every `/admin/explorer/*` route MUST use `GET`. Every non-`GET` request to `/admin/explorer/*` MUST return 405 or 404. Explorer handlers MUST NOT call mutating coordinator functions. Explorer handlers MUST NOT call mutating gateway functions. Explorer handlers MUST NOT insert, update, or delete rows. Explorer handlers MUST NOT trigger SPEC-005 reconciliation writes.
 ## 5. Read-only endpoint surface (coordinator)
+**Route-template notation:** In §5 and §6 the `{request_id}` route-template segment is the typed form per SPEC-007 v0.5 (#245) — `int_<request_id>` for coordinator endpoints (§5.6), `ext_<external_request_id>` for gateway endpoints (§6.4). Untyped (bare-id) calls return `400 invalid_request_error` + `code: session_id_untyped`. Inventory tables (§8, §12, §13) reuse the `{request_id}` placeholder for brevity; the typed-prefix requirement applies in every call site.
 ### 5.1 Common coordinator endpoint contract
 All coordinator explorer API endpoints live under `/admin/explorer/*`.
 All coordinator explorer API endpoints MUST require:
@@ -403,38 +405,45 @@ Error behavior:
 - Invalid date range MUST return 400.
 - Local timeout MUST return 408.
 - Gateway failure MUST return 200 with `partial=true` when local data succeeds.
-### 5.6 `GET /admin/explorer/sessions/{request_id}`
+### 5.6 `GET /admin/explorer/sessions/int_{request_id}`
 Method and path:
-- `GET /admin/explorer/sessions/{request_id}`.
+- `GET /admin/explorer/sessions/int_{request_id}`.
 Purpose:
 - Return one completed request's attempts and all read-only joined context.
-Identity model (v0.3):
-- The path-segment `{request_id}` is the coordinator-internal
+Identity model (v0.5 — #245):
+- The path-segment MUST be `int_<request_id>`. The underlying
+  `<request_id>` is the coordinator-internal
   `request_log.request_id` (UUID v4 minted server-side per buyer
   request — see SPEC-002 v1.5.0 §11). It is NOT the inbound
   `X-Request-ID`; that buyer-supplied value lives in
-  `request_log.external_request_id`. **v0.3 limitation:** the
-  explorer has no UI / endpoint surface for resolving by
-  `external_request_id` (the §5.5 sessions list does not yet
-  filter by it either). An operator who starts from a buyer-facing
-  ticket carrying a buyer-supplied `X-Request-ID` MUST resolve
-  the corresponding internal `request_id` out-of-band (direct
-  SQL against the operator's SQLite copy:
+  `request_log.external_request_id`. Untyped (legacy bare-UUID)
+  calls are rejected with `400 invalid_request_error` +
+  `code: session_id_untyped` (see Path-segment-overload status
+  below).
+- An operator who starts from a buyer-facing ticket carrying a
+  buyer-supplied `X-Request-ID` either resolves the corresponding
+  internal `request_id` out-of-band (direct SQL against the
+  operator's SQLite copy:
   `SELECT request_id FROM request_log WHERE external_request_id = ? AND account_id = ?`)
-  before navigating to the session-detail surface. The v0.4
-  path-segment-overload future enhancement will surface this in
-  the UI (see "Deferred to v0.4" below).
+  before navigating, OR navigates directly to the gateway-side
+  endpoint (§6.4) under `ext_<external_request_id>` +
+  `?account_id=`. The coordinator-side dashboard emits
+  `int_`-prefixed URLs by construction (see
+  `phase4-coordinator/internal/explorer/static/js/dashboard.js`
+  `linkFor`).
 - For gateway proxy to `GET /admin/explorer/sessions/...` on the
   gateway, the coordinator MUST proxy ONLY when the resolved row
   supplies BOTH a non-empty `external_request_id` AND a non-empty
-  `account_id`. In that case it MUST forward
-  `GET /admin/explorer/sessions/<external_request_id>?account_id=<account_id>`
-  using a real HTTP query parameter (NOT a path-escaped string).
-  When either component is missing (legacy pre-v1.5.0-coordinator
-  row, v1.5.0 row written from a pre-v0.9.1 gateway, or a
-  direct legacy buyer call with no `X-Request-ID`), the
-  coordinator MUST NOT proxy — it returns the coordinator-side
-  detail with a `gateway` object of shape
+  `account_id`. In that case it MUST forward the typed
+  `GET /admin/explorer/sessions/ext_<external_request_id>?account_id=<account_id>`
+  (typed `ext_` prefix is mandatory per §6.4 v0.5; the gateway
+  rejects untyped calls with the same `400 session_id_untyped`
+  envelope), using a real HTTP query parameter (NOT a
+  path-escaped string). When either component is missing (legacy
+  pre-v1.5.0-coordinator row, v1.5.0 row written from a
+  pre-v0.9.1 gateway, or a direct legacy buyer call with no
+  `X-Request-ID`), the coordinator MUST NOT proxy — it returns
+  the coordinator-side detail with a `gateway` object of shape
   `{"error":{"code":"gateway_identity_unavailable"}}`. Forwarding
   with a partial key — unscoped `external_request_id`, OR the
   coordinator-internal `request_id` — would risk the gateway
@@ -443,37 +452,34 @@ Identity model (v0.3):
   under unrelated coordinator-side data. The both-or-nothing
   contract eliminates that risk.
 
-Path-segment-overload status (v0.4 — #231):
-- `int_<request_id>` continues to resolve as a
-  coordinator-internal id; `ext_<external_request_id>` resolves
-  by re-issuing a scoped lookup against
-  `request_log.external_request_id` then proxying to the gateway.
-  The bare-id form remains accepted in v0.4 with a deprecation
-  WARN; v0.5 (tracked at #245) will reject it with
-  `400 session_id_untyped`.
+Path-segment-overload status (v0.5 — #245):
+- `int_<request_id>` is the ONLY accepted form. The prefix is
+  stripped before the SQL lookup runs against
+  `request_log.request_id`. Untyped (legacy bare-UUID) calls are
+  rejected with `400 invalid_request_error` + `code:
+  session_id_untyped`. The v0.4 deprecation-window WARN log emit
+  is removed because the path is no longer reachable.
 Path parameters:
-- `request_id`: required string. **v0.3:** coordinator-internal
-  billing id (UUID v4) only. **v0.4 (#231):** the coordinator
-  handler MAY accept an `int_`-prefixed value (e.g.
-  `int_<uuid>`) to mark the segment as a coordinator-internal
-  `request_id` explicitly; the prefix is stripped before the SQL
-  lookup runs. Untyped (bare-UUID) calls are still accepted in
-  v0.4 BUT the handler MUST emit a
-  `payout_explorer_path_segment_untyped` audit row at severity
-  WARN. v0.5 (tracked at #245) will reject untyped with `400 session_id_untyped`.
+- `request_id`: required string of the form `int_<uuid>`. The
+  coordinator handler MUST strip the `int_` prefix before
+  resolving the underlying coordinator-internal `request_id`
+  against `request_log.request_id`. The handler MUST return
+  `400 invalid_request_error` with `code: session_id_untyped`
+  when the path-segment lacks the `int_` prefix OR when the
+  stripped value is empty (`int_` alone).
 Headers:
 - `Authorization: Bearer <coordinator operator bearer>` is required.
 Query parameters:
 - `include_gateway`: optional boolean, default `true`.
-- `account_id`: (v0.4, deferred) optional disambiguator for the
-  path-segment-overload future enhancement; ignored in v0.3.
 Window contract:
 - No time window is required because `request_id` is an indexed key.
-Ambiguity contract (v0.3):
-- v0.3 path-segment is the coordinator-internal `request_id`
-  (UUID v4, unique by construction); 409 cannot fire on this
-  path. The 409 contract is reserved for the v0.4 path-segment-
-  overload future enhancement; see "Deferred to v0.4" above.
+Ambiguity contract:
+- The coordinator path-segment is the coordinator-internal
+  `request_id` (UUID v4, unique by construction); 409 cannot
+  fire on this path. The 409 `ambiguous_request_id` contract is
+  exclusive to the gateway-side endpoint (§6.4) under
+  `ext_<external_request_id>` where the same buyer-supplied
+  X-Request-ID can legitimately appear under multiple accounts.
 - Per the both-or-nothing proxy contract in Identity model, the
   coordinator does NOT fall back to forwarding the
   coordinator-internal `request_id` to the gateway when the
@@ -589,7 +595,7 @@ Underlying coordinator sources (intra-coordinator joins by internal `request_id`
 - `ledger_operator_credits` by `request_id` and `request_credit_id`.
 - `ledger_provider_identity_snapshots` by `request_id`.
 Underlying gateway endpoint:
-- `GET /admin/explorer/sessions/{external_request_id}?account_id=<account_id>`
+- `GET /admin/explorer/sessions/ext_<external_request_id>?account_id=<account_id>` (typed `ext_` prefix required per §6.4 v0.5)
   (coordinator forwards the resolved row's `external_request_id`
   and `account_id`; see Identity model above for the security
   rationale). When either field is missing on the resolved row,
@@ -1351,9 +1357,9 @@ Underlying gateway tables:
 Forbidden fields:
 - `api_keys.key_hash` MUST NOT be returned.
 - `demo_usage_events.demo_token_hash` MUST NOT be returned.
-### 6.4 `GET /admin/explorer/sessions/{request_id}`
+### 6.4 `GET /admin/explorer/sessions/ext_{external_request_id}`
 Method and path:
-- `GET /admin/explorer/sessions/{request_id}`.
+- `GET /admin/explorer/sessions/ext_{external_request_id}`.
 Purpose:
 - Return gateway-owned request context for a completed request.
 Identity model:
@@ -1364,16 +1370,15 @@ Identity model:
   MUST treat `request_id` as account-scoped when reconciling against
   gateway storage.
 Path parameters:
-- `request_id`: required string. **v0.4 path-segment typing
-  (#231):** the gateway handler MAY accept an `ext_`-prefixed value
-  (e.g. `ext_req-abc123`) to mark the segment as an
-  `external_request_id` explicitly; the prefix is stripped before
-  the SQL lookup runs. Untyped (bare) calls are still accepted in
-  v0.4 for backward compatibility BUT the handler MUST emit a
-  `payout_explorer_path_segment_untyped` `audit_events` row at
-  severity WARN with `endpoint, request_id, ts_utc` to surface the
-  upcoming v0.5 break. v0.5 will reject untyped with
-  `400 session_id_untyped`.
+- `request_id`: required string of the form
+  `ext_<external_request_id>`. **v0.5 path-segment typing
+  (#245):** the gateway handler MUST strip the `ext_` prefix
+  before the SQL lookup runs. The handler MUST return
+  `400 invalid_request_error` with `code: session_id_untyped`
+  when the path-segment lacks the `ext_` prefix OR when the
+  stripped value is empty (`ext_` alone). The v0.4 deprecation
+  `payout_explorer_path_segment_untyped` `audit_events` emit is
+  removed because the path is no longer reachable.
 Headers:
 - `Authorization: Bearer <coordinator.operator_key>` is required.
 Query parameters:
@@ -2533,8 +2538,8 @@ Partial data responses MUST include:
 - `warnings[]`.
 - a source-specific error object where practical.
 Partial data MUST NOT silently omit a failed source.
-### 14.7.1 Gateway-section identity unavailable (v0.3, §5.6)
-The session-detail endpoint MAY return HTTP 200 with `partial: false` AND a gateway section of shape `{"error": {"code": "gateway_identity_unavailable"}}`. This is NOT a partial-data state and NOT a gateway failure. It is the documented outcome when the resolved coordinator `request_log` row lacks `external_request_id`, `account_id`, or both — a legacy-identity-limit on pre-v1.5.0-coordinator rows or v1.5.0 rows written from a pre-v0.9.1 gateway. Coordinator-side detail (attempts, ledger rows, identity snapshots) is fully populated. Retrying does NOT make the gateway data appear; the operator's path is to query gateway storage out-of-band by `external_request_id` (or wait for the v0.4 path-segment-overload that will surface this in the UI). UI rendering MUST distinguish this state from `gateway_unavailable` so it does not appear as a retryable failure.
+### 14.7.1 Gateway-section identity unavailable (§5.6)
+The session-detail endpoint MAY return HTTP 200 with `partial: false` AND a gateway section of shape `{"error": {"code": "gateway_identity_unavailable"}}`. This is NOT a partial-data state and NOT a gateway failure. It is the documented outcome when the resolved coordinator `request_log` row lacks `external_request_id`, `account_id`, or both — a legacy-identity-limit on pre-v1.5.0-coordinator rows or v1.5.0 rows written from a pre-v0.9.1 gateway. Coordinator-side detail (attempts, ledger rows, identity snapshots) is fully populated. Retrying does NOT make the gateway data appear; the operator's path is to navigate directly to the gateway-side endpoint (§6.4) under `ext_<external_request_id>` + `?account_id=`, or to query gateway storage out-of-band by `external_request_id`. UI rendering MUST distinguish this state from `gateway_unavailable` so it does not appear as a retryable failure.
 ### 14.8 Cancellation paths
 If the operator navigates away, the browser SHOULD abort in-flight fetches. The coordinator MUST propagate request context cancellation to SQLite queries and gateway proxy calls. The gateway MUST propagate request context cancellation to SQLite queries. Cancelled requests MUST NOT mutate state.
 ## 15. Acceptance criteria
@@ -2585,61 +2590,61 @@ Verification:
 - Assert no duplicate `request_log_id`.
 - Assert no seeded row older than the first page boundary is skipped.
 ### AC-7: session detail joins request, ledger, and gateway under the composite key
-Verification (v0.3 — path-segment is coordinator-internal `request_id`):
+Verification (v0.5 — typed path-segments `int_` / `ext_`, #245):
 - Seed one row in coordinator `request_log` with internal
   `request_id = R_int`, `external_request_id = X`, `account_id = "acct_A"`.
 - Seed matching `ledger_request_credits` keyed by `R_int`.
 - Seed matching `ledger_operator_credits` keyed by `R_int`.
 - Seed gateway `usage_events` with `(account_id, request_id) =
   ("acct_A", X)`. Coordinator-internal joins use `R_int`; the
-  gateway proxy MUST forward `external_request_id` (`X`) +
+  gateway proxy MUST forward the typed
+  `ext_<external_request_id>` (`ext_X`) +
   `?account_id=acct_A` so the gateway-side composite-PK lookup
   returns the matching account's row.
-- Request `GET /admin/explorer/sessions/R_int`.
+- Request `GET /admin/explorer/sessions/int_R_int`.
 - Assert response contains coordinator attempt fields.
 - Assert response contains ledger credit fields.
 - Assert response contains gateway usage fields, scoped to
   `account_id = "acct_A"`.
-- **Gateway-proxy URL sub-case (v0.3 §5.6 security contract):**
+- **Gateway-proxy URL sub-case (v0.5 §5.6 security contract):**
   inspect the outbound gateway HTTP request and assert the path
-  is `/admin/explorer/sessions/X?account_id=acct_A` — NOT
-  `/admin/explorer/sessions/R_int`. Forwarding the internal id
-  risks the gateway interpreting it as an external_request_id
+  is `/admin/explorer/sessions/ext_X?account_id=acct_A` — NOT
+  `/admin/explorer/sessions/int_R_int`. Forwarding the internal
+  id risks the gateway interpreting it as an external_request_id
   and returning unrelated single-account data.
-- **Cross-account isolation sub-case (v0.3 gateway-proxy
+- **Cross-account isolation sub-case (v0.5 gateway-proxy
   guarantee):**
   - Additionally seed a second coordinator `request_log` row with
     internal `request_id = R_int2`, `external_request_id = X`,
     `account_id = "acct_B"`, plus a matching gateway
     `usage_events` row with `(account_id, request_id) =
     ("acct_B", X)`.
-  - Request `GET /admin/explorer/sessions/R_int2`.
+  - Request `GET /admin/explorer/sessions/int_R_int2`.
   - Assert the gateway-proxy URL is
-    `/admin/explorer/sessions/X?account_id=acct_B` and the
+    `/admin/explorer/sessions/ext_X?account_id=acct_B` and the
     response contains only `acct_B`'s gateway data; `acct_A`'s
     rows MUST NOT appear.
 - **Legacy NULL-account "no proxy" sub-case (both-or-nothing):**
   - Seed a coordinator `request_log` row with NULL `account_id`
     + non-empty `external_request_id` (pre-v0.9.1 gateway shape).
-  - Request the session detail; assert the coordinator-side
-    detail (attempts/ledger/snapshots) is returned with
-    `gateway: {"error": {"code": "gateway_identity_unavailable"}}`.
-    The coordinator MUST NOT proxy to the gateway because
-    `account_id` is missing — the both-or-nothing contract
-    treats this as an expected legacy-identity-limit, not a
-    gateway failure.
+  - Request the session detail (`int_<id>`); assert the
+    coordinator-side detail (attempts/ledger/snapshots) is
+    returned with `gateway: {"error": {"code":
+    "gateway_identity_unavailable"}}`. The coordinator MUST NOT
+    proxy to the gateway because `account_id` is missing — the
+    both-or-nothing contract treats this as an expected
+    legacy-identity-limit, not a gateway failure.
   - Repeat for a row with non-NULL `account_id` but empty
     `external_request_id` (direct legacy buyer call with no
     inbound X-Request-ID): assert the same
     `gateway_identity_unavailable` outcome.
-
-**Deferred to v0.4 (not required by AC-7 in v0.3):**
-- Operator pasting `external_request_id` directly into the path
-  segment and 409 `ambiguous_request_id` on cross-account
-  collision when no `?account_id=` is supplied. The 409 contract
-  for the gateway-side endpoint (§6.4) is normative in v0.3; the
-  coordinator-side path-segment overload that would expose it is
-  v0.4 work.
+- **Untyped-rejection sub-case (v0.5 break, #245):** request
+  `GET /admin/explorer/sessions/R_int` (no `int_` prefix).
+  Assert the coordinator returns
+  `400 invalid_request_error` with `code: session_id_untyped`
+  and does NOT reach SQL. The same untyped-rejection contract
+  applies to the gateway-side `§6.4` endpoint with the `ext_`
+  prefix.
 ### AC-8: provider list reflects live pool
 Verification:
 - Start coordinator with two live providers in registry.

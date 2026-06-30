@@ -721,30 +721,37 @@ Filters:
 - `from` - `to` - `status` - `model` - `provider_id` - `account_id` - `request_id` - `error_code` - `quarantined` -
 `limit` - `cursor`
 
-`GET /admin/explorer/sessions/{request_id}`
+`GET /admin/explorer/sessions/int_{request_id}`
 
-Path segment (v0.3):
+Path segment (v0.5 — #245, normative typed prefix):
 
-- `{request_id}` is the coordinator-internal `request_log.request_id`
+- The path-segment MUST carry the `int_` prefix; the underlying
+  value is the coordinator-internal `request_log.request_id`
   (server-minted UUID v4). It is NOT the buyer-supplied
   `X-Request-ID` — that lives in `request_log.external_request_id`.
-  Operators starting from a buyer-facing ticket carrying an
-  `X-Request-ID` MUST resolve the internal id via direct SQL in
-  v0.3 (UI surface for external-id lookup is deferred to v0.4).
-  See SPEC-007 §5.6 v0.3.
+  Untyped (legacy bare-id) calls are rejected with
+  `400 invalid_request_error` + `code: session_id_untyped` per
+  SPEC-007 §5.6 v0.5. Operators starting from a buyer-facing
+  ticket carrying an `X-Request-ID` resolve the internal id
+  either via direct SQL or via the gateway's `?account_id=`-
+  scoped lookup; the coordinator-side dashboard emits typed
+  `int_`-prefixed URLs by construction (see
+  `phase4-coordinator/internal/explorer/static/js/dashboard.js`
+  `linkFor`).
 
-Gateway proxy (v0.3 both-or-nothing):
+Gateway proxy (v0.5 both-or-nothing + typed):
 
 - The coordinator forwards
-  `GET /admin/explorer/sessions/<external_request_id>?account_id=<account_id>`
-  to the gateway ONLY when the resolved coordinator row supplies
-  BOTH a non-empty `external_request_id` AND a non-empty
-  `account_id`. Otherwise the coordinator does NOT proxy and the
-  response carries `gateway: {"error": {"code":
+  `GET /admin/explorer/sessions/ext_<external_request_id>?account_id=<account_id>`
+  (typed `ext_` prefix per SPEC-007 §6.4 v0.5) to the gateway
+  ONLY when the resolved coordinator row supplies BOTH a
+  non-empty `external_request_id` AND a non-empty `account_id`.
+  Otherwise the coordinator does NOT proxy and the response
+  carries `gateway: {"error": {"code":
   "gateway_identity_unavailable"}}`. Gateway-side ambiguity is
-  documented in SPEC-007 §6.4 v0.3 — the coordinator surface
-  never exposes the 409 itself in v0.3 (the path-segment-overload
-  + 409 surfacing is deferred to v0.4).
+  documented in SPEC-007 §6.4 — the coordinator surface
+  surfaces a coordinator-resolved 200 (with the proxy result
+  embedded) or a 404 when no coordinator row matches.
 
 Returns:
 

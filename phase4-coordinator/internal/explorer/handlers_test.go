@@ -109,7 +109,7 @@ func TestAC07_SessionDetailIncludesLocalAndGatewayData(t *testing.T) {
 			Body:       io.NopCloser(strings.NewReader(`{"request_id":"req_seed","gateway_marker":true,"partial":false,"error":null}`)),
 		}, nil
 	})}
-	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/req_seed", "operator-key")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_req_seed", "operator-key")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
@@ -121,14 +121,15 @@ func TestAC07_SessionDetailIncludesLocalAndGatewayData(t *testing.T) {
 }
 
 // TestSessionDetailGatewayProxyUsesExternalRequestIDAndAccountID pins
-// the ISS-212 v0.3 §5.6 security contract: when the coordinator
-// resolves the path-segment as an internal request_id and the
-// resolved request_log row carries an external_request_id and
-// account_id, the gateway proxy URL MUST be
-// /admin/explorer/sessions/{external_request_id}?account_id=<account_id>.
+// the §5.6 security contract: when the coordinator resolves the
+// path-segment as an internal request_id and the resolved
+// request_log row carries an external_request_id and account_id,
+// the gateway proxy URL MUST be
+// /admin/explorer/sessions/ext_<external_request_id>?account_id=<account_id>.
 // Forwarding the coordinator-internal id risks the gateway
 // interpreting it as a buyer-supplied X-Request-ID and returning a
-// wrong-account 200 (ISS-212 R3 security MEDIUM).
+// wrong-account 200 (ISS-212 R3 security MEDIUM). SPEC-007 v0.5
+// (#245) made the ext_ prefix mandatory.
 func TestSessionDetailGatewayProxyUsesExternalRequestIDAndAccountID(t *testing.T) {
 	h, db := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
 	if _, err := db.ExecContext(context.Background(),
@@ -156,7 +157,7 @@ func TestSessionDetailGatewayProxyUsesExternalRequestIDAndAccountID(t *testing.T
 			Body:       io.NopCloser(strings.NewReader(`{"request_id":"buyer-supplied-X","partial":false,"error":null}`)),
 		}, nil
 	})}
-	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/coord-internal-uuid-aaaa", "operator-key")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_coord-internal-uuid-aaaa", "operator-key")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
@@ -203,7 +204,7 @@ func TestSessionDetailGatewayProxySkippedOnIncompleteIdentity(t *testing.T) {
 		gatewayCalled = true
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 	})}
-	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/coord-internal-uuid-legacy", "operator-key")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_coord-internal-uuid-legacy", "operator-key")
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
@@ -232,7 +233,7 @@ func TestSessionDetailNoCoordinatorRowReturns404(t *testing.T) {
 		gatewayCalled = true
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 	})}
-	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/no-such-internal-id", "operator-key")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/int_no-such-internal-id", "operator-key")
 	if resp.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s, want 404", resp.Code, resp.Body.String())
 	}
@@ -807,7 +808,7 @@ func TestDashboardCrossViewLinkWiring(t *testing.T) {
 	raw := readStatic(t, "static/js/dashboard.js")
 	for _, want := range []string{
 		`dataset.view`,
-		`/admin/explorer/sessions/${encodeURIComponent(v)}`,
+		`/admin/explorer/sessions/int_${encodeURIComponent(v)}`,
 		`/admin/explorer/buyers/${encodeURIComponent(v)}`,
 		`/admin/explorer/providers/${encodeURIComponent(v)}`,
 		`/admin/explorer/settlements/${encodeURIComponent(v)}`,
@@ -896,7 +897,7 @@ func TestAC25_CoreExplorerRoutesTraverseSuccessfully(t *testing.T) {
 	for _, path := range []string{
 		"/admin/explorer/overview?include_gateway=false",
 		"/admin/explorer/sessions",
-		"/admin/explorer/sessions/req_seed",
+		"/admin/explorer/sessions/int_req_seed",
 		"/admin/explorer/buyers",
 		"/admin/explorer/providers",
 		"/admin/explorer/providers/provider_seed",
