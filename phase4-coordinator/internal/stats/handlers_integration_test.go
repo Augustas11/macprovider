@@ -928,18 +928,21 @@ func TestStale503NotDebitedFromSuccessBucket(t *testing.T) {
 
 // AC-18 — three-way timing equivalence rows 5/6/7. Each row
 // MUST take ≤270 rpm (below the 300 rpm auth-failure cap) and
-// produce 401 with floor latency within ±20% of the other two rows.
+// produce 401 with median latency within ±20% of the other two rows.
 //
-// #281: We compare the MINIMUM of 100 samples per row, not the
-// median. The minimum represents the floor of handler execution —
-// what the path actually costs when no ambient noise (GC pauses,
-// page-cache misses, container CPU throttling) is present. Noise
-// can only push timings UP, never DOWN, so the min is genuinely
-// stable across shared CI runners. The security invariant the
-// test pins ("no fingerprintable difference between failure modes
-// 5/6/7") is correctly measured by the floor: an attacker cannot
-// probe below the handler's actual cost. Median of 100 was tried
-// pre-#281 and flaked at ~30% variance on cold runners.
+// #281: Pre-#281 the median of 100 samples was flaking at ~30%
+// variance on shared CI runners. R1 SEC audit flagged that
+// switching to min weakens the security property — an attacker
+// measures wall-clock medians, not floor execution time. So a
+// future leak where row 6 takes 1ms for the first 5 warmed samples
+// but 3ms for the rest would pass a min-based test while still
+// being attacker-distinguishable.
+//
+// R1 fix-pass: keep the median (attacker-relevant statistic), but
+// discard the first 10 samples per row as warm-up so handler/JIT/
+// connection-pool stabilisation noise doesn't pull the recorded
+// medians around. Median of 100 warmed samples is robust enough on
+// shared CI without trading away the security invariant.
 func TestAC18_TimingEquivalenceRows5_6_7(t *testing.T) {
 	fx, adminDB := setupRollupFixture(t)
 	seedFreshOverview(t, adminDB)
@@ -976,10 +979,31 @@ func TestAC18_TimingEquivalenceRows5_6_7(t *testing.T) {
 	measure := func(headers http.Header) time.Duration {
 		// Round-6 BUILD ask: 100+ samples per row, sustained
 		// rate ≤270 rpm so the auth-failure 300 rpm cap does
-		// not perturb measurements. 100 × 225ms ≈ 22.5s/row =
-		// ~265 rpm.
+		// not perturb measurements. (10 warmup + 100 measured)
+		// × 225ms ≈ 24.75s/row at ~267 rpm per row.
+		const Warmup = 10
 		const N = 100
-		var minSample time.Duration
+		// #281: discard the first Warmup samples per row to
+		// stabilise handler-side state (Postgres prepared-
+		// statement cache, Go JIT for the auth path, connection
+		// pool reuse). Without warmup the recorded median
+		// includes 5-10% cold-start spikes that pulled the
+		// median around by ~30% on shared CI runners.
+		oneSample := func() {
+			start := time.Now()
+			resp := mustDoWithHeaders(t, mux, http.MethodGet, "/v1/stats/leaderboard", headers)
+			elapsed := time.Since(start)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("expected 401, got %d", resp.StatusCode)
+			}
+			resp.Body.Close()
+			_ = elapsed
+		}
+		for i := 0; i < Warmup; i++ {
+			oneSample()
+			time.Sleep(225 * time.Millisecond)
+		}
+		samples := make([]time.Duration, 0, N)
 		for i := 0; i < N; i++ {
 			start := time.Now()
 			resp := mustDoWithHeaders(t, mux, http.MethodGet, "/v1/stats/leaderboard", headers)
@@ -988,15 +1012,13 @@ func TestAC18_TimingEquivalenceRows5_6_7(t *testing.T) {
 				t.Fatalf("expected 401, got %d", resp.StatusCode)
 			}
 			resp.Body.Close()
-			if i == 0 || elapsed < minSample {
-				minSample = elapsed
-			}
+			samples = append(samples, elapsed)
 			time.Sleep(225 * time.Millisecond)
 		}
-		// #281: return the minimum sample (handler-execution floor).
-		// Min is noise-robust because ambient noise can only push
-		// timings UP, never DOWN.
-		return minSample
+		// Median of warmed samples — attacker-relevant statistic
+		// per R1 SEC MEDIUM-1.
+		sortDurations(samples)
+		return samples[N/2]
 	}
 
 	// Row 5: valid key + non-allowlist Origin → 401.
@@ -1015,15 +1037,21 @@ func TestAC18_TimingEquivalenceRows5_6_7(t *testing.T) {
 	hdr7.Set("Authorization", "Bearer "+bearer7)
 	med7 := measure(hdr7)
 
-	// Pairwise floor-variance ≤ 20% of the maximum floor.
-	// #281: med5/6/7 are now MINIMUMS (handler floor execution time),
-	// not medians — variable names kept for blast-radius minimization.
+	// Pairwise variance ≤ 20% of the maximum.
 	max3 := max3d(med5, med6, med7)
 	min3 := min3d(med5, med6, med7)
 	delta := max3 - min3
 	if max3 > 0 && float64(delta)/float64(max3) > 0.20 {
-		t.Errorf("AC-18 floor-timing variance > 20%%: row5=%v row6=%v row7=%v (Δ=%v / max=%v = %.1f%%)",
+		t.Errorf("AC-18 timing variance > 20%%: row5=%v row6=%v row7=%v (Δ=%v / max=%v = %.1f%%)",
 			med5, med6, med7, delta, max3, 100*float64(delta)/float64(max3))
+	}
+}
+
+func sortDurations(d []time.Duration) {
+	for i := 1; i < len(d); i++ {
+		for j := i; j > 0 && d[j] < d[j-1]; j-- {
+			d[j], d[j-1] = d[j-1], d[j]
+		}
 	}
 }
 
