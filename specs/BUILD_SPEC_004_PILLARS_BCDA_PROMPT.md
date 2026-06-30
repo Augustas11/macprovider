@@ -20,6 +20,19 @@ FR-SR-7 + FR-SR-7a). Each PR runs the locked three-lane codex
 audit (code / security / architect) to 0 CRITICAL / 0 HIGH / 0
 MEDIUM before merge.
 
+**Phase-letter regrouping (read before any PR scope discussion).**
+This BUILD prompt deliberately regroups SPEC-004's pillar letters
+into IMPLEMENTATION PHASES of the same letter that map differently.
+SPEC-004's own §11 uses B = model classes, C = retry, D = epsilon
+tiebreak. THIS prompt uses B = weighting + tiebreak scaffolding,
+C = breaker composition, D = classes + retry + randomized tiebreak
+activation. Treat the names below ("Phase B", "Phase C", etc.) as
+IMPLEMENTATION-PHASE labels owned by this BUILD prompt, NOT as
+references to SPEC-004's pillar letters. When opening a PR or
+audit, name the branch/PR by the implementation phase letter from
+THIS file; the spec-side R-rules each phase covers are explicit
+in the per-phase "SPEC-004 rules implemented" lines.
+
 **Locked-spec dependencies (DO NOT contradict).** Versions below
 reflect current `origin/main` headers as of the BUILD prompt
 landing. Verify against each spec file's line 3 before starting an
@@ -32,10 +45,12 @@ IMPL session.
 - SPEC-004 v0.3.1 (THE FILE BEING IMPLEMENTED — read every section
   before writing any line of Go; SPEC-004's own change-log cites
   older dependency versions, which are historical)
-- SPEC-005 v0.3.3 (billing — `request_log.retried` semantics per
-  FR-SR-14 are SPEC-005's read contract; do not bypass; check
-  current SPEC-005 header before starting Pillar D since the v0.4
-  amendment for quarantine resolution may have landed by then)
+- SPEC-005 v0.4 (billing — `request_log.retried` semantics per
+  FR-SR-14 are SPEC-005's read contract; do not bypass; v0.4
+  preserves the `request_log.retried` read contract relevant to
+  Phase D. v0.4 added the force-void quarantine-resolution admin
+  surface — that surface is OUT OF SCOPE for this build cycle; see
+  "What this prompt does NOT cover")
 - SPEC-006 v0.9.1 (`routing_internal.conversation_key` derivation;
   Pillar A consumes this gateway-derived field — NOT a buyer header)
 
@@ -171,13 +186,13 @@ Never edit in the canonical checkout (user memory
    lives in `provider.go`. SPEC-004 REUSES these primitives;
    no parallel router.
 
-6. SPEC-005 v0.3.3+ `request_log` schema (`phase4-coordinator/internal/requestlog/`).
+6. SPEC-005 v0.4 `request_log` schema (`phase4-coordinator/internal/requestlog/`).
    Verify `retried INTEGER NOT NULL DEFAULT 0` column exists. If
    missing, that's a SPEC-002 migration prerequisite — surface
-   before any pillar IMPL. (The current SPEC-005 header on
-   origin/main is v0.3.3; check before starting Pillar D since
-   SPEC-005 v0.4 partial-OQ-5 work landed independently and may
-   bump the header.)
+   before any pillar IMPL. SPEC-005 v0.4's force-void quarantine-
+   resolution admin surface (OQ-5 partial) does NOT alter the
+   `request_log.retried` read contract Phase D writes; v0.4 only
+   adds a separate admin endpoint + table + audit event.
 
 ## Phase order (FOUR PRs, in this order)
 
@@ -190,8 +205,12 @@ Never edit in the canonical checkout (user memory
 helper (referenced from FR-SR-8 `fast` objective and §3 step 6);
 the helper data structures for FR-SR-16 (epsilon-cohort
 identification). NO randomized tiebreak active in this PR;
-`tiebreak_randomize` parsing lands here but `true` is unimplemented
-and validated as a runtime error if set.
+`tiebreak_randomize` parsing lands here as a VALID config value
+(true or false per SPEC-004 §5) but does NOT activate randomized
+selection — Phase B leaves the active comparator unchanged. The
+runtime randomization wiring lands in Phase D per FR-SR-16. Phase
+B MUST NOT reject `tiebreak_randomize=true` with a load-time or
+runtime validation error; doing so would violate SPEC-004 §5.
 
 **Critical default-preservation invariant.** Per SPEC-004 FR-SR-16:
 "When `routing.tiebreak_randomize` is false, SPEC-002 deterministic
@@ -226,7 +245,13 @@ in Phase B regardless of `tiebreak_epsilon` value.
 Phase B lands and prove the candidate order is byte-identical
 for two same-model providers with identical metrics and different
 `connected_at`). AC-SR-4 partial (hard pins unchanged). AC-SR-14
-partial (composition gates).
+is "composition gates hold" per SPEC-004 §8 — Phase B proves the
+helper-layer subset (Candidate / effectiveThroughput helpers DO
+NOT alter the F-4 / FR-P5 / FR-P8a / FR-P11a composition surface).
+Phase C and Phase D each extend AC-SR-14 with their own feature-
+addition leg; Phase A adds the sticky leg. The "per-request
+breaker fault cap" assertion is FR-SR-14 regression coverage,
+NOT AC-SR-14 — see Phase D below.
 
 **Audit lenses:** code (does the tiebreak code preserve SPEC-002
 ordering at epsilon=0?), security (does an oversized epsilon ever
@@ -253,9 +278,12 @@ composition: same dead provider not selected twice).
 - `internal/routing/exclusion.go` (NEW) — `Excluded(providers)` set
   threading for F-4 + retry composition.
 
-**ACs proven:** AC-SR-14 (composition gates hold across all SPEC-004
-features), the FR-SR-18 + FR-SR-19 ordering assertions, breaker-held
-provider explicit-exclude regression.
+**ACs proven:** AC-SR-14 leg-2 (composition gates: Phase C proves
+the filter helper + FR-P11a recovery-gating composition leg of
+"composition gates hold" — sticky / class / retry / randomization
+legs are proven in their own phases, not here), the FR-SR-18 +
+FR-SR-19 ordering assertions, breaker-held provider explicit-
+exclude regression.
 
 **Audit lenses:** code (does the filter helper produce the same
 candidate set as the v1.5.2 inline code at epsilon=0 / no classes
@@ -272,8 +300,12 @@ empty map), `routing.max_retries` (default 0; if already present
 on origin/main with a different default, RECONCILE to 0),
 `routing.retry_per_attempt_timeout_s` (default 60),
 `routing.max_providers_faulted_per_request` (default 2 per
-SPEC-004 §5; verify against `config.Default()` — origin/main has
-a non-zero default but it may not match SPEC-004 §5; reconcile),
+SPEC-004 §5; on origin/main `config.Default()` currently has
+`MaxProvidersFaultedPerRequest: 0` and validation allows `>= 0`
+— Phase D MUST reconcile the default to `2` AND tighten validation
+to require a positive integer whenever `routing.max_retries > 0`.
+Validation failure mode: load-time error naming the offending key
+and the SPEC-004 §5 minimum),
 `routing.tiebreak_randomize` (default false — Phase D enables it
 with the FR-SR-16 randomized epsilon cohort; FR-SR-17 audit
 explainability fields mandatory).
@@ -318,6 +350,20 @@ candidate selection or alias resolution. This is a SECURITY
 boundary: the coordinator's parsed `model` MUST match what the
 provider observes after dispatch rewrite.
 
+**SPEC-008 / SPEC-010 additive-only invariant (FR-SR-10
+composition rules — read before editing `/v1/models`).** The
+FR-SR-10 class entries Phase D adds to `/v1/models` MUST be
+PURELY ADDITIVE to the existing SPEC-008 / SPEC-010 surface. They
+MUST NOT alter Tier-2 hash disclosure (SPEC-008 §5.7 hash block
+is unaffected per SPEC-010 v1.5 §6.3), MUST NOT alter any
+concrete-model entry's existing fields, and MUST NOT change how
+`model_hash` flows through the heartbeat or auth-frame contracts.
+SPEC-010 cold-supported-model behavior is unchanged. Phase D MUST
+write a regression test that captures the pre-Pillar-D
+`/v1/models` body shape for an existing concrete model and asserts
+the post-Pillar-D shape contains the identical concrete entry
+verbatim (alongside any new class entries).
+
 **SPEC-004 rules implemented:** FR-SR-7 (alias resolution),
 FR-SR-7a (dispatch-time `model` field rewrite at EVERY dispatch
 path — see §11 implementation hand-off; current dispatch is split
@@ -346,8 +392,24 @@ FR-SR-16 (randomized tiebreak), FR-SR-17
   function applied at every dispatch path.
 - `internal/routing/retry.go` (NEW) — retry loop with budget +
   exclusion + buyer-cancel attribution (FR-P11a C2).
+- `internal/routing/log.go` (NEW) — `LogRoutingDecision(ctx, dec)`
+  emits the FR-SR-17 reproducibility-of-randomized-decision log
+  row. Fields (every field below is REQUIRED on every routing
+  decision when `tiebreak_randomize=true` is active, suppressed-
+  with-zero when not): `candidate_set` (ordered list of
+  `peer_id`s post-filter pre-sort), `objective_metric_per_candidate`
+  (parallel array of the score driving the cohort), `epsilon`
+  (the active `routing.tiebreak_epsilon`), `cohort_size`,
+  `random_seed` (the per-request seed used; SPEC-004 §7
+  reproducibility contract — MUST be derivable from request id +
+  daily key, NEVER from `time.Now()` alone), `random_draw` (the
+  cohort index chosen), `chosen_peer_id`. The call site lives in
+  `internal/buyer/server.go::selectProvider` (or its Phase B
+  refactored equivalent) and fires AFTER candidate selection,
+  BEFORE dispatch.
 - `internal/buyer/server.go` — `/v1/chat/completions` wires class
-  resolution + retry loop + dispatch rewrite.
+  resolution + retry loop + dispatch rewrite, AND calls
+  `LogRoutingDecision` per request when randomization is active.
 - `internal/buyer/server.go::handleModels` (the existing
   `/v1/models` handler — on `origin/main` there is no separate
   `models.go` file; extend the handler in place) — additive
@@ -359,9 +421,14 @@ assertion on the wire), AC-SR-6 (empty class 503), AC-SR-7
 AC-SR-9 (no retry post-commit / buyer-cancel), AC-SR-10 (no
 double-emit), AC-SR-11 (retry budget), AC-SR-12 (randomized
 distribution under sufficient mock-load), AC-SR-13 (log
-explainability), AC-SR-14 (per-request breaker fault cap — assert
-the `min(max_providers_faulted_per_request, max_retries)` ceiling
-is honored), AC-SR-16 (retry budget + cancel attribution).
+explainability), AC-SR-14 leg-3/4 (composition gates: Phase D
+proves the class + retry + randomization legs of "composition
+gates hold"), AC-SR-16 (retry budget + cancel attribution).
+**FR-SR-14 regression coverage (NOT AC-SR-14):** assert the
+`min(max_providers_faulted_per_request, max_retries)` per-request
+breaker fault cap is honored — drive N+1 retries into N pre-commit
+failures and assert the (N+1)-th attempt is skipped (no new
+breaker fault charged).
 
 **Audit lenses:** code (does FR-SR-7a rewrite at EVERY dispatch
 path — write the assertForwardedModel helper from SPEC-004 §test-
@@ -391,6 +458,25 @@ is a SECURITY boundary: accepting buyer-supplied sticky keys
 would let a hostile buyer pin themselves to a specific provider
 or steal another buyer's sticky session.
 
+**Sticky bounded-map SECURITY / DoS boundary (Phase A — read before
+implementing).** The `routing.sticky_max_entries` cap is NOT
+ordinary cache hygiene; it is a SECURITY / DoS boundary. A buggy
+eviction path, unbounded growth, or missing mutex coverage on any
+of the five FR-SR-5 paragraph 2 operations (read, write,
+`last_used_at` update, TTL expiry, LRU eviction) is a release
+blocker, not a perf nit. The audit and AC layers below treat any
+unbounded-growth or race-condition class as HIGH severity.
+
+**Sticky-disabled allocation allowance (Phase A — C2 clarification).**
+With `routing.sticky_enabled: false`, sticky storage MAY be
+constructed in an inert state at startup (zero-value `Map`, empty
+mutex), but request handling MUST perform no sticky read, no
+sticky write, no `last_used_at` update, no TTL expiry sweep, no
+LRU eviction, and no sticky-log mutation. AC-SR-1 byte-identity
+holds against allocation OR inert-construction; SPEC-004 AC-SR-1
+requires no lookup/write/log-order change, not necessarily zero
+allocation.
+
 **SPEC-004 rules implemented:** FR-SR-2 (sticky keying on
 `routing_internal.conversation_key`; reject values not in
 `conv:<opaque-id>` namespace), FR-SR-3 (sticky is soft preference;
@@ -414,8 +500,21 @@ update-on-retry-final-provider rule).
 
 **ACs proven:** AC-SR-2 (sticky hit routes to prior provider),
 AC-SR-3 (sticky miss falls back gracefully — every miss reason
-enumerated in FR-SR-3 covered), AC-SR-15 (session hard-pin is
-never sticky).
+enumerated in FR-SR-3 covered), AC-SR-14 leg-1 (composition gates:
+Phase A proves the sticky leg of "composition gates hold"),
+AC-SR-15 (session hard-pin is never sticky).
+**Sticky lifecycle / concurrency regression tests (FR-SR-5
+SECURITY / DoS boundary — these are gating, not optional):**
+(a) bounded-map eviction at `routing.sticky_max_entries` — insert
+N+1 distinct keys, assert oldest evicted (LRU); (b) TTL expiry —
+advance synthetic clock past `routing.sticky_ttl_s`, assert prior
+entry no longer returned by `Lookup`; (c) concurrent mixed
+operation race coverage — N goroutines hammering `Lookup` /
+`Update` / `last_used_at` / TTL-sweep / eviction simultaneously,
+asserting no panic, no double-free of LRU positions, no entry
+count exceeding `routing.sticky_max_entries`, no read-after-evict;
+(d) `InvalidateClass` under concurrent reads — asserts class
+removal is mutex-serialized with active `Lookup` calls.
 
 **Audit lenses:** code (does the mutex protect ALL of the
 operations FR-SR-5 paragraph 2 enumerates: read, write,
@@ -458,6 +557,19 @@ For each pillar PR:
 - **Gateway-side `routing_internal.conversation_key` derivation.**
   That's SPEC-006 v0.8 PG-9; the coordinator only CONSUMES the
   header in Pillar A.
+- **SPEC-005 OQ-5 quarantine-resolution admin surface.** SPEC-005
+  v0.4 added the force-void quarantine-resolution admin endpoint
+  + table + audit event (and v0.5 will add force-credit). Pillar D
+  touches retry / accounting paths adjacent to that surface but
+  MUST preserve existing quarantine behavior verbatim — no new
+  admin endpoints, no resolution-row writes, no quarantine-table
+  schema changes in this build cycle.
+- **SPEC-008 hash-disclosure changes.** SPEC-008 §5.7 hash block
+  is unaffected; Phase D's `/v1/models` edits are PURELY ADDITIVE
+  class entries (see Phase D body).
+- **SPEC-010 cold-supported-model behavior changes.** SPEC-010
+  v1.5+ cold-supported-model surface is unchanged; Phase D's
+  `/v1/models` edits MUST NOT alter concrete-model entry fields.
 
 ## Pillar-completion checklist (gate to next pillar)
 
