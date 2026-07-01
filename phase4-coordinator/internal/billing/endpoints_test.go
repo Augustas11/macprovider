@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -389,6 +391,227 @@ func TestEarningsEndpoint_AppliesDateRange(t *testing.T) {
 	}
 	if resp["current_window_credits"].(float64) != 500 {
 		t.Fatalf("current_window_credits=%v want 500", resp["current_window_credits"])
+	}
+}
+
+func TestEarningsEndpointIncludesProviderSettlementReceiptReasonCodes(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	base, negative := firstSettlementTupleWithNegativeFailure(t, fixtures, "normal_done", "wrong_key_signature")
+	input := settlementVerifierInputFromFixture(t, fixtures, base, pubkey)
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	insertCredit(t, store.db, input.ProviderID, time.Now().UTC(), 500)
+
+	state, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: SettlementReceiptIdentity{
+			AccountScope: input.AccountScope,
+			RequestID:    input.RequestID,
+			AttemptN:     input.AttemptN,
+			ProviderID:   input.ProviderID,
+		},
+		Header:                negative.WireReceipt,
+		ProviderReceiptPubkey: pubkey,
+		receiptReceivedUnixMS: input.ReceiptReceivedUnixMS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Reason != "signature_verify_failed" {
+		t.Fatalf("state reason=%s want signature_verify_failed", state.Reason)
+	}
+	pendingInput := input
+	pendingInput.RequestID = input.RequestID + "-pending"
+	pendingInput.RouteSnapshot.RequestID = pendingInput.RequestID
+	seedSettlementReceiptEvidence(t, store, pendingInput)
+	if _, err := store.RecordMissingSettlementReceipt(context.Background(), SettlementReceiptMissingInput{
+		SettlementReceiptIdentity: SettlementReceiptIdentity{
+			AccountScope: pendingInput.AccountScope,
+			RequestID:    pendingInput.RequestID,
+			AttemptN:     pendingInput.AttemptN,
+			ProviderID:   pendingInput.ProviderID,
+		},
+		NowUnixMS: pendingInput.TerminalStateTSUnixMS + pendingInput.RouteSnapshot.PendingDeadlineSeconds*1000 - 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	zeroTuple := firstSettlementTupleWithTerminal(t, fixtures, "provider_error")
+	zeroInput := settlementVerifierInputFromFixture(t, fixtures, zeroTuple, pubkey)
+	seedSettlementReceiptEvidence(t, store, zeroInput)
+	zeroState, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: SettlementReceiptIdentity{
+			AccountScope: zeroInput.AccountScope,
+			RequestID:    zeroInput.RequestID,
+			AttemptN:     zeroInput.AttemptN,
+			ProviderID:   zeroInput.ProviderID,
+		},
+		Header:                zeroInput.Header,
+		ProviderReceiptPubkey: pubkey,
+		receiptReceivedUnixMS: zeroInput.ReceiptReceivedUnixMS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zeroState.SettlementOutcome != SettlementOutcomeZeroSettled || zeroState.ReceiptResult != SettlementReceiptResultValid {
+		t.Fatalf("zero settlement state=%#v, want valid zero_settled", zeroState)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/providers/"+input.ProviderID+"/earnings", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{"good": input.ProviderID}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		SettlementReceipts settlementReceiptSummary `json:"settlement_receipts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.SettlementReceipts.ReceiptProfile != settlementReceiptProfileV04 ||
+		resp.SettlementReceipts.FailedCount != 1 ||
+		resp.SettlementReceipts.ZeroSettledCount != 1 ||
+		resp.SettlementReceipts.PendingCount != 1 {
+		t.Fatalf("settlement summary=%#v, want failed/zero-settled/pending v0.4 receipts", resp.SettlementReceipts)
+	}
+	if resp.SettlementReceipts.WindowFromUTC == "" || resp.SettlementReceipts.WindowToUTC == "" {
+		t.Fatalf("settlement summary missing bounded diagnostics window: %#v", resp.SettlementReceipts)
+	}
+	if len(resp.SettlementReceipts.RecentFailures) != 1 || resp.SettlementReceipts.RecentFailures[0].Reason != "signature_verify_failed" {
+		t.Fatalf("recent failures=%#v, want provider-facing reason code", resp.SettlementReceipts.RecentFailures)
+	}
+	failure := resp.SettlementReceipts.RecentFailures[0]
+	if failure.RouteSnapshotMode != input.RouteSnapshot.RouteSnapshotMode ||
+		failure.RouteSnapshotPolicyVersion != input.RouteSnapshot.RouteSnapshotPolicyVersion ||
+		failure.PaidEntrypoint != input.RouteSnapshot.PaidEntrypoint ||
+		failure.Spec008HashStatus != input.RouteSnapshot.Spec008HashStatus ||
+		failure.ProviderReportedModelHash != input.RouteSnapshot.ProviderReportedModelHash ||
+		failure.ExpectedCatalogModelHash != input.RouteSnapshot.ExpectedCatalogModelHash {
+		t.Fatalf("recent failure missing route policy/hash context: %#v", failure)
+	}
+	body := w.Body.String()
+	rawPubkey := string(pubkey)
+	for _, forbidden := range []string{
+		negative.WireReceipt,
+		fixtures.ProviderReceiptPubkeyB64,
+		rawPubkey,
+		"provider_receipt_public_key",
+		"raw_receipt",
+		"receipt_envelope",
+		"\"account_scope\"",
+		"Bearer ",
+	} {
+		if forbidden != "" && strings.Contains(body, forbidden) {
+			t.Fatalf("provider earnings diagnostics leaked forbidden material %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestProvidersEndpointIncludesRedactedSettlementReceiptDiagnostics(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	base, negative := firstSettlementTupleWithNegativeFailure(t, fixtures, "normal_done", "wrong_key_signature")
+	input := settlementVerifierInputFromFixture(t, fixtures, base, pubkey)
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	insertCredit(t, store.db, input.ProviderID, time.Now().UTC(), 500)
+
+	if _, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: SettlementReceiptIdentity{
+			AccountScope: input.AccountScope,
+			RequestID:    input.RequestID,
+			AttemptN:     input.AttemptN,
+			ProviderID:   input.ProviderID,
+		},
+		Header:                negative.WireReceipt,
+		ProviderReceiptPubkey: pubkey,
+		receiptReceivedUnixMS: input.ReceiptReceivedUnixMS,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/providers", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Providers []struct {
+			ProviderID         string                   `json:"provider_id"`
+			SettlementReceipts settlementReceiptSummary `json:"settlement_receipts"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Providers) != 1 || resp.Providers[0].ProviderID != input.ProviderID {
+		t.Fatalf("providers=%#v want one provider %s", resp.Providers, input.ProviderID)
+	}
+	summary := resp.Providers[0].SettlementReceipts
+	if summary.FailedCount != 1 || len(summary.RecentFailures) != 1 {
+		t.Fatalf("admin settlement summary=%#v, want one redacted failure", summary)
+	}
+	failure := summary.RecentFailures[0]
+	if failure.Reason != "signature_verify_failed" || failure.ProviderReceiptKeyFingerprint == "" || failure.RouteSnapshotDigest == "" || failure.PromptHash == "" {
+		t.Fatalf("admin diagnostic=%#v, want reason code plus digests/fingerprints", failure)
+	}
+	if failure.RouteSnapshotMode != input.RouteSnapshot.RouteSnapshotMode ||
+		failure.RouteSnapshotPolicyVersion != input.RouteSnapshot.RouteSnapshotPolicyVersion ||
+		failure.PaidEntrypoint != input.RouteSnapshot.PaidEntrypoint ||
+		failure.Spec008HashStatus != input.RouteSnapshot.Spec008HashStatus ||
+		failure.ProviderReportedModelHash != input.RouteSnapshot.ProviderReportedModelHash ||
+		failure.ExpectedCatalogModelHash != input.RouteSnapshot.ExpectedCatalogModelHash {
+		t.Fatalf("admin diagnostic missing route policy/hash context: %#v", failure)
+	}
+	body := w.Body.String()
+	for _, forbidden := range []string{
+		negative.WireReceipt,
+		fixtures.ProviderReceiptPubkeyB64,
+		string(pubkey),
+		"provider_receipt_public_key",
+		"raw_receipt",
+		"receipt_envelope",
+		"\"account_scope\"",
+		"Bearer ",
+	} {
+		if forbidden != "" && strings.Contains(body, forbidden) {
+			t.Fatalf("admin diagnostics leaked forbidden material %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestSettlementReceiptDiagnosticsQueryShapeIsBounded(t *testing.T) {
+	endpointsRaw, err := os.ReadFile("endpoints.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoints := string(endpointsRaw)
+	for _, forbidden := range []string{"ROW_NUMBER()", "WITH ranked"} {
+		if strings.Contains(endpoints, forbidden) {
+			t.Fatalf("settlement diagnostics query must avoid unbounded ranking shape %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		"settlementReceiptDiagnosticsDefaultWindow",
+		"ORDER BY received_at_unix_ms DESC, id DESC\n LIMIT ?",
+	} {
+		if !strings.Contains(endpoints, want) {
+			t.Fatalf("settlement diagnostics query missing bounded shape marker %q", want)
+		}
+	}
+	storeRaw, err := os.ReadFile("store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := string(storeRaw)
+	if !strings.Contains(store, "idx_srv_provider_failed_recent") ||
+		!strings.Contains(store, "WHERE closed=1 AND settlement_outcome='quarantined'") {
+		t.Fatalf("settlement diagnostics missing partial failed-receipt index")
 	}
 }
 

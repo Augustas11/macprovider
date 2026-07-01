@@ -35,6 +35,97 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
     }
 
+    func testHTTPNonStreamingHandlerWritesV04SettlementReceipt() async throws {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let modelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let metadata = httpSettlementMetadataHeader(
+            receiptKeyID: httpReceiptKeyID(key.publicKey.rawRepresentation),
+            expectedModelHash: modelHash
+        )
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "hello"]],
+            ],
+            requestHeaders: [(RouterHandler.settlementMetadataHeaderName, metadata)],
+            receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+            completion: CompletionResult(
+                content: "answer",
+                finishReason: "stop",
+                promptTokens: 8,
+                completionTokens: 3,
+                ttftMilliseconds: 7
+            ),
+            warmSwapEnabled: true,
+            modelHash: modelHash
+        )
+
+        let header = try XCTUnwrap(response.headers.first(name: RouterHandler.receiptHeaderName))
+        let parsed = try parseReceiptHeader(header, publicKey: key.publicKey)
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        XCTAssertEqual(parsed.tuple["receipt_version"] as? String, "4")
+        XCTAssertEqual(parsed.tuple["request_id"] as? String, "req-http-receipt")
+        XCTAssertEqual(parsed.tuple["provider_id"] as? String, "provider-a")
+        XCTAssertEqual(parsed.tuple["model_hash"] as? String, modelHash)
+        XCTAssertEqual(parsed.tuple["expected_catalog_model_hash"] as? String, modelHash)
+        XCTAssertEqual(parsed.tuple["route_snapshot_digest"] as? String, String(repeating: "3", count: 64))
+        XCTAssertEqual(parsed.tuple["terminal_state"] as? String, "normal_done")
+        XCTAssertEqual(response.headers.first(name: RouterHandler.receiptPendingDeadlineHeaderName), "120")
+        XCTAssertEqual(response.headers.first(name: RouterHandler.lateReceiptSettlementHeaderName), "not_settled")
+        XCTAssertNotNil(response.headers.first(name: RouterHandler.receiptTerminalStateTSHeaderName))
+        XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
+    }
+
+    func testHTTPStreamingHandlerWritesV04SettlementReceiptTrailer() async throws {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let modelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let metadata = httpSettlementMetadataHeader(
+            receiptKeyID: httpReceiptKeyID(key.publicKey.rawRepresentation),
+            expectedModelHash: modelHash
+        )
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "hello"]],
+                "stream": true,
+            ],
+            requestHeaders: [(RouterHandler.settlementMetadataHeaderName, metadata)],
+            receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+            completion: CompletionResult(
+                content: "streamed",
+                finishReason: "stop",
+                promptTokens: 8,
+                completionTokens: 3,
+                ttftMilliseconds: 7
+            ),
+            warmSwapEnabled: true,
+            modelHash: modelHash,
+            readStreamingBody: true
+        )
+
+        let receipt = try XCTUnwrap(httpTrailerValue(named: RouterHandler.receiptHeaderName, in: response.body))
+        let parsed = try parseReceiptHeader(receipt, publicKey: key.publicKey)
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        XCTAssertEqual(response.headers.first(name: "trailer"), [
+            RouterHandler.receiptHeaderName,
+            RouterHandler.receiptTerminalStateTSHeaderName,
+            RouterHandler.receiptPendingDeadlineHeaderName,
+            RouterHandler.lateReceiptSettlementHeaderName,
+        ].joined(separator: ", "))
+        XCTAssertTrue(response.body.contains("data: [DONE]"), response.body)
+        XCTAssertEqual(parsed.tuple["receipt_version"] as? String, "4")
+        XCTAssertEqual(parsed.tuple["request_id"] as? String, "req-http-receipt")
+        XCTAssertEqual(parsed.tuple["provider_id"] as? String, "provider-a")
+        XCTAssertEqual(parsed.tuple["model_hash"] as? String, modelHash)
+        XCTAssertEqual(parsed.tuple["terminal_state"] as? String, "normal_done")
+        XCTAssertEqual(httpTrailerValue(named: RouterHandler.receiptPendingDeadlineHeaderName, in: response.body), "120")
+        XCTAssertEqual(httpTrailerValue(named: RouterHandler.lateReceiptSettlementHeaderName, in: response.body), "not_settled")
+        XCTAssertNotNil(httpTrailerValue(named: RouterHandler.receiptTerminalStateTSHeaderName, in: response.body))
+        XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
+    }
+
     func testHTTPPreKeypairOmissionDoesNotFailResponse() async throws {
         let response = try await roundTripChatCompletion(
             body: [
@@ -826,6 +917,7 @@ private func roundTripChatCompletion(
     routerModelID: String? = "fixture-model",
     providerID: String? = "provider-a",
     requestID: String = "req-http-receipt",
+    requestHeaders: [(String, String)] = [],
     receiptBuilder: ReceiptBuilder?,
     completion: CompletionResult? = nil,
     completionError: Error? = nil,
@@ -869,7 +961,8 @@ private func roundTripChatCompletion(
             port: port,
             body: body,
             headerOnly: isStreaming && !readStreamingBody,
-            requestID: requestID
+            requestID: requestID,
+            requestHeaders: requestHeaders
         )
     }
 }
@@ -920,15 +1013,19 @@ private func rawChatCompletionRoundTrip(
     port: Int,
     body: [String: Any],
     headerOnly: Bool,
-    requestID: String
+    requestID: String,
+    requestHeaders: [(String, String)] = []
 ) throws -> HTTPReceiptResponse {
     let bodyData = try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
-    let requestHead = "POST /v1/chat/completions HTTP/1.1\r\n"
+    var requestHead = "POST /v1/chat/completions HTTP/1.1\r\n"
         + "Host: 127.0.0.1:\(port)\r\n"
         + "Content-Type: application/json\r\n"
         + "Content-Length: \(bodyData.count)\r\n"
         + "X-Request-ID: \(requestID)\r\n"
-        + "Connection: close\r\n"
+    for (name, value) in requestHeaders {
+        requestHead += "\(name): \(value)\r\n"
+    }
+    requestHead += "Connection: close\r\n"
         + "\r\n"
     var requestData = Data(requestHead.utf8)
     requestData.append(bodyData)
@@ -1029,20 +1126,64 @@ private func parseRawHTTPResponse(_ data: Data) throws -> HTTPReceiptResponse {
     )
 }
 
-private func parseReceiptHeader(_ header: String) throws -> ParsedReceipt {
+private func parseReceiptHeader(_ header: String, publicKey suppliedPublicKey: Curve25519.Signing.PublicKey? = nil) throws -> ParsedReceipt {
     let pieces = header.split(separator: ".")
     XCTAssertEqual(pieces.count, 2)
     let tupleData = try XCTUnwrap(Data(base64Encoded: String(pieces[0])))
     let signature = try XCTUnwrap(Data(base64Encoded: String(pieces[1])))
     let tuple = try XCTUnwrap(JSONSerialization.jsonObject(with: tupleData) as? [String: Any])
-    let pubkey = try XCTUnwrap(tuple["provider_pubkey"] as? String)
-    let pubkeyData = try XCTUnwrap(Data(base64Encoded: pubkey))
+    let publicKey: Curve25519.Signing.PublicKey
+    if let suppliedPublicKey {
+        publicKey = suppliedPublicKey
+    } else {
+        let pubkey = try XCTUnwrap(tuple["provider_pubkey"] as? String)
+        let pubkeyData = try XCTUnwrap(Data(base64Encoded: pubkey))
+        publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: pubkeyData)
+    }
     return ParsedReceipt(
         tupleData: tupleData,
         tuple: tuple,
         signature: signature,
-        publicKey: try Curve25519.Signing.PublicKey(rawRepresentation: pubkeyData)
+        publicKey: publicKey
     )
+}
+
+private func httpSettlementMetadataHeader(receiptKeyID: String, expectedModelHash: String) -> String {
+    let metadata: [String: Any] = [
+        "account_scope": "acct_sha256:" + String(repeating: "1", count: 64),
+        "request_id": "req-http-receipt",
+        "attempt_n": 0,
+        "provider_id": "provider-a",
+        "provider_receipt_key_id": receiptKeyID,
+        "model_id": "fixture-model",
+        "expected_catalog_model_hash": expectedModelHash,
+        "catalog_id": "catalog-a",
+        "catalog_body_digest": String(repeating: "2", count: 64),
+        "route_snapshot_digest": String(repeating: "3", count: 64),
+        "route_snapshot_policy_version": "spec022-prereq-v0",
+        "route_snapshot_mode": "observe",
+        "prompt_hash": String(repeating: "4", count: 64),
+        "output_prefix_start_byte": 5,
+        "pending_deadline_seconds": 120,
+    ]
+    let data = try! JSONSerialization.data(withJSONObject: metadata, options: [.withoutEscapingSlashes])
+    return data.base64URLUnpadded()
+}
+
+private func httpReceiptKeyID(_ pubkey: Data) -> String {
+    let digest = SHA256.hash(data: pubkey)
+    return "ed25519-sha256:" + digest.map { String(format: "%02x", $0) }.joined()
+}
+
+private func httpTrailerValue(named name: String, in body: String) -> String? {
+    let expected = name.lowercased()
+    for line in body.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false) {
+        guard let colon = line.firstIndex(of: ":") else { continue }
+        let actual = line[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard actual == expected else { continue }
+        return line[line.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return nil
 }
 
 private final class HTTPFixedReceiptKeyStore: ReceiptKeyStoring, @unchecked Sendable {

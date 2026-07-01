@@ -49,6 +49,24 @@ func TestParseHeartbeatPreservesRollingMetrics(t *testing.T) {
 	}
 }
 
+func TestInferenceResponseEndPreservesSettlementReceiptDeadline(t *testing.T) {
+	payload := []byte(`{"type":"inference_response_end","request_id":"req-1","status":"complete","chunks_sent":1,"terminal_state_ts_unix_ms":1710000000123,"receipt_pending_deadline_seconds":120,"late_receipt_settlement":"not_settled","receipt":"tuple.sig"}`)
+
+	var end InferenceResponseEnd
+	if err := json.Unmarshal(payload, &end); err != nil {
+		t.Fatalf("unmarshal end: %v", err)
+	}
+	if end.TerminalStateTSUnixMS != 1710000000123 {
+		t.Fatalf("TerminalStateTSUnixMS = %d", end.TerminalStateTSUnixMS)
+	}
+	if end.ReceiptPendingDeadlineSeconds != 120 {
+		t.Fatalf("ReceiptPendingDeadlineSeconds = %d", end.ReceiptPendingDeadlineSeconds)
+	}
+	if end.LateReceiptSettlement != "not_settled" {
+		t.Fatalf("LateReceiptSettlement = %q", end.LateReceiptSettlement)
+	}
+}
+
 func TestParseHeartbeatL1AcceptsLegacyAbsentSPEC011Fields(t *testing.T) {
 	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5}`)
 

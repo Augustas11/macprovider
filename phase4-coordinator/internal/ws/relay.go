@@ -88,11 +88,12 @@ type providerFrame struct {
 }
 
 type encryptedInferenceRequest struct {
-	Type      string                 `json:"type"`
-	RequestID string                 `json:"request_id"`
-	Stream    bool                   `json:"stream"`
-	Encrypted bool                   `json:"encrypted"`
-	Enc       tier2.AEADEnvelopeBody `json:"enc"`
+	Type       string                     `json:"type"`
+	RequestID  string                     `json:"request_id"`
+	Stream     bool                       `json:"stream"`
+	Encrypted  bool                       `json:"encrypted"`
+	Enc        tier2.AEADEnvelopeBody     `json:"enc"`
+	Settlement *SettlementReceiptMetadata `json:"settlement,omitempty"`
 }
 
 type encryptedInferenceResponseChunk struct {
@@ -336,16 +337,17 @@ func (ps *providerSession) hasTier2Session() bool {
 	return ps.tier2 != nil
 }
 
-func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestID string, body []byte, stream bool) ([]byte, error) {
+func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata) ([]byte, error) {
 	ps.tier2Mu.Lock()
 	session := ps.tier2
 	if session == nil {
 		ps.tier2Mu.Unlock()
 		msg := InferenceRequest{
-			Type:      "inference_request",
-			RequestID: requestID,
-			Stream:    stream,
-			Body:      string(body),
+			Type:       "inference_request",
+			RequestID:  requestID,
+			Stream:     stream,
+			Body:       string(body),
+			Settlement: settlement,
 		}
 		return json.Marshal(msg)
 	}
@@ -369,11 +371,12 @@ func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestI
 	}
 	session.C2PCounter++
 	return json.Marshal(encryptedInferenceRequest{
-		Type:      "inference_request",
-		RequestID: requestID,
-		Stream:    stream,
-		Encrypted: true,
-		Enc:       envelope.Enc,
+		Type:       "inference_request",
+		RequestID:  requestID,
+		Stream:     stream,
+		Encrypted:  true,
+		Enc:        envelope.Enc,
+		Settlement: settlement,
 	})
 }
 
@@ -523,6 +526,14 @@ func (s *Server) closeProviderForTier2AEADFailure(session *providerSession, prov
 }
 
 func (s *Server) DispatchInference(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*RelayStream, error) {
+	return s.dispatchInference(ctx, provider, requestID, body, stream, nil)
+}
+
+func (s *Server) DispatchInferenceWithSettlement(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata) (*RelayStream, error) {
+	return s.dispatchInference(ctx, provider, requestID, body, stream, settlement)
+}
+
+func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool, settlementMetadata *SettlementReceiptMetadata) (*RelayStream, error) {
 	if !strings.HasPrefix(requestID, "req-") {
 		requestID = "req-" + requestID
 	}
@@ -544,7 +555,7 @@ func (s *Server) DispatchInference(ctx context.Context, provider pool.Provider, 
 	if err != nil {
 		return nil, err
 	}
-	payload, err := session.sealInferenceRequest(provider, requestID, body, stream)
+	payload, err := session.sealInferenceRequest(provider, requestID, body, stream, settlementMetadata)
 	if err != nil {
 		session.removeActive(requestID)
 		return nil, err

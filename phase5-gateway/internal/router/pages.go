@@ -38,8 +38,12 @@ var tier1DisclosureText = []disclosureItem{
 		Text: "Model identity is provider-reported. When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.8 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.",
 	},
 	{
+		Key:  "model_verification_limit",
+		Text: modelVerificationLimitDisclosure,
+	},
+	{
 		Key:  "tier2_milestone",
-		Text: "The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-3.",
+		Text: "The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-4.",
 	},
 }
 

@@ -203,10 +203,29 @@ type DrainStatus struct {
 }
 
 type InferenceRequest struct {
-	Type      string `json:"type"`
-	RequestID string `json:"request_id"`
-	Stream    bool   `json:"stream"`
-	Body      string `json:"body"`
+	Type       string                     `json:"type"`
+	RequestID  string                     `json:"request_id"`
+	Stream     bool                       `json:"stream"`
+	Body       string                     `json:"body"`
+	Settlement *SettlementReceiptMetadata `json:"settlement,omitempty"`
+}
+
+type SettlementReceiptMetadata struct {
+	AccountScope               string `json:"account_scope"`
+	RequestID                  string `json:"request_id"`
+	AttemptN                   int64  `json:"attempt_n"`
+	ProviderID                 string `json:"provider_id"`
+	ProviderReceiptKeyID       string `json:"provider_receipt_key_id"`
+	ModelID                    string `json:"model_id"`
+	ExpectedCatalogModelHash   string `json:"expected_catalog_model_hash"`
+	CatalogID                  string `json:"catalog_id"`
+	CatalogBodyDigest          string `json:"catalog_body_digest"`
+	RouteSnapshotDigest        string `json:"route_snapshot_digest"`
+	RouteSnapshotPolicyVersion string `json:"route_snapshot_policy_version"`
+	RouteSnapshotMode          string `json:"route_snapshot_mode"`
+	PromptHash                 string `json:"prompt_hash"`
+	OutputPrefixStartByte      int64  `json:"output_prefix_start_byte"`
+	PendingDeadlineSeconds     int64  `json:"pending_deadline_seconds"`
 }
 
 type InferenceResponseChunk struct {
@@ -217,13 +236,16 @@ type InferenceResponseChunk struct {
 }
 
 type InferenceResponseEnd struct {
-	Type       string          `json:"type"`
-	RequestID  string          `json:"request_id"`
-	Status     string          `json:"status"`
-	ChunksSent int             `json:"chunks_sent"`
-	Usage      json.RawMessage `json:"usage,omitempty"`
-	Error      string          `json:"error,omitempty"`
-	Retryable  *bool           `json:"retryable,omitempty"`
+	Type                          string          `json:"type"`
+	RequestID                     string          `json:"request_id"`
+	Status                        string          `json:"status"`
+	ChunksSent                    int             `json:"chunks_sent"`
+	Usage                         json.RawMessage `json:"usage,omitempty"`
+	Error                         string          `json:"error,omitempty"`
+	Retryable                     *bool           `json:"retryable,omitempty"`
+	TerminalStateTSUnixMS         int64           `json:"terminal_state_ts_unix_ms,omitempty"`
+	ReceiptPendingDeadlineSeconds int64           `json:"receipt_pending_deadline_seconds,omitempty"`
+	LateReceiptSettlement         string          `json:"late_receipt_settlement,omitempty"`
 	// SPEC-015 v0.1.x: WS-tunneled non-streaming inference carries the
 	// X-MacProvider-Receipt header value as a field on the
 	// inference_response_end frame. Coordinator stamps it as the

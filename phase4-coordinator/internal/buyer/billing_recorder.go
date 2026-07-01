@@ -78,6 +78,15 @@ type billingRecorder struct {
 	// this was billingAttemptN, incremented via deferred closure on
 	// every successful provider-bound record.
 	attemptN int
+	// routeSnapshotAttemptN is the pre-dispatch provider-dispatch
+	// ordinal used by settlement_route_snapshots. It advances at the
+	// dispatch boundary, not at request_log write time, so streaming
+	// failover-before-first-chunk and HTTP/WS retries share one
+	// monotonic attempt identity surface for later receipt settlement.
+	routeSnapshotAttemptN int
+	outputCursorByte      int64
+	settlementAttemptN    int
+	hasSettlementAttemptN bool
 }
 
 // newBillingRecorder constructs the per-request recorder. Called once
@@ -140,6 +149,7 @@ func (b *billingRecorder) recordRow(
 	retried int,
 	estimatedCompTokens *int64,
 	faultFlag string,
+	settlementOutput *billing.SettlementOutput,
 ) error {
 	s := b.server
 	if s.reqLog == nil {
@@ -221,13 +231,113 @@ func (b *billingRecorder) recordRow(
 				return fmt.Errorf("billing hot-path insert failed: %w; fallback failed: %v", err, fallbackErr)
 			}
 		}
+		if err := b.recordSettlementAttemptOutput(ctx, billingStore, billingInput, settlementOutput); err != nil {
+			return err
+		}
 		return nil
 	}
 	if err := s.reqLog.Insert(ctx, row); err != nil {
 		s.log.Warn().Err(err).Str("request_id", b.requestID).Msg("request_log insert failed")
 		return err
 	}
+	if billingStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
+		billingInput := billing.HotPathInput{
+			RequestID:           row.RequestID,
+			AttemptN:            attemptN,
+			ProviderAssignedID:  providerAssignedID,
+			ProviderID:          providerID,
+			Model:               row.Model,
+			Status:              status,
+			Stream:              row.Stream,
+			TSUtc:               row.TSUtc,
+			PromptTokens:        promptTok,
+			CompletionTokens:    completionTok,
+			EstimatedCompTokens: estimatedCompTokens,
+			ErrorCode:           errCode,
+			FaultFlag:           faultFlag,
+		}
+		if err := b.recordSettlementAttemptOutput(ctx, billingStore, billingInput, settlementOutput); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {
+	if store == nil || in.ProviderID == "" {
+		return nil
+	}
+	if output == nil {
+		output = settlementOutputForContent("", nil, nil, terminalStateFromAttempt(in.Status, "", in.ErrorCode))
+	}
+	out := *output
+	outputAvailable := !settlementOutputIsUnavailable(output)
+	delivered := out.OutputPrefixEndByte - out.OutputPrefixStartByte
+	start := b.outputCursorByte
+	if outputAvailable {
+		out.OutputPrefixStartByte = b.outputCursorByte
+		out.OutputPrefixEndByte = b.outputCursorByte + delivered
+	} else {
+		delivered = 0
+		out.OutputPrefixStartByte = 0
+		out.OutputPrefixEndByte = 0
+	}
+
+	observedInput := int64(0)
+	observedOutput := int64(0)
+	usageSource := billing.UsageSourceByteEstimated
+	if in.PromptTokens != nil && in.CompletionTokens != nil {
+		observedInput = *in.PromptTokens
+		observedOutput = *in.CompletionTokens
+		usageSource = billing.UsageSourceCoordinatorObserved
+	} else if outputAvailable {
+		coordinatorOutputEstimate := b.server.estimatedCompletionTokensFromBytes(int(delivered))
+		if coordinatorOutputEstimate != nil {
+			observedOutput = *coordinatorOutputEstimate
+		} else if in.EstimatedCompTokens != nil {
+			observedOutput = *in.EstimatedCompTokens
+		}
+	}
+	billableInput := observedInput
+	billableOutput := observedOutput
+	if usageSource == billing.UsageSourceByteEstimated {
+		billableInput = 0
+		billableOutput = 0
+	}
+	if out.TerminalState != billing.TerminalStateNormalDone && delivered == 0 {
+		billableInput = 0
+		billableOutput = 0
+	}
+	terminalTS := out.TerminalStateTSUnixMS
+	if terminalTS <= 0 {
+		terminalTS = time.Now().UTC().UnixMilli()
+	}
+	settlementAttemptN := in.AttemptN
+	if b.hasSettlementAttemptN {
+		settlementAttemptN = b.settlementAttemptN
+	}
+	attempt := billing.SettlementAttemptOutput{
+		AccountScope:          accountScopeForSettlement(b.accountID),
+		RequestID:             in.RequestID,
+		AttemptN:              int64(settlementAttemptN),
+		ProviderID:            in.ProviderID,
+		Output:                out,
+		OutputAvailable:       outputAvailable,
+		UsageSource:           usageSource,
+		TerminalStateTSUnixMS: terminalTS,
+		Usage: billing.SettlementUsage{
+			BillableInputTokens:  billableInput,
+			BillableOutputTokens: billableOutput,
+			DeliveredOutputBytes: delivered,
+			ObservedInputTokens:  observedInput,
+			ObservedOutputTokens: observedOutput,
+		},
+	}
+	_, err := store.InsertSettlementAttemptOutput(ctx, attempt)
+	if err == nil {
+		b.outputCursorByte = start + delivered
+	}
+	return err
 }
 
 // logRow is the convenience wrapper matching the pre-refactor `logRow`
@@ -241,7 +351,7 @@ func (b *billingRecorder) logRow(
 	errMsg, errCode string,
 	retried int,
 ) {
-	_ = b.recordRow(providerAssignedID, "", status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
+	_ = b.recordRow(providerAssignedID, "", status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
 }
 
 // logBuyerFailure mirrors the pre-refactor `logBuyerFailure` closure.
@@ -257,7 +367,7 @@ func (b *billingRecorder) logProviderRow(
 	errMsg, errCode string,
 	retried int,
 ) error {
-	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
+	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
 }
 
 // logProviderRowWithEstimate mirrors the pre-refactor
@@ -270,5 +380,17 @@ func (b *billingRecorder) logProviderRowWithEstimate(
 	retried int,
 	estimatedCompTokens *int64,
 ) error {
-	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone)
+	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, nil)
+}
+
+func (b *billingRecorder) logProviderRowWithEstimateAndOutput(
+	provider pool.Provider,
+	status int,
+	promptTok, completionTok *int64,
+	errMsg, errCode string,
+	retried int,
+	estimatedCompTokens *int64,
+	output *billing.SettlementOutput,
+) error {
+	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, output)
 }

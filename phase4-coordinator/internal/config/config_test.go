@@ -110,6 +110,13 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 
 	cfg = Default()
 	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Settlement.RecoveryGraceSeconds = 901
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "recovery_grace_seconds") {
+		t.Fatalf("settlement recovery grace above verified receipt cap should fail; err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Storage.RequestLogRetentionDays = 0
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "request_log_retention_days") {
 		t.Fatalf("request log retention validation err=%v", err)

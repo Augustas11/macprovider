@@ -46,6 +46,7 @@ package integration
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
@@ -58,19 +59,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 	_ "modernc.org/sqlite"
 )
@@ -204,6 +211,7 @@ type scenario struct {
 	cancelAll   context.CancelFunc
 	fakeProv    *fakeProvider
 	procWG      sync.WaitGroup
+	modelHash   string
 }
 
 type scenarioOpts struct {
@@ -245,6 +253,17 @@ type scenarioOpts struct {
 	// SPEC-015-shaped non-streaming receipt header so the gateway and
 	// coordinator boundary can be tested without mocking either service.
 	receiptEnabledProvider bool
+	// settlementReceiptProvider, when true, makes the fake provider
+	// advertise a catalog-verified model hash and emit signed SPEC-015
+	// v0.4 settlement receipts on both non-streaming and streaming
+	// requests.
+	settlementReceiptProvider bool
+}
+
+type settlementCatalogFixture struct {
+	path      string
+	publicKey string
+	modelHash string
 }
 
 func newScenario(t *testing.T, opts scenarioOpts) *scenario {
@@ -327,7 +346,12 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 			"display_name": fmt.Sprintf("fake-integration-%d", i),
 		}
 	}
-	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs)
+	var settlementCatalog settlementCatalogFixture
+	if opts.settlementReceiptProvider {
+		settlementCatalog = s.writeSettlementCatalogFixture()
+		s.modelHash = settlementCatalog.modelHash
+	}
+	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog)
 
 	gwServiceTok := s.serviceToken
 	if opts.gatewayServiceToken != nil {
@@ -371,6 +395,9 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 			if opts.receiptEnabledProvider {
 				fp.enableReceipts()
 			}
+			if opts.settlementReceiptProvider {
+				fp.enableSettlementReceipts(settlementCatalog.modelHash)
+			}
 			fp.start(ctx)
 			s.fakeProvs = append(s.fakeProvs, fp)
 			s.waitForProviderReady(slot.ID)
@@ -410,8 +437,32 @@ func randHex(t *testing.T, n int) string {
 // the audit fixture: we want a clean room for testing the GATEWAY ↔
 // COORDINATOR boundary, not the provider auth gate which has its own
 // dedicated tests in phase4-coordinator/internal/ws).
-func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any) {
+func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture) {
 	s.t.Helper()
+	tier2Cfg := map[string]any{
+		"observe_enabled":                    false,
+		"require_hash_verified":              false,
+		"require_encrypted_leg":              false,
+		"encrypted_leg_aead":                 "A256GCM",
+		"encrypted_leg_rekey_after_requests": 10000,
+		"encrypted_leg_rekey_after_seconds":  3600,
+		"require_attestation":                false,
+		"attestation_max_age_s":              600,
+		"behavioral_safety_enabled":          false,
+		"output_size_cap_bytes":              0,
+		"output_bytes_per_token_ceiling":     16,
+		"default_output_size_cap_bytes":      1048576,
+		"encoding_validation_enabled":        false,
+		"response_time_anomaly_enabled":      false,
+		"response_time_anomaly_factor":       5.0,
+		"response_time_anomaly_min_ms":       10000,
+	}
+	if settlementCatalog.path != "" {
+		tier2Cfg["observe_enabled"] = true
+		tier2Cfg["require_hash_verified"] = true
+		tier2Cfg["catalog_path"] = settlementCatalog.path
+		tier2Cfg["catalog_public_key"] = settlementCatalog.publicKey
+	}
 	cfg := map[string]any{
 		"listen": map[string]any{
 			"buyer_port":    buyerPort,
@@ -465,24 +516,7 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"provisional_tier_weight":             0.3,
 			"provisional_retention_days":          30,
 		},
-		"tier2": map[string]any{
-			"observe_enabled":                    false,
-			"require_hash_verified":              false,
-			"require_encrypted_leg":              false,
-			"encrypted_leg_aead":                 "A256GCM",
-			"encrypted_leg_rekey_after_requests": 10000,
-			"encrypted_leg_rekey_after_seconds":  3600,
-			"require_attestation":                false,
-			"attestation_max_age_s":              600,
-			"behavioral_safety_enabled":          false,
-			"output_size_cap_bytes":              0,
-			"output_bytes_per_token_ceiling":     16,
-			"default_output_size_cap_bytes":      1048576,
-			"encoding_validation_enabled":        false,
-			"response_time_anomaly_enabled":      false,
-			"response_time_anomaly_factor":       5.0,
-			"response_time_anomaly_min_ms":       10000,
-		},
+		"tier2": tier2Cfg,
 		"auth": map[string]any{
 			"operator_key":            s.operatorKey,
 			"gateway_service_token":   gatewayServiceToken,
@@ -540,6 +574,96 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 	if err := os.WriteFile(s.coordYAML, b, 0o600); err != nil {
 		s.t.Fatalf("write coordinator yaml: %v", err)
 	}
+}
+
+func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
+	s.t.Helper()
+	modelHash := randHex(s.t, 32)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		s.t.Fatalf("generate catalog key: %v", err)
+	}
+	minRAM := 16
+	models := []settlementCatalogModel{{
+		ArtifactKind: "mlx_weight_file",
+		HashScope:    "primary_weight_file",
+		ModelID:      "llama-3.2-3b-instruct",
+		MinRAMGB:     &minRAM,
+		SHA256:       modelHash,
+		Source:       "integration-test",
+	}}
+	issuedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	expiresAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+	body := settlementCatalogBody{
+		CatalogID: "integration-catalog",
+		ExpiresAt: expiresAt.Format(time.RFC3339),
+		IssuedAt:  issuedAt.Format(time.RFC3339),
+		Models:    models,
+		Version:   1,
+	}
+	canonical, err := json.Marshal(body)
+	if err != nil {
+		s.t.Fatalf("marshal catalog body: %v", err)
+	}
+	sig := ed25519.Sign(priv, canonical)
+	file := settlementCatalogFile{
+		CatalogID: body.CatalogID,
+		ExpiresAt: body.ExpiresAt,
+		IssuedAt:  body.IssuedAt,
+		Models:    body.Models,
+		Signature: settlementCatalogSignature{
+			Alg:   "Ed25519",
+			KeyID: "integration-catalog-key",
+			Sig:   base64.RawURLEncoding.EncodeToString(sig),
+		},
+		Version: body.Version,
+	}
+	raw, err := json.Marshal(file)
+	if err != nil {
+		s.t.Fatalf("marshal catalog file: %v", err)
+	}
+	path := filepath.Join(s.tempDir, "settlement-catalog.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		s.t.Fatalf("write settlement catalog: %v", err)
+	}
+	return settlementCatalogFixture{
+		path:      path,
+		publicKey: base64.RawURLEncoding.EncodeToString(pub),
+		modelHash: modelHash,
+	}
+}
+
+type settlementCatalogModel struct {
+	ArtifactKind string `json:"artifact_kind"`
+	HashScope    string `json:"hash_scope"`
+	ModelID      string `json:"model_id"`
+	MinRAMGB     *int   `json:"min_ram_gb,omitempty"`
+	Notes        string `json:"notes,omitempty"`
+	SHA256       string `json:"sha256"`
+	Source       string `json:"source"`
+}
+
+type settlementCatalogSignature struct {
+	Alg   string `json:"alg"`
+	KeyID string `json:"key_id"`
+	Sig   string `json:"sig"`
+}
+
+type settlementCatalogBody struct {
+	CatalogID string                   `json:"catalog_id"`
+	ExpiresAt string                   `json:"expires_at"`
+	IssuedAt  string                   `json:"issued_at"`
+	Models    []settlementCatalogModel `json:"models"`
+	Version   int                      `json:"version"`
+}
+
+type settlementCatalogFile struct {
+	CatalogID string                     `json:"catalog_id"`
+	ExpiresAt string                     `json:"expires_at"`
+	IssuedAt  string                     `json:"issued_at"`
+	Models    []settlementCatalogModel   `json:"models"`
+	Signature settlementCatalogSignature `json:"signature"`
+	Version   int                        `json:"version"`
 }
 
 func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken string) {
@@ -923,22 +1047,24 @@ func (s *scenario) chatRequest(headers map[string]string, body string) (int, htt
 // serves OpenAI-shaped chat completions on the endpoint port.
 // Cancellation tears both halves down.
 type fakeProvider struct {
-	t                *testing.T
-	providerID       string
-	providerToken    string
-	httpPort         int
-	wsURL            string
-	hServer          *http.Server
-	receiptEnabled   bool
-	receiptPubkey    ed25519.PublicKey
-	receiptPrivkey   ed25519.PrivateKey
-	lastRequestBody  []byte
-	lastResponseBody []byte
-	hReady           chan struct{}
-	stopOnce         sync.Once
-	stopped          chan struct{}
-	hitMu            sync.Mutex
-	hits             int // /v1/chat/completions hit count, for sticky verification
+	t                 *testing.T
+	providerID        string
+	providerToken     string
+	httpPort          int
+	wsURL             string
+	hServer           *http.Server
+	receiptEnabled    bool
+	settlementEnabled bool
+	modelHash         string
+	receiptPubkey     ed25519.PublicKey
+	receiptPrivkey    ed25519.PrivateKey
+	lastRequestBody   []byte
+	lastResponseBody  []byte
+	hReady            chan struct{}
+	stopOnce          sync.Once
+	stopped           chan struct{}
+	hitMu             sync.Mutex
+	hits              int // /v1/chat/completions hit count, for sticky verification
 }
 
 // Hits returns the number of /v1/chat/completions requests this fake
@@ -988,6 +1114,18 @@ func (p *fakeProvider) enableReceipts() {
 	p.receiptPrivkey = priv
 }
 
+func (p *fakeProvider) enableSettlementReceipts(modelHash string) {
+	p.t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		p.t.Fatalf("generate fake settlement receipt key: %v", err)
+	}
+	p.settlementEnabled = true
+	p.modelHash = modelHash
+	p.receiptPubkey = pub
+	p.receiptPrivkey = priv
+}
+
 const fakeCompletionBody = `{
   "id":"chatcmpl-fake-integration",
   "object":"chat.completion",
@@ -1015,6 +1153,96 @@ func (p *fakeProvider) buildReceiptHeader(requestBody, responseBody []byte) (str
 	)
 	signature := ed25519.Sign(p.receiptPrivkey, []byte(tuple))
 	return base64.StdEncoding.EncodeToString([]byte(tuple)) + "." + base64.StdEncoding.EncodeToString(signature), nil
+}
+
+type settlementMetadata struct {
+	AccountScope               string `json:"account_scope"`
+	RequestID                  string `json:"request_id"`
+	AttemptN                   int64  `json:"attempt_n"`
+	ProviderID                 string `json:"provider_id"`
+	ProviderReceiptKeyID       string `json:"provider_receipt_key_id"`
+	ModelID                    string `json:"model_id"`
+	ExpectedCatalogModelHash   string `json:"expected_catalog_model_hash"`
+	CatalogID                  string `json:"catalog_id"`
+	CatalogBodyDigest          string `json:"catalog_body_digest"`
+	RouteSnapshotDigest        string `json:"route_snapshot_digest"`
+	RouteSnapshotPolicyVersion string `json:"route_snapshot_policy_version"`
+	RouteSnapshotMode          string `json:"route_snapshot_mode"`
+	PromptHash                 string `json:"prompt_hash"`
+	OutputPrefixStartByte      int64  `json:"output_prefix_start_byte"`
+	PendingDeadlineSeconds     int64  `json:"pending_deadline_seconds"`
+}
+
+func decodeSettlementMetadataHeader(header string) (settlementMetadata, bool, error) {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return settlementMetadata{}, false, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(header)
+	if err != nil {
+		return settlementMetadata{}, false, fmt.Errorf("decode settlement metadata: %w", err)
+	}
+	var metadata settlementMetadata
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return settlementMetadata{}, false, fmt.Errorf("decode settlement metadata json: %w", err)
+	}
+	return metadata, true, nil
+}
+
+func (p *fakeProvider) buildSettlementReceiptHeader(metadata settlementMetadata, content, finishReason string, promptTokens, completionTokens, terminalTSUnixMS int64) (string, error) {
+	normalizedContent := norm.NFC.String(normalizeSpec015LineEndings(content))
+	deliveredBytes := int64(len([]byte(normalizedContent)))
+	outputPrefixEnd := metadata.OutputPrefixStartByte + deliveredBytes
+	output := map[string]any{
+		"content":                  normalizedContent,
+		"finish_reason":            finishReason,
+		"output_prefix_end_byte":   outputPrefixEnd,
+		"output_prefix_start_byte": metadata.OutputPrefixStartByte,
+		"terminal_state":           "normal_done",
+		"tool_calls":               nil,
+	}
+	outputHash, _, err := spec015CanonicalSHA256Hex(output)
+	if err != nil {
+		return "", fmt.Errorf("canonical output hash: %w", err)
+	}
+	usage := map[string]any{
+		"billable_input_tokens":  promptTokens,
+		"billable_output_tokens": completionTokens,
+		"delivered_output_bytes": deliveredBytes,
+		"observed_input_tokens":  promptTokens,
+		"observed_output_tokens": completionTokens,
+	}
+	tuple := map[string]any{
+		"account_scope":                 metadata.AccountScope,
+		"attempt_n":                     metadata.AttemptN,
+		"catalog_body_digest":           metadata.CatalogBodyDigest,
+		"catalog_id":                    metadata.CatalogID,
+		"expected_catalog_model_hash":   metadata.ExpectedCatalogModelHash,
+		"issued_at_unix_ms":             terminalTSUnixMS,
+		"model_hash":                    p.modelHash,
+		"model_id":                      metadata.ModelID,
+		"output_hash":                   outputHash,
+		"output_prefix_end_byte":        outputPrefixEnd,
+		"output_prefix_start_byte":      metadata.OutputPrefixStartByte,
+		"prompt_hash":                   metadata.PromptHash,
+		"provider_id":                   metadata.ProviderID,
+		"provider_receipt_key_id":       metadata.ProviderReceiptKeyID,
+		"receipt_version":               "4",
+		"request_id":                    metadata.RequestID,
+		"route_snapshot_digest":         metadata.RouteSnapshotDigest,
+		"route_snapshot_mode":           metadata.RouteSnapshotMode,
+		"route_snapshot_policy_version": metadata.RouteSnapshotPolicyVersion,
+		"signature_key_alg":             "Ed25519",
+		"terminal_state":                "normal_done",
+		"terminal_state_ts_unix_ms":     terminalTSUnixMS,
+		"usage":                         usage,
+	}
+	canonical, err := spec015CanonicalJSON(tuple)
+	if err != nil {
+		return "", fmt.Errorf("canonical settlement tuple: %w", err)
+	}
+	signature := ed25519.Sign(p.receiptPrivkey, canonical)
+	return base64.StdEncoding.EncodeToString(canonical) + "." + base64.StdEncoding.EncodeToString(signature), nil
 }
 
 func spec015CanonicalPromptHash(requestBody []byte) (string, error) {
@@ -1164,8 +1392,227 @@ func spec015JCSHash(value any) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func readyStateUpdate() map[string]any {
-	return map[string]any{
+func spec015CanonicalSHA256Hex(value any) (string, []byte, error) {
+	canonical, err := spec015CanonicalJSON(value)
+	if err != nil {
+		return "", nil, err
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:]), canonical, nil
+}
+
+func spec015CanonicalJSON(v any) ([]byte, error) {
+	var b bytes.Buffer
+	if err := writeSpec015JCS(&b, v); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+func writeSpec015JCS(b *bytes.Buffer, v any) error {
+	switch x := v.(type) {
+	case nil:
+		b.WriteString("null")
+	case string:
+		b.WriteString(escapeSpec015JCSString(norm.NFC.String(x)))
+	case bool:
+		if x {
+			b.WriteString("true")
+		} else {
+			b.WriteString("false")
+		}
+	case int:
+		b.WriteString(strconv.Itoa(x))
+	case int64:
+		b.WriteString(strconv.FormatInt(x, 10))
+	case json.Number:
+		formatted, err := canonicalSpec015JSONNumber(x.String())
+		if err != nil {
+			return err
+		}
+		b.WriteString(formatted)
+	case float64:
+		formatted, err := canonicalSpec015Double(x)
+		if err != nil {
+			return err
+		}
+		b.WriteString(formatted)
+	case []any:
+		b.WriteByte('[')
+		for i, item := range x {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			if err := writeSpec015JCS(b, item); err != nil {
+				return err
+			}
+		}
+		b.WriteByte(']')
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for key := range x {
+			keys = append(keys, key)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			return spec015UTF16Less(keys[i], keys[j])
+		})
+		b.WriteByte('{')
+		for i, key := range keys {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(escapeSpec015JCSString(key))
+			b.WriteByte(':')
+			if err := writeSpec015JCS(b, x[key]); err != nil {
+				return err
+			}
+		}
+		b.WriteByte('}')
+	default:
+		return fmt.Errorf("unsupported JCS value %T", v)
+	}
+	return nil
+}
+
+var integerNumberPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
+
+func canonicalSpec015JSONNumber(raw string) (string, error) {
+	if integerNumberPattern.MatchString(raw) {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err == nil {
+			return strconv.FormatInt(n, 10), nil
+		}
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return "", fmt.Errorf("invalid JSON number %q", raw)
+	}
+	if f == math.Trunc(f) && f >= math.MinInt64 && f <= math.MaxInt64 {
+		return strconv.FormatInt(int64(f), 10), nil
+	}
+	return canonicalSpec015Double(f)
+}
+
+func canonicalSpec015Double(f float64) (string, error) {
+	if math.IsInf(f, 0) || math.IsNaN(f) {
+		return "", fmt.Errorf("non-finite number")
+	}
+	if f == 0 {
+		return "0", nil
+	}
+	sign := ""
+	if f < 0 {
+		sign = "-"
+		f = -f
+	}
+	digits, e, err := decimalDigitsAndExponent(strconv.FormatFloat(f, 'g', -1, 64))
+	if err != nil {
+		return "", err
+	}
+	return sign + renderSpec015ECMAScriptNumber(digits, e), nil
+}
+
+func decimalDigitsAndExponent(s string) (string, int, error) {
+	if split := strings.IndexAny(s, "eE"); split >= 0 {
+		mantissa := s[:split]
+		exp, err := strconv.Atoi(s[split+1:])
+		if err != nil {
+			return "", 0, fmt.Errorf("parse float exponent %q: %w", s, err)
+		}
+		point := strings.IndexByte(mantissa, '.')
+		integerDigits := len(mantissa)
+		if point >= 0 {
+			integerDigits = point
+			mantissa = mantissa[:point] + mantissa[point+1:]
+		}
+		digits := strings.TrimLeft(mantissa, "0")
+		if digits == "" {
+			return "0", 1, nil
+		}
+		return digits, exp + integerDigits, nil
+	}
+	point := strings.IndexByte(s, '.')
+	if point < 0 {
+		point = len(s)
+	} else {
+		s = s[:point] + s[point+1:]
+	}
+	leadingZeroes := len(s) - len(strings.TrimLeft(s, "0"))
+	digits := strings.TrimLeft(s, "0")
+	if digits == "" {
+		return "0", 1, nil
+	}
+	return digits, point - leadingZeroes, nil
+}
+
+func renderSpec015ECMAScriptNumber(digits string, e int) string {
+	k := len(digits)
+	switch {
+	case k <= e && e <= 21:
+		return digits + strings.Repeat("0", e-k)
+	case 0 < e && e <= 21:
+		return digits[:e] + "." + digits[e:]
+	case -6 < e && e <= 0:
+		return "0." + strings.Repeat("0", -e) + digits
+	default:
+		exponent := e - 1
+		mantissa := digits[:1]
+		if k > 1 {
+			mantissa += "." + digits[1:]
+		}
+		if exponent >= 0 {
+			return mantissa + "e+" + strconv.Itoa(exponent)
+		}
+		return mantissa + "e-" + strconv.Itoa(-exponent)
+	}
+}
+
+func spec015UTF16Less(a, b string) bool {
+	aa := utf16.Encode([]rune(a))
+	bb := utf16.Encode([]rune(b))
+	for i := 0; i < len(aa) && i < len(bb); i++ {
+		if aa[i] != bb[i] {
+			return aa[i] < bb[i]
+		}
+	}
+	return len(aa) < len(bb)
+}
+
+func escapeSpec015JCSString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			if r >= 0 && r <= 0x1f {
+				b.WriteString(`\u00`)
+				b.WriteString(hex.EncodeToString([]byte{byte(r)}))
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func readyStateUpdate(modelHash string) map[string]any {
+	msg := map[string]any{
 		"type":  "state_update",
 		"state": "ready",
 		"metrics_snapshot": map[string]any{
@@ -1182,6 +1629,10 @@ func readyStateUpdate() map[string]any {
 			"throughput_tps_since_last":  0.0,
 		},
 	}
+	if modelHash != "" {
+		msg["metrics_snapshot"].(map[string]any)["model_hash"] = modelHash
+	}
+	return msg
 }
 
 func chatBodyRequestsStream(body []byte) bool {
@@ -1199,6 +1650,11 @@ func (p *fakeProvider) start(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		requestBody, _ := io.ReadAll(r.Body)
+		settlementMetadata, hasSettlementMetadata, err := decodeSettlementMetadataHeader(r.Header.Get("X-MacProvider-Settlement-Metadata"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		p.hitMu.Lock()
 		p.hits++
 		p.lastRequestBody = append([]byte(nil), requestBody...)
@@ -1206,10 +1662,28 @@ func (p *fakeProvider) start(ctx context.Context) {
 		p.hitMu.Unlock()
 		if chatBodyRequestsStream(requestBody) {
 			w.Header().Set("Content-Type", "text/event-stream")
+			terminalTS := time.Now().UTC().UnixMilli()
+			var receipt string
+			if p.settlementEnabled && hasSettlementMetadata {
+				var err error
+				receipt, err = p.buildSettlementReceiptHeader(settlementMetadata, "hello from fake provider", "stop", 8, 12, terminalTS)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Add("Trailer", "X-MacProvider-Receipt")
+				w.Header().Add("Trailer", "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS")
+			}
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello \"},\"finish_reason\":null}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"from fake provider\"},\"finish_reason\":null}]}\n\n"))
 			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":12,\"total_tokens\":20},\"choices\":[]}\n\n"))
 			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			if receipt != "" {
+				w.Header().Set("X-MacProvider-Receipt", receipt)
+				w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", strconv.FormatInt(terminalTS, 10))
+			}
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1221,6 +1695,16 @@ func (p *fakeProvider) start(ctx context.Context) {
 				return
 			}
 			w.Header().Set("X-MacProvider-Receipt", receipt)
+		}
+		if p.settlementEnabled && hasSettlementMetadata {
+			terminalTS := time.Now().UTC().UnixMilli()
+			receipt, err := p.buildSettlementReceiptHeader(settlementMetadata, "hello from fake provider", "stop", 8, 12, terminalTS)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("X-MacProvider-Receipt", receipt)
+			w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", strconv.FormatInt(terminalTS, 10))
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(fakeCompletionBody))
@@ -1298,7 +1782,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 	defer conn.Close()
 
 	endpointURL := fmt.Sprintf("http://127.0.0.1:%d", p.httpPort)
-	if p.receiptEnabled {
+	if p.receiptEnabled || p.settlementEnabled {
 		providerECDH := make([]byte, 32)
 		if _, err := rand.Read(providerECDH); err != nil {
 			p.t.Errorf("provider ecdh key: %v", err)
@@ -1323,6 +1807,9 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			"supported_models":            []string{"llama-3.2-3b-instruct"},
 			"publishes_supported_models":  true,
 			"tier2_capabilities":          map[string]any{"encrypted_leg": true, "attestation": false, "aead_suites": []string{"A256GCM"}},
+		}
+		if p.modelHash != "" {
+			initial["model_hash"] = p.modelHash
 		}
 		if err := writeJSONFrame(conn, initial); err != nil {
 			p.t.Errorf("auth initial write: %v", err)
@@ -1366,7 +1853,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			p.t.Errorf("auth_response = %s err=%v", string(responsePayload), err)
 			return
 		}
-		if err := writeJSONFrame(conn, readyStateUpdate()); err != nil {
+		if err := writeJSONFrame(conn, readyStateUpdate(p.modelHash)); err != nil {
 			p.t.Errorf("state_update write: %v", err)
 			return
 		}
@@ -1445,6 +1932,9 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 				"avg_latency_ms_since_last":  0.0,
 				"throughput_tps_since_last":  0.0,
 			}
+			if p.modelHash != "" {
+				hb["model_hash"] = p.modelHash
+			}
 			if err := writeJSONFrame(conn, hb); err != nil {
 				return
 			}
@@ -1482,6 +1972,22 @@ type usageEventRow struct {
 	TotalTokens int64
 	Outcome     string
 	TokenSource string
+}
+
+type settlementReceiptVerdictRow struct {
+	RequestID                 string
+	AttemptN                  int64
+	ProviderID                string
+	ReceiptPresent            int
+	ReceiptVersion            sql.NullString
+	ReceiptResult             string
+	SettlementOutcome         string
+	Reason                    string
+	Closed                    int
+	ModelHash                 sql.NullString
+	BuyerDebitOutcome         string
+	ProviderSettlementOutcome string
+	PayoutExclusionOutcome    string
 }
 
 // readLatestUsageEvent opens the gateway SQLite DB and returns the
@@ -1537,4 +2043,49 @@ func (s *scenario) readLatestRequestLog() (requestLogRow, bool) {
 		s.t.Fatalf("query request_log: %v", err)
 	}
 	return row, true
+}
+
+func (s *scenario) readSettlementReceiptVerdicts() []settlementReceiptVerdictRow {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", s.coordinatorDB)
+	if err != nil {
+		s.t.Fatalf("open coord db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`
+SELECT request_id, attempt_n, provider_id, receipt_present, receipt_version,
+       receipt_result, settlement_outcome, reason, closed, model_hash,
+       buyer_debit_outcome, provider_settlement_outcome, payout_exclusion_outcome
+  FROM settlement_receipt_verdicts
+ ORDER BY id ASC`)
+	if err != nil {
+		s.t.Fatalf("query settlement_receipt_verdicts: %v", err)
+	}
+	defer rows.Close()
+	var verdicts []settlementReceiptVerdictRow
+	for rows.Next() {
+		var row settlementReceiptVerdictRow
+		if err := rows.Scan(
+			&row.RequestID,
+			&row.AttemptN,
+			&row.ProviderID,
+			&row.ReceiptPresent,
+			&row.ReceiptVersion,
+			&row.ReceiptResult,
+			&row.SettlementOutcome,
+			&row.Reason,
+			&row.Closed,
+			&row.ModelHash,
+			&row.BuyerDebitOutcome,
+			&row.ProviderSettlementOutcome,
+			&row.PayoutExclusionOutcome,
+		); err != nil {
+			s.t.Fatalf("scan settlement_receipt_verdicts: %v", err)
+		}
+		verdicts = append(verdicts, row)
+	}
+	if err := rows.Err(); err != nil {
+		s.t.Fatalf("settlement_receipt_verdict rows: %v", err)
+	}
+	return verdicts
 }

@@ -17,6 +17,7 @@ type tier1Disclosure struct {
 	HardwareAttestation     string                    `json:"hardware_attestation"`
 	Tier2Milestone          string                    `json:"tier2_milestone"`
 	StickyAffinity          *stickyAffinityDisclosure `json:"sticky_affinity"`
+	ModelVerificationLimit  string                    `json:"model_verification_limit"`
 	ModelHashVerified       string                    `json:"model_hash_verified,omitempty"`
 	ProviderLegEncryption   string                    `json:"provider_leg_encryption,omitempty"`
 	UntrustedProviderSafety string                    `json:"untrusted_provider_safety,omitempty"`
@@ -189,6 +190,8 @@ func (m coordinatorBehavioralSafetyMetadata) toDisclosure() behavioralSafetyDisc
 
 const routingMetaTTL = 5 * time.Second
 
+const modelVerificationLimitDisclosure = "v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement."
+
 func (s *Server) coordinatorRoutingMetadata(ctx context.Context) (coordinatorRoutingMetadata, bool) {
 	// Per-request roundtrip cost is bad at scale (audit HIGH). 5s TTL is
 	// safe for sticky-affinity hints because staleness only affects whether
@@ -239,11 +242,12 @@ func (s *Server) coordinatorRoutingMetadataFresh(ctx context.Context) (coordinat
 
 func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 	disclosure := tier1Disclosure{
-		Version:             "v0.8",
-		PlaintextToProvider: true,
-		ModelIdentity:       "provider_reported",
-		HardwareAttestation: "none",
-		Tier2Milestone:      "future",
+		Version:                "v0.8",
+		PlaintextToProvider:    true,
+		ModelIdentity:          "provider_reported",
+		HardwareAttestation:    "none",
+		Tier2Milestone:         "future",
+		ModelVerificationLimit: modelVerificationLimitDisclosure,
 		StickyAffinity: &stickyAffinityDisclosure{
 			Enabled: false, TTLSeconds: 0,
 			Description: "Sticky affinity is disabled; related requests are not preferentially routed to the same provider.",

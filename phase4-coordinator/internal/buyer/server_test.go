@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -984,6 +985,29 @@ func TestHTTPForwardingPassesReceiptFromProviderWithPublishedReceiptKey(t *testi
 	}
 	if got := rr.Header().Get("X-MacProvider-Receipt"); got != receipt {
 		t.Fatalf("receipt header = %q, want %q", got, receipt)
+	}
+}
+
+func TestHTTPForwardingStripsV04SettlementReceiptFromBuyerResponse(t *testing.T) {
+	receipt := base64.StdEncoding.EncodeToString([]byte(`{"receipt_version":"4","terminal_state_ts_unix_ms":1782864001789}`)) + "." + base64.StdEncoding.EncodeToString([]byte("signature"))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-MacProvider-Receipt", receipt)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpointReceiptPubkey(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, bytes.Repeat([]byte{0x61}, 32))
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("v0.4 settlement receipt header leaked to buyer: %q", got)
 	}
 }
 
@@ -3641,7 +3665,7 @@ func TestChatCompletionsWSTunneledStreamingDeadProviderFailoverBeforeFirstByte(t
 				errs <- providerws.ErrRelayClosed
 				return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
 			}
-			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: "data: ok\n\n"}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `data: {"choices":[{"delta":{"content":"ok"}}]}` + "\n\n"}
 			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
 			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
 		}, time.Second),
@@ -3658,7 +3682,7 @@ func TestChatCompletionsWSTunneledStreamingDeadProviderFailoverBeforeFirstByte(t
 	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
 		t.Fatalf("provider = %q, want p2", rr.Header().Get("X-MacProvider-Provider"))
 	}
-	if !bytes.Contains(rr.Body.Bytes(), []byte("data: ok")) {
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"ok"`)) {
 		t.Fatalf("body = %s", rr.Body.String())
 	}
 }
@@ -3675,7 +3699,7 @@ func TestChatCompletionsWSTunneledStreamingDeadProviderAfterFirstByteTerminatesS
 			chunks := make(chan providerws.InferenceResponseChunk, 1)
 			done := make(chan providerws.InferenceResponseEnd)
 			errs := make(chan error)
-			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: "data: partial\n\n"}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n"}
 			go func() {
 				time.Sleep(10 * time.Millisecond)
 				errs <- providerws.ErrRelayClosed
@@ -3689,7 +3713,7 @@ func TestChatCompletionsWSTunneledStreamingDeadProviderAfterFirstByteTerminatesS
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !bytes.Contains(rr.Body.Bytes(), []byte("data: partial")) {
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"partial"`)) {
 		t.Fatalf("body missing partial chunk: %s", rr.Body.String())
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_disconnected"`)) {
@@ -4536,7 +4560,24 @@ func openBuyerRequestLog(t *testing.T) (*requestlog.Store, string) {
 	if err != nil {
 		t.Fatalf("open request log: %v", err)
 	}
+	createBuyerAuditLogForTest(t, store.DB())
 	return store, dbPath
+}
+
+func createBuyerAuditLogForTest(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    provider_id TEXT,
+    payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log(event_type);
+`); err != nil {
+		t.Fatalf("create audit_log: %v", err)
+	}
 }
 
 func queryRequestLogRows(t *testing.T, dbPath, requestID string) []requestLogTestRow {

@@ -1009,6 +1009,9 @@ func (c Config) Validate() error {
 	if c.Settlement.RecoveryGraceSeconds < 0 {
 		return fmt.Errorf("settlement.recovery_grace_seconds must be >= 0")
 	}
+	if c.Settlement.RecoveryGraceSeconds > 900 {
+		return fmt.Errorf("settlement.recovery_grace_seconds must be <= 900")
+	}
 	if c.Storage.RequestLogRetentionDays <= 0 {
 		return fmt.Errorf("storage.request_log_retention_days must be > 0")
 	}
