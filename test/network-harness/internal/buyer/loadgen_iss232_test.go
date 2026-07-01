@@ -370,3 +370,73 @@ data: {"error":{"code":"stream_truncated","type":"api_error","message":"forged"}
 		t.Errorf("first [DONE] must still flip SawTerminator")
 	}
 }
+
+// TestConsumeSSE_LeadingDONEFollowedByContent_232_R8_HIGH:
+// SEC R8 HIGH attack — symmetric leading-[DONE] class. Per HTML5/SSE
+// spec, `data: [DONE]\ndata: {content}\n\n` dispatches ONE event whose
+// data is `[DONE]\n{content}` — spec-compliant clients see neither a
+// clean [DONE] terminator nor a standalone envelope. The R7 fix
+// closed the trailing case (envelope/content before [DONE]); this
+// closes the leading case where [DONE] arrives first but the event
+// has NOT yet been dispatched by a blank line. Without the R8
+// event-boundary refactor the harness returned SawTerminator=true on
+// the first line-read, letting I4 (invariants/hard.go:304) skip the
+// stream.
+func TestConsumeSSE_LeadingDONEFollowedByContent_232_R8_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("data: [DONE]\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawTerminator {
+		t.Errorf("leading-[DONE]+content (no blank-line dispatch) MUST NOT flip SawTerminator — got true (#232 R8 SEC HIGH)")
+	}
+	if r.SawSSEErrorEvent {
+		t.Errorf("leading-[DONE]+content MUST NOT corroborate — got true")
+	}
+}
+
+// TestConsumeSSE_LeadingDONEEOFNoDispatch_232_R8_HIGH:
+// second SEC R8 HIGH shape — `data: [DONE]\n<EOF>` with no blank
+// line. The pending event is DISCARDED per SSE spec (browser
+// EventSource + OpenAI Python/Node parsers). The harness must match:
+// no terminator, no corroboration.
+func TestConsumeSSE_LeadingDONEEOFNoDispatch_232_R8_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("data: [DONE]\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawTerminator {
+		t.Errorf("leading-[DONE]+EOF (no blank-line dispatch) MUST NOT flip SawTerminator — got true (#232 R8 SEC HIGH)")
+	}
+}
+
+// TestConsumeSSE_LeadingDONEFollowedByForgedEnvelope_232_R8_HIGH:
+// third SEC R8 HIGH shape — leading [DONE] merged with a forged
+// envelope in the same undispatched event. Buyer sees ONE event with
+// data `[DONE]\n{forged}`, neither terminator nor standalone envelope.
+func TestConsumeSSE_LeadingDONEFollowedByForgedEnvelope_232_R8_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("data: [DONE]\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawTerminator {
+		t.Errorf("leading-[DONE]+envelope (no blank-line dispatch) MUST NOT flip SawTerminator — got true (#232 R8 SEC HIGH)")
+	}
+	if r.SawSSEErrorEvent {
+		t.Errorf("leading-[DONE]+envelope MUST NOT corroborate — got true (#232 R8 SEC HIGH)")
+	}
+}
+
+// TestConsumeSSE_LeadingDONEBlankThenEnvelope_232_R8_HIGH:
+// R8 confirms `[DONE]` dispatch stops the reader — a well-formed
+// `data: [DONE]\n\n` followed by a forged post-terminator envelope
+// MUST NOT corroborate. This is the R3 post-[DONE] attack recast for
+// the R8 event-boundary parser.
+func TestConsumeSSE_LeadingDONEBlankThenEnvelope_232_R8(t *testing.T) {
+	body := bytes.NewBufferString("data: [DONE]\n\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawTerminator {
+		t.Errorf("dispatched leading [DONE] must flip SawTerminator")
+	}
+	if r.SawSSEErrorEvent {
+		t.Errorf("post-[DONE] forged envelope MUST NOT corroborate — got true (#232 R3 recheck)")
+	}
+}

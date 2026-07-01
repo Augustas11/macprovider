@@ -244,10 +244,13 @@ type MatchedPair struct {
 	GatewayLagMs                int64  `json:"gateway_lag_ms"`
 
 	// HarnessSawSSEErrorEvent carries through buyer.Result.SawSSEErrorEvent:
-	// true when the FINAL data chunk in the buyer's stream before `[DONE]`
-	// or EOF was a STANDALONE OpenAI-style terminal `error` envelope (no
-	// `choices`, no `usage` tokens) — the shape SPEC-006 §17.7.1 pins for
-	// every in-scope fallback path. Used by
+	// true when the last DISPATCHED SSE event in the buyer's stream before
+	// `[DONE]` or EOF was a STANDALONE OpenAI-style terminal `error`
+	// envelope (no `choices`, no `usage` tokens) — the shape SPEC-006
+	// §17.7.1 pins for every in-scope fallback path. "Dispatched" is
+	// precise per the HTML5/SSE model: only a blank-line-terminated
+	// event counts (#232 R8 SEC HIGH — closes the leading-`[DONE]`
+	// undispatched-event class). Used by
 	// the fallback-overbill corroboration check at computePerPairDrift to
 	// close the trust gap #232 raised:
 	//

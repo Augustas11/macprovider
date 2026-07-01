@@ -261,39 +261,36 @@ func isSSE(resp *http.Response) bool {
 }
 
 // consumeSSE reads the SSE stream, recording TTFT, byte count, token
-// count parsed from each chunk's usage field if present, the "[DONE]"
-// terminator, and (#232) whether the FINAL data chunk before terminator
-// or EOF was a standalone error envelope. Errors mid-stream are
-// recorded but do not panic.
+// count parsed from each dispatched SSE event's usage field if present,
+// the "[DONE]" terminator, and (#232) whether the final DISPATCHED SSE
+// event before terminator or EOF was a standalone error envelope.
+// Errors mid-stream are recorded but do not panic.
+//
+// Parser model (#232 R8 SEC HIGH): fully event-boundary. Data payloads
+// are accumulated into `eventBuf`; classification (`[DONE]` terminator,
+// standalone error envelope, content/usage chunk, or unparseable
+// merged garbage) happens ONLY when a blank line dispatches the event.
+// A pending event with no blank-line terminator (EOF or transport
+// error) is DISCARDED per HTML5/SSE spec, matching what OpenAI's
+// Python/Node clients and browser EventSource do. This closes the full
+// class of "buyer sees X, harness sees Y" attacks that arise when
+// classification is done at line-read time instead of event-dispatch
+// time.
 func consumeSSE(body io.Reader, res *Result) {
 	reader := bufio.NewReader(body)
 	firstByte := true
 	bomConsumed := false
-	// #232 R2 SEC HIGH: track the most-recent data chunk's classification
-	// so that an attacker who injects an error envelope MID-stream and
-	// then keeps emitting content cannot trigger SawSSEErrorEvent. Only
-	// the LAST data chunk before [DONE] or EOF flips the bit.
-	//
-	// #232 R5 SEC HIGH-2: track whether a blank-line event terminator
-	// followed the last data chunk. Per the HTML5/SSE spec, an event is
-	// not dispatched to the client until a blank line follows the
-	// preceding data/field lines. EOF without that blank line means the
-	// pending event is DISCARDED by spec-compliant clients (OpenAI
-	// Python/Node decoders included). The harness must mirror that: the
-	// EOF corroboration path only fires when a blank line was seen
-	// AFTER the standalone envelope.
-	var lastErrorCode string
-	lastWasErrorEnvelope := false
-	envelopeDispatched := false
-	// #232 R7 SEC HIGH / CODE MED: track whether we're at the start of
-	// a new SSE event (no `data:` lines accumulated for the current
-	// event yet). Only a `data: [DONE]` line at event start is a real
-	// terminator; the same text mid-event is a continuation payload per
-	// the HTML5/SSE dispatch model. I4 (`invariants/hard.go:304`) skips
-	// any stream with `SawTerminator=true`, so a wrongly-flipped
-	// terminator on an undispatched `[DONE]` bypasses silent-hang
-	// detection.
-	atEventStart := true
+	// eventBuf accumulates the current SSE event's data payload. Per
+	// SSE spec, consecutive `data:` field lines concatenate with `\n`
+	// separators; the event is dispatched on the first blank line and
+	// discarded on EOF without a terminating blank line.
+	var eventBuf []byte
+	// lastDispatchedWasEnvelope + lastDispatchedErrorCode track the
+	// most-recently DISPATCHED event's classification. Only the last
+	// dispatched event before `[DONE]` or EOF can corroborate the
+	// gateway's fallback outcome.
+	lastDispatchedWasEnvelope := false
+	var lastDispatchedErrorCode string
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -306,12 +303,7 @@ func consumeSSE(body io.Reader, res *Result) {
 			res.BytesReceived += int64(len(line))
 			// #232 R5 SEC HIGH-1: strip a leading UTF-8 BOM (U+FEFF =
 			// EF BB BF) at stream start. Per the WHATWG SSE spec the
-			// BOM is removed before line parsing. Without this strip a
-			// malicious gateway could prefix a `data: [DONE]`
-			// terminator with the BOM, making strict EventSource-style
-			// clients terminate there while this harness's column-0
-			// check rejected the line and kept reading past it into a
-			// forged envelope.
+			// BOM is removed before line parsing.
 			workLine := line
 			if !bomConsumed {
 				bomConsumed = true
@@ -321,31 +313,40 @@ func consumeSSE(body io.Reader, res *Result) {
 			}
 			// #232 R4 SEC HIGH — strict SSE field parsing. The HTML5
 			// SSE spec requires field lines to start at column 0; any
-			// leading whitespace (space, tab) makes the line an
-			// unrecognized non-field line that a strict client (and
-			// browser EventSource) ignores. Trimming leading whitespace
-			// before the `data:` prefix check accepted `\tdata: ...` /
-			// ` data: ...` shapes — a malicious gateway could emit a
-			// forged terminal envelope on a leading-whitespace line and
-			// have the harness corroborate while the buyer's strict
-			// parser dropped the line.
-			//
-			// We strip ONLY the trailing CR/LF, then require `data:` at
-			// column 0. After the colon, the spec allows at most one
-			// optional space before the value.
+			// leading whitespace makes the line an unrecognized non-
+			// field line that a strict client (and browser EventSource)
+			// ignores. We strip ONLY the trailing CR/LF, then require
+			// `data:` at column 0. After the colon, the spec allows at
+			// most one optional space before the value.
 			fieldLine := workLine
 			for len(fieldLine) > 0 && (fieldLine[len(fieldLine)-1] == '\n' || fieldLine[len(fieldLine)-1] == '\r') {
 				fieldLine = fieldLine[:len(fieldLine)-1]
 			}
-			// #232 R5 SEC HIGH-2 — track blank-line dispatch. An empty
-			// line completes the SSE event that preceded it; only
-			// after dispatch can the buyer-visible envelope corroborate
-			// an EOF-terminated stream.
 			if len(fieldLine) == 0 {
-				if lastWasErrorEnvelope {
-					envelopeDispatched = true
+				// Blank line: dispatch the current event, if any.
+				if len(eventBuf) > 0 {
+					if bytes.Equal(eventBuf, []byte("[DONE]")) {
+						// A standalone dispatched `[DONE]` event is the
+						// terminator. Corroborate ONLY if the previously
+						// dispatched event was a standalone error
+						// envelope.
+						res.SawTerminator = true
+						if lastDispatchedWasEnvelope {
+							res.SawSSEErrorEvent = true
+							res.SSEErrorCode = lastDispatchedErrorCode
+						}
+						return
+					}
+					code, isStandalone := parseChunkTokens(eventBuf, res)
+					if isStandalone {
+						lastDispatchedWasEnvelope = true
+						lastDispatchedErrorCode = code
+					} else {
+						lastDispatchedWasEnvelope = false
+						lastDispatchedErrorCode = ""
+					}
+					eventBuf = eventBuf[:0]
 				}
-				atEventStart = true
 				continue
 			}
 			if bytes.HasPrefix(fieldLine, []byte("data:")) {
@@ -353,82 +354,36 @@ func consumeSSE(body io.Reader, res *Result) {
 				if len(payload) > 0 && payload[0] == ' ' {
 					payload = payload[1:]
 				}
-				if bytes.Equal(payload, []byte("[DONE]")) {
-					// #232 R3 SEC HIGH — first `[DONE]` is terminal.
-					// Anything the gateway emits after this point is
-					// invisible to a normal OpenAI-style client (which
-					// also stops at `[DONE]`), so the harness MUST stop
-					// reading too. Otherwise a malicious gateway can
-					// present a buyer-visible clean completion and
-					// then forge a terminal error envelope post-`[DONE]`
-					// to satisfy the corroboration check.
-					//
-					// #232 R6 SEC HIGH — `[DONE]` path also requires
-					// `envelopeDispatched`. Per HTML5/SSE spec, multiple
-					// consecutive `data:` lines without an intervening
-					// blank line form ONE event with concatenated data.
-					// So `data: {forged}\ndata: [DONE]\n\n` is NOT a
-					// dispatch-then-terminate pair — it's one event
-					// whose data is `{forged}\n[DONE]`, which is neither
-					// a clean terminator nor a standalone envelope to
-					// spec-compliant clients. The harness must require
-					// a blank-line dispatch between the envelope and
-					// `[DONE]` to match buyer-visible behavior.
-					//
-					// #232 R7 SEC HIGH / CODE MED — `SawTerminator` also
-					// requires `atEventStart`. `data: foo\ndata: [DONE]\n\n`
-					// is ONE undispatched event whose data is `foo\n[DONE]`;
-					// spec-compliant clients see neither a clean [DONE]
-					// terminator nor an envelope. Without this guard the
-					// harness flipped SawTerminator=true and I4
-					// (`invariants/hard.go:304`) skipped the stream —
-					// silent-hang detection would miss malformed streams.
-					// When [DONE] is mid-event, treat it as continuation
-					// data (per SSE): keep reading, and this event is
-					// no longer a standalone envelope.
-					if !atEventStart {
-						lastWasErrorEnvelope = false
-						lastErrorCode = ""
-						envelopeDispatched = false
-						continue
-					}
-					res.SawTerminator = true
-					if lastWasErrorEnvelope && envelopeDispatched {
-						res.SawSSEErrorEvent = true
-						res.SSEErrorCode = lastErrorCode
-					}
-					return
+				// Append to current event buffer. Per SSE spec,
+				// consecutive `data:` lines concatenate with `\n`.
+				// Classification is deferred to blank-line dispatch —
+				// a `data: [DONE]` line here does NOT terminate; it is
+				// merely appended, and only becomes a terminator if the
+				// dispatched event's full data equals exactly `[DONE]`.
+				// (#232 R8 SEC HIGH — closes the symmetric leading-
+				// `[DONE]` attack: `data: [DONE]\ndata: {content}\n\n`
+				// dispatches ONE event with data `[DONE]\n{content}`,
+				// which is neither a terminator nor an envelope.)
+				if len(eventBuf) > 0 {
+					eventBuf = append(eventBuf, '\n')
 				}
-				code, isStandalone := parseChunkTokens(payload, res)
-				// A standalone envelope requires it to be the ONLY data
-				// line of its event — i.e. we arrived at event start.
-				// A parseChunkTokens=isStandalone hit on a continuation
-				// line is part of a multi-data event and is not a
-				// standalone dispatch. (#232 R7 SEC HIGH / CODE MED —
-				// same event-boundary reasoning as the [DONE] path.)
-				if isStandalone && atEventStart {
-					lastErrorCode = code
-					lastWasErrorEnvelope = true
-					envelopeDispatched = false
-				} else {
-					lastWasErrorEnvelope = false
-					lastErrorCode = ""
-					envelopeDispatched = false
-				}
-				atEventStart = false
+				eventBuf = append(eventBuf, payload...)
 			}
+			// Non-data field lines (event:, id:, retry:) and non-field
+			// lines are ignored — none of them affect corroboration.
 		}
 		if err != nil {
 			if err == io.EOF {
-				// EOF without [DONE]: corroborate ONLY if the last data
-				// chunk was a standalone error envelope AND a blank
-				// line followed it (the event was dispatched per SSE
-				// spec). A `data: {forged}` followed by EOF without the
-				// blank-line terminator is discarded by spec-compliant
-				// clients and MUST NOT corroborate.
-				if lastWasErrorEnvelope && envelopeDispatched {
+				// EOF: any pending event (non-empty eventBuf without a
+				// terminating blank line) is DISCARDED per SSE spec.
+				// Corroborate ONLY if the last DISPATCHED event was a
+				// standalone error envelope. This closes the EOF variant
+				// of the R8 leading-`[DONE]` attack: `data: [DONE]\n<EOF>`
+				// has no blank-line dispatch, so the pending `[DONE]`
+				// event is discarded — no terminator, no corroboration.
+				if lastDispatchedWasEnvelope {
 					res.SawSSEErrorEvent = true
-					res.SSEErrorCode = lastErrorCode
+					res.SSEErrorCode = lastDispatchedErrorCode
 				}
 				return
 			}

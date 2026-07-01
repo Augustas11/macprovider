@@ -59,20 +59,31 @@ type Result struct {
 	// I4 may flag it.
 	SawTerminator bool `json:"saw_terminator"`
 
-	// SawSSEErrorEvent is true when the SSE stream's final data chunk
-	// before `[DONE]` (or EOF) was a STANDALONE terminal error envelope
-	// — `{"error": {"code": "...", ...}}` with no `choices` and no
-	// `usage` tokens. This shape matches the gateway's writeSSEError and
-	// writeStructuredOutputTimeoutSSE helpers in chat_proxy.go.
+	// SawSSEErrorEvent is true when the SSE stream's last DISPATCHED SSE
+	// event before `[DONE]` (or EOF) was a STANDALONE terminal error
+	// envelope — `{"error": {"code": "...", ...}}` with no `choices`
+	// and no `usage` tokens. This shape matches the gateway's
+	// writeSSEError and writeStructuredOutputTimeoutSSE helpers in
+	// chat_proxy.go.
+	//
+	// "Dispatched" is precise (#232 R8 SEC HIGH): under the HTML5/SSE
+	// spec, an event is only dispatched to the client when a blank line
+	// follows its `data:` field lines. A pending event with no blank-
+	// line terminator (EOF or another `data:` line before the blank
+	// line) is DISCARDED. The harness parser mirrors that: classification
+	// happens at event-dispatch time, not per-line, so
+	// `data: {envelope}\ndata: [DONE]\n\n` (one merged undispatched
+	// event) neither terminates nor corroborates.
 	//
 	// Used by the reconciler (#232) to corroborate fallback outcome
 	// labels — the gateway's outcome label alone is a trust gate, but
 	// satisfying this bit requires the gateway to actually present the
-	// buyer with a standalone terminal error envelope as the LAST data
-	// frame before `[DONE]` or EOF. Post-`[DONE]` envelopes are
-	// invisible to OpenAI-style clients (and to this parser per #232
-	// R3) and do not corroborate. Leading-whitespace forged envelopes
-	// are dropped by the strict SSE field-line parser per #232 R4.
+	// buyer with a standalone terminal error envelope as the last
+	// DISPATCHED SSE event before `[DONE]` or EOF. Post-`[DONE]`
+	// envelopes are invisible to OpenAI-style clients (and to this
+	// parser per #232 R3) and do not corroborate. Leading-whitespace
+	// forged envelopes are dropped by the strict SSE field-line parser
+	// per #232 R4.
 	//
 	// Tightening (#232 R2 SEC HIGH): position-aware. An attacker who
 	// injects `"error":{"code":"..."}` into a normal-looking content
