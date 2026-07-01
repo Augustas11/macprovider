@@ -3,8 +3,18 @@ import Darwin
 import Foundation
 import MacProviderCore
 
+struct LaunchdRestartFailure: Error, CustomStringConvertible {
+    let error: Error
+    let recoveryCommand: String
+
+    var description: String {
+        String(describing: error)
+    }
+}
+
 struct SelfUpdate {
     static let defaultReleasesAPIURL = "https://api.github.com/repos/Augustas11/macprovider/releases/latest"
+    static let launchdLabel = "live.streamvc.macprovider"
     static let checksumPublicKeyPEM = """
     -----BEGIN PUBLIC KEY-----
     MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwwd0Vzj35OP8DlZU+0lUa8vI9gHK
@@ -55,8 +65,13 @@ struct SelfUpdate {
 
         let prepared = try await prepareValidatedUpdate(from: release)
         defer { prepared.cleanup() }
-        try await applyValidatedUpdate(newBinary: prepared.newBinary)
+        let restartError = try await applyValidatedUpdate(newBinary: prepared.newBinary)
         try await persistSignedPolicyIfPresent(prepared.signedPolicy)
+        if let restartError {
+            print("Binary upgraded to v\(latest), but automatic restart failed: \(restartError)")
+            print("Run: \(restartError.recoveryCommand)")
+            return
+        }
         print("Update complete. Restart macprovider-cli to use v\(latest).")
     }
 
@@ -64,7 +79,7 @@ struct SelfUpdate {
         let release = try await releaseByTag(tag)
         let prepared = try await prepareValidatedUpdate(from: release)
         defer { prepared.cleanup() }
-        try await applyValidatedUpdate(newBinary: prepared.newBinary)
+        _ = try await applyValidatedUpdate(newBinary: prepared.newBinary)
         try await persistSignedPolicyIfPresent(prepared.signedPolicy)
     }
 
@@ -122,7 +137,8 @@ struct SelfUpdate {
         }
     }
 
-    func applyValidatedUpdateForTest(newBinary: URL) async throws {
+    @discardableResult
+    func applyValidatedUpdateForTest(newBinary: URL) async throws -> LaunchdRestartFailure? {
         try await applyValidatedUpdate(newBinary: newBinary)
     }
 
@@ -253,43 +269,57 @@ struct SelfUpdate {
         }
     }
 
-    private func applyValidatedUpdate(newBinary: URL) async throws {
+    private func applyValidatedUpdate(newBinary: URL) async throws -> LaunchdRestartFailure? {
         if let drainBeforeReplace {
             try await drainBeforeReplace()
-        } else {
-            try drainLaunchdIfInstalled()
         }
         if let replaceBinary {
             try replaceBinary(newBinary)
         } else {
             try replaceCurrentBinary(with: newBinary)
         }
-        if let restartLaunchd {
-            try restartLaunchd()
-        } else {
-            try restartLaunchdIfInstalled()
+        do {
+            if let restartLaunchd {
+                try restartLaunchd()
+            } else {
+                try restartLaunchdIfInstalled()
+            }
+        } catch let failure as LaunchdRestartFailure {
+            return failure
+        } catch {
+            return LaunchdRestartFailure(error: error, recoveryCommand: restartRecoveryCommand())
         }
-    }
-
-    private func drainLaunchdIfInstalled() throws {
-        let plist = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
-        guard FileManager.default.fileExists(atPath: plist.path) else {
-            return
-        }
-        let domain = "gui/\(getuid())"
-        try runProcess("/bin/launchctl", arguments: ["bootout", domain, "live.streamvc.macprovider"], allowFailure: true)
+        return nil
     }
 
     private func restartLaunchdIfInstalled() throws {
         let plist = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+            .appendingPathComponent("Library/LaunchAgents/\(Self.launchdLabel).plist")
         guard FileManager.default.fileExists(atPath: plist.path) else {
             return
         }
-        let domain = "gui/\(getuid())"
-        try runProcess("/bin/launchctl", arguments: ["bootout", domain, "live.streamvc.macprovider"], allowFailure: true)
-        try runProcess("/bin/launchctl", arguments: ["bootstrap", domain, plist.path])
+        let loaded = launchctlServiceLoaded(label: Self.launchdLabel)
+        do {
+            try runProcess(
+                "/bin/launchctl",
+                arguments: Self.launchdRestartArguments(serviceLoaded: loaded, plistPath: plist.path)
+            )
+        } catch {
+            throw LaunchdRestartFailure(
+                error: error,
+                recoveryCommand: Self.launchdRestartRecoveryCommand(serviceLoaded: loaded, plistPath: plist.path)
+            )
+        }
+    }
+
+    private func restartRecoveryCommand() -> String {
+        let plist = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(Self.launchdLabel).plist")
+        guard FileManager.default.fileExists(atPath: plist.path) else {
+            return Self.launchdRestartRecoveryCommand()
+        }
+        let loaded = launchctlServiceLoaded(label: Self.launchdLabel)
+        return Self.launchdRestartRecoveryCommand(serviceLoaded: loaded, plistPath: plist.path)
     }
 
     private func runProcess(_ executable: String, arguments: [String], allowFailure: Bool = false) throws {
@@ -301,6 +331,44 @@ struct SelfUpdate {
         if !allowFailure, process.terminationStatus != 0 {
             throw UpdateError.processFailed(executable, process.terminationStatus)
         }
+    }
+
+    private func launchctlServiceLoaded(label: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["print", Self.launchdServiceTarget(label: label)]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return false
+        }
+        guard process.terminationStatus == 0 else { return false }
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        return !output.lowercased().contains("disabled = true")
+    }
+
+    static func launchdRestartArguments(serviceLoaded: Bool, uid: uid_t = getuid(), plistPath: String) -> [String] {
+        let domain = "gui/\(uid)"
+        if serviceLoaded {
+            return ["kickstart", "-k", "\(domain)/\(launchdLabel)"]
+        }
+        return ["bootstrap", domain, plistPath]
+    }
+
+    static func launchdRestartRecoveryCommand(serviceLoaded: Bool = true, uid: uid_t = getuid(), plistPath: String? = nil) -> String {
+        if serviceLoaded {
+            return "launchctl kickstart -k \(launchdServiceTarget(uid: uid))"
+        }
+        let plist = plistPath ?? "~/Library/LaunchAgents/\(launchdLabel).plist"
+        return "launchctl bootstrap gui/\(uid) \(plist)"
+    }
+
+    private static func launchdServiceTarget(label: String = launchdLabel, uid: uid_t = getuid()) -> String {
+        "gui/\(uid)/\(label)"
     }
 
     private func validateDownloadURL(_ url: URL) throws {
