@@ -112,6 +112,53 @@ logging:
   level: "info"
   format: "json"
 
+# Rewards / rate-card configuration (Entry 92 v2 pricing thesis; Wave 1 hot-reload surface).
+#
+# Sample below documents the Wave 1 2-row canary pattern that shipped 2026-07-01
+# (Entry 96 in beta/DECISION_CRITERIA.md). Fill in your own per-model rows using
+# the same schema. Absent block → coord falls through to code defaults
+# (`default` at 500k prompt / 1M completion credits = $0.50/$1.00 per Mtok
+# via stats_rollup.usd_per_million_credits=1.0).
+#
+# KEY NORMALIZATION: row keys must match phase4-coordinator/internal/billing/
+# formula.go::normalizeModelKey() output for buyer strings you expect. Examples:
+#   mlx-community/Qwen3-32B-4bit          → `qwen3-32b`
+#   mlx-community/gpt-oss-20b-MXFP4-Q8    → `openai/gpt-oss-20b`
+#   mlx-community/Meta-Llama-3.1-8B-Instruct-4bit → `meta-llama/llama-3.1-8b-instruct`
+# The normalization allowlist covers namespaces {mlx-community, openai, google,
+# meta-llama, nvidia, qwen}; unknown namespaces do NOT normalize.
+#
+# HOT RELOAD: coordinator supports SIGHUP-driven reload of this block. The
+# deploy-pearl-vps.sh script's config-drift check will refuse the deploy if
+# local + live diverge; pass ALLOW_CONFIG_DRIFT=1 to acknowledge intentional
+# yaml overwrite (money-path safety net).
+#
+# UNITS: credits_per_mtok — 1M credits = $1.00 at
+# stats_rollup.usd_per_million_credits=1.0. To price a $0.100/M completion
+# rate, set completion_credits_per_mtok: 100000.
+#
+# rewards:
+#   global_multiplier: 1.0
+#   provider_share: 0.90
+#   rate_card:
+#     default:                                # MUST be present per config validator
+#       prompt_credits_per_mtok: 500000       # $0.50/M — code-default fallback
+#       completion_credits_per_mtok: 1000000  # $1.00/M — code-default fallback
+#     qwen3-32b:                              # Wave 1 subset — Entry 92 v2 target
+#       prompt_credits_per_mtok: 110000       # $0.110/M
+#       completion_credits_per_mtok: 220000   # $0.220/M — 21% undercut of $0.28 market
+#     openai/gpt-oss-20b:                     # Wave 1 subset — Entry 92 v2 target
+#       prompt_credits_per_mtok: 50000        # $0.050/M
+#       completion_credits_per_mtok: 100000   # $0.100/M — 23% undercut of $0.13 WandB
+#
+# EXPECTED-LOG-NOISE PATTERN (Entry 96 note): the coord journal at every
+# restart emits a burst of `event=rate_card_normalized ... matched=default`
+# events. These are provider pool-check queries firing before the
+# `Rewards.RateCard` map finishes loading from yaml — the requests fall
+# through to the code-default row. Post-startup requests correctly hit the
+# configured rows (log will show `matched=<key>` e.g. `matched=qwen3-32b`).
+# Do NOT treat the startup-burst `matched=default` as a live-buyer bug.
+
 # SPEC-005 v0.4 §11.5 launch-gate item 10. Quarantine resolution
 # `/admin/ledger/quarantine/{id}/force-void` admin surface is
 # default-OFF — operators MUST flip this flag deliberately after
