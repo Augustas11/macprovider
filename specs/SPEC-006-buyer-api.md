@@ -1,7 +1,11 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.3 (2026-06-30, ISS-278 streaming under-report symmetric clamp policy)
+**Version:** 0.9.4 (2026-07-01, SPEC-015 v0.4 model-verification disclosure)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.0, SPEC-003 v0.7, SPEC-004 v0.2
+
+**Change log v0.9.4 (2026-07-01, SPEC-015 v0.4):**
+- § 1.6 and § 5.3.1 now disclose the SPEC-015 v0.4 / SPEC-022 model-verification limit: v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot, but do not detect a provider falsifying its own loaded-model hash measurement.
+- The `/v1/models tier1_disclosure` example adds `model_verification_limit` so buyer/product surfaces can show the caveat alongside model identity and Tier 2 disclosure text.
 
 **Change log v0.9.3 (2026-06-30, issue #278):**
 - § 7.2 streaming settlement now also clamps the *upward*-correction direction (provider's reported completion_tokens is *under* the gateway's byte-based observation) using the SAME pure-absolute window `2 < overshoot ≤ 20`. In-window upward gaps settle at the provider-reported count with `token_source = "provider_reported"` (the provider's tokenizer is authoritative on its own output when the disagreement is small). Below 2 tokens: still trust the byte estimate (existing behavior, byte-based observation drives settlement). Above 20 tokens: still trust the byte estimate (stream-truncation / zero-report-fraud guard). Clamp window constants `clampFloorTokens=2`, `clampCeilingTokens=20` are shared between both directions — no direction-specific tuning.
@@ -274,10 +278,11 @@ SPEC-006 v0.8 is a Tier 1 cooperative inference product. The following propertie
 1. **Buyer prompts and provider responses are processed as plaintext on provider hardware.** Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.
 2. **There is no hardware attestation or runtime integrity check on providers.** The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.
 3. **Model identity is provider-reported.** When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.8 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.
-4. **The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-3.
-5. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-4.
+4. **v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot.** They do not detect a provider falsifying its own loaded-model hash measurement.
+5. **The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-4.
+6. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-5.
 
-These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in v0.8 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, all five limitations are normative and MUST be preserved in product language, with property 5 conditional on `routing.sticky_enabled: true`.
+These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in v0.8 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, all six limitations are normative and MUST be preserved in product language, with property 6 conditional on `routing.sticky_enabled: true`.
 
 Production gate: this disclosure MUST appear in substantively equivalent language in:
 
@@ -286,7 +291,7 @@ Production gate: this disclosure MUST appear in substantively equivalent languag
 - The `/v1/models` response as a top-level `tier1_disclosure` field with the same plaintext-to-provider wording.
 - The README.md of any client SDK distributed by the operator.
 
-When `routing.sticky_enabled: true`, the same appearance points MUST also include the sticky affinity disclosure in property 5. When `routing.sticky_enabled: false`, operators are not required to surface sticky-specific disclosure language beyond `/v1/models tier1_disclosure.sticky_affinity.enabled: false`.
+When `routing.sticky_enabled: true`, the same appearance points MUST also include the sticky affinity disclosure in property 6. When `routing.sticky_enabled: false`, operators are not required to surface sticky-specific disclosure language beyond `/v1/models tier1_disclosure.sticky_affinity.enabled: false`.
 
 ### 1.7 Relationship to SPEC-003
 
@@ -986,6 +991,7 @@ Response shape:
     "model_identity": "provider_reported",
     "hardware_attestation": "none",
     "tier2_milestone": "future",
+    "model_verification_limit": "v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.",
     "sticky_affinity": {
       "enabled": false,
       "ttl_seconds": 0,
@@ -1040,6 +1046,7 @@ The `/v1/models` response MUST include a top-level field:
   "model_identity": "provider_reported",
   "hardware_attestation": "none",
   "tier2_milestone": "future",
+  "model_verification_limit": "v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.",
   "sticky_affinity": {
     "enabled": false,
     "ttl_seconds": 0,

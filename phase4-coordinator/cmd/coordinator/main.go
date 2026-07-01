@@ -525,6 +525,7 @@ func main() {
 		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
 		buyer.WithGatewayServiceToken(cfg.Auth.GatewayServiceToken),
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
+		buyer.WithSettlementRelay(wsServer.DispatchInferenceWithSettlement),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),
 		buyer.WithRequestLog(reqLogStore),
 		buyer.WithBilling(billingStore, cfg.Rewards),

@@ -207,6 +207,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let providerID = providerID
         let requestAcceptedAt = Date()
         let auditRequestID = requestHead?.headers.first(name: "X-Request-ID") ?? UUID().uuidString
+        let settlementMetadata = Self.settlementMetadata(from: requestHead?.headers.first(name: Self.settlementMetadataHeaderName))
         var parsedRequest: ChatCompletionRequest?
 
         do {
@@ -218,18 +219,24 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             }
 
             if request.stream {
-                ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .streamingRequest)
+                if settlementMetadata == nil {
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .streamingRequest)
+                }
                 handleStreamingChatCompletions(
                     request: request,
                     writer: writer,
                     modelRuntime: modelRuntime,
-                    warmSwapEnabled: warmSwapEnabled
+                    warmSwapEnabled: warmSwapEnabled,
+                    receiptBuilder: receiptBuilder,
+                    providerID: providerID,
+                    requestID: auditRequestID,
+                    settlementMetadata: settlementMetadata
                 )
                 return
             }
 
             let providerStatus = providerStatus
-            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID] in
+            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, settlementMetadata] in
                 let startedAt = await providerStatus.beginRequest()
                 // SPEC-015 §M.2.2 atomic-read invariant — capture
                 // the pre-snapshot for warm-swap validation, then
@@ -264,6 +271,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
                     let response = Self.chatCompletionResponse(request: request, completion: completion)
                     let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
+                    let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                     // SPEC-015 §M.2.2 — bind the receipt's
                     // `model_hash` to the runtime-served snapshot
                     // returned above by
@@ -280,15 +288,19 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         outputContent: completion.content,
                         outputToolCalls: completion.toolCalls,
                         finishReason: completion.finishReason,
+                        promptTokens: Int64(completion.promptTokens),
                         ttftMs: ttftMs,
                         tokensOut: Int64(completion.completionTokens),
                         unixTsSeconds: unixTsSeconds,
-                        modelHashSource: modelHashSource
+                        modelHashSource: modelHashSource,
+                        requestID: auditRequestID,
+                        settlementMetadata: settlementMetadata,
+                        terminalStateTSUnixMS: terminalStateTSUnixMS
                     )
                     switch receipt {
                     case .issued(let header):
                         let tokensOut = Int64(completion.completionTokens)
-                        writer.writeJSON(status: .ok, body: response, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
+                        writer.writeJSON(status: .ok, body: response, extraHeaders: Self.receiptExtraHeaders(header: header, settlementMetadata: settlementMetadata, terminalStateTSUnixMS: terminalStateTSUnixMS)) { delivered in
                             if delivered {
                                 ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
                             } else {
@@ -454,13 +466,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         request: ChatCompletionRequest,
         writer: ResponseWriter,
         modelRuntime: ModelRuntime,
-        warmSwapEnabled: Bool
+        warmSwapEnabled: Bool,
+        receiptBuilder: ReceiptBuilder?,
+        providerID: String?,
+        requestID: String,
+        settlementMetadata: SettlementReceiptMetadata?
     ) {
         let created = Int(Date().timeIntervalSince1970)
         let id = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
         let providerStatus = providerStatus
-        Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled] in
+        Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, settlementMetadata] in
             let startedAt = await providerStatus.beginRequest()
             var sseStarted = false
             do {
@@ -477,7 +493,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 try await modelRuntime.preflight(request, with: handle)
 
-                writer.startSSE(extraHeaders: [
+                writer.startSSE(extraHeaders: Self.streamingSettlementHeadHeaders(settlementMetadata: settlementMetadata) + [
                     ("X-MacProvider-Provider-Unix-Ms", "\(Int64(Date().timeIntervalSince1970 * 1000))"),
                 ])
                 sseStarted = true
@@ -560,7 +576,40 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         "usage": Self.usage(completion),
                     ]
                 )
-                writer.writeSSEDone()
+                let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
+                let unixTsSeconds = Int64(Date().timeIntervalSince1970)
+                var trailers: [(String, String)] = []
+                if settlementMetadata != nil {
+                    let modelHashSource = Self.resolveModelHashSource(
+                        warmSwapEnabled: warmSwapEnabled,
+                        snapshot: handle.snapshot
+                    )
+                    let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
+                    let receipt = try Self.receiptHeaderResult(
+                        providerID: providerID,
+                        receiptBuilder: receiptBuilder,
+                        request: request,
+                        outputContent: completion.content,
+                        outputToolCalls: completion.toolCalls,
+                        finishReason: completion.finishReason,
+                        promptTokens: Int64(completion.promptTokens),
+                        ttftMs: ttftMs,
+                        tokensOut: Int64(completion.completionTokens),
+                        unixTsSeconds: unixTsSeconds,
+                        modelHashSource: modelHashSource,
+                        requestID: requestID,
+                        settlementMetadata: settlementMetadata,
+                        terminalStateTSUnixMS: terminalStateTSUnixMS
+                    )
+                    switch receipt {
+                    case .issued(let header):
+                        trailers = Self.receiptExtraHeaders(header: header, settlementMetadata: settlementMetadata, terminalStateTSUnixMS: terminalStateTSUnixMS)
+                        ReceiptAudit.emitIssued(providerID: providerID, requestID: requestID, modelID: request.model, tokensOut: Int64(completion.completionTokens), ttftMs: ttftMs, unixTs: unixTsSeconds)
+                    case .omitted(let reason):
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: reason)
+                    }
+                }
+                writer.writeSSEDone(trailers: trailers)
             } catch let error as APIError {
                 await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                 if sseStarted {
@@ -616,7 +665,49 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     static let receiptHeaderName = "X-MacProvider-Receipt"
+    static let settlementMetadataHeaderName = "X-MacProvider-Settlement-Metadata"
+    static let receiptTerminalStateTSHeaderName = "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS"
+    static let receiptPendingDeadlineHeaderName = "X-MacProvider-Receipt-Pending-Deadline-Seconds"
+    static let lateReceiptSettlementHeaderName = "X-MacProvider-Late-Receipt-Settlement"
     static let maxReceiptHeaderBytes = 4096
+
+    private static func settlementMetadata(from encoded: String?) -> SettlementReceiptMetadata? {
+        guard let encoded, !encoded.isEmpty,
+              let data = try? Data(base64URLUnpadded: encoded),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return SettlementReceiptMetadata(wire: object)
+    }
+
+    private static func receiptExtraHeaders(
+        header: String,
+        settlementMetadata: SettlementReceiptMetadata?,
+        terminalStateTSUnixMS: Int64
+    ) -> [(String, String)] {
+        var headers = [(Self.receiptHeaderName, header)]
+        if let settlementMetadata {
+            headers.append((Self.receiptTerminalStateTSHeaderName, String(terminalStateTSUnixMS)))
+            headers.append((Self.receiptPendingDeadlineHeaderName, String(settlementMetadata.pendingDeadlineSeconds)))
+            headers.append((Self.lateReceiptSettlementHeaderName, "not_settled"))
+        }
+        return headers
+    }
+
+    private static func streamingSettlementHeadHeaders(settlementMetadata: SettlementReceiptMetadata?) -> [(String, String)] {
+        guard settlementMetadata != nil else {
+            return []
+        }
+        return [(
+            "Trailer",
+            [
+                Self.receiptHeaderName,
+                Self.receiptTerminalStateTSHeaderName,
+                Self.receiptPendingDeadlineHeaderName,
+                Self.lateReceiptSettlementHeaderName,
+            ].joined(separator: ", ")
+        )]
+    }
 
     enum ReceiptHeaderResult: Equatable {
         case issued(String)
@@ -636,6 +727,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         outputContent: String,
         outputToolCalls: [ToolCall]?,
         finishReason: String,
+        promptTokens: Int64? = nil,
         ttftMs: Int64,
         tokensOut: Int64,
         unixTsSeconds: Int64,
@@ -648,10 +740,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             outputContent: outputContent,
             outputToolCalls: outputToolCalls,
             finishReason: finishReason,
+            promptTokens: promptTokens,
             ttftMs: ttftMs,
             tokensOut: tokensOut,
             unixTsSeconds: unixTsSeconds,
-            modelHashSource: modelHashSource
+            modelHashSource: modelHashSource,
+            requestID: nil,
+            settlementMetadata: nil,
+            terminalStateTSUnixMS: nil
         ) {
         case .issued(let header):
             return header
@@ -691,10 +787,15 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         outputContent: String,
         outputToolCalls: [ToolCall]?,
         finishReason: String,
+        promptTokens: Int64? = nil,
         ttftMs: Int64,
         tokensOut: Int64,
         unixTsSeconds: Int64,
-        modelHashSource: ReceiptModelHashSource
+        modelHashSource: ReceiptModelHashSource,
+        requestID: String? = nil,
+        settlementMetadata: SettlementReceiptMetadata? = nil,
+        terminalState: String = "normal_done",
+        terminalStateTSUnixMS: Int64? = nil
     ) throws -> ReceiptHeaderResult {
         guard let providerID, !providerID.isEmpty else {
             return .omitted(.noKeypair)
@@ -720,6 +821,34 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             return .omitted(.modelSwapViolation)
         }
         do {
+            if let settlementMetadata {
+                guard let requestID, settlementMetadata.requestID == requestID,
+                      settlementMetadata.providerID == providerID,
+                      settlementMetadata.modelID == request.model,
+                      case .captured(let modelHash) = modelHashSource else {
+                    return .omitted(.constructionFailed)
+                }
+                let issuedAt = Int64(Date().timeIntervalSince1970 * 1000)
+                let header = try receiptBuilder.buildSettlement(
+                    providerId: providerID,
+                    input: SettlementReceiptInput(
+                        metadata: settlementMetadata,
+                        modelHash: modelHash,
+                        content: outputContent,
+                        toolCalls: outputToolCalls,
+                        finishReason: finishReason,
+                        promptTokens: promptTokens ?? 0,
+                        completionTokens: tokensOut,
+                        terminalState: terminalState,
+                        terminalStateUnixMS: terminalStateTSUnixMS ?? issuedAt,
+                        issuedAtUnixMS: issuedAt
+                    )
+                )
+                guard header.utf8.count <= maxReceiptHeaderBytes else {
+                    throw ReceiptEmissionError.headerTooLarge(byteCount: header.utf8.count)
+                }
+                return .issued(header)
+            }
             let header = try receiptBuilder.build(
                 providerId: providerID,
                 input: ReceiptInput(
@@ -1057,10 +1186,18 @@ private struct ResponseWriter: @unchecked Sendable {
         }
     }
 
-    func writeSSEDone() {
+    func writeSSEDone(trailers: [(String, String)] = []) {
         writeSSEData("[DONE]")
         context.eventLoop.execute {
-            context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil))).whenComplete { _ in
+            var headers: HTTPHeaders?
+            if !trailers.isEmpty {
+                var trailerHeaders = HTTPHeaders()
+                for (name, value) in trailers {
+                    trailerHeaders.add(name: name, value: value)
+                }
+                headers = trailerHeaders
+            }
+            context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(headers))).whenComplete { _ in
                 context.close(promise: nil)
             }
         }

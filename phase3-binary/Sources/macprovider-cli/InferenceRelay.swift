@@ -92,6 +92,22 @@ actor InferenceRelay {
             return
         }
 
+        let settlementMetadata: SettlementReceiptMetadata?
+        if let settlementWire = message["settlement"] as? [String: Any] {
+            guard let parsed = SettlementReceiptMetadata(wire: settlementWire) else {
+                try await sendNAK(inReplyTo: requestID, code: "invalid_settlement_metadata", message: "inference_request settlement metadata is malformed")
+                return
+            }
+            guard parsed.requestID == requestID,
+                  receiptProviderID == nil || parsed.providerID == receiptProviderID else {
+                try await sendNAK(inReplyTo: requestID, code: "invalid_settlement_metadata", message: "inference_request settlement metadata does not match this request")
+                return
+            }
+            settlementMetadata = parsed
+        } else {
+            settlementMetadata = nil
+        }
+
         guard body.utf8.count <= maxBodyBytes else {
             try await Self.sendEndFrame([
                 "type": "inference_response_end",
@@ -106,7 +122,7 @@ actor InferenceRelay {
         let state = RelayRequestState()
         let receiptBuilder = receiptBuilder
         let receiptProviderID = receiptProviderID
-        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, warmSwapEnabled, sendFrame, tier2Session, state] in
+        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, warmSwapEnabled, sendFrame, tier2Session, state, settlementMetadata] in
             await Self.process(
                 requestID: requestID,
                 body: body,
@@ -119,6 +135,7 @@ actor InferenceRelay {
                 tier2Session: tier2Session,
                 receiptBuilder: receiptBuilder,
                 receiptProviderID: receiptProviderID,
+                settlementMetadata: settlementMetadata,
                 sendFrame: sendFrame
             )
             await self?.removeActive(requestID)
@@ -199,6 +216,7 @@ actor InferenceRelay {
         tier2Session: Tier2ProviderSession?,
         receiptBuilder: ReceiptBuilder?,
         receiptProviderID: String?,
+        settlementMetadata: SettlementReceiptMetadata?,
         sendFrame: @escaping SendFrame
     ) async {
         let startedAt = await providerStatus.beginRequest(requestID: requestID)
@@ -218,7 +236,11 @@ actor InferenceRelay {
                     request: request,
                     state: state,
                     modelRuntime: modelRuntime,
+                    warmSwapEnabled: warmSwapEnabled,
                     tier2Session: tier2Session,
+                    receiptBuilder: receiptBuilder,
+                    receiptProviderID: receiptProviderID,
+                    settlementMetadata: settlementMetadata,
                     sendFrame: sendFrame
                 )
             } else {
@@ -230,6 +252,7 @@ actor InferenceRelay {
                     tier2Session: tier2Session,
                     receiptBuilder: receiptBuilder,
                     receiptProviderID: receiptProviderID,
+                    settlementMetadata: settlementMetadata,
                     startedAt: startedAt,
                     warmSwapEnabled: warmSwapEnabled,
                     sendFrame: sendFrame
@@ -238,29 +261,35 @@ actor InferenceRelay {
         } catch is RelayCancellationAcknowledged {
         } catch is CancellationError {
             if state.markTerminalSent() {
-                try? await sendEndFrame([
+                var endFrame: [String: Any] = [
                     "type": "inference_response_end",
                     "request_id": requestID,
                     "status": "cancelled",
                     "chunks_sent": state.chunksSent,
                     "usage": state.usage ?? zeroUsage(),
-                ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
+                ]
+                addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
+                try? await sendEndFrame(endFrame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
         } catch let error as APIError {
             failed = true
             if state.markTerminalSent() {
-                try? await sendEndFrame(errorEndFrame(requestID: requestID, error: error, chunksSent: state.chunksSent), requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
+                var endFrame = errorEndFrame(requestID: requestID, error: error, chunksSent: state.chunksSent)
+                addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
+                try? await sendEndFrame(endFrame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
         } catch {
             failed = true
             if state.markTerminalSent() {
-                try? await sendEndFrame([
+                var endFrame: [String: Any] = [
                     "type": "inference_response_end",
                     "request_id": requestID,
                     "status": "error_internal",
                     "chunks_sent": state.chunksSent,
                     "error": String(describing: error),
-                ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
+                ]
+                addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
+                try? await sendEndFrame(endFrame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
         }
         await providerStatus.finishRequest(
@@ -279,6 +308,7 @@ actor InferenceRelay {
         tier2Session: Tier2ProviderSession?,
         receiptBuilder: ReceiptBuilder?,
         receiptProviderID: String?,
+        settlementMetadata: SettlementReceiptMetadata?,
         startedAt: Date,
         warmSwapEnabled: Bool,
         sendFrame: @escaping SendFrame
@@ -296,13 +326,36 @@ actor InferenceRelay {
         state.setUsage(completion)
         if state.isCancelled {
             if state.markTerminalSent() {
-                try await sendEndFrame([
+                let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
+                let receiptHeader = Self.buildReceiptHeader(
+                    receiptBuilder: receiptBuilder,
+                    providerID: receiptProviderID,
+                    request: request,
+                    completion: completion,
+                    ttftMs: completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt),
+                    unixTsSeconds: unixTsSeconds,
+                    requestID: requestID,
+                    modelHashSource: modelHashSource,
+                    settlementMetadata: settlementMetadata,
+                    terminalState: "buyer_cancel",
+                    terminalStateTSUnixMS: terminalStateTSUnixMS
+                )
+                var endFrame: [String: Any] = [
                     "type": "inference_response_end",
                     "request_id": requestID,
                     "status": "cancelled",
                     "chunks_sent": state.chunksSent,
                     "usage": usage(completion),
-                ], requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
+                    "terminal_state_ts_unix_ms": terminalStateTSUnixMS,
+                ]
+                if let receiptHeader {
+                    endFrame["receipt"] = receiptHeader
+                }
+                if let settlementMetadata {
+                    endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
+                    endFrame["late_receipt_settlement"] = "not_settled"
+                }
+                try await sendEndFrame(endFrame, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
             }
             return completion
         }
@@ -313,6 +366,7 @@ actor InferenceRelay {
         let seq = state.nextSeq()
         try await sendChunk(requestID: requestID, stream: false, seq: seq, data: response, tier2Session: tier2Session, sendFrame: sendFrame)
         let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
+        let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
         let receiptHeader = Self.buildReceiptHeader(
             receiptBuilder: receiptBuilder,
             providerID: receiptProviderID,
@@ -321,7 +375,9 @@ actor InferenceRelay {
             ttftMs: ttftMs,
             unixTsSeconds: unixTsSeconds,
             requestID: requestID,
-            modelHashSource: modelHashSource
+            modelHashSource: modelHashSource,
+            settlementMetadata: settlementMetadata,
+            terminalStateTSUnixMS: terminalStateTSUnixMS
         )
         if state.markTerminalSent() {
             var endFrame: [String: Any] = [
@@ -330,9 +386,14 @@ actor InferenceRelay {
                 "status": "complete",
                 "chunks_sent": state.chunksSent,
                 "usage": usage(completion),
+                "terminal_state_ts_unix_ms": terminalStateTSUnixMS,
             ]
             if let receiptHeader {
                 endFrame["receipt"] = receiptHeader
+            }
+            if let settlementMetadata {
+                endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
+                endFrame["late_receipt_settlement"] = "not_settled"
             }
             try await sendEndFrame(endFrame, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
         }
@@ -347,7 +408,10 @@ actor InferenceRelay {
         ttftMs: Int64,
         unixTsSeconds: Int64,
         requestID: String,
-        modelHashSource: ReceiptModelHashSource
+        modelHashSource: ReceiptModelHashSource,
+        settlementMetadata: SettlementReceiptMetadata? = nil,
+        terminalState: String = "normal_done",
+        terminalStateTSUnixMS: Int64? = nil
     ) -> String? {
         guard let receiptBuilder, let providerID, !providerID.isEmpty else {
             return nil
@@ -365,6 +429,33 @@ actor InferenceRelay {
             return nil
         }
         do {
+            if let settlementMetadata {
+                guard settlementMetadata.providerID == providerID,
+                      settlementMetadata.modelID == request.model else {
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .constructionFailed)
+                    return nil
+                }
+                guard let modelHash = resolvedModelHash else {
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .constructionFailed)
+                    return nil
+                }
+                let issuedAt = Int64(Date().timeIntervalSince1970 * 1000)
+                return try receiptBuilder.buildSettlement(
+                    providerId: providerID,
+                    input: SettlementReceiptInput(
+                        metadata: settlementMetadata,
+                        modelHash: modelHash,
+                        content: completion.content,
+                        toolCalls: completion.toolCalls,
+                        finishReason: completion.finishReason,
+                        promptTokens: Int64(completion.promptTokens),
+                        completionTokens: Int64(completion.completionTokens),
+                        terminalState: terminalState,
+                        terminalStateUnixMS: terminalStateTSUnixMS ?? issuedAt,
+                        issuedAtUnixMS: issuedAt
+                    )
+                )
+            }
             return try receiptBuilder.build(
                 providerId: providerID,
                 input: ReceiptInput(
@@ -389,12 +480,30 @@ actor InferenceRelay {
         max(0, Int64(now.timeIntervalSince(start) * 1000))
     }
 
+    private static func addSettlementTerminalMetadata(
+        _ frame: inout [String: Any],
+        settlementMetadata: SettlementReceiptMetadata?
+    ) {
+        guard let settlementMetadata else {
+            return
+        }
+        if frame["terminal_state_ts_unix_ms"] == nil {
+            frame["terminal_state_ts_unix_ms"] = Int64(Date().timeIntervalSince1970 * 1000)
+        }
+        frame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
+        frame["late_receipt_settlement"] = "not_settled"
+    }
+
     private static func processStreaming(
         requestID: String,
         request: ChatCompletionRequest,
         state: RelayRequestState,
         modelRuntime: any ModelRuntimeServing,
+        warmSwapEnabled: Bool,
         tier2Session: Tier2ProviderSession?,
+        receiptBuilder: ReceiptBuilder?,
+        receiptProviderID: String?,
+        settlementMetadata: SettlementReceiptMetadata?,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
         let created = Int(Date().timeIntervalSince1970)
@@ -456,13 +565,40 @@ actor InferenceRelay {
                 consumer.cancel()
                 let chunksSent = (try? await consumer.value) ?? state.chunksSent
                 if state.markTerminalSent() {
-                    try await sendEndFrame([
+                    let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
+                    let modelHashSource = RouterHandler.resolveModelHashSource(
+                        warmSwapEnabled: warmSwapEnabled,
+                        snapshot: handle.snapshot
+                    )
+                    let receiptHeader = Self.buildReceiptHeader(
+                        receiptBuilder: receiptBuilder,
+                        providerID: receiptProviderID,
+                        request: request,
+                        completion: completion,
+                        ttftMs: 0,
+                        unixTsSeconds: Int64(Date().timeIntervalSince1970),
+                        requestID: requestID,
+                        modelHashSource: modelHashSource,
+                        settlementMetadata: settlementMetadata,
+                        terminalState: "buyer_cancel",
+                        terminalStateTSUnixMS: terminalStateTSUnixMS
+                    )
+                    var endFrame: [String: Any] = [
                         "type": "inference_response_end",
                         "request_id": requestID,
                         "status": "cancelled",
                         "chunks_sent": chunksSent,
                         "usage": usage(completion),
-                    ], requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
+                        "terminal_state_ts_unix_ms": terminalStateTSUnixMS,
+                    ]
+                    if let receiptHeader {
+                        endFrame["receipt"] = receiptHeader
+                    }
+                    if let settlementMetadata {
+                        endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
+                        endFrame["late_receipt_settlement"] = "not_settled"
+                    }
+                    try await sendEndFrame(endFrame, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
                 }
                 return completion
             }
@@ -502,13 +638,39 @@ actor InferenceRelay {
 
             let chunksSent = try await consumer.value
             if state.markTerminalSent() {
-                try await sendEndFrame([
+                let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
+                var endFrame: [String: Any] = [
                     "type": "inference_response_end",
                     "request_id": requestID,
                     "status": "complete",
                     "chunks_sent": chunksSent,
                     "usage": usage(completion),
-                ], requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
+                    "terminal_state_ts_unix_ms": terminalStateTSUnixMS,
+                ]
+                let modelHashSource = RouterHandler.resolveModelHashSource(
+                    warmSwapEnabled: warmSwapEnabled,
+                    snapshot: handle.snapshot
+                )
+                let receiptHeader = Self.buildReceiptHeader(
+                    receiptBuilder: receiptBuilder,
+                    providerID: receiptProviderID,
+                    request: request,
+                    completion: completion,
+                    ttftMs: 0,
+                    unixTsSeconds: Int64(Date().timeIntervalSince1970),
+                    requestID: requestID,
+                    modelHashSource: modelHashSource,
+                    settlementMetadata: settlementMetadata,
+                    terminalStateTSUnixMS: terminalStateTSUnixMS
+                )
+                if let receiptHeader {
+                    endFrame["receipt"] = receiptHeader
+                }
+                if let settlementMetadata {
+                    endFrame["receipt_pending_deadline_seconds"] = settlementMetadata.pendingDeadlineSeconds
+                    endFrame["late_receipt_settlement"] = "not_settled"
+                }
+                try await sendEndFrame(endFrame, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
             }
             return completion
         } catch {
@@ -517,13 +679,15 @@ actor InferenceRelay {
             if error is CancellationError {
                 let chunksSent = (try? await consumer.value) ?? state.chunksSent
                 if state.markTerminalSent() {
-                    try? await sendEndFrame([
+                    var endFrame: [String: Any] = [
                         "type": "inference_response_end",
                         "request_id": requestID,
                         "status": "cancelled",
                         "chunks_sent": chunksSent,
                         "usage": state.usage ?? zeroUsage(),
-                    ], requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
+                    ]
+                    addSettlementTerminalMetadata(&endFrame, settlementMetadata: settlementMetadata)
+                    try? await sendEndFrame(endFrame, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
                 }
                 throw RelayCancellationAcknowledged()
             }

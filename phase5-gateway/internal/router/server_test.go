@@ -172,6 +172,10 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	if !reflect.DeepEqual(body.Tier1Disclosure, want) {
 		t.Fatalf("tier1_disclosure=%+v want %+v", body.Tier1Disclosure, want)
 	}
+	if !strings.Contains(body.Tier1Disclosure.ModelVerificationLimit, "provider-reported request-start model hash") ||
+		!strings.Contains(body.Tier1Disclosure.ModelVerificationLimit, "do not detect a provider falsifying") {
+		t.Fatalf("model verification limit disclosure is incomplete: %q", body.Tier1Disclosure.ModelVerificationLimit)
+	}
 }
 
 func TestModelsStickyDisclosureUsesCoordinatorRoutingMetadata(t *testing.T) {
@@ -1304,6 +1308,29 @@ func TestReceiptHeaderForwardedAndSiblingMacProviderHeadersStripped(t *testing.T
 		if got := resp.Header().Get(header); got != "" {
 			t.Fatalf("buyer response exposed %s=%q", header, got)
 		}
+	}
+}
+
+func TestSettlementV04ReceiptHeaderStrippedFromBuyerResponse(t *testing.T) {
+	receipt := base64.StdEncoding.EncodeToString([]byte(`{"receipt_version":"4","terminal_state_ts_unix_ms":1782864001789}`)) + "." + base64.StdEncoding.EncodeToString([]byte("signature"))
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{
+			"Content-Type":          []string{"application/json"},
+			"X-MacProvider-Receipt": []string{receipt},
+		}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_receipt_header_v04")
+
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("v0.4 settlement receipt header leaked to buyer: %q", got)
 	}
 }
 

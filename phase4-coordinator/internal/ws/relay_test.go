@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,76 @@ func TestEncryptedRelayDispatchEncryptsRequestBody(t *testing.T) {
 	}
 	if provider.Tier2Session.C2PCounter != 1 {
 		t.Fatalf("c2p counter = %d, want 1", provider.Tier2Session.C2PCounter)
+	}
+}
+
+func TestRelayDispatchCarriesSettlementMetadata(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "p1",
+		AssignedID:     "s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, serverConn)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", serverConn, 1)
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+
+	metadata := settlementMetadataFixture()
+	if _, err := s.DispatchInferenceWithSettlement(context.Background(), *provider, "req-settlement", []byte(`{"model":"model-a"}`), false, metadata); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(providerConn)
+	if err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+	var req InferenceRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("request json: %v", err)
+	}
+	if req.Settlement == nil {
+		t.Fatal("settlement metadata missing")
+	}
+	if req.Settlement.RouteSnapshotDigest != metadata.RouteSnapshotDigest || req.Settlement.PendingDeadlineSeconds != metadata.PendingDeadlineSeconds {
+		t.Fatalf("settlement metadata = %+v, want %+v", req.Settlement, metadata)
+	}
+	if bytes.Contains(payload, []byte("Authorization")) || bytes.Contains(payload, []byte("Bearer ")) {
+		t.Fatalf("settlement metadata leaked credential-looking material: %s", payload)
+	}
+}
+
+func TestEncryptedRelayDispatchCarriesSettlementMetadataOutsideBody(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	metadata := settlementMetadataFixture()
+
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"secret prompt"}]}`)
+	if _, err := s.DispatchInferenceWithSettlement(context.Background(), *provider, "req-settlement-encrypted", body, true, metadata); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(providerConn)
+	if err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+	if bytes.Contains(payload, []byte("secret prompt")) || bytes.Contains(payload, []byte(`"body"`)) {
+		t.Fatalf("encrypted request leaked plaintext body: %s", payload)
+	}
+	var req encryptedInferenceRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("encrypted request json: %v", err)
+	}
+	if req.Settlement == nil || req.Settlement.ProviderReceiptKeyID != metadata.ProviderReceiptKeyID {
+		t.Fatalf("settlement metadata = %+v, want %+v", req.Settlement, metadata)
 	}
 }
 
@@ -911,6 +982,26 @@ func encryptedResponseEnd(t *testing.T, provider *pool.Provider, requestID strin
 		Encrypted: true,
 		Enc:       envelope.Enc,
 	})
+}
+
+func settlementMetadataFixture() *SettlementReceiptMetadata {
+	return &SettlementReceiptMetadata{
+		AccountScope:               "acct_sha256:" + strings.Repeat("1", 64),
+		RequestID:                  "req-settlement",
+		AttemptN:                   0,
+		ProviderID:                 "p1",
+		ProviderReceiptKeyID:       "ed25519-sha256:" + strings.Repeat("2", 64),
+		ModelID:                    "model-a",
+		ExpectedCatalogModelHash:   strings.Repeat("3", 64),
+		CatalogID:                  "catalog-a",
+		CatalogBodyDigest:          strings.Repeat("4", 64),
+		RouteSnapshotDigest:        strings.Repeat("5", 64),
+		RouteSnapshotPolicyVersion: "spec022-prereq-v0",
+		RouteSnapshotMode:          "observe",
+		PromptHash:                 strings.Repeat("6", 64),
+		OutputPrefixStartByte:      7,
+		PendingDeadlineSeconds:     120,
+	}
 }
 
 func sessionForTest(s *Server, providerID, assignedID string) *providerSession {

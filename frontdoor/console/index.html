@@ -552,7 +552,8 @@ svg{display:block;flex-shrink:0}
     <p>Buyer prompts and provider responses are processed as plaintext on provider hardware. Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.</p>
     <p>There is no hardware attestation or runtime integrity check on providers. The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.</p>
     <p>Model identity is provider-reported. When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.8 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.</p>
-    <p>The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-3.</p>
+    <p>v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.</p>
+    <p>The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-4.</p>
   </section>
 </div>
 

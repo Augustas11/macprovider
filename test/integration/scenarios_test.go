@@ -155,6 +155,78 @@ func TestSpec015ReceiptEnabledCrossServiceHeaderVerifies(t *testing.T) {
 	}
 }
 
+func TestSpec015V04SettlementReceiptCrossServiceVerifies(t *testing.T) {
+	s := newScenario(t, scenarioOpts{seedAccount: true, settlementReceiptProvider: true})
+
+	status, headers, body := s.chatRequest(nil, `{
+		"model":"llama-3.2-3b-instruct",
+		"max_tokens":32,
+		"messages":[{"role":"user","content":"SPEC-015 v0.4 settlement receipt"}]
+	}`)
+	if status != http.StatusOK {
+		t.Fatalf("non-streaming chat status=%d body=%s", status, string(body))
+	}
+	if got := headers.Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("buyer response exposed non-streaming v0.4 receipt header %q", got)
+	}
+
+	status, headers, body = s.chatRequest(nil, `{
+		"model":"llama-3.2-3b-instruct",
+		"max_tokens":32,
+		"stream":true,
+		"messages":[{"role":"user","content":"SPEC-015 v0.4 streaming settlement receipt"}]
+	}`)
+	if status != http.StatusOK {
+		t.Fatalf("streaming chat status=%d body=%s", status, string(body))
+	}
+	if got := headers.Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("buyer response exposed streaming v0.4 receipt header %q", got)
+	}
+	if !strings.Contains(string(body), "hello ") || !strings.Contains(string(body), "from fake provider") || !strings.Contains(string(body), "data: [DONE]") {
+		t.Fatalf("streaming body missing provider content or DONE marker: %s", string(body))
+	}
+
+	verdicts := waitForSettlementVerdicts(t, s, 2)
+	if len(verdicts) != 2 {
+		t.Fatalf("settlement verdict count=%d want 2", len(verdicts))
+	}
+	for i, verdict := range verdicts {
+		if verdict.ProviderID != s.providerID {
+			t.Fatalf("verdict[%d].provider_id=%q want %q", i, verdict.ProviderID, s.providerID)
+		}
+		if verdict.ReceiptPresent != 1 || !verdict.ReceiptVersion.Valid || verdict.ReceiptVersion.String != "4" {
+			t.Fatalf("verdict[%d] receipt present/version=%d/%v want present v4", i, verdict.ReceiptPresent, verdict.ReceiptVersion)
+		}
+		if verdict.ReceiptResult != "valid" || verdict.SettlementOutcome != "verified" || verdict.Reason != "verified_settlement" || verdict.Closed != 1 {
+			t.Fatalf("verdict[%d]=%s/%s reason=%s closed=%d want valid/verified verified_settlement closed",
+				i, verdict.ReceiptResult, verdict.SettlementOutcome, verdict.Reason, verdict.Closed)
+		}
+		if !verdict.ModelHash.Valid || verdict.ModelHash.String != s.modelHash {
+			t.Fatalf("verdict[%d].model_hash=%v want %s", i, verdict.ModelHash, s.modelHash)
+		}
+		if verdict.BuyerDebitOutcome != "no_money_movement_step5" ||
+			verdict.ProviderSettlementOutcome != "no_money_movement_step5" ||
+			verdict.PayoutExclusionOutcome != "excluded_until_spec022_verified" {
+			t.Fatalf("verdict[%d] money outcomes=%s/%s/%s want no-money step5 + payout exclusion",
+				i, verdict.BuyerDebitOutcome, verdict.ProviderSettlementOutcome, verdict.PayoutExclusionOutcome)
+		}
+	}
+}
+
+func waitForSettlementVerdicts(t *testing.T, s *scenario, want int) []settlementReceiptVerdictRow {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var latest []settlementReceiptVerdictRow
+	for time.Now().Before(deadline) {
+		latest = s.readSettlementReceiptVerdicts()
+		if len(latest) >= want {
+			return latest
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return latest
+}
+
 func TestInternalBearerWrongTokenRejected(t *testing.T) {
 	s := newScenario(t, scenarioOpts{skipProvider: true})
 

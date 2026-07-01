@@ -101,6 +101,47 @@ type handler struct {
 	log                     zerolog.Logger
 }
 
+const settlementReceiptDiagnosticsDisclosure = "Settlement receipt diagnostics expose reason codes plus digest/fingerprint identifiers only. Raw receipt envelopes, raw receipt public keys, raw signatures, raw prompts, raw outputs, bearer tokens, receipt private keys, and provider-private state are not exposed."
+
+const settlementReceiptDiagnosticsDefaultWindow = 31 * 24 * time.Hour
+
+type settlementReceiptSummary struct {
+	ReceiptProfile        string                        `json:"receipt_profile"`
+	WindowFromUTC         string                        `json:"window_from_utc,omitempty"`
+	WindowToUTC           string                        `json:"window_to_utc,omitempty"`
+	VerifiedCount         int64                         `json:"verified_count"`
+	ZeroSettledCount      int64                         `json:"zero_settled_count"`
+	FailedCount           int64                         `json:"failed_count"`
+	PendingCount          int64                         `json:"pending_count"`
+	DiagnosticsDisclosure string                        `json:"diagnostics_disclosure"`
+	RecentFailures        []settlementReceiptDiagnostic `json:"recent_failures"`
+}
+
+type settlementReceiptDiagnostic struct {
+	RequestID                     string `json:"request_id"`
+	AttemptN                      int64  `json:"attempt_n"`
+	ReceiptResult                 string `json:"receipt_result"`
+	SettlementOutcome             string `json:"settlement_outcome"`
+	Reason                        string `json:"reason"`
+	ReceivedAtUnixMS              int64  `json:"received_at_unix_ms"`
+	DeadlineUnixMS                int64  `json:"deadline_unix_ms"`
+	RouteSnapshotDigest           string `json:"route_snapshot_digest"`
+	RouteSnapshotPolicyVersion    string `json:"route_snapshot_policy_version"`
+	RouteSnapshotMode             string `json:"route_snapshot_mode"`
+	PaidEntrypoint                string `json:"paid_entrypoint"`
+	Spec008HashStatus             string `json:"spec008_hash_status"`
+	ProviderReceiptKeyFingerprint string `json:"provider_receipt_key_fingerprint"`
+	CatalogBodyDigest             string `json:"catalog_body_digest"`
+	ProviderReportedModelHash     string `json:"provider_reported_model_hash"`
+	ExpectedCatalogModelHash      string `json:"expected_catalog_model_hash"`
+	ModelID                       string `json:"model_id"`
+	ModelHash                     string `json:"model_hash"`
+	PromptHash                    string `json:"prompt_hash"`
+	OutputHash                    any    `json:"output_hash"`
+	UsageDigest                   any    `json:"usage_digest"`
+	ReceiptTupleCanonicalSHA256   any    `json:"receipt_tuple_canonical_sha256"`
+}
+
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// SPEC-005 v0.4 §11.6.6 — every /admin/ledger/* response path
 	// consumes the same rate-limit bucket. Charge BEFORE any
@@ -182,12 +223,12 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	current := currentMondayUTC(time.Now().UTC()).Format(time.RFC3339Nano)
 	resp := map[string]any{
-		"total_gross_credits":               h.sum(ctx, `SELECT SUM(gross_credits) FROM ledger_request_credits WHERE quarantined=0`),
-		"total_provider_credits":            h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE quarantined=0`),
-		"total_operator_credits":            h.sum(ctx, `SELECT SUM(gross_credits - provider_credits) FROM ledger_request_credits WHERE quarantined=0`),
-		"current_window_provider_credits":   h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE quarantined=0 AND ts_utc >= ?`, current),
-		"pending_payout_count":              h.sum(ctx, `SELECT COUNT(*) FROM ledger_payout_ready WHERE status='ready'`),
-		"pending_payout_credits":            h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE status='ready'`),
+		"total_gross_credits":             h.sum(ctx, `SELECT SUM(gross_credits) FROM ledger_request_credits WHERE quarantined=0`),
+		"total_provider_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE quarantined=0`),
+		"total_operator_credits":          h.sum(ctx, `SELECT SUM(gross_credits - provider_credits) FROM ledger_request_credits WHERE quarantined=0`),
+		"current_window_provider_credits": h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE quarantined=0 AND ts_utc >= ?`, current),
+		"pending_payout_count":            h.sum(ctx, `SELECT COUNT(*) FROM ledger_payout_ready WHERE status='ready'`),
+		"pending_payout_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE status='ready'`),
 		// SPEC-005 v0.4 §11.6.5 OPEN_PREDICATE — `quarantined_count`
 		// surfaces ONLY open quarantines (not force_void-resolved).
 		// Force-voided rows are resolved-and-excluded.
@@ -295,6 +336,26 @@ SELECT lrc.provider_id,
 	if err := rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
+	}
+	if err := rows.Close(); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	providerIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if providerID, ok := item["provider_id"].(string); ok {
+			providerIDs = append(providerIDs, providerID)
+		}
+	}
+	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(time.Now().UTC(), time.Time{}, time.Time{}, false)
+	summaries, err := h.settlementReceiptSummariesForProviders(ctx, providerIDs, diagnosticsFrom, diagnosticsTo, true, 3)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	for _, item := range items {
+		providerID, _ := item["provider_id"].(string)
+		item["settlement_receipts"] = summaries[providerID]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": items, "next_cursor": nextCursor})
 }
@@ -586,11 +647,166 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		"rate_card_excerpt":      h.rateCardExcerpt(r.Context(), models),
 		"fault_count":            h.sum(r.Context(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, faultArgs...),
 	}
+	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(time.Now().UTC(), rangeFrom, rangeTo, hasRange)
+	summaries, err := h.settlementReceiptSummariesForProviders(r.Context(), []string{providerID}, diagnosticsFrom, diagnosticsTo, true, 5)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	resp["settlement_receipts"] = summaries[providerID]
 	if hasRange {
 		resp["from_utc"] = rangeFrom.Format(time.RFC3339)
 		resp["to_utc"] = rangeTo.Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *handler) settlementReceiptSummariesForProviders(ctx context.Context, providerIDs []string, from, to time.Time, hasRange bool, recentLimit int) (map[string]settlementReceiptSummary, error) {
+	out := make(map[string]settlementReceiptSummary, len(providerIDs))
+	for _, providerID := range providerIDs {
+		out[providerID] = settlementReceiptSummary{
+			ReceiptProfile:        settlementReceiptProfileV04,
+			DiagnosticsDisclosure: settlementReceiptDiagnosticsDisclosure,
+			WindowFromUTC:         diagnosticsWindowString(from, hasRange),
+			WindowToUTC:           diagnosticsWindowString(to, hasRange),
+			RecentFailures:        []settlementReceiptDiagnostic{},
+		}
+	}
+	if len(providerIDs) == 0 {
+		return out, nil
+	}
+	placeholders := sqlPlaceholders(len(providerIDs))
+	rangeSQL, rangeArgs := settlementReceiptRangeFilter(from, to, hasRange)
+	args := make([]any, 0, len(providerIDs)+len(rangeArgs))
+	for _, providerID := range providerIDs {
+		args = append(args, providerID)
+	}
+	args = append(args, rangeArgs...)
+	rows, err := h.store.db.QueryContext(ctx, `
+SELECT provider_id,
+       COALESCE(SUM(CASE WHEN settlement_outcome='verified' AND receipt_result='valid' THEN 1 ELSE 0 END), 0) AS verified_count,
+       COALESCE(SUM(CASE WHEN settlement_outcome='zero_settled' AND receipt_result='valid' THEN 1 ELSE 0 END), 0) AS zero_settled_count,
+       COALESCE(SUM(CASE WHEN settlement_outcome='quarantined' THEN 1 ELSE 0 END), 0) AS failed_count,
+       COALESCE(SUM(CASE WHEN closed=0 THEN 1 ELSE 0 END), 0) AS pending_count
+  FROM settlement_receipt_verdicts
+ WHERE provider_id IN (`+placeholders+`)`+rangeSQL+`
+ GROUP BY provider_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var providerID string
+		var summary settlementReceiptSummary
+		summary.ReceiptProfile = settlementReceiptProfileV04
+		summary.DiagnosticsDisclosure = settlementReceiptDiagnosticsDisclosure
+		summary.WindowFromUTC = diagnosticsWindowString(from, hasRange)
+		summary.WindowToUTC = diagnosticsWindowString(to, hasRange)
+		summary.RecentFailures = []settlementReceiptDiagnostic{}
+		if err := rows.Scan(&providerID, &summary.VerifiedCount, &summary.ZeroSettledCount, &summary.FailedCount, &summary.PendingCount); err != nil {
+			return nil, err
+		}
+		out[providerID] = summary
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if recentLimit <= 0 {
+		return out, nil
+	}
+
+	for _, providerID := range providerIDs {
+		recentArgs := make([]any, 0, 1+len(rangeArgs)+1)
+		recentArgs = append(recentArgs, providerID)
+		recentArgs = append(recentArgs, rangeArgs...)
+		recentArgs = append(recentArgs, recentLimit)
+		rows, err = h.store.db.QueryContext(ctx, `
+SELECT request_id, attempt_n, receipt_result, settlement_outcome,
+       reason, received_at_unix_ms, pending_deadline_unix_ms,
+       route_snapshot_digest, route_snapshot_policy_version,
+       route_snapshot_mode, paid_entrypoint, spec008_hash_status,
+       provider_receipt_key_fingerprint, catalog_body_digest,
+       provider_reported_model_hash, expected_catalog_model_hash,
+       model_id, model_hash, prompt_hash,
+       output_hash, usage_digest, receipt_tuple_canonical_sha256
+  FROM settlement_receipt_verdicts
+ WHERE provider_id = ?`+rangeSQL+`
+   AND closed=1
+   AND settlement_outcome='quarantined'
+ ORDER BY received_at_unix_ms DESC, id DESC
+ LIMIT ?`, recentArgs...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var diagnostic settlementReceiptDiagnostic
+			var outputHash, usageDigest, tupleDigest sql.NullString
+			if err := rows.Scan(
+				&diagnostic.RequestID, &diagnostic.AttemptN,
+				&diagnostic.ReceiptResult, &diagnostic.SettlementOutcome,
+				&diagnostic.Reason, &diagnostic.ReceivedAtUnixMS,
+				&diagnostic.DeadlineUnixMS, &diagnostic.RouteSnapshotDigest,
+				&diagnostic.RouteSnapshotPolicyVersion,
+				&diagnostic.RouteSnapshotMode, &diagnostic.PaidEntrypoint,
+				&diagnostic.Spec008HashStatus,
+				&diagnostic.ProviderReceiptKeyFingerprint,
+				&diagnostic.CatalogBodyDigest,
+				&diagnostic.ProviderReportedModelHash,
+				&diagnostic.ExpectedCatalogModelHash, &diagnostic.ModelID,
+				&diagnostic.ModelHash, &diagnostic.PromptHash,
+				&outputHash, &usageDigest, &tupleDigest,
+			); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			diagnostic.OutputHash = nullStringAny(outputHash)
+			diagnostic.UsageDigest = nullStringAny(usageDigest)
+			diagnostic.ReceiptTupleCanonicalSHA256 = nullStringAny(tupleDigest)
+			summary := out[providerID]
+			summary.RecentFailures = append(summary.RecentFailures, diagnostic)
+			out[providerID] = summary
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func settlementReceiptDiagnosticsWindow(now, from, to time.Time, hasRange bool) (time.Time, time.Time) {
+	if hasRange {
+		return from, to
+	}
+	to = now.UTC()
+	return to.Add(-settlementReceiptDiagnosticsDefaultWindow), to
+}
+
+func diagnosticsWindowString(t time.Time, enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func settlementReceiptRangeFilter(from, to time.Time, enabled bool) (string, []any) {
+	if !enabled {
+		return "", nil
+	}
+	return " AND received_at_unix_ms >= ? AND received_at_unix_ms < ?", []any{from.UnixMilli(), to.UnixMilli()}
+}
+
+func sqlPlaceholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.TrimRight(strings.Repeat("?,", n), ",")
 }
 
 func parseOptionalDayRange(r *http.Request) (time.Time, time.Time, bool, error) {

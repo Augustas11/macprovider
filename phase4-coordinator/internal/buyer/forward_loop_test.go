@@ -190,7 +190,7 @@ func TestM2_1C_RowSequence_StreamingCommittedSingleRow(t *testing.T) {
 			chunks := make(chan providerws.InferenceResponseChunk, 1)
 			done := make(chan providerws.InferenceResponseEnd)
 			errs := make(chan error)
-			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: reqID, Seq: 0, Data: "data: partial\n\n"}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: reqID, Seq: 0, Data: `data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n"}
 			go func() {
 				time.Sleep(10 * time.Millisecond)
 				errs <- providerws.ErrRelayClosed
@@ -207,7 +207,7 @@ func TestM2_1C_RowSequence_StreamingCommittedSingleRow(t *testing.T) {
 	}
 	// One chunk emitted before the relay closes; the buyer must have
 	// written it (committed=true) before the disconnect was observed.
-	if !bytes.Contains(rr.Body.Bytes(), []byte("data: partial")) {
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"partial"`)) {
 		t.Fatalf("body missing committed chunk; body=%s", rr.Body.String())
 	}
 	rows := queryAllRequestLogRows(t, dbPath)

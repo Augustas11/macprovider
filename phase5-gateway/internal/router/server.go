@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -814,7 +815,15 @@ func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
 		if strings.EqualFold(key, "Content-Length") {
 			continue
 		}
-		if isMacProviderHeader(key) && !(allowReceipt && isReceiptResponseHeader(key)) {
+		if allowReceipt && isReceiptResponseHeader(key) {
+			for _, value := range values {
+				if receipt := buyerVisibleReceiptHeader(value); receipt != "" {
+					dst.Add(key, receipt)
+				}
+			}
+			continue
+		}
+		if isMacProviderHeader(key) {
 			continue
 		}
 		// Issue #190: the gateway is authoritative for rate-limit
@@ -852,6 +861,40 @@ func isGatewayOwnedRateLimitHeader(key string) bool {
 
 func isReceiptResponseHeader(key string) bool {
 	return strings.EqualFold(key, "X-MacProvider-Receipt")
+}
+
+func buyerVisibleReceiptHeader(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" || len(value) > 4096 {
+		return ""
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] > 0x7E {
+			return ""
+		}
+	}
+	if receiptHeaderVersion(value) == "4" {
+		return ""
+	}
+	return value
+}
+
+func receiptHeaderVersion(header string) string {
+	tupleB64, _, ok := strings.Cut(header, ".")
+	if !ok || tupleB64 == "" {
+		return ""
+	}
+	raw, err := base64.StdEncoding.DecodeString(tupleB64)
+	if err != nil {
+		return ""
+	}
+	var payload struct {
+		ReceiptVersion string `json:"receipt_version"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	return payload.ReceiptVersion
 }
 
 func stripInternalMacProviderHeaders(header http.Header) []string {

@@ -20,6 +20,7 @@ type SettlementConfig = config.SettlementConfig
 
 type Store struct {
 	db           *sql.DB
+	now          func() time.Time
 	settlementMu sync.RWMutex
 	settlement   SettlementConfig
 	// SPEC-005 v0.4 §13.2 — billing.quarantine_resolution_force_void_enabled
@@ -38,7 +39,7 @@ func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db is required")
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, now: time.Now}
 	if err := s.migrate(context.Background()); err != nil {
 		return nil, err
 	}
@@ -182,6 +183,116 @@ CREATE TABLE IF NOT EXISTS ledger_provider_identity_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_lpis_request ON ledger_provider_identity_snapshots(request_id, attempt_n);
 CREATE INDEX IF NOT EXISTS idx_lpis_provider ON ledger_provider_identity_snapshots(provider_id, created_at_utc);
+
+CREATE TABLE IF NOT EXISTS settlement_route_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_scope TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL CHECK(attempt_n >= 0),
+    provider_id TEXT NOT NULL,
+    provider_session_id TEXT NULL,
+    provider_generation_id TEXT NULL,
+    paid_entrypoint TEXT NOT NULL,
+    provider_receipt_key_id TEXT NOT NULL CHECK(length(provider_receipt_key_id) = 79 AND substr(provider_receipt_key_id, 1, 15) = 'ed25519-sha256:' AND substr(provider_receipt_key_id, 16) NOT GLOB '*[^0-9a-f]*'),
+    provider_receipt_key_source TEXT NOT NULL CHECK(provider_receipt_key_source IN ('auth_session','rotation_grace','operator_pin')),
+    model_id TEXT NOT NULL,
+    provider_reported_model_hash TEXT NOT NULL CHECK(length(provider_reported_model_hash) = 64 AND provider_reported_model_hash NOT GLOB '*[^0-9a-f]*'),
+    expected_catalog_model_hash TEXT NOT NULL CHECK(length(expected_catalog_model_hash) = 64 AND expected_catalog_model_hash NOT GLOB '*[^0-9a-f]*'),
+    catalog_id TEXT NOT NULL,
+    catalog_body_digest TEXT NOT NULL CHECK(length(catalog_body_digest) = 64 AND catalog_body_digest NOT GLOB '*[^0-9a-f]*'),
+    catalog_signature_key_id TEXT NOT NULL,
+    catalog_signature_pubkey_fingerprint TEXT NOT NULL CHECK(length(catalog_signature_pubkey_fingerprint) = 79 AND substr(catalog_signature_pubkey_fingerprint, 1, 15) = 'ed25519-sha256:' AND substr(catalog_signature_pubkey_fingerprint, 16) NOT GLOB '*[^0-9a-f]*'),
+    catalog_expires_at_unix_ms INTEGER NOT NULL CHECK(catalog_expires_at_unix_ms > 0),
+    spec008_hash_status TEXT NOT NULL,
+    route_snapshot_policy_version TEXT NOT NULL,
+    route_snapshot_mode TEXT NOT NULL CHECK(route_snapshot_mode IN ('observe','enforce')),
+    route_decision_ts_unix_ms INTEGER NOT NULL CHECK(route_decision_ts_unix_ms > 0),
+    request_start_ts_unix_ms INTEGER NOT NULL CHECK(request_start_ts_unix_ms > 0),
+    pending_deadline_seconds INTEGER NOT NULL CHECK(pending_deadline_seconds BETWEEN 1 AND 900),
+    prompt_hash_basis TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL CHECK(length(prompt_hash) = 64 AND prompt_hash NOT GLOB '*[^0-9a-f]*'),
+    route_snapshot_digest TEXT NOT NULL CHECK(length(route_snapshot_digest) = 64 AND route_snapshot_digest NOT GLOB '*[^0-9a-f]*'),
+    route_snapshot_json TEXT NOT NULL,
+    route_snapshot_canonical_json TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    UNIQUE(account_scope, request_id, attempt_n, provider_id)
+);
+CREATE INDEX IF NOT EXISTS idx_srs_request ON settlement_route_snapshots(account_scope, request_id, attempt_n);
+CREATE INDEX IF NOT EXISTS idx_srs_provider ON settlement_route_snapshots(provider_id, created_at_utc);
+CREATE INDEX IF NOT EXISTS idx_srs_digest ON settlement_route_snapshots(route_snapshot_digest);
+
+CREATE TABLE IF NOT EXISTS settlement_attempt_outputs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_scope TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL CHECK(attempt_n >= 0),
+    provider_id TEXT NOT NULL,
+    terminal_state TEXT NOT NULL CHECK(terminal_state IN ('normal_done','provider_error','buyer_cancel','gateway_timeout','upstream_transport_disconnect')),
+    terminal_state_ts_unix_ms INTEGER NOT NULL CHECK(terminal_state_ts_unix_ms > 0),
+    output_available INTEGER NOT NULL DEFAULT 1 CHECK(output_available IN (0,1)),
+    output_prefix_start_byte INTEGER NOT NULL CHECK(output_prefix_start_byte >= 0),
+    output_prefix_end_byte INTEGER NOT NULL CHECK(output_prefix_end_byte >= output_prefix_start_byte),
+    output_hash TEXT CHECK(output_hash IS NULL OR (length(output_hash) = 64 AND output_hash NOT GLOB '*[^0-9a-f]*')),
+    settlement_output_canonical_json TEXT,
+    usage_hash TEXT NOT NULL CHECK(length(usage_hash) = 64 AND usage_hash NOT GLOB '*[^0-9a-f]*'),
+    usage_canonical_json TEXT NOT NULL,
+    usage_source TEXT NOT NULL CHECK(usage_source IN ('coordinator_observed','byte_estimated')),
+    overlapping_or_duplicate INTEGER NOT NULL DEFAULT 0 CHECK(overlapping_or_duplicate IN (0,1)),
+    created_at_utc TEXT NOT NULL,
+    UNIQUE(account_scope, request_id, attempt_n, provider_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sao_request_range ON settlement_attempt_outputs(account_scope, request_id, output_prefix_start_byte, output_prefix_end_byte);
+CREATE INDEX IF NOT EXISTS idx_sao_output_hash ON settlement_attempt_outputs(output_hash);
+
+CREATE TABLE IF NOT EXISTS settlement_receipt_verdicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_scope_hash TEXT NOT NULL CHECK(length(account_scope_hash) = 64 AND account_scope_hash NOT GLOB '*[^0-9a-f]*'),
+    request_id TEXT NOT NULL,
+    attempt_n INTEGER NOT NULL CHECK(attempt_n >= 0),
+    provider_id TEXT NOT NULL,
+    receipt_present INTEGER NOT NULL CHECK(receipt_present IN (0,1)),
+    receipt_version TEXT NULL,
+    receipt_result TEXT NOT NULL CHECK(receipt_result IN ('valid','invalid','inconclusive')),
+    settlement_outcome TEXT NOT NULL CHECK(settlement_outcome IN ('pending','verified','quarantined','zero_settled')),
+    reason TEXT NOT NULL,
+    idempotency_status TEXT NOT NULL CHECK(idempotency_status IN ('pending','pending_updated','first_terminal','terminal_after_pending','terminal_noop')),
+    closed INTEGER NOT NULL CHECK(closed IN (0,1)),
+    terminal_state TEXT NOT NULL CHECK(terminal_state IN ('normal_done','provider_error','buyer_cancel','gateway_timeout','upstream_transport_disconnect')),
+    terminal_state_ts_unix_ms INTEGER NOT NULL CHECK(terminal_state_ts_unix_ms > 0),
+    pending_deadline_unix_ms INTEGER NOT NULL CHECK(pending_deadline_unix_ms > 0),
+    received_at_unix_ms INTEGER NOT NULL CHECK(received_at_unix_ms > 0),
+    route_snapshot_digest TEXT NOT NULL CHECK(length(route_snapshot_digest) = 64 AND route_snapshot_digest NOT GLOB '*[^0-9a-f]*'),
+    route_snapshot_policy_version TEXT NOT NULL,
+    route_snapshot_mode TEXT NOT NULL CHECK(route_snapshot_mode IN ('observe','enforce')),
+    paid_entrypoint TEXT NOT NULL,
+    spec008_hash_status TEXT NOT NULL,
+    provider_reported_model_hash TEXT NOT NULL CHECK(length(provider_reported_model_hash) = 64 AND provider_reported_model_hash NOT GLOB '*[^0-9a-f]*'),
+    provider_receipt_key_fingerprint TEXT NOT NULL CHECK(length(provider_receipt_key_fingerprint) = 79 AND substr(provider_receipt_key_fingerprint, 1, 15) = 'ed25519-sha256:' AND substr(provider_receipt_key_fingerprint, 16) NOT GLOB '*[^0-9a-f]*'),
+    catalog_id TEXT NOT NULL,
+    catalog_body_digest TEXT NOT NULL CHECK(length(catalog_body_digest) = 64 AND catalog_body_digest NOT GLOB '*[^0-9a-f]*'),
+    expected_catalog_model_hash TEXT NOT NULL CHECK(length(expected_catalog_model_hash) = 64 AND expected_catalog_model_hash NOT GLOB '*[^0-9a-f]*'),
+    model_id TEXT NOT NULL,
+    model_hash TEXT NULL CHECK(model_hash IS NULL OR (length(model_hash) = 64 AND model_hash NOT GLOB '*[^0-9a-f]*')),
+    receipt_profile TEXT NOT NULL CHECK(receipt_profile = 'spec015-v0.4'),
+    buyer_debit_outcome TEXT NOT NULL CHECK(buyer_debit_outcome = 'no_money_movement_step5'),
+    provider_settlement_outcome TEXT NOT NULL CHECK(provider_settlement_outcome = 'no_money_movement_step5'),
+    payout_exclusion_outcome TEXT NOT NULL CHECK(payout_exclusion_outcome = 'excluded_until_spec022_verified'),
+    prompt_hash TEXT NOT NULL CHECK(length(prompt_hash) = 64 AND prompt_hash NOT GLOB '*[^0-9a-f]*'),
+    output_hash TEXT NULL CHECK(output_hash IS NULL OR (length(output_hash) = 64 AND output_hash NOT GLOB '*[^0-9a-f]*')),
+    usage_digest TEXT NULL CHECK(usage_digest IS NULL OR (length(usage_digest) = 64 AND usage_digest NOT GLOB '*[^0-9a-f]*')),
+    receipt_tuple_canonical_sha256 TEXT NULL CHECK(receipt_tuple_canonical_sha256 IS NULL OR (length(receipt_tuple_canonical_sha256) = 64 AND receipt_tuple_canonical_sha256 NOT GLOB '*[^0-9a-f]*')),
+    checks_json TEXT NOT NULL,
+    verifier_diagnostics_json TEXT NOT NULL,
+    facts_json TEXT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NULL,
+    UNIQUE(account_scope_hash, request_id, attempt_n, provider_id)
+);
+CREATE INDEX IF NOT EXISTS idx_srv_outcome ON settlement_receipt_verdicts(settlement_outcome, closed, received_at_unix_ms);
+CREATE INDEX IF NOT EXISTS idx_srv_request ON settlement_receipt_verdicts(account_scope_hash, request_id, attempt_n);
+CREATE INDEX IF NOT EXISTS idx_srv_provider_recent ON settlement_receipt_verdicts(provider_id, received_at_unix_ms DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_srv_provider_failed_recent ON settlement_receipt_verdicts(provider_id, received_at_unix_ms DESC, id DESC)
+    WHERE closed=1 AND settlement_outcome='quarantined';
 
 -- SPEC-005 v0.4 (issue #169) — MIG-005-010
 -- ledger_quarantine_resolutions records the operator-issued force-void

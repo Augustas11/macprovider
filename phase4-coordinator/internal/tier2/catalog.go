@@ -3,7 +3,9 @@ package tier2
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,10 +45,23 @@ type ModelEntry struct {
 // (Previously named Catalog; renamed M3-8d so the per-coordinator state
 // container could take that name. The on-disk format is unchanged.)
 type ParsedCatalog struct {
-	CatalogID string
-	ExpiresAt time.Time
-	Models    map[string]ModelEntry
-	Raw       []byte
+	CatalogID                         string
+	ExpiresAt                         time.Time
+	Models                            map[string]ModelEntry
+	Raw                               []byte
+	CatalogBodyDigest                 string
+	CatalogSignatureKeyID             string
+	CatalogSignaturePubkeyFingerprint string
+}
+
+type RouteSnapshotMaterial struct {
+	CatalogID                         string
+	ExpectedModelHash                 string
+	CatalogBodyDigest                 string
+	CatalogSignatureKeyID             string
+	CatalogSignaturePubkeyFingerprint string
+	CatalogExpiresAt                  time.Time
+	HashStatus                        pool.HashStatus
 }
 
 type HashCounts struct {
@@ -294,6 +309,10 @@ func (c *Catalog) VerifyProviderHash(modelID, reportedHash string) pool.HashStat
 	c.mu.RLock()
 	st := c.st
 	c.mu.RUnlock()
+	return hashStatusForState(st, modelID, reportedHash)
+}
+
+func hashStatusForState(st state, modelID, reportedHash string) pool.HashStatus {
 	parsed := activeParsedLocked(st)
 	if parsed == nil {
 		if catalogUnavailableLocked(st) {
@@ -355,6 +374,28 @@ func (c *Catalog) CatalogSnapshot() (string, []byte, bool) {
 	return parsed.CatalogID, append([]byte(nil), parsed.Raw...), true
 }
 
+func (c *Catalog) RouteSnapshotMaterial(modelID, reportedHash string) (RouteSnapshotMaterial, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	parsed := activeParsedLocked(c.st)
+	if parsed == nil {
+		return RouteSnapshotMaterial{HashStatus: hashStatusForState(c.st, modelID, reportedHash)}, false
+	}
+	model, ok := parsed.Models[catalogModelKey(modelID)]
+	if !ok {
+		return RouteSnapshotMaterial{HashStatus: hashStatusForState(c.st, modelID, reportedHash)}, false
+	}
+	return RouteSnapshotMaterial{
+		CatalogID:                         parsed.CatalogID,
+		ExpectedModelHash:                 model.SHA256,
+		CatalogBodyDigest:                 parsed.CatalogBodyDigest,
+		CatalogSignatureKeyID:             parsed.CatalogSignatureKeyID,
+		CatalogSignaturePubkeyFingerprint: parsed.CatalogSignaturePubkeyFingerprint,
+		CatalogExpiresAt:                  parsed.ExpiresAt,
+		HashStatus:                        hashStatusForState(c.st, modelID, reportedHash),
+	}, true
+}
+
 // CatalogBytes returns the exact signed catalog bytes accepted by signature
 // verification, or nil if no active catalog exists.
 func (c *Catalog) CatalogBytes() []byte {
@@ -392,6 +433,9 @@ func ExpectedHashPrefix(modelID string) string { return Default().ExpectedHashPr
 func CatalogID() string                        { return Default().CatalogID() }
 func CatalogBytes() []byte                     { return Default().CatalogBytes() }
 func CatalogSnapshot() (string, []byte, bool)  { return Default().CatalogSnapshot() }
+func SnapshotMaterial(modelID, reportedHash string) (RouteSnapshotMaterial, bool) {
+	return Default().RouteSnapshotMaterial(modelID, reportedHash)
+}
 
 // ResetForTest swaps in a fresh package-singleton Catalog and restores nowUTC.
 //
@@ -530,6 +574,8 @@ func ParseCatalog(raw []byte, publicKey string) (*ParsedCatalog, error) {
 	if !ed25519.Verify(ed25519.PublicKey(pub), canonical, sig) {
 		return nil, signatureError("catalog signature invalid")
 	}
+	bodyDigest := sha256.Sum256(canonical)
+	pubkeyFingerprint := sha256.Sum256(pub)
 	expiresAt, err := time.Parse(time.RFC3339, file.ExpiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("invalid expires_at: %w", err)
@@ -570,10 +616,13 @@ func ParseCatalog(raw []byte, publicKey string) (*ParsedCatalog, error) {
 		models[modelID] = model
 	}
 	return &ParsedCatalog{
-		CatalogID: file.CatalogID,
-		ExpiresAt: expiresAt,
-		Models:    models,
-		Raw:       append([]byte(nil), raw...),
+		CatalogID:                         file.CatalogID,
+		ExpiresAt:                         expiresAt,
+		Models:                            models,
+		Raw:                               append([]byte(nil), raw...),
+		CatalogBodyDigest:                 hex.EncodeToString(bodyDigest[:]),
+		CatalogSignatureKeyID:             file.Signature.KeyID,
+		CatalogSignaturePubkeyFingerprint: "ed25519-sha256:" + hex.EncodeToString(pubkeyFingerprint[:]),
 	}, nil
 }
 
