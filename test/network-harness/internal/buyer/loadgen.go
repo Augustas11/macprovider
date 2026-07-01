@@ -178,6 +178,16 @@ func fireOnce(ctx context.Context, client *http.Client, sc *scenario.Scenario, p
 	req.Header.Set("X-Request-Id", hReqID)
 	res.RequestID = hReqID
 
+	// SPEC-004 Pillar A sticky affinity — per-buyer conversation tag.
+	// Gateway (with routing.sticky_enabled=true and key_hash_secret set)
+	// derives an HMAC internal key from (account_id, tag) and forwards
+	// it to coord as X-MacProvider-Internal-Conv. Coord routes by that
+	// key when its own routing.sticky_enabled is true. Empty template =
+	// header not emitted, sticky path stays inert.
+	if sc.Buyers.StickyConversationKey != "" {
+		req.Header.Set("X-MacProvider-Conversation", fmt.Sprintf(sc.Buyers.StickyConversationKey, buyerIdx))
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		res.EndUTC = time.Now().UTC()

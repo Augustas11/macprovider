@@ -160,6 +160,28 @@ type Buyers struct {
 	// provider to drop in-flight state but short enough for 10 pairs to
 	// fit in ~15min wall-clock.
 	InterPairIdleSeconds int `yaml:"inter_pair_idle_seconds"`
+
+	// StickyConversationKey is a printf-style template with a single %d
+	// verb for the buyer index. When set, each buyer sends
+	//
+	//   X-MacProvider-Conversation: <expanded-template>
+	//
+	// on every request, activating SPEC-004 Pillar A sticky affinity —
+	// the gateway HMAC-derives the internal key and forwards to coord
+	// as X-MacProvider-Internal-Conv. Coord routes by that key when
+	// its routing.sticky_enabled flag is true. Requires both:
+	//
+	//   1. gateway routing.sticky_enabled: true + auth.key_hash_secret set
+	//   2. coordinator routing.sticky_enabled: true
+	//
+	// Empty string (default) leaves the header off — pre-existing
+	// scenarios behave exactly as before. Non-sticky scenarios should
+	// keep this empty so their B4/B5 numbers stay comparable to prior
+	// baselines.
+	//
+	// Example: "harness-buyer-%d" → buyer 0 sends
+	// "X-MacProvider-Conversation: harness-buyer-0" on every request.
+	StickyConversationKey string `yaml:"sticky_conversation_key"`
 }
 
 // Prompt is one item in the rotating prompt pool. Buyers pick by index
