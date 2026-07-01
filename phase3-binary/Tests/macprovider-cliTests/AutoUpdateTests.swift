@@ -385,6 +385,54 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(event?["reason"] as? String, "tier_demoted")
     }
 
+    func testRestartFailureRollbackRestoresBinaryAndClearsPendingState() async throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, binary, backup) = try makePendingMarkerFixture(
+            store: store,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let updater = AutoUpdater(
+            config: .defaults(configPath: fixture.url.appendingPathComponent("config.yaml").path),
+            currentVersion: "1.6.0",
+            providerStatus: status,
+            markerStore: store,
+            trustProvider: {
+                AutoUpdateTrustState(
+                    v2Accepted: true,
+                    tier: "pinned",
+                    encryptedLegValid: true,
+                    attestationRequired: false,
+                    attestationSatisfied: true,
+                    tokenConfigured: true,
+                    tokenValidated: true,
+                    bearerlessDuplicate: false,
+                    connected: true
+                )
+            },
+            drain: { _ in true },
+            sendReady: {},
+            restartLaunchd: {},
+            currentBinaryURL: { binary },
+            rollbackObserverAvailable: { true },
+            launchdProviderAvailable: { true }
+        )
+
+        updater.rollbackCommittedSwapAfterRestartFailureForTest(marker)
+
+        XCTAssertEqual(try String(contentsOf: binary), "old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
+    }
+
     func testAutoupdateReasonRedactionUsesStableCodes() {
         let errors: [Error] = [
             UpdateError.invalidURL("https://example.com/update?token=secret"),

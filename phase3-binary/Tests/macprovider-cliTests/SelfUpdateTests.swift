@@ -83,6 +83,66 @@ final class SelfUpdateTests: XCTestCase {
         ])
     }
 
+    func testRestartFailureAfterBinaryReplaceDoesNotFailValidatedUpdate() async throws {
+        let recorder = UpdateActionRecorder()
+        let binary = URL(fileURLWithPath: "/tmp/macprovider-cli-test")
+        let update = SelfUpdate(
+            currentVersion: "1.2.0",
+            releasesAPIURL: nil,
+            drainBeforeReplace: {
+                recorder.append("drain")
+            },
+            replaceBinary: { _ in
+                recorder.append("replace")
+            },
+            restartLaunchd: {
+                recorder.append("restart")
+                throw UpdateError.processFailed("/bin/launchctl", 5)
+            }
+        )
+
+        let restartError = try await update.applyValidatedUpdateForTest(newBinary: binary)
+
+        XCTAssertEqual(recorder.snapshot(), ["drain", "replace", "restart"])
+        XCTAssertEqual(restartError.map { String(describing: $0) }, "/bin/launchctl exited with status 5")
+    }
+
+    func testLaunchdRestartUsesKickstartForLoadedService() {
+        XCTAssertEqual(
+            SelfUpdate.launchdRestartArguments(
+                serviceLoaded: true,
+                uid: 501,
+                plistPath: "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
+            ),
+            ["kickstart", "-k", "gui/501/live.streamvc.macprovider"]
+        )
+    }
+
+    func testLaunchdRestartBootstrapsOnlyWhenServiceIsNotLoaded() {
+        let plist = "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
+
+        XCTAssertEqual(
+            SelfUpdate.launchdRestartArguments(serviceLoaded: false, uid: 501, plistPath: plist),
+            ["bootstrap", "gui/501", plist]
+        )
+    }
+
+    func testRestartFailureRecoveryCommandUsesKickstart() {
+        XCTAssertEqual(
+            SelfUpdate.launchdRestartRecoveryCommand(uid: 501),
+            "launchctl kickstart -k gui/501/live.streamvc.macprovider"
+        )
+    }
+
+    func testRestartFailureRecoveryCommandUsesBootstrapForUnloadedService() {
+        let plist = "/Users/provider/Library/LaunchAgents/live.streamvc.macprovider.plist"
+
+        XCTAssertEqual(
+            SelfUpdate.launchdRestartRecoveryCommand(serviceLoaded: false, uid: 501, plistPath: plist),
+            "launchctl bootstrap gui/501 \(plist)"
+        )
+    }
+
     func testUpdateRequiresSignedChecksumAsset() async throws {
         let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
         MockURLProtocol.responses = [

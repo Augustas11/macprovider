@@ -170,8 +170,14 @@ struct AutoUpdater: Sendable {
             }
             await record(updateID: updateID, target: target, phase: .swap, outcome: .success, reason: "binary_swap_complete", attempt: 1)
             try await ensureEligible(phase: .restart)
-            try restartLaunchd()
-            await record(updateID: updateID, target: target, phase: .restart, outcome: .inProgress, reason: "launchctl_bootstrap_invoked", attempt: 1)
+            do {
+                try restartLaunchd()
+            } catch {
+                try? rollbackCommittedSwapAfterRestartFailure(commitTracker)
+                await fail(updateID: updateID, target: target, phase: .restart, failure: .other, reason: Self.redactedReason(for: error))
+                return
+            }
+            await record(updateID: updateID, target: target, phase: .restart, outcome: .inProgress, reason: "launchctl_restart_invoked", attempt: 1)
         } catch AutoUpdateMarkerError.lockContended {
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "autoupdate_already_pending")
         } catch AutoUpdateError.trustStateLost(let reason) {
@@ -231,6 +237,24 @@ struct AutoUpdater: Sendable {
             throw UpdateError.renameFailed(errnoValue)
         }
         tracker.committedSwap = true
+    }
+
+    func rollbackCommittedSwapAfterRestartFailureForTest(_ marker: AutoUpdatePendingMarker) {
+        let tracker = AutoUpdateCommitTracker()
+        tracker.marker = marker
+        tracker.committedMarker = true
+        tracker.committedBackup = true
+        tracker.committedSwap = true
+        try? rollbackCommittedSwapAfterRestartFailure(tracker)
+    }
+
+    private func rollbackCommittedSwapAfterRestartFailure(_ tracker: AutoUpdateCommitTracker) throws {
+        guard tracker.committedSwap, let marker = tracker.marker ?? (try? markerStore.readPending()) else {
+            return
+        }
+        try markerStore.restoreBackup(marker)
+        markerStore.clearPendingAndLock(target: nil)
+        try? FileManager.default.removeItem(atPath: marker.backupPath)
     }
 
     private func ensureEligible(phase: AutoUpdatePhase) async throws {
@@ -364,9 +388,11 @@ struct AutoUpdater: Sendable {
         guard FileManager.default.fileExists(atPath: plist.path) else {
             throw AutoUpdateError.other("unsupported_install_topology")
         }
-        let domain = "gui/\(getuid())"
-        try runProcess("/bin/launchctl", arguments: ["bootout", domain, "live.streamvc.macprovider"], allowFailure: true)
-        try runProcess("/bin/launchctl", arguments: ["bootstrap", domain, plist.path])
+        let loaded = launchctlServiceLoaded(label: SelfUpdate.launchdLabel)
+        try runProcess(
+            "/bin/launchctl",
+            arguments: SelfUpdate.launchdRestartArguments(serviceLoaded: loaded, plistPath: plist.path)
+        )
     }
 
     private static func launchctlServiceLoaded(label: String) -> Bool {
