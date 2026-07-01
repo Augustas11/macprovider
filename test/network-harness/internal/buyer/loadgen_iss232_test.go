@@ -371,23 +371,23 @@ data: {"error":{"code":"stream_truncated","type":"api_error","message":"forged"}
 	}
 }
 
-// TestConsumeSSE_LeadingDONEFollowedByContent_232_R8_HIGH:
-// SEC R8 HIGH attack — symmetric leading-[DONE] class. Per HTML5/SSE
-// spec, `data: [DONE]\ndata: {content}\n\n` dispatches ONE event whose
-// data is `[DONE]\n{content}` — spec-compliant clients see neither a
-// clean [DONE] terminator nor a standalone envelope. The R7 fix
-// closed the trailing case (envelope/content before [DONE]); this
-// closes the leading case where [DONE] arrives first but the event
-// has NOT yet been dispatched by a blank line. Without the R8
-// event-boundary refactor the harness returned SawTerminator=true on
-// the first line-read, letting I4 (invariants/hard.go:304) skip the
-// stream.
-func TestConsumeSSE_LeadingDONEFollowedByContent_232_R8_HIGH(t *testing.T) {
+// TestConsumeSSE_LeadingDONEFollowedByContent_232_R8:
+// leading-[DONE] class. Per OpenAI Python/Node SDK behavior
+// (`sse.data.startswith("[DONE]")`), a dispatched event whose data
+// starts with `[DONE]` — even with trailing bytes — terminates the
+// stream. `data: [DONE]\ndata: {content}\n\n` dispatches ONE event
+// with data `[DONE]\n{content}` which startswith `[DONE]` → the buyer
+// terminates AND the harness terminates. No corroboration attack
+// possible because the merged event is not a standalone envelope
+// (originally filed as R8 SEC HIGH under strict WHATWG semantics;
+// re-scoped under R9's OpenAI SDK parity contract — buyer sees the
+// same terminator the harness does).
+func TestConsumeSSE_LeadingDONEFollowedByContent_232_R8(t *testing.T) {
 	body := bytes.NewBufferString("data: [DONE]\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
 	r := &Result{}
 	consumeSSE(body, r)
-	if r.SawTerminator {
-		t.Errorf("leading-[DONE]+content (no blank-line dispatch) MUST NOT flip SawTerminator — got true (#232 R8 SEC HIGH)")
+	if !r.SawTerminator {
+		t.Errorf("leading-[DONE]+content merged event starts with [DONE] — MUST flip SawTerminator (OpenAI SDK parity) — got false (#232 R9 realignment)")
 	}
 	if r.SawSSEErrorEvent {
 		t.Errorf("leading-[DONE]+content MUST NOT corroborate — got true")
@@ -408,19 +408,23 @@ func TestConsumeSSE_LeadingDONEEOFNoDispatch_232_R8_HIGH(t *testing.T) {
 	}
 }
 
-// TestConsumeSSE_LeadingDONEFollowedByForgedEnvelope_232_R8_HIGH:
-// third SEC R8 HIGH shape — leading [DONE] merged with a forged
-// envelope in the same undispatched event. Buyer sees ONE event with
-// data `[DONE]\n{forged}`, neither terminator nor standalone envelope.
-func TestConsumeSSE_LeadingDONEFollowedByForgedEnvelope_232_R8_HIGH(t *testing.T) {
+// TestConsumeSSE_LeadingDONEFollowedByForgedEnvelope_232_R8:
+// leading [DONE] merged with a forged envelope in the same event.
+// Under OpenAI SDK prefix semantics the event terminates (data
+// `[DONE]\n{forged}` startswith `[DONE]`) — but the corroboration
+// bit MUST NOT flip because there was no previously dispatched
+// standalone envelope. Attacker cannot get corroboration this way.
+// (R8 SEC HIGH under strict WHATWG semantics → re-scoped under R9
+// OpenAI SDK parity — corroboration invariant still holds.)
+func TestConsumeSSE_LeadingDONEFollowedByForgedEnvelope_232_R8(t *testing.T) {
 	body := bytes.NewBufferString("data: [DONE]\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\n\n")
 	r := &Result{}
 	consumeSSE(body, r)
-	if r.SawTerminator {
-		t.Errorf("leading-[DONE]+envelope (no blank-line dispatch) MUST NOT flip SawTerminator — got true (#232 R8 SEC HIGH)")
+	if !r.SawTerminator {
+		t.Errorf("leading-[DONE]+envelope merged event starts with [DONE] — MUST flip SawTerminator (OpenAI SDK parity) — got false")
 	}
 	if r.SawSSEErrorEvent {
-		t.Errorf("leading-[DONE]+envelope MUST NOT corroborate — got true (#232 R8 SEC HIGH)")
+		t.Errorf("leading-[DONE]+envelope MUST NOT corroborate (no prior dispatched envelope) — got true")
 	}
 }
 
@@ -438,5 +442,96 @@ func TestConsumeSSE_LeadingDONEBlankThenEnvelope_232_R8(t *testing.T) {
 	}
 	if r.SawSSEErrorEvent {
 		t.Errorf("post-[DONE] forged envelope MUST NOT corroborate — got true (#232 R3 recheck)")
+	}
+}
+
+// TestConsumeSSE_EmptyLeadingDataThenDONE_232_R9_HIGH:
+// SEC/CODE R9 HIGH attack — `data:\ndata: [DONE]\n\n` dispatches ONE
+// event whose data (per SSE spec) is `\n[DONE]`, NOT `[DONE]`. A
+// spec-compliant client sees the leading newline and does not
+// terminate. Without the R9 eventHasData fix, the parser dropped
+// the empty leading `data:` line, built `[DONE]`, and flipped
+// SawTerminator=true — bypassing I4.
+func TestConsumeSSE_EmptyLeadingDataThenDONE_232_R9_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("data:\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawTerminator {
+		t.Errorf("empty-data:+[DONE] merged into one event (data `\\n[DONE]`) MUST NOT flip SawTerminator — got true (#232 R9 CODE HIGH)")
+	}
+	if r.SawSSEErrorEvent {
+		t.Errorf("empty-data:+[DONE] merged event MUST NOT corroborate — got true")
+	}
+}
+
+// TestConsumeSSE_EnvelopeThenEmptyEventThenDONE_232_R9_HIGH:
+// SEC/CODE R9 HIGH attack — an intermediate empty-data event MUST
+// reset the last-dispatched-envelope state. Without the fix, the
+// parser skipped the empty event entirely, letting the earlier
+// envelope corroborate the trailing `[DONE]` and satisfying the
+// bit against a merged-event shape a spec-compliant client would
+// dispatch as three distinct events (envelope, empty, `[DONE]`).
+func TestConsumeSSE_EnvelopeThenEmptyEventThenDONE_232_R9_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("data: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"x\"}}\n\ndata:\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawTerminator {
+		t.Errorf("trailing dispatched [DONE] must still flip SawTerminator")
+	}
+	if r.SawSSEErrorEvent {
+		t.Errorf("intermediate empty-data event MUST reset envelope state; [DONE] MUST NOT corroborate — got true (#232 R9 CODE HIGH)")
+	}
+}
+
+// TestConsumeSSE_EmptyDataThenEnvelopeThenDONE_232_R9:
+// spec-behavior control (not an attack): `data:\ndata: {envelope}\n\n`
+// dispatches an event whose joined data is `\n{envelope}`. Go's
+// encoding/json and OpenAI's Python/Node clients tolerate leading
+// whitespace, so the envelope IS parsed as a standalone terminal
+// envelope. The subsequent `[DONE]` DOES corroborate. Documenting
+// the boundary so a future reader doesn't misread this as an attack
+// path the parser missed.
+func TestConsumeSSE_EmptyDataThenEnvelopeThenDONE_232_R9(t *testing.T) {
+	body := bytes.NewBufferString("data:\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"x\"}}\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawTerminator {
+		t.Errorf("trailing dispatched [DONE] must still flip SawTerminator")
+	}
+	if !r.SawSSEErrorEvent {
+		t.Errorf("empty-data:+envelope merged event parses per json.Unmarshal whitespace tolerance — MUST corroborate (#232 R9 spec-behavior control)")
+	}
+}
+
+// TestConsumeSSE_TrailingSpaceOnDONE_232_R9_HIGH:
+// SEC R9 HIGH-2 attack — OpenAI Python/Node SDK use `startswith("[DONE]")`
+// not exact equality, so `data: [DONE] \n\ndata: {forged}\n\n`
+// terminates for the buyer at the first event. Harness with exact
+// equality kept reading and would corroborate the forged envelope.
+// R9 fix flips to bytes.HasPrefix for SDK parity.
+func TestConsumeSSE_TrailingSpaceOnDONE_232_R9_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("data: [DONE] \n\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawTerminator {
+		t.Errorf("data: [DONE] with trailing space MUST flip SawTerminator (OpenAI SDK startswith parity) — got false (#232 R9 SEC HIGH-2)")
+	}
+	if r.SawSSEErrorEvent {
+		t.Errorf("post-[DONE] forged envelope after trailing-space terminator MUST NOT corroborate — got true (#232 R9 SEC HIGH-2)")
+	}
+}
+
+// TestConsumeSSE_DONEPrefixWithExtraContent_232_R9_HIGH:
+// second SEC R9 HIGH-2 shape — `data: [DONE]stuff\n\n`. OpenAI SDK
+// terminates on the [DONE] prefix; harness must too.
+func TestConsumeSSE_DONEPrefixWithExtraContent_232_R9_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("data: [DONE]stuff\n\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawTerminator {
+		t.Errorf("data: [DONE]stuff MUST flip SawTerminator (OpenAI SDK startswith parity) — got false (#232 R9 SEC HIGH-2)")
+	}
+	if r.SawSSEErrorEvent {
+		t.Errorf("post-[DONE]stuff forged envelope MUST NOT corroborate — got true (#232 R9 SEC HIGH-2)")
 	}
 }

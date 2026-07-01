@@ -276,6 +276,22 @@ func isSSE(resp *http.Response) bool {
 // class of "buyer sees X, harness sees Y" attacks that arise when
 // classification is done at line-read time instead of event-dispatch
 // time.
+//
+// Terminator predicate (#232 R9 SEC HIGH-2): OpenAI Python/Node SDK
+// use `sse.data.startswith("[DONE]")`, not exact equality. The
+// harness matches that: `bytes.HasPrefix(eventBuf, "[DONE]")` on
+// dispatch. Exact equality left `data: [DONE] \n\ndata: forged\n\n`
+// (trailing whitespace) and `data: [DONE]\ndata: X\n\n` (merged
+// event) unterminated on the harness while the buyer's SDK
+// terminated — reopening the R3 post-terminator forgery class for
+// SDK parity. Prefix matching aligns both sides.
+//
+// Line-ending scope: `\n` and `\r\n` are handled by trimming trailing
+// CR/LF. Bare `\r` line endings (WHATWG SSE permits them) are NOT
+// handled — OpenAI Python/Node SDKs also don't handle them, and
+// production gateway code emits `\n` exclusively (see writeSSEError /
+// writeStructuredOutputTimeoutSSE in chat_proxy.go). Deferred (SEC
+// R9 LOW) as out-of-scope for #232 corroboration correctness.
 func consumeSSE(body io.Reader, res *Result) {
 	reader := bufio.NewReader(body)
 	firstByte := true
@@ -285,6 +301,17 @@ func consumeSSE(body io.Reader, res *Result) {
 	// separators; the event is dispatched on the first blank line and
 	// discarded on EOF without a terminating blank line.
 	var eventBuf []byte
+	// eventHasData tracks whether the current event has received AT
+	// LEAST ONE `data:` field line — including empty ones. Per SSE
+	// spec, `data:\n\n` dispatches an event whose data is the empty
+	// string; `data:\ndata: [DONE]\n\n` dispatches an event whose
+	// data is `\n[DONE]` (NOT a terminator). Tracking this separately
+	// from `len(eventBuf) > 0` is required to (a) insert the `\n`
+	// separator between data lines when the FIRST payload was empty,
+	// and (b) reset dispatched-envelope state on intermediate empty
+	// events. (#232 R9 CODE HIGH — closes the "empty leading data:"
+	// terminator-bypass class.)
+	eventHasData := false
 	// lastDispatchedWasEnvelope + lastDispatchedErrorCode track the
 	// most-recently DISPATCHED event's classification. Only the last
 	// dispatched event before `[DONE]` or EOF can corroborate the
@@ -323,13 +350,29 @@ func consumeSSE(body io.Reader, res *Result) {
 				fieldLine = fieldLine[:len(fieldLine)-1]
 			}
 			if len(fieldLine) == 0 {
-				// Blank line: dispatch the current event, if any.
-				if len(eventBuf) > 0 {
-					if bytes.Equal(eventBuf, []byte("[DONE]")) {
-						// A standalone dispatched `[DONE]` event is the
-						// terminator. Corroborate ONLY if the previously
-						// dispatched event was a standalone error
-						// envelope.
+				// Blank line: dispatch the current event, if any. Per
+				// SSE spec, "if any" is gated on `eventHasData`, NOT
+				// on `len(eventBuf) > 0`: an event that received ONLY
+				// empty `data:` lines dispatches with empty data and
+				// still counts as a dispatched event for corroboration
+				// state.
+				if eventHasData {
+					if bytes.HasPrefix(eventBuf, []byte("[DONE]")) {
+						// A dispatched event whose data starts with
+						// `[DONE]` is the terminator. Prefix match (not
+						// exact equality) matches the OpenAI Python/Node
+						// SDK behavior (`sse.data.startswith("[DONE]")`),
+						// which is the buyer contract SPEC-006 §17.7.1
+						// pins. Prefix matters (#232 R9 SEC HIGH-2):
+						// exact equality left `data: [DONE] \n\n` (or
+						// `data: [DONE]\ndata: forged\n\n`) unterminated
+						// on the harness side while OpenAI SDK consumers
+						// terminated at the first `[DONE]` prefix — an
+						// attacker could then forge a post-terminator
+						// envelope invisible to the buyer but visible
+						// (and corroborating) to the harness.
+						// Corroborate ONLY if the previously dispatched
+						// event was a standalone error envelope.
 						res.SawTerminator = true
 						if lastDispatchedWasEnvelope {
 							res.SawSSEErrorEvent = true
@@ -346,6 +389,7 @@ func consumeSSE(body io.Reader, res *Result) {
 						lastDispatchedErrorCode = ""
 					}
 					eventBuf = eventBuf[:0]
+					eventHasData = false
 				}
 				continue
 			}
@@ -355,19 +399,20 @@ func consumeSSE(body io.Reader, res *Result) {
 					payload = payload[1:]
 				}
 				// Append to current event buffer. Per SSE spec,
-				// consecutive `data:` lines concatenate with `\n`.
+				// consecutive `data:` lines concatenate with `\n` —
+				// including when the FIRST `data:` was empty. Gating
+				// the separator on `eventHasData` (not eventBuf length)
+				// preserves that leading empty line in the joined data.
 				// Classification is deferred to blank-line dispatch —
 				// a `data: [DONE]` line here does NOT terminate; it is
 				// merely appended, and only becomes a terminator if the
 				// dispatched event's full data equals exactly `[DONE]`.
-				// (#232 R8 SEC HIGH — closes the symmetric leading-
-				// `[DONE]` attack: `data: [DONE]\ndata: {content}\n\n`
-				// dispatches ONE event with data `[DONE]\n{content}`,
-				// which is neither a terminator nor an envelope.)
-				if len(eventBuf) > 0 {
+				// (#232 R8 SEC HIGH + R9 CODE HIGH.)
+				if eventHasData {
 					eventBuf = append(eventBuf, '\n')
 				}
 				eventBuf = append(eventBuf, payload...)
+				eventHasData = true
 			}
 			// Non-data field lines (event:, id:, retry:) and non-field
 			// lines are ignored — none of them affect corroboration.
@@ -415,10 +460,10 @@ type chunkPayload struct {
 	} `json:"choices"`
 	// Error is the OpenAI-style terminal error envelope the gateway
 	// emits on fallback paths via writeSSEError before `data: [DONE]`.
-	// Issue #232: presence of this field on the FINAL data chunk before
-	// `[DONE]`/EOF (and ONLY as a standalone envelope) is the buyer-
-	// side corroboration the reconciler uses to verify the gateway's
-	// fallback outcome label.
+	// Issue #232: presence of this field on the last DISPATCHED SSE
+	// event before `[DONE]`/EOF (and ONLY as a standalone envelope) is
+	// the buyer-side corroboration the reconciler uses to verify the
+	// gateway's fallback outcome label.
 	Error *struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
@@ -426,21 +471,23 @@ type chunkPayload struct {
 	} `json:"error,omitempty"`
 }
 
-// parseChunkTokens decodes a single SSE chunk's `data:` payload and
-// updates `res` with any token counts the chunk carried. It returns
-// the chunk's classification for #232 corroboration tracking:
+// parseChunkTokens decodes a dispatched SSE event's joined `data:`
+// payload and updates `res` with any token counts the event carried.
+// It returns the event's classification for #232 corroboration
+// tracking:
 //
-//   - code: the non-empty `error.code` value if the chunk is a
-//     STANDALONE error envelope; "" otherwise.
-//   - isStandaloneError: true ONLY if the chunk has a non-empty
+//   - code: the non-empty `error.code` value if the dispatched event
+//     is a STANDALONE error envelope; "" otherwise.
+//   - isStandaloneError: true ONLY if the event has a non-empty
 //     `error.code` AND no `choices` AND no `usage` tokens.
 //
-// The caller in consumeSSE tracks whether the LAST data chunk before
-// `[DONE]`/EOF was a standalone error envelope; only that position
-// flips `Result.SawSSEErrorEvent`. This makes the corroboration bit
-// position-aware so that injecting `"error":{"code":"..."}` into a
-// content-bearing chunk or before more content chunks does not
-// satisfy the buyer-corroboration check. (#232 R2 SEC HIGH.)
+// The caller in consumeSSE tracks whether the LAST DISPATCHED event
+// before `[DONE]`/EOF was a standalone error envelope; only that
+// position flips `Result.SawSSEErrorEvent`. This makes the
+// corroboration bit position-aware so that injecting
+// `"error":{"code":"..."}` into a content-bearing dispatched event, or
+// into an event followed by more content events, does not satisfy the
+// buyer-corroboration check. (#232 R2 SEC HIGH.)
 func parseChunkTokens(payload []byte, res *Result) (code string, isStandaloneError bool) {
 	var c chunkPayload
 	if err := json.Unmarshal(payload, &c); err != nil {
