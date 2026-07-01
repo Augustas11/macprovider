@@ -36,6 +36,15 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/stats/store"
 )
 
+// recentPartialSince returns a PartialSince string safely inside the
+// 30-day window used by shouldExposePartialHistorySince. Computed at
+// call time rather than hardcoded so the test suite does not become a
+// time bomb once wall-clock crosses 30 days past a hardcoded date.
+// The 25-day offset leaves headroom for slow CI runs + timezone drift.
+func recentPartialSince() string {
+	return time.Now().UTC().Add(-25 * 24 * time.Hour).Format(time.RFC3339)
+}
+
 // setupStatsHandler wires the Step 3 mux against the per-test
 // Postgres fixture, applies the Step 1 schema, and seeds fresh
 // snapshot rows so the freshness pre-check doesn't trip 503 on
@@ -56,7 +65,7 @@ func setupStatsHandler(t *testing.T) (http.Handler, *sql.DB) {
 			},
 		},
 		"partial",
-		"2026-06-01T00:00:00Z",
+		recentPartialSince(),
 		nil,
 		zerolog.Nop(),
 	)
@@ -496,7 +505,7 @@ func TestAC22_AuthFailureLimiter(t *testing.T) {
 		st,
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"partial",
-		"2026-06-01T00:00:00Z",
+		recentPartialSince(),
 		nil,
 		zerolog.Nop(),
 	).Handler()
@@ -574,7 +583,7 @@ func TestPartialHistorySinceBackfillModeGate(t *testing.T) {
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"partial",
-		"2026-06-01T00:00:00Z",
+		recentPartialSince(),
 		nil,
 		zerolog.Nop(),
 	).Handler()
@@ -591,7 +600,7 @@ func TestPartialHistorySinceBackfillModeGate(t *testing.T) {
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"full",
-		"2026-06-01T00:00:00Z", // stale config — should be ignored
+		recentPartialSince(), // stale config — should be ignored
 		nil,
 		zerolog.Nop(),
 	).Handler()
@@ -627,7 +636,7 @@ func TestAC15_RedactionSweep(t *testing.T) {
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"partial",
-		"2026-06-01T00:00:00Z",
+		recentPartialSince(),
 		nil,
 		logger,
 	).Handler()
@@ -687,7 +696,7 @@ func TestAC6_PartnerProjection(t *testing.T) {
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"partial",
-		"2026-06-01T00:00:00Z",
+		recentPartialSince(),
 		nil,
 		zerolog.Nop(),
 	).Handler()
@@ -787,7 +796,7 @@ func TestAC4_BucketedExactEarningsNull(t *testing.T) {
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"partial",
-		"2026-06-01T00:00:00Z",
+		recentPartialSince(),
 		nil,
 		zerolog.Nop(),
 	).Handler()
@@ -837,7 +846,7 @@ func TestAC5_ExactProviderExactEarnings(t *testing.T) {
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"partial",
-		"2026-06-01T00:00:00Z",
+		recentPartialSince(),
 		nil,
 		zerolog.Nop(),
 	).Handler()
@@ -971,7 +980,7 @@ func TestAC18_TimingEquivalenceRows5_6_7(t *testing.T) {
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"partial",
-		"2026-06-01T00:00:00Z",
+		recentPartialSince(),
 		nil,
 		zerolog.Nop(),
 	).Handler()
@@ -1101,7 +1110,7 @@ func TestPartnerProjectionNeverACAOStar(t *testing.T) {
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"partial",
-		"2026-06-01T00:00:00Z",
+		recentPartialSince(),
 		nil,
 		zerolog.Nop(),
 	).Handler()
@@ -1277,7 +1286,7 @@ func TestPartnerHEADParity(t *testing.T) {
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"partial",
-		"2026-06-01T00:00:00Z",
+		recentPartialSince(),
 		nil,
 		zerolog.Nop(),
 	).Handler()
@@ -1320,7 +1329,7 @@ func TestPartialHistoryAllWindowsCoverage(t *testing.T) {
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"partial",
-		"2026-06-01T00:00:00Z",
+		recentPartialSince(),
 		nil,
 		zerolog.Nop(),
 	).Handler()
