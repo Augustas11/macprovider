@@ -288,10 +288,15 @@ func isSSE(resp *http.Response) bool {
 //
 // Line-ending scope: `\n` and `\r\n` are handled by trimming trailing
 // CR/LF. Bare `\r` line endings (WHATWG SSE permits them) are NOT
-// handled — OpenAI Python/Node SDKs also don't handle them, and
-// production gateway code emits `\n` exclusively (see writeSSEError /
-// writeStructuredOutputTimeoutSSE in chat_proxy.go). Deferred (SEC
-// R9 LOW) as out-of-scope for #232 corroboration correctness.
+// handled. OpenAI Python/Node SDKs DO handle bare-CR event separation
+// (SEC R10 LOW correction), but production gateway code emits `\n`
+// exclusively (see writeSSEError / writeStructuredOutputTimeoutSSE in
+// chat_proxy.go). The remaining shape mismatch is conservative for
+// corroboration: a bare-CR-only stream the SDK dispatches as multiple
+// events, the harness treats as one long line — making corroboration
+// LESS likely, not more. No known suppression-bypass attack path.
+// Deferred (SEC R9 LOW → R10 LOW correction) as out-of-scope for
+// #232 corroboration correctness.
 func consumeSSE(body io.Reader, res *Result) {
 	reader := bufio.NewReader(body)
 	firstByte := true
@@ -312,6 +317,26 @@ func consumeSSE(body io.Reader, res *Result) {
 	// events. (#232 R9 CODE HIGH — closes the "empty leading data:"
 	// terminator-bypass class.)
 	eventHasData := false
+	// currentEventName tracks the SSE event name for the current
+	// pending event (set by `event:` field lines). Per SSE spec, this
+	// resets on each blank-line dispatch. Corroboration is gated on
+	// the default event name (empty or "message"): the OpenAI Python/
+	// Node SDK stream decoders route non-default events like
+	// `event: thread.*` and `event: response.*` through Assistants /
+	// Responses API handlers that do NOT surface `data.error` on the
+	// normal chat.completions terminal-envelope path. A malicious
+	// gateway sending
+	//   event: thread.message.delta
+	//   data: {"error":{"code":"stream_truncated",...}}
+	//   \n
+	//   data: [DONE]
+	//   \n
+	// would have the buyer's SDK NOT treat the envelope as terminal,
+	// but the harness (ignoring event:) would corroborate. (#232 R10
+	// SEC HIGH — closes the event-type-forge class.) SPEC-006 §17.7.1
+	// pins the terminal envelope to the default chat.completions
+	// data path; the gateway's writeSSEError never emits `event:`.
+	var currentEventName []byte
 	// lastDispatchedWasEnvelope + lastDispatchedErrorCode track the
 	// most-recently DISPATCHED event's classification. Only the last
 	// dispatched event before `[DONE]` or EOF can corroborate the
@@ -381,7 +406,12 @@ func consumeSSE(body io.Reader, res *Result) {
 						return
 					}
 					code, isStandalone := parseChunkTokens(eventBuf, res)
-					if isStandalone {
+					// Gate corroboration on default event name (empty or
+					// "message"). Non-default event names route to
+					// non-chat-completion SDK handlers where `data.error`
+					// is not surfaced as the terminal envelope the buyer
+					// contract pins. (#232 R10 SEC HIGH.)
+					if isStandalone && isDefaultEventName(currentEventName) {
 						lastDispatchedWasEnvelope = true
 						lastDispatchedErrorCode = code
 					} else {
@@ -390,36 +420,61 @@ func consumeSSE(body io.Reader, res *Result) {
 					}
 					eventBuf = eventBuf[:0]
 					eventHasData = false
+					currentEventName = currentEventName[:0]
 				}
 				continue
 			}
-			if bytes.HasPrefix(fieldLine, []byte("data:")) {
-				payload := fieldLine[len("data:"):]
-				if len(payload) > 0 && payload[0] == ' ' {
-					payload = payload[1:]
+			// Generic WHATWG SSE field parse: split at the first colon.
+			// If no colon is present, the entire line is the field name
+			// and the value is empty. `data:` and bare `data` both
+			// count as a data field — the latter is CODE R10 HIGH:
+			// `data\ndata: [DONE]\n\n` dispatches one event with data
+			// `\n[DONE]` (not a terminator), and `data: {env}\n\ndata\n\n
+			// data: [DONE]\n\n` must reset the envelope state on the
+			// empty-payload event before `[DONE]`. Only the `data`
+			// field affects corroboration; `event:`/`id:`/`retry:` and
+			// comments (colon-first) are still ignored.
+			var field, value []byte
+			if colon := bytes.IndexByte(fieldLine, ':'); colon < 0 {
+				field = fieldLine
+			} else {
+				field = fieldLine[:colon]
+				value = fieldLine[colon+1:]
+				if len(value) > 0 && value[0] == ' ' {
+					value = value[1:]
 				}
+			}
+			if bytes.Equal(field, []byte("event")) {
+				// Record the SSE event name for the current pending
+				// event. Reset on blank-line dispatch. Used to gate
+				// corroboration on the default chat.completions event
+				// path (#232 R10 SEC HIGH).
+				currentEventName = append(currentEventName[:0], value...)
+			} else if bytes.Equal(field, []byte("data")) {
 				// Append to current event buffer. Per SSE spec,
-				// consecutive `data:` lines concatenate with `\n` —
-				// including when the FIRST `data:` was empty. Gating
+				// consecutive data fields concatenate with `\n` —
+				// including when the FIRST payload was empty. Gating
 				// the separator on `eventHasData` (not eventBuf length)
-				// preserves that leading empty line in the joined data.
+				// preserves leading empty lines in the joined data.
 				// Classification is deferred to blank-line dispatch —
-				// a `data: [DONE]` line here does NOT terminate; it is
-				// merely appended, and only becomes a terminator if the
-				// dispatched event's full data equals exactly `[DONE]`.
-				// (#232 R8 SEC HIGH + R9 CODE HIGH.)
+				// a data value of `[DONE]` here does NOT terminate; it
+				// is merely appended, and only becomes a terminator if
+				// the dispatched event's full data has `[DONE]` as its
+				// prefix (OpenAI SDK parity, R9 SEC HIGH-2). (#232 R8
+				// SEC HIGH + R9 CODE HIGH + R10 CODE HIGH.)
 				if eventHasData {
 					eventBuf = append(eventBuf, '\n')
 				}
-				eventBuf = append(eventBuf, payload...)
+				eventBuf = append(eventBuf, value...)
 				eventHasData = true
 			}
-			// Non-data field lines (event:, id:, retry:) and non-field
-			// lines are ignored — none of them affect corroboration.
+			// Non-data fields (event, id, retry) and comment lines
+			// (leading colon → empty field name) are ignored — none of
+			// them affect corroboration.
 		}
 		if err != nil {
 			if err == io.EOF {
-				// EOF: any pending event (non-empty eventBuf without a
+				// EOF: any pending event (eventHasData=true without a
 				// terminating blank line) is DISCARDED per SSE spec.
 				// Corroborate ONLY if the last DISPATCHED event was a
 				// standalone error envelope. This closes the EOF variant
@@ -510,6 +565,18 @@ func parseChunkTokens(payload []byte, res *Result) (code string, isStandaloneErr
 		return c.Error.Code, true
 	}
 	return "", false
+}
+
+// isDefaultEventName returns true when the SSE event name is empty or
+// exactly "message" — the two spec-equivalent defaults per WHATWG SSE.
+// The OpenAI Python/Node stream decoders route these through the
+// normal chat.completions data handler where `data.error` surfaces
+// as the terminal envelope SPEC-006 §17.7.1 pins. Non-default names
+// (Assistants API `thread.*`, Responses API `response.*`, etc.) route
+// through handlers that do NOT treat the envelope as terminal.
+// (#232 R10 SEC HIGH.)
+func isDefaultEventName(name []byte) bool {
+	return len(name) == 0 || bytes.Equal(name, []byte("message"))
 }
 
 func consumeJSON(body io.Reader, res *Result) {

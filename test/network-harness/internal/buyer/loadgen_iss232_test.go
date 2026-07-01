@@ -535,3 +535,119 @@ func TestConsumeSSE_DONEPrefixWithExtraContent_232_R9_HIGH(t *testing.T) {
 		t.Errorf("post-[DONE]stuff forged envelope MUST NOT corroborate — got true (#232 R9 SEC HIGH-2)")
 	}
 }
+
+// TestConsumeSSE_BareDataNoColonThenDONE_232_R10_HIGH:
+// CODE R10 HIGH attack — WHATWG SSE treats a line with just `data`
+// (no colon) as field `data` with empty value. `data\ndata: [DONE]\n\n`
+// dispatches ONE event with data `\n[DONE]` (leading newline from
+// the empty field) — not a terminator. Without generic field parsing
+// the harness dropped the `data` line, saw `[DONE]` alone, and
+// flipped SawTerminator=true — bypassing I4.
+func TestConsumeSSE_BareDataNoColonThenDONE_232_R10_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("data\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawTerminator {
+		t.Errorf("bare-`data`+[DONE] merged event (data `\\n[DONE]`) MUST NOT flip SawTerminator — got true (#232 R10 CODE HIGH)")
+	}
+	if r.SawSSEErrorEvent {
+		t.Errorf("bare-`data`+[DONE] MUST NOT corroborate — got true")
+	}
+}
+
+// TestConsumeSSE_EnvelopeThenBareDataResetThenDONE_232_R10_HIGH:
+// CODE R10 HIGH second shape — an intermediate bare-`data` dispatch
+// must reset envelope corroboration. Otherwise the trailing `[DONE]`
+// would incorrectly corroborate the earlier envelope.
+func TestConsumeSSE_EnvelopeThenBareDataResetThenDONE_232_R10_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("data: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"x\"}}\n\ndata\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawTerminator {
+		t.Errorf("trailing dispatched [DONE] must still flip SawTerminator")
+	}
+	if r.SawSSEErrorEvent {
+		t.Errorf("intermediate bare-`data` event MUST reset envelope state; [DONE] MUST NOT corroborate — got true (#232 R10 CODE HIGH)")
+	}
+}
+
+// TestConsumeSSE_CommentLineIgnored_232_R10:
+// generic-parse regression control — a comment line (`: keep-alive`)
+// per SSE spec has empty field name and MUST be ignored, not treated
+// as data. Verifies the generic field parser distinguishes bare
+// `data` (data field) from colon-first lines (comments).
+func TestConsumeSSE_CommentLineIgnored_232_R10(t *testing.T) {
+	body := bytes.NewBufferString(": keep-alive\n\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"x\"}}\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawTerminator {
+		t.Errorf("trailing [DONE] must flip SawTerminator after comment")
+	}
+	if !r.SawSSEErrorEvent {
+		t.Errorf("comment lines must not disturb envelope corroboration — got SawSSEErrorEvent=false")
+	}
+}
+
+// TestConsumeSSE_ThreadEventForgedEnvelope_232_R10_HIGH:
+// SEC R10 HIGH attack — OpenAI Python/Node SDK routes `event: thread.*`
+// through Assistants API handlers that do NOT surface `data.error`
+// as a terminal envelope on the chat.completions path. A malicious
+// gateway emitting `event: thread.message.delta` + envelope-shaped
+// data + `[DONE]` fools the harness (which ignored `event:`) into
+// corroborating while the buyer's SDK does NOT see the envelope as
+// terminal.
+func TestConsumeSSE_ThreadEventForgedEnvelope_232_R10_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("event: thread.message.delta\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawSSEErrorEvent {
+		t.Errorf("event: thread.* + envelope MUST NOT corroborate (SDK routes to Assistants handler) — got true (#232 R10 SEC HIGH)")
+	}
+	if !r.SawTerminator {
+		t.Errorf("trailing [DONE] must still flip SawTerminator")
+	}
+}
+
+// TestConsumeSSE_ResponseEventForgedEnvelope_232_R10_HIGH:
+// SEC R10 HIGH sibling shape — `event: response.*` is the OpenAI
+// Responses API prefix, routed through a non-chat-completion handler.
+func TestConsumeSSE_ResponseEventForgedEnvelope_232_R10_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("event: response.output.item\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"forged\"}}\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawSSEErrorEvent {
+		t.Errorf("event: response.* + envelope MUST NOT corroborate — got true (#232 R10 SEC HIGH)")
+	}
+}
+
+// TestConsumeSSE_ExplicitMessageEventLegit_232_R10:
+// happy-path control — `event: message` is the SSE default alias
+// and MUST still corroborate a standalone envelope on the chat.
+// completions path.
+func TestConsumeSSE_ExplicitMessageEventLegit_232_R10(t *testing.T) {
+	body := bytes.NewBufferString("event: message\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"legit\"}}\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawSSEErrorEvent {
+		t.Errorf("event: message + envelope MUST corroborate (SSE default alias) — got false")
+	}
+	if r.SSEErrorCode != "stream_truncated" {
+		t.Errorf("SSEErrorCode = %q, want stream_truncated", r.SSEErrorCode)
+	}
+}
+
+// TestConsumeSSE_EventNameResetsOnDispatch_232_R10:
+// per SSE spec, currentEventName resets on blank-line dispatch. A
+// prior `event: thread.*` MUST NOT taint the next event's default
+// classification.
+func TestConsumeSSE_EventNameResetsOnDispatch_232_R10(t *testing.T) {
+	body := bytes.NewBufferString("event: thread.message.delta\ndata: {\"choices\":[{\"delta\":{\"content\":\"noise\"}}]}\n\ndata: {\"error\":{\"code\":\"stream_truncated\",\"type\":\"api_error\",\"message\":\"legit\"}}\n\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawSSEErrorEvent {
+		t.Errorf("second event (default) with envelope MUST corroborate; event: thread.* on prior event must not taint — got false (#232 R10)")
+	}
+	if r.SSEErrorCode != "stream_truncated" {
+		t.Errorf("SSEErrorCode = %q, want stream_truncated", r.SSEErrorCode)
+	}
+}
