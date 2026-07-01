@@ -285,6 +285,15 @@ func consumeSSE(body io.Reader, res *Result) {
 	var lastErrorCode string
 	lastWasErrorEnvelope := false
 	envelopeDispatched := false
+	// #232 R7 SEC HIGH / CODE MED: track whether we're at the start of
+	// a new SSE event (no `data:` lines accumulated for the current
+	// event yet). Only a `data: [DONE]` line at event start is a real
+	// terminator; the same text mid-event is a continuation payload per
+	// the HTML5/SSE dispatch model. I4 (`invariants/hard.go:304`) skips
+	// any stream with `SawTerminator=true`, so a wrongly-flipped
+	// terminator on an undispatched `[DONE]` bypasses silent-hang
+	// detection.
+	atEventStart := true
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -336,6 +345,7 @@ func consumeSSE(body io.Reader, res *Result) {
 				if lastWasErrorEnvelope {
 					envelopeDispatched = true
 				}
+				atEventStart = true
 				continue
 			}
 			if bytes.HasPrefix(fieldLine, []byte("data:")) {
@@ -364,6 +374,24 @@ func consumeSSE(body io.Reader, res *Result) {
 					// spec-compliant clients. The harness must require
 					// a blank-line dispatch between the envelope and
 					// `[DONE]` to match buyer-visible behavior.
+					//
+					// #232 R7 SEC HIGH / CODE MED — `SawTerminator` also
+					// requires `atEventStart`. `data: foo\ndata: [DONE]\n\n`
+					// is ONE undispatched event whose data is `foo\n[DONE]`;
+					// spec-compliant clients see neither a clean [DONE]
+					// terminator nor an envelope. Without this guard the
+					// harness flipped SawTerminator=true and I4
+					// (`invariants/hard.go:304`) skipped the stream —
+					// silent-hang detection would miss malformed streams.
+					// When [DONE] is mid-event, treat it as continuation
+					// data (per SSE): keep reading, and this event is
+					// no longer a standalone envelope.
+					if !atEventStart {
+						lastWasErrorEnvelope = false
+						lastErrorCode = ""
+						envelopeDispatched = false
+						continue
+					}
 					res.SawTerminator = true
 					if lastWasErrorEnvelope && envelopeDispatched {
 						res.SawSSEErrorEvent = true
@@ -372,7 +400,13 @@ func consumeSSE(body io.Reader, res *Result) {
 					return
 				}
 				code, isStandalone := parseChunkTokens(payload, res)
-				if isStandalone {
+				// A standalone envelope requires it to be the ONLY data
+				// line of its event — i.e. we arrived at event start.
+				// A parseChunkTokens=isStandalone hit on a continuation
+				// line is part of a multi-data event and is not a
+				// standalone dispatch. (#232 R7 SEC HIGH / CODE MED —
+				// same event-boundary reasoning as the [DONE] path.)
+				if isStandalone && atEventStart {
 					lastErrorCode = code
 					lastWasErrorEnvelope = true
 					envelopeDispatched = false
@@ -381,6 +415,7 @@ func consumeSSE(body io.Reader, res *Result) {
 					lastErrorCode = ""
 					envelopeDispatched = false
 				}
+				atEventStart = false
 			}
 		}
 		if err != nil {

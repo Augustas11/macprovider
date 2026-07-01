@@ -532,10 +532,15 @@ func computePerPairDrift(r *Result) {
 //
 //   - Gateway outcome "ok" → never suppressed; clean settlement, drift
 //     is real.
-//   - Gateway outcome fallback + buyer saw SSE error envelope → suppressed.
-//     The gateway's fallback claim is corroborated by the buyer; F-8 SSE-
-//     undercount asymmetry is expected; do not false-fail I1 on the
-//     production #226 shape (#229 R5 architect HIGH).
+//   - Gateway outcome fallback + buyer saw SSE error envelope with a
+//     corroborating code (per SPEC-006 §17.7.1 default equality OR a
+//     named-mapping exception) → suppressed. The gateway's fallback
+//     claim is corroborated by the buyer; F-8 SSE-undercount asymmetry
+//     is expected; do not false-fail I1 on the production #226 shape
+//     (#229 R5 architect HIGH). Unlisted mismatches (e.g. buyer
+//     `provider_timeout` against outcome `stream_truncated`) do NOT
+//     suppress — see sseErrorCorroboratesOutcome (#232 R6 SEC + ARCH
+//     convergent HIGH; ARCH R7 LOW comment tightening).
 //   - Gateway outcome fallback + buyer DID NOT see SSE error envelope →
 //     NOT suppressed. The gateway labeled the pair as a fallback but never
 //     told the buyer the stream failed via the OpenAI-style error

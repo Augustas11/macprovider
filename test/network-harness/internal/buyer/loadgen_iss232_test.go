@@ -292,6 +292,47 @@ func TestConsumeSSE_EnvelopeImmediatelyBeforeDONENoBlankLine_232_R6_HIGH(t *test
 	if r.SawSSEErrorEvent {
 		t.Errorf("envelope+immediate-[DONE] (no blank-line dispatch) MUST NOT corroborate — got true (#232 R6 SEC HIGH)")
 	}
+	// #232 R7 SEC HIGH / CODE MED — same event-boundary reasoning as
+	// R6, extended to SawTerminator. This is one undispatched merged
+	// event whose data is `{forged}\n[DONE]`; spec-compliant clients
+	// see no terminator. Without this assertion, I4 would skip the
+	// stream even though the buyer never saw completion.
+	if r.SawTerminator {
+		t.Errorf("envelope+immediate-[DONE] (no blank-line dispatch) MUST NOT flip SawTerminator — got true (#232 R7 SEC HIGH / CODE MED)")
+	}
+}
+
+// TestConsumeSSE_ContentImmediatelyBeforeDONENoBlankLine_232_R7_HIGH:
+// SEC R7 HIGH attack vector — no envelope, just content data merged
+// with [DONE] in a single undispatched SSE event. Per HTML5/SSE spec,
+// `data: hello\ndata: [DONE]\n\n` dispatches ONE event whose data is
+// `hello\n[DONE]`; a spec-compliant OpenAI-style client does not
+// terminate on this because the event's data is not exactly `[DONE]`.
+// The harness must match: SawTerminator=false so I4 still checks the
+// silent-hang path.
+func TestConsumeSSE_ContentImmediatelyBeforeDONENoBlankLine_232_R7_HIGH(t *testing.T) {
+	body := bytes.NewBufferString("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\ndata: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if r.SawTerminator {
+		t.Errorf("content+immediate-[DONE] (no blank-line dispatch) MUST NOT flip SawTerminator — got true (#232 R7 SEC HIGH)")
+	}
+	if r.SawSSEErrorEvent {
+		t.Errorf("content+immediate-[DONE] MUST NOT corroborate — got true")
+	}
+}
+
+// TestConsumeSSE_LeadingDONENoDispatch_232_R7:
+// happy-path control at event start — a leading `data: [DONE]` at
+// the very start of the stream IS a standalone terminator event
+// (blank line before is implicit at stream start).
+func TestConsumeSSE_LeadingDONE_232_R7(t *testing.T) {
+	body := bytes.NewBufferString("data: [DONE]\n\n")
+	r := &Result{}
+	consumeSSE(body, r)
+	if !r.SawTerminator {
+		t.Errorf("leading standalone [DONE] must flip SawTerminator")
+	}
 }
 
 // TestConsumeSSE_EnvelopeBlankLineDONE_232_R6:
