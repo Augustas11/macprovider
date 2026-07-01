@@ -2685,6 +2685,34 @@ SPEC-001 null-usage errors are distinguished from 502/504 with 0 completion (whi
 
 The client-disconnect rows intentionally prefer provider-reported actuals and preserve deterministic estimation as a backward-compatibility fallback for pre-v1.2.4 providers.
 
+#### 17.7.1 Buyer-visible terminal SSE error envelope contract (#232)
+
+**Scope.** This clause applies to streaming fallback settlements whose `usage_events.outcome` is non-`"ok"` AND where the buyer connection remains writable at settle time (the harness-success stream surface — the buyer received an HTTP 2xx, the gateway is mid-stream, settlement happens before the response closes). The contract does NOT apply to client-disconnect rows in §17.7 where the buyer has already left the wire; those settle on the gateway side without a buyer-visible terminal frame by definition.
+
+Streaming fallback settlements in scope MUST emit a buyer-visible OpenAI-style terminal SSE error envelope to the byte stream BEFORE the closing `data: [DONE]` frame (or before EOF for paths that cannot emit `[DONE]`):
+
+```text
+data: {"error": {"message": "...", "type": "...", "code": "<error-code>"}}
+```
+
+Constraints on the envelope:
+
+1. The envelope MUST be a STANDALONE SSE data frame. No `choices` field. No `usage` field with non-zero token counts.
+2. `error.code` MUST be non-empty. The relationship between `error.code` and `usage_events.outcome` is normatively bound:
+   - DEFAULT: `error.code` MUST equal the settled `usage_events.outcome` value. Examples of values where gateway writes both sides identically: `stream_truncated`, `stream_malformed`, `stream_output_exceeded`, `upstream_error`, `provider_timeout`.
+   - PASS-THROUGH EXCLUSION: terminal envelopes the gateway FORWARDS verbatim without writing its own `usage_events` row (the SPEC-019 v0.2 pass-through allow-list, e.g. `response_byte_cap_exceeded`, `malformed_json_response`, `json_schema_validation_failed`, and the provider-emitted `provider_timeout` variant) have no settlement row to match — this mapping clause does not apply to them. Their shape/position rules still apply (per §17.7.1 clauses 1, 3, 4).
+   - NAMED MAPPING EXCEPTIONS — each entry below is a named gateway divergence (gateway writes a `usage_events` row AND the buyer-visible `error.code` is different) that this clause permits explicitly:
+     - `error.code = "provider_disconnected"` ↔ `usage_events.outcome = "stream_truncated"`. Reference: `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go:1282`, which calls `writeSSEError(..., "server_error", "provider_disconnected")` for the SPEC-002 FR-B6 envelope while the gateway settles as `stream_truncated`.
+   - Any future divergence MUST be added to this list as a named mapping (with reference implementation citation) BEFORE the divergent code path ships. Unlisted divergences MUST be treated by the harness as uncorroborated overbill candidates.
+3. The envelope MUST be the LAST data frame on the stream before `[DONE]` or EOF. Content frames MUST NOT follow the envelope. Additional data frames sent AFTER `[DONE]` are invisible to OpenAI-style clients; the harness MUST stop reading at the first `[DONE]` and MUST NOT count post-`[DONE]` content (envelope or otherwise) as part of buyer-side corroboration evidence. (#232 R3 SEC HIGH.)
+4. Reference implementations: `writeSSEError`, `writeStructuredOutputTimeoutSSE`, `writeProviderDisconnectedSSE` in `phase5-gateway/internal/router/chat_proxy.go`.
+
+This contract is what the harness reconciler relies on to corroborate the gateway's `usage_events.outcome` label when suppressing fallback pairs from the I1 overbill check (`GatewayOverbillVsHarnessTokens` / `GatewayOverbillVsCoordinatorTokens` / `AbsGatewayCoordinatorMismatchTokens`). Without this clause the gateway's outcome label is a trust gate: a buggy or attacker-controlled gateway could label a real overbill as `stream_truncated` to hide it from I1 (#229 R6 security HIGH → #232).
+
+A fallback row whose buyer never saw the standalone terminal envelope MUST be flagged by the harness as an uncorroborated overbill. Future money-path code paths that intentionally settle as a fallback outcome without emitting the envelope (e.g. a future code path that closes the stream silently) MUST update this SPEC clause with a named exception and version bump — a silent broad escape clause is not permitted.
+
+SPEC-019 structured-output terminal frames inherit this same standalone / last-data-frame / no-content-after rule when settling streaming fallback outcomes (see SPEC-019 for the structured-output specific code list).
+
 ### 17.8 Kill-switch failure mode
 
 Kill-switch responses MUST be 503.

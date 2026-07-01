@@ -1275,8 +1275,14 @@ receipt-eligible provider error pass-through helper, and
 
 **v0.2 streaming pass-through allow-list amendment**: SPEC-006 gateway
 normalization MUST also pass through terminal SSE error frames whose
-`error.code` is `malformed_json_response` or
-`json_schema_validation_failed`. The gateway MUST NOT remap these terminal SSE
+`error.code` is one of:
+
+- `malformed_json_response` (coordinator/provider-emitted)
+- `json_schema_validation_failed` (coordinator/provider-emitted)
+- `response_byte_cap_exceeded` (coordinator/provider-emitted; pass-through, no gateway `usage_events` row written — refund-only)
+- `provider_timeout` (TWO emission paths: provider/coordinator-emitted pass-through with no gateway row, AND gateway-owned wall-clock timeout written by `writeStructuredOutputTimeoutSSE` with `usage_events.outcome=provider_timeout`)
+
+The gateway MUST NOT remap these terminal SSE
 error frames to `api_error`, `stream_malformed`, generic
 `upstream_provider_error`, or any other code, and MUST NOT drop the structured
 `retryable`, `request_id`, `inference_ran`, or `settlement_ran` fields required
@@ -1287,6 +1293,28 @@ normalization site is the full `forwardLine` closure at
 `phase5-gateway/internal/router/chat_proxy.go:482-557`; the positive-settlement
 site that MUST be skipped after forwarding these terminal SSE error frames is
 `phase5-gateway/internal/router/chat_proxy.go:625-629`.
+
+These v0.2 terminal SSE error frames inherit the SHAPE and POSITION clauses
+of SPEC-006 §17.7.1 (#232): the envelope MUST be a standalone data frame
+(no `choices`, no `usage` tokens), MUST be the LAST data frame before
+`[DONE]` or EOF, MUST NOT be followed by additional content frames, and
+MUST be on a line starting at column 0 with no leading whitespace per the
+SSE spec.
+
+The code-vs-outcome MAPPING clause of §17.7.1 applies ONLY when the gateway
+itself writes a non-`"ok"` `usage_events` row at the same time the envelope
+is emitted. Forwarded v0.2 structured-output terminal frames where the
+gateway PASSES THROUGH the provider's envelope and SKIPS positive/ok
+settlement (no gateway `usage_events` row) do not trigger the mapping
+check — there is no settlement row to match against. All four v0.2
+terminal codes — `malformed_json_response`, `json_schema_validation_failed`,
+`response_byte_cap_exceeded`, and the provider/coordinator pass-through
+variant of `provider_timeout` — are valid `error.code` values for the
+shape/position contract regardless. When SPEC-019 paths DO settle a non-ok
+gateway `usage_events` row (e.g. the gateway-owned wall-clock
+`provider_timeout` written by `writeStructuredOutputTimeoutSSE`), the
+mapping is `error.code = usage_events.outcome` by default, with any
+divergence added to the §17.7.1 mapping-exception list.
 
 Provider-to-coordinator WS streaming terminal validation failure MUST close the
 WS stream with `inference_response_end.status` in `{malformed_json_response,

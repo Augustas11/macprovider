@@ -223,15 +223,19 @@ func TestCollectUnmatchedGatewayOK_NoLeftovers(t *testing.T) {
 // streams as stream_output_exceeded with gateway tokens >> harness
 // tokens (F-8 SSE undercount). Pre-R5 this counted as gateway overbill
 // and false-failed I1 on exactly the shape #226 was filed to fix.
-// Post-R5, only OK-outcome overbill counts.
+// Post-R5 + #232: suppression applies when buyer ALSO corroborated the
+// truncation via the gateway's terminal SSE error envelope.
 func TestComputePerPairDrift_FallbackPairsDontCountAsOverbill_R5HIGH(t *testing.T) {
 	r := &Result{
 		MatchedSuccesses: []MatchedPair{
 			// Fallback pair: gateway recorded 64 bytes' worth of tokens
-			// before the upstream error, harness's SSE parser only saw 8.
-			// Pre-R5: GatewayOverbillVsHarnessTokens += 56. R5: excluded.
+			// before the upstream error, harness's SSE parser only saw 8
+			// AND received the gateway's terminal SSE error envelope
+			// (writeSSEError → error + [DONE]) → corroborated truncation,
+			// suppression applies (the post-R5 + #232 happy path for
+			// legitimate F-8 cases).
 			{HarnessRequestID: "fallback_undercount", HarnessCompletionTokens: 8, GatewayCompletionTokens: 64,
-				GatewayOutcome: "stream_output_exceeded"},
+				GatewayOutcome: "stream_output_exceeded", HarnessSawSSEErrorEvent: true, HarnessSSEErrorCode: "stream_output_exceeded"},
 			// OK pair: clean billing.
 			{HarnessRequestID: "ok_clean", HarnessCompletionTokens: 32, GatewayCompletionTokens: 32, GatewayOutcome: "ok"},
 		},
@@ -242,6 +246,179 @@ func TestComputePerPairDrift_FallbackPairsDontCountAsOverbill_R5HIGH(t *testing.
 	}
 	if len(r.OverbilledPairs) != 0 {
 		t.Errorf("fallback pair must not appear in OverbilledPairs: %v", r.OverbilledPairs)
+	}
+}
+
+// TestComputePerPairDrift_FallbackOverbillFlagged_WhenNoSSEErrorEvent_232:
+// the trust-gap scenario #232 was filed about. A gateway labels the
+// pair as a SPEC-006 §17.7 fallback outcome (claiming truncation) with
+// a large overbill (gateway=999, harness=8). But the buyer never
+// received the gateway's terminal SSE error envelope. Without #232
+// corroboration the overbill would be silently suppressed; with it,
+// the overbill is fed into I1 and the pair surfaces in OverbilledPairs.
+func TestComputePerPairDrift_FallbackOverbillFlagged_WhenNoSSEErrorEvent_232(t *testing.T) {
+	r := &Result{
+		MatchedSuccesses: []MatchedPair{
+			// Buggy / malicious gateway shape: claims fallback but never
+			// emitted the terminal error envelope the buyer would have
+			// received on a real truncation.
+			{HarnessRequestID: "trust_gap", HarnessCompletionTokens: 8, GatewayCompletionTokens: 999,
+				GatewayOutcome: "stream_truncated", HarnessSawSSEErrorEvent: false,
+				CoordinatorRequestID: "coord_trust_gap", CoordinatorCompletionTokens: 8},
+		},
+	}
+	computePerPairDrift(r)
+
+	// Gateway-vs-harness axis: overbill of 991 must be flagged.
+	if r.GatewayOverbillVsHarnessTokens != 991 {
+		t.Errorf("trust-gap pair must flag harness-axis overbill 991, got %d", r.GatewayOverbillVsHarnessTokens)
+	}
+	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "trust_gap" {
+		t.Errorf("trust-gap pair must appear in OverbilledPairs, got %v", r.OverbilledPairs)
+	}
+
+	// Gateway-vs-coordinator axis: overbill of 991 must also surface.
+	if r.GatewayOverbillVsCoordinatorTokens != 991 {
+		t.Errorf("trust-gap pair must flag coord-axis overbill 991, got %d", r.GatewayOverbillVsCoordinatorTokens)
+	}
+	if r.AbsGatewayCoordinatorMismatchTokens != 991 {
+		t.Errorf("trust-gap pair must contribute |delta|=991 to coord mismatch, got %d", r.AbsGatewayCoordinatorMismatchTokens)
+	}
+	if len(r.GatewayCoordMismatchedPairs) != 1 || r.GatewayCoordMismatchedPairs[0] != "trust_gap" {
+		t.Errorf("trust-gap pair must appear in GatewayCoordMismatchedPairs, got %v", r.GatewayCoordMismatchedPairs)
+	}
+}
+
+// TestComputePerPairDrift_FallbackUnlistedCodeMismatch_232_R6_HIGH:
+// SEC R6 + ARCH R6 convergent HIGH — buyer-visible error.code differs
+// from gateway outcome WITHOUT a named SPEC-006 mapping exception
+// (e.g. code=provider_timeout while outcome=stream_truncated). The
+// mapping clause says unlisted mismatches MUST be treated as
+// uncorroborated overbill candidates. fallbackOverbillSuppressed must
+// refuse to suppress.
+func TestComputePerPairDrift_FallbackUnlistedCodeMismatch_232_R6_HIGH(t *testing.T) {
+	r := &Result{
+		MatchedSuccesses: []MatchedPair{
+			{HarnessRequestID: "code_mismatch", HarnessCompletionTokens: 8, GatewayCompletionTokens: 500,
+				GatewayOutcome:          "stream_truncated",
+				HarnessSawSSEErrorEvent: true,
+				HarnessSSEErrorCode:     "provider_timeout"}, // unlisted mismatch
+		},
+	}
+	computePerPairDrift(r)
+	if r.GatewayOverbillVsHarnessTokens != 492 {
+		t.Errorf("unlisted code/outcome mismatch must NOT suppress overbill, got %d", r.GatewayOverbillVsHarnessTokens)
+	}
+	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "code_mismatch" {
+		t.Errorf("unlisted code/outcome mismatch must surface pair in OverbilledPairs, got %v", r.OverbilledPairs)
+	}
+}
+
+// TestComputePerPairDrift_FallbackNamedMappingException_232_R6:
+// the SPEC-006 §17.7.1 named-mapping exception path. Buyer-visible
+// `error.code=provider_disconnected` while gateway outcome is
+// `stream_truncated` is an EXPLICITLY allowed divergence (matches
+// gateway writeProviderDisconnectedSSE behavior). Suppression must
+// apply.
+func TestComputePerPairDrift_FallbackNamedMappingException_232_R6(t *testing.T) {
+	r := &Result{
+		MatchedSuccesses: []MatchedPair{
+			{HarnessRequestID: "named_exception", HarnessCompletionTokens: 8, GatewayCompletionTokens: 64,
+				GatewayOutcome:          "stream_truncated",
+				HarnessSawSSEErrorEvent: true,
+				HarnessSSEErrorCode:     "provider_disconnected"},
+		},
+	}
+	computePerPairDrift(r)
+	if r.GatewayOverbillVsHarnessTokens != 0 {
+		t.Errorf("provider_disconnected↔stream_truncated named mapping MUST suppress overbill, got %d", r.GatewayOverbillVsHarnessTokens)
+	}
+	if len(r.OverbilledPairs) != 0 {
+		t.Errorf("named-mapping exception must NOT surface pair, got %v", r.OverbilledPairs)
+	}
+}
+
+// TestSseErrorCorroboratesOutcome_232_R6: unit cases for the
+// SPEC-006 §17.7.1 mapping helper.
+func TestSseErrorCorroboratesOutcome_232_R6(t *testing.T) {
+	cases := []struct {
+		name    string
+		code    string
+		outcome string
+		want    bool
+	}{
+		{"default same code", "stream_truncated", "stream_truncated", true},
+		{"default same code stream_malformed", "stream_malformed", "stream_malformed", true},
+		{"default same code provider_timeout", "provider_timeout", "provider_timeout", true},
+		{"named exception provider_disconnected", "provider_disconnected", "stream_truncated", true},
+		{"unlisted mismatch", "provider_timeout", "stream_truncated", false},
+		{"unlisted mismatch other dir", "stream_truncated", "stream_malformed", false},
+		{"empty code", "", "stream_truncated", false},
+		{"unicode injected code", "🚫", "stream_truncated", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sseErrorCorroboratesOutcome(tc.code, tc.outcome)
+			if got != tc.want {
+				t.Errorf("sseErrorCorroboratesOutcome(%q, %q) = %v, want %v", tc.code, tc.outcome, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestComputePerPairDrift_FallbackPairSuppressedWithSSEErrorEvent_232:
+// the legitimate F-8 case: gateway labeled the pair as a fallback AND
+// the buyer received the matching terminal SSE error envelope. Both
+// signals agree the stream truncated, so the F-8 SSE-undercount delta
+// is suppressed (preserves R5 production happy path).
+func TestComputePerPairDrift_FallbackPairSuppressedWithSSEErrorEvent_232(t *testing.T) {
+	r := &Result{
+		MatchedSuccesses: []MatchedPair{
+			{HarnessRequestID: "legit_truncation", HarnessCompletionTokens: 8, GatewayCompletionTokens: 64,
+				GatewayOutcome: "stream_output_exceeded", HarnessSawSSEErrorEvent: true, HarnessSSEErrorCode: "stream_output_exceeded",
+				CoordinatorRequestID: "coord_legit", CoordinatorCompletionTokens: 80},
+		},
+	}
+	computePerPairDrift(r)
+
+	// Both axes: suppression preserves I1 from false-failing on the
+	// known F-8 production shape (#229 R5 architect HIGH).
+	if r.GatewayOverbillVsHarnessTokens != 0 {
+		t.Errorf("legit truncation must keep harness-axis suppression, got %d", r.GatewayOverbillVsHarnessTokens)
+	}
+	if r.GatewayOverbillVsCoordinatorTokens != 0 {
+		t.Errorf("legit truncation must keep coord-axis suppression, got %d", r.GatewayOverbillVsCoordinatorTokens)
+	}
+	if r.AbsGatewayCoordinatorMismatchTokens != 0 {
+		t.Errorf("legit truncation must keep coord-mismatch suppression, got %d", r.AbsGatewayCoordinatorMismatchTokens)
+	}
+	if len(r.OverbilledPairs) != 0 || len(r.GatewayCoordMismatchedPairs) != 0 {
+		t.Errorf("legit truncation must not surface in either pair list, got %v / %v",
+			r.OverbilledPairs, r.GatewayCoordMismatchedPairs)
+	}
+}
+
+// TestComputePerPairDrift_FallbackOverbillFlagged_BenignNoDoneCase_232:
+// SEC R1 HIGH-1 edge: a gateway delivers a buyer-visible 200 stream
+// with no `[DONE]` terminator AND no error envelope, then labels the
+// usage_events row as `stream_truncated` with a large gateway-token
+// count. Earlier draft used SawTerminator as the anchor, which would
+// have suppressed this case (SawTerminator=false matched the "harness
+// corroborates" branch). The SSE-error-event anchor catches it: no
+// error envelope means no corroboration, drift goes into I1.
+func TestComputePerPairDrift_FallbackOverbillFlagged_BenignNoDoneCase_232(t *testing.T) {
+	r := &Result{
+		MatchedSuccesses: []MatchedPair{
+			{HarnessRequestID: "benign_no_done", HarnessCompletionTokens: 8, GatewayCompletionTokens: 500,
+				GatewayOutcome: "stream_truncated", HarnessSawSSEErrorEvent: false},
+		},
+	}
+	computePerPairDrift(r)
+	if r.GatewayOverbillVsHarnessTokens != 492 {
+		t.Errorf("benign-no-DONE trust-gap must flag overbill 492, got %d", r.GatewayOverbillVsHarnessTokens)
+	}
+	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "benign_no_done" {
+		t.Errorf("benign-no-DONE pair must surface in OverbilledPairs, got %v", r.OverbilledPairs)
 	}
 }
 
@@ -843,7 +1020,13 @@ func TestMatchPairs_FallbackExactMatchEndToEnd(t *testing.T) {
 		{RequestID: "h1", Outcome: "stream_truncated", CompletionTokens: 64, CreatedAt: now},
 	}
 	results := []buyer.Result{
-		{Outcome: "ok", CompletionTokensReceived: 8, EndUTC: now, StartUTC: now, RequestID: "h1"},
+		// SawSSEErrorEvent=true matches production happy path: gateway's
+		// writeSSEError emits the OpenAI-style error envelope before
+		// `data: [DONE]` on every fallback path. #232 corroborates the
+		// fallback outcome via that envelope; the code must match the
+		// gateway's outcome per SPEC-006 §17.7.1 mapping (#232 R6).
+		{Outcome: "ok", CompletionTokensReceived: 8, EndUTC: now, StartUTC: now, RequestID: "h1",
+			SawSSEErrorEvent: true, SSEErrorCode: "stream_truncated"},
 	}
 	r := &Result{}
 	leftoverGw, _ := matchPairs(r, results, gwRows, nil)
@@ -874,7 +1057,11 @@ func TestMatchPairs_FallbackExactMatchEndToEnd(t *testing.T) {
 func TestAttachCoord_PairsFallbackOutcomeWithCoord2xx(t *testing.T) {
 	now := time.Now()
 	results := []buyer.Result{
-		{RequestID: "h_trunc_1", Outcome: "ok", CompletionTokensReceived: 0, StartUTC: now, EndUTC: now},
+		// SawSSEErrorEvent=true: gateway's writeSSEError envelope (#232).
+		// SSEErrorCode must match the gateway's outcome per SPEC-006
+		// §17.7.1 mapping (#232 R6).
+		{RequestID: "h_trunc_1", Outcome: "ok", CompletionTokensReceived: 0, StartUTC: now, EndUTC: now,
+			SawSSEErrorEvent: true, SSEErrorCode: "stream_truncated"},
 	}
 	gwRows := []gwRow{
 		{RequestID: "h_trunc_1", Outcome: "stream_truncated", CompletionTokens: 64, CreatedAt: now},

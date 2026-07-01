@@ -242,6 +242,47 @@ type MatchedPair struct {
 	CoordinatorCompletionTokens int64  `json:"coordinator_completion_tokens"`
 	CoordinatorMatchMethod      string `json:"coordinator_match_method,omitempty"` // "exact_id" | "fuzzy_token_ts"
 	GatewayLagMs                int64  `json:"gateway_lag_ms"`
+
+	// HarnessSawSSEErrorEvent carries through buyer.Result.SawSSEErrorEvent:
+	// true when the last DISPATCHED SSE event in the buyer's stream before
+	// `[DONE]` or EOF was a STANDALONE OpenAI-style terminal `error`
+	// envelope (no `choices`, no `usage` tokens) — the shape SPEC-006
+	// §17.7.1 pins for every in-scope fallback path. "Dispatched" is
+	// precise per the HTML5/SSE model: only a blank-line-terminated
+	// event counts (#232 R8 SEC HIGH — closes the leading-`[DONE]`
+	// undispatched-event class). Used by
+	// the fallback-overbill corroboration check at computePerPairDrift to
+	// close the trust gap #232 raised:
+	//
+	//   - gateway "ok"              → never suppressed (clean settlement).
+	//   - fallback + SSE error seen → suppressed (gateway claim AND buyer
+	//                                 experience agree on truncation; the
+	//                                 F-8 SSE-undercount asymmetry the R5
+	//                                 fix targeted).
+	//   - fallback + no SSE error   → flagged (gateway claims truncation
+	//                                 but the buyer never saw an error
+	//                                 envelope; the gateway-mislabel /
+	//                                 trust-gap signal).
+	//
+	// Anchor choice rationale (#232 R1 SEC HIGH): an earlier draft used
+	// SawTerminator (whether the buyer saw `data: [DONE]`). That was
+	// wrong both ways: the gateway's legit fallback paths emit the error
+	// envelope FOLLOWED by `[DONE]`, so SawTerminator=true on every real
+	// truncation, and a buggy gateway can deliver a clean-looking 200
+	// stream WITHOUT `[DONE]` and label the row fallback to evade the
+	// check. The SSE error envelope is the actual buyer-side proof of
+	// truncation — the gateway cannot fake it without telling the buyer
+	// the stream failed.
+	HarnessSawSSEErrorEvent bool `json:"harness_saw_sse_error_event"`
+
+	// HarnessSSEErrorCode carries the `error.code` value from the
+	// terminal SSE error envelope, when one was observed. Empty when
+	// HarnessSawSSEErrorEvent is false. Triage uses this to cross-check
+	// the buyer-visible code against the gateway's `outcome` column —
+	// a mismatch (e.g. buyer saw `provider_disconnected` but gateway
+	// settled `stream_truncated`) is not currently an I1 signal but is
+	// useful evidence in `ledger_reconcile.json`. (#232 R2 ARCH LOW.)
+	HarnessSSEErrorCode string `json:"harness_sse_error_code,omitempty"`
 }
 
 // snapshotWindow returns the SQL query bounds for a reconcile run.
@@ -411,17 +452,31 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 func computePerPairDrift(r *Result) {
 	for _, p := range r.MatchedSuccesses {
 		// Gateway vs Harness — fold the delta into the headline overbill
-		// signal ONLY for gateway "ok" pairs. SPEC-006 §17.7 fallback
-		// outcomes (stream_truncated etc.) have a known asymmetry: the
-		// gateway records the bytes it actually emitted before the upstream
-		// error, while the harness's SSE parser undercounts (F-8). The
-		// pre-existing #226 production scenario specifically had fallback
-		// gateway tokens >> harness tokens; if we counted those as overbill,
-		// I1 would false-fail on exactly the shape this PR is meant to fix
-		// (#229 R5 architect HIGH).
+		// signal for gateway "ok" pairs OR for fallback pairs where the
+		// buyer did NOT see the gateway's SSE error envelope (#232).
+		//
+		// SPEC-006 §17.7 fallback outcomes (stream_truncated etc.) have a
+		// known asymmetry: the gateway records the bytes it actually emitted
+		// before the upstream error, while the harness's SSE parser
+		// undercounts (F-8). The #229 R5 fix suppressed fallback pairs to
+		// stop false-failing I1 on the production #226 shape. But suppressing
+		// every fallback pair makes the gateway outcome label a trust gate:
+		// a buggy or attacker-controlled gateway that labels a real overbill
+		// as `stream_truncated` would hide it from I1 (#229 R6 security HIGH,
+		// tracked as #232).
+		//
+		// Resolution (#232): use the buyer's own observation as a
+		// corroboration check. fallbackOverbillSuppressed() returns true
+		// only when the buyer ALSO saw the gateway's terminal SSE error
+		// envelope (writeSSEError on every fallback path). If the gateway
+		// claims a fallback but the buyer never received an error envelope,
+		// the truncation is uncorroborated and the overbill is fed into I1
+		// — flagging exactly the trust-gap scenario the audit raised. See
+		// the helper docstring for why SawTerminator alone was the wrong
+		// anchor (#232 R1 SEC HIGH).
 		dh := p.GatewayCompletionTokens - p.HarnessCompletionTokens
 		r.NetGatewayMinusHarnessTokens += dh
-		if dh > 0 && isGatewayOKOutcome(p.GatewayOutcome) {
+		if dh > 0 && !fallbackOverbillSuppressed(p) {
 			r.GatewayOverbillVsHarnessTokens += dh
 			r.OverbilledPairs = append(r.OverbilledPairs, p.HarnessRequestID)
 		}
@@ -440,16 +495,22 @@ func computePerPairDrift(r *Result) {
 		// can record the provider's full reported usage. Counting that as
 		// drift false-fails I1 in the #285 reproduction.
 		//
+		// #232: same buyer-corroboration check applies here. The coord
+		// axis uses the buyer's view as the trust anchor — if the buyer
+		// did NOT receive the gateway's terminal SSE error envelope
+		// (HarnessSawSSEErrorEvent=false), the gateway claiming a
+		// fallback outcome is uncorroborated and the drift signals fire.
+		//
 		// When a coord row is missing for a gateway-OK pair (i.e. the
 		// gateway settled cleanly but no coord trail), surface separately
 		// in MatchedCoordMissing rather than dropping the signal.
 		if p.CoordinatorRequestID != "" {
 			dc := p.GatewayCompletionTokens - p.CoordinatorCompletionTokens
 			r.NetGatewayMinusCoordinatorTokens += dc
-			if dc > 0 && isGatewayOKOutcome(p.GatewayOutcome) {
+			if dc > 0 && !fallbackOverbillSuppressed(p) {
 				r.GatewayOverbillVsCoordinatorTokens += dc
 			}
-			if dc != 0 && isGatewayOKOutcome(p.GatewayOutcome) {
+			if dc != 0 && !fallbackOverbillSuppressed(p) {
 				if dc < 0 {
 					r.AbsGatewayCoordinatorMismatchTokens += -dc
 				} else {
@@ -461,6 +522,87 @@ func computePerPairDrift(r *Result) {
 			r.MatchedCoordMissing = append(r.MatchedCoordMissing, p.HarnessRequestID)
 		}
 	}
+}
+
+// fallbackOverbillSuppressed returns true when the per-pair drift should
+// be excluded from I1's overbill/mismatch signals because the pair is a
+// SPEC-006 §17.7 streaming-fallback outcome AND the buyer independently
+// corroborated the truncation by seeing the gateway's terminal SSE error
+// envelope (#232 R1 SEC HIGH: SawTerminator alone was the wrong anchor —
+// real truncation paths emit error + `[DONE]` so SawTerminator is always
+// true on legitimate fallbacks, and a malicious gateway can omit `[DONE]`
+// on a clean stream to forge the negative).
+//
+//   - Gateway outcome "ok" → never suppressed; clean settlement, drift
+//     is real.
+//   - Gateway outcome fallback + buyer saw SSE error envelope with a
+//     corroborating code (per SPEC-006 §17.7.1 default equality OR a
+//     named-mapping exception) → suppressed. The gateway's fallback
+//     claim is corroborated by the buyer; F-8 SSE-undercount asymmetry
+//     is expected; do not false-fail I1 on the production #226 shape
+//     (#229 R5 architect HIGH). Unlisted mismatches (e.g. buyer
+//     `provider_timeout` against outcome `stream_truncated`) do NOT
+//     suppress — see sseErrorCorroboratesOutcome (#232 R6 SEC + ARCH
+//     convergent HIGH; ARCH R7 LOW comment tightening).
+//   - Gateway outcome fallback + buyer DID NOT see SSE error envelope →
+//     NOT suppressed. The gateway labeled the pair as a fallback but never
+//     told the buyer the stream failed via the OpenAI-style error
+//     envelope. The truncation claim is uncorroborated and the drift is
+//     fed into I1 — flagging exactly the trust-gap shape #229 R6 security
+//     HIGH (tracked as #232) raised.
+//
+// The SSE error envelope is what the gateway must emit for the buyer to
+// see a non-clean stream completion (writeSSEError in chat_proxy.go).
+// The narrowed corroboration invariant (#232 R3 + R4): the gateway
+// cannot satisfy this check unless the buyer-visible final pre-
+// `[DONE]`/EOF data frame is a standalone error envelope on a column-0
+// line. Post-`[DONE]` envelopes (invisible to OpenAI clients) and
+// leading-whitespace forged envelopes (dropped by strict SSE field
+// parsing) cannot satisfy it.
+func fallbackOverbillSuppressed(p MatchedPair) bool {
+	if isGatewayOKOutcome(p.GatewayOutcome) {
+		return false
+	}
+	if !p.HarnessSawSSEErrorEvent {
+		return false
+	}
+	// #232 R6 SEC + ARCH convergent HIGH — enforce the SPEC-006 §17.7.1
+	// code/outcome mapping clause. The harness MUST refuse to suppress
+	// unless the buyer-visible `error.code` agrees with the gateway's
+	// `usage_events.outcome` (either by default equality OR by a named
+	// mapping exception). An unlisted mismatch (e.g. buyer code
+	// `provider_timeout` against outcome `stream_truncated`) is
+	// uncorroborated by SPEC; suppressing it would re-open the trust
+	// gap #232 is closing.
+	return sseErrorCorroboratesOutcome(p.HarnessSSEErrorCode, p.GatewayOutcome)
+}
+
+// sseErrorCorroboratesOutcome implements the SPEC-006 §17.7.1 code/
+// outcome mapping check. It returns true when the buyer-visible
+// `error.code` agrees with the gateway's `usage_events.outcome`, either
+// because they are byte-identical (the default rule) or because the
+// pair is on the named-mapping-exception list. Any unlisted mismatch
+// returns false.
+//
+// Empty `code` returns false defensively — the parser only sets
+// HarnessSSEErrorCode when a standalone envelope was dispatched, so an
+// empty code alongside HarnessSawSSEErrorEvent=true would be a parser
+// bug; refuse to suppress.
+//
+// Future named-mapping exceptions added to SPEC-006 §17.7.1 MUST also
+// be added here as additional case branches.
+func sseErrorCorroboratesOutcome(code, outcome string) bool {
+	if code == "" {
+		return false
+	}
+	if code == outcome {
+		return true
+	}
+	// Named mapping exception per SPEC-006 §17.7.1:
+	if code == "provider_disconnected" && outcome == "stream_truncated" {
+		return true
+	}
+	return false
 }
 
 // collectUnmatchedGatewayOK lists gateway rows with outcome="ok" that
@@ -604,6 +746,8 @@ func matchExactPass(r *Result, ordered []buyer.Result, gwPool *[]gwRow, coordPoo
 		pair := MatchedPair{
 			HarnessRequestID:        h.RequestID,
 			HarnessCompletionTokens: h.CompletionTokensReceived,
+			HarnessSawSSEErrorEvent: h.SawSSEErrorEvent,
+			HarnessSSEErrorCode:     h.SSEErrorCode,
 			GatewayMatchMethod:      methodExactID,
 			GatewayRequestID:        g.RequestID,
 			GatewayAccountID:        g.AccountID,
@@ -642,6 +786,8 @@ func matchFuzzyPass(r *Result, deferred []buyer.Result, gwPool *[]gwRow, coordPo
 		pair := MatchedPair{
 			HarnessRequestID:        h.RequestID,
 			HarnessCompletionTokens: h.CompletionTokensReceived,
+			HarnessSawSSEErrorEvent: h.SawSSEErrorEvent,
+			HarnessSSEErrorCode:     h.SSEErrorCode,
 			GatewayMatchMethod:      methodFuzzy,
 			GatewayRequestID:        g.RequestID,
 			GatewayAccountID:        g.AccountID,
@@ -904,13 +1050,26 @@ func isGatewayOKOutcome(outcome string) bool {
 //
 // Source enumeration: phase5-gateway/internal/router/chat_proxy.go
 // settleAfterCommit() / settleBeforeResponse() call sites.
+//
+// `provider_timeout` was added in #232 R5 ARCH MED — SPEC-019 v0.2.4 §10
+// gateway wall-clock timeout writes `usage_events.outcome=provider_timeout`
+// for structured streaming; prior to this addition the reconciler treated
+// those rows as incomplete and surfaced them as unmatched.
 func isSettlementComplete(outcome string) bool {
 	switch outcome {
 	case "ok",
 		"stream_truncated",
 		"stream_malformed",
 		"stream_output_exceeded",
-		"upstream_error":
+		"upstream_error",
+		"provider_timeout",
+		// `client_disconnect` and `invalid_provider_usage` are gateway-
+		// settled outcomes for non-success paths (client-disconnect
+		// surface vs malformed-provider-usage detection). Adding both
+		// keeps the reconciler from surfacing these rows as
+		// unmatched/incomplete. (#232 R6 CODE LOW.)
+		"client_disconnect",
+		"invalid_provider_usage":
 		return true
 	}
 	return false
