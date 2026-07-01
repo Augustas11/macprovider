@@ -131,11 +131,18 @@ Validation:
 | `rg -n "phase7-verify/internal\|github.com/augstar/macprovider/phase7-verify/internal" phase4-coordinator phase5-gateway` | no matches |
 | deterministic regeneration diff for `testdata/spec015/v04_settlement_receipts.json` | PASS, no diff |
 
-Known baseline retained:
+Post-Step 1 baseline cleanup:
 
-- Full `cd phase3-binary && swift test` is still expected to fail on the
-  pre-existing `ModelsSubcommandTests.testModelsListDisabledModePrintsIdleTableAndExitsZero`
-  issue recorded in Step 0. The new Step 1 Swift fixture tests pass.
+- The prior full `cd phase3-binary && swift test` failure in
+  `ModelsSubcommandTests.testModelsListDisabledModePrintsIdleTableAndExitsZero`
+  was a non-hermetic test issue, not settlement behavior. The test expected
+  `--model old-model` to be the idle row, but the command also reads local
+  operator config; machines with configured `supported_models` correctly prefer
+  that catalog. The test now passes explicit `--supported-models old-model`.
+- Follow-up validation:
+  `cd phase3-binary && swift test --filter ModelsSubcommandTests.testModelsListDisabledModePrintsIdleTableAndExitsZero`
+  passed, and full `cd phase3-binary && swift test` passed with 680 tests,
+  7 skipped, and 0 failures.
 
 Stop condition:
 
