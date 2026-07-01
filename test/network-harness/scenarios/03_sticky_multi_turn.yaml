@@ -1,34 +1,33 @@
-# 03_sticky_multi_turn.yaml — 3 buyers each fire 5 sequential prompts.
+# 03_sticky_multi_turn.yaml — 3 buyers each fire 5 sequential prompts,
+# each sending a per-buyer X-MacProvider-Conversation tag to exercise
+# SPEC-004 Pillar A sticky affinity.
 #
-# Live /v1/models reports `sticky_affinity.enabled: false` for tier1
-# disclosure. This scenario will confirm that finding empirically: with
-# sticky off, each buyer's 5 requests should scatter across providers
-# (when multiple providers serve the requested model).
+# Requires both sides ON:
+#   - gateway: routing.sticky_enabled=true + auth.key_hash_secret set
+#   - coordinator: routing.sticky_enabled=true
 #
-# What we want to learn (phase A, descriptive — recorded only):
-#  - Phase B will judge: do we WANT sticky for beta? If providers cache
-#    model context, sticky reduces TTFT. If not, sticky just trades
-#    fairness for stickiness with no benefit.
-#  - The fact that tier1 disclosure ALREADY says sticky_affinity.enabled=false
-#    is itself a finding — if we want sticky for beta, the disclosure
-#    and the routing default both need to flip.
+# What we assert descriptively (phase A, no verdict):
+#  - Each buyer's 5 requests should land on ONE provider consistently.
+#    Group per_request.jsonl by buyer_index and check that
+#    route_provider_id is single-valued per buyer (modulo drain/failover
+#    edge cases).
 #
 # What gets asserted (the 4 hard invariants): all 4 run.
 #
-# Cost estimate (15 requests x 32 max_tokens): order of cents.
+# Cost estimate (15 requests x 24 max_tokens): order of cents.
 name: sticky_multi_turn
 description: |
-  3 buyers, each sends 5 sequential non-streaming requests. Used to
-  detect whether sticky routing fires on multi-turn workloads (it
-  should NOT, per live disclosure).
+  3 buyers, each sends 5 sequential non-streaming requests with a per-
+  buyer X-MacProvider-Conversation tag. Confirms sticky affinity fires
+  when both gateway and coord have routing.sticky_enabled=true.
 
 expected_shape: |
   Phase A note (descriptive, not asserted):
    - 15 total requests (3 buyers x 5 each).
-   - With sticky OFF (current live state): each buyer's requests
-     scatter across providers serving the model.
-   - per_request.jsonl is the authoritative source — group by buyer_index
-     and look at route_provider_id distribution.
+   - With sticky ON on both sides: each buyer's 5 requests land on the
+     same provider (per_request.route_provider_id column, grouped by
+     buyer_index).
+   - With sticky OFF (or header unset): each buyer's requests scatter.
 
 target:
   gateway_url: https://api.streamvc.live
@@ -44,6 +43,9 @@ buyers:
   pattern: interval
   interval_ms: 1500
   requests_per_buyer: 5
+  # SPEC-004 Pillar A: per-buyer conversation tag. Gateway HMACs it with
+  # account_id to produce X-MacProvider-Internal-Conv for coord routing.
+  sticky_conversation_key: "harness-scenario-03-buyer-%d"
 
 duration: 300s
 request_timeout: 60s
