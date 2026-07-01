@@ -223,10 +223,10 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	current := currentMondayUTC(time.Now().UTC()).Format(time.RFC3339Nano)
 	resp := map[string]any{
-		"total_gross_credits":             h.sum(ctx, `SELECT SUM(gross_credits) FROM ledger_request_credits WHERE quarantined=0`),
-		"total_provider_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE quarantined=0`),
-		"total_operator_credits":          h.sum(ctx, `SELECT SUM(gross_credits - provider_credits) FROM ledger_request_credits WHERE quarantined=0`),
-		"current_window_provider_credits": h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE quarantined=0 AND ts_utc >= ?`, current),
+		"total_gross_credits":             h.sum(ctx, `SELECT SUM(gross_credits) FROM spec022_payable_request_credits`),
+		"total_provider_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits`),
+		"total_operator_credits":          h.sum(ctx, `SELECT SUM(gross_credits - provider_credits) FROM spec022_payable_request_credits`),
+		"current_window_provider_credits": h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE ts_utc >= ?`, current),
 		"pending_payout_count":            h.sum(ctx, `SELECT COUNT(*) FROM ledger_payout_ready WHERE status='ready'`),
 		"pending_payout_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE status='ready'`),
 		// SPEC-005 v0.4 §11.6.5 OPEN_PREDICATE — `quarantined_count`
@@ -266,7 +266,7 @@ func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
 	// longer change shape based on the query parameter.
 	havingClause := ""
 	if !includeQuarantined {
-		havingClause = " HAVING SUM(CASE WHEN lrc.quarantined=0 THEN 1 ELSE 0 END) > 0 "
+		havingClause = " HAVING SUM(CASE WHEN payable.id IS NOT NULL THEN 1 ELSE 0 END) > 0 "
 	}
 	// Single grouped LEFT JOIN — the prior shape was outer-aggregate +
 	// per-row h.sum(...) on ledger_payout_ready, which (a) deadlocked at
@@ -283,8 +283,8 @@ func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
 	// page, which is strictly cheaper than the per-provider sum loop.
 	rows, err := h.store.db.QueryContext(ctx, `
 SELECT lrc.provider_id,
-       SUM(CASE WHEN lrc.quarantined=0 THEN lrc.provider_credits ELSE 0 END),
-       SUM(CASE WHEN lrc.quarantined=0 AND lrc.ts_utc >= ? THEN lrc.provider_credits ELSE 0 END),
+       SUM(CASE WHEN payable.id IS NOT NULL THEN payable.provider_credits ELSE 0 END),
+       SUM(CASE WHEN payable.id IS NOT NULL AND payable.ts_utc >= ? THEN payable.provider_credits ELSE 0 END),
        MAX(lrc.ts_utc),
        SUM(CASE WHEN lrc.fault_flag != 'none' THEN 1 ELSE 0 END),
        SUM(CASE WHEN lrc.quarantined=1 AND NOT EXISTS (
@@ -293,6 +293,7 @@ SELECT lrc.provider_id,
        MAX(lrc.attestation_class),
        COALESCE(pp.pending_payout, 0) AS pending_payout
   FROM ledger_request_credits lrc
+  LEFT JOIN spec022_payable_request_credits payable ON payable.id = lrc.id
   LEFT JOIN (
         SELECT provider_id, SUM(provider_credits) AS pending_payout
           FROM ledger_payout_ready
@@ -380,7 +381,7 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
-	providerGross, err := h.sumErr(ctx, `SELECT SUM(gross_credits) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND quarantined=0`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	providerGross, err := h.sumErr(ctx, `SELECT SUM(gross_credits) FROM spec022_payable_request_credits WHERE ts_utc >= ? AND ts_utc < ?`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -392,10 +393,9 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 	}
 	splitDelta, err := h.sumErr(ctx, `
 SELECT COUNT(*)
-  FROM ledger_request_credits lrc
+  FROM spec022_payable_request_credits lrc
   LEFT JOIN ledger_operator_credits loc ON loc.request_credit_id = lrc.id
  WHERE lrc.ts_utc >= ? AND lrc.ts_utc < ?
-   AND lrc.quarantined = 0
    AND (loc.id IS NULL OR lrc.provider_credits + loc.operator_credits != lrc.gross_credits)`,
 		from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
 	if err != nil {
@@ -639,8 +639,8 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	faultArgs := append([]any{providerID}, rangeArgs...)
 	resp := map[string]any{
 		"provider_id":            providerID,
-		"total_credits":          h.sum(r.Context(), `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE provider_id=? AND quarantined=0`+rangeSQL, totalArgs...),
-		"current_window_credits": h.sum(r.Context(), `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE provider_id=? AND quarantined=0 AND ts_utc >= ?`+rangeSQL, currentArgs...),
+		"total_credits":          h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL, totalArgs...),
+		"current_window_credits": h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND ts_utc >= ?`+rangeSQL, currentArgs...),
 		"last_payout_ready":      h.lastPayout(r.Context(), providerID),
 		"provider_share_bps":     h.latestShareBps(r.Context()),
 		"models_served":          models,
@@ -878,7 +878,7 @@ func (h *handler) allowEarnings(providerID string) bool {
 
 func (h *handler) modelsServed(ctx context.Context, providerID string, rangeSQL string, rangeArgs ...any) []string {
 	args := append([]any{providerID}, rangeArgs...)
-	rows, err := h.store.db.QueryContext(ctx, `SELECT DISTINCT model FROM ledger_request_credits WHERE provider_id=?`+rangeSQL+` ORDER BY model`, args...)
+	rows, err := h.store.db.QueryContext(ctx, `SELECT DISTINCT model FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL+` ORDER BY model`, args...)
 	if err != nil {
 		return []string{}
 	}

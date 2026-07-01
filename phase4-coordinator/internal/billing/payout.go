@@ -13,17 +13,116 @@ func (s *Store) ClaimPayoutReady(ctx context.Context, payoutID int64, expectedGr
 		return false, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var windowStart, windowEnd string
-	var grossCredits int64
+	var windowStart, windowEnd, payoutStatus string
+	var grossCredits, minPayoutCredits int64
 	err = tx.QueryRowContext(ctx, `
-SELECT window_start_utc, window_end_utc, gross_credits
+SELECT window_start_utc, window_end_utc, gross_credits, min_payout_credits, status
   FROM ledger_payout_ready
- WHERE id = ?`, payoutID).Scan(&windowStart, &windowEnd, &grossCredits)
+ WHERE id = ?`, payoutID).Scan(&windowStart, &windowEnd, &grossCredits, &minPayoutCredits, &payoutStatus)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	recordClaimAudit := func(status string, errText any) error {
+		_, err := tx.ExecContext(ctx, `
+INSERT INTO ledger_reconciliation_runs (
+    run_type, from_utc, to_utc, request_log_rows_scanned,
+    missing_credit_rows_created, orphan_credit_rows_quarantined,
+    buyer_equivalent_credits, provider_gross_credits,
+    reconciliation_delta_credits, started_at_utc, finished_at_utc, status,
+    error, created_at_utc
+) VALUES ('spec_007_claim', ?, ?, 0, 0, 0, ?, ?, 0, ?, ?, ?, ?, ?)`,
+			windowStart,
+			windowEnd,
+			grossCredits,
+			grossCredits,
+			now,
+			now,
+			status,
+			errText,
+			now,
+		)
+		return err
+	}
+	if payoutStatus == "ready" {
+		var invalidSources int64
+		if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+  FROM ledger_request_credits lrc
+ WHERE lrc.settlement_id = ?
+   AND NOT EXISTS (
+       SELECT 1
+         FROM spec022_payable_request_credits payable
+        WHERE payable.id = lrc.id
+   )`, payoutID).Scan(&invalidSources); err != nil {
+			return false, err
+		}
+		if invalidSources > 0 {
+			if _, err := tx.ExecContext(ctx, `
+UPDATE ledger_request_credits
+   SET settled = 0,
+       settlement_id = NULL,
+       updated_at_utc = ?
+ WHERE settlement_id = ?
+   AND NOT EXISTS (
+       SELECT 1
+         FROM spec022_payable_request_credits payable
+        WHERE payable.id = ledger_request_credits.id
+   )`, now, payoutID); err != nil {
+				return false, err
+			}
+			var remainingCount, remainingGross, remainingProvider, remainingOperator int64
+			if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*),
+       COALESCE(SUM(lrc.gross_credits), 0),
+       COALESCE(SUM(lrc.provider_credits), 0),
+       COALESCE(SUM(lrc.gross_credits - lrc.provider_credits), 0)
+  FROM ledger_request_credits lrc
+  JOIN spec022_payable_request_credits payable ON payable.id = lrc.id
+ WHERE lrc.settlement_id = ?`, payoutID).Scan(&remainingCount, &remainingGross, &remainingProvider, &remainingOperator); err != nil {
+				return false, err
+			}
+			if remainingCount > 0 && remainingProvider >= minPayoutCredits {
+				if _, err := tx.ExecContext(ctx, `
+UPDATE ledger_payout_ready
+   SET source_credit_count = ?,
+       gross_credits = ?,
+       provider_credits = ?,
+       operator_credits = ?
+ WHERE id = ?
+   AND status = 'ready'`,
+					remainingCount,
+					remainingGross,
+					remainingProvider,
+					remainingOperator,
+					payoutID,
+				); err != nil {
+					return false, err
+				}
+			} else {
+				if _, err := tx.ExecContext(ctx, `
+UPDATE ledger_request_credits
+   SET settled = 0,
+       settlement_id = NULL,
+       updated_at_utc = ?
+ WHERE settlement_id = ?`, now, payoutID); err != nil {
+					return false, err
+				}
+				if _, err := tx.ExecContext(ctx, `DELETE FROM ledger_payout_ready WHERE id = ? AND status = 'ready'`, payoutID); err != nil {
+					return false, err
+				}
+			}
+			if err := recordClaimAudit("failed", fmt.Sprintf("payout %d source credits were recomputed after SPEC-022 revalidation", payoutID)); err != nil {
+				return false, err
+			}
+			if err := tx.Commit(); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
 	}
 	res, err := tx.ExecContext(ctx, `
 UPDATE ledger_payout_ready
@@ -52,25 +151,7 @@ UPDATE ledger_payout_ready
 		status = "failed"
 		errText = fmt.Sprintf("payout %d is not ready or amount changed", payoutID)
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO ledger_reconciliation_runs (
-    run_type, from_utc, to_utc, request_log_rows_scanned,
-    missing_credit_rows_created, orphan_credit_rows_quarantined,
-    buyer_equivalent_credits, provider_gross_credits,
-    reconciliation_delta_credits, started_at_utc, finished_at_utc, status,
-    error, created_at_utc
-) VALUES ('spec_007_claim', ?, ?, 0, 0, 0, ?, ?, 0, ?, ?, ?, ?, ?)`,
-		windowStart,
-		windowEnd,
-		grossCredits,
-		grossCredits,
-		now,
-		now,
-		status,
-		errText,
-		now,
-	); err != nil {
+	if err := recordClaimAudit(status, errText); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {

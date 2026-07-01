@@ -83,10 +83,12 @@ type billingRecorder struct {
 	// dispatch boundary, not at request_log write time, so streaming
 	// failover-before-first-chunk and HTTP/WS retries share one
 	// monotonic attempt identity surface for later receipt settlement.
-	routeSnapshotAttemptN int
-	outputCursorByte      int64
-	settlementAttemptN    int
-	hasSettlementAttemptN bool
+	routeSnapshotAttemptN   int
+	outputCursorByte        int64
+	settlementAttemptN      int
+	hasSettlementAttemptN   bool
+	settlementPolicyMode    string
+	settlementPolicyVersion string
 }
 
 // newBillingRecorder constructs the per-request recorder. Called once
@@ -202,24 +204,29 @@ func (b *billingRecorder) recordRow(
 		if faultFlag == "" {
 			faultFlag = billing.FaultNone
 		}
+		accountScope := accountScopeForSettlement(b.accountID)
+		settlementMode, settlementVersion := b.settlementPolicyForLedger()
 		billingInput := billing.HotPathInput{
-			RequestID:           row.RequestID,
-			AttemptN:            attemptN,
-			ProviderAssignedID:  providerAssignedID,
-			ProviderID:          stableProviderID,
-			Model:               row.Model,
-			Status:              status,
-			Stream:              row.Stream,
-			TSUtc:               row.TSUtc,
-			PromptTokens:        promptTok,
-			CompletionTokens:    completionTok,
-			EstimatedCompTokens: estimatedCompTokens,
-			ErrorCode:           errCode,
-			FaultFlag:           faultFlag,
-			ConfigSnapshotID:    billingSnapshotID,
-			RateEntry:           billing.RateFor(billingCfg.RateCard, row.Model),
-			MultiplierPPM:       billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
-			ProviderShareBps:    billing.ParseShareBps(billingCfg.ProviderShare),
+			RequestID:                  row.RequestID,
+			AttemptN:                   attemptN,
+			ProviderAssignedID:         providerAssignedID,
+			ProviderID:                 stableProviderID,
+			Model:                      row.Model,
+			Status:                     status,
+			Stream:                     row.Stream,
+			TSUtc:                      row.TSUtc,
+			PromptTokens:               promptTok,
+			CompletionTokens:           completionTok,
+			EstimatedCompTokens:        estimatedCompTokens,
+			ErrorCode:                  errCode,
+			FaultFlag:                  faultFlag,
+			ConfigSnapshotID:           billingSnapshotID,
+			RateEntry:                  billing.RateFor(billingCfg.RateCard, row.Model),
+			MultiplierPPM:              billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
+			ProviderShareBps:           billing.ParseShareBps(billingCfg.ProviderShare),
+			SettlementAccountScopeHash: billing.SettlementAccountScopeHash(accountScope),
+			SettlementPolicyMode:       settlementMode,
+			SettlementPolicyVersion:    settlementVersion,
 		}
 		err := billingStore.WriteHotPath(ctx, s.reqLogStore, row, billingInput)
 		if err != nil {
@@ -241,26 +248,46 @@ func (b *billingRecorder) recordRow(
 		return err
 	}
 	if billingStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
+		accountScope := accountScopeForSettlement(b.accountID)
+		settlementMode, settlementVersion := b.settlementPolicyForLedger()
 		billingInput := billing.HotPathInput{
-			RequestID:           row.RequestID,
-			AttemptN:            attemptN,
-			ProviderAssignedID:  providerAssignedID,
-			ProviderID:          providerID,
-			Model:               row.Model,
-			Status:              status,
-			Stream:              row.Stream,
-			TSUtc:               row.TSUtc,
-			PromptTokens:        promptTok,
-			CompletionTokens:    completionTok,
-			EstimatedCompTokens: estimatedCompTokens,
-			ErrorCode:           errCode,
-			FaultFlag:           faultFlag,
+			RequestID:                  row.RequestID,
+			AttemptN:                   attemptN,
+			ProviderAssignedID:         providerAssignedID,
+			ProviderID:                 providerID,
+			Model:                      row.Model,
+			Status:                     status,
+			Stream:                     row.Stream,
+			TSUtc:                      row.TSUtc,
+			PromptTokens:               promptTok,
+			CompletionTokens:           completionTok,
+			EstimatedCompTokens:        estimatedCompTokens,
+			ErrorCode:                  errCode,
+			FaultFlag:                  faultFlag,
+			SettlementAccountScopeHash: billing.SettlementAccountScopeHash(accountScope),
+			SettlementPolicyMode:       settlementMode,
+			SettlementPolicyVersion:    settlementVersion,
 		}
 		if err := b.recordSettlementAttemptOutput(ctx, billingStore, billingInput, settlementOutput); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (b *billingRecorder) settlementPolicyForLedger() (string, string) {
+	if !b.hasSettlementAttemptN {
+		return "legacy", ""
+	}
+	mode := b.settlementPolicyMode
+	if mode == "" {
+		mode = billing.RouteSnapshotModeEnforce
+	}
+	version := b.settlementPolicyVersion
+	if version == "" {
+		version = billing.RouteSnapshotPolicyVersion
+	}
+	return mode, version
 }
 
 func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {

@@ -44,6 +44,7 @@ func TestStructuredOutputProviderDetailErrorsPassThroughWithoutRetry(t *testing.
 			if err != nil {
 				t.Fatalf("billing.NewStore: %v", err)
 			}
+			setSettlementModeForTest(billingStore, billing.RouteSnapshotModeObserve)
 			rewards := config.RewardsConfig{
 				GlobalMultiplier: 1.0,
 				ProviderShare:    0.90,
@@ -114,6 +115,7 @@ func TestStructuredOutputProviderDetailErrorsPassThroughWithoutRetryWS(t *testin
 			if err != nil {
 				t.Fatalf("billing.NewStore: %v", err)
 			}
+			setSettlementModeForTest(billingStore, billing.RouteSnapshotModeObserve)
 			rewards := config.RewardsConfig{
 				GlobalMultiplier: 1.0,
 				ProviderShare:    0.90,

@@ -3,8 +3,6 @@ package buyer
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -29,30 +27,37 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	if store == nil {
 		return nil, nil
 	}
-	if len(provider.ReceiptPubkey) == 0 {
+	settlementCfg := store.SettlementConfig(config.Default().Settlement)
+	routeMode := billing.VerifiedModelSettlementMode(settlementCfg)
+	skipOrEnforceError := func(reason string) (*providerws.SettlementReceiptMetadata, error) {
+		if routeMode == billing.RouteSnapshotModeEnforce {
+			return nil, fmt.Errorf("verified model settlement enforce requires route snapshot: %s", reason)
+		}
 		return nil, nil
+	}
+	if len(provider.ReceiptPubkey) == 0 {
+		return skipOrEnforceError("missing provider receipt key")
 	}
 	keyID, err := billing.ReceiptKeyID(provider.ReceiptPubkey)
 	if err != nil {
-		return nil, nil
+		return skipOrEnforceError("invalid provider receipt key")
 	}
 	reportedHash := strings.TrimSpace(provider.ModelHash)
 	if !isLowerHex64(reportedHash) {
-		return nil, nil
+		return skipOrEnforceError("invalid provider model hash")
 	}
 	material, ok := tier2.SnapshotMaterial(provider.ModelID, reportedHash)
 	if !ok {
-		return nil, nil
+		return skipOrEnforceError("missing catalog material")
 	}
 	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != reportedHash {
-		return nil, nil
+		return skipOrEnforceError("model hash not verified")
 	}
 	promptHash, err := coordinatorPromptHash(providerBody)
 	if err != nil {
 		return nil, err
 	}
 	sessionID := stringPtrOrNil(provider.AssignedID)
-	settlementCfg := store.SettlementConfig(config.Default().Settlement)
 	pendingDeadline := settlementCfg.RecoveryGraceSeconds
 	if pendingDeadline <= 0 {
 		pendingDeadline = config.Default().Settlement.RecoveryGraceSeconds
@@ -77,7 +82,7 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		CatalogExpiresAtUnixMS:            material.CatalogExpiresAt.UnixMilli(),
 		Spec008HashStatus:                 string(material.HashStatus),
 		RouteSnapshotPolicyVersion:        billing.RouteSnapshotPolicyVersion,
-		RouteSnapshotMode:                 billing.RouteSnapshotModeObserve,
+		RouteSnapshotMode:                 routeMode,
 		RouteDecisionTSUnixMS:             b.state.routingDone.UnixMilli(),
 		RequestStartTSUnixMS:              b.startedAt.UnixMilli(),
 		PendingDeadlineSeconds:            int64(pendingDeadline),
@@ -92,6 +97,8 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	}
 	b.settlementAttemptN = attemptN
 	b.hasSettlementAttemptN = true
+	b.settlementPolicyMode = snapshot.RouteSnapshotMode
+	b.settlementPolicyVersion = snapshot.RouteSnapshotPolicyVersion
 	return &providerws.SettlementReceiptMetadata{
 		AccountScope:               snapshot.AccountScope,
 		RequestID:                  snapshot.RequestID,
@@ -124,12 +131,7 @@ func isLowerHex64(value string) bool {
 }
 
 func accountScopeForSettlement(accountID string) string {
-	accountID = strings.TrimSpace(accountID)
-	if accountID == "" {
-		return "legacy_direct"
-	}
-	sum := sha256.Sum256([]byte("spec015-account-scope-v1:" + accountID))
-	return "acct_sha256:" + hex.EncodeToString(sum[:])
+	return billing.AccountScopeForSettlement(accountID)
 }
 
 func stringPtrOrNil(value string) *string {

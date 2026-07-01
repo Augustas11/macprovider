@@ -96,7 +96,7 @@ UPDATE ledger_request_credits
 	}
 	orphanRows, _ := orphanRes.RowsAffected()
 	rows, err := tx.QueryContext(ctx, `
-SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
+SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_assigned_id,
        rl.prompt_tokens, rl.completion_tokens, rl.estimated_completion_tokens,
        rl.status, rl.stream, rl.error_code,
        rl.retried,
@@ -127,10 +127,10 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
 	for rows.Next() {
 		var rlID int64
 		var tsText, requestID, model, assignedID string
-		var errorCode sql.NullString
+		var accountID, errorCode sql.NullString
 		var prompt, completion, estimated sql.NullInt64
 		var status, stream, retried, attemptN int
-		if err := rows.Scan(&rlID, &tsText, &requestID, &model, &assignedID, &prompt, &completion, &estimated, &status, &stream, &errorCode, &retried, &attemptN); err != nil {
+		if err := rows.Scan(&rlID, &tsText, &requestID, &accountID, &model, &assignedID, &prompt, &completion, &estimated, &status, &stream, &errorCode, &retried, &attemptN); err != nil {
 			return err
 		}
 		scanned++
@@ -223,24 +223,31 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			v := estimated.Int64
 			ep = &v
 		}
+		settlementHash, settlementMode, settlementVersion, err := recoveredSettlementPolicyTx(ctx, tx, requestID, attemptN, providerID, accountID.String)
+		if err != nil {
+			return err
+		}
 		input := HotPathInput{
-			RequestID:           requestID,
-			AttemptN:            attemptN,
-			ProviderAssignedID:  assignedID,
-			ProviderID:          providerID,
-			Model:               model,
-			Status:              status,
-			Stream:              stream == 1,
-			TSUtc:               ts,
-			PromptTokens:        pp,
-			CompletionTokens:    cp,
-			EstimatedCompTokens: ep,
-			ErrorCode:           errorCode.String,
-			FaultFlag:           FaultNone,
-			ConfigSnapshotID:    snapshotID,
-			RateEntry:           RateFor(rewards.RateCard, model),
-			MultiplierPPM:       multiplier,
-			ProviderShareBps:    share,
+			RequestID:                  requestID,
+			AttemptN:                   attemptN,
+			ProviderAssignedID:         assignedID,
+			ProviderID:                 providerID,
+			Model:                      model,
+			Status:                     status,
+			Stream:                     stream == 1,
+			TSUtc:                      ts,
+			PromptTokens:               pp,
+			CompletionTokens:           cp,
+			EstimatedCompTokens:        ep,
+			ErrorCode:                  errorCode.String,
+			FaultFlag:                  FaultNone,
+			ConfigSnapshotID:           snapshotID,
+			RateEntry:                  RateFor(rewards.RateCard, model),
+			MultiplierPPM:              multiplier,
+			ProviderShareBps:           share,
+			SettlementAccountScopeHash: settlementHash,
+			SettlementPolicyMode:       settlementMode,
+			SettlementPolicyVersion:    settlementVersion,
 		}
 		result := ComputeCredits(pp, cp, ep, usageFor(errorCode.String, ep), FaultNone, input.RateEntry, multiplier, share)
 		// SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168): the v0.3.1
@@ -316,6 +323,24 @@ func (s *Store) StartStartupScan(ctx context.Context, cfg SettlementConfig, now 
 	to := now.UTC().Add(-time.Duration(cfg.RecoveryGraceSeconds) * time.Second)
 	from := to.Add(-time.Duration(cfg.StartupReconcileWindowHours) * time.Hour)
 	return s.RecoverLedger(ctx, RecoverInput{ScanFrom: from, ScanTo: to, Source: "startup_scan"})
+}
+
+func recoveredSettlementPolicyTx(ctx context.Context, tx *sql.Tx, requestID string, attemptN int, providerID, accountID string) (string, string, string, error) {
+	var accountScope, mode, version string
+	err := tx.QueryRowContext(ctx, `
+SELECT account_scope, route_snapshot_mode, route_snapshot_policy_version
+  FROM settlement_route_snapshots
+ WHERE account_scope = ?
+   AND request_id = ? AND attempt_n = ? AND provider_id = ?
+ ORDER BY id DESC
+ LIMIT 1`, AccountScopeForSettlement(accountID), requestID, attemptN, providerID).Scan(&accountScope, &mode, &version)
+	if err == nil {
+		return SettlementAccountScopeHash(accountScope), settlementPolicyModeOrLegacy(mode), version, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", "", "", err
+	}
+	return SettlementAccountScopeHashForAccountID(accountID), "legacy", "", nil
 }
 
 func (s *Store) StartNightlyReconcile(ctx context.Context, cfg SettlementConfig) {

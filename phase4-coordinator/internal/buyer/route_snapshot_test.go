@@ -58,6 +58,9 @@ func TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts(t *testing.T) {
 	defer first.Close()
 	const futureProviderTerminalTS = int64(4102444800000)
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observeSettlement := config.Default().Settlement
+		observeSettlement.VerifiedModelSettlementMode = billing.RouteSnapshotModeObserve
+		billingStore.SetSettlementConfig(observeSettlement)
 		w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", "4102444800000")
 		writeProviderOK(w)
 	}))
@@ -104,6 +107,9 @@ func TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts(t *testing.T) {
 		if row.Status != string(pool.HashStatusVerified) {
 			t.Fatalf("hash status=%q want %q", row.Status, pool.HashStatusVerified)
 		}
+		if row.Mode != billing.RouteSnapshotModeEnforce {
+			t.Fatalf("route_snapshot_mode=%q want enforce", row.Mode)
+		}
 		if len(row.Digest) != 64 || len(row.PromptHash) != 64 {
 			t.Fatalf("digest/prompt hash lengths invalid: %#v", row)
 		}
@@ -149,6 +155,29 @@ func TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts(t *testing.T) {
 		if verdict.ReceiptPresent != 0 || verdict.ReceiptResult != billing.SettlementReceiptResultInconclusive || verdict.SettlementOutcome != billing.SettlementOutcomePending {
 			t.Fatalf("verdict=%#v, want missing receipt pending/inconclusive", verdict)
 		}
+	}
+	ledgerPolicies := queryLedgerSettlementPolicies(t, dbPath)
+	if len(ledgerPolicies) != 2 {
+		t.Fatalf("ledger policy rows=%d want 2: %#v", len(ledgerPolicies), ledgerPolicies)
+	}
+	for _, policy := range ledgerPolicies {
+		if policy != billing.RouteSnapshotModeEnforce {
+			t.Fatalf("ledger settlement policy=%q want enforce", policy)
+		}
+	}
+	if err := billingStore.RunSettlement(context.Background(), config.SettlementConfig{
+		CadenceDays:                 7,
+		MinPayoutCredits:            1,
+		StartupReconcileWindowHours: 24,
+		NightlyReconcileWindowDays:  7,
+		RecoveryGraceSeconds:        30,
+		VerifiedModelSettlementMode: billing.RouteSnapshotModeEnforce,
+		JobEnabled:                  true,
+	}, time.Unix(1716768000, 0).UTC().Add(-time.Hour), time.Unix(4102444800, 0).UTC().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := payoutReadyCount(t, dbPath); got != 0 {
+		t.Fatalf("payout-ready rows without verified receipt=%d want 0", got)
 	}
 }
 
@@ -372,6 +401,7 @@ func TestRouteSnapshotSkippedForNonSettlementCapableModelHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("billing.NewStore: %v", err)
 	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeObserve)
 	cfg := config.Default().Rewards
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
 	if err != nil {
@@ -433,6 +463,7 @@ func TestRouteSnapshotSkippedForUppercaseModelHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("billing.NewStore: %v", err)
 	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeObserve)
 	cfg := config.Default().Rewards
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
 	if err != nil {
@@ -472,6 +503,69 @@ func TestRouteSnapshotSkippedForUppercaseModelHash(t *testing.T) {
 	}
 	if verdicts := querySettlementReceiptVerdicts(t, dbPath); len(verdicts) != 0 {
 		t.Fatalf("receipt verdict rows=%d want 0: %#v", len(verdicts), verdicts)
+	}
+}
+
+func TestRouteSnapshotEnforceFailsClosedWithoutValidReceiptKey(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  []byte
+	}{
+		{name: "missing", key: nil},
+		{name: "malformed", key: []byte{0x01, 0x02, 0x03}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tier2.ResetForTest()
+			t.Cleanup(tier2.ResetForTest)
+			raw, pubkey := routeSnapshotCatalogFixture(t, "enforce-"+tc.name+"-receipt-key-catalog", time.Now().UTC().Add(time.Hour))
+			if err := tier2.Configure(config.Tier2Config{
+				ObserveEnabled:      true,
+				CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+				CatalogPublicKey:    pubkey,
+				RequireHashVerified: true,
+			}, zerolog.Nop()); err != nil {
+				t.Fatalf("tier2.Configure: %v", err)
+			}
+
+			reqLog, dbPath := openBuyerRequestLog(t)
+			t.Cleanup(func() { _ = reqLog.Close() })
+			billingStore, err := billing.NewStore(reqLog.DB())
+			if err != nil {
+				t.Fatalf("billing.NewStore: %v", err)
+			}
+			cfg := config.Default().Rewards
+			snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+			if err != nil {
+				t.Fatalf("InsertConfigSnapshot: %v", err)
+			}
+
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeProviderOK(w)
+			}))
+			defer upstream.Close()
+
+			registry := pool.NewRegistry(nil)
+			registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, tc.key)
+			server := buyer.NewServer(
+				registry,
+				zerolog.Nop(),
+				time.Unix(1716768000, 0),
+				buyer.WithRequestLog(reqLog),
+				buyer.WithBilling(billingStore, cfg),
+				buyer.WithBillingSnapshotID(snapshotID),
+			)
+
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+			if rr.Code != http.StatusInternalServerError {
+				t.Fatalf("status=%d body=%s, want enforce fail-closed", rr.Code, rr.Body.String())
+			}
+			if got := routeSnapshotCount(t, dbPath); got != 0 {
+				t.Fatalf("route snapshots=%d want 0", got)
+			}
+			if got := ledgerCreditCount(t, dbPath); got != 0 {
+				t.Fatalf("ledger credits=%d want 0", got)
+			}
+		})
 	}
 }
 
@@ -599,6 +693,7 @@ type routeSnapshotRow struct {
 	AttemptN   int
 	ProviderID string
 	Status     string
+	Mode       string
 	Digest     string
 	PromptHash string
 }
@@ -695,7 +790,7 @@ func queryRouteSnapshots(t *testing.T, dbPath string) []routeSnapshotRow {
 	}
 	defer db.Close()
 	rows, err := db.Query(`
-SELECT attempt_n, provider_id, spec008_hash_status, route_snapshot_digest, prompt_hash
+SELECT attempt_n, provider_id, spec008_hash_status, route_snapshot_mode, route_snapshot_digest, prompt_hash
 FROM settlement_route_snapshots
 ORDER BY attempt_n ASC`)
 	if err != nil {
@@ -705,7 +800,7 @@ ORDER BY attempt_n ASC`)
 	var got []routeSnapshotRow
 	for rows.Next() {
 		var row routeSnapshotRow
-		if err := rows.Scan(&row.AttemptN, &row.ProviderID, &row.Status, &row.Digest, &row.PromptHash); err != nil {
+		if err := rows.Scan(&row.AttemptN, &row.ProviderID, &row.Status, &row.Mode, &row.Digest, &row.PromptHash); err != nil {
 			t.Fatalf("scan snapshots: %v", err)
 		}
 		got = append(got, row)
@@ -714,6 +809,66 @@ ORDER BY attempt_n ASC`)
 		t.Fatalf("snapshots rows: %v", err)
 	}
 	return got
+}
+
+func queryLedgerSettlementPolicies(t *testing.T, dbPath string) []string {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT settlement_policy_mode FROM ledger_request_credits ORDER BY attempt_n ASC`)
+	if err != nil {
+		t.Fatalf("query ledger policies: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var policy string
+		if err := rows.Scan(&policy); err != nil {
+			t.Fatalf("scan ledger policy: %v", err)
+		}
+		got = append(got, policy)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("ledger policy rows: %v", err)
+	}
+	return got
+}
+
+func payoutReadyCount(t *testing.T, dbPath string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_payout_ready`).Scan(&count); err != nil {
+		t.Fatalf("count payout-ready: %v", err)
+	}
+	return count
+}
+
+func ledgerCreditCount(t *testing.T, dbPath string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_request_credits`).Scan(&count); err != nil {
+		t.Fatalf("count ledger credits: %v", err)
+	}
+	return count
+}
+
+func setSettlementModeForTest(store *billing.Store, mode string) {
+	cfg := config.Default().Settlement
+	cfg.VerifiedModelSettlementMode = mode
+	store.SetSettlementConfig(cfg)
 }
 
 func routeSnapshotCount(t *testing.T, dbPath string) int {

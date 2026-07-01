@@ -2,9 +2,7 @@ package billing
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -799,6 +797,5 @@ func settlementReceiptAuditPayload(state SettlementReceiptState, checks *Settlem
 }
 
 func redactedAccountScopeHash(accountScope string) string {
-	sum := sha256.Sum256([]byte("settlement_receipt_account_scope_v1:" + accountScope))
-	return hex.EncodeToString(sum[:])
+	return SettlementAccountScopeHash(accountScope)
 }

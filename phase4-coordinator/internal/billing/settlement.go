@@ -57,8 +57,8 @@ UPDATE ledger_request_credits
 	}
 	rows, err := tx.QueryContext(ctx, `
 SELECT provider_id, COUNT(*), SUM(gross_credits), SUM(provider_credits), SUM(gross_credits - provider_credits)
-  FROM ledger_request_credits
- WHERE ts_utc < ? AND settled = 0 AND settlement_id IS NULL AND quarantined = 0
+  FROM spec022_payable_request_credits
+ WHERE ts_utc < ? AND settled = 0 AND settlement_id IS NULL
  GROUP BY provider_id
 HAVING SUM(provider_credits) >= ?`,
 		windowEnd.UTC().Format(time.RFC3339Nano),
@@ -117,7 +117,8 @@ WHERE ledger_payout_ready.status = 'ready'`,
 		if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET settled = 1, settlement_id = ?, updated_at_utc = ?
- WHERE provider_id = ? AND ts_utc < ? AND settled = 0 AND settlement_id IS NULL AND quarantined = 0`,
+ WHERE provider_id = ? AND ts_utc < ? AND settled = 0 AND settlement_id IS NULL AND quarantined = 0
+   AND id IN (SELECT id FROM spec022_payable_request_credits)`,
 			settlementID,
 			now,
 			providerID,
