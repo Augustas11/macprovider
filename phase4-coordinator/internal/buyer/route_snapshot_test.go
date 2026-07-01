@@ -232,6 +232,15 @@ func TestSettlementOutputDoesNotUseV04ReceiptTerminalTimestamp(t *testing.T) {
 	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
 		t.Fatalf("v0.4 settlement receipt leaked to buyer: %q", got)
 	}
+	if got := rr.Header().Get("X-MacProvider-Settlement-Outcome"); got != billing.SettlementOutcomeQuarantined {
+		t.Fatalf("settlement outcome header = %q, want %q", got, billing.SettlementOutcomeQuarantined)
+	}
+	if got := rr.Header().Get("X-MacProvider-Settlement-Receipt-Result"); got != billing.SettlementReceiptResultInvalid {
+		t.Fatalf("settlement receipt result header = %q, want %q", got, billing.SettlementReceiptResultInvalid)
+	}
+	if got := rr.Header().Get("X-MacProvider-Settlement-Closed"); got != "true" {
+		t.Fatalf("settlement closed header = %q, want true", got)
+	}
 	outputRows := querySettlementAttemptOutputs(t, dbPath)
 	if len(outputRows) != 1 {
 		t.Fatalf("output rows=%d want 1: %#v", len(outputRows), outputRows)

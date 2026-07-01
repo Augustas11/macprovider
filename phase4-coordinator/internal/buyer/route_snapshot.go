@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
@@ -148,14 +149,21 @@ func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err er
 	writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "Could not durably record route snapshot")
 }
 
-func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header string) error {
+const (
+	settlementOutcomeHeader       = "X-MacProvider-Settlement-Outcome"
+	settlementReceiptResultHeader = "X-MacProvider-Settlement-Receipt-Result"
+	settlementReasonHeader        = "X-MacProvider-Settlement-Reason"
+	settlementClosedHeader        = "X-MacProvider-Settlement-Closed"
+)
+
+func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header string) (billing.SettlementReceiptState, bool, error) {
 	header = normalizeReceiptHeaderValue(header)
 	if len(provider.ReceiptPubkey) == 0 || !b.hasSettlementAttemptN {
-		return nil
+		return billing.SettlementReceiptState{}, false, nil
 	}
 	store, _, _ := b.server.billingState()
 	if store == nil {
-		return nil
+		return billing.SettlementReceiptState{}, false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
@@ -166,15 +174,15 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 		ProviderID:   provider.ProviderID,
 	}
 	if header == "" {
-		_, err := store.RecordMissingSettlementReceipt(ctx, billing.SettlementReceiptMissingInput{
+		state, err := store.RecordMissingSettlementReceipt(ctx, billing.SettlementReceiptMissingInput{
 			SettlementReceiptIdentity: identity,
 		})
 		if err != nil {
 			b.server.log.Warn().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("missing settlement receipt recording failed")
 		}
-		return err
+		return state, err == nil, err
 	}
-	_, err := store.IngestSettlementReceipt(ctx, billing.SettlementReceiptIngestionInput{
+	state, err := store.IngestSettlementReceipt(ctx, billing.SettlementReceiptIngestionInput{
 		SettlementReceiptIdentity: identity,
 		Header:                    header,
 		ProviderReceiptPubkey:     provider.ReceiptPubkey,
@@ -182,7 +190,14 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 	if err != nil {
 		b.server.log.Warn().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("settlement receipt ingestion failed")
 	}
-	return err
+	return state, err == nil, err
+}
+
+func setSettlementOutcomeHeaders(dst http.Header, state billing.SettlementReceiptState) {
+	dst.Set(settlementOutcomeHeader, state.SettlementOutcome)
+	dst.Set(settlementReceiptResultHeader, state.ReceiptResult)
+	dst.Set(settlementReasonHeader, state.Reason)
+	dst.Set(settlementClosedHeader, strconv.FormatBool(state.Closed))
 }
 
 func coordinatorPromptHash(raw json.RawMessage) (string, error) {

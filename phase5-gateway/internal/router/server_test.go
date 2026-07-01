@@ -1668,6 +1668,99 @@ func TestProviderAttributionHeadersEmitted(t *testing.T) {
 	})
 }
 
+func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	successBody := `{"id":"chatcmpl","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
+	cases := []struct {
+		name           string
+		outcome        string
+		closed         string
+		wantUsageRows  int64
+		wantSettled    int64
+		wantRefunded   int64
+		wantActive     int64
+		wantActiveHold int64
+	}{
+		{
+			name:          "legacy-no-header-debits",
+			wantUsageRows: 1,
+			wantSettled:   1,
+		},
+		{
+			name:          "verified-closed-debits",
+			outcome:       "verified",
+			closed:        "true",
+			wantUsageRows: 1,
+			wantSettled:   1,
+		},
+		{
+			name:          "quarantined-closed-refunds",
+			outcome:       "quarantined",
+			closed:        "true",
+			wantRefunded:  1,
+			wantUsageRows: 0,
+		},
+		{
+			name:          "zero-settled-closed-refunds",
+			outcome:       "zero_settled",
+			closed:        "true",
+			wantRefunded:  1,
+			wantUsageRows: 0,
+		},
+		{
+			name:           "pending-holds-reservation",
+			outcome:        "pending",
+			closed:         "false",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:           "verified-open-holds-reservation",
+			outcome:        "verified",
+			closed:         "false",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				h := http.Header{}
+				h.Set("Content-Type", "application/json")
+				if tc.outcome != "" {
+					h.Set(settlementOutcomeHeader, tc.outcome)
+					h.Set(settlementClosedHeader, tc.closed)
+					h.Set(settlementReceiptResultHeader, "valid")
+					h.Set(settlementReasonHeader, "test_"+tc.outcome)
+				}
+				return responseWithBody(http.StatusOK, h, successBody), nil
+			})}
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			accountID := "acct_spec022_finality_" + strings.ReplaceAll(tc.name, "-", "_")
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+			resp := postChat(t, h, fullKey, body, nil)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			for _, header := range []string{settlementOutcomeHeader, settlementClosedHeader, settlementReceiptResultHeader, settlementReasonHeader} {
+				if got := resp.Header().Get(header); got != "" {
+					t.Fatalf("buyer response leaked internal settlement header %s=%q", header, got)
+				}
+			}
+			got := gatewaySettlementSnapshot(t, dbPath, accountID)
+			if got.usageRows != tc.wantUsageRows || got.settledRows != tc.wantSettled || got.refundedRows != tc.wantRefunded || got.activeRows != tc.wantActive || got.activeReserved != tc.wantActiveHold {
+				t.Fatalf("settlement snapshot = %+v, want usage=%d settled=%d refunded=%d active=%d active_reserved=%d",
+					got, tc.wantUsageRows, tc.wantSettled, tc.wantRefunded, tc.wantActive, tc.wantActiveHold)
+			}
+		})
+	}
+}
+
 func TestProviderPinningHeadersStripped(t *testing.T) {
 	var captured http.Header
 	failing := false
@@ -4102,6 +4195,37 @@ func usageEventOutcome(t *testing.T, dbPath, accountID string) (string, string) 
 		t.Fatalf("query usage outcome: %v", err)
 	}
 	return outcome, source
+}
+
+type gatewaySettlementState struct {
+	usageRows      int64
+	settledRows    int64
+	refundedRows   int64
+	activeRows     int64
+	activeReserved int64
+}
+
+func gatewaySettlementSnapshot(t *testing.T, dbPath, accountID string) gatewaySettlementState {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var state gatewaySettlementState
+	if err := db.QueryRow(`SELECT COUNT(*) FROM usage_events WHERE account_id = ?`, accountID).Scan(&state.usageRows); err != nil {
+		t.Fatalf("query usage_events count: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'settled'`, accountID).Scan(&state.settledRows); err != nil {
+		t.Fatalf("query settled reservations count: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'refunded'`, accountID).Scan(&state.refundedRows); err != nil {
+		t.Fatalf("query refunded reservations count: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(reserved_tokens), 0) FROM quota_reservations WHERE account_id = ? AND status = 'active'`, accountID).Scan(&state.activeRows, &state.activeReserved); err != nil {
+		t.Fatalf("query active reservations: %v", err)
+	}
+	return state
 }
 
 func assertStatus(t *testing.T, h http.Handler, method, path, bearer, demoToken, ip string, want int) *httptest.ResponseRecorder {

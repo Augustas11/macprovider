@@ -1480,7 +1480,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err := rec.recordRow(provider.AssignedID, provider.ProviderID, status, attempt.PromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, retried, attempt.EstimatedCompTokens, attempt.FaultFlag, attempt.SettlementOutput); err != nil {
 			return err
 		}
-		return rec.ingestSettlementReceipt(provider, attempt.SettlementReceipt)
+		_, _, err := rec.ingestSettlementReceipt(provider, attempt.SettlementReceipt)
+		return err
 	}
 	shouldLogAttempt := func(attempt requestLogAttempt) bool {
 		return attempt.Status != 0 || attempt.PromptTokens != nil || attempt.CompletionTokens != nil || attempt.EstimatedCompTokens != nil || attempt.Error != "" || attempt.ErrorCode != ""
@@ -1995,10 +1996,14 @@ func (s *Server) forwardHTTPSequence(
 					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 					return dispatchedAttempt{}, false
 				}
-				if err := rec.ingestSettlementReceipt(state.provider, receiptValue); err != nil {
+				receiptState, hasReceiptState, err := rec.ingestSettlementReceipt(state.provider, receiptValue)
+				if err != nil {
 					cancelAttempt()
 					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log settlement receipt")
 					return dispatchedAttempt{}, false
+				}
+				if hasReceiptState {
+					setSettlementOutcomeHeaders(w.Header(), receiptState)
 				}
 				copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
 				w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
@@ -2039,10 +2044,14 @@ func (s *Server) forwardHTTPSequence(
 						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 						return dispatchedAttempt{}, false
 					}
-					if err := rec.ingestSettlementReceipt(state.provider, receiptValue); err != nil {
+					receiptState, hasReceiptState, err := rec.ingestSettlementReceipt(state.provider, receiptValue)
+					if err != nil {
 						cancelAttempt()
 						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log settlement receipt")
 						return dispatchedAttempt{}, false
+					}
+					if hasReceiptState {
+						setSettlementOutcomeHeaders(w.Header(), receiptState)
 					}
 					copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
 					w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
@@ -2068,10 +2077,14 @@ func (s *Server) forwardHTTPSequence(
 							writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 							return dispatchedAttempt{}, false
 						}
-						if err := rec.ingestSettlementReceipt(state.provider, receiptValue); err != nil {
+						receiptState, hasReceiptState, err := rec.ingestSettlementReceipt(state.provider, receiptValue)
+						if err != nil {
 							cancelAttempt()
 							writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log settlement receipt")
 							return dispatchedAttempt{}, false
+						}
+						if hasReceiptState {
+							setSettlementOutcomeHeaders(w.Header(), receiptState)
 						}
 						copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
 						w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
@@ -2126,7 +2139,8 @@ func (s *Server) forwardHTTPSequence(
 					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 					return
 				}
-				if err := rec.ingestSettlementReceipt(state.provider, ""); err != nil {
+				_, _, err := rec.ingestSettlementReceipt(state.provider, "")
+				if err != nil {
 					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log settlement receipt")
 					return
 				}
@@ -2137,7 +2151,8 @@ func (s *Server) forwardHTTPSequence(
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 				return
 			}
-			if err := rec.ingestSettlementReceipt(state.provider, ""); err != nil {
+			_, _, err := rec.ingestSettlementReceipt(state.provider, "")
+			if err != nil {
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log settlement receipt")
 				return
 			}
@@ -2156,7 +2171,8 @@ func (s *Server) forwardHTTPSequence(
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("retry attempt request log failed")
 				return
 			}
-			if err := rec.ingestSettlementReceipt(state.provider, ""); err != nil {
+			_, _, err := rec.ingestSettlementReceipt(state.provider, "")
+			if err != nil {
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("retry attempt missing settlement receipt recording failed")
 			}
 		},
