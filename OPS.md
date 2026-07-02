@@ -94,13 +94,24 @@ M1-6). Mirrors the coordinator pattern:
   `check-deploy-config.sh` (now enforced — the pre-M1-6 path treated a
   missing input as a warning, which was a real gap). `SKIP_C2_CHECK=1`
   exists as an explicit override but should not be the default path.
-- **Steps 1–2:** verify the freshly built `dist/gateway-linux-amd64` and the
-  systemd unit file.
+- **Steps 1–2:** SSH/DNS check, then verify `/etc/macprovider/gateway.env`
+  exists on Pearl (secrets ship out-of-band, script does not touch it).
+- **Step 2b (#290):** ensure macprovider user exists + `/opt/macprovider`
+  is `root:macprovider 0750` before any file install (idempotent).
 - **Step 3:** snapshot the live `/opt/macprovider/gateway` binary as
-  `gateway.prev` so rollback is `cp gateway.prev gateway && systemctl restart`.
-- **Steps 4–7:** copy, restart, poll `/healthz`, assert version.
-- **Step 8:** remote backup of `gateway.db` to the operator's stored S3-like
-  bucket (M1-6 added this; without it the WAL file was unbacked).
+  `gateway.prev` via `install -o root -g macprovider -m 0750`. After
+  any schema-bumping deploy, single-file binary rollback is INVALID; use
+  the schema-aware rollback command below (both binary AND db snapshot).
+- **Step 4:** upload binary + systemd unit + nginx site to a per-deploy
+  `mktemp -d` staging dir (#290 mirrors #244 R5), then root `install`s
+  each artifact to its final location. EXIT trap cleans up staging.
+- **Step 5:** connected-buyer guard on `/healthz` in-flight count.
+  `FORCE_RESTART=1` writes a tombstone via `mktemp` under `umask 077`.
+- **Step 5b (issue #196):** pre-restart WAL-consistent snapshot of
+  `gateway.db` via `sqlite3 .backup` running as macprovider under
+  `umask 077` (#290 R1 CRITICAL — never chmod/chown as root on a
+  daemon-writable path). Retains the 5 most recent snapshots.
+- **Steps 6–8:** enable + start + healthz version check + journal tail.
 
 **Rollback procedure:**
 

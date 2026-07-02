@@ -93,6 +93,19 @@ case "$EMAIL" in
     ;;
 esac
 
+# #290 R1 (CODE+SEC+ARCH convergent MED) — the baked-in vhost template
+# `nginx-api.streamvc.live.conf` hardcodes `server_name api.streamvc.live`
+# and matching Let's Encrypt paths. Refuse if $DOMAIN was overridden to
+# something else; otherwise we'd install a vhost with a non-matching
+# server_name / cert path against a live gateway binary. Mirrors the
+# same guard on the coordinator side (chat_proxy has domain=coordinator.streamvc.live).
+if [ "$DOMAIN" != "api.streamvc.live" ]; then
+  echo "aborting deploy: DOMAIN override ($DOMAIN) does not match the baked-in vhost template" >&2
+  echo "  dist/nginx-api.streamvc.live.conf has server_name=api.streamvc.live hardcoded." >&2
+  echo "  Edit the conf file in lockstep, or remove the DOMAIN env override." >&2
+  exit 1
+fi
+
 DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
 BINARY="$DIST_DIR/gateway-linux-amd64"
 SERVICE="$DIST_DIR/macprovider-gateway.service"
@@ -174,6 +187,21 @@ fi
 log "step 2/8: confirm /etc/macprovider/gateway.env exists on Pearl"
 $SSH "test -f /etc/macprovider/gateway.env || { echo 'missing /etc/macprovider/gateway.env on Pearl' >&2; exit 1; }"
 
+log "step 2b/8: ensure macprovider user + /opt/macprovider parent-dir hardening"
+# #290 R1 (SEC+ARCH convergent HIGH) — the .prev / binary ownership
+# hardening (root:macprovider 0750 files inside) is state-dependent on
+# /opt/macprovider itself being root-owned. If this script runs on a
+# rebuilt / partially restored host where /opt/macprovider is still
+# daemon-writable (e.g. left over from pre-hardening state), a
+# compromised macprovider UID can still unlink/replace root-owned
+# files inside the parent. Enforce here — idempotent; matches the
+# coordinator's step 3 pattern.
+$SSH 'set -e
+  id macprovider >/dev/null 2>&1 || useradd --system --home /opt/macprovider --shell /usr/sbin/nologin macprovider
+  install -d -o root -g macprovider -m 0750 /opt/macprovider
+  install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider
+'
+
 log "step 3/8: snapshot live gateway binary as .prev (rollback)"
 # Mirror the coordinator's M0-5 .prev pattern. install(1) is intentional —
 # preserves ownership/perms even if a future recovery rebuilds the snapshot.
@@ -181,9 +209,9 @@ log "step 3/8: snapshot live gateway binary as .prev (rollback)"
 # to root:macprovider 0750. Previously macprovider:macprovider 0755,
 # which meant a compromised macprovider UID could rewrite the rollback
 # binary — a persistent attack path against the /opt/macprovider surface.
-# Parent dir /opt/macprovider is already root:macprovider 0750 (set by
-# the coordinator's step 3); files inside can be group-read by the
-# macprovider daemon but not written by anything running as macprovider.
+# Parent dir /opt/macprovider is guaranteed root:macprovider 0750 by
+# step 2b above; files inside can be group-read by the macprovider
+# daemon but not written by anything running as macprovider.
 $SSH 'if [ -x /opt/macprovider/gateway ]; then
         install -o root -g macprovider -m 0750 /opt/macprovider/gateway /opt/macprovider/gateway.prev
         echo "  snapshot saved at /opt/macprovider/gateway.prev (root:macprovider 0750)"
@@ -304,13 +332,24 @@ $SSH 'set -e
   DB=/var/lib/macprovider/gateway.db
   if [ -f "$DB" ]; then
     SNAP="${DB}.pre-deploy.${TS}"
+    # #290 R1 (SEC+ARCH convergent CRITICAL) — do NOT run root
+    # chmod/chown on files under /var/lib/macprovider. That directory
+    # is daemon-writable, so a compromised macprovider UID could
+    # race-replace ${SNAP} with a symlink after the .backup completes
+    # and before root ran chmod/chown — pointing at e.g.
+    # /etc/systemd/system/macprovider-gateway.service. root chmod
+    # would then hand the daemon UID ownership of the unit file
+    # (path-following chown), which becomes code execution on the
+    # next daemon-reload/restart.
+    #
+    # Safe pattern: run the ENTIRE snapshot as macprovider under
+    # umask 077 so the file lands at 0600 macprovider:macprovider
+    # from creation — no root ops on attacker-controlled paths.
     # .backup opens a read txn that pins a consistent WAL view; the
     # output file is a single .db with WAL already merged in (no
     # accompanying -wal/-shm sidecars), so rollback restore is a
     # single-file copy.
-    sudo -u macprovider sqlite3 "$DB" ".backup ${SNAP}"
-    chmod 0600 "$SNAP"
-    chown macprovider:macprovider "$SNAP"
+    sudo -u macprovider sh -c "umask 077 && sqlite3 \"$DB\" \".backup ${SNAP}\""
     INTEG=$(sudo -u macprovider sqlite3 "$SNAP" "PRAGMA integrity_check;" 2>&1 | head -1)
     if [ "$INTEG" != "ok" ]; then
       echo "  ERROR: snapshot integrity_check returned: $INTEG" >&2
