@@ -48,16 +48,21 @@ set -euo pipefail
 # invocation from an attacker-writable dir source a hostile helper.
 # macOS bash 3.2 has no `readlink -f`, so we walk symlinks by hand.
 _pearl_resolve_symlink() {
+  # R2 SEC MED: use `pwd -P` so PARENT-directory symlinks also
+  # resolve to the physical path. Plain `pwd` returns the logical
+  # path, which would leave e.g. `/attacker/dist-link/deploy.sh` →
+  # source `/attacker/dist-link/lib/pearl_tls.sh` — retargetable
+  # between resolution and source.
   local src="$1" dir
   while [ -h "$src" ]; do
-    dir="$(cd "$(dirname "$src")" && pwd)"
+    dir="$(cd "$(dirname "$src")" && pwd -P)"
     src="$(readlink "$src")"
     case "$src" in
       /*) ;;             # absolute — use as-is
       *) src="$dir/$src" ;;
     esac
   done
-  cd "$(dirname "$src")" && pwd
+  cd "$(dirname "$src")" && pwd -P
 }
 _PEARL_TLS_SCRIPT_DIR="$(_pearl_resolve_symlink "${BASH_SOURCE[0]}")"
 # shellcheck source=lib/pearl_tls.sh

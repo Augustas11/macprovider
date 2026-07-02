@@ -408,44 +408,73 @@ out=$(PATH="$_empty_dir" "$_bash_exe" -c "$probe_text" -- "have.example" 2>&1) &
 _assert_eq "T24 rc"       "1" "$rc"
 _assert_contains "T24 stderr" "ABORT openssl-missing-on-remote" "$out"
 
-# T25 SEC R1 MED: sourcing via symlink resolves to the REAL script's
-# lib dir, not the symlink's parent dir. Prove by placing a hostile
-# lib in the symlink's parent — sourcing must ignore it.
+# T25 SEC R1+R2 MED: sourcing via symlink resolves to the REAL
+# script's lib dir, not the symlink's parent dir. Prove by placing
+# a hostile lib in the symlink's parent — resolver must ignore it,
+# AND we source the resolved lib to prove the hostile sentinel
+# NEVER gets set.
+#
+# T25 covers:
+#   T25a: absolute symlink pointing at the real script
+#   T25b: symlink-to-symlink chain
+#   T25c: parent-DIRECTORY symlink (R2 SEC MED — pwd -P fix)
+#   T25d: end-to-end sourcing — hostile lib planted next to symlink
+#         is NOT sourced (sentinel var must stay unset)
 _symlink_dir="$_probe_fixture_dir/symlink_test"
 mkdir -p "$_symlink_dir/lib"
-# Point the deploy symlink at the real deploy script under the
-# canonical dist/ location.
 _real_deploy="$SCRIPT_DIR/../deploy-pearl-vps.sh"
+_real_dist_dir=$(cd "$SCRIPT_DIR/.." && pwd -P)
 if [ -f "$_real_deploy" ]; then
   ln -sf "$_real_deploy" "$_symlink_dir/deploy-fake.sh"
-  # Plant a hostile lib in the symlink's parent that would set a
-  # sentinel if sourced. If the resolver walks the symlink correctly,
-  # THIS lib must NOT be sourced.
+  # Hostile helper — MUST NOT be sourced by the resolver.
   cat > "$_symlink_dir/lib/pearl_tls.sh" <<'HOSTILE'
-export PEARL_TLS_HOSTILE_SOURCED=1
+PEARL_TLS_HOSTILE_SOURCED=1
 HOSTILE
-  # Extract just the sourcing block and run it in isolation.
+
+  # The resolver snippet — kept in one place so tests exercise the
+  # same code the deploy script sources.
   _resolve_snippet='
 _pearl_resolve_symlink() {
   local src="$1" dir
   while [ -h "$src" ]; do
-    dir="$(cd "$(dirname "$src")" && pwd)"
+    dir="$(cd "$(dirname "$src")" && pwd -P)"
     src="$(readlink "$src")"
     case "$src" in
       /*) ;;
       *) src="$dir/$src" ;;
     esac
   done
-  cd "$(dirname "$src")" && pwd
+  cd "$(dirname "$src")" && pwd -P
 }
-resolved="$(_pearl_resolve_symlink "'"$_symlink_dir/deploy-fake.sh"'")"
-echo "$resolved"
 '
-  resolved_dir=$(bash -c "$_resolve_snippet" 2>&1)
-  _real_dist_dir=$(cd "$SCRIPT_DIR/.." && pwd)
-  _assert_eq "T25 symlink resolves to real dist" "$_real_dist_dir" "$resolved_dir"
+
+  # T25a: absolute-target symlink
+  resolved_dir=$(bash -c "$_resolve_snippet"'echo "$(_pearl_resolve_symlink "'"$_symlink_dir/deploy-fake.sh"'")"' 2>&1)
+  _assert_eq "T25a absolute symlink → real dist" "$_real_dist_dir" "$resolved_dir"
+
+  # T25b: symlink-to-symlink chain
+  ln -sf "$_symlink_dir/deploy-fake.sh" "$_symlink_dir/deploy-chain.sh"
+  resolved_dir=$(bash -c "$_resolve_snippet"'echo "$(_pearl_resolve_symlink "'"$_symlink_dir/deploy-chain.sh"'")"' 2>&1)
+  _assert_eq "T25b chain symlink → real dist" "$_real_dist_dir" "$resolved_dir"
+
+  # T25c: parent-DIRECTORY symlink (R2 SEC MED). Point a directory
+  # symlink at the real dist/ dir, invoke via that alias, ensure
+  # the resolver still lands on the physical real path.
+  _parent_alias="$_probe_fixture_dir/dist-alias"
+  ln -sf "$_real_dist_dir" "$_parent_alias"
+  resolved_dir=$(bash -c "$_resolve_snippet"'echo "$(_pearl_resolve_symlink "'"$_parent_alias/deploy-pearl-vps.sh"'")"' 2>&1)
+  _assert_eq "T25c parent-dir symlink → real dist (pwd -P)" "$_real_dist_dir" "$resolved_dir"
+
+  # T25d: END-TO-END. Actually source the resolved lib in a
+  # subshell and prove the hostile sentinel never gets set.
+  end_to_end=$(bash -c "$_resolve_snippet"'
+    resolved="$(_pearl_resolve_symlink "'"$_symlink_dir/deploy-fake.sh"'")"
+    unset PEARL_TLS_HOSTILE_SOURCED
+    . "$resolved/lib/pearl_tls.sh"
+    echo "hostile=${PEARL_TLS_HOSTILE_SOURCED:-unset}"
+  ' 2>&1)
+  _assert_eq "T25d hostile lib NOT sourced" "hostile=unset" "$end_to_end"
 else
-  # Deploy script not present in this worktree state — assert-skip
   PASS=$((PASS+1))
   LOG="${LOG}  PASS  T25 (skipped: real deploy script not present)
 "
