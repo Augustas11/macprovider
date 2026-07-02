@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS ledger_request_credits (
     status INTEGER NOT NULL,
     stream INTEGER NOT NULL CHECK(stream IN (0,1)),
     prompt_tokens INTEGER NULL CHECK(prompt_tokens IS NULL OR prompt_tokens >= 0),
+    cached_prompt_tokens INTEGER NULL CHECK(cached_prompt_tokens IS NULL OR (cached_prompt_tokens >= 0 AND cached_prompt_tokens <= prompt_tokens)),
     completion_tokens INTEGER NULL CHECK(completion_tokens IS NULL OR completion_tokens >= 0),
     estimated_completion_tokens INTEGER NULL CHECK(estimated_completion_tokens IS NULL OR estimated_completion_tokens >= 0),
     usage_source TEXT NOT NULL CHECK(usage_source IN ('provider_reported','byte_estimated','null_error')),
@@ -181,6 +182,7 @@ CREATE TABLE IF NOT EXISTS ledger_provider_identity_snapshots (
     provider_id TEXT NOT NULL,
     resolved_from TEXT NOT NULL CHECK(resolved_from IN ('pool_entry','response_header','admin_recovery')),
     pool_session_started_at_utc TEXT NULL,
+    config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0),
     created_at_utc TEXT NOT NULL,
     UNIQUE(request_id, attempt_n, provider_assigned_id)
 );
@@ -318,6 +320,12 @@ CREATE INDEX IF NOT EXISTS idx_lqr_kind_created ON ledger_quarantine_resolutions
 `); err != nil {
 		return err
 	}
+	if err := s.ensureCachedPromptTokensColumn(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureLedgerProviderIdentityConfigSnapshotColumn(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureLedgerRequestCreditSettlementColumns(ctx); err != nil {
 		return err
 	}
@@ -372,6 +380,62 @@ func (s *Store) ensureLedgerRequestCreditSettlementColumns(ctx context.Context) 
 	return nil
 }
 
+func (s *Store) ensureCachedPromptTokensColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(ledger_request_credits)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "cached_prompt_tokens" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+ALTER TABLE ledger_request_credits
+ADD COLUMN cached_prompt_tokens INTEGER NULL CHECK(cached_prompt_tokens IS NULL OR (cached_prompt_tokens >= 0 AND cached_prompt_tokens <= prompt_tokens))`)
+	return err
+}
+
+func (s *Store) ensureLedgerProviderIdentityConfigSnapshotColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(ledger_provider_identity_snapshots)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "config_snapshot_id" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+ALTER TABLE ledger_provider_identity_snapshots
+ADD COLUMN config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0)`)
+	return err
+}
+
 func (s *Store) ensureLedgerRequestCreditSettlementPolicyGuards(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 CREATE TRIGGER IF NOT EXISTS trg_lrc_settlement_policy_insert_guard
@@ -415,6 +479,7 @@ DROP TRIGGER IF EXISTS trg_lrc_settled_link_immutable;
 CREATE TRIGGER trg_lrc_settled_money_immutable
 BEFORE UPDATE OF prompt_tokens, completion_tokens, estimated_completion_tokens,
                  usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
+                 cached_prompt_tokens,
                  global_multiplier_ppm, gross_credits, provider_share_bps,
                  provider_credits, fault_flag ON ledger_request_credits
 WHEN (OLD.settled = 1 OR NEW.settled = 1)
@@ -424,6 +489,7 @@ WHEN (OLD.settled = 1 OR NEW.settled = 1)
       OR COALESCE(OLD.estimated_completion_tokens, -1) != COALESCE(NEW.estimated_completion_tokens, -1)
       OR OLD.usage_source != NEW.usage_source
       OR OLD.prompt_rate_per_mtok != NEW.prompt_rate_per_mtok
+      OR COALESCE(OLD.cached_prompt_tokens, -1) != COALESCE(NEW.cached_prompt_tokens, -1)
       OR OLD.completion_rate_per_mtok != NEW.completion_rate_per_mtok
       OR OLD.global_multiplier_ppm != NEW.global_multiplier_ppm
       OR OLD.gross_credits != NEW.gross_credits
@@ -659,6 +725,13 @@ func nullInt64(v *int64) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: *v, Valid: true}
+}
+
+func nullPositiveInt64(v int64) sql.NullInt64 {
+	if v <= 0 {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: v, Valid: true}
 }
 
 // ForceVoidEnabled returns the current value of the SPEC-005 v0.4

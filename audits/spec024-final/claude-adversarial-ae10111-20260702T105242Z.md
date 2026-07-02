@@ -1,0 +1,17 @@
+I've completed a thorough adversarial verification of the full SPEC-024 prefix-cache billing implementation across the coordinator (`formula.go`, `hotpath.go`, `recovery.go`, `endpoints.go`, `store.go`, `buyer/server.go`, `billing_recorder.go`, `config.go`, `rate_card.go`, `requestlog/store.go`) and the gateway (`chat_proxy.go`). Build and tests pass on both modules.
+
+## Verification of prior findings (all confirmed fixed)
+
+- **Admin reconciliation cache pricing** — `endpoints.go:497,542-560` now selects `rl.cached_prompt_tokens` and passes it into `ComputeCreditsWithCache(pp, cachedP, cp, …)`, so buyer-equivalent uses the discounted split. Matches ledger gross → delta reconciles.
+- **Complete gateway usage synthesis for absent usage** — `chat_proxy.go:395-411` + `usageBodyWithTokenUsage` (1513-1542): `!ok` (absent usage) synthesizes a full object incl. `cached_prompt_tokens:0`, satisfying §8.
+- **Explicit-null invalid quarantine** — `server.go:5553-5567` `cachedPromptTokensPointer` maps explicit `null`/string/float/object to sentinel `-1`, which `normalizeCachedPromptTokens` (hotpath.go:211) quarantines as `invalid_cached_prompt_tokens`; absent field (`len==0`) stays `nil`→effective 0. Correct absence-vs-null distinction.
+- **Recovery comparing ledger cached provenance vs request_log/hot-path input** — `recovery.go:451` `!nullInt64MatchesPtr(cached, input.CachedPromptTokens)`; `requestLogCacheRecoveryFields` (server.go:5621) and `normalizeCachedPromptTokens` apply identical validation, so request_log stores the same validated provenance the hot path writes; cache-quarantined rows short-circuit at recovery.go:187 before reconcile.
+- **Coordinator does not emit partial usage after adding cached** — `chatJSONWithCachedPromptTokens` only augments already-complete usage; incomplete usage routes to `chatResponseWithCompleteUsage` (full object); absent usage left untouched. No partial-object emission.
+- **Gateway streaming drops malformed usage frames** — `chat_proxy.go:640-649`: `err != nil` sets `line = nil` (frame dropped) and falls back to gateway estimate; the `err != nil` check precedes the `!invalidReportedUsage` guard so subsequent malformed frames are also dropped.
+
+## Additional adversarial checks (all pass)
+Malformed/partial usage, negative/above-prompt/non-integer cached, missing/null usage, retry rows (`attempt_n>0`→cached NULL, all prompt at full rate), sticky-hit final-provider provenance (tiebreak skipped on hit; `provider_not_candidate` downgrade at server.go:4677; `sticky!="hit"` + positive cached → `ambiguous_cache` quarantine), overflow guards (`checkedMul/checkedAdd`), byte-identical legacy/NULL arithmetic, config default (`prompt_cache_hit_credits_per_mtok` → prompt rate when omitted) and `<= prompt_rate` validation (config.go:1133-1138), DB CHECK (`cached <= prompt_tokens`), quota settlement remaining nominal (no cache discount), and no rate-card pricing duplicated in the gateway. Over-report is provider-adverse (fraud-safe); under-report is documented/deferred to v0.2.
+
+Low/informational only (not C/H/M): after a first invalid streaming usage frame sets the estimate fallback, a subsequent *valid* usage frame is forwarded verbatim without cached re-sanitization (cosmetic; settlement already on gateway estimate; malformed frames still dropped). Coordinator-direct callers (bypassing the SPEC-006 gateway) may see absent usage with no `cached_prompt_tokens`, but §8 scopes the MUST to the gateway, which synthesizes it.
+
+0 C/H/M findings

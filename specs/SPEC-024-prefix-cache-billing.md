@@ -1,7 +1,7 @@
 # SPEC-024 - Prefix-cache billing
 
-**Version:** 0.1 (2026-07-02, design-only draft)
-**Status:** Draft (design-only -- no IMPL until v0.1 audit-clean lock).
+**Version:** 0.1 (2026-07-02, implementation lock)
+**Status:** Locked for SPEC-024 implementation after v0.1 audit review.
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.1 (sticky affinity), SPEC-005 v0.4 (billing), SPEC-006 v0.9.4 (buyer API), SPEC-018 v0.2.4 (tool calling)
 
 **Change log v0.1 (2026-07-02, prefix-cache billing design):**
@@ -128,6 +128,8 @@ The SPEC-005 `usage_source = 'null_error'` NULL guard remains binding: when `usa
 
 Per-attempt rule: cache-hit billing applies only to `attempt_n = 0` for a conversation turn. Retry / re-attempt rows (`attempt_n > 0`) MUST set `cached_prompt_tokens` to `NULL` or `0` and MUST price all prompt tokens at `prompt_rate_per_mtok`, even if the same provider is retried.
 
+Final-provider provenance rule: `sticky_result = "hit"` is a statement about the provider that actually receives the attempt, not only the pre-tiebreak candidate. A SPEC-024-aware coordinator MUST NOT let random tiebreaking or retry/failover relabel a different final provider as a sticky hit for cache-billing purposes. Implementations MAY skip random tiebreaking after a sticky-hit swap; if they keep random tiebreaking enabled after sticky lookup, they MUST recompute cache-billing eligibility from the final selected provider before accepting positive `cached_prompt_tokens`.
+
 SPEC-005 coordinator billing is the sole v0.1 authority for credit-denominated buyer billing. A SPEC-024 IMPL MUST NOT duplicate rate-card pricing authority in the SPEC-006 gateway. Buyer invoices, paid credit debits, or any credit-denominated export MUST use the coordinator ledger/rate snapshot and this cached / uncached prompt split:
 
 ```text
@@ -186,4 +188,4 @@ Rows written before SPEC-024 IMPL have `cached_prompt_tokens IS NULL`. Rows writ
 
 For the first two cases, Section 6 reduces algebraically to the SPEC-005 v0.4 numerator because `COALESCE(cached_prompt_tokens, 0) = 0`. For pre-SPEC-024 configs, Section 5 also defaults `prompt_cache_hit_rate_per_mtok = prompt_rate_per_mtok`; even an explicit sanitized `0` therefore preserves startup and arithmetic compatibility. Rollout MUST preserve byte-identical gross numerator arithmetic for all legacy and non-hit rows.
 
-Next-step deliverable: `BUILD_SPEC_024_PREFIX_CACHE_BILLING_IMPL_PROMPT.md` will define implementation work after v0.1 audit lock. This file is referenced here only and MUST NOT be bundled with v0.1.
+Implementation deliverable: `BUILD_SPEC_024_PREFIX_CACHE_BILLING_IMPL_PROMPT.md` defines the implementation work for this locked SPEC.

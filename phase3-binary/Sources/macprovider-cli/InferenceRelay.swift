@@ -851,6 +851,7 @@ actor InferenceRelay {
     private static func usage(_ completion: CompletionResult) -> [String: Any] {
         [
             "prompt_tokens": completion.promptTokens,
+            "cached_prompt_tokens": 0,
             "completion_tokens": completion.completionTokens,
             "total_tokens": completion.promptTokens + completion.completionTokens,
             "macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull(),
@@ -860,6 +861,7 @@ actor InferenceRelay {
     private static func zeroUsage() -> [String: Any] {
         [
             "prompt_tokens": 0,
+            "cached_prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
             "macprovider_model_hash_observed": NSNull(),
@@ -918,6 +920,7 @@ private final class RelayRequestState: @unchecked Sendable {
         lock.lock()
         currentUsage = [
             "prompt_tokens": completion.promptTokens,
+            "cached_prompt_tokens": 0,
             "completion_tokens": completion.completionTokens,
             "total_tokens": completion.promptTokens + completion.completionTokens,
         ]

@@ -18,10 +18,13 @@ type HotPathInput struct {
 	Stream                     bool
 	TSUtc                      time.Time
 	PromptTokens               *int64
+	CachedPromptTokens         *int64
 	CompletionTokens           *int64
 	EstimatedCompTokens        *int64
 	ErrorCode                  string
 	FaultFlag                  string
+	StickyResult               string
+	StickyMissReason           string
 	ConfigSnapshotID           int64
 	RateEntry                  RateCardEntry
 	MultiplierPPM              int64
@@ -29,6 +32,18 @@ type HotPathInput struct {
 	SettlementAccountScopeHash string
 	SettlementPolicyMode       string
 	SettlementPolicyVersion    string
+	RoutingDecisionLog         func(CacheBillingRoutingDecision)
+}
+
+type CacheBillingRoutingDecision struct {
+	RequestID          string
+	AttemptN           int
+	ProviderID         string
+	ProviderAssignedID string
+	CachedPromptTokens int64
+	StickyResult       string
+	StickyMissReason   string
+	ValidationReason   string
 }
 
 func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
@@ -122,6 +137,8 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	if in.FaultFlag == "" {
 		in.FaultFlag = FaultNone
 	}
+	cacheQuarantineReason := normalizeCachedPromptTokens(&in)
+	logCacheBillingRoutingDecision(in, cacheQuarantineReason)
 	// SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168) quarantine rule:
 	// with persisted monotonic attempt_n, row 3+ (attempt_n >= 2) is
 	// credited normally — the v0.3.1 "row 3+ MUST quarantine until
@@ -156,8 +173,9 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		committed = err == nil
 		return err
 	}
-	result := ComputeCredits(
+	result := ComputeCreditsWithCache(
 		in.PromptTokens,
+		in.CachedPromptTokens,
 		in.CompletionTokens,
 		in.EstimatedCompTokens,
 		usageFor(in.ErrorCode, in.EstimatedCompTokens),
@@ -167,6 +185,18 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		in.ProviderShareBps,
 	)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if cacheQuarantineReason != "" {
+		result = zeroCredits(result)
+		if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, cacheQuarantineReason); err != nil {
+			return err
+		}
+		if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+			return err
+		}
+		_, err := conn.ExecContext(ctx, `COMMIT`)
+		committed = err == nil
+		return err
+	}
 	requestCreditID, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, false, "")
 	if err != nil {
 		return err
@@ -174,15 +204,59 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	if err := insertOperatorCreditTx(ctx, conn, requestCreditID, in, result, now); err != nil {
 		return err
 	}
-	if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
+	if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
 		return err
 	}
-	if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+	if _, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
 		return err
 	}
 	_, err = conn.ExecContext(ctx, `COMMIT`)
 	committed = err == nil
 	return err
+}
+
+func normalizeCachedPromptTokens(in *HotPathInput) string {
+	if in.CachedPromptTokens == nil {
+		return ""
+	}
+	cached := *in.CachedPromptTokens
+	if cached < 0 || in.PromptTokens == nil || cached > *in.PromptTokens {
+		in.CachedPromptTokens = nil
+		return "invalid_cached_prompt_tokens"
+	}
+	if in.AttemptN > 0 {
+		in.CachedPromptTokens = nil
+		return ""
+	}
+	if in.StickyResult != "hit" {
+		if cached > 0 {
+			in.CachedPromptTokens = nil
+			return "ambiguous_cache"
+		}
+		in.CachedPromptTokens = nil
+		return ""
+	}
+	return ""
+}
+
+func logCacheBillingRoutingDecision(in HotPathInput, validationReason string) {
+	if in.RoutingDecisionLog == nil {
+		return
+	}
+	effectiveCached := int64(0)
+	if in.CachedPromptTokens != nil {
+		effectiveCached = *in.CachedPromptTokens
+	}
+	in.RoutingDecisionLog(CacheBillingRoutingDecision{
+		RequestID:          in.RequestID,
+		AttemptN:           in.AttemptN,
+		ProviderID:         in.ProviderID,
+		ProviderAssignedID: in.ProviderAssignedID,
+		CachedPromptTokens: effectiveCached,
+		StickyResult:       in.StickyResult,
+		StickyMissReason:   in.StickyMissReason,
+		ValidationReason:   validationReason,
+	})
 }
 
 func (s *Store) WriteRequestLogWithIdentity(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
@@ -218,10 +292,10 @@ func insertProviderIdentitySnapshotTx(ctx context.Context, db sqlExecutor, in Ho
 	_, err := db.ExecContext(ctx, `
 INSERT INTO ledger_provider_identity_snapshots (
     request_id, attempt_n, provider_assigned_id, provider_id, resolved_from,
-    pool_session_started_at_utc, created_at_utc
-) VALUES (?, ?, ?, ?, 'pool_entry', NULL, ?)
+    pool_session_started_at_utc, config_snapshot_id, created_at_utc
+) VALUES (?, ?, ?, ?, 'pool_entry', NULL, ?, ?)
 ON CONFLICT(request_id, attempt_n, provider_assigned_id) DO NOTHING`,
-		in.RequestID, in.AttemptN, in.ProviderAssignedID, in.ProviderID, now,
+		in.RequestID, in.AttemptN, in.ProviderAssignedID, in.ProviderID, nullPositiveInt64(in.ConfigSnapshotID), now,
 	)
 	return err
 }
@@ -234,13 +308,13 @@ func insertRequestCreditTx(ctx context.Context, db sqlExecutor, in HotPathInput,
 	res, err := db.ExecContext(ctx, `
 INSERT INTO ledger_request_credits (
     request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
-    status, stream, prompt_tokens, completion_tokens, estimated_completion_tokens,
+    status, stream, prompt_tokens, cached_prompt_tokens, completion_tokens, estimated_completion_tokens,
     usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
     global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
     fault_flag, settlement_account_scope_hash, settlement_policy_mode,
     settlement_policy_version, recovery_source, created_at_utc, quarantined,
     quarantine_reason
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.RequestID,
 		in.AttemptN,
 		in.ProviderID,
@@ -250,6 +324,7 @@ INSERT INTO ledger_request_credits (
 		in.Status,
 		boolInt(in.Stream),
 		nullInt64(result.PromptTokens),
+		nullInt64(result.CachedPromptTokens),
 		nullInt64(result.CompletionTokens),
 		nullInt64(result.EstimatedCompTokens),
 		result.UsageSource,

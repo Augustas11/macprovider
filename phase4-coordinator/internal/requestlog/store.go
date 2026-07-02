@@ -50,22 +50,24 @@ type Row struct {
 	// across two accounts cannot be attributed back to the correct
 	// gateway account (issue #211, follow-up to #196). Empty for
 	// direct legacy buyer calls without the header.
-	AccountID           string
-	Model               string
-	ProviderAssignedID  string
-	PromptTokens        *int64
-	CompletionTokens    *int64
-	EstimatedCompTokens *int64
-	LatencyMs           float64
-	RoutingMs           float64
-	Status              int
-	Stream              bool
-	BuyerIP             string
-	Error               string
-	ErrorCode           string
-	PrefHeader          string
-	ProviderHeader      string
-	Retried             int
+	AccountID             string
+	Model                 string
+	ProviderAssignedID    string
+	PromptTokens          *int64
+	CachedPromptTokens    *int64
+	CompletionTokens      *int64
+	EstimatedCompTokens   *int64
+	LatencyMs             float64
+	RoutingMs             float64
+	Status                int
+	Stream                bool
+	BuyerIP               string
+	Error                 string
+	ErrorCode             string
+	CacheQuarantineReason string
+	PrefHeader            string
+	ProviderHeader        string
+	Retried               int
 	// AttemptN is the zero-based monotonic attempt ordinal within the
 	// same (AccountID, RequestID) group under SQLite IS semantics
 	// (SPEC-002 v1.5.2 / issue #168). Populated at INSERT time by the
@@ -170,6 +172,7 @@ CREATE TABLE IF NOT EXISTS request_log (
     model                TEXT    NOT NULL,
     provider_assigned_id TEXT    NULL,
     prompt_tokens        INTEGER NULL,
+    cached_prompt_tokens INTEGER NULL,
     completion_tokens    INTEGER NULL,
     estimated_completion_tokens INTEGER NULL,
     total_tokens         INTEGER NULL,
@@ -180,6 +183,7 @@ CREATE TABLE IF NOT EXISTS request_log (
     buyer_ip             TEXT    NOT NULL DEFAULT '',
     error                TEXT    NULL,
     error_code           TEXT    NULL,
+    cache_quarantine_reason TEXT NULL,
     pref_header          TEXT    NULL,
     provider_header      TEXT    NULL,
     retried              INTEGER NOT NULL DEFAULT 0,
@@ -203,17 +207,22 @@ CREATE INDEX IF NOT EXISTS idx_request_log_request_id_id
 -- by MigrateIndexes.
 
 CREATE TABLE IF NOT EXISTS request_idempotency_keys (
-    idempotency_key TEXT PRIMARY KEY,
+    account_id      TEXT NOT NULL DEFAULT '',
+    idempotency_key TEXT NOT NULL,
     body_sha256    TEXT NOT NULL,
     request_id     TEXT NOT NULL UNIQUE,
-    created_at_utc TEXT NOT NULL
+    created_at_utc TEXT NOT NULL,
+    PRIMARY KEY (account_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS idx_request_idempotency_request
     ON request_idempotency_keys(request_id);
 `); err != nil {
 		return err
 	}
-	return s.ensureColumns(ctx)
+	if err := s.ensureColumns(ctx); err != nil {
+		return err
+	}
+	return s.ensureIdempotencyAccountScope(ctx)
 }
 
 func (s *Store) Insert(ctx context.Context, row Row) error {
@@ -238,7 +247,7 @@ func (s *Store) Insert(ctx context.Context, row Row) error {
 	return insert(ctx, conn, row)
 }
 
-func (s *Store) ReserveIdempotencyKey(ctx context.Context, key, bodySHA256, requestID string, now time.Time) (string, bool, error) {
+func (s *Store) ReserveIdempotencyKey(ctx context.Context, accountID, key, bodySHA256, requestID string, now time.Time) (string, bool, error) {
 	if s == nil || s.db == nil {
 		return "", false, fmt.Errorf("store is closed")
 	}
@@ -253,7 +262,7 @@ func (s *Store) ReserveIdempotencyKey(ctx context.Context, key, bodySHA256, requ
 		}
 	}()
 	var existingHash, existingRequestID string
-	err = tx.QueryRowContext(ctx, `SELECT body_sha256, request_id FROM request_idempotency_keys WHERE idempotency_key = ?`, key).Scan(&existingHash, &existingRequestID)
+	err = tx.QueryRowContext(ctx, `SELECT body_sha256, request_id FROM request_idempotency_keys WHERE account_id = ? AND idempotency_key = ?`, accountID, key).Scan(&existingHash, &existingRequestID)
 	if err == nil {
 		if existingHash != bodySHA256 {
 			return "", false, ErrIdempotencyConflict
@@ -268,9 +277,9 @@ func (s *Store) ReserveIdempotencyKey(ctx context.Context, key, bodySHA256, requ
 		return "", false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO request_idempotency_keys (idempotency_key, body_sha256, request_id, created_at_utc)
-VALUES (?, ?, ?, ?)`,
-		key, bodySHA256, requestID, now.UTC().Format(time.RFC3339Nano),
+INSERT INTO request_idempotency_keys (account_id, idempotency_key, body_sha256, request_id, created_at_utc)
+VALUES (?, ?, ?, ?, ?)`,
+		accountID, key, bodySHA256, requestID, now.UTC().Format(time.RFC3339Nano),
 	); err != nil {
 		return "", false, err
 	}
@@ -437,6 +446,7 @@ INSERT INTO request_log (
     model,
     provider_assigned_id,
     prompt_tokens,
+    cached_prompt_tokens,
     completion_tokens,
     estimated_completion_tokens,
     total_tokens,
@@ -447,11 +457,12 @@ INSERT INTO request_log (
     buyer_ip,
     error,
     error_code,
+    cache_quarantine_reason,
     pref_header,
     provider_header,
     retried,
     attempt_n
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.TSUtc.UTC().Format(time.RFC3339Nano),
 		row.RequestID,
 		nullString(row.ExternalRequestID),
@@ -459,6 +470,7 @@ INSERT INTO request_log (
 		row.Model,
 		nullString(row.ProviderAssignedID),
 		nullInt64(row.PromptTokens),
+		nullInt64(row.CachedPromptTokens),
 		nullInt64(row.CompletionTokens),
 		nullInt64(row.EstimatedCompTokens),
 		totalTokens,
@@ -469,6 +481,7 @@ INSERT INTO request_log (
 		row.BuyerIP,
 		nullString(row.Error),
 		nullString(row.ErrorCode),
+		nullString(row.CacheQuarantineReason),
 		nullString(row.PrefHeader),
 		nullString(row.ProviderHeader),
 		row.Retried,
@@ -488,6 +501,7 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 	}{
 		{name: "provider_assigned_id", sql: `ALTER TABLE request_log ADD COLUMN provider_assigned_id TEXT NULL`},
 		{name: "prompt_tokens", sql: `ALTER TABLE request_log ADD COLUMN prompt_tokens INTEGER NULL`},
+		{name: "cached_prompt_tokens", sql: `ALTER TABLE request_log ADD COLUMN cached_prompt_tokens INTEGER NULL`},
 		{name: "completion_tokens", sql: `ALTER TABLE request_log ADD COLUMN completion_tokens INTEGER NULL`},
 		{name: "estimated_completion_tokens", sql: `ALTER TABLE request_log ADD COLUMN estimated_completion_tokens INTEGER NULL`},
 		{name: "total_tokens", sql: `ALTER TABLE request_log ADD COLUMN total_tokens INTEGER NULL`},
@@ -498,6 +512,7 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		{name: "buyer_ip", sql: `ALTER TABLE request_log ADD COLUMN buyer_ip TEXT NOT NULL DEFAULT ''`},
 		{name: "error", sql: `ALTER TABLE request_log ADD COLUMN error TEXT NULL`},
 		{name: "error_code", sql: `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`},
+		{name: "cache_quarantine_reason", sql: `ALTER TABLE request_log ADD COLUMN cache_quarantine_reason TEXT NULL`},
 		{name: "pref_header", sql: `ALTER TABLE request_log ADD COLUMN pref_header TEXT NULL`},
 		{name: "provider_header", sql: `ALTER TABLE request_log ADD COLUMN provider_header TEXT NULL`},
 		{name: "retried", sql: `ALTER TABLE request_log ADD COLUMN retried INTEGER NOT NULL DEFAULT 0`},
@@ -530,6 +545,98 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		}
 	}
 	return s.requireColumns(ctx, []string{"id", "ts_utc", "request_id", "model"})
+}
+
+func (s *Store) ensureIdempotencyAccountScope(ctx context.Context) error {
+	type columnInfo struct {
+		name string
+		pk   int
+	}
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(request_idempotency_keys)`)
+	if err != nil {
+		return err
+	}
+	cols := map[string]columnInfo{}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		cols[name] = columnInfo{name: name, pk: pk}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if cols["account_id"].name != "" && cols["idempotency_key"].pk == 2 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS request_idempotency_keys_v2`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE request_idempotency_keys_v2 (
+    account_id      TEXT NOT NULL DEFAULT '',
+    idempotency_key TEXT NOT NULL,
+    body_sha256    TEXT NOT NULL,
+    request_id     TEXT NOT NULL UNIQUE,
+    created_at_utc TEXT NOT NULL,
+    PRIMARY KEY (account_id, idempotency_key)
+)`); err != nil {
+		return err
+	}
+	accountFromRequestLog := `(
+		SELECT rl.account_id
+		  FROM request_log rl
+		 WHERE rl.request_id = request_idempotency_keys.request_id
+		   AND rl.account_id IS NOT NULL
+		   AND rl.account_id != ''
+		 ORDER BY rl.id ASC
+		 LIMIT 1
+	)`
+	accountSelect := `COALESCE(` + accountFromRequestLog + `, '')`
+	if cols["account_id"].name != "" {
+		accountSelect = `COALESCE(NULLIF(request_idempotency_keys.account_id, ''), ` + accountFromRequestLog + `, '')`
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO request_idempotency_keys_v2 (
+    account_id, idempotency_key, body_sha256, request_id, created_at_utc
+)
+SELECT `+accountSelect+`, idempotency_key, body_sha256, request_id, created_at_utc
+  FROM request_idempotency_keys
+ ORDER BY created_at_utc, rowid`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE request_idempotency_keys`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE request_idempotency_keys_v2 RENAME TO request_idempotency_keys`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_request_idempotency_request ON request_idempotency_keys(request_id)`); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // MigrationKeyState reports the migration state of a single

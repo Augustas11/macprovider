@@ -1210,6 +1210,53 @@ func TestQuarantineRouteHidesShapeWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestDisabledQuarantineRouteChargesAuthenticatedAdminBucketOnly(t *testing.T) {
+	store := quarantineFixture(t)
+	handler := store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, false)
+	id := insertQuarantinedCredit(t, store, "p-disabled-rate")
+	path := "/admin/ledger/quarantine/" + itoa(id) + "/force-void"
+
+	for i := 0; i < adminBucketCapacity; i++ {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+		req.Header.Set("Authorization", "Bearer operator")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("authenticated disabled request %d status=%d body=%s want 404", i, w.Code, w.Body.String())
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+	req.Header.Set("Authorization", "Bearer operator")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("post-drain authenticated disabled status=%d body=%s want 429", w.Code, w.Body.String())
+	}
+
+	store2 := quarantineFixture(t)
+	handler2 := store2.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, false)
+	id2 := insertQuarantinedCredit(t, store2, "p-disabled-unauth")
+	path2 := "/admin/ledger/quarantine/" + itoa(id2) + "/force-void"
+	for i := 0; i < adminBucketCapacity+5; i++ {
+		req := httptest.NewRequest(http.MethodPost, path2, strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handler2.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("unauth disabled request %d status=%d body=%s want hidden 404", i, w.Code, w.Body.String())
+		}
+	}
+	req = httptest.NewRequest(http.MethodGet, "/admin/ledger/summary", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w = httptest.NewRecorder()
+	handler2.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorized summary after unauth disabled probes status=%d body=%s want 200", w.Code, w.Body.String())
+	}
+}
+
 // R3 (ARCH-H1): Store.ReloadBillingConfig must atomically commit the
 // config snapshot row AND the billing_config_flag_changed audit row
 // (when the flag is actually changing), or neither. If the audit

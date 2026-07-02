@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -93,16 +94,19 @@ func TestRateCardProjectionReturnsRecommendationSchema(t *testing.T) {
 		ProviderShare:    0.875,
 		RateCard: map[string]config.RateCardEntry{
 			"model-a": {
-				PromptCreditsPerMtok:     100000,
-				CompletionCreditsPerMtok: 200000,
+				PromptCreditsPerMtok:         100000,
+				PromptCacheHitCreditsPerMtok: 25000,
+				CompletionCreditsPerMtok:     200000,
 			},
 			"mlx-community/gpt-oss-20b-MXFP4-Q8": {
-				PromptCreditsPerMtok:     300000,
-				CompletionCreditsPerMtok: 400000,
+				PromptCreditsPerMtok:         300000,
+				PromptCacheHitCreditsPerMtok: 75000,
+				CompletionCreditsPerMtok:     400000,
 			},
 			"openai/gpt-oss-20b": {
-				PromptCreditsPerMtok:     500000,
-				CompletionCreditsPerMtok: 600000,
+				PromptCreditsPerMtok:         500000,
+				PromptCacheHitCreditsPerMtok: 125000,
+				CompletionCreditsPerMtok:     600000,
 			},
 		},
 	}
@@ -126,10 +130,11 @@ func TestRateCardProjectionReturnsRecommendationSchema(t *testing.T) {
 		GeneratedAt          string  `json:"generated_at"`
 		USDPerMillionCredits float64 `json:"usd_per_million_credits"`
 		Rows                 map[string]struct {
-			PromptRatePerMtok     int64 `json:"prompt_rate_per_mtok"`
-			CompletionRatePerMtok int64 `json:"completion_rate_per_mtok"`
-			ProviderShareBPS      int64 `json:"provider_share_bps"`
-			GlobalMultiplierPPM   int64 `json:"global_multiplier_ppm"`
+			PromptRatePerMtok         int64 `json:"prompt_rate_per_mtok"`
+			PromptCacheHitRatePerMtok int64 `json:"prompt_cache_hit_rate_per_mtok"`
+			CompletionRatePerMtok     int64 `json:"completion_rate_per_mtok"`
+			ProviderShareBPS          int64 `json:"provider_share_bps"`
+			GlobalMultiplierPPM       int64 `json:"global_multiplier_ppm"`
 		} `json:"rows"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
@@ -148,7 +153,7 @@ func TestRateCardProjectionReturnsRecommendationSchema(t *testing.T) {
 	if !ok {
 		t.Fatalf("model-a row missing: %s", rr.Body.String())
 	}
-	if row.PromptRatePerMtok != 100000 || row.CompletionRatePerMtok != 200000 || row.ProviderShareBPS != 8750 || row.GlobalMultiplierPPM != 1250000 {
+	if row.PromptRatePerMtok != 100000 || row.PromptCacheHitRatePerMtok != 25000 || row.CompletionRatePerMtok != 200000 || row.ProviderShareBPS != 8750 || row.GlobalMultiplierPPM != 1250000 {
 		t.Fatalf("unexpected row: %+v", row)
 	}
 	if _, ok := got.Rows["mlx-community/gpt-oss-20b-MXFP4-Q8"]; ok {
@@ -158,10 +163,10 @@ func TestRateCardProjectionReturnsRecommendationSchema(t *testing.T) {
 	if !ok {
 		t.Fatalf("normalized gpt-oss row missing: %s", rr.Body.String())
 	}
-	if normalized.PromptRatePerMtok != 500000 || normalized.CompletionRatePerMtok != 600000 {
+	if normalized.PromptRatePerMtok != 500000 || normalized.PromptCacheHitRatePerMtok != 125000 || normalized.CompletionRatePerMtok != 600000 {
 		t.Fatalf("canonical row did not win normalized collision: %+v", normalized)
 	}
-	canonical := `{"global_multiplier_ppm":1250000,"provider_share_bps":8750,"rows":{"model-a":{"completion_rate_per_mtok":200000,"global_multiplier_ppm":1250000,"prompt_rate_per_mtok":100000,"provider_share_bps":8750},"openai/gpt-oss-20b":{"completion_rate_per_mtok":600000,"global_multiplier_ppm":1250000,"prompt_rate_per_mtok":500000,"provider_share_bps":8750}},"usd_per_million_credits":1.5}`
+	canonical := `{"global_multiplier_ppm":1250000,"provider_share_bps":8750,"rows":{"model-a":{"completion_rate_per_mtok":200000,"global_multiplier_ppm":1250000,"prompt_cache_hit_rate_per_mtok":25000,"prompt_rate_per_mtok":100000,"provider_share_bps":8750},"openai/gpt-oss-20b":{"completion_rate_per_mtok":600000,"global_multiplier_ppm":1250000,"prompt_cache_hit_rate_per_mtok":125000,"prompt_rate_per_mtok":500000,"provider_share_bps":8750}},"usd_per_million_credits":1.5}`
 	sum := sha256.Sum256([]byte(canonical))
 	if got.Version != hex.EncodeToString(sum[:]) {
 		t.Fatalf("version hash mismatch: got %s want hash of %s", got.Version, canonical)
@@ -263,6 +268,12 @@ func TestRateCardProjectionVersionChangesOnlyForProjectionFields(t *testing.T) {
 		"model-a": {PromptCreditsPerMtok: 100000, CompletionCreditsPerMtok: 200001},
 	}
 	assertRateCardVersionChanged(t, baseVersion, rowsChanged, 1.0)
+
+	cacheHitRateChanged := base
+	cacheHitRateChanged.RateCard = map[string]config.RateCardEntry{
+		"model-a": {PromptCreditsPerMtok: 100000, PromptCacheHitCreditsPerMtok: 50000, CompletionCreditsPerMtok: 200000},
+	}
+	assertRateCardVersionChanged(t, baseVersion, cacheHitRateChanged, 1.0)
 
 	shareChanged := base
 	shareChanged.ProviderShare = 0.91
@@ -1740,6 +1751,466 @@ func TestSuccessfulNonStreamingBillingClampsInflatedProviderCompletion(t *testin
 	}
 }
 
+func TestNonStreamingCompletesIncompleteProviderUsageBeforeForwarding(t *testing.T) {
+	responseBody := []byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"cached_prompt_tokens":null}}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(responseBody)
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+		buyer.WithTier2Config(config.Tier2Config{OutputBytesPerTokenCeiling: 16}),
+	)
+
+	requestBody := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`)
+	rr := postChat(t, server, requestBody, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Usage struct {
+			PromptTokens       int64 `json:"prompt_tokens"`
+			CachedPromptTokens int64 `json:"cached_prompt_tokens"`
+			CompletionTokens   int64 `json:"completion_tokens"`
+			TotalTokens        int64 `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("response json: %v body=%s", err, rr.Body.String())
+	}
+	wantPrompt := int64(len(requestBody) / 4)
+	if wantPrompt < 1 {
+		wantPrompt = 1
+	}
+	wantCompletion := int64((len(responseBody) + 15) / 16)
+	if out.Usage.PromptTokens != wantPrompt || out.Usage.CachedPromptTokens != 0 || out.Usage.CompletionTokens != wantCompletion || out.Usage.TotalTokens != wantPrompt+wantCompletion {
+		t.Fatalf("usage=%+v, want complete estimated usage with prompt=%d completion=%d", out.Usage, wantPrompt, wantCompletion)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open billing db: %v", err)
+	}
+	defer db.Close()
+	var usageSource string
+	var quarantined int
+	var reason sql.NullString
+	if err := db.QueryRow(`SELECT usage_source, quarantined, quarantine_reason FROM ledger_request_credits ORDER BY id DESC LIMIT 1`).Scan(&usageSource, &quarantined, &reason); err != nil {
+		t.Fatalf("query billing row: %v", err)
+	}
+	if usageSource != "byte_estimated" || quarantined != 1 || !reason.Valid || reason.String != "invalid_cached_prompt_tokens" {
+		t.Fatalf("billing row usage_source/quarantine/reason = %s/%d/%#v, want byte_estimated/1/invalid_cached_prompt_tokens", usageSource, quarantined, reason)
+	}
+}
+
+func TestStreamingBillingMergesLaterPartialUsageWithPriorPrompt(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk\",\"usage\":{\"prompt_tokens\":3,\"cached_prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":3},\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk\",\"usage\":{\"completion_tokens\":1},\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+		buyer.WithTier2Config(config.Tier2Config{OutputBytesPerTokenCeiling: 16}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	row := queryLatestBillingRow(t, dbPath)
+	if row.UsageSource != "byte_estimated" {
+		t.Fatalf("usage_source=%q want byte_estimated", row.UsageSource)
+	}
+	if row.CompletionTokens != 1 {
+		t.Fatalf("completion_tokens=%d want 1", row.CompletionTokens)
+	}
+	wantGross := int64(5)
+	if row.GrossCredits != wantGross {
+		t.Fatalf("gross_credits=%d want %d from preserved prompt=3 and completion=1", row.GrossCredits, wantGross)
+	}
+	if row.Quarantined != 0 || row.QuarantineReason.Valid {
+		t.Fatalf("row quarantined=%d reason=%#v, want clean", row.Quarantined, row.QuarantineReason)
+	}
+}
+
+func TestStreamingBillingLatchesInvalidCachedPromptTokensAfterLaterValidUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk\",\"usage\":{\"prompt_tokens\":3,\"cached_prompt_tokens\":4,\"completion_tokens\":0,\"total_tokens\":3},\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk\",\"usage\":{\"prompt_tokens\":3,\"cached_prompt_tokens\":0,\"completion_tokens\":1,\"total_tokens\":4},\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+		buyer.WithTier2Config(config.Tier2Config{OutputBytesPerTokenCeiling: 16}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), `"cached_prompt_tokens":4`) {
+		t.Fatalf("stream leaked invalid cached_prompt_tokens to buyer: %s", rr.Body.String())
+	}
+	row := queryLatestBillingRow(t, dbPath)
+	if row.UsageSource != "byte_estimated" {
+		t.Fatalf("usage_source=%q want byte_estimated", row.UsageSource)
+	}
+	if row.CachedPromptTokens.Valid {
+		t.Fatalf("cached_prompt_tokens=%#v want NULL", row.CachedPromptTokens)
+	}
+	if row.Quarantined != 1 || !row.QuarantineReason.Valid || row.QuarantineReason.String != "invalid_cached_prompt_tokens" {
+		t.Fatalf("row quarantined=%d reason=%#v, want invalid_cached_prompt_tokens", row.Quarantined, row.QuarantineReason)
+	}
+}
+
+func TestNonStreamingBillingDiscountsCachedPromptTokensOnlyOnStickyHit(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			_, _ = w.Write([]byte(`{"id":"seed","choices":[{"message":{"content":"seed"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"hit","choices":[{"message":{"content":"hit"}}],"usage":{"prompt_tokens":10,"cached_prompt_tokens":4,"completion_tokens":2,"total_tokens":12}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {
+				PromptCreditsPerMtok:         1000000,
+				PromptCacheHitCreditsPerMtok: 250000,
+				CompletionCreditsPerMtok:     2000000,
+			},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "p1", EndpointURL: upstream.URL},
+		{ProviderID: "p2", EndpointURL: upstream.URL},
+	})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			StickyEnabled:           true,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+			RetryPerAttemptTimeoutS: 1,
+		}),
+	)
+	headers := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"conv:cache-hit"},
+		"X-MacProvider-Account":       []string{"acct_cache"},
+	}
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`)
+
+	seed := postChat(t, server, body, headers)
+	if seed.Code != http.StatusOK {
+		t.Fatalf("seed status=%d body=%s", seed.Code, seed.Body.String())
+	}
+	seedProvider := seed.Header().Get("X-MacProvider-Provider")
+	if seedProvider == "" {
+		t.Fatalf("seed provider header empty")
+	}
+	rr := postChat(t, server, body, headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("hit status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Provider"); got != seedProvider {
+		t.Fatalf("sticky provider=%q want seeded provider %q", got, seedProvider)
+	}
+	assertResponseCachedPromptTokens(t, rr.Body.Bytes(), 4)
+	row := queryLatestBillingRow(t, dbPath)
+	if !row.CachedPromptTokens.Valid || row.CachedPromptTokens.Int64 != 4 {
+		t.Fatalf("cached_prompt_tokens=%#v want 4", row.CachedPromptTokens)
+	}
+	if row.Quarantined != 0 || row.QuarantineReason.Valid {
+		t.Fatalf("row quarantined=%d reason=%#v, want clean", row.Quarantined, row.QuarantineReason)
+	}
+	if row.GrossCredits != 11 {
+		t.Fatalf("gross_credits=%d want 11", row.GrossCredits)
+	}
+}
+
+func TestNonStreamingBillingDiscountsCachedPromptTokensOnSingleProviderStickyHit(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			_, _ = w.Write([]byte(`{"id":"seed","choices":[{"message":{"content":"seed"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"hit","choices":[{"message":{"content":"hit"}}],"usage":{"prompt_tokens":10,"cached_prompt_tokens":4,"completion_tokens":2,"total_tokens":12}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {
+				PromptCreditsPerMtok:         1000000,
+				PromptCacheHitCreditsPerMtok: 250000,
+				CompletionCreditsPerMtok:     2000000,
+			},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			StickyEnabled:           true,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+			RetryPerAttemptTimeoutS: 1,
+		}),
+	)
+	headers := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"conv:single-cache-hit"},
+		"X-MacProvider-Account":       []string{"acct_cache"},
+	}
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`)
+
+	seed := postChat(t, server, body, headers)
+	if seed.Code != http.StatusOK {
+		t.Fatalf("seed status=%d body=%s", seed.Code, seed.Body.String())
+	}
+	rr := postChat(t, server, body, headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("hit status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	assertResponseCachedPromptTokens(t, rr.Body.Bytes(), 4)
+	row := queryLatestBillingRow(t, dbPath)
+	if !row.CachedPromptTokens.Valid || row.CachedPromptTokens.Int64 != 4 {
+		t.Fatalf("cached_prompt_tokens=%#v want 4", row.CachedPromptTokens)
+	}
+	if row.Quarantined != 0 || row.QuarantineReason.Valid {
+		t.Fatalf("row quarantined=%d reason=%#v, want clean", row.Quarantined, row.QuarantineReason)
+	}
+	if row.GrossCredits != 11 {
+		t.Fatalf("gross_credits=%d want 11", row.GrossCredits)
+	}
+}
+
+func TestNonStreamingBillingQuarantinesCachedPromptTokensWhenStickyProviderPreflightRejected(t *testing.T) {
+	p1Upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"seed","choices":[{"message":{"content":"seed"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`))
+	}))
+	defer p1Upstream.Close()
+	p2Upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"fallback","choices":[{"message":{"content":"fallback"}}],"usage":{"prompt_tokens":10,"cached_prompt_tokens":4,"completion_tokens":2,"total_tokens":12}}`))
+	}))
+	defer p2Upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {
+				PromptCreditsPerMtok:         1000000,
+				PromptCacheHitCreditsPerMtok: 250000,
+				CompletionCreditsPerMtok:     2000000,
+			},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "p1", EndpointURL: p1Upstream.URL},
+		{ProviderID: "p2", EndpointURL: p2Upstream.URL},
+	})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, p1Upstream.URL, 20)
+	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 2, p2Upstream.URL, 20)
+	p1PreflightCalls := 0
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+		buyer.WithPreflightConfig(1, time.Second),
+		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
+			if provider.ProviderID == "p1" {
+				p1PreflightCalls++
+				if p1PreflightCalls > 1 {
+					return buyer.PreflightResult{Accepted: false, Reason: "queue_full"}, true, nil
+				}
+			}
+			return buyer.PreflightResult{Accepted: true}, true, nil
+		}),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			StickyEnabled:           true,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+			RetryPerAttemptTimeoutS: 1,
+		}),
+	)
+	headers := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"conv:preflight-cache-hit"},
+		"X-MacProvider-Account":       []string{"acct_cache"},
+	}
+	body := chatBodyWithContent("model-a", strings.Repeat("x", 64))
+
+	seed := postChat(t, server, body, headers)
+	if seed.Code != http.StatusOK {
+		t.Fatalf("seed status=%d body=%s", seed.Code, seed.Body.String())
+	}
+	if got := seed.Header().Get("X-MacProvider-Provider"); got != "p1" {
+		t.Fatalf("seed provider=%q want p1", got)
+	}
+	rr := postChat(t, server, body, headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("fallback status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Provider"); got != "p2" {
+		t.Fatalf("fallback provider=%q want p2", got)
+	}
+	assertResponseCachedPromptTokens(t, rr.Body.Bytes(), 0)
+	row := queryLatestBillingRow(t, dbPath)
+	if row.CachedPromptTokens.Valid {
+		t.Fatalf("cached_prompt_tokens=%#v want NULL", row.CachedPromptTokens)
+	}
+	if row.Quarantined != 1 || !row.QuarantineReason.Valid || row.QuarantineReason.String != "ambiguous_cache" {
+		t.Fatalf("row quarantined=%d reason=%#v, want ambiguous_cache quarantine", row.Quarantined, row.QuarantineReason)
+	}
+	if row.GrossCredits != 0 {
+		t.Fatalf("gross_credits=%d want 0", row.GrossCredits)
+	}
+}
+
+func TestNonStreamingBillingQuarantinesPositiveCachedPromptTokensWithoutStickyHit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ambiguous","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":10,"cached_prompt_tokens":4,"completion_tokens":2,"total_tokens":12}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {
+				PromptCreditsPerMtok:         1000000,
+				PromptCacheHitCreditsPerMtok: 250000,
+				CompletionCreditsPerMtok:     2000000,
+			},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	assertResponseCachedPromptTokens(t, rr.Body.Bytes(), 0)
+	row := queryLatestBillingRow(t, dbPath)
+	if row.CachedPromptTokens.Valid {
+		t.Fatalf("cached_prompt_tokens=%#v want NULL", row.CachedPromptTokens)
+	}
+	if row.Quarantined != 1 || !row.QuarantineReason.Valid || row.QuarantineReason.String != "ambiguous_cache" {
+		t.Fatalf("quarantine=%d reason=%#v want ambiguous_cache", row.Quarantined, row.QuarantineReason)
+	}
+	if row.GrossCredits != 0 {
+		t.Fatalf("gross_credits=%d want 0 for quarantined row", row.GrossCredits)
+	}
+}
+
 func TestIdempotencyKeyRejectsReplayAndBodyMismatchBeforeProvider(t *testing.T) {
 	var calls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3212,6 +3683,36 @@ func TestChatCompletionsStreamingWSTunneledAEADFailureAfterCommitSendsSSEError(t
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"hello"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_aead_decrypt_failed"`)) {
 		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsStreamingWSTunneledPreCommitGenericFailureWritesSingleError(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk)
+			done := make(chan providerws.InferenceResponseEnd)
+			errs := make(chan error, 1)
+			errs <- errors.New("provider failed before first chunk")
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "data:") {
+		t.Fatalf("pre-commit failure wrote SSE after JSON error: %s", body)
+	}
+	if count := strings.Count(body, `"error"`); count != 1 {
+		t.Fatalf("error envelope count=%d body=%s", count, body)
 	}
 }
 
@@ -4987,6 +5488,9 @@ type billingRow struct {
 	CompletionTokens          int64
 	EstimatedCompletionTokens int64
 	UsageSource               string
+	CachedPromptTokens        sql.NullInt64
+	Quarantined               int
+	QuarantineReason          sql.NullString
 }
 
 func queryLatestBillingRow(t *testing.T, dbPath string) billingRow {
@@ -4998,17 +5502,36 @@ func queryLatestBillingRow(t *testing.T, dbPath string) billingRow {
 	defer db.Close()
 	var row billingRow
 	if err := db.QueryRow(`
-SELECT gross_credits, completion_tokens, estimated_completion_tokens, usage_source
+SELECT gross_credits, completion_tokens, estimated_completion_tokens, usage_source,
+       cached_prompt_tokens, quarantined, quarantine_reason
 FROM ledger_request_credits
 ORDER BY id DESC LIMIT 1`).Scan(
 		&row.GrossCredits,
 		&row.CompletionTokens,
 		&row.EstimatedCompletionTokens,
 		&row.UsageSource,
+		&row.CachedPromptTokens,
+		&row.Quarantined,
+		&row.QuarantineReason,
 	); err != nil {
 		t.Fatalf("query billing row: %v", err)
 	}
 	return row
+}
+
+func assertResponseCachedPromptTokens(t *testing.T, body []byte, want int64) {
+	t.Helper()
+	var got struct {
+		Usage struct {
+			CachedPromptTokens int64 `json:"cached_prompt_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("response json: %v body=%s", err, string(body))
+	}
+	if got.Usage.CachedPromptTokens != want {
+		t.Fatalf("response cached_prompt_tokens=%d want %d body=%s", got.Usage.CachedPromptTokens, want, string(body))
+	}
 }
 
 func providerByID(registry *pool.Registry, providerID string) (pool.Provider, bool) {

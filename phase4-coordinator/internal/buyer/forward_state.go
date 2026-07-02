@@ -27,11 +27,9 @@ import (
 // bodies. See audits/2026-06-10/REMAINING_WORK.md ARCH-1/CODE-1 for
 // the "RESOLVED_DIFFERENTLY" status disposition.
 //
-// Shape locked in audits/2026-06-10/M2-1B_DESIGN.md §forwardState — five
-// fields, no per-loop scratch (excluded, failoverAttempted). The
-// per-loop scratch intentionally stays in each helper's local scope
-// because each helper handles exactly one transport sequence; scratch
-// does not survive transport boundaries.
+// Shape locked in audits/2026-06-10/M2-1B_DESIGN.md §forwardState for retry
+// state. SPEC-024 adds typed sticky outcome fields because cache billing must
+// validate provider reports against the actual per-attempt sticky decision.
 //
 // Audit refs: REPO_AUDIT.md §3.1 item 3 (ARCH-1 / CODE-1),
 // REMAINING_WORK.md M2-1.
@@ -97,4 +95,7 @@ type forwardState struct {
 	// preflight was skipped (low estimate OR no preflight func), the
 	// label is "not_applicable". Issue #266 T1 R1 audit MEDIUM fix.
 	estimatedTokens int
+
+	stickyResult     string
+	stickyMissReason string
 }

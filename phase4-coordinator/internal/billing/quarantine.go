@@ -14,7 +14,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"modernc.org/sqlite"
 	sqlite3errs "modernc.org/sqlite/lib"
 )
@@ -83,26 +82,9 @@ func matchQuarantinePath(path string) quarantinePathMatch {
 // forceVoidHandler implements POST /admin/ledger/quarantine/{id}/force-void
 // per SPEC-005 v0.4 §11.6.1.
 func (h *handler) forceVoidHandler(w http.ResponseWriter, r *http.Request, requestCreditID int64) {
-	// Method enforcement (§11.6.1.1).
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
-		return
-	}
-	// Auth — operator-key, matches existing §16.1 contract (403 for
-	// both missing and wrong key).
-	if !auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
-		writeError(w, http.StatusForbidden, "forbidden", "operator key required")
-		return
-	}
-	// Route-layer gate (§11.5 launch-gate item 10). Disabled-flag and
-	// row-not-found both return 404 with byte-identical bodies — no
-	// leak of which case fired. Read the flag via the Store atomic
-	// so SIGHUP-driven flips take effect on the next request without
-	// rewiring the http.Handler.
-	if !h.store.ForceVoidEnabled() {
-		writeError(w, http.StatusNotFound, "not_found", "not found")
-		return
-	}
+	// The dispatcher has already enforced the route launch gate,
+	// operator auth, admin rate limit, method, and id shape before
+	// entering this mutation handler.
 	// Body shape pre-checks before reading. §11.6.1.1 names 415 and 413.
 	if ct := r.Header.Get("Content-Type"); !isJSONContentType(ct) {
 		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "content-type must be application/json")

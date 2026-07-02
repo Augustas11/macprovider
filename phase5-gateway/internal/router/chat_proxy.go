@@ -33,9 +33,10 @@ type chatRequest struct {
 }
 
 type tokenUsage struct {
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
-	TotalTokens      int64 `json:"total_tokens"`
+	PromptTokens       int64 `json:"prompt_tokens"`
+	CachedPromptTokens int64 `json:"cached_prompt_tokens"`
+	CompletionTokens   int64 `json:"completion_tokens"`
+	TotalTokens        int64 `json:"total_tokens"`
 }
 
 type usageSubject struct {
@@ -53,6 +54,7 @@ const (
 	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
 	settlementPolicyVersion       = "spec022-prereq-v0"
+	settlementHoldFallbackTTL     = 5 * time.Minute
 )
 
 type settlementFinalityAction int
@@ -421,7 +423,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	usage, ok, usageErr := usageFromJSON(body, maxUsageTokens, maxTokens)
 	tokenSource := "gateway_estimated"
 	if !ok {
-		usage = tokenUsage{PromptTokens: promptEstimate, CompletionTokens: 0, TotalTokens: promptEstimate}
+		usage = tokenUsage{PromptTokens: promptEstimate, CachedPromptTokens: 0, CompletionTokens: 0, TotalTokens: promptEstimate}
 	} else if usageErr != nil {
 		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_usage", resp.Header) {
 			return
@@ -434,6 +436,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
 		return
 	}
+	body = usageBodyWithTokenUsage(body, usage)
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
@@ -671,8 +674,12 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						invalidReportedUsage = true
 						reported = nil
 						slog.Warn("invalid provider usage in stream; falling back to gateway estimate", "request_id", requestID(r), "error", err)
+						line = nil
 					} else if !invalidReportedUsage {
 						reported = &usage
+						line = sseDataLineWithCachedPromptTokens(line, usage.CachedPromptTokens)
+					} else {
+						line = nil
 					}
 				} else if !hasChoices {
 					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
@@ -686,6 +693,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					return false
 				}
 			}
+		}
+		if len(line) == 0 {
+			return true
 		}
 		if _, err := w.Write(line); err != nil {
 			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
@@ -833,6 +843,12 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 			return
 		}
 	case settlementFinalityHold:
+		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+			return
+		}
 		slog.Info("gateway deferred buyer settlement pending coordinator receipt finality",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,
@@ -968,18 +984,18 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 		}
 		return true
 	case settlementFinalityHold:
-		if boundHold {
-			if !s.boundStreamingSettlementHold(r.Context(), r, subject, finality) {
-				writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
-				return false
-			}
-			return true
+		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+			return false
 		}
 		slog.Info("gateway deferred buyer settlement pending coordinator receipt finality",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,
 			"settlement_outcome", finality.Outcome,
 			"settlement_reason", finality.Reason,
+			"settlement_hold_bound", boundHold,
 		)
 		return true
 	default:
@@ -1005,7 +1021,16 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 			)
 		}
 	case settlementFinalityHold:
-		s.boundStreamingSettlementHold(r.Context(), r, subject, finality)
+		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+			slog.Error("gateway failed to persist streaming settlement hold after coordinator finality",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+			)
+		}
 	default:
 		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
 	}
@@ -1059,7 +1084,7 @@ func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Reque
 	if finality.PendingDeadlineUnixMS > 0 {
 		deadline = time.UnixMilli(finality.PendingDeadlineUnixMS).UTC()
 	}
-	if deadline.IsZero() || !deadline.After(now) {
+	if !deadline.IsZero() && !deadline.After(now) {
 		if err := s.store.RefundReservation(ctx, subject.AccountID, requestID(r), now.Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 			slog.Error("gateway streaming settlement hold refund failed",
 				"request_id", requestID(r),
@@ -1080,7 +1105,50 @@ func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Reque
 		)
 		return true
 	}
-	if err := s.store.ClampReservationExpiry(ctx, subject.AccountID, requestID(r), deadline); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+	if deadline.IsZero() {
+		if finality.Reason == "missing_settlement_finality_trailer" {
+			if err := s.store.RefundReservation(ctx, subject.AccountID, requestID(r), now.Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+				slog.Error("gateway streaming settlement hold refund failed",
+					"request_id", requestID(r),
+					"account_id", subject.AccountID,
+					"settlement_outcome", finality.Outcome,
+					"settlement_reason", finality.Reason,
+					"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+					"error", err,
+				)
+				return false
+			}
+			slog.Info("gateway released streaming buyer reservation without coordinator settlement finality",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+				"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+			)
+			return true
+		}
+		deadline = now.Add(settlementHoldFallbackTTL).UTC()
+		slog.Info("gateway bounded streaming settlement hold to local fallback deadline",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+			"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+			"settlement_fallback_deadline_unix_ms", deadline.UnixMilli(),
+		)
+	}
+	if err := s.store.MarkReservationSettlementHold(ctx, subject.AccountID, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) && !errors.Is(err, storage.ErrReservationTerminal) {
+		slog.Error("gateway streaming settlement hold marker failed",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+			"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+			"error", err,
+		)
+		return false
+	}
+	if err := s.store.ClampReservationExpiry(ctx, subject.AccountID, requestID(r), deadline); err != nil && !errors.Is(err, storage.ErrReservationNotFound) && !errors.Is(err, storage.ErrReservationTerminal) {
 		slog.Error("gateway streaming settlement hold deadline clamp failed",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,
@@ -1091,12 +1159,13 @@ func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Reque
 		)
 		return false
 	}
-	slog.Info("gateway bounded streaming buyer settlement hold to coordinator receipt deadline",
+	slog.Info("gateway bounded streaming buyer settlement hold to receipt deadline",
 		"request_id", requestID(r),
 		"account_id", subject.AccountID,
 		"settlement_outcome", finality.Outcome,
 		"settlement_reason", finality.Reason,
 		"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+		"settlement_hold_deadline_unix_ms", deadline.UnixMilli(),
 	)
 	return true
 }
@@ -1536,6 +1605,7 @@ func sseDataValue(line string) (string, bool) {
 //   - Non-enumerated usage subfields: `{"usage":{"total_tokens":10}}`
 //     is not covered by prompt/completion checks but still constitutes
 //     usage accounting on a supposed "standalone" envelope.
+//
 // The strict parser rejects ANY presence of `choices` or `usage`, plus
 // any duplicate top-level key, aligning with SPEC-006 §17.7.1's "no
 // choices field, no usage field" clause literally.
@@ -1804,9 +1874,10 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 		return tokenUsage{}, false, nil
 	}
 	var rawUsage struct {
-		PromptTokens     *int64 `json:"prompt_tokens"`
-		CompletionTokens *int64 `json:"completion_tokens"`
-		TotalTokens      *int64 `json:"total_tokens"`
+		PromptTokens       *int64          `json:"prompt_tokens"`
+		CachedPromptTokens json.RawMessage `json:"cached_prompt_tokens"`
+		CompletionTokens   *int64          `json:"completion_tokens"`
+		TotalTokens        *int64          `json:"total_tokens"`
 	}
 	if err := json.Unmarshal(envelope.Usage, &rawUsage); err != nil {
 		return tokenUsage{}, true, fmt.Errorf("usage object is malformed")
@@ -1823,6 +1894,7 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 	if usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 {
 		return tokenUsage{}, true, fmt.Errorf("usage tokens must be non-negative")
 	}
+	usage.CachedPromptTokens = sanitizedCachedPromptTokens(rawUsage.CachedPromptTokens, usage.PromptTokens)
 	if usage.PromptTokens > math.MaxInt64-usage.CompletionTokens {
 		return tokenUsage{}, true, fmt.Errorf("usage token total overflows int64")
 	}
@@ -1838,6 +1910,99 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 	}
 	usage.TotalTokens = sum
 	return usage, true, nil
+}
+
+func sanitizedCachedPromptTokens(raw json.RawMessage, promptTokens int64) int64 {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0
+	}
+	var cached int64
+	if err := json.Unmarshal(raw, &cached); err != nil {
+		return 0
+	}
+	if cached < 0 || cached > promptTokens {
+		return 0
+	}
+	return cached
+}
+
+func usageBodyWithTokenUsage(body []byte, usage tokenUsage) []byte {
+	updated, ok := usageJSONWithCachedPromptTokens(body, usage.CachedPromptTokens)
+	if ok {
+		return updated
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body
+	}
+	total := usage.TotalTokens
+	if total == 0 {
+		total = usage.PromptTokens + usage.CompletionTokens
+	}
+	usageObject := map[string]int64{
+		"prompt_tokens":        usage.PromptTokens,
+		"completion_tokens":    usage.CompletionTokens,
+		"total_tokens":         total,
+		"cached_prompt_tokens": usage.CachedPromptTokens,
+	}
+	rawUsage, err := json.Marshal(usageObject)
+	if err != nil {
+		return body
+	}
+	envelope["usage"] = rawUsage
+	updated, err = json.Marshal(envelope)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+func sseDataLineWithCachedPromptTokens(line []byte, cachedPromptTokens int64) []byte {
+	text := string(line)
+	trimmed := strings.TrimRight(text, "\r\n")
+	suffix := text[len(trimmed):]
+	data, ok := sseDataValue(trimmed)
+	if !ok || data == "[DONE]" {
+		return line
+	}
+	updated, ok := usageJSONWithCachedPromptTokens([]byte(data), cachedPromptTokens)
+	if !ok {
+		return line
+	}
+	return []byte("data: " + string(updated) + suffix)
+}
+
+func usageJSONWithCachedPromptTokens(body []byte, cachedPromptTokens int64) ([]byte, bool) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, false
+	}
+	rawUsage, ok := envelope["usage"]
+	if !ok || bytes.Equal(bytes.TrimSpace(rawUsage), []byte("null")) {
+		return nil, false
+	}
+	var usage map[string]json.RawMessage
+	if err := json.Unmarshal(rawUsage, &usage); err != nil {
+		return nil, false
+	}
+	if cachedPromptTokens < 0 {
+		cachedPromptTokens = 0
+	}
+	encoded, err := json.Marshal(cachedPromptTokens)
+	if err != nil {
+		return nil, false
+	}
+	usage["cached_prompt_tokens"] = encoded
+	rawUsage, err = json.Marshal(usage)
+	if err != nil {
+		return nil, false
+	}
+	envelope["usage"] = rawUsage
+	updated, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, false
+	}
+	return updated, true
 }
 
 // completionFromHeader reads the upstream's X-MacProvider-Completion-Tokens

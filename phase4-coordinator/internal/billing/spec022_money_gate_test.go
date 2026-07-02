@@ -288,6 +288,314 @@ func TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout
 	}
 }
 
+func TestSPEC022VerifiedReceiptPreservesCachedPromptDiscount(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	input.RouteSnapshot.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersion
+	routeDigest, _, err := input.RouteSnapshot.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Header = settlementHeaderWithCanonicalMutationAndTestSignature(t, input.Header, func(tuple map[string]any) {
+		tuple["route_snapshot_mode"] = RouteSnapshotModeEnforce
+		tuple["route_snapshot_policy_version"] = RouteSnapshotPolicyVersion
+		tuple["route_snapshot_digest"] = routeDigest
+	})
+
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	cfg := testRewards()
+	cfg.ProviderShare = 1.0
+	cfg.RateCard[input.RouteSnapshot.ModelID] = RateCardEntry{
+		PromptCreditsPerMtok:         1000000,
+		PromptCacheHitCreditsPerMtok: 250000,
+		CompletionCreditsPerMtok:     1000000,
+	}
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.UnixMilli(input.TerminalStateTSUnixMS-1000).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedSettlementReceiptEvidence(t, store, input)
+	cached := input.ExpectedUsage.BillableInputTokens / 2
+	receiptBoundCredits := insertSPEC022CachedReceiptLedgerCredit(t, store.db, input, cached, snapshotID)
+	cfgOther := cfg
+	cfgOther.RateCard[input.RouteSnapshot.ModelID] = RateCardEntry{
+		PromptCreditsPerMtok:         1000000,
+		PromptCacheHitCreditsPerMtok: 1000000,
+		CompletionCreditsPerMtok:     1000000,
+	}
+	otherSnapshotID, err := store.InsertConfigSnapshot(context.Background(), cfgOther, time.UnixMilli(input.TerminalStateTSUnixMS-500).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+INSERT INTO ledger_provider_identity_snapshots (
+    request_id, attempt_n, provider_assigned_id, provider_id,
+    resolved_from, config_snapshot_id, created_at_utc
+) VALUES (?, ?, 'assigned-other', ?, 'pool_entry', ?, ?)`,
+		input.RequestID,
+		input.AttemptN,
+		input.ProviderID,
+		otherSnapshotID,
+		time.UnixMilli(input.TerminalStateTSUnixMS).UTC().Add(time.Millisecond).Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+	state, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: settlementIdentityFromInput(input),
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     pubkey,
+		receiptReceivedUnixMS:     input.ReceiptReceivedUnixMS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SettlementOutcome != SettlementOutcomeVerified || state.ReceiptResult != SettlementReceiptResultValid {
+		t.Fatalf("state=%#v, want verified cached receipt", state)
+	}
+	if got := scalar(t, store.db, `SELECT cached_prompt_tokens FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != cached {
+		t.Fatalf("cached prompt tokens after receipt=%d want %d", got, cached)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("ledger provider credits after receipt=%d want cached receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("payable provider credits after receipt=%d want cached receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+	}
+	if _, err := store.db.Exec(`
+UPDATE ledger_provider_identity_snapshots
+   SET config_snapshot_id = NULL
+ WHERE request_id = ?`, input.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: settlementIdentityFromInput(input),
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     pubkey,
+		receiptReceivedUnixMS:     input.ReceiptReceivedUnixMS + 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.SettlementOutcome != SettlementOutcomeVerified || duplicate.Reason != "verified_settlement" || duplicate.IdempotencyStatus != settlementReceiptIDTerminalNoop {
+		t.Fatalf("duplicate cached receipt state=%#v, want immutable terminal no-op verified", duplicate)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE request_id = ? AND reason = 'verified_settlement'`, input.RequestID); got != 1 {
+		t.Fatalf("verified settlement rows after duplicate=%d want 1", got)
+	}
+}
+
+func TestSPEC022VerifiedReceiptQuarantinesCacheSnapshotPricingMismatch(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	input.RouteSnapshot.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersion
+	routeDigest, _, err := input.RouteSnapshot.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Header = settlementHeaderWithCanonicalMutationAndTestSignature(t, input.Header, func(tuple map[string]any) {
+		tuple["route_snapshot_mode"] = RouteSnapshotModeEnforce
+		tuple["route_snapshot_policy_version"] = RouteSnapshotPolicyVersion
+		tuple["route_snapshot_digest"] = routeDigest
+	})
+
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	cfg := testRewards()
+	cfg.ProviderShare = 1.0
+	cfg.RateCard[input.RouteSnapshot.ModelID] = RateCardEntry{
+		PromptCreditsPerMtok:         1000000,
+		PromptCacheHitCreditsPerMtok: 1000000,
+		CompletionCreditsPerMtok:     1000000,
+	}
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.UnixMilli(input.TerminalStateTSUnixMS-1000).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedSettlementReceiptEvidence(t, store, input)
+	cached := input.ExpectedUsage.BillableInputTokens / 2
+	insertSPEC022CachedReceiptLedgerCredit(t, store.db, input, cached, snapshotID)
+
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+	state, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: settlementIdentityFromInput(input),
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     pubkey,
+		receiptReceivedUnixMS:     input.ReceiptReceivedUnixMS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SettlementOutcome != SettlementOutcomeQuarantined || state.ReceiptResult != SettlementReceiptResultInvalid || state.Reason != "cache_config_snapshot_rate_mismatch" {
+		t.Fatalf("state=%#v, want cache snapshot pricing mismatch quarantine", state)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != 0 {
+		t.Fatalf("payable rows for pricing mismatch=%d want 0", got)
+	}
+	if got := scalar(t, store.db, `SELECT cached_prompt_tokens FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != cached {
+		t.Fatalf("cached prompt tokens after pricing mismatch=%d want immutable %d", got, cached)
+	}
+}
+
+func TestSPEC022VerifiedReceiptQuarantinesInvalidCachedPromptTokens(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	input.RouteSnapshot.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersion
+	routeDigest, _, err := input.RouteSnapshot.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Header = settlementHeaderWithCanonicalMutationAndTestSignature(t, input.Header, func(tuple map[string]any) {
+		tuple["route_snapshot_mode"] = RouteSnapshotModeEnforce
+		tuple["route_snapshot_policy_version"] = RouteSnapshotPolicyVersion
+		tuple["route_snapshot_digest"] = routeDigest
+	})
+
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	cfg := testRewards()
+	cfg.ProviderShare = 1.0
+	cfg.RateCard[input.RouteSnapshot.ModelID] = RateCardEntry{
+		PromptCreditsPerMtok:         1000000,
+		PromptCacheHitCreditsPerMtok: 250000,
+		CompletionCreditsPerMtok:     1000000,
+	}
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.UnixMilli(input.TerminalStateTSUnixMS-1000).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedSettlementReceiptEvidence(t, store, input)
+	otherInput := input
+	otherInput.AccountScope = AccountScopeForSettlement("other-cache-buyer")
+	otherInput.RouteSnapshot.AccountScope = otherInput.AccountScope
+	seedSettlementReceiptEvidence(t, store, otherInput)
+	markSPEC022ReceiptVerified(t, store.db, otherInput)
+	cached := input.ExpectedUsage.BillableInputTokens + 1
+	insertSPEC022CachedReceiptLedgerCredit(t, store.db, input, cached, snapshotID)
+
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+	state, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: settlementIdentityFromInput(input),
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     pubkey,
+		receiptReceivedUnixMS:     input.ReceiptReceivedUnixMS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SettlementOutcome != SettlementOutcomeQuarantined || state.ReceiptResult != SettlementReceiptResultInvalid || state.Reason != "invalid_cached_prompt_tokens" {
+		t.Fatalf("state=%#v, want invalid cached quarantine", state)
+	}
+	var gotCached sql.NullInt64
+	var gross int64
+	var reason string
+	if err := store.db.QueryRow(`
+SELECT cached_prompt_tokens, gross_credits, quarantine_reason
+  FROM ledger_request_credits
+ WHERE request_id = ?`, input.RequestID).Scan(&gotCached, &gross, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if !gotCached.Valid || gotCached.Int64 != cached || gross != 0 || reason != "invalid_cached_prompt_tokens" {
+		t.Fatalf("ledger cached/gross/reason=%#v/%d/%s want %d/0/invalid_cached_prompt_tokens", gotCached, gross, reason, cached)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != 0 {
+		t.Fatalf("payable rows for invalid cached receipt=%d want 0", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE request_id = ? AND account_scope_hash = ? AND settlement_outcome = 'verified'`, input.RequestID, SettlementAccountScopeHash(otherInput.AccountScope)); got != 1 {
+		t.Fatalf("other account verified verdict rows after cache quarantine=%d want 1", got)
+	}
+}
+
+func TestSPEC022RecoveryCountersExcludeReceiptSyncCacheQuarantine(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RequestID = "recover-cache-receipt-quarantine"
+	input.AccountScope = AccountScopeForSettlement("recover-cache-buyer")
+	input.RouteSnapshot.AccountScope = input.AccountScope
+	input.RouteSnapshot.RequestID = input.RequestID
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	input.RouteSnapshot.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersion
+	input.AttemptN = 0
+	input.RouteSnapshot.AttemptN = 0
+
+	reqStore, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	cfg := testRewards()
+	cfg.ProviderShare = 1.0
+	cfg.RateCard[input.RouteSnapshot.ModelID] = RateCardEntry{
+		PromptCreditsPerMtok:         1000000,
+		PromptCacheHitCreditsPerMtok: 250000,
+		CompletionCreditsPerMtok:     1000000,
+	}
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.UnixMilli(input.TerminalStateTSUnixMS-1000).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedSettlementReceiptEvidence(t, store, input)
+	markSPEC022ReceiptVerified(t, store.db, input)
+	ts := time.UnixMilli(input.TerminalStateTSUnixMS).UTC()
+	prompt := input.ExpectedUsage.BillableInputTokens + 1
+	cached := prompt
+	completion := input.ExpectedUsage.BillableOutputTokens
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc:              ts,
+		RequestID:          input.RequestID,
+		AccountID:          "recover-cache-buyer",
+		Model:              input.RouteSnapshot.ModelID,
+		ProviderAssignedID: "assigned",
+		PromptTokens:       &prompt,
+		CachedPromptTokens: &cached,
+		CompletionTokens:   &completion,
+		Status:             200,
+		BuyerIP:            "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+INSERT INTO ledger_provider_identity_snapshots (
+    request_id, attempt_n, provider_assigned_id, provider_id,
+    resolved_from, config_snapshot_id, created_at_utc
+) VALUES (?, 0, 'assigned', ?, 'pool_entry', ?, ?)`,
+		input.RequestID,
+		input.ProviderID,
+		snapshotID,
+		ts.Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecoverLedger(context.Background(), RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'invalid_cached_prompt_tokens'`, input.RequestID); got != 1 {
+		t.Fatalf("receipt-sync quarantine rows=%d want 1", got)
+	}
+	var created, quarantined, buyerEquivalent, providerGross int64
+	if err := store.db.QueryRow(`
+SELECT missing_credit_rows_created, orphan_credit_rows_quarantined, buyer_equivalent_credits, provider_gross_credits
+  FROM ledger_reconciliation_runs
+ WHERE run_type = 'startup_scan'
+ ORDER BY id DESC
+ LIMIT 1`).Scan(&created, &quarantined, &buyerEquivalent, &providerGross); err != nil {
+		t.Fatal(err)
+	}
+	if created != 1 || quarantined != 1 || buyerEquivalent != 0 || providerGross != 0 {
+		t.Fatalf("recovery counters created/quarantined/buyer/provider=%d/%d/%d/%d want 1/1/0/0", created, quarantined, buyerEquivalent, providerGross)
+	}
+}
+
 func TestSPEC022StreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout(t *testing.T) {
 	fixtures := loadSettlementVerifierFixtures(t)
 	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
@@ -1484,6 +1792,90 @@ INSERT INTO ledger_operator_credits (
 		input.ProviderID,
 		ts.Format(time.RFC3339Nano),
 		inflatedProviderCredits,
+		ts.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func insertSPEC022CachedReceiptLedgerCredit(t *testing.T, db *sql.DB, input SettlementVerifyInput, cachedPromptTokens int64, configSnapshotID int64) BilledRow {
+	t.Helper()
+	receiptPrompt := input.ExpectedUsage.BillableInputTokens
+	ledgerPrompt := receiptPrompt
+	if cachedPromptTokens > ledgerPrompt {
+		ledgerPrompt = cachedPromptTokens
+	}
+	completion := input.ExpectedUsage.BillableOutputTokens
+	result := ComputeCreditsWithCache(
+		&ledgerPrompt,
+		&cachedPromptTokens,
+		&completion,
+		nil,
+		UsageProviderReported,
+		FaultNone,
+		RateCardEntry{PromptCreditsPerMtok: 1000000, PromptCacheHitCreditsPerMtok: 250000, CompletionCreditsPerMtok: 1000000},
+		1000000,
+		10000,
+	)
+	ts := time.UnixMilli(input.TerminalStateTSUnixMS).UTC()
+	_, err := db.Exec(`
+INSERT INTO ledger_request_credits (
+    request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
+    status, stream, prompt_tokens, cached_prompt_tokens, completion_tokens,
+    estimated_completion_tokens, usage_source, prompt_rate_per_mtok,
+    completion_rate_per_mtok, global_multiplier_ppm, gross_credits,
+    provider_share_bps, provider_credits, fault_flag,
+    settlement_account_scope_hash, settlement_policy_mode,
+    settlement_policy_version, recovery_source, created_at_utc
+) VALUES (?, ?, ?, 'assigned', ?, ?, 200, 0, ?, ?, ?, NULL,
+          'provider_reported', 1000000, 1000000, 1000000, ?, 10000,
+          ?, 'none', ?, 'enforce', ?, 'hot_path', ?)`,
+		input.RequestID,
+		input.AttemptN,
+		input.ProviderID,
+		ts.Format(time.RFC3339Nano),
+		input.RouteSnapshot.ModelID,
+		ledgerPrompt,
+		cachedPromptTokens,
+		completion,
+		result.GrossCredits,
+		result.ProviderCredits,
+		SettlementAccountScopeHash(input.AccountScope),
+		input.RouteSnapshot.RouteSnapshotPolicyVersion,
+		ts.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestCreditID := scalar(t, db, `SELECT id FROM ledger_request_credits WHERE request_id = ? AND attempt_n = ? AND provider_id = ?`, input.RequestID, input.AttemptN, input.ProviderID)
+	_, err = db.Exec(`
+INSERT INTO ledger_operator_credits (
+    request_credit_id, request_id, attempt_n, provider_id, ts_utc,
+    gross_credits, operator_share_bps, operator_credits, fault_flag, created_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'none', ?)`,
+		requestCreditID,
+		input.RequestID,
+		input.AttemptN,
+		input.ProviderID,
+		ts.Format(time.RFC3339Nano),
+		result.GrossCredits,
+		result.OperatorCredits,
+		ts.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+INSERT INTO ledger_provider_identity_snapshots (
+    request_id, attempt_n, provider_assigned_id, provider_id,
+    resolved_from, config_snapshot_id, created_at_utc
+) VALUES (?, ?, 'assigned', ?, 'pool_entry', ?, ?)`,
+		input.RequestID,
+		input.AttemptN,
+		input.ProviderID,
+		configSnapshotID,
 		ts.Format(time.RFC3339Nano),
 	)
 	if err != nil {

@@ -2163,6 +2163,54 @@ func TestSPEC022GatewayStreamingVerifiedHoldIgnoresBuyerCanceledContext(t *testi
 	}
 }
 
+func TestSPEC022GatewayNonStreamingPendingHoldIgnoresBuyerCanceledContext(t *testing.T) {
+	accountID := "acct_spec022_nonstream_pending_hold_ctx"
+	requestID := "req_spec022_nonstream_pending_hold_ctx"
+	pendingDeadlineUnixMS := fixedNow().Add(5 * time.Minute).UnixMilli()
+	wrapped := &settlementHoldContextStore{}
+	s := &Server{store: wrapped, now: fixedNow}
+	ctx := context.WithValue(context.Background(), requestIDKey{}, requestID)
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+	h := settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "receipt_verdict_pending", pendingDeadlineUnixMS)
+	w := httptest.NewRecorder()
+
+	if !s.settleBeforeResponseWithCoordinatorFinality(w, req, usageSubject{AccountID: accountID}, 1, 1, 2, "coordinator", "pending", h) {
+		t.Fatalf("settleBeforeResponseWithCoordinatorFinality status=%d body=%s", w.Code, w.Body.String())
+	}
+	if wrapped.markCtxErr != nil {
+		t.Fatalf("MarkReservationSettlementHold ctx err=%v want nil despite canceled buyer context", wrapped.markCtxErr)
+	}
+	if wrapped.clampCtxErr != nil {
+		t.Fatalf("ClampReservationExpiry ctx err=%v want nil despite canceled buyer context", wrapped.clampCtxErr)
+	}
+}
+
+func TestSPEC022GatewayStreamingPendingHoldIgnoresBuyerCanceledContext(t *testing.T) {
+	accountID := "acct_spec022_stream_pending_hold_ctx"
+	requestID := "req_spec022_stream_pending_hold_ctx"
+	pendingDeadlineUnixMS := fixedNow().Add(5 * time.Minute).UnixMilli()
+	wrapped := &settlementHoldContextStore{}
+	s := &Server{store: wrapped, now: fixedNow}
+	ctx := context.WithValue(context.Background(), requestIDKey{}, requestID)
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+	resp := &http.Response{
+		Trailer: settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "receipt_verdict_pending", pendingDeadlineUnixMS),
+	}
+
+	s.settleStreamingAfterCommitWithCoordinatorFinality(req, usageSubject{AccountID: accountID}, 1, 1, 2, "coordinator", "pending", "", resp)
+
+	if wrapped.markCtxErr != nil {
+		t.Fatalf("MarkReservationSettlementHold ctx err=%v want nil despite canceled buyer context", wrapped.markCtxErr)
+	}
+	if wrapped.clampCtxErr != nil {
+		t.Fatalf("ClampReservationExpiry ctx err=%v want nil despite canceled buyer context", wrapped.clampCtxErr)
+	}
+}
+
 func settlementFinalityHeaderNamesForTest() []string {
 	return []string{
 		settlementOutcomeHeader,
@@ -2347,6 +2395,7 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 		wantRefunded   int64
 		wantActive     int64
 		wantActiveHold int64
+		wantExpiresAt  int64
 	}{
 		{
 			name:          "legacy-no-header-debits",
@@ -2381,34 +2430,37 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			wantUsageRows: 0,
 		},
 		{
-			name:           "pending-holds-reservation",
+			name:           "pending-without-deadline-holds-with-fallback-deadline",
 			mode:           "enforce",
 			outcome:        "pending",
 			receiptResult:  "inconclusive",
 			closed:         "false",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
-			name:           "verified-open-holds-reservation",
+			name:           "verified-open-without-deadline-holds-with-fallback-deadline",
 			mode:           "enforce",
 			outcome:        "verified",
 			receiptResult:  "valid",
 			closed:         "false",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
-			name:           "verified-invalid-result-holds",
+			name:           "verified-invalid-result-without-deadline-holds",
 			mode:           "enforce",
 			outcome:        "verified",
 			receiptResult:  "invalid",
 			closed:         "true",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
 			name:          "observe-mode-keeps-legacy-debit",
@@ -2420,45 +2472,49 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			wantSettled:   1,
 		},
 		{
-			name:           "partial-outcome-without-mode-holds-reservation",
+			name:           "partial-outcome-without-mode-holds",
 			outcome:        "verified",
 			receiptResult:  "valid",
 			closed:         "true",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
-			name:           "enforce-without-policy-version-holds-reservation",
+			name:           "enforce-without-policy-version-holds",
 			mode:           "enforce",
 			omitPolicy:     true,
 			outcome:        "verified",
 			receiptResult:  "valid",
 			closed:         "true",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
-			name:           "enforce-with-unknown-policy-version-holds-reservation",
+			name:           "enforce-with-unknown-policy-version-holds",
 			mode:           "enforce",
 			policyVersion:  "unknown-policy",
 			outcome:        "verified",
 			receiptResult:  "valid",
 			closed:         "true",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
-			name:           "unknown-mode-holds-reservation",
+			name:           "unknown-mode-holds",
 			mode:           "monitor",
 			outcome:        "verified",
 			receiptResult:  "valid",
 			closed:         "true",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 	}
 	for _, tc := range cases {
@@ -2502,12 +2558,18 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 				t.Fatalf("settlement snapshot = %+v, want usage=%d settled=%d refunded=%d active=%d active_reserved=%d",
 					got, tc.wantUsageRows, tc.wantSettled, tc.wantRefunded, tc.wantActive, tc.wantActiveHold)
 			}
+			if tc.wantExpiresAt > 0 {
+				if got := gatewayReservationExpiresAtUnixMS(t, dbPath, accountID); got != tc.wantExpiresAt {
+					t.Fatalf("reservation expires_at=%d want fallback hold deadline %d", got, tc.wantExpiresAt)
+				}
+			}
 		})
 	}
 }
 
 func TestSPEC022GatewayProviderErrorFinalityHoldsBuyerDebit(t *testing.T) {
 	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	pendingDeadline := fixedNow().Add(5 * time.Minute)
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		h := http.Header{}
 		h.Set("Content-Type", "application/json")
@@ -2517,6 +2579,7 @@ func TestSPEC022GatewayProviderErrorFinalityHoldsBuyerDebit(t *testing.T) {
 		h.Set(settlementReceiptResultHeader, "inconclusive")
 		h.Set(settlementReasonHeader, "missing_receipt_deadline_open")
 		h.Set(settlementClosedHeader, "false")
+		h.Set(settlementPendingUntilHeader, strconv.FormatInt(pendingDeadline.UnixMilli(), 10))
 		return responseWithBody(http.StatusGatewayTimeout, h, `{"error":{"message":"timeout","type":"api_error","param":null,"code":"provider_timeout"}}`), nil
 	})}
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
@@ -2532,6 +2595,16 @@ func TestSPEC022GatewayProviderErrorFinalityHoldsBuyerDebit(t *testing.T) {
 	got := gatewaySettlementSnapshot(t, dbPath, accountID)
 	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != 20 {
 		t.Fatalf("settlement snapshot = %+v, want pending provider error to hold reservation without debit", got)
+	}
+	holds, err := store.ListSettlementHeldReservations(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListSettlementHeldReservations: %v", err)
+	}
+	if len(holds) != 1 || holds[0].AccountID != accountID {
+		t.Fatalf("settlement holds=%#v want one visible hold for %s", holds, accountID)
+	}
+	if got := holds[0].ExpiresAt.UnixMilli(); got != pendingDeadline.UnixMilli() {
+		t.Fatalf("held reservation expires_at_unix_ms=%d want %d", got, pendingDeadline.UnixMilli())
 	}
 }
 
@@ -2977,6 +3050,63 @@ func TestNonStreamingRejectsInvalidProviderUsage(t *testing.T) {
 	}
 }
 
+func TestNonStreamingSanitizesInvalidCachedPromptTokensWithoutRejectingUsage(t *testing.T) {
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"invalid cache"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		responseBody := `{"id":"chatcmpl_cache","usage":{"prompt_tokens":3,"cached_prompt_tokens":4,"completion_tokens":2,"total_tokens":5},"choices":[{"message":{"content":"ok"}}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, responseBody), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_invalid_cache_nonstream")
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"cached_prompt_tokens":0`) {
+		t.Fatalf("response did not sanitize cached_prompt_tokens: %s", resp.Body.String())
+	}
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_invalid_cache_nonstream")
+	if outcome != "ok" || source != "provider_reported" || prompt != 3 || completion != 2 {
+		t.Fatalf("usage event outcome/source/prompt/completion = %s/%s/%d/%d, want ok/provider_reported/3/2", outcome, source, prompt, completion)
+	}
+}
+
+func TestNonStreamingSynthesizesCompleteUsageWhenProviderUsageAbsent(t *testing.T) {
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"legacy usage"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		responseBody := `{"id":"chatcmpl_legacy","choices":[{"message":{"content":"ok"}}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, responseBody), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_absent_usage_nonstream")
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var out struct {
+		Usage tokenUsage `json:"usage"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	wantPrompt := estimatePromptTokens([]byte(body))
+	if out.Usage.PromptTokens != wantPrompt || out.Usage.CachedPromptTokens != 0 || out.Usage.CompletionTokens != 0 || out.Usage.TotalTokens != wantPrompt {
+		t.Fatalf("usage=%+v, want complete gateway-estimated prompt=%d cached=0 completion=0 total=%d", out.Usage, wantPrompt, wantPrompt)
+	}
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_absent_usage_nonstream")
+	if outcome != "ok" || source != "gateway_estimated" || prompt != wantPrompt || completion != 0 {
+		t.Fatalf("usage event outcome/source/prompt/completion = %s/%s/%d/%d, want ok/gateway_estimated/%d/0", outcome, source, prompt, completion, wantPrompt)
+	}
+}
+
 func TestNonStreamingSettlementFailureDoesNotReturnSuccess(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_ok","usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`), nil
@@ -3020,11 +3150,64 @@ func TestUsageFromJSONValidatesProviderReportedUsage(t *testing.T) {
 		})
 	}
 	usage, ok, err := usageFromJSON([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2}}`), 10, 10)
-	if err != nil || !ok || usage.TotalTokens != 3 {
-		t.Fatalf("valid usage = %#v ok=%v err=%v, want total 3", usage, ok, err)
+	if err != nil || !ok || usage.TotalTokens != 3 || usage.CachedPromptTokens != 0 {
+		t.Fatalf("valid usage = %#v ok=%v err=%v, want total 3 and cached 0", usage, ok, err)
+	}
+	usage, ok, err = usageFromJSON([]byte(`{"usage":{"prompt_tokens":10,"cached_prompt_tokens":4,"completion_tokens":2}}`), 20, 10)
+	if err != nil || !ok || usage.CachedPromptTokens != 4 || usage.TotalTokens != 12 {
+		t.Fatalf("valid cached usage = %#v ok=%v err=%v, want cached 4 total 12", usage, ok, err)
+	}
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "negative", body: `{"usage":{"prompt_tokens":3,"cached_prompt_tokens":-1,"completion_tokens":2}}`},
+		{name: "above_prompt", body: `{"usage":{"prompt_tokens":3,"cached_prompt_tokens":4,"completion_tokens":2}}`},
+		{name: "string", body: `{"usage":{"prompt_tokens":3,"cached_prompt_tokens":"1","completion_tokens":2}}`},
+		{name: "float", body: `{"usage":{"prompt_tokens":3,"cached_prompt_tokens":1.5,"completion_tokens":2}}`},
+		{name: "object", body: `{"usage":{"prompt_tokens":3,"cached_prompt_tokens":{"n":1},"completion_tokens":2}}`},
+		{name: "null", body: `{"usage":{"prompt_tokens":3,"cached_prompt_tokens":null,"completion_tokens":2}}`},
+	} {
+		t.Run("sanitizes_cache_"+tc.name, func(t *testing.T) {
+			usage, ok, err := usageFromJSON([]byte(tc.body), 20, 10)
+			if err != nil || !ok {
+				t.Fatalf("usageFromJSON ok=%v err=%v, want valid provider usage with sanitized cache", ok, err)
+			}
+			if usage.PromptTokens != 3 || usage.CompletionTokens != 2 || usage.TotalTokens != 5 || usage.CachedPromptTokens != 0 {
+				t.Fatalf("usage=%#v, want prompt=3 completion=2 total=5 cached=0", usage)
+			}
+		})
 	}
 	if _, ok, err := usageFromJSON([]byte(`{"usage":null}`), 10, 10); ok || err != nil {
 		t.Fatalf("usage null ok=%v err=%v, want absent usage", ok, err)
+	}
+}
+
+func TestUsageBodyWithTokenUsageAddsBuyerVisibleField(t *testing.T) {
+	body := []byte(`{"id":"cmpl","usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`)
+	updated := usageBodyWithTokenUsage(body, tokenUsage{PromptTokens: 10, CachedPromptTokens: 4, CompletionTokens: 2, TotalTokens: 12})
+	var out struct {
+		Usage tokenUsage `json:"usage"`
+	}
+	if err := json.Unmarshal(updated, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Usage.CachedPromptTokens != 4 || out.Usage.TotalTokens != 12 {
+		t.Fatalf("updated usage = %+v, want cached 4 and total 12", out.Usage)
+	}
+}
+
+func TestUsageBodyWithTokenUsageSynthesizesCompleteUsageWhenAbsent(t *testing.T) {
+	body := []byte(`{"id":"cmpl","choices":[{"message":{"content":"ok"}}]}`)
+	updated := usageBodyWithTokenUsage(body, tokenUsage{PromptTokens: 7, CachedPromptTokens: 0, CompletionTokens: 3, TotalTokens: 10})
+	var out struct {
+		Usage tokenUsage `json:"usage"`
+	}
+	if err := json.Unmarshal(updated, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Usage.PromptTokens != 7 || out.Usage.CachedPromptTokens != 0 || out.Usage.CompletionTokens != 3 || out.Usage.TotalTokens != 10 {
+		t.Fatalf("updated usage = %+v, want complete synthesized usage with cached_prompt_tokens=0", out.Usage)
 	}
 }
 
@@ -4348,6 +4531,7 @@ func TestStreamingInvalidUsageAfterValidFallsBackToGatewayEstimate(t *testing.T)
 			`data: {"id":"chatcmpl","usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1},"choices":[{"delta":{"content":"ok"}}]}`,
 			`data: {"id":"chatcmpl","choices":[{"delta":{"content":"more"}}]}`,
 			`data: {"id":"chatcmpl","usage":{},"choices":[{"delta":{"content":""}}]}`,
+			`data: {"id":"chatcmpl","usage":{"prompt_tokens":9,"cached_prompt_tokens":4,"completion_tokens":1,"total_tokens":10},"choices":[{"delta":{"content":""}}]}`,
 			`data: [DONE]`,
 			``,
 		}, "\n\n")
@@ -4370,6 +4554,43 @@ func TestStreamingInvalidUsageAfterValidFallsBackToGatewayEstimate(t *testing.T)
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
 	if outcome != "ok" || source != "gateway_estimated" {
 		t.Fatalf("usage outcome/source = %s/%s, want ok/gateway_estimated", outcome, source)
+	}
+	if strings.Contains(resp.Body.String(), `"usage":{}`) {
+		t.Fatalf("invalid usage frame was forwarded: %s", resp.Body.String())
+	}
+	if strings.Contains(resp.Body.String(), `"cached_prompt_tokens":4`) || strings.Contains(resp.Body.String(), `"prompt_tokens":9`) {
+		t.Fatalf("later usage frame was forwarded after invalid usage: %s", resp.Body.String())
+	}
+}
+
+func TestStreamingSanitizesInvalidCachedPromptTokensWithoutRejectingUsage(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"ok"}]}`
+	accountID := "acct_stream_invalid_cache"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := strings.Join([]string{
+			`data: {"id":"chatcmpl","choices":[{"delta":{"content":"ok"}}]}`,
+			`data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"cached_prompt_tokens":4,"completion_tokens":2,"total_tokens":5},"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n\n")
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"cached_prompt_tokens":0`) {
+		t.Fatalf("stream body did not sanitize cached_prompt_tokens: %s", resp.Body.String())
+	}
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
+	if outcome != "ok" || source != "provider_reported" || prompt != 3 || completion != 2 {
+		t.Fatalf("usage event outcome/source/prompt/completion = %s/%s/%d/%d, want ok/provider_reported/3/2", outcome, source, prompt, completion)
 	}
 }
 

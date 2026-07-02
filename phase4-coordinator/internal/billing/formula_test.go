@@ -117,6 +117,31 @@ func TestComputeCredits_WorkedExamples(t *testing.T) {
 	}
 }
 
+func TestComputeCreditsWithCachePricesOnlyCachedPromptAtCacheRate(t *testing.T) {
+	rate := RateCardEntry{
+		PromptCreditsPerMtok:         1000000,
+		PromptCacheHitCreditsPerMtok: 250000,
+		CompletionCreditsPerMtok:     2000000,
+	}
+	prompt, cached, completion := int64(1000), int64(400), int64(100)
+	row := ComputeCreditsWithCache(&prompt, &cached, &completion, nil, UsageProviderReported, FaultNone, rate, 1000000, 9000)
+	if row.GrossCredits != 900 || row.ProviderCredits != 810 || row.OperatorCredits != 90 {
+		t.Fatalf("cache-priced row = %+v, want gross/provider/operator 900/810/90", row)
+	}
+	if row.CachedPromptTokens == nil || *row.CachedPromptTokens != cached || row.PromptCacheHitRatePerMtok != 250000 {
+		t.Fatalf("cache fields = %+v, want cached tokens and rate preserved", row)
+	}
+}
+
+func TestComputeCreditsWithCacheRejectsCachedPromptAbovePrompt(t *testing.T) {
+	rate := RateCardEntry{PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000}
+	prompt, cached, completion := int64(100), int64(101), int64(1)
+	row := ComputeCreditsWithCache(&prompt, &cached, &completion, nil, UsageProviderReported, FaultNone, rate, 1000000, 9000)
+	if row.GrossCredits != 0 || row.ProviderCredits != 0 || row.OperatorCredits != 0 || row.FaultFlag != FaultNullUsageError || row.CachedPromptTokens != nil {
+		t.Fatalf("invalid cached row = %+v, want null-error zero row", row)
+	}
+}
+
 func TestComputeCredits_InvalidTokenCountsZeroAndFlag(t *testing.T) {
 	rate := RateCardEntry{PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000}
 	negative := int64(-1)

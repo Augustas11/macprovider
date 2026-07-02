@@ -198,6 +198,20 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func handleChatCompletions(context: ChannelHandlerContext) {
+        do {
+            try Self.validateBrowserRequestHeaders(requestHead?.headers ?? HTTPHeaders())
+            try Self.validateJSONContentType(requestHead?.headers.first(name: "Content-Type"))
+        } catch let apiErr as APIError {
+            writeAPIError(context: context, apiErr)
+            return
+        } catch {
+            writeAPIError(
+                context: context,
+                APIError(status: 400, message: "Invalid request", code: "invalid_request")
+            )
+            return
+        }
+
         var body = bodyBuffer ?? context.channel.allocator.buffer(capacity: 0)
         let data = Data(body.readBytes(length: body.readableBytes) ?? [])
         let writer = ResponseWriter(context: context)
@@ -454,6 +468,60 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 message: "v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding` header; compressed request bodies are deferred to v0.2 per §10.",
                 code: "request_content_encoding_unsupported",
                 param: "Content-Encoding"
+            )
+        }
+    }
+
+    static func validateJSONContentType(_ value: String?) throws {
+        guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw APIError(
+                status: 415,
+                message: "v0.1.0 accepts only `Content-Type: application/json` request bodies.",
+                code: "request_content_type_unsupported",
+                param: "Content-Type"
+            )
+        }
+        let mediaType = value.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard mediaType == "application/json" else {
+            throw APIError(
+                status: 415,
+                message: "v0.1.0 accepts only `Content-Type: application/json` request bodies.",
+                code: "request_content_type_unsupported",
+                param: "Content-Type"
+            )
+        }
+    }
+
+    static func validateBrowserRequestHeaders(_ headers: HTTPHeaders) throws {
+        let fetchSite = headers.first(name: "Sec-Fetch-Site")?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if fetchSite == "cross-site" {
+            throw APIError(
+                status: 403,
+                message: "Browser-originated cross-site requests are not accepted by the local inference endpoint.",
+                code: "browser_request_forbidden",
+                param: "Sec-Fetch-Site"
+            )
+        }
+        guard let origin = headers.first(name: "Origin")?.trimmingCharacters(in: .whitespacesAndNewlines), !origin.isEmpty else {
+            return
+        }
+        guard let url = URL(string: origin), let host = url.host?.lowercased(), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            throw APIError(
+                status: 403,
+                message: "Browser-originated requests must use a trusted local origin.",
+                code: "browser_request_forbidden",
+                param: "Origin"
+            )
+        }
+        guard host == "127.0.0.1" || host == "localhost" || host == "::1" else {
+            throw APIError(
+                status: 403,
+                message: "Browser-originated requests must use a trusted local origin.",
+                code: "browser_request_forbidden",
+                param: "Origin"
             )
         }
     }
@@ -1032,6 +1100,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private static func usage(_ completion: CompletionResult) -> [String: Any] {
         [
             "prompt_tokens": completion.promptTokens,
+            "cached_prompt_tokens": 0,
             "completion_tokens": completion.completionTokens,
             "total_tokens": completion.promptTokens + completion.completionTokens,
             "macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull(),

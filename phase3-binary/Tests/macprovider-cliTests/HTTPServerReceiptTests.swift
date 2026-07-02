@@ -8,6 +8,39 @@ import XCTest
 @testable import macprovider_cli
 
 final class HTTPServerReceiptTests: XCTestCase {
+    func testHTTPChatCompletionRejectsSimpleBrowserContentTypeBeforeInference() async throws {
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "hello"]],
+            ],
+            contentType: "text/plain",
+            receiptBuilder: nil,
+            completionError: HTTPReceiptFixtureError.inferenceFailed
+        )
+
+        XCTAssertEqual(response.status, .unsupportedMediaType, response.body)
+        XCTAssertTrue(response.body.contains(#""code":"request_content_type_unsupported""#), response.body)
+    }
+
+    func testHTTPChatCompletionRejectsCrossSiteBrowserOriginBeforeInference() async throws {
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "hello"]],
+            ],
+            requestHeaders: [
+                ("Origin", "https://evil.example"),
+                ("Sec-Fetch-Site", "cross-site"),
+            ],
+            receiptBuilder: nil,
+            completionError: HTTPReceiptFixtureError.inferenceFailed
+        )
+
+        XCTAssertEqual(response.status, .forbidden, response.body)
+        XCTAssertTrue(response.body.contains(#""code":"browser_request_forbidden""#), response.body)
+    }
+
     func testHTTPNonStreamingHandlerWritesReceiptHeaderOnSuccess() async throws {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let response = try await roundTripChatCompletion(
@@ -155,6 +188,7 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertEqual(response.status, .ok, response.body)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: Any])
         let usage = try XCTUnwrap(json["usage"] as? [String: Any])
+        XCTAssertEqual(usage["cached_prompt_tokens"] as? Int, 0)
         XCTAssertEqual(usage["macprovider_model_hash_observed"] as? String, hash)
     }
 
@@ -171,6 +205,7 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertEqual(response.status, .ok, response.body)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: Any])
         let usage = try XCTUnwrap(json["usage"] as? [String: Any])
+        XCTAssertEqual(usage["cached_prompt_tokens"] as? Int, 0)
         XCTAssertTrue(usage.keys.contains("macprovider_model_hash_observed"))
         XCTAssertTrue(usage["macprovider_model_hash_observed"] is NSNull)
     }
@@ -917,6 +952,7 @@ private func roundTripChatCompletion(
     routerModelID: String? = "fixture-model",
     providerID: String? = "provider-a",
     requestID: String = "req-http-receipt",
+    contentType: String? = "application/json",
     requestHeaders: [(String, String)] = [],
     receiptBuilder: ReceiptBuilder?,
     completion: CompletionResult? = nil,
@@ -962,6 +998,7 @@ private func roundTripChatCompletion(
             body: body,
             headerOnly: isStreaming && !readStreamingBody,
             requestID: requestID,
+            contentType: contentType,
             requestHeaders: requestHeaders
         )
     }
@@ -1014,14 +1051,17 @@ private func rawChatCompletionRoundTrip(
     body: [String: Any],
     headerOnly: Bool,
     requestID: String,
+    contentType: String? = "application/json",
     requestHeaders: [(String, String)] = []
 ) throws -> HTTPReceiptResponse {
     let bodyData = try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
     var requestHead = "POST /v1/chat/completions HTTP/1.1\r\n"
         + "Host: 127.0.0.1:\(port)\r\n"
-        + "Content-Type: application/json\r\n"
         + "Content-Length: \(bodyData.count)\r\n"
         + "X-Request-ID: \(requestID)\r\n"
+    if let contentType {
+        requestHead += "Content-Type: \(contentType)\r\n"
+    }
     for (name, value) in requestHeaders {
         requestHead += "\(name): \(value)\r\n"
     }

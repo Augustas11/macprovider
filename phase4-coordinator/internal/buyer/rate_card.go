@@ -22,10 +22,11 @@ type recommendationRateCardResponse struct {
 }
 
 type recommendationRateCardRow struct {
-	PromptRatePerMtok     int64 `json:"prompt_rate_per_mtok"`
-	CompletionRatePerMtok int64 `json:"completion_rate_per_mtok"`
-	ProviderShareBPS      int64 `json:"provider_share_bps"`
-	GlobalMultiplierPPM   int64 `json:"global_multiplier_ppm"`
+	PromptRatePerMtok         int64 `json:"prompt_rate_per_mtok"`
+	PromptCacheHitRatePerMtok int64 `json:"prompt_cache_hit_rate_per_mtok"`
+	CompletionRatePerMtok     int64 `json:"completion_rate_per_mtok"`
+	ProviderShareBPS          int64 `json:"provider_share_bps"`
+	GlobalMultiplierPPM       int64 `json:"global_multiplier_ppm"`
 }
 
 type recommendationRateCardVersionProjection struct {
@@ -95,10 +96,11 @@ func recommendationRateCardProjectionKey(key string) string {
 
 func recommendationRateCardRowFromEntry(entry config.RateCardEntry, providerShareBPS, globalMultiplierPPM int64) recommendationRateCardRow {
 	return recommendationRateCardRow{
-		PromptRatePerMtok:     entry.PromptCreditsPerMtok,
-		CompletionRatePerMtok: entry.CompletionCreditsPerMtok,
-		ProviderShareBPS:      providerShareBPS,
-		GlobalMultiplierPPM:   globalMultiplierPPM,
+		PromptRatePerMtok:         entry.PromptCreditsPerMtok,
+		PromptCacheHitRatePerMtok: entry.EffectivePromptCacheHitCreditsPerMtok(),
+		CompletionRatePerMtok:     entry.CompletionCreditsPerMtok,
+		ProviderShareBPS:          providerShareBPS,
+		GlobalMultiplierPPM:       globalMultiplierPPM,
 	}
 }
 
@@ -138,6 +140,8 @@ func canonicalRecommendationRateCardVersionBytes(rows map[string]recommendationR
 		b.WriteString(strconv.FormatInt(row.CompletionRatePerMtok, 10))
 		b.WriteString(`,"global_multiplier_ppm":`)
 		b.WriteString(strconv.FormatInt(row.GlobalMultiplierPPM, 10))
+		b.WriteString(`,"prompt_cache_hit_rate_per_mtok":`)
+		b.WriteString(strconv.FormatInt(row.PromptCacheHitRatePerMtok, 10))
 		b.WriteString(`,"prompt_rate_per_mtok":`)
 		b.WriteString(strconv.FormatInt(row.PromptRatePerMtok, 10))
 		b.WriteString(`,"provider_share_bps":`)

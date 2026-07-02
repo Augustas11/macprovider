@@ -140,24 +140,32 @@ logging:
 # rewards:
 #   global_multiplier: 1.0
 #   provider_share: 0.90
+#   # Prefix-cache hit pricing should typically start near 25% of prompt pricing.
+#   # If omitted, prompt_cache_hit_credits_per_mtok defaults to prompt_credits_per_mtok.
 #   rate_card:
 #     default:                                # MUST be present per config validator
 #       prompt_credits_per_mtok: 500000       # $0.50/M — code-default fallback
+#       prompt_cache_hit_credits_per_mtok: 125000 # $0.125/M prefix-cache hit
 #       completion_credits_per_mtok: 1000000  # $1.00/M — code-default fallback
 #     qwen3-32b:                              # Wave 1 v0.1 — Entry 92 v2 target
 #       prompt_credits_per_mtok: 110000       # $0.110/M
+#       prompt_cache_hit_credits_per_mtok: 27500 # $0.0275/M prefix-cache hit
 #       completion_credits_per_mtok: 220000   # $0.220/M — 21% undercut of $0.28 market
 #     openai/gpt-oss-20b:                     # Wave 1 v0.1
 #       prompt_credits_per_mtok: 50000        # $0.050/M
+#       prompt_cache_hit_credits_per_mtok: 12500 # $0.0125/M prefix-cache hit
 #       completion_credits_per_mtok: 100000   # $0.100/M — 23% undercut of $0.13 WandB
 #     qwen3-coder-30b-a3b-instruct:           # Wave 1 v0.2 (Entry 97) — developer coding MoE
 #       prompt_credits_per_mtok: 117500       # $0.1175/M
+#       prompt_cache_hit_credits_per_mtok: 29375 # $0.029375/M prefix-cache hit
 #       completion_credits_per_mtok: 235000   # $0.235/M — RESEARCH_227 developer-coding target
 #     meta-llama/llama-3.1-8b-instruct:       # Wave 1 v0.2 — broad-compatibility 8B
 #       prompt_credits_per_mtok: 13500        # $0.0135/M
+#       prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
 #       completion_credits_per_mtok: 27000    # $0.027/M — cheapest publicly-served 8B
 #     qwen2.5-coder-32b-instruct:             # Wave 1 v0.2 — M-Max/Ultra only per admission
 #       prompt_credits_per_mtok: 425000       # $0.425/M
+#       prompt_cache_hit_credits_per_mtok: 106250 # $0.10625/M prefix-cache hit
 #       completion_credits_per_mtok: 850000   # $0.850/M — RESEARCH_227 dev-coding premium
 #
 # EXPECTED-LOG-NOISE PATTERN (Entry 96 note): the coord journal at every
