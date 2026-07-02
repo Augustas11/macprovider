@@ -378,22 +378,32 @@ private extension Stage1ProbeResult {
 
 struct Stage1Prober: Stage1Probing {
     static let maxTokens = 64
+    /// URL request idle-timeout (URLSession semantics: max seconds without any
+    /// bytes arriving from the server). Must cover prefill TTFT for the largest
+    /// supported candidate on the weakest supported hardware (30B MoE on M-Base
+    /// prefilling a ~3200-token probe can take 60-180s before first byte).
+    /// A value below 200s produced silent .infeasible timeouts on M-Base;
+    /// keeping headroom above measured maxima. See SPEC-023 v1.7.5.
+    static let defaultProbeIdleTimeoutSec: TimeInterval = 300
     private static let stopTokens = ["<|im_end|>", "<|endoftext|>", "<|eot_id|>"]
 
     private let session: URLSession
     private let readyTimeoutSec: TimeInterval
     private let stopGraceSeconds: Double
+    private let probeIdleTimeoutSec: TimeInterval
     private let clock: () -> Date
 
     init(
         session: URLSession = .shared,
         readyTimeoutSec: TimeInterval = 120,
         stopGraceSeconds: Double = 10,
+        probeIdleTimeoutSec: TimeInterval = Stage1Prober.defaultProbeIdleTimeoutSec,
         clock: @escaping () -> Date = Date.init
     ) {
         self.session = session
         self.readyTimeoutSec = readyTimeoutSec
         self.stopGraceSeconds = stopGraceSeconds
+        self.probeIdleTimeoutSec = max(1, probeIdleTimeoutSec)
         self.clock = clock
     }
 
@@ -519,7 +529,7 @@ struct Stage1Prober: Stage1Probing {
     private func probeOnce(model: String, port: Int, targetContext: Int) async throws -> SingleProbeResult {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
         request.httpMethod = "POST"
-        request.timeoutInterval = max(1, TimeInterval(Stage1Prober.maxTokens))
+        request.timeoutInterval = probeIdleTimeoutSec
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": model,
