@@ -740,18 +740,21 @@ func TestRecoverLedger_DoesNotQuarantineSettledMismatch(t *testing.T) {
 	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET settled = 1, settlement_id = 42, gross_credits = gross_credits + 1 WHERE request_id = ?`, row.RequestID); err != nil {
+	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET settled = 1, settlement_id = 42 WHERE request_id = ?`, row.RequestID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET gross_credits = gross_credits + 1 WHERE request_id = ?`, row.RequestID); err == nil {
+		t.Fatal("settled money mutation succeeded")
+	}
 	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "nightly_reconcile"}
-	if err := store.RecoverLedger(context.Background(), in); err == nil {
-		t.Fatal("RecoverLedger succeeded on settled mismatch, want error")
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'settled-mismatch' AND quarantined = 1`); got != 0 {
 		t.Fatalf("settled mismatch quarantined rows=%d want 0", got)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE run_type = 'nightly_reconcile' AND status = 'failed'`); got != 1 {
-		t.Fatalf("failed reconciliation rows=%d want 1", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE run_type = 'nightly_reconcile' AND status = 'failed'`); got != 0 {
+		t.Fatalf("failed reconciliation rows=%d want 0", got)
 	}
 }
 

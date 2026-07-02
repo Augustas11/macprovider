@@ -16,16 +16,19 @@ amounts still match those source rows, immediately before consumption.
   pool settle the same verified source row once and produce one payout-ready row
   with one settlement id.
 - Manually inserted `ledger_payout_ready` rows with no verified source rows are
-  deleted and audited as failed claims.
+  voided and audited as failed claims.
 - Ready payout rows whose gross/provider/operator totals were manually inflated
   are recomputed from `spec022_payable_request_credits`, audited as failed, and
   must be claimed again with the corrected verified total.
-- Settled source money fields are immutable, so claim-time recomputation cannot
-  be inflated by editing a settled source row after settlement.
+- Settled source money fields and settlement links are immutable, so claim-time
+  recomputation cannot be inflated by editing or repointing a settled source row
+  after settlement.
+- A source row cannot enter `settled=1` while changing its money fields in the
+  same statement.
 - Manually linked source rows must be settled, provider-matching, in-window, and
   payable before they can back a payout claim.
-- Existing post-ready source revalidation still releases source rows that later
-  become non-payable or below the minimum payout threshold.
+- Existing post-ready source revalidation voids the payout when the source set
+  itself is no longer valid; immutable settled source history is not rewritten.
 
 ## Acceptance movement
 
@@ -50,7 +53,7 @@ amounts still match those source rows, immediately before consumption.
 Validated with:
 
 ```bash
-cd phase4-coordinator && go test -count=1 ./internal/billing -run 'TestSPEC022(DuplicateVerifiedReceiptAfterSettlementDoesNotDoublePay|ConcurrentSettlementWorkersSettleVerifiedRowOnce|PayoutClaimRejectsManualReadyRowWithoutVerifiedSources|PayoutClaimRevalidatesReadyRowTotals|SettledSourceMoneyFieldsAreImmutable|PayoutClaimRejectsForgedSourceRows|PayoutClaimRevalidatesSourceRows|PayoutClaimRecomputesMixedSources|PayoutClaimReleasesRemainderBelowMinimum)'
+cd phase4-coordinator && go test -count=1 ./internal/billing -run 'TestSPEC022(DuplicateVerifiedReceiptAfterSettlementDoesNotDoublePay|ConcurrentSettlementWorkersSettleVerifiedRowOnce|PayoutClaimRejectsManualReadyRowWithoutVerifiedSources|PayoutClaimRevalidatesReadyRowTotals|SettledSourceMoneyFieldsAreImmutable|SettlementTransitionCannotMutateMoney|PayoutClaimRejectsForgedSourceRows|PayoutClaimRevalidatesSourceRows|PayoutClaimRecomputesMixedSources|PayoutClaimReleasesRemainderBelowMinimum)'
 cd phase4-coordinator && go test -count=1 ./internal/billing
 cd phase4-coordinator && go test -count=1 ./...
 git diff --check

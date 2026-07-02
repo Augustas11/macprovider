@@ -415,7 +415,7 @@ BEFORE UPDATE OF prompt_tokens, completion_tokens, estimated_completion_tokens,
                  usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
                  global_multiplier_ppm, gross_credits, provider_share_bps,
                  provider_credits, fault_flag ON ledger_request_credits
-WHEN OLD.settled = 1
+WHEN (OLD.settled = 1 OR NEW.settled = 1)
   AND (
       COALESCE(OLD.prompt_tokens, -1) != COALESCE(NEW.prompt_tokens, -1)
       OR COALESCE(OLD.completion_tokens, -1) != COALESCE(NEW.completion_tokens, -1)
@@ -431,6 +431,16 @@ WHEN OLD.settled = 1
   )
 BEGIN
     SELECT RAISE(ABORT, 'settled ledger_request_credits money fields are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_lrc_settled_link_immutable
+BEFORE UPDATE OF settled, settlement_id ON ledger_request_credits
+WHEN OLD.settled = 1
+  AND (
+      OLD.settled != NEW.settled
+      OR COALESCE(OLD.settlement_id, -1) != COALESCE(NEW.settlement_id, -1)
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'settled ledger_request_credits settlement link is immutable');
 END;
 `)
 	return err

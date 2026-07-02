@@ -532,11 +532,11 @@ UPDATE settlement_attempt_outputs
 	if claimed {
 		t.Fatal("claim succeeded after source row became non-payable")
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ?`, payoutID); got != 0 {
-		t.Fatalf("payout rows after fully invalid revalidation=%d want 0", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ? AND status='voided'`, payoutID); got != 1 {
+		t.Fatalf("voided payout rows after fully invalid revalidation=%d want 1", got)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 0 AND settlement_id IS NULL`, input.RequestID); got != 1 {
-		t.Fatalf("released invalid source rows=%d want 1", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 1 AND settlement_id = ?`, input.RequestID, payoutID); got != 1 {
+		t.Fatalf("immutable invalid source rows=%d want 1", got)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE run_type='spec_007_claim' AND status='failed'`); got != 1 {
 		t.Fatalf("failed claim audit rows=%d want 1", got)
@@ -572,8 +572,8 @@ INSERT INTO ledger_payout_ready (
 	if claimed {
 		t.Fatal("manual source-less payout claim succeeded")
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ?`, payoutID); got != 0 {
-		t.Fatalf("manual source-less payout rows=%d want 0", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ? AND status='voided'`, payoutID); got != 1 {
+		t.Fatalf("manual source-less voided payout rows=%d want 1", got)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE run_type='spec_007_claim' AND status='failed'`); got != 1 {
 		t.Fatalf("failed manual source-less claim audits=%d want 1", got)
@@ -656,6 +656,19 @@ UPDATE ledger_request_credits
 	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != 500 {
 		t.Fatalf("settled source provider credits=%d want 500", got)
 	}
+	if _, err := store.db.Exec(`
+UPDATE ledger_request_credits
+   SET settlement_id = settlement_id + 100
+ WHERE request_id = ?`, input.RequestID); err == nil {
+		t.Fatal("settled source settlement link update succeeded")
+	}
+	manualPayoutID := insertSPEC022ManualPayoutReady(t, store.db, input.ProviderID, windowStart.AddDate(0, 0, 7), windowEnd.AddDate(0, 0, 7), 1, 500, 500, "repoint-settled-source")
+	if _, err := store.db.Exec(`
+UPDATE ledger_request_credits
+   SET settlement_id = ?
+ WHERE request_id = ?`, manualPayoutID, input.RequestID); err == nil {
+		t.Fatal("settled source repoint succeeded")
+	}
 	claimed, err := store.ClaimPayoutReady(context.Background(), payoutID, 900, "external-mutated-source", "USDC")
 	if err != nil {
 		t.Fatal(err)
@@ -669,6 +682,45 @@ UPDATE ledger_request_credits
 	}
 	if !claimed {
 		t.Fatal("claim with original verified source amount failed")
+	}
+}
+
+func TestSPEC022SettlementTransitionCannotMutateMoney(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	input.RequestID = input.RequestID + "-transition-mutation"
+	input.RouteSnapshot.RequestID = input.RequestID
+	_, store := newRequestAndBillingStores(t)
+	seedSettlementReceiptEvidence(t, store, input)
+	insertSPEC022LedgerCredit(t, store.db, input, 500)
+	markSPEC022ReceiptVerified(t, store.db, input)
+	windowStart, windowEnd := settlementWindowForInput(input)
+	payoutID := insertSPEC022ManualPayoutReady(t, store.db, input.ProviderID, windowStart, windowEnd, 1, 900, 900, "transition-mutation")
+
+	if _, err := store.db.Exec(`
+UPDATE ledger_request_credits
+   SET settled = 1,
+       settlement_id = ?,
+       gross_credits = 900,
+       provider_credits = 900
+ WHERE request_id = ?`, payoutID, input.RequestID); err == nil {
+		t.Fatal("settlement transition with money mutation succeeded")
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ? AND settled = 0 AND settlement_id IS NULL`, input.RequestID); got != 500 {
+		t.Fatalf("unsettled source provider credits after failed transition=%d want 500", got)
+	}
+	claimed, err := store.ClaimPayoutReady(context.Background(), payoutID, 900, "external-transition-mutation", "USDC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("claim with failed forged transition succeeded")
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ? AND status='voided'`, payoutID); got != 1 {
+		t.Fatalf("voided transition-mutation payout rows=%d want 1", got)
 	}
 }
 
@@ -726,11 +778,17 @@ func TestSPEC022PayoutClaimRejectsForgedSourceRows(t *testing.T) {
 			if claimed {
 				t.Fatal("forged source payout claim succeeded")
 			}
-			if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ?`, payoutID); got != 0 {
-				t.Fatalf("forged source payout rows=%d want 0", got)
+			if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ? AND status='voided'`, payoutID); got != 1 {
+				t.Fatalf("voided forged source payout rows=%d want 1", got)
 			}
-			if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 0 AND settlement_id IS NULL`, input.RequestID); got != 1 {
-				t.Fatalf("released forged source rows=%d want 1", got)
+			if tc.payoutProvider == "" {
+				if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 0 AND settlement_id IS NULL`, input.RequestID); got != 1 {
+					t.Fatalf("released unsettled forged source rows=%d want 1", got)
+				}
+			} else {
+				if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 1 AND settlement_id = ?`, input.RequestID, payoutID); got != 1 {
+					t.Fatalf("immutable settled forged source rows=%d want 1", got)
+				}
 			}
 		})
 	}
@@ -766,11 +824,11 @@ UPDATE ledger_request_credits
 	if claimed {
 		t.Fatal("claim succeeded after observe source row became non-payable")
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ?`, payoutID); got != 0 {
-		t.Fatalf("payout rows after observe revalidation=%d want 0", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ? AND status='voided'`, payoutID); got != 1 {
+		t.Fatalf("voided payout rows after observe revalidation=%d want 1", got)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 0 AND settlement_id IS NULL`, input.RequestID); got != 1 {
-		t.Fatalf("released observe source rows=%d want 1", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 1 AND settlement_id = ?`, input.RequestID, payoutID); got != 1 {
+		t.Fatalf("immutable observe source rows=%d want 1", got)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE run_type='spec_007_claim' AND status='failed'`); got != 1 {
 		t.Fatalf("failed observe claim audit rows=%d want 1", got)
@@ -821,11 +879,11 @@ UPDATE settlement_attempt_outputs
 	if claimed {
 		t.Fatal("claim succeeded with stale mixed total")
 	}
-	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE id = ? AND status='ready'`, payoutID); got != 500 {
-		t.Fatalf("recomputed payout provider credits=%d want 500", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ? AND status='voided'`, payoutID); got != 1 {
+		t.Fatalf("voided mixed-source payout rows=%d want 1", got)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 0 AND settlement_id IS NULL`, first.RequestID); got != 1 {
-		t.Fatalf("invalid source release rows=%d want 1", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 1 AND settlement_id = ?`, first.RequestID, payoutID); got != 1 {
+		t.Fatalf("immutable invalid mixed source rows=%d want 1", got)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 1 AND settlement_id = ?`, second.RequestID, payoutID); got != 1 {
 		t.Fatalf("valid source retained rows=%d want 1", got)
@@ -834,8 +892,8 @@ UPDATE settlement_attempt_outputs
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !claimed {
-		t.Fatal("claim with recomputed valid total failed")
+	if claimed {
+		t.Fatal("claim with voided mixed-source payout succeeded")
 	}
 }
 
@@ -880,11 +938,11 @@ UPDATE settlement_attempt_outputs
 	if claimed {
 		t.Fatal("claim succeeded with stale below-minimum remainder")
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ?`, payoutID); got != 0 {
-		t.Fatalf("below-minimum payout rows=%d want 0", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ? AND status='voided'`, payoutID); got != 1 {
+		t.Fatalf("voided below-minimum payout rows=%d want 1", got)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id IN (?, ?) AND settled = 0 AND settlement_id IS NULL`, first.RequestID, second.RequestID); got != 2 {
-		t.Fatalf("released source rows=%d want 2", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id IN (?, ?) AND settled = 1 AND settlement_id = ?`, first.RequestID, second.RequestID, payoutID); got != 2 {
+		t.Fatalf("immutable below-minimum source rows=%d want 2", got)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE run_type='spec_007_claim' AND status='failed'`); got != 1 {
 		t.Fatalf("failed below-minimum claim audit rows=%d want 1", got)

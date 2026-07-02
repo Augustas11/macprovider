@@ -85,9 +85,8 @@ SELECT COUNT(*),
 			grossCredits == payableGross &&
 			providerCredits == payableProvider &&
 			operatorCredits == payableOperator
-		if !sourceSetValid || !payoutMatchesSources {
-			if payableCount != sourceCount {
-				if _, err := tx.ExecContext(ctx, `
+		if !sourceSetValid {
+			if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET settled = 0,
        settlement_id = NULL,
@@ -102,11 +101,27 @@ UPDATE ledger_request_credits
              FROM spec022_payable_request_credits payable
             WHERE payable.id = ledger_request_credits.id
        )
-   )`, now, payoutID, providerID, windowEnd); err != nil {
-					return false, err
-				}
+   )
+   AND settled = 0`, now, payoutID, providerID, windowEnd); err != nil {
+				return false, err
 			}
-			if payableCount > 0 && payableProvider >= minPayoutCredits {
+			if _, err := tx.ExecContext(ctx, `
+UPDATE ledger_payout_ready
+   SET status = 'voided'
+ WHERE id = ?
+   AND status = 'ready'`, payoutID); err != nil {
+				return false, err
+			}
+			if err := recordClaimAudit("failed", fmt.Sprintf("payout %d source credits failed SPEC-022 revalidation", payoutID)); err != nil {
+				return false, err
+			}
+			if err := tx.Commit(); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		if !payoutMatchesSources {
+			if payableProvider >= minPayoutCredits {
 				if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_payout_ready
    SET source_credit_count = ?,
@@ -125,14 +140,10 @@ UPDATE ledger_payout_ready
 				}
 			} else {
 				if _, err := tx.ExecContext(ctx, `
-UPDATE ledger_request_credits
-   SET settled = 0,
-       settlement_id = NULL,
-       updated_at_utc = ?
- WHERE settlement_id = ?`, now, payoutID); err != nil {
-					return false, err
-				}
-				if _, err := tx.ExecContext(ctx, `DELETE FROM ledger_payout_ready WHERE id = ? AND status = 'ready'`, payoutID); err != nil {
+UPDATE ledger_payout_ready
+   SET status = 'voided'
+ WHERE id = ?
+   AND status = 'ready'`, payoutID); err != nil {
 					return false, err
 				}
 			}
