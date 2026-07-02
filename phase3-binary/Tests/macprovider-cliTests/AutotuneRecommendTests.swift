@@ -941,7 +941,7 @@ final class AutotuneRecommendTests: XCTestCase {
             safetySampler: StaticProbeSafetySampler()
         )
 
-        let benchmarks = try await benchmarker.benchmarks(
+        let outcomes = try await benchmarker.benchmarks(
             request: request,
             targetContext: 4_000,
             gateTTFTMS: 3_000,
@@ -949,7 +949,7 @@ final class AutotuneRecommendTests: XCTestCase {
             port: 18080
         )
 
-        XCTAssertNotNil(benchmarks[modelKey])
+        XCTAssertNotNil(outcomes.benchmarks[modelKey])
         XCTAssertEqual(prober.probedModels, [snapshot.path])
     }
 
@@ -1096,6 +1096,157 @@ final class AutotuneRecommendTests: XCTestCase {
 
         XCTAssertNil(staleSince)
         XCTAssertEqual(staleWithDifferentProvider, Optional(Self.date("2026-07-02T00:00:00Z")))
+    }
+
+    // MARK: - Stage1 probe timeout + BenchmarkOutcomes diagnostics (v1.7.5)
+
+    func testStage1ProberDefaultIdleTimeoutIsSafeForLargePrefill() {
+        // Regression guard: v1.7.4 shipped with `TimeInterval(maxTokens)` = 64s,
+        // which idle-timed-out on M-Base 30B-MoE + 3200-token probes before the
+        // first byte arrived. Any value < 200s would re-introduce that bug.
+        XCTAssertGreaterThanOrEqual(Stage1Prober.defaultProbeIdleTimeoutSec, 200)
+    }
+
+    func testStage1ProberClampsSubSecondTimeoutToOne() {
+        // The `max(1, ...)` clamp guards the URLRequest contract (timeoutInterval
+        // must be > 0). Cover the boundary explicitly.
+        let clamped = Stage1Prober(probeIdleTimeoutSec: 0)
+        // Cannot inspect private storage; instead assert Mirror shows the clamp.
+        let mirror = Mirror(reflecting: clamped)
+        let stored = mirror.children.first(where: { $0.label == "probeIdleTimeoutSec" })?.value as? TimeInterval
+        XCTAssertEqual(stored, 1)
+    }
+
+    func testBenchmarksReturnsInfeasibleDiagnostics() async throws {
+        let modelKey = "qwen3-32b"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.bandwidthTier = .a
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let revision = try XCTUnwrap(row.modelRevision)
+        let hub = try tempDir()
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: row.modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        request.benchmarks = [:]
+        let prober = RecordingStage1Prober(results: [
+            snapshot.path: .infeasible(reason: "probe request failed: The request timed out.", nErr: 3),
+        ])
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: resolver,
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: prober,
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 3,
+            port: 18080
+        )
+
+        XCTAssertNil(outcomes.benchmarks[modelKey])
+        XCTAssertEqual(
+            outcomes.diagnostics[modelKey],
+            "probe request failed: The request timed out. (n_err=3)"
+        )
+    }
+
+    func testBenchmarksDiagnosesRowsSkippedByRAMGate() async throws {
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.memoryGB = 8   // < row.minRAMGB + safetyMarginGB
+        request.benchmarks = [:]
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: try tempDir()),
+            runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("must not spawn runner for skipped row") },
+            prober: RecordingStage1Prober(results: [:]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+
+        XCTAssertNil(outcomes.benchmarks[modelKey])
+        let diagnostic = try XCTUnwrap(outcomes.diagnostics[modelKey])
+        XCTAssertTrue(diagnostic.contains("min_ram"))
+        XCTAssertTrue(diagnostic.contains("safety margin"))
+    }
+
+    func testBenchmarksDiagnosesRowsSkippedByBandwidthGate() async throws {
+        let modelKey = "qwen3-32b"
+        var request = try makeRequest(modelKey: modelKey)
+        request.hardware.bandwidthTier = .c  // qwen3-32b needs >= B
+        request.benchmarks = [:]
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: try tempDir()),
+            runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("must not spawn runner") },
+            prober: RecordingStage1Prober(results: [:]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+
+        XCTAssertNil(outcomes.benchmarks[modelKey])
+        let diagnostic = try XCTUnwrap(outcomes.diagnostics[modelKey])
+        XCTAssertTrue(diagnostic.contains("bandwidth tier"))
+        XCTAssertTrue(diagnostic.contains("below minimum"))
+    }
+
+    func testStoredStateJSONIncludesProbeDiagnostics() throws {
+        var result = AutotuneRecommendEngine().recommend(try makeRequest())
+        result.probeDiagnostics = [
+            "qwen3-32b": "bandwidth tier C below minimum B",
+            "gpt-oss-20b": "probe request failed: The request timed out. (n_err=1)",
+        ]
+        let stored = result.storedStateJSON()
+        XCTAssertTrue(stored.contains(#""probe_diagnostics":{"#))
+        XCTAssertTrue(stored.contains(#""gpt-oss-20b":"probe request failed: The request timed out. (n_err=1)""#))
+        XCTAssertTrue(stored.contains(#""qwen3-32b":"bandwidth tier C below minimum B""#))
+        // Deterministic ordering: keys sorted lexicographically.
+        let gptIdx = try XCTUnwrap(stored.range(of: #""gpt-oss-20b""#))
+        let qwenIdx = try XCTUnwrap(stored.range(of: #""qwen3-32b""#))
+        XCTAssertLessThan(gptIdx.lowerBound, qwenIdx.lowerBound)
+    }
+
+    func testStoredStateJSONEmitsEmptyDiagnosticsObjectWhenNone() throws {
+        let result = AutotuneRecommendEngine().recommend(try makeRequest())
+        // Default probeDiagnostics is [:] — JSON must still be valid.
+        let stored = result.storedStateJSON()
+        XCTAssertTrue(stored.contains(#""probe_diagnostics":{}"#))
+        let data = try XCTUnwrap(stored.data(using: .utf8))
+        _ = try JSONSerialization.jsonObject(with: data)  // round-trip parse must not throw
+    }
+
+    func testLastRecommendationStateDecodesProbeDiagnostics() throws {
+        let json = """
+        {"generated_at":"2026-07-02T18:00:00Z","rate_card_version":"v1","demand_rank_version":"v1","candidate_catalog_version":"v1","candidate_catalog_sha256":"abc","benchmark_id":null,"benchmark_generated_at":null,"binary_version":"1.7.5","hardware_identity_hash":"hw","recommended_model":null,"probe_diagnostics":{"qwen3-32b":"tier below minimum"}}
+        """
+        let decoded = try JSONDecoder().decode(LastRecommendationState.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.probeDiagnostics, ["qwen3-32b": "tier below minimum"])
+    }
+
+    func testLastRecommendationStateDecodesOldJSONWithoutProbeDiagnostics() throws {
+        // Backwards-compat: pre-v1.7.5 last-recommendation.json files must still decode.
+        let json = """
+        {"generated_at":"2026-07-02T18:00:00Z","rate_card_version":"v1","demand_rank_version":"v1","candidate_catalog_version":"v1","candidate_catalog_sha256":"abc","benchmark_id":null,"benchmark_generated_at":null,"binary_version":"1.7.4","hardware_identity_hash":"hw","recommended_model":null}
+        """
+        let decoded = try JSONDecoder().decode(LastRecommendationState.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.probeDiagnostics, [String: String]())
     }
 
     private func makeRequest(modelKey: String = "qwen3-coder-30b-a3b-instruct") throws -> AutotuneRecommendRequest {

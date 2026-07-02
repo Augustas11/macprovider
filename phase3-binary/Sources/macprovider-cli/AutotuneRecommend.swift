@@ -833,6 +833,12 @@ struct AutotuneRecommendResult: Equatable {
     var assumedUtilization: Double
     var availabilityHoursPerDay: Int
     var electricityUSDPerKWH: Double?
+    /// modelKey -> reason string for each candidate that did not produce a
+    /// feasible probe. Populated by AutotuneRecommendationBenchmarker and
+    /// attached by the CLI caller after engine.recommend() returns. Persisted
+    /// into last-recommendation.json so post-hoc diagnosis explains WHY
+    /// benchmark_id is null / no eligible paid model was found.
+    var probeDiagnostics: [String: String] = [:]
 }
 
 struct AutotuneRecommendEngine {
@@ -1082,8 +1088,11 @@ extension AutotuneRecommendResult {
     }
 
     func storedStateJSON() -> String {
-        """
-        {"generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"candidate_catalog_sha256":\(candidateCatalogSHA256.jsonEscaped),"benchmark_id":\(benchmarkID?.jsonEscaped ?? "null"),"benchmark_generated_at":\(benchmarkGeneratedAt.map { ISO8601DateFormatter.autotuneInternet.string(from: $0).jsonEscaped } ?? "null"),"binary_version":\(hardware.binaryVersion.jsonEscaped),"hardware_identity_hash":\(hardware.hardwareIdentityHash.jsonEscaped),"recommended_model":\(recommendedModel?.jsonEscaped ?? "null")}
+        let diagnosticsJSON = probeDiagnostics.keys.sorted().map { key in
+            "\(key.jsonEscaped):\(probeDiagnostics[key]!.jsonEscaped)"
+        }.joined(separator: ",")
+        return """
+        {"generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"candidate_catalog_sha256":\(candidateCatalogSHA256.jsonEscaped),"benchmark_id":\(benchmarkID?.jsonEscaped ?? "null"),"benchmark_generated_at":\(benchmarkGeneratedAt.map { ISO8601DateFormatter.autotuneInternet.string(from: $0).jsonEscaped } ?? "null"),"binary_version":\(hardware.binaryVersion.jsonEscaped),"hardware_identity_hash":\(hardware.hardwareIdentityHash.jsonEscaped),"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"probe_diagnostics":{\(diagnosticsJSON)}}
         """
     }
 
@@ -1135,6 +1144,7 @@ struct LastRecommendationState: Decodable, Equatable {
     var binaryVersion: String
     var hardwareIdentityHash: String
     var recommendedModel: String?
+    var probeDiagnostics: [String: String]
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
@@ -1147,6 +1157,7 @@ struct LastRecommendationState: Decodable, Equatable {
         case binaryVersion = "binary_version"
         case hardwareIdentityHash = "hardware_identity_hash"
         case recommendedModel = "recommended_model"
+        case probeDiagnostics = "probe_diagnostics"
     }
 
     init(
@@ -1159,7 +1170,8 @@ struct LastRecommendationState: Decodable, Equatable {
         benchmarkGeneratedAt: Date?,
         binaryVersion: String,
         hardwareIdentityHash: String,
-        recommendedModel: String?
+        recommendedModel: String?,
+        probeDiagnostics: [String: String] = [:]
     ) {
         self.generatedAt = generatedAt
         self.rateCardVersion = rateCardVersion
@@ -1171,6 +1183,7 @@ struct LastRecommendationState: Decodable, Equatable {
         self.binaryVersion = binaryVersion
         self.hardwareIdentityHash = hardwareIdentityHash
         self.recommendedModel = recommendedModel
+        self.probeDiagnostics = probeDiagnostics
     }
 
     init(from decoder: Decoder) throws {
@@ -1190,6 +1203,7 @@ struct LastRecommendationState: Decodable, Equatable {
         binaryVersion = try c.decode(String.self, forKey: .binaryVersion)
         hardwareIdentityHash = try c.decode(String.self, forKey: .hardwareIdentityHash)
         recommendedModel = try c.decodeIfPresent(String.self, forKey: .recommendedModel)
+        probeDiagnostics = try c.decodeIfPresent([String: String].self, forKey: .probeDiagnostics) ?? [:]
     }
 }
 
@@ -1627,6 +1641,23 @@ struct CachedModelArtifactResolver {
     }
 }
 
+/// Outcome of running Stage 1 probes across every eligible candidate row.
+///
+/// `benchmarks` contains only feasible probes (rows admitted into eligibility);
+/// `diagnostics` contains a modelKey -> reason string for every candidate that
+/// returned .infeasible OR was skipped by runtime-status/RAM/tier gates. This is
+/// what the SPEC-023 caller emits to stderr + persists into
+/// last-recommendation.json so the user can see WHY no eligible paid model was
+/// found. Prior to v1.7.5 the .infeasible(reason:nErr:) string was silently
+/// dropped, leaving users with `benchmark_id: null` and no root-cause path.
+struct BenchmarkOutcomes: Equatable {
+    var benchmarks: [String: CandidateBenchmark]
+    /// Ordered modelKey -> single-line diagnostic reason. Deterministic key
+    /// ordering (see `benchmarks(request:...)` iteration) so persisted JSON is
+    /// byte-stable across runs with identical inputs.
+    var diagnostics: [String: String]
+}
+
 struct AutotuneRecommendationBenchmarker {
     var artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
     var runnerFactory: () throws -> CandidateProviderRunner = { try CandidateProviderRunner() }
@@ -1640,14 +1671,23 @@ struct AutotuneRecommendationBenchmarker {
         gateTTFTMS: Int,
         replicates: Int,
         port: Int
-    ) async throws -> [String: CandidateBenchmark] {
+    ) async throws -> BenchmarkOutcomes {
         var results: [String: CandidateBenchmark] = [:]
+        var diagnostics: [String: String] = [:]
         for modelKey in request.candidateCatalog.rows.keys.sorted() {
-            guard let row = request.candidateCatalog.rows[modelKey],
-                  row.runtimeStatus != "blocked",
-                  row.minRAMGB <= request.hardware.memoryGB - AutotuneRecommendEngine.safetyMarginGB,
-                  request.hardware.bandwidthTier.satisfies(minimum: row.minBandwidthTier)
-            else {
+            guard let row = request.candidateCatalog.rows[modelKey] else {
+                continue
+            }
+            if row.runtimeStatus == "blocked" {
+                diagnostics[modelKey] = "catalog row blocked by upstream"
+                continue
+            }
+            if row.minRAMGB > request.hardware.memoryGB - AutotuneRecommendEngine.safetyMarginGB {
+                diagnostics[modelKey] = "min_ram \(row.minRAMGB)GB exceeds \(request.hardware.memoryGB)GB - \(AutotuneRecommendEngine.safetyMarginGB)GB safety margin"
+                continue
+            }
+            if !request.hardware.bandwidthTier.satisfies(minimum: row.minBandwidthTier) {
+                diagnostics[modelKey] = "bandwidth tier \(request.hardware.bandwidthTier.rawValue) below minimum \(row.minBandwidthTier.rawValue)"
                 continue
             }
             do {
@@ -1664,7 +1704,8 @@ struct AutotuneRecommendationBenchmarker {
                 )
                 let after = safetySampler.sample()
                 let safety = ProbeSafetyAssessment.assess(before: before, after: after)
-                if case .feasible(let medianTPS, let p95TTFTMS) = probe {
+                switch probe {
+                case .feasible(let medianTPS, let p95TTFTMS):
                     let generatedAt = clock()
                     results[modelKey] = CandidateBenchmark(
                         modelKey: modelKey,
@@ -1681,12 +1722,20 @@ struct AutotuneRecommendationBenchmarker {
                         modelID: row.modelID,
                         hardwareIdentityHash: request.hardware.hardwareIdentityHash
                     )
+                    if safety.swapDetected || safety.thermalThrottleDetected {
+                        var flags: [String] = []
+                        if safety.swapDetected { flags.append("swap detected") }
+                        if safety.thermalThrottleDetected { flags.append("thermal throttle detected") }
+                        diagnostics[modelKey] = "feasible but " + flags.joined(separator: ", ")
+                    }
+                case .infeasible(let reason, let nErr):
+                    diagnostics[modelKey] = "\(reason) (n_err=\(nErr))"
                 }
             } catch {
                 throw error
             }
         }
-        return results
+        return BenchmarkOutcomes(benchmarks: results, diagnostics: diagnostics)
     }
 }
 
