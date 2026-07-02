@@ -1766,6 +1766,7 @@ func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T)
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.OperatorURL = coordinator.URL
 		cfg.Coordinator.OperatorKey = "operator-key"
+		cfg.Coordinator.ServiceToken = "service-token"
 	}, WithHTTPClient(coordinator.Client()))
 	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
 		AccountID:       accountID,
@@ -1796,8 +1797,8 @@ func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T)
 	if summary.Scanned != 1 || summary.Verified != 1 || summary.Errors != 0 {
 		t.Fatalf("summary=%+v, want one verified reconciliation", summary)
 	}
-	if got := captured.Get("Authorization"); got != "Bearer operator-key" {
-		t.Fatalf("coordinator Authorization=%q want operator key", got)
+	if got := captured.Get("Authorization"); got != "Bearer service-token" {
+		t.Fatalf("coordinator Authorization=%q want service token", got)
 	}
 	got := gatewaySettlementSnapshot(t, dbPath, accountID)
 	if got.usageRows != 1 || got.settledRows != 1 || got.refundedRows != 0 || got.activeRows != 0 {
@@ -1885,12 +1886,12 @@ func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
 		t.Fatalf("decode summary: %v", err)
 	}
-	if summary.Scanned != 3 || summary.Refunded != 1 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Errors != 0 {
-		t.Fatalf("summary=%+v, want refund/hold/404 split", summary)
+	if summary.Scanned != 3 || summary.Refunded != 2 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v, want refund/refund404/hold split", summary)
 	}
 	got := gatewaySettlementSnapshot(t, dbPath, "acct_spec022_reconcile")
-	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 3 || got.activeReserved != 60 {
-		t.Fatalf("settlement snapshot=%+v, want one refund, two held active reservations, and one ordinary active reservation", got)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 2 || got.activeRows != 2 || got.activeReserved != 40 {
+		t.Fatalf("settlement snapshot=%+v, want two refunds, one held active reservation, and one ordinary active reservation", got)
 	}
 	if got := gatewayReservationExpiresAtUnixMSForRequest(t, dbPath, "acct_spec022_reconcile", "req_hold"); got != pendingDeadlineUnixMS {
 		t.Fatalf("held reservation expires_at=%d want %d", got, pendingDeadlineUnixMS)

@@ -19,9 +19,11 @@ could be reconciled only by an operator-triggered admin sweep.
 - Each worker run wraps the shared reconciliation call in the configured
   timeout and batch limit.
 - The admin `/admin/settlement/reconcile` endpoint and the background worker
-  share `ReconcileSettlementHolds`, so verified, refund, hold, coordinator
-  404, and terminal-race behavior stays identical across manual and automatic
-  paths.
+  share `ReconcileSettlementHolds`, so verified, refund, hold,
+  coordinator-missing, and terminal-race behavior stays identical across manual
+  and automatic paths.
+- Coordinator 404 finality for an already marked settlement hold refunds the
+  reservation instead of leaving an unbounded active hold.
 - Worker logging emits structured reconciliation counts when it scans held
   reservations or encounters errors.
 
@@ -50,6 +52,7 @@ Validated with:
 cd phase5-gateway && go test -count=1 ./cmd/gateway -run 'TestRunSettlementReconcilerRunsImmediately|TestRunSettlementReconcilerRunsOnInterval|TestNewHTTPServerAppliesTimeouts'
 cd phase5-gateway && go test -count=1 ./internal/config -run 'TestSettlementReconcileDefaults|TestSettlementReconcileConfigValidation'
 cd phase5-gateway && go test -count=1 ./internal/router -run 'TestSPEC022GatewaySettlementReconcile|TestSPEC022GatewayStreamingSettlementTrailersControlBuyerDebit|TestSPEC022GatewayStreamingNonOKFinalityBoundsHold'
+cd phase4-coordinator && go test -count=1 ./internal/billing -run 'TestSPEC022|TestRequestSettlementFinality|TestSettlementReceiptPendingCanCloseWithValidReceiptBeforeDeadline|TestRecordMissingSettlementReceiptQuarantinesAfterDeadlineAndLateReceiptNoops'
 ```
 
 ## Remaining gap

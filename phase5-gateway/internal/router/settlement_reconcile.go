@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
@@ -62,7 +63,13 @@ func (s *Server) handleSettlementReconcile(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_limit", err.Error())
 		return
 	}
-	summary, err := s.ReconcileSettlementHolds(r.Context(), limit)
+	ctx := r.Context()
+	if timeout := time.Duration(s.cfg.Settlement.ReconcileRequestTimeoutSeconds) * time.Second; timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	summary, err := s.ReconcileSettlementHolds(ctx, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "settlement_reconcile_load_failed", "Could not load active reservations")
 		return
@@ -100,6 +107,9 @@ func (s *Server) ReconcileSettlementHolds(ctx context.Context, limit int) (Settl
 			summary.Refunded++
 		case "held":
 			summary.Held++
+		case "coordinator_404_refunded":
+			summary.Coordinator404++
+			summary.Refunded++
 		case "coordinator_404":
 			summary.Coordinator404++
 			summary.Skipped++
@@ -128,7 +138,13 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 	finality, found, err := s.fetchCoordinatorRequestSettlementFinality(ctx, reservation.AccountID, reservation.RequestID)
 	if err != nil || !found {
 		if !found {
-			return "coordinator_404", nil
+			if err := s.store.RefundReservation(ctx, reservation.AccountID, reservation.RequestID, s.now().Unix()); err != nil {
+				if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+					return "already_terminal", nil
+				}
+				return "", err
+			}
+			return "coordinator_404_refunded", nil
 		}
 		return "", err
 	}
