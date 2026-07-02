@@ -266,7 +266,7 @@ func finalityTokenTotals(finality coordinatorRequestSettlementFinality) (int64, 
 		return 0, 0, 0, fmt.Errorf("coordinator finality total_tokens mismatch")
 	}
 	source := strings.TrimSpace(finality.TokenSource)
-	if source != "" && source != "coordinator_observed" {
+	if source != "coordinator_observed" {
 		return 0, 0, 0, fmt.Errorf("coordinator finality token_source %q is not settlement-capable", source)
 	}
 	return prompt, completion, total, nil

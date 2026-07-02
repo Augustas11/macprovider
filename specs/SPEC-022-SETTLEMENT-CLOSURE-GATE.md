@@ -61,6 +61,24 @@ settlement finality backed by signed, catalog-matching receipt verdicts.
 
 ## Implementation Evidence
 
+- Item 1 streaming money-path closure is covered by a deterministic
+  coordinator/gateway contract pair, not by a live-network run. The coordinator
+  side is `phase4-coordinator/internal/billing/spec022_money_gate_test.go`
+  `TestSPEC022StreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout`:
+  a signed, catalog-matching streaming receipt with a non-empty delivered output
+  prefix creates no provider-positive payable row before verification, then
+  creates verified buyer-debit finality and receipt-bound provider payout
+  eligibility from coordinator-observed usage after verification. The gateway
+  side is `phase5-gateway/internal/router/server_test.go`
+  `TestSPEC022GatewayStreamingReconcileConsumesCoordinatorVerifiedFinality`:
+  a held streaming reservation is settled only from the coordinator internal
+  finality contract and records buyer debit usage with
+  `coordinator_observed` token source. `TestSPEC022StreamingPartialTerminalReceiptsCreateReceiptBoundSettlement`
+  extends that coordinator money-path proof across provider error, buyer cancel,
+  gateway timeout, and upstream disconnect streaming receipts with non-empty
+  output prefixes. `TestSPEC022GatewaySettlementReconcileRejectsMissingTokenSource`
+  proves verified coordinator finality without `coordinator_observed`
+  provenance leaves the buyer hold active instead of creating a debit.
 - `phase5-gateway/internal/config/config.go` exposes
   `settlement.reconcile_enabled`, `settlement.reconcile_interval_s`,
   `settlement.reconcile_batch_limit`, and

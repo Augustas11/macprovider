@@ -527,6 +527,17 @@ func firstSettlementTupleWithTerminal(t *testing.T, fixtures settlementVerifierF
 	return settlementVerifierTupleFixture{}
 }
 
+func settlementTupleByID(t *testing.T, fixtures settlementVerifierFixtures, id string) settlementVerifierTupleFixture {
+	t.Helper()
+	for _, tuple := range fixtures.ReceiptTuples {
+		if tuple.ID == id {
+			return tuple
+		}
+	}
+	t.Fatalf("no settlement tuple with id=%s", id)
+	return settlementVerifierTupleFixture{}
+}
+
 func firstNegativeReceiptForBase(t *testing.T, fixtures settlementVerifierFixtures, baseID string) string {
 	t.Helper()
 	for _, negative := range fixtures.NegativeReceipts {

@@ -288,6 +288,231 @@ func TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout
 	}
 }
 
+func TestSPEC022StreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := settlementTupleByID(t, fixtures, "receipt_tuple_v4_streaming_tool_call_nonzero_prefix")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	input.RouteSnapshot.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersion
+	routeDigest, _, err := input.RouteSnapshot.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Header = settlementHeaderWithCanonicalMutationAndTestSignature(t, input.Header, func(tuple map[string]any) {
+		tuple["route_snapshot_mode"] = RouteSnapshotModeEnforce
+		tuple["route_snapshot_policy_version"] = RouteSnapshotPolicyVersion
+		tuple["route_snapshot_digest"] = routeDigest
+	})
+	if input.OutputPrefixEndByte <= input.OutputPrefixStartByte {
+		t.Fatalf("streaming fixture output prefix [%d,%d) must be non-empty", input.OutputPrefixStartByte, input.OutputPrefixEndByte)
+	}
+	if input.ExpectedUsage.BillableOutputTokens <= 0 || input.ExpectedUsage.DeliveredOutputBytes <= 0 {
+		t.Fatalf("streaming fixture usage=%#v, want partial output usage", input.ExpectedUsage)
+	}
+
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	receiptBoundCredits := insertSPEC022ReceiptBoundLedgerCreditWithStream(t, store.db, input, 100, true)
+	if receiptBoundCredits.ProviderCredits <= 0 {
+		t.Fatalf("receipt-bound provider credits=%d want positive", receiptBoundCredits.ProviderCredits)
+	}
+
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != 0 {
+		t.Fatalf("streaming payable rows before receipt=%d want 0", got)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ? AND stream = 1`, input.RequestID); got != receiptBoundCredits.ProviderCredits+100 {
+		t.Fatalf("streaming pre-receipt provider credits=%d want inflated seed %d", got, receiptBoundCredits.ProviderCredits+100)
+	}
+
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+	state, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: settlementIdentityFromInput(input),
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     pubkey,
+		receiptReceivedUnixMS:     input.ReceiptReceivedUnixMS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SettlementOutcome != SettlementOutcomeVerified || state.ReceiptResult != SettlementReceiptResultValid || !state.Closed {
+		t.Fatalf("state=%#v, want terminal verified streaming receipt", state)
+	}
+
+	finality, found, err := store.RequestSettlementFinality(context.Background(), input.AccountScope, input.RequestID, input.ReceiptReceivedUnixMS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("streaming settlement finality not found")
+	}
+	if finality.Outcome != SettlementOutcomeVerified ||
+		finality.ReceiptResult != SettlementReceiptResultValid ||
+		!finality.Closed ||
+		finality.Mode != RouteSnapshotModeEnforce ||
+		finality.PolicyVersion != input.RouteSnapshot.RouteSnapshotPolicyVersion ||
+		finality.TokenSource != UsageSourceCoordinatorObserved {
+		t.Fatalf("finality=%#v, want enforce verified streaming buyer-debit finality", finality)
+	}
+	if finality.PromptTokens != input.ExpectedUsage.BillableInputTokens ||
+		finality.CompletionTokens != input.ExpectedUsage.BillableOutputTokens ||
+		finality.TotalTokens != input.ExpectedUsage.BillableInputTokens+input.ExpectedUsage.BillableOutputTokens ||
+		finality.TotalTokens <= 0 {
+		t.Fatalf("finality tokens=%#v, want streaming billable usage %#v", finality, input.ExpectedUsage)
+	}
+
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE request_id = ? AND stream = 1`, input.RequestID); got != 1 {
+		t.Fatalf("streaming payable rows after verified receipt=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("streaming payable provider credits=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("streaming ledger provider credits after receipt=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+	}
+	windowStart, windowEnd := settlementWindowForInput(input)
+	if err := store.RunSettlement(context.Background(), SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, windowEnd); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("streaming payout provider credits=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND stream = 1 AND settled = 1`, input.RequestID); got != 1 {
+		t.Fatalf("streaming settled request credit rows=%d want 1", got)
+	}
+}
+
+func TestSPEC022StreamingPartialTerminalReceiptsCreateReceiptBoundSettlement(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	for _, tc := range []struct {
+		name          string
+		tupleID       string
+		terminalState string
+	}{
+		{
+			name:          "provider-error-prefix",
+			tupleID:       "receipt_tuple_v4_provider_error_prefix",
+			terminalState: TerminalStateProviderError,
+		},
+		{
+			name:          "buyer-cancel-prefix",
+			tupleID:       "receipt_tuple_v4_buyer_cancel_prefix",
+			terminalState: TerminalStateBuyerCancel,
+		},
+		{
+			name:          "gateway-timeout-prefix",
+			tupleID:       "receipt_tuple_v4_gateway_timeout_prefix",
+			terminalState: TerminalStateGatewayTimeout,
+		},
+		{
+			name:          "upstream-disconnect-prefix",
+			tupleID:       "receipt_tuple_v4_upstream_disconnect_prefix",
+			terminalState: TerminalStateUpstreamTransportDisconnect,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tuple := settlementTupleByID(t, fixtures, tc.tupleID)
+			input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+			input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+			input.RouteSnapshot.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersion
+			routeDigest, _, err := input.RouteSnapshot.Digest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			input.Header = settlementHeaderWithCanonicalMutationAndTestSignature(t, input.Header, func(tuple map[string]any) {
+				tuple["route_snapshot_mode"] = RouteSnapshotModeEnforce
+				tuple["route_snapshot_policy_version"] = RouteSnapshotPolicyVersion
+				tuple["route_snapshot_digest"] = routeDigest
+			})
+			if input.TerminalState != tc.terminalState {
+				t.Fatalf("terminal_state=%q want %q", input.TerminalState, tc.terminalState)
+			}
+			if input.OutputPrefixEndByte <= input.OutputPrefixStartByte {
+				t.Fatalf("partial terminal fixture output prefix [%d,%d) must be non-empty", input.OutputPrefixStartByte, input.OutputPrefixEndByte)
+			}
+			if input.ExpectedUsage.BillableOutputTokens <= 0 || input.ExpectedUsage.DeliveredOutputBytes <= 0 {
+				t.Fatalf("partial terminal usage=%#v, want delivered output usage", input.ExpectedUsage)
+			}
+
+			_, store := newRequestAndBillingStores(t)
+			createSettlementReceiptAuditLog(t, store.db)
+			seedSettlementReceiptEvidence(t, store, input)
+			receiptBoundCredits := insertSPEC022ReceiptBoundLedgerCreditWithStream(t, store.db, input, 100, true)
+			if receiptBoundCredits.ProviderCredits <= 0 {
+				t.Fatalf("receipt-bound provider credits=%d want positive", receiptBoundCredits.ProviderCredits)
+			}
+			if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != 0 {
+				t.Fatalf("partial terminal payable rows before receipt=%d want 0", got)
+			}
+			if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ? AND stream = 1`, input.RequestID); got != receiptBoundCredits.ProviderCredits+100 {
+				t.Fatalf("partial terminal pre-receipt provider credits=%d want inflated seed %d", got, receiptBoundCredits.ProviderCredits+100)
+			}
+
+			setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+			state, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+				SettlementReceiptIdentity: settlementIdentityFromInput(input),
+				Header:                    input.Header,
+				ProviderReceiptPubkey:     pubkey,
+				receiptReceivedUnixMS:     input.ReceiptReceivedUnixMS,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.SettlementOutcome != SettlementOutcomeVerified ||
+				state.ReceiptResult != SettlementReceiptResultValid ||
+				!state.Closed ||
+				state.TerminalState != tc.terminalState {
+				t.Fatalf("state=%#v, want terminal verified partial streaming receipt", state)
+			}
+
+			finality, found, err := store.RequestSettlementFinality(context.Background(), input.AccountScope, input.RequestID, input.ReceiptReceivedUnixMS)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !found {
+				t.Fatal("partial terminal settlement finality not found")
+			}
+			if finality.Outcome != SettlementOutcomeVerified ||
+				finality.ReceiptResult != SettlementReceiptResultValid ||
+				!finality.Closed ||
+				finality.Mode != RouteSnapshotModeEnforce ||
+				finality.PolicyVersion != input.RouteSnapshot.RouteSnapshotPolicyVersion ||
+				finality.TokenSource != UsageSourceCoordinatorObserved {
+				t.Fatalf("finality=%#v, want enforce verified partial streaming buyer-debit finality", finality)
+			}
+			if finality.PromptTokens != input.ExpectedUsage.BillableInputTokens ||
+				finality.CompletionTokens != input.ExpectedUsage.BillableOutputTokens ||
+				finality.TotalTokens != input.ExpectedUsage.BillableInputTokens+input.ExpectedUsage.BillableOutputTokens ||
+				finality.TotalTokens <= 0 {
+				t.Fatalf("finality tokens=%#v, want partial streaming billable usage %#v", finality, input.ExpectedUsage)
+			}
+
+			if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE request_id = ? AND stream = 1`, input.RequestID); got != 1 {
+				t.Fatalf("partial terminal payable rows after verified receipt=%d want 1", got)
+			}
+			if got := scalar(t, store.db, `SELECT provider_credits FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != receiptBoundCredits.ProviderCredits {
+				t.Fatalf("partial terminal payable provider credits=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+			}
+			if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != receiptBoundCredits.ProviderCredits {
+				t.Fatalf("partial terminal ledger provider credits after receipt=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+			}
+
+			windowStart, windowEnd := settlementWindowForInput(input)
+			if err := store.RunSettlement(context.Background(), SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, windowEnd); err != nil {
+				t.Fatal(err)
+			}
+			if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != receiptBoundCredits.ProviderCredits {
+				t.Fatalf("partial terminal payout provider credits=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+			}
+			if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND stream = 1 AND settled = 1`, input.RequestID); got != 1 {
+				t.Fatalf("partial terminal settled request credit rows=%d want 1", got)
+			}
+		})
+	}
+}
+
 func TestSPEC022ReceiptBeforeHotPathLedgerStillPaysReceiptBoundCredits(t *testing.T) {
 	fixtures := loadSettlementVerifierFixtures(t)
 	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
@@ -1194,6 +1419,11 @@ INSERT INTO ledger_operator_credits (
 
 func insertSPEC022ReceiptBoundLedgerCredit(t *testing.T, db *sql.DB, input SettlementVerifyInput, providerCreditInflation int64) BilledRow {
 	t.Helper()
+	return insertSPEC022ReceiptBoundLedgerCreditWithStream(t, db, input, providerCreditInflation, false)
+}
+
+func insertSPEC022ReceiptBoundLedgerCreditWithStream(t *testing.T, db *sql.DB, input SettlementVerifyInput, providerCreditInflation int64, stream bool) BilledRow {
+	t.Helper()
 	prompt := input.ExpectedUsage.BillableInputTokens
 	completion := input.ExpectedUsage.BillableOutputTokens
 	result := ComputeCredits(
@@ -1211,6 +1441,10 @@ func insertSPEC022ReceiptBoundLedgerCredit(t *testing.T, db *sql.DB, input Settl
 		t.Fatalf("provider credit inflation overflow: base=%d inflation=%d", result.ProviderCredits, providerCreditInflation)
 	}
 	ts := time.UnixMilli(input.TerminalStateTSUnixMS).UTC()
+	streamInt := 0
+	if stream {
+		streamInt = 1
+	}
 	_, err := db.Exec(`
 INSERT INTO ledger_request_credits (
     request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
@@ -1219,13 +1453,14 @@ INSERT INTO ledger_request_credits (
     global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
     fault_flag, settlement_account_scope_hash, settlement_policy_mode,
     settlement_policy_version, recovery_source, created_at_utc
-) VALUES (?, ?, ?, 'assigned', ?, ?, 200, 0, ?, ?, NULL, 'provider_reported',
+) VALUES (?, ?, ?, 'assigned', ?, ?, 200, ?, ?, ?, NULL, 'provider_reported',
           1000000, 1000000, 1000000, ?, 10000, ?, 'none', ?, 'enforce', ?, 'hot_path', ?)`,
 		input.RequestID,
 		input.AttemptN,
 		input.ProviderID,
 		ts.Format(time.RFC3339Nano),
 		input.RouteSnapshot.ModelID,
+		streamInt,
 		prompt,
 		completion,
 		inflatedProviderCredits,
