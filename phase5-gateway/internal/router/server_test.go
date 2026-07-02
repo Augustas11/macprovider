@@ -3020,11 +3020,46 @@ func TestUsageFromJSONValidatesProviderReportedUsage(t *testing.T) {
 		})
 	}
 	usage, ok, err := usageFromJSON([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2}}`), 10, 10)
-	if err != nil || !ok || usage.TotalTokens != 3 {
-		t.Fatalf("valid usage = %#v ok=%v err=%v, want total 3", usage, ok, err)
+	if err != nil || !ok || usage.TotalTokens != 3 || usage.CachedPromptTokens != 0 {
+		t.Fatalf("valid usage = %#v ok=%v err=%v, want total 3 and cached 0", usage, ok, err)
+	}
+	usage, ok, err = usageFromJSON([]byte(`{"usage":{"prompt_tokens":10,"cached_prompt_tokens":4,"completion_tokens":2}}`), 20, 10)
+	if err != nil || !ok || usage.CachedPromptTokens != 4 || usage.TotalTokens != 12 {
+		t.Fatalf("valid cached usage = %#v ok=%v err=%v, want cached 4 total 12", usage, ok, err)
+	}
+	if _, ok, err := usageFromJSON([]byte(`{"usage":{"prompt_tokens":3,"cached_prompt_tokens":4,"completion_tokens":2}}`), 20, 10); !ok || err == nil {
+		t.Fatalf("cached_prompt_tokens above prompt ok=%v err=%v, want validation error", ok, err)
 	}
 	if _, ok, err := usageFromJSON([]byte(`{"usage":null}`), 10, 10); ok || err != nil {
 		t.Fatalf("usage null ok=%v err=%v, want absent usage", ok, err)
+	}
+}
+
+func TestUsageBodyWithCachedPromptTokensAddsBuyerVisibleField(t *testing.T) {
+	body := []byte(`{"id":"cmpl","usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`)
+	updated := usageBodyWithCachedPromptTokens(body, 4)
+	var out struct {
+		Usage tokenUsage `json:"usage"`
+	}
+	if err := json.Unmarshal(updated, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Usage.CachedPromptTokens != 4 || out.Usage.TotalTokens != 12 {
+		t.Fatalf("updated usage = %+v, want cached 4 and total 12", out.Usage)
+	}
+}
+
+func TestUsageBodyWithTokenUsageSynthesizesCachedPromptTokensWhenUsageAbsent(t *testing.T) {
+	body := []byte(`{"id":"cmpl","choices":[{"message":{"content":"ok"}}]}`)
+	updated := usageBodyWithTokenUsage(body, tokenUsage{PromptTokens: 7, CompletionTokens: 3, TotalTokens: 10})
+	var out struct {
+		Usage tokenUsage `json:"usage"`
+	}
+	if err := json.Unmarshal(updated, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Usage.PromptTokens != 7 || out.Usage.CachedPromptTokens != 0 || out.Usage.CompletionTokens != 3 || out.Usage.TotalTokens != 10 {
+		t.Fatalf("updated usage = %+v, want synthesized cached_prompt_tokens=0", out.Usage)
 	}
 }
 

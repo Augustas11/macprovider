@@ -1032,6 +1032,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private static func usage(_ completion: CompletionResult) -> [String: Any] {
         [
             "prompt_tokens": completion.promptTokens,
+            "cached_prompt_tokens": 0,
             "completion_tokens": completion.completionTokens,
             "total_tokens": completion.promptTokens + completion.completionTokens,
             "macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull(),

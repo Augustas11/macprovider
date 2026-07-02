@@ -45,6 +45,12 @@ func TestBillingMigration(t *testing.T) {
 			t.Fatalf("missing request_log index %s", idx)
 		}
 	}
+	if !columnExists(t, db, "ledger_request_credits", "cached_prompt_tokens") {
+		t.Fatalf("missing ledger_request_credits.cached_prompt_tokens")
+	}
+	if !columnExists(t, db, "ledger_request_credits", "prompt_cache_hit_rate_per_mtok") {
+		t.Fatalf("missing ledger_request_credits.prompt_cache_hit_rate_per_mtok")
+	}
 }
 
 func TestBillingMigration_ReplacesSettledMoneyTrigger(t *testing.T) {
@@ -147,6 +153,45 @@ func TestWriteHotPath_ACID(t *testing.T) {
 	}
 }
 
+func TestWriteHotPath_StickyHitPersistsCachedPromptDiscount(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	cached := int64(400)
+	input.CachedPromptTokens = &cached
+	input.StickyResult = "hit"
+	input.RateEntry.PromptCacheHitCreditsPerMtok = 250000
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	var gotCached, gross, provider int64
+	if err := store.db.QueryRow(`
+SELECT cached_prompt_tokens, gross_credits, provider_credits
+  FROM ledger_request_credits
+ WHERE request_id = ? AND quarantined = 0`, row.RequestID).Scan(&gotCached, &gross, &provider); err != nil {
+		t.Fatal(err)
+	}
+	if gotCached != cached || gross != 4700 || provider != 4230 {
+		t.Fatalf("cached/gross/provider=%d/%d/%d want 400/4700/4230", gotCached, gross, provider)
+	}
+}
+
+func TestWriteHotPath_AmbiguousPositiveCacheQuarantinesCredit(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	cached := int64(400)
+	input.CachedPromptTokens = &cached
+	input.StickyResult = "miss"
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'ambiguous_cache' AND gross_credits = 0`, row.RequestID); got != 1 {
+		t.Fatalf("ambiguous-cache quarantine rows=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_operator_credits`); got != 0 {
+		t.Fatalf("operator rows=%d want 0 for quarantined cache claim", got)
+	}
+}
+
 func TestWriteHotPath_503_NoLedgerRows(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)
@@ -184,6 +229,96 @@ func TestWriteRequestLogWithIdentity_AllowsRecoveryAfterHotPathFailure(t *testin
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND provider_id = ? AND quarantined = 0`, row.RequestID, input.ProviderID); got != 1 {
 		t.Fatalf("recovered ledger rows=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_ReplaysCachedPromptTokensFromRequestLogFallback(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	cfg.RateCard["model-a"] = RateCardEntry{
+		PromptCreditsPerMtok:         1000000,
+		PromptCacheHitCreditsPerMtok: 250000,
+		CompletionCreditsPerMtok:     2000000,
+	}
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, cached, completion := int64(10), int64(4), int64(2)
+	row := requestlog.Row{
+		TSUtc: time.Unix(200, 0).UTC(), RequestID: "fallback-cache-hit", Model: "model-a", ProviderAssignedID: "assigned-a",
+		PromptTokens: &prompt, CachedPromptTokens: &cached, CompletionTokens: &completion, Status: 200, Stream: false,
+		BuyerIP: "127.0.0.1",
+	}
+	input := HotPathInput{
+		RequestID: row.RequestID, AttemptN: 0, ProviderAssignedID: row.ProviderAssignedID,
+		ProviderID: "provider-a", Model: row.Model, Status: row.Status, Stream: row.Stream,
+		TSUtc: row.TSUtc, PromptTokens: &prompt, CachedPromptTokens: &cached, CompletionTokens: &completion,
+		ConfigSnapshotID: snapshotID, RateEntry: RateFor(cfg.RateCard, row.Model),
+		MultiplierPPM: ParseMultiplierPPM(cfg.GlobalMultiplier), ProviderShareBps: ParseShareBps(cfg.ProviderShare),
+	}
+	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	var gotCached, gross int64
+	if err := store.db.QueryRow(`SELECT cached_prompt_tokens, gross_credits FROM ledger_request_credits WHERE request_id = ? AND quarantined = 0`, row.RequestID).Scan(&gotCached, &gross); err != nil {
+		t.Fatal(err)
+	}
+	if gotCached != cached || gross != 11 {
+		t.Fatalf("recovered cached/gross=%d/%d want 4/11", gotCached, gross)
+	}
+}
+
+func TestRecoverLedger_RecreatesCacheQuarantineFromRequestLogFallback(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "fallback-cache-quarantine"
+	row.CacheQuarantineReason = "ambiguous_cache"
+	input.RequestID = row.RequestID
+	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'ambiguous_cache' AND gross_credits = 0`, row.RequestID); got != 1 {
+		t.Fatalf("cache quarantine rows=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_RecreatesCacheQuarantineWithByteEstimateProvenance(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "fallback-cache-quarantine-estimated"
+	estimate := int64(7)
+	row.CompletionTokens = nil
+	row.EstimatedCompTokens = &estimate
+	row.CacheQuarantineReason = "ambiguous_cache"
+	input.RequestID = row.RequestID
+	input.CompletionTokens = nil
+	input.EstimatedCompTokens = &estimate
+	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	var usage string
+	var gotEstimate int64
+	if err := store.db.QueryRow(`
+SELECT usage_source, estimated_completion_tokens
+  FROM ledger_request_credits
+ WHERE request_id = ? AND quarantined = 1 AND quarantine_reason = 'ambiguous_cache'`, row.RequestID).Scan(&usage, &gotEstimate); err != nil {
+		t.Fatal(err)
+	}
+	if usage != UsageByteEstimated || gotEstimate != estimate {
+		t.Fatalf("usage/estimate=%s/%d want %s/%d", usage, gotEstimate, UsageByteEstimated, estimate)
 	}
 }
 
@@ -1094,6 +1229,32 @@ func indexExists(t *testing.T, db *sql.DB, table, index string) bool {
 		if name == index {
 			return true
 		}
+	}
+	return false
+}
+
+func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	return false
 }

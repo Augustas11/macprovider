@@ -136,7 +136,7 @@ func (s *Server) forwardWithFailover(
 		// failover callbacks nil.
 		if tr.failoverEligible && tx.onFailoverHit != nil && tx.onFailoverMiss != nil {
 			if !failoverAttempted && !hasPinnedRoute(r.Header) {
-				next, hit := s.failoverCandidate(uuid.NewString(), req, r.Header, state.provider, excluded, state.dailyKey)
+				next, hit := s.failoverCandidate(uuid.NewString(), req, r.Header, state.provider, excluded, state.dailyKey, state)
 				if hit {
 					tx.onFailoverHit(originalRequestID, requestID, dispatched, state, next)
 					failoverAttempted = true

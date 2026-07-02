@@ -146,7 +146,7 @@ func (b *billingRecorder) recordRow(
 	providerAssignedID string,
 	providerID string,
 	status int,
-	promptTok, completionTok *int64,
+	promptTok, cachedPromptTok, completionTok *int64,
 	errMsg, errCode string,
 	retried int,
 	estimatedCompTokens *int64,
@@ -163,26 +163,29 @@ func (b *billingRecorder) recordRow(
 			b.attemptN++
 		}()
 	}
+	recoveryCachedPromptTok, cacheQuarantineReason := requestLogCacheRecoveryFields(cachedPromptTok, promptTok, b.state, attemptN)
 	row := requestlog.Row{
-		TSUtc:               b.startedAt,
-		RequestID:           b.requestID,
-		ExternalRequestID:   b.externalRequestID,
-		AccountID:           b.accountID,
-		Model:               sanitizeRequestLogText(b.model),
-		ProviderAssignedID:  providerAssignedID,
-		PromptTokens:        promptTok,
-		CompletionTokens:    completionTok,
-		EstimatedCompTokens: estimatedCompTokens,
-		LatencyMs:           float64(time.Since(b.startedAt).Milliseconds()),
-		RoutingMs:           float64(b.state.routingDone.Sub(b.startedAt).Milliseconds()),
-		Status:              status,
-		Stream:              b.stream,
-		BuyerIP:             buyerIP(b.req.RemoteAddr),
-		Error:               sanitizeRequestLogText(errMsg),
-		ErrorCode:           errCode,
-		PrefHeader:          sanitizeRequestLogText(b.req.Header.Get("X-MacProvider-Pref")),
-		ProviderHeader:      sanitizeRequestLogText(b.req.Header.Get("X-MacProvider-Provider")),
-		Retried:             retried,
+		TSUtc:                 b.startedAt,
+		RequestID:             b.requestID,
+		ExternalRequestID:     b.externalRequestID,
+		AccountID:             b.accountID,
+		Model:                 sanitizeRequestLogText(b.model),
+		ProviderAssignedID:    providerAssignedID,
+		PromptTokens:          promptTok,
+		CachedPromptTokens:    recoveryCachedPromptTok,
+		CompletionTokens:      completionTok,
+		EstimatedCompTokens:   estimatedCompTokens,
+		LatencyMs:             float64(time.Since(b.startedAt).Milliseconds()),
+		RoutingMs:             float64(b.state.routingDone.Sub(b.startedAt).Milliseconds()),
+		Status:                status,
+		Stream:                b.stream,
+		BuyerIP:               buyerIP(b.req.RemoteAddr),
+		Error:                 sanitizeRequestLogText(errMsg),
+		ErrorCode:             errCode,
+		CacheQuarantineReason: cacheQuarantineReason,
+		PrefHeader:            sanitizeRequestLogText(b.req.Header.Get("X-MacProvider-Pref")),
+		ProviderHeader:        sanitizeRequestLogText(b.req.Header.Get("X-MacProvider-Provider")),
+		Retried:               retried,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
@@ -216,10 +219,13 @@ func (b *billingRecorder) recordRow(
 			Stream:                     row.Stream,
 			TSUtc:                      row.TSUtc,
 			PromptTokens:               promptTok,
+			CachedPromptTokens:         cachedPromptTok,
 			CompletionTokens:           completionTok,
 			EstimatedCompTokens:        estimatedCompTokens,
 			ErrorCode:                  errCode,
 			FaultFlag:                  faultFlag,
+			StickyResult:               b.state.stickyResult,
+			StickyMissReason:           b.state.stickyMissReason,
 			ConfigSnapshotID:           billingSnapshotID,
 			RateEntry:                  billing.RateFor(billingCfg.RateCard, row.Model),
 			MultiplierPPM:              billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
@@ -260,6 +266,7 @@ func (b *billingRecorder) recordRow(
 			Stream:                     row.Stream,
 			TSUtc:                      row.TSUtc,
 			PromptTokens:               promptTok,
+			CachedPromptTokens:         cachedPromptTok,
 			CompletionTokens:           completionTok,
 			EstimatedCompTokens:        estimatedCompTokens,
 			ErrorCode:                  errCode,
@@ -378,7 +385,7 @@ func (b *billingRecorder) logRow(
 	errMsg, errCode string,
 	retried int,
 ) {
-	_ = b.recordRow(providerAssignedID, "", status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
+	_ = b.recordRow(providerAssignedID, "", status, promptTok, nil, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
 }
 
 // logBuyerFailure mirrors the pre-refactor `logBuyerFailure` closure.
@@ -394,7 +401,7 @@ func (b *billingRecorder) logProviderRow(
 	errMsg, errCode string,
 	retried int,
 ) error {
-	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
+	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, nil, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
 }
 
 // logProviderRowWithEstimate mirrors the pre-refactor
@@ -407,7 +414,7 @@ func (b *billingRecorder) logProviderRowWithEstimate(
 	retried int,
 	estimatedCompTokens *int64,
 ) error {
-	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, nil)
+	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, nil, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, nil)
 }
 
 func (b *billingRecorder) logProviderRowWithEstimateAndOutput(
@@ -419,5 +426,17 @@ func (b *billingRecorder) logProviderRowWithEstimateAndOutput(
 	estimatedCompTokens *int64,
 	output *billing.SettlementOutput,
 ) error {
-	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, output)
+	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, nil, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, output)
+}
+
+func (b *billingRecorder) logProviderRowWithCacheEstimateAndOutput(
+	provider pool.Provider,
+	status int,
+	promptTok, cachedPromptTok, completionTok *int64,
+	errMsg, errCode string,
+	retried int,
+	estimatedCompTokens *int64,
+	output *billing.SettlementOutput,
+) error {
+	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, cachedPromptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, output)
 }

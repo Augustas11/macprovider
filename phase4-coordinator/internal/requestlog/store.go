@@ -50,22 +50,24 @@ type Row struct {
 	// across two accounts cannot be attributed back to the correct
 	// gateway account (issue #211, follow-up to #196). Empty for
 	// direct legacy buyer calls without the header.
-	AccountID           string
-	Model               string
-	ProviderAssignedID  string
-	PromptTokens        *int64
-	CompletionTokens    *int64
-	EstimatedCompTokens *int64
-	LatencyMs           float64
-	RoutingMs           float64
-	Status              int
-	Stream              bool
-	BuyerIP             string
-	Error               string
-	ErrorCode           string
-	PrefHeader          string
-	ProviderHeader      string
-	Retried             int
+	AccountID             string
+	Model                 string
+	ProviderAssignedID    string
+	PromptTokens          *int64
+	CachedPromptTokens    *int64
+	CompletionTokens      *int64
+	EstimatedCompTokens   *int64
+	LatencyMs             float64
+	RoutingMs             float64
+	Status                int
+	Stream                bool
+	BuyerIP               string
+	Error                 string
+	ErrorCode             string
+	CacheQuarantineReason string
+	PrefHeader            string
+	ProviderHeader        string
+	Retried               int
 	// AttemptN is the zero-based monotonic attempt ordinal within the
 	// same (AccountID, RequestID) group under SQLite IS semantics
 	// (SPEC-002 v1.5.2 / issue #168). Populated at INSERT time by the
@@ -170,6 +172,7 @@ CREATE TABLE IF NOT EXISTS request_log (
     model                TEXT    NOT NULL,
     provider_assigned_id TEXT    NULL,
     prompt_tokens        INTEGER NULL,
+    cached_prompt_tokens INTEGER NULL,
     completion_tokens    INTEGER NULL,
     estimated_completion_tokens INTEGER NULL,
     total_tokens         INTEGER NULL,
@@ -180,6 +183,7 @@ CREATE TABLE IF NOT EXISTS request_log (
     buyer_ip             TEXT    NOT NULL DEFAULT '',
     error                TEXT    NULL,
     error_code           TEXT    NULL,
+    cache_quarantine_reason TEXT NULL,
     pref_header          TEXT    NULL,
     provider_header      TEXT    NULL,
     retried              INTEGER NOT NULL DEFAULT 0,
@@ -437,6 +441,7 @@ INSERT INTO request_log (
     model,
     provider_assigned_id,
     prompt_tokens,
+    cached_prompt_tokens,
     completion_tokens,
     estimated_completion_tokens,
     total_tokens,
@@ -447,11 +452,12 @@ INSERT INTO request_log (
     buyer_ip,
     error,
     error_code,
+    cache_quarantine_reason,
     pref_header,
     provider_header,
     retried,
     attempt_n
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.TSUtc.UTC().Format(time.RFC3339Nano),
 		row.RequestID,
 		nullString(row.ExternalRequestID),
@@ -459,6 +465,7 @@ INSERT INTO request_log (
 		row.Model,
 		nullString(row.ProviderAssignedID),
 		nullInt64(row.PromptTokens),
+		nullInt64(row.CachedPromptTokens),
 		nullInt64(row.CompletionTokens),
 		nullInt64(row.EstimatedCompTokens),
 		totalTokens,
@@ -469,6 +476,7 @@ INSERT INTO request_log (
 		row.BuyerIP,
 		nullString(row.Error),
 		nullString(row.ErrorCode),
+		nullString(row.CacheQuarantineReason),
 		nullString(row.PrefHeader),
 		nullString(row.ProviderHeader),
 		row.Retried,
@@ -488,6 +496,7 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 	}{
 		{name: "provider_assigned_id", sql: `ALTER TABLE request_log ADD COLUMN provider_assigned_id TEXT NULL`},
 		{name: "prompt_tokens", sql: `ALTER TABLE request_log ADD COLUMN prompt_tokens INTEGER NULL`},
+		{name: "cached_prompt_tokens", sql: `ALTER TABLE request_log ADD COLUMN cached_prompt_tokens INTEGER NULL`},
 		{name: "completion_tokens", sql: `ALTER TABLE request_log ADD COLUMN completion_tokens INTEGER NULL`},
 		{name: "estimated_completion_tokens", sql: `ALTER TABLE request_log ADD COLUMN estimated_completion_tokens INTEGER NULL`},
 		{name: "total_tokens", sql: `ALTER TABLE request_log ADD COLUMN total_tokens INTEGER NULL`},
@@ -498,6 +507,7 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		{name: "buyer_ip", sql: `ALTER TABLE request_log ADD COLUMN buyer_ip TEXT NOT NULL DEFAULT ''`},
 		{name: "error", sql: `ALTER TABLE request_log ADD COLUMN error TEXT NULL`},
 		{name: "error_code", sql: `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`},
+		{name: "cache_quarantine_reason", sql: `ALTER TABLE request_log ADD COLUMN cache_quarantine_reason TEXT NULL`},
 		{name: "pref_header", sql: `ALTER TABLE request_log ADD COLUMN pref_header TEXT NULL`},
 		{name: "provider_header", sql: `ALTER TABLE request_log ADD COLUMN provider_header TEXT NULL`},
 		{name: "retried", sql: `ALTER TABLE request_log ADD COLUMN retried INTEGER NOT NULL DEFAULT 0`},

@@ -1,8 +1,13 @@
 package config
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestModelClassRejectsMembersAndModelsTogether(t *testing.T) {
@@ -85,6 +90,7 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 		t.Fatalf("unexpected rewards defaults: %+v", cfg.Rewards)
 	}
 	if cfg.Rewards.RateCard["default"].PromptCreditsPerMtok != 500000 ||
+		cfg.Rewards.RateCard["default"].EffectivePromptCacheHitCreditsPerMtok() != 500000 ||
 		cfg.Rewards.RateCard["default"].CompletionCreditsPerMtok != 1000000 {
 		t.Fatalf("unexpected default rate card: %+v", cfg.Rewards.RateCard["default"])
 	}
@@ -162,6 +168,61 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	delete(cfg.Rewards.RateCard, "default")
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "rate_card") {
 		t.Fatalf("default rate-card validation err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Rewards.RateCard["default"] = RateCardEntry{
+		PromptCreditsPerMtok:         500000,
+		PromptCacheHitCreditsPerMtok: 600000,
+		CompletionCreditsPerMtok:     1000000,
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "prompt_cache_hit_credits_per_mtok") {
+		t.Fatalf("cache rate above prompt validation err=%v", err)
+	}
+}
+
+func TestRateCardEntryCacheRateDefaultAndExplicitZero(t *testing.T) {
+	var omitted RateCardEntry
+	if err := yaml.Unmarshal([]byte("prompt_credits_per_mtok: 500000\ncompletion_credits_per_mtok: 1000000\n"), &omitted); err != nil {
+		t.Fatal(err)
+	}
+	if got := omitted.EffectivePromptCacheHitCreditsPerMtok(); got != 500000 {
+		t.Fatalf("omitted YAML cache rate=%d want prompt rate", got)
+	}
+
+	var explicitZero RateCardEntry
+	if err := yaml.Unmarshal([]byte("prompt_credits_per_mtok: 500000\nprompt_cache_hit_credits_per_mtok: 0\ncompletion_credits_per_mtok: 1000000\n"), &explicitZero); err != nil {
+		t.Fatal(err)
+	}
+	if got := explicitZero.EffectivePromptCacheHitCreditsPerMtok(); got != 0 {
+		t.Fatalf("explicit zero YAML cache rate=%d want 0", got)
+	}
+
+	var snapshot RateCardEntry
+	if err := json.Unmarshal([]byte(`{"prompt_rate_per_mtok":500000,"prompt_cache_hit_rate_per_mtok":250000,"completion_rate_per_mtok":1000000}`), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.EffectivePromptCacheHitCreditsPerMtok(); got != 250000 {
+		t.Fatalf("snapshot cache rate=%d want 250000", got)
+	}
+}
+
+func TestCoordinatorYAMLExamplesIncludePromptCacheHitRate(t *testing.T) {
+	for _, rel := range []string{
+		"../../coordinator.yaml.example",
+		"../../dist/coordinator.yaml",
+		"../../dist/coordinator.yaml.example",
+	} {
+		t.Run(rel, func(t *testing.T) {
+			b, err := os.ReadFile(filepath.Clean(rel))
+			if err != nil {
+				t.Fatalf("read %s: %v", rel, err)
+			}
+			if !strings.Contains(string(b), "prompt_cache_hit_credits_per_mtok") {
+				t.Fatalf("%s missing prompt_cache_hit_credits_per_mtok", rel)
+			}
+		})
 	}
 }
 

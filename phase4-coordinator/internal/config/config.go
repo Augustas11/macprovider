@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -391,8 +392,102 @@ type LoggingConfig struct {
 }
 
 type RateCardEntry struct {
-	PromptCreditsPerMtok     int64 `yaml:"prompt_credits_per_mtok"`
-	CompletionCreditsPerMtok int64 `yaml:"completion_credits_per_mtok"`
+	PromptCreditsPerMtok         int64 `yaml:"prompt_credits_per_mtok"`
+	PromptCacheHitCreditsPerMtok int64 `yaml:"prompt_cache_hit_credits_per_mtok"`
+	CompletionCreditsPerMtok     int64 `yaml:"completion_credits_per_mtok"`
+
+	promptCacheHitRateSet bool
+}
+
+func (e RateCardEntry) EffectivePromptCacheHitCreditsPerMtok() int64 {
+	if e.promptCacheHitRateSet || e.PromptCacheHitCreditsPerMtok != 0 || e.PromptCreditsPerMtok == 0 {
+		return e.PromptCacheHitCreditsPerMtok
+	}
+	return e.PromptCreditsPerMtok
+}
+
+func (e *RateCardEntry) SetPromptCacheHitCreditsPerMtok(v int64) {
+	e.PromptCacheHitCreditsPerMtok = v
+	e.promptCacheHitRateSet = true
+}
+
+func (e RateCardEntry) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		PromptRatePerMtok         int64 `json:"prompt_rate_per_mtok"`
+		PromptCacheHitRatePerMtok int64 `json:"prompt_cache_hit_rate_per_mtok"`
+		CompletionRatePerMtok     int64 `json:"completion_rate_per_mtok"`
+	}{
+		PromptRatePerMtok:         e.PromptCreditsPerMtok,
+		PromptCacheHitRatePerMtok: e.EffectivePromptCacheHitCreditsPerMtok(),
+		CompletionRatePerMtok:     e.CompletionCreditsPerMtok,
+	})
+}
+
+func (e *RateCardEntry) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		PromptCreditsPerMtok         *int64 `json:"PromptCreditsPerMtok"`
+		PromptRatePerMtok            *int64 `json:"prompt_rate_per_mtok"`
+		PromptCreditsPerMtokSnake    *int64 `json:"prompt_credits_per_mtok"`
+		PromptCacheHitCreditsPerMtok *int64 `json:"PromptCacheHitCreditsPerMtok"`
+		PromptCacheHitRatePerMtok    *int64 `json:"prompt_cache_hit_rate_per_mtok"`
+		PromptCacheHitCreditsSnake   *int64 `json:"prompt_cache_hit_credits_per_mtok"`
+		CompletionCreditsPerMtok     *int64 `json:"CompletionCreditsPerMtok"`
+		CompletionRatePerMtok        *int64 `json:"completion_rate_per_mtok"`
+		CompletionCreditsSnake       *int64 `json:"completion_credits_per_mtok"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.PromptRatePerMtok != nil {
+		e.PromptCreditsPerMtok = *raw.PromptRatePerMtok
+	} else if raw.PromptCreditsPerMtokSnake != nil {
+		e.PromptCreditsPerMtok = *raw.PromptCreditsPerMtokSnake
+	} else if raw.PromptCreditsPerMtok != nil {
+		e.PromptCreditsPerMtok = *raw.PromptCreditsPerMtok
+	}
+	if raw.CompletionRatePerMtok != nil {
+		e.CompletionCreditsPerMtok = *raw.CompletionRatePerMtok
+	} else if raw.CompletionCreditsSnake != nil {
+		e.CompletionCreditsPerMtok = *raw.CompletionCreditsSnake
+	} else if raw.CompletionCreditsPerMtok != nil {
+		e.CompletionCreditsPerMtok = *raw.CompletionCreditsPerMtok
+	}
+	switch {
+	case raw.PromptCacheHitRatePerMtok != nil:
+		e.PromptCacheHitCreditsPerMtok = *raw.PromptCacheHitRatePerMtok
+		e.promptCacheHitRateSet = true
+	case raw.PromptCacheHitCreditsSnake != nil:
+		e.PromptCacheHitCreditsPerMtok = *raw.PromptCacheHitCreditsSnake
+		e.promptCacheHitRateSet = true
+	case raw.PromptCacheHitCreditsPerMtok != nil:
+		e.PromptCacheHitCreditsPerMtok = *raw.PromptCacheHitCreditsPerMtok
+		e.promptCacheHitRateSet = true
+	default:
+		e.PromptCacheHitCreditsPerMtok = e.PromptCreditsPerMtok
+		e.promptCacheHitRateSet = false
+	}
+	return nil
+}
+
+func (e *RateCardEntry) UnmarshalYAML(value *yaml.Node) error {
+	var raw struct {
+		PromptCreditsPerMtok         int64  `yaml:"prompt_credits_per_mtok"`
+		PromptCacheHitCreditsPerMtok *int64 `yaml:"prompt_cache_hit_credits_per_mtok"`
+		CompletionCreditsPerMtok     int64  `yaml:"completion_credits_per_mtok"`
+	}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	e.PromptCreditsPerMtok = raw.PromptCreditsPerMtok
+	e.CompletionCreditsPerMtok = raw.CompletionCreditsPerMtok
+	if raw.PromptCacheHitCreditsPerMtok != nil {
+		e.PromptCacheHitCreditsPerMtok = *raw.PromptCacheHitCreditsPerMtok
+		e.promptCacheHitRateSet = true
+	} else {
+		e.PromptCacheHitCreditsPerMtok = raw.PromptCreditsPerMtok
+		e.promptCacheHitRateSet = false
+	}
+	return nil
 }
 
 type RewardsConfig struct {
@@ -562,8 +657,9 @@ func Default() Config {
 			ProviderShare:    0.90,
 			RateCard: map[string]RateCardEntry{
 				"default": {
-					PromptCreditsPerMtok:     500000,
-					CompletionCreditsPerMtok: 1000000,
+					PromptCreditsPerMtok:         500000,
+					PromptCacheHitCreditsPerMtok: 500000,
+					CompletionCreditsPerMtok:     1000000,
 				},
 			},
 		},
@@ -1039,8 +1135,12 @@ func (c Config) Validate() error {
 		return fmt.Errorf("rewards.rate_card must contain default")
 	}
 	for model, entry := range c.Rewards.RateCard {
-		if entry.PromptCreditsPerMtok < 0 || entry.CompletionCreditsPerMtok < 0 {
+		cacheRate := entry.EffectivePromptCacheHitCreditsPerMtok()
+		if entry.PromptCreditsPerMtok < 0 || entry.CompletionCreditsPerMtok < 0 || cacheRate < 0 {
 			return fmt.Errorf("rewards.rate_card.%s rates must be >= 0", model)
+		}
+		if cacheRate > entry.PromptCreditsPerMtok {
+			return fmt.Errorf("rewards.rate_card.%s prompt_cache_hit_credits_per_mtok must be <= prompt_credits_per_mtok", model)
 		}
 	}
 	seen := map[string]struct{}{}

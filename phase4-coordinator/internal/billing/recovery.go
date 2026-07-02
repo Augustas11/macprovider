@@ -97,8 +97,8 @@ UPDATE ledger_request_credits
 	orphanRows, _ := orphanRes.RowsAffected()
 	rows, err := tx.QueryContext(ctx, `
 SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_assigned_id,
-       rl.prompt_tokens, rl.completion_tokens, rl.estimated_completion_tokens,
-       rl.status, rl.stream, rl.error_code,
+       rl.prompt_tokens, rl.cached_prompt_tokens, rl.completion_tokens, rl.estimated_completion_tokens,
+       rl.status, rl.stream, rl.error_code, rl.cache_quarantine_reason,
        rl.retried,
        -- SPEC-002 v1.5.2 / SPEC-005 v0.3.3 (issue #168): prefer
        -- persisted rl.attempt_n when non-NULL; fall back to the
@@ -127,10 +127,10 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 	for rows.Next() {
 		var rlID int64
 		var tsText, requestID, model, assignedID string
-		var accountID, errorCode sql.NullString
-		var prompt, completion, estimated sql.NullInt64
+		var accountID, errorCode, cacheQuarantineReason sql.NullString
+		var prompt, cached, completion, estimated sql.NullInt64
 		var status, stream, retried, attemptN int
-		if err := rows.Scan(&rlID, &tsText, &requestID, &accountID, &model, &assignedID, &prompt, &completion, &estimated, &status, &stream, &errorCode, &retried, &attemptN); err != nil {
+		if err := rows.Scan(&rlID, &tsText, &requestID, &accountID, &model, &assignedID, &prompt, &cached, &completion, &estimated, &status, &stream, &errorCode, &cacheQuarantineReason, &retried, &attemptN); err != nil {
 			return err
 		}
 		scanned++
@@ -149,7 +149,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 					return err
 				}
 				if !exists {
-					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, nil, nil, errorCode.String, in.Source, "invalid_usage_tokens", now); err != nil {
+					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, nil, nil, nil, errorCode.String, in.Source, "invalid_usage_tokens", now); err != nil {
 						return err
 					}
 					quarantined++
@@ -178,10 +178,30 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			if ambiguousAttempt {
 				reason = "ambiguous_attempt_n"
 			}
-			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), errorCode.String, in.Source, reason, now); err != nil {
+			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), intPtrFromNull(estimated), errorCode.String, in.Source, reason, now); err != nil {
 				return err
 			}
 			quarantined++
+			continue
+		}
+		if cacheQuarantineReason.Valid && cacheQuarantineReason.String != "" {
+			affected, err := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, cacheQuarantineReason.String, now)
+			if err != nil {
+				return err
+			}
+			if affected == 0 {
+				exists, err := ledgerRowExistsForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), intPtrFromNull(estimated), errorCode.String, in.Source, cacheQuarantineReason.String, now); err != nil {
+						return err
+					}
+					quarantined++
+				}
+			}
+			quarantined += affected
 			continue
 		}
 		// Use the tx-bound queryer — at MaxOpenConns(1), calling
@@ -200,7 +220,7 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 					return existsErr
 				}
 				if !exists {
-					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), errorCode.String, in.Source, "missing_config_snapshot", now); err != nil {
+					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), intPtrFromNull(estimated), errorCode.String, in.Source, "missing_config_snapshot", now); err != nil {
 						return err
 					}
 					quarantined++
@@ -209,11 +229,15 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			quarantined += affected
 			continue
 		}
-		var pp, cp *int64
+		var pp, cachedP, cp *int64
 		var ep *int64
 		if prompt.Valid {
 			v := prompt.Int64
 			pp = &v
+		}
+		if cached.Valid {
+			v := cached.Int64
+			cachedP = &v
 		}
 		if completion.Valid {
 			v := completion.Int64
@@ -237,6 +261,7 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			Stream:                     stream == 1,
 			TSUtc:                      ts,
 			PromptTokens:               pp,
+			CachedPromptTokens:         cachedP,
 			CompletionTokens:           cp,
 			EstimatedCompTokens:        ep,
 			ErrorCode:                  errorCode.String,
@@ -249,7 +274,7 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			SettlementPolicyMode:       settlementMode,
 			SettlementPolicyVersion:    settlementVersion,
 		}
-		result := ComputeCredits(pp, cp, ep, usageFor(errorCode.String, ep), FaultNone, input.RateEntry, multiplier, share)
+		result := ComputeCreditsWithCache(pp, cachedP, cp, ep, usageFor(errorCode.String, ep), FaultNone, input.RateEntry, multiplier, share)
 		// SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168): the v0.3.1
 		// "attemptN > 1 unconditionally quarantines" branch is removed.
 		// With persisted monotonic attempt_n (or its byte-identical
@@ -271,7 +296,7 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			continue
 		}
 		if ambiguousAttempt {
-			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, pp, cp, errorCode.String, in.Source, "ambiguous_attempt_n", now); err != nil {
+			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, pp, cp, ep, errorCode.String, in.Source, "ambiguous_attempt_n", now); err != nil {
 				return err
 			}
 			quarantined++
@@ -370,8 +395,8 @@ func (s *Store) StartNightlyReconcile(ctx context.Context, cfg SettlementConfig)
 	}()
 }
 
-func insertQuarantineTx(ctx context.Context, tx *sql.Tx, requestID string, attemptN int, providerID, assignedID string, ts time.Time, model string, status int, stream bool, promptTokens, completionTokens *int64, errorCode, source, reason, now string) error {
-	usage := usageFor(errorCode, nil)
+func insertQuarantineTx(ctx context.Context, tx *sql.Tx, requestID string, attemptN int, providerID, assignedID string, ts time.Time, model string, status int, stream bool, promptTokens, completionTokens, estimatedCompletionTokens *int64, errorCode, source, reason, now string) error {
+	usage := usageFor(errorCode, estimatedCompletionTokens)
 	fault := FaultNone
 	if usage == UsageNullError {
 		fault = FaultNullUsageError
@@ -380,10 +405,10 @@ func insertQuarantineTx(ctx context.Context, tx *sql.Tx, requestID string, attem
 INSERT OR IGNORE INTO ledger_request_credits (
     request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
     status, stream, prompt_tokens, completion_tokens, estimated_completion_tokens,
-    usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
+    usage_source, prompt_rate_per_mtok, prompt_cache_hit_rate_per_mtok, completion_rate_per_mtok,
     global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
     fault_flag, recovery_source, created_at_utc, quarantined, quarantine_reason
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?, 1, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, ?, ?, ?, 1, ?)`,
 		requestID,
 		attemptN,
 		providerID,
@@ -394,6 +419,7 @@ INSERT OR IGNORE INTO ledger_request_credits (
 		boolInt(stream),
 		nullInt64(promptTokens),
 		nullInt64(completionTokens),
+		nullInt64(estimatedCompletionTokens),
 		usage,
 		fault,
 		source,
@@ -404,18 +430,18 @@ INSERT OR IGNORE INTO ledger_request_credits (
 }
 
 func reconcileExistingCreditTx(ctx context.Context, tx *sql.Tx, input HotPathInput, expected BilledRow, now string) (int64, int64, bool, bool, error) {
-	var id, gross, providerCredits, promptRate, completionRate, multiplier, share int64
+	var id, gross, providerCredits, promptRate, promptCacheHitRate, completionRate, multiplier, share int64
 	var usageSource, faultFlag string
-	var estimated sql.NullInt64
+	var cached, estimated sql.NullInt64
 	var quarantined, settled int
 	var settlementID sql.NullInt64
 	err := tx.QueryRowContext(ctx, `
-SELECT id, gross_credits, provider_credits, usage_source, estimated_completion_tokens,
-       prompt_rate_per_mtok, completion_rate_per_mtok, global_multiplier_ppm,
+SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, estimated_completion_tokens,
+       prompt_rate_per_mtok, COALESCE(prompt_cache_hit_rate_per_mtok, prompt_rate_per_mtok), completion_rate_per_mtok, global_multiplier_ppm,
        provider_share_bps, fault_flag, quarantined, settled, settlement_id
   FROM ledger_request_credits
  WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
- LIMIT 1`, input.RequestID, input.AttemptN, input.ProviderID).Scan(&id, &gross, &providerCredits, &usageSource, &estimated, &promptRate, &completionRate, &multiplier, &share, &faultFlag, &quarantined, &settled, &settlementID)
+ LIMIT 1`, input.RequestID, input.AttemptN, input.ProviderID).Scan(&id, &gross, &providerCredits, &usageSource, &cached, &estimated, &promptRate, &promptCacheHitRate, &completionRate, &multiplier, &share, &faultFlag, &quarantined, &settled, &settlementID)
 	if err == sql.ErrNoRows {
 		return 0, 0, false, false, nil
 	}
@@ -426,11 +452,14 @@ SELECT id, gross_credits, provider_credits, usage_source, estimated_completion_t
 		return 0, 0, true, false, nil
 	}
 	recomputed := expected
+	recomputeRateEntry := input.RateEntry
+	recomputeRateEntry.SetPromptCacheHitCreditsPerMtok(promptCacheHitRate)
+	cachedPromptTokens := intPtrFromNull(cached)
 	allowByteEstimated := usageSource == UsageByteEstimated && input.CompletionTokens == nil && estimated.Valid
 	if allowByteEstimated {
-		recomputed = ComputeCredits(input.PromptTokens, input.CompletionTokens, intPtrFromNull(estimated), usageSource, faultFlag, input.RateEntry, input.MultiplierPPM, input.ProviderShareBps)
+		recomputed = ComputeCreditsWithCache(input.PromptTokens, cachedPromptTokens, input.CompletionTokens, intPtrFromNull(estimated), usageSource, faultFlag, recomputeRateEntry, input.MultiplierPPM, input.ProviderShareBps)
 	} else {
-		recomputed = expected
+		recomputed = ComputeCreditsWithCache(input.PromptTokens, cachedPromptTokens, input.CompletionTokens, input.EstimatedCompTokens, usageSource, faultFlag, recomputeRateEntry, input.MultiplierPPM, input.ProviderShareBps)
 	}
 	var operatorCredits sql.NullInt64
 	var operatorRows int64
@@ -438,6 +467,7 @@ SELECT id, gross_credits, provider_credits, usage_source, estimated_completion_t
 		return 0, 0, true, false, err
 	}
 	contractMismatch := promptRate != input.RateEntry.PromptCreditsPerMtok ||
+		promptCacheHitRate != input.RateEntry.EffectivePromptCacheHitCreditsPerMtok() ||
 		completionRate != input.RateEntry.CompletionCreditsPerMtok ||
 		multiplier != input.MultiplierPPM ||
 		share != input.ProviderShareBps

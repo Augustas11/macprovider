@@ -11,13 +11,13 @@ import (
 )
 
 func TestTokenPointersFromUsageObjectPreservesInvalidUsageForBillingFault(t *testing.T) {
-	prompt, completion := tokenPointersFromUsageObject(json.RawMessage(`{"prompt_tokens":-1,"completion_tokens":10}`))
+	prompt, _, completion := tokenPointersFromUsageObject(json.RawMessage(`{"prompt_tokens":-1,"completion_tokens":10}`))
 	if prompt == nil || *prompt != -1 || completion == nil || *completion != 10 {
 		t.Fatalf("invalid usage was not preserved: prompt=%v completion=%v", prompt, completion)
 	}
 	tooLarge := maxRequestLogUsageTokens + 1
 	raw := json.RawMessage(`{"prompt_tokens":1,"completion_tokens":10000001}`)
-	prompt, completion = tokenPointersFromUsageObject(raw)
+	prompt, _, completion = tokenPointersFromUsageObject(raw)
 	if prompt == nil || *prompt != 1 || completion == nil || *completion != tooLarge {
 		t.Fatalf("oversized usage was not preserved: prompt=%v completion=%v", prompt, completion)
 	}

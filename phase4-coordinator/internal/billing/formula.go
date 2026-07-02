@@ -21,18 +21,20 @@ const (
 )
 
 type BilledRow struct {
-	GrossCredits          int64
-	ProviderCredits       int64
-	OperatorCredits       int64
-	UsageSource           string
-	FaultFlag             string
-	PromptTokens          *int64
-	CompletionTokens      *int64
-	EstimatedCompTokens   *int64
-	PromptRatePerMtok     int64
-	CompletionRatePerMtok int64
-	GlobalMultiplierPPM   int64
-	ProviderShareBps      int64
+	GrossCredits              int64
+	ProviderCredits           int64
+	OperatorCredits           int64
+	UsageSource               string
+	FaultFlag                 string
+	PromptTokens              *int64
+	CachedPromptTokens        *int64
+	CompletionTokens          *int64
+	EstimatedCompTokens       *int64
+	PromptRatePerMtok         int64
+	PromptCacheHitRatePerMtok int64
+	CompletionRatePerMtok     int64
+	GlobalMultiplierPPM       int64
+	ProviderShareBps          int64
 }
 
 func RateFor(rateCard map[string]RateCardEntry, model string) RateCardEntry {
@@ -142,6 +144,18 @@ func ComputeCredits(
 	multiplierPPM int64,
 	providerShareBps int64,
 ) BilledRow {
+	return ComputeCreditsWithCache(promptTokens, nil, completionTokens, estimatedCompletionTokens, usageSource, faultFlag, rateEntry, multiplierPPM, providerShareBps)
+}
+
+func ComputeCreditsWithCache(
+	promptTokens, cachedPromptTokens, completionTokens *int64,
+	estimatedCompletionTokens *int64,
+	usageSource string,
+	faultFlag string,
+	rateEntry RateCardEntry,
+	multiplierPPM int64,
+	providerShareBps int64,
+) BilledRow {
 	if usageSource == "" {
 		usageSource = UsageProviderReported
 	}
@@ -149,15 +163,17 @@ func ComputeCredits(
 		faultFlag = FaultNone
 	}
 	row := BilledRow{
-		UsageSource:           usageSource,
-		FaultFlag:             faultFlag,
-		PromptTokens:          promptTokens,
-		CompletionTokens:      completionTokens,
-		EstimatedCompTokens:   estimatedCompletionTokens,
-		PromptRatePerMtok:     rateEntry.PromptCreditsPerMtok,
-		CompletionRatePerMtok: rateEntry.CompletionCreditsPerMtok,
-		GlobalMultiplierPPM:   multiplierPPM,
-		ProviderShareBps:      providerShareBps,
+		UsageSource:               usageSource,
+		FaultFlag:                 faultFlag,
+		PromptTokens:              promptTokens,
+		CachedPromptTokens:        cachedPromptTokens,
+		CompletionTokens:          completionTokens,
+		EstimatedCompTokens:       estimatedCompletionTokens,
+		PromptRatePerMtok:         rateEntry.PromptCreditsPerMtok,
+		PromptCacheHitRatePerMtok: rateEntry.EffectivePromptCacheHitCreditsPerMtok(),
+		CompletionRatePerMtok:     rateEntry.CompletionCreditsPerMtok,
+		GlobalMultiplierPPM:       multiplierPPM,
+		ProviderShareBps:          providerShareBps,
 	}
 	if row.FaultFlag == FaultBreakerQualifying {
 		return row
@@ -169,6 +185,10 @@ func ComputeCredits(
 	prompt := int64(0)
 	if promptTokens != nil {
 		prompt = *promptTokens
+	}
+	cached := int64(0)
+	if cachedPromptTokens != nil {
+		cached = *cachedPromptTokens
 	}
 	completion, completionOK, clampedToEstimate := billableCompletion(row.UsageSource, completionTokens, estimatedCompletionTokens)
 	if !completionOK {
@@ -183,12 +203,25 @@ func ComputeCredits(
 	default:
 		row.UsageSource = UsageProviderReported
 	}
-	if invalidBillableTokenCount(prompt) || invalidBillableTokenCount(completion) {
+	if invalidBillableTokenCount(prompt) || invalidBillableTokenCount(cached) || cached > prompt || invalidBillableTokenCount(completion) {
 		row.FaultFlag = FaultNullUsageError
 		row.UsageSource = UsageNullError
 		return zeroCredits(row)
 	}
-	promptNumerator, ok := checkedMul(prompt, rateEntry.PromptCreditsPerMtok)
+	uncached := prompt - cached
+	uncachedPromptNumerator, ok := checkedMul(uncached, rateEntry.PromptCreditsPerMtok)
+	if !ok {
+		row.FaultFlag = FaultNullUsageError
+		row.UsageSource = UsageNullError
+		return zeroCredits(row)
+	}
+	cachedPromptNumerator, ok := checkedMul(cached, row.PromptCacheHitRatePerMtok)
+	if !ok {
+		row.FaultFlag = FaultNullUsageError
+		row.UsageSource = UsageNullError
+		return zeroCredits(row)
+	}
+	promptNumerator, ok := checkedAdd(uncachedPromptNumerator, cachedPromptNumerator)
 	if !ok {
 		row.FaultFlag = FaultNullUsageError
 		row.UsageSource = UsageNullError
@@ -300,6 +333,7 @@ func zeroCredits(row BilledRow) BilledRow {
 	row.OperatorCredits = 0
 	if row.FaultFlag == FaultNullUsageError {
 		row.PromptTokens = nil
+		row.CachedPromptTokens = nil
 		row.CompletionTokens = nil
 		row.EstimatedCompTokens = nil
 	}

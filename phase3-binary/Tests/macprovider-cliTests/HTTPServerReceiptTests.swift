@@ -155,6 +155,7 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertEqual(response.status, .ok, response.body)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: Any])
         let usage = try XCTUnwrap(json["usage"] as? [String: Any])
+        XCTAssertEqual(usage["cached_prompt_tokens"] as? Int, 0)
         XCTAssertEqual(usage["macprovider_model_hash_observed"] as? String, hash)
     }
 
@@ -171,6 +172,7 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertEqual(response.status, .ok, response.body)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: Any])
         let usage = try XCTUnwrap(json["usage"] as? [String: Any])
+        XCTAssertEqual(usage["cached_prompt_tokens"] as? Int, 0)
         XCTAssertTrue(usage.keys.contains("macprovider_model_hash_observed"))
         XCTAssertTrue(usage["macprovider_model_hash_observed"] is NSNull)
     }

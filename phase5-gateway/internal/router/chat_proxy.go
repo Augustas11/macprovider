@@ -33,9 +33,10 @@ type chatRequest struct {
 }
 
 type tokenUsage struct {
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
-	TotalTokens      int64 `json:"total_tokens"`
+	PromptTokens       int64 `json:"prompt_tokens"`
+	CachedPromptTokens int64 `json:"cached_prompt_tokens"`
+	CompletionTokens   int64 `json:"completion_tokens"`
+	TotalTokens        int64 `json:"total_tokens"`
 }
 
 type usageSubject struct {
@@ -421,7 +422,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	usage, ok, usageErr := usageFromJSON(body, maxUsageTokens, maxTokens)
 	tokenSource := "gateway_estimated"
 	if !ok {
-		usage = tokenUsage{PromptTokens: promptEstimate, CompletionTokens: 0, TotalTokens: promptEstimate}
+		usage = tokenUsage{PromptTokens: promptEstimate, CachedPromptTokens: 0, CompletionTokens: 0, TotalTokens: promptEstimate}
 	} else if usageErr != nil {
 		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_usage", resp.Header) {
 			return
@@ -434,6 +435,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
 		return
 	}
+	body = usageBodyWithTokenUsage(body, usage)
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
@@ -674,6 +676,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					} else if !invalidReportedUsage {
 						reported = &usage
 					}
+					line = sseDataLineWithCachedPromptTokens(line, usage.CachedPromptTokens)
 				} else if !hasChoices {
 					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
 					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
@@ -1536,6 +1539,7 @@ func sseDataValue(line string) (string, bool) {
 //   - Non-enumerated usage subfields: `{"usage":{"total_tokens":10}}`
 //     is not covered by prompt/completion checks but still constitutes
 //     usage accounting on a supposed "standalone" envelope.
+//
 // The strict parser rejects ANY presence of `choices` or `usage`, plus
 // any duplicate top-level key, aligning with SPEC-006 §17.7.1's "no
 // choices field, no usage field" clause literally.
@@ -1804,9 +1808,10 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 		return tokenUsage{}, false, nil
 	}
 	var rawUsage struct {
-		PromptTokens     *int64 `json:"prompt_tokens"`
-		CompletionTokens *int64 `json:"completion_tokens"`
-		TotalTokens      *int64 `json:"total_tokens"`
+		PromptTokens       *int64 `json:"prompt_tokens"`
+		CachedPromptTokens *int64 `json:"cached_prompt_tokens"`
+		CompletionTokens   *int64 `json:"completion_tokens"`
+		TotalTokens        *int64 `json:"total_tokens"`
 	}
 	if err := json.Unmarshal(envelope.Usage, &rawUsage); err != nil {
 		return tokenUsage{}, true, fmt.Errorf("usage object is malformed")
@@ -1816,12 +1821,18 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 	}
 	usage := tokenUsage{}
 	usage.PromptTokens = *rawUsage.PromptTokens
+	if rawUsage.CachedPromptTokens != nil {
+		usage.CachedPromptTokens = *rawUsage.CachedPromptTokens
+	}
 	usage.CompletionTokens = *rawUsage.CompletionTokens
 	if rawUsage.TotalTokens != nil {
 		usage.TotalTokens = *rawUsage.TotalTokens
 	}
-	if usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 {
+	if usage.PromptTokens < 0 || usage.CachedPromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 {
 		return tokenUsage{}, true, fmt.Errorf("usage tokens must be non-negative")
+	}
+	if usage.CachedPromptTokens > usage.PromptTokens {
+		return tokenUsage{}, true, fmt.Errorf("usage cached_prompt_tokens exceeds prompt_tokens")
 	}
 	if usage.PromptTokens > math.MaxInt64-usage.CompletionTokens {
 		return tokenUsage{}, true, fmt.Errorf("usage token total overflows int64")
@@ -1838,6 +1849,89 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 	}
 	usage.TotalTokens = sum
 	return usage, true, nil
+}
+
+func usageBodyWithCachedPromptTokens(body []byte, cachedPromptTokens int64) []byte {
+	updated, ok := usageJSONWithCachedPromptTokens(body, cachedPromptTokens)
+	if !ok {
+		return body
+	}
+	return updated
+}
+
+func usageBodyWithTokenUsage(body []byte, usage tokenUsage) []byte {
+	updated, ok := usageJSONWithCachedPromptTokens(body, usage.CachedPromptTokens)
+	if ok {
+		return updated
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body
+	}
+	usageObject := map[string]int64{
+		"prompt_tokens":        usage.PromptTokens,
+		"cached_prompt_tokens": usage.CachedPromptTokens,
+		"completion_tokens":    usage.CompletionTokens,
+		"total_tokens":         usage.PromptTokens + usage.CompletionTokens,
+	}
+	rawUsage, err := json.Marshal(usageObject)
+	if err != nil {
+		return body
+	}
+	envelope["usage"] = rawUsage
+	updated, err = json.Marshal(envelope)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+func sseDataLineWithCachedPromptTokens(line []byte, cachedPromptTokens int64) []byte {
+	text := string(line)
+	trimmed := strings.TrimRight(text, "\r\n")
+	suffix := text[len(trimmed):]
+	data, ok := sseDataValue(trimmed)
+	if !ok || data == "[DONE]" {
+		return line
+	}
+	updated, ok := usageJSONWithCachedPromptTokens([]byte(data), cachedPromptTokens)
+	if !ok {
+		return line
+	}
+	return []byte("data: " + string(updated) + suffix)
+}
+
+func usageJSONWithCachedPromptTokens(body []byte, cachedPromptTokens int64) ([]byte, bool) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, false
+	}
+	rawUsage, ok := envelope["usage"]
+	if !ok || bytes.Equal(bytes.TrimSpace(rawUsage), []byte("null")) {
+		return nil, false
+	}
+	var usage map[string]json.RawMessage
+	if err := json.Unmarshal(rawUsage, &usage); err != nil {
+		return nil, false
+	}
+	if cachedPromptTokens < 0 {
+		cachedPromptTokens = 0
+	}
+	encoded, err := json.Marshal(cachedPromptTokens)
+	if err != nil {
+		return nil, false
+	}
+	usage["cached_prompt_tokens"] = encoded
+	rawUsage, err = json.Marshal(usage)
+	if err != nil {
+		return nil, false
+	}
+	envelope["usage"] = rawUsage
+	updated, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, false
+	}
+	return updated, true
 }
 
 // completionFromHeader reads the upstream's X-MacProvider-Completion-Tokens
