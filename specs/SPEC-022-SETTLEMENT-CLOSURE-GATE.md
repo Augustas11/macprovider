@@ -1,6 +1,6 @@
 # SPEC-022 Settlement Closure Gate
 
-Status: implementation gate
+Status: implemented and locally validated
 Scope: SPEC-022 verified model settlement
 
 ## Objective
@@ -47,3 +47,21 @@ settlement finality backed by signed, catalog-matching receipt verdicts.
 - Before closure, run the gateway targeted tests plus the coordinator SPEC-022
   money-gate tests, then run the three Codex auditor lanes and resolve all
   critical/high/medium findings.
+
+## Implementation Evidence
+
+- `phase5-gateway/internal/config/config.go` exposes
+  `settlement.reconcile_enabled`, `settlement.reconcile_interval_s`,
+  `settlement.reconcile_batch_limit`, and
+  `settlement.reconcile_request_timeout_s`, and validates enabled
+  configurations fail closed.
+- `phase5-gateway/cmd/gateway/main.go` starts `runSettlementReconciler` when
+  enabled, using the configured interval, batch limit, and per-run request
+  timeout.
+- `runSettlementReconciler` runs once immediately, then on each interval until
+  gateway shutdown context cancellation.
+- `phase5-gateway/internal/router/settlement_reconcile.go` keeps the admin
+  endpoint and background worker on the shared `ReconcileSettlementHolds`
+  implementation.
+- `phase5-gateway/internal/router/server_test.go` keeps the verified, refund,
+  hold, and terminal-race reconciliation cases covered.
