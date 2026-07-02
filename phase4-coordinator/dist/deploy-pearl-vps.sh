@@ -113,7 +113,13 @@ if [ "${STATS_DOMAIN:-stats.streamvc.live}" != "stats.streamvc.live" ]; then
   exit 1
 fi
 
-DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
+# R3 SEC MED — reuse the already-resolved physical dir from the
+# symlink walker rather than recomputing from `$0` (which is the
+# symlink path) + logical `pwd`. All later artifact reads,
+# check-deploy-config, config uploads, and vhost templates hang
+# off DIST_DIR, so any parent-symlink retargeting attack that
+# survives helper sourcing would still land here.
+DIST_DIR="$_PEARL_TLS_SCRIPT_DIR"
 BINARY="$DIST_DIR/coordinator-linux-amd64"
 CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
 CONFIG="$DIST_DIR/coordinator.yaml"

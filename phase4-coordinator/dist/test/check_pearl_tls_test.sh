@@ -474,6 +474,52 @@ _pearl_resolve_symlink() {
     echo "hostile=${PEARL_TLS_HOSTILE_SOURCED:-unset}"
   ' 2>&1)
   _assert_eq "T25d hostile lib NOT sourced" "hostile=unset" "$end_to_end"
+
+  # T25e: R3 SEC MED — DIST_DIR (deploy artifact root) hangs off
+  # `$_PEARL_TLS_SCRIPT_DIR`, not a logical recomputation from `$0`.
+  # Grep the assignment line to prove that dependency at rest,
+  # then invoke deploy through the parent-alias symlink so
+  # BASH_SOURCE[0] IS the symlinked path, and verify DIST_DIR
+  # settles on the physical real path.
+  #
+  # Static check: the assignment must reuse the physically-
+  # resolved var. Codex R3 SEC MED flagged the previous
+  # `DIST_DIR="$(cd "$(dirname "$0")" && pwd)"` shape.
+  dist_dir_line=$(grep '^DIST_DIR=' "$_real_deploy" | head -1)
+  _assert_eq "T25e DIST_DIR reuses resolved dir" \
+    'DIST_DIR="$_PEARL_TLS_SCRIPT_DIR"' "$dist_dir_line"
+
+  # T25f: dynamic check — extract the prelude WITH BASH_SOURCE
+  # captured before the resolver runs. We do this by writing a
+  # tiny driver at the symlinked path that sources the extracted
+  # prelude, then reads DIST_DIR. Because the driver lives at
+  # `$_parent_alias/driver.sh` (the parent-DIR symlink), BASH_SOURCE
+  # naturally reflects the symlinked path.
+  # Extract only the two blocks needed to prove DIST_DIR resolution:
+  # (1) the _pearl_resolve_symlink function + its invocation, and
+  # (2) the DIST_DIR assignment line. Skip all downstream validation
+  # (SSH key checks, EMAIL regex, DNS probes) which would otherwise
+  # abort the driver before DIST_DIR is even reached.
+  _resolver=$(sed -n '/^_pearl_resolve_symlink()/,/^\. "\$_PEARL_TLS_SCRIPT_DIR/p' "$_real_deploy")
+  _dist_line=$(grep '^DIST_DIR=' "$_real_deploy" | head -1)
+  _prelude=$(printf '#!/usr/bin/env bash\nset -u\n%s\n%s\n' "$_resolver" "$_dist_line")
+  # Write the driver into the REAL dist dir (so it exists inside
+  # $_parent_alias, which is a symlink to it), name unique to avoid
+  # collision with dist artifacts.
+  _driver_name="__pearl_tls_test_driver_$$.sh"
+  _driver_real="$_real_dist_dir/$_driver_name"
+  _driver_via_alias="$_parent_alias/$_driver_name"
+  {
+    printf '%s\n' "$_prelude"
+    printf 'echo "DIST_DIR=$DIST_DIR"\n'
+    printf 'exit 0\n'
+  } > "$_driver_real"
+  # Register cleanup on top of the existing trap.
+  trap 'rm -f "'"$_driver_real"'"; rm -rf "$_probe_fixture_dir"' EXIT
+
+  dist_dir_out=$(bash "$_driver_via_alias" 2>&1 | tail -1)
+  _assert_eq "T25f DIST_DIR resolves to physical real dist via parent-alias" \
+    "DIST_DIR=$_real_dist_dir" "$dist_dir_out"
 else
   PASS=$((PASS+1))
   LOG="${LOG}  PASS  T25 (skipped: real deploy script not present)
