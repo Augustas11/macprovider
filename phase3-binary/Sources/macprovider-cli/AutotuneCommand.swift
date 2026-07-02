@@ -4,6 +4,8 @@ import Foundation
 import MacProviderCore
 
 struct AutotuneCommand: AsyncParsableCommand {
+    static let spec023RecommendationProbeContext = 4_000
+
     static let configuration = CommandConfiguration(
         commandName: "autotune",
         abstract: "Find the biggest feasible model for this Mac and recommend serve knobs."
@@ -63,6 +65,21 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(name: .customLong("json"), help: "Emit recommendation as JSON.")
     var emitJSON = false
 
+    @Flag(help: "Recommend the best paid-yield model for this Mac from the signed/static market inputs.")
+    var recommend = false
+
+    @Flag(help: "With --recommend, check whether the stored recommendation is fresh without benchmarking.")
+    var freshnessCheck = false
+
+    @Flag(help: "Allow local donor-mode configuration for non-paid-yield rows.")
+    var donorMode = false
+
+    @Option(help: "Electricity price in USD/kWh for net capacity estimate.")
+    var electricityUSDPerKWH: Double?
+
+    @Option(help: "Assumed utilization in [0.0, 1.0] for net capacity estimate.")
+    var assumedUtilization = 1.0
+
     @Flag(help: "Write the final recommendation to config.yaml.")
     var apply = false
 
@@ -109,6 +126,15 @@ struct AutotuneCommand: AsyncParsableCommand {
     }
 
     func run(dependencies: AutotuneRunDependencies) async throws {
+        if recommend {
+            if freshnessCheck {
+                try await runRecommendationFreshnessCheck()
+                return
+            }
+            try await runAutotuneRecommend()
+            return
+        }
+
         let plan = try candidatePlan()
 
         if dryRun {
@@ -643,6 +669,15 @@ struct AutotuneCommand: AsyncParsableCommand {
         guard tpsTieEpsilon >= 0 else {
             throw ValidationError("--tps-tie-epsilon must be >= 0")
         }
+        if let electricityUSDPerKWH, electricityUSDPerKWH < 0 {
+            throw ValidationError("--electricity-usd-per-kwh must be >= 0")
+        }
+        if freshnessCheck && !recommend {
+            throw ValidationError("--freshness-check requires --recommend")
+        }
+        guard (0.0...1.0).contains(assumedUtilization) else {
+            throw ValidationError("--assumed-utilization must be in 0.0...1.0")
+        }
         guard maxDuration > 0 else {
             throw ValidationError("--max-duration must be > 0")
         }
@@ -658,6 +693,122 @@ struct AutotuneCommand: AsyncParsableCommand {
         _ = try Self.parseKvBitsAxis(kvBitsAxis)
         _ = try Self.parsePositiveIntAxis(maxBatchAxis, flag: "--max-batch-axis")
         _ = try Self.parseMaxContextAxis(maxContextAxis, targetContext: targetContext)
+    }
+
+    private func runAutotuneRecommend() async throws {
+        let staticInputs = AutotuneStaticInputs()
+        let demand = await staticInputs.loadDemandRank()
+        let catalog = await staticInputs.loadCandidateCatalog()
+        let rateCard = await staticInputs.loadRateCard()
+
+        let fingerprint = MachineFingerprinter().sample()
+        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+        let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
+        let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
+        let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
+        let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
+        let now = Date()
+        var warnings = Set<AutotuneRecommendWarning>()
+        warnings.formUnion(demand.warnings)
+        warnings.formUnion(catalog.warnings)
+        warnings.formUnion(rateCard.warnings)
+
+        var request = AutotuneRecommendRequest(
+            hardware: hardware,
+            demandRank: demand.value,
+            candidateCatalog: catalog.value,
+            candidateCatalogSHA256: catalogSHA,
+            rateCard: rateCard.value,
+            benchmarks: [:],
+            warnings: warnings,
+            generatedAt: now,
+            electricityUSDPerKWH: electricityUSDPerKWH,
+            assumedUtilization: assumedUtilization,
+            availabilityHoursPerDay: 24,
+            donorMode: donorMode
+        )
+        request.benchmarks = try await AutotuneRecommendationBenchmarker().benchmarks(
+            request: request,
+            targetContext: Self.spec023RecommendationProbeContext,
+            gateTTFTMS: gateTTFTMS,
+            replicates: stage1Replicates,
+            port: port
+        )
+        let result = AutotuneRecommendEngine().recommend(request)
+        try RecommendationStateStore.write(result)
+        let paidSelected = result.recommendedModel.flatMap { recommendedModel in
+            result.selectedCandidate.flatMap { $0.model == recommendedModel ? $0 : nil }
+        }
+        if apply, result.recommendedModel != nil, paidSelected == nil, !donorMode {
+            throw ValidationError("selected paid recommendation was not available for config apply")
+        }
+        let donorSelected = donorMode ? result.donorFallbackCandidate : nil
+        if apply, donorMode, result.donorFallbackModel != nil, donorSelected == nil {
+            throw ValidationError("selected donor recommendation was not available for config apply")
+        }
+        if apply, let selected = paidSelected ?? donorSelected {
+            let applyingDonorFallback = paidSelected == nil && selected == donorSelected
+            guard let selectedBenchmark = request.benchmarks[selected.catalogKey] else {
+                throw ValidationError("selected recommendation lacks verified benchmark artifact")
+            }
+            guard let selectedRow = catalog.value.rows[selected.catalogKey] else {
+                throw ValidationError("selected recommendation lacks signed catalog row")
+            }
+            if applyingDonorFallback {
+                FileHandle.standardError.write(Data("DONOR MODE: no paid model clears $0.0050/hr on this Mac; \(selected.model) is for network support only.\n".utf8))
+            }
+            let rawPath = config ?? AppConfig.defaultConfigPath
+            let expanded = ConfigLoader.expandTilde(rawPath)
+            let core = RecommendationCore(
+                model: selected.model,
+                targetContext: Self.spec023RecommendationProbeContext,
+                knobs: WinningKnobs(kvBits: nil, maxBatch: 1, maxContext: Self.spec023RecommendationProbeContext),
+                tpsMedian: selected.tokensPerSecond,
+                ttftP95MS: 0,
+                replicates: 0,
+                modelArtifactPath: selectedBenchmark.modelArtifactPath,
+                modelArtifactSHA256: selectedBenchmark.artifactSHA256,
+                modelCatalogKey: selected.catalogKey,
+                modelCatalogModelID: selectedRow.modelID,
+                modelCatalogRevision: selectedRow.modelRevision,
+                modelCatalogSHA256: selectedRow.modelSHA256,
+                modelCatalogVersion: catalog.value.version,
+                modelCatalogHash: catalogSHA
+            )
+            let applied = try ConfigApplier(configPath: URL(fileURLWithPath: expanded)).apply(
+                recommendation: core,
+                now: now,
+                donorMode: applyingDonorFallback
+            )
+            if emitJSON {
+                FileHandle.standardError.write(Data("\(applied.summary)\n".utf8))
+            } else {
+                print(applied.summary)
+            }
+        }
+        if emitJSON {
+            print(result.jsonString())
+        } else {
+            print(result.humanTranscript())
+        }
+        for warning in result.warnings {
+            FileHandle.standardError.write(Data("\(warning.rawValue)\n".utf8))
+        }
+    }
+
+    private func runRecommendationFreshnessCheck() async throws {
+        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+        let status = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).status()
+        switch status {
+        case .fresh:
+            print("recommendation_fresh")
+        case .missing:
+            FileHandle.standardError.write(Data("recommendation_stale: missing stored recommendation\n".utf8))
+            throw ExitCode(10)
+        case .stale(let generatedAt):
+            FileHandle.standardError.write(Data("recommendation_stale: inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt))\n".utf8))
+            throw ExitCode(10)
+        }
     }
 
     /// Tolerant CSV split: trims each token and DROPS empty tokens.

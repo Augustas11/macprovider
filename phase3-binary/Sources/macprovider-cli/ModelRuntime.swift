@@ -259,6 +259,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
     init(
         modelID: String?,
+        modelLoadPath: String? = nil,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
         maxBatch: Int = 1,
@@ -289,7 +290,7 @@ actor ModelRuntime: ModelRuntimeServing {
             return
         }
 
-        let configuration = Self.configuration(for: modelID)
+        let configuration = Self.configuration(for: modelLoadPath ?? modelID)
         let container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
         self.currentContainer = container
 

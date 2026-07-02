@@ -530,6 +530,7 @@ func main() {
 		buyer.WithRequestLog(reqLogStore),
 		buyer.WithBilling(billingStore, cfg.Rewards),
 		buyer.WithBillingSnapshotID(snapshotID),
+		buyer.WithRateCardUSDPerMillionCredits(cfg.Stats.Rollup.UsdPerMillionCredits),
 		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
 			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)
 			return buyer.PreflightResult{Accepted: ack.Accepted, Reason: ack.Reason}, ok, err
@@ -911,7 +912,7 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 			logger.Error().Err(err).Msg("billing config reload rejected (snapshot + flag audit atomic)")
 			return
 		}
-		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID)
+		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID, cfg.Stats.Rollup.UsdPerMillionCredits)
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
 		logger.Info().
 			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).

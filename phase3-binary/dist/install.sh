@@ -38,6 +38,7 @@ NO_LAUNCHD="${MACPROVIDER_NO_LAUNCHD:-0}"
 TMPDIR_PATH=""
 LAUNCHD_INSTALLED=0
 MANUAL_PID=""
+SKIP_PROVIDER_START=0
 
 log() { printf "[macprovider-install] %s\n" "$*"; }
 die() {
@@ -958,6 +959,154 @@ coordinator_url: "$(yaml_escape "$coordinator_url")"
 provider_id: "$(yaml_escape "$provider_id")"
 port: $PORT
 EOF
+  chmod 600 "$CONFIG_PATH" "$PROVIDER_ID_PATH" 2>/dev/null || true
+}
+
+read_config_model() {
+  [ -f "$CONFIG_PATH" ] || return 1
+  awk -F: '
+    /^model:/ {
+      value=$0
+      sub(/^model:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }
+  ' "$CONFIG_PATH"
+}
+
+read_config_artifact_sha() {
+  [ -f "$CONFIG_PATH" ] || return 1
+  awk -F: '
+    /^model_artifact_sha256:/ {
+      value=$0
+      sub(/^model_artifact_sha256:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }
+  ' "$CONFIG_PATH"
+}
+
+read_config_artifact_path() {
+  [ -f "$CONFIG_PATH" ] || return 1
+  awk -F: '
+    /^model_artifact_path:/ {
+      value=$0
+      sub(/^model_artifact_path:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }
+  ' "$CONFIG_PATH"
+}
+
+read_config_donor_mode() {
+  [ -f "$CONFIG_PATH" ] || return 1
+  awk -F: '
+    /^donor_mode:/ {
+      value=$0
+      sub(/^donor_mode:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }
+  ' "$CONFIG_PATH"
+}
+
+run_autotune_recommend_apply() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "Would run paid-yield recommendation before service start."
+    return 0
+  fi
+  if [ ! -x "$INSTALL_DIR/macprovider-cli" ]; then
+    die 5 "installed macprovider-cli missing before autotune recommendation"
+  fi
+  log "Running paid-yield recommendation before service start."
+  if "$INSTALL_DIR/macprovider-cli" autotune --recommend --apply --config "$CONFIG_PATH"; then
+    recommended_model="$(read_config_model || true)"
+    artifact_path="$(read_config_artifact_path || true)"
+    artifact_sha="$(read_config_artifact_sha || true)"
+    if [ -n "$recommended_model" ] && [ -n "$artifact_path" ] && [ -n "$artifact_sha" ]; then
+      case "$artifact_path" in
+        /*)
+          if prompt_yes_no "Start provider with $recommended_model? [Y/n]" "Y"; then
+            model="$recommended_model"
+            log "Recommendation selected verified model: $model (artifact: $artifact_path)"
+            return 0
+          fi
+          SKIP_PROVIDER_START=1
+          log "Provider start declined. macprovider-cli is installed, but the provider service will not be started."
+          return 0
+          ;;
+      esac
+    fi
+    log "No paid model currently clears the minimum net-yield threshold on this Mac."
+    if prompt_yes_no "Enable donor mode? [y/N]" "N"; then
+      log "Applying donor-mode configuration."
+      "$INSTALL_DIR/macprovider-cli" autotune --recommend --apply --donor-mode --config "$CONFIG_PATH" \
+        || die 6 "donor-mode recommendation failed before service start"
+      recommended_model="$(read_config_model || true)"
+      artifact_path="$(read_config_artifact_path || true)"
+      artifact_sha="$(read_config_artifact_sha || true)"
+      if [ -n "$recommended_model" ] && [ -n "$artifact_path" ] && [ -n "$artifact_sha" ]; then
+        case "$artifact_path" in
+          /*)
+            model="$recommended_model"
+            log "Donor mode selected verified model: $model (artifact: $artifact_path)"
+            SKIP_PROVIDER_START=1
+            log "Donor-mode configuration applied. Provider service will not be started automatically."
+            return 0
+            ;;
+        esac
+      fi
+      die 6 "donor mode did not apply a verified local model artifact before service start"
+    fi
+    SKIP_PROVIDER_START=1
+    log "Donor mode declined. macprovider-cli is installed, but the provider service will not be started."
+    return 0
+  fi
+  die 6 "autotune recommendation failed before service start"
+}
+
+use_fresh_recommendation_if_available() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    return 1
+  fi
+  if [ ! -x "$INSTALL_DIR/macprovider-cli" ] || [ ! -f "$CONFIG_PATH" ]; then
+    return 1
+  fi
+
+  if "$INSTALL_DIR/macprovider-cli" autotune --recommend --freshness-check --config "$CONFIG_PATH" >/dev/null; then
+    recommended_model="$(read_config_model || true)"
+    artifact_path="$(read_config_artifact_path || true)"
+    artifact_sha="$(read_config_artifact_sha || true)"
+    donor_mode="$(read_config_donor_mode || true)"
+    if [ "$donor_mode" = "true" ]; then
+      SKIP_PROVIDER_START=1
+      log "Stored donor-mode recommendation is fresh; provider service will not be started automatically."
+      return 0
+    fi
+    if [ -n "$recommended_model" ] && [ -n "$artifact_path" ] && [ -n "$artifact_sha" ]; then
+      case "$artifact_path" in
+        /*)
+          model="$recommended_model"
+          log "Stored paid-yield recommendation is fresh; skipping re-tune."
+          log "Using verified model from existing config: $model (artifact: $artifact_path)"
+          return 0
+          ;;
+      esac
+    fi
+    log "Stored recommendation is fresh but config lacks a verified local model; re-running recommendation."
+    return 1
+  else
+    rc=$?
+    if [ "$rc" -eq 10 ]; then
+      log "Stored recommendation is stale or missing; running recommendation."
+      return 1
+    fi
+    die 6 "recommendation freshness check failed before service start"
+  fi
 }
 
 install_binary() {
@@ -2035,6 +2184,8 @@ print_autotune_handoff() {
   provider_id="$1"
   printf "To tune throughput / latency parameters for your specific Mac, run:\n"
   printf "  macprovider-cli autotune --provider-id %s\n" "$provider_id"
+  printf "To refresh the paid-model recommendation after install or update, run:\n"
+  printf "  macprovider-cli autotune --recommend --apply\n"
 }
 
 main() {
@@ -2077,7 +2228,18 @@ main() {
   check_path_hint
   clear_quarantine
   ensure_port_free
-  write_config "$model" "$provider_id" "$coordinator_url"
+  if ! use_fresh_recommendation_if_available; then
+    write_config "$model" "$provider_id" "$coordinator_url"
+    run_autotune_recommend_apply
+  fi
+  if [ "$SKIP_PROVIDER_START" -eq 1 ]; then
+    log "Install complete without starting a provider service."
+    log "To re-check paid-yield recommendation later, run:"
+    log "  macprovider-cli autotune --recommend --apply"
+    log "To opt into local donor-mode testing, run:"
+    log "  macprovider-cli autotune --recommend --apply --donor-mode"
+    exit 0
+  fi
   install_plist "$model" "$provider_id" "$coordinator_url"
   install_watchdog "$coordinator_url"
   start_manual_service "$model" "$provider_id" "$coordinator_url"

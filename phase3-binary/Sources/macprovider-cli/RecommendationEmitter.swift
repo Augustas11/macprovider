@@ -32,6 +32,14 @@ struct RecommendationCore {
     var ttftP95MS: Double
     var replicates: Int
     var partial: Bool = false
+    var modelArtifactPath: String? = nil
+    var modelArtifactSHA256: String? = nil
+    var modelCatalogKey: String? = nil
+    var modelCatalogModelID: String? = nil
+    var modelCatalogRevision: String? = nil
+    var modelCatalogSHA256: String? = nil
+    var modelCatalogVersion: String? = nil
+    var modelCatalogHash: String? = nil
 }
 
 struct InfeasibleEntry {

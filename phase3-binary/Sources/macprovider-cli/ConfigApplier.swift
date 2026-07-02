@@ -42,7 +42,8 @@ struct ConfigApplier {
 
     func apply(
         recommendation: RecommendationCore,
-        now: Date
+        now: Date,
+        donorMode: Bool = false
     ) throws -> AppliedConfig {
         let fileManager = FileManager.default
         let directory = configPath.deletingLastPathComponent()
@@ -55,7 +56,7 @@ struct ConfigApplier {
         let unixTS = Int(now.timeIntervalSince1970)
         let backupPath = try writeBackupExclusively(originalData, unixTS: unixTS)
 
-        let updatedText = try updatedConfigText(originalText, recommendation: recommendation)
+        let updatedText = try updatedConfigText(originalText, recommendation: recommendation, donorMode: donorMode)
         guard let updatedData = updatedText.data(using: .utf8) else {
             throw ConfigApplierError.stringEncodingFailed(configPath.path)
         }
@@ -63,7 +64,7 @@ struct ConfigApplier {
 
         return AppliedConfig(
             backupPath: backupPath,
-            summary: Self.summary(recommendation: recommendation, backupPath: backupPath)
+            summary: Self.summary(recommendation: recommendation, backupPath: backupPath, donorMode: donorMode)
         )
     }
 
@@ -91,7 +92,7 @@ struct ConfigApplier {
         for counter in 0...maxBackupCounter {
             let candidate = directory
                 .appendingPathComponent("\(configPath.lastPathComponent).bak-\(unixTS)-\(counter)")
-            let fd = candidate.path.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY, 0o644) }
+            let fd = candidate.path.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600) }
             if fd >= 0 {
                 defer { _ = close(fd) }
                 try writeAll(fd: fd, data: data, destination: candidate.path)
@@ -132,7 +133,19 @@ struct ConfigApplier {
 
     private func atomicWrite(_ data: Data, to destination: URL, unixTS: Int) throws {
         let tempURL = tempFileNamer(destination, unixTS)
-        try data.write(to: tempURL, options: [])
+        let fd = tempURL.path.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600) }
+        guard fd >= 0 else {
+            throw ConfigApplierError.backupWriteFailed(destination: tempURL.path, errno: errno)
+        }
+        do {
+            try writeAll(fd: fd, data: data, destination: tempURL.path)
+            _ = fsync(fd)
+            _ = close(fd)
+        } catch {
+            _ = close(fd)
+            try? FileManager.default.removeItem(at: tempURL)
+            throw error
+        }
         if rename(tempURL.path, destination.path) != 0 {
             let renameErrno = errno
             try? FileManager.default.removeItem(at: tempURL)
@@ -146,15 +159,39 @@ struct ConfigApplier {
 
     private func updatedConfigText(
         _ original: String,
-        recommendation: RecommendationCore
+        recommendation: RecommendationCore,
+        donorMode: Bool
     ) throws -> String {
         let values: [String: String?] = [
             "model": recommendation.model,
+            "model_artifact_path": recommendation.modelArtifactPath,
+            "model_artifact_sha256": recommendation.modelArtifactSHA256,
+            "model_catalog_key": recommendation.modelCatalogKey,
+            "model_catalog_model_id": recommendation.modelCatalogModelID,
+            "model_catalog_revision": recommendation.modelCatalogRevision,
+            "model_catalog_sha256": recommendation.modelCatalogSHA256,
+            "model_catalog_version": recommendation.modelCatalogVersion,
+            "model_catalog_hash": recommendation.modelCatalogHash,
             "kv_bits": recommendation.knobs.kvBits.map(String.init),
             "max_context_override": String(recommendation.knobs.maxContext),
             "max_concurrency_override": String(recommendation.knobs.maxBatch),
+            "donor_mode": donorMode ? "true" : nil,
         ]
-        let ownedKeys = ["model", "kv_bits", "max_context_override", "max_concurrency_override"]
+        let ownedKeys = [
+            "model",
+            "model_artifact_path",
+            "model_artifact_sha256",
+            "model_catalog_key",
+            "model_catalog_model_id",
+            "model_catalog_revision",
+            "model_catalog_sha256",
+            "model_catalog_version",
+            "model_catalog_hash",
+            "kv_bits",
+            "max_context_override",
+            "max_concurrency_override",
+            "donor_mode",
+        ]
 
         if original.isEmpty {
             return renderOwnedConfig(values: values)
@@ -202,8 +239,29 @@ struct ConfigApplier {
             "max_context_override: \(values["max_context_override"]!!)",
             "max_concurrency_override: \(values["max_concurrency_override"]!!)",
         ]
+        if let artifactSHA = values["model_artifact_sha256"] ?? nil {
+            lines.insert("model_artifact_sha256: \(artifactSHA)", at: 1)
+        }
+        if let artifactPath = values["model_artifact_path"] ?? nil {
+            lines.insert("model_artifact_path: \(artifactPath)", at: 1)
+        }
+        for key in [
+            "model_catalog_key",
+            "model_catalog_model_id",
+            "model_catalog_revision",
+            "model_catalog_sha256",
+            "model_catalog_version",
+            "model_catalog_hash",
+        ].reversed() {
+            if let value = values[key] ?? nil {
+                lines.insert("\(key): \(value)", at: 1)
+            }
+        }
         if let kvBits = values["kv_bits"] ?? nil {
             lines.insert("kv_bits: \(kvBits)", at: 1)
+        }
+        if let donorMode = values["donor_mode"] ?? nil {
+            lines.append("donor_mode: \(donorMode)")
         }
         return lines.joined(separator: "\n") + "\n"
     }
@@ -227,9 +285,10 @@ struct ConfigApplier {
         return ""
     }
 
-    private static func summary(recommendation: RecommendationCore, backupPath: URL) -> String {
+    private static func summary(recommendation: RecommendationCore, backupPath: URL, donorMode: Bool) -> String {
         let kvBits = recommendation.knobs.kvBits.map(String.init) ?? "unset"
-        return "applied: model=\(recommendation.model) kv_bits=\(kvBits) max_concurrency_override=\(recommendation.knobs.maxBatch) max_context_override=\(recommendation.knobs.maxContext) (backup at \(backupPath.path))"
+        let donorSuffix = donorMode ? " donor_mode=true" : ""
+        return "applied: model=\(recommendation.model) kv_bits=\(kvBits) max_concurrency_override=\(recommendation.knobs.maxBatch) max_context_override=\(recommendation.knobs.maxContext)\(donorSuffix) (backup at \(backupPath.path))"
     }
 
     private static func defaultTempFileName(destination: URL, unixTS: Int) -> URL {

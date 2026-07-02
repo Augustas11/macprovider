@@ -62,6 +62,29 @@ final class StatusCommandTests: XCTestCase {
         XCTAssertTrue(output.contains("Owner: (unclaimed — run `macprovider-cli claim`)"), output)
     }
 
+    func testStatusShowsDonorModeBadge() {
+        let output = LocalStatusFormatter.format(
+            status(providerID: "provider-a"),
+            latestVersion: nil,
+            donorMode: true
+        )
+
+        XCTAssertTrue(output.contains("Model:       model-a DONOR MODE"), output)
+    }
+
+    func testStatusShowsStaleRecommendationWarning() {
+        let staleSince = ISO8601DateFormatter.autotuneInternet.date(from: "2026-07-01T00:00:00Z")!
+
+        let output = LocalStatusFormatter.format(
+            status(providerID: "provider-a"),
+            latestVersion: nil,
+            staleRecommendationSince: staleSince
+        )
+
+        XCTAssertTrue(output.contains("Recommendation stale: recommendation inputs changed since 2026-07-01T00:00:00Z."), output)
+        XCTAssertTrue(output.contains("Run: macprovider-cli autotune --recommend"), output)
+    }
+
     private func makeFixture(prefix: String) throws -> StatusFixture {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
