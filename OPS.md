@@ -113,14 +113,34 @@ M1-6). Mirrors the coordinator pattern:
   daemon-writable path). Retains the 5 most recent snapshots.
 - **Steps 6–8:** enable + start + healthz version check + journal tail.
 
-**Rollback procedure:**
+**Rollback procedure (schema-aware — default; issue #196):**
+
+After ANY deploy that could have run a schema migration, use this
+block. It restores BOTH the previous binary AND the pre-deploy DB
+snapshot atomically.
+
+```bash
+ssh pearl
+sudo systemctl stop macprovider-gateway
+sudo install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway
+LATEST=$(sudo ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* | head -1)
+sudo install -o macprovider -g macprovider -m 0600 "$LATEST" /var/lib/macprovider/gateway.db
+sudo systemctl start macprovider-gateway
+curl -s http://127.0.0.1:9443/healthz   # confirm OK + version reflects .prev
+```
+
+**Binary-only rollback (ONLY if you are certain no schema bump ran):**
 
 ```bash
 ssh pearl
 sudo install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway
 sudo systemctl restart macprovider-gateway
-curl -s http://127.0.0.1:9443/healthz   # confirm OK + version reflects .prev
+curl -s http://127.0.0.1:9443/healthz
 ```
+
+Do NOT use the binary-only variant after a schema-bumping deploy —
+the old binary against the upgraded DB reopens issue #196's
+wrong-account / money-path integrity failure.
 
 Confirmed by the first M0-5/M1-6 production deploy (2026-06-11): both
 services maintain a single `.prev` artifact that is overwritten on each

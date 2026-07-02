@@ -127,6 +127,19 @@ for f in "$BINARY" "$SERVICE" "$NGINX_SITE"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
 
+# #290 R2 SEC MED — assert the shipped nginx template still contains
+# the expected `server_name` + Let's Encrypt paths before we upload +
+# sed-uncomment it on the remote. Rejects an accidentally edited /
+# stale checked-in conf that would point to a different vhost / cert.
+if ! grep -qE '^[[:space:]]*server_name[[:space:]]+api\.streamvc\.live;' "$NGINX_SITE"; then
+  echo "aborting deploy: nginx template $NGINX_SITE is missing 'server_name api.streamvc.live;'" >&2
+  exit 5
+fi
+if ! grep -qE '# ssl_certificate[[:space:]]+/etc/letsencrypt/live/api\.streamvc\.live/' "$NGINX_SITE"; then
+  echo "aborting deploy: nginx template $NGINX_SITE cert path drifted from expected /etc/letsencrypt/live/api.streamvc.live/" >&2
+  exit 5
+fi
+
 SSH="ssh -i $SSH_KEY -o ConnectTimeout=10 -p 22 $VPS_USER@$VPS_HOST"
 SCP="scp -i $SSH_KEY -P 22"
 
@@ -202,6 +215,104 @@ $SSH 'set -e
   install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider
 '
 
+log "step 2c/8: pre-restart safeguard EARLY (before binary swap)"
+# #290 R2 (CODE+ARCH convergent HIGH) — MOVED this guard from post-
+# install step 5 to pre-install step 2c. Previously the binary was
+# already swapped on disk by the time the guard refused, so a
+# subsequent crash / reboot / manual restart between the failed guard
+# and rollback would boot the new schema-migrating binary against an
+# unsnapshotted DB — defeating the issue #196 rollback safety.
+#
+# Query the LIVE (old) gateway's /healthz for in-flight buyer count.
+# Refuse to proceed unless FORCE_RESTART=1 acknowledges the drop.
+INFLIGHT=$(curl -fsS --max-time 5 --max-filesize 65536 "https://$DOMAIN/healthz" 2>/dev/null \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('in_flight_requests', d.get('inflight', 0)))" 2>/dev/null \
+  || echo 0)
+if [ "${INFLIGHT:-0}" -gt 0 ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
+  log "  REFUSING TO PROCEED — $INFLIGHT request(s) in flight."
+  log "  Refusing EARLY (pre-scp) so no new binary is left on disk."
+  log "  To proceed anyway:  FORCE_RESTART=1 bash $0"
+  exit 4
+fi
+if [ "${FORCE_RESTART:-0}" = "1" ] && [ "${INFLIGHT:-0}" -gt 0 ]; then
+  TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  OP_HOST="${HOSTNAME:-unknown}"
+  # #290 R1 (mirrors #244 R6 convergent MED) — write tombstone via
+  # remote `mktemp` under `umask 077`, not predictable /tmp path.
+  $SSH "set -e
+        install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider 2>/dev/null || true
+        _bypass_tmp=\$(umask 077 && mktemp)
+        cat > \"\$_bypass_tmp\" <<EOF
+{\"ts\":\"$TS_NOW\",\"service\":\"gateway\",\"reason\":\"FORCE_RESTART=1\",\"step\":\"2c\",\"metric\":\"in_flight_requests\",\"value\":$INFLIGHT,\"operator_host\":\"$OP_HOST\"}
+EOF
+        install -o macprovider -g macprovider -m 0640 \"\$_bypass_tmp\" /var/lib/macprovider/last-deploy-bypass.json
+        rm -f \"\$_bypass_tmp\"
+        logger -t macprovider-deploy \"FORCE_RESTART=1 used at gateway step 2c; in_flight=$INFLIGHT\""
+  log "  AUDIT TRAIL: FORCE_RESTART=1 override written to /var/lib/macprovider/last-deploy-bypass.json"
+fi
+log "  ok: $INFLIGHT in-flight requests (or FORCE_RESTART=1 set)"
+
+log "step 2d/8: pre-restart snapshot of gateway.db (BEFORE binary swap — #290 R2)"
+# #290 R2 (CODE+ARCH convergent HIGH) — MOVED from step 5b to 2d.
+# Rollback safety (issue #196) requires the DB snapshot to be taken
+# BEFORE the binary is swapped on disk. Otherwise: any crash/reboot/
+# manual restart after step 4's install but before step 5b would boot
+# the new schema-migrating binary with no pre-deploy snapshot.
+#
+# #290 R2 CODE HIGH — snapshot pruning was `ls ... | xargs rm -f`
+# over filenames in a daemon-writable directory, opening a
+# filename-injection window (a macprovider-created file with a
+# newline in the name would inject arbitrary paths into rm). Prune
+# now runs as macprovider with `find -print0 | xargs -0`.
+$SSH 'set -e
+  TS=$(date -u +%Y%m%dT%H%M%SZ)
+  DB=/var/lib/macprovider/gateway.db
+  if [ -f "$DB" ]; then
+    SNAP="${DB}.pre-deploy.${TS}"
+    # #290 R1 (SEC+ARCH convergent CRITICAL) — run ENTIRE snapshot as
+    # macprovider under umask 077. No root chmod/chown on daemon-
+    # writable paths — closes the symlink-follow → root-code-exec
+    # race that could target /etc/systemd/system/macprovider-gateway.service.
+    sudo -u macprovider sh -c "umask 077 && sqlite3 \"$DB\" \".backup ${SNAP}\""
+    INTEG=$(sudo -u macprovider sqlite3 "$SNAP" "PRAGMA integrity_check;" 2>&1 | head -1)
+    if [ "$INTEG" != "ok" ]; then
+      echo "  ERROR: snapshot integrity_check returned: $INTEG" >&2
+      sudo -u macprovider rm -f "$SNAP"
+      exit 5
+    fi
+    echo "  db snapshot saved at $SNAP (WAL-consistent, integrity=ok)"
+    # #290 R2 CODE HIGH — retain the 5 most recent pre-deploy snapshots;
+    # prune older ones as macprovider (no root ops on daemon-writable
+    # dir) via python with strict filename validation. Python enforces
+    # the exact `gateway.db.pre-deploy.YYYYMMDDTHHMMSSZ` pattern, so a
+    # macprovider-planted file with newline/space/`../` in the name
+    # cannot smuggle an unlink of arbitrary paths.
+    sudo -u macprovider python3 - <<PYEOF
+import os, re, sys
+d = "/var/lib/macprovider"
+pat = re.compile(r"^gateway\.db\.pre-deploy\.[0-9]{8}T[0-9]{6}Z$")
+try:
+    entries = os.listdir(d)
+except OSError:
+    sys.exit(0)
+snaps = sorted([e for e in entries if pat.match(e)], reverse=True)
+for stale in snaps[5:]:
+    p = os.path.join(d, stale)
+    try:
+        st = os.lstat(p)
+        # Defense in depth: only unlink regular files (not symlinks or
+        # dirs), matching what \`find -type f\` would do.
+        if not (st.st_mode & 0o170000) == 0o100000:
+            continue
+        os.unlink(p)
+    except OSError:
+        pass
+PYEOF
+  else
+    echo "  no live gateway.db at $DB — first deploy, no snapshot needed"
+  fi
+'
+
 log "step 3/8: snapshot live gateway binary as .prev (rollback)"
 # Mirror the coordinator's M0-5 .prev pattern. install(1) is intentional —
 # preserves ownership/perms even if a future recovery rebuilds the snapshot.
@@ -266,105 +377,8 @@ $SSH "set -e
   systemctl reload nginx
 "
 
-log "step 5/8: pre-restart safeguard (check for in-flight buyer requests)"
-# Mirror the coordinator's FORCE_RESTART guard. Gateway restart drops
-# in-flight buyer requests; a quiet window is preferable. Defensive but
-# overrideable.
-# We use the gateway's own /healthz which includes a coarse in-flight metric
-# when available; if absent, fall back to nginx access-log activity.
-#
-# Both this script and the coordinator's deploy-pearl-vps.sh write the
-# bypass tombstone to the same path (/var/lib/macprovider/last-deploy-bypass.json)
-# so a subsequent deploy of either service surfaces the override at its
-# step 1. Manual jumps past this step are tracked the same way as
-# manual jumps past the coordinator's step 6c — write the file by hand
-# (the refusal message below has the command).
-INFLIGHT=$(curl -fsS --max-time 5 --max-filesize 65536 "https://$DOMAIN/healthz" 2>/dev/null \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('in_flight_requests', d.get('inflight', 0)))" 2>/dev/null \
-  || echo 0)
-if [ "${INFLIGHT:-0}" -gt 0 ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
-  log "  REFUSING TO RESTART — $INFLIGHT request(s) in flight."
-  log "  To proceed anyway:  FORCE_RESTART=1 bash $0"
-  log "  If you must JUMP past this step manually, please first write:"
-  log "    ssh <pearl> 'echo {\"ts\":\"\$(date -u +%FT%TZ)\",\"service\":\"gateway\",\"reason\":\"manual_jump\",\"step\":\"5\",\"metric\":\"in_flight_requests\",\"value\":$INFLIGHT,\"operator_host\":\"\$HOSTNAME\"} > /var/lib/macprovider/last-deploy-bypass.json'"
-  log "  so the next deploy surfaces the bypass at step 1."
-  exit 4
-fi
-if [ "${FORCE_RESTART:-0}" = "1" ] && [ "${INFLIGHT:-0}" -gt 0 ]; then
-  TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  OP_HOST="${HOSTNAME:-unknown}"
-  # #290 (mirrors #244 R6 SEC/CODE/ARCH convergent MED) — write the
-  # tombstone via remote `mktemp` under `umask 077` instead of the
-  # predictable /tmp/last-deploy-bypass.json path. Same threat model as
-  # step 4's DEPLOY_TMP fix: a same-host attacker could otherwise
-  # pre-place a FIFO/symlink at the predictable name and forge or
-  # clobber the audit tombstone, or cause a deploy DoS.
-  $SSH "set -e
-        install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider 2>/dev/null || true
-        _bypass_tmp=\$(umask 077 && mktemp)
-        cat > \"\$_bypass_tmp\" <<EOF
-{\"ts\":\"$TS_NOW\",\"service\":\"gateway\",\"reason\":\"FORCE_RESTART=1\",\"step\":\"5\",\"metric\":\"in_flight_requests\",\"value\":$INFLIGHT,\"operator_host\":\"$OP_HOST\"}
-EOF
-        install -o macprovider -g macprovider -m 0640 \"\$_bypass_tmp\" /var/lib/macprovider/last-deploy-bypass.json
-        rm -f \"\$_bypass_tmp\"
-        logger -t macprovider-deploy \"FORCE_RESTART=1 used at gateway step 5; in_flight=$INFLIGHT\""
-  log "  AUDIT TRAIL: FORCE_RESTART=1 override written to /var/lib/macprovider/last-deploy-bypass.json"
-fi
-log "  ok: $INFLIGHT in-flight requests (or FORCE_RESTART=1 set)"
-
-log "step 5b/8: pre-restart snapshot of gateway.db (rollback safety, issue #196)"
-# The new binary's first start runs Migrate() which may upgrade schema
-# in place (e.g. v1 -> v2 composite-PK rebuild). The old binary CANNOT
-# read the upgraded schema correctly — its WHERE request_id = ? lookup
-# returns wrong-account rows once cross-account collisions exist. So
-# binary-only rollback via gateway.prev is INVALID after a schema
-# upgrade. We snapshot the DB BEFORE the new binary starts; rollback
-# becomes binary.prev + db.pre-deploy.<ts>.
-#
-# Snapshot uses `sqlite3 .backup` (which serializes a WAL-consistent
-# copy from a still-running gateway) rather than a raw `install`/`cp`
-# of just gateway.db. Raw copy misses rows still in gateway.db-wal
-# that have been COMMITTED but not yet checkpointed into the main
-# file — a rollback to that snapshot would silently lose money-path
-# audit rows. ISS-196 R3 codex SECURITY + ARCHITECT HIGH.
-$SSH 'set -e
-  TS=$(date -u +%Y%m%dT%H%M%SZ)
-  DB=/var/lib/macprovider/gateway.db
-  if [ -f "$DB" ]; then
-    SNAP="${DB}.pre-deploy.${TS}"
-    # #290 R1 (SEC+ARCH convergent CRITICAL) — do NOT run root
-    # chmod/chown on files under /var/lib/macprovider. That directory
-    # is daemon-writable, so a compromised macprovider UID could
-    # race-replace ${SNAP} with a symlink after the .backup completes
-    # and before root ran chmod/chown — pointing at e.g.
-    # /etc/systemd/system/macprovider-gateway.service. root chmod
-    # would then hand the daemon UID ownership of the unit file
-    # (path-following chown), which becomes code execution on the
-    # next daemon-reload/restart.
-    #
-    # Safe pattern: run the ENTIRE snapshot as macprovider under
-    # umask 077 so the file lands at 0600 macprovider:macprovider
-    # from creation — no root ops on attacker-controlled paths.
-    # .backup opens a read txn that pins a consistent WAL view; the
-    # output file is a single .db with WAL already merged in (no
-    # accompanying -wal/-shm sidecars), so rollback restore is a
-    # single-file copy.
-    sudo -u macprovider sh -c "umask 077 && sqlite3 \"$DB\" \".backup ${SNAP}\""
-    INTEG=$(sudo -u macprovider sqlite3 "$SNAP" "PRAGMA integrity_check;" 2>&1 | head -1)
-    if [ "$INTEG" != "ok" ]; then
-      echo "  ERROR: snapshot integrity_check returned: $INTEG" >&2
-      rm -f "$SNAP"
-      exit 5
-    fi
-    echo "  db snapshot saved at $SNAP (WAL-consistent, integrity=ok)"
-    # Retain the 5 most recent pre-deploy snapshots; older ones are
-    # auto-pruned to bound disk growth.
-    ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* 2>/dev/null \
-      | tail -n +6 | xargs -r rm -f
-  else
-    echo "  no live gateway.db at $DB — first deploy, no snapshot needed"
-  fi
-'
+# step 5 + 5b were merged into step 2c + 2d (in-flight guard EARLY +
+# DB snapshot BEFORE binary swap). #290 R2 CODE+ARCH convergent HIGH.
 
 log "step 6/8: enable + start gateway service"
 $SSH 'set -e
