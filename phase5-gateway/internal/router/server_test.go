@@ -1621,10 +1621,10 @@ func TestSPEC022GatewayStreamingSettlementTrailersControlBuyerDebit(t *testing.T
 			wantSettled:   1,
 		},
 		{
-			name:          "verified-closed-trailer-debits",
-			trailer:       settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "verified", "valid", "true", "receipt_verified"),
-			wantUsageRows: 1,
-			wantSettled:   1,
+			name:           "verified-closed-trailer-holds-for-reconcile",
+			trailer:        settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "verified", "valid", "true", "receipt_verified"),
+			wantActive:     1,
+			wantActiveHold: 20,
 		},
 		{
 			name:         "quarantined-closed-trailer-refunds",
@@ -1746,6 +1746,9 @@ func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T)
 		}
 		if got := r.URL.Query().Get("request_id"); got != requestID {
 			t.Fatalf("request_id query=%q want %q", got, requestID)
+		}
+		if got, want := r.URL.Query().Get("reservation_created_at_unix_ms"), strconv.FormatInt(fixedNow().UnixMilli(), 10); got != want {
+			t.Fatalf("reservation_created_at_unix_ms query=%q want %q", got, want)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"request_id":        requestID,
@@ -2102,10 +2105,16 @@ func TestSPEC022GatewaySettlementReconcileTreatsTerminalRaceAsSkipped(t *testing
 type settlementHoldContextStore struct {
 	*sqlite.Store
 	clampCtxErr error
+	markCtxErr  error
 }
 
 func (s *settlementHoldContextStore) ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error {
 	s.clampCtxErr = ctx.Err()
+	return nil
+}
+
+func (s *settlementHoldContextStore) MarkReservationSettlementHold(ctx context.Context, accountID, requestID string) error {
+	s.markCtxErr = ctx.Err()
 	return nil
 }
 
@@ -2130,6 +2139,27 @@ func TestSPEC022GatewaySettlementReconcileHoldUsesCallerContext(t *testing.T) {
 	}
 	if !errors.Is(wrapped.clampCtxErr, context.Canceled) {
 		t.Fatalf("ClampReservationExpiry ctx err=%v want context.Canceled", wrapped.clampCtxErr)
+	}
+}
+
+func TestSPEC022GatewayStreamingVerifiedHoldIgnoresBuyerCanceledContext(t *testing.T) {
+	accountID := "acct_spec022_stream_hold_ctx"
+	requestID := "req_spec022_stream_hold_ctx"
+	wrapped := &settlementHoldContextStore{}
+	s := &Server{store: wrapped, now: fixedNow}
+	ctx := context.WithValue(context.Background(), requestIDKey{}, requestID)
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+
+	s.markStreamingSettlementHoldForReconciliation(req, usageSubject{AccountID: accountID}, coordinatorSettlementFinality{
+		Action:  settlementFinalityDebit,
+		Outcome: "verified",
+		Reason:  "verified_settlement",
+	})
+
+	if wrapped.markCtxErr != nil {
+		t.Fatalf("MarkReservationSettlementHold ctx err=%v want nil despite canceled buyer context", wrapped.markCtxErr)
 	}
 }
 

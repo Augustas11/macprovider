@@ -79,6 +79,15 @@ settlement finality backed by signed, catalog-matching receipt verdicts.
   output prefixes. `TestSPEC022GatewaySettlementReconcileRejectsMissingTokenSource`
   proves verified coordinator finality without `coordinator_observed`
   provenance leaves the buyer hold active instead of creating a debit.
+- Local cross-service smoke is covered by `test/integration/scenarios_test.go`
+  `TestSpec022V04StreamingSettlementReconcilerE2E`: real gateway + real
+  coordinator + in-process fake provider run the enforced v0.4 streaming
+  settlement path; the gateway keeps the buyer response receipt-free, preserves
+  the external request ID, defers verified streaming finality to the SPEC-022
+  background reconciler, and records the final buyer debit as
+  `spec022_verified` with `coordinator_observed` 8/12/20 token totals after the
+  coordinator finality endpoint resolves the gateway external request ID to the
+  coordinator-internal receipt verdict.
 - `phase5-gateway/internal/config/config.go` exposes
   `settlement.reconcile_enabled`, `settlement.reconcile_interval_s`,
   `settlement.reconcile_batch_limit`, and

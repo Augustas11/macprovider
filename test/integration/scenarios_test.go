@@ -213,6 +213,69 @@ func TestSpec015V04SettlementReceiptCrossServiceVerifies(t *testing.T) {
 	}
 }
 
+func TestSpec022V04StreamingSettlementReconcilerE2E(t *testing.T) {
+	s := newScenario(t, scenarioOpts{
+		seedAccount:                        true,
+		settlementReceiptProvider:          true,
+		settlementEnforceMode:              true,
+		settlementReconcileIntervalSeconds: 1,
+	})
+	const requestID = "77777777-7777-4777-8777-777777777777"
+
+	status, headers, body := s.chatRequest(map[string]string{"X-Request-ID": requestID}, `{
+		"model":"llama-3.2-3b-instruct",
+		"max_tokens":32,
+		"stream":true,
+		"messages":[{"role":"user","content":"SPEC-022 local e2e streaming settlement receipt"}]
+	}`)
+	if status != http.StatusOK {
+		t.Fatalf("streaming chat status=%d body=%s", status, string(body))
+	}
+	if got := headers.Get("X-Request-ID"); got != requestID {
+		t.Fatalf("gateway X-Request-ID=%q want %q", got, requestID)
+	}
+	if got := headers.Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("buyer response exposed streaming v0.4 receipt header %q", got)
+	}
+	if !strings.Contains(string(body), "hello ") || !strings.Contains(string(body), "from fake provider") || !strings.Contains(string(body), "data: [DONE]") {
+		t.Fatalf("streaming body missing provider content or DONE marker: %s", string(body))
+	}
+
+	verdicts := waitForSettlementVerdicts(t, s, 1)
+	if len(verdicts) != 1 {
+		t.Fatalf("settlement verdict count=%d want 1", len(verdicts))
+	}
+	verdict := verdicts[0]
+	if verdict.RequestID == "" || verdict.RequestID == requestID {
+		t.Fatalf("verdict.request_id=%q want non-empty coordinator-internal request id distinct from gateway request id %q", verdict.RequestID, requestID)
+	}
+	if verdict.ProviderID != s.providerID {
+		t.Fatalf("verdict.provider_id=%q want %q", verdict.ProviderID, s.providerID)
+	}
+	if verdict.ReceiptPresent != 1 || !verdict.ReceiptVersion.Valid || verdict.ReceiptVersion.String != "4" {
+		t.Fatalf("receipt present/version=%d/%v want present v4", verdict.ReceiptPresent, verdict.ReceiptVersion)
+	}
+	if verdict.ReceiptResult != "valid" || verdict.SettlementOutcome != "verified" || verdict.Reason != "verified_settlement" || verdict.Closed != 1 {
+		t.Fatalf("verdict=%s/%s reason=%s closed=%d want valid/verified verified_settlement closed",
+			verdict.ReceiptResult, verdict.SettlementOutcome, verdict.Reason, verdict.Closed)
+	}
+	if !verdict.ModelHash.Valid || verdict.ModelHash.String != s.modelHash {
+		t.Fatalf("verdict.model_hash=%v want %s", verdict.ModelHash, s.modelHash)
+	}
+
+	usage, reservation := waitForSpec022GatewaySettlement(t, s, requestID)
+	if usage.Outcome != "spec022_verified" || usage.TokenSource != "coordinator_observed" {
+		t.Fatalf("usage outcome/source=%s/%s want spec022_verified/coordinator_observed", usage.Outcome, usage.TokenSource)
+	}
+	if usage.PromptTokens != 8 || usage.CompletionTokens != 12 || usage.TotalTokens != 20 {
+		t.Fatalf("usage tokens prompt/completion/total=%d/%d/%d want 8/12/20",
+			usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
+	}
+	if reservation.Status != "settled" || reservation.SettledTokens != 20 || reservation.SettlementHold != 1 {
+		t.Fatalf("reservation=%+v want settled 20-token held reservation", reservation)
+	}
+}
+
 func waitForSettlementVerdicts(t *testing.T, s *scenario, want int) []settlementReceiptVerdictRow {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -225,6 +288,31 @@ func waitForSettlementVerdicts(t *testing.T, s *scenario, want int) []settlement
 		time.Sleep(50 * time.Millisecond)
 	}
 	return latest
+}
+
+func waitForSpec022GatewaySettlement(t *testing.T, s *scenario, requestID string) (usageEventRow, quotaReservationRow) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var latestReservation quotaReservationRow
+	for time.Now().Before(deadline) {
+		usage, ok := s.readUsageEvent(requestID)
+		reservation, reservationOK := s.readQuotaReservation(requestID)
+		if reservationOK {
+			latestReservation = reservation
+		}
+		if ok && reservationOK && reservation.Status == "settled" {
+			return usage, reservation
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	usage, usageOK := s.readUsageEvent(requestID)
+	reservation, reservationOK := s.readQuotaReservation(requestID)
+	if reservationOK {
+		latestReservation = reservation
+	}
+	t.Fatalf("gateway settlement for request %s not settled before deadline: usage_found=%v usage=%+v reservation_found=%v reservation=%+v latest_reservation=%+v",
+		requestID, usageOK, usage, reservationOK, reservation, latestReservation)
+	return usageEventRow{}, quotaReservationRow{}
 }
 
 func TestInternalBearerWrongTokenRejected(t *testing.T) {

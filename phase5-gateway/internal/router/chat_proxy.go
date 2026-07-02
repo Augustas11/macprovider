@@ -979,8 +979,10 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string, resp *http.Response) {
 	finality := coordinatorStreamingSettlementFinality(resp)
 	switch finality.Action {
-	case settlementFinalityLegacy, settlementFinalityDebit:
+	case settlementFinalityLegacy:
 		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
+	case settlementFinalityDebit:
+		s.markStreamingSettlementHoldForReconciliation(r, subject, finality)
 	case settlementFinalityRefund:
 		if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 			slog.Error("gateway streaming settlement refund failed after coordinator receipt finality",
@@ -996,6 +998,48 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 	default:
 		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
 	}
+}
+
+func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) {
+	holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.store.MarkReservationSettlementHold(holdCtx, subject.AccountID, requestID(r)); err != nil {
+		if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+			slog.Info("gateway skipped streaming settlement hold after coordinator finality because reservation is not active",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+				"error", err,
+			)
+			return
+		}
+		slog.Error("gateway failed to mark streaming settlement hold after coordinator finality",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+			"error", err,
+		)
+		refundCtx, refundCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer refundCancel()
+		if refundErr := s.store.RefundReservation(refundCtx, subject.AccountID, requestID(r), s.now().Unix()); refundErr != nil && !errors.Is(refundErr, storage.ErrReservationNotFound) && !errors.Is(refundErr, storage.ErrReservationTerminal) {
+			slog.Error("gateway failed to refund streaming reservation after settlement hold marker failure",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+				"error", refundErr,
+			)
+		}
+		return
+	}
+	slog.Info("gateway deferred verified streaming buyer settlement to SPEC-022 reconciler",
+		"request_id", requestID(r),
+		"account_id", subject.AccountID,
+		"settlement_outcome", finality.Outcome,
+		"settlement_reason", finality.Reason,
+	)
 }
 
 func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) bool {

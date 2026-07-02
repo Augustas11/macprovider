@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 )
 
 func TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit(t *testing.T) {
@@ -204,6 +206,111 @@ func TestRequestSettlementFinalityAggregatesVerifiedUsageAfterPending(t *testing
 		finality.TotalTokens != input.ExpectedUsage.BillableInputTokens+input.ExpectedUsage.BillableOutputTokens ||
 		finality.TokenSource != UsageSourceCoordinatorObserved {
 		t.Fatalf("finality tokens=%#v, want coordinator observed billable usage %#v", finality, input.ExpectedUsage)
+	}
+}
+
+func TestRequestSettlementFinalityForAccountResolvesGatewayExternalRequestID(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	accountID := "acct_spec022_external_finality"
+	externalRequestID := "77777777-7777-4777-8777-777777777777"
+	input.AccountScope = AccountScopeForSettlement(accountID)
+	input.RouteSnapshot.AccountScope = input.AccountScope
+	reqStore, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	markSPEC022ReceiptVerified(t, store.db, input)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc:              time.UnixMilli(input.TerminalStateTSUnixMS).UTC(),
+		RequestID:          input.RequestID,
+		ExternalRequestID:  externalRequestID,
+		AccountID:          accountID,
+		Model:              input.RouteSnapshot.ModelID,
+		ProviderAssignedID: "assigned",
+		PromptTokens:       &input.ExpectedUsage.BillableInputTokens,
+		CompletionTokens:   &input.ExpectedUsage.BillableOutputTokens,
+		Status:             200,
+		Stream:             true,
+		BuyerIP:            "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	finality, found, err := store.RequestSettlementFinalityForAccount(context.Background(), accountID, externalRequestID, input.ReceiptReceivedUnixMS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("settlement finality not found through gateway external request id")
+	}
+	if finality.RequestID != externalRequestID {
+		t.Fatalf("finality.request_id=%q want external request id %q", finality.RequestID, externalRequestID)
+	}
+	if finality.Outcome != SettlementOutcomeVerified ||
+		finality.ReceiptResult != SettlementReceiptResultValid ||
+		!finality.Closed ||
+		finality.TokenSource != UsageSourceCoordinatorObserved {
+		t.Fatalf("finality=%#v, want closed verified coordinator-observed finality", finality)
+	}
+	if finality.PromptTokens != input.ExpectedUsage.BillableInputTokens ||
+		finality.CompletionTokens != input.ExpectedUsage.BillableOutputTokens ||
+		finality.TotalTokens != input.ExpectedUsage.BillableInputTokens+input.ExpectedUsage.BillableOutputTokens {
+		t.Fatalf("finality tokens=%#v, want receipt-bound usage %#v", finality, input.ExpectedUsage)
+	}
+}
+
+func TestRequestSettlementFinalityForAccountIgnoresExternalRowsBeforeReservationStart(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	accountID := "acct_spec022_external_reuse"
+	externalRequestID := "77777777-7777-4777-8777-777777777777"
+	input.AccountScope = AccountScopeForSettlement(accountID)
+	input.RouteSnapshot.AccountScope = input.AccountScope
+	reqStore, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	markSPEC022ReceiptVerified(t, store.db, input)
+	oldTS := time.UnixMilli(input.TerminalStateTSUnixMS).UTC()
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc:              oldTS,
+		RequestID:          input.RequestID,
+		ExternalRequestID:  externalRequestID,
+		AccountID:          accountID,
+		Model:              input.RouteSnapshot.ModelID,
+		ProviderAssignedID: "assigned-old",
+		PromptTokens:       &input.ExpectedUsage.BillableInputTokens,
+		CompletionTokens:   &input.ExpectedUsage.BillableOutputTokens,
+		Status:             200,
+		Stream:             true,
+		BuyerIP:            "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newReservationTS := oldTS.Add(time.Hour)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc:              newReservationTS,
+		RequestID:          "88888888-8888-4888-8888-888888888888",
+		ExternalRequestID:  externalRequestID,
+		AccountID:          accountID,
+		Model:              input.RouteSnapshot.ModelID,
+		ProviderAssignedID: "assigned-new",
+		Status:             200,
+		Stream:             true,
+		BuyerIP:            "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	finality, found, err := store.RequestSettlementFinalityForAccount(context.Background(), accountID, externalRequestID, newReservationTS.UnixMilli(), newReservationTS.UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Fatalf("finality=%#v found through stale external request id before current reservation start", finality)
 	}
 }
 

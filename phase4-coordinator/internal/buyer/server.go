@@ -578,12 +578,21 @@ func (s *Server) handleInternalSettlementFinality(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, "invalid_request", "account_id and request_id are required")
 		return
 	}
+	reservationCreatedAtUnixMS := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("reservation_created_at_unix_ms")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_request", "reservation_created_at_unix_ms must be a non-negative unix millisecond timestamp")
+			return
+		}
+		reservationCreatedAtUnixMS = parsed
+	}
 	billingStore, _, _ := s.billingState()
 	if billingStore == nil {
 		writeError(w, http.StatusNotFound, "not_found", "Settlement finality is unavailable")
 		return
 	}
-	finality, found, err := billingStore.RequestSettlementFinalityForAccount(r.Context(), accountID, requestID, s.now().UnixMilli())
+	finality, found, err := billingStore.RequestSettlementFinalityForAccount(r.Context(), accountID, requestID, s.now().UnixMilli(), reservationCreatedAtUnixMS)
 	if err != nil {
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("account_id", accountID).Msg("internal settlement finality lookup failed")
 		writeError(w, http.StatusInternalServerError, "settlement_finality_failed", "Could not load settlement finality")

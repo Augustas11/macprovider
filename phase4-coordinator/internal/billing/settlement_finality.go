@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 type RequestSettlementFinality struct {
@@ -39,8 +40,51 @@ type requestSettlementVerdictRow struct {
 	mode                  string
 }
 
-func (s *Store) RequestSettlementFinalityForAccount(ctx context.Context, accountID, requestID string, nowUnixMS int64) (RequestSettlementFinality, bool, error) {
-	return s.RequestSettlementFinality(ctx, AccountScopeForSettlement(accountID), requestID, nowUnixMS)
+const externalRequestFinalityLookupSkew = 5 * time.Minute
+
+func (s *Store) RequestSettlementFinalityForAccount(ctx context.Context, accountID, requestID string, nowUnixMS int64, notBeforeUnixMS ...int64) (RequestSettlementFinality, bool, error) {
+	accountScope := AccountScopeForSettlement(accountID)
+	finality, found, err := s.RequestSettlementFinality(ctx, accountScope, requestID, nowUnixMS)
+	if err != nil || found {
+		return finality, found, err
+	}
+	notBefore := int64(0)
+	if len(notBeforeUnixMS) > 0 {
+		notBefore = notBeforeUnixMS[0]
+	}
+	internalRequestIDs, err := s.requestIDsForExternalRequest(ctx, accountID, requestID, notBefore)
+	if err != nil || len(internalRequestIDs) == 0 {
+		return RequestSettlementFinality{}, false, err
+	}
+	finalities := make([]RequestSettlementFinality, 0, len(internalRequestIDs))
+	missingFinality := false
+	for _, internalRequestID := range internalRequestIDs {
+		resolved, resolvedFound, err := s.RequestSettlementFinality(ctx, accountScope, internalRequestID, nowUnixMS)
+		if err != nil {
+			return RequestSettlementFinality{}, false, err
+		}
+		if resolvedFound {
+			finalities = append(finalities, resolved)
+		} else {
+			missingFinality = true
+		}
+	}
+	if len(finalities) == 0 {
+		return RequestSettlementFinality{}, false, nil
+	}
+	finality = aggregateExternalRequestFinality(requestID, finalities)
+	if missingFinality && finality.Outcome == SettlementOutcomeVerified && finality.Closed {
+		finality.Outcome = SettlementOutcomePending
+		finality.ReceiptResult = SettlementReceiptResultInconclusive
+		finality.Reason = "missing_current_settlement_finality"
+		finality.Closed = false
+		finality.TokenSource = ""
+		finality.PromptTokens = 0
+		finality.CompletionTokens = 0
+		finality.TotalTokens = 0
+		finality.PendingAttempts++
+	}
+	return finality, true, nil
 }
 
 func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, requestID string, nowUnixMS int64) (RequestSettlementFinality, bool, error) {
@@ -233,4 +277,104 @@ func minPositiveDeadline(current, candidate int64) int64 {
 		return candidate
 	}
 	return current
+}
+
+func (s *Store) requestIDsForExternalRequest(ctx context.Context, accountID, externalRequestID string, notBeforeUnixMS int64) ([]string, error) {
+	args := []any{accountID, externalRequestID}
+	notBeforeClause := ""
+	if notBeforeUnixMS > 0 {
+		notBeforeUnixMS -= externalRequestFinalityLookupSkew.Milliseconds()
+		if notBeforeUnixMS < 0 {
+			notBeforeUnixMS = 0
+		}
+		notBeforeClause = " AND ts_utc >= ?"
+		args = append(args, time.UnixMilli(notBeforeUnixMS).UTC().Format(time.RFC3339Nano))
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT request_id
+  FROM (
+        SELECT request_id, MIN(id) AS first_id
+          FROM request_log
+         WHERE account_id = ? AND external_request_id = ? AND request_id IS NOT NULL AND request_id != ''`+notBeforeClause+`
+         GROUP BY request_id
+       )
+ ORDER BY first_id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var requestID string
+		if err := rows.Scan(&requestID); err != nil {
+			return nil, err
+		}
+		out = append(out, requestID)
+	}
+	return out, rows.Err()
+}
+
+func aggregateExternalRequestFinality(externalRequestID string, finalities []RequestSettlementFinality) RequestSettlementFinality {
+	out := RequestSettlementFinality{
+		RequestID:     externalRequestID,
+		PolicyVersion: finalities[0].PolicyVersion,
+		Mode:          finalities[0].Mode,
+	}
+	var firstTerminalRefund RequestSettlementFinality
+	hasTerminalRefund := false
+	for i := range finalities {
+		finality := finalities[i]
+		if finality.PolicyVersion != out.PolicyVersion || finality.Mode != out.Mode {
+			out.Outcome = SettlementOutcomePending
+			out.ReceiptResult = SettlementReceiptResultInconclusive
+			out.Reason = "mixed_settlement_policy_snapshot"
+			out.Closed = false
+			out.PendingAttempts++
+			out.PendingDeadlineUnixMS = minPositiveDeadline(out.PendingDeadlineUnixMS, finality.PendingDeadlineUnixMS)
+			return out
+		}
+		out.VerifiedAttempts += finality.VerifiedAttempts
+		out.PendingAttempts += finality.PendingAttempts
+		out.QuarantinedAttempts += finality.QuarantinedAttempts
+		out.ZeroSettledAttempts += finality.ZeroSettledAttempts
+		out.OverlappingBlockedTokens += finality.OverlappingBlockedTokens
+		out.PendingDeadlineUnixMS = minPositiveDeadline(out.PendingDeadlineUnixMS, finality.PendingDeadlineUnixMS)
+		out.PromptTokens += finality.PromptTokens
+		out.CompletionTokens += finality.CompletionTokens
+		out.TotalTokens += finality.TotalTokens
+		if !hasTerminalRefund &&
+			finality.Closed &&
+			finality.Outcome != SettlementOutcomeVerified &&
+			(finality.QuarantinedAttempts > 0 || finality.ZeroSettledAttempts > 0) {
+			firstTerminalRefund = finality
+			hasTerminalRefund = true
+		}
+	}
+	if out.PendingAttempts > 0 {
+		out.Outcome = SettlementOutcomePending
+		out.ReceiptResult = SettlementReceiptResultInconclusive
+		out.Reason = "receipt_verdict_pending"
+		out.Closed = false
+		return out
+	}
+	if out.VerifiedAttempts > 0 {
+		out.Outcome = SettlementOutcomeVerified
+		out.ReceiptResult = SettlementReceiptResultValid
+		out.Reason = "verified_settlement"
+		out.Closed = true
+		out.TokenSource = UsageSourceCoordinatorObserved
+		return out
+	}
+	if hasTerminalRefund {
+		out.Outcome = firstTerminalRefund.Outcome
+		out.ReceiptResult = firstTerminalRefund.ReceiptResult
+		out.Reason = firstTerminalRefund.Reason
+		out.Closed = true
+		return out
+	}
+	out.Outcome = SettlementOutcomePending
+	out.ReceiptResult = SettlementReceiptResultInconclusive
+	out.Reason = "no_settlement_candidate"
+	out.Closed = false
+	return out
 }

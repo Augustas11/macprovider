@@ -460,6 +460,34 @@ func TestClampReservationExpiryBoundsActiveHold(t *testing.T) {
 	}
 }
 
+func TestMarkReservationSettlementHoldPreservesExpiry(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_mark_hold")
+	created := fixedTime()
+	originalExpiry := created.Add(24 * time.Hour)
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_mark_hold", RequestID: "req_mark_hold", WindowDate: "2026-05-29",
+		RequestedTokens: 40, DailyQuota: 100, CreatedAt: created, ExpiresAt: originalExpiry,
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(ctx, "acct_mark_hold", "req_mark_hold"); err != nil {
+		t.Fatalf("MarkReservationSettlementHold: %v", err)
+	}
+	var raw string
+	var settlementHold int
+	if err := store.db.QueryRow(`SELECT expires_at, settlement_hold FROM quota_reservations WHERE account_id = ? AND request_id = ?`, "acct_mark_hold", "req_mark_hold").Scan(&raw, &settlementHold); err != nil {
+		t.Fatalf("query reservation: %v", err)
+	}
+	if expiresAt := decodeTime(raw); !expiresAt.Equal(originalExpiry) {
+		t.Fatalf("expires_at=%s want preserved original expiry %s", expiresAt, originalExpiry)
+	}
+	if settlementHold != 1 {
+		t.Fatalf("settlement_hold=%d want 1", settlementHold)
+	}
+}
+
 func TestListSettlementHeldReservationsSkipsOrdinaryActive(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

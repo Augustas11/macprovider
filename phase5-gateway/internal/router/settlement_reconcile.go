@@ -135,7 +135,7 @@ func parseSettlementReconcileLimit(raw string) (int, error) {
 }
 
 func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation storage.ActiveReservation) (string, error) {
-	finality, found, err := s.fetchCoordinatorRequestSettlementFinality(ctx, reservation.AccountID, reservation.RequestID)
+	finality, found, err := s.fetchCoordinatorRequestSettlementFinality(ctx, reservation)
 	if err != nil || !found {
 		if !found {
 			if err := s.store.RefundReservation(ctx, reservation.AccountID, reservation.RequestID, s.now().Unix()); err != nil {
@@ -196,7 +196,7 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 	}
 }
 
-func (s *Server) fetchCoordinatorRequestSettlementFinality(ctx context.Context, accountID, requestID string) (coordinatorRequestSettlementFinality, bool, error) {
+func (s *Server) fetchCoordinatorRequestSettlementFinality(ctx context.Context, reservation storage.ActiveReservation) (coordinatorRequestSettlementFinality, bool, error) {
 	base := strings.TrimRight(s.cfg.Coordinator.OperatorURL, "/")
 	if base == "" {
 		return coordinatorRequestSettlementFinality{}, false, fmt.Errorf("coordinator operator URL is not configured")
@@ -206,15 +206,18 @@ func (s *Server) fetchCoordinatorRequestSettlementFinality(ctx context.Context, 
 		return coordinatorRequestSettlementFinality{}, false, err
 	}
 	q := u.Query()
-	q.Set("account_id", accountID)
-	q.Set("request_id", requestID)
+	q.Set("account_id", reservation.AccountID)
+	q.Set("request_id", reservation.RequestID)
+	if !reservation.CreatedAt.IsZero() {
+		q.Set("reservation_created_at_unix_ms", strconv.FormatInt(reservation.CreatedAt.UTC().UnixMilli(), 10))
+	}
 	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return coordinatorRequestSettlementFinality{}, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
-	req.Header.Set("X-Request-ID", requestID)
+	req.Header.Set("X-Request-ID", reservation.RequestID)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return coordinatorRequestSettlementFinality{}, false, err
@@ -232,7 +235,7 @@ func (s *Server) fetchCoordinatorRequestSettlementFinality(ctx context.Context, 
 	if err := json.NewDecoder(resp.Body).Decode(&finality); err != nil {
 		return coordinatorRequestSettlementFinality{}, false, err
 	}
-	if finality.RequestID != "" && finality.RequestID != requestID {
+	if finality.RequestID != "" && finality.RequestID != reservation.RequestID {
 		return coordinatorRequestSettlementFinality{}, false, fmt.Errorf("coordinator finality request_id mismatch")
 	}
 	return finality, true, nil

@@ -1007,6 +1007,35 @@ func (s *Store) RefundReservation(ctx context.Context, accountID, requestID stri
 	return tx.Commit()
 }
 
+func (s *Store) MarkReservationSettlementHold(ctx context.Context, accountID, requestID string) error {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var status string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status FROM quota_reservations
+		WHERE account_id = ? AND request_id = ?`,
+		accountID, requestID).Scan(&status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.ErrReservationNotFound
+		}
+		return err
+	}
+	if status != "active" {
+		return fmt.Errorf("%w: reservation %s is %s", storage.ErrReservationTerminal, requestID, status)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET settlement_hold = 1
+		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+		accountID, requestID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error {
 	if expiresAt.IsZero() {
 		return fmt.Errorf("reservation expiry cannot be zero")
