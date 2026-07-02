@@ -198,6 +198,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/kill-switch", s.handleKillSwitch)
 	mux.HandleFunc("/admin/capacity-signal", s.handleCapacitySignal)
 	mux.HandleFunc("/admin/capacity-tier/evaluate", s.handleCapacityEvaluate)
+	mux.HandleFunc("/admin/settlement/reconcile", s.handleSettlementReconcile)
 	if s.cfg.Explorer.Enabled {
 		mux.HandleFunc("/admin/explorer/buyers", s.handleExplorerBuyers)
 		mux.HandleFunc("/admin/explorer/buyers/", s.handleExplorerBuyerDetail)

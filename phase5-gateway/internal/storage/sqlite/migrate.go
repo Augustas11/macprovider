@@ -14,7 +14,7 @@ const usageEventsTableDDL = `CREATE TABLE IF NOT EXISTS usage_events (
 	prompt_tokens INTEGER NOT NULL CHECK (prompt_tokens >= 0),
 	completion_tokens INTEGER NOT NULL CHECK (completion_tokens >= 0),
 	total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
-	token_source TEXT NOT NULL CHECK (token_source IN ('provider_reported', 'gateway_estimated', 'manual_fixture')),
+	token_source TEXT NOT NULL CHECK (token_source IN ('provider_reported', 'gateway_estimated', 'manual_fixture', 'coordinator_observed')),
 	outcome TEXT NOT NULL,
 	created_at TEXT NOT NULL,
 	PRIMARY KEY (account_id, request_id)
@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS quota_reservations (
 	reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
 	settled_tokens INTEGER NOT NULL DEFAULT 0 CHECK (settled_tokens >= 0),
 	status TEXT NOT NULL CHECK (status IN ('active', 'settled', 'refunded', 'expired')),
+	settlement_hold INTEGER NOT NULL DEFAULT 0 CHECK (settlement_hold IN (0, 1)),
 	expires_at TEXT NOT NULL,
 	created_at TEXT NOT NULL,
 	settled_at TEXT NOT NULL DEFAULT '',

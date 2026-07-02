@@ -543,6 +543,7 @@ func (s *Server) InternalHandler() http.Handler {
 	r := chi.NewRouter()
 	r.Delete("/internal/sticky", s.handleInternalStickyDelete)
 	r.Get("/internal/routing", s.handleInternalRouting)
+	r.Get("/internal/settlement/finality", s.handleInternalSettlementFinality)
 	return r
 }
 
@@ -564,6 +565,36 @@ func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
 		},
 		"tier2": s.internalTier2Metadata(),
 	})
+}
+
+func (s *Server) handleInternalSettlementFinality(w http.ResponseWriter, r *http.Request) {
+	if !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Internal settlement finality requires coordinator authorization")
+		return
+	}
+	accountID := sanitizeAccountID(r.URL.Query().Get("account_id"))
+	requestID := sanitizeExternalRequestID(r.URL.Query().Get("request_id"))
+	if accountID == "" || requestID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "account_id and request_id are required")
+		return
+	}
+	billingStore, _, _ := s.billingState()
+	if billingStore == nil {
+		writeError(w, http.StatusNotFound, "not_found", "Settlement finality is unavailable")
+		return
+	}
+	finality, found, err := billingStore.RequestSettlementFinalityForAccount(r.Context(), accountID, requestID, s.now().UnixMilli())
+	if err != nil {
+		s.log.Warn().Err(err).Str("request_id", requestID).Str("account_id", accountID).Msg("internal settlement finality lookup failed")
+		writeError(w, http.StatusInternalServerError, "settlement_finality_failed", "Could not load settlement finality")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "not_found", "Settlement finality not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(finality)
 }
 
 func (s *Server) internalTier2Metadata() map[string]any {

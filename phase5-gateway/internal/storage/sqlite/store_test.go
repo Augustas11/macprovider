@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -436,6 +437,13 @@ func TestClampReservationExpiryBoundsActiveHold(t *testing.T) {
 	if !expiresAt.Equal(deadline) {
 		t.Fatalf("expires_at=%s want clamped deadline %s", expiresAt, deadline)
 	}
+	held, err := store.ListSettlementHeldReservations(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListSettlementHeldReservations: %v", err)
+	}
+	if len(held) != 1 || held[0].RequestID != "req_clamp" {
+		t.Fatalf("held reservations=%+v, want req_clamp only", held)
+	}
 	reaped, err := store.ReapExpiredReservations(ctx, deadline.Add(time.Second))
 	if err != nil {
 		t.Fatalf("ReapExpiredReservations: %v", err)
@@ -449,6 +457,88 @@ func TestClampReservationExpiryBoundsActiveHold(t *testing.T) {
 	}
 	if reserved != 0 {
 		t.Fatalf("reserved after clamped expiry reap=%d want 0", reserved)
+	}
+}
+
+func TestListSettlementHeldReservationsSkipsOrdinaryActive(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_held_only")
+	now := fixedTime()
+	for _, requestID := range []string{"req_ordinary", "req_held"} {
+		if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+			AccountID: "acct_held_only", RequestID: requestID, WindowDate: "2026-05-29",
+			RequestedTokens: 10, DailyQuota: 100, CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour),
+		}); err != nil {
+			t.Fatalf("ReserveQuota %s: %v", requestID, err)
+		}
+	}
+	if err := store.ClampReservationExpiry(ctx, "acct_held_only", "req_held", now.Add(5*time.Minute)); err != nil {
+		t.Fatalf("ClampReservationExpiry: %v", err)
+	}
+	held, err := store.ListSettlementHeldReservations(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListSettlementHeldReservations: %v", err)
+	}
+	if len(held) != 1 || held[0].RequestID != "req_held" {
+		t.Fatalf("held reservations=%+v, want req_held only", held)
+	}
+}
+
+func TestQuotaSettlementHoldColumnMigration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v5-gateway.db")
+	rawDB, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	for _, d := range []string{
+		`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`,
+		`INSERT INTO schema_migrations VALUES (1, '2026-06-01T00:00:00Z')`,
+		`INSERT INTO schema_migrations VALUES (2, '2026-06-02T00:00:00Z')`,
+		`INSERT INTO schema_migrations VALUES (3, '2026-06-03T00:00:00Z')`,
+		`INSERT INTO schema_migrations VALUES (4, '2026-06-04T00:00:00Z')`,
+		`INSERT INTO schema_migrations VALUES (5, '2026-06-05T00:00:00Z')`,
+		`CREATE TABLE quota_reservations (
+			account_id TEXT NOT NULL,
+			request_id TEXT NOT NULL,
+			window_date TEXT NOT NULL,
+			reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
+			settled_tokens INTEGER NOT NULL DEFAULT 0 CHECK (settled_tokens >= 0),
+			status TEXT NOT NULL CHECK (status IN ('active', 'settled', 'refunded', 'expired')),
+			expires_at TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			settled_at TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (account_id, request_id)
+		)`,
+		`INSERT INTO quota_reservations(account_id, request_id, window_date, reserved_tokens, status, expires_at, created_at)
+			VALUES('acct_v5', 'req_v5', '2026-05-29', 10, 'active', '2026-05-30T00:00:00Z', '2026-05-29T00:00:00Z')`,
+	} {
+		if _, err := rawDB.ExecContext(ctx, d); err != nil {
+			t.Fatalf("v5 DDL: %v", err)
+		}
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("close v5 db: %v", err)
+	}
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	var settlementHold int
+	if err := store.db.QueryRowContext(ctx, `SELECT settlement_hold FROM quota_reservations WHERE account_id = 'acct_v5' AND request_id = 'req_v5'`).Scan(&settlementHold); err != nil {
+		t.Fatalf("query settlement_hold: %v", err)
+	}
+	if settlementHold != 0 {
+		t.Fatalf("settlement_hold=%d want default 0", settlementHold)
+	}
+	var maxVer int64
+	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&maxVer); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	if maxVer < 6 {
+		t.Fatalf("schema_migrations max version=%d want >=6", maxVer)
 	}
 }
 
@@ -747,8 +837,8 @@ func TestReservationErrorBranches(t *testing.T) {
 		AccountID: "acct_reservation_errors", RequestID: "req_refund_then_settle", PromptTokens: 1,
 		TokenSource: "provider_reported", Outcome: "ok",
 	})
-	if err == nil {
-		t.Fatal("SettleReservation on refunded reservation unexpectedly succeeded")
+	if !errors.Is(err, storage.ErrReservationTerminal) {
+		t.Fatalf("SettleReservation on refunded reservation err=%v, want ErrReservationTerminal", err)
 	}
 }
 

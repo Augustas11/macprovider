@@ -159,6 +159,91 @@ func TestSettlementReceiptPendingCanCloseWithValidReceiptBeforeDeadline(t *testi
 	}
 }
 
+func TestRequestSettlementFinalityAggregatesVerifiedUsageAfterPending(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	id := SettlementReceiptIdentity{
+		AccountScope: input.AccountScope,
+		RequestID:    input.RequestID,
+		AttemptN:     input.AttemptN,
+		ProviderID:   input.ProviderID,
+	}
+	deadline := input.TerminalStateTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000
+	if _, err := store.RecordMissingSettlementReceipt(context.Background(), SettlementReceiptMissingInput{
+		SettlementReceiptIdentity: id,
+		NowUnixMS:                 deadline - 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: id,
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     pubkey,
+		receiptReceivedUnixMS:     deadline - 50,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	finality, found, err := store.RequestSettlementFinality(context.Background(), input.AccountScope, input.RequestID, deadline-25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("settlement finality not found")
+	}
+	if finality.Outcome != SettlementOutcomeVerified || finality.ReceiptResult != SettlementReceiptResultValid || !finality.Closed {
+		t.Fatalf("finality=%#v, want closed verified finality", finality)
+	}
+	if finality.PromptTokens != input.ExpectedUsage.BillableInputTokens ||
+		finality.CompletionTokens != input.ExpectedUsage.BillableOutputTokens ||
+		finality.TotalTokens != input.ExpectedUsage.BillableInputTokens+input.ExpectedUsage.BillableOutputTokens ||
+		finality.TokenSource != UsageSourceCoordinatorObserved {
+		t.Fatalf("finality tokens=%#v, want coordinator observed billable usage %#v", finality, input.ExpectedUsage)
+	}
+}
+
+func TestRequestSettlementFinalityDeadlineQuarantinesOpenPending(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	id := SettlementReceiptIdentity{
+		AccountScope: input.AccountScope,
+		RequestID:    input.RequestID,
+		AttemptN:     input.AttemptN,
+		ProviderID:   input.ProviderID,
+	}
+	deadline := input.TerminalStateTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000
+	if _, err := store.RecordMissingSettlementReceipt(context.Background(), SettlementReceiptMissingInput{
+		SettlementReceiptIdentity: id,
+		NowUnixMS:                 deadline - 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	finality, found, err := store.RequestSettlementFinality(context.Background(), input.AccountScope, input.RequestID, deadline+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("settlement finality not found")
+	}
+	if finality.Outcome != SettlementOutcomeQuarantined || !finality.Closed || finality.Reason != "missing_receipt_deadline_elapsed" {
+		t.Fatalf("finality=%#v, want deadline quarantine refund finality", finality)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE settlement_outcome='quarantined' AND reason='missing_receipt_deadline_elapsed' AND closed=1`); got != 1 {
+		t.Fatalf("deadline quarantine rows=%d want 1", got)
+	}
+}
+
 func TestSettlementReceiptReceivedAfterDeadlineQuarantinesEvenWithValidHeader(t *testing.T) {
 	fixtures := loadSettlementVerifierFixtures(t)
 	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)

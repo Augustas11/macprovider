@@ -58,6 +58,7 @@ type UsageStore interface {
 	SettleDemoReservation(ctx context.Context, settlement ReservationSettlement, demo DemoUsageEvent) error
 	RefundReservation(ctx context.Context, accountID, requestID string, refundedAt int64) error
 	ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error
+	ListSettlementHeldReservations(ctx context.Context, limit int) ([]ActiveReservation, error)
 	InsertUsageEvent(ctx context.Context, event UsageEvent) error
 	// EnsureUsageEvent inserts a usage_events row idempotently. The
 	// behavior on a request_id PK conflict is the SPEC-006 § 17.7

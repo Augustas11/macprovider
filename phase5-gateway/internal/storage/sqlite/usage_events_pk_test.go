@@ -6,17 +6,17 @@
 //
 // Three checks here:
 //
-//   1. Cross-account collision now SUCCEEDS — both accounts get their
-//      own row. This is the core acceptance criterion for #196.
-//   2. Same-account collision still no-ops via INSERT OR IGNORE and
-//      the EnsureUsageEvent payload verify still returns
-//      ErrUsageEventConflict on a payload mismatch. Confirms the
-//      composite PK didn't accidentally re-open the same-account
-//      double-bill window.
-//   3. A pre-existing gateway.db with the legacy single-column PK
-//      survives Migrate(), gets rebuilt into the composite shape,
-//      preserves all rows, AND the append-only triggers + indexes
-//      are recreated.
+//  1. Cross-account collision now SUCCEEDS — both accounts get their
+//     own row. This is the core acceptance criterion for #196.
+//  2. Same-account collision still no-ops via INSERT OR IGNORE and
+//     the EnsureUsageEvent payload verify still returns
+//     ErrUsageEventConflict on a payload mismatch. Confirms the
+//     composite PK didn't accidentally re-open the same-account
+//     double-bill window.
+//  3. A pre-existing gateway.db with the legacy single-column PK
+//     survives Migrate(), gets rebuilt into the composite shape,
+//     preserves all rows, AND the append-only triggers + indexes
+//     are recreated.
 package sqlite
 
 import (
@@ -429,6 +429,83 @@ func TestUsageEventsCompositePKAndSchemaV2CommitAtomically(t *testing.T) {
 	if !maxVer.Valid || maxVer.Int64 < 2 {
 		t.Errorf("schema_migrations max version = %v, want >= 2 (must be stamped atomically with rebuild)", maxVer)
 	}
+}
+
+func TestUsageEventsCoordinatorObservedSourceMigration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v4-gateway.db")
+	rawDB, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	for _, d := range []string{
+		`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`,
+		`INSERT INTO schema_migrations VALUES (1, '2026-06-01T00:00:00Z')`,
+		`INSERT INTO schema_migrations VALUES (2, '2026-06-02T00:00:00Z')`,
+		`INSERT INTO schema_migrations VALUES (3, '2026-06-03T00:00:00Z')`,
+		`INSERT INTO schema_migrations VALUES (4, '2026-06-04T00:00:00Z')`,
+		`CREATE TABLE accounts (account_id TEXT PRIMARY KEY, status TEXT NOT NULL, quota_class TEXT NOT NULL, concurrency_class TEXT NOT NULL, created_at TEXT NOT NULL)`,
+		`CREATE TABLE usage_events (
+			request_id TEXT NOT NULL,
+			account_id TEXT NOT NULL,
+			demo_identity TEXT NOT NULL DEFAULT '',
+			window_date TEXT NOT NULL,
+			prompt_tokens INTEGER NOT NULL CHECK (prompt_tokens >= 0),
+			completion_tokens INTEGER NOT NULL CHECK (completion_tokens >= 0),
+			total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
+			token_source TEXT NOT NULL CHECK (token_source IN ('provider_reported', 'gateway_estimated', 'manual_fixture')),
+			outcome TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (account_id, request_id)
+		)`,
+		`CREATE INDEX idx_usage_account_date ON usage_events(account_id, window_date)`,
+		`CREATE INDEX idx_usage_created_at ON usage_events(created_at)`,
+		`CREATE TRIGGER usage_events_no_update BEFORE UPDATE ON usage_events
+			BEGIN SELECT RAISE(ABORT, 'usage_events are append-only'); END`,
+		`CREATE TRIGGER usage_events_no_delete BEFORE DELETE ON usage_events
+			BEGIN SELECT RAISE(ABORT, 'usage_events are append-only'); END`,
+		`INSERT INTO usage_events(request_id, account_id, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
+			VALUES('req_existing', 'acct_v4', '2026-06-27', 1, 2, 3, 'provider_reported', 'ok', '2026-06-27T00:00:00Z')`,
+	} {
+		if _, err := rawDB.ExecContext(ctx, d); err != nil {
+			t.Fatalf("v4 DDL: %v", err)
+		}
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("close v4 db: %v", err)
+	}
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open (triggers migration): %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	sqlText := readUsageEventsMaster(t, store)["usage_events"]
+	if !strings.Contains(sqlText, "coordinator_observed") {
+		t.Fatalf("usage_events DDL missing coordinator_observed after migration: %s", sqlText)
+	}
+	var maxVer int64
+	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&maxVer); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	if maxVer < 5 {
+		t.Fatalf("schema_migrations max version=%d want >=5", maxVer)
+	}
+	if err := store.InsertUsageEvent(ctx, storage.UsageEvent{
+		RequestID: "req_coord", AccountID: "acct_v4", WindowDate: "2026-06-27",
+		PromptTokens: 4, CompletionTokens: 5, TotalTokens: 9,
+		TokenSource: "coordinator_observed", Outcome: "spec022_verified", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("InsertUsageEvent coordinator_observed: %v", err)
+	}
+	var n int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_events WHERE account_id = 'acct_v4'`).Scan(&n); err != nil {
+		t.Fatalf("count usage_events: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("usage_events count=%d want existing row plus coordinator_observed row", n)
+	}
+	assertSQLFails(t, store, `UPDATE usage_events SET total_tokens = 99 WHERE request_id = 'req_coord'`)
 }
 
 // TestUsageEventsSqliteMasterByteIdenticalAcrossPaths pins ISS-196
