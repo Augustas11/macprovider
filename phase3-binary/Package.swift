@@ -31,7 +31,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/jpsim/Yams.git",
-            exact: "5.1.0"
+            exact: "6.2.2"
         )
     ],
     targets: [
