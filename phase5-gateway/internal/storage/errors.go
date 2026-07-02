@@ -8,6 +8,7 @@ var (
 	ErrQuotaExceeded       = errors.New("quota exceeded")
 	ErrReservationExists   = errors.New("quota reservation exists")
 	ErrReservationNotFound = errors.New("quota reservation not found")
+	ErrReservationTerminal = errors.New("quota reservation is terminal")
 	// ErrUsageEventConflict is returned by EnsureUsageEvent when the
 	// request_id PK already has a row whose identity fields
 	// (account_id, demo_identity, token_source, outcome) DISAGREE

@@ -3,11 +3,10 @@ package buyer
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
@@ -29,30 +28,37 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	if store == nil {
 		return nil, nil
 	}
-	if len(provider.ReceiptPubkey) == 0 {
+	settlementCfg := store.SettlementConfig(config.Default().Settlement)
+	routeMode := billing.VerifiedModelSettlementMode(settlementCfg)
+	skipOrEnforceError := func(reason string) (*providerws.SettlementReceiptMetadata, error) {
+		if routeMode == billing.RouteSnapshotModeEnforce {
+			return nil, fmt.Errorf("verified model settlement enforce requires route snapshot: %s", reason)
+		}
 		return nil, nil
+	}
+	if len(provider.ReceiptPubkey) == 0 {
+		return skipOrEnforceError("missing provider receipt key")
 	}
 	keyID, err := billing.ReceiptKeyID(provider.ReceiptPubkey)
 	if err != nil {
-		return nil, nil
+		return skipOrEnforceError("invalid provider receipt key")
 	}
 	reportedHash := strings.TrimSpace(provider.ModelHash)
 	if !isLowerHex64(reportedHash) {
-		return nil, nil
+		return skipOrEnforceError("invalid provider model hash")
 	}
 	material, ok := tier2.SnapshotMaterial(provider.ModelID, reportedHash)
 	if !ok {
-		return nil, nil
+		return skipOrEnforceError("missing catalog material")
 	}
 	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != reportedHash {
-		return nil, nil
+		return skipOrEnforceError("model hash not verified")
 	}
 	promptHash, err := coordinatorPromptHash(providerBody)
 	if err != nil {
 		return nil, err
 	}
 	sessionID := stringPtrOrNil(provider.AssignedID)
-	settlementCfg := store.SettlementConfig(config.Default().Settlement)
 	pendingDeadline := settlementCfg.RecoveryGraceSeconds
 	if pendingDeadline <= 0 {
 		pendingDeadline = config.Default().Settlement.RecoveryGraceSeconds
@@ -77,7 +83,7 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		CatalogExpiresAtUnixMS:            material.CatalogExpiresAt.UnixMilli(),
 		Spec008HashStatus:                 string(material.HashStatus),
 		RouteSnapshotPolicyVersion:        billing.RouteSnapshotPolicyVersion,
-		RouteSnapshotMode:                 billing.RouteSnapshotModeObserve,
+		RouteSnapshotMode:                 routeMode,
 		RouteDecisionTSUnixMS:             b.state.routingDone.UnixMilli(),
 		RequestStartTSUnixMS:              b.startedAt.UnixMilli(),
 		PendingDeadlineSeconds:            int64(pendingDeadline),
@@ -92,6 +98,8 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	}
 	b.settlementAttemptN = attemptN
 	b.hasSettlementAttemptN = true
+	b.settlementPolicyMode = snapshot.RouteSnapshotMode
+	b.settlementPolicyVersion = snapshot.RouteSnapshotPolicyVersion
 	return &providerws.SettlementReceiptMetadata{
 		AccountScope:               snapshot.AccountScope,
 		RequestID:                  snapshot.RequestID,
@@ -124,12 +132,7 @@ func isLowerHex64(value string) bool {
 }
 
 func accountScopeForSettlement(accountID string) string {
-	accountID = strings.TrimSpace(accountID)
-	if accountID == "" {
-		return "legacy_direct"
-	}
-	sum := sha256.Sum256([]byte("spec015-account-scope-v1:" + accountID))
-	return "acct_sha256:" + hex.EncodeToString(sum[:])
+	return billing.AccountScopeForSettlement(accountID)
 }
 
 func stringPtrOrNil(value string) *string {
@@ -146,14 +149,34 @@ func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err er
 	writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "Could not durably record route snapshot")
 }
 
-func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header string) error {
+const (
+	settlementOutcomeHeader       = "X-MacProvider-Settlement-Outcome"
+	settlementReceiptResultHeader = "X-MacProvider-Settlement-Receipt-Result"
+	settlementReasonHeader        = "X-MacProvider-Settlement-Reason"
+	settlementClosedHeader        = "X-MacProvider-Settlement-Closed"
+	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
+	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
+	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
+)
+
+var settlementOutcomeHeaderNames = []string{
+	settlementOutcomeHeader,
+	settlementReceiptResultHeader,
+	settlementReasonHeader,
+	settlementClosedHeader,
+	settlementModeHeader,
+	settlementPolicyVersionHeader,
+	settlementPendingUntilHeader,
+}
+
+func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header string) (billing.SettlementReceiptState, bool, error) {
 	header = normalizeReceiptHeaderValue(header)
 	if len(provider.ReceiptPubkey) == 0 || !b.hasSettlementAttemptN {
-		return nil
+		return billing.SettlementReceiptState{}, false, nil
 	}
 	store, _, _ := b.server.billingState()
 	if store == nil {
-		return nil
+		return billing.SettlementReceiptState{}, false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
@@ -164,15 +187,15 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 		ProviderID:   provider.ProviderID,
 	}
 	if header == "" {
-		_, err := store.RecordMissingSettlementReceipt(ctx, billing.SettlementReceiptMissingInput{
+		state, err := store.RecordMissingSettlementReceipt(ctx, billing.SettlementReceiptMissingInput{
 			SettlementReceiptIdentity: identity,
 		})
 		if err != nil {
 			b.server.log.Warn().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("missing settlement receipt recording failed")
 		}
-		return err
+		return state, err == nil, err
 	}
-	_, err := store.IngestSettlementReceipt(ctx, billing.SettlementReceiptIngestionInput{
+	state, err := store.IngestSettlementReceipt(ctx, billing.SettlementReceiptIngestionInput{
 		SettlementReceiptIdentity: identity,
 		Header:                    header,
 		ProviderReceiptPubkey:     provider.ReceiptPubkey,
@@ -180,7 +203,35 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 	if err != nil {
 		b.server.log.Warn().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("settlement receipt ingestion failed")
 	}
-	return err
+	return state, err == nil, err
+}
+
+func setSettlementOutcomeHeaders(dst http.Header, state billing.SettlementReceiptState) {
+	dst.Set(settlementOutcomeHeader, state.SettlementOutcome)
+	dst.Set(settlementReceiptResultHeader, state.ReceiptResult)
+	dst.Set(settlementReasonHeader, state.Reason)
+	dst.Set(settlementClosedHeader, strconv.FormatBool(state.Closed))
+	dst.Set(settlementModeHeader, state.RouteSnapshotMode)
+	dst.Set(settlementPolicyVersionHeader, state.RouteSnapshotPolicyVersion)
+	if state.PendingDeadlineUnixMS > 0 {
+		dst.Set(settlementPendingUntilHeader, strconv.FormatInt(state.PendingDeadlineUnixMS, 10))
+	}
+}
+
+func setInternalSettlementOutcomeHeaders(dst http.Header, rec *billingRecorder, state billing.SettlementReceiptState) {
+	if rec == nil || rec.accountID == "" {
+		return
+	}
+	setSettlementOutcomeHeaders(dst, state)
+}
+
+func declareInternalSettlementOutcomeTrailers(dst http.Header, rec *billingRecorder) {
+	if rec == nil || rec.accountID == "" {
+		return
+	}
+	for _, header := range settlementOutcomeHeaderNames {
+		dst.Add("Trailer", header)
+	}
 }
 
 func coordinatorPromptHash(raw json.RawMessage) (string, error) {

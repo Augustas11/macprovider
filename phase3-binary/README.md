@@ -60,6 +60,10 @@ Quick reference for Mac owners running `macprovider-cli`:
 - **Rate card (default):** 500,000 credits / 1 M prompt tokens; 1,000,000 credits / 1 M completion tokens.
 - **Minimum payout threshold:** 500,000 credits (config: `settlement.min_payout_credits`).
 - **Settlement cadence:** weekly, every Monday 00:00 UTC (config: `settlement.cadence_days = 7`).
+- **Receipt deadline:** for SPEC-022 settlement-capable traffic, receipts
+  arriving after `pending_deadline_seconds` are non-settling and
+  non-recoverable unless a future operator-review exception spec changes that
+  rule.
 - **Balance check:** `GET /providers/{id}/earnings` with `Authorization: Bearer <provider_token>`.
 - **Sleep behavior:** the binary holds `caffeinate -dimsu` to prevent idle system sleep; lid-close still drops the WebSocket (binary reconnects automatically on wake).
 - **Reaping:** coordinator closes idle WebSocket connections after 90 s of no inbound frames (heartbeat or inference chunk); default `pool.heartbeat_miss_threshold_s = 90`.

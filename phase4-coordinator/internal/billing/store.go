@@ -81,6 +81,9 @@ CREATE TABLE IF NOT EXISTS ledger_request_credits (
     settlement_id INTEGER NULL,
     quarantined INTEGER NOT NULL DEFAULT 0 CHECK(quarantined IN (0,1)),
     quarantine_reason TEXT NULL,
+    settlement_account_scope_hash TEXT NULL CHECK(settlement_account_scope_hash IS NULL OR (length(settlement_account_scope_hash) = 64 AND settlement_account_scope_hash NOT GLOB '*[^0-9a-f]*')),
+    settlement_policy_mode TEXT NOT NULL DEFAULT 'legacy' CHECK(settlement_policy_mode IN ('legacy','observe','enforce')),
+    settlement_policy_version TEXT NULL,
     recovery_source TEXT NOT NULL DEFAULT 'hot_path' CHECK(recovery_source IN ('hot_path','startup_scan','nightly_reconcile')),
     created_at_utc TEXT NOT NULL,
     updated_at_utc TEXT NULL,
@@ -315,10 +318,191 @@ CREATE INDEX IF NOT EXISTS idx_lqr_kind_created ON ledger_quarantine_resolutions
 `); err != nil {
 		return err
 	}
+	if err := s.ensureLedgerRequestCreditSettlementColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureLedgerRequestCreditSettlementPolicyGuards(ctx); err != nil {
+		return err
+	}
+	if err := s.rebuildSpec022PayableRequestCreditsView(ctx); err != nil {
+		return err
+	}
 	if err := s.rebuildLegacyConfigSnapshots(ctx); err != nil {
 		return err
 	}
 	return s.validateRequestLog(ctx)
+}
+
+func (s *Store) ensureLedgerRequestCreditSettlementColumns(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(ledger_request_credits)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	add := []struct {
+		name string
+		sql  string
+	}{
+		{"settlement_account_scope_hash", `ALTER TABLE ledger_request_credits ADD COLUMN settlement_account_scope_hash TEXT NULL`},
+		{"settlement_policy_mode", `ALTER TABLE ledger_request_credits ADD COLUMN settlement_policy_mode TEXT NOT NULL DEFAULT 'legacy'`},
+		{"settlement_policy_version", `ALTER TABLE ledger_request_credits ADD COLUMN settlement_policy_version TEXT NULL`},
+	}
+	for _, col := range add {
+		if cols[col.name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, col.sql); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureLedgerRequestCreditSettlementPolicyGuards(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+CREATE TRIGGER IF NOT EXISTS trg_lrc_settlement_policy_insert_guard
+BEFORE INSERT ON ledger_request_credits
+WHEN NEW.settlement_policy_mode IS NULL
+  OR NEW.settlement_policy_mode NOT IN ('legacy','observe','enforce')
+  OR (
+      NEW.settlement_account_scope_hash IS NOT NULL
+      AND (
+          length(NEW.settlement_account_scope_hash) != 64
+          OR NEW.settlement_account_scope_hash GLOB '*[^0-9a-f]*'
+      )
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'invalid ledger_request_credits settlement policy');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_lrc_settlement_policy_update_guard
+BEFORE UPDATE OF settlement_account_scope_hash, settlement_policy_mode, settlement_policy_version ON ledger_request_credits
+WHEN NEW.settlement_policy_mode IS NULL
+  OR NEW.settlement_policy_mode NOT IN ('legacy','observe','enforce')
+  OR (
+      NEW.settlement_account_scope_hash IS NOT NULL
+      AND (
+          length(NEW.settlement_account_scope_hash) != 64
+          OR NEW.settlement_account_scope_hash GLOB '*[^0-9a-f]*'
+      )
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'invalid ledger_request_credits settlement policy');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_lrc_settlement_policy_immutable
+BEFORE UPDATE OF settlement_account_scope_hash, settlement_policy_mode, settlement_policy_version ON ledger_request_credits
+WHEN COALESCE(OLD.settlement_account_scope_hash, '') != COALESCE(NEW.settlement_account_scope_hash, '')
+  OR COALESCE(OLD.settlement_policy_mode, '') != COALESCE(NEW.settlement_policy_mode, '')
+  OR COALESCE(OLD.settlement_policy_version, '') != COALESCE(NEW.settlement_policy_version, '')
+BEGIN
+    SELECT RAISE(ABORT, 'ledger_request_credits settlement policy is immutable');
+END;
+DROP TRIGGER IF EXISTS trg_lrc_settled_money_immutable;
+DROP TRIGGER IF EXISTS trg_lrc_settled_link_immutable;
+CREATE TRIGGER trg_lrc_settled_money_immutable
+BEFORE UPDATE OF prompt_tokens, completion_tokens, estimated_completion_tokens,
+                 usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
+                 global_multiplier_ppm, gross_credits, provider_share_bps,
+                 provider_credits, fault_flag ON ledger_request_credits
+WHEN (OLD.settled = 1 OR NEW.settled = 1)
+  AND (
+      COALESCE(OLD.prompt_tokens, -1) != COALESCE(NEW.prompt_tokens, -1)
+      OR COALESCE(OLD.completion_tokens, -1) != COALESCE(NEW.completion_tokens, -1)
+      OR COALESCE(OLD.estimated_completion_tokens, -1) != COALESCE(NEW.estimated_completion_tokens, -1)
+      OR OLD.usage_source != NEW.usage_source
+      OR OLD.prompt_rate_per_mtok != NEW.prompt_rate_per_mtok
+      OR OLD.completion_rate_per_mtok != NEW.completion_rate_per_mtok
+      OR OLD.global_multiplier_ppm != NEW.global_multiplier_ppm
+      OR OLD.gross_credits != NEW.gross_credits
+      OR OLD.provider_share_bps != NEW.provider_share_bps
+      OR OLD.provider_credits != NEW.provider_credits
+      OR OLD.fault_flag != NEW.fault_flag
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'settled ledger_request_credits money fields are immutable');
+END;
+CREATE TRIGGER trg_lrc_settled_link_immutable
+BEFORE UPDATE OF settled, settlement_id ON ledger_request_credits
+WHEN OLD.settled = 1
+  AND (
+      OLD.settled != NEW.settled
+      OR COALESCE(OLD.settlement_id, -1) != COALESCE(NEW.settlement_id, -1)
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'settled ledger_request_credits settlement link is immutable');
+END;
+`)
+	return err
+}
+
+func (s *Store) rebuildSpec022PayableRequestCreditsView(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_lrc_spec022_payable ON ledger_request_credits(
+    settlement_policy_mode, settlement_account_scope_hash, request_id, attempt_n, provider_id,
+    quarantined, settled, settlement_id, ts_utc
+);
+CREATE INDEX IF NOT EXISTS idx_srs_spec022_payable ON settlement_route_snapshots(
+    request_id, attempt_n, provider_id, route_snapshot_mode, route_snapshot_digest, account_scope
+);
+CREATE INDEX IF NOT EXISTS idx_srv_spec022_payable ON settlement_receipt_verdicts(
+    account_scope_hash, request_id, attempt_n, provider_id, route_snapshot_digest, closed, settlement_outcome
+);
+CREATE INDEX IF NOT EXISTS idx_sao_spec022_payable ON settlement_attempt_outputs(
+    account_scope, request_id, attempt_n, provider_id, overlapping_or_duplicate
+);
+DROP VIEW IF EXISTS spec022_payable_request_credits;
+CREATE VIEW spec022_payable_request_credits AS
+SELECT lrc.*
+  FROM ledger_request_credits lrc
+ WHERE lrc.quarantined = 0
+   AND (
+       COALESCE(lrc.settlement_policy_mode, 'legacy') IN ('legacy', 'observe')
+       OR (
+           lrc.settlement_policy_mode = 'enforce'
+           AND lrc.settlement_account_scope_hash IS NOT NULL
+           AND lrc.settlement_policy_version IS NOT NULL
+           AND EXISTS (
+               SELECT 1
+                 FROM settlement_route_snapshots srs
+                 JOIN settlement_receipt_verdicts srv
+                   ON srv.account_scope_hash = lrc.settlement_account_scope_hash
+                  AND srv.request_id = srs.request_id
+                  AND srv.attempt_n = srs.attempt_n
+                  AND srv.provider_id = srs.provider_id
+                  AND srv.route_snapshot_digest = srs.route_snapshot_digest
+                 JOIN settlement_attempt_outputs sao
+                   ON sao.account_scope = srs.account_scope
+                  AND sao.request_id = srs.request_id
+                  AND sao.attempt_n = srs.attempt_n
+                  AND sao.provider_id = srs.provider_id
+                WHERE srs.request_id = lrc.request_id
+                  AND srs.attempt_n = lrc.attempt_n
+                  AND srs.provider_id = lrc.provider_id
+                  AND srs.route_snapshot_mode = 'enforce'
+                  AND srs.route_snapshot_policy_version = lrc.settlement_policy_version
+                  AND srv.route_snapshot_mode = 'enforce'
+                  AND srv.route_snapshot_policy_version = lrc.settlement_policy_version
+                  AND srv.closed = 1
+                  AND srv.settlement_outcome = 'verified'
+                  AND sao.overlapping_or_duplicate = 0
+           )
+       )
+   );
+`)
+	return err
 }
 
 func (s *Store) rebuildLegacyConfigSnapshots(ctx context.Context) error {

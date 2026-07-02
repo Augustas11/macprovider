@@ -1703,6 +1703,7 @@ func TestSuccessfulNonStreamingBillingClampsInflatedProviderCompletion(t *testin
 	if err != nil {
 		t.Fatalf("billing.NewStore: %v", err)
 	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeObserve)
 	rewards := config.RewardsConfig{
 		GlobalMultiplier: 1.0,
 		ProviderShare:    0.90,
@@ -1796,6 +1797,7 @@ func TestRawHTTPStreamingBuyerCancelDoesNotBreakerFaultProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("billing.NewStore: %v", err)
 	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeObserve)
 	rewards := config.RewardsConfig{
 		GlobalMultiplier: 1.0,
 		ProviderShare:    0.90,

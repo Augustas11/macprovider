@@ -142,6 +142,22 @@ type settlementReceiptDiagnostic struct {
 	ReceiptTupleCanonicalSHA256   any    `json:"receipt_tuple_canonical_sha256"`
 }
 
+type settlementVerdictCounter struct {
+	PolicyVersion           string `json:"policy_version"`
+	ModelID                 string `json:"model_id"`
+	Entrypoint              string `json:"entrypoint"`
+	ReasonCode              string `json:"reason_code"`
+	VerifiedCount           int64  `json:"verified_count"`
+	PendingCount            int64  `json:"pending_count"`
+	QuarantinedCount        int64  `json:"quarantined_count"`
+	ZeroSettledCount        int64  `json:"zero_settled_count"`
+	LegacyReceiptCount      int64  `json:"legacy_receipt_count"`
+	MissingReceiptCount     int64  `json:"missing_receipt_count"`
+	CatalogMismatchCount    int64  `json:"catalog_mismatch_count"`
+	ModelHashNullCount      int64  `json:"model_hash_null_count"`
+	ReceiptKeyMismatchCount int64  `json:"receipt_key_mismatch_count"`
+}
+
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// SPEC-005 v0.4 §11.6.6 — every /admin/ledger/* response path
 	// consumes the same rate-limit bucket. Charge BEFORE any
@@ -221,12 +237,17 @@ func (h *handler) admin(w http.ResponseWriter, r *http.Request, fn func(http.Res
 
 func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	settlementVerdictCounters, err := h.settlementVerdictCounters(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
 	current := currentMondayUTC(time.Now().UTC()).Format(time.RFC3339Nano)
 	resp := map[string]any{
-		"total_gross_credits":             h.sum(ctx, `SELECT SUM(gross_credits) FROM ledger_request_credits WHERE quarantined=0`),
-		"total_provider_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE quarantined=0`),
-		"total_operator_credits":          h.sum(ctx, `SELECT SUM(gross_credits - provider_credits) FROM ledger_request_credits WHERE quarantined=0`),
-		"current_window_provider_credits": h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE quarantined=0 AND ts_utc >= ?`, current),
+		"total_gross_credits":             h.sum(ctx, `SELECT SUM(gross_credits) FROM spec022_payable_request_credits`),
+		"total_provider_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits`),
+		"total_operator_credits":          h.sum(ctx, `SELECT SUM(gross_credits - provider_credits) FROM spec022_payable_request_credits`),
+		"current_window_provider_credits": h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE ts_utc >= ?`, current),
 		"pending_payout_count":            h.sum(ctx, `SELECT COUNT(*) FROM ledger_payout_ready WHERE status='ready'`),
 		"pending_payout_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE status='ready'`),
 		// SPEC-005 v0.4 §11.6.5 OPEN_PREDICATE — `quarantined_count`
@@ -239,6 +260,7 @@ SELECT COUNT(*) FROM ledger_request_credits lrc
                     WHERE r.request_credit_id = lrc.id)`),
 		"fault_count":                       h.sum(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE fault_flag != 'none'`),
 		"last_reconciliation_delta_credits": h.sum(ctx, `SELECT reconciliation_delta_credits FROM ledger_reconciliation_runs ORDER BY started_at_utc DESC, id DESC LIMIT 1`),
+		"settlement_verdict_counters":       settlementVerdictCounters,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -266,7 +288,7 @@ func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
 	// longer change shape based on the query parameter.
 	havingClause := ""
 	if !includeQuarantined {
-		havingClause = " HAVING SUM(CASE WHEN lrc.quarantined=0 THEN 1 ELSE 0 END) > 0 "
+		havingClause = " HAVING SUM(CASE WHEN payable.id IS NOT NULL THEN 1 ELSE 0 END) > 0 "
 	}
 	// Single grouped LEFT JOIN — the prior shape was outer-aggregate +
 	// per-row h.sum(...) on ledger_payout_ready, which (a) deadlocked at
@@ -283,8 +305,8 @@ func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
 	// page, which is strictly cheaper than the per-provider sum loop.
 	rows, err := h.store.db.QueryContext(ctx, `
 SELECT lrc.provider_id,
-       SUM(CASE WHEN lrc.quarantined=0 THEN lrc.provider_credits ELSE 0 END),
-       SUM(CASE WHEN lrc.quarantined=0 AND lrc.ts_utc >= ? THEN lrc.provider_credits ELSE 0 END),
+       SUM(CASE WHEN payable.id IS NOT NULL THEN payable.provider_credits ELSE 0 END),
+       SUM(CASE WHEN payable.id IS NOT NULL AND payable.ts_utc >= ? THEN payable.provider_credits ELSE 0 END),
        MAX(lrc.ts_utc),
        SUM(CASE WHEN lrc.fault_flag != 'none' THEN 1 ELSE 0 END),
        SUM(CASE WHEN lrc.quarantined=1 AND NOT EXISTS (
@@ -293,6 +315,7 @@ SELECT lrc.provider_id,
        MAX(lrc.attestation_class),
        COALESCE(pp.pending_payout, 0) AS pending_payout
   FROM ledger_request_credits lrc
+  LEFT JOIN spec022_payable_request_credits payable ON payable.id = lrc.id
   LEFT JOIN (
         SELECT provider_id, SUM(provider_credits) AS pending_payout
           FROM ledger_payout_ready
@@ -380,7 +403,7 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
-	providerGross, err := h.sumErr(ctx, `SELECT SUM(gross_credits) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND quarantined=0`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	providerGross, err := h.sumErr(ctx, `SELECT SUM(gross_credits) FROM spec022_payable_request_credits WHERE ts_utc >= ? AND ts_utc < ?`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -392,10 +415,9 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 	}
 	splitDelta, err := h.sumErr(ctx, `
 SELECT COUNT(*)
-  FROM ledger_request_credits lrc
+  FROM spec022_payable_request_credits lrc
   LEFT JOIN ledger_operator_credits loc ON loc.request_credit_id = lrc.id
  WHERE lrc.ts_utc >= ? AND lrc.ts_utc < ?
-   AND lrc.quarantined = 0
    AND (loc.id IS NULL OR lrc.provider_credits + loc.operator_credits != lrc.gross_credits)`,
 		from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
 	if err != nil {
@@ -639,8 +661,8 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	faultArgs := append([]any{providerID}, rangeArgs...)
 	resp := map[string]any{
 		"provider_id":            providerID,
-		"total_credits":          h.sum(r.Context(), `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE provider_id=? AND quarantined=0`+rangeSQL, totalArgs...),
-		"current_window_credits": h.sum(r.Context(), `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE provider_id=? AND quarantined=0 AND ts_utc >= ?`+rangeSQL, currentArgs...),
+		"total_credits":          h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL, totalArgs...),
+		"current_window_credits": h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND ts_utc >= ?`+rangeSQL, currentArgs...),
 		"last_payout_ready":      h.lastPayout(r.Context(), providerID),
 		"provider_share_bps":     h.latestShareBps(r.Context()),
 		"models_served":          models,
@@ -795,6 +817,70 @@ func diagnosticsWindowString(t time.Time, enabled bool) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
+func (h *handler) settlementVerdictCounters(ctx context.Context) ([]settlementVerdictCounter, error) {
+	rows, err := h.store.db.QueryContext(ctx, `
+SELECT route_snapshot_policy_version,
+       model_id,
+       paid_entrypoint,
+       reason,
+       COALESCE(SUM(CASE WHEN settlement_outcome='verified' THEN 1 ELSE 0 END), 0) AS verified_count,
+       COALESCE(SUM(CASE WHEN settlement_outcome='pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+       COALESCE(SUM(CASE WHEN settlement_outcome='quarantined' THEN 1 ELSE 0 END), 0) AS quarantined_count,
+       COALESCE(SUM(CASE WHEN settlement_outcome='zero_settled' THEN 1 ELSE 0 END), 0) AS zero_settled_count,
+       COALESCE(SUM(CASE
+           WHEN reason IN ('unknown_receipt_version', 'legacy_receipt_version')
+             OR (receipt_present=1 AND receipt_version IS NOT NULL AND receipt_version NOT IN ('4', 'spec015-v0.4', 'v0.4'))
+           THEN 1 ELSE 0 END), 0) AS legacy_receipt_count,
+       COALESCE(SUM(CASE
+           WHEN receipt_present=0 OR reason IN ('missing_receipt', 'missing_receipt_deadline_elapsed')
+           THEN 1 ELSE 0 END), 0) AS missing_receipt_count,
+       COALESCE(SUM(CASE
+           WHEN reason IN ('catalog_snapshot_mismatch', 'expected_catalog_model_hash_mismatch')
+             OR reason LIKE 'catalog_%'
+           THEN 1 ELSE 0 END), 0) AS catalog_mismatch_count,
+       COALESCE(SUM(CASE
+           WHEN reason IN ('model_hash_invalid', 'model_hash_null')
+             OR spec008_hash_status IN ('missing', 'null', 'unavailable')
+           THEN 1 ELSE 0 END), 0) AS model_hash_null_count,
+       COALESCE(SUM(CASE
+           WHEN reason IN ('provider_receipt_key_id_invalid', 'provider_receipt_key_id_mismatch', 'receipt_key_mismatch')
+           THEN 1 ELSE 0 END), 0) AS receipt_key_mismatch_count
+  FROM settlement_receipt_verdicts
+ GROUP BY route_snapshot_policy_version, model_id, paid_entrypoint, reason
+ ORDER BY route_snapshot_policy_version, model_id, paid_entrypoint, reason`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counters := []settlementVerdictCounter{}
+	for rows.Next() {
+		var counter settlementVerdictCounter
+		if err := rows.Scan(
+			&counter.PolicyVersion,
+			&counter.ModelID,
+			&counter.Entrypoint,
+			&counter.ReasonCode,
+			&counter.VerifiedCount,
+			&counter.PendingCount,
+			&counter.QuarantinedCount,
+			&counter.ZeroSettledCount,
+			&counter.LegacyReceiptCount,
+			&counter.MissingReceiptCount,
+			&counter.CatalogMismatchCount,
+			&counter.ModelHashNullCount,
+			&counter.ReceiptKeyMismatchCount,
+		); err != nil {
+			return nil, err
+		}
+		counters = append(counters, counter)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return counters, nil
+}
+
 func settlementReceiptRangeFilter(from, to time.Time, enabled bool) (string, []any) {
 	if !enabled {
 		return "", nil
@@ -878,7 +964,7 @@ func (h *handler) allowEarnings(providerID string) bool {
 
 func (h *handler) modelsServed(ctx context.Context, providerID string, rangeSQL string, rangeArgs ...any) []string {
 	args := append([]any{providerID}, rangeArgs...)
-	rows, err := h.store.db.QueryContext(ctx, `SELECT DISTINCT model FROM ledger_request_credits WHERE provider_id=?`+rangeSQL+` ORDER BY model`, args...)
+	rows, err := h.store.db.QueryContext(ctx, `SELECT DISTINCT model FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL+` ORDER BY model`, args...)
 	if err != nil {
 		return []string{}
 	}

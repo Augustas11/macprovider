@@ -281,12 +281,16 @@ SPEC-006 v0.8 is a Tier 1 cooperative inference product. The following propertie
 
 1. **Buyer prompts and provider responses are processed as plaintext on provider hardware.** Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.
 2. **There is no hardware attestation or runtime integrity check on providers.** The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.
-3. **Model identity is provider-reported.** When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.8 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.
+3. **Model identity is provider-reported.** `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately. Mixed pools are not described as fully verified.
 4. **v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot.** They do not detect a provider falsifying its own loaded-model hash measurement.
-5. **The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-4.
-6. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-5.
+5. **Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.** Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.
+6. **Pending means quota or balance can remain reserved while receipt verification is incomplete.** Non-verified terminal outcomes release or refund that reservation. pending: receipt verification is still incomplete and the reservation is not final usage. verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement. quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault. zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault.
+7. **Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.** Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.
+8. **Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs.**
+9. **The product makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.
+10. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-9.
 
-These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in v0.8 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, all six limitations are normative and MUST be preserved in product language, with property 6 conditional on `routing.sticky_enabled: true`.
+These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in v0.8 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, all ten limitations are normative and MUST be preserved in product language, with property 10 conditional on `routing.sticky_enabled: true`.
 
 Production gate: this disclosure MUST appear in substantively equivalent language in:
 
@@ -996,6 +1000,26 @@ Response shape:
     "hardware_attestation": "none",
     "tier2_milestone": "future",
     "model_verification_limit": "v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.",
+    "verified_model_settlement": {
+      "included_paid_entrypoints": ["POST /v1/chat/completions"],
+      "excluded_paid_entrypoints": [
+        "legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger"
+      ],
+      "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
+      "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
+      "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
+      "enforce_mode": "Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
+      "pending_reservation": "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation.",
+      "outcomes": {
+        "pending": "pending: receipt verification is still incomplete and the reservation is not final usage.",
+        "verified": "verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement.",
+        "quarantined": "quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault.",
+        "zero_settled": "zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault."
+      },
+      "partial_charge": "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.",
+      "streaming_failover": "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.",
+      "buyer_receipt_status": "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
+    },
     "sticky_affinity": {
       "enabled": false,
       "ttl_seconds": 0,
@@ -1021,7 +1045,7 @@ The gateway MUST aggregate providers by case-insensitive model identifier.
 
 The gateway MUST preserve the canonical model ID spelling returned by the coordinator.
 
-The `id` field returned by `/v1/models` reflects the model identifier as advertised by the serving provider binary. The coordinator does NOT cryptographically verify the loaded model weights against a catalog of expected artifact hashes. Buyers SHOULD treat `id` as provider-reported and NOT as a verified integrity claim. A future SPEC-006 or SPEC-008 Tier 2 revision MAY introduce coordinator-managed model catalog plus verified hash policy; until then, model identity verification is out of scope.
+The `id` field returned by `/v1/models` reflects the model identifier as advertised by the serving provider binary. `/v1/models` may also expose catalog-known hash status and settlement-enforced receipt matching for covered enforce-mode traffic. Buyers SHOULD treat `id` as provider-reported and SHOULD NOT treat catalog or settlement fields as hardware attestation, runtime binary attestation, malicious-output prevention, private inference, or detection of a provider falsifying its own loaded-model hash measurement.
 
 The gateway MUST tolerate `/` and `\/` escaped model IDs.
 
@@ -1051,6 +1075,26 @@ The `/v1/models` response MUST include a top-level field:
   "hardware_attestation": "none",
   "tier2_milestone": "future",
   "model_verification_limit": "v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.",
+  "verified_model_settlement": {
+    "included_paid_entrypoints": ["POST /v1/chat/completions"],
+    "excluded_paid_entrypoints": [
+      "legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger"
+    ],
+    "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
+    "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
+    "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
+    "enforce_mode": "Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
+    "pending_reservation": "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation.",
+    "outcomes": {
+      "pending": "pending: receipt verification is still incomplete and the reservation is not final usage.",
+      "verified": "verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement.",
+      "quarantined": "quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault.",
+      "zero_settled": "zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault."
+    },
+    "partial_charge": "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.",
+    "streaming_failover": "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.",
+    "buyer_receipt_status": "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
+  },
   "sticky_affinity": {
     "enabled": false,
     "ttl_seconds": 0,
@@ -1224,6 +1268,7 @@ Response shape:
   "quota": {
     "daily_token_limit": 100000,
     "daily_tokens_used": 12000,
+    "daily_tokens_reserved": 0,
     "daily_tokens_remaining": 88000,
     "resets_at": "2026-05-29T00:00:00Z",
     "concurrency_limit": 2,
@@ -1251,6 +1296,26 @@ Response shape:
   "rating": {
     "latest": 3,
     "updated_at": "2026-05-28T02:10:00Z"
+  },
+  "settlement_disclosure": {
+    "included_paid_entrypoints": ["POST /v1/chat/completions"],
+    "excluded_paid_entrypoints": [
+      "legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger"
+    ],
+    "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
+    "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
+    "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
+    "enforce_mode": "Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.",
+    "pending_reservation": "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation.",
+    "outcomes": {
+      "pending": "pending: receipt verification is still incomplete and the reservation is not final usage.",
+      "verified": "verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement.",
+      "quarantined": "quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault.",
+      "zero_settled": "zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault."
+    },
+    "partial_charge": "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.",
+    "streaming_failover": "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.",
+    "buyer_receipt_status": "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
   }
 }
 ```
@@ -1260,6 +1325,12 @@ The response MUST NOT include the full API key.
 The response MAY include a key prefix for identification.
 
 The endpoint MUST provide enough data for the `/account` page to show usage, remaining quota, key status, and rating widget state.
+
+The response MUST include `settlement_disclosure` when SPEC-022 settlement
+labels or reservations are exposed. That disclosure MUST explain pending
+verification reservations, non-verified reservation release/refund behavior,
+and the provider-reported-hash caveat without exposing raw prompts or raw
+outputs.
 
 ### 5.6 `GET /v1/status`
 
@@ -2217,13 +2288,13 @@ The front-door signup flow MUST show a prominent Tier 1 disclosure before the us
 
 The disclosure MUST state, in substantively equivalent language:
 
-> MacProvider Tier 1 is cooperative inference. Buyer prompts and provider responses are processed as plaintext on provider hardware, so providers can technically observe prompts and outputs routed through their machine. Model identity is provider-reported, provider hardware is not attested, and MacProvider Tier 1 does not claim private inference, malicious-provider resistance, or verified model integrity.
+> MacProvider Tier 1 is cooperative inference. Buyer prompts and provider responses are processed as plaintext on provider hardware, so providers can technically observe prompts and outputs routed through their machine. Model identity is provider-reported. Verified model settlement, when enforce-active for covered paid traffic, means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt; it does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.
 
 The signup flow MUST require this disclosure to be visible before key issuance.
 
 When `routing.sticky_enabled: true`, the signup flow MUST also state, in substantively equivalent language: "If you use a conversation tag, related requests may be routed to the same provider for up to the configured sticky TTL, so that provider can observe and correlate more of your traffic than under default routing." Operators running the default `routing.sticky_enabled: false` posture MUST NOT be required to show sticky-specific language.
 
-The signup flow MUST NOT describe Tier 1 as provider-private, attested, encrypted-to-provider, malicious-provider-resistant, or model-integrity-verified.
+The signup flow MUST NOT describe Tier 1 as provider-private, attested, encrypted-to-provider, malicious-provider-resistant, or model-integrity-verified without the provider-reported-hash caveat in the same view.
 
 ---
 
@@ -2305,11 +2376,11 @@ Docs MUST map:
 
 ### 13.5 Tier 1 and model identity caveats
 
-The single-page docs MUST include a "Tier 1 disclosure" subsection explaining that buyer prompts and provider responses are processed as plaintext on provider hardware; providers can technically observe prompts and outputs routed through their machine; hardware attestation is not performed; and Tier 1 makes no privacy, attestation, integrity, untrusted-provider, or malicious-provider claims.
+The single-page docs MUST include a "Tier 1 disclosure" subsection explaining that buyer prompts and provider responses are processed as plaintext on provider hardware; providers can technically observe prompts and outputs routed through their machine; hardware attestation is not performed; model identity is provider-reported; verified settlement language is constrained by the provider-reported-hash caveat; and Tier 1 makes no private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims.
 
 When `routing.sticky_enabled: true`, the single-page docs MUST include a "Sticky affinity" subsection explaining `X-MacProvider-Conversation`, `DELETE /v1/sticky`, the configured `sticky_ttl_s`, and the privacy tradeoff that related requests may be preferentially routed to the same provider during the TTL. When `routing.sticky_enabled: false`, this subsection is optional and, if present, MUST clearly state sticky affinity is disabled.
 
-The single-page docs MUST include a "Model identity caveat" subsection explaining that model `id` is provider-reported, not cryptographically verified.
+The single-page docs MUST include a "Model identity caveat" subsection explaining that model `id` is provider-reported, catalog-known hash status is distinct from settlement enforcement, and neither detects a provider falsifying its own loaded-model hash measurement.
 
 The single-page docs MUST avoid wording that invites buyers to infer provider-private prompts from statements about avoiding AWS, GCP, Azure, or other hyperscalers.
 
@@ -2490,6 +2561,12 @@ capacity:
 timeouts:
   coordinator_request_seconds: 300
   streaming_cancel_ms: 500
+
+settlement:
+  reconcile_enabled: true
+  reconcile_interval_s: 30
+  reconcile_batch_limit: 100
+  reconcile_request_timeout_s: 10
 ```
 
 The gateway MUST authenticate `/poolz` requests with `coordinator.operator_key`.

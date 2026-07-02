@@ -2,9 +2,7 @@ package billing
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -242,6 +240,12 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	}
 	if found && existing.Closed {
 		existing.IdempotencyStatus = settlementReceiptIDTerminalNoop
+		if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, existing.RequestID, existing.AttemptN, existing.ProviderID); err != nil {
+			return SettlementReceiptState{}, err
+		}
+		if err := hydrateSettlementReceiptRouteAuditFieldsConn(ctx, conn, &existing); err != nil {
+			return SettlementReceiptState{}, err
+		}
 		if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, existing, nil, receivedAtUnixMS); err != nil {
 			return SettlementReceiptState{}, err
 		}
@@ -272,6 +276,9 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	} else if err := insertSettlementReceiptStateConn(ctx, conn, persisted); err != nil {
 		return SettlementReceiptState{}, err
 	}
+	if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, state.RequestID, state.AttemptN, state.ProviderID); err != nil {
+		return SettlementReceiptState{}, err
+	}
 	if receiptPresent {
 		if err := insertSettlementReceiptIngestedAuditConn(ctx, conn, state); err != nil {
 			return SettlementReceiptState{}, err
@@ -285,6 +292,116 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	}
 	committed = true
 	return state, nil
+}
+
+type settlementReceiptCreditSyncDB interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestID string, attemptN int64, providerID string) error {
+	var requestCreditID int64
+	var promptRate, completionRate, multiplier, share int64
+	var faultFlag string
+	var usageJSON string
+	err := db.QueryRowContext(ctx, `
+SELECT lrc.id, lrc.prompt_rate_per_mtok, lrc.completion_rate_per_mtok,
+       lrc.global_multiplier_ppm, lrc.provider_share_bps, lrc.fault_flag,
+       sao.usage_canonical_json
+  FROM ledger_request_credits lrc
+  JOIN settlement_receipt_verdicts srv
+    ON srv.account_scope_hash = lrc.settlement_account_scope_hash
+   AND srv.request_id = lrc.request_id
+   AND srv.attempt_n = lrc.attempt_n
+   AND srv.provider_id = lrc.provider_id
+   AND srv.route_snapshot_mode = 'enforce'
+   AND srv.route_snapshot_policy_version = lrc.settlement_policy_version
+   AND srv.closed = 1
+   AND srv.settlement_outcome = 'verified'
+  JOIN settlement_route_snapshots srs
+    ON srs.request_id = lrc.request_id
+   AND srs.attempt_n = lrc.attempt_n
+   AND srs.provider_id = lrc.provider_id
+   AND srs.route_snapshot_digest = srv.route_snapshot_digest
+   AND srs.route_snapshot_mode = 'enforce'
+   AND srs.route_snapshot_policy_version = lrc.settlement_policy_version
+  JOIN settlement_attempt_outputs sao
+    ON sao.account_scope = srs.account_scope
+   AND sao.request_id = srs.request_id
+   AND sao.attempt_n = srs.attempt_n
+   AND sao.provider_id = srs.provider_id
+   AND sao.overlapping_or_duplicate = 0
+ WHERE lrc.request_id = ?
+   AND lrc.attempt_n = ?
+   AND lrc.provider_id = ?
+   AND lrc.settlement_policy_mode = 'enforce'
+   AND lrc.settlement_account_scope_hash IS NOT NULL
+   AND lrc.settlement_policy_version IS NOT NULL
+   AND lrc.quarantined = 0
+   AND lrc.settled = 0
+   AND lrc.settlement_id IS NULL
+ LIMIT 1`,
+		requestID,
+		attemptN,
+		providerID,
+	).Scan(&requestCreditID, &promptRate, &completionRate, &multiplier, &share, &faultFlag, &usageJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	var usage settlementUsageV04
+	if err := json.Unmarshal([]byte(usageJSON), &usage); err != nil {
+		return fmt.Errorf("decode settlement receipt-bound usage: %w", err)
+	}
+	prompt := usage.BillableInputTokens
+	completion := usage.BillableOutputTokens
+	result := ComputeCredits(
+		&prompt,
+		&completion,
+		nil,
+		UsageProviderReported,
+		faultFlag,
+		RateCardEntry{PromptCreditsPerMtok: promptRate, CompletionCreditsPerMtok: completionRate},
+		multiplier,
+		share,
+	)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx, `
+UPDATE ledger_request_credits
+   SET prompt_tokens = ?,
+       completion_tokens = ?,
+       estimated_completion_tokens = NULL,
+       usage_source = ?,
+       gross_credits = ?,
+       provider_credits = ?,
+       fault_flag = ?,
+       updated_at_utc = ?
+ WHERE id = ?`,
+		nullInt64(result.PromptTokens),
+		nullInt64(result.CompletionTokens),
+		result.UsageSource,
+		result.GrossCredits,
+		result.ProviderCredits,
+		result.FaultFlag,
+		now,
+		requestCreditID,
+	); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `
+UPDATE ledger_operator_credits
+   SET gross_credits = ?,
+       operator_credits = ?,
+       fault_flag = ?
+ WHERE request_credit_id = ?`,
+		result.GrossCredits,
+		result.OperatorCredits,
+		result.FaultFlag,
+		requestCreditID,
+	)
+	return err
 }
 
 func (id SettlementReceiptIdentity) validate() error {
@@ -331,6 +448,8 @@ func settlementReceiptStateFromResult(id SettlementReceiptIdentity, evidence set
 		RouteSnapshotPolicyVersion:    evidence.route.RouteSnapshotPolicyVersion,
 		RouteSnapshotMode:             evidence.route.RouteSnapshotMode,
 		PaidEntrypoint:                evidence.route.PaidEntrypoint,
+		ProviderSessionID:             derefString(evidence.route.ProviderSessionID),
+		ProviderGenerationID:          derefString(evidence.route.ProviderGenerationID),
 		Spec008HashStatus:             evidence.route.Spec008HashStatus,
 		ProviderReportedModelHash:     evidence.route.ProviderReportedModelHash,
 		ProviderReceiptKeyFingerprint: evidence.route.ProviderReceiptKeyID,
@@ -752,6 +871,7 @@ func settlementReceiptAuditPayload(state SettlementReceiptState, checks *Settlem
 	payload := map[string]any{
 		"account_scope_hash":               redactedAccountScopeHash(state.AccountScope),
 		"request_id":                       state.RequestID,
+		"attempt_id":                       settlementReceiptAttemptID(state),
 		"attempt_n":                        state.AttemptN,
 		"provider_id":                      state.ProviderID,
 		"receipt_version":                  state.ReceiptVersion,
@@ -774,19 +894,30 @@ func settlementReceiptAuditPayload(state SettlementReceiptState, checks *Settlem
 		"usage_digest":                     state.UsageDigest,
 		"received_at_unix_ms":              state.ReceivedAtUnixMS,
 	}
+	if state.ProviderSessionID != "" {
+		payload["provider_session_id"] = state.ProviderSessionID
+	}
+	if state.ProviderGenerationID != "" {
+		payload["provider_generation_id"] = state.ProviderGenerationID
+	}
 	if verdict {
 		if attemptedReceivedAtUnixMS == 0 {
 			attemptedReceivedAtUnixMS = state.ReceivedAtUnixMS
 		}
 		payload["receipt_result"] = state.ReceiptResult
+		payload["receipt_verification_outcome"] = state.SettlementOutcome
 		payload["settlement_outcome"] = state.SettlementOutcome
 		payload["reason"] = state.Reason
 		payload["deadline_unix_ms"] = state.PendingDeadlineUnixMS
+		payload["pending_deadline_unix_ms"] = state.PendingDeadlineUnixMS
 		payload["idempotency_status"] = state.IdempotencyStatus
 		payload["attempted_received_at_unix_ms"] = attemptedReceivedAtUnixMS
 		payload["buyer_debit_outcome"] = state.BuyerDebitOutcome
 		payload["provider_settlement_outcome"] = state.ProviderSettlementOutcome
 		payload["payout_exclusion_outcome"] = state.PayoutExclusionOutcome
+		if state.SettlementOutcome == SettlementOutcomeQuarantined || state.SettlementOutcome == SettlementOutcomeZeroSettled {
+			payload["quarantine_zero_settle_reason"] = state.Reason
+		}
 	}
 	if checks != nil {
 		payload["verifier_checks"] = *checks
@@ -798,7 +929,37 @@ func settlementReceiptAuditPayload(state SettlementReceiptState, checks *Settlem
 	return string(raw), nil
 }
 
+func hydrateSettlementReceiptRouteAuditFieldsConn(ctx context.Context, conn *sql.Conn, state *SettlementReceiptState) error {
+	var providerSession, providerGeneration sql.NullString
+	err := conn.QueryRowContext(ctx, `
+SELECT provider_session_id, provider_generation_id
+FROM settlement_route_snapshots
+WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		state.AccountScope, state.RequestID, state.AttemptN, state.ProviderID,
+	).Scan(&providerSession, &providerGeneration)
+	if err != nil {
+		return err
+	}
+	if providerSession.Valid {
+		state.ProviderSessionID = providerSession.String
+	}
+	if providerGeneration.Valid {
+		state.ProviderGenerationID = providerGeneration.String
+	}
+	return nil
+}
+
+func settlementReceiptAttemptID(state SettlementReceiptState) string {
+	return fmt.Sprintf("%s:%d:%s", state.RequestID, state.AttemptN, state.ProviderID)
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 func redactedAccountScopeHash(accountScope string) string {
-	sum := sha256.Sum256([]byte("settlement_receipt_account_scope_v1:" + accountScope))
-	return hex.EncodeToString(sum[:])
+	return SettlementAccountScopeHash(accountScope)
 }

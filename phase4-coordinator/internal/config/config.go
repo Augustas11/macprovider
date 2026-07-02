@@ -402,12 +402,13 @@ type RewardsConfig struct {
 }
 
 type SettlementConfig struct {
-	CadenceDays                 int   `yaml:"cadence_days"`
-	MinPayoutCredits            int64 `yaml:"min_payout_credits"`
-	StartupReconcileWindowHours int   `yaml:"startup_reconcile_window_hours"`
-	NightlyReconcileWindowDays  int   `yaml:"nightly_reconcile_window_days"`
-	RecoveryGraceSeconds        int   `yaml:"recovery_grace_seconds"`
-	JobEnabled                  bool  `yaml:"job_enabled"`
+	CadenceDays                 int    `yaml:"cadence_days"`
+	MinPayoutCredits            int64  `yaml:"min_payout_credits"`
+	StartupReconcileWindowHours int    `yaml:"startup_reconcile_window_hours"`
+	NightlyReconcileWindowDays  int    `yaml:"nightly_reconcile_window_days"`
+	RecoveryGraceSeconds        int    `yaml:"recovery_grace_seconds"`
+	VerifiedModelSettlementMode string `yaml:"verified_model_settlement_mode"`
+	JobEnabled                  bool   `yaml:"job_enabled"`
 }
 
 // BillingConfig is the SPEC-005 v0.4 (issue #169) billing-side
@@ -572,6 +573,7 @@ func Default() Config {
 			StartupReconcileWindowHours: 24,
 			NightlyReconcileWindowDays:  7,
 			RecoveryGraceSeconds:        30,
+			VerifiedModelSettlementMode: "observe",
 			JobEnabled:                  true,
 		},
 		Endpoints: EndpointsConfig{
@@ -1011,6 +1013,9 @@ func (c Config) Validate() error {
 	}
 	if c.Settlement.RecoveryGraceSeconds > 900 {
 		return fmt.Errorf("settlement.recovery_grace_seconds must be <= 900")
+	}
+	if c.Settlement.VerifiedModelSettlementMode != "observe" && c.Settlement.VerifiedModelSettlementMode != "enforce" {
+		return fmt.Errorf("settlement.verified_model_settlement_mode must be observe or enforce")
 	}
 	if c.Storage.RequestLogRetentionDays <= 0 {
 		return fmt.Errorf("storage.request_log_retention_days must be > 0")

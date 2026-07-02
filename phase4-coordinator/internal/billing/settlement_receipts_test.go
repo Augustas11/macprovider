@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 )
 
 func TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit(t *testing.T) {
@@ -159,6 +161,196 @@ func TestSettlementReceiptPendingCanCloseWithValidReceiptBeforeDeadline(t *testi
 	}
 }
 
+func TestRequestSettlementFinalityAggregatesVerifiedUsageAfterPending(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	id := SettlementReceiptIdentity{
+		AccountScope: input.AccountScope,
+		RequestID:    input.RequestID,
+		AttemptN:     input.AttemptN,
+		ProviderID:   input.ProviderID,
+	}
+	deadline := input.TerminalStateTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000
+	if _, err := store.RecordMissingSettlementReceipt(context.Background(), SettlementReceiptMissingInput{
+		SettlementReceiptIdentity: id,
+		NowUnixMS:                 deadline - 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: id,
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     pubkey,
+		receiptReceivedUnixMS:     deadline - 50,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	finality, found, err := store.RequestSettlementFinality(context.Background(), input.AccountScope, input.RequestID, deadline-25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("settlement finality not found")
+	}
+	if finality.Outcome != SettlementOutcomeVerified || finality.ReceiptResult != SettlementReceiptResultValid || !finality.Closed {
+		t.Fatalf("finality=%#v, want closed verified finality", finality)
+	}
+	if finality.PromptTokens != input.ExpectedUsage.BillableInputTokens ||
+		finality.CompletionTokens != input.ExpectedUsage.BillableOutputTokens ||
+		finality.TotalTokens != input.ExpectedUsage.BillableInputTokens+input.ExpectedUsage.BillableOutputTokens ||
+		finality.TokenSource != UsageSourceCoordinatorObserved {
+		t.Fatalf("finality tokens=%#v, want coordinator observed billable usage %#v", finality, input.ExpectedUsage)
+	}
+}
+
+func TestRequestSettlementFinalityForAccountResolvesGatewayExternalRequestID(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	accountID := "acct_spec022_external_finality"
+	externalRequestID := "77777777-7777-4777-8777-777777777777"
+	input.AccountScope = AccountScopeForSettlement(accountID)
+	input.RouteSnapshot.AccountScope = input.AccountScope
+	reqStore, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	markSPEC022ReceiptVerified(t, store.db, input)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc:              time.UnixMilli(input.TerminalStateTSUnixMS).UTC(),
+		RequestID:          input.RequestID,
+		ExternalRequestID:  externalRequestID,
+		AccountID:          accountID,
+		Model:              input.RouteSnapshot.ModelID,
+		ProviderAssignedID: "assigned",
+		PromptTokens:       &input.ExpectedUsage.BillableInputTokens,
+		CompletionTokens:   &input.ExpectedUsage.BillableOutputTokens,
+		Status:             200,
+		Stream:             true,
+		BuyerIP:            "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	finality, found, err := store.RequestSettlementFinalityForAccount(context.Background(), accountID, externalRequestID, input.ReceiptReceivedUnixMS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("settlement finality not found through gateway external request id")
+	}
+	if finality.RequestID != externalRequestID {
+		t.Fatalf("finality.request_id=%q want external request id %q", finality.RequestID, externalRequestID)
+	}
+	if finality.Outcome != SettlementOutcomeVerified ||
+		finality.ReceiptResult != SettlementReceiptResultValid ||
+		!finality.Closed ||
+		finality.TokenSource != UsageSourceCoordinatorObserved {
+		t.Fatalf("finality=%#v, want closed verified coordinator-observed finality", finality)
+	}
+	if finality.PromptTokens != input.ExpectedUsage.BillableInputTokens ||
+		finality.CompletionTokens != input.ExpectedUsage.BillableOutputTokens ||
+		finality.TotalTokens != input.ExpectedUsage.BillableInputTokens+input.ExpectedUsage.BillableOutputTokens {
+		t.Fatalf("finality tokens=%#v, want receipt-bound usage %#v", finality, input.ExpectedUsage)
+	}
+}
+
+func TestRequestSettlementFinalityForAccountIgnoresExternalRowsBeforeReservationStart(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	accountID := "acct_spec022_external_reuse"
+	externalRequestID := "77777777-7777-4777-8777-777777777777"
+	input.AccountScope = AccountScopeForSettlement(accountID)
+	input.RouteSnapshot.AccountScope = input.AccountScope
+	reqStore, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	markSPEC022ReceiptVerified(t, store.db, input)
+	oldTS := time.UnixMilli(input.TerminalStateTSUnixMS).UTC()
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc:              oldTS,
+		RequestID:          input.RequestID,
+		ExternalRequestID:  externalRequestID,
+		AccountID:          accountID,
+		Model:              input.RouteSnapshot.ModelID,
+		ProviderAssignedID: "assigned-old",
+		PromptTokens:       &input.ExpectedUsage.BillableInputTokens,
+		CompletionTokens:   &input.ExpectedUsage.BillableOutputTokens,
+		Status:             200,
+		Stream:             true,
+		BuyerIP:            "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newReservationTS := oldTS.Add(time.Hour)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc:              newReservationTS,
+		RequestID:          "88888888-8888-4888-8888-888888888888",
+		ExternalRequestID:  externalRequestID,
+		AccountID:          accountID,
+		Model:              input.RouteSnapshot.ModelID,
+		ProviderAssignedID: "assigned-new",
+		Status:             200,
+		Stream:             true,
+		BuyerIP:            "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	finality, found, err := store.RequestSettlementFinalityForAccount(context.Background(), accountID, externalRequestID, newReservationTS.UnixMilli(), newReservationTS.UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Fatalf("finality=%#v found through stale external request id before current reservation start", finality)
+	}
+}
+
+func TestRequestSettlementFinalityDeadlineQuarantinesOpenPending(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	id := SettlementReceiptIdentity{
+		AccountScope: input.AccountScope,
+		RequestID:    input.RequestID,
+		AttemptN:     input.AttemptN,
+		ProviderID:   input.ProviderID,
+	}
+	deadline := input.TerminalStateTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000
+	if _, err := store.RecordMissingSettlementReceipt(context.Background(), SettlementReceiptMissingInput{
+		SettlementReceiptIdentity: id,
+		NowUnixMS:                 deadline - 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	finality, found, err := store.RequestSettlementFinality(context.Background(), input.AccountScope, input.RequestID, deadline+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("settlement finality not found")
+	}
+	if finality.Outcome != SettlementOutcomeQuarantined || !finality.Closed || finality.Reason != "missing_receipt_deadline_elapsed" {
+		t.Fatalf("finality=%#v, want deadline quarantine refund finality", finality)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE settlement_outcome='quarantined' AND reason='missing_receipt_deadline_elapsed' AND closed=1`); got != 1 {
+		t.Fatalf("deadline quarantine rows=%d want 1", got)
+	}
+}
+
 func TestSettlementReceiptReceivedAfterDeadlineQuarantinesEvenWithValidHeader(t *testing.T) {
 	fixtures := loadSettlementVerifierFixtures(t)
 	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
@@ -194,6 +386,11 @@ func TestSettlementReceiptResubmissionCannotChangeClosedOutcome(t *testing.T) {
 	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
 	tuple := firstSettlementTupleWithNegativeVariant(t, fixtures, "normal_done")
 	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	if input.RouteSnapshot.ProviderSessionID == nil || input.RouteSnapshot.ProviderGenerationID == nil {
+		t.Fatal("fixture missing provider session/generation ids")
+	}
+	sessionID := *input.RouteSnapshot.ProviderSessionID
+	generationID := *input.RouteSnapshot.ProviderGenerationID
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
 	seedSettlementReceiptEvidence(t, store, input)
@@ -234,6 +431,8 @@ func TestSettlementReceiptResubmissionCannotChangeClosedOutcome(t *testing.T) {
 	if payload["idempotency_status"] != settlementReceiptIDTerminalNoop ||
 		payload["settlement_outcome"] != SettlementOutcomeVerified ||
 		payload["reason"] != "verified_settlement" ||
+		payload["provider_session_id"] != sessionID ||
+		payload["provider_generation_id"] != generationID ||
 		int64(payload["attempted_received_at_unix_ms"].(float64)) != input.ReceiptReceivedUnixMS+1 {
 		t.Fatalf("terminal no-op audit payload=%#v, want complete verdict fields and attempted receive time", payload)
 	}
@@ -435,6 +634,17 @@ func firstSettlementTupleWithTerminal(t *testing.T, fixtures settlementVerifierF
 	return settlementVerifierTupleFixture{}
 }
 
+func settlementTupleByID(t *testing.T, fixtures settlementVerifierFixtures, id string) settlementVerifierTupleFixture {
+	t.Helper()
+	for _, tuple := range fixtures.ReceiptTuples {
+		if tuple.ID == id {
+			return tuple
+		}
+	}
+	t.Fatalf("no settlement tuple with id=%s", id)
+	return settlementVerifierTupleFixture{}
+}
+
 func firstNegativeReceiptForBase(t *testing.T, fixtures settlementVerifierFixtures, baseID string) string {
 	t.Helper()
 	for _, negative := range fixtures.NegativeReceipts {
@@ -500,8 +710,6 @@ func assertSettlementReceiptAuditRedacted(t *testing.T, db *sql.DB, rawReceipt, 
 			"receipt_envelope",
 			"bearer",
 			"\"account_scope\":",
-			"provider_session_id",
-			"provider_generation_id",
 		} {
 			if forbidden != "" && strings.Contains(payload, forbidden) {
 				t.Fatalf("audit payload contains forbidden material %q: %s", forbidden, payload)
@@ -578,6 +786,7 @@ func assertSettlementReceiptVerdictAuditContract(t *testing.T, db *sql.DB, state
 		"request_id":                       state.RequestID,
 		"provider_id":                      state.ProviderID,
 		"receipt_result":                   state.ReceiptResult,
+		"receipt_verification_outcome":     state.SettlementOutcome,
 		"settlement_outcome":               state.SettlementOutcome,
 		"reason":                           state.Reason,
 		"route_snapshot_policy_version":    state.RouteSnapshotPolicyVersion,
@@ -595,6 +804,12 @@ func assertSettlementReceiptVerdictAuditContract(t *testing.T, db *sql.DB, state
 		"provider_settlement_outcome":      settlementReceiptNoMoneyMovementStep5,
 		"payout_exclusion_outcome":         settlementReceiptPayoutExcludedUntil022,
 	}
+	if state.ProviderSessionID != "" {
+		wantStrings["provider_session_id"] = state.ProviderSessionID
+	}
+	if state.ProviderGenerationID != "" {
+		wantStrings["provider_generation_id"] = state.ProviderGenerationID
+	}
 	for key, want := range wantStrings {
 		if got := payload[key]; got != want {
 			t.Fatalf("audit %s=%v want %s", key, got, want)
@@ -608,5 +823,16 @@ func assertSettlementReceiptVerdictAuditContract(t *testing.T, db *sql.DB, state
 	}
 	if got := int64(payload["attempt_n"].(float64)); got != state.AttemptN {
 		t.Fatalf("audit attempt_n=%d want %d", got, state.AttemptN)
+	}
+	if got := payload["attempt_id"]; got != settlementReceiptAttemptID(state) {
+		t.Fatalf("audit attempt_id=%v want %s", got, settlementReceiptAttemptID(state))
+	}
+	if got := int64(payload["pending_deadline_unix_ms"].(float64)); got != state.PendingDeadlineUnixMS {
+		t.Fatalf("audit pending_deadline_unix_ms=%d want %d", got, state.PendingDeadlineUnixMS)
+	}
+	if state.SettlementOutcome == SettlementOutcomeQuarantined || state.SettlementOutcome == SettlementOutcomeZeroSettled {
+		if got := payload["quarantine_zero_settle_reason"]; got != state.Reason {
+			t.Fatalf("audit quarantine_zero_settle_reason=%v want %s", got, state.Reason)
+		}
 	}
 }

@@ -109,6 +109,15 @@ type ReservationRequest struct {
 	CreatedAt       time.Time
 }
 
+type ActiveReservation struct {
+	AccountID      string
+	RequestID      string
+	WindowDate     string
+	ReservedTokens int64
+	ExpiresAt      time.Time
+	CreatedAt      time.Time
+}
+
 type QuotaDecision struct {
 	Admitted        bool
 	LimitTokens     int64

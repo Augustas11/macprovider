@@ -44,6 +44,33 @@ type usageSubject struct {
 	DemoTokenHash string
 }
 
+const (
+	settlementOutcomeHeader       = "X-MacProvider-Settlement-Outcome"
+	settlementReceiptResultHeader = "X-MacProvider-Settlement-Receipt-Result"
+	settlementReasonHeader        = "X-MacProvider-Settlement-Reason"
+	settlementClosedHeader        = "X-MacProvider-Settlement-Closed"
+	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
+	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
+	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
+	settlementPolicyVersion       = "spec022-prereq-v0"
+)
+
+type settlementFinalityAction int
+
+const (
+	settlementFinalityLegacy settlementFinalityAction = iota
+	settlementFinalityDebit
+	settlementFinalityRefund
+	settlementFinalityHold
+)
+
+type coordinatorSettlementFinality struct {
+	Action                settlementFinalityAction
+	Outcome               string
+	Reason                string
+	PendingDeadlineUnixMS int64
+}
+
 func (c chatRequest) hasStructuredOutput() bool {
 	if len(c.ResponseFormat) == 0 || bytes.Equal(bytes.TrimSpace(c.ResponseFormat), []byte("null")) {
 		return false
@@ -344,7 +371,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		if isNullUsageProviderError(body) {
-			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body)
+			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, maxTokens)
 			return
 		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
@@ -356,7 +383,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if resp.StatusCode == http.StatusGatewayTimeout {
-		if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout") {
+		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout", resp.Header) {
 			return
 		}
 		writeError(w, http.StatusGatewayTimeout, "api_error", "provider_timeout", "Provider timed out")
@@ -381,11 +408,11 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	}
 	if resp.StatusCode != http.StatusOK {
 		if isNullUsageProviderError(body) {
-			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body)
+			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, maxTokens)
 			return
 		}
 		completion := completionFromHeaderCapped(resp.Header, maxTokens)
-		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "upstream_error") {
+		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "upstream_error", resp.Header) {
 			return
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
@@ -396,7 +423,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		usage = tokenUsage{PromptTokens: promptEstimate, CompletionTokens: 0, TotalTokens: promptEstimate}
 	} else if usageErr != nil {
-		if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_usage") {
+		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_usage", resp.Header) {
 			return
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_usage", "Upstream provider returned invalid usage")
@@ -404,7 +431,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	} else {
 		tokenSource = "provider_reported"
 	}
-	if !s.settleBeforeResponse(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok") {
+	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
 		return
 	}
 	emitProviderAttribution(w.Header(), resp.Header)
@@ -453,7 +480,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusGatewayTimeout {
-			if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout") {
+			if !s.settleBeforeStreamingResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout", resp.Header) {
 				return
 			}
 			writeError(w, http.StatusGatewayTimeout, "api_error", "provider_timeout", "Provider timed out")
@@ -477,7 +504,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 			return
 		}
-		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completionFromHeaderCapped(resp.Header, maxTokens), maxUsageTokens, "gateway_estimated", "upstream_error") {
+		if !s.settleBeforeStreamingResponseWithCoordinatorFinality(w, r, subject, promptEstimate, completionFromHeaderCapped(resp.Header, maxTokens), maxUsageTokens, "gateway_estimated", "upstream_error", resp.Header) {
 			return
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
@@ -532,7 +559,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					"observed", observedRawCompletion,
 					"max_completion_tokens", maxCompletion,
 				)
-				s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
+				s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
 				return
 			}
 		}
@@ -544,17 +571,21 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				"observed", observedCompletion,
 				"outcome", outcome,
 			)
-			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
+			s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
 			return
 		}
-		s.settleAfterCommit(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome, reservationWindow)
+		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome, reservationWindow, resp)
 	}
 	settleTruncated := func() {
 		if reported != nil {
 			settleReported("stream_truncated")
 			return
 		}
-		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "stream_truncated", reservationWindow)
+		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "stream_truncated", reservationWindow, resp)
+	}
+	settleCancelled := func() {
+		cancelCoordinator()
+		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "client_disconnect", reservationWindow, resp)
 	}
 	forwardLine := func(line []byte) bool {
 		select {
@@ -563,7 +594,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return false
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, maxTokens, cancelCoordinator, reservationWindow)
+			settleCancelled()
 			return false
 		default:
 		}
@@ -613,7 +644,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					}
 					cancelCoordinator()
 					completion := estimateStreamingCompletionTokens(emitted, maxTokens)
-					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow)
+					s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow, resp)
 					return false
 				}
 				if deltaBytes > 0 {
@@ -630,7 +661,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 							flusher.Flush()
 						}
 						cancelCoordinator()
-						s.settleAfterCommit(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow)
+						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow, resp)
 						return false
 					}
 					emitted += deltaBytes
@@ -651,7 +682,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					}
 					cancelCoordinator()
 					completion := estimateStreamingCompletionTokens(emitted, maxTokens)
-					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow)
+					s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow, resp)
 					return false
 				}
 			}
@@ -662,7 +693,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return false
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, maxTokens, cancelCoordinator, reservationWindow)
+			settleCancelled()
 			return false
 		}
 		if flusher != nil {
@@ -701,7 +732,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, maxTokens, cancelCoordinator, reservationWindow)
+			settleCancelled()
 			return
 		}
 		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
@@ -739,7 +770,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			if flusher != nil {
 				flusher.Flush()
 			}
-			s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "provider_timeout", reservationWindow)
+			s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "provider_timeout", reservationWindow, resp)
 			return
 		}
 		writeProviderDisconnectedSSE(w)
@@ -754,7 +785,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			settleReported("client_disconnect")
 			return
 		}
-		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, maxTokens, cancelCoordinator, reservationWindow)
+		settleCancelled()
 		return
 	}
 	if terminalStructuredErrorCode != "" {
@@ -770,7 +801,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	if estimateTokensFromBytes(emitted) > maxStreamingCompletionTokens(maxTokens) {
 		outcome = "stream_output_exceeded"
 	}
-	s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
+	s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
 }
 
 func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
@@ -781,8 +812,34 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 	_, _ = w.Write(body)
 }
 
-func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
-	_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens, maxTokens int64) {
+	completion := completionFromHeaderCapped(resp.Header, maxTokens)
+	finality := coordinatorSettlementFinalityFromHeaders(resp.Header)
+	switch finality.Action {
+	case settlementFinalityLegacy, settlementFinalityRefund:
+		if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+			slog.Error("gateway settlement refund failed before provider error response",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+				"error", err,
+			)
+			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+			return
+		}
+	case settlementFinalityDebit:
+		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "upstream_error") {
+			return
+		}
+	case settlementFinalityHold:
+		slog.Info("gateway deferred buyer settlement pending coordinator receipt finality",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+		)
+	}
 	// PR #250 R1 code MEDIUM: this path serves provider-SELECTED
 	// errors (null-usage 5xx, etc.) where the coord did pick a
 	// provider before the failure (server.go:1886, :1909 set
@@ -882,6 +939,303 @@ func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, su
 		return false
 	}
 	return true
+}
+
+func (s *Server) settleBeforeResponseWithCoordinatorFinality(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header) bool {
+	return s.settleBeforeResponseWithCoordinatorFinalityPolicy(w, r, subject, prompt, completion, maxTotal, source, outcome, h, false)
+}
+
+func (s *Server) settleBeforeStreamingResponseWithCoordinatorFinality(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header) bool {
+	return s.settleBeforeResponseWithCoordinatorFinalityPolicy(w, r, subject, prompt, completion, maxTotal, source, outcome, h, true)
+}
+
+func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header, boundHold bool) bool {
+	finality := coordinatorSettlementFinalityFromHeaders(h)
+	switch finality.Action {
+	case settlementFinalityLegacy, settlementFinalityDebit:
+		return s.settleBeforeResponse(w, r, subject, prompt, completion, maxTotal, source, outcome)
+	case settlementFinalityRefund:
+		if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+			slog.Error("gateway settlement refund failed before response",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+				"error", err,
+			)
+			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+			return false
+		}
+		return true
+	case settlementFinalityHold:
+		if boundHold {
+			if !s.boundStreamingSettlementHold(r.Context(), r, subject, finality) {
+				writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+				return false
+			}
+			return true
+		}
+		slog.Info("gateway deferred buyer settlement pending coordinator receipt finality",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+		)
+		return true
+	default:
+		return s.settleBeforeResponse(w, r, subject, prompt, completion, maxTotal, source, outcome)
+	}
+}
+
+func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string, resp *http.Response) {
+	finality := coordinatorStreamingSettlementFinality(resp)
+	switch finality.Action {
+	case settlementFinalityLegacy:
+		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
+	case settlementFinalityDebit:
+		s.markStreamingSettlementHoldForReconciliation(r, subject, finality)
+	case settlementFinalityRefund:
+		if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+			slog.Error("gateway streaming settlement refund failed after coordinator receipt finality",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+				"error", err,
+			)
+		}
+	case settlementFinalityHold:
+		s.boundStreamingSettlementHold(r.Context(), r, subject, finality)
+	default:
+		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
+	}
+}
+
+func (s *Server) markStreamingSettlementHoldForReconciliation(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) {
+	holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.store.MarkReservationSettlementHold(holdCtx, subject.AccountID, requestID(r)); err != nil {
+		if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+			slog.Info("gateway skipped streaming settlement hold after coordinator finality because reservation is not active",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+				"error", err,
+			)
+			return
+		}
+		slog.Error("gateway failed to mark streaming settlement hold after coordinator finality",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+			"error", err,
+		)
+		refundCtx, refundCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer refundCancel()
+		if refundErr := s.store.RefundReservation(refundCtx, subject.AccountID, requestID(r), s.now().Unix()); refundErr != nil && !errors.Is(refundErr, storage.ErrReservationNotFound) && !errors.Is(refundErr, storage.ErrReservationTerminal) {
+			slog.Error("gateway failed to refund streaming reservation after settlement hold marker failure",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+				"error", refundErr,
+			)
+		}
+		return
+	}
+	slog.Info("gateway deferred verified streaming buyer settlement to SPEC-022 reconciler",
+		"request_id", requestID(r),
+		"account_id", subject.AccountID,
+		"settlement_outcome", finality.Outcome,
+		"settlement_reason", finality.Reason,
+	)
+}
+
+func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) bool {
+	now := s.now()
+	deadline := time.Time{}
+	if finality.PendingDeadlineUnixMS > 0 {
+		deadline = time.UnixMilli(finality.PendingDeadlineUnixMS).UTC()
+	}
+	if deadline.IsZero() || !deadline.After(now) {
+		if err := s.store.RefundReservation(ctx, subject.AccountID, requestID(r), now.Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+			slog.Error("gateway streaming settlement hold refund failed",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+				"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+				"error", err,
+			)
+			return false
+		}
+		slog.Info("gateway released streaming buyer reservation without trustworthy coordinator receipt deadline",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+			"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+		)
+		return true
+	}
+	if err := s.store.ClampReservationExpiry(ctx, subject.AccountID, requestID(r), deadline); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+		slog.Error("gateway streaming settlement hold deadline clamp failed",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+			"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+			"error", err,
+		)
+		return false
+	}
+	slog.Info("gateway bounded streaming buyer settlement hold to coordinator receipt deadline",
+		"request_id", requestID(r),
+		"account_id", subject.AccountID,
+		"settlement_outcome", finality.Outcome,
+		"settlement_reason", finality.Reason,
+		"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+	)
+	return true
+}
+
+func coordinatorStreamingSettlementFinality(resp *http.Response) coordinatorSettlementFinality {
+	if resp == nil {
+		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
+	}
+	if hasAnySettlementFinalityHeader(resp.Trailer) {
+		return coordinatorSettlementFinalityFromHeaders(resp.Trailer)
+	}
+	if hasSettlementFinalityTrailerDeclaration(resp) {
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "missing_settlement_finality_trailer"}
+	}
+	return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
+}
+
+func coordinatorSettlementFinalityFromHeaders(h http.Header) coordinatorSettlementFinality {
+	if !hasAnySettlementFinalityHeader(h) {
+		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
+	}
+	mode := strings.TrimSpace(h.Get(settlementModeHeader))
+	if mode == "observe" {
+		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
+	}
+	if mode != "enforce" {
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "invalid_settlement_mode"}
+	}
+	policyVersion := strings.TrimSpace(h.Get(settlementPolicyVersionHeader))
+	if policyVersion != settlementPolicyVersion {
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "invalid_settlement_policy_version"}
+	}
+	outcome := strings.TrimSpace(h.Get(settlementOutcomeHeader))
+	if outcome == "" {
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "missing_settlement_outcome"}
+	}
+	receiptResult := strings.TrimSpace(h.Get(settlementReceiptResultHeader))
+	reason := strings.TrimSpace(h.Get(settlementReasonHeader))
+	closed, closedOK := parseSettlementClosedHeader(h.Get(settlementClosedHeader))
+	pendingDeadlineUnixMS := parseSettlementPendingDeadlineUnixMS(h.Get(settlementPendingUntilHeader))
+	switch outcome {
+	case "verified":
+		if receiptResult == "valid" && closedOK && closed {
+			return coordinatorSettlementFinality{Action: settlementFinalityDebit, Outcome: outcome, Reason: reason, PendingDeadlineUnixMS: pendingDeadlineUnixMS}
+		}
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "verified_receipt_not_final", PendingDeadlineUnixMS: pendingDeadlineUnixMS}
+	case "quarantined", "zero_settled":
+		if closedOK && closed && settlementRefundReceiptResultValid(outcome, receiptResult) {
+			return coordinatorSettlementFinality{Action: settlementFinalityRefund, Outcome: outcome, Reason: reason, PendingDeadlineUnixMS: pendingDeadlineUnixMS}
+		}
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "settlement_refund_tuple_incomplete", PendingDeadlineUnixMS: pendingDeadlineUnixMS}
+	case "pending":
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: reason, PendingDeadlineUnixMS: pendingDeadlineUnixMS}
+	default:
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "unrecognized_settlement_outcome", PendingDeadlineUnixMS: pendingDeadlineUnixMS}
+	}
+}
+
+func hasAnySettlementFinalityHeader(h http.Header) bool {
+	for _, header := range []string{
+		settlementOutcomeHeader,
+		settlementReceiptResultHeader,
+		settlementReasonHeader,
+		settlementClosedHeader,
+		settlementModeHeader,
+		settlementPolicyVersionHeader,
+		settlementPendingUntilHeader,
+	} {
+		if strings.TrimSpace(h.Get(header)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSettlementFinalityTrailerDeclaration(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	for _, value := range resp.Header.Values("Trailer") {
+		for _, name := range strings.Split(value, ",") {
+			if isSettlementFinalityHeader(strings.TrimSpace(name)) {
+				return true
+			}
+		}
+	}
+	for name := range resp.Trailer {
+		if isSettlementFinalityHeader(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSettlementFinalityHeader(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case strings.ToLower(settlementOutcomeHeader),
+		strings.ToLower(settlementReceiptResultHeader),
+		strings.ToLower(settlementReasonHeader),
+		strings.ToLower(settlementClosedHeader),
+		strings.ToLower(settlementModeHeader),
+		strings.ToLower(settlementPolicyVersionHeader),
+		strings.ToLower(settlementPendingUntilHeader):
+		return true
+	default:
+		return false
+	}
+}
+
+func settlementRefundReceiptResultValid(outcome, receiptResult string) bool {
+	switch outcome {
+	case "zero_settled":
+		return receiptResult == "valid"
+	case "quarantined":
+		return receiptResult == "invalid" || receiptResult == "inconclusive"
+	default:
+		return false
+	}
+}
+
+func parseSettlementClosedHeader(raw string) (bool, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, false
+	}
+	closed, err := strconv.ParseBool(raw)
+	return closed, err == nil
+}
+
+func parseSettlementPendingDeadlineUnixMS(raw string) int64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	deadline, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || deadline <= 0 {
+		return 0
+	}
+	return deadline
 }
 
 func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string) {

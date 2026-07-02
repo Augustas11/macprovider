@@ -258,6 +258,14 @@ type scenarioOpts struct {
 	// v0.4 settlement receipts on both non-streaming and streaming
 	// requests.
 	settlementReceiptProvider bool
+	// settlementEnforceMode, when true, runs the coordinator with
+	// settlement.verified_model_settlement_mode=enforce so gateway
+	// money movement must be driven by coordinator finality rather than
+	// legacy/provider-reported accounting.
+	settlementEnforceMode bool
+	// settlementReconcileIntervalSeconds overrides the gateway SPEC-022
+	// background reconciler cadence. Zero keeps the gateway default.
+	settlementReconcileIntervalSeconds int
 }
 
 type settlementCatalogFixture struct {
@@ -351,13 +359,13 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		settlementCatalog = s.writeSettlementCatalogFixture()
 		s.modelHash = settlementCatalog.modelHash
 	}
-	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog)
+	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs, settlementCatalog, opts.settlementEnforceMode)
 
 	gwServiceTok := s.serviceToken
 	if opts.gatewayServiceToken != nil {
 		gwServiceTok = *opts.gatewayServiceToken
 	}
-	s.writeGatewayYAML(gwPort, opts.stickyEnabled, gwServiceTok)
+	s.writeGatewayYAML(gwPort, opts.stickyEnabled, gwServiceTok, opts.settlementReconcileIntervalSeconds)
 
 	if opts.seedAccount {
 		s.apiKey = s.seedGatewayAccountAndKey()
@@ -437,7 +445,7 @@ func randHex(t *testing.T, n int) string {
 // the audit fixture: we want a clean room for testing the GATEWAY ↔
 // COORDINATOR boundary, not the provider auth gate which has its own
 // dedicated tests in phase4-coordinator/internal/ws).
-func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture) {
+func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any, settlementCatalog settlementCatalogFixture, settlementEnforceMode bool) {
 	s.t.Helper()
 	tier2Cfg := map[string]any{
 		"observe_enabled":                    false,
@@ -548,6 +556,7 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"startup_reconcile_window_hours": 24,
 			"nightly_reconcile_window_days":  7,
 			"recovery_grace_seconds":         30,
+			"verified_model_settlement_mode": verifiedModelSettlementMode(settlementEnforceMode),
 			"job_enabled":                    false,
 		},
 		"endpoints": map[string]any{
@@ -574,6 +583,13 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 	if err := os.WriteFile(s.coordYAML, b, 0o600); err != nil {
 		s.t.Fatalf("write coordinator yaml: %v", err)
 	}
+}
+
+func verifiedModelSettlementMode(enforce bool) string {
+	if enforce {
+		return "enforce"
+	}
+	return "observe"
 }
 
 func (s *scenario) writeSettlementCatalogFixture() settlementCatalogFixture {
@@ -666,7 +682,7 @@ type settlementCatalogFile struct {
 	Version   int                        `json:"version"`
 }
 
-func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken string) {
+func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken string, settlementReconcileIntervalSeconds int) {
 	s.t.Helper()
 	cfg := map[string]any{
 		"listen": map[string]any{
@@ -747,6 +763,14 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 		"explorer": map[string]any{
 			"enabled": false,
 		},
+	}
+	if settlementReconcileIntervalSeconds > 0 {
+		cfg["settlement"] = map[string]any{
+			"reconcile_enabled":           true,
+			"reconcile_interval_s":        settlementReconcileIntervalSeconds,
+			"reconcile_batch_limit":       100,
+			"reconcile_request_timeout_s": 5,
+		}
 	}
 	b, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -1968,10 +1992,13 @@ type requestLogRow struct {
 // in the money-path scenario. Columns match
 // phase5-gateway/internal/storage/sqlite/migrate.go:68-79.
 type usageEventRow struct {
-	AccountID   string
-	TotalTokens int64
-	Outcome     string
-	TokenSource string
+	AccountID        string
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+	Outcome          string
+	TokenSource      string
+	RequestID        string
 }
 
 type settlementReceiptVerdictRow struct {
@@ -1990,6 +2017,15 @@ type settlementReceiptVerdictRow struct {
 	PayoutExclusionOutcome    string
 }
 
+type quotaReservationRow struct {
+	AccountID      string
+	RequestID      string
+	ReservedTokens int64
+	SettledTokens  int64
+	Status         string
+	SettlementHold int
+}
+
 // readLatestUsageEvent opens the gateway SQLite DB and returns the
 // most recent usage_events row for the seeded account, or (zero, false)
 // if none exists. This is the gateway-side store; together with
@@ -2004,16 +2040,60 @@ func (s *scenario) readLatestUsageEvent() (usageEventRow, bool) {
 	defer db.Close()
 	var row usageEventRow
 	err = db.QueryRow(
-		`SELECT account_id, total_tokens, outcome, token_source
+		`SELECT account_id, request_id, prompt_tokens, completion_tokens, total_tokens, outcome, token_source
 		   FROM usage_events WHERE account_id = ?
 		  ORDER BY created_at DESC LIMIT 1`,
 		s.accountID,
-	).Scan(&row.AccountID, &row.TotalTokens, &row.Outcome, &row.TokenSource)
+	).Scan(&row.AccountID, &row.RequestID, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.Outcome, &row.TokenSource)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return usageEventRow{}, false
 		}
 		s.t.Fatalf("query usage_events: %v", err)
+	}
+	return row, true
+}
+
+func (s *scenario) readUsageEvent(requestID string) (usageEventRow, bool) {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", s.gatewayDB)
+	if err != nil {
+		s.t.Fatalf("open gateway db: %v", err)
+	}
+	defer db.Close()
+	var row usageEventRow
+	err = db.QueryRow(
+		`SELECT account_id, request_id, prompt_tokens, completion_tokens, total_tokens, outcome, token_source
+		   FROM usage_events WHERE account_id = ? AND request_id = ?`,
+		s.accountID, requestID,
+	).Scan(&row.AccountID, &row.RequestID, &row.PromptTokens, &row.CompletionTokens, &row.TotalTokens, &row.Outcome, &row.TokenSource)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return usageEventRow{}, false
+		}
+		s.t.Fatalf("query usage_events for request %s: %v", requestID, err)
+	}
+	return row, true
+}
+
+func (s *scenario) readQuotaReservation(requestID string) (quotaReservationRow, bool) {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", s.gatewayDB)
+	if err != nil {
+		s.t.Fatalf("open gateway db: %v", err)
+	}
+	defer db.Close()
+	var row quotaReservationRow
+	err = db.QueryRow(
+		`SELECT account_id, request_id, reserved_tokens, settled_tokens, status, settlement_hold
+		   FROM quota_reservations WHERE account_id = ? AND request_id = ?`,
+		s.accountID, requestID,
+	).Scan(&row.AccountID, &row.RequestID, &row.ReservedTokens, &row.SettledTokens, &row.Status, &row.SettlementHold)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return quotaReservationRow{}, false
+		}
+		s.t.Fatalf("query quota_reservations for request %s: %v", requestID, err)
 	}
 	return row, true
 }

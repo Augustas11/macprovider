@@ -198,6 +198,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/kill-switch", s.handleKillSwitch)
 	mux.HandleFunc("/admin/capacity-signal", s.handleCapacitySignal)
 	mux.HandleFunc("/admin/capacity-tier/evaluate", s.handleCapacityEvaluate)
+	mux.HandleFunc("/admin/settlement/reconcile", s.handleSettlementReconcile)
 	if s.cfg.Explorer.Enabled {
 		mux.HandleFunc("/admin/explorer/buyers", s.handleExplorerBuyers)
 		mux.HandleFunc("/admin/explorer/buyers/", s.handleExplorerBuyerDetail)
@@ -338,10 +339,11 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 			"window_date": window, "daily_tokens_used": used, "daily_tokens_reserved": reserved,
 			"daily_tokens_remaining": remaining, "daily_tokens_limit": limit,
 		},
-		"capacity": map[string]any{"tier": tier.Tier},
-		"keys":     keys,
-		"models":   []any{},
-		"rating":   nil,
+		"settlement_disclosure": makeVerifiedModelSettlementDisclosure(),
+		"capacity":              map[string]any{"tier": tier.Tier},
+		"keys":                  keys,
+		"models":                []any{},
+		"rating":                nil,
 	})
 }
 
@@ -812,7 +814,7 @@ func copyReceiptEligibleHeaders(dst, src http.Header) {
 
 func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
 	for key, values := range src {
-		if strings.EqualFold(key, "Content-Length") {
+		if strings.EqualFold(key, "Content-Length") || strings.EqualFold(key, "Trailer") {
 			continue
 		}
 		if allowReceipt && isReceiptResponseHeader(key) {

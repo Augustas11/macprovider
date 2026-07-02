@@ -176,6 +176,71 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 		!strings.Contains(body.Tier1Disclosure.ModelVerificationLimit, "do not detect a provider falsifying") {
 		t.Fatalf("model verification limit disclosure is incomplete: %q", body.Tier1Disclosure.ModelVerificationLimit)
 	}
+	settlement := body.Tier1Disclosure.VerifiedModelSettlement
+	if !reflect.DeepEqual(settlement.IncludedPaidEntrypoints, []string{"POST /v1/chat/completions"}) {
+		t.Fatalf("included paid entrypoints=%v", settlement.IncludedPaidEntrypoints)
+	}
+	if len(settlement.ExcludedPaidEntrypoints) == 0 ||
+		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "coordinator.streamvc.live") ||
+		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "m4.streamvc.live") ||
+		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "m1.streamvc.live") {
+		t.Fatalf("excluded paid entrypoints must name legacy/direct paths: %+v", settlement.ExcludedPaidEntrypoints)
+	}
+	for _, got := range []string{
+		settlement.ModelIdentity,
+		settlement.ModelIdentityCaveat,
+		settlement.ObserveMode,
+		settlement.EnforceMode,
+		settlement.Outcomes.Quarantined,
+		settlement.Outcomes.ZeroSettled,
+		settlement.PartialCharge,
+		settlement.StreamingFailover,
+		settlement.BuyerReceiptStatus,
+	} {
+		if got == "" {
+			t.Fatalf("settlement disclosure has empty field: %+v", settlement)
+		}
+	}
+	if !strings.Contains(settlement.ModelIdentityCaveat, "provider-reported request-start model hash") ||
+		!strings.Contains(settlement.ModelIdentityCaveat, "does not provide hardware attestation") ||
+		!strings.Contains(settlement.ObserveMode, "cannot claim verified model integrity") ||
+		!strings.Contains(settlement.EnforceMode, "mixed pools are not described as fully verified") ||
+		!strings.Contains(settlement.Outcomes.Quarantined, "not charged") ||
+		!strings.Contains(settlement.Outcomes.Quarantined, "not labeled as buyer fault") ||
+		!strings.Contains(settlement.Outcomes.ZeroSettled, "no billable verified work") ||
+		!strings.Contains(settlement.PartialCharge, "delivered output prefix") ||
+		!strings.Contains(settlement.StreamingFailover, "does not double-charge overlapping output") ||
+		!strings.Contains(settlement.BuyerReceiptStatus, "without raw prompts or raw outputs") {
+		t.Fatalf("settlement disclosure is incomplete: %+v", settlement)
+	}
+}
+
+func TestUsageIncludesSPEC022SettlementDisclosure(t *testing.T) {
+	h, store, _, cfg := newTestHarness(t, fakeOAuth{})
+	fullKey := createAccountAndKey(t, store, cfg, "acct_usage_settlement_disclosure")
+	resp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	var body struct {
+		Quota                map[string]any                    `json:"quota"`
+		SettlementDisclosure verifiedModelSettlementDisclosure `json:"settlement_disclosure"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("usage json: %v", err)
+	}
+	if body.Quota["daily_tokens_reserved"] == nil {
+		t.Fatalf("usage response missing daily_tokens_reserved: %s", resp.Body.String())
+	}
+	disclosure := body.SettlementDisclosure
+	if !strings.Contains(disclosure.PendingReservation, "quota or balance can remain reserved") ||
+		!strings.Contains(disclosure.PendingReservation, "Non-verified terminal outcomes release or refund") ||
+		!strings.Contains(disclosure.Outcomes.Pending, "not final usage") ||
+		!strings.Contains(disclosure.Outcomes.Quarantined, "not charged") ||
+		!strings.Contains(disclosure.Outcomes.Quarantined, "not labeled as buyer fault") ||
+		!strings.Contains(disclosure.Outcomes.ZeroSettled, "no billable verified work") ||
+		!strings.Contains(disclosure.PartialCharge, "settlement-capable receipt binds the delivered output prefix") ||
+		!strings.Contains(disclosure.StreamingFailover, "does not double-charge overlapping output") ||
+		!strings.Contains(disclosure.BuyerReceiptStatus, "without raw prompts or raw outputs") {
+		t.Fatalf("usage settlement disclosure is incomplete: %+v", disclosure)
+	}
 }
 
 func TestModelsStickyDisclosureUsesCoordinatorRoutingMetadata(t *testing.T) {
@@ -1485,6 +1550,7 @@ func TestStreamingReceiptHeaderStripped(t *testing.T) {
 		payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"ok"}}]}`
 		return responseWithBody(http.StatusOK, http.Header{
 			"Content-Type":                    []string{"text/event-stream; charset=utf-8"},
+			"Trailer":                         []string{settlementOutcomeHeader + ", " + settlementModeHeader},
 			"X-MacProvider-Receipt":           []string{receipt},
 			"X-MacProvider-Foo":               []string{"strip-me"},
 			"X-MacProvider-Receipt-Pending":   []string{"strip-me-too"},
@@ -1509,6 +1575,9 @@ func TestStreamingReceiptHeaderStripped(t *testing.T) {
 			t.Fatalf("streaming buyer response exposed %s=%q", header, got)
 		}
 	}
+	if got := resp.Header().Get("Trailer"); got != "" {
+		t.Fatalf("streaming buyer response exposed upstream Trailer declaration %q", got)
+	}
 	// Issue #190 R2 security HIGH: streaming success responses
 	// carry per-tenant X-RateLimit-*-Requests headers and must NOT
 	// be cacheable. The SSE-required no-cache/no-transform must
@@ -1524,6 +1593,600 @@ func TestStreamingReceiptHeaderStripped(t *testing.T) {
 	if got := resp.Header().Get("X-RateLimit-Limit-Requests"); got == "" {
 		t.Errorf("streaming response missing X-RateLimit-Limit-Requests")
 	}
+}
+
+func TestSPEC022GatewayStreamingSettlementTrailersControlBuyerDebit(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	payload := strings.Join([]string{
+		`data: {"id":"chatcmpl","choices":[{"delta":{"content":"ok"}}]}`,
+		`data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n")
+	pendingDeadlineUnixMS := fixedNow().Add(5 * time.Minute).UnixMilli()
+	cases := []struct {
+		name           string
+		trailer        http.Header
+		declareOnly    bool
+		wantUsageRows  int64
+		wantSettled    int64
+		wantRefunded   int64
+		wantActive     int64
+		wantActiveHold int64
+		wantExpiresAt  int64
+	}{
+		{
+			name:          "legacy-no-trailer-debits",
+			wantUsageRows: 1,
+			wantSettled:   1,
+		},
+		{
+			name:           "verified-closed-trailer-holds-for-reconcile",
+			trailer:        settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "verified", "valid", "true", "receipt_verified"),
+			wantActive:     1,
+			wantActiveHold: 20,
+		},
+		{
+			name:         "quarantined-closed-trailer-refunds",
+			trailer:      settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "quarantined", "invalid", "true", "receipt_invalid"),
+			wantRefunded: 1,
+		},
+		{
+			name:           "pending-open-trailer-holds",
+			trailer:        settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "pending_recovery", pendingDeadlineUnixMS),
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantExpiresAt:  pendingDeadlineUnixMS,
+		},
+		{
+			name:         "declared-missing-trailer-refunds",
+			declareOnly:  true,
+			wantRefunded: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
+				trailer := tc.trailer
+				if trailer != nil || tc.declareOnly {
+					header.Set("Trailer", strings.Join(settlementFinalityHeaderNamesForTest(), ", "))
+				}
+				if trailer == nil && tc.declareOnly {
+					trailer = http.Header{}
+					for _, name := range settlementFinalityHeaderNamesForTest() {
+						trailer[name] = nil
+					}
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Trailer:    trailer,
+					Body:       io.NopCloser(strings.NewReader(payload)),
+				}, nil
+			})}
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			accountID := "acct_spec022_stream_finality_" + strings.ReplaceAll(tc.name, "-", "_")
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+			resp := postChat(t, h, fullKey, body, nil)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			if got := resp.Header().Get("Trailer"); got != "" {
+				t.Fatalf("buyer streaming response leaked internal Trailer declaration %q", got)
+			}
+			for _, header := range settlementFinalityHeaderNamesForTest() {
+				if got := resp.Header().Get(header); got != "" {
+					t.Fatalf("buyer streaming response leaked internal settlement header %s=%q", header, got)
+				}
+			}
+			if !strings.Contains(resp.Body.String(), "data: [DONE]") {
+				t.Fatalf("streaming response missing OpenAI-compatible DONE frame: %s", resp.Body.String())
+			}
+			got := gatewaySettlementSnapshot(t, dbPath, accountID)
+			if got.usageRows != tc.wantUsageRows || got.settledRows != tc.wantSettled || got.refundedRows != tc.wantRefunded || got.activeRows != tc.wantActive || got.activeReserved != tc.wantActiveHold {
+				t.Fatalf("settlement snapshot = %+v, want usage=%d settled=%d refunded=%d active=%d active_reserved=%d",
+					got, tc.wantUsageRows, tc.wantSettled, tc.wantRefunded, tc.wantActive, tc.wantActiveHold)
+			}
+			if tc.wantExpiresAt > 0 {
+				if got := gatewayReservationExpiresAtUnixMS(t, dbPath, accountID); got != tc.wantExpiresAt {
+					t.Fatalf("reservation expires_at=%d want coordinator pending deadline %d", got, tc.wantExpiresAt)
+				}
+			}
+		})
+	}
+}
+
+func TestSPEC022GatewayStreamingNonOKFinalityBoundsHold(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	pendingDeadlineUnixMS := fixedNow().Add(5 * time.Minute).UnixMilli()
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		h := settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "missing_receipt_deadline_open", pendingDeadlineUnixMS)
+		h.Set("Content-Type", "application/json")
+		return responseWithBody(http.StatusGatewayTimeout, h, `{"error":{"message":"timeout","type":"api_error","param":null,"code":"provider_timeout"}}`), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	accountID := "acct_spec022_stream_non_ok_pending"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if resp.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	for _, header := range settlementFinalityHeaderNamesForTest() {
+		if got := resp.Header().Get(header); got != "" {
+			t.Fatalf("buyer streaming error response leaked internal settlement header %s=%q", header, got)
+		}
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != 20 {
+		t.Fatalf("settlement snapshot = %+v, want non-OK streaming pending finality to hold reservation without debit", got)
+	}
+	if got := gatewayReservationExpiresAtUnixMS(t, dbPath, accountID); got != pendingDeadlineUnixMS {
+		t.Fatalf("reservation expires_at=%d want coordinator pending deadline %d", got, pendingDeadlineUnixMS)
+	}
+}
+
+func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T) {
+	accountID := "acct_spec022_reconcile_verified"
+	requestID := "req_spec022_reconcile_verified"
+	var captured http.Header
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		if r.URL.Path != "/internal/settlement/finality" {
+			t.Fatalf("coordinator path=%s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("account_id"); got != accountID {
+			t.Fatalf("account_id query=%q want %q", got, accountID)
+		}
+		if got := r.URL.Query().Get("request_id"); got != requestID {
+			t.Fatalf("request_id query=%q want %q", got, requestID)
+		}
+		if got, want := r.URL.Query().Get("reservation_created_at_unix_ms"), strconv.FormatInt(fixedNow().UnixMilli(), 10); got != want {
+			t.Fatalf("reservation_created_at_unix_ms query=%q want %q", got, want)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"request_id":        requestID,
+			"policy_version":    settlementPolicyVersion,
+			"mode":              "enforce",
+			"outcome":           "verified",
+			"receipt_result":    "valid",
+			"reason":            "verified_settlement",
+			"closed":            true,
+			"prompt_tokens":     8,
+			"completion_tokens": 4,
+			"total_tokens":      12,
+			"token_source":      "coordinator_observed",
+			"verified_attempts": 1,
+		})
+	}))
+	defer coordinator.Close()
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = coordinator.URL
+		cfg.Coordinator.OperatorKey = "operator-key"
+		cfg.Coordinator.ServiceToken = "service-token"
+	}, WithHTTPClient(coordinator.Client()))
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      fixedNow().UTC().Format("2006-01-02"),
+		RequestedTokens: 20,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       fixedNow(),
+		ExpiresAt:       fixedNow().Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.ClampReservationExpiry(context.Background(), accountID, requestID, fixedNow().Add(4*time.Minute)); err != nil {
+		t.Fatalf("ClampReservationExpiry: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?limit=10", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var summary settlementReconcileSummary
+	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.Scanned != 1 || summary.Verified != 1 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v, want one verified reconciliation", summary)
+	}
+	if got := captured.Get("Authorization"); got != "Bearer service-token" {
+		t.Fatalf("coordinator Authorization=%q want service token", got)
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 1 || got.settledRows != 1 || got.refundedRows != 0 || got.activeRows != 0 {
+		t.Fatalf("settlement snapshot=%+v, want verified debit and settled reservation", got)
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "spec022_verified" || source != "coordinator_observed" {
+		t.Fatalf("usage outcome/source=%s/%s, want spec022_verified/coordinator_observed", outcome, source)
+	}
+}
+
+func TestSPEC022GatewayStreamingReconcileConsumesCoordinatorVerifiedFinality(t *testing.T) {
+	accountID := "acct_spec022_streaming_contract"
+	requestID := "req_spec015_v04_streaming_tool_call_nonzero_prefix"
+	const promptTokens int64 = 11
+	const completionTokens int64 = 7
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/settlement/finality" {
+			t.Fatalf("coordinator path=%s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("account_id"); got != accountID {
+			t.Fatalf("account_id query=%q want %q", got, accountID)
+		}
+		if got := r.URL.Query().Get("request_id"); got != requestID {
+			t.Fatalf("request_id query=%q want %q", got, requestID)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer service-token" {
+			t.Fatalf("coordinator Authorization=%q want service token", got)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"request_id":        requestID,
+			"policy_version":    settlementPolicyVersion,
+			"mode":              "enforce",
+			"outcome":           "verified",
+			"receipt_result":    "valid",
+			"reason":            "verified_settlement",
+			"closed":            true,
+			"prompt_tokens":     promptTokens,
+			"completion_tokens": completionTokens,
+			"total_tokens":      promptTokens + completionTokens,
+			"token_source":      "coordinator_observed",
+			"verified_attempts": 1,
+		})
+	}))
+	defer coordinator.Close()
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = coordinator.URL
+		cfg.Coordinator.OperatorKey = "operator-key"
+		cfg.Coordinator.ServiceToken = "service-token"
+	}, WithHTTPClient(coordinator.Client()))
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      fixedNow().UTC().Format("2006-01-02"),
+		RequestedTokens: 32,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       fixedNow(),
+		ExpiresAt:       fixedNow().Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.ClampReservationExpiry(context.Background(), accountID, requestID, fixedNow().Add(4*time.Minute)); err != nil {
+		t.Fatalf("ClampReservationExpiry: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?limit=10", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var summary settlementReconcileSummary
+	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.Scanned != 1 || summary.Verified != 1 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v, want one verified streaming reconciliation", summary)
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 1 || got.settledRows != 1 || got.refundedRows != 0 || got.activeRows != 0 {
+		t.Fatalf("settlement snapshot=%+v, want verified debit and settled streaming reservation", got)
+	}
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
+	if outcome != "spec022_verified" || source != "coordinator_observed" || prompt != promptTokens || completion != completionTokens {
+		t.Fatalf("usage event outcome/source/tokens=%s/%s/%d/%d, want spec022_verified/coordinator_observed/%d/%d",
+			outcome, source, prompt, completion, promptTokens, completionTokens)
+	}
+}
+
+func TestSPEC022GatewaySettlementReconcileRejectsMissingTokenSource(t *testing.T) {
+	accountID := "acct_spec022_missing_token_source"
+	requestID := "req_spec022_missing_token_source"
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/settlement/finality" {
+			t.Fatalf("coordinator path=%s", r.URL.Path)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"request_id":        requestID,
+			"policy_version":    settlementPolicyVersion,
+			"mode":              "enforce",
+			"outcome":           "verified",
+			"receipt_result":    "valid",
+			"reason":            "verified_settlement",
+			"closed":            true,
+			"prompt_tokens":     11,
+			"completion_tokens": 7,
+			"total_tokens":      18,
+			"verified_attempts": 1,
+		})
+	}))
+	defer coordinator.Close()
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = coordinator.URL
+		cfg.Coordinator.OperatorKey = "operator-key"
+		cfg.Coordinator.ServiceToken = "service-token"
+	}, WithHTTPClient(coordinator.Client()))
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      fixedNow().UTC().Format("2006-01-02"),
+		RequestedTokens: 32,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       fixedNow(),
+		ExpiresAt:       fixedNow().Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.ClampReservationExpiry(context.Background(), accountID, requestID, fixedNow().Add(4*time.Minute)); err != nil {
+		t.Fatalf("ClampReservationExpiry: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?limit=10", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var summary settlementReconcileSummary
+	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.Scanned != 1 || summary.Verified != 0 || summary.Errors != 1 {
+		t.Fatalf("summary=%+v, want missing token_source rejected as reconcile error", summary)
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 {
+		t.Fatalf("settlement snapshot=%+v, want reservation held with no buyer debit", got)
+	}
+}
+
+func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
+	now := fixedNow()
+	pendingDeadlineUnixMS := now.Add(2 * time.Minute).UnixMilli()
+	finalities := map[string]map[string]any{
+		"req_refund": {
+			"request_id":     "req_refund",
+			"policy_version": settlementPolicyVersion,
+			"mode":           "enforce",
+			"outcome":        "quarantined",
+			"receipt_result": "invalid",
+			"reason":         "signature_verify_failed",
+			"closed":         true,
+		},
+		"req_hold": {
+			"request_id":               "req_hold",
+			"policy_version":           settlementPolicyVersion,
+			"mode":                     "enforce",
+			"outcome":                  "pending",
+			"receipt_result":           "inconclusive",
+			"reason":                   "receipt_verdict_pending",
+			"closed":                   false,
+			"pending_deadline_unix_ms": pendingDeadlineUnixMS,
+		},
+	}
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, ok := finalities[r.URL.Query().Get("request_id")]
+		if !ok {
+			writeError(w, http.StatusNotFound, "invalid_request_error", "not_found", "Settlement finality not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, body)
+	}))
+	defer coordinator.Close()
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = coordinator.URL
+		cfg.Coordinator.OperatorKey = "operator-key"
+	}, WithHTTPClient(coordinator.Client()))
+	for _, requestID := range []string{"req_refund", "req_hold", "req_missing"} {
+		if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+			AccountID:       "acct_spec022_reconcile",
+			RequestID:       requestID,
+			WindowDate:      now.UTC().Format("2006-01-02"),
+			RequestedTokens: 20,
+			DailyQuota:      cfg.Quotas.AccountDailyTokens,
+			CreatedAt:       now,
+			ExpiresAt:       now.Add(24 * time.Hour),
+		}); err != nil {
+			t.Fatalf("ReserveQuota %s: %v", requestID, err)
+		}
+		if err := store.ClampReservationExpiry(context.Background(), "acct_spec022_reconcile", requestID, now.Add(5*time.Minute)); err != nil {
+			t.Fatalf("ClampReservationExpiry %s: %v", requestID, err)
+		}
+	}
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       "acct_spec022_reconcile",
+		RequestID:       "req_ordinary_active",
+		WindowDate:      now.UTC().Format("2006-01-02"),
+		RequestedTokens: 20,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       now,
+		ExpiresAt:       now.Add(24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("ReserveQuota ordinary active: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?limit=10", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var summary settlementReconcileSummary
+	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.Scanned != 3 || summary.Refunded != 2 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v, want refund/refund404/hold split", summary)
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, "acct_spec022_reconcile")
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 2 || got.activeRows != 2 || got.activeReserved != 40 {
+		t.Fatalf("settlement snapshot=%+v, want two refunds, one held active reservation, and one ordinary active reservation", got)
+	}
+	if got := gatewayReservationExpiresAtUnixMSForRequest(t, dbPath, "acct_spec022_reconcile", "req_hold"); got != pendingDeadlineUnixMS {
+		t.Fatalf("held reservation expires_at=%d want %d", got, pendingDeadlineUnixMS)
+	}
+}
+
+func TestSPEC022GatewaySettlementReconcileTreatsTerminalRaceAsSkipped(t *testing.T) {
+	accountID := "acct_spec022_reconcile_race"
+	requestID := "req_spec022_reconcile_race"
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"request_id":        requestID,
+			"policy_version":    settlementPolicyVersion,
+			"mode":              "enforce",
+			"outcome":           "verified",
+			"receipt_result":    "valid",
+			"reason":            "verified_settlement",
+			"closed":            true,
+			"prompt_tokens":     8,
+			"completion_tokens": 4,
+			"total_tokens":      12,
+			"token_source":      "coordinator_observed",
+			"verified_attempts": 1,
+		})
+	}))
+	defer coordinator.Close()
+	_, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = coordinator.URL
+		cfg.Coordinator.OperatorKey = "operator-key"
+	}, WithHTTPClient(coordinator.Client()))
+	now := fixedNow()
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      now.UTC().Format("2006-01-02"),
+		RequestedTokens: 20,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       now,
+		ExpiresAt:       now.Add(24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.ClampReservationExpiry(context.Background(), accountID, requestID, now.Add(5*time.Minute)); err != nil {
+		t.Fatalf("ClampReservationExpiry: %v", err)
+	}
+	stale := storage.ActiveReservation{
+		AccountID:      accountID,
+		RequestID:      requestID,
+		WindowDate:     now.UTC().Format("2006-01-02"),
+		ReservedTokens: 20,
+		ExpiresAt:      now.Add(5 * time.Minute),
+		CreatedAt:      now,
+	}
+	if err := store.RefundReservation(context.Background(), accountID, requestID, now.Unix()); err != nil {
+		t.Fatalf("RefundReservation race setup: %v", err)
+	}
+	s := New(cfg, store, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(coordinator.Client()))
+	result, err := s.reconcileSettlementReservation(context.Background(), stale)
+	if err != nil {
+		t.Fatalf("reconcile terminal race err=%v", err)
+	}
+	if result != "already_terminal" {
+		t.Fatalf("reconcile terminal race result=%q want already_terminal", result)
+	}
+}
+
+type settlementHoldContextStore struct {
+	*sqlite.Store
+	clampCtxErr error
+	markCtxErr  error
+}
+
+func (s *settlementHoldContextStore) ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error {
+	s.clampCtxErr = ctx.Err()
+	return nil
+}
+
+func (s *settlementHoldContextStore) MarkReservationSettlementHold(ctx context.Context, accountID, requestID string) error {
+	s.markCtxErr = ctx.Err()
+	return nil
+}
+
+func TestSPEC022GatewaySettlementReconcileHoldUsesCallerContext(t *testing.T) {
+	accountID := "acct_spec022_reconcile_hold_ctx"
+	requestID := "req_spec022_reconcile_hold_ctx"
+	pendingDeadlineUnixMS := fixedNow().Add(5 * time.Minute).UnixMilli()
+	wrapped := &settlementHoldContextStore{}
+	s := &Server{store: wrapped, now: fixedNow}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx = context.WithValue(ctx, requestIDKey{}, requestID)
+	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile", nil).WithContext(ctx)
+
+	if !s.boundStreamingSettlementHold(ctx, req, usageSubject{AccountID: accountID}, coordinatorSettlementFinality{
+		Action:                settlementFinalityHold,
+		Outcome:               "pending",
+		Reason:                "receipt_verdict_pending",
+		PendingDeadlineUnixMS: pendingDeadlineUnixMS,
+	}) {
+		t.Fatal("boundStreamingSettlementHold returned false")
+	}
+	if !errors.Is(wrapped.clampCtxErr, context.Canceled) {
+		t.Fatalf("ClampReservationExpiry ctx err=%v want context.Canceled", wrapped.clampCtxErr)
+	}
+}
+
+func TestSPEC022GatewayStreamingVerifiedHoldIgnoresBuyerCanceledContext(t *testing.T) {
+	accountID := "acct_spec022_stream_hold_ctx"
+	requestID := "req_spec022_stream_hold_ctx"
+	wrapped := &settlementHoldContextStore{}
+	s := &Server{store: wrapped, now: fixedNow}
+	ctx := context.WithValue(context.Background(), requestIDKey{}, requestID)
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+
+	s.markStreamingSettlementHoldForReconciliation(req, usageSubject{AccountID: accountID}, coordinatorSettlementFinality{
+		Action:  settlementFinalityDebit,
+		Outcome: "verified",
+		Reason:  "verified_settlement",
+	})
+
+	if wrapped.markCtxErr != nil {
+		t.Fatalf("MarkReservationSettlementHold ctx err=%v want nil despite canceled buyer context", wrapped.markCtxErr)
+	}
+}
+
+func settlementFinalityHeaderNamesForTest() []string {
+	return []string{
+		settlementOutcomeHeader,
+		settlementReceiptResultHeader,
+		settlementReasonHeader,
+		settlementClosedHeader,
+		settlementModeHeader,
+		settlementPolicyVersionHeader,
+		settlementPendingUntilHeader,
+	}
+}
+
+func settlementFinalityTrailerForTest(mode, policyVersion, outcome, receiptResult, closed, reason string, pendingDeadlineUnixMS ...int64) http.Header {
+	h := http.Header{}
+	h.Set(settlementModeHeader, mode)
+	h.Set(settlementPolicyVersionHeader, policyVersion)
+	h.Set(settlementOutcomeHeader, outcome)
+	h.Set(settlementReceiptResultHeader, receiptResult)
+	h.Set(settlementClosedHeader, closed)
+	h.Set(settlementReasonHeader, reason)
+	if len(pendingDeadlineUnixMS) > 0 && pendingDeadlineUnixMS[0] > 0 {
+		h.Set(settlementPendingUntilHeader, strconv.FormatInt(pendingDeadlineUnixMS[0], 10))
+	}
+	return h
 }
 
 // TestProviderAttributionHeadersEmitted asserts the gateway surfaces
@@ -1666,6 +2329,210 @@ func TestProviderAttributionHeadersEmitted(t *testing.T) {
 			t.Errorf("X-Provider-Id must not be set when source is missing, got %q", resp.Header().Get("X-Provider-Id"))
 		}
 	})
+}
+
+func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	successBody := `{"id":"chatcmpl","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
+	cases := []struct {
+		name           string
+		mode           string
+		policyVersion  string
+		omitPolicy     bool
+		outcome        string
+		receiptResult  string
+		closed         string
+		wantUsageRows  int64
+		wantSettled    int64
+		wantRefunded   int64
+		wantActive     int64
+		wantActiveHold int64
+	}{
+		{
+			name:          "legacy-no-header-debits",
+			wantUsageRows: 1,
+			wantSettled:   1,
+		},
+		{
+			name:          "verified-closed-debits",
+			mode:          "enforce",
+			outcome:       "verified",
+			receiptResult: "valid",
+			closed:        "true",
+			wantUsageRows: 1,
+			wantSettled:   1,
+		},
+		{
+			name:          "quarantined-closed-refunds",
+			mode:          "enforce",
+			outcome:       "quarantined",
+			receiptResult: "invalid",
+			closed:        "true",
+			wantRefunded:  1,
+			wantUsageRows: 0,
+		},
+		{
+			name:          "zero-settled-closed-refunds",
+			mode:          "enforce",
+			outcome:       "zero_settled",
+			receiptResult: "valid",
+			closed:        "true",
+			wantRefunded:  1,
+			wantUsageRows: 0,
+		},
+		{
+			name:           "pending-holds-reservation",
+			mode:           "enforce",
+			outcome:        "pending",
+			receiptResult:  "inconclusive",
+			closed:         "false",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:           "verified-open-holds-reservation",
+			mode:           "enforce",
+			outcome:        "verified",
+			receiptResult:  "valid",
+			closed:         "false",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:           "verified-invalid-result-holds",
+			mode:           "enforce",
+			outcome:        "verified",
+			receiptResult:  "invalid",
+			closed:         "true",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:          "observe-mode-keeps-legacy-debit",
+			mode:          "observe",
+			outcome:       "quarantined",
+			receiptResult: "invalid",
+			closed:        "true",
+			wantUsageRows: 1,
+			wantSettled:   1,
+		},
+		{
+			name:           "partial-outcome-without-mode-holds-reservation",
+			outcome:        "verified",
+			receiptResult:  "valid",
+			closed:         "true",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:           "enforce-without-policy-version-holds-reservation",
+			mode:           "enforce",
+			omitPolicy:     true,
+			outcome:        "verified",
+			receiptResult:  "valid",
+			closed:         "true",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:           "enforce-with-unknown-policy-version-holds-reservation",
+			mode:           "enforce",
+			policyVersion:  "unknown-policy",
+			outcome:        "verified",
+			receiptResult:  "valid",
+			closed:         "true",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:           "unknown-mode-holds-reservation",
+			mode:           "monitor",
+			outcome:        "verified",
+			receiptResult:  "valid",
+			closed:         "true",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				h := http.Header{}
+				h.Set("Content-Type", "application/json")
+				if tc.outcome != "" {
+					h.Set(settlementModeHeader, tc.mode)
+					policyVersion := tc.policyVersion
+					if policyVersion == "" {
+						policyVersion = settlementPolicyVersion
+					}
+					if !tc.omitPolicy {
+						h.Set(settlementPolicyVersionHeader, policyVersion)
+					}
+					h.Set(settlementOutcomeHeader, tc.outcome)
+					h.Set(settlementClosedHeader, tc.closed)
+					h.Set(settlementReceiptResultHeader, tc.receiptResult)
+					h.Set(settlementReasonHeader, "test_"+tc.outcome)
+				}
+				return responseWithBody(http.StatusOK, h, successBody), nil
+			})}
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			accountID := "acct_spec022_finality_" + strings.ReplaceAll(tc.name, "-", "_")
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+			resp := postChat(t, h, fullKey, body, nil)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			for _, header := range []string{settlementOutcomeHeader, settlementClosedHeader, settlementReceiptResultHeader, settlementReasonHeader, settlementModeHeader, settlementPolicyVersionHeader, settlementPendingUntilHeader} {
+				if got := resp.Header().Get(header); got != "" {
+					t.Fatalf("buyer response leaked internal settlement header %s=%q", header, got)
+				}
+			}
+			got := gatewaySettlementSnapshot(t, dbPath, accountID)
+			if got.usageRows != tc.wantUsageRows || got.settledRows != tc.wantSettled || got.refundedRows != tc.wantRefunded || got.activeRows != tc.wantActive || got.activeReserved != tc.wantActiveHold {
+				t.Fatalf("settlement snapshot = %+v, want usage=%d settled=%d refunded=%d active=%d active_reserved=%d",
+					got, tc.wantUsageRows, tc.wantSettled, tc.wantRefunded, tc.wantActive, tc.wantActiveHold)
+			}
+		})
+	}
+}
+
+func TestSPEC022GatewayProviderErrorFinalityHoldsBuyerDebit(t *testing.T) {
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		h := http.Header{}
+		h.Set("Content-Type", "application/json")
+		h.Set(settlementModeHeader, "enforce")
+		h.Set(settlementPolicyVersionHeader, settlementPolicyVersion)
+		h.Set(settlementOutcomeHeader, "pending")
+		h.Set(settlementReceiptResultHeader, "inconclusive")
+		h.Set(settlementReasonHeader, "missing_receipt_deadline_open")
+		h.Set(settlementClosedHeader, "false")
+		return responseWithBody(http.StatusGatewayTimeout, h, `{"error":{"message":"timeout","type":"api_error","param":null,"code":"provider_timeout"}}`), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	accountID := "acct_spec022_provider_error_pending"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if resp.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != 20 {
+		t.Fatalf("settlement snapshot = %+v, want pending provider error to hold reservation without debit", got)
+	}
 }
 
 func TestProviderPinningHeadersStripped(t *testing.T) {
@@ -4102,6 +4969,73 @@ func usageEventOutcome(t *testing.T, dbPath, accountID string) (string, string) 
 		t.Fatalf("query usage outcome: %v", err)
 	}
 	return outcome, source
+}
+
+type gatewaySettlementState struct {
+	usageRows      int64
+	settledRows    int64
+	refundedRows   int64
+	activeRows     int64
+	activeReserved int64
+}
+
+func gatewaySettlementSnapshot(t *testing.T, dbPath, accountID string) gatewaySettlementState {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var state gatewaySettlementState
+	if err := db.QueryRow(`SELECT COUNT(*) FROM usage_events WHERE account_id = ?`, accountID).Scan(&state.usageRows); err != nil {
+		t.Fatalf("query usage_events count: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'settled'`, accountID).Scan(&state.settledRows); err != nil {
+		t.Fatalf("query settled reservations count: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'refunded'`, accountID).Scan(&state.refundedRows); err != nil {
+		t.Fatalf("query refunded reservations count: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(reserved_tokens), 0) FROM quota_reservations WHERE account_id = ? AND status = 'active'`, accountID).Scan(&state.activeRows, &state.activeReserved); err != nil {
+		t.Fatalf("query active reservations: %v", err)
+	}
+	return state
+}
+
+func gatewayReservationExpiresAtUnixMS(t *testing.T, dbPath, accountID string) int64 {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var raw string
+	if err := db.QueryRow(`SELECT expires_at FROM quota_reservations WHERE account_id = ? ORDER BY created_at DESC LIMIT 1`, accountID).Scan(&raw); err != nil {
+		t.Fatalf("query reservation expires_at: %v", err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		t.Fatalf("parse reservation expires_at %q: %v", raw, err)
+	}
+	return expiresAt.UnixMilli()
+}
+
+func gatewayReservationExpiresAtUnixMSForRequest(t *testing.T, dbPath, accountID, requestID string) int64 {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var raw string
+	if err := db.QueryRow(`SELECT expires_at FROM quota_reservations WHERE account_id = ? AND request_id = ? ORDER BY created_at DESC LIMIT 1`, accountID, requestID).Scan(&raw); err != nil {
+		t.Fatalf("query reservation expires_at: %v", err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		t.Fatalf("parse reservation expires_at %q: %v", raw, err)
+	}
+	return expiresAt.UnixMilli()
 }
 
 func assertStatus(t *testing.T, h http.Handler, method, path, bearer, demoToken, ip string, want int) *httptest.ResponseRecorder {

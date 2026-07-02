@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/augstar/macprovider-gateway/internal/router"
 )
 
 func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
@@ -16,5 +19,73 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 	}
 	if server.IdleTimeout != 120*time.Second {
 		t.Fatalf("IdleTimeout=%s want 120s", server.IdleTimeout)
+	}
+}
+
+type fakeSettlementReconciler struct {
+	calls chan int
+}
+
+func (f *fakeSettlementReconciler) ReconcileSettlementHolds(ctx context.Context, limit int) (router.SettlementReconcileSummary, error) {
+	select {
+	case <-ctx.Done():
+		return router.SettlementReconcileSummary{}, ctx.Err()
+	case f.calls <- limit:
+		return router.SettlementReconcileSummary{Scanned: 1, Verified: 1}, nil
+	}
+}
+
+func TestRunSettlementReconcilerRunsImmediately(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	fake := &fakeSettlementReconciler{calls: make(chan int, 2)}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSettlementReconciler(ctx, fake, time.Hour, 17, time.Second)
+	}()
+
+	select {
+	case got := <-fake.calls:
+		if got != 17 {
+			t.Fatalf("reconcile limit=%d want 17", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("settlement reconciler did not run immediately")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("settlement reconciler did not stop after context cancellation")
+	}
+}
+
+func TestRunSettlementReconcilerRunsOnInterval(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := &fakeSettlementReconciler{calls: make(chan int, 4)}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSettlementReconciler(ctx, fake, 10*time.Millisecond, 23, time.Second)
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case got := <-fake.calls:
+			if got != 23 {
+				t.Fatalf("reconcile call %d limit=%d want 23", i+1, got)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("settlement reconciler call %d did not arrive", i+1)
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("settlement reconciler did not stop after interval test cancellation")
 	}
 }

@@ -66,7 +66,11 @@ completion, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewPara
 
 ## Models
 
-Use `/v1/models` with bearer auth for the current model list. The live pool has recently served:
+Use `/v1/models` with bearer auth for the current model list. Model identity is provider-reported. `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately. Mixed pools are not described as fully verified.
+
+v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.
+
+The live pool has recently served:
 
 | Model | Notes |
 |---|---|
@@ -89,13 +93,30 @@ Primary buyer endpoints:
 
 `POST /v1/chat/completions` accepts OpenAI-compatible chat completion requests. Set `stream:true` for server-sent events or omit it for a single JSON response.
 
+Covered paid settlement claims are limited to `POST /v1/chat/completions`. Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.
+
+Excluded legacy/direct paths are outside this SPEC-022 gateway settlement claim unless separately disabled or migrated behind the gateway paid ledger: `coordinator.streamvc.live`, `m4.streamvc.live`, and `m1.streamvc.live`.
+
+Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.
+
 ### Models
 
-`GET /v1/models` returns the current provider-reported model list.
+`GET /v1/models` returns the current provider-reported model list plus `tier1_disclosure`. The disclosure separates provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching.
 
 ### Usage
 
-`GET /v1/usage` returns account quota, key, model, and rating summary fields for signed-in API-key users.
+`GET /v1/usage` returns account quota, key, model, rating summary, and `settlement_disclosure` fields for signed-in API-key users. `daily_tokens_reserved` can include pending verification reservations after a request completes; non-verified terminal outcomes release or refund that reservation.
+
+Buyer receipt and status labels:
+
+| Label | Meaning |
+|---|---|
+| `pending` | receipt verification is still incomplete and the reservation is not final usage |
+| `verified` | a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement |
+| `quarantined` | not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault |
+| `zero_settled` | not charged because no billable verified work was produced; this is not labeled as buyer fault |
+
+Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs.
 
 ### Feedback
 
@@ -103,7 +124,7 @@ Primary buyer endpoints:
 
 ## Quotas and limits
 
-- Free beta accounts: 100,000 tokens/account/day.
+- Free accounts: 100,000 tokens/account/day.
 - Request limit: 4096 tokens/request.
 - Account concurrency: 2 concurrent requests/account.
 - Demo mode: 1000 tokens/IP/day, 512 tokens/request, 10 sessions/IP/hour.
@@ -118,11 +139,15 @@ Both streaming and non-streaming chat completions are supported. Request timeout
 
 1. **Buyer prompts and provider responses are processed as plaintext on provider hardware.** Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.
 2. **There is no hardware attestation or runtime integrity check on providers.** The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.
-3. **Model identity is provider-reported.** When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.8 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.
+3. **Model identity is provider-reported.** `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately. Mixed pools are not described as fully verified.
 4. v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.
-5. **The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-4.
+5. Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout. Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.
+6. Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation. pending: receipt verification is still incomplete and the reservation is not final usage. verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement. quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault. zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault.
+7. Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage. Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.
+8. Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs.
+9. **The product makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.
 
-What this means for your prompts and outputs: use Mac Provider for cooperative beta workloads where local-provider plaintext processing is acceptable. Do not send secrets or regulated data that require private inference, attestation, or malicious-provider resistance.
+What this means for your prompts and outputs: use Mac Provider for cooperative workloads where local-provider plaintext processing is acceptable. Do not send secrets or regulated data that require private inference, attestation, or malicious-provider resistance.
 
 Tier 2 roadmap: future.
 

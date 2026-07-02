@@ -90,7 +90,7 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	}
 	if cfg.Settlement.CadenceDays != 7 || cfg.Settlement.MinPayoutCredits != 500000 ||
 		cfg.Settlement.StartupReconcileWindowHours != 24 || cfg.Settlement.NightlyReconcileWindowDays != 7 ||
-		cfg.Settlement.RecoveryGraceSeconds != 30 || !cfg.Settlement.JobEnabled {
+		cfg.Settlement.RecoveryGraceSeconds != 30 || cfg.Settlement.VerifiedModelSettlementMode != "observe" || !cfg.Settlement.JobEnabled {
 		t.Fatalf("unexpected settlement defaults: %+v", cfg.Settlement)
 	}
 	if cfg.Endpoints.ProviderEarnings.RateLimitPerMinute != 60 {
@@ -113,6 +113,13 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	cfg.Settlement.RecoveryGraceSeconds = 901
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "recovery_grace_seconds") {
 		t.Fatalf("settlement recovery grace above verified receipt cap should fail; err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Settlement.VerifiedModelSettlementMode = "shadow"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "verified_model_settlement_mode") {
+		t.Fatalf("settlement verified model mode validation err=%v", err)
 	}
 
 	cfg = Default()

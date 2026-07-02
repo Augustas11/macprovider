@@ -9,23 +9,26 @@ import (
 )
 
 type HotPathInput struct {
-	RequestID           string
-	AttemptN            int
-	ProviderAssignedID  string
-	ProviderID          string
-	Model               string
-	Status              int
-	Stream              bool
-	TSUtc               time.Time
-	PromptTokens        *int64
-	CompletionTokens    *int64
-	EstimatedCompTokens *int64
-	ErrorCode           string
-	FaultFlag           string
-	ConfigSnapshotID    int64
-	RateEntry           RateCardEntry
-	MultiplierPPM       int64
-	ProviderShareBps    int64
+	RequestID                  string
+	AttemptN                   int
+	ProviderAssignedID         string
+	ProviderID                 string
+	Model                      string
+	Status                     int
+	Stream                     bool
+	TSUtc                      time.Time
+	PromptTokens               *int64
+	CompletionTokens           *int64
+	EstimatedCompTokens        *int64
+	ErrorCode                  string
+	FaultFlag                  string
+	ConfigSnapshotID           int64
+	RateEntry                  RateCardEntry
+	MultiplierPPM              int64
+	ProviderShareBps           int64
+	SettlementAccountScopeHash string
+	SettlementPolicyMode       string
+	SettlementPolicyVersion    string
 }
 
 func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
@@ -50,6 +53,12 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		_, err := conn.ExecContext(ctx, `COMMIT`)
 		committed = err == nil
 		return err
+	}
+	if in.SettlementAccountScopeHash == "" {
+		in.SettlementAccountScopeHash = SettlementAccountScopeHashForAccountID(reqRow.AccountID)
+	}
+	if in.SettlementPolicyMode == "" {
+		in.SettlementPolicyMode = "legacy"
 	}
 	// SPEC-002 v1.5.0 / issue #211 money-path defense-in-depth:
 	// scope the AttemptN-derivation COUNT by (account_id, request_id)
@@ -165,6 +174,9 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	if err := insertOperatorCreditTx(ctx, conn, requestCreditID, in, result, now); err != nil {
 		return err
 	}
+	if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
+		return err
+	}
 	if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
 		return err
 	}
@@ -225,9 +237,10 @@ INSERT INTO ledger_request_credits (
     status, stream, prompt_tokens, completion_tokens, estimated_completion_tokens,
     usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
     global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
-    fault_flag, recovery_source, created_at_utc, quarantined,
+    fault_flag, settlement_account_scope_hash, settlement_policy_mode,
+    settlement_policy_version, recovery_source, created_at_utc, quarantined,
     quarantine_reason
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.RequestID,
 		in.AttemptN,
 		in.ProviderID,
@@ -247,6 +260,9 @@ INSERT INTO ledger_request_credits (
 		result.ProviderShareBps,
 		result.ProviderCredits,
 		result.FaultFlag,
+		nullString(in.SettlementAccountScopeHash),
+		settlementPolicyModeOrLegacy(in.SettlementPolicyMode),
+		nullString(in.SettlementPolicyVersion),
 		source,
 		now,
 		boolInt(quarantined),
@@ -256,6 +272,15 @@ INSERT INTO ledger_request_credits (
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+func settlementPolicyModeOrLegacy(mode string) string {
+	switch mode {
+	case "observe", "enforce":
+		return mode
+	default:
+		return "legacy"
+	}
 }
 
 func insertOperatorCreditTx(ctx context.Context, db sqlExecutor, requestCreditID int64, in HotPathInput, result BilledRow, now string) error {
