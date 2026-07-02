@@ -581,6 +581,17 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					return false
 				}
 			} else {
+				// SPEC-006 §17.7.1 clause 3 (#295): once we've
+				// dispatched a terminal error envelope, no further
+				// content `data:` frames may cross the wire to the
+				// buyer before `[DONE]`. A malicious or buggy provider
+				// that keeps emitting content after the envelope
+				// violates the "last frame before [DONE]" contract;
+				// drop the line and continue reading so the terminator
+				// still fires the refund path.
+				if terminalStructuredErrorCode != "" {
+					return true
+				}
 				if code := terminalSSEErrorCode(data); isSpec019TerminalSSEErrorCode(code) {
 					terminalStructuredErrorCode = code
 					if _, err := w.Write(line); err != nil {
@@ -1151,13 +1162,38 @@ func sseDataValue(line string) (string, bool) {
 	return value, true
 }
 
+// terminalSSEErrorCode extracts the SPEC-006 §17.7.1 terminal error
+// envelope code from an SSE data payload, but ONLY when the payload
+// satisfies the "standalone envelope" clause: no `choices` field, and
+// no non-zero `usage` tokens. A payload with `error.code` alongside
+// content deltas or usage tokens is structurally inconsistent with the
+// contract (a terminal envelope is the LAST buyer-visible frame before
+// `[DONE]` and cannot carry content) and is rejected. Returns "" for
+// non-standalone or unparseable payloads. Origin: #295 (§17.7.1
+// producer-side enforcement, harness-side counterpart shipped in #232).
 func terminalSSEErrorCode(data string) string {
 	var envelope struct {
 		Error struct {
 			Code string `json:"code"`
 		} `json:"error"`
+		Choices []json.RawMessage `json:"choices"`
+		Usage   *struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(data), &envelope); err != nil {
+		return ""
+	}
+	// SPEC-006 §17.7.1 clause 1: the terminal envelope MUST be a
+	// standalone data frame — no `choices`, no `usage` tokens. A
+	// payload carrying delta content or token accounting alongside
+	// `error.code` violates the standalone shape and MUST NOT trip
+	// the terminal-error refund path.
+	if len(envelope.Choices) > 0 {
+		return ""
+	}
+	if envelope.Usage != nil && (envelope.Usage.PromptTokens > 0 || envelope.Usage.CompletionTokens > 0) {
 		return ""
 	}
 	return strings.TrimSpace(envelope.Error.Code)

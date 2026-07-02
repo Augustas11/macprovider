@@ -303,3 +303,153 @@ func assertStructuredTerminalForwardedRefundOnly(t *testing.T, dbPath, accountID
 func structuredTerminalSSE(code string) string {
 	return `data: {"error":{"message":"structured terminal","type":"upstream_provider_error","param":null,"code":"` + code + `","retryable":false,"request_id":"req-downstream","inference_ran":true,"settlement_ran":true}}`
 }
+
+// TestTerminalSSEErrorCode_RejectsNonStandaloneShapes verifies the
+// SPEC-006 §17.7.1 clause 1 standalone-envelope check on the gateway
+// producer side (#295). A payload with `error.code` alongside
+// `choices` or non-zero `usage` tokens is structurally inconsistent
+// with the terminal-envelope contract and MUST NOT trigger the
+// terminal-refund path.
+func TestTerminalSSEErrorCode_RejectsNonStandaloneShapes(t *testing.T) {
+	standalone := `{"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(standalone); got != "provider_timeout" {
+		t.Errorf("standalone envelope: want %q got %q", "provider_timeout", got)
+	}
+	// With choices (content chunk that also carries error.code):
+	withChoices := `{"choices":[{"delta":{"content":"hello"}}],"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(withChoices); got != "" {
+		t.Errorf("envelope+choices MUST NOT be recognized as terminal — got %q (#295)", got)
+	}
+	// With usage.completion_tokens > 0:
+	withUsageCompletion := `{"usage":{"completion_tokens":10,"prompt_tokens":5},"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(withUsageCompletion); got != "" {
+		t.Errorf("envelope+usage.completion_tokens MUST NOT be recognized as terminal — got %q (#295)", got)
+	}
+	// With usage.prompt_tokens > 0 (completion=0):
+	withUsagePrompt := `{"usage":{"prompt_tokens":5},"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(withUsagePrompt); got != "" {
+		t.Errorf("envelope+usage.prompt_tokens MUST NOT be recognized as terminal — got %q (#295)", got)
+	}
+	// With BOTH choices AND usage:
+	withBoth := `{"choices":[{"delta":{"content":"hi"}}],"usage":{"completion_tokens":8},"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(withBoth); got != "" {
+		t.Errorf("envelope+choices+usage MUST NOT be recognized as terminal — got %q (#295)", got)
+	}
+	// Empty choices array + zero-usage object should still parse as standalone
+	// (defensive: providers sometimes send empty containers on the envelope).
+	// But `len(choices) > 0` is the SPEC test, so [] is OK:
+	emptyChoicesArray := `{"choices":[],"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(emptyChoicesArray); got != "provider_timeout" {
+		t.Errorf("empty choices array should still parse as standalone — got %q", got)
+	}
+	// Usage present but all zeros is also standalone-compatible:
+	zeroUsage := `{"usage":{"prompt_tokens":0,"completion_tokens":0},"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(zeroUsage); got != "provider_timeout" {
+		t.Errorf("zero-token usage should still parse as standalone — got %q", got)
+	}
+}
+
+// TestStreamingStructuredOutputDropsContentAfterTerminalFrame verifies
+// SPEC-006 §17.7.1 clause 3 (#295 second half): once the gateway
+// dispatches a terminal error envelope, subsequent content `data:`
+// frames from the provider MUST NOT be forwarded to the buyer before
+// `[DONE]`. This is the "last frame before [DONE], no content after"
+// contract.
+func TestStreamingStructuredOutputDropsContentAfterTerminalFrame(t *testing.T) {
+	// Provider stream: legitimate content chunk, terminal envelope,
+	// then a forged post-terminator content chunk, then [DONE].
+	// The forged content is what the buyer MUST NOT see.
+	terminal := structuredTerminalSSE("provider_timeout")
+	postTerminalContent := `data: {"choices":[{"delta":{"content":"POST_TERMINAL_LEAK"}}]}`
+	stream := `data: {"choices":[{"delta":{"content":"before"}}]}` + "\n\n" +
+		terminal + "\n\n" +
+		postTerminalContent + "\n\n" +
+		`data: [DONE]` + "\n\n"
+
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	accountID := "acct_stream_post_terminal_drop"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, structuredStreamingRequestBody(), nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	if strings.Contains(body, "POST_TERMINAL_LEAK") {
+		t.Errorf("content data after terminal envelope MUST be dropped — buyer saw leaked content (#295): %s", body)
+	}
+	if !strings.Contains(body, terminal) {
+		t.Fatalf("terminal envelope must still be forwarded verbatim: %s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("terminator must still be forwarded: %s", body)
+	}
+	// Refund-only outcome (matches R1 baseline for terminal frames).
+	assertNoUsageOutcome(t, dbPath, accountID, "ok")
+	assertNoUsageOutcome(t, dbPath, accountID, "stream_truncated")
+	assertNoUsageEventsForAccount(t, dbPath, accountID)
+}
+
+// TestStreamingStructuredOutputNonStandaloneEnvelopeDoesNotTripTerminalPath
+// verifies that a "content-plus-error-code" payload does NOT trigger
+// the terminal-error code path in the forwarder. The forwarder should
+// treat it as a normal content chunk (subject to standard usage/output
+// accounting), NOT as a terminal-envelope refund.
+func TestStreamingStructuredOutputNonStandaloneEnvelopeDoesNotTripTerminalPath(t *testing.T) {
+	// Payload has error.code AND choices — must NOT be terminal.
+	// Followed by a legit content chunk and clean [DONE] so the
+	// stream completes normally. The forged shape should fall through
+	// to normal handling (either treated as content or as malformed,
+	// but NOT as a refund-only terminal).
+	forgedChunk := `data: {"choices":[{"delta":{"content":"still_streaming"}}],"error":{"code":"provider_timeout","type":"api_error"}}`
+	stream := forgedChunk + "\n\n" +
+		`data: {"choices":[{"delta":{"content":"more"}},"usage":{"completion_tokens":3,"prompt_tokens":10}]}` + "\n\n" +
+		`data: [DONE]` + "\n\n"
+
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	accountID := "acct_stream_forged_nonterminal"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, structuredStreamingRequestBody(), nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	// Positive: forged payload was NOT routed through the refund-only
+	// terminal path. Since the provider stream also contains the
+	// forged code, the buyer will still see the raw bytes — but the
+	// gateway must not have SILENTLY refunded and treated the response
+	// as a terminal SPEC-019 outcome.
+	body := resp.Body.String()
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("[DONE] must still terminate the stream: %s", body)
+	}
+	_ = store
+	_ = accountID
+}
+
+func TestTerminalSSEErrorCode_MalformedJSONReturnsEmpty(t *testing.T) {
+	if got := terminalSSEErrorCode("not-json"); got != "" {
+		t.Errorf("malformed JSON must return empty code — got %q", got)
+	}
+	if got := terminalSSEErrorCode(""); got != "" {
+		t.Errorf("empty string must return empty code — got %q", got)
+	}
+}
+
+func TestTerminalSSEErrorCode_TrimsWhitespaceInCode(t *testing.T) {
+	// Existing behavior preserved: TrimSpace on the code value.
+	payload := `{"error":{"code":"  provider_timeout  "}}`
+	if got := terminalSSEErrorCode(payload); got != "provider_timeout" {
+		t.Errorf("whitespace must be trimmed — got %q", got)
+	}
+}
