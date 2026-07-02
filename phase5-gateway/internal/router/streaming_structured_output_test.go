@@ -245,6 +245,23 @@ func assertNoUsageOutcome(t *testing.T, dbPath, accountID, outcome string) {
 	}
 }
 
+func assertHasUsageOutcome(t *testing.T, dbPath, accountID, outcome string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var count int
+	err = db.QueryRow(`SELECT COUNT(*) FROM usage_events WHERE account_id = ? AND outcome = ?`, accountID, outcome).Scan(&count)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("query usage_events: %v", err)
+	}
+	if count == 0 {
+		t.Fatalf("usage_events outcome %q count=0, want >=1", outcome)
+	}
+}
+
 func assertNoUsageEventsForAccount(t *testing.T, dbPath, accountID string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbPath)
@@ -306,46 +323,85 @@ func structuredTerminalSSE(code string) string {
 
 // TestTerminalSSEErrorCode_RejectsNonStandaloneShapes verifies the
 // SPEC-006 §17.7.1 clause 1 standalone-envelope check on the gateway
-// producer side (#295). A payload with `error.code` alongside
-// `choices` or non-zero `usage` tokens is structurally inconsistent
-// with the terminal-envelope contract and MUST NOT trigger the
-// terminal-refund path.
+// producer side (#295). SPEC-006 says "no `choices` field, no `usage`
+// field" — the token-level parser enforces LITERAL absence of these
+// keys, defending against duplicate-key JSON smuggling (R1 SEC/CODE/
+// ARCH convergent HIGH) and non-enumerated usage subfields like
+// `total_tokens`.
 func TestTerminalSSEErrorCode_RejectsNonStandaloneShapes(t *testing.T) {
 	standalone := `{"error":{"code":"provider_timeout","type":"api_error"}}`
 	if got := terminalSSEErrorCode(standalone); got != "provider_timeout" {
 		t.Errorf("standalone envelope: want %q got %q", "provider_timeout", got)
+	}
+	// Standalone with innocuous metadata is fine:
+	withMetadata := `{"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1000,"model":"llama","error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(withMetadata); got != "provider_timeout" {
+		t.Errorf("standalone with metadata: want %q got %q", "provider_timeout", got)
 	}
 	// With choices (content chunk that also carries error.code):
 	withChoices := `{"choices":[{"delta":{"content":"hello"}}],"error":{"code":"provider_timeout","type":"api_error"}}`
 	if got := terminalSSEErrorCode(withChoices); got != "" {
 		t.Errorf("envelope+choices MUST NOT be recognized as terminal — got %q (#295)", got)
 	}
+	// SPEC-006 §17.7.1: "no `choices` field" — presence of the KEY
+	// disqualifies the frame, even if the array is empty (R1 SEC MED).
+	emptyChoicesArray := `{"choices":[],"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(emptyChoicesArray); got != "" {
+		t.Errorf("envelope+choices:[] MUST NOT be recognized as terminal — spec says no choices FIELD; got %q (#295)", got)
+	}
 	// With usage.completion_tokens > 0:
 	withUsageCompletion := `{"usage":{"completion_tokens":10,"prompt_tokens":5},"error":{"code":"provider_timeout","type":"api_error"}}`
 	if got := terminalSSEErrorCode(withUsageCompletion); got != "" {
 		t.Errorf("envelope+usage.completion_tokens MUST NOT be recognized as terminal — got %q (#295)", got)
 	}
-	// With usage.prompt_tokens > 0 (completion=0):
-	withUsagePrompt := `{"usage":{"prompt_tokens":5},"error":{"code":"provider_timeout","type":"api_error"}}`
-	if got := terminalSSEErrorCode(withUsagePrompt); got != "" {
-		t.Errorf("envelope+usage.prompt_tokens MUST NOT be recognized as terminal — got %q (#295)", got)
+	// Non-enumerated usage subfield (R1 3-of-3 HIGH): total_tokens
+	// present is still usage accounting — must reject.
+	withTotalTokens := `{"usage":{"total_tokens":15},"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(withTotalTokens); got != "" {
+		t.Errorf("envelope+usage.total_tokens MUST NOT be recognized as terminal — got %q (#295 R1 HIGH)", got)
 	}
-	// With BOTH choices AND usage:
-	withBoth := `{"choices":[{"delta":{"content":"hi"}}],"usage":{"completion_tokens":8},"error":{"code":"provider_timeout","type":"api_error"}}`
-	if got := terminalSSEErrorCode(withBoth); got != "" {
-		t.Errorf("envelope+choices+usage MUST NOT be recognized as terminal — got %q (#295)", got)
-	}
-	// Empty choices array + zero-usage object should still parse as standalone
-	// (defensive: providers sometimes send empty containers on the envelope).
-	// But `len(choices) > 0` is the SPEC test, so [] is OK:
-	emptyChoicesArray := `{"choices":[],"error":{"code":"provider_timeout","type":"api_error"}}`
-	if got := terminalSSEErrorCode(emptyChoicesArray); got != "provider_timeout" {
-		t.Errorf("empty choices array should still parse as standalone — got %q", got)
-	}
-	// Usage present but all zeros is also standalone-compatible:
+	// Even zero-token usage: SPEC says no usage FIELD.
 	zeroUsage := `{"usage":{"prompt_tokens":0,"completion_tokens":0},"error":{"code":"provider_timeout","type":"api_error"}}`
-	if got := terminalSSEErrorCode(zeroUsage); got != "provider_timeout" {
-		t.Errorf("zero-token usage should still parse as standalone — got %q", got)
+	if got := terminalSSEErrorCode(zeroUsage); got != "" {
+		t.Errorf("envelope+usage:{0-tokens} MUST NOT be recognized as terminal — spec says no usage FIELD; got %q (#295)", got)
+	}
+	// Empty usage object:
+	emptyUsage := `{"usage":{},"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(emptyUsage); got != "" {
+		t.Errorf("envelope+usage:{} MUST NOT be recognized as terminal — got %q (#295)", got)
+	}
+	// Null usage:
+	nullUsage := `{"usage":null,"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(nullUsage); got != "" {
+		t.Errorf("envelope+usage:null MUST NOT be recognized as terminal — got %q (#295)", got)
+	}
+	// R1 3-of-3 HIGH: duplicate `choices` key. Struct unmarshal keeps
+	// the second value (empty), letting content bytes cross the wire
+	// while the check "passed". Token-level parser rejects.
+	dupChoices := `{"choices":[{"delta":{"content":"hello"}}],"choices":[],"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(dupChoices); got != "" {
+		t.Errorf("duplicate `choices` key MUST NOT be recognized as terminal — got %q (#295 R1 HIGH)", got)
+	}
+	// Duplicate `usage` key: same smuggling shape.
+	dupUsage := `{"usage":{"completion_tokens":10},"usage":null,"error":{"code":"provider_timeout","type":"api_error"}}`
+	if got := terminalSSEErrorCode(dupUsage); got != "" {
+		t.Errorf("duplicate `usage` key MUST NOT be recognized as terminal — got %q (#295 R1 HIGH)", got)
+	}
+	// Duplicate `error` key rejected too — envelope integrity attack.
+	dupError := `{"error":{"code":"provider_timeout"},"error":{"code":"stream_truncated"}}`
+	if got := terminalSSEErrorCode(dupError); got != "" {
+		t.Errorf("duplicate `error` key MUST NOT be recognized as terminal — got %q (#295)", got)
+	}
+	// Non-object JSON at top level rejected:
+	if got := terminalSSEErrorCode(`[{"error":{"code":"provider_timeout"}}]`); got != "" {
+		t.Errorf("array top-level MUST NOT parse as terminal — got %q", got)
+	}
+	if got := terminalSSEErrorCode(`"provider_timeout"`); got != "" {
+		t.Errorf("string top-level MUST NOT parse as terminal — got %q", got)
+	}
+	// Trailing garbage after object rejected:
+	if got := terminalSSEErrorCode(`{"error":{"code":"provider_timeout"}}{"choices":[{}]}`); got != "" {
+		t.Errorf("trailing garbage MUST NOT parse as terminal — got %q", got)
 	}
 }
 
@@ -397,24 +453,26 @@ func TestStreamingStructuredOutputDropsContentAfterTerminalFrame(t *testing.T) {
 
 // TestStreamingStructuredOutputNonStandaloneEnvelopeDoesNotTripTerminalPath
 // verifies that a "content-plus-error-code" payload does NOT trigger
-// the terminal-error code path in the forwarder. The forwarder should
-// treat it as a normal content chunk (subject to standard usage/output
-// accounting), NOT as a terminal-envelope refund.
+// the terminal-error refund code path in the forwarder (#295 R1 SEC
+// MED / ARCH LOW / CODE MED convergent test-quality finding). The
+// forwarder must fall through to normal streaming: forward all
+// content, record usage, settle with an `ok` outcome rather than
+// silently refunding.
 func TestStreamingStructuredOutputNonStandaloneEnvelopeDoesNotTripTerminalPath(t *testing.T) {
-	// Payload has error.code AND choices — must NOT be terminal.
-	// Followed by a legit content chunk and clean [DONE] so the
-	// stream completes normally. The forged shape should fall through
-	// to normal handling (either treated as content or as malformed,
-	// but NOT as a refund-only terminal).
+	// First chunk carries error.code AND choices (forged non-standalone
+	// envelope). Under the standalone-envelope rule this is treated as
+	// a regular content chunk; the forwarder must keep streaming, log
+	// usage on the second (valid) chunk, and settle `ok`.
 	forgedChunk := `data: {"choices":[{"delta":{"content":"still_streaming"}}],"error":{"code":"provider_timeout","type":"api_error"}}`
+	validChunk := `data: {"choices":[{"delta":{"content":"more"}}],"usage":{"prompt_tokens":10,"completion_tokens":3}}`
 	stream := forgedChunk + "\n\n" +
-		`data: {"choices":[{"delta":{"content":"more"}},"usage":{"completion_tokens":3,"prompt_tokens":10}]}` + "\n\n" +
+		validChunk + "\n\n" +
 		`data: [DONE]` + "\n\n"
 
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, stream), nil
 	})}
-	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 	}, WithHTTPClient(client))
 	accountID := "acct_stream_forged_nonterminal"
@@ -424,17 +482,30 @@ func TestStreamingStructuredOutputNonStandaloneEnvelopeDoesNotTripTerminalPath(t
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	// Positive: forged payload was NOT routed through the refund-only
-	// terminal path. Since the provider stream also contains the
-	// forged code, the buyer will still see the raw bytes — but the
-	// gateway must not have SILENTLY refunded and treated the response
-	// as a terminal SPEC-019 outcome.
 	body := resp.Body.String()
-	if !strings.Contains(body, "data: [DONE]") {
-		t.Fatalf("[DONE] must still terminate the stream: %s", body)
+	// The forged chunk crosses the wire (buyer's SDK will handle it
+	// however it handles error.code+content). The critical assertion
+	// is that the SECOND chunk was NOT dropped — that would only
+	// happen if the forwarder incorrectly classified the forged
+	// chunk as a terminal envelope and gated subsequent content.
+	if !strings.Contains(body, `"still_streaming"`) {
+		t.Errorf("forged (non-standalone) chunk MUST still be forwarded to buyer — got %s (#295 R1)", body)
 	}
-	_ = store
-	_ = accountID
+	if !strings.Contains(body, `"more"`) {
+		t.Errorf("second content chunk MUST NOT be dropped (terminal path was wrongly triggered): %s (#295 R1)", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("[DONE] must terminate the stream: %s", body)
+	}
+	// The forged shape is NOT a terminal envelope, so settlement path
+	// must be the normal provider-reported/gateway-estimated ok flow,
+	// not the refund-only terminal-error path.
+	assertNoUsageOutcome(t, dbPath, accountID, "stream_truncated")
+	// A usage event MUST exist (settlement happened, buyer was billed)
+	// — under the terminal-refund path there would be no usage event
+	// (see assertStructuredTerminalForwardedRefundOnly which asserts
+	// the opposite direction).
+	assertHasUsageOutcome(t, dbPath, accountID, "ok")
 }
 
 func TestTerminalSSEErrorCode_MalformedJSONReturnsEmpty(t *testing.T) {

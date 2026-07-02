@@ -1164,39 +1164,90 @@ func sseDataValue(line string) (string, bool) {
 
 // terminalSSEErrorCode extracts the SPEC-006 §17.7.1 terminal error
 // envelope code from an SSE data payload, but ONLY when the payload
-// satisfies the "standalone envelope" clause: no `choices` field, and
-// no non-zero `usage` tokens. A payload with `error.code` alongside
-// content deltas or usage tokens is structurally inconsistent with the
-// contract (a terminal envelope is the LAST buyer-visible frame before
-// `[DONE]` and cannot carry content) and is rejected. Returns "" for
-// non-standalone or unparseable payloads. Origin: #295 (§17.7.1
-// producer-side enforcement, harness-side counterpart shipped in #232).
+// satisfies the "standalone envelope" clause: no `choices` key, no
+// `usage` key at all (any presence — even zero tokens or empty
+// containers — is rejected). A payload with `error.code` alongside
+// content deltas or usage-token accounting is structurally inconsistent
+// with the contract (a terminal envelope is the LAST buyer-visible
+// frame before `[DONE]` and cannot carry content) and is rejected.
+// Returns "" for non-standalone or unparseable payloads. Origin: #295
+// (§17.7.1 producer-side enforcement, harness-side counterpart in #232).
+//
+// Parser is token-level (not lossy struct unmarshal) to defend against
+// #295 R1 SEC/ARCH convergent HIGH bypasses:
+//   - Duplicate keys: `{"choices":[{...}],"choices":[]}` — struct
+//     unmarshal keeps the second value (empty), letting the frame
+//     satisfy `len(choices) == 0` while the wire bytes still carry
+//     content the buyer sees.
+//   - Non-enumerated usage subfields: `{"usage":{"total_tokens":10}}`
+//     is not covered by prompt/completion checks but still constitutes
+//     usage accounting on a supposed "standalone" envelope.
+// The strict parser rejects ANY presence of `choices` or `usage`, plus
+// any duplicate top-level key, aligning with SPEC-006 §17.7.1's "no
+// choices field, no usage field" clause literally.
 func terminalSSEErrorCode(data string) string {
-	var envelope struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-		Choices []json.RawMessage `json:"choices"`
-		Usage   *struct {
-			PromptTokens     int64 `json:"prompt_tokens"`
-			CompletionTokens int64 `json:"completion_tokens"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal([]byte(data), &envelope); err != nil {
+	dec := json.NewDecoder(strings.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
 		return ""
 	}
-	// SPEC-006 §17.7.1 clause 1: the terminal envelope MUST be a
-	// standalone data frame — no `choices`, no `usage` tokens. A
-	// payload carrying delta content or token accounting alongside
-	// `error.code` violates the standalone shape and MUST NOT trip
-	// the terminal-error refund path.
-	if len(envelope.Choices) > 0 {
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
 		return ""
 	}
-	if envelope.Usage != nil && (envelope.Usage.PromptTokens > 0 || envelope.Usage.CompletionTokens > 0) {
+	var code string
+	seen := make(map[string]struct{})
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return ""
+		}
+		if _, dup := seen[key]; dup {
+			// Duplicate top-level key on a purported terminal
+			// envelope is a smuggling shape: reject unconditionally.
+			return ""
+		}
+		seen[key] = struct{}{}
+		switch key {
+		case "choices", "usage":
+			// SPEC-006 §17.7.1: standalone envelope has NO choices
+			// and NO usage. Presence of the key at all — regardless
+			// of value shape — disqualifies the frame.
+			return ""
+		case "error":
+			var e struct {
+				Code string `json:"code"`
+			}
+			if err := dec.Decode(&e); err != nil {
+				return ""
+			}
+			code = strings.TrimSpace(e.Code)
+		default:
+			// Other top-level fields (id, object, created, model,
+			// etc.) are innocuous metadata; skip past their value.
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				return ""
+			}
+		}
+	}
+	// Consume the closing '}'.
+	if _, err := dec.Token(); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(envelope.Error.Code)
+	// Reject trailing garbage after the object.
+	if dec.More() {
+		return ""
+	}
+	if extra, err := dec.Token(); err == nil {
+		_ = extra
+		return ""
+	}
+	return code
 }
 
 func isSpec019TerminalSSEErrorCode(code string) bool {
