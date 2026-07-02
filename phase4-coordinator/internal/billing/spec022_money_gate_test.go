@@ -1,9 +1,14 @@
 package billing
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +63,90 @@ func TestSPEC022PayableCreditGateRequiresVerifiedReceipt(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != 600 {
 		t.Fatalf("duplicate receipt payout provider credits=%d want 600", got)
+	}
+}
+
+func TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	routeDigest, _, err := input.RouteSnapshot.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Header = settlementHeaderWithCanonicalMutationAndTestSignature(t, input.Header, func(tuple map[string]any) {
+		tuple["route_snapshot_mode"] = RouteSnapshotModeEnforce
+		tuple["route_snapshot_digest"] = routeDigest
+	})
+
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	insertSPEC022LedgerCredit(t, store.db, input, 600)
+
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != 0 {
+		t.Fatalf("payable rows before receipt=%d want 0", got)
+	}
+
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+	state, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: settlementIdentityFromInput(input),
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     pubkey,
+		receiptReceivedUnixMS:     input.ReceiptReceivedUnixMS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.SettlementOutcome != SettlementOutcomeVerified || state.ReceiptResult != SettlementReceiptResultValid || !state.Closed {
+		t.Fatalf("state=%#v, want terminal verified receipt", state)
+	}
+	if state.RouteSnapshotMode != RouteSnapshotModeEnforce ||
+		state.RouteSnapshotPolicyVersion != input.RouteSnapshot.RouteSnapshotPolicyVersion ||
+		state.CatalogID != input.RouteSnapshot.CatalogID ||
+		state.ModelHash != input.RouteSnapshot.ExpectedCatalogModelHash {
+		t.Fatalf("state route/catalog binding=%#v, want enforce catalog-matching receipt", state)
+	}
+
+	finality, found, err := store.RequestSettlementFinality(context.Background(), input.AccountScope, input.RequestID, input.ReceiptReceivedUnixMS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("settlement finality not found")
+	}
+	if finality.Outcome != SettlementOutcomeVerified ||
+		finality.ReceiptResult != SettlementReceiptResultValid ||
+		!finality.Closed ||
+		finality.Mode != RouteSnapshotModeEnforce ||
+		finality.PolicyVersion != input.RouteSnapshot.RouteSnapshotPolicyVersion ||
+		finality.TokenSource != UsageSourceCoordinatorObserved {
+		t.Fatalf("finality=%#v, want enforce verified buyer-debit finality", finality)
+	}
+	if finality.PromptTokens != input.ExpectedUsage.BillableInputTokens ||
+		finality.CompletionTokens != input.ExpectedUsage.BillableOutputTokens ||
+		finality.TotalTokens != input.ExpectedUsage.BillableInputTokens+input.ExpectedUsage.BillableOutputTokens ||
+		finality.TotalTokens <= 0 {
+		t.Fatalf("finality tokens=%#v, want positive billable usage %#v", finality, input.ExpectedUsage)
+	}
+
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != 1 {
+		t.Fatalf("payable rows after verified receipt=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != 600 {
+		t.Fatalf("payable provider credits=%d want 600", got)
+	}
+	windowStart, windowEnd := settlementWindowForInput(input)
+	if err := store.RunSettlement(context.Background(), SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, windowEnd); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != 600 {
+		t.Fatalf("payout provider credits=%d want 600", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 1`, input.RequestID); got != 1 {
+		t.Fatalf("settled request credit rows=%d want 1", got)
 	}
 }
 
@@ -654,6 +743,41 @@ INSERT INTO settlement_receipt_verdicts (
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func settlementHeaderWithCanonicalMutationAndTestSignature(t *testing.T, header string, mutate func(map[string]any)) string {
+	t.Helper()
+	parts := strings.Split(header, ".")
+	if len(parts) != 2 {
+		t.Fatalf("receipt envelope parts=%d, want 2", len(parts))
+	}
+	raw, err := base64.StdEncoding.DecodeString(parts[0])
+	if err != nil {
+		t.Fatalf("decode tuple: %v", err)
+	}
+	var tuple map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&tuple); err != nil {
+		t.Fatalf("decode tuple JSON: %v", err)
+	}
+	mutate(tuple)
+	canonical, err := CanonicalJSON(tuple)
+	if err != nil {
+		t.Fatalf("canonicalize mutated tuple: %v", err)
+	}
+	// Match phase7-verify/testdata/generator/v04's deterministic fixture key.
+	priv := ed25519.NewKeyFromSeed(settlementFixtureTestSeed(32))
+	sig := ed25519.Sign(priv, canonical)
+	return base64.StdEncoding.EncodeToString(canonical) + "." + base64.StdEncoding.EncodeToString(sig)
+}
+
+func settlementFixtureTestSeed(n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = byte(i)
+	}
+	return out
 }
 
 func settlementIdentityFromInput(input SettlementVerifyInput) SettlementReceiptIdentity {

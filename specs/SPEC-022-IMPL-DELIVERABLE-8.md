@@ -10,20 +10,21 @@ map for every SPEC-022 acceptance criterion. The map separates deterministic
 automated coverage, partial component evidence, conditional manual gates, and
 launch blockers.
 
-The current implementation has deterministic component coverage for route
-snapshots, SPEC-015 v0.4 receipt verification, streaming terminal-output
-capture, late-receipt quarantine, gateway quota reservation primitives, Tier 2
-model-hash disclosure, SPEC-022 buyer disclosure surfaces, and provider-facing
-late-receipt deadline docs. It is not yet ready for enforce-mode launch because
-the signed-receipt money path, enforce-mode configuration gate, race harnesses,
-and full e2e/live-network gates are not fully proven in this branch.
+The current implementation has deterministic coverage for the non-streaming
+signed-receipt money path, route snapshots, SPEC-015 v0.4 receipt verification,
+streaming terminal-output capture, late-receipt quarantine, gateway quota
+reservation primitives, Tier 2 model-hash disclosure, SPEC-022 buyer disclosure
+surfaces, and provider-facing late-receipt deadline docs. It is not yet ready
+for enforce-mode launch because the streaming money path, enforce-mode
+configuration gate, race harnesses, and full e2e/live-network gates are not
+fully proven in this branch.
 
 ## Blocking gaps before enforce launch
 
-- **AC-022-8 / AC-022-13 / AC-022-15 / AC-022-33 / AC-022-63:** add a
-  full-path gateway plus coordinator harness proving only signed,
-  catalog-matching settlement receipts can create final buyer debit and
-  positive provider credit for non-streaming and streaming requests.
+- **AC-022-13 / AC-022-15 / AC-022-33 / AC-022-63:** add a full-path gateway
+  plus coordinator harness proving only signed, catalog-matching settlement
+  receipts can create final buyer debit and positive provider credit for
+  streaming requests and cross-module e2e release gates.
 - **AC-022-4:** add coordinator-side covered-routing tests proving warm-swap
   loading or draining providers fail the SPEC-022 target-model predicate and
   cannot receive paid covered work.
@@ -70,7 +71,7 @@ Status legend:
 | AC-022-5 | Covered | `phase4-coordinator/internal/buyer/route_snapshot_test.go` `TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts`; `phase4-coordinator/internal/billing/route_snapshot_test.go` `TestInsertRouteSnapshotPersistsCanonicalDigestAndRejectsRewrite`. |
 | AC-022-6 | Covered | `phase4-coordinator/internal/buyer/route_snapshot_test.go` `TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts`; `phase4-coordinator/internal/billing/route_snapshot_test.go` `TestRouteSnapshotStrictKeysAndDigestSensitivity`. |
 | AC-022-7 | Blocked | Add an enforce-mode expired or unverifiable catalog test proving no final buyer debit and no provider credit. Current catalog freshness tests do not cover SPEC-022 money settlement. |
-| AC-022-8 | Blocked | Add non-streaming full-path test proving a settlement-capable, catalog-matching receipt creates final buyer debit and positive provider settlement. Current branch has verifier components only. |
+| AC-022-8 | Covered | `phase4-coordinator/internal/billing/spec022_money_gate_test.go` `TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout` proves an enforce-mode signed, catalog-matching non-streaming receipt opens verified buyer-debit finality and positive provider payout readiness only after receipt verification; `phase5-gateway/internal/router/server_test.go` `TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation` proves verified coordinator finality creates the final gateway buyer debit. |
 | AC-022-9 | Partial | `phase4-coordinator/internal/billing/settlement_verifier_test.go` `TestVerifySettlementReceiptUnknownFutureVersionNotPayable`; `phase7-verify/internal/verify/settlement_test.go` `TestV03VerifierReportsV04WireReceiptUnknownVersion`; add full no-buyer-debit and no-provider-settlement assertion for v0.3-or-earlier receipts. |
 | AC-022-10a | Partial | `phase4-coordinator/internal/billing/settlement_verifier_test.go` `TestVerifySettlementReceiptV04NegativeFixturesQuarantine`; add full buyer reservation refund and provider-zero assertion. |
 | AC-022-10b | Partial | `phase4-coordinator/internal/billing/settlement_verifier_test.go` `TestVerifySettlementReceiptDeadlineAndReplayMapping`; `phase7-verify/internal/verify/settlement_test.go` `TestVerifySettlementReceiptRejectsReplayContext`; add full refund/provider-zero assertion. |
