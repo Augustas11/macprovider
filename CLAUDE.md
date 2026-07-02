@@ -141,6 +141,11 @@ pre-merge tip in case of regression.
 
 ## Other repo conventions worth remembering
 
+- Every implementation slice must pass the audit loop before being treated as
+  done. This applies to full implementations and step/deliverable/checkpoint
+  implementations alike: run the three Codex audit lanes (code, security,
+  architect) and keep fixing/re-auditing until all three report 0 CRITICAL,
+  0 HIGH, and 0 MEDIUM findings. LOW/INFO findings may be carried explicitly.
 - Spec corpus lives in `specs/`. House style: `BUILD_SPEC_*`, `AUDIT_SPEC_*`,
   `FIX_SPEC_*_VX_Y` naming for prompts; `SPEC-NNN-*.md` for normative
   documents.

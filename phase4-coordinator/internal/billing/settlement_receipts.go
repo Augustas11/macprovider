@@ -273,6 +273,9 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	} else if err := insertSettlementReceiptStateConn(ctx, conn, persisted); err != nil {
 		return SettlementReceiptState{}, err
 	}
+	if err := syncVerifiedReceiptLedgerCreditConn(ctx, conn, state, evidence.attempt.Usage); err != nil {
+		return SettlementReceiptState{}, err
+	}
 	if receiptPresent {
 		if err := insertSettlementReceiptIngestedAuditConn(ctx, conn, state); err != nil {
 			return SettlementReceiptState{}, err
@@ -286,6 +289,87 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	}
 	committed = true
 	return state, nil
+}
+
+func syncVerifiedReceiptLedgerCreditConn(ctx context.Context, conn *sql.Conn, state SettlementReceiptState, usage SettlementUsage) error {
+	if state.SettlementOutcome != SettlementOutcomeVerified || !state.Closed || state.RouteSnapshotMode != RouteSnapshotModeEnforce {
+		return nil
+	}
+	prompt := usage.BillableInputTokens
+	completion := usage.BillableOutputTokens
+	var requestCreditID int64
+	var promptRate, completionRate, multiplier, share int64
+	var faultFlag string
+	err := conn.QueryRowContext(ctx, `
+SELECT id, prompt_rate_per_mtok, completion_rate_per_mtok,
+       global_multiplier_ppm, provider_share_bps, fault_flag
+  FROM ledger_request_credits
+ WHERE request_id = ?
+   AND attempt_n = ?
+   AND provider_id = ?
+   AND settlement_account_scope_hash = ?
+   AND settlement_policy_mode = 'enforce'
+   AND settlement_policy_version = ?
+   AND quarantined = 0
+   AND settled = 0
+   AND settlement_id IS NULL`,
+		state.RequestID,
+		state.AttemptN,
+		state.ProviderID,
+		SettlementAccountScopeHash(state.AccountScope),
+		state.RouteSnapshotPolicyVersion,
+	).Scan(&requestCreditID, &promptRate, &completionRate, &multiplier, &share, &faultFlag)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	result := ComputeCredits(
+		&prompt,
+		&completion,
+		nil,
+		UsageProviderReported,
+		faultFlag,
+		RateCardEntry{PromptCreditsPerMtok: promptRate, CompletionCreditsPerMtok: completionRate},
+		multiplier,
+		share,
+	)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := conn.ExecContext(ctx, `
+UPDATE ledger_request_credits
+   SET prompt_tokens = ?,
+       completion_tokens = ?,
+       estimated_completion_tokens = NULL,
+       usage_source = ?,
+       gross_credits = ?,
+       provider_credits = ?,
+       fault_flag = ?,
+       updated_at_utc = ?
+ WHERE id = ?`,
+		nullInt64(result.PromptTokens),
+		nullInt64(result.CompletionTokens),
+		result.UsageSource,
+		result.GrossCredits,
+		result.ProviderCredits,
+		result.FaultFlag,
+		now,
+		requestCreditID,
+	); err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, `
+UPDATE ledger_operator_credits
+   SET gross_credits = ?,
+       operator_credits = ?,
+       fault_flag = ?
+ WHERE request_credit_id = ?`,
+		result.GrossCredits,
+		result.OperatorCredits,
+		result.FaultFlag,
+		requestCreditID,
+	)
+	return err
 }
 
 func (id SettlementReceiptIdentity) validate() error {

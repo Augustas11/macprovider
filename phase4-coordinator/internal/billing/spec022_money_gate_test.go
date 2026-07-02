@@ -72,22 +72,30 @@ func TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout
 	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
 	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
 	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	input.RouteSnapshot.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersion
 	routeDigest, _, err := input.RouteSnapshot.Digest()
 	if err != nil {
 		t.Fatal(err)
 	}
 	input.Header = settlementHeaderWithCanonicalMutationAndTestSignature(t, input.Header, func(tuple map[string]any) {
 		tuple["route_snapshot_mode"] = RouteSnapshotModeEnforce
+		tuple["route_snapshot_policy_version"] = RouteSnapshotPolicyVersion
 		tuple["route_snapshot_digest"] = routeDigest
 	})
 
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
 	seedSettlementReceiptEvidence(t, store, input)
-	insertSPEC022LedgerCredit(t, store.db, input, 600)
+	receiptBoundCredits := insertSPEC022ReceiptBoundLedgerCredit(t, store.db, input, 100)
+	if receiptBoundCredits.ProviderCredits <= 0 {
+		t.Fatalf("receipt-bound provider credits=%d want positive", receiptBoundCredits.ProviderCredits)
+	}
 
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != 0 {
 		t.Fatalf("payable rows before receipt=%d want 0", got)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != receiptBoundCredits.ProviderCredits+100 {
+		t.Fatalf("pre-receipt provider credits=%d want inflated seed %d", got, receiptBoundCredits.ProviderCredits+100)
 	}
 
 	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
@@ -135,15 +143,18 @@ func TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != 1 {
 		t.Fatalf("payable rows after verified receipt=%d want 1", got)
 	}
-	if got := scalar(t, store.db, `SELECT provider_credits FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != 600 {
-		t.Fatalf("payable provider credits=%d want 600", got)
+	if got := scalar(t, store.db, `SELECT provider_credits FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("payable provider credits=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("ledger provider credits after receipt=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
 	}
 	windowStart, windowEnd := settlementWindowForInput(input)
 	if err := store.RunSettlement(context.Background(), SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, windowEnd); err != nil {
 		t.Fatal(err)
 	}
-	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != 600 {
-		t.Fatalf("payout provider credits=%d want 600", got)
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("payout provider credits=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 1`, input.RequestID); got != 1 {
 		t.Fatalf("settled request credit rows=%d want 1", got)
@@ -680,6 +691,71 @@ INSERT INTO ledger_operator_credits (
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func insertSPEC022ReceiptBoundLedgerCredit(t *testing.T, db *sql.DB, input SettlementVerifyInput, providerCreditInflation int64) BilledRow {
+	t.Helper()
+	prompt := input.ExpectedUsage.BillableInputTokens
+	completion := input.ExpectedUsage.BillableOutputTokens
+	result := ComputeCredits(
+		&prompt,
+		&completion,
+		nil,
+		UsageProviderReported,
+		FaultNone,
+		RateCardEntry{PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 1000000},
+		1000000,
+		10000,
+	)
+	inflatedProviderCredits := result.ProviderCredits + providerCreditInflation
+	if inflatedProviderCredits < result.ProviderCredits {
+		t.Fatalf("provider credit inflation overflow: base=%d inflation=%d", result.ProviderCredits, providerCreditInflation)
+	}
+	ts := time.UnixMilli(input.TerminalStateTSUnixMS).UTC()
+	_, err := db.Exec(`
+INSERT INTO ledger_request_credits (
+    request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
+    status, stream, prompt_tokens, completion_tokens, estimated_completion_tokens,
+    usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
+    global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
+    fault_flag, settlement_account_scope_hash, settlement_policy_mode,
+    settlement_policy_version, recovery_source, created_at_utc
+) VALUES (?, ?, ?, 'assigned', ?, ?, 200, 0, ?, ?, NULL, 'provider_reported',
+          1000000, 1000000, 1000000, ?, 10000, ?, 'none', ?, 'enforce', ?, 'hot_path', ?)`,
+		input.RequestID,
+		input.AttemptN,
+		input.ProviderID,
+		ts.Format(time.RFC3339Nano),
+		input.RouteSnapshot.ModelID,
+		prompt,
+		completion,
+		inflatedProviderCredits,
+		inflatedProviderCredits,
+		SettlementAccountScopeHash(input.AccountScope),
+		input.RouteSnapshot.RouteSnapshotPolicyVersion,
+		ts.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestCreditID := scalar(t, db, `SELECT id FROM ledger_request_credits WHERE request_id = ? AND attempt_n = ? AND provider_id = ?`, input.RequestID, input.AttemptN, input.ProviderID)
+	_, err = db.Exec(`
+INSERT INTO ledger_operator_credits (
+    request_credit_id, request_id, attempt_n, provider_id, ts_utc,
+    gross_credits, operator_share_bps, operator_credits, fault_flag, created_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 'none', ?)`,
+		requestCreditID,
+		input.RequestID,
+		input.AttemptN,
+		input.ProviderID,
+		ts.Format(time.RFC3339Nano),
+		inflatedProviderCredits,
+		ts.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func markSPEC022ReceiptVerified(t *testing.T, db *sql.DB, input SettlementVerifyInput) {
