@@ -410,7 +410,9 @@ WHEN COALESCE(OLD.settlement_account_scope_hash, '') != COALESCE(NEW.settlement_
 BEGIN
     SELECT RAISE(ABORT, 'ledger_request_credits settlement policy is immutable');
 END;
-CREATE TRIGGER IF NOT EXISTS trg_lrc_settled_money_immutable
+DROP TRIGGER IF EXISTS trg_lrc_settled_money_immutable;
+DROP TRIGGER IF EXISTS trg_lrc_settled_link_immutable;
+CREATE TRIGGER trg_lrc_settled_money_immutable
 BEFORE UPDATE OF prompt_tokens, completion_tokens, estimated_completion_tokens,
                  usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
                  global_multiplier_ppm, gross_credits, provider_share_bps,
@@ -432,7 +434,7 @@ WHEN (OLD.settled = 1 OR NEW.settled = 1)
 BEGIN
     SELECT RAISE(ABORT, 'settled ledger_request_credits money fields are immutable');
 END;
-CREATE TRIGGER IF NOT EXISTS trg_lrc_settled_link_immutable
+CREATE TRIGGER trg_lrc_settled_link_immutable
 BEFORE UPDATE OF settled, settlement_id ON ledger_request_credits
 WHEN OLD.settled = 1
   AND (

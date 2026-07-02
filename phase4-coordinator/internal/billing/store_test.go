@@ -47,6 +47,41 @@ func TestBillingMigration(t *testing.T) {
 	}
 }
 
+func TestBillingMigration_ReplacesSettledMoneyTrigger(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	if _, err := store.db.Exec(`
+DROP TRIGGER IF EXISTS trg_lrc_settled_money_immutable;
+CREATE TRIGGER trg_lrc_settled_money_immutable
+BEFORE UPDATE OF gross_credits, provider_credits ON ledger_request_credits
+WHEN OLD.settled = 1
+  AND (
+      OLD.gross_credits != NEW.gross_credits
+      OR OLD.provider_credits != NEW.provider_credits
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'old settled money trigger');
+END;`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(store.db); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	insertCreditWithRequest(t, store.db, "settled-money-upgrade", "provider-a", ts, 500)
+	if _, err := store.db.Exec(`
+UPDATE ledger_request_credits
+   SET settled = 1,
+       settlement_id = 42,
+       gross_credits = 900,
+       provider_credits = 900
+ WHERE request_id = 'settled-money-upgrade'`); err == nil {
+		t.Fatal("upgraded settled money trigger allowed transition-time amount mutation")
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = 'settled-money-upgrade' AND settled = 0 AND settlement_id IS NULL`); got != 500 {
+		t.Fatalf("source row after failed upgraded trigger mutation=%d want 500", got)
+	}
+}
+
 func TestInsertConfigSnapshot_AppendsReloadEvents(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	cfg := testRewards()
