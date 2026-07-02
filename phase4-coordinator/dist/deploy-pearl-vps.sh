@@ -38,6 +38,14 @@
 
 set -euo pipefail
 
+# TLS state machine (classify/plan/message) lives in a sourced helper
+# (lib/pearl_tls.sh) so it can be exercised by fixture tests without a
+# real deploy. Issue #291. Resolve path via BASH_SOURCE so the script
+# works from any CWD and from a symlink.
+_PEARL_TLS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/pearl_tls.sh
+. "$_PEARL_TLS_SCRIPT_DIR/lib/pearl_tls.sh"
+
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
 VPS_HOST="${VPS_HOST:-159.223.165.194}"
 VPS_USER="${VPS_USER:-root}"
@@ -655,108 +663,15 @@ STATS_DOMAIN="${STATS_DOMAIN:-stats.streamvc.live}"
 # via parallel array + linear scan; only 2 domains, no perf concern.
 log "step 4b/9: classify domains by cert state"
 DOMAINS_ALL=("$DOMAIN" "$STATS_DOMAIN")
-DOMAINS_HAVE_CERT=()
-DOMAINS_NEED_CERT=()
-DOMAINS_NEED_STUB=()
-# Track per-domain "what state was this in BEFORE certbot" so failure
-# messaging at end-of-step-6b can give the operator the truth (R3 LOW).
-DOMAINS_STATE_KEYS=()
-DOMAINS_STATE_VALS=()
-# Pass domains via positional args; single-quoted remote heredoc for safety.
-CERT_STATUS=$($SSH "bash -s -- '$DOMAIN' '$STATS_DOMAIN'" <<'REMOTE_PROBE'
-set -e
-if ! command -v openssl >/dev/null 2>&1; then
-  echo "ABORT openssl-missing-on-remote" >&2
-  exit 1
-fi
-for d in "$@"; do
-  full="/etc/letsencrypt/live/$d/fullchain.pem"
-  priv="/etc/letsencrypt/live/$d/privkey.pem"
-  if [ -f "$full" ] && [ -f "$priv" ]; then
-    # R3 ARCH MED: split RENEW (still valid right now) from EXPIRED
-    # (already expired or malformed). EXPIRED behaves like MISSING.
-    if ! openssl x509 -checkend 0 -noout -in "$full" >/dev/null 2>&1; then
-      echo "EXPIRED $d"
-    elif openssl x509 -checkend 86400 -noout -in "$full" >/dev/null 2>&1; then
-      echo "HAVE $d"
-    else
-      echo "RENEW $d"
-    fi
-  else
-    echo "MISSING $d"
-  fi
-done
+# TLS classification + planning + messaging factored into
+# dist/lib/pearl_tls.sh so the state machine can be exercised without
+# a real deploy (dist/test/check_pearl_tls_test.sh). Issue #291.
+CERT_STATUS=$($SSH "bash -s -- '$DOMAIN' '$STATS_DOMAIN'" <<REMOTE_PROBE
+$(pearl_tls_remote_probe_script)
 REMOTE_PROBE
 ) || { echo "cert-status probe failed (see ABORT line above)" >&2; exit 1; }
 
-# Strict parsing (R2 CODE LOW): use `read -r` to enforce exactly two
-# fields per line — "<STATE> <DOMAIN>". Anything else fatal. R3 dropped
-# the vhost flag (R3 ARCH+CODE convergent MED): MISSING/EXPIRED always
-# install the stub for safety; the flag was over-coarse.
-_seen=()  # parallel array, linear scan (bash 3.2 — no `declare -A`)
-while IFS= read -r line; do
-  [ -z "$line" ] && continue
-  read -r status domain extra <<<"$line"
-  if [ -n "$extra" ]; then
-    echo "aborting deploy: malformed cert-status line (extra field): '$line'" >&2
-    exit 1
-  fi
-  case "$status" in
-    HAVE|RENEW|EXPIRED|MISSING) ;;
-    *) echo "aborting deploy: unknown cert-status state: '$status' in '$line'" >&2; exit 1 ;;
-  esac
-  # Reject unexpected domains.
-  expected=0
-  for d in "${DOMAINS_ALL[@]}"; do
-    [ "$d" = "$domain" ] && expected=1 && break
-  done
-  if [ "$expected" -ne 1 ]; then
-    echo "aborting deploy: unexpected domain in cert-status: '$domain'" >&2
-    exit 1
-  fi
-  # bash 3.2 + set -u: guard empty-array expansion with ${arr[@]+...}.
-  for s in ${_seen[@]+"${_seen[@]}"}; do
-    if [ "$s" = "$domain" ]; then
-      echo "aborting deploy: duplicate cert-status line for: '$domain'" >&2
-      exit 1
-    fi
-  done
-  _seen+=("$domain")
-  DOMAINS_STATE_KEYS+=("$domain")
-  DOMAINS_STATE_VALS+=("$status")
-  case "$status" in
-    HAVE)
-      DOMAINS_HAVE_CERT+=("$domain")
-      ;;
-    RENEW)
-      # Currently-valid cert; need certbot to refresh, but do NOT
-      # install the stub — existing vhost stays in place so a certbot
-      # failure leaves the soon-expiring cert serving instead of
-      # replacing it with an HTTP-only stub.
-      DOMAINS_NEED_CERT+=("$domain")
-      ;;
-    EXPIRED|MISSING)
-      # No usable cert today: stub install is safe (no working TLS
-      # vhost to clobber) and needed (so certbot webroot has a
-      # /.well-known/acme-challenge/ listener). Always install the
-      # stub, regardless of whether some other vhost happens to be
-      # enabled at this hostname.
-      DOMAINS_NEED_CERT+=("$domain")
-      DOMAINS_NEED_STUB+=("$domain")
-      ;;
-  esac
-done <<< "$CERT_STATUS"
-# Coverage check — every expected domain accounted for.
-for d in "${DOMAINS_ALL[@]}"; do
-  found=0
-  for s in ${_seen[@]+"${_seen[@]}"}; do
-    [ "$s" = "$d" ] && found=1 && break
-  done
-  if [ "$found" -eq 0 ]; then
-    echo "aborting deploy: cert-status missing for domain: '$d'" >&2
-    exit 1
-  fi
-done
+pearl_tls_classify "$CERT_STATUS" || exit 1
 log "  cert status: have=[${DOMAINS_HAVE_CERT[*]:-none}] need_cert=[${DOMAINS_NEED_CERT[*]:-none}] need_stub=[${DOMAINS_NEED_STUB[*]:-none}]"
 
 log "step 5/9: install port-80 ACME-stub for EXPIRED + MISSING domains"
@@ -811,25 +726,15 @@ else
       log "    ok: cert issued for $d"
     else
       DOMAINS_ISSUED_FAIL+=("$d")
-      # R3 CODE+ARCH LOW: state-aware messaging so the operator knows
-      # which fallback applies to this specific failed domain.
-      prior_state=""
-      i=0
-      for k in ${DOMAINS_STATE_KEYS[@]+"${DOMAINS_STATE_KEYS[@]}"}; do
-        if [ "$k" = "$d" ]; then prior_state="${DOMAINS_STATE_VALS[$i]}"; break; fi
-        i=$((i+1))
-      done
-      case "$prior_state" in
-        RENEW)            log "    WARN: certbot failed for $d (was RENEW) — existing full TLS vhost left in place; soon-expiring cert keeps serving until next deploy" ;;
-        EXPIRED|MISSING)  log "    WARN: certbot failed for $d (was $prior_state) — ACME stub left in place; HTTPS unavailable for $d until next deploy" ;;
-        *)                log "    WARN: certbot failed for $d (state=$prior_state) — continuing deploy" ;;
-      esac
+      # State-aware messaging (lib/pearl_tls.sh — issue #291).
+      log "    $(pearl_tls_certbot_fail_warn "$d")"
     fi
   done
 fi
 
-# Final set of domains that should get a full TLS vhost installed.
-DOMAINS_FULL_TLS=(${DOMAINS_HAVE_CERT[@]+"${DOMAINS_HAVE_CERT[@]}"} ${DOMAINS_ISSUED_OK[@]+"${DOMAINS_ISSUED_OK[@]}"})
+# Final set of domains that should get a full TLS vhost installed
+# (lib/pearl_tls.sh — issue #291).
+pearl_tls_plan_full_tls
 log "step 6b/9: install nginx artifacts + full TLS vhost for [${DOMAINS_FULL_TLS[*]:-none}]"
 # Shared http-context snippets always go in — no cert dependency.
 $SSH "set -e
@@ -880,46 +785,13 @@ fi
 # must not break primary deploy); STATS_REQUIRED=1 promotes any non-
 # primary failure to a fail-closed exit so operators with strict
 # uptime SLOs can enforce it.
-_primary_failed=0
-_nonprimary_failed=0
-for d in ${DOMAINS_ISSUED_FAIL[@]+"${DOMAINS_ISSUED_FAIL[@]}"}; do
-  if [ "$d" = "$DOMAIN" ]; then
-    _primary_failed=1
-  else
-    _nonprimary_failed=1
-  fi
-done
-if [ "$_primary_failed" -eq 1 ]; then
-  # R4 ARCH MED-1: state-aware abort. For RENEW the existing TLS vhost
-  # is kept and the soon-expiring cert is still serving; for EXPIRED/
-  # MISSING the ACME stub is in place and HTTPS is gone.
-  primary_prior_state=""
-  i=0
-  for k in ${DOMAINS_STATE_KEYS[@]+"${DOMAINS_STATE_KEYS[@]}"}; do
-    if [ "$k" = "$DOMAIN" ]; then primary_prior_state="${DOMAINS_STATE_VALS[$i]}"; break; fi
-    i=$((i+1))
-  done
-  echo "" >&2
-  echo "  ABORT-EXIT: primary domain $DOMAIN failed cert issuance during this deploy." >&2
-  case "$primary_prior_state" in
-    RENEW)
-      echo "             Prior state was RENEW — existing TLS vhost left in place;" >&2
-      echo "             soon-expiring cert keeps serving until next deploy." >&2
-      echo "             Fix DNS/certbot and re-run; do not wait beyond cert expiry." >&2
-      ;;
-    EXPIRED|MISSING)
-      echo "             Prior state was $primary_prior_state — ACME stub is in place;" >&2
-      echo "             HTTPS is unavailable on $DOMAIN until DNS/certbot is fixed" >&2
-      echo "             and this script is re-run." >&2
-      ;;
-    *)
-      echo "             Prior state was $primary_prior_state — re-run after fixing DNS/certbot." >&2
-      ;;
-  esac
-  echo "             Coordinator binary NOT restarted — old binary still serving." >&2
+pearl_tls_check_issuance_failures "$DOMAIN"
+if [ "$PEARL_TLS_PRIMARY_FAILED" -eq 1 ]; then
+  # State-aware abort (lib/pearl_tls.sh — issue #291).
+  pearl_tls_primary_abort_msg "$DOMAIN" >&2
   exit 9
 fi
-if [ "$_nonprimary_failed" -eq 1 ] && [ "${STATS_REQUIRED:-0}" = "1" ]; then
+if [ "$PEARL_TLS_NONPRIMARY_FAILED" -eq 1 ] && [ "${STATS_REQUIRED:-0}" = "1" ]; then
   echo "" >&2
   echo "  ABORT-EXIT: STATS_REQUIRED=1 set and a non-primary domain failed cert" >&2
   echo "             issuance ([${DOMAINS_ISSUED_FAIL[*]}]). Refusing to restart." >&2
