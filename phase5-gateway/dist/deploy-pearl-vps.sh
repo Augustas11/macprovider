@@ -225,30 +225,67 @@ log "step 2c/8: pre-restart safeguard EARLY (before binary swap)"
 #
 # Query the LIVE (old) gateway's /healthz for in-flight buyer count.
 # Refuse to proceed unless FORCE_RESTART=1 acknowledges the drop.
+#
+# #290 R3 (CODE MED + SEC HIGH) — the guard now FAILS CLOSED when the
+# metric is missing/unparseable. Prior code defaulted to 0 on any
+# parse failure, effectively treating a missing metric as "no in-flight
+# requests" — the guard silently passed while the healthz shape (which
+# does not currently emit `in_flight_requests`) rendered it a no-op.
+# INFLIGHT is now either an integer >= 0 or the literal string "unknown".
 INFLIGHT=$(curl -fsS --max-time 5 --max-filesize 65536 "https://$DOMAIN/healthz" 2>/dev/null \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('in_flight_requests', d.get('inflight', 0)))" 2>/dev/null \
-  || echo 0)
-if [ "${INFLIGHT:-0}" -gt 0 ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
+  | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('unknown'); sys.exit(0)
+for k in ('in_flight_requests', 'inflight'):
+    v = d.get(k)
+    if isinstance(v, int) and v >= 0:
+        print(v); sys.exit(0)
+    if isinstance(v, str) and v.isdigit():
+        print(int(v)); sys.exit(0)
+print('unknown')
+" 2>/dev/null || echo "unknown")
+if [ "${INFLIGHT}" = "unknown" ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
+  log "  REFUSING TO PROCEED — gateway /healthz did not report a numeric in-flight metric."
+  log "  Cannot verify quiet window; refusing EARLY (pre-scp) so no artifact is placed."
+  log "  To proceed anyway:  FORCE_RESTART=1 bash $0"
+  exit 4
+fi
+if [ "${INFLIGHT}" != "unknown" ] && [ "${INFLIGHT:-0}" -gt 0 ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
   log "  REFUSING TO PROCEED — $INFLIGHT request(s) in flight."
   log "  Refusing EARLY (pre-scp) so no new binary is left on disk."
   log "  To proceed anyway:  FORCE_RESTART=1 bash $0"
   exit 4
 fi
-if [ "${FORCE_RESTART:-0}" = "1" ] && [ "${INFLIGHT:-0}" -gt 0 ]; then
-  TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  OP_HOST="${HOSTNAME:-unknown}"
-  # #290 R1 (mirrors #244 R6 convergent MED) — write tombstone via
-  # remote `mktemp` under `umask 077`, not predictable /tmp path.
-  $SSH "set -e
-        install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider 2>/dev/null || true
-        _bypass_tmp=\$(umask 077 && mktemp)
-        cat > \"\$_bypass_tmp\" <<EOF
-{\"ts\":\"$TS_NOW\",\"service\":\"gateway\",\"reason\":\"FORCE_RESTART=1\",\"step\":\"2c\",\"metric\":\"in_flight_requests\",\"value\":$INFLIGHT,\"operator_host\":\"$OP_HOST\"}
+# Tombstone the FORCE_RESTART=1 override for any bypass case (in-flight
+# > 0 OR healthz metric unknown). #290 R3 SEC HIGH — audit the "unknown"
+# bypass path too so operators can post-audit deploys that ran without
+# a verifiable quiet window.
+if [ "${FORCE_RESTART:-0}" = "1" ]; then
+  if [ "${INFLIGHT}" = "unknown" ] || { [ "${INFLIGHT}" != "unknown" ] && [ "${INFLIGHT:-0}" -gt 0 ]; }; then
+    TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    OP_HOST="${HOSTNAME:-unknown}"
+    # JSON value: quote strings, don't quote numbers.
+    if [ "${INFLIGHT}" = "unknown" ]; then
+      INFLIGHT_JSON='"unknown"'
+    else
+      INFLIGHT_JSON="$INFLIGHT"
+    fi
+    # #290 R1 (mirrors #244 R6 convergent MED) — write tombstone via
+    # remote `mktemp` under `umask 077`, not predictable /tmp path.
+    $SSH "set -e
+          install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider 2>/dev/null || true
+          _bypass_tmp=\$(umask 077 && mktemp)
+          cat > \"\$_bypass_tmp\" <<EOF
+{\"ts\":\"$TS_NOW\",\"service\":\"gateway\",\"reason\":\"FORCE_RESTART=1\",\"step\":\"2c\",\"metric\":\"in_flight_requests\",\"value\":$INFLIGHT_JSON,\"operator_host\":\"$OP_HOST\"}
 EOF
-        install -o macprovider -g macprovider -m 0640 \"\$_bypass_tmp\" /var/lib/macprovider/last-deploy-bypass.json
-        rm -f \"\$_bypass_tmp\"
-        logger -t macprovider-deploy \"FORCE_RESTART=1 used at gateway step 2c; in_flight=$INFLIGHT\""
-  log "  AUDIT TRAIL: FORCE_RESTART=1 override written to /var/lib/macprovider/last-deploy-bypass.json"
+          install -o macprovider -g macprovider -m 0640 \"\$_bypass_tmp\" /var/lib/macprovider/last-deploy-bypass.json
+          rm -f \"\$_bypass_tmp\"
+          logger -t macprovider-deploy \"FORCE_RESTART=1 used at gateway step 2c; in_flight=$INFLIGHT\""
+    log "  AUDIT TRAIL: FORCE_RESTART=1 override written to /var/lib/macprovider/last-deploy-bypass.json"
+  fi
 fi
 log "  ok: $INFLIGHT in-flight requests (or FORCE_RESTART=1 set)"
 
@@ -263,7 +300,10 @@ log "step 2d/8: pre-restart snapshot of gateway.db (BEFORE binary swap — #290 
 # over filenames in a daemon-writable directory, opening a
 # filename-injection window (a macprovider-created file with a
 # newline in the name would inject arbitrary paths into rm). Prune
-# now runs as macprovider with `find -print0 | xargs -0`.
+# now runs as macprovider via a Python one-liner that strict-
+# validates the exact `gateway.db.pre-deploy.YYYYMMDDTHHMMSSZ`
+# pattern via regex (see step 2d snapshot block) — no shell
+# expansion, no xargs, filename-injection closed.
 $SSH 'set -e
   TS=$(date -u +%Y%m%dT%H%M%SZ)
   DB=/var/lib/macprovider/gateway.db
@@ -433,7 +473,12 @@ echo "    ssh $VPS_USER@$VPS_HOST '"
 echo "      systemctl stop macprovider-gateway &&"
 echo "      install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway &&"
 echo "      LATEST=\$(ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* | head -1) &&"
+echo "      # #290 R3 CODE HIGH — MUST remove stale WAL/SHM sidecars before"
+echo "      # restoring the snapshot; SQLite would otherwise replay the WAL"
+echo "      # and reintroduce post-deploy state, silently defeating the rollback."
+echo "      rm -f /var/lib/macprovider/gateway.db-wal /var/lib/macprovider/gateway.db-shm &&"
 echo "      install -o macprovider -g macprovider -m 0600 \"\$LATEST\" /var/lib/macprovider/gateway.db &&"
+echo "      sudo -u macprovider sqlite3 /var/lib/macprovider/gateway.db \"PRAGMA integrity_check;\" &&"
 echo "      systemctl start macprovider-gateway"
 echo "    '"
 echo

@@ -98,33 +98,47 @@ M1-6). Mirrors the coordinator pattern:
   exists on Pearl (secrets ship out-of-band, script does not touch it).
 - **Step 2b (#290):** ensure macprovider user exists + `/opt/macprovider`
   is `root:macprovider 0750` before any file install (idempotent).
+- **Step 2c (#290 R2):** connected-buyer guard on `/healthz` in-flight
+  count — MOVED to BEFORE binary swap (was step 5). Fails CLOSED if the
+  metric is missing/unparseable (#290 R3 SEC HIGH). `FORCE_RESTART=1`
+  writes an audit tombstone via `mktemp` under `umask 077`.
+- **Step 2d (#290 R2, issue #196):** pre-binary-swap WAL-consistent
+  snapshot of `gateway.db` via `sqlite3 .backup` running as macprovider
+  under `umask 077` (#290 R1 CRITICAL — never chmod/chown as root on a
+  daemon-writable path). Snapshot happens BEFORE the binary swap so a
+  crash/reboot between install and restart can't boot the new
+  schema-migrating binary against an unsnapshotted DB. Retains the 5
+  most recent snapshots; prune is python-strict-regex as macprovider
+  (#290 R2 CODE HIGH — closes filename-injection window).
 - **Step 3:** snapshot the live `/opt/macprovider/gateway` binary as
   `gateway.prev` via `install -o root -g macprovider -m 0750`. After
   any schema-bumping deploy, single-file binary rollback is INVALID; use
-  the schema-aware rollback command below (both binary AND db snapshot).
+  the schema-aware rollback command below (binary + db snapshot + WAL
+  cleanup, per #290 R3 CODE HIGH).
 - **Step 4:** upload binary + systemd unit + nginx site to a per-deploy
   `mktemp -d` staging dir (#290 mirrors #244 R5), then root `install`s
   each artifact to its final location. EXIT trap cleans up staging.
-- **Step 5:** connected-buyer guard on `/healthz` in-flight count.
-  `FORCE_RESTART=1` writes a tombstone via `mktemp` under `umask 077`.
-- **Step 5b (issue #196):** pre-restart WAL-consistent snapshot of
-  `gateway.db` via `sqlite3 .backup` running as macprovider under
-  `umask 077` (#290 R1 CRITICAL — never chmod/chown as root on a
-  daemon-writable path). Retains the 5 most recent snapshots.
 - **Steps 6–8:** enable + start + healthz version check + journal tail.
+  (Steps 5 and 5b were merged into 2c and 2d by #290 R2.)
 
 **Rollback procedure (schema-aware — default; issue #196):**
 
 After ANY deploy that could have run a schema migration, use this
 block. It restores BOTH the previous binary AND the pre-deploy DB
-snapshot atomically.
+snapshot atomically. **Critical: the `-wal` and `-shm` sidecars must
+be removed before installing the snapshot**, or SQLite will replay
+the stale WAL and reintroduce post-deploy state — silently defeating
+the rollback (verified by #290 R3 CODE HIGH SQLite repro).
 
 ```bash
 ssh pearl
 sudo systemctl stop macprovider-gateway
 sudo install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway
 LATEST=$(sudo ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* | head -1)
+# Remove stale WAL/SHM sidecars before restoring the snapshot.
+sudo rm -f /var/lib/macprovider/gateway.db-wal /var/lib/macprovider/gateway.db-shm
 sudo install -o macprovider -g macprovider -m 0600 "$LATEST" /var/lib/macprovider/gateway.db
+sudo -u macprovider sqlite3 /var/lib/macprovider/gateway.db "PRAGMA integrity_check;"
 sudo systemctl start macprovider-gateway
 curl -s http://127.0.0.1:9443/healthz   # confirm OK + version reflects .prev
 ```
