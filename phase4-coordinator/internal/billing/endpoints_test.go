@@ -32,12 +32,195 @@ func TestSummaryEndpoint(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	var resp map[string]int64
+	var resp struct {
+		TotalProviderCredits      int64                      `json:"total_provider_credits"`
+		SettlementVerdictCounters []settlementVerdictCounter `json:"settlement_verdict_counters"`
+	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if resp["total_provider_credits"] != 4500 {
-		t.Fatalf("total_provider_credits=%d want 4500", resp["total_provider_credits"])
+	if resp.TotalProviderCredits != 4500 {
+		t.Fatalf("total_provider_credits=%d want 4500", resp.TotalProviderCredits)
+	}
+	if resp.SettlementVerdictCounters == nil {
+		t.Fatal("settlement_verdict_counters missing from summary response")
+	}
+}
+
+func TestSummaryEndpointIncludesSettlementVerdictCounters(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	base := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, base, pubkey)
+	_, store := newRequestAndBillingStores(t)
+
+	counterRows := []struct {
+		suffix         string
+		receiptPresent int
+		receiptVersion any
+		receiptResult  string
+		outcome        string
+		reason         string
+		spec008Status  string
+		closed         int
+		wantField      string
+		wantValue      int64
+	}{
+		{"verified", 1, "4", "valid", SettlementOutcomeVerified, "verified_settlement", input.RouteSnapshot.Spec008HashStatus, 1, "verified", 1},
+		{"pending", 0, nil, SettlementReceiptResultInconclusive, SettlementOutcomePending, "missing_receipt", input.RouteSnapshot.Spec008HashStatus, 0, "pending", 1},
+		{"quarantined", 1, "spec015-v0.4", SettlementReceiptResultInvalid, SettlementOutcomeQuarantined, "catalog_snapshot_mismatch", input.RouteSnapshot.Spec008HashStatus, 1, "catalog", 1},
+		{"zero", 1, "spec015-v0.4", "valid", SettlementOutcomeZeroSettled, "verified_zero_settlement", input.RouteSnapshot.Spec008HashStatus, 1, "zero", 1},
+		{"legacy", 1, "v0.3", SettlementReceiptResultInconclusive, SettlementOutcomeQuarantined, "unknown_receipt_version", input.RouteSnapshot.Spec008HashStatus, 1, "legacy", 1},
+		{"missing", 0, nil, SettlementReceiptResultInconclusive, SettlementOutcomeQuarantined, "missing_receipt_deadline_elapsed", input.RouteSnapshot.Spec008HashStatus, 1, "missing", 1},
+		{"model-null", 1, "spec015-v0.4", SettlementReceiptResultInvalid, SettlementOutcomeQuarantined, "model_hash_null", "null", 1, "model_hash_null", 1},
+		{"receipt-key", 1, "spec015-v0.4", SettlementReceiptResultInvalid, SettlementOutcomeQuarantined, "provider_receipt_key_id_mismatch", input.RouteSnapshot.Spec008HashStatus, 1, "receipt_key", 1},
+	}
+
+	for _, row := range counterRows {
+		rowInput := input
+		rowInput.RequestID = input.RequestID + "-" + row.suffix
+		rowInput.RouteSnapshot.RequestID = rowInput.RequestID
+		rowInput.RouteSnapshot.Spec008HashStatus = row.spec008Status
+		seedSettlementVerdictCounterRow(t, store, rowInput, row.receiptPresent,
+			row.receiptVersion, row.receiptResult, row.outcome, row.reason,
+			row.spec008Status, row.closed)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/summary", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		SettlementVerdictCounters []settlementVerdictCounter `json:"settlement_verdict_counters"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.SettlementVerdictCounters) != len(counterRows) {
+		t.Fatalf("counter rows=%d want %d: %#v", len(resp.SettlementVerdictCounters), len(counterRows), resp.SettlementVerdictCounters)
+	}
+	byReason := map[string]settlementVerdictCounter{}
+	for _, counter := range resp.SettlementVerdictCounters {
+		if counter.PolicyVersion != input.RouteSnapshot.RouteSnapshotPolicyVersion ||
+			counter.ModelID != input.RouteSnapshot.ModelID ||
+			counter.Entrypoint != input.RouteSnapshot.PaidEntrypoint {
+			t.Fatalf("counter grouping fields=%#v want route policy/model/entrypoint", counter)
+		}
+		byReason[counter.ReasonCode] = counter
+	}
+	for _, row := range counterRows {
+		counter, ok := byReason[row.reason]
+		if !ok {
+			t.Fatalf("missing counter reason %s in %#v", row.reason, byReason)
+		}
+		switch row.wantField {
+		case "verified":
+			if counter.VerifiedCount != row.wantValue {
+				t.Fatalf("%s verified_count=%d want %d", row.reason, counter.VerifiedCount, row.wantValue)
+			}
+		case "pending":
+			if counter.PendingCount != row.wantValue {
+				t.Fatalf("%s pending_count=%d want %d", row.reason, counter.PendingCount, row.wantValue)
+			}
+		case "catalog":
+			if counter.QuarantinedCount != row.wantValue || counter.CatalogMismatchCount != row.wantValue {
+				t.Fatalf("%s quarantined/catalog counters=%#v want %d", row.reason, counter, row.wantValue)
+			}
+		case "zero":
+			if counter.ZeroSettledCount != row.wantValue {
+				t.Fatalf("%s zero_settled_count=%d want %d", row.reason, counter.ZeroSettledCount, row.wantValue)
+			}
+		case "legacy":
+			if counter.LegacyReceiptCount != row.wantValue {
+				t.Fatalf("%s legacy_receipt_count=%d want %d", row.reason, counter.LegacyReceiptCount, row.wantValue)
+			}
+		case "missing":
+			if counter.MissingReceiptCount != row.wantValue {
+				t.Fatalf("%s missing_receipt_count=%d want %d", row.reason, counter.MissingReceiptCount, row.wantValue)
+			}
+		case "model_hash_null":
+			if counter.ModelHashNullCount != row.wantValue {
+				t.Fatalf("%s model_hash_null_count=%d want %d", row.reason, counter.ModelHashNullCount, row.wantValue)
+			}
+		case "receipt_key":
+			if counter.ReceiptKeyMismatchCount != row.wantValue {
+				t.Fatalf("%s receipt_key_mismatch_count=%d want %d", row.reason, counter.ReceiptKeyMismatchCount, row.wantValue)
+			}
+		default:
+			t.Fatalf("unhandled counter assertion %s", row.wantField)
+		}
+	}
+}
+
+func seedSettlementVerdictCounterRow(t *testing.T, store *Store, input SettlementVerifyInput, receiptPresent int, receiptVersion any, receiptResult, settlementOutcome, reason, spec008Status string, closed int) {
+	t.Helper()
+	seedSettlementReceiptEvidence(t, store, input)
+	var routeDigest string
+	if err := store.db.QueryRow(`
+SELECT route_snapshot_digest
+  FROM settlement_route_snapshots
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		input.AccountScope, input.RequestID, input.AttemptN, input.ProviderID,
+	).Scan(&routeDigest); err != nil {
+		t.Fatal(err)
+	}
+	usageDigest, _, err := input.ExpectedUsage.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := input.TerminalStateTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000
+	_, err = store.db.Exec(`
+INSERT INTO settlement_receipt_verdicts (
+    account_scope_hash, request_id, attempt_n, provider_id,
+    receipt_present, receipt_version, receipt_result, settlement_outcome,
+    reason, idempotency_status, closed, terminal_state, terminal_state_ts_unix_ms,
+    pending_deadline_unix_ms, received_at_unix_ms, route_snapshot_digest,
+    route_snapshot_policy_version, route_snapshot_mode, paid_entrypoint,
+    spec008_hash_status, provider_reported_model_hash, provider_receipt_key_fingerprint,
+    catalog_id, catalog_body_digest, expected_catalog_model_hash, model_id, model_hash,
+    receipt_profile, buyer_debit_outcome, provider_settlement_outcome,
+    payout_exclusion_outcome, prompt_hash, output_hash, usage_digest,
+    receipt_tuple_canonical_sha256, checks_json, verifier_diagnostics_json,
+    facts_json, created_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'first_terminal', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, NULL, 'spec015-v0.4', 'no_money_movement_step5',
+          'no_money_movement_step5', 'excluded_until_spec022_verified',
+          ?, ?, ?, NULL, '{}', '{}', NULL, ?)`,
+		SettlementAccountScopeHash(input.AccountScope),
+		input.RequestID,
+		input.AttemptN,
+		input.ProviderID,
+		receiptPresent,
+		receiptVersion,
+		receiptResult,
+		settlementOutcome,
+		reason,
+		closed,
+		input.TerminalState,
+		input.TerminalStateTSUnixMS,
+		deadline,
+		input.ReceiptReceivedUnixMS,
+		routeDigest,
+		input.RouteSnapshot.RouteSnapshotPolicyVersion,
+		input.RouteSnapshot.RouteSnapshotMode,
+		input.RouteSnapshot.PaidEntrypoint,
+		spec008Status,
+		input.RouteSnapshot.ProviderReportedModelHash,
+		input.RouteSnapshot.ProviderReceiptKeyID,
+		input.RouteSnapshot.CatalogID,
+		input.RouteSnapshot.CatalogBodyDigest,
+		input.RouteSnapshot.ExpectedCatalogModelHash,
+		input.RouteSnapshot.ModelID,
+		input.RouteSnapshot.PromptHash,
+		input.OutputHash,
+		usageDigest,
+		time.UnixMilli(input.ReceiptReceivedUnixMS).UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

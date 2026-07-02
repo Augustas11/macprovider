@@ -279,6 +279,11 @@ func TestSettlementReceiptResubmissionCannotChangeClosedOutcome(t *testing.T) {
 	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
 	tuple := firstSettlementTupleWithNegativeVariant(t, fixtures, "normal_done")
 	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	if input.RouteSnapshot.ProviderSessionID == nil || input.RouteSnapshot.ProviderGenerationID == nil {
+		t.Fatal("fixture missing provider session/generation ids")
+	}
+	sessionID := *input.RouteSnapshot.ProviderSessionID
+	generationID := *input.RouteSnapshot.ProviderGenerationID
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
 	seedSettlementReceiptEvidence(t, store, input)
@@ -319,6 +324,8 @@ func TestSettlementReceiptResubmissionCannotChangeClosedOutcome(t *testing.T) {
 	if payload["idempotency_status"] != settlementReceiptIDTerminalNoop ||
 		payload["settlement_outcome"] != SettlementOutcomeVerified ||
 		payload["reason"] != "verified_settlement" ||
+		payload["provider_session_id"] != sessionID ||
+		payload["provider_generation_id"] != generationID ||
 		int64(payload["attempted_received_at_unix_ms"].(float64)) != input.ReceiptReceivedUnixMS+1 {
 		t.Fatalf("terminal no-op audit payload=%#v, want complete verdict fields and attempted receive time", payload)
 	}
@@ -585,8 +592,6 @@ func assertSettlementReceiptAuditRedacted(t *testing.T, db *sql.DB, rawReceipt, 
 			"receipt_envelope",
 			"bearer",
 			"\"account_scope\":",
-			"provider_session_id",
-			"provider_generation_id",
 		} {
 			if forbidden != "" && strings.Contains(payload, forbidden) {
 				t.Fatalf("audit payload contains forbidden material %q: %s", forbidden, payload)
@@ -663,6 +668,7 @@ func assertSettlementReceiptVerdictAuditContract(t *testing.T, db *sql.DB, state
 		"request_id":                       state.RequestID,
 		"provider_id":                      state.ProviderID,
 		"receipt_result":                   state.ReceiptResult,
+		"receipt_verification_outcome":     state.SettlementOutcome,
 		"settlement_outcome":               state.SettlementOutcome,
 		"reason":                           state.Reason,
 		"route_snapshot_policy_version":    state.RouteSnapshotPolicyVersion,
@@ -680,6 +686,12 @@ func assertSettlementReceiptVerdictAuditContract(t *testing.T, db *sql.DB, state
 		"provider_settlement_outcome":      settlementReceiptNoMoneyMovementStep5,
 		"payout_exclusion_outcome":         settlementReceiptPayoutExcludedUntil022,
 	}
+	if state.ProviderSessionID != "" {
+		wantStrings["provider_session_id"] = state.ProviderSessionID
+	}
+	if state.ProviderGenerationID != "" {
+		wantStrings["provider_generation_id"] = state.ProviderGenerationID
+	}
 	for key, want := range wantStrings {
 		if got := payload[key]; got != want {
 			t.Fatalf("audit %s=%v want %s", key, got, want)
@@ -693,5 +705,16 @@ func assertSettlementReceiptVerdictAuditContract(t *testing.T, db *sql.DB, state
 	}
 	if got := int64(payload["attempt_n"].(float64)); got != state.AttemptN {
 		t.Fatalf("audit attempt_n=%d want %d", got, state.AttemptN)
+	}
+	if got := payload["attempt_id"]; got != settlementReceiptAttemptID(state) {
+		t.Fatalf("audit attempt_id=%v want %s", got, settlementReceiptAttemptID(state))
+	}
+	if got := int64(payload["pending_deadline_unix_ms"].(float64)); got != state.PendingDeadlineUnixMS {
+		t.Fatalf("audit pending_deadline_unix_ms=%d want %d", got, state.PendingDeadlineUnixMS)
+	}
+	if state.SettlementOutcome == SettlementOutcomeQuarantined || state.SettlementOutcome == SettlementOutcomeZeroSettled {
+		if got := payload["quarantine_zero_settle_reason"]; got != state.Reason {
+			t.Fatalf("audit quarantine_zero_settle_reason=%v want %s", got, state.Reason)
+		}
 	}
 }

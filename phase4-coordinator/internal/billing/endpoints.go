@@ -142,6 +142,22 @@ type settlementReceiptDiagnostic struct {
 	ReceiptTupleCanonicalSHA256   any    `json:"receipt_tuple_canonical_sha256"`
 }
 
+type settlementVerdictCounter struct {
+	PolicyVersion           string `json:"policy_version"`
+	ModelID                 string `json:"model_id"`
+	Entrypoint              string `json:"entrypoint"`
+	ReasonCode              string `json:"reason_code"`
+	VerifiedCount           int64  `json:"verified_count"`
+	PendingCount            int64  `json:"pending_count"`
+	QuarantinedCount        int64  `json:"quarantined_count"`
+	ZeroSettledCount        int64  `json:"zero_settled_count"`
+	LegacyReceiptCount      int64  `json:"legacy_receipt_count"`
+	MissingReceiptCount     int64  `json:"missing_receipt_count"`
+	CatalogMismatchCount    int64  `json:"catalog_mismatch_count"`
+	ModelHashNullCount      int64  `json:"model_hash_null_count"`
+	ReceiptKeyMismatchCount int64  `json:"receipt_key_mismatch_count"`
+}
+
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	// SPEC-005 v0.4 §11.6.6 — every /admin/ledger/* response path
 	// consumes the same rate-limit bucket. Charge BEFORE any
@@ -221,6 +237,11 @@ func (h *handler) admin(w http.ResponseWriter, r *http.Request, fn func(http.Res
 
 func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	settlementVerdictCounters, err := h.settlementVerdictCounters(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
 	current := currentMondayUTC(time.Now().UTC()).Format(time.RFC3339Nano)
 	resp := map[string]any{
 		"total_gross_credits":             h.sum(ctx, `SELECT SUM(gross_credits) FROM spec022_payable_request_credits`),
@@ -239,6 +260,7 @@ SELECT COUNT(*) FROM ledger_request_credits lrc
                     WHERE r.request_credit_id = lrc.id)`),
 		"fault_count":                       h.sum(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE fault_flag != 'none'`),
 		"last_reconciliation_delta_credits": h.sum(ctx, `SELECT reconciliation_delta_credits FROM ledger_reconciliation_runs ORDER BY started_at_utc DESC, id DESC LIMIT 1`),
+		"settlement_verdict_counters":       settlementVerdictCounters,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -793,6 +815,70 @@ func diagnosticsWindowString(t time.Time, enabled bool) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+func (h *handler) settlementVerdictCounters(ctx context.Context) ([]settlementVerdictCounter, error) {
+	rows, err := h.store.db.QueryContext(ctx, `
+SELECT route_snapshot_policy_version,
+       model_id,
+       paid_entrypoint,
+       reason,
+       COALESCE(SUM(CASE WHEN settlement_outcome='verified' THEN 1 ELSE 0 END), 0) AS verified_count,
+       COALESCE(SUM(CASE WHEN settlement_outcome='pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+       COALESCE(SUM(CASE WHEN settlement_outcome='quarantined' THEN 1 ELSE 0 END), 0) AS quarantined_count,
+       COALESCE(SUM(CASE WHEN settlement_outcome='zero_settled' THEN 1 ELSE 0 END), 0) AS zero_settled_count,
+       COALESCE(SUM(CASE
+           WHEN reason IN ('unknown_receipt_version', 'legacy_receipt_version')
+             OR (receipt_present=1 AND receipt_version IS NOT NULL AND receipt_version NOT IN ('4', 'spec015-v0.4', 'v0.4'))
+           THEN 1 ELSE 0 END), 0) AS legacy_receipt_count,
+       COALESCE(SUM(CASE
+           WHEN receipt_present=0 OR reason IN ('missing_receipt', 'missing_receipt_deadline_elapsed')
+           THEN 1 ELSE 0 END), 0) AS missing_receipt_count,
+       COALESCE(SUM(CASE
+           WHEN reason IN ('catalog_snapshot_mismatch', 'expected_catalog_model_hash_mismatch')
+             OR reason LIKE 'catalog_%'
+           THEN 1 ELSE 0 END), 0) AS catalog_mismatch_count,
+       COALESCE(SUM(CASE
+           WHEN reason IN ('model_hash_invalid', 'model_hash_null')
+             OR spec008_hash_status IN ('missing', 'null', 'unavailable')
+           THEN 1 ELSE 0 END), 0) AS model_hash_null_count,
+       COALESCE(SUM(CASE
+           WHEN reason IN ('provider_receipt_key_id_invalid', 'provider_receipt_key_id_mismatch', 'receipt_key_mismatch')
+           THEN 1 ELSE 0 END), 0) AS receipt_key_mismatch_count
+  FROM settlement_receipt_verdicts
+ GROUP BY route_snapshot_policy_version, model_id, paid_entrypoint, reason
+ ORDER BY route_snapshot_policy_version, model_id, paid_entrypoint, reason`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counters := []settlementVerdictCounter{}
+	for rows.Next() {
+		var counter settlementVerdictCounter
+		if err := rows.Scan(
+			&counter.PolicyVersion,
+			&counter.ModelID,
+			&counter.Entrypoint,
+			&counter.ReasonCode,
+			&counter.VerifiedCount,
+			&counter.PendingCount,
+			&counter.QuarantinedCount,
+			&counter.ZeroSettledCount,
+			&counter.LegacyReceiptCount,
+			&counter.MissingReceiptCount,
+			&counter.CatalogMismatchCount,
+			&counter.ModelHashNullCount,
+			&counter.ReceiptKeyMismatchCount,
+		); err != nil {
+			return nil, err
+		}
+		counters = append(counters, counter)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return counters, nil
 }
 
 func settlementReceiptRangeFilter(from, to time.Time, enabled bool) (string, []any) {

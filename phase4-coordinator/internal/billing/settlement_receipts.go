@@ -240,6 +240,9 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	}
 	if found && existing.Closed {
 		existing.IdempotencyStatus = settlementReceiptIDTerminalNoop
+		if err := hydrateSettlementReceiptRouteAuditFieldsConn(ctx, conn, &existing); err != nil {
+			return SettlementReceiptState{}, err
+		}
 		if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, existing, nil, receivedAtUnixMS); err != nil {
 			return SettlementReceiptState{}, err
 		}
@@ -329,6 +332,8 @@ func settlementReceiptStateFromResult(id SettlementReceiptIdentity, evidence set
 		RouteSnapshotPolicyVersion:    evidence.route.RouteSnapshotPolicyVersion,
 		RouteSnapshotMode:             evidence.route.RouteSnapshotMode,
 		PaidEntrypoint:                evidence.route.PaidEntrypoint,
+		ProviderSessionID:             derefString(evidence.route.ProviderSessionID),
+		ProviderGenerationID:          derefString(evidence.route.ProviderGenerationID),
 		Spec008HashStatus:             evidence.route.Spec008HashStatus,
 		ProviderReportedModelHash:     evidence.route.ProviderReportedModelHash,
 		ProviderReceiptKeyFingerprint: evidence.route.ProviderReceiptKeyID,
@@ -750,6 +755,7 @@ func settlementReceiptAuditPayload(state SettlementReceiptState, checks *Settlem
 	payload := map[string]any{
 		"account_scope_hash":               redactedAccountScopeHash(state.AccountScope),
 		"request_id":                       state.RequestID,
+		"attempt_id":                       settlementReceiptAttemptID(state),
 		"attempt_n":                        state.AttemptN,
 		"provider_id":                      state.ProviderID,
 		"receipt_version":                  state.ReceiptVersion,
@@ -772,19 +778,30 @@ func settlementReceiptAuditPayload(state SettlementReceiptState, checks *Settlem
 		"usage_digest":                     state.UsageDigest,
 		"received_at_unix_ms":              state.ReceivedAtUnixMS,
 	}
+	if state.ProviderSessionID != "" {
+		payload["provider_session_id"] = state.ProviderSessionID
+	}
+	if state.ProviderGenerationID != "" {
+		payload["provider_generation_id"] = state.ProviderGenerationID
+	}
 	if verdict {
 		if attemptedReceivedAtUnixMS == 0 {
 			attemptedReceivedAtUnixMS = state.ReceivedAtUnixMS
 		}
 		payload["receipt_result"] = state.ReceiptResult
+		payload["receipt_verification_outcome"] = state.SettlementOutcome
 		payload["settlement_outcome"] = state.SettlementOutcome
 		payload["reason"] = state.Reason
 		payload["deadline_unix_ms"] = state.PendingDeadlineUnixMS
+		payload["pending_deadline_unix_ms"] = state.PendingDeadlineUnixMS
 		payload["idempotency_status"] = state.IdempotencyStatus
 		payload["attempted_received_at_unix_ms"] = attemptedReceivedAtUnixMS
 		payload["buyer_debit_outcome"] = state.BuyerDebitOutcome
 		payload["provider_settlement_outcome"] = state.ProviderSettlementOutcome
 		payload["payout_exclusion_outcome"] = state.PayoutExclusionOutcome
+		if state.SettlementOutcome == SettlementOutcomeQuarantined || state.SettlementOutcome == SettlementOutcomeZeroSettled {
+			payload["quarantine_zero_settle_reason"] = state.Reason
+		}
 	}
 	if checks != nil {
 		payload["verifier_checks"] = *checks
@@ -794,6 +811,37 @@ func settlementReceiptAuditPayload(state SettlementReceiptState, checks *Settlem
 		return "", err
 	}
 	return string(raw), nil
+}
+
+func hydrateSettlementReceiptRouteAuditFieldsConn(ctx context.Context, conn *sql.Conn, state *SettlementReceiptState) error {
+	var providerSession, providerGeneration sql.NullString
+	err := conn.QueryRowContext(ctx, `
+SELECT provider_session_id, provider_generation_id
+FROM settlement_route_snapshots
+WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		state.AccountScope, state.RequestID, state.AttemptN, state.ProviderID,
+	).Scan(&providerSession, &providerGeneration)
+	if err != nil {
+		return err
+	}
+	if providerSession.Valid {
+		state.ProviderSessionID = providerSession.String
+	}
+	if providerGeneration.Valid {
+		state.ProviderGenerationID = providerGeneration.String
+	}
+	return nil
+}
+
+func settlementReceiptAttemptID(state SettlementReceiptState) string {
+	return fmt.Sprintf("%s:%d:%s", state.RequestID, state.AttemptN, state.ProviderID)
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func redactedAccountScopeHash(accountScope string) string {

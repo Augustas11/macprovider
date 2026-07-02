@@ -335,16 +335,19 @@ func TestACQ045_ReaderSideNarrowing(t *testing.T) {
 	if sw.Code != http.StatusOK {
 		t.Fatalf("summary status=%d body=%s", sw.Code, sw.Body.String())
 	}
-	var summary map[string]int64
+	var summary struct {
+		QuarantinedCount     int64 `json:"quarantined_count"`
+		TotalProviderCredits int64 `json:"total_provider_credits"`
+	}
 	if err := json.Unmarshal(sw.Body.Bytes(), &summary); err != nil {
 		t.Fatal(err)
 	}
-	if got := summary["quarantined_count"]; got != 1 {
+	if got := summary.QuarantinedCount; got != 1 {
 		t.Fatalf("quarantined_count=%d want 1 (only the open row (b))", got)
 	}
 	// total_provider_credits covers ONLY (a) — the payable set is
 	// UNCHANGED from v0.3.3.
-	if got := summary["total_provider_credits"]; got != 100 {
+	if got := summary.TotalProviderCredits; got != 100 {
 		t.Fatalf("total_provider_credits=%d want 100 (force-void does NOT add to payable set)", got)
 	}
 	// R3 fix (CODE-M1): SPEC AC-Q045 also requires hitting
