@@ -253,6 +253,7 @@ bash "$DIST_DIR/test/check_nginx_catalog_routes_test.sh" || {
 # no-op when they are unset.
 trap '
   rm -f "${TMP_CATALOG_PUBKEY:-}"
+  rm -f "${CATALOG_SMOKE_TMP:-}"
   if [ -n "${DEPLOY_TMP:-}" ]; then
     $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
   fi
@@ -1006,12 +1007,23 @@ fi
 
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   echo "  GET https://$DOMAIN/catalog/current -> expect 200"
-  STATUS=$(curl -sS -o /tmp/macprovider-catalog-current.json -w '%{http_code}' --max-time 10 --max-filesize 1048576 "https://$DOMAIN/catalog/current")
+  # Issue #292 (LOW, deferred from #244 R6/R7 CODE+SEC): don't write
+  # the smoke response to a predictable operator-Mac /tmp path. A
+  # local attacker on the operator's workstation could pre-place a
+  # symlink at /tmp/macprovider-catalog-current.json (or race the
+  # curl -o open) to redirect the write. mktemp under umask 077
+  # picks an unpredictable name with 0600 perms; cleanup rides the
+  # unconditional EXIT trap registered above.
+  CATALOG_SMOKE_TMP=$(umask 077 && mktemp -t macprovider-catalog-current.XXXXXXXX) || {
+    echo "aborting smoke: mktemp failed" >&2
+    exit 1
+  }
+  STATUS=$(curl -sS -o "$CATALOG_SMOKE_TMP" -w '%{http_code}' --max-time 10 --max-filesize 1048576 "https://$DOMAIN/catalog/current")
   if [ "$STATUS" != "200" ]; then
-    echo "coordinator /catalog/current check failed: status=$STATUS body=$(head -c 300 /tmp/macprovider-catalog-current.json)" >&2
+    echo "coordinator /catalog/current check failed: status=$STATUS body=$(head -c 300 "$CATALOG_SMOKE_TMP")" >&2
     exit 1
   fi
-  echo "  catalog OK: $(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print("catalog_id=%s models=%d" % (c.get("catalog_id"), len(c.get("models", []))))' /tmp/macprovider-catalog-current.json)"
+  echo "  catalog OK: $(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print("catalog_id=%s models=%d" % (c.get("catalog_id"), len(c.get("models", []))))' "$CATALOG_SMOKE_TMP")"
 fi
 
 # R3+R4+R5 stats smoke check on STATS_DOMAIN.
