@@ -630,6 +630,112 @@ UPDATE ledger_payout_ready
 	}
 }
 
+func TestSPEC022SettledSourceMoneyFieldsAreImmutable(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	_, store := newRequestAndBillingStores(t)
+	seedSettlementReceiptEvidence(t, store, input)
+	insertSPEC022LedgerCredit(t, store.db, input, 500)
+	markSPEC022ReceiptVerified(t, store.db, input)
+	windowStart, windowEnd := settlementWindowForInput(input)
+	if err := store.RunSettlement(context.Background(), SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, windowEnd); err != nil {
+		t.Fatal(err)
+	}
+	payoutID := scalar(t, store.db, `SELECT id FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID)
+
+	if _, err := store.db.Exec(`
+UPDATE ledger_request_credits
+   SET gross_credits = 900,
+       provider_credits = 900
+ WHERE request_id = ?`, input.RequestID); err == nil {
+		t.Fatal("settled source money update succeeded")
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != 500 {
+		t.Fatalf("settled source provider credits=%d want 500", got)
+	}
+	claimed, err := store.ClaimPayoutReady(context.Background(), payoutID, 900, "external-mutated-source", "USDC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("claim with mutated source amount succeeded")
+	}
+	claimed, err = store.ClaimPayoutReady(context.Background(), payoutID, 500, "external-verified-source", "USDC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatal("claim with original verified source amount failed")
+	}
+}
+
+func TestSPEC022PayoutClaimRejectsForgedSourceRows(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+
+	for _, tc := range []struct {
+		name           string
+		payoutProvider string
+		linkSource     func(t *testing.T, store *Store, input SettlementVerifyInput, payoutID int64)
+	}{
+		{
+			name: "unsettled linked source",
+			linkSource: func(t *testing.T, store *Store, input SettlementVerifyInput, payoutID int64) {
+				t.Helper()
+				if _, err := store.db.Exec(`UPDATE ledger_request_credits SET settlement_id = ? WHERE request_id = ?`, payoutID, input.RequestID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:           "wrong provider linked source",
+			payoutProvider: "provider-forged",
+			linkSource: func(t *testing.T, store *Store, input SettlementVerifyInput, payoutID int64) {
+				t.Helper()
+				if _, err := store.db.Exec(`UPDATE ledger_request_credits SET settled = 1, settlement_id = ? WHERE request_id = ?`, payoutID, input.RequestID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+			input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+			input.RequestID = input.RequestID + "-" + strings.ReplaceAll(tc.name, " ", "-")
+			input.RouteSnapshot.RequestID = input.RequestID
+			_, store := newRequestAndBillingStores(t)
+			seedSettlementReceiptEvidence(t, store, input)
+			insertSPEC022LedgerCredit(t, store.db, input, 500)
+			markSPEC022ReceiptVerified(t, store.db, input)
+			windowStart, windowEnd := settlementWindowForInput(input)
+			providerID := input.ProviderID
+			if tc.payoutProvider != "" {
+				providerID = tc.payoutProvider
+			}
+			payoutID := insertSPEC022ManualPayoutReady(t, store.db, providerID, windowStart, windowEnd, 1, 500, 500, "forged-"+tc.name)
+			tc.linkSource(t, store, input, payoutID)
+
+			claimed, err := store.ClaimPayoutReady(context.Background(), payoutID, 500, "external-forged", "USDC")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if claimed {
+				t.Fatal("forged source payout claim succeeded")
+			}
+			if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ?`, payoutID); got != 0 {
+				t.Fatalf("forged source payout rows=%d want 0", got)
+			}
+			if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 0 AND settlement_id IS NULL`, input.RequestID); got != 1 {
+				t.Fatalf("released forged source rows=%d want 1", got)
+			}
+		})
+	}
+}
+
 func TestSPEC022PayoutClaimRevalidatesObserveSourceRows(t *testing.T) {
 	fixtures := loadSettlementVerifierFixtures(t)
 	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
@@ -966,6 +1072,35 @@ INSERT INTO ledger_request_credits (
 func insertSPEC022LedgerCredit(t *testing.T, db *sql.DB, input SettlementVerifyInput, providerCredits int64) {
 	t.Helper()
 	insertSPEC022LedgerCreditWithMode(t, db, input, providerCredits, RouteSnapshotModeEnforce, "")
+}
+
+func insertSPEC022ManualPayoutReady(t *testing.T, db *sql.DB, providerID string, windowStart, windowEnd time.Time, sourceCount, grossCredits, providerCredits int64, idempotencySuffix string) int64 {
+	t.Helper()
+	now := windowStart.Add(time.Hour).Format(time.RFC3339Nano)
+	res, err := db.Exec(`
+INSERT INTO ledger_payout_ready (
+    provider_id, window_start_utc, window_end_utc, cadence_days, source_credit_count,
+    gross_credits, provider_credits, operator_credits, min_payout_credits,
+    payout_currency, payout_external_id, status, idempotency_key, created_at_utc
+) VALUES (?, ?, ?, 7, ?, ?, ?, ?, 1, NULL, NULL, 'ready', ?, ?)`,
+		providerID,
+		windowStart.Format(time.RFC3339Nano),
+		windowEnd.Format(time.RFC3339Nano),
+		sourceCount,
+		grossCredits,
+		providerCredits,
+		grossCredits-providerCredits,
+		providerID+"|"+idempotencySuffix,
+		now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func insertSPEC022LedgerCreditWithMode(t *testing.T, db *sql.DB, input SettlementVerifyInput, providerCredits int64, mode, accountScopeHash string) {

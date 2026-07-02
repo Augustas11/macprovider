@@ -24,9 +24,11 @@ settlement finality backed by signed, catalog-matching receipt verdicts.
 - Coordinator payout and revenue surfaces must continue to read from
   `spec022_payable_request_credits`, which excludes enforce-mode rows without a
   closed verified receipt verdict and excludes overlapping output claims.
-- Payout claim consumption must revalidate payout-ready source rows and totals
-  against `spec022_payable_request_credits` immediately before marking a payout
-  consumed.
+- Payout claim consumption must revalidate settled, provider-matching
+  payout-ready source rows and totals against `spec022_payable_request_credits`
+  immediately before marking a payout consumed.
+- Settled request-credit money fields must be immutable so claim-time
+  recomputation cannot be inflated after settlement.
 
 ## Out of Scope
 
@@ -47,9 +49,10 @@ settlement finality backed by signed, catalog-matching receipt verdicts.
   existing verified/refund/hold/terminal-race reconciliation cases.
 - Existing coordinator money-gate tests continue to prove payout eligibility is
   receipt-bound.
-- Coordinator tests cover duplicate receipt replay after settlement, concurrent
-  settlement workers for one verified source row, manual source-less payout rows,
-  and inflated ready payout totals.
+- Coordinator tests cover duplicate receipt replay after settlement,
+  same-process settlement workers for one verified source row, manual
+  source-less payout rows, forged source links, settled-source immutability, and
+  inflated ready payout totals.
 - Before closure, run the gateway targeted tests plus the coordinator SPEC-022
   money-gate tests, then run the three Codex auditor lanes and resolve all
   critical/high/medium findings.
@@ -72,7 +75,11 @@ settlement finality backed by signed, catalog-matching receipt verdicts.
 - `phase5-gateway/internal/router/server_test.go` keeps the verified, refund,
   hold, and terminal-race reconciliation cases covered.
 - `phase4-coordinator/internal/billing/payout.go` revalidates ready payout rows
-  against `spec022_payable_request_credits` before consumption.
+  against settled provider-matching sources in `spec022_payable_request_credits`
+  before consumption.
+- `phase4-coordinator/internal/billing/store.go` rejects money-field mutation
+  after a request credit is settled.
 - `phase4-coordinator/internal/billing/spec022_money_gate_test.go` covers
-  duplicate receipt replay, concurrent settlement-worker idempotency,
-  source-less manual payout rejection, and payout total recomputation.
+  duplicate receipt replay, same-process settlement-worker idempotency,
+  source-less manual payout rejection, forged source rejection, settled-source
+  immutability, and payout total recomputation.

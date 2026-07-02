@@ -410,6 +410,28 @@ WHEN COALESCE(OLD.settlement_account_scope_hash, '') != COALESCE(NEW.settlement_
 BEGIN
     SELECT RAISE(ABORT, 'ledger_request_credits settlement policy is immutable');
 END;
+CREATE TRIGGER IF NOT EXISTS trg_lrc_settled_money_immutable
+BEFORE UPDATE OF prompt_tokens, completion_tokens, estimated_completion_tokens,
+                 usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
+                 global_multiplier_ppm, gross_credits, provider_share_bps,
+                 provider_credits, fault_flag ON ledger_request_credits
+WHEN OLD.settled = 1
+  AND (
+      COALESCE(OLD.prompt_tokens, -1) != COALESCE(NEW.prompt_tokens, -1)
+      OR COALESCE(OLD.completion_tokens, -1) != COALESCE(NEW.completion_tokens, -1)
+      OR COALESCE(OLD.estimated_completion_tokens, -1) != COALESCE(NEW.estimated_completion_tokens, -1)
+      OR OLD.usage_source != NEW.usage_source
+      OR OLD.prompt_rate_per_mtok != NEW.prompt_rate_per_mtok
+      OR OLD.completion_rate_per_mtok != NEW.completion_rate_per_mtok
+      OR OLD.global_multiplier_ppm != NEW.global_multiplier_ppm
+      OR OLD.gross_credits != NEW.gross_credits
+      OR OLD.provider_share_bps != NEW.provider_share_bps
+      OR OLD.provider_credits != NEW.provider_credits
+      OR OLD.fault_flag != NEW.fault_flag
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'settled ledger_request_credits money fields are immutable');
+END;
 `)
 	return err
 }

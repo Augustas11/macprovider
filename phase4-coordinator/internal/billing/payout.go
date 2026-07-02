@@ -13,13 +13,14 @@ func (s *Store) ClaimPayoutReady(ctx context.Context, payoutID int64, expectedGr
 		return false, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var windowStart, windowEnd, payoutStatus string
+	var providerID, windowStart, windowEnd, payoutStatus string
 	var sourceCreditCount, grossCredits, providerCredits, operatorCredits, minPayoutCredits int64
 	err = tx.QueryRowContext(ctx, `
-SELECT window_start_utc, window_end_utc, source_credit_count, gross_credits,
+SELECT provider_id, window_start_utc, window_end_utc, source_credit_count, gross_credits,
        provider_credits, operator_credits, min_payout_credits, status
   FROM ledger_payout_ready
  WHERE id = ?`, payoutID).Scan(
+		&providerID,
 		&windowStart,
 		&windowEnd,
 		&sourceCreditCount,
@@ -73,7 +74,10 @@ SELECT COUNT(*),
        COALESCE(SUM(lrc.gross_credits - lrc.provider_credits), 0)
   FROM ledger_request_credits lrc
   JOIN spec022_payable_request_credits payable ON payable.id = lrc.id
- WHERE lrc.settlement_id = ?`, payoutID).Scan(&payableCount, &payableGross, &payableProvider, &payableOperator); err != nil {
+ WHERE lrc.settlement_id = ?
+   AND lrc.settled = 1
+   AND lrc.provider_id = ?
+   AND lrc.ts_utc < ?`, payoutID, providerID, windowEnd).Scan(&payableCount, &payableGross, &payableProvider, &payableOperator); err != nil {
 			return false, err
 		}
 		sourceSetValid := sourceCount > 0 && sourceCount == payableCount
@@ -89,11 +93,16 @@ UPDATE ledger_request_credits
        settlement_id = NULL,
        updated_at_utc = ?
  WHERE settlement_id = ?
-   AND NOT EXISTS (
-       SELECT 1
-         FROM spec022_payable_request_credits payable
-        WHERE payable.id = ledger_request_credits.id
-   )`, now, payoutID); err != nil {
+   AND NOT (
+       settled = 1
+       AND provider_id = ?
+       AND ts_utc < ?
+       AND EXISTS (
+           SELECT 1
+             FROM spec022_payable_request_credits payable
+            WHERE payable.id = ledger_request_credits.id
+       )
+   )`, now, payoutID, providerID, windowEnd); err != nil {
 					return false, err
 				}
 			}
