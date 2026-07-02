@@ -106,23 +106,20 @@ M1-6). Mirrors the coordinator pattern:
 
 ```bash
 ssh pearl
-cd /opt/macprovider/gateway
-sudo -u macprovider cp gateway.prev gateway
+sudo install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway
 sudo systemctl restart macprovider-gateway
 curl -s http://127.0.0.1:9443/healthz   # confirm OK + version reflects .prev
 ```
 
 Confirmed by the first M0-5/M1-6 production deploy (2026-06-11): both
 services maintain a single `.prev` artifact that is overwritten on each
-deploy. The coordinator deploy script (#244 R4+R5) now installs the
-coordinator binary + .prev as `root:macprovider 0750` (was
+deploy. Both deploy scripts (coordinator: #244 R4+R5; gateway: #290)
+now install their binary + .prev as `root:macprovider 0750` (was
 `macprovider:macprovider 0755`) so a compromised daemon UID can no
-longer rewrite the previous binary. The gateway deploy script has
-NOT yet been hardened the same way — `gateway.prev` is still
-`macprovider:macprovider 0755` until a parallel fix lands.
+longer rewrite the previous binary.
 
 - `/opt/macprovider/coordinator.prev` — `root:macprovider 0750`
-- `/opt/macprovider/gateway.prev` — `macprovider:macprovider 0755` (TODO: harden in parallel PR)
+- `/opt/macprovider/gateway.prev` — `root:macprovider 0750` (#290)
 
 For the coordinator, the deploy script additionally writes a timestamped
 config backup at `/opt/macprovider/coordinator.yaml.bak-<UTC>` (UTC stamp

@@ -54,6 +54,45 @@ VPS_USER="${VPS_USER:-root}"
 DOMAIN="${DOMAIN:-api.streamvc.live}"
 EMAIL="${EMAIL:-augstar@gmail.com}"
 
+# #290 (mirrors #244 R2 CODE MED): validate DOMAIN + EMAIL up front so a
+# typo doesn't fail mid-deploy leaving the VPS in a partial state.
+# DOMAIN must be a plausible hostname; EMAIL must have exactly one @ with
+# non-empty local and domain parts. Not RFC-strict; guards against
+# accidental empty/whitespace/multiline overrides.
+case "$DOMAIN" in
+  *' '*|*$'\n'*|'')
+    echo "aborting deploy: DOMAIN='$DOMAIN' is empty or contains whitespace" >&2
+    exit 1
+    ;;
+esac
+case "$DOMAIN" in
+  *[!A-Za-z0-9.-]*)
+    echo "aborting deploy: DOMAIN='$DOMAIN' contains invalid characters (only A-Za-z0-9.- allowed)" >&2
+    exit 1
+    ;;
+esac
+case "$EMAIL" in
+  *' '*|*$'\n'*|'')
+    echo "aborting deploy: EMAIL='$EMAIL' is empty or contains whitespace" >&2
+    exit 1
+    ;;
+  *@*@*)
+    echo "aborting deploy: EMAIL='$EMAIL' has more than one '@'" >&2
+    exit 1
+    ;;
+  *@?*)
+    _email_local="${EMAIL%@*}"
+    [ -n "$_email_local" ] || {
+      echo "aborting deploy: EMAIL='$EMAIL' has empty local part" >&2
+      exit 1
+    }
+    ;;
+  *)
+    echo "aborting deploy: EMAIL='$EMAIL' missing '@' with non-empty domain" >&2
+    exit 1
+    ;;
+esac
+
 DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
 BINARY="$DIST_DIR/gateway-linux-amd64"
 SERVICE="$DIST_DIR/macprovider-gateway.service"
@@ -79,6 +118,17 @@ SSH="ssh -i $SSH_KEY -o ConnectTimeout=10 -p 22 $VPS_USER@$VPS_HOST"
 SCP="scp -i $SSH_KEY -P 22"
 
 log() { printf "\n[deploy-gateway] %s\n" "$*"; }
+
+# #290 (mirrors #244 R6 CODE+SEC+ARCH convergent MED) — register the
+# EXIT cleanup trap UNCONDITIONALLY, before any temp resource is
+# created. Same threat model as the coordinator: if the deploy fails
+# mid-flight, the remote staging dir must not persist. $DEPLOY_TMP is
+# guarded with `:-` so the trap is a no-op when it is unset.
+trap '
+  if [ -n "${DEPLOY_TMP:-}" ]; then
+    $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
+  fi
+' EXIT
 
 log "step 0/8: pre-deploy C2 cross-component config check"
 # M1-6 follow-up (codex audits 2026-06-11): require real configs for C2,
@@ -127,23 +177,53 @@ $SSH "test -f /etc/macprovider/gateway.env || { echo 'missing /etc/macprovider/g
 log "step 3/8: snapshot live gateway binary as .prev (rollback)"
 # Mirror the coordinator's M0-5 .prev pattern. install(1) is intentional —
 # preserves ownership/perms even if a future recovery rebuilds the snapshot.
+# #290 (mirrors #244 R5 SEC CRITICAL / R5 SEC MED): ownership tightened
+# to root:macprovider 0750. Previously macprovider:macprovider 0755,
+# which meant a compromised macprovider UID could rewrite the rollback
+# binary — a persistent attack path against the /opt/macprovider surface.
+# Parent dir /opt/macprovider is already root:macprovider 0750 (set by
+# the coordinator's step 3); files inside can be group-read by the
+# macprovider daemon but not written by anything running as macprovider.
 $SSH 'if [ -x /opt/macprovider/gateway ]; then
-        install -o macprovider -g macprovider -m 0755 /opt/macprovider/gateway /opt/macprovider/gateway.prev
-        echo "  snapshot saved at /opt/macprovider/gateway.prev"
+        install -o root -g macprovider -m 0750 /opt/macprovider/gateway /opt/macprovider/gateway.prev
+        echo "  snapshot saved at /opt/macprovider/gateway.prev (root:macprovider 0750)"
       else
         echo "  no live gateway at /opt/macprovider/gateway — first deploy"
       fi'
 
 log "step 4/8: upload binary + service unit + nginx site"
-$SCP "$BINARY" "$VPS_USER@$VPS_HOST:/tmp/gateway-linux-amd64"
-$SCP "$SERVICE" "$VPS_USER@$VPS_HOST:/tmp/macprovider-gateway.service"
-$SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-api.streamvc.live.conf"
+# #290 (mirrors #244 R5 SEC CRITICAL) — stage uploaded artifacts into a
+# fresh per-deploy root-owned 0700 directory instead of predictable
+# /tmp/<name> paths. Otherwise any local user (including a compromised
+# macprovider UID) can race the SCP/install window and substitute their
+# own systemd unit, binary, or nginx config — which root then installs.
+# `mktemp -d` returns a fresh dir with mode 0700 owned by the SSH user
+# (root). The wider /tmp permissions (1777) don't matter because the
+# fresh subdir denies traversal.
+DEPLOY_TMP=$($SSH 'umask 077 && mktemp -d -t macprovider-deploy.XXXXXXXX') || {
+  echo "failed to create remote staging directory" >&2; exit 1;
+}
+case "$DEPLOY_TMP" in
+  /tmp/macprovider-deploy.*) ;;
+  *)
+    echo "aborting deploy: mktemp produced unexpected path: '$DEPLOY_TMP'" >&2
+    exit 1
+    ;;
+esac
+log "  staging dir: $DEPLOY_TMP (root:root 0700)"
+
+$SCP "$BINARY"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/gateway-linux-amd64"
+$SCP "$SERVICE"    "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/macprovider-gateway.service"
+$SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-api.streamvc.live.conf"
 
 $SSH "set -e
-  install -o macprovider -g macprovider -m 0755 /tmp/gateway-linux-amd64 /opt/macprovider/gateway
-  install -o root -g root -m 0644 /tmp/macprovider-gateway.service /etc/systemd/system/macprovider-gateway.service
-  install -o root -g root -m 0644 /tmp/nginx-api.streamvc.live.conf /etc/nginx/sites-available/$DOMAIN
-  rm -f /tmp/gateway-linux-amd64 /tmp/macprovider-gateway.service /tmp/nginx-api.streamvc.live.conf
+  # #290 (mirrors #244 R5 SEC MED) — binary is root:macprovider 0750.
+  # macprovider daemon can execute + read via group; only root can write.
+  install -o root -g macprovider -m 0750 $DEPLOY_TMP/gateway-linux-amd64 /opt/macprovider/gateway
+  install -o root -g root -m 0644 $DEPLOY_TMP/macprovider-gateway.service /etc/systemd/system/macprovider-gateway.service
+  install -o root -g root -m 0644 $DEPLOY_TMP/nginx-api.streamvc.live.conf /etc/nginx/sites-available/$DOMAIN
+  # EXIT trap will rm -rf \$DEPLOY_TMP after script exits (success or
+  # failure). Explicit cleanup here is not required.
   ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
   # Mirror the coordinator script's step 6b: nginx-api.streamvc.live.conf ships
   # with the ssl_certificate / ssl_certificate_key lines commented (so a
@@ -185,13 +265,20 @@ fi
 if [ "${FORCE_RESTART:-0}" = "1" ] && [ "${INFLIGHT:-0}" -gt 0 ]; then
   TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   OP_HOST="${HOSTNAME:-unknown}"
+  # #290 (mirrors #244 R6 SEC/CODE/ARCH convergent MED) — write the
+  # tombstone via remote `mktemp` under `umask 077` instead of the
+  # predictable /tmp/last-deploy-bypass.json path. Same threat model as
+  # step 4's DEPLOY_TMP fix: a same-host attacker could otherwise
+  # pre-place a FIFO/symlink at the predictable name and forge or
+  # clobber the audit tombstone, or cause a deploy DoS.
   $SSH "set -e
         install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider 2>/dev/null || true
-        cat > /tmp/last-deploy-bypass.json <<EOF
+        _bypass_tmp=\$(umask 077 && mktemp)
+        cat > \"\$_bypass_tmp\" <<EOF
 {\"ts\":\"$TS_NOW\",\"service\":\"gateway\",\"reason\":\"FORCE_RESTART=1\",\"step\":\"5\",\"metric\":\"in_flight_requests\",\"value\":$INFLIGHT,\"operator_host\":\"$OP_HOST\"}
 EOF
-        install -o macprovider -g macprovider -m 0640 /tmp/last-deploy-bypass.json /var/lib/macprovider/last-deploy-bypass.json
-        rm -f /tmp/last-deploy-bypass.json
+        install -o macprovider -g macprovider -m 0640 \"\$_bypass_tmp\" /var/lib/macprovider/last-deploy-bypass.json
+        rm -f \"\$_bypass_tmp\"
         logger -t macprovider-deploy \"FORCE_RESTART=1 used at gateway step 5; in_flight=$INFLIGHT\""
   log "  AUDIT TRAIL: FORCE_RESTART=1 override written to /var/lib/macprovider/last-deploy-bypass.json"
 fi
@@ -291,7 +378,7 @@ echo "  versions, restore BOTH the binary AND the pre-deploy DB snapshot:"
 echo
 echo "    ssh $VPS_USER@$VPS_HOST '"
 echo "      systemctl stop macprovider-gateway &&"
-echo "      install -o macprovider -g macprovider -m 0755 /opt/macprovider/gateway.prev /opt/macprovider/gateway &&"
+echo "      install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway &&"
 echo "      LATEST=\$(ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* | head -1) &&"
 echo "      install -o macprovider -g macprovider -m 0600 \"\$LATEST\" /var/lib/macprovider/gateway.db &&"
 echo "      systemctl start macprovider-gateway"
