@@ -256,7 +256,7 @@ final class ServeCommandTests: XCTestCase {
         let rateCardBytes = Data(rateCardJSON.utf8)
         let staticInputs = AutotuneStaticInputs(
             fetch: { url in
-                if url.host == "coordinator.streamvc.live" {
+                if url.path == "/v1/rate-card" {
                     return rateCardBytes
                 }
                 if url.path.hasSuffix(".sig") {
