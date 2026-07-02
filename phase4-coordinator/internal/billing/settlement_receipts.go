@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -240,9 +241,6 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	}
 	if found && existing.Closed {
 		existing.IdempotencyStatus = settlementReceiptIDTerminalNoop
-		if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, existing.RequestID, existing.AttemptN, existing.ProviderID); err != nil {
-			return SettlementReceiptState{}, err
-		}
 		if err := hydrateSettlementReceiptRouteAuditFieldsConn(ctx, conn, &existing); err != nil {
 			return SettlementReceiptState{}, err
 		}
@@ -276,8 +274,16 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	} else if err := insertSettlementReceiptStateConn(ctx, conn, persisted); err != nil {
 		return SettlementReceiptState{}, err
 	}
-	if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, state.RequestID, state.AttemptN, state.ProviderID); err != nil {
+	if reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, state.RequestID, state.AttemptN, state.ProviderID); err != nil {
 		return SettlementReceiptState{}, err
+	} else if reason != "" {
+		state.ReceiptResult = SettlementReceiptResultInvalid
+		state.SettlementOutcome = SettlementOutcomeQuarantined
+		state.Reason = reason
+		state.Closed = true
+		if err := markSettlementReceiptCacheQuarantinedConn(ctx, conn, state, reason); err != nil {
+			return SettlementReceiptState{}, err
+		}
 	}
 	if receiptPresent {
 		if err := insertSettlementReceiptIngestedAuditConn(ctx, conn, state); err != nil {
@@ -299,14 +305,33 @@ type settlementReceiptCreditSyncDB interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestID string, attemptN int64, providerID string) error {
+func syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestID string, attemptN int64, providerID string) (string, error) {
 	var requestCreditID int64
 	var promptRate, completionRate, multiplier, share int64
-	var faultFlag string
+	var cachedPromptTokens, configSnapshotID sql.NullInt64
+	var ledgerPrompt, ledgerCompletion, ledgerEstimate sql.NullInt64
+	var ledgerGross, ledgerProvider int64
+	var accountScopeHash string
+	var faultFlag, ledgerUsageSource string
+	var model string
 	var usageJSON string
 	err := db.QueryRowContext(ctx, `
-SELECT lrc.id, lrc.prompt_rate_per_mtok, lrc.completion_rate_per_mtok,
-       lrc.global_multiplier_ppm, lrc.provider_share_bps, lrc.fault_flag,
+SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
+       lrc.prompt_tokens, lrc.completion_tokens, lrc.estimated_completion_tokens,
+       lrc.prompt_rate_per_mtok, lrc.completion_rate_per_mtok,
+       lrc.global_multiplier_ppm, lrc.provider_share_bps,
+       lrc.gross_credits, lrc.provider_credits,
+       lrc.settlement_account_scope_hash, lrc.usage_source, lrc.fault_flag,
+       (
+           SELECT lpis.config_snapshot_id
+             FROM ledger_provider_identity_snapshots lpis
+            WHERE lpis.request_id = lrc.request_id
+              AND lpis.attempt_n = lrc.attempt_n
+              AND lpis.provider_id = lrc.provider_id
+              AND lpis.provider_assigned_id = lrc.provider_assigned_id
+         ORDER BY lpis.id DESC
+            LIMIT 1
+       ) AS config_snapshot_id,
        sao.usage_canonical_json
   FROM ledger_request_credits lrc
   JOIN settlement_receipt_verdicts srv
@@ -344,26 +369,104 @@ SELECT lrc.id, lrc.prompt_rate_per_mtok, lrc.completion_rate_per_mtok,
 		requestID,
 		attemptN,
 		providerID,
-	).Scan(&requestCreditID, &promptRate, &completionRate, &multiplier, &share, &faultFlag, &usageJSON)
+	).Scan(&requestCreditID, &model, &cachedPromptTokens, &ledgerPrompt, &ledgerCompletion, &ledgerEstimate, &promptRate, &completionRate, &multiplier, &share, &ledgerGross, &ledgerProvider, &accountScopeHash, &ledgerUsageSource, &faultFlag, &configSnapshotID, &usageJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil
+			return "", nil
 		}
-		return err
+		return "", err
 	}
 	var usage settlementUsageV04
 	if err := json.Unmarshal([]byte(usageJSON), &usage); err != nil {
-		return fmt.Errorf("decode settlement receipt-bound usage: %w", err)
+		return "", fmt.Errorf("decode settlement receipt-bound usage: %w", err)
 	}
 	prompt := usage.BillableInputTokens
 	completion := usage.BillableOutputTokens
-	result := ComputeCredits(
+	rateEntry := RateCardEntry{PromptCreditsPerMtok: promptRate, CompletionCreditsPerMtok: completionRate}
+	var cached *int64
+	if cachedPromptTokens.Valid && cachedPromptTokens.Int64 > 0 {
+		if cachedPromptTokens.Int64 > prompt {
+			reason := "invalid_cached_prompt_tokens"
+			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
+				return "", err
+			}
+			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
+				return "", err
+			}
+			return reason, nil
+		}
+		if !configSnapshotID.Valid {
+			reason := "missing_cache_config_snapshot"
+			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
+				return "", err
+			}
+			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
+				return "", err
+			}
+			return reason, nil
+		}
+		rewards, snapshotMultiplier, snapshotShare, err := snapshotByIDQueryer(ctx, db, configSnapshotID.Int64)
+		if err != nil {
+			if !errors.Is(err, ErrNoSnapshot) {
+				return "", err
+			}
+			reason := "missing_cache_config_snapshot"
+			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
+				return "", err
+			}
+			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
+				return "", err
+			}
+			return reason, nil
+		}
+		rateEntry = RateFor(rewards.RateCard, model)
+		if rateEntry.PromptCreditsPerMtok != promptRate ||
+			rateEntry.CompletionCreditsPerMtok != completionRate ||
+			snapshotMultiplier != multiplier ||
+			snapshotShare != share {
+			reason := "cache_config_snapshot_rate_mismatch"
+			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
+				return "", err
+			}
+			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
+				return "", err
+			}
+			return reason, nil
+		}
+		current := ComputeCreditsWithCache(
+			ppFromNull(ledgerPrompt),
+			&cachedPromptTokens.Int64,
+			cpFromNull(ledgerCompletion),
+			intPtrFromNull(ledgerEstimate),
+			ledgerUsageSource,
+			faultFlag,
+			rateEntry,
+			multiplier,
+			share,
+		)
+		if current.GrossCredits != ledgerGross ||
+			current.ProviderCredits != ledgerProvider ||
+			current.UsageSource != ledgerUsageSource ||
+			current.FaultFlag != faultFlag {
+			reason := "cache_config_snapshot_rate_mismatch"
+			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
+				return "", err
+			}
+			if err := markSettlementReceiptCacheQuarantinedTx(ctx, db, accountScopeHash, requestID, attemptN, providerID, reason); err != nil {
+				return "", err
+			}
+			return reason, nil
+		}
+		cached = &cachedPromptTokens.Int64
+	}
+	result := ComputeCreditsWithCache(
 		&prompt,
+		cached,
 		&completion,
 		nil,
 		UsageProviderReported,
 		faultFlag,
-		RateCardEntry{PromptCreditsPerMtok: promptRate, CompletionCreditsPerMtok: completionRate},
+		rateEntry,
 		multiplier,
 		share,
 	)
@@ -388,7 +491,7 @@ UPDATE ledger_request_credits
 		now,
 		requestCreditID,
 	); err != nil {
-		return err
+		return "", err
 	}
 	_, err = db.ExecContext(ctx, `
 UPDATE ledger_operator_credits
@@ -400,6 +503,71 @@ UPDATE ledger_operator_credits
 		result.OperatorCredits,
 		result.FaultFlag,
 		requestCreditID,
+	)
+	return "", err
+}
+
+func markVerifiedReceiptCacheQuarantinedTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestCreditID int64, reason string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(ctx, `
+UPDATE ledger_request_credits
+   SET quarantined = 1,
+       quarantine_reason = ?,
+       gross_credits = 0,
+       provider_credits = 0,
+       updated_at_utc = ?
+ WHERE id = ?`, reason, now, requestCreditID); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, `
+UPDATE ledger_operator_credits
+   SET gross_credits = 0,
+       operator_credits = 0
+ WHERE request_credit_id = ?`, requestCreditID)
+	return err
+}
+
+func markSettlementReceiptCacheQuarantinedTx(ctx context.Context, db settlementReceiptCreditSyncDB, accountScopeHash string, requestID string, attemptN int64, providerID string, reason string) error {
+	_, err := db.ExecContext(ctx, `
+UPDATE settlement_receipt_verdicts
+   SET receipt_result = ?,
+       settlement_outcome = ?,
+       reason = ?,
+       closed = 1,
+       updated_at_utc = ?
+ WHERE account_scope_hash = ?
+   AND request_id = ?
+   AND attempt_n = ?
+   AND provider_id = ?`,
+		SettlementReceiptResultInvalid,
+		SettlementOutcomeQuarantined,
+		reason,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		accountScopeHash,
+		requestID,
+		attemptN,
+		providerID,
+	)
+	return err
+}
+
+func markSettlementReceiptCacheQuarantinedConn(ctx context.Context, conn *sql.Conn, state SettlementReceiptState, reason string) error {
+	_, err := conn.ExecContext(ctx, `
+UPDATE settlement_receipt_verdicts
+   SET receipt_result = ?,
+       settlement_outcome = ?,
+       reason = ?,
+       closed = 1,
+       updated_at_utc = ?
+ WHERE account_scope_hash = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		SettlementReceiptResultInvalid,
+		SettlementOutcomeQuarantined,
+		reason,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		redactedAccountScopeHash(state.AccountScope),
+		state.RequestID,
+		state.AttemptN,
+		state.ProviderID,
 	)
 	return err
 }

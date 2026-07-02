@@ -138,8 +138,14 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		if err != nil {
 			ts = time.Now().UTC()
 		}
+		invalidReason := ""
 		if invalidRecoveryToken(prompt) || invalidRecoveryEstimate(estimated) || invalidRecoveryCompletion(completion, estimated) {
-			affected, err := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, "invalid_usage_tokens", now)
+			invalidReason = "invalid_usage_tokens"
+		} else if invalidRecoveryCached(prompt, cached) {
+			invalidReason = "invalid_cached_prompt_tokens"
+		}
+		if invalidReason != "" {
+			affected, err := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, invalidReason, now)
 			if err != nil {
 				return err
 			}
@@ -149,7 +155,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 					return err
 				}
 				if !exists {
-					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, nil, nil, nil, errorCode.String, in.Source, "invalid_usage_tokens", now); err != nil {
+					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, nil, nil, nil, errorCode.String, in.Source, invalidReason, now); err != nil {
 						return err
 					}
 					quarantined++
@@ -169,10 +175,11 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		// distinguished from a buggy duplicate INSERT.
 		ambiguousAttempt := attemptN == 1 && retried == 0
 		var providerID string
+		var identityConfigSnapshotID sql.NullInt64
 		err = tx.QueryRowContext(ctx, `
-SELECT provider_id FROM ledger_provider_identity_snapshots
+SELECT provider_id, config_snapshot_id FROM ledger_provider_identity_snapshots
  WHERE request_id = ? AND attempt_n = ? AND provider_assigned_id = ?
-	 ORDER BY id DESC LIMIT 1`, requestID, attemptN, assignedID).Scan(&providerID)
+	 ORDER BY id DESC LIMIT 1`, requestID, attemptN, assignedID).Scan(&providerID, &identityConfigSnapshotID)
 		if err != nil {
 			reason := "missing_provider_identity"
 			if ambiguousAttempt {
@@ -204,13 +211,28 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			quarantined += affected
 			continue
 		}
-		// Use the tx-bound queryer — at MaxOpenConns(1), calling
-		// s.snapshotAt (which uses s.db) here would deadlock waiting for a
-		// second connection that cannot be obtained while this tx pins the
-		// only one. Issue #21 / ARCH-3.
-		snapshotID, rewards, multiplier, share, err := snapshotAtTx(ctx, tx, ts)
+		var snapshotID int64
+		var rewards RewardsConfig
+		var multiplier, share int64
+		cacheProvenanceRequired := cached.Valid && cached.Int64 > 0 && attemptN == 0
+		if identityConfigSnapshotID.Valid {
+			snapshotID = identityConfigSnapshotID.Int64
+			rewards, multiplier, share, err = snapshotByIDQueryer(ctx, tx, snapshotID)
+		} else if cacheProvenanceRequired {
+			err = ErrNoSnapshot
+		} else {
+			// Use the tx-bound queryer — at MaxOpenConns(1), calling
+			// s.snapshotAt (which uses s.db) here would deadlock waiting for a
+			// second connection that cannot be obtained while this tx pins the
+			// only one. Issue #21 / ARCH-3.
+			snapshotID, rewards, multiplier, share, err = snapshotAtTx(ctx, tx, ts)
+		}
 		if err != nil {
-			affected, quarantineErr := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, "missing_config_snapshot", now)
+			reason := "missing_config_snapshot"
+			if cacheProvenanceRequired {
+				reason = "missing_cache_config_snapshot"
+			}
+			affected, quarantineErr := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, reason, now)
 			if quarantineErr != nil {
 				return quarantineErr
 			}
@@ -220,7 +242,7 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 					return existsErr
 				}
 				if !exists {
-					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), intPtrFromNull(estimated), errorCode.String, in.Source, "missing_config_snapshot", now); err != nil {
+					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), intPtrFromNull(estimated), errorCode.String, in.Source, reason, now); err != nil {
 						return err
 					}
 					quarantined++
@@ -235,7 +257,7 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			v := prompt.Int64
 			pp = &v
 		}
-		if cached.Valid {
+		if cached.Valid && attemptN == 0 {
 			v := cached.Int64
 			cachedP = &v
 		}
@@ -309,12 +331,17 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 		if err := insertOperatorCreditTx(ctx, tx, id, input, result, now); err != nil {
 			return err
 		}
-		if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, tx, requestID, int64(attemptN), providerID); err != nil {
+		reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, tx, requestID, int64(attemptN), providerID)
+		if err != nil {
 			return err
 		}
 		created++
-		buyerEquivalent += result.GrossCredits
-		providerGross += result.GrossCredits
+		if reason == "" {
+			buyerEquivalent += result.GrossCredits
+			providerGross += result.GrossCredits
+		} else {
+			quarantined++
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -566,6 +593,16 @@ func invalidRecoveryCompletion(completion, estimated sql.NullInt64) bool {
 		return false
 	}
 	return !estimated.Valid || invalidRecoveryEstimate(estimated)
+}
+
+func invalidRecoveryCached(prompt, cached sql.NullInt64) bool {
+	if !cached.Valid {
+		return false
+	}
+	if invalidBillableTokenCount(cached.Int64) {
+		return true
+	}
+	return cached.Int64 > 0 && (!prompt.Valid || cached.Int64 > prompt.Int64)
 }
 
 func intPtrFromNull(v sql.NullInt64) *int64 {

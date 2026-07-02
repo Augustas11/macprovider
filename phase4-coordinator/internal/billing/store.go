@@ -182,6 +182,7 @@ CREATE TABLE IF NOT EXISTS ledger_provider_identity_snapshots (
     provider_id TEXT NOT NULL,
     resolved_from TEXT NOT NULL CHECK(resolved_from IN ('pool_entry','response_header','admin_recovery')),
     pool_session_started_at_utc TEXT NULL,
+    config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0),
     created_at_utc TEXT NOT NULL,
     UNIQUE(request_id, attempt_n, provider_assigned_id)
 );
@@ -322,6 +323,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_kind_created ON ledger_quarantine_resolutions
 	if err := s.ensureCachedPromptTokensColumn(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureLedgerProviderIdentityConfigSnapshotColumn(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureLedgerRequestCreditSettlementColumns(ctx); err != nil {
 		return err
 	}
@@ -401,6 +405,34 @@ func (s *Store) ensureCachedPromptTokensColumn(ctx context.Context) error {
 	_, err = s.db.ExecContext(ctx, `
 ALTER TABLE ledger_request_credits
 ADD COLUMN cached_prompt_tokens INTEGER NULL CHECK(cached_prompt_tokens IS NULL OR (cached_prompt_tokens >= 0 AND cached_prompt_tokens <= prompt_tokens))`)
+	return err
+}
+
+func (s *Store) ensureLedgerProviderIdentityConfigSnapshotColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(ledger_provider_identity_snapshots)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "config_snapshot_id" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+ALTER TABLE ledger_provider_identity_snapshots
+ADD COLUMN config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0)`)
 	return err
 }
 
@@ -693,6 +725,13 @@ func nullInt64(v *int64) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: *v, Valid: true}
+}
+
+func nullPositiveInt64(v int64) sql.NullInt64 {
+	if v <= 0 {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: v, Valid: true}
 }
 
 // ForceVoidEnabled returns the current value of the SPEC-005 v0.4

@@ -493,16 +493,17 @@ func (h *handler) buyerEquivalentCredits(ctx context.Context, from, to time.Time
 	// a hard error). The second pass only parses ts for rows that
 	// actually contribute to the credit total.
 	type requestLogScan struct {
-		requestID  string
-		tsText     string
-		model      string
-		prompt     sql.NullInt64
-		cached     sql.NullInt64
-		completion sql.NullInt64
-		status     int
-		errorCode  sql.NullString
-		cacheQuar  sql.NullString
-		attemptN   int
+		requestID          string
+		tsText             string
+		model              string
+		providerAssignedID string
+		prompt             sql.NullInt64
+		cached             sql.NullInt64
+		completion         sql.NullInt64
+		status             int
+		errorCode          sql.NullString
+		cacheQuar          sql.NullString
+		attemptN           int
 	}
 	// SPEC-002 v1.5.0 / issue #211 money-path defense-in-depth:
 	// the attempt_n subquery scopes by (account_id, request_id)
@@ -517,7 +518,7 @@ func (h *handler) buyerEquivalentCredits(ctx context.Context, from, to time.Time
 	// account_id legacy rows cluster among themselves only,
 	// preserving pre-v1.5.0 behavior.
 	rows, err := h.store.db.QueryContext(ctx, `
-SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.cached_prompt_tokens, rl.completion_tokens, rl.status, rl.error_code, rl.cache_quarantine_reason,
+SELECT rl.request_id, rl.ts_utc, rl.model, COALESCE(rl.provider_assigned_id, ''), rl.prompt_tokens, rl.cached_prompt_tokens, rl.completion_tokens, rl.status, rl.error_code, rl.cache_quarantine_reason,
        -- SPEC-002 v1.5.2 / SPEC-005 v0.3.3 (issue #168): prefer
        -- persisted rl.attempt_n when non-NULL; fall back to v0.3.1
        -- id-ASC derivation for legacy NULL rows during rollout.
@@ -536,7 +537,7 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.cached_prompt_to
 	scratch := []requestLogScan{}
 	for rows.Next() {
 		var s requestLogScan
-		if err := rows.Scan(&s.requestID, &s.tsText, &s.model, &s.prompt, &s.cached, &s.completion, &s.status, &s.errorCode, &s.cacheQuar, &s.attemptN); err != nil {
+		if err := rows.Scan(&s.requestID, &s.tsText, &s.model, &s.providerAssignedID, &s.prompt, &s.cached, &s.completion, &s.status, &s.errorCode, &s.cacheQuar, &s.attemptN); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -565,7 +566,10 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.cached_prompt_to
 			v := s.prompt.Int64
 			pp = &v
 		}
-		if s.cached.Valid {
+		if invalidRecoveryCached(s.prompt, s.cached) {
+			continue
+		}
+		if s.cached.Valid && s.attemptN == 0 {
 			v := s.cached.Int64
 			cachedP = &v
 		}
@@ -579,7 +583,19 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.cached_prompt_to
 			total += gross
 			continue
 		}
-		_, rewards, multiplier, share, err := h.store.snapshotAt(ctx, ts)
+		var rewards RewardsConfig
+		var multiplier, share int64
+		configSnapshotID, found, err := h.providerIdentityConfigSnapshotID(ctx, s.requestID, s.attemptN, s.providerAssignedID)
+		if err != nil {
+			return 0, err
+		}
+		if found {
+			rewards, multiplier, share, err = snapshotByIDQueryer(ctx, h.store.db, configSnapshotID)
+		} else if s.cached.Valid && s.cached.Int64 > 0 && s.attemptN == 0 {
+			continue
+		} else {
+			_, rewards, multiplier, share, err = h.store.snapshotAt(ctx, ts)
+		}
 		if err != nil {
 			continue
 		}
@@ -587,6 +603,23 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.cached_prompt_to
 		total += row.GrossCredits
 	}
 	return total, nil
+}
+
+func (h *handler) providerIdentityConfigSnapshotID(ctx context.Context, requestID string, attemptN int, providerAssignedID string) (int64, bool, error) {
+	var id sql.NullInt64
+	err := h.store.db.QueryRowContext(ctx, `
+SELECT config_snapshot_id
+  FROM ledger_provider_identity_snapshots
+ WHERE request_id = ? AND attempt_n = ? AND provider_assigned_id = ?
+ ORDER BY id DESC
+ LIMIT 1`, requestID, attemptN, providerAssignedID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return id.Int64, id.Valid, nil
 }
 
 func (h *handler) byteEstimatedLedgerGross(ctx context.Context, requestID string, attemptN int) (int64, bool, error) {

@@ -204,10 +204,10 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	if err := insertOperatorCreditTx(ctx, conn, requestCreditID, in, result, now); err != nil {
 		return err
 	}
-	if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
+	if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
 		return err
 	}
-	if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+	if _, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
 		return err
 	}
 	_, err = conn.ExecContext(ctx, `COMMIT`)
@@ -292,10 +292,10 @@ func insertProviderIdentitySnapshotTx(ctx context.Context, db sqlExecutor, in Ho
 	_, err := db.ExecContext(ctx, `
 INSERT INTO ledger_provider_identity_snapshots (
     request_id, attempt_n, provider_assigned_id, provider_id, resolved_from,
-    pool_session_started_at_utc, created_at_utc
-) VALUES (?, ?, ?, ?, 'pool_entry', NULL, ?)
+    pool_session_started_at_utc, config_snapshot_id, created_at_utc
+) VALUES (?, ?, ?, ?, 'pool_entry', NULL, ?, ?)
 ON CONFLICT(request_id, attempt_n, provider_assigned_id) DO NOTHING`,
-		in.RequestID, in.AttemptN, in.ProviderAssignedID, in.ProviderID, now,
+		in.RequestID, in.AttemptN, in.ProviderAssignedID, in.ProviderID, nullPositiveInt64(in.ConfigSnapshotID), now,
 	)
 	return err
 }

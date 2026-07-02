@@ -48,6 +48,9 @@ func TestBillingMigration(t *testing.T) {
 	if !columnExists(t, db, "ledger_request_credits", "cached_prompt_tokens") {
 		t.Fatalf("missing ledger_request_credits.cached_prompt_tokens")
 	}
+	if !columnExists(t, db, "ledger_provider_identity_snapshots", "config_snapshot_id") {
+		t.Fatalf("missing ledger_provider_identity_snapshots.config_snapshot_id")
+	}
 	if columnExists(t, db, "ledger_request_credits", "prompt_cache_hit_rate_per_mtok") {
 		t.Fatalf("ledger_request_credits.prompt_cache_hit_rate_per_mtok must not be persisted")
 	}
@@ -275,6 +278,48 @@ func TestWriteRequestLogWithIdentity_AllowsRecoveryAfterHotPathFailure(t *testin
 	}
 }
 
+func TestInsertProviderIdentitySnapshotDoesNotRetrofillConfigSnapshot(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, row := testHotPathInput(t, store)
+	input.RequestID = "identity-no-retrofill"
+	row.RequestID = input.RequestID
+	input.ConfigSnapshotID = snapshotID
+	if _, err := store.db.Exec(`
+INSERT INTO ledger_provider_identity_snapshots (
+    request_id, attempt_n, provider_assigned_id, provider_id, resolved_from, created_at_utc
+) VALUES (?, ?, ?, ?, 'pool_entry', ?)`,
+		input.RequestID,
+		input.AttemptN,
+		input.ProviderAssignedID,
+		input.ProviderID,
+		row.TSUtc.Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertProviderIdentitySnapshotTx(context.Background(), store.db, input, row.TSUtc.Add(time.Second).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	var got sql.NullInt64
+	if err := store.db.QueryRow(`
+SELECT config_snapshot_id
+  FROM ledger_provider_identity_snapshots
+ WHERE request_id = ? AND attempt_n = ? AND provider_assigned_id = ?`,
+		input.RequestID,
+		input.AttemptN,
+		input.ProviderAssignedID,
+	).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Valid {
+		t.Fatalf("config_snapshot_id retrofilled to %d, want NULL", got.Int64)
+	}
+}
+
 func TestRecoverLedger_ReplaysCachedPromptTokensFromRequestLogFallback(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	cfg := testRewards()
@@ -303,6 +348,15 @@ func TestRecoverLedger_ReplaysCachedPromptTokensFromRequestLogFallback(t *testin
 	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row, input); err != nil {
 		t.Fatal(err)
 	}
+	cfgReload := cfg
+	cfgReload.RateCard["model-a"] = RateCardEntry{
+		PromptCreditsPerMtok:         1000000,
+		PromptCacheHitCreditsPerMtok: 1000000,
+		CompletionCreditsPerMtok:     2000000,
+	}
+	if _, err := store.InsertConfigSnapshot(context.Background(), cfgReload, time.Unix(150, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
 	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "startup_scan"}
 	if err := store.RecoverLedger(context.Background(), in); err != nil {
 		t.Fatal(err)
@@ -313,6 +367,88 @@ func TestRecoverLedger_ReplaysCachedPromptTokensFromRequestLogFallback(t *testin
 	}
 	if gotCached != cached || gross != 11 {
 		t.Fatalf("recovered cached/gross=%d/%d want 4/11", gotCached, gross)
+	}
+}
+
+func TestRecoverLedger_CachedFallbackWithoutSnapshotProvenanceQuarantines(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	cfg.RateCard["model-a"] = RateCardEntry{
+		PromptCreditsPerMtok:         1000000,
+		PromptCacheHitCreditsPerMtok: 250000,
+		CompletionCreditsPerMtok:     2000000,
+	}
+	if _, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Unix(200, 0).UTC()
+	prompt, cached, completion := int64(10), int64(4), int64(2)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc: ts, RequestID: "fallback-cache-missing-snapshot", Model: "model-a", ProviderAssignedID: "assigned-a",
+		PromptTokens: &prompt, CachedPromptTokens: &cached, CompletionTokens: &completion, Status: 200, BuyerIP: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+INSERT INTO ledger_provider_identity_snapshots (
+    request_id, attempt_n, provider_assigned_id, provider_id, resolved_from, created_at_utc
+) VALUES ('fallback-cache-missing-snapshot', 0, 'assigned-a', 'provider-a', 'pool_entry', ?)`, ts.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	var gotCached sql.NullInt64
+	var gross int64
+	var reason string
+	if err := store.db.QueryRow(`
+SELECT cached_prompt_tokens, gross_credits, quarantine_reason
+  FROM ledger_request_credits
+ WHERE request_id = 'fallback-cache-missing-snapshot'`).Scan(&gotCached, &gross, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if gotCached.Valid || gross != 0 || reason != "missing_cache_config_snapshot" {
+		t.Fatalf("cached/gross/reason=%#v/%d/%s want NULL/0/missing_cache_config_snapshot", gotCached, gross, reason)
+	}
+}
+
+func TestRecoverLedger_RejectsInvalidCachedPromptTokensWithoutStoredReason(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Unix(200, 0).UTC()
+	prompt, cached, completion := int64(3), int64(4), int64(2)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc: ts, RequestID: "fallback-cache-invalid", Model: "model-a", ProviderAssignedID: "assigned-a",
+		PromptTokens: &prompt, CachedPromptTokens: &cached, CompletionTokens: &completion, Status: 200, BuyerIP: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+INSERT INTO ledger_provider_identity_snapshots (
+    request_id, attempt_n, provider_assigned_id, provider_id, resolved_from, config_snapshot_id, created_at_utc
+) VALUES ('fallback-cache-invalid', 0, 'assigned-a', 'provider-a', 'pool_entry', ?, ?)`, snapshotID, ts.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	var gotCached sql.NullInt64
+	var gross int64
+	var reason string
+	if err := store.db.QueryRow(`
+SELECT cached_prompt_tokens, gross_credits, quarantine_reason
+  FROM ledger_request_credits
+ WHERE request_id = 'fallback-cache-invalid'`).Scan(&gotCached, &gross, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if gotCached.Valid || gross != 0 || reason != "invalid_cached_prompt_tokens" {
+		t.Fatalf("cached/gross/reason=%#v/%d/%s want NULL/0/invalid_cached_prompt_tokens", gotCached, gross, reason)
 	}
 }
 
