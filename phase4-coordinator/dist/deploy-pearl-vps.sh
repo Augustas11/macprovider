@@ -1023,7 +1023,16 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
     echo "coordinator /catalog/current check failed: status=$STATUS body=$(head -c 300 "$CATALOG_SMOKE_TMP")" >&2
     exit 1
   fi
-  echo "  catalog OK: $(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print("catalog_id=%s models=%d" % (c.get("catalog_id"), len(c.get("models", []))))' "$CATALOG_SMOKE_TMP")"
+  # #292 R1 ARCH MED: `echo "$(python3 ...)"` under set -e is silent on
+  # python failure — echo succeeds regardless, so invalid JSON (or a
+  # 200 response body that isn't the catalog schema) prints
+  # "catalog OK:" and the deploy proceeds. Assign first, check exit
+  # explicitly, then echo.
+  CATALOG_SUMMARY=$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print("catalog_id=%s models=%d" % (c.get("catalog_id"), len(c.get("models", []))))' "$CATALOG_SMOKE_TMP") || {
+    echo "coordinator /catalog/current smoke: python3 parse failed on 200 body (head -c 300: $(head -c 300 "$CATALOG_SMOKE_TMP"))" >&2
+    exit 1
+  }
+  echo "  catalog OK: $CATALOG_SUMMARY"
 fi
 
 # R3+R4+R5 stats smoke check on STATS_DOMAIN.
