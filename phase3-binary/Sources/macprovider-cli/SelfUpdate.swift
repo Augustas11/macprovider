@@ -620,7 +620,7 @@ struct LocalStatusClient {
 }
 
 struct LocalStatusFormatter {
-    static func format(_ status: [String: Any], latestVersion: String? = nil, ownerLogin: String? = nil) -> String {
+    static func format(_ status: [String: Any], latestVersion: String? = nil, ownerLogin: String? = nil, donorMode: Bool = false, staleRecommendationSince: Date? = nil) -> String {
         let capacity = status["capacity"] as? [String: Any] ?? [:]
         let coordinator = status["coordinator"] as? [String: Any] ?? [:]
         let version = status["binary_version"] as? String ?? CoordinatorClient.binaryVersion
@@ -636,6 +636,10 @@ struct LocalStatusFormatter {
         } else {
             latestLine = "unknown (run 'macprovider-cli update --check')"
         }
+        let donorBadge = donorMode ? " DONOR MODE" : ""
+        let staleBlock = staleRecommendationSince.map {
+            "\nRecommendation stale: recommendation inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: $0)).\nRun: macprovider-cli autotune --recommend\n"
+        } ?? ""
 
         return """
         macprovider-cli v\(version)
@@ -643,7 +647,7 @@ struct LocalStatusFormatter {
         Local:
           Provider ID:  \(string(status["provider_id"]))
           Owner: \(ownerLine)
-          Model:       \(string(status["model"]))
+          Model:       \(string(status["model"]))\(donorBadge)
           Status:      \(string(status["status"]))
           Uptime:      \(uptime)
           Requests:    \(status["requests_total"] ?? 0) served, \(status["errors_total"] ?? 0) errors
@@ -661,6 +665,7 @@ struct LocalStatusFormatter {
         Update:
           Current:     v\(version)
           Latest:      \(latestLine)
+        \(staleBlock)
         """
     }
 

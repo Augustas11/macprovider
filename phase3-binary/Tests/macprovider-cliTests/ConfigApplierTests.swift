@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import MacProviderCore
 import XCTest
@@ -13,6 +14,8 @@ final class ConfigApplierTests: XCTestCase {
         XCTAssertEqual(applied.backupPath.lastPathComponent, "config.yaml.bak-1718712345-0")
         XCTAssertEqual(try String(contentsOf: applied.backupPath), sampleConfig())
         XCTAssertTrue(applied.summary.contains("backup at \(applied.backupPath.path)"))
+        XCTAssertEqual(try fileMode(applied.backupPath) & 0o777, 0o600)
+        XCTAssertEqual(try fileMode(fixture.configURL) & 0o777, 0o600)
     }
 
     func testApplyIncrementsCounterWhenBackupExists() throws {
@@ -87,6 +90,72 @@ final class ConfigApplierTests: XCTestCase {
 
         let post = try String(contentsOf: fixture.configURL)
         XCTAssertFalse(post.contains("kv_bits:"))
+    }
+
+    func testApplyWritesArtifactHashAndConfigLoaderReadsIt() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        let artifactSHA = String(repeating: "a", count: 64)
+        var recommendation = recommendation()
+        recommendation.model = "test-public-model"
+        recommendation.modelArtifactPath = "/tmp/macprovider-test-snapshot"
+        recommendation.modelArtifactSHA256 = artifactSHA
+
+        _ = try fixture.applier().apply(recommendation: recommendation, now: fixture.now)
+
+        let post = try String(contentsOf: fixture.configURL)
+        XCTAssertTrue(post.contains("model: test-public-model\n"))
+        XCTAssertTrue(post.contains("model_artifact_path: /tmp/macprovider-test-snapshot\n"))
+        XCTAssertTrue(post.contains("model_artifact_sha256: \(artifactSHA)\n"))
+        let loaded = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: fixture.configURL.path),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in post }
+        )
+        XCTAssertEqual(loaded.model, "test-public-model")
+        XCTAssertEqual(loaded.modelArtifactPath, "/tmp/macprovider-test-snapshot")
+        XCTAssertEqual(loaded.modelArtifactSHA256, artifactSHA)
+    }
+
+    func testApplyWritesDonorCatalogBindingAndConfigLoaderReadsIt() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        let artifactSHA = String(repeating: "b", count: 64)
+        let catalogHash = String(repeating: "c", count: 64)
+        var recommendation = recommendation()
+        recommendation.model = "test-model"
+        recommendation.modelArtifactPath = "/tmp/macprovider-test-snapshot"
+        recommendation.modelArtifactSHA256 = artifactSHA
+        recommendation.modelCatalogKey = "test-model"
+        recommendation.modelCatalogModelID = "test/model"
+        recommendation.modelCatalogRevision = String(repeating: "1", count: 40)
+        recommendation.modelCatalogSHA256 = artifactSHA
+        recommendation.modelCatalogVersion = "test-catalog"
+        recommendation.modelCatalogHash = catalogHash
+
+        _ = try fixture.applier().apply(recommendation: recommendation, now: fixture.now, donorMode: true)
+
+        let post = try String(contentsOf: fixture.configURL)
+        XCTAssertTrue(post.contains("model_catalog_key: test-model\n"))
+        XCTAssertTrue(post.contains("model_catalog_model_id: test/model\n"))
+        XCTAssertTrue(post.contains("model_catalog_revision: \(String(repeating: "1", count: 40))\n"))
+        XCTAssertTrue(post.contains("model_catalog_sha256: \(artifactSHA)\n"))
+        XCTAssertTrue(post.contains("model_catalog_version: test-catalog\n"))
+        XCTAssertTrue(post.contains("model_catalog_hash: \(catalogHash)\n"))
+        let loaded = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: fixture.configURL.path),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in post }
+        )
+        XCTAssertTrue(loaded.donorMode)
+        XCTAssertEqual(loaded.modelCatalogKey, "test-model")
+        XCTAssertEqual(loaded.modelCatalogModelID, "test/model")
+        XCTAssertEqual(loaded.modelCatalogRevision, String(repeating: "1", count: 40))
+        XCTAssertEqual(loaded.modelCatalogSHA256, artifactSHA)
+        XCTAssertEqual(loaded.modelCatalogVersion, "test-catalog")
+        XCTAssertEqual(loaded.modelCatalogHash, catalogHash)
     }
 
     func testApplyIsIdempotent() throws {
@@ -199,6 +268,38 @@ final class ConfigApplierTests: XCTestCase {
         XCTAssertEqual(loaded.maxConcurrencyOverride, 1)
     }
 
+    func testApplyDonorModeWritesConfigAndSummary() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+
+        let applied = try fixture.applier().apply(recommendation: recommendation(), now: fixture.now, donorMode: true)
+
+        let post = try String(contentsOf: fixture.configURL)
+        XCTAssertTrue(post.contains("donor_mode: true\n"))
+        XCTAssertTrue(applied.summary.contains("donor_mode=true"))
+        let loaded = try ConfigLoader.load(cli: CLIOverrides(configPath: fixture.configURL.path), environment: [:])
+        XCTAssertTrue(loaded.donorMode)
+    }
+
+    func testApplyDonorModeRendersForNewConfig() throws {
+        let fixture = try ConfigFixture()
+
+        _ = try fixture.applier().apply(recommendation: recommendation(), now: fixture.now, donorMode: true)
+
+        let post = try String(contentsOf: fixture.configURL)
+        XCTAssertTrue(post.contains("donor_mode: true\n"))
+    }
+
+    func testConfigLoaderReadsDonorModeFromEnvironment() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_DONOR_MODE": "true"],
+            fileExists: { _ in false }
+        )
+
+        XCTAssertTrue(config.donorMode)
+    }
+
     func testLaunchdRestartHintIncludesAllRequiredSubstrings() {
         let hint = RecommendationEmitter.launchdRestartHint()
 
@@ -247,7 +348,11 @@ final class ConfigApplierTests: XCTestCase {
 
     private func nonOwnedLines(_ text: String) -> [String] {
         let ownedKeys: Set<String> = [
-            "model", "kv_bits", "max_context_override", "max_concurrency_override",
+            "model", "model_artifact_sha256", "model_catalog_key", "model_catalog_model_id",
+            "model_artifact_path", "model_catalog_revision", "model_catalog_sha256",
+            "model_catalog_version", "model_catalog_hash", "kv_bits", "max_context_override",
+            "max_concurrency_override",
+            "donor_mode",
         ]
         return text.split(separator: "\n", omittingEmptySubsequences: false).compactMap { sub in
             let line = String(sub)
@@ -259,6 +364,12 @@ final class ConfigApplierTests: XCTestCase {
             }
             return isOwned ? nil : line
         }
+    }
+
+    private func fileMode(_ url: URL) throws -> mode_t {
+        var st = stat()
+        XCTAssertEqual(lstat(url.path, &st), 0)
+        return st.st_mode
     }
 }
 
