@@ -583,6 +583,16 @@ $SSH "set -e
   # coordinator.streamvc.live/static/*. Files are world-readable
   # (mode 0644) because they are public signed content; nginx runs as
   # www-data. Directory itself is world-executable so www-data can enter.
+  #
+  # /opt/macprovider/ is provisioned as root:macprovider 0750, which
+  # blocks www-data (not in the macprovider group) from traversing INTO
+  # any subdir including /static/. Add +x for others so nginx can walk
+  # the path; contents of siblings (coordinator, coordinator-cli,
+  # coordinator.yaml, coordinator.env) stay unreadable — their own modes
+  # 0750/0640 unchanged, +x on the parent only adds path-traversal, not
+  # listing or reading. Caught 2026-07-02 v1.7.3 first deploy: smoke
+  # returned 404 until the parent chmod was applied.
+  chmod o+x /opt/macprovider
   mkdir -p /opt/macprovider/static
   chown root:root /opt/macprovider/static
   chmod 0755      /opt/macprovider/static
