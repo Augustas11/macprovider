@@ -40,9 +40,26 @@ set -euo pipefail
 
 # TLS state machine (classify/plan/message) lives in a sourced helper
 # (lib/pearl_tls.sh) so it can be exercised by fixture tests without a
-# real deploy. Issue #291. Resolve path via BASH_SOURCE so the script
-# works from any CWD and from a symlink.
-_PEARL_TLS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# real deploy. Issue #291.
+#
+# R1 SEC MED — resolve the PHYSICAL script path (walk symlinks) before
+# sourcing. Plain `dirname "${BASH_SOURCE[0]}"` returns the symlink's
+# parent, not the real target's parent, which would let a symlink
+# invocation from an attacker-writable dir source a hostile helper.
+# macOS bash 3.2 has no `readlink -f`, so we walk symlinks by hand.
+_pearl_resolve_symlink() {
+  local src="$1" dir
+  while [ -h "$src" ]; do
+    dir="$(cd "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in
+      /*) ;;             # absolute — use as-is
+      *) src="$dir/$src" ;;
+    esac
+  done
+  cd "$(dirname "$src")" && pwd
+}
+_PEARL_TLS_SCRIPT_DIR="$(_pearl_resolve_symlink "${BASH_SOURCE[0]}")"
 # shellcheck source=lib/pearl_tls.sh
 . "$_PEARL_TLS_SCRIPT_DIR/lib/pearl_tls.sh"
 

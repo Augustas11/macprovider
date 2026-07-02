@@ -93,9 +93,20 @@ _reset() {
   PEARL_TLS_NONPRIMARY_FAILED=0
 }
 
+# _classify_ok — CODE R1 MED fix: success-path calls MUST assert rc=0.
+# Without this, a bug where pearl_tls_classify returns nonzero AFTER
+# correctly mutating arrays would pass all downstream assertions but
+# make deploy-pearl-vps.sh exit at `|| exit 1`.
+_classify_ok() {
+  local name="$1" status_text="$2"
+  local rc=0
+  pearl_tls_classify "$status_text" 2>/dev/null || rc=$?
+  _assert_eq "$name (classify rc=0)" "0" "$rc"
+}
+
 # T01 HAVE + HAVE → no stub, no certbot
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "HAVE coordinator.streamvc.live
+_classify_ok "T01" "HAVE coordinator.streamvc.live
 HAVE stats.streamvc.live"
 _assert_eq "T01 have_cert count"    "2" "${#DOMAINS_HAVE_CERT[@]}"
 _assert_eq "T01 need_cert count"    "0" "${#DOMAINS_NEED_CERT[@]}"
@@ -103,7 +114,7 @@ _assert_eq "T01 need_stub count"    "0" "${#DOMAINS_NEED_STUB[@]}"
 
 # T02 RENEW + HAVE → certbot RENEW, no stub
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "RENEW coordinator.streamvc.live
+_classify_ok "T02" "RENEW coordinator.streamvc.live
 HAVE stats.streamvc.live"
 _assert_eq "T02 have_cert count"    "1" "${#DOMAINS_HAVE_CERT[@]}"
 _assert_eq "T02 need_cert count"    "1" "${#DOMAINS_NEED_CERT[@]}"
@@ -112,7 +123,7 @@ _assert_eq "T02 need_cert domain"   "coordinator.streamvc.live" "${DOMAINS_NEED_
 
 # T03 EXPIRED + HAVE → stub + certbot for EXPIRED
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "EXPIRED coordinator.streamvc.live
+_classify_ok "T03" "EXPIRED coordinator.streamvc.live
 HAVE stats.streamvc.live"
 _assert_eq "T03 have_cert count"    "1" "${#DOMAINS_HAVE_CERT[@]}"
 _assert_eq "T03 need_cert count"    "1" "${#DOMAINS_NEED_CERT[@]}"
@@ -121,14 +132,14 @@ _assert_eq "T03 need_stub domain"   "coordinator.streamvc.live" "${DOMAINS_NEED_
 
 # T04 MISSING + HAVE → stub + certbot for MISSING
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "MISSING coordinator.streamvc.live
+_classify_ok "T04" "MISSING coordinator.streamvc.live
 HAVE stats.streamvc.live"
 _assert_eq "T04 need_stub count"    "1" "${#DOMAINS_NEED_STUB[@]}"
 _assert_eq "T04 need_stub domain"   "coordinator.streamvc.live" "${DOMAINS_NEED_STUB[0]}"
 
 # T05 EXPIRED + MISSING → stub for both, certbot for both
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "EXPIRED coordinator.streamvc.live
+_classify_ok "T05" "EXPIRED coordinator.streamvc.live
 MISSING stats.streamvc.live"
 _assert_eq "T05 have_cert count"    "0" "${#DOMAINS_HAVE_CERT[@]}"
 _assert_eq "T05 need_cert count"    "2" "${#DOMAINS_NEED_CERT[@]}"
@@ -136,14 +147,14 @@ _assert_eq "T05 need_stub count"    "2" "${#DOMAINS_NEED_STUB[@]}"
 
 # T06 RENEW + RENEW → certbot both, no stubs
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "RENEW coordinator.streamvc.live
+_classify_ok "T06" "RENEW coordinator.streamvc.live
 RENEW stats.streamvc.live"
 _assert_eq "T06 need_cert count"    "2" "${#DOMAINS_NEED_CERT[@]}"
 _assert_eq "T06 need_stub count"    "0" "${#DOMAINS_NEED_STUB[@]}"
 
 # T07 primary MISSING + certbot fail → PRIMARY_FAILED=1
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "MISSING coordinator.streamvc.live
+_classify_ok "T07" "MISSING coordinator.streamvc.live
 HAVE stats.streamvc.live"
 DOMAINS_ISSUED_FAIL=("coordinator.streamvc.live")
 pearl_tls_check_issuance_failures "coordinator.streamvc.live"
@@ -152,25 +163,40 @@ _assert_eq "T07 nonprimary_failed"  "0" "$PEARL_TLS_NONPRIMARY_FAILED"
 
 # T08 non-primary MISSING + fail → NONPRIMARY_FAILED=1
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "HAVE coordinator.streamvc.live
+_classify_ok "T08" "HAVE coordinator.streamvc.live
 MISSING stats.streamvc.live"
 DOMAINS_ISSUED_FAIL=("stats.streamvc.live")
 pearl_tls_check_issuance_failures "coordinator.streamvc.live"
 _assert_eq "T08 primary_failed"     "0" "$PEARL_TLS_PRIMARY_FAILED"
 _assert_eq "T08 nonprimary_failed"  "1" "$PEARL_TLS_NONPRIMARY_FAILED"
 
-# T09 plan_full_tls picks HAVE ∪ ISSUED_OK
+# T09 plan_full_tls picks HAVE ∪ ISSUED_OK and DROPS ISSUED_FAIL.
+# R1 CODE LOW + ARCH MED: original T09 set ISSUED_FAIL=() and only
+# checked count — a bug that included ISSUED_FAIL would pass. Now
+# populate a real failed domain and assert exact contents.
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "RENEW coordinator.streamvc.live
+_classify_ok "T09" "EXPIRED coordinator.streamvc.live
+HAVE stats.streamvc.live"
+DOMAINS_ISSUED_OK=()
+DOMAINS_ISSUED_FAIL=("coordinator.streamvc.live")   # certbot failed for primary
+pearl_tls_plan_full_tls
+_assert_eq "T09 full_tls count (fail excluded)"  "1" "${#DOMAINS_FULL_TLS[@]}"
+_assert_eq "T09 full_tls content"                "stats.streamvc.live" "${DOMAINS_FULL_TLS[0]}"
+
+# T09b plan_full_tls with HAVE ∪ ISSUED_OK when a RENEW succeeds
+_reset "coordinator.streamvc.live" "stats.streamvc.live"
+_classify_ok "T09b" "RENEW coordinator.streamvc.live
 HAVE stats.streamvc.live"
 DOMAINS_ISSUED_OK=("coordinator.streamvc.live")
 DOMAINS_ISSUED_FAIL=()
 pearl_tls_plan_full_tls
-_assert_eq "T09 full_tls count"     "2" "${#DOMAINS_FULL_TLS[@]}"
+_assert_eq "T09b full_tls count"                 "2" "${#DOMAINS_FULL_TLS[@]}"
+_assert_eq "T09b full_tls has HAVE first"        "stats.streamvc.live" "${DOMAINS_FULL_TLS[0]}"
+_assert_eq "T09b full_tls has ISSUED_OK second"  "coordinator.streamvc.live" "${DOMAINS_FULL_TLS[1]}"
 
 # T10 certbot_fail_warn: RENEW mentions "keeps serving"
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "RENEW coordinator.streamvc.live
+_classify_ok "T10" "RENEW coordinator.streamvc.live
 HAVE stats.streamvc.live"
 warn=$(pearl_tls_certbot_fail_warn "coordinator.streamvc.live")
 _assert_contains "T10 renew warn" "was RENEW" "$warn"
@@ -178,7 +204,7 @@ _assert_contains "T10 renew warn body" "keeps serving" "$warn"
 
 # T11 certbot_fail_warn: MISSING mentions "HTTPS unavailable"
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "MISSING coordinator.streamvc.live
+_classify_ok "T11" "MISSING coordinator.streamvc.live
 HAVE stats.streamvc.live"
 warn=$(pearl_tls_certbot_fail_warn "coordinator.streamvc.live")
 _assert_contains "T11 missing warn" "was MISSING" "$warn"
@@ -186,17 +212,71 @@ _assert_contains "T11 missing warn body" "HTTPS unavailable" "$warn"
 
 # T12 primary_abort_msg RENEW mentions "existing TLS vhost"
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "RENEW coordinator.streamvc.live
+_classify_ok "T12" "RENEW coordinator.streamvc.live
 HAVE stats.streamvc.live"
 abort=$(pearl_tls_primary_abort_msg "coordinator.streamvc.live")
 _assert_contains "T12 abort RENEW" "existing TLS vhost left in place" "$abort"
 
 # T13 primary_abort_msg MISSING mentions "ACME stub is in place"
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "MISSING coordinator.streamvc.live
+_classify_ok "T13" "MISSING coordinator.streamvc.live
 HAVE stats.streamvc.live"
 abort=$(pearl_tls_primary_abort_msg "coordinator.streamvc.live")
 _assert_contains "T13 abort MISSING" "ACME stub is in place" "$abort"
+
+# R1 ARCH MED — add missing prior-state × certbot-fail × primary/non-primary combos.
+# T13a: RENEW + certbot fail on PRIMARY → PRIMARY_FAILED=1, abort text "existing TLS vhost"
+_reset "coordinator.streamvc.live" "stats.streamvc.live"
+_classify_ok "T13a" "RENEW coordinator.streamvc.live
+HAVE stats.streamvc.live"
+DOMAINS_ISSUED_FAIL=("coordinator.streamvc.live")
+pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_assert_eq "T13a RENEW primary_failed"     "1" "$PEARL_TLS_PRIMARY_FAILED"
+_assert_eq "T13a RENEW nonprimary_failed"  "0" "$PEARL_TLS_NONPRIMARY_FAILED"
+abort=$(pearl_tls_primary_abort_msg "coordinator.streamvc.live")
+_assert_contains "T13a RENEW abort text" "existing TLS vhost left in place" "$abort"
+
+# T13b: EXPIRED + certbot fail on PRIMARY → PRIMARY_FAILED=1, abort text "ACME stub"
+_reset "coordinator.streamvc.live" "stats.streamvc.live"
+_classify_ok "T13b" "EXPIRED coordinator.streamvc.live
+HAVE stats.streamvc.live"
+DOMAINS_ISSUED_FAIL=("coordinator.streamvc.live")
+pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_assert_eq "T13b EXPIRED primary_failed"     "1" "$PEARL_TLS_PRIMARY_FAILED"
+abort=$(pearl_tls_primary_abort_msg "coordinator.streamvc.live")
+_assert_contains "T13b EXPIRED abort text" "ACME stub is in place" "$abort"
+
+# T13c: RENEW + certbot fail on NON-PRIMARY (stats) → NONPRIMARY_FAILED=1 only
+_reset "coordinator.streamvc.live" "stats.streamvc.live"
+_classify_ok "T13c" "HAVE coordinator.streamvc.live
+RENEW stats.streamvc.live"
+DOMAINS_ISSUED_FAIL=("stats.streamvc.live")
+pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_assert_eq "T13c RENEW nonprim primary_failed"     "0" "$PEARL_TLS_PRIMARY_FAILED"
+_assert_eq "T13c RENEW nonprim nonprimary_failed"  "1" "$PEARL_TLS_NONPRIMARY_FAILED"
+# Non-primary WARN text
+warn=$(pearl_tls_certbot_fail_warn "stats.streamvc.live")
+_assert_contains "T13c nonprim RENEW warn" "was RENEW" "$warn"
+
+# T13d: EXPIRED + certbot fail on NON-PRIMARY
+_reset "coordinator.streamvc.live" "stats.streamvc.live"
+_classify_ok "T13d" "HAVE coordinator.streamvc.live
+EXPIRED stats.streamvc.live"
+DOMAINS_ISSUED_FAIL=("stats.streamvc.live")
+pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_assert_eq "T13d EXPIRED nonprim primary_failed"     "0" "$PEARL_TLS_PRIMARY_FAILED"
+_assert_eq "T13d EXPIRED nonprim nonprimary_failed"  "1" "$PEARL_TLS_NONPRIMARY_FAILED"
+warn=$(pearl_tls_certbot_fail_warn "stats.streamvc.live")
+_assert_contains "T13d nonprim EXPIRED warn" "was EXPIRED" "$warn"
+
+# T13e: BOTH primary + non-primary fail simultaneously → both flags set
+_reset "coordinator.streamvc.live" "stats.streamvc.live"
+_classify_ok "T13e" "MISSING coordinator.streamvc.live
+MISSING stats.streamvc.live"
+DOMAINS_ISSUED_FAIL=("coordinator.streamvc.live" "stats.streamvc.live")
+pearl_tls_check_issuance_failures "coordinator.streamvc.live"
+_assert_eq "T13e both primary_failed"     "1" "$PEARL_TLS_PRIMARY_FAILED"
+_assert_eq "T13e both nonprimary_failed"  "1" "$PEARL_TLS_NONPRIMARY_FAILED"
 
 # T14 malformed line (extra field) → non-zero + stderr mentions "extra field"
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
@@ -234,7 +314,7 @@ _assert_contains "T18 stderr" "cert-status missing for domain" "$err"
 
 # T19 bash-3.2 + set -u guard: empty DOMAINS_ISSUED_FAIL iteration doesn't unbound
 _reset "coordinator.streamvc.live" "stats.streamvc.live"
-pearl_tls_classify "HAVE coordinator.streamvc.live
+_classify_ok "T19" "HAVE coordinator.streamvc.live
 HAVE stats.streamvc.live"
 DOMAINS_ISSUED_FAIL=()
 # Turn set -u on locally to prove the ${arr[@]+"${arr[@]}"} guard works
@@ -316,11 +396,60 @@ _assert_eq "T23 RENEW" "RENEW renew.example" "$out"
 # defeating the purpose).
 _empty_dir="$_probe_fixture_dir/empty_path"
 mkdir -p "$_empty_dir"
-_bash_exe="$(command -v bash)"
+# R1 SEC LOW harden: prefer $BASH (set by bash itself) over PATH-
+# resolved lookup so a poisoned PATH cannot substitute a fake bash.
+_bash_exe="${BASH:-/bin/bash}"
+case "$_bash_exe" in
+  /*) ;;
+  *)  echo "FAIL: \$BASH resolved to non-absolute path '$_bash_exe'"; exit 1 ;;
+esac
 probe_text=$(pearl_tls_remote_probe_script | sed "s|/etc/letsencrypt/live|$_probe_fixture_dir/live|g")
 out=$(PATH="$_empty_dir" "$_bash_exe" -c "$probe_text" -- "have.example" 2>&1) && rc=0 || rc=$?
 _assert_eq "T24 rc"       "1" "$rc"
 _assert_contains "T24 stderr" "ABORT openssl-missing-on-remote" "$out"
+
+# T25 SEC R1 MED: sourcing via symlink resolves to the REAL script's
+# lib dir, not the symlink's parent dir. Prove by placing a hostile
+# lib in the symlink's parent — sourcing must ignore it.
+_symlink_dir="$_probe_fixture_dir/symlink_test"
+mkdir -p "$_symlink_dir/lib"
+# Point the deploy symlink at the real deploy script under the
+# canonical dist/ location.
+_real_deploy="$SCRIPT_DIR/../deploy-pearl-vps.sh"
+if [ -f "$_real_deploy" ]; then
+  ln -sf "$_real_deploy" "$_symlink_dir/deploy-fake.sh"
+  # Plant a hostile lib in the symlink's parent that would set a
+  # sentinel if sourced. If the resolver walks the symlink correctly,
+  # THIS lib must NOT be sourced.
+  cat > "$_symlink_dir/lib/pearl_tls.sh" <<'HOSTILE'
+export PEARL_TLS_HOSTILE_SOURCED=1
+HOSTILE
+  # Extract just the sourcing block and run it in isolation.
+  _resolve_snippet='
+_pearl_resolve_symlink() {
+  local src="$1" dir
+  while [ -h "$src" ]; do
+    dir="$(cd "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in
+      /*) ;;
+      *) src="$dir/$src" ;;
+    esac
+  done
+  cd "$(dirname "$src")" && pwd
+}
+resolved="$(_pearl_resolve_symlink "'"$_symlink_dir/deploy-fake.sh"'")"
+echo "$resolved"
+'
+  resolved_dir=$(bash -c "$_resolve_snippet" 2>&1)
+  _real_dist_dir=$(cd "$SCRIPT_DIR/.." && pwd)
+  _assert_eq "T25 symlink resolves to real dist" "$_real_dist_dir" "$resolved_dir"
+else
+  # Deploy script not present in this worktree state — assert-skip
+  PASS=$((PASS+1))
+  LOG="${LOG}  PASS  T25 (skipped: real deploy script not present)
+"
+fi
 
 # ---- summary ----
 printf '%s\n' "$LOG"
