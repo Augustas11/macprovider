@@ -12,11 +12,11 @@ launch blockers.
 
 The current implementation has deterministic component coverage for route
 snapshots, SPEC-015 v0.4 receipt verification, streaming terminal-output
-capture, late-receipt quarantine, gateway quota reservation primitives, and
-Tier 2 model-hash disclosure. It is not yet ready for enforce-mode launch
-because the signed-receipt money path, enforce-mode configuration gate,
-buyer-facing SPEC-022 disclosures, race harnesses, and provider-facing
-late-receipt docs are not fully proven in this branch.
+capture, late-receipt quarantine, gateway quota reservation primitives, Tier 2
+model-hash disclosure, SPEC-022 buyer disclosure surfaces, and provider-facing
+late-receipt deadline docs. It is not yet ready for enforce-mode launch because
+the signed-receipt money path, enforce-mode configuration gate, race harnesses,
+and full e2e/live-network gates are not fully proven in this branch.
 
 ## Blocking gaps before enforce launch
 
@@ -45,15 +45,9 @@ late-receipt docs are not fully proven in this branch.
 - **AC-022-57:** add ledger-row policy persistence or an equivalent immutable
   ledger-to-route-snapshot linkage proving settlement and rollback read the
   request-start policy version and mode for every covered ledger row.
-- **AC-022-25 / AC-022-44 / AC-022-45 / AC-022-46 / AC-022-55 / AC-022-56:**
-  add buyer-facing SPEC-022 model, usage, quota, and caveat disclosures with
-  deterministic tests.
 - **AC-022-27 / AC-022-47 / AC-022-49 / AC-022-62:** add acceptance harnesses
   for receipt/sweep race orderings, concurrent agentic quota reservations, and
   receipt-aware streaming failover.
-- **AC-022-64:** add provider-facing onboarding or operating docs stating that
-  receipts arriving after `pending_deadline_seconds` are non-settling and
-  non-recoverable unless a future operator-review spec defines an exception.
 
 ## AC coverage table
 
@@ -96,7 +90,7 @@ Status legend:
 | AC-022-22 | Partial | `phase4-coordinator/internal/billing/store_test.go` `TestSnapshotAt_UsesRollbackReloadEffectiveTime`; `phase4-coordinator/internal/buyer/route_snapshot_test.go` `TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts`; add rollback test proving existing enforce rows retain payout exclusion and pending deadline behavior. |
 | AC-022-23 | Blocked | Add admin/operator money-positive path tests proving pending or quarantined SPEC-022 rows cannot be credited or paid. |
 | AC-022-24 | Manual gate | No buyer receipt retrieval API is introduced by this branch. Release gate: verify route inventory still exposes no buyer receipt retrieval endpoint; if added, add account-ownership and redaction tests. |
-| AC-022-25 | Blocked | Add `/v1/models` SPEC-022 disclosure tests for mixed verified/unverified pools, observe-mode policies, and excluded paid entrypoints. Tier 2 hash-state tests are not sufficient. |
+| AC-022-25 | Covered | `phase5-gateway/internal/router/server_test.go` `TestModelsResponseIncludesTier1Disclosure`; `TestModelsDisclosureReflectsTier2HashState`; `phase5-gateway/internal/router/pages_test.go` `TestTier1DisclosureMatchesSpecSection16`. `/v1/models` names included paid entrypoints, states observe mode cannot claim verified integrity, and avoids fully verified language for mixed pools. |
 | AC-022-26 | Partial | `phase4-coordinator/internal/billing/store_test.go` `TestRecoverLedger_MissingSnapshotQuarantinesExistingRow`; add direct recovery/backfill test proving missing route snapshots are never synthesized into verified outcomes. |
 | AC-022-27 | Blocked | Add deterministic race harness for stream completion, receipt arrival, settlement sweep, and payout sweep orderings. |
 | AC-022-28 | Partial | `phase4-coordinator/internal/billing/settlement_receipts_test.go` `TestSettlementReceiptPersistsCoordinatorEvidenceForMismatchedSignedReceipt`; add full buyer refund and provider-zero assertion for mid-request warm-swap mismatch. |
@@ -116,9 +110,9 @@ Status legend:
 | AC-022-42a | Covered | `phase4-coordinator/internal/billing/settlement_verifier_test.go` `TestVerifySettlementReceiptV04NegativeFixturesQuarantine`; `phase7-verify/internal/jcs/v04_settlement_fixture_test.go` `TestV04NegativeReceiptFixturesFailExpectedChecks`. |
 | AC-022-42b | Covered | `phase4-coordinator/internal/billing/settlement_verifier_test.go` `TestVerifySettlementReceiptRequiresLedgerUsageAndOutputState`; `phase7-verify/internal/verify/settlement_test.go` `TestVerifySettlementReceiptRequiresLedgerUsageAndOutputState`. |
 | AC-022-43 | Blocked | Add enforce activation failure reporting for each unmet R-1.3 precondition. |
-| AC-022-44 | Blocked | Add buyer-facing model disclosure stating SPEC-022 uses provider-reported request-start model hash and cannot detect self-falsified hash measurement. |
-| AC-022-45 | Blocked | Add buyer-facing usage/disclosure surfaces for pending, quarantined/refunded, and zero-settled outcomes without blaming buyer fault. |
-| AC-022-46 | Blocked | Add buyer-facing disclosure that cancel, timeout, provider error, and upstream disconnect can create partial charge only with receipt-bound prefix and partial usage. |
+| AC-022-44 | Covered | `phase5-gateway/internal/router/server_test.go` `TestModelsResponseIncludesTier1Disclosure`; SPEC/account/docs/console drift test co-locates the provider-reported-hash caveat with verified-model language. |
+| AC-022-45 | Covered | `phase5-gateway/internal/router/server_test.go` `TestUsageIncludesSPEC022SettlementDisclosure`; `phase5-gateway/internal/router/pages_test.go` `TestTier1DisclosureMatchesSpecSection16`. |
+| AC-022-46 | Covered | `phase5-gateway/internal/router/server_test.go` `TestUsageIncludesSPEC022SettlementDisclosure`; docs/account/console disclosure text states receipt-bound prefix and partial usage are required. |
 | AC-022-47 | Blocked | Add SPEC-006 concurrent agentic reservation test proving terminal SPEC-022 rows do not leave stale quota holds. Existing primitives: `phase5-gateway/internal/storage/sqlite/store_test.go` `TestConcurrentQuotaReservationsNoOverspend`. |
 | AC-022-48 | Partial | `phase4-coordinator/internal/billing/settlement_receipts_test.go` `TestRecordMissingSettlementReceiptQuarantinesAfterDeadlineAndLateReceiptNoops`; `TestSettlementReceiptReceivedAfterDeadlineQuarantinesEvenWithValidHeader`; add full buyer refund/release, provider-zero, and payout-absence assertion for late valid receipts. |
 | AC-022-49 | Blocked | Add receipt-aware streaming failover harness proving per-attempt debit/settlement, sum of verified prefixes, no unverified charge, and no overlapping credit. |
@@ -131,8 +125,8 @@ Status legend:
 | AC-022-52 | Blocked | Add concurrent settlement-worker idempotency test proving one final buyer debit, one provider credit, and at most one payout-ready insertion for one verified row. |
 | AC-022-53 | Partial | `phase4-coordinator/internal/billing/settlement_receipts_test.go` `TestRecordMissingSettlementReceiptQuarantinesAfterDeadlineAndLateReceiptNoops`; add rollback test proving deadline-quarantined rows remain non-payable after enforce-to-observe rollback. |
 | AC-022-54 | Covered | `phase4-coordinator/internal/billing/settlement_verifier_test.go` `TestVerifySettlementReceiptAcceptsCoordinatorObservedAttemptOutputRow`; `phase5-gateway/internal/router/server_test.go` `TestStreamingProviderReportedUsageCannotUnderstateObservedOutput`; `TestStreamingUnderreportedUsageWithHighProviderPromptFallsBackToGatewayEstimate`. |
-| AC-022-55 | Blocked | Add buyer-facing surface tests co-locating any verified-model language with the provider-reported-hash caveat in the same view. |
-| AC-022-56 | Blocked | Add buyer-facing quota and usage explanation for pending receipt verification and non-verified terminal refund/release behavior. |
+| AC-022-55 | Covered | `phase5-gateway/internal/router/server_test.go` `TestModelsResponseIncludesTier1Disclosure`; `phase5-gateway/internal/router/pages_test.go` `TestTier1DisclosureMatchesSpecSection16`. |
+| AC-022-56 | Covered | `phase5-gateway/internal/router/server_test.go` `TestUsageIncludesSPEC022SettlementDisclosure`; `/v1/usage` now returns `settlement_disclosure.pending_reservation`. |
 | AC-022-57 | Partial | `phase4-coordinator/internal/buyer/route_snapshot_test.go` `TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts`; `phase4-coordinator/internal/billing/settlement_receipts_test.go` `TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit`; add ledger-row policy persistence or immutable ledger-to-route-snapshot linkage tests for settlement and rollback decisions. |
 | AC-022-58 | Partial | `phase4-coordinator/internal/billing/settlement_receipts_test.go` `TestSettlementReceiptResubmissionCannotChangeClosedOutcome`; add bad-then-good still-open receipt test proving first terminal verifier outcome remains authoritative. |
 | AC-022-59 | Partial | `phase4-coordinator/internal/billing/settlement_receipts_test.go` `TestSettlementReceiptResubmissionCannotChangeClosedOutcome`; `phase7-verify/internal/jcs/v04_settlement_fixture_test.go` `TestV04ReceiptTupleRangesDoNotOverlapWithinRequest`; add still-open different-usage-or-hash replay test. |
@@ -140,7 +134,7 @@ Status legend:
 | AC-022-61 | Partial | `phase4-coordinator/internal/buyer/route_snapshot_test.go` `TestSettlementOutputUsesBoundedTerminalTimestampHeader`; `phase4-coordinator/internal/billing/settlement_receipts_test.go` `TestSettlementReceiptRejectsCallerControlledReceiveTime`; add normal plus every partial terminal-state deadline matrix. |
 | AC-022-62 | Blocked | Add receipt-aware failover test for buyer-cancel, gateway-timeout, and upstream-disconnect final attempts with no overlapping charge or credit. |
 | AC-022-63 | Blocked | Add normal-completion full-path usage assertion proving buyer debit and provider credit derive from the same canonical request/output evidence and not provider-signed usage alone. |
-| AC-022-64 | Blocked | Add provider-facing operating/onboarding docs stating receipts after `pending_deadline_seconds` are non-settling and non-recoverable unless a future operator-review spec defines an exception. |
+| AC-022-64 | Covered | `phase5-gateway/internal/router/pages_test.go` `TestProviderPartnerDocsIncludeLateReceiptDeadlineDisclosure`; `phase3-binary/dist/README-partner.md` states receipts after `pending_deadline_seconds` are non-settling and non-recoverable unless a future exception spec changes the rule. |
 
 ## Tests
 

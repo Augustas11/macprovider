@@ -100,6 +100,14 @@ From inside:
 - Synthesized `usage` chunks on streaming responses (more spec-compliant)
 - ~3 GB resident memory once model is loaded (similar to mlx_lm.server)
 
+## Settlement receipt deadline
+
+For SPEC-022 settlement-capable traffic, the provider receipt must arrive
+before the coordinator's `pending_deadline_seconds` window closes. Receipts
+arriving after `pending_deadline_seconds` are non-settling and non-recoverable:
+they cannot create provider credit, payout readiness, or a new buyer debit
+unless a future operator-review exception spec explicitly changes that rule.
+
 ## Monitoring
 
 ```bash

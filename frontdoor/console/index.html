@@ -335,7 +335,14 @@ svg{display:block;flex-shrink:0}
   text-decoration:none;
 }
 .quick-link:hover{border-color:var(--accent);color:var(--accent);text-decoration:none}
-.compliance-copy{position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden}
+.compliance-copy{
+  width:min(720px, calc(100% - 48px));margin:0 auto 24px;padding:14px 18px;
+  border:1px solid var(--border);border-radius:8px;background:var(--surface);
+  color:var(--muted);font-size:11px;line-height:1.45;
+  flex-shrink:0;
+}
+.compliance-copy p{margin:0 0 8px}
+.compliance-copy p:last-child{margin-bottom:0}
 
 /* ── arm64golf view ──────────────────────────────────── */
 .a64-hero{
@@ -505,6 +512,17 @@ svg{display:block;flex-shrink:0}
           </div>
           <div class="chips" id="suggestionChips"></div>
         </div>
+        <section class="compliance-copy" aria-label="Tier 1 disclosure">
+          <p>Buyer prompts and provider responses are processed as plaintext on provider hardware. Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.</p>
+          <p>There is no hardware attestation or runtime integrity check on providers. The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.</p>
+          <p>Model identity is provider-reported. `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately. Mixed pools are not described as fully verified.</p>
+          <p>v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.</p>
+          <p>Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout. Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.</p>
+          <p>Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation. pending: receipt verification is still incomplete and the reservation is not final usage. verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement. quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault. zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault.</p>
+          <p>Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage. Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above.</p>
+          <p>Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs.</p>
+          <p>The product makes NO private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, or provider-falsified-model-measurement detection claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with these limitations.</p>
+        </section>
         <!-- Message thread (rendered into chat-messages directly by JS) -->
       </div>
 
@@ -548,13 +566,6 @@ svg{display:block;flex-shrink:0}
       <div class="dash-body" id="armBody"></div>
     </div>
   </main>
-  <section class="compliance-copy" aria-label="Tier 1 disclosure">
-    <p>Buyer prompts and provider responses are processed as plaintext on provider hardware. Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.</p>
-    <p>There is no hardware attestation or runtime integrity check on providers. The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.</p>
-    <p>Model identity is provider-reported. When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.8 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.</p>
-    <p>v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement.</p>
-    <p>The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-4.</p>
-  </section>
 </div>
 
 <script>

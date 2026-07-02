@@ -11,17 +11,18 @@ import (
 )
 
 type tier1Disclosure struct {
-	Version                 string                    `json:"version"`
-	PlaintextToProvider     bool                      `json:"plaintext_to_provider"`
-	ModelIdentity           string                    `json:"model_identity"`
-	HardwareAttestation     string                    `json:"hardware_attestation"`
-	Tier2Milestone          string                    `json:"tier2_milestone"`
-	StickyAffinity          *stickyAffinityDisclosure `json:"sticky_affinity"`
-	ModelVerificationLimit  string                    `json:"model_verification_limit"`
-	ModelHashVerified       string                    `json:"model_hash_verified,omitempty"`
-	ProviderLegEncryption   string                    `json:"provider_leg_encryption,omitempty"`
-	UntrustedProviderSafety string                    `json:"untrusted_provider_safety,omitempty"`
-	Tier2                   *tier2Disclosure          `json:"tier2,omitempty"`
+	Version                 string                            `json:"version"`
+	PlaintextToProvider     bool                              `json:"plaintext_to_provider"`
+	ModelIdentity           string                            `json:"model_identity"`
+	HardwareAttestation     string                            `json:"hardware_attestation"`
+	Tier2Milestone          string                            `json:"tier2_milestone"`
+	StickyAffinity          *stickyAffinityDisclosure         `json:"sticky_affinity"`
+	ModelVerificationLimit  string                            `json:"model_verification_limit"`
+	VerifiedModelSettlement verifiedModelSettlementDisclosure `json:"verified_model_settlement"`
+	ModelHashVerified       string                            `json:"model_hash_verified,omitempty"`
+	ProviderLegEncryption   string                            `json:"provider_leg_encryption,omitempty"`
+	UntrustedProviderSafety string                            `json:"untrusted_provider_safety,omitempty"`
+	Tier2                   *tier2Disclosure                  `json:"tier2,omitempty"`
 }
 
 type stickyAffinityDisclosure struct {
@@ -65,6 +66,27 @@ type behavioralSafetyDisclosure struct {
 	SizeCap            bool   `json:"size_cap"`
 	EncodingValidation bool   `json:"encoding_validation"`
 	TTFTAnomalyLogging bool   `json:"ttft_anomaly_logging"`
+}
+
+type verifiedModelSettlementDisclosure struct {
+	IncludedPaidEntrypoints []string                    `json:"included_paid_entrypoints"`
+	ExcludedPaidEntrypoints []string                    `json:"excluded_paid_entrypoints"`
+	ModelIdentity           string                      `json:"model_identity"`
+	ModelIdentityCaveat     string                      `json:"model_identity_caveat"`
+	ObserveMode             string                      `json:"observe_mode"`
+	EnforceMode             string                      `json:"enforce_mode"`
+	PendingReservation      string                      `json:"pending_reservation"`
+	Outcomes                settlementOutcomeDisclosure `json:"outcomes"`
+	PartialCharge           string                      `json:"partial_charge"`
+	StreamingFailover       string                      `json:"streaming_failover"`
+	BuyerReceiptStatus      string                      `json:"buyer_receipt_status"`
+}
+
+type settlementOutcomeDisclosure struct {
+	Pending     string `json:"pending"`
+	Verified    string `json:"verified"`
+	Quarantined string `json:"quarantined"`
+	ZeroSettled string `json:"zero_settled"`
 }
 
 type coordinatorRoutingMetadata struct {
@@ -191,6 +213,41 @@ func (m coordinatorBehavioralSafetyMetadata) toDisclosure() behavioralSafetyDisc
 const routingMetaTTL = 5 * time.Second
 
 const modelVerificationLimitDisclosure = "v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement."
+const settlementModelIdentityDisclosure = "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately."
+const settlementModelIdentityCaveatDisclosure = "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement."
+const settlementObserveModeDisclosure = "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout."
+const settlementEnforceModeDisclosure = "Enforce mode may settle only covered paid POST /v1/chat/completions attempts whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified."
+const settlementPendingReservationDisclosure = "Pending means quota or balance can remain reserved while receipt verification is incomplete. Non-verified terminal outcomes release or refund that reservation."
+const settlementPendingOutcomeDisclosure = "pending: receipt verification is still incomplete and the reservation is not final usage."
+const settlementVerifiedOutcomeDisclosure = "verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement."
+const settlementQuarantinedOutcomeDisclosure = "quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault."
+const settlementZeroSettledOutcomeDisclosure = "zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault."
+const settlementPartialChargeDisclosure = "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage."
+const settlementStreamingFailoverDisclosure = "Transparent streaming failover bills only delivered, verified output across attempts and does not double-charge overlapping output; verified here means receipt-bound under the provider-reported-hash caveat above."
+const settlementBuyerReceiptStatusDisclosure = "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
+
+func makeVerifiedModelSettlementDisclosure() verifiedModelSettlementDisclosure {
+	return verifiedModelSettlementDisclosure{
+		IncludedPaidEntrypoints: []string{"POST /v1/chat/completions"},
+		ExcludedPaidEntrypoints: []string{
+			"legacy direct-tunnel buyer paths at coordinator.streamvc.live, m4.streamvc.live, and m1.streamvc.live unless separately disabled or migrated behind the gateway paid ledger",
+		},
+		ModelIdentity:       settlementModelIdentityDisclosure,
+		ModelIdentityCaveat: settlementModelIdentityCaveatDisclosure,
+		ObserveMode:         settlementObserveModeDisclosure,
+		EnforceMode:         settlementEnforceModeDisclosure,
+		PendingReservation:  settlementPendingReservationDisclosure,
+		Outcomes: settlementOutcomeDisclosure{
+			Pending:     settlementPendingOutcomeDisclosure,
+			Verified:    settlementVerifiedOutcomeDisclosure,
+			Quarantined: settlementQuarantinedOutcomeDisclosure,
+			ZeroSettled: settlementZeroSettledOutcomeDisclosure,
+		},
+		PartialCharge:      settlementPartialChargeDisclosure,
+		StreamingFailover:  settlementStreamingFailoverDisclosure,
+		BuyerReceiptStatus: settlementBuyerReceiptStatusDisclosure,
+	}
+}
 
 func (s *Server) coordinatorRoutingMetadata(ctx context.Context) (coordinatorRoutingMetadata, bool) {
 	// Per-request roundtrip cost is bad at scale (audit HIGH). 5s TTL is
@@ -242,12 +299,13 @@ func (s *Server) coordinatorRoutingMetadataFresh(ctx context.Context) (coordinat
 
 func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 	disclosure := tier1Disclosure{
-		Version:                "v0.8",
-		PlaintextToProvider:    true,
-		ModelIdentity:          "provider_reported",
-		HardwareAttestation:    "none",
-		Tier2Milestone:         "future",
-		ModelVerificationLimit: modelVerificationLimitDisclosure,
+		Version:                 "v0.8",
+		PlaintextToProvider:     true,
+		ModelIdentity:           "provider_reported",
+		HardwareAttestation:     "none",
+		Tier2Milestone:          "future",
+		ModelVerificationLimit:  modelVerificationLimitDisclosure,
+		VerifiedModelSettlement: makeVerifiedModelSettlementDisclosure(),
 		StickyAffinity: &stickyAffinityDisclosure{
 			Enabled: false, TTLSeconds: 0,
 			Description: "Sticky affinity is disabled; related requests are not preferentially routed to the same provider.",

@@ -339,10 +339,11 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 			"window_date": window, "daily_tokens_used": used, "daily_tokens_reserved": reserved,
 			"daily_tokens_remaining": remaining, "daily_tokens_limit": limit,
 		},
-		"capacity": map[string]any{"tier": tier.Tier},
-		"keys":     keys,
-		"models":   []any{},
-		"rating":   nil,
+		"settlement_disclosure": makeVerifiedModelSettlementDisclosure(),
+		"capacity":              map[string]any{"tier": tier.Tier},
+		"keys":                  keys,
+		"models":                []any{},
+		"rating":                nil,
 	})
 }
 

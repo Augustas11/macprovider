@@ -127,6 +127,30 @@ func TestTier1DisclosureMatchesSpecSection16(t *testing.T) {
 	}
 }
 
+func TestProviderPartnerDocsIncludeLateReceiptDeadlineDisclosure(t *testing.T) {
+	for _, path := range []string{
+		filepath.Join("..", "..", "..", "phase3-binary", "README.md"),
+		filepath.Join("..", "..", "..", "phase3-binary", "dist", "README-partner.md"),
+		filepath.Join("..", "..", "..", "doc", "provider-economics.md"),
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read provider docs %s: %v", path, err)
+		}
+		text := string(raw)
+		for _, want := range []string{
+			"pending_deadline_seconds",
+			"non-settling",
+			"non-recoverable",
+			"future operator-review exception spec",
+		} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("provider docs %s missing %q", path, want)
+			}
+		}
+	}
+}
+
 func TestConsoleStaticContracts(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "frontdoor", "console", "index.html"))
 	if err != nil {
@@ -137,10 +161,24 @@ func TestConsoleStaticContracts(t *testing.T) {
 		`docs#api-reference`,
 		`r.headers.get("X-Request-ID")`,
 		`minting=null;throw e`,
+		`.compliance-copy{`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("console missing %q", want)
 		}
+	}
+	if strings.Contains(html, ".compliance-copy{position:absolute") || strings.Contains(html, "left:-10000px") {
+		t.Fatal("console compliance disclosure must be visible, not positioned off-screen")
+	}
+	chatIndex := strings.Index(html, `<div class="chat-messages" id="chatMessages">`)
+	disclosureIndex := strings.Index(html, `<section class="compliance-copy" aria-label="Tier 1 disclosure">`)
+	inputIndex := strings.Index(html, `<div class="input-dock">`)
+	mainCloseIndex := strings.Index(html, `</main>`)
+	if chatIndex < 0 || disclosureIndex < 0 || inputIndex < 0 || mainCloseIndex < 0 {
+		t.Fatal("console disclosure placement anchors missing")
+	}
+	if disclosureIndex < chatIndex || disclosureIndex > inputIndex || disclosureIndex > mainCloseIndex {
+		t.Fatal("console disclosure must render inside the main chat scroll area before the input dock")
 	}
 	if strings.Contains(html, "innerHTML") {
 		t.Fatal("console must build status/dashboard DOM with textContent, not innerHTML")

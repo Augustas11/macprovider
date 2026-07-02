@@ -176,6 +176,71 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 		!strings.Contains(body.Tier1Disclosure.ModelVerificationLimit, "do not detect a provider falsifying") {
 		t.Fatalf("model verification limit disclosure is incomplete: %q", body.Tier1Disclosure.ModelVerificationLimit)
 	}
+	settlement := body.Tier1Disclosure.VerifiedModelSettlement
+	if !reflect.DeepEqual(settlement.IncludedPaidEntrypoints, []string{"POST /v1/chat/completions"}) {
+		t.Fatalf("included paid entrypoints=%v", settlement.IncludedPaidEntrypoints)
+	}
+	if len(settlement.ExcludedPaidEntrypoints) == 0 ||
+		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "coordinator.streamvc.live") ||
+		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "m4.streamvc.live") ||
+		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "m1.streamvc.live") {
+		t.Fatalf("excluded paid entrypoints must name legacy/direct paths: %+v", settlement.ExcludedPaidEntrypoints)
+	}
+	for _, got := range []string{
+		settlement.ModelIdentity,
+		settlement.ModelIdentityCaveat,
+		settlement.ObserveMode,
+		settlement.EnforceMode,
+		settlement.Outcomes.Quarantined,
+		settlement.Outcomes.ZeroSettled,
+		settlement.PartialCharge,
+		settlement.StreamingFailover,
+		settlement.BuyerReceiptStatus,
+	} {
+		if got == "" {
+			t.Fatalf("settlement disclosure has empty field: %+v", settlement)
+		}
+	}
+	if !strings.Contains(settlement.ModelIdentityCaveat, "provider-reported request-start model hash") ||
+		!strings.Contains(settlement.ModelIdentityCaveat, "does not provide hardware attestation") ||
+		!strings.Contains(settlement.ObserveMode, "cannot claim verified model integrity") ||
+		!strings.Contains(settlement.EnforceMode, "mixed pools are not described as fully verified") ||
+		!strings.Contains(settlement.Outcomes.Quarantined, "not charged") ||
+		!strings.Contains(settlement.Outcomes.Quarantined, "not labeled as buyer fault") ||
+		!strings.Contains(settlement.Outcomes.ZeroSettled, "no billable verified work") ||
+		!strings.Contains(settlement.PartialCharge, "delivered output prefix") ||
+		!strings.Contains(settlement.StreamingFailover, "does not double-charge overlapping output") ||
+		!strings.Contains(settlement.BuyerReceiptStatus, "without raw prompts or raw outputs") {
+		t.Fatalf("settlement disclosure is incomplete: %+v", settlement)
+	}
+}
+
+func TestUsageIncludesSPEC022SettlementDisclosure(t *testing.T) {
+	h, store, _, cfg := newTestHarness(t, fakeOAuth{})
+	fullKey := createAccountAndKey(t, store, cfg, "acct_usage_settlement_disclosure")
+	resp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	var body struct {
+		Quota                map[string]any                    `json:"quota"`
+		SettlementDisclosure verifiedModelSettlementDisclosure `json:"settlement_disclosure"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("usage json: %v", err)
+	}
+	if body.Quota["daily_tokens_reserved"] == nil {
+		t.Fatalf("usage response missing daily_tokens_reserved: %s", resp.Body.String())
+	}
+	disclosure := body.SettlementDisclosure
+	if !strings.Contains(disclosure.PendingReservation, "quota or balance can remain reserved") ||
+		!strings.Contains(disclosure.PendingReservation, "Non-verified terminal outcomes release or refund") ||
+		!strings.Contains(disclosure.Outcomes.Pending, "not final usage") ||
+		!strings.Contains(disclosure.Outcomes.Quarantined, "not charged") ||
+		!strings.Contains(disclosure.Outcomes.Quarantined, "not labeled as buyer fault") ||
+		!strings.Contains(disclosure.Outcomes.ZeroSettled, "no billable verified work") ||
+		!strings.Contains(disclosure.PartialCharge, "settlement-capable receipt binds the delivered output prefix") ||
+		!strings.Contains(disclosure.StreamingFailover, "does not double-charge overlapping output") ||
+		!strings.Contains(disclosure.BuyerReceiptStatus, "without raw prompts or raw outputs") {
+		t.Fatalf("usage settlement disclosure is incomplete: %+v", disclosure)
+	}
 }
 
 func TestModelsStickyDisclosureUsesCoordinatorRoutingMetadata(t *testing.T) {

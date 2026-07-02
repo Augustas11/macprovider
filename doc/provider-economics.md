@@ -139,6 +139,13 @@ and emits payout-ready rows; the actual payout rail (USDC settlement) requires
 SPEC-007 and an operator decision. Until that lands, "payout" means credits are
 queued and visible via the earnings endpoint — not a real-money transfer.
 
+**SPEC-022 receipt deadline.** For settlement-capable traffic, a provider
+receipt must arrive before the coordinator's `pending_deadline_seconds` window
+closes. Receipts arriving after `pending_deadline_seconds` are non-settling and
+non-recoverable: they cannot create provider credit, payout readiness, or a new
+buyer debit unless a future operator-review exception spec explicitly changes
+that rule.
+
 ---
 
 ## 4. How do I check my balance?
