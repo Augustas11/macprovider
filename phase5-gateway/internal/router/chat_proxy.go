@@ -581,6 +581,17 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					return false
 				}
 			} else {
+				// SPEC-006 §17.7.1 clause 3 (#295): once we've
+				// dispatched a terminal error envelope, no further
+				// content `data:` frames may cross the wire to the
+				// buyer before `[DONE]`. A malicious or buggy provider
+				// that keeps emitting content after the envelope
+				// violates the "last frame before [DONE]" contract;
+				// drop the line and continue reading so the terminator
+				// still fires the refund path.
+				if terminalStructuredErrorCode != "" {
+					return true
+				}
 				if code := terminalSSEErrorCode(data); isSpec019TerminalSSEErrorCode(code) {
 					terminalStructuredErrorCode = code
 					if _, err := w.Write(line); err != nil {
@@ -1151,16 +1162,136 @@ func sseDataValue(line string) (string, bool) {
 	return value, true
 }
 
+// terminalSSEErrorCode extracts the SPEC-006 §17.7.1 terminal error
+// envelope code from an SSE data payload, but ONLY when the payload
+// satisfies the "standalone envelope" clause: no `choices` key, no
+// `usage` key at all (any presence — even zero tokens or empty
+// containers — is rejected). A payload with `error.code` alongside
+// content deltas or usage-token accounting is structurally inconsistent
+// with the contract (a terminal envelope is the LAST buyer-visible
+// frame before `[DONE]` and cannot carry content) and is rejected.
+// Returns "" for non-standalone or unparseable payloads. Origin: #295
+// (§17.7.1 producer-side enforcement, harness-side counterpart in #232).
+//
+// Parser is token-level (not lossy struct unmarshal) to defend against
+// #295 R1 SEC/ARCH convergent HIGH bypasses:
+//   - Duplicate keys: `{"choices":[{...}],"choices":[]}` — struct
+//     unmarshal keeps the second value (empty), letting the frame
+//     satisfy `len(choices) == 0` while the wire bytes still carry
+//     content the buyer sees.
+//   - Non-enumerated usage subfields: `{"usage":{"total_tokens":10}}`
+//     is not covered by prompt/completion checks but still constitutes
+//     usage accounting on a supposed "standalone" envelope.
+// The strict parser rejects ANY presence of `choices` or `usage`, plus
+// any duplicate top-level key, aligning with SPEC-006 §17.7.1's "no
+// choices field, no usage field" clause literally.
 func terminalSSEErrorCode(data string) string {
-	var envelope struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(data), &envelope); err != nil {
+	dec := json.NewDecoder(strings.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(envelope.Error.Code)
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return ""
+	}
+	var code string
+	seen := make(map[string]struct{})
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return ""
+		}
+		if _, dup := seen[key]; dup {
+			// Duplicate top-level key on a purported terminal
+			// envelope is a smuggling shape: reject unconditionally.
+			return ""
+		}
+		seen[key] = struct{}{}
+		switch key {
+		case "choices", "usage":
+			// SPEC-006 §17.7.1: standalone envelope has NO choices
+			// and NO usage. Presence of the key at all — regardless
+			// of value shape — disqualifies the frame.
+			return ""
+		case "error":
+			// Parse `error` token-by-token to defend against nested
+			// duplicate `code` keys — `{"error":{"code":"upstream",
+			// "code":"provider_timeout"}}` — where a lossy decode
+			// would keep the last value and let an attacker smuggle
+			// a SPEC-019-listed code past the allow-list check.
+			// (#295 R2 SEC MED.)
+			errTok, err := dec.Token()
+			if err != nil {
+				return ""
+			}
+			errDelim, ok := errTok.(json.Delim)
+			if !ok || errDelim != '{' {
+				return ""
+			}
+			var errCode string
+			errSeen := make(map[string]struct{})
+			for dec.More() {
+				eKeyTok, err := dec.Token()
+				if err != nil {
+					return ""
+				}
+				eKey, ok := eKeyTok.(string)
+				if !ok {
+					return ""
+				}
+				if _, dup := errSeen[eKey]; dup {
+					return ""
+				}
+				errSeen[eKey] = struct{}{}
+				if eKey == "code" {
+					v, err := dec.Token()
+					if err != nil {
+						return ""
+					}
+					s, ok := v.(string)
+					if !ok {
+						return ""
+					}
+					errCode = strings.TrimSpace(s)
+				} else {
+					var raw json.RawMessage
+					if err := dec.Decode(&raw); err != nil {
+						return ""
+					}
+				}
+			}
+			if _, err := dec.Token(); err != nil {
+				return ""
+			}
+			code = errCode
+		default:
+			// Other top-level fields (id, object, created, model,
+			// etc.) are innocuous metadata; skip past their value.
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				return ""
+			}
+		}
+	}
+	// Consume the closing '}'.
+	if _, err := dec.Token(); err != nil {
+		return ""
+	}
+	// Reject trailing garbage after the object. `dec.Token()` at EOF
+	// returns io.EOF; anything else (another value OR a syntax error
+	// on invalid trailing bytes) means the input is not a clean
+	// standalone envelope. (#295 R2 SEC HIGH — prior implementation
+	// only checked err==nil, so invalid suffixes like `{...}x` fell
+	// through to accept.)
+	if _, err := dec.Token(); err != io.EOF {
+		return ""
+	}
+	return code
 }
 
 func isSpec019TerminalSSEErrorCode(code string) bool {
