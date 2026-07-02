@@ -24,6 +24,9 @@ settlement finality backed by signed, catalog-matching receipt verdicts.
 - Coordinator payout and revenue surfaces must continue to read from
   `spec022_payable_request_credits`, which excludes enforce-mode rows without a
   closed verified receipt verdict and excludes overlapping output claims.
+- Payout claim consumption must revalidate payout-ready source rows and totals
+  against `spec022_payable_request_credits` immediately before marking a payout
+  consumed.
 
 ## Out of Scope
 
@@ -44,6 +47,9 @@ settlement finality backed by signed, catalog-matching receipt verdicts.
   existing verified/refund/hold/terminal-race reconciliation cases.
 - Existing coordinator money-gate tests continue to prove payout eligibility is
   receipt-bound.
+- Coordinator tests cover duplicate receipt replay after settlement, concurrent
+  settlement workers for one verified source row, manual source-less payout rows,
+  and inflated ready payout totals.
 - Before closure, run the gateway targeted tests plus the coordinator SPEC-022
   money-gate tests, then run the three Codex auditor lanes and resolve all
   critical/high/medium findings.
@@ -65,3 +71,8 @@ settlement finality backed by signed, catalog-matching receipt verdicts.
   implementation.
 - `phase5-gateway/internal/router/server_test.go` keeps the verified, refund,
   hold, and terminal-race reconciliation cases covered.
+- `phase4-coordinator/internal/billing/payout.go` revalidates ready payout rows
+  against `spec022_payable_request_credits` before consumption.
+- `phase4-coordinator/internal/billing/spec022_money_gate_test.go` covers
+  duplicate receipt replay, concurrent settlement-worker idempotency,
+  source-less manual payout rejection, and payout total recomputation.

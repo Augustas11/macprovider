@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,6 +64,132 @@ func TestSPEC022PayableCreditGateRequiresVerifiedReceipt(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != 600 {
 		t.Fatalf("duplicate receipt payout provider credits=%d want 600", got)
+	}
+}
+
+func TestSPEC022DuplicateVerifiedReceiptAfterSettlementDoesNotDoublePay(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	input.RouteSnapshot.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersion
+	routeDigest, _, err := input.RouteSnapshot.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Header = settlementHeaderWithCanonicalMutationAndTestSignature(t, input.Header, func(tuple map[string]any) {
+		tuple["route_snapshot_mode"] = RouteSnapshotModeEnforce
+		tuple["route_snapshot_policy_version"] = RouteSnapshotPolicyVersion
+		tuple["route_snapshot_digest"] = routeDigest
+	})
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	receiptBoundCredits := insertSPEC022ReceiptBoundLedgerCredit(t, store.db, input, 0)
+	id := SettlementReceiptIdentity{
+		AccountScope: input.AccountScope,
+		RequestID:    input.RequestID,
+		AttemptN:     input.AttemptN,
+		ProviderID:   input.ProviderID,
+	}
+
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+	first, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: id,
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     pubkey,
+		receiptReceivedUnixMS:     input.ReceiptReceivedUnixMS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SettlementOutcome != SettlementOutcomeVerified || first.IdempotencyStatus != settlementReceiptIDFirstTerminal {
+		t.Fatalf("first receipt state=%#v, want first terminal verified", first)
+	}
+	windowStart, windowEnd := settlementWindowForInput(input)
+	if err := store.RunSettlement(context.Background(), SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, windowEnd); err != nil {
+		t.Fatal(err)
+	}
+
+	duplicate, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: id,
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     pubkey,
+		receiptReceivedUnixMS:     input.ReceiptReceivedUnixMS + 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.IdempotencyStatus != settlementReceiptIDTerminalNoop || duplicate.SettlementOutcome != SettlementOutcomeVerified {
+		t.Fatalf("duplicate receipt state=%#v, want terminal noop verified", duplicate)
+	}
+	if err := store.RunSettlement(context.Background(), SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, windowEnd); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE request_id = ?`, input.RequestID); got != 1 {
+		t.Fatalf("receipt verdict rows=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != 1 {
+		t.Fatalf("payout rows after duplicate receipt=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("payout provider credits after duplicate=%d want %d", got, receiptBoundCredits.ProviderCredits)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 1`, input.RequestID); got != 1 {
+		t.Fatalf("settled rows after duplicate receipt=%d want 1", got)
+	}
+}
+
+func TestSPEC022ConcurrentSettlementWorkersSettleVerifiedRowOnce(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	_, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	receiptBoundCredits := insertSPEC022ReceiptBoundLedgerCredit(t, store.db, input, 0)
+	markSPEC022ReceiptVerified(t, store.db, input)
+	windowStart, windowEnd := settlementWindowForInput(input)
+	cfg := SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- store.RunSettlement(context.Background(), cfg, windowStart, windowEnd)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != 1 {
+		t.Fatalf("concurrent payout rows=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("concurrent payout provider credits=%d want %d", got, receiptBoundCredits.ProviderCredits)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 1`, input.RequestID); got != 1 {
+		t.Fatalf("concurrent settled rows=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(DISTINCT settlement_id) FROM ledger_request_credits WHERE request_id = ? AND settlement_id IS NOT NULL`, input.RequestID); got != 1 {
+		t.Fatalf("concurrent settlement IDs=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT source_credit_count FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != 1 {
+		t.Fatalf("concurrent source count=%d want 1", got)
 	}
 }
 
@@ -413,6 +540,93 @@ UPDATE settlement_attempt_outputs
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE run_type='spec_007_claim' AND status='failed'`); got != 1 {
 		t.Fatalf("failed claim audit rows=%d want 1", got)
+	}
+}
+
+func TestSPEC022PayoutClaimRejectsManualReadyRowWithoutVerifiedSources(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	windowStart := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	windowEnd := windowStart.AddDate(0, 0, 7)
+	now := windowStart.Add(time.Hour).Format(time.RFC3339Nano)
+	res, err := store.db.Exec(`
+INSERT INTO ledger_payout_ready (
+    provider_id, window_start_utc, window_end_utc, cadence_days, source_credit_count,
+    gross_credits, provider_credits, operator_credits, min_payout_credits,
+    payout_currency, payout_external_id, status, idempotency_key, created_at_utc
+) VALUES ('manual-provider', ?, ?, 7, 1, 900, 900, 0, 1, NULL, NULL, 'ready', 'manual-provider|source-less', ?)`,
+		windowStart.Format(time.RFC3339Nano),
+		windowEnd.Format(time.RFC3339Nano),
+		now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payoutID, err := res.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimPayoutReady(context.Background(), payoutID, 900, "external-manual", "USDC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("manual source-less payout claim succeeded")
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE id = ?`, payoutID); got != 0 {
+		t.Fatalf("manual source-less payout rows=%d want 0", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE run_type='spec_007_claim' AND status='failed'`); got != 1 {
+		t.Fatalf("failed manual source-less claim audits=%d want 1", got)
+	}
+}
+
+func TestSPEC022PayoutClaimRevalidatesReadyRowTotals(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	_, store := newRequestAndBillingStores(t)
+	seedSettlementReceiptEvidence(t, store, input)
+	insertSPEC022LedgerCredit(t, store.db, input, 500)
+	markSPEC022ReceiptVerified(t, store.db, input)
+	windowStart, windowEnd := settlementWindowForInput(input)
+	if err := store.RunSettlement(context.Background(), SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, windowEnd); err != nil {
+		t.Fatal(err)
+	}
+	payoutID := scalar(t, store.db, `SELECT id FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID)
+	if _, err := store.db.Exec(`
+UPDATE ledger_payout_ready
+   SET gross_credits = 900,
+       provider_credits = 900,
+       operator_credits = 0
+ WHERE id = ?`, payoutID); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := store.ClaimPayoutReady(context.Background(), payoutID, 900, "external-inflated", "USDC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("inflated payout claim succeeded")
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE id = ? AND status = 'ready'`, payoutID); got != 500 {
+		t.Fatalf("revalidated payout provider credits=%d want 500", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 1 AND settlement_id = ?`, input.RequestID, payoutID); got != 1 {
+		t.Fatalf("verified source rows after total revalidation=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE run_type='spec_007_claim' AND status='failed'`); got != 1 {
+		t.Fatalf("failed inflated claim audits=%d want 1", got)
+	}
+
+	claimed, err = store.ClaimPayoutReady(context.Background(), payoutID, 500, "external-corrected", "USDC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatal("claim with corrected verified total failed")
 	}
 }
 

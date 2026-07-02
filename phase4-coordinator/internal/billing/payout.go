@@ -14,11 +14,21 @@ func (s *Store) ClaimPayoutReady(ctx context.Context, payoutID int64, expectedGr
 	}
 	defer func() { _ = tx.Rollback() }()
 	var windowStart, windowEnd, payoutStatus string
-	var grossCredits, minPayoutCredits int64
+	var sourceCreditCount, grossCredits, providerCredits, operatorCredits, minPayoutCredits int64
 	err = tx.QueryRowContext(ctx, `
-SELECT window_start_utc, window_end_utc, gross_credits, min_payout_credits, status
+SELECT window_start_utc, window_end_utc, source_credit_count, gross_credits,
+       provider_credits, operator_credits, min_payout_credits, status
   FROM ledger_payout_ready
- WHERE id = ?`, payoutID).Scan(&windowStart, &windowEnd, &grossCredits, &minPayoutCredits, &payoutStatus)
+ WHERE id = ?`, payoutID).Scan(
+		&windowStart,
+		&windowEnd,
+		&sourceCreditCount,
+		&grossCredits,
+		&providerCredits,
+		&operatorCredits,
+		&minPayoutCredits,
+		&payoutStatus,
+	)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -48,20 +58,32 @@ INSERT INTO ledger_reconciliation_runs (
 		return err
 	}
 	if payoutStatus == "ready" {
-		var invalidSources int64
+		var sourceCount int64
 		if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
-  FROM ledger_request_credits lrc
- WHERE lrc.settlement_id = ?
-   AND NOT EXISTS (
-       SELECT 1
-         FROM spec022_payable_request_credits payable
-        WHERE payable.id = lrc.id
-   )`, payoutID).Scan(&invalidSources); err != nil {
+  FROM ledger_request_credits
+ WHERE settlement_id = ?`, payoutID).Scan(&sourceCount); err != nil {
 			return false, err
 		}
-		if invalidSources > 0 {
-			if _, err := tx.ExecContext(ctx, `
+		var payableCount, payableGross, payableProvider, payableOperator int64
+		if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*),
+       COALESCE(SUM(lrc.gross_credits), 0),
+       COALESCE(SUM(lrc.provider_credits), 0),
+       COALESCE(SUM(lrc.gross_credits - lrc.provider_credits), 0)
+  FROM ledger_request_credits lrc
+  JOIN spec022_payable_request_credits payable ON payable.id = lrc.id
+ WHERE lrc.settlement_id = ?`, payoutID).Scan(&payableCount, &payableGross, &payableProvider, &payableOperator); err != nil {
+			return false, err
+		}
+		sourceSetValid := sourceCount > 0 && sourceCount == payableCount
+		payoutMatchesSources := sourceCreditCount == payableCount &&
+			grossCredits == payableGross &&
+			providerCredits == payableProvider &&
+			operatorCredits == payableOperator
+		if !sourceSetValid || !payoutMatchesSources {
+			if payableCount != sourceCount {
+				if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET settled = 0,
        settlement_id = NULL,
@@ -72,20 +94,10 @@ UPDATE ledger_request_credits
          FROM spec022_payable_request_credits payable
         WHERE payable.id = ledger_request_credits.id
    )`, now, payoutID); err != nil {
-				return false, err
+					return false, err
+				}
 			}
-			var remainingCount, remainingGross, remainingProvider, remainingOperator int64
-			if err := tx.QueryRowContext(ctx, `
-SELECT COUNT(*),
-       COALESCE(SUM(lrc.gross_credits), 0),
-       COALESCE(SUM(lrc.provider_credits), 0),
-       COALESCE(SUM(lrc.gross_credits - lrc.provider_credits), 0)
-  FROM ledger_request_credits lrc
-  JOIN spec022_payable_request_credits payable ON payable.id = lrc.id
- WHERE lrc.settlement_id = ?`, payoutID).Scan(&remainingCount, &remainingGross, &remainingProvider, &remainingOperator); err != nil {
-				return false, err
-			}
-			if remainingCount > 0 && remainingProvider >= minPayoutCredits {
+			if payableCount > 0 && payableProvider >= minPayoutCredits {
 				if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_payout_ready
    SET source_credit_count = ?,
@@ -94,10 +106,10 @@ UPDATE ledger_payout_ready
        operator_credits = ?
  WHERE id = ?
    AND status = 'ready'`,
-					remainingCount,
-					remainingGross,
-					remainingProvider,
-					remainingOperator,
+					payableCount,
+					payableGross,
+					payableProvider,
+					payableOperator,
 					payoutID,
 				); err != nil {
 					return false, err
