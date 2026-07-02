@@ -435,9 +435,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
 		return
 	}
-	if ok {
-		body = usageBodyWithTokenUsage(body, usage)
-	}
+	body = usageBodyWithTokenUsage(body, usage)
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
@@ -1867,7 +1865,30 @@ func usageBodyWithTokenUsage(body []byte, usage tokenUsage) []byte {
 	if ok {
 		return updated
 	}
-	return body
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body
+	}
+	total := usage.TotalTokens
+	if total == 0 {
+		total = usage.PromptTokens + usage.CompletionTokens
+	}
+	usageObject := map[string]int64{
+		"prompt_tokens":        usage.PromptTokens,
+		"completion_tokens":    usage.CompletionTokens,
+		"total_tokens":         total,
+		"cached_prompt_tokens": usage.CachedPromptTokens,
+	}
+	rawUsage, err := json.Marshal(usageObject)
+	if err != nil {
+		return body
+	}
+	envelope["usage"] = rawUsage
+	updated, err = json.Marshal(envelope)
+	if err != nil {
+		return body
+	}
+	return updated
 }
 
 func sseDataLineWithCachedPromptTokens(line []byte, cachedPromptTokens int64) []byte {

@@ -27,38 +27,21 @@ func TestRequestLogCacheRecoveryFieldsDropsNonHitZero(t *testing.T) {
 	}
 }
 
-func TestCachedPromptTokensPointerTreatsExplicitNullAsAbsent(t *testing.T) {
-	if got := cachedPromptTokensPointer(json.RawMessage("null")); got != nil {
-		t.Fatalf("cached_prompt_tokens null = %v, want nil", got)
+func TestCachedPromptTokensPointerTreatsExplicitNullAsInvalid(t *testing.T) {
+	got := cachedPromptTokensPointer(json.RawMessage("null"))
+	if got == nil || *got != -1 {
+		t.Fatalf("cached_prompt_tokens null = %v, want invalid sentinel", got)
 	}
 }
 
-func TestChatResponseWithCachedPromptTokensSynthesizesMinimalUsageWhenAbsent(t *testing.T) {
+func TestChatResponseWithCachedPromptTokensPreservesAbsentUsage(t *testing.T) {
 	body := []byte(`{"id":"cmpl","choices":[{"message":{"content":"ok"}}]}`)
 	updated := chatResponseWithCachedPromptTokens(body, 0)
-	var out struct {
-		Usage struct {
-			CachedPromptTokens int64 `json:"cached_prompt_tokens"`
-		} `json:"usage"`
-	}
+	var out map[string]json.RawMessage
 	if err := json.Unmarshal(updated, &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Usage.CachedPromptTokens != 0 {
-		t.Fatalf("cached_prompt_tokens=%d want 0 body=%s", out.Usage.CachedPromptTokens, string(updated))
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(updated, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	usage, ok := decoded["usage"].(map[string]any)
-	if !ok {
-		t.Fatalf("usage missing or wrong type: %s", string(updated))
-	}
-	if _, ok := usage["prompt_tokens"]; ok {
-		t.Fatalf("synthesized usage invented prompt_tokens: %s", string(updated))
-	}
-	if _, ok := usage["completion_tokens"]; ok {
-		t.Fatalf("synthesized usage invented token counts: %s", string(updated))
+	if _, ok := out["usage"]; ok {
+		t.Fatalf("coordinator synthesized partial usage: %s", string(updated))
 	}
 }

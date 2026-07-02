@@ -453,12 +453,11 @@ SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, 
 	}
 	recomputed := expected
 	recomputeRateEntry := input.RateEntry
-	cachedPromptTokens := intPtrFromNull(cached)
 	allowByteEstimated := usageSource == UsageByteEstimated && input.CompletionTokens == nil && estimated.Valid
 	if allowByteEstimated {
-		recomputed = ComputeCreditsWithCache(input.PromptTokens, cachedPromptTokens, input.CompletionTokens, intPtrFromNull(estimated), usageSource, faultFlag, recomputeRateEntry, input.MultiplierPPM, input.ProviderShareBps)
+		recomputed = ComputeCreditsWithCache(input.PromptTokens, input.CachedPromptTokens, input.CompletionTokens, intPtrFromNull(estimated), usageSource, faultFlag, recomputeRateEntry, input.MultiplierPPM, input.ProviderShareBps)
 	} else {
-		recomputed = ComputeCreditsWithCache(input.PromptTokens, cachedPromptTokens, input.CompletionTokens, input.EstimatedCompTokens, usageSource, faultFlag, recomputeRateEntry, input.MultiplierPPM, input.ProviderShareBps)
+		recomputed = ComputeCreditsWithCache(input.PromptTokens, input.CachedPromptTokens, input.CompletionTokens, input.EstimatedCompTokens, usageSource, faultFlag, recomputeRateEntry, input.MultiplierPPM, input.ProviderShareBps)
 	}
 	var operatorCredits sql.NullInt64
 	var operatorRows int64
@@ -477,6 +476,7 @@ SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, 
 	mismatch := recomputed.GrossCredits != gross ||
 		recomputed.ProviderCredits != providerCredits ||
 		recomputed.FaultFlag != faultFlag ||
+		!nullInt64MatchesPtr(cached, input.CachedPromptTokens) ||
 		contractMismatch ||
 		operatorRows != 1 ||
 		providerCredits+operatorCredits.Int64 != gross
@@ -574,6 +574,13 @@ func intPtrFromNull(v sql.NullInt64) *int64 {
 	}
 	out := v.Int64
 	return &out
+}
+
+func nullInt64MatchesPtr(v sql.NullInt64, p *int64) bool {
+	if !v.Valid {
+		return p == nil
+	}
+	return p != nil && v.Int64 == *p
 }
 
 func unresolvedProviderID(assignedID string) string {

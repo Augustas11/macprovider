@@ -497,6 +497,7 @@ func (h *handler) buyerEquivalentCredits(ctx context.Context, from, to time.Time
 		tsText     string
 		model      string
 		prompt     sql.NullInt64
+		cached     sql.NullInt64
 		completion sql.NullInt64
 		status     int
 		errorCode  sql.NullString
@@ -515,7 +516,7 @@ func (h *handler) buyerEquivalentCredits(ctx context.Context, from, to time.Time
 	// account_id legacy rows cluster among themselves only,
 	// preserving pre-v1.5.0 behavior.
 	rows, err := h.store.db.QueryContext(ctx, `
-SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_tokens, rl.status, rl.error_code,
+SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.cached_prompt_tokens, rl.completion_tokens, rl.status, rl.error_code,
        -- SPEC-002 v1.5.2 / SPEC-005 v0.3.3 (issue #168): prefer
        -- persisted rl.attempt_n when non-NULL; fall back to v0.3.1
        -- id-ASC derivation for legacy NULL rows during rollout.
@@ -534,7 +535,7 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_token
 	scratch := []requestLogScan{}
 	for rows.Next() {
 		var s requestLogScan
-		if err := rows.Scan(&s.requestID, &s.tsText, &s.model, &s.prompt, &s.completion, &s.status, &s.errorCode, &s.attemptN); err != nil {
+		if err := rows.Scan(&s.requestID, &s.tsText, &s.model, &s.prompt, &s.cached, &s.completion, &s.status, &s.errorCode, &s.attemptN); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -555,16 +556,20 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_token
 		if err != nil {
 			return 0, err
 		}
-		var pp, cp *int64
+		var pp, cachedP, cp *int64
 		if s.prompt.Valid {
 			v := s.prompt.Int64
 			pp = &v
+		}
+		if s.cached.Valid {
+			v := s.cached.Int64
+			cachedP = &v
 		}
 		if s.completion.Valid {
 			v := s.completion.Int64
 			cp = &v
 		}
-		if gross, ok, err := h.byteEstimatedLedgerGross(ctx, s.requestID, s.attemptN, pp); err != nil {
+		if gross, ok, err := h.byteEstimatedLedgerGross(ctx, s.requestID, s.attemptN); err != nil {
 			return 0, err
 		} else if ok {
 			total += gross
@@ -574,16 +579,15 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_token
 		if err != nil {
 			continue
 		}
-		row := ComputeCredits(pp, cp, nil, usageFor(s.errorCode.String, nil), FaultNone, RateFor(rewards.RateCard, s.model), multiplier, share)
+		row := ComputeCreditsWithCache(pp, cachedP, cp, nil, usageFor(s.errorCode.String, nil), FaultNone, RateFor(rewards.RateCard, s.model), multiplier, share)
 		total += row.GrossCredits
 	}
 	return total, nil
 }
 
-func (h *handler) byteEstimatedLedgerGross(ctx context.Context, requestID string, attemptN int, promptTokens *int64) (int64, bool, error) {
+func (h *handler) byteEstimatedLedgerGross(ctx context.Context, requestID string, attemptN int) (int64, bool, error) {
 	rows, err := h.store.db.QueryContext(ctx, `
-SELECT estimated_completion_tokens, fault_flag, prompt_rate_per_mtok,
-       completion_rate_per_mtok, global_multiplier_ppm, provider_share_bps
+SELECT gross_credits
   FROM ledger_request_credits
  WHERE request_id = ? AND attempt_n = ? AND quarantined = 0 AND usage_source = 'byte_estimated'`, requestID, attemptN)
 	if err != nil {
@@ -591,29 +595,23 @@ SELECT estimated_completion_tokens, fault_flag, prompt_rate_per_mtok,
 	}
 	defer rows.Close()
 	count := 0
-	var estimated sql.NullInt64
-	var faultFlag string
-	var promptRate, completionRate, multiplier, share int64
+	var gross int64
 	for rows.Next() {
 		count++
 		if count > 1 {
 			return 0, false, nil
 		}
-		if err := rows.Scan(&estimated, &faultFlag, &promptRate, &completionRate, &multiplier, &share); err != nil {
+		if err := rows.Scan(&gross); err != nil {
 			return 0, false, err
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return 0, false, err
 	}
-	if count != 1 || !estimated.Valid {
+	if count != 1 {
 		return 0, false, nil
 	}
-	row := ComputeCredits(promptTokens, nil, intPtrFromNull(estimated), UsageByteEstimated, faultFlag, RateCardEntry{
-		PromptCreditsPerMtok:     promptRate,
-		CompletionCreditsPerMtok: completionRate,
-	}, multiplier, share)
-	return row.GrossCredits, true, nil
+	return gross, true, nil
 }
 
 func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {

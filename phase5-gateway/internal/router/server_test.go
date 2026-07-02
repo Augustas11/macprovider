@@ -3002,6 +3002,38 @@ func TestNonStreamingSanitizesInvalidCachedPromptTokensWithoutRejectingUsage(t *
 	}
 }
 
+func TestNonStreamingSynthesizesCompleteUsageWhenProviderUsageAbsent(t *testing.T) {
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"legacy usage"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		responseBody := `{"id":"chatcmpl_legacy","choices":[{"message":{"content":"ok"}}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, responseBody), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_absent_usage_nonstream")
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var out struct {
+		Usage tokenUsage `json:"usage"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	wantPrompt := estimatePromptTokens([]byte(body))
+	if out.Usage.PromptTokens != wantPrompt || out.Usage.CachedPromptTokens != 0 || out.Usage.CompletionTokens != 0 || out.Usage.TotalTokens != wantPrompt {
+		t.Fatalf("usage=%+v, want complete gateway-estimated prompt=%d cached=0 completion=0 total=%d", out.Usage, wantPrompt, wantPrompt)
+	}
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_absent_usage_nonstream")
+	if outcome != "ok" || source != "gateway_estimated" || prompt != wantPrompt || completion != 0 {
+		t.Fatalf("usage event outcome/source/prompt/completion = %s/%s/%d/%d, want ok/gateway_estimated/%d/0", outcome, source, prompt, completion, wantPrompt)
+	}
+}
+
 func TestNonStreamingSettlementFailureDoesNotReturnSuccess(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_ok","usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`), nil
@@ -3092,15 +3124,17 @@ func TestUsageBodyWithTokenUsageAddsBuyerVisibleField(t *testing.T) {
 	}
 }
 
-func TestUsageBodyWithTokenUsageLeavesAbsentUsageAbsent(t *testing.T) {
+func TestUsageBodyWithTokenUsageSynthesizesCompleteUsageWhenAbsent(t *testing.T) {
 	body := []byte(`{"id":"cmpl","choices":[{"message":{"content":"ok"}}]}`)
-	updated := usageBodyWithTokenUsage(body, tokenUsage{PromptTokens: 7, CompletionTokens: 3, TotalTokens: 10})
-	var out map[string]json.RawMessage
+	updated := usageBodyWithTokenUsage(body, tokenUsage{PromptTokens: 7, CachedPromptTokens: 0, CompletionTokens: 3, TotalTokens: 10})
+	var out struct {
+		Usage tokenUsage `json:"usage"`
+	}
 	if err := json.Unmarshal(updated, &out); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := out["usage"]; ok {
-		t.Fatalf("usage was synthesized in body: %s", string(updated))
+	if out.Usage.PromptTokens != 7 || out.Usage.CachedPromptTokens != 0 || out.Usage.CompletionTokens != 3 || out.Usage.TotalTokens != 10 {
+		t.Fatalf("updated usage = %+v, want complete synthesized usage with cached_prompt_tokens=0", out.Usage)
 	}
 }
 
