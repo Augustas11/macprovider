@@ -2163,6 +2163,54 @@ func TestSPEC022GatewayStreamingVerifiedHoldIgnoresBuyerCanceledContext(t *testi
 	}
 }
 
+func TestSPEC022GatewayNonStreamingPendingHoldIgnoresBuyerCanceledContext(t *testing.T) {
+	accountID := "acct_spec022_nonstream_pending_hold_ctx"
+	requestID := "req_spec022_nonstream_pending_hold_ctx"
+	pendingDeadlineUnixMS := fixedNow().Add(5 * time.Minute).UnixMilli()
+	wrapped := &settlementHoldContextStore{}
+	s := &Server{store: wrapped, now: fixedNow}
+	ctx := context.WithValue(context.Background(), requestIDKey{}, requestID)
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+	h := settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "receipt_verdict_pending", pendingDeadlineUnixMS)
+	w := httptest.NewRecorder()
+
+	if !s.settleBeforeResponseWithCoordinatorFinality(w, req, usageSubject{AccountID: accountID}, 1, 1, 2, "coordinator", "pending", h) {
+		t.Fatalf("settleBeforeResponseWithCoordinatorFinality status=%d body=%s", w.Code, w.Body.String())
+	}
+	if wrapped.markCtxErr != nil {
+		t.Fatalf("MarkReservationSettlementHold ctx err=%v want nil despite canceled buyer context", wrapped.markCtxErr)
+	}
+	if wrapped.clampCtxErr != nil {
+		t.Fatalf("ClampReservationExpiry ctx err=%v want nil despite canceled buyer context", wrapped.clampCtxErr)
+	}
+}
+
+func TestSPEC022GatewayStreamingPendingHoldIgnoresBuyerCanceledContext(t *testing.T) {
+	accountID := "acct_spec022_stream_pending_hold_ctx"
+	requestID := "req_spec022_stream_pending_hold_ctx"
+	pendingDeadlineUnixMS := fixedNow().Add(5 * time.Minute).UnixMilli()
+	wrapped := &settlementHoldContextStore{}
+	s := &Server{store: wrapped, now: fixedNow}
+	ctx := context.WithValue(context.Background(), requestIDKey{}, requestID)
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+	resp := &http.Response{
+		Trailer: settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "receipt_verdict_pending", pendingDeadlineUnixMS),
+	}
+
+	s.settleStreamingAfterCommitWithCoordinatorFinality(req, usageSubject{AccountID: accountID}, 1, 1, 2, "coordinator", "pending", "", resp)
+
+	if wrapped.markCtxErr != nil {
+		t.Fatalf("MarkReservationSettlementHold ctx err=%v want nil despite canceled buyer context", wrapped.markCtxErr)
+	}
+	if wrapped.clampCtxErr != nil {
+		t.Fatalf("ClampReservationExpiry ctx err=%v want nil despite canceled buyer context", wrapped.clampCtxErr)
+	}
+}
+
 func settlementFinalityHeaderNamesForTest() []string {
 	return []string{
 		settlementOutcomeHeader,
@@ -2347,6 +2395,7 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 		wantRefunded   int64
 		wantActive     int64
 		wantActiveHold int64
+		wantExpiresAt  int64
 	}{
 		{
 			name:          "legacy-no-header-debits",
@@ -2381,34 +2430,37 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			wantUsageRows: 0,
 		},
 		{
-			name:           "pending-holds-reservation",
+			name:           "pending-without-deadline-holds-with-fallback-deadline",
 			mode:           "enforce",
 			outcome:        "pending",
 			receiptResult:  "inconclusive",
 			closed:         "false",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
-			name:           "verified-open-holds-reservation",
+			name:           "verified-open-without-deadline-holds-with-fallback-deadline",
 			mode:           "enforce",
 			outcome:        "verified",
 			receiptResult:  "valid",
 			closed:         "false",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
-			name:           "verified-invalid-result-holds",
+			name:           "verified-invalid-result-without-deadline-holds",
 			mode:           "enforce",
 			outcome:        "verified",
 			receiptResult:  "invalid",
 			closed:         "true",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
 			name:          "observe-mode-keeps-legacy-debit",
@@ -2420,45 +2472,49 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			wantSettled:   1,
 		},
 		{
-			name:           "partial-outcome-without-mode-holds-reservation",
+			name:           "partial-outcome-without-mode-holds",
 			outcome:        "verified",
 			receiptResult:  "valid",
 			closed:         "true",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
-			name:           "enforce-without-policy-version-holds-reservation",
+			name:           "enforce-without-policy-version-holds",
 			mode:           "enforce",
 			omitPolicy:     true,
 			outcome:        "verified",
 			receiptResult:  "valid",
 			closed:         "true",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
-			name:           "enforce-with-unknown-policy-version-holds-reservation",
+			name:           "enforce-with-unknown-policy-version-holds",
 			mode:           "enforce",
 			policyVersion:  "unknown-policy",
 			outcome:        "verified",
 			receiptResult:  "valid",
 			closed:         "true",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
-			name:           "unknown-mode-holds-reservation",
+			name:           "unknown-mode-holds",
 			mode:           "monitor",
 			outcome:        "verified",
 			receiptResult:  "valid",
 			closed:         "true",
+			wantUsageRows:  0,
 			wantActive:     1,
 			wantActiveHold: 20,
-			wantUsageRows:  0,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 	}
 	for _, tc := range cases {
@@ -2502,12 +2558,18 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 				t.Fatalf("settlement snapshot = %+v, want usage=%d settled=%d refunded=%d active=%d active_reserved=%d",
 					got, tc.wantUsageRows, tc.wantSettled, tc.wantRefunded, tc.wantActive, tc.wantActiveHold)
 			}
+			if tc.wantExpiresAt > 0 {
+				if got := gatewayReservationExpiresAtUnixMS(t, dbPath, accountID); got != tc.wantExpiresAt {
+					t.Fatalf("reservation expires_at=%d want fallback hold deadline %d", got, tc.wantExpiresAt)
+				}
+			}
 		})
 	}
 }
 
 func TestSPEC022GatewayProviderErrorFinalityHoldsBuyerDebit(t *testing.T) {
 	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	pendingDeadline := fixedNow().Add(5 * time.Minute)
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		h := http.Header{}
 		h.Set("Content-Type", "application/json")
@@ -2517,6 +2579,7 @@ func TestSPEC022GatewayProviderErrorFinalityHoldsBuyerDebit(t *testing.T) {
 		h.Set(settlementReceiptResultHeader, "inconclusive")
 		h.Set(settlementReasonHeader, "missing_receipt_deadline_open")
 		h.Set(settlementClosedHeader, "false")
+		h.Set(settlementPendingUntilHeader, strconv.FormatInt(pendingDeadline.UnixMilli(), 10))
 		return responseWithBody(http.StatusGatewayTimeout, h, `{"error":{"message":"timeout","type":"api_error","param":null,"code":"provider_timeout"}}`), nil
 	})}
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
@@ -2532,6 +2595,16 @@ func TestSPEC022GatewayProviderErrorFinalityHoldsBuyerDebit(t *testing.T) {
 	got := gatewaySettlementSnapshot(t, dbPath, accountID)
 	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != 20 {
 		t.Fatalf("settlement snapshot = %+v, want pending provider error to hold reservation without debit", got)
+	}
+	holds, err := store.ListSettlementHeldReservations(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListSettlementHeldReservations: %v", err)
+	}
+	if len(holds) != 1 || holds[0].AccountID != accountID {
+		t.Fatalf("settlement holds=%#v want one visible hold for %s", holds, accountID)
+	}
+	if got := holds[0].ExpiresAt.UnixMilli(); got != pendingDeadline.UnixMilli() {
+		t.Fatalf("held reservation expires_at_unix_ms=%d want %d", got, pendingDeadline.UnixMilli())
 	}
 }
 

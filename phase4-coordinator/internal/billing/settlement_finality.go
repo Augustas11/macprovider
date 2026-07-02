@@ -287,8 +287,8 @@ func (s *Store) requestIDsForExternalRequest(ctx context.Context, accountID, ext
 		if notBeforeUnixMS < 0 {
 			notBeforeUnixMS = 0
 		}
-		notBeforeClause = " AND ts_utc >= ?"
-		args = append(args, time.UnixMilli(notBeforeUnixMS).UTC().Format(time.RFC3339Nano))
+		notBeforeClause = " AND " + sqliteTimeSince("ts_utc")
+		args = append(args, sqliteTimeText(time.UnixMilli(notBeforeUnixMS)))
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT request_id

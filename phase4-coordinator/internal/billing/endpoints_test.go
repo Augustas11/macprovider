@@ -21,6 +21,31 @@ func (f fakeTokens) ValidateToken(_ context.Context, raw string) (string, bool, 
 	return providerID, ok, nil
 }
 
+func (f fakeTokens) ValidateAndMarkTokenUsed(ctx context.Context, raw string) (string, bool, error) {
+	return f.ValidateToken(ctx, raw)
+}
+
+type markingTokens struct {
+	providerID string
+	marked     int
+}
+
+func (m *markingTokens) ValidateToken(context.Context, string) (string, bool, error) {
+	return "", false, nil
+}
+
+func (m *markingTokens) ValidateAndMarkTokenUsed(context.Context, string) (string, bool, error) {
+	m.marked++
+	return m.providerID, true, nil
+}
+
+type validateOnlyTokens map[string]string
+
+func (v validateOnlyTokens) ValidateToken(_ context.Context, raw string) (string, bool, error) {
+	providerID, ok := v[raw]
+	return providerID, ok, nil
+}
+
 func TestSummaryEndpoint(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	now := time.Now().UTC()
@@ -258,6 +283,56 @@ func TestAdminLedgerDeniesWhenOperatorKeyEmpty(t *testing.T) {
 	}
 }
 
+func TestAdminRateLimitRunsAfterAuthentication(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	handler := store.Handlers("operator", fakeTokens{}, true, 60)
+	for i := 0; i < 200; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/admin/ledger/summary", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("unauth request %d status=%d want 403", i, w.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/summary", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorized status=%d body=%s; unauth requests drained admin limiter", w.Code, w.Body.String())
+	}
+}
+
+func TestUnknownAdminLedgerPathRequiresAuthAndAuthenticatedRequestsConsumeLimiter(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	handler := store.Handlers("operator", fakeTokens{}, true, 60)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/not-a-route", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unauth status=%d body=%s want 403", w.Code, w.Body.String())
+	}
+
+	for i := 0; i < 128; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/admin/ledger/not-a-route", nil)
+		req.Header.Set("Authorization", "Bearer operator")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("auth unknown request %d status=%d body=%s want 404", i, w.Code, w.Body.String())
+		}
+	}
+	req = httptest.NewRequest(http.MethodGet, "/admin/ledger/not-a-route", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("post-drain status=%d body=%s want 429", w.Code, w.Body.String())
+	}
+}
+
 func TestProvidersEndpoint(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	now := time.Now().UTC()
@@ -354,6 +429,32 @@ func TestReconcileEndpoint_CleanDelta(t *testing.T) {
 	}
 	if resp["delta_gross_credits"].(float64) != 0 {
 		t.Fatalf("delta=%v want 0", resp["delta_gross_credits"])
+	}
+}
+
+func TestReconcileEndpointCountsFractionalRFC3339TimestampChronologically(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	ts := time.Date(2026, 6, 1, 0, 0, 0, 500*int(time.Millisecond), time.UTC)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc: ts, RequestID: "fractional-rfc3339", Model: "model-a", ProviderAssignedID: "assigned-a",
+		Status: 200, BuyerIP: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile?from=2026-06-01&to=2026-06-02", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if got := resp["rows_scanned"].(float64); got != 1 {
+		t.Fatalf("rows_scanned=%v want 1 for fractional RFC3339 timestamp", got)
 	}
 }
 
@@ -567,6 +668,33 @@ func TestEarningsEndpoint_TokenRequired(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("wrong subject status=%d want 403", w.Code)
+	}
+}
+
+func TestEarningsEndpointMarksProviderTokenUsed(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	insertCredit(t, store.db, "provider-a", time.Now().UTC(), 500)
+	tokens := &markingTokens{providerID: "provider-a"}
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", tokens, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if tokens.marked != 1 {
+		t.Fatalf("token mark count=%d want 1", tokens.marked)
+	}
+}
+
+func TestEarningsEndpointRejectsTokenStoreWithoutMarkUse(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", validateOnlyTokens{"good": "provider-a"}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s want 503 when token store cannot mark use", w.Code, w.Body.String())
 	}
 }
 

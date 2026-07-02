@@ -179,9 +179,9 @@ func (s *Store) LatestConfigSnapshotAt(ctx context.Context, t time.Time) (int64,
 	var id int64
 	err := s.db.QueryRowContext(ctx, `
 SELECT id FROM ledger_config_snapshots
- WHERE effective_at_utc <= ?
- ORDER BY effective_at_utc DESC, id DESC
- LIMIT 1`, t.UTC().Format(time.RFC3339Nano)).Scan(&id)
+ WHERE julianday(effective_at_utc) <= julianday(?)
+ ORDER BY julianday(effective_at_utc) DESC, id DESC
+ LIMIT 1`, sqliteTimeText(t)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNoSnapshot
 	}
@@ -232,9 +232,9 @@ func snapshotAtQueryer(ctx context.Context, q snapshotQueryer, t time.Time) (int
 	err := q.QueryRowContext(ctx, `
 SELECT id, provider_share_bps, global_multiplier_ppm, rate_card_json
   FROM ledger_config_snapshots
- WHERE effective_at_utc <= ?
- ORDER BY effective_at_utc DESC, id DESC
- LIMIT 1`, t.UTC().Format(time.RFC3339Nano)).Scan(&id, &providerShareBps, &multiplierPPM, &rateJSON)
+ WHERE julianday(effective_at_utc) <= julianday(?)
+ ORDER BY julianday(effective_at_utc) DESC, id DESC
+ LIMIT 1`, sqliteTimeText(t)).Scan(&id, &providerShareBps, &multiplierPPM, &rateJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, RewardsConfig{}, 0, 0, ErrNoSnapshot
 	}

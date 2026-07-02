@@ -5,14 +5,14 @@ import (
 	"time"
 )
 
-// SPEC-005 v0.4 §11.6.6 / §11 — every `/admin/ledger/*` response
-// path consumes the SAME rate-limit bucket. v0.4 IMPL ships a
-// process-global token bucket keyed by the (single) operator-key
-// principal. The bucket is intentionally simple: a token capacity
-// + a refill cadence in tokens-per-second. Future spec versions
-// may replace this with a multi-tenant or persistent limiter; v0.4
-// only needs to satisfy the "every-response consumes" property,
-// not a sophisticated traffic shape.
+// SPEC-005 v0.4 §11.6.6 / §11 — every authenticated `/admin/ledger/*`
+// response path consumes the SAME rate-limit bucket. v0.4 IMPL ships
+// a process-global token bucket keyed by the (single) operator-key
+// principal. The bucket is intentionally simple: a token capacity + a
+// refill cadence in tokens-per-second. Future spec versions may replace
+// this with a multi-tenant or persistent limiter; v0.4 only needs to
+// satisfy the "authenticated response consumes" property, not a
+// sophisticated traffic shape.
 
 const (
 	// R3 fix (CODE-H1): SPEC AC-Q049 requires 64 concurrent POSTs to
@@ -29,12 +29,12 @@ const (
 )
 
 type adminRateLimiter struct {
-	mu        sync.Mutex
-	tokens    float64
-	last      time.Time
-	capacity  float64
-	refillPS  float64
-	now       func() time.Time
+	mu       sync.Mutex
+	tokens   float64
+	last     time.Time
+	capacity float64
+	refillPS float64
+	now      func() time.Time
 }
 
 func newAdminRateLimiter() *adminRateLimiter {
@@ -48,9 +48,10 @@ func newAdminRateLimiter() *adminRateLimiter {
 }
 
 // Allow returns true if a token was consumed, false if the bucket
-// is exhausted. SPEC §11.6.6 requires EVERY response code path
-// (200, 4xx, 5xx) to consume one token — failure responses do NOT
-// bypass.
+// is exhausted. SPEC §11.6.6 requires every authenticated response code
+// path (200, 4xx, 5xx) to consume one token; unauthenticated failures
+// are rejected before the operator-key bucket to avoid letting unauth
+// traffic drain authenticated admin capacity.
 func (b *adminRateLimiter) Allow() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()

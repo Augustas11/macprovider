@@ -68,8 +68,7 @@ UPDATE ledger_request_credits
        quarantine_reason = COALESCE(quarantine_reason, 'missing_request_log'),
        updated_at_utc = ?
  WHERE quarantined = 0
-    AND ts_utc >= ?
-    AND ts_utc < ?
+    AND `+sqliteTimeRange("ts_utc")+`
 	AND NOT EXISTS (
        SELECT 1
          FROM request_log rl
@@ -90,7 +89,7 @@ UPDATE ledger_request_credits
                  AND prior.request_id = rl.request_id
                  AND prior.id <= rl.id
           ), 0) = ledger_request_credits.attempt_n
-   )`, now, in.ScanFrom.UTC().Format(time.RFC3339Nano), in.ScanTo.UTC().Format(time.RFC3339Nano))
+   )`, now, sqliteTimeText(in.ScanFrom), sqliteTimeText(in.ScanTo))
 	if err != nil {
 		return err
 	}
@@ -111,12 +110,12 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
             AND prior.id <= rl.id
        ), 0) AS attempt_n
   FROM request_log rl
- WHERE rl.ts_utc >= ? AND rl.ts_utc < ?
+ WHERE `+sqliteTimeRange("rl.ts_utc")+`
    AND rl.provider_assigned_id IS NOT NULL
    AND rl.status != 503
- ORDER BY rl.ts_utc, rl.id`,
-		in.ScanFrom.UTC().Format(time.RFC3339Nano),
-		in.ScanTo.UTC().Format(time.RFC3339Nano),
+ ORDER BY julianday(rl.ts_utc), rl.id`,
+		sqliteTimeText(in.ScanFrom),
+		sqliteTimeText(in.ScanTo),
 	)
 	if err != nil {
 		return err

@@ -133,6 +133,22 @@ func TestSnapshotAt_UsesRollbackReloadEffectiveTime(t *testing.T) {
 	}
 }
 
+func TestSnapshotAtUsesChronologicalRFC3339NanoOrdering(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	effectiveAt := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := store.InsertConfigSnapshot(context.Background(), cfg, effectiveAt); err != nil {
+		t.Fatal(err)
+	}
+	_, rewards, _, _, err := store.snapshotAt(context.Background(), effectiveAt.Add(500*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := RateFor(rewards.RateCard, "model-a").PromptCreditsPerMtok; got != 1000000 {
+		t.Fatalf("prompt rate=%d want 1000000", got)
+	}
+}
+
 func TestWriteHotPath_ACID(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)

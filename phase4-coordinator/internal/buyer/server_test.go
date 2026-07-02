@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -3682,6 +3683,36 @@ func TestChatCompletionsStreamingWSTunneledAEADFailureAfterCommitSendsSSEError(t
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"hello"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_aead_decrypt_failed"`)) {
 		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsStreamingWSTunneledPreCommitGenericFailureWritesSingleError(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk)
+			done := make(chan providerws.InferenceResponseEnd)
+			errs := make(chan error, 1)
+			errs <- errors.New("provider failed before first chunk")
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "data:") {
+		t.Fatalf("pre-commit failure wrote SSE after JSON error: %s", body)
+	}
+	if count := strings.Count(body, `"error"`); count != 1 {
+		t.Fatalf("error envelope count=%d body=%s", count, body)
 	}
 }
 

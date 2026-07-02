@@ -242,24 +242,24 @@ func TestReserveIdempotencyKeyDetectsReplayConflictAndPrunes(t *testing.T) {
 	old := time.Date(2026, 5, 31, 0, 0, 0, 0, time.UTC)
 	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 
-	requestID, replay, err := store.ReserveIdempotencyKey(ctx, "idem-old", "hash-a", "req-a", old)
+	requestID, replay, err := store.ReserveIdempotencyKey(ctx, "", "idem-old", "hash-a", "req-a", old)
 	if err != nil {
 		t.Fatalf("ReserveIdempotencyKey first: %v", err)
 	}
 	if replay || requestID != "req-a" {
 		t.Fatalf("first reserve requestID=%q replay=%v", requestID, replay)
 	}
-	requestID, replay, err = store.ReserveIdempotencyKey(ctx, "idem-old", "hash-a", "req-b", cutoff)
+	requestID, replay, err = store.ReserveIdempotencyKey(ctx, "", "idem-old", "hash-a", "req-b", cutoff)
 	if err != nil {
 		t.Fatalf("ReserveIdempotencyKey replay: %v", err)
 	}
 	if !replay || requestID != "req-a" {
 		t.Fatalf("replay requestID=%q replay=%v", requestID, replay)
 	}
-	if _, _, err := store.ReserveIdempotencyKey(ctx, "idem-old", "hash-b", "req-c", cutoff); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, _, err := store.ReserveIdempotencyKey(ctx, "", "idem-old", "hash-b", "req-c", cutoff); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("mismatch err=%v want ErrIdempotencyConflict", err)
 	}
-	if _, _, err := store.ReserveIdempotencyKey(ctx, "idem-new", "hash-n", "req-n", cutoff.Add(time.Second)); err != nil {
+	if _, _, err := store.ReserveIdempotencyKey(ctx, "", "idem-new", "hash-n", "req-n", cutoff.Add(time.Second)); err != nil {
 		t.Fatalf("ReserveIdempotencyKey new: %v", err)
 	}
 	if _, err := store.PruneBefore(ctx, cutoff); err != nil {
@@ -277,6 +277,108 @@ func TestReserveIdempotencyKeyDetectsReplayConflictAndPrunes(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("new idempotency keys=%d want 1", count)
+	}
+}
+
+func TestReserveIdempotencyKeyScopesByAccount(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	requestID, replay, err := store.ReserveIdempotencyKey(ctx, "acct-a", "same-key", "hash-a", "req-a", now)
+	if err != nil {
+		t.Fatalf("ReserveIdempotencyKey account A: %v", err)
+	}
+	if replay || requestID != "req-a" {
+		t.Fatalf("account A first requestID=%q replay=%v", requestID, replay)
+	}
+	requestID, replay, err = store.ReserveIdempotencyKey(ctx, "acct-b", "same-key", "hash-b", "req-b", now)
+	if err != nil {
+		t.Fatalf("ReserveIdempotencyKey account B: %v", err)
+	}
+	if replay || requestID != "req-b" {
+		t.Fatalf("account B first requestID=%q replay=%v", requestID, replay)
+	}
+	requestID, replay, err = store.ReserveIdempotencyKey(ctx, "acct-a", "same-key", "hash-a", "req-a2", now)
+	if err != nil {
+		t.Fatalf("ReserveIdempotencyKey account A replay: %v", err)
+	}
+	if !replay || requestID != "req-a" {
+		t.Fatalf("account A replay requestID=%q replay=%v", requestID, replay)
+	}
+	if _, _, err := store.ReserveIdempotencyKey(ctx, "acct-a", "same-key", "hash-b", "req-a3", now); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("account A mismatch err=%v want ErrIdempotencyConflict", err)
+	}
+}
+
+func TestMigrateIdempotencyKeysBackfillsLegacyAccountScope(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE request_log (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc               TEXT    NOT NULL,
+    request_id           TEXT    NOT NULL,
+    account_id           TEXT    NULL,
+    model                TEXT    NOT NULL,
+    provider_assigned_id TEXT    NULL,
+    prompt_tokens        INTEGER NULL,
+    completion_tokens    INTEGER NULL,
+    total_tokens         INTEGER NULL,
+    latency_ms           REAL    NOT NULL,
+    routing_ms           REAL    NOT NULL,
+    status               INTEGER NOT NULL,
+    stream               INTEGER NOT NULL,
+    buyer_ip             TEXT    NOT NULL DEFAULT '',
+    error                TEXT    NULL,
+    pref_header          TEXT    NULL,
+    provider_header      TEXT    NULL,
+    retried              INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE request_idempotency_keys (
+    idempotency_key TEXT PRIMARY KEY,
+    body_sha256    TEXT NOT NULL,
+    request_id     TEXT NOT NULL UNIQUE,
+    created_at_utc TEXT NOT NULL
+)`); err != nil {
+		t.Fatalf("seed legacy schema: %v", err)
+	}
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`
+INSERT INTO request_log (
+    ts_utc, request_id, account_id, model, provider_assigned_id,
+    prompt_tokens, completion_tokens, total_tokens, latency_ms, routing_ms,
+    status, stream, buyer_ip, error, pref_header, provider_header, retried
+) VALUES (?, 'req-legacy', 'acct-legacy', 'model-a', 'session-a', NULL, NULL, NULL, 0, 0, 200, 0, '127.0.0.1', NULL, NULL, NULL, 0)`,
+		now.UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed request_log: %v", err)
+	}
+	if _, err := db.Exec(`
+INSERT INTO request_idempotency_keys (idempotency_key, body_sha256, request_id, created_at_utc)
+VALUES ('idem-legacy', 'hash-a', 'req-legacy', ?)`,
+		now.UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed idempotency key: %v", err)
+	}
+	_ = db.Close()
+
+	store, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	requestID, replay, err := store.ReserveIdempotencyKey(context.Background(), "acct-legacy", "idem-legacy", "hash-a", "req-new", now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("ReserveIdempotencyKey replay: %v", err)
+	}
+	if !replay || requestID != "req-legacy" {
+		t.Fatalf("replay requestID=%q replay=%v want req-legacy/true", requestID, replay)
+	}
+	if _, _, err := store.ReserveIdempotencyKey(context.Background(), "acct-legacy", "idem-legacy", "hash-b", "req-conflict", now.Add(2*time.Second)); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("mismatch err=%v want ErrIdempotencyConflict", err)
 	}
 }
 

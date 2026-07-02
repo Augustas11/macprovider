@@ -1479,7 +1479,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		bodyHash := sha256.Sum256(body)
-		reservedRequestID, replay, err := s.reqLogStore.ReserveIdempotencyKey(r.Context(), idempotencyKey, hex.EncodeToString(bodyHash[:]), originalRequestID, startedAt)
+		reservedRequestID, replay, err := s.reqLogStore.ReserveIdempotencyKey(r.Context(), accountID, idempotencyKey, hex.EncodeToString(bodyHash[:]), originalRequestID, startedAt)
 		if err != nil {
 			if errors.Is(err, requestlog.ErrIdempotencyConflict) {
 				rec.logBuyerFailure(http.StatusConflict, "Idempotency-Key was already used with a different request body")
@@ -2367,13 +2367,17 @@ func (s *Server) attemptTimeout(r *http.Request) time.Duration {
 
 func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID string, body []byte, provider pool.Provider, stream bool, timeout time.Duration, logNonStreamingSuccess func(requestLogAttempt) error, settlementMetadata *providerws.SettlementReceiptMetadata, state *forwardState, billingAttemptN int) (wsForwardResult, requestLogAttempt) {
 	if s.relay == nil {
-		writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
+		if !stream {
+			writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
+		}
 		return wsForwardUnavailable, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is not reachable"}
 	}
 	reserved := false
 	if s.admission != nil {
 		if !s.admission.TryReserveRequest(provider) {
-			writeError(w, http.StatusTooManyRequests, "provisional_quota_exceeded", "Selected provisional provider is over request quota")
+			if !stream {
+				writeError(w, http.StatusTooManyRequests, "provisional_quota_exceeded", "Selected provisional provider is over request quota")
+			}
 			return wsForwardFailed, requestLogAttempt{Status: http.StatusTooManyRequests, Error: "Selected provisional provider is over request quota"}
 		}
 		reserved = provider.Tier == pool.TierProvisional
@@ -2826,7 +2830,6 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			if errors.Is(err, providerws.ErrRelayAEADFailed) {
 				if !committed {
-					writeError(w, http.StatusBadGateway, "tier2_aead_decrypt_failed", "Provider encrypted response failed authentication")
 					return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider encrypted response failed authentication"}
 				}
 				writeSSEError(w, "Provider encrypted response failed authentication", "tier2_aead_decrypt_failed")
@@ -2834,6 +2837,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 					flusher.Flush()
 				}
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider encrypted response failed authentication", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementTracker.output(billing.TerminalStateProviderError)}
+			}
+			if !committed {
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider failed; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 			}
 			commit()
 			writeSSEError(w, "Provider failed during streaming", "provider_error")

@@ -20,6 +20,10 @@ type tokenValidator interface {
 	ValidateToken(ctx context.Context, raw string) (providerID string, ok bool, err error)
 }
 
+type tokenUseMarker interface {
+	ValidateAndMarkTokenUsed(ctx context.Context, raw string) (providerID string, ok bool, err error)
+}
+
 func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int) http.Handler {
 	return s.HandlersWithBridge(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin)
 }
@@ -159,17 +163,6 @@ type settlementVerdictCounter struct {
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
-	// SPEC-005 v0.4 §11.6.6 — every /admin/ledger/* response path
-	// consumes the same rate-limit bucket. Charge BEFORE any
-	// further branching so 4xx / 5xx responses count too.
-	isAdminPath := strings.HasPrefix(r.URL.Path, "/admin/ledger/")
-	if isAdminPath {
-		if !h.adminBucket.Allow() {
-			writeError(w, http.StatusTooManyRequests, "rate_limited", "admin rate limit exceeded")
-			return
-		}
-	}
-
 	// SPEC-005 v0.4 §11.6 quarantine surface (issue #169).
 	// matchQuarantinePath distinguishes "not this route" from
 	// "matched route + bad id" so we can emit 400 (not 404) per
@@ -182,7 +175,19 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		// existence via 405 / 400 even when the operator has not
 		// turned the surface on.
 		if !h.store.ForceVoidEnabled() {
+			if auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
+				if !h.allowAdminRequest(w) {
+					return
+				}
+			}
 			writeError(w, http.StatusNotFound, "not_found", "not found")
+			return
+		}
+		if !auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
+			writeError(w, http.StatusForbidden, "forbidden", "operator key required")
+			return
+		}
+		if !h.allowAdminRequest(w) {
 			return
 		}
 		if r.Method != http.MethodPost {
@@ -206,6 +211,8 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.admin(w, r, h.providers)
 	case r.URL.Path == "/admin/ledger/reconcile":
 		h.admin(w, r, h.reconcile)
+	case strings.HasPrefix(r.URL.Path, "/admin/ledger/"):
+		h.adminNotFound(w, r)
 	case strings.HasPrefix(r.URL.Path, "/providers/") && strings.HasSuffix(r.URL.Path, "/earnings"):
 		h.earnings(w, r)
 	default:
@@ -214,16 +221,19 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) admin(w http.ResponseWriter, r *http.Request, fn func(http.ResponseWriter, *http.Request)) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
-		return
-	}
 	// /admin/ledger/* is operator-only (codex PR #73 HIGH-1 fix). The
 	// gateway service token is intentionally NOT accepted here so a
 	// compromised gateway can't pivot to billing-ledger reads. Empty
 	// operator_key still means DENY (M1-5 / SECU-5).
 	if !auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
 		writeError(w, http.StatusForbidden, "forbidden", "operator key required")
+		return
+	}
+	if !h.allowAdminRequest(w) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	h.log.Info().
@@ -235,6 +245,25 @@ func (h *handler) admin(w http.ResponseWriter, r *http.Request, fn func(http.Res
 	fn(w, r)
 }
 
+func (h *handler) adminNotFound(w http.ResponseWriter, r *http.Request) {
+	if !auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
+		writeError(w, http.StatusForbidden, "forbidden", "operator key required")
+		return
+	}
+	if !h.allowAdminRequest(w) {
+		return
+	}
+	writeError(w, http.StatusNotFound, "not_found", "not found")
+}
+
+func (h *handler) allowAdminRequest(w http.ResponseWriter) bool {
+	if h.adminBucket.Allow() {
+		return true
+	}
+	writeError(w, http.StatusTooManyRequests, "rate_limited", "admin rate limit exceeded")
+	return false
+}
+
 func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	settlementVerdictCounters, err := h.settlementVerdictCounters(ctx)
@@ -242,12 +271,12 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
-	current := currentMondayUTC(time.Now().UTC()).Format(time.RFC3339Nano)
+	current := sqliteTimeText(currentMondayUTC(time.Now().UTC()))
 	resp := map[string]any{
 		"total_gross_credits":             h.sum(ctx, `SELECT SUM(gross_credits) FROM spec022_payable_request_credits`),
 		"total_provider_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits`),
 		"total_operator_credits":          h.sum(ctx, `SELECT SUM(gross_credits - provider_credits) FROM spec022_payable_request_credits`),
-		"current_window_provider_credits": h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE ts_utc >= ?`, current),
+		"current_window_provider_credits": h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE `+sqliteTimeSince("ts_utc"), current),
 		"pending_payout_count":            h.sum(ctx, `SELECT COUNT(*) FROM ledger_payout_ready WHERE status='ready'`),
 		"pending_payout_credits":          h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE status='ready'`),
 		// SPEC-005 v0.4 §11.6.5 OPEN_PREDICATE — `quarantined_count`
@@ -278,7 +307,7 @@ func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
 	}
 	cursor := r.URL.Query().Get("cursor")
 	includeQuarantined := r.URL.Query().Get("include_quarantined") == "true"
-	current := currentMondayUTC(time.Now().UTC()).Format(time.RFC3339Nano)
+	current := sqliteTimeText(currentMondayUTC(time.Now().UTC()))
 	// R2 fix (CODE-H4): payable aggregates ALWAYS exclude quarantined
 	// rows (CASE on lrc.quarantined=0); quarantined_count ALWAYS uses
 	// OPEN_PREDICATE (quarantined=1 AND no resolution row).
@@ -306,7 +335,7 @@ func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.store.db.QueryContext(ctx, `
 SELECT lrc.provider_id,
        SUM(CASE WHEN payable.id IS NOT NULL THEN payable.provider_credits ELSE 0 END),
-       SUM(CASE WHEN payable.id IS NOT NULL AND payable.ts_utc >= ? THEN payable.provider_credits ELSE 0 END),
+       SUM(CASE WHEN payable.id IS NOT NULL AND `+sqliteTimeSince("payable.ts_utc")+` THEN payable.provider_credits ELSE 0 END),
        MAX(lrc.ts_utc),
        SUM(CASE WHEN lrc.fault_flag != 'none' THEN 1 ELSE 0 END),
        SUM(CASE WHEN lrc.quarantined=1 AND NOT EXISTS (
@@ -398,12 +427,12 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	rowsScanned, err := h.sumErr(ctx, `SELECT COUNT(*) FROM request_log WHERE ts_utc >= ? AND ts_utc < ?`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	rowsScanned, err := h.sumErr(ctx, `SELECT COUNT(*) FROM request_log WHERE `+sqliteTimeRange("ts_utc"), sqliteTimeText(from), sqliteTimeText(to))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
-	providerGross, err := h.sumErr(ctx, `SELECT SUM(gross_credits) FROM spec022_payable_request_credits WHERE ts_utc >= ? AND ts_utc < ?`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	providerGross, err := h.sumErr(ctx, `SELECT SUM(gross_credits) FROM spec022_payable_request_credits WHERE `+sqliteTimeRange("ts_utc"), sqliteTimeText(from), sqliteTimeText(to))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -417,9 +446,9 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 SELECT COUNT(*)
   FROM spec022_payable_request_credits lrc
   LEFT JOIN ledger_operator_credits loc ON loc.request_credit_id = lrc.id
- WHERE lrc.ts_utc >= ? AND lrc.ts_utc < ?
+ WHERE `+sqliteTimeRange("lrc.ts_utc")+`
    AND (loc.id IS NULL OR lrc.provider_credits + loc.operator_credits != lrc.gross_credits)`,
-		from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+		sqliteTimeText(from), sqliteTimeText(to))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -430,10 +459,10 @@ SELECT COUNT(*)
 	// excluded).
 	rowsQuarantined, err := h.sumErr(ctx, `
 SELECT COUNT(*) FROM ledger_request_credits lrc
- WHERE lrc.ts_utc >= ? AND lrc.ts_utc < ? AND lrc.quarantined=1
+ WHERE `+sqliteTimeRange("lrc.ts_utc")+` AND lrc.quarantined=1
    AND NOT EXISTS (SELECT 1 FROM ledger_quarantine_resolutions r
                     WHERE r.request_credit_id = lrc.id)`,
-		from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+		sqliteTimeText(from), sqliteTimeText(to))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -443,8 +472,8 @@ SELECT COUNT(*) FROM ledger_request_credits lrc
 	// v0.5 will widen to include `force_credit`.
 	rowsForceResolved, err := h.sumErr(ctx, `
 SELECT COUNT(*) FROM ledger_quarantine_resolutions
- WHERE created_at_utc >= ? AND created_at_utc < ?`,
-		from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+ WHERE `+sqliteTimeRange("created_at_utc"),
+		sqliteTimeText(from), sqliteTimeText(to))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -529,8 +558,8 @@ SELECT rl.request_id, rl.ts_utc, rl.model, COALESCE(rl.provider_assigned_id, '')
             AND prior.id <= rl.id
        ), 0) AS attempt_n
   FROM request_log rl
- WHERE rl.ts_utc >= ? AND rl.ts_utc < ?
- ORDER BY rl.ts_utc, rl.id`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+ WHERE `+sqliteTimeRange("rl.ts_utc")+`
+ ORDER BY julianday(rl.ts_utc), rl.id`, sqliteTimeText(from), sqliteTimeText(to))
 	if err != nil {
 		return 0, err
 	}
@@ -666,7 +695,12 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "provider tokens not available")
 		return
 	}
-	subject, ok, err := h.tokenStore.ValidateToken(r.Context(), raw)
+	marker, canMark := h.tokenStore.(tokenUseMarker)
+	if !canMark {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "provider token use marker not available")
+		return
+	}
+	subject, ok, err := marker.ValidateAndMarkTokenUsed(r.Context(), raw)
 	if err != nil || !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "provider bearer token required")
 		return
@@ -689,7 +723,7 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rangeSQL, rangeArgs := earningsRangeFilter(rangeFrom, rangeTo, hasRange)
-	current := currentMondayUTC(time.Now().UTC()).Format(time.RFC3339Nano)
+	current := sqliteTimeText(currentMondayUTC(time.Now().UTC()))
 	models := h.modelsServed(r.Context(), providerID, rangeSQL, rangeArgs...)
 	totalArgs := append([]any{providerID}, rangeArgs...)
 	currentArgs := append([]any{providerID, current}, rangeArgs...)
@@ -697,7 +731,7 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"provider_id":            providerID,
 		"total_credits":          h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL, totalArgs...),
-		"current_window_credits": h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND ts_utc >= ?`+rangeSQL, currentArgs...),
+		"current_window_credits": h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, currentArgs...),
 		"last_payout_ready":      h.lastPayout(r.Context(), providerID),
 		"provider_share_bps":     h.latestShareBps(r.Context()),
 		"models_served":          models,
@@ -954,7 +988,7 @@ func earningsRangeFilter(from, to time.Time, enabled bool) (string, []any) {
 	if !enabled {
 		return "", nil
 	}
-	return " AND ts_utc >= ? AND ts_utc < ?", []any{from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano)}
+	return " AND " + sqliteTimeRange("ts_utc"), []any{sqliteTimeText(from), sqliteTimeText(to)}
 }
 
 func (h *handler) sum(ctx context.Context, query string, args ...any) int64 {
@@ -1016,7 +1050,7 @@ func (h *handler) modelsServed(ctx context.Context, providerID string, rangeSQL 
 
 func (h *handler) rateCardExcerpt(ctx context.Context, models []string) map[string]RateCardEntry {
 	var raw string
-	if err := h.store.db.QueryRowContext(ctx, `SELECT rate_card_json FROM ledger_config_snapshots ORDER BY effective_at_utc DESC, id DESC LIMIT 1`).Scan(&raw); err != nil {
+	if err := h.store.db.QueryRowContext(ctx, `SELECT rate_card_json FROM ledger_config_snapshots ORDER BY julianday(effective_at_utc) DESC, id DESC LIMIT 1`).Scan(&raw); err != nil {
 		return map[string]RateCardEntry{}
 	}
 	var card map[string]RateCardEntry
@@ -1031,7 +1065,7 @@ func (h *handler) rateCardExcerpt(ctx context.Context, models []string) map[stri
 }
 
 func (h *handler) latestShareBps(ctx context.Context) int64 {
-	return h.sum(ctx, `SELECT provider_share_bps FROM ledger_config_snapshots ORDER BY effective_at_utc DESC, id DESC LIMIT 1`)
+	return h.sum(ctx, `SELECT provider_share_bps FROM ledger_config_snapshots ORDER BY julianday(effective_at_utc) DESC, id DESC LIMIT 1`)
 }
 
 func (h *handler) lastPayout(ctx context.Context, providerID string) any {

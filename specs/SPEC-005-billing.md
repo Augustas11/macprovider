@@ -1620,9 +1620,12 @@ amendment). v0.4 deliberately punts that complexity.
 #### 11.6.6 Rate limit, concurrency, and threat-model notes
 
 The endpoint shares the existing `/admin/*` rate-limit posture
-(per §11 preamble — operator key, /admin/* bucket). EVERY response
-code path — 200, 4xx, 5xx — consumes the SAME bucket; failure
-responses (404, 409, 422, etc.) do NOT bypass.
+(per §11 preamble — operator key, /admin/* bucket). Authentication
+runs before the operator-key bucket so unauthenticated traffic cannot
+drain authenticated admin capacity. After successful operator-key
+authentication, every response code path — 200, 4xx, 5xx — consumes
+the SAME bucket; authenticated failure responses (404, 409, 422, etc.)
+do NOT bypass.
 
 Concurrent POSTs against the same `request_credit_id` race at the
 UNIQUE constraint layer: SQLite's serialization yields exactly
@@ -2178,7 +2181,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 ### AC-Q049: Concurrent UNIQUE conflict mapping (v0.4 §11.6.2, §11.6.6)
 
 **Verification:** With route flag enabled, seed a `quarantined=1` row. Fire 64 parallel POST `/force-void` requests against it from independent client goroutines, each with a distinct `reason` value.
-**Expected:** Exactly one 200 response. Exactly 63 × 409 `already_resolved` responses, each with `existing_resolution` populated with the winner's identity. SELECT on `ledger_quarantine_resolutions` returns exactly one row. SELECT on `audit_log` returns exactly one row of `event_type='ledger_quarantine_force_void'`. All 64 responses count against the `/admin/*` rate-limit bucket.
+**Expected:** Exactly one 200 response. Exactly 63 × 409 `already_resolved` responses, each with `existing_resolution` populated with the winner's identity. SELECT on `ledger_quarantine_resolutions` returns exactly one row. SELECT on `audit_log` returns exactly one row of `event_type='ledger_quarantine_force_void'`. All 64 authenticated responses count against the `/admin/*` rate-limit bucket.
 **Network:** Not required.
 **State reset:** Fresh fixture database.
 

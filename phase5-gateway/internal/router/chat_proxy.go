@@ -54,6 +54,7 @@ const (
 	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
 	settlementPolicyVersion       = "spec022-prereq-v0"
+	settlementHoldFallbackTTL     = 5 * time.Minute
 )
 
 type settlementFinalityAction int
@@ -842,6 +843,12 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 			return
 		}
 	case settlementFinalityHold:
+		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+			return
+		}
 		slog.Info("gateway deferred buyer settlement pending coordinator receipt finality",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,
@@ -977,18 +984,18 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 		}
 		return true
 	case settlementFinalityHold:
-		if boundHold {
-			if !s.boundStreamingSettlementHold(r.Context(), r, subject, finality) {
-				writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
-				return false
-			}
-			return true
+		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+			return false
 		}
 		slog.Info("gateway deferred buyer settlement pending coordinator receipt finality",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,
 			"settlement_outcome", finality.Outcome,
 			"settlement_reason", finality.Reason,
+			"settlement_hold_bound", boundHold,
 		)
 		return true
 	default:
@@ -1014,7 +1021,16 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 			)
 		}
 	case settlementFinalityHold:
-		s.boundStreamingSettlementHold(r.Context(), r, subject, finality)
+		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+			slog.Error("gateway failed to persist streaming settlement hold after coordinator finality",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+			)
+		}
 	default:
 		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
 	}
@@ -1068,7 +1084,7 @@ func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Reque
 	if finality.PendingDeadlineUnixMS > 0 {
 		deadline = time.UnixMilli(finality.PendingDeadlineUnixMS).UTC()
 	}
-	if deadline.IsZero() || !deadline.After(now) {
+	if !deadline.IsZero() && !deadline.After(now) {
 		if err := s.store.RefundReservation(ctx, subject.AccountID, requestID(r), now.Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 			slog.Error("gateway streaming settlement hold refund failed",
 				"request_id", requestID(r),
@@ -1089,7 +1105,50 @@ func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Reque
 		)
 		return true
 	}
-	if err := s.store.ClampReservationExpiry(ctx, subject.AccountID, requestID(r), deadline); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+	if deadline.IsZero() {
+		if finality.Reason == "missing_settlement_finality_trailer" {
+			if err := s.store.RefundReservation(ctx, subject.AccountID, requestID(r), now.Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+				slog.Error("gateway streaming settlement hold refund failed",
+					"request_id", requestID(r),
+					"account_id", subject.AccountID,
+					"settlement_outcome", finality.Outcome,
+					"settlement_reason", finality.Reason,
+					"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+					"error", err,
+				)
+				return false
+			}
+			slog.Info("gateway released streaming buyer reservation without coordinator settlement finality",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"settlement_outcome", finality.Outcome,
+				"settlement_reason", finality.Reason,
+				"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+			)
+			return true
+		}
+		deadline = now.Add(settlementHoldFallbackTTL).UTC()
+		slog.Info("gateway bounded streaming settlement hold to local fallback deadline",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+			"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+			"settlement_fallback_deadline_unix_ms", deadline.UnixMilli(),
+		)
+	}
+	if err := s.store.MarkReservationSettlementHold(ctx, subject.AccountID, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) && !errors.Is(err, storage.ErrReservationTerminal) {
+		slog.Error("gateway streaming settlement hold marker failed",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+			"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+			"error", err,
+		)
+		return false
+	}
+	if err := s.store.ClampReservationExpiry(ctx, subject.AccountID, requestID(r), deadline); err != nil && !errors.Is(err, storage.ErrReservationNotFound) && !errors.Is(err, storage.ErrReservationTerminal) {
 		slog.Error("gateway streaming settlement hold deadline clamp failed",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,
@@ -1100,12 +1159,13 @@ func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Reque
 		)
 		return false
 	}
-	slog.Info("gateway bounded streaming buyer settlement hold to coordinator receipt deadline",
+	slog.Info("gateway bounded streaming buyer settlement hold to receipt deadline",
 		"request_id", requestID(r),
 		"account_id", subject.AccountID,
 		"settlement_outcome", finality.Outcome,
 		"settlement_reason", finality.Reason,
 		"settlement_pending_deadline_unix_ms", finality.PendingDeadlineUnixMS,
+		"settlement_hold_deadline_unix_ms", deadline.UnixMilli(),
 	)
 	return true
 }
