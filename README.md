@@ -114,7 +114,8 @@ print(response.choices[0].message.content)
 ```
 
 Get an API key → [api.streamvc.live/auth/github/start](https://api.streamvc.live/auth/github/start)  
-API reference → [api.streamvc.live/docs#api-reference](https://api.streamvc.live/docs#api-reference)
+API reference → [api.streamvc.live/docs#api-reference](https://api.streamvc.live/docs#api-reference)  
+Cookbook (tool calling, structured output, sticky conversations, receipt verification) → [docs/using-macprovider-with-openai-sdk.md](docs/using-macprovider-with-openai-sdk.md)
 
 ### Security model: buyer-side validation obligation
 
