@@ -106,6 +106,16 @@ NGINX_STATS_SECHEADERS="$DIST_DIR/nginx-snippets/stats-security-headers.conf"
 NGINX_STATS_SITE="$DIST_DIR/nginx-stats.streamvc.live.conf"
 CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}"
 
+# SPEC-023 v1.7.3 — signed static feeds (demand-rank + autotune-candidates)
+# served by nginx from /opt/macprovider/static/ under the /static/ prefix.
+# Files live in phase3-binary/dist/static/ in the repo. Deploy installs
+# them alongside the coordinator config.
+STATIC_FEEDS_DIR="$DIST_DIR/../../phase3-binary/dist/static"
+STATIC_DEMAND_JSON="$STATIC_FEEDS_DIR/demand-rank.json"
+STATIC_DEMAND_SIG="$STATIC_FEEDS_DIR/demand-rank.json.sig"
+STATIC_AUTOTUNE_JSON="$STATIC_FEEDS_DIR/autotune-candidates.json"
+STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
+
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
 # FR-C9.4 strict-reject path still requires `coordinator-cli
 # revoke-token` for the used-token-persist-failure case; routine
@@ -113,7 +123,9 @@ CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}
 # operator forgot to run build-linux.sh after the M2 update that
 # extended it. Fail closed — do NOT silently deploy with a stale CLI.
 for f in "$BINARY" "$CLI_BINARY" "$CONFIG" "$SERVICE" "$NGINX_SITE" \
-         "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE"; do
+         "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE" \
+         "$STATIC_DEMAND_JSON" "$STATIC_DEMAND_SIG" \
+         "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
 
@@ -494,6 +506,11 @@ $SCP "$NGINX_SITE"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-coordinator-full.conf
 $SCP "$NGINX_STATS_SHARED"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats-shared.conf"
 $SCP "$NGINX_STATS_SECHEADERS" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats-security-headers.conf"
 $SCP "$NGINX_STATS_SITE"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats.streamvc.live.conf"
+# SPEC-023 v1.7.3 signed static feeds
+$SCP "$STATIC_DEMAND_JSON"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/demand-rank.json"
+$SCP "$STATIC_DEMAND_SIG"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/demand-rank.json.sig"
+$SCP "$STATIC_AUTOTUNE_JSON"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json"
+$SCP "$STATIC_AUTOTUNE_SIG"    "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json.sig"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   $SCP "$CATALOG_SOURCE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
 fi
@@ -526,6 +543,17 @@ $SSH "set -e
   install -o root -g macprovider -m 0750 $DEPLOY_TMP/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.yaml /opt/macprovider/coordinator.yaml
   install -o root -g root       -m 0644 $DEPLOY_TMP/macprovider-coordinator.service /etc/systemd/system/macprovider-coordinator.service
+  # SPEC-023 v1.7.3 signed static feeds — served by nginx as
+  # coordinator.streamvc.live/static/*. Files are world-readable
+  # (mode 0644) because they are public signed content; nginx runs as
+  # www-data. Directory itself is world-executable so www-data can enter.
+  mkdir -p /opt/macprovider/static
+  chown root:root /opt/macprovider/static
+  chmod 0755      /opt/macprovider/static
+  install -o root -g root -m 0644 $DEPLOY_TMP/demand-rank.json          /opt/macprovider/static/demand-rank.json
+  install -o root -g root -m 0644 $DEPLOY_TMP/demand-rank.json.sig      /opt/macprovider/static/demand-rank.json.sig
+  install -o root -g root -m 0644 $DEPLOY_TMP/autotune-candidates.json  /opt/macprovider/static/autotune-candidates.json
+  install -o root -g root -m 0644 $DEPLOY_TMP/autotune-candidates.json.sig /opt/macprovider/static/autotune-candidates.json.sig
 "
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   # R4: no more `install -d` on a dynamic dirname. /opt/macprovider is
@@ -1034,6 +1062,21 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   }
   echo "  catalog OK: $CATALOG_SUMMARY"
 fi
+
+# SPEC-023 v1.7.3 signed static feeds smoke.
+for STATIC_PATH in \
+    /static/demand-rank.json \
+    /static/demand-rank.json.sig \
+    /static/autotune-candidates.json \
+    /static/autotune-candidates.json.sig; do
+  echo "  GET https://$DOMAIN$STATIC_PATH -> expect 200"
+  STATUS=$(curl -sS -o /tmp/macprovider-static-probe -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN$STATIC_PATH")
+  if [ "$STATUS" != "200" ]; then
+    echo "SPEC-023 static feed smoke failed: $STATIC_PATH status=$STATUS body=$(head -c 200 /tmp/macprovider-static-probe)" >&2
+    exit 1
+  fi
+done
+echo "  SPEC-023 static feeds OK"
 
 # R3+R4+R5 stats smoke check on STATS_DOMAIN.
 #

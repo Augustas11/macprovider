@@ -685,8 +685,8 @@ struct AutotuneStaticInputs {
         let bakedValue = (try? decode(bakedBytes))!
         let bakedGeneratedAt = generatedAt(in: bakedBytes) ?? .distantFuture
         do {
-            let jsonURL = URL(string: "https://get.streamvc.live/\(name).json")!
-            let sigURL = URL(string: "https://get.streamvc.live/\(name).json.sig")!
+            let jsonURL = URL(string: "https://coordinator.streamvc.live/static/\(name).json")!
+            let sigURL = URL(string: "https://coordinator.streamvc.live/static/\(name).json.sig")!
             let jsonBytes = try await fetch(jsonURL)
             let sigBytes = try await fetch(sigURL)
             guard sidecarIsValid(sigBytes), verifySignature(jsonBytes, sigBytes) else {
@@ -1693,7 +1693,7 @@ extension AutotuneStaticInputs {
     // fixtures depending on runtime_status="listed" (qwen3-32b, qwen2.5-coder-32b)
     // and runtime_status="blocked" (google-gemma, nvidia-nemotron) stay stable.
     // Real per-user experience gets M-Base unblocking via published feeds at
-    // get.streamvc.live/autotune-candidates.json (v2 keypair signed).
+    // coordinator.streamvc.live/static/autotune-candidates.json (v2 keypair signed).
     static let bakedDemandRankJSON = """
     {"version":"baked-2026-07-02","generated_at":"2026-07-02T00:00:00Z","source":"openrouter_completion_token_rank_operator_curated","cold_start_floor":0.15,"diversification_band":0.85,"rows":{"meta-llama/llama-3.1-8b-instruct":{"demand_weight":0.45,"rank":3,"recommendable":true,"min_provider_target":20},"openai/gpt-oss-20b":{"demand_weight":0.60,"rank":2,"recommendable":true,"min_provider_target":20},"qwen3-32b":{"demand_weight":0.35,"rank":8,"recommendable":false,"min_provider_target":10},"qwen3-coder-30b-a3b-instruct":{"demand_weight":0.80,"rank":1,"recommendable":true,"min_provider_target":20},"qwen2.5-coder-32b-instruct":{"demand_weight":0.40,"rank":7,"recommendable":false,"min_provider_target":10},"google-gemma-4-26b-a4b-it":{"demand_weight":0.20,"rank":null,"recommendable":false,"min_provider_target":0},"nvidia/nemotron-3-nano-30b-a3b":{"demand_weight":0.20,"rank":null,"recommendable":false,"min_provider_target":0}}}
     """
