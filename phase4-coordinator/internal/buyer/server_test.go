@@ -1814,6 +1814,55 @@ func TestNonStreamingCompletesIncompleteProviderUsageBeforeForwarding(t *testing
 	}
 }
 
+func TestStreamingBillingLatchesInvalidCachedPromptTokensAfterLaterValidUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk\",\"usage\":{\"prompt_tokens\":3,\"cached_prompt_tokens\":4,\"completion_tokens\":0,\"total_tokens\":3},\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk\",\"usage\":{\"prompt_tokens\":3,\"cached_prompt_tokens\":0,\"completion_tokens\":1,\"total_tokens\":4},\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+		buyer.WithTier2Config(config.Tier2Config{OutputBytesPerTokenCeiling: 16}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), `"cached_prompt_tokens":4`) {
+		t.Fatalf("stream leaked invalid cached_prompt_tokens to buyer: %s", rr.Body.String())
+	}
+	row := queryLatestBillingRow(t, dbPath)
+	if row.UsageSource != "byte_estimated" {
+		t.Fatalf("usage_source=%q want byte_estimated", row.UsageSource)
+	}
+	if row.CachedPromptTokens.Valid {
+		t.Fatalf("cached_prompt_tokens=%#v want NULL", row.CachedPromptTokens)
+	}
+	if row.Quarantined != 1 || !row.QuarantineReason.Valid || row.QuarantineReason.String != "invalid_cached_prompt_tokens" {
+		t.Fatalf("row quarantined=%d reason=%#v, want invalid_cached_prompt_tokens", row.Quarantined, row.QuarantineReason)
+	}
+}
+
 func TestNonStreamingBillingDiscountsCachedPromptTokensOnlyOnStickyHit(t *testing.T) {
 	var calls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

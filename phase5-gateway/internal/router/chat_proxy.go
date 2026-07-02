@@ -677,6 +677,8 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					} else if !invalidReportedUsage {
 						reported = &usage
 						line = sseDataLineWithCachedPromptTokens(line, usage.CachedPromptTokens)
+					} else {
+						line = nil
 					}
 				} else if !hasChoices {
 					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))

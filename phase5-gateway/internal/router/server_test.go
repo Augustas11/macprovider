@@ -4458,6 +4458,7 @@ func TestStreamingInvalidUsageAfterValidFallsBackToGatewayEstimate(t *testing.T)
 			`data: {"id":"chatcmpl","usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1},"choices":[{"delta":{"content":"ok"}}]}`,
 			`data: {"id":"chatcmpl","choices":[{"delta":{"content":"more"}}]}`,
 			`data: {"id":"chatcmpl","usage":{},"choices":[{"delta":{"content":""}}]}`,
+			`data: {"id":"chatcmpl","usage":{"prompt_tokens":9,"cached_prompt_tokens":4,"completion_tokens":1,"total_tokens":10},"choices":[{"delta":{"content":""}}]}`,
 			`data: [DONE]`,
 			``,
 		}, "\n\n")
@@ -4483,6 +4484,9 @@ func TestStreamingInvalidUsageAfterValidFallsBackToGatewayEstimate(t *testing.T)
 	}
 	if strings.Contains(resp.Body.String(), `"usage":{}`) {
 		t.Fatalf("invalid usage frame was forwarded: %s", resp.Body.String())
+	}
+	if strings.Contains(resp.Body.String(), `"cached_prompt_tokens":4`) || strings.Contains(resp.Body.String(), `"prompt_tokens":9`) {
+		t.Fatalf("later usage frame was forwarded after invalid usage: %s", resp.Body.String())
 	}
 }
 

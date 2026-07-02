@@ -2642,7 +2642,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			finishReason = reason
 		}
 		if sanitized, p, cached, c := sseBlockWithCachedPromptTokens([]byte(checked), state, billingAttemptN); p != nil || cached != nil || c != nil {
-			promptTok, cachedPromptTok, completionTok = p, cached, c
+			promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 			checked = string(sanitized)
 		}
 		if err := settlementTracker.observeBlock([]byte(checked)); err != nil {
@@ -2748,7 +2748,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			settlementOutput := settlementTracker.outputAt(billing.TerminalStateNormalDone, terminalTS)
 			attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(bytesEmitted), SettlementOutput: settlementOutput, SettlementReceipt: receiptValue}
-			attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = tokenPointersFromUsageObject(end.Usage)
+			if p, cached, c := tokenPointersFromUsageObject(end.Usage); p != nil || cached != nil || c != nil {
+				attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
+			}
 			if attempt.PromptTokens == nil && attempt.CachedPromptTokens == nil && attempt.CompletionTokens == nil {
 				attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = promptTok, cachedPromptTok, completionTok
 			}
@@ -2857,7 +2859,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				continue
 			}
 			if _, p, cached, c := sseBlockWithCachedPromptTokens([]byte(chunk.Data), state, billingAttemptN); p != nil || cached != nil || c != nil {
-				promptTok, cachedPromptTok, completionTok = p, cached, c
+				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 			}
 			checked, stop, err := guard.CheckStreamingChunk(chunk.Data)
 			if err != nil {
@@ -2869,7 +2871,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider buffered stream exceeded cap", ErrorCode: "provider_stream_too_large", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
 			if sanitized, p, cached, c := sseBlockWithCachedPromptTokens([]byte(checked), state, billingAttemptN); p != nil || cached != nil || c != nil {
-				promptTok, cachedPromptTok, completionTok = p, cached, c
+				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 				checked = string(sanitized)
 			}
 			raw.WriteString(checked)
@@ -2918,7 +2920,9 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			}
 			settlementOutput := settlementTracker.outputAt(billing.TerminalStateNormalDone, terminalTS)
 			attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(len(out)), SettlementOutput: settlementOutput, SettlementReceipt: receiptValue}
-			attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = tokenPointersFromUsageObject(end.Usage)
+			if p, cached, c := tokenPointersFromUsageObject(end.Usage); p != nil || cached != nil || c != nil {
+				attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
+			}
 			if attempt.PromptTokens == nil && attempt.CachedPromptTokens == nil && attempt.CompletionTokens == nil {
 				attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = promptTok, cachedPromptTok, completionTok
 			}
@@ -3085,7 +3089,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			}
 			line := lineBuf.Bytes()
 			if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
-				promptTok, cachedPromptTok, completionTok = p, cached, c
+				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 				line = sseLineWithCachedPromptTokens(line, effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, billingAttemptN))
 			}
 			if providerToolCallOpen.IsZero() {
@@ -3176,7 +3180,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
 			if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
-				promptTok, cachedPromptTok, completionTok = p, cached, c
+				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 				line = sseLineWithCachedPromptTokens(line, effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, billingAttemptN))
 			}
 			if code := terminalSSEErrorCodeFromLine(line); isSpec019TerminalSSEErrorCode(code) {
@@ -3293,7 +3297,7 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 	}
 	var promptTok, cachedPromptTok, completionTok *int64
 	if sanitized, p, cached, c := sseBlockWithCachedPromptTokens(out, state, billingAttemptN); p != nil || cached != nil || c != nil {
-		promptTok, cachedPromptTok, completionTok = p, cached, c
+		promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 		out = sanitized
 	}
 	settlementTracker := newSettlementStreamOutputTracker()
@@ -5668,6 +5672,33 @@ func cachedPromptTokensPointer(raw json.RawMessage) *int64 {
 	return &value
 }
 
+func mergeStreamUsagePointers(currentPrompt, currentCached, currentCompletion, nextPrompt, nextCached, nextCompletion *int64) (*int64, *int64, *int64) {
+	if nextPrompt == nil && nextCached == nil && nextCompletion == nil {
+		return currentPrompt, currentCached, currentCompletion
+	}
+	prompt := nextPrompt
+	if prompt == nil {
+		prompt = currentPrompt
+	}
+	completion := nextCompletion
+	if completion == nil {
+		completion = currentCompletion
+	}
+	if invalidCachedPromptTokens(currentCached, currentPrompt) || invalidCachedPromptTokens(nextCached, nextPrompt) {
+		invalid := int64(-1)
+		return prompt, &invalid, completion
+	}
+	return nextPrompt, nextCached, nextCompletion
+}
+
+func invalidCachedPromptTokens(cachedPromptTokens, promptTokens *int64) bool {
+	if cachedPromptTokens == nil {
+		return false
+	}
+	cached := *cachedPromptTokens
+	return cached < 0 || promptTokens == nil || cached > *promptTokens
+}
+
 func (s *Server) estimatedCompletionTokensFromBytes(n int) *int64 {
 	return estimatedCompletionTokensFromBytes(n, s.tier2Config().OutputBytesPerTokenCeiling)
 }
@@ -5824,7 +5855,7 @@ func sseBlockWithCachedPromptTokens(block []byte, state *forwardState, attemptN 
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
 			if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
-				promptTok, cachedPromptTok, completionTok = p, cached, c
+				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 				rewritten := sseLineWithCachedPromptTokens(line, effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, attemptN))
 				if !bytes.Equal(rewritten, line) {
 					changed = true

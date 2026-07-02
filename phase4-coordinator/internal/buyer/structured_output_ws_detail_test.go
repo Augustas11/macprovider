@@ -142,6 +142,98 @@ func TestForwardWSStreamingBufferedSanitizesCachedPromptTokensInBuyerSSE(t *test
 	}
 }
 
+func TestForwardWSStreamingLatchesInvalidCachedPromptTokensAfterLaterValidUsage(t *testing.T) {
+	requestID := "req-cache-ws-invalid-then-valid"
+	chunks := make(chan providerws.InferenceResponseChunk)
+	done := make(chan providerws.InferenceResponseEnd)
+	errs := make(chan error, 1)
+	go func() {
+		chunks <- providerws.InferenceResponseChunk{
+			Type:      "inference_response_chunk",
+			RequestID: requestID,
+			Seq:       0,
+			Data:      `data: {"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_tokens":3,"cached_prompt_tokens":4,"completion_tokens":0,"total_tokens":3}}` + "\n\n",
+		}
+		chunks <- providerws.InferenceResponseChunk{
+			Type:      "inference_response_chunk",
+			RequestID: requestID,
+			Seq:       1,
+			Data:      `data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"cached_prompt_tokens":0,"completion_tokens":1,"total_tokens":4}}` + "\n\n",
+		}
+		close(chunks)
+		done <- providerws.InferenceResponseEnd{
+			Type:       "inference_response_end",
+			RequestID:  requestID,
+			Status:     "complete",
+			ChunksSent: 2,
+		}
+	}()
+
+	server := &Server{}
+	provider := pool.Provider{ProviderID: "provider-a", AssignedID: "session-a"}
+	relay := &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+
+	result, attempt := server.forwardWSStreaming(rr, req, requestID, provider, relay, &forwardState{}, 0)
+	if result != wsForwardComplete {
+		t.Fatalf("result=%q, want %q", result, wsForwardComplete)
+	}
+	if attempt.CachedPromptTokens == nil || *attempt.CachedPromptTokens != -1 {
+		t.Fatalf("attempt cached_prompt_tokens=%v, want invalid sentinel", attempt.CachedPromptTokens)
+	}
+	if strings.Contains(rr.Body.String(), `"cached_prompt_tokens":4`) {
+		t.Fatalf("buyer SSE leaked invalid cached_prompt_tokens: %s", rr.Body.String())
+	}
+}
+
+func TestForwardWSStreamingBufferedLatchesInvalidCachedPromptTokensAfterLaterValidUsage(t *testing.T) {
+	requestID := "req-cache-ws-buffered-invalid-then-valid"
+	chunks := make(chan providerws.InferenceResponseChunk)
+	done := make(chan providerws.InferenceResponseEnd)
+	errs := make(chan error, 1)
+	go func() {
+		chunks <- providerws.InferenceResponseChunk{
+			Type:      "inference_response_chunk",
+			RequestID: requestID,
+			Seq:       0,
+			Data:      `data: {"choices":[{"delta":{"content":"ok"}}],"usage":{"prompt_tokens":3,"cached_prompt_tokens":4,"completion_tokens":0,"total_tokens":3}}` + "\n\n",
+		}
+		chunks <- providerws.InferenceResponseChunk{
+			Type:      "inference_response_chunk",
+			RequestID: requestID,
+			Seq:       1,
+			Data:      `data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"cached_prompt_tokens":0,"completion_tokens":1,"total_tokens":4}}` + "\n\n",
+		}
+		close(chunks)
+		done <- providerws.InferenceResponseEnd{
+			Type:       "inference_response_end",
+			RequestID:  requestID,
+			Status:     "complete",
+			ChunksSent: 2,
+		}
+	}()
+
+	server := &Server{}
+	provider := pool.Provider{ProviderID: "provider-a", AssignedID: "session-a"}
+	relay := &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+
+	result, attempt := server.forwardWSStreamingBuffered(rr, req, requestID, provider, relay, streamingModeBufferedKillSwitch, "buyer-a", &forwardState{}, 0)
+	if result != wsForwardComplete {
+		t.Fatalf("result=%q, want %q", result, wsForwardComplete)
+	}
+	if attempt.CachedPromptTokens == nil || *attempt.CachedPromptTokens != -1 {
+		t.Fatalf("attempt cached_prompt_tokens=%v, want invalid sentinel", attempt.CachedPromptTokens)
+	}
+	if strings.Contains(rr.Body.String(), `"cached_prompt_tokens":4`) {
+		t.Fatalf("buyer SSE leaked invalid cached_prompt_tokens: %s", rr.Body.String())
+	}
+}
+
 func assertForwardWSStreamingMapsDetailCodeToSSE(t *testing.T, code string) {
 	t.Helper()
 	requestID := "req-structured"
