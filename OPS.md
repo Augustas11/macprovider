@@ -141,7 +141,7 @@ ssh pearl
 # touching any live DB state. Uses `sudo -u macprovider` consistently
 # for validation so a sudo-capable non-root operator does not fail
 # the plain-shell -r check on a 0750 daemon-owned directory.
-LATEST=$(sudo -u macprovider ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* 2>/dev/null | head -1) &&
+LATEST=$(sudo -u macprovider sh -c 'ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* 2>/dev/null | head -1') &&
 [ -n "$LATEST" ] && sudo -u macprovider test -f "$LATEST" && sudo -u macprovider test -r "$LATEST" &&
 sudo -u macprovider sqlite3 "$LATEST" "PRAGMA integrity_check;" | head -1 | grep -q "^ok$" &&
 # Also validate the binary .prev exists and is executable (#290 R5
