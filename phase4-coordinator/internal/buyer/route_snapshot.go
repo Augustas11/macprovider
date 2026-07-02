@@ -154,6 +154,9 @@ const (
 	settlementReceiptResultHeader = "X-MacProvider-Settlement-Receipt-Result"
 	settlementReasonHeader        = "X-MacProvider-Settlement-Reason"
 	settlementClosedHeader        = "X-MacProvider-Settlement-Closed"
+	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
+	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
+	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
 )
 
 func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header string) (billing.SettlementReceiptState, bool, error) {
@@ -198,6 +201,18 @@ func setSettlementOutcomeHeaders(dst http.Header, state billing.SettlementReceip
 	dst.Set(settlementReceiptResultHeader, state.ReceiptResult)
 	dst.Set(settlementReasonHeader, state.Reason)
 	dst.Set(settlementClosedHeader, strconv.FormatBool(state.Closed))
+	dst.Set(settlementModeHeader, state.RouteSnapshotMode)
+	dst.Set(settlementPolicyVersionHeader, state.RouteSnapshotPolicyVersion)
+	if state.PendingDeadlineUnixMS > 0 {
+		dst.Set(settlementPendingUntilHeader, strconv.FormatInt(state.PendingDeadlineUnixMS, 10))
+	}
+}
+
+func setInternalSettlementOutcomeHeaders(dst http.Header, rec *billingRecorder, state billing.SettlementReceiptState) {
+	if rec == nil || rec.accountID == "" {
+		return
+	}
+	setSettlementOutcomeHeaders(dst, state)
 }
 
 func coordinatorPromptHash(raw json.RawMessage) (string, error) {

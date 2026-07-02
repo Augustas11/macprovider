@@ -1462,9 +1462,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// billing/request-log orchestration that ARCH-6 flagged still
 	// lives in *billingRecorder — only the per-attempt token-estimate
 	// adapter remains here.
-	logAttempt := func(provider pool.Provider, fallbackStatus int, attempt requestLogAttempt, retried int) error {
+	logAttemptWithReceiptState := func(provider pool.Provider, fallbackStatus int, attempt requestLogAttempt, retried int) (billing.SettlementReceiptState, bool, error) {
 		if attempt.Logged {
-			return nil
+			return billing.SettlementReceiptState{}, false, nil
 		}
 		status := attempt.Status
 		if status == 0 {
@@ -1478,9 +1478,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			attempt.SettlementOutput = settlementOutputForContent("", nil, nil, terminalStateFromAttempt(status, attempt.Error, attempt.ErrorCode))
 		}
 		if err := rec.recordRow(provider.AssignedID, provider.ProviderID, status, attempt.PromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, retried, attempt.EstimatedCompTokens, attempt.FaultFlag, attempt.SettlementOutput); err != nil {
-			return err
+			return billing.SettlementReceiptState{}, false, err
 		}
-		_, _, err := rec.ingestSettlementReceipt(provider, attempt.SettlementReceipt)
+		return rec.ingestSettlementReceipt(provider, attempt.SettlementReceipt)
+	}
+	logAttempt := func(provider pool.Provider, fallbackStatus int, attempt requestLogAttempt, retried int) error {
+		_, _, err := logAttemptWithReceiptState(provider, fallbackStatus, attempt, retried)
 		return err
 	}
 	shouldLogAttempt := func(attempt requestLogAttempt) bool {
@@ -1517,7 +1520,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if state.provider.IsWSTunneled() {
 		excluded := map[string]struct{}{}
-		shouldFallThroughToHTTP := s.forwardWSNonStreamSequence(w, r, req, requestID, originalRequestID, externalRequestID, startedAt, state, excluded, rec, logAttempt, shouldLogAttempt)
+		shouldFallThroughToHTTP := s.forwardWSNonStreamSequence(w, r, req, requestID, originalRequestID, externalRequestID, startedAt, state, excluded, rec, logAttempt, logAttemptWithReceiptState, shouldLogAttempt)
 		if !shouldFallThroughToHTTP {
 			return
 		}
@@ -1731,6 +1734,7 @@ func (s *Server) forwardWSNonStreamSequence(
 	excluded map[string]struct{},
 	rec *billingRecorder,
 	logAttempt func(pool.Provider, int, requestLogAttempt, int) error,
+	logAttemptWithReceiptState func(pool.Provider, int, requestLogAttempt, int) (billing.SettlementReceiptState, bool, error),
 	shouldLogAttempt func(requestLogAttempt) bool,
 ) (shouldFallThroughToHTTP bool) {
 	// M2-1e (issue #94): now a thin wrapper that builds per-transport
@@ -1765,7 +1769,14 @@ func (s *Server) forwardWSNonStreamSequence(
 				return dispatchedAttempt{}, false
 			}
 			logSuccess := func(attempt requestLogAttempt) error {
-				return logAttempt(state.provider, http.StatusOK, attempt, state.explicitRetries)
+				receiptState, hasReceiptState, err := logAttemptWithReceiptState(state.provider, http.StatusOK, attempt, state.explicitRetries)
+				if err != nil {
+					return err
+				}
+				if hasReceiptState {
+					setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
+				}
+				return nil
 			}
 			result, attempt := s.forwardWS(w, r, requestID, dispatchBody, state.provider, false, s.attemptTimeout(r), logSuccess, settlementMetadata)
 			tr := classifyWSResult(result, attempt)
@@ -1808,9 +1819,13 @@ func (s *Server) forwardWSNonStreamSequence(
 			// failoverEligible carries retryable=false, so a miss MUST
 			// fast-fail with 502 — NOT fall through to shouldRetry.
 			s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, state.provider, "fast_fail", "")
-			if err := logAttempt(state.provider, http.StatusBadGateway, dispatched.tr.attempt, state.explicitRetries); err != nil {
+			receiptState, hasReceiptState, err := logAttemptWithReceiptState(state.provider, http.StatusBadGateway, dispatched.tr.attempt, state.explicitRetries)
+			if err != nil {
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 				return true
+			}
+			if hasReceiptState {
+				setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 			}
 			writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
 			return true
@@ -1829,9 +1844,13 @@ func (s *Server) forwardWSNonStreamSequence(
 			// cancelled/failed/unavailable short-circuit before fault
 			// mutation. The 504/provider_timeout envelope mirrors the
 			// pre-refactor inline branch at server.go:1423-1424.
-			if err := logAttempt(state.provider, http.StatusGatewayTimeout, dispatched.tr.attempt, state.explicitRetries); err != nil {
+			receiptState, hasReceiptState, err := logAttemptWithReceiptState(state.provider, http.StatusGatewayTimeout, dispatched.tr.attempt, state.explicitRetries)
+			if err != nil {
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 				return
+			}
+			if hasReceiptState {
+				setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 			}
 			writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
 		},
@@ -2003,7 +2022,7 @@ func (s *Server) forwardHTTPSequence(
 					return dispatchedAttempt{}, false
 				}
 				if hasReceiptState {
-					setSettlementOutcomeHeaders(w.Header(), receiptState)
+					setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 				}
 				copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
 				w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
@@ -2051,7 +2070,7 @@ func (s *Server) forwardHTTPSequence(
 						return dispatchedAttempt{}, false
 					}
 					if hasReceiptState {
-						setSettlementOutcomeHeaders(w.Header(), receiptState)
+						setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 					}
 					copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
 					w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
@@ -2084,7 +2103,7 @@ func (s *Server) forwardHTTPSequence(
 							return dispatchedAttempt{}, false
 						}
 						if hasReceiptState {
-							setSettlementOutcomeHeaders(w.Header(), receiptState)
+							setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 						}
 						copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
 						w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
@@ -2139,10 +2158,13 @@ func (s *Server) forwardHTTPSequence(
 					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 					return
 				}
-				_, _, err := rec.ingestSettlementReceipt(state.provider, "")
+				receiptState, hasReceiptState, err := rec.ingestSettlementReceipt(state.provider, "")
 				if err != nil {
 					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log settlement receipt")
 					return
+				}
+				if hasReceiptState {
+					setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 				}
 				writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
 				return
@@ -2151,10 +2173,13 @@ func (s *Server) forwardHTTPSequence(
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 				return
 			}
-			_, _, err := rec.ingestSettlementReceipt(state.provider, "")
+			receiptState, hasReceiptState, err := rec.ingestSettlementReceipt(state.provider, "")
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log settlement receipt")
 				return
+			}
+			if hasReceiptState {
+				setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 			}
 			writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
 		},

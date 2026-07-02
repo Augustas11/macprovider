@@ -281,7 +281,7 @@ func (b *billingRecorder) settlementPolicyForLedger() (string, string) {
 	}
 	mode := b.settlementPolicyMode
 	if mode == "" {
-		mode = billing.RouteSnapshotModeEnforce
+		mode = billing.RouteSnapshotModeObserve
 	}
 	version := b.settlementPolicyVersion
 	if version == "" {

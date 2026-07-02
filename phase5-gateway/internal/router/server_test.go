@@ -1673,7 +1673,11 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 	successBody := `{"id":"chatcmpl","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
 	cases := []struct {
 		name           string
+		mode           string
+		policyVersion  string
+		omitPolicy     bool
 		outcome        string
+		receiptResult  string
 		closed         string
 		wantUsageRows  int64
 		wantSettled    int64
@@ -1688,28 +1692,36 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 		},
 		{
 			name:          "verified-closed-debits",
+			mode:          "enforce",
 			outcome:       "verified",
+			receiptResult: "valid",
 			closed:        "true",
 			wantUsageRows: 1,
 			wantSettled:   1,
 		},
 		{
 			name:          "quarantined-closed-refunds",
+			mode:          "enforce",
 			outcome:       "quarantined",
+			receiptResult: "invalid",
 			closed:        "true",
 			wantRefunded:  1,
 			wantUsageRows: 0,
 		},
 		{
 			name:          "zero-settled-closed-refunds",
+			mode:          "enforce",
 			outcome:       "zero_settled",
+			receiptResult: "valid",
 			closed:        "true",
 			wantRefunded:  1,
 			wantUsageRows: 0,
 		},
 		{
 			name:           "pending-holds-reservation",
+			mode:           "enforce",
 			outcome:        "pending",
+			receiptResult:  "inconclusive",
 			closed:         "false",
 			wantActive:     1,
 			wantActiveHold: 20,
@@ -1717,8 +1729,70 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 		},
 		{
 			name:           "verified-open-holds-reservation",
+			mode:           "enforce",
 			outcome:        "verified",
+			receiptResult:  "valid",
 			closed:         "false",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:           "verified-invalid-result-holds",
+			mode:           "enforce",
+			outcome:        "verified",
+			receiptResult:  "invalid",
+			closed:         "true",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:          "observe-mode-keeps-legacy-debit",
+			mode:          "observe",
+			outcome:       "quarantined",
+			receiptResult: "invalid",
+			closed:        "true",
+			wantUsageRows: 1,
+			wantSettled:   1,
+		},
+		{
+			name:           "partial-outcome-without-mode-holds-reservation",
+			outcome:        "verified",
+			receiptResult:  "valid",
+			closed:         "true",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:           "enforce-without-policy-version-holds-reservation",
+			mode:           "enforce",
+			omitPolicy:     true,
+			outcome:        "verified",
+			receiptResult:  "valid",
+			closed:         "true",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:           "enforce-with-unknown-policy-version-holds-reservation",
+			mode:           "enforce",
+			policyVersion:  "unknown-policy",
+			outcome:        "verified",
+			receiptResult:  "valid",
+			closed:         "true",
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantUsageRows:  0,
+		},
+		{
+			name:           "unknown-mode-holds-reservation",
+			mode:           "monitor",
+			outcome:        "verified",
+			receiptResult:  "valid",
+			closed:         "true",
 			wantActive:     1,
 			wantActiveHold: 20,
 			wantUsageRows:  0,
@@ -1730,9 +1804,17 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 				h := http.Header{}
 				h.Set("Content-Type", "application/json")
 				if tc.outcome != "" {
+					h.Set(settlementModeHeader, tc.mode)
+					policyVersion := tc.policyVersion
+					if policyVersion == "" {
+						policyVersion = settlementPolicyVersion
+					}
+					if !tc.omitPolicy {
+						h.Set(settlementPolicyVersionHeader, policyVersion)
+					}
 					h.Set(settlementOutcomeHeader, tc.outcome)
 					h.Set(settlementClosedHeader, tc.closed)
-					h.Set(settlementReceiptResultHeader, "valid")
+					h.Set(settlementReceiptResultHeader, tc.receiptResult)
 					h.Set(settlementReasonHeader, "test_"+tc.outcome)
 				}
 				return responseWithBody(http.StatusOK, h, successBody), nil
@@ -1747,7 +1829,7 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			if resp.Code != http.StatusOK {
 				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 			}
-			for _, header := range []string{settlementOutcomeHeader, settlementClosedHeader, settlementReceiptResultHeader, settlementReasonHeader} {
+			for _, header := range []string{settlementOutcomeHeader, settlementClosedHeader, settlementReceiptResultHeader, settlementReasonHeader, settlementModeHeader, settlementPolicyVersionHeader, settlementPendingUntilHeader} {
 				if got := resp.Header().Get(header); got != "" {
 					t.Fatalf("buyer response leaked internal settlement header %s=%q", header, got)
 				}
@@ -1758,6 +1840,35 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 					got, tc.wantUsageRows, tc.wantSettled, tc.wantRefunded, tc.wantActive, tc.wantActiveHold)
 			}
 		})
+	}
+}
+
+func TestSPEC022GatewayProviderErrorFinalityHoldsBuyerDebit(t *testing.T) {
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		h := http.Header{}
+		h.Set("Content-Type", "application/json")
+		h.Set(settlementModeHeader, "enforce")
+		h.Set(settlementPolicyVersionHeader, settlementPolicyVersion)
+		h.Set(settlementOutcomeHeader, "pending")
+		h.Set(settlementReceiptResultHeader, "inconclusive")
+		h.Set(settlementReasonHeader, "missing_receipt_deadline_open")
+		h.Set(settlementClosedHeader, "false")
+		return responseWithBody(http.StatusGatewayTimeout, h, `{"error":{"message":"timeout","type":"api_error","param":null,"code":"provider_timeout"}}`), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	accountID := "acct_spec022_provider_error_pending"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if resp.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != 20 {
+		t.Fatalf("settlement snapshot = %+v, want pending provider error to hold reservation without debit", got)
 	}
 }
 

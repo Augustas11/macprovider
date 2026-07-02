@@ -28,9 +28,9 @@ func SettlementAccountScopeHashForAccountID(accountID string) string {
 
 func VerifiedModelSettlementMode(cfg config.SettlementConfig) string {
 	switch strings.TrimSpace(cfg.VerifiedModelSettlementMode) {
-	case RouteSnapshotModeObserve:
-		return RouteSnapshotModeObserve
-	default:
+	case RouteSnapshotModeEnforce:
 		return RouteSnapshotModeEnforce
+	default:
+		return RouteSnapshotModeObserve
 	}
 }

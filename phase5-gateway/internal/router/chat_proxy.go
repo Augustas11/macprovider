@@ -49,6 +49,10 @@ const (
 	settlementReceiptResultHeader = "X-MacProvider-Settlement-Receipt-Result"
 	settlementReasonHeader        = "X-MacProvider-Settlement-Reason"
 	settlementClosedHeader        = "X-MacProvider-Settlement-Closed"
+	settlementModeHeader          = "X-MacProvider-Settlement-Mode"
+	settlementPolicyVersionHeader = "X-MacProvider-Settlement-Policy-Version"
+	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
+	settlementPolicyVersion       = "spec022-prereq-v0"
 )
 
 type settlementFinalityAction int
@@ -953,31 +957,70 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinality(w http.ResponseWrit
 }
 
 func coordinatorSettlementFinalityFromHeaders(h http.Header) coordinatorSettlementFinality {
+	if !hasAnySettlementFinalityHeader(h) {
+		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
+	}
+	mode := strings.TrimSpace(h.Get(settlementModeHeader))
+	if mode == "observe" {
+		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
+	}
+	if mode != "enforce" {
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "invalid_settlement_mode"}
+	}
+	policyVersion := strings.TrimSpace(h.Get(settlementPolicyVersionHeader))
+	if policyVersion != settlementPolicyVersion {
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "invalid_settlement_policy_version"}
+	}
 	outcome := strings.TrimSpace(h.Get(settlementOutcomeHeader))
 	if outcome == "" {
-		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "missing_settlement_outcome"}
 	}
 	receiptResult := strings.TrimSpace(h.Get(settlementReceiptResultHeader))
 	reason := strings.TrimSpace(h.Get(settlementReasonHeader))
 	closed, closedOK := parseSettlementClosedHeader(h.Get(settlementClosedHeader))
 	switch outcome {
 	case "verified":
-		if closedOK && closed {
+		if receiptResult == "valid" && closedOK && closed {
 			return coordinatorSettlementFinality{Action: settlementFinalityDebit, Outcome: outcome, Reason: reason}
 		}
-		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "verified_receipt_not_closed"}
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "verified_receipt_not_final"}
 	case "quarantined", "zero_settled":
-		if closedOK && closed {
+		if closedOK && closed && settlementRefundReceiptResultValid(outcome, receiptResult) {
 			return coordinatorSettlementFinality{Action: settlementFinalityRefund, Outcome: outcome, Reason: reason}
 		}
-		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: reason}
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "settlement_refund_tuple_incomplete"}
 	case "pending":
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: reason}
 	default:
-		if receiptResult != "" {
-			reason = "unrecognized_settlement_outcome"
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: "unrecognized_settlement_outcome"}
+	}
+}
+
+func hasAnySettlementFinalityHeader(h http.Header) bool {
+	for _, header := range []string{
+		settlementOutcomeHeader,
+		settlementReceiptResultHeader,
+		settlementReasonHeader,
+		settlementClosedHeader,
+		settlementModeHeader,
+		settlementPolicyVersionHeader,
+		settlementPendingUntilHeader,
+	} {
+		if strings.TrimSpace(h.Get(header)) != "" {
+			return true
 		}
-		return coordinatorSettlementFinality{Action: settlementFinalityHold, Outcome: outcome, Reason: reason}
+	}
+	return false
+}
+
+func settlementRefundReceiptResultValid(outcome, receiptResult string) bool {
+	switch outcome {
+	case "zero_settled":
+		return receiptResult == "valid"
+	case "quarantined":
+		return receiptResult == "invalid" || receiptResult == "inconclusive"
+	default:
+		return false
 	}
 }
 

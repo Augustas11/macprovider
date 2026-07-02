@@ -573,7 +573,7 @@ func Default() Config {
 			StartupReconcileWindowHours: 24,
 			NightlyReconcileWindowDays:  7,
 			RecoveryGraceSeconds:        30,
-			VerifiedModelSettlementMode: "enforce",
+			VerifiedModelSettlementMode: "observe",
 			JobEnabled:                  true,
 		},
 		Endpoints: EndpointsConfig{

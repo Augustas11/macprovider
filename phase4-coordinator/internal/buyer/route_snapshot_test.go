@@ -21,6 +21,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
 	_ "modernc.org/sqlite"
 )
@@ -44,6 +45,7 @@ func TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("billing.NewStore: %v", err)
 	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
 	cfg := config.Default().Rewards
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
 	if err != nil {
@@ -73,6 +75,7 @@ func TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
 		buyer.WithRequestLog(reqLog),
 		buyer.WithBilling(billingStore, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
@@ -85,10 +88,18 @@ func TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts(t *testing.T) {
 	)
 
 	rr := postChat(t, server, []byte(`{"model":"mlx-fast","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`), http.Header{
-		"X-MacProvider-Retry": {"1"},
+		"Authorization":         {"Bearer operator-key"},
+		"X-MacProvider-Account": {"acct_gateway"},
+		"X-MacProvider-Retry":   {"1"},
 	})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Settlement-Outcome"); got != billing.SettlementOutcomePending {
+		t.Fatalf("internal settlement outcome header = %q, want %q", got, billing.SettlementOutcomePending)
+	}
+	if got := rr.Header().Get("X-MacProvider-Settlement-Mode"); got != billing.RouteSnapshotModeEnforce {
+		t.Fatalf("internal settlement mode header = %q, want %q", got, billing.RouteSnapshotModeEnforce)
 	}
 	if !firstSawSnapshot {
 		t.Fatal("first upstream did not observe its route snapshot before dispatch")
@@ -200,6 +211,7 @@ func TestSettlementOutputDoesNotUseV04ReceiptTerminalTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("billing.NewStore: %v", err)
 	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
 	cfg := config.Default().Rewards
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
 	if err != nil {
@@ -220,6 +232,7 @@ func TestSettlementOutputDoesNotUseV04ReceiptTerminalTimestamp(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
 		buyer.WithRequestLog(reqLog),
 		buyer.WithBilling(billingStore, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
@@ -232,14 +245,14 @@ func TestSettlementOutputDoesNotUseV04ReceiptTerminalTimestamp(t *testing.T) {
 	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
 		t.Fatalf("v0.4 settlement receipt leaked to buyer: %q", got)
 	}
-	if got := rr.Header().Get("X-MacProvider-Settlement-Outcome"); got != billing.SettlementOutcomeQuarantined {
-		t.Fatalf("settlement outcome header = %q, want %q", got, billing.SettlementOutcomeQuarantined)
+	if got := rr.Header().Get("X-MacProvider-Settlement-Outcome"); got != "" {
+		t.Fatalf("direct buyer response leaked settlement outcome header: %q", got)
 	}
-	if got := rr.Header().Get("X-MacProvider-Settlement-Receipt-Result"); got != billing.SettlementReceiptResultInvalid {
-		t.Fatalf("settlement receipt result header = %q, want %q", got, billing.SettlementReceiptResultInvalid)
+	if got := rr.Header().Get("X-MacProvider-Settlement-Receipt-Result"); got != "" {
+		t.Fatalf("direct buyer response leaked settlement receipt result header: %q", got)
 	}
-	if got := rr.Header().Get("X-MacProvider-Settlement-Closed"); got != "true" {
-		t.Fatalf("settlement closed header = %q, want true", got)
+	if got := rr.Header().Get("X-MacProvider-Settlement-Closed"); got != "" {
+		t.Fatalf("direct buyer response leaked settlement closed header: %q", got)
 	}
 	outputRows := querySettlementAttemptOutputs(t, dbPath)
 	if len(outputRows) != 1 {
@@ -250,6 +263,104 @@ func TestSettlementOutputDoesNotUseV04ReceiptTerminalTimestamp(t *testing.T) {
 	}
 	if outputRows[0].TerminalStateTSUnixMS == futureProviderTerminalTS {
 		t.Fatalf("provider-controlled terminal timestamp was persisted: %#v", outputRows[0])
+	}
+
+	internalHeaders := http.Header{}
+	internalHeaders.Set("Authorization", "Bearer operator-key")
+	internalHeaders.Set("X-MacProvider-Account", "acct_gateway")
+	internalRR := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`), internalHeaders)
+	if internalRR.Code != http.StatusOK {
+		t.Fatalf("internal status=%d body=%s", internalRR.Code, internalRR.Body.String())
+	}
+	if got := internalRR.Header().Get("X-MacProvider-Settlement-Outcome"); got != billing.SettlementOutcomeQuarantined {
+		t.Fatalf("internal settlement outcome header = %q, want %q", got, billing.SettlementOutcomeQuarantined)
+	}
+	if got := internalRR.Header().Get("X-MacProvider-Settlement-Receipt-Result"); got != billing.SettlementReceiptResultInvalid {
+		t.Fatalf("internal settlement receipt result header = %q, want %q", got, billing.SettlementReceiptResultInvalid)
+	}
+	if got := internalRR.Header().Get("X-MacProvider-Settlement-Closed"); got != "true" {
+		t.Fatalf("internal settlement closed header = %q, want true", got)
+	}
+	if got := internalRR.Header().Get("X-MacProvider-Settlement-Mode"); got != billing.RouteSnapshotModeEnforce {
+		t.Fatalf("internal settlement mode header = %q, want %q", got, billing.RouteSnapshotModeEnforce)
+	}
+}
+
+func TestWSTunneledNonStreamingEmitsInternalSettlementHeaders(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "settlement-ws-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+
+	const futureProviderTerminalTS = int64(4102444800000)
+	registry := pool.NewRegistry(nil)
+	registerSettlementWSProvider(registry, "p1", "session-1", 20, bytes.Repeat([]byte{0x79}, 32))
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"ws","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1, Receipt: syntheticV04ReceiptHeader(t, futureProviderTerminalTS)}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`), http.Header{
+		"Authorization":         {"Bearer operator-key"},
+		"X-MacProvider-Account": {"acct_gateway"},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("v0.4 settlement receipt leaked to buyer: %q", got)
+	}
+	if got := rr.Header().Get("X-MacProvider-Settlement-Outcome"); got != billing.SettlementOutcomeQuarantined {
+		t.Fatalf("internal WS settlement outcome header = %q, want %q", got, billing.SettlementOutcomeQuarantined)
+	}
+	if got := rr.Header().Get("X-MacProvider-Settlement-Receipt-Result"); got != billing.SettlementReceiptResultInvalid {
+		t.Fatalf("internal WS settlement receipt result header = %q, want %q", got, billing.SettlementReceiptResultInvalid)
+	}
+	if got := rr.Header().Get("X-MacProvider-Settlement-Closed"); got != "true" {
+		t.Fatalf("internal WS settlement closed header = %q, want true", got)
+	}
+	if got := rr.Header().Get("X-MacProvider-Settlement-Mode"); got != billing.RouteSnapshotModeEnforce {
+		t.Fatalf("internal WS settlement mode header = %q, want %q", got, billing.RouteSnapshotModeEnforce)
+	}
+	if got := rr.Header().Get("X-MacProvider-Settlement-Policy-Version"); got != billing.RouteSnapshotPolicyVersion {
+		t.Fatalf("internal WS settlement policy version header = %q, want %q", got, billing.RouteSnapshotPolicyVersion)
+	}
+	verdicts := querySettlementReceiptVerdicts(t, dbPath)
+	if len(verdicts) != 1 || verdicts[0].ProviderID != "p1" || verdicts[0].SettlementOutcome != billing.SettlementOutcomeQuarantined || verdicts[0].ReceiptResult != billing.SettlementReceiptResultInvalid {
+		t.Fatalf("WS settlement verdicts = %#v, want one quarantined invalid verdict for p1", verdicts)
 	}
 }
 
@@ -542,6 +653,7 @@ func TestRouteSnapshotEnforceFailsClosedWithoutValidReceiptKey(t *testing.T) {
 			if err != nil {
 				t.Fatalf("billing.NewStore: %v", err)
 			}
+			setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
 			cfg := config.Default().Rewards
 			snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
 			if err != nil {
@@ -959,6 +1071,35 @@ func registerSettlementProvider(registry *pool.Registry, providerID, assignedID,
 		EndpointURL:           endpointURL,
 		Tier:                  pool.TierPinned,
 		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       now,
+		ConnectedAt:           now,
+		BinaryVersion:         "0.1.0",
+		ModelHash:             buyerTestHash,
+		HashStatus:            pool.HashStatusVerified,
+		ReceiptPubkey:         append([]byte(nil), receiptPubkey...),
+	}, nil)
+	slotsFree := 1
+	registry.ApplyStateUpdate(providerID, assignedID, pool.StateUpdate{State: pool.StateReady, SlotsFree: &slotsFree, At: now})
+}
+
+func registerSettlementWSProvider(registry *pool.Registry, providerID, assignedID string, throughput float64, receiptPubkey []byte) {
+	now := time.Now().UTC()
+	registry.Register(&pool.Provider{
+		ProviderID:            providerID,
+		AssignedID:            assignedID,
+		Hostname:              providerID + ".local",
+		ModelID:               "model-a",
+		ModelParamsB:          7,
+		RAMGB:                 16,
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: throughput,
+		EndpointURL:           "ws://provider.local",
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathWSTunneled,
 		State:                 pool.StateReady,
 		LastHeartbeatAt:       now,
 		ConnectedAt:           now,

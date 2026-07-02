@@ -90,7 +90,7 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	}
 	if cfg.Settlement.CadenceDays != 7 || cfg.Settlement.MinPayoutCredits != 500000 ||
 		cfg.Settlement.StartupReconcileWindowHours != 24 || cfg.Settlement.NightlyReconcileWindowDays != 7 ||
-		cfg.Settlement.RecoveryGraceSeconds != 30 || cfg.Settlement.VerifiedModelSettlementMode != "enforce" || !cfg.Settlement.JobEnabled {
+		cfg.Settlement.RecoveryGraceSeconds != 30 || cfg.Settlement.VerifiedModelSettlementMode != "observe" || !cfg.Settlement.JobEnabled {
 		t.Fatalf("unexpected settlement defaults: %+v", cfg.Settlement)
 	}
 	if cfg.Endpoints.ProviderEarnings.RateLimitPerMinute != 60 {
