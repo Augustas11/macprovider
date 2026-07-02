@@ -159,6 +159,16 @@ const (
 	settlementPendingUntilHeader  = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
 )
 
+var settlementOutcomeHeaderNames = []string{
+	settlementOutcomeHeader,
+	settlementReceiptResultHeader,
+	settlementReasonHeader,
+	settlementClosedHeader,
+	settlementModeHeader,
+	settlementPolicyVersionHeader,
+	settlementPendingUntilHeader,
+}
+
 func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header string) (billing.SettlementReceiptState, bool, error) {
 	header = normalizeReceiptHeaderValue(header)
 	if len(provider.ReceiptPubkey) == 0 || !b.hasSettlementAttemptN {
@@ -213,6 +223,15 @@ func setInternalSettlementOutcomeHeaders(dst http.Header, rec *billingRecorder, 
 		return
 	}
 	setSettlementOutcomeHeaders(dst, state)
+}
+
+func declareInternalSettlementOutcomeTrailers(dst http.Header, rec *billingRecorder) {
+	if rec == nil || rec.accountID == "" {
+		return
+	}
+	for _, header := range settlementOutcomeHeaderNames {
+		dst.Add("Trailer", header)
+	}
 }
 
 func coordinatorPromptHash(raw json.RawMessage) (string, error) {

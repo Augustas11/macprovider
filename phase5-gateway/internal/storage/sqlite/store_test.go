@@ -409,6 +409,49 @@ func TestExpiredReservationsReclaimedAfter24h(t *testing.T) {
 	}
 }
 
+func TestClampReservationExpiryBoundsActiveHold(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_clamp_expiry")
+	created := fixedTime()
+	originalExpiry := created.Add(24 * time.Hour)
+	deadline := created.Add(5 * time.Minute)
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_clamp_expiry", RequestID: "req_clamp", WindowDate: "2026-05-29",
+		RequestedTokens: 40, DailyQuota: 100, CreatedAt: created, ExpiresAt: originalExpiry,
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.ClampReservationExpiry(ctx, "acct_clamp_expiry", "req_clamp", deadline); err != nil {
+		t.Fatalf("ClampReservationExpiry: %v", err)
+	}
+	if err := store.ClampReservationExpiry(ctx, "acct_clamp_expiry", "req_clamp", originalExpiry); err != nil {
+		t.Fatalf("ClampReservationExpiry later: %v", err)
+	}
+	var raw string
+	if err := store.db.QueryRow(`SELECT expires_at FROM quota_reservations WHERE account_id = ? AND request_id = ?`, "acct_clamp_expiry", "req_clamp").Scan(&raw); err != nil {
+		t.Fatalf("query expires_at: %v", err)
+	}
+	expiresAt := decodeTime(raw)
+	if !expiresAt.Equal(deadline) {
+		t.Fatalf("expires_at=%s want clamped deadline %s", expiresAt, deadline)
+	}
+	reaped, err := store.ReapExpiredReservations(ctx, deadline.Add(time.Second))
+	if err != nil {
+		t.Fatalf("ReapExpiredReservations: %v", err)
+	}
+	if reaped != 1 {
+		t.Fatalf("reaped=%d want 1", reaped)
+	}
+	_, reserved, err := store.DailyUsage(ctx, "acct_clamp_expiry", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage: %v", err)
+	}
+	if reserved != 0 {
+		t.Fatalf("reserved after clamped expiry reap=%d want 0", reserved)
+	}
+}
+
 // TestDeleteTerminalQuotaReservationsKeepsActiveAndDropsOld pins the
 // M2-4 / PERF-1 Part B contract: terminal-state rows past the retention
 // window are deletable; active rows (and recent terminal rows) survive.

@@ -442,6 +442,7 @@ func TestStreamingSettlementOutputPersistsOpenAICompatibleSSE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("billing.NewStore: %v", err)
 	}
+	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
 	cfg := config.Default().Rewards
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
 	if err != nil {
@@ -451,11 +452,13 @@ func TestStreamingSettlementOutputPersistsOpenAICompatibleSSE(t *testing.T) {
 	const futureStreamingProviderTerminalTS = int64(4102444800000)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Add("Trailer", "X-MacProvider-Receipt")
 		w.Header().Add("Trailer", "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS")
 		_, _ = w.Write([]byte(`data: {"id":"chatcmpl-test","choices":[{"delta":{"content":"he"},"finish_reason":null}]}` + "\n\n"))
 		_, _ = w.Write([]byte(`data: {"id":"chatcmpl-test","choices":[{"delta":{"content":"llo"},"finish_reason":null}]}` + "\n\n"))
 		_, _ = w.Write([]byte(`data: {"id":"chatcmpl-test","usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4},"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		w.Header().Set("X-MacProvider-Receipt", syntheticV04ReceiptHeader(t, futureStreamingProviderTerminalTS))
 		w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", "4102444800000")
 	}))
 	defer upstream.Close()
@@ -466,6 +469,7 @@ func TestStreamingSettlementOutputPersistsOpenAICompatibleSSE(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
 		buyer.WithRequestLog(reqLog),
 		buyer.WithBilling(billingStore, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
@@ -478,6 +482,12 @@ func TestStreamingSettlementOutputPersistsOpenAICompatibleSSE(t *testing.T) {
 	body := rr.Body.String()
 	if !bytes.Contains([]byte(body), []byte(`data: {"id":"chatcmpl-test"`)) || !bytes.Contains([]byte(body), []byte("data: [DONE]")) {
 		t.Fatalf("stream body not relayed as OpenAI-compatible SSE: %s", body)
+	}
+	if got := rr.Header().Get("X-MacProvider-Settlement-Outcome"); got != "" {
+		t.Fatalf("direct buyer response leaked settlement outcome header: %q", got)
+	}
+	if got := rr.Header().Get("Trailer"); got != "" {
+		t.Fatalf("direct buyer response leaked internal Trailer declaration: %q", got)
 	}
 
 	outputRows := querySettlementAttemptOutputs(t, dbPath)
@@ -499,6 +509,34 @@ func TestStreamingSettlementOutputPersistsOpenAICompatibleSSE(t *testing.T) {
 	}
 	if row.CanonicalJSON != "" {
 		t.Fatalf("raw canonical output persisted unexpectedly: %s", row.CanonicalJSON)
+	}
+
+	internalHeaders := http.Header{}
+	internalHeaders.Set("Authorization", "Bearer operator-key")
+	internalHeaders.Set("X-MacProvider-Account", "acct_gateway")
+	internalRR := postChat(t, server, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}]}`), internalHeaders)
+	if internalRR.Code != http.StatusOK {
+		t.Fatalf("internal status=%d body=%s", internalRR.Code, internalRR.Body.String())
+	}
+	internalBody := internalRR.Body.String()
+	if !bytes.Contains([]byte(internalBody), []byte(`data: {"id":"chatcmpl-test"`)) || !bytes.Contains([]byte(internalBody), []byte("data: [DONE]")) {
+		t.Fatalf("internal stream body not relayed as OpenAI-compatible SSE: %s", internalBody)
+	}
+	internalResult := internalRR.Result()
+	if got := internalResult.Trailer.Get("X-MacProvider-Settlement-Outcome"); got != billing.SettlementOutcomeQuarantined {
+		t.Fatalf("internal streaming settlement outcome trailer = %q, want %q", got, billing.SettlementOutcomeQuarantined)
+	}
+	if got := internalResult.Trailer.Get("X-MacProvider-Settlement-Receipt-Result"); got != billing.SettlementReceiptResultInvalid {
+		t.Fatalf("internal streaming settlement receipt result trailer = %q, want %q", got, billing.SettlementReceiptResultInvalid)
+	}
+	if got := internalResult.Trailer.Get("X-MacProvider-Settlement-Closed"); got != "true" {
+		t.Fatalf("internal streaming settlement closed trailer = %q, want true", got)
+	}
+	if got := internalResult.Trailer.Get("X-MacProvider-Settlement-Mode"); got != billing.RouteSnapshotModeEnforce {
+		t.Fatalf("internal streaming settlement mode trailer = %q, want %q", got, billing.RouteSnapshotModeEnforce)
+	}
+	if got := internalResult.Trailer.Get("X-MacProvider-Settlement-Policy-Version"); got != billing.RouteSnapshotPolicyVersion {
+		t.Fatalf("internal streaming settlement policy version trailer = %q, want %q", got, billing.RouteSnapshotPolicyVersion)
 	}
 }
 

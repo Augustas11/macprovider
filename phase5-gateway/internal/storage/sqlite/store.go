@@ -892,6 +892,43 @@ func (s *Store) RefundReservation(ctx context.Context, accountID, requestID stri
 	return tx.Commit()
 }
 
+func (s *Store) ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error {
+	if expiresAt.IsZero() {
+		return fmt.Errorf("reservation expiry cannot be zero")
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	expiresAt = expiresAt.UTC()
+	var rawExpiry string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT expires_at FROM quota_reservations
+		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+		accountID, requestID).Scan(&rawExpiry); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.ErrReservationNotFound
+		}
+		return err
+	}
+	currentExpiry := decodeTime(rawExpiry)
+	if currentExpiry.IsZero() {
+		return fmt.Errorf("reservation %s expiry is invalid", requestID)
+	}
+	if !expiresAt.Before(currentExpiry) {
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET expires_at = ?
+		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+		encodeTime(expiresAt), accountID, requestID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) AcquireConcurrency(ctx context.Context, req storage.ConcurrencyRequest) (storage.ConcurrencyDecision, error) {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {

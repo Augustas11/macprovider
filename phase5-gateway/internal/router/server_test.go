@@ -1485,6 +1485,7 @@ func TestStreamingReceiptHeaderStripped(t *testing.T) {
 		payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"ok"}}]}`
 		return responseWithBody(http.StatusOK, http.Header{
 			"Content-Type":                    []string{"text/event-stream; charset=utf-8"},
+			"Trailer":                         []string{settlementOutcomeHeader + ", " + settlementModeHeader},
 			"X-MacProvider-Receipt":           []string{receipt},
 			"X-MacProvider-Foo":               []string{"strip-me"},
 			"X-MacProvider-Receipt-Pending":   []string{"strip-me-too"},
@@ -1509,6 +1510,9 @@ func TestStreamingReceiptHeaderStripped(t *testing.T) {
 			t.Fatalf("streaming buyer response exposed %s=%q", header, got)
 		}
 	}
+	if got := resp.Header().Get("Trailer"); got != "" {
+		t.Fatalf("streaming buyer response exposed upstream Trailer declaration %q", got)
+	}
 	// Issue #190 R2 security HIGH: streaming success responses
 	// carry per-tenant X-RateLimit-*-Requests headers and must NOT
 	// be cacheable. The SSE-required no-cache/no-transform must
@@ -1524,6 +1528,169 @@ func TestStreamingReceiptHeaderStripped(t *testing.T) {
 	if got := resp.Header().Get("X-RateLimit-Limit-Requests"); got == "" {
 		t.Errorf("streaming response missing X-RateLimit-Limit-Requests")
 	}
+}
+
+func TestSPEC022GatewayStreamingSettlementTrailersControlBuyerDebit(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	payload := strings.Join([]string{
+		`data: {"id":"chatcmpl","choices":[{"delta":{"content":"ok"}}]}`,
+		`data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n")
+	pendingDeadlineUnixMS := fixedNow().Add(5 * time.Minute).UnixMilli()
+	cases := []struct {
+		name           string
+		trailer        http.Header
+		declareOnly    bool
+		wantUsageRows  int64
+		wantSettled    int64
+		wantRefunded   int64
+		wantActive     int64
+		wantActiveHold int64
+		wantExpiresAt  int64
+	}{
+		{
+			name:          "legacy-no-trailer-debits",
+			wantUsageRows: 1,
+			wantSettled:   1,
+		},
+		{
+			name:          "verified-closed-trailer-debits",
+			trailer:       settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "verified", "valid", "true", "receipt_verified"),
+			wantUsageRows: 1,
+			wantSettled:   1,
+		},
+		{
+			name:         "quarantined-closed-trailer-refunds",
+			trailer:      settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "quarantined", "invalid", "true", "receipt_invalid"),
+			wantRefunded: 1,
+		},
+		{
+			name:           "pending-open-trailer-holds",
+			trailer:        settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "pending_recovery", pendingDeadlineUnixMS),
+			wantActive:     1,
+			wantActiveHold: 20,
+			wantExpiresAt:  pendingDeadlineUnixMS,
+		},
+		{
+			name:         "declared-missing-trailer-refunds",
+			declareOnly:  true,
+			wantRefunded: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
+				trailer := tc.trailer
+				if trailer != nil || tc.declareOnly {
+					header.Set("Trailer", strings.Join(settlementFinalityHeaderNamesForTest(), ", "))
+				}
+				if trailer == nil && tc.declareOnly {
+					trailer = http.Header{}
+					for _, name := range settlementFinalityHeaderNamesForTest() {
+						trailer[name] = nil
+					}
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Trailer:    trailer,
+					Body:       io.NopCloser(strings.NewReader(payload)),
+				}, nil
+			})}
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			accountID := "acct_spec022_stream_finality_" + strings.ReplaceAll(tc.name, "-", "_")
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+			resp := postChat(t, h, fullKey, body, nil)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			if got := resp.Header().Get("Trailer"); got != "" {
+				t.Fatalf("buyer streaming response leaked internal Trailer declaration %q", got)
+			}
+			for _, header := range settlementFinalityHeaderNamesForTest() {
+				if got := resp.Header().Get(header); got != "" {
+					t.Fatalf("buyer streaming response leaked internal settlement header %s=%q", header, got)
+				}
+			}
+			if !strings.Contains(resp.Body.String(), "data: [DONE]") {
+				t.Fatalf("streaming response missing OpenAI-compatible DONE frame: %s", resp.Body.String())
+			}
+			got := gatewaySettlementSnapshot(t, dbPath, accountID)
+			if got.usageRows != tc.wantUsageRows || got.settledRows != tc.wantSettled || got.refundedRows != tc.wantRefunded || got.activeRows != tc.wantActive || got.activeReserved != tc.wantActiveHold {
+				t.Fatalf("settlement snapshot = %+v, want usage=%d settled=%d refunded=%d active=%d active_reserved=%d",
+					got, tc.wantUsageRows, tc.wantSettled, tc.wantRefunded, tc.wantActive, tc.wantActiveHold)
+			}
+			if tc.wantExpiresAt > 0 {
+				if got := gatewayReservationExpiresAtUnixMS(t, dbPath, accountID); got != tc.wantExpiresAt {
+					t.Fatalf("reservation expires_at=%d want coordinator pending deadline %d", got, tc.wantExpiresAt)
+				}
+			}
+		})
+	}
+}
+
+func TestSPEC022GatewayStreamingNonOKFinalityBoundsHold(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	pendingDeadlineUnixMS := fixedNow().Add(5 * time.Minute).UnixMilli()
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		h := settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "missing_receipt_deadline_open", pendingDeadlineUnixMS)
+		h.Set("Content-Type", "application/json")
+		return responseWithBody(http.StatusGatewayTimeout, h, `{"error":{"message":"timeout","type":"api_error","param":null,"code":"provider_timeout"}}`), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	accountID := "acct_spec022_stream_non_ok_pending"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if resp.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	for _, header := range settlementFinalityHeaderNamesForTest() {
+		if got := resp.Header().Get(header); got != "" {
+			t.Fatalf("buyer streaming error response leaked internal settlement header %s=%q", header, got)
+		}
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != 20 {
+		t.Fatalf("settlement snapshot = %+v, want non-OK streaming pending finality to hold reservation without debit", got)
+	}
+	if got := gatewayReservationExpiresAtUnixMS(t, dbPath, accountID); got != pendingDeadlineUnixMS {
+		t.Fatalf("reservation expires_at=%d want coordinator pending deadline %d", got, pendingDeadlineUnixMS)
+	}
+}
+
+func settlementFinalityHeaderNamesForTest() []string {
+	return []string{
+		settlementOutcomeHeader,
+		settlementReceiptResultHeader,
+		settlementReasonHeader,
+		settlementClosedHeader,
+		settlementModeHeader,
+		settlementPolicyVersionHeader,
+		settlementPendingUntilHeader,
+	}
+}
+
+func settlementFinalityTrailerForTest(mode, policyVersion, outcome, receiptResult, closed, reason string, pendingDeadlineUnixMS ...int64) http.Header {
+	h := http.Header{}
+	h.Set(settlementModeHeader, mode)
+	h.Set(settlementPolicyVersionHeader, policyVersion)
+	h.Set(settlementOutcomeHeader, outcome)
+	h.Set(settlementReceiptResultHeader, receiptResult)
+	h.Set(settlementClosedHeader, closed)
+	h.Set(settlementReasonHeader, reason)
+	if len(pendingDeadlineUnixMS) > 0 && pendingDeadlineUnixMS[0] > 0 {
+		h.Set(settlementPendingUntilHeader, strconv.FormatInt(pendingDeadlineUnixMS[0], 10))
+	}
+	return h
 }
 
 // TestProviderAttributionHeadersEmitted asserts the gateway surfaces
@@ -4337,6 +4504,24 @@ func gatewaySettlementSnapshot(t *testing.T, dbPath, accountID string) gatewaySe
 		t.Fatalf("query active reservations: %v", err)
 	}
 	return state
+}
+
+func gatewayReservationExpiresAtUnixMS(t *testing.T, dbPath, accountID string) int64 {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var raw string
+	if err := db.QueryRow(`SELECT expires_at FROM quota_reservations WHERE account_id = ? ORDER BY created_at DESC LIMIT 1`, accountID).Scan(&raw); err != nil {
+		t.Fatalf("query reservation expires_at: %v", err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		t.Fatalf("parse reservation expires_at %q: %v", raw, err)
+	}
+	return expiresAt.UnixMilli()
 }
 
 func assertStatus(t *testing.T, h http.Handler, method, path, bearer, demoToken, ip string, want int) *httptest.ResponseRecorder {

@@ -812,7 +812,7 @@ func copyReceiptEligibleHeaders(dst, src http.Header) {
 
 func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
 	for key, values := range src {
-		if strings.EqualFold(key, "Content-Length") {
+		if strings.EqualFold(key, "Content-Length") || strings.EqualFold(key, "Trailer") {
 			continue
 		}
 		if allowReceipt && isReceiptResponseHeader(key) {
