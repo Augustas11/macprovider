@@ -95,11 +95,19 @@ func main() {
 	}
 	oauthClient := &http.Client{Timeout: 30 * time.Second}
 	oauth := auth.NewGitHubProvider(cfg.Auth.OAuth.GitHub, oauthClient)
-	httpServer := newHTTPServer(cfg.Address(), router.New(cfg, store, oauth,
+	gatewayRouter := router.New(cfg, store, oauth,
 		router.WithHTTPClient(coordinatorClient),
 		router.WithVersion(version),
 		router.WithReadStore(readStore),
-	).Handler())
+	)
+	if cfg.Settlement.ReconcileEnabled {
+		go runSettlementReconciler(ctx, gatewayRouter,
+			time.Duration(cfg.Settlement.ReconcileIntervalSeconds)*time.Second,
+			cfg.Settlement.ReconcileBatchLimit,
+			time.Duration(cfg.Settlement.ReconcileRequestTimeoutSeconds)*time.Second,
+		)
+	}
+	httpServer := newHTTPServer(cfg.Address(), gatewayRouter.Handler())
 	go func() {
 		slog.Info("gateway listening", "address", cfg.Address())
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -124,6 +132,53 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       120 * time.Second,
+	}
+}
+
+type settlementReconciler interface {
+	ReconcileSettlementHolds(context.Context, int) (router.SettlementReconcileSummary, error)
+}
+
+func runSettlementReconciler(ctx context.Context, reconciler settlementReconciler, interval time.Duration, limit int, requestTimeout time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if requestTimeout <= 0 {
+		requestTimeout = 10 * time.Second
+	}
+	reconcile := func() {
+		runCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+		defer cancel()
+		summary, err := reconciler.ReconcileSettlementHolds(runCtx, limit)
+		if err != nil {
+			slog.Warn("SPEC-022 settlement reconciler failed", "error", err)
+			return
+		}
+		if summary.Scanned > 0 || summary.Errors > 0 {
+			slog.Info("SPEC-022 settlement reconciler completed",
+				"scanned", summary.Scanned,
+				"verified", summary.Verified,
+				"refunded", summary.Refunded,
+				"held", summary.Held,
+				"skipped", summary.Skipped,
+				"errors", summary.Errors,
+				"coordinator_404", summary.Coordinator404,
+			)
+		}
+	}
+	reconcile()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reconcile()
+		}
 	}
 }
 

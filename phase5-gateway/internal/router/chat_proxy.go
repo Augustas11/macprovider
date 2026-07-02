@@ -958,7 +958,7 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 		return true
 	case settlementFinalityHold:
 		if boundHold {
-			if !s.boundStreamingSettlementHold(r, subject, finality) {
+			if !s.boundStreamingSettlementHold(r.Context(), r, subject, finality) {
 				writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
 				return false
 			}
@@ -992,20 +992,20 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 			)
 		}
 	case settlementFinalityHold:
-		s.boundStreamingSettlementHold(r, subject, finality)
+		s.boundStreamingSettlementHold(r.Context(), r, subject, finality)
 	default:
 		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
 	}
 }
 
-func (s *Server) boundStreamingSettlementHold(r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) bool {
+func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Request, subject usageSubject, finality coordinatorSettlementFinality) bool {
 	now := s.now()
 	deadline := time.Time{}
 	if finality.PendingDeadlineUnixMS > 0 {
 		deadline = time.UnixMilli(finality.PendingDeadlineUnixMS).UTC()
 	}
 	if deadline.IsZero() || !deadline.After(now) {
-		if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), now.Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+		if err := s.store.RefundReservation(ctx, subject.AccountID, requestID(r), now.Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 			slog.Error("gateway streaming settlement hold refund failed",
 				"request_id", requestID(r),
 				"account_id", subject.AccountID,
@@ -1025,7 +1025,7 @@ func (s *Server) boundStreamingSettlementHold(r *http.Request, subject usageSubj
 		)
 		return true
 	}
-	if err := s.store.ClampReservationExpiry(context.Background(), subject.AccountID, requestID(r), deadline); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+	if err := s.store.ClampReservationExpiry(ctx, subject.AccountID, requestID(r), deadline); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
 		slog.Error("gateway streaming settlement hold deadline clamp failed",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,

@@ -23,6 +23,7 @@ type Config struct {
 	KillSwitch  KillSwitchConfig  `yaml:"kill_switch"`
 	Capacity    CapacityConfig    `yaml:"capacity"`
 	Timeouts    TimeoutsConfig    `yaml:"timeouts"`
+	Settlement  SettlementConfig  `yaml:"settlement"`
 	CORS        CORSConfig        `yaml:"cors"`
 	Routing     RoutingConfig     `yaml:"routing"`
 	Explorer    ExplorerConfig    `yaml:"explorer"`
@@ -126,6 +127,13 @@ type TimeoutsConfig struct {
 	StreamingCancelMS               int `yaml:"streaming_cancel_ms"`
 }
 
+type SettlementConfig struct {
+	ReconcileEnabled               bool `yaml:"reconcile_enabled"`
+	ReconcileIntervalSeconds       int  `yaml:"reconcile_interval_s"`
+	ReconcileBatchLimit            int  `yaml:"reconcile_batch_limit"`
+	ReconcileRequestTimeoutSeconds int  `yaml:"reconcile_request_timeout_s"`
+}
+
 type CORSConfig struct {
 	AllowedOrigins []string `yaml:"allowed_origins"`
 }
@@ -162,9 +170,9 @@ func Default() Config {
 			}},
 		},
 		Quotas: QuotasConfig{
-			AccountDailyTokens:        100000,
-			DemoDailyTokensPerIP:      1000,
-			DemoSessionsPerIPPerHour:  10,
+			AccountDailyTokens:       100000,
+			DemoDailyTokensPerIP:     1000,
+			DemoSessionsPerIPPerHour: 10,
 			// Issue #190: AccountConcurrency=3 matches phase-A
 			// network capacity (3 providers × 1 slot each) and the
 			// "user types follow-up while previous reply still
@@ -193,6 +201,12 @@ func Default() Config {
 			MonthlyBudgetUSD: 500, ReadyProviderDegradedThreshold: 1, ProjectedCostTier1Percent: 80, TierCooldownSeconds: 3600,
 		},
 		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, CoordinatorHeaderTimeoutSeconds: 300, StreamingCancelMS: 500},
+		Settlement: SettlementConfig{
+			ReconcileEnabled:               true,
+			ReconcileIntervalSeconds:       30,
+			ReconcileBatchLimit:            100,
+			ReconcileRequestTimeoutSeconds: 10,
+		},
 		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.streamvc.live", "https://streamvc.live"}},
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
 		Explorer: ExplorerConfig{Enabled: false},
@@ -384,6 +398,17 @@ func (c Config) Validate() error {
 		return fmt.Errorf("timeouts.coordinator_header_timeout_seconds (%d) must be >= timeouts.coordinator_request_seconds (%d) — see SPEC-002 FR-P11a (post-#92)",
 			c.Timeouts.CoordinatorHeaderTimeoutSeconds, c.Timeouts.CoordinatorRequestSeconds)
 	}
+	if c.Settlement.ReconcileEnabled {
+		if c.Settlement.ReconcileIntervalSeconds <= 0 {
+			return fmt.Errorf("settlement.reconcile_interval_s must be > 0 when settlement.reconcile_enabled is true")
+		}
+		if c.Settlement.ReconcileBatchLimit <= 0 || c.Settlement.ReconcileBatchLimit > 500 {
+			return fmt.Errorf("settlement.reconcile_batch_limit must be between 1 and 500 when settlement.reconcile_enabled is true")
+		}
+		if c.Settlement.ReconcileRequestTimeoutSeconds <= 0 {
+			return fmt.Errorf("settlement.reconcile_request_timeout_s must be > 0 when settlement.reconcile_enabled is true")
+		}
+	}
 	if c.Routing.StickyTTLS <= 0 {
 		return fmt.Errorf("routing.sticky_ttl_s must be > 0")
 	}
@@ -478,6 +503,7 @@ func (c Config) CoordinatorTimeout() time.Duration {
 //     arrive at completion (bounded by provider inference latency).
 //   - Streaming (post-#92): headers wait for the first commit-worthy SSE
 //     event from the provider; pre-event garbage no longer commits.
+//
 // Therefore this MUST be >= CoordinatorRequestSeconds so a slow-but-valid
 // provider does not false-fail as coordinator_unavailable before the
 // coordinator's own routing.request_timeout_s has elapsed. The deploy-time

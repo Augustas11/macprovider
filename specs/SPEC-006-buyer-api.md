@@ -2486,6 +2486,12 @@ capacity:
 timeouts:
   coordinator_request_seconds: 300
   streaming_cancel_ms: 500
+
+settlement:
+  reconcile_enabled: true
+  reconcile_interval_s: 30
+  reconcile_batch_limit: 100
+  reconcile_request_timeout_s: 10
 ```
 
 The gateway MUST authenticate `/poolz` requests with `coordinator.operator_key`.

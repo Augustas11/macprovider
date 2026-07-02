@@ -37,7 +37,7 @@ type coordinatorRequestSettlementFinality struct {
 	ZeroSettledAttempts   int64  `json:"zero_settled_attempts"`
 }
 
-type settlementReconcileSummary struct {
+type SettlementReconcileSummary struct {
 	Scanned        int `json:"scanned"`
 	Verified       int `json:"verified"`
 	Refunded       int `json:"refunded"`
@@ -46,6 +46,8 @@ type settlementReconcileSummary struct {
 	Errors         int `json:"errors"`
 	Coordinator404 int `json:"coordinator_404"`
 }
+
+type settlementReconcileSummary = SettlementReconcileSummary
 
 func (s *Server) handleSettlementReconcile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -60,14 +62,28 @@ func (s *Server) handleSettlementReconcile(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_limit", err.Error())
 		return
 	}
-	reservations, err := s.store.ListSettlementHeldReservations(r.Context(), limit)
+	summary, err := s.ReconcileSettlementHolds(r.Context(), limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "settlement_reconcile_load_failed", "Could not load active reservations")
 		return
 	}
-	summary := settlementReconcileSummary{Scanned: len(reservations)}
+	writeJSON(w, http.StatusOK, summary)
+}
+
+func (s *Server) ReconcileSettlementHolds(ctx context.Context, limit int) (SettlementReconcileSummary, error) {
+	if limit <= 0 {
+		limit = defaultSettlementReconcileLimit
+	}
+	if limit > maxSettlementReconcileLimit {
+		limit = maxSettlementReconcileLimit
+	}
+	reservations, err := s.store.ListSettlementHeldReservations(ctx, limit)
+	if err != nil {
+		return SettlementReconcileSummary{}, err
+	}
+	summary := SettlementReconcileSummary{Scanned: len(reservations)}
 	for _, reservation := range reservations {
-		result, err := s.reconcileSettlementReservation(r.Context(), reservation)
+		result, err := s.reconcileSettlementReservation(ctx, reservation)
 		if err != nil {
 			summary.Errors++
 			slog.Error("gateway SPEC-022 settlement reconciliation failed",
@@ -91,7 +107,7 @@ func (s *Server) handleSettlementReconcile(w http.ResponseWriter, r *http.Reques
 			summary.Skipped++
 		}
 	}
-	writeJSON(w, http.StatusOK, summary)
+	return summary, nil
 }
 
 func parseSettlementReconcileLimit(raw string) (int, error) {
@@ -155,7 +171,7 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		req = req.WithContext(ctx)
 		ctx = context.WithValue(ctx, requestIDKey{}, reservation.RequestID)
 		req = req.WithContext(ctx)
-		if !s.boundStreamingSettlementHold(req, usageSubject{AccountID: reservation.AccountID}, action) {
+		if !s.boundStreamingSettlementHold(ctx, req, usageSubject{AccountID: reservation.AccountID}, action) {
 			return "", fmt.Errorf("failed to bound settlement hold")
 		}
 		return "held", nil
@@ -193,8 +209,8 @@ func (s *Server) fetchCoordinatorRequestSettlementFinality(ctx context.Context, 
 		return coordinatorRequestSettlementFinality{}, false, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return coordinatorRequestSettlementFinality{}, false, fmt.Errorf("coordinator finality status=%d body=%s", resp.StatusCode, string(body))
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return coordinatorRequestSettlementFinality{}, false, fmt.Errorf("coordinator finality status=%d", resp.StatusCode)
 	}
 	var finality coordinatorRequestSettlementFinality
 	if err := json.NewDecoder(resp.Body).Decode(&finality); err != nil {

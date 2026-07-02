@@ -55,6 +55,64 @@ func TestValidateAcceptsEqualHeaderAndRequestTimeout(t *testing.T) {
 	}
 }
 
+func TestSettlementReconcileDefaults(t *testing.T) {
+	cfg := Default()
+	if !cfg.Settlement.ReconcileEnabled {
+		t.Fatal("Settlement.ReconcileEnabled=false want true")
+	}
+	if cfg.Settlement.ReconcileIntervalSeconds != 30 {
+		t.Fatalf("ReconcileIntervalSeconds=%d want 30", cfg.Settlement.ReconcileIntervalSeconds)
+	}
+	if cfg.Settlement.ReconcileBatchLimit != 100 {
+		t.Fatalf("ReconcileBatchLimit=%d want 100", cfg.Settlement.ReconcileBatchLimit)
+	}
+	if cfg.Settlement.ReconcileRequestTimeoutSeconds != 10 {
+		t.Fatalf("ReconcileRequestTimeoutSeconds=%d want 10", cfg.Settlement.ReconcileRequestTimeoutSeconds)
+	}
+}
+
+func TestSettlementReconcileConfigValidation(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate func(*Config)
+		want   string
+	}{
+		"zero interval": {
+			mutate: func(cfg *Config) { cfg.Settlement.ReconcileIntervalSeconds = 0 },
+			want:   "settlement.reconcile_interval_s must be > 0",
+		},
+		"zero batch": {
+			mutate: func(cfg *Config) { cfg.Settlement.ReconcileBatchLimit = 0 },
+			want:   "settlement.reconcile_batch_limit must be between 1 and 500",
+		},
+		"oversized batch": {
+			mutate: func(cfg *Config) { cfg.Settlement.ReconcileBatchLimit = 501 },
+			want:   "settlement.reconcile_batch_limit must be between 1 and 500",
+		},
+		"zero request timeout": {
+			mutate: func(cfg *Config) { cfg.Settlement.ReconcileRequestTimeoutSeconds = 0 },
+			want:   "settlement.reconcile_request_timeout_s must be > 0",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate error=%v want containing %q", err, tc.want)
+			}
+		})
+	}
+
+	cfg := validTestConfig()
+	cfg.Settlement.ReconcileEnabled = false
+	cfg.Settlement.ReconcileIntervalSeconds = 0
+	cfg.Settlement.ReconcileBatchLimit = 0
+	cfg.Settlement.ReconcileRequestTimeoutSeconds = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected disabled settlement reconciler: %v", err)
+	}
+}
+
 func TestQuotaReaperConfigValidation(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mutate func(*Config)

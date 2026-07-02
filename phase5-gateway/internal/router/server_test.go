@@ -1892,6 +1892,40 @@ func TestSPEC022GatewaySettlementReconcileTreatsTerminalRaceAsSkipped(t *testing
 	}
 }
 
+type settlementHoldContextStore struct {
+	*sqlite.Store
+	clampCtxErr error
+}
+
+func (s *settlementHoldContextStore) ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error {
+	s.clampCtxErr = ctx.Err()
+	return nil
+}
+
+func TestSPEC022GatewaySettlementReconcileHoldUsesCallerContext(t *testing.T) {
+	accountID := "acct_spec022_reconcile_hold_ctx"
+	requestID := "req_spec022_reconcile_hold_ctx"
+	pendingDeadlineUnixMS := fixedNow().Add(5 * time.Minute).UnixMilli()
+	wrapped := &settlementHoldContextStore{}
+	s := &Server{store: wrapped, now: fixedNow}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx = context.WithValue(ctx, requestIDKey{}, requestID)
+	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile", nil).WithContext(ctx)
+
+	if !s.boundStreamingSettlementHold(ctx, req, usageSubject{AccountID: accountID}, coordinatorSettlementFinality{
+		Action:                settlementFinalityHold,
+		Outcome:               "pending",
+		Reason:                "receipt_verdict_pending",
+		PendingDeadlineUnixMS: pendingDeadlineUnixMS,
+	}) {
+		t.Fatal("boundStreamingSettlementHold returned false")
+	}
+	if !errors.Is(wrapped.clampCtxErr, context.Canceled) {
+		t.Fatalf("ClampReservationExpiry ctx err=%v want context.Canceled", wrapped.clampCtxErr)
+	}
+}
+
 func settlementFinalityHeaderNamesForTest() []string {
 	return []string{
 		settlementOutcomeHeader,
