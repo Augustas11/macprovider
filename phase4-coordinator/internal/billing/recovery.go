@@ -284,6 +284,9 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 		if err := insertOperatorCreditTx(ctx, tx, id, input, result, now); err != nil {
 			return err
 		}
+		if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, tx, requestID, int64(attemptN), providerID); err != nil {
+			return err
+		}
 		created++
 		buyerEquivalent += result.GrossCredits
 		providerGross += result.GrossCredits

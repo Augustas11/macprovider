@@ -161,6 +161,98 @@ func TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout
 	}
 }
 
+func TestSPEC022ReceiptBeforeHotPathLedgerStillPaysReceiptBoundCredits(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	input.RouteSnapshot.RouteSnapshotPolicyVersion = RouteSnapshotPolicyVersion
+	routeDigest, _, err := input.RouteSnapshot.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Header = settlementHeaderWithCanonicalMutationAndTestSignature(t, input.Header, func(tuple map[string]any) {
+		tuple["route_snapshot_mode"] = RouteSnapshotModeEnforce
+		tuple["route_snapshot_policy_version"] = RouteSnapshotPolicyVersion
+		tuple["route_snapshot_digest"] = routeDigest
+	})
+
+	reqStore, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	setSettlementReceiptNow(store, input.ReceiptReceivedUnixMS)
+	if _, err := store.IngestSettlementReceipt(context.Background(), SettlementReceiptIngestionInput{
+		SettlementReceiptIdentity: settlementIdentityFromInput(input),
+		Header:                    input.Header,
+		ProviderReceiptPubkey:     pubkey,
+		receiptReceivedUnixMS:     input.ReceiptReceivedUnixMS,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != 0 {
+		t.Fatalf("ledger rows before hotpath=%d want 0", got)
+	}
+
+	prompt := input.ExpectedUsage.BillableInputTokens
+	completion := input.ExpectedUsage.BillableOutputTokens
+	receiptBoundCredits := ComputeCredits(
+		&prompt,
+		&completion,
+		nil,
+		UsageProviderReported,
+		FaultNone,
+		RateCardEntry{PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 1000000},
+		1000000,
+		10000,
+	)
+	inflatedPrompt := prompt + 1000000
+	inflatedCompletion := completion + 1000000
+	hotPathInput := HotPathInput{
+		RequestID:                  input.RequestID,
+		AttemptN:                   int(input.AttemptN),
+		ProviderAssignedID:         "assigned",
+		ProviderID:                 input.ProviderID,
+		Model:                      input.RouteSnapshot.ModelID,
+		Status:                     200,
+		Stream:                     false,
+		TSUtc:                      time.UnixMilli(input.TerminalStateTSUnixMS).UTC(),
+		PromptTokens:               &inflatedPrompt,
+		CompletionTokens:           &inflatedCompletion,
+		ErrorCode:                  "",
+		FaultFlag:                  FaultNone,
+		RateEntry:                  RateCardEntry{PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 1000000},
+		MultiplierPPM:              1000000,
+		ProviderShareBps:           10000,
+		SettlementAccountScopeHash: SettlementAccountScopeHash(input.AccountScope),
+		SettlementPolicyMode:       RouteSnapshotModeEnforce,
+		SettlementPolicyVersion:    input.RouteSnapshot.RouteSnapshotPolicyVersion,
+	}
+	if err := store.WriteHotPath(context.Background(), reqStore, requestLogRow(hotPathInput), hotPathInput); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("post-receipt hotpath provider credits=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+	}
+	if got := scalar(t, store.db, `SELECT prompt_tokens FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != prompt {
+		t.Fatalf("post-receipt hotpath prompt tokens=%d want receipt-bound %d", got, prompt)
+	}
+	if got := scalar(t, store.db, `SELECT completion_tokens FROM ledger_request_credits WHERE request_id = ?`, input.RequestID); got != completion {
+		t.Fatalf("post-receipt hotpath completion tokens=%d want receipt-bound %d", got, completion)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM spec022_payable_request_credits WHERE request_id = ?`, input.RequestID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("payable provider credits=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+	}
+	windowStart, windowEnd := settlementWindowForInput(input)
+	if err := store.RunSettlement(context.Background(), SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, windowStart, windowEnd); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = ?`, input.ProviderID); got != receiptBoundCredits.ProviderCredits {
+		t.Fatalf("payout provider credits=%d want receipt-bound %d", got, receiptBoundCredits.ProviderCredits)
+	}
+}
+
 func TestSPEC022PayableCreditGateBlocksQuarantineAndOverlap(t *testing.T) {
 	fixtures := loadSettlementVerifierFixtures(t)
 	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)

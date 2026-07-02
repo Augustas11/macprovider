@@ -240,6 +240,9 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	}
 	if found && existing.Closed {
 		existing.IdempotencyStatus = settlementReceiptIDTerminalNoop
+		if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, existing.RequestID, existing.AttemptN, existing.ProviderID); err != nil {
+			return SettlementReceiptState{}, err
+		}
 		if err := hydrateSettlementReceiptRouteAuditFieldsConn(ctx, conn, &existing); err != nil {
 			return SettlementReceiptState{}, err
 		}
@@ -273,7 +276,7 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	} else if err := insertSettlementReceiptStateConn(ctx, conn, persisted); err != nil {
 		return SettlementReceiptState{}, err
 	}
-	if err := syncVerifiedReceiptLedgerCreditConn(ctx, conn, state, evidence.attempt.Usage); err != nil {
+	if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, state.RequestID, state.AttemptN, state.ProviderID); err != nil {
 		return SettlementReceiptState{}, err
 	}
 	if receiptPresent {
@@ -291,40 +294,69 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 	return state, nil
 }
 
-func syncVerifiedReceiptLedgerCreditConn(ctx context.Context, conn *sql.Conn, state SettlementReceiptState, usage SettlementUsage) error {
-	if state.SettlementOutcome != SettlementOutcomeVerified || !state.Closed || state.RouteSnapshotMode != RouteSnapshotModeEnforce {
-		return nil
-	}
-	prompt := usage.BillableInputTokens
-	completion := usage.BillableOutputTokens
+type settlementReceiptCreditSyncDB interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func syncVerifiedReceiptLedgerCreditForAttemptTx(ctx context.Context, db settlementReceiptCreditSyncDB, requestID string, attemptN int64, providerID string) error {
 	var requestCreditID int64
 	var promptRate, completionRate, multiplier, share int64
 	var faultFlag string
-	err := conn.QueryRowContext(ctx, `
-SELECT id, prompt_rate_per_mtok, completion_rate_per_mtok,
-       global_multiplier_ppm, provider_share_bps, fault_flag
-  FROM ledger_request_credits
- WHERE request_id = ?
-   AND attempt_n = ?
-   AND provider_id = ?
-   AND settlement_account_scope_hash = ?
-   AND settlement_policy_mode = 'enforce'
-   AND settlement_policy_version = ?
-   AND quarantined = 0
-   AND settled = 0
-   AND settlement_id IS NULL`,
-		state.RequestID,
-		state.AttemptN,
-		state.ProviderID,
-		SettlementAccountScopeHash(state.AccountScope),
-		state.RouteSnapshotPolicyVersion,
-	).Scan(&requestCreditID, &promptRate, &completionRate, &multiplier, &share, &faultFlag)
+	var usageJSON string
+	err := db.QueryRowContext(ctx, `
+SELECT lrc.id, lrc.prompt_rate_per_mtok, lrc.completion_rate_per_mtok,
+       lrc.global_multiplier_ppm, lrc.provider_share_bps, lrc.fault_flag,
+       sao.usage_canonical_json
+  FROM ledger_request_credits lrc
+  JOIN settlement_receipt_verdicts srv
+    ON srv.account_scope_hash = lrc.settlement_account_scope_hash
+   AND srv.request_id = lrc.request_id
+   AND srv.attempt_n = lrc.attempt_n
+   AND srv.provider_id = lrc.provider_id
+   AND srv.route_snapshot_mode = 'enforce'
+   AND srv.route_snapshot_policy_version = lrc.settlement_policy_version
+   AND srv.closed = 1
+   AND srv.settlement_outcome = 'verified'
+  JOIN settlement_route_snapshots srs
+    ON srs.request_id = lrc.request_id
+   AND srs.attempt_n = lrc.attempt_n
+   AND srs.provider_id = lrc.provider_id
+   AND srs.route_snapshot_digest = srv.route_snapshot_digest
+   AND srs.route_snapshot_mode = 'enforce'
+   AND srs.route_snapshot_policy_version = lrc.settlement_policy_version
+  JOIN settlement_attempt_outputs sao
+    ON sao.account_scope = srs.account_scope
+   AND sao.request_id = srs.request_id
+   AND sao.attempt_n = srs.attempt_n
+   AND sao.provider_id = srs.provider_id
+   AND sao.overlapping_or_duplicate = 0
+ WHERE lrc.request_id = ?
+   AND lrc.attempt_n = ?
+   AND lrc.provider_id = ?
+   AND lrc.settlement_policy_mode = 'enforce'
+   AND lrc.settlement_account_scope_hash IS NOT NULL
+   AND lrc.settlement_policy_version IS NOT NULL
+   AND lrc.quarantined = 0
+   AND lrc.settled = 0
+   AND lrc.settlement_id IS NULL
+ LIMIT 1`,
+		requestID,
+		attemptN,
+		providerID,
+	).Scan(&requestCreditID, &promptRate, &completionRate, &multiplier, &share, &faultFlag, &usageJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
 		}
 		return err
 	}
+	var usage settlementUsageV04
+	if err := json.Unmarshal([]byte(usageJSON), &usage); err != nil {
+		return fmt.Errorf("decode settlement receipt-bound usage: %w", err)
+	}
+	prompt := usage.BillableInputTokens
+	completion := usage.BillableOutputTokens
 	result := ComputeCredits(
 		&prompt,
 		&completion,
@@ -336,7 +368,7 @@ SELECT id, prompt_rate_per_mtok, completion_rate_per_mtok,
 		share,
 	)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := conn.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET prompt_tokens = ?,
        completion_tokens = ?,
@@ -358,7 +390,7 @@ UPDATE ledger_request_credits
 	); err != nil {
 		return err
 	}
-	_, err = conn.ExecContext(ctx, `
+	_, err = db.ExecContext(ctx, `
 UPDATE ledger_operator_credits
    SET gross_credits = ?,
        operator_credits = ?,

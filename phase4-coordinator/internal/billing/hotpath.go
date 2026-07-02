@@ -174,6 +174,9 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	if err := insertOperatorCreditTx(ctx, conn, requestCreditID, in, result, now); err != nil {
 		return err
 	}
+	if err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
+		return err
+	}
 	if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
 		return err
 	}
