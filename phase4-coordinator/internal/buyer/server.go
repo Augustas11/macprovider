@@ -2086,7 +2086,15 @@ func (s *Server) forwardHTTPSequence(
 				estimatedCompletion := s.observedCompletionTokensFromBytes(len(respBody))
 				promptTok, cachedPromptTok, completionTok := tokenPointersFromChatResponse(respBody)
 				effectiveCached := effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, rec.attemptN)
-				respBody = chatResponseWithCachedPromptTokens(respBody, effectiveCached)
+				if chatResponseHasIncompleteUsage(respBody) {
+					completionEstimate := int64(0)
+					if estimatedCompletion != nil {
+						completionEstimate = *estimatedCompletion
+					}
+					respBody = chatResponseWithCompleteUsage(respBody, 0, effectiveCached, completionEstimate)
+				} else {
+					respBody = chatResponseWithCachedPromptTokens(respBody, effectiveCached)
+				}
 				receiptValue := normalizeReceiptHeaderValue(resp.Header.Get("X-MacProvider-Receipt"))
 				terminalTS := time.Now().UTC().UnixMilli()
 				if providerTS, ok := trustedProviderTerminalStateTS(resp.Header.Get(receiptTerminalStateTSHeaderName), startedAt, time.Now().UTC()); ok {
@@ -2509,7 +2517,17 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			if promptTok == nil && completionTok == nil {
 				promptTok, cachedPromptTok, completionTok = tokenPointersFromChatResponse(checkedBody)
 			}
-			checkedBody = chatResponseWithCachedPromptTokens(checkedBody, effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, billingAttemptN))
+			effectiveCached := effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, billingAttemptN)
+			estimatedCompletion := s.observedCompletionTokensFromBytes(body.Len())
+			if chatResponseHasIncompleteUsage(checkedBody) {
+				completionEstimate := int64(0)
+				if estimatedCompletion != nil {
+					completionEstimate = *estimatedCompletion
+				}
+				checkedBody = chatResponseWithCompleteUsage(checkedBody, 0, effectiveCached, completionEstimate)
+			} else {
+				checkedBody = chatResponseWithCachedPromptTokens(checkedBody, effectiveCached)
+			}
 			terminalTS := time.Now().UTC().UnixMilli()
 			if providerTS, ok := trustedProviderTerminalStateTSInt(end.TerminalStateTSUnixMS, started, time.Now().UTC()); ok {
 				terminalTS = providerTS
@@ -2518,7 +2536,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			if !outputOK {
 				output = settlementOutputUnavailable()
 			}
-			attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CachedPromptTokens: cachedPromptTok, CompletionTokens: completionTok, EstimatedCompTokens: s.observedCompletionTokensFromBytes(body.Len()), FaultFlag: faultFlag, SettlementOutput: output, SettlementReceipt: receiptValue}
+			attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CachedPromptTokens: cachedPromptTok, CompletionTokens: completionTok, EstimatedCompTokens: estimatedCompletion, FaultFlag: faultFlag, SettlementOutput: output, SettlementReceipt: receiptValue}
 			if logSuccess != nil {
 				if err := logSuccess(attempt); err != nil {
 					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
@@ -5726,6 +5744,53 @@ func requestLogCacheRecoveryFields(cachedPromptTokens, promptTokens *int64, stat
 func chatResponseWithCachedPromptTokens(body []byte, cachedPromptTokens int64) []byte {
 	updated, ok := chatJSONWithCachedPromptTokens(body, cachedPromptTokens)
 	if !ok {
+		return body
+	}
+	return updated
+}
+
+func chatResponseHasIncompleteUsage(body []byte) bool {
+	var envelope struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return false
+	}
+	if len(envelope.Usage) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Usage), []byte("null")) {
+		return false
+	}
+	var usage struct {
+		PromptTokens     *int64 `json:"prompt_tokens"`
+		CompletionTokens *int64 `json:"completion_tokens"`
+		TotalTokens      *int64 `json:"total_tokens"`
+	}
+	if err := json.Unmarshal(envelope.Usage, &usage); err != nil {
+		return true
+	}
+	return usage.PromptTokens == nil || usage.CompletionTokens == nil || usage.TotalTokens == nil
+}
+
+func chatResponseWithCompleteUsage(body []byte, promptTokens, cachedPromptTokens, completionTokens int64) []byte {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body
+	}
+	if cachedPromptTokens < 0 {
+		cachedPromptTokens = 0
+	}
+	usage := map[string]int64{
+		"prompt_tokens":        promptTokens,
+		"cached_prompt_tokens": cachedPromptTokens,
+		"completion_tokens":    completionTokens,
+		"total_tokens":         promptTokens + completionTokens,
+	}
+	rawUsage, err := json.Marshal(usage)
+	if err != nil {
+		return body
+	}
+	envelope["usage"] = rawUsage
+	updated, err := json.Marshal(envelope)
+	if err != nil {
 		return body
 	}
 	return updated

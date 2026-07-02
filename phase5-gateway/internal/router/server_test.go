@@ -4481,6 +4481,9 @@ func TestStreamingInvalidUsageAfterValidFallsBackToGatewayEstimate(t *testing.T)
 	if outcome != "ok" || source != "gateway_estimated" {
 		t.Fatalf("usage outcome/source = %s/%s, want ok/gateway_estimated", outcome, source)
 	}
+	if strings.Contains(resp.Body.String(), `"usage":{}`) {
+		t.Fatalf("invalid usage frame was forwarded: %s", resp.Body.String())
+	}
 }
 
 func TestStreamingSanitizesInvalidCachedPromptTokensWithoutRejectingUsage(t *testing.T) {

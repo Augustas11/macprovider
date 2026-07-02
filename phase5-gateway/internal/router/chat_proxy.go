@@ -673,10 +673,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						invalidReportedUsage = true
 						reported = nil
 						slog.Warn("invalid provider usage in stream; falling back to gateway estimate", "request_id", requestID(r), "error", err)
+						line = nil
 					} else if !invalidReportedUsage {
 						reported = &usage
+						line = sseDataLineWithCachedPromptTokens(line, usage.CachedPromptTokens)
 					}
-					line = sseDataLineWithCachedPromptTokens(line, usage.CachedPromptTokens)
 				} else if !hasChoices {
 					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
 					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
@@ -689,6 +690,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					return false
 				}
 			}
+		}
+		if len(line) == 0 {
+			return true
 		}
 		if _, err := w.Write(line); err != nil {
 			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
