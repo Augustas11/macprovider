@@ -241,12 +241,26 @@ except Exception:
     print('unknown'); sys.exit(0)
 for k in ('in_flight_requests', 'inflight'):
     v = d.get(k)
-    if isinstance(v, int) and v >= 0:
+    # #290 R4 (3-of-3 HIGH) — reject booleans explicitly. Python
+    # bool is a subclass of int, so \`isinstance(v, int)\` matches
+    # True/False. A malformed \`{\"in_flight_requests\": true}\`
+    # would print \"True\" and bypass the shell-side numeric check
+    # via fall-through. \`type(v) is int\` is exact-type match.
+    if type(v) is int and v >= 0:
         print(v); sys.exit(0)
     if isinstance(v, str) and v.isdigit():
         print(int(v)); sys.exit(0)
 print('unknown')
 " 2>/dev/null || echo "unknown")
+# #290 R4 SEC HIGH — belt-and-braces shell-side validation. After the
+# Python parser, INFLIGHT MUST be either the literal string "unknown"
+# or a bounded ASCII digit string. Any other shape (whitespace, "True",
+# "1e9", "-5", etc.) is treated as "unknown" and fails closed.
+case "$INFLIGHT" in
+  unknown) ;;
+  ''|*[!0-9]*) INFLIGHT="unknown" ;;
+  *) if [ "${#INFLIGHT}" -gt 10 ]; then INFLIGHT="unknown"; fi ;;
+esac
 if [ "${INFLIGHT}" = "unknown" ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
   log "  REFUSING TO PROCEED — gateway /healthz did not report a numeric in-flight metric."
   log "  Cannot verify quiet window; refusing EARLY (pre-scp) so no artifact is placed."
@@ -266,7 +280,16 @@ fi
 if [ "${FORCE_RESTART:-0}" = "1" ]; then
   if [ "${INFLIGHT}" = "unknown" ] || { [ "${INFLIGHT}" != "unknown" ] && [ "${INFLIGHT:-0}" -gt 0 ]; }; then
     TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    OP_HOST="${HOSTNAME:-unknown}"
+    # #290 R4 SEC HIGH — sanitize $HOSTNAME (untrusted local env value).
+    # If it contains anything other than A-Za-z0-9.- we fall back to
+    # "unknown". Prior code interpolated it directly into a double-quoted
+    # remote heredoc; a HOSTNAME=$(id) attack would then execute on Pearl
+    # while writing the tombstone.
+    _op_host_raw="${HOSTNAME:-unknown}"
+    case "$_op_host_raw" in
+      *[!A-Za-z0-9.-]*|'') OP_HOST="unknown" ;;
+      *) OP_HOST="$_op_host_raw" ;;
+    esac
     # JSON value: quote strings, don't quote numbers.
     if [ "${INFLIGHT}" = "unknown" ]; then
       INFLIGHT_JSON='"unknown"'
@@ -470,9 +493,17 @@ echo "  binary cannot safely read. After any deploy that crosses schema"
 echo "  versions, restore BOTH the binary AND the pre-deploy DB snapshot:"
 echo
 echo "    ssh $VPS_USER@$VPS_HOST '"
+echo "      set -e &&"
+echo "      # #290 R4 ARCH HIGH — resolve + VALIDATE snapshot BEFORE"
+echo "      # touching any live DB state. Empty-glob previously left"
+echo "      # LATEST=\"\" then rm'd WAL sidecars → data loss on missing"
+echo "      # snapshot. Now: enforce non-empty, readable, integrity-ok."
+echo "      LATEST=\$(ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* 2>/dev/null | head -1) &&"
+echo "      test -n \"\$LATEST\" -a -f \"\$LATEST\" -a -r \"\$LATEST\" &&"
+echo "      sudo -u macprovider sqlite3 \"\$LATEST\" \"PRAGMA integrity_check;\" | head -1 | grep -q \"^ok\$\" &&"
+echo "      # Snapshot verified. Now stop service + swap binary + restore DB."
 echo "      systemctl stop macprovider-gateway &&"
 echo "      install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway &&"
-echo "      LATEST=\$(ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* | head -1) &&"
 echo "      # #290 R3 CODE HIGH — MUST remove stale WAL/SHM sidecars before"
 echo "      # restoring the snapshot; SQLite would otherwise replay the WAL"
 echo "      # and reintroduce post-deploy state, silently defeating the rollback."

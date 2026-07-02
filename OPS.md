@@ -132,9 +132,20 @@ the rollback (verified by #290 R3 CODE HIGH SQLite repro).
 
 ```bash
 ssh pearl
+# #290 R4 ARCH HIGH — resolve + VALIDATE snapshot BEFORE touching any
+# live DB state. Prior version rm'd WAL sidecars before checking that
+# a snapshot even existed; an empty glob would leave $LATEST empty and
+# silently destroy live WAL state.
+LATEST=$(sudo ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* 2>/dev/null | head -1)
+[ -n "$LATEST" ] && [ -f "$LATEST" ] && [ -r "$LATEST" ] || {
+  echo "aborting rollback: no readable pre-deploy snapshot found"; exit 1;
+}
+sudo -u macprovider sqlite3 "$LATEST" "PRAGMA integrity_check;" | head -1 | grep -q "^ok$" || {
+  echo "aborting rollback: snapshot $LATEST failed integrity_check"; exit 1;
+}
+# Snapshot verified. Now stop service + swap binary + restore DB.
 sudo systemctl stop macprovider-gateway
 sudo install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway
-LATEST=$(sudo ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* | head -1)
 # Remove stale WAL/SHM sidecars before restoring the snapshot.
 sudo rm -f /var/lib/macprovider/gateway.db-wal /var/lib/macprovider/gateway.db-shm
 sudo install -o macprovider -g macprovider -m 0600 "$LATEST" /var/lib/macprovider/gateway.db
