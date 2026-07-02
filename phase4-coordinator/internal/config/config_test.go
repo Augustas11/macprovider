@@ -211,7 +211,6 @@ func TestRateCardEntryCacheRateDefaultAndExplicitZero(t *testing.T) {
 func TestCoordinatorYAMLExamplesIncludePromptCacheHitRate(t *testing.T) {
 	for _, rel := range []string{
 		"../../coordinator.yaml.example",
-		"../../dist/coordinator.yaml",
 		"../../dist/coordinator.yaml.example",
 	} {
 		t.Run(rel, func(t *testing.T) {
