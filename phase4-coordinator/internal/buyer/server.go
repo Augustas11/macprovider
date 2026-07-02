@@ -2087,11 +2087,12 @@ func (s *Server) forwardHTTPSequence(
 				promptTok, cachedPromptTok, completionTok := tokenPointersFromChatResponse(respBody)
 				effectiveCached := effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, rec.attemptN)
 				if chatResponseHasIncompleteUsage(respBody) {
+					estimatedPrompt := int64(state.estimatedTokens)
 					completionEstimate := int64(0)
 					if estimatedCompletion != nil {
 						completionEstimate = *estimatedCompletion
 					}
-					respBody = chatResponseWithCompleteUsage(respBody, 0, effectiveCached, completionEstimate)
+					respBody = chatResponseWithCompleteUsage(respBody, estimatedPrompt, effectiveCached, completionEstimate)
 				} else {
 					respBody = chatResponseWithCachedPromptTokens(respBody, effectiveCached)
 				}
@@ -2520,11 +2521,12 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			effectiveCached := effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, billingAttemptN)
 			estimatedCompletion := s.observedCompletionTokensFromBytes(body.Len())
 			if chatResponseHasIncompleteUsage(checkedBody) {
+				estimatedPrompt := int64(state.estimatedTokens)
 				completionEstimate := int64(0)
 				if estimatedCompletion != nil {
 					completionEstimate = *estimatedCompletion
 				}
-				checkedBody = chatResponseWithCompleteUsage(checkedBody, 0, effectiveCached, completionEstimate)
+				checkedBody = chatResponseWithCompleteUsage(checkedBody, estimatedPrompt, effectiveCached, completionEstimate)
 			} else {
 				checkedBody = chatResponseWithCachedPromptTokens(checkedBody, effectiveCached)
 			}
@@ -5684,11 +5686,15 @@ func mergeStreamUsagePointers(currentPrompt, currentCached, currentCompletion, n
 	if completion == nil {
 		completion = currentCompletion
 	}
-	if invalidCachedPromptTokens(currentCached, currentPrompt) || invalidCachedPromptTokens(nextCached, nextPrompt) {
+	cached := nextCached
+	if cached == nil {
+		cached = currentCached
+	}
+	if invalidCachedPromptTokens(currentCached, currentPrompt) || invalidCachedPromptTokens(cached, prompt) {
 		invalid := int64(-1)
 		return prompt, &invalid, completion
 	}
-	return nextPrompt, nextCached, nextCompletion
+	return prompt, cached, completion
 }
 
 func invalidCachedPromptTokens(cachedPromptTokens, promptTokens *int64) bool {

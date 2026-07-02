@@ -1779,7 +1779,8 @@ func TestNonStreamingCompletesIncompleteProviderUsageBeforeForwarding(t *testing
 		buyer.WithTier2Config(config.Tier2Config{OutputBytesPerTokenCeiling: 16}),
 	)
 
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+	requestBody := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`)
+	rr := postChat(t, server, requestBody, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
@@ -1794,9 +1795,13 @@ func TestNonStreamingCompletesIncompleteProviderUsageBeforeForwarding(t *testing
 	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
 		t.Fatalf("response json: %v body=%s", err, rr.Body.String())
 	}
+	wantPrompt := int64(len(requestBody) / 4)
+	if wantPrompt < 1 {
+		wantPrompt = 1
+	}
 	wantCompletion := int64((len(responseBody) + 15) / 16)
-	if out.Usage.PromptTokens != 0 || out.Usage.CachedPromptTokens != 0 || out.Usage.CompletionTokens != wantCompletion || out.Usage.TotalTokens != wantCompletion {
-		t.Fatalf("usage=%+v, want complete estimated usage with completion=%d", out.Usage, wantCompletion)
+	if out.Usage.PromptTokens != wantPrompt || out.Usage.CachedPromptTokens != 0 || out.Usage.CompletionTokens != wantCompletion || out.Usage.TotalTokens != wantPrompt+wantCompletion {
+		t.Fatalf("usage=%+v, want complete estimated usage with prompt=%d completion=%d", out.Usage, wantPrompt, wantCompletion)
 	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -1811,6 +1816,56 @@ func TestNonStreamingCompletesIncompleteProviderUsageBeforeForwarding(t *testing
 	}
 	if usageSource != "byte_estimated" || quarantined != 1 || !reason.Valid || reason.String != "invalid_cached_prompt_tokens" {
 		t.Fatalf("billing row usage_source/quarantine/reason = %s/%d/%#v, want byte_estimated/1/invalid_cached_prompt_tokens", usageSource, quarantined, reason)
+	}
+}
+
+func TestStreamingBillingMergesLaterPartialUsageWithPriorPrompt(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk\",\"usage\":{\"prompt_tokens\":3,\"cached_prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":3},\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk\",\"usage\":{\"completion_tokens\":1},\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+		buyer.WithTier2Config(config.Tier2Config{OutputBytesPerTokenCeiling: 16}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	row := queryLatestBillingRow(t, dbPath)
+	if row.UsageSource != "byte_estimated" {
+		t.Fatalf("usage_source=%q want byte_estimated", row.UsageSource)
+	}
+	if row.CompletionTokens != 1 {
+		t.Fatalf("completion_tokens=%d want 1", row.CompletionTokens)
+	}
+	wantGross := int64(5)
+	if row.GrossCredits != wantGross {
+		t.Fatalf("gross_credits=%d want %d from preserved prompt=3 and completion=1", row.GrossCredits, wantGross)
+	}
+	if row.Quarantined != 0 || row.QuarantineReason.Valid {
+		t.Fatalf("row quarantined=%d reason=%#v, want clean", row.Quarantined, row.QuarantineReason)
 	}
 }
 

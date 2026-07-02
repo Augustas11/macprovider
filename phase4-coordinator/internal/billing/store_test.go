@@ -175,6 +175,29 @@ SELECT cached_prompt_tokens, gross_credits, provider_credits
 	}
 }
 
+func TestWriteHotPath_EmitsCacheBillingRoutingDecision(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	cached := int64(400)
+	var got CacheBillingRoutingDecision
+	input.CachedPromptTokens = &cached
+	input.StickyResult = "hit"
+	input.RoutingDecisionLog = func(d CacheBillingRoutingDecision) {
+		got = d
+	}
+
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+
+	if got.RequestID != row.RequestID || got.ProviderID != "provider-a" || got.ProviderAssignedID != "assigned-a" {
+		t.Fatalf("identity fields=%#v", got)
+	}
+	if got.AttemptN != 0 || got.CachedPromptTokens != 400 || got.StickyResult != "hit" || got.ValidationReason != "" {
+		t.Fatalf("cache routing decision=%#v, want sticky hit cached=400 with no validation reason", got)
+	}
+}
+
 func TestWriteHotPath_AmbiguousPositiveCacheQuarantinesCredit(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)
@@ -189,6 +212,26 @@ func TestWriteHotPath_AmbiguousPositiveCacheQuarantinesCredit(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_operator_credits`); got != 0 {
 		t.Fatalf("operator rows=%d want 0 for quarantined cache claim", got)
+	}
+}
+
+func TestWriteHotPath_EmitsCacheBillingRoutingDecisionForInvalidCache(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	cached := int64(1001)
+	var got CacheBillingRoutingDecision
+	input.CachedPromptTokens = &cached
+	input.StickyResult = "hit"
+	input.RoutingDecisionLog = func(d CacheBillingRoutingDecision) {
+		got = d
+	}
+
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+
+	if got.CachedPromptTokens != 0 || got.ValidationReason != "invalid_cached_prompt_tokens" || got.StickyResult != "hit" {
+		t.Fatalf("cache routing decision=%#v, want effective cached=0 invalid_cached_prompt_tokens", got)
 	}
 }
 
