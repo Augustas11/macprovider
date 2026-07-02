@@ -496,6 +496,239 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertNil(redirected)
     }
 
+    // MARK: - downloadWithResume (v1.7.4 retry-with-resume for HF -1005 drops)
+
+    private static func makeDownloadRetryPolicyNoDelay(
+        maxAttempts: Int,
+        sleepCalls: SleepCounter
+    ) -> HuggingFaceSnapshotDownloader.DownloadRetryPolicy {
+        HuggingFaceSnapshotDownloader.DownloadRetryPolicy(
+            maxAttempts: maxAttempts,
+            baseDelaySeconds: 0.0,
+            backoffMultiplier: 1.0,
+            sleep: { ns in await sleepCalls.record(ns) }
+        )
+    }
+
+    private actor SleepCounter {
+        var invocations: [UInt64] = []
+        func record(_ ns: UInt64) { invocations.append(ns) }
+        func snapshot() -> [UInt64] { invocations }
+    }
+
+    private static let dummyOKResponse: HTTPURLResponse = HTTPURLResponse(
+        url: URL(string: "https://huggingface.co/repo/resolve/main/file.safetensors")!,
+        statusCode: 200,
+        httpVersion: "HTTP/1.1",
+        headerFields: nil
+    )!
+
+    private static func fakeDownloadedFileURL(name: String) throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("hf-download-resume-\(UUID().uuidString)-\(name)")
+        try Data("stub".utf8).write(to: url)
+        return url
+    }
+
+    func testDownloadWithResumeSucceedsOnFirstAttempt() async throws {
+        let counter = SleepCounter()
+        let policy = Self.makeDownloadRetryPolicyNoDelay(maxAttempts: 3, sleepCalls: counter)
+        let request = URLRequest(url: URL(string: "https://huggingface.co/repo/resolve/main/file.safetensors")!)
+        let temp = try Self.fakeDownloadedFileURL(name: "first-attempt")
+
+        let initialCalls = SleepCounter()
+        let (localURL, response) = try await HuggingFaceSnapshotDownloader.downloadWithResume(
+            request: request,
+            policy: policy,
+            initialDownload: { req in
+                await initialCalls.record(UInt64(req.url?.absoluteString.count ?? 0))
+                return (temp, Self.dummyOKResponse)
+            },
+            resumeDownload: { _ in
+                XCTFail("resume should not be invoked when initial download succeeds")
+                return (temp, Self.dummyOKResponse)
+            }
+        )
+
+        XCTAssertEqual(localURL, temp)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let calls = await initialCalls.snapshot()
+        XCTAssertEqual(calls.count, 1)
+        let sleeps = await counter.snapshot()
+        XCTAssertTrue(sleeps.isEmpty, "no backoff sleep expected on first-try success")
+        try? FileManager.default.removeItem(at: temp)
+    }
+
+    func testDownloadWithResumeUsesResumeDataOnTransientFailure() async throws {
+        let counter = SleepCounter()
+        let policy = Self.makeDownloadRetryPolicyNoDelay(maxAttempts: 3, sleepCalls: counter)
+        let request = URLRequest(url: URL(string: "https://huggingface.co/repo/resolve/main/file.safetensors")!)
+        let resumeBlob = Data("resume-state-bytes".utf8)
+        let temp = try Self.fakeDownloadedFileURL(name: "resume-hit")
+
+        let resumeCalls = SleepCounter()
+        let (localURL, _) = try await HuggingFaceSnapshotDownloader.downloadWithResume(
+            request: request,
+            policy: policy,
+            initialDownload: { _ in
+                throw URLError(
+                    .networkConnectionLost,
+                    userInfo: [NSURLSessionDownloadTaskResumeData: resumeBlob]
+                )
+            },
+            resumeDownload: { data in
+                XCTAssertEqual(data, resumeBlob, "resume must carry the exact bytes URLSession serialized")
+                await resumeCalls.record(UInt64(data.count))
+                return (temp, Self.dummyOKResponse)
+            }
+        )
+
+        XCTAssertEqual(localURL, temp)
+        let calls = await resumeCalls.snapshot()
+        XCTAssertEqual(calls.count, 1)
+        let sleeps = await counter.snapshot()
+        XCTAssertEqual(sleeps.count, 1, "one backoff sleep expected between attempts 1 and 2")
+        try? FileManager.default.removeItem(at: temp)
+    }
+
+    func testDownloadWithResumeRetriesFreshWhenNoResumeDataProvided() async throws {
+        let counter = SleepCounter()
+        let policy = Self.makeDownloadRetryPolicyNoDelay(maxAttempts: 3, sleepCalls: counter)
+        let request = URLRequest(url: URL(string: "https://huggingface.co/repo/resolve/main/file.safetensors")!)
+        let temp = try Self.fakeDownloadedFileURL(name: "no-resume-fresh")
+
+        let initialCalls = SleepCounter()
+        _ = try await HuggingFaceSnapshotDownloader.downloadWithResume(
+            request: request,
+            policy: policy,
+            initialDownload: { req in
+                await initialCalls.record(UInt64(req.url?.absoluteString.count ?? 0))
+                let count = await initialCalls.snapshot().count
+                if count == 1 {
+                    throw URLError(.timedOut)
+                }
+                return (temp, Self.dummyOKResponse)
+            },
+            resumeDownload: { _ in
+                XCTFail("resume must not run when no resume data was captured")
+                return (temp, Self.dummyOKResponse)
+            }
+        )
+
+        let calls = await initialCalls.snapshot()
+        XCTAssertEqual(calls.count, 2, "second attempt is a fresh initialDownload when no resume data")
+        try? FileManager.default.removeItem(at: temp)
+    }
+
+    func testDownloadWithResumeExhaustsAttemptsThenThrowsLast() async throws {
+        let counter = SleepCounter()
+        let policy = Self.makeDownloadRetryPolicyNoDelay(maxAttempts: 3, sleepCalls: counter)
+        let request = URLRequest(url: URL(string: "https://huggingface.co/repo/resolve/main/file.safetensors")!)
+        let final = URLError(.networkConnectionLost)
+
+        do {
+            _ = try await HuggingFaceSnapshotDownloader.downloadWithResume(
+                request: request,
+                policy: policy,
+                initialDownload: { _ in throw URLError(.timedOut) },
+                resumeDownload: { _ in throw final }
+            )
+            XCTFail("expected throw after all attempts fail")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .timedOut, "no resume data ever captured, initial keeps running; last=timedOut")
+        }
+        let sleeps = await counter.snapshot()
+        XCTAssertEqual(sleeps.count, 2, "sleeps=maxAttempts-1 between failing attempts")
+    }
+
+    func testDownloadWithResumeRethrowsNonTransientImmediately() async throws {
+        let counter = SleepCounter()
+        let policy = Self.makeDownloadRetryPolicyNoDelay(maxAttempts: 3, sleepCalls: counter)
+        let request = URLRequest(url: URL(string: "https://huggingface.co/repo/resolve/main/file.safetensors")!)
+
+        // .cancelled (-999) is programmatic cancel — never retry.
+        do {
+            _ = try await HuggingFaceSnapshotDownloader.downloadWithResume(
+                request: request,
+                policy: policy,
+                initialDownload: { _ in throw URLError(.cancelled) },
+                resumeDownload: { _ in
+                    XCTFail("resume must not run on non-transient error")
+                    return (URL(fileURLWithPath: "/tmp/x"), Self.dummyOKResponse)
+                }
+            )
+            XCTFail("expected cancellation to propagate")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .cancelled)
+        }
+        let sleeps = await counter.snapshot()
+        XCTAssertTrue(sleeps.isEmpty, "non-transient errors skip backoff and skip retry")
+    }
+
+    func testDownloadWithResumeRethrowsNonURLErrorImmediately() async throws {
+        struct SpecificError: Error, Equatable {}
+        let counter = SleepCounter()
+        let policy = Self.makeDownloadRetryPolicyNoDelay(maxAttempts: 3, sleepCalls: counter)
+        let request = URLRequest(url: URL(string: "https://huggingface.co/repo/resolve/main/file.safetensors")!)
+
+        do {
+            _ = try await HuggingFaceSnapshotDownloader.downloadWithResume(
+                request: request,
+                policy: policy,
+                initialDownload: { _ in throw SpecificError() },
+                resumeDownload: { _ in
+                    XCTFail("resume must not run on non-URLError")
+                    return (URL(fileURLWithPath: "/tmp/x"), Self.dummyOKResponse)
+                }
+            )
+            XCTFail("expected non-URLError to propagate")
+        } catch is SpecificError {
+            // expected
+        } catch {
+            XCTFail("expected SpecificError; got \(error)")
+        }
+        let sleeps = await counter.snapshot()
+        XCTAssertTrue(sleeps.isEmpty)
+    }
+
+    func testIsTransientDownloadErrorCoversExpectedSet() {
+        let transient: [URLError.Code] = [
+            .networkConnectionLost, .timedOut, .notConnectedToInternet,
+            .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+            .resourceUnavailable
+        ]
+        for code in transient {
+            XCTAssertTrue(
+                HuggingFaceSnapshotDownloader.isTransientDownloadError(URLError(code)),
+                "\(code) should be considered transient"
+            )
+        }
+        let nonTransient: [URLError.Code] = [
+            .cancelled, .badURL, .unsupportedURL, .badServerResponse,
+            .userAuthenticationRequired, .fileDoesNotExist
+        ]
+        for code in nonTransient {
+            XCTAssertFalse(
+                HuggingFaceSnapshotDownloader.isTransientDownloadError(URLError(code)),
+                "\(code) should NOT be considered transient"
+            )
+        }
+    }
+
+    func testExtractResumeDataReturnsNilWhenAbsent() {
+        let e = URLError(.networkConnectionLost)
+        XCTAssertNil(HuggingFaceSnapshotDownloader.extractResumeData(from: e))
+    }
+
+    func testExtractResumeDataReturnsBytesWhenPresent() {
+        let blob = Data("captured-resume-state".utf8)
+        let e = URLError(
+            .networkConnectionLost,
+            userInfo: [NSURLSessionDownloadTaskResumeData: blob]
+        )
+        XCTAssertEqual(HuggingFaceSnapshotDownloader.extractResumeData(from: e), blob)
+    }
+
     func testHMACIdentityUsesSeparateDomainsAndSecretFileIs0600() throws {
         let dir = try tempDir()
         let secretURL = dir.appendingPathComponent("autotune-hmac-secret")
