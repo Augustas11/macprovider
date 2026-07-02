@@ -48,8 +48,8 @@ func TestBillingMigration(t *testing.T) {
 	if !columnExists(t, db, "ledger_request_credits", "cached_prompt_tokens") {
 		t.Fatalf("missing ledger_request_credits.cached_prompt_tokens")
 	}
-	if !columnExists(t, db, "ledger_request_credits", "prompt_cache_hit_rate_per_mtok") {
-		t.Fatalf("missing ledger_request_credits.prompt_cache_hit_rate_per_mtok")
+	if columnExists(t, db, "ledger_request_credits", "prompt_cache_hit_rate_per_mtok") {
+		t.Fatalf("ledger_request_credits.prompt_cache_hit_rate_per_mtok must not be persisted")
 	}
 }
 

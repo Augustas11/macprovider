@@ -108,6 +108,26 @@ func (s *Server) newBillingRecorder(r *http.Request, state *forwardState, starte
 	}
 }
 
+func (s *Server) logCacheBillingRoutingDecision(d billing.CacheBillingRoutingDecision) {
+	event := s.log.Info().
+		Str("event", "routing_decision").
+		Str("request_id", d.RequestID).
+		Int("attempt_n", d.AttemptN).
+		Str("provider_id", d.ProviderID).
+		Str("provider_assigned_id", d.ProviderAssignedID).
+		Int64("cached_prompt_tokens", d.CachedPromptTokens)
+	if d.StickyResult != "" {
+		event = event.Str("sticky_result", d.StickyResult)
+	}
+	if d.StickyMissReason != "" {
+		event = event.Str("sticky_miss_reason", d.StickyMissReason)
+	}
+	if d.ValidationReason != "" {
+		event = event.Str("cache_validation_reason", d.ValidationReason).Str("cache_json_type", "invalid_or_policy_rejected")
+	}
+	event.Msg("routing_decision")
+}
+
 // setModel updates the model field. Called from handleChatCompletions
 // after body parse, before any provider-bound recordRow fires. The
 // pre-refactor closure read this from a captured outer-scope variable;
@@ -233,6 +253,7 @@ func (b *billingRecorder) recordRow(
 			SettlementAccountScopeHash: billing.SettlementAccountScopeHash(accountScope),
 			SettlementPolicyMode:       settlementMode,
 			SettlementPolicyVersion:    settlementVersion,
+			RoutingDecisionLog:         s.logCacheBillingRoutingDecision,
 		}
 		err := billingStore.WriteHotPath(ctx, s.reqLogStore, row, billingInput)
 		if err != nil {

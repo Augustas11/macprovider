@@ -128,6 +128,8 @@ The SPEC-005 `usage_source = 'null_error'` NULL guard remains binding: when `usa
 
 Per-attempt rule: cache-hit billing applies only to `attempt_n = 0` for a conversation turn. Retry / re-attempt rows (`attempt_n > 0`) MUST set `cached_prompt_tokens` to `NULL` or `0` and MUST price all prompt tokens at `prompt_rate_per_mtok`, even if the same provider is retried.
 
+Final-provider provenance rule: `sticky_result = "hit"` is a statement about the provider that actually receives the attempt, not only the pre-tiebreak candidate. A SPEC-024-aware coordinator MUST NOT let random tiebreaking or retry/failover relabel a different final provider as a sticky hit for cache-billing purposes. Implementations MAY skip random tiebreaking after a sticky-hit swap; if they keep random tiebreaking enabled after sticky lookup, they MUST recompute cache-billing eligibility from the final selected provider before accepting positive `cached_prompt_tokens`.
+
 SPEC-005 coordinator billing is the sole v0.1 authority for credit-denominated buyer billing. A SPEC-024 IMPL MUST NOT duplicate rate-card pricing authority in the SPEC-006 gateway. Buyer invoices, paid credit debits, or any credit-denominated export MUST use the coordinator ledger/rate snapshot and this cached / uncached prompt split:
 
 ```text

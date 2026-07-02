@@ -1830,9 +1830,6 @@ func TestNonStreamingBillingDiscountsCachedPromptTokensOnlyOnStickyHit(t *testin
 	if row.GrossCredits != 11 {
 		t.Fatalf("gross_credits=%d want 11", row.GrossCredits)
 	}
-	if row.PromptCacheHitRatePerMtok != 250000 {
-		t.Fatalf("prompt_cache_hit_rate_per_mtok=%d want 250000", row.PromptCacheHitRatePerMtok)
-	}
 }
 
 func TestNonStreamingBillingDiscountsCachedPromptTokensOnSingleProviderStickyHit(t *testing.T) {
@@ -5293,7 +5290,6 @@ type billingRow struct {
 	EstimatedCompletionTokens int64
 	UsageSource               string
 	CachedPromptTokens        sql.NullInt64
-	PromptCacheHitRatePerMtok int64
 	Quarantined               int
 	QuarantineReason          sql.NullString
 }
@@ -5308,7 +5304,7 @@ func queryLatestBillingRow(t *testing.T, dbPath string) billingRow {
 	var row billingRow
 	if err := db.QueryRow(`
 SELECT gross_credits, completion_tokens, estimated_completion_tokens, usage_source,
-       cached_prompt_tokens, COALESCE(prompt_cache_hit_rate_per_mtok, -1), quarantined, quarantine_reason
+       cached_prompt_tokens, quarantined, quarantine_reason
 FROM ledger_request_credits
 ORDER BY id DESC LIMIT 1`).Scan(
 		&row.GrossCredits,
@@ -5316,7 +5312,6 @@ ORDER BY id DESC LIMIT 1`).Scan(
 		&row.EstimatedCompletionTokens,
 		&row.UsageSource,
 		&row.CachedPromptTokens,
-		&row.PromptCacheHitRatePerMtok,
 		&row.Quarantined,
 		&row.QuarantineReason,
 	); err != nil {

@@ -5639,8 +5639,7 @@ func cachedPromptTokensPointer(raw json.RawMessage) *int64 {
 		return nil
 	}
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		invalid := int64(-1)
-		return &invalid
+		return nil
 	}
 	var value int64
 	if err := json.Unmarshal(raw, &value); err != nil {
@@ -5785,7 +5784,25 @@ func chatJSONWithCachedPromptTokens(body []byte, cachedPromptTokens int64) ([]by
 	}
 	rawUsage, ok := envelope["usage"]
 	if !ok || bytes.Equal(bytes.TrimSpace(rawUsage), []byte("null")) {
-		return nil, false
+		usage := map[string]json.RawMessage{}
+		if cachedPromptTokens < 0 {
+			cachedPromptTokens = 0
+		}
+		encoded, err := json.Marshal(cachedPromptTokens)
+		if err != nil {
+			return nil, false
+		}
+		usage["cached_prompt_tokens"] = encoded
+		rawUsage, err = json.Marshal(usage)
+		if err != nil {
+			return nil, false
+		}
+		envelope["usage"] = rawUsage
+		updated, err := json.Marshal(envelope)
+		if err != nil {
+			return nil, false
+		}
+		return updated, true
 	}
 	var usage map[string]json.RawMessage
 	if err := json.Unmarshal(rawUsage, &usage); err != nil {

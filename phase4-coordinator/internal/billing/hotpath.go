@@ -3,7 +3,6 @@ package billing
 import (
 	"context"
 	"database/sql"
-	"log/slog"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
@@ -33,6 +32,18 @@ type HotPathInput struct {
 	SettlementAccountScopeHash string
 	SettlementPolicyMode       string
 	SettlementPolicyVersion    string
+	RoutingDecisionLog         func(CacheBillingRoutingDecision)
+}
+
+type CacheBillingRoutingDecision struct {
+	RequestID          string
+	AttemptN           int
+	ProviderID         string
+	ProviderAssignedID string
+	CachedPromptTokens int64
+	StickyResult       string
+	StickyMissReason   string
+	ValidationReason   string
 }
 
 func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
@@ -127,7 +138,7 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		in.FaultFlag = FaultNone
 	}
 	cacheQuarantineReason := normalizeCachedPromptTokens(&in)
-	logCacheBillingRoutingDecision(in)
+	logCacheBillingRoutingDecision(in, cacheQuarantineReason)
 	// SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168) quarantine rule:
 	// with persisted monotonic attempt_n, row 3+ (attempt_n >= 2) is
 	// credited normally — the v0.3.1 "row 3+ MUST quarantine until
@@ -228,26 +239,24 @@ func normalizeCachedPromptTokens(in *HotPathInput) string {
 	return ""
 }
 
-func logCacheBillingRoutingDecision(in HotPathInput) {
+func logCacheBillingRoutingDecision(in HotPathInput, validationReason string) {
+	if in.RoutingDecisionLog == nil {
+		return
+	}
 	effectiveCached := int64(0)
 	if in.CachedPromptTokens != nil {
 		effectiveCached = *in.CachedPromptTokens
 	}
-	attrs := []any{
-		"event", "routing_decision",
-		"request_id", in.RequestID,
-		"attempt_n", in.AttemptN,
-		"provider_id", in.ProviderID,
-		"provider_assigned_id", in.ProviderAssignedID,
-		"cached_prompt_tokens", effectiveCached,
-	}
-	if in.StickyResult != "" {
-		attrs = append(attrs, "sticky_result", in.StickyResult)
-	}
-	if in.StickyMissReason != "" {
-		attrs = append(attrs, "sticky_miss_reason", in.StickyMissReason)
-	}
-	slog.Info("routing_decision", attrs...)
+	in.RoutingDecisionLog(CacheBillingRoutingDecision{
+		RequestID:          in.RequestID,
+		AttemptN:           in.AttemptN,
+		ProviderID:         in.ProviderID,
+		ProviderAssignedID: in.ProviderAssignedID,
+		CachedPromptTokens: effectiveCached,
+		StickyResult:       in.StickyResult,
+		StickyMissReason:   in.StickyMissReason,
+		ValidationReason:   validationReason,
+	})
 }
 
 func (s *Store) WriteRequestLogWithIdentity(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
@@ -300,12 +309,12 @@ func insertRequestCreditTx(ctx context.Context, db sqlExecutor, in HotPathInput,
 INSERT INTO ledger_request_credits (
     request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
     status, stream, prompt_tokens, cached_prompt_tokens, completion_tokens, estimated_completion_tokens,
-    usage_source, prompt_rate_per_mtok, prompt_cache_hit_rate_per_mtok, completion_rate_per_mtok,
+    usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
     global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
     fault_flag, settlement_account_scope_hash, settlement_policy_mode,
     settlement_policy_version, recovery_source, created_at_utc, quarantined,
     quarantine_reason
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.RequestID,
 		in.AttemptN,
 		in.ProviderID,
@@ -320,7 +329,6 @@ INSERT INTO ledger_request_credits (
 		nullInt64(result.EstimatedCompTokens),
 		result.UsageSource,
 		result.PromptRatePerMtok,
-		result.PromptCacheHitRatePerMtok,
 		result.CompletionRatePerMtok,
 		result.GlobalMultiplierPPM,
 		result.GrossCredits,

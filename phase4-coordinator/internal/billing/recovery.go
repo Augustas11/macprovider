@@ -405,10 +405,10 @@ func insertQuarantineTx(ctx context.Context, tx *sql.Tx, requestID string, attem
 INSERT OR IGNORE INTO ledger_request_credits (
     request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
     status, stream, prompt_tokens, completion_tokens, estimated_completion_tokens,
-    usage_source, prompt_rate_per_mtok, prompt_cache_hit_rate_per_mtok, completion_rate_per_mtok,
+    usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
     global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
     fault_flag, recovery_source, created_at_utc, quarantined, quarantine_reason
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, ?, ?, ?, 1, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?, 1, ?)`,
 		requestID,
 		attemptN,
 		providerID,
@@ -430,18 +430,18 @@ INSERT OR IGNORE INTO ledger_request_credits (
 }
 
 func reconcileExistingCreditTx(ctx context.Context, tx *sql.Tx, input HotPathInput, expected BilledRow, now string) (int64, int64, bool, bool, error) {
-	var id, gross, providerCredits, promptRate, promptCacheHitRate, completionRate, multiplier, share int64
+	var id, gross, providerCredits, promptRate, completionRate, multiplier, share int64
 	var usageSource, faultFlag string
 	var cached, estimated sql.NullInt64
 	var quarantined, settled int
 	var settlementID sql.NullInt64
 	err := tx.QueryRowContext(ctx, `
 SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, estimated_completion_tokens,
-       prompt_rate_per_mtok, COALESCE(prompt_cache_hit_rate_per_mtok, prompt_rate_per_mtok), completion_rate_per_mtok, global_multiplier_ppm,
+       prompt_rate_per_mtok, completion_rate_per_mtok, global_multiplier_ppm,
        provider_share_bps, fault_flag, quarantined, settled, settlement_id
   FROM ledger_request_credits
  WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
- LIMIT 1`, input.RequestID, input.AttemptN, input.ProviderID).Scan(&id, &gross, &providerCredits, &usageSource, &cached, &estimated, &promptRate, &promptCacheHitRate, &completionRate, &multiplier, &share, &faultFlag, &quarantined, &settled, &settlementID)
+ LIMIT 1`, input.RequestID, input.AttemptN, input.ProviderID).Scan(&id, &gross, &providerCredits, &usageSource, &cached, &estimated, &promptRate, &completionRate, &multiplier, &share, &faultFlag, &quarantined, &settled, &settlementID)
 	if err == sql.ErrNoRows {
 		return 0, 0, false, false, nil
 	}
@@ -453,7 +453,6 @@ SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, 
 	}
 	recomputed := expected
 	recomputeRateEntry := input.RateEntry
-	recomputeRateEntry.SetPromptCacheHitCreditsPerMtok(promptCacheHitRate)
 	cachedPromptTokens := intPtrFromNull(cached)
 	allowByteEstimated := usageSource == UsageByteEstimated && input.CompletionTokens == nil && estimated.Valid
 	if allowByteEstimated {
@@ -467,7 +466,6 @@ SELECT id, gross_credits, provider_credits, usage_source, cached_prompt_tokens, 
 		return 0, 0, true, false, err
 	}
 	contractMismatch := promptRate != input.RateEntry.PromptCreditsPerMtok ||
-		promptCacheHitRate != input.RateEntry.EffectivePromptCacheHitCreditsPerMtok() ||
 		completionRate != input.RateEntry.CompletionCreditsPerMtok ||
 		multiplier != input.MultiplierPPM ||
 		share != input.ProviderShareBps

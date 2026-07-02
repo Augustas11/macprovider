@@ -435,7 +435,9 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
 		return
 	}
-	body = usageBodyWithTokenUsage(body, usage)
+	if ok {
+		body = usageBodyWithTokenUsage(body, usage)
+	}
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
@@ -1808,10 +1810,10 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 		return tokenUsage{}, false, nil
 	}
 	var rawUsage struct {
-		PromptTokens       *int64 `json:"prompt_tokens"`
-		CachedPromptTokens *int64 `json:"cached_prompt_tokens"`
-		CompletionTokens   *int64 `json:"completion_tokens"`
-		TotalTokens        *int64 `json:"total_tokens"`
+		PromptTokens       *int64          `json:"prompt_tokens"`
+		CachedPromptTokens json.RawMessage `json:"cached_prompt_tokens"`
+		CompletionTokens   *int64          `json:"completion_tokens"`
+		TotalTokens        *int64          `json:"total_tokens"`
 	}
 	if err := json.Unmarshal(envelope.Usage, &rawUsage); err != nil {
 		return tokenUsage{}, true, fmt.Errorf("usage object is malformed")
@@ -1821,19 +1823,14 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 	}
 	usage := tokenUsage{}
 	usage.PromptTokens = *rawUsage.PromptTokens
-	if rawUsage.CachedPromptTokens != nil {
-		usage.CachedPromptTokens = *rawUsage.CachedPromptTokens
-	}
 	usage.CompletionTokens = *rawUsage.CompletionTokens
 	if rawUsage.TotalTokens != nil {
 		usage.TotalTokens = *rawUsage.TotalTokens
 	}
-	if usage.PromptTokens < 0 || usage.CachedPromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 {
+	if usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 {
 		return tokenUsage{}, true, fmt.Errorf("usage tokens must be non-negative")
 	}
-	if usage.CachedPromptTokens > usage.PromptTokens {
-		return tokenUsage{}, true, fmt.Errorf("usage cached_prompt_tokens exceeds prompt_tokens")
-	}
+	usage.CachedPromptTokens = sanitizedCachedPromptTokens(rawUsage.CachedPromptTokens, usage.PromptTokens)
 	if usage.PromptTokens > math.MaxInt64-usage.CompletionTokens {
 		return tokenUsage{}, true, fmt.Errorf("usage token total overflows int64")
 	}
@@ -1851,12 +1848,18 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 	return usage, true, nil
 }
 
-func usageBodyWithCachedPromptTokens(body []byte, cachedPromptTokens int64) []byte {
-	updated, ok := usageJSONWithCachedPromptTokens(body, cachedPromptTokens)
-	if !ok {
-		return body
+func sanitizedCachedPromptTokens(raw json.RawMessage, promptTokens int64) int64 {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0
 	}
-	return updated
+	var cached int64
+	if err := json.Unmarshal(raw, &cached); err != nil {
+		return 0
+	}
+	if cached < 0 || cached > promptTokens {
+		return 0
+	}
+	return cached
 }
 
 func usageBodyWithTokenUsage(body []byte, usage tokenUsage) []byte {
@@ -1864,26 +1867,7 @@ func usageBodyWithTokenUsage(body []byte, usage tokenUsage) []byte {
 	if ok {
 		return updated
 	}
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return body
-	}
-	usageObject := map[string]int64{
-		"prompt_tokens":        usage.PromptTokens,
-		"cached_prompt_tokens": usage.CachedPromptTokens,
-		"completion_tokens":    usage.CompletionTokens,
-		"total_tokens":         usage.PromptTokens + usage.CompletionTokens,
-	}
-	rawUsage, err := json.Marshal(usageObject)
-	if err != nil {
-		return body
-	}
-	envelope["usage"] = rawUsage
-	updated, err = json.Marshal(envelope)
-	if err != nil {
-		return body
-	}
-	return updated
+	return body
 }
 
 func sseDataLineWithCachedPromptTokens(line []byte, cachedPromptTokens int64) []byte {
