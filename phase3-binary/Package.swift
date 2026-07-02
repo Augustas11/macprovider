@@ -23,7 +23,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/apple/swift-nio.git",
-            exact: "2.101.0"
+            exact: "2.101.2"
         ),
         .package(
             url: "https://github.com/apple/swift-argument-parser.git",
