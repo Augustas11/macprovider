@@ -357,6 +357,46 @@ func TestReconcileEndpoint_CleanDelta(t *testing.T) {
 	}
 }
 
+func TestReconcileEndpoint_CacheQuarantineDoesNotCreateBuyerEquivalentDelta(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+	prompt, cached, completion := int64(3), int64(4), int64(1)
+	input := HotPathInput{
+		RequestID: "reconcile-cache-quarantine", AttemptN: 0, ProviderAssignedID: "assigned-a", ProviderID: "provider-a",
+		Model: "model-a", Status: 200, TSUtc: ts, PromptTokens: &prompt, CachedPromptTokens: &cached, CompletionTokens: &completion,
+		ConfigSnapshotID: snapshotID, RateEntry: RateFor(cfg.RateCard, "model-a"),
+		MultiplierPPM: 1000000, ProviderShareBps: 9000, StickyResult: "hit",
+	}
+	row := requestLogRow(input)
+	row.CachedPromptTokens = nil
+	row.CacheQuarantineReason = "invalid_cached_prompt_tokens"
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile?from=2026-06-01&to=2026-06-08", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["buyer_equivalent_credits"].(float64) != 0 || resp["provider_gross_credits"].(float64) != 0 || resp["delta_gross_credits"].(float64) != 0 {
+		t.Fatalf("reconcile response=%v, want zero buyer/provider/delta for cache quarantine", resp)
+	}
+	if resp["rows_quarantined"].(float64) != 1 {
+		t.Fatalf("rows_quarantined=%v want 1", resp["rows_quarantined"])
+	}
+}
+
 // SPEC-002 v1.5.0 / issue #211 defense-in-depth regression:
 // the /admin/ledger/reconcile `buyerEquivalentCredits` attempt_n
 // derivation uses the same (account_id, request_id) IS-clustering as

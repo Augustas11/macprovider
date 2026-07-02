@@ -501,6 +501,7 @@ func (h *handler) buyerEquivalentCredits(ctx context.Context, from, to time.Time
 		completion sql.NullInt64
 		status     int
 		errorCode  sql.NullString
+		cacheQuar  sql.NullString
 		attemptN   int
 	}
 	// SPEC-002 v1.5.0 / issue #211 money-path defense-in-depth:
@@ -516,7 +517,7 @@ func (h *handler) buyerEquivalentCredits(ctx context.Context, from, to time.Time
 	// account_id legacy rows cluster among themselves only,
 	// preserving pre-v1.5.0 behavior.
 	rows, err := h.store.db.QueryContext(ctx, `
-SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.cached_prompt_tokens, rl.completion_tokens, rl.status, rl.error_code,
+SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.cached_prompt_tokens, rl.completion_tokens, rl.status, rl.error_code, rl.cache_quarantine_reason,
        -- SPEC-002 v1.5.2 / SPEC-005 v0.3.3 (issue #168): prefer
        -- persisted rl.attempt_n when non-NULL; fall back to v0.3.1
        -- id-ASC derivation for legacy NULL rows during rollout.
@@ -535,7 +536,7 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.cached_prompt_to
 	scratch := []requestLogScan{}
 	for rows.Next() {
 		var s requestLogScan
-		if err := rows.Scan(&s.requestID, &s.tsText, &s.model, &s.prompt, &s.cached, &s.completion, &s.status, &s.errorCode, &s.attemptN); err != nil {
+		if err := rows.Scan(&s.requestID, &s.tsText, &s.model, &s.prompt, &s.cached, &s.completion, &s.status, &s.errorCode, &s.cacheQuar, &s.attemptN); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -550,6 +551,9 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.cached_prompt_to
 	total := int64(0)
 	for _, s := range scratch {
 		if s.status == http.StatusServiceUnavailable {
+			continue
+		}
+		if s.cacheQuar.Valid && s.cacheQuar.String != "" {
 			continue
 		}
 		ts, err := time.Parse(time.RFC3339Nano, s.tsText)

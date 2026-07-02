@@ -3093,6 +3093,10 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
 				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 				line = sseLineWithCachedPromptTokens(line, effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, billingAttemptN))
+				if line == nil {
+					lineBuf.Reset()
+					continue
+				}
 			}
 			if providerToolCallOpen.IsZero() {
 				if openedAt, ok := toolCallOpenFromSSELine(line); ok {
@@ -3184,6 +3188,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
 				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 				line = sseLineWithCachedPromptTokens(line, effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, billingAttemptN))
+				if line == nil {
+					continue
+				}
 			}
 			if code := terminalSSEErrorCodeFromLine(line); isSpec019TerminalSSEErrorCode(code) {
 				terminalSSEErrorCode = code
@@ -5845,9 +5852,12 @@ func sseLineWithCachedPromptTokens(line []byte, cachedPromptTokens int64) []byte
 	if payload == "" || payload == "[DONE]" {
 		return line
 	}
-	updated, ok := chatJSONWithCachedPromptTokens([]byte(payload), cachedPromptTokens)
+	updated, ok := streamingJSONWithCachedPromptTokens([]byte(payload), cachedPromptTokens)
 	if !ok {
 		return line
+	}
+	if updated == nil {
+		return nil
 	}
 	return []byte("data: " + string(updated) + suffix)
 }
@@ -5863,6 +5873,10 @@ func sseBlockWithCachedPromptTokens(block []byte, state *forwardState, attemptN 
 			if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
 				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 				rewritten := sseLineWithCachedPromptTokens(line, effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, attemptN))
+				if rewritten == nil {
+					changed = true
+					continue
+				}
 				if !bytes.Equal(rewritten, line) {
 					changed = true
 				}
@@ -5878,6 +5892,53 @@ func sseBlockWithCachedPromptTokens(block []byte, state *forwardState, attemptN 
 		return block, promptTok, cachedPromptTok, completionTok
 	}
 	return out.Bytes(), promptTok, cachedPromptTok, completionTok
+}
+
+func streamingJSONWithCachedPromptTokens(body []byte, cachedPromptTokens int64) ([]byte, bool) {
+	if streamingUsageObjectComplete(body) {
+		return chatJSONWithCachedPromptTokens(body, cachedPromptTokens)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, false
+	}
+	rawUsage, ok := envelope["usage"]
+	if !ok || bytes.Equal(bytes.TrimSpace(rawUsage), []byte("null")) {
+		return nil, false
+	}
+	delete(envelope, "usage")
+	if len(envelope) == 0 {
+		return nil, true
+	}
+	updated, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, false
+	}
+	return updated, true
+}
+
+func streamingUsageObjectComplete(body []byte) bool {
+	var envelope struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || len(envelope.Usage) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Usage), []byte("null")) {
+		return false
+	}
+	var usage struct {
+		PromptTokens     *int64 `json:"prompt_tokens"`
+		CompletionTokens *int64 `json:"completion_tokens"`
+		TotalTokens      *int64 `json:"total_tokens"`
+	}
+	if err := json.Unmarshal(envelope.Usage, &usage); err != nil {
+		return false
+	}
+	if usage.PromptTokens == nil || usage.CompletionTokens == nil || usage.TotalTokens == nil {
+		return false
+	}
+	if *usage.PromptTokens < 0 || *usage.CompletionTokens < 0 || *usage.TotalTokens < 0 {
+		return false
+	}
+	return *usage.TotalTokens == *usage.PromptTokens+*usage.CompletionTokens
 }
 
 func chatJSONWithCachedPromptTokens(body []byte, cachedPromptTokens int64) ([]byte, bool) {

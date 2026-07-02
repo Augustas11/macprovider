@@ -55,6 +55,39 @@ func TestMergeStreamUsagePointersPreservesPriorValidPromptOnPartialUsage(t *test
 	}
 }
 
+func TestSSELineWithCachedPromptTokensStripsIncompleteUsage(t *testing.T) {
+	line := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"cached_prompt_tokens\":null}}\n")
+	got := sseLineWithCachedPromptTokens(line, 0)
+	if got == nil {
+		t.Fatalf("rewritten line was dropped, want choices preserved")
+	}
+	if bytes.Contains(got, []byte(`"usage"`)) {
+		t.Fatalf("partial usage was forwarded: %s", string(got))
+	}
+	if !bytes.Contains(got, []byte(`"content":"ok"`)) {
+		t.Fatalf("choice content was not preserved: %s", string(got))
+	}
+
+	usageOnly := []byte("data: {\"usage\":{\"cached_prompt_tokens\":null}}\n")
+	if got := sseLineWithCachedPromptTokens(usageOnly, 0); got != nil {
+		t.Fatalf("usage-only partial line=%s, want dropped", string(got))
+	}
+}
+
+func TestSSELineWithCachedPromptTokensRewritesCompleteUsage(t *testing.T) {
+	line := []byte("data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":3,\"cached_prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":4}}\n")
+	got := sseLineWithCachedPromptTokens(line, 0)
+	if got == nil {
+		t.Fatalf("complete usage line was dropped")
+	}
+	if !bytes.Contains(got, []byte(`"cached_prompt_tokens":0`)) {
+		t.Fatalf("complete usage was not sanitized: %s", string(got))
+	}
+	if bytes.Contains(got, []byte(`"cached_prompt_tokens":4`)) {
+		t.Fatalf("raw cached_prompt_tokens leaked: %s", string(got))
+	}
+}
+
 func TestLogCacheBillingRoutingDecisionEmitsSpec024Fields(t *testing.T) {
 	var buf bytes.Buffer
 	server := &Server{log: zerolog.New(&buf)}
