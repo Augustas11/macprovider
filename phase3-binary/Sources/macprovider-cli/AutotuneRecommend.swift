@@ -1355,11 +1355,108 @@ struct HuggingFaceSnapshotDownloader {
         return URLSession(configuration: config)
     }()
 
+    // Retry-with-resume policy for the transient network errors that URLSession
+    // serializes into NSURLSessionDownloadTaskResumeData on -1005 / -1001 /
+    // -1009 / -1004 / -1006 (network connection lost, timeout, offline, host
+    // routing failure, DNS lookup failure). Multi-GB HF safetensors shards
+    // reliably trip these over ~10-30 min continuous transfers on residential
+    // links; without resume, one drop wipes gigabytes of prior progress and
+    // fails install with die 6.
+    struct DownloadRetryPolicy {
+        var maxAttempts: Int
+        var baseDelaySeconds: Double
+        var backoffMultiplier: Double
+        var sleep: @Sendable (UInt64) async throws -> Void
+
+        static let production = DownloadRetryPolicy(
+            maxAttempts: 3,
+            baseDelaySeconds: 5.0,
+            backoffMultiplier: 4.0,
+            sleep: { ns in try await Task.sleep(nanoseconds: ns) }
+        )
+    }
+
     var fetch: (URLRequest) async throws -> (Data, URLResponse) = { request in
         try await HuggingFaceSnapshotDownloader.guardedSession.data(for: request, delegate: HFRedirectGuard())
     }
     var download: (URLRequest) async throws -> (URL, URLResponse) = { request in
-        try await HuggingFaceSnapshotDownloader.guardedSession.download(for: request, delegate: HFAssetRedirectGuard())
+        try await HuggingFaceSnapshotDownloader.downloadWithResume(
+            request: request,
+            policy: .production,
+            initialDownload: { req in
+                try await HuggingFaceSnapshotDownloader.guardedSession.download(
+                    for: req, delegate: HFAssetRedirectGuard()
+                )
+            },
+            resumeDownload: { data in
+                try await HuggingFaceSnapshotDownloader.guardedSession.download(
+                    resumeFrom: data, delegate: HFAssetRedirectGuard()
+                )
+            }
+        )
+    }
+
+    // Retry-with-resume shell. Delegates the actual network operation to
+    // injectable closures so unit tests can drive the retry state machine
+    // without a live URLSession or real backoff delays.
+    //
+    // Loop invariants:
+    //  - resumeData starts nil (first attempt is a fresh download).
+    //  - On transient URLError, capture resume data from userInfo (may be nil
+    //    if the failure was too early for URLSession to serialize state).
+    //  - On next attempt, if resumeData is non-nil use resumeDownload; else
+    //    fall back to initialDownload (fresh start).
+    //  - Non-transient URLError or non-URLError bubbles up immediately.
+    //  - After maxAttempts failures, throw the last recorded error.
+    //  - Cancellation cooperates through policy.sleep (Task.sleep participates
+    //    in Swift structured concurrency cancellation).
+    static func downloadWithResume(
+        request: URLRequest,
+        policy: DownloadRetryPolicy,
+        initialDownload: @Sendable (URLRequest) async throws -> (URL, URLResponse),
+        resumeDownload: @Sendable (Data) async throws -> (URL, URLResponse)
+    ) async throws -> (URL, URLResponse) {
+        var lastError: Error?
+        var resumeData: Data?
+        for attempt in 0..<max(1, policy.maxAttempts) {
+            do {
+                if let data = resumeData {
+                    return try await resumeDownload(data)
+                }
+                return try await initialDownload(request)
+            } catch let error as URLError where isTransientDownloadError(error) {
+                lastError = error
+                if let extracted = extractResumeData(from: error) {
+                    resumeData = extracted
+                }
+                if attempt + 1 < policy.maxAttempts {
+                    let delaySeconds = policy.baseDelaySeconds
+                        * pow(policy.backoffMultiplier, Double(attempt))
+                    let delayNanoseconds = UInt64(max(0, delaySeconds) * 1_000_000_000)
+                    try await policy.sleep(delayNanoseconds)
+                }
+            }
+        }
+        throw lastError ?? URLError(.unknown)
+    }
+
+    static func isTransientDownloadError(_ error: URLError) -> Bool {
+        switch error.code {
+        case .networkConnectionLost,
+             .timedOut,
+             .notConnectedToInternet,
+             .cannotConnectToHost,
+             .cannotFindHost,
+             .dnsLookupFailed,
+             .resourceUnavailable:
+            return true
+        default:
+            return false
+        }
+    }
+
+    static func extractResumeData(from error: URLError) -> Data? {
+        error.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
     }
 
     func downloadSnapshot(modelID: String, revision: String, to snapshot: URL) async throws {
