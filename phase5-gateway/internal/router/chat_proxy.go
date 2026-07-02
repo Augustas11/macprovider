@@ -1219,13 +1219,56 @@ func terminalSSEErrorCode(data string) string {
 			// of value shape — disqualifies the frame.
 			return ""
 		case "error":
-			var e struct {
-				Code string `json:"code"`
-			}
-			if err := dec.Decode(&e); err != nil {
+			// Parse `error` token-by-token to defend against nested
+			// duplicate `code` keys — `{"error":{"code":"upstream",
+			// "code":"provider_timeout"}}` — where a lossy decode
+			// would keep the last value and let an attacker smuggle
+			// a SPEC-019-listed code past the allow-list check.
+			// (#295 R2 SEC MED.)
+			errTok, err := dec.Token()
+			if err != nil {
 				return ""
 			}
-			code = strings.TrimSpace(e.Code)
+			errDelim, ok := errTok.(json.Delim)
+			if !ok || errDelim != '{' {
+				return ""
+			}
+			var errCode string
+			errSeen := make(map[string]struct{})
+			for dec.More() {
+				eKeyTok, err := dec.Token()
+				if err != nil {
+					return ""
+				}
+				eKey, ok := eKeyTok.(string)
+				if !ok {
+					return ""
+				}
+				if _, dup := errSeen[eKey]; dup {
+					return ""
+				}
+				errSeen[eKey] = struct{}{}
+				if eKey == "code" {
+					v, err := dec.Token()
+					if err != nil {
+						return ""
+					}
+					s, ok := v.(string)
+					if !ok {
+						return ""
+					}
+					errCode = strings.TrimSpace(s)
+				} else {
+					var raw json.RawMessage
+					if err := dec.Decode(&raw); err != nil {
+						return ""
+					}
+				}
+			}
+			if _, err := dec.Token(); err != nil {
+				return ""
+			}
+			code = errCode
 		default:
 			// Other top-level fields (id, object, created, model,
 			// etc.) are innocuous metadata; skip past their value.
@@ -1239,12 +1282,13 @@ func terminalSSEErrorCode(data string) string {
 	if _, err := dec.Token(); err != nil {
 		return ""
 	}
-	// Reject trailing garbage after the object.
-	if dec.More() {
-		return ""
-	}
-	if extra, err := dec.Token(); err == nil {
-		_ = extra
+	// Reject trailing garbage after the object. `dec.Token()` at EOF
+	// returns io.EOF; anything else (another value OR a syntax error
+	// on invalid trailing bytes) means the input is not a clean
+	// standalone envelope. (#295 R2 SEC HIGH — prior implementation
+	// only checked err==nil, so invalid suffixes like `{...}x` fell
+	// through to accept.)
+	if _, err := dec.Token(); err != io.EOF {
 		return ""
 	}
 	return code

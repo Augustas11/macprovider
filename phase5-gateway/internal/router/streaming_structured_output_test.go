@@ -401,7 +401,48 @@ func TestTerminalSSEErrorCode_RejectsNonStandaloneShapes(t *testing.T) {
 	}
 	// Trailing garbage after object rejected:
 	if got := terminalSSEErrorCode(`{"error":{"code":"provider_timeout"}}{"choices":[{}]}`); got != "" {
-		t.Errorf("trailing garbage MUST NOT parse as terminal — got %q", got)
+		t.Errorf("trailing garbage (second object) MUST NOT parse as terminal — got %q", got)
+	}
+	// R2 SEC HIGH / ARCH MED — invalid trailing bytes (syntax error,
+	// not another valid token). Prior R1 implementation only rejected
+	// when the trailing token parsed successfully; invalid suffixes
+	// like `{...}x` or `{...}]` fell through to accept.
+	invalidSuffixes := []string{
+		`{"error":{"code":"provider_timeout"}}x`,
+		`{"error":{"code":"provider_timeout"}}]`,
+		`{"error":{"code":"provider_timeout"}}}`,
+		`{"error":{"code":"provider_timeout"}}   x`,
+		`{"error":{"code":"provider_timeout"}} `, // one trailing space is fine
+	}
+	// The last case (trailing space) is legitimate whitespace and
+	// should still parse — json.Decoder tolerates trailing whitespace.
+	if got := terminalSSEErrorCode(invalidSuffixes[4]); got != "provider_timeout" {
+		t.Errorf("trailing whitespace only should still parse — got %q", got)
+	}
+	for _, s := range invalidSuffixes[:4] {
+		if got := terminalSSEErrorCode(s); got != "" {
+			t.Errorf("invalid trailing bytes %q MUST NOT parse as terminal — got %q (#295 R2 SEC HIGH)", s, got)
+		}
+	}
+	// R2 SEC MED / ARCH LOW — nested duplicate `error.code`. Prior
+	// R1 implementation lossy-decoded the error object, so a
+	// {"code":"upstream_error","code":"provider_timeout"} shape could
+	// smuggle a SPEC-019-listed code past the allow-list check while
+	// the buyer's parser might see the first value.
+	nestedDupCode := `{"error":{"code":"upstream_error","code":"provider_timeout"}}`
+	if got := terminalSSEErrorCode(nestedDupCode); got != "" {
+		t.Errorf("nested duplicate error.code MUST NOT parse — got %q (#295 R2 SEC MED)", got)
+	}
+	// Nested duplicate arbitrary error field:
+	nestedDupType := `{"error":{"type":"api_error","type":"server_error","code":"provider_timeout"}}`
+	if got := terminalSSEErrorCode(nestedDupType); got != "" {
+		t.Errorf("nested duplicate error.type MUST NOT parse — got %q (#295 R2)", got)
+	}
+	// R2 LOW spec-alignment: `usage:null` explicitly rejected (was
+	// contentious wording under previous SPEC v0.9.4; SPEC v0.9.5
+	// clarifies literal absence).
+	if got := terminalSSEErrorCode(`{"usage":null,"error":{"code":"provider_timeout"}}`); got != "" {
+		t.Errorf("usage:null MUST NOT parse — spec v0.9.5 clarifies; got %q (#295 R2)", got)
 	}
 }
 

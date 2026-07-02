@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.4 (2026-07-01, SPEC-015 v0.4 model-verification disclosure)
+**Version:** 0.9.5 (2026-07-02, § 17.7.1 clause 1 strict-presence tightening — #295)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.0, SPEC-003 v0.7, SPEC-004 v0.2
+
+**Change log v0.9.5 (2026-07-02, issue #295):**
+- § 17.7.1 clause 1 tightened: the standalone envelope now literally forbids the `choices` and `usage` KEYS (regardless of value shape), plus duplicate top-level and nested keys and trailing garbage. Earlier "no usage field with non-zero token counts" wording drifted from the gateway's producer-side enforcement and from the #232 harness-side corroboration, opening JSON smuggling shapes (`usage:null`, `usage:{}`, duplicate `choices`/`usage`/`error.code`, non-enumerated usage subfields like `total_tokens`, invalid trailing bytes). Aligned to what the token-level parser and buyer's OpenAI SDK actually see.
 
 **Change log v0.9.4 (2026-07-01, SPEC-015 v0.4):**
 - § 1.6 and § 5.3.1 now disclose the SPEC-015 v0.4 / SPEC-022 model-verification limit: v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot, but do not detect a provider falsifying its own loaded-model hash measurement.
@@ -2704,7 +2707,7 @@ data: {"error": {"message": "...", "type": "...", "code": "<error-code>"}}
 
 Constraints on the envelope:
 
-1. The envelope MUST be a STANDALONE SSE data frame. No `choices` field. No `usage` field with non-zero token counts.
+1. The envelope MUST be a STANDALONE SSE data frame. No `choices` field. No `usage` field. Presence of either key — regardless of value shape (empty array, empty object, `null`, zero token counts) — disqualifies the frame as a terminal envelope. Additionally, top-level JSON keys MUST be unique; duplicate keys anywhere in the object (including nested duplicates of `error.code`) MUST cause a spec-compliant parser to reject the frame. (Tightened by #295: literal absence of `choices`/`usage` keys, and byte-strict rejection of duplicates and trailing garbage — earlier "no usage field with non-zero token counts" wording allowed JSON smuggling shapes the buyer's SDK would still see as valid.)
 2. `error.code` MUST be non-empty. The relationship between `error.code` and `usage_events.outcome` is normatively bound:
    - DEFAULT: `error.code` MUST equal the settled `usage_events.outcome` value. Examples of values where gateway writes both sides identically: `stream_truncated`, `stream_malformed`, `stream_output_exceeded`, `upstream_error`, `provider_timeout`.
    - PASS-THROUGH EXCLUSION: terminal envelopes the gateway FORWARDS verbatim without writing its own `usage_events` row (the SPEC-019 v0.2 pass-through allow-list, e.g. `response_byte_cap_exceeded`, `malformed_json_response`, `json_schema_validation_failed`, and the provider-emitted `provider_timeout` variant) have no settlement row to match — this mapping clause does not apply to them. Their shape/position rules still apply (per §17.7.1 clauses 1, 3, 4).
