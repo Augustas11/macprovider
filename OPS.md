@@ -94,35 +94,98 @@ M1-6). Mirrors the coordinator pattern:
   `check-deploy-config.sh` (now enforced — the pre-M1-6 path treated a
   missing input as a warning, which was a real gap). `SKIP_C2_CHECK=1`
   exists as an explicit override but should not be the default path.
-- **Steps 1–2:** verify the freshly built `dist/gateway-linux-amd64` and the
-  systemd unit file.
+- **Steps 1–2:** SSH/DNS check, then verify `/etc/macprovider/gateway.env`
+  exists on Pearl (secrets ship out-of-band, script does not touch it).
+- **Step 2b (#290):** ensure macprovider user exists + `/opt/macprovider`
+  is `root:macprovider 0750` before any file install (idempotent).
+- **Step 2c (#290 R2):** connected-buyer guard on `/healthz` in-flight
+  count — MOVED to BEFORE binary swap (was step 5). Fails CLOSED if the
+  metric is missing/unparseable (#290 R3 SEC HIGH). `FORCE_RESTART=1`
+  writes an audit tombstone via `mktemp` under `umask 077`.
+- **Step 2d (#290 R2, issue #196):** pre-binary-swap WAL-consistent
+  snapshot of `gateway.db` via `sqlite3 .backup` running as macprovider
+  under `umask 077` (#290 R1 CRITICAL — never chmod/chown as root on a
+  daemon-writable path). Snapshot happens BEFORE the binary swap so a
+  crash/reboot between install and restart can't boot the new
+  schema-migrating binary against an unsnapshotted DB. Retains the 5
+  most recent snapshots; prune is python-strict-regex as macprovider
+  (#290 R2 CODE HIGH — closes filename-injection window).
 - **Step 3:** snapshot the live `/opt/macprovider/gateway` binary as
-  `gateway.prev` so rollback is `cp gateway.prev gateway && systemctl restart`.
-- **Steps 4–7:** copy, restart, poll `/healthz`, assert version.
-- **Step 8:** remote backup of `gateway.db` to the operator's stored S3-like
-  bucket (M1-6 added this; without it the WAL file was unbacked).
+  `gateway.prev` via `install -o root -g macprovider -m 0750`. After
+  any schema-bumping deploy, single-file binary rollback is INVALID; use
+  the schema-aware rollback command below (binary + db snapshot + WAL
+  cleanup, per #290 R3 CODE HIGH).
+- **Step 4:** upload binary + systemd unit + nginx site to a per-deploy
+  `mktemp -d` staging dir (#290 mirrors #244 R5), then root `install`s
+  each artifact to its final location. EXIT trap cleans up staging.
+- **Steps 6–8:** enable + start + healthz version check + journal tail.
+  (Steps 5 and 5b were merged into 2c and 2d by #290 R2.)
 
-**Rollback procedure:**
+**Rollback procedure (schema-aware — default; issue #196):**
+
+After ANY deploy that could have run a schema migration, use this
+block. It restores BOTH the previous binary AND the pre-deploy DB
+snapshot atomically. **Critical: the `-wal` and `-shm` sidecars must
+be removed before installing the snapshot**, or SQLite will replay
+the stale WAL and reintroduce post-deploy state — silently defeating
+the rollback (verified by #290 R3 CODE HIGH SQLite repro).
+
+Run this as a single `&&`-chained pipeline so ANY step failing aborts
+the rollback (matching the script's printed rollback shape; #290 R5
+ARCH HIGH — a non-chained runbook could stop the service then bail
+before the DB was restored, splitting binary and DB rollback state).
 
 ```bash
 ssh pearl
-cd /opt/macprovider/gateway
-sudo -u macprovider cp gateway.prev gateway
-sudo systemctl restart macprovider-gateway
+# #290 R4 ARCH HIGH + R5 MED — resolve + VALIDATE snapshot BEFORE
+# touching any live DB state. Uses `sudo -u macprovider` consistently
+# for validation so a sudo-capable non-root operator does not fail
+# the plain-shell -r check on a 0750 daemon-owned directory.
+LATEST=$(sudo -u macprovider sh -c 'ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* 2>/dev/null | head -1') &&
+[ -n "$LATEST" ] && sudo -u macprovider test -f "$LATEST" && sudo -u macprovider test -r "$LATEST" &&
+sudo -u macprovider sqlite3 "$LATEST" "PRAGMA integrity_check;" | head -1 | grep -q "^ok$" &&
+# Also validate the binary .prev exists and is executable (#290 R5
+# ARCH HIGH belt-and-braces — don't stop the service to swap in
+# something that isn't there).
+sudo test -x /opt/macprovider/gateway.prev &&
+# Snapshot + binary verified. Now stop service + swap binary + restore DB.
+sudo systemctl stop macprovider-gateway &&
+sudo install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway &&
+# Remove stale WAL/SHM sidecars before restoring the snapshot.
+sudo rm -f /var/lib/macprovider/gateway.db-wal /var/lib/macprovider/gateway.db-shm &&
+sudo install -o macprovider -g macprovider -m 0600 "$LATEST" /var/lib/macprovider/gateway.db &&
+sudo -u macprovider sqlite3 /var/lib/macprovider/gateway.db "PRAGMA integrity_check;" &&
+sudo systemctl start macprovider-gateway &&
 curl -s http://127.0.0.1:9443/healthz   # confirm OK + version reflects .prev
 ```
 
+If any step fails, the chain stops. Investigate the failing step before
+retrying — do NOT run subsequent commands manually, as split
+binary/DB state is worse than either alone.
+
+**Binary-only rollback (ONLY if you are certain no schema bump ran):**
+
+```bash
+ssh pearl
+sudo test -x /opt/macprovider/gateway.prev &&
+sudo install -o root -g macprovider -m 0750 /opt/macprovider/gateway.prev /opt/macprovider/gateway &&
+sudo systemctl restart macprovider-gateway &&
+curl -s http://127.0.0.1:9443/healthz
+```
+
+Do NOT use the binary-only variant after a schema-bumping deploy —
+the old binary against the upgraded DB reopens issue #196's
+wrong-account / money-path integrity failure.
+
 Confirmed by the first M0-5/M1-6 production deploy (2026-06-11): both
 services maintain a single `.prev` artifact that is overwritten on each
-deploy. The coordinator deploy script (#244 R4+R5) now installs the
-coordinator binary + .prev as `root:macprovider 0750` (was
+deploy. Both deploy scripts (coordinator: #244 R4+R5; gateway: #290)
+now install their binary + .prev as `root:macprovider 0750` (was
 `macprovider:macprovider 0755`) so a compromised daemon UID can no
-longer rewrite the previous binary. The gateway deploy script has
-NOT yet been hardened the same way — `gateway.prev` is still
-`macprovider:macprovider 0755` until a parallel fix lands.
+longer rewrite the previous binary.
 
 - `/opt/macprovider/coordinator.prev` — `root:macprovider 0750`
-- `/opt/macprovider/gateway.prev` — `macprovider:macprovider 0755` (TODO: harden in parallel PR)
+- `/opt/macprovider/gateway.prev` — `root:macprovider 0750` (#290)
 
 For the coordinator, the deploy script additionally writes a timestamped
 config backup at `/opt/macprovider/coordinator.yaml.bak-<UTC>` (UTC stamp

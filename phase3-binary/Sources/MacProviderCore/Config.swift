@@ -19,6 +19,14 @@ public enum LogLevel: String, Sendable {
 public struct AppConfig: Equatable, Sendable {
     public var port: Int
     public var model: String?
+    public var modelArtifactPath: String?
+    public var modelArtifactSHA256: String?
+    public var modelCatalogKey: String?
+    public var modelCatalogModelID: String?
+    public var modelCatalogRevision: String?
+    public var modelCatalogSHA256: String?
+    public var modelCatalogVersion: String?
+    public var modelCatalogHash: String?
     public var coordinatorURL: String?
     public var providerID: String?
     public var endpointURL: String?
@@ -48,6 +56,7 @@ public struct AppConfig: Equatable, Sendable {
     public var swapDrainTimeoutSeconds: Int
     public var ctlSocketPath: String?
     public var switchStatePath: String?
+    public var donorMode: Bool
     // SPEC-001: provider authentication token (closes XSEC-1 from
     // audits/2026-06-10/REPO_AUDIT.md). When set, the binary sends
     // "Authorization: Bearer <token>" on the WS connect and the
@@ -65,6 +74,14 @@ public struct AppConfig: Equatable, Sendable {
         AppConfig(
             port: 8080,
             model: nil,
+            modelArtifactPath: nil,
+            modelArtifactSHA256: nil,
+            modelCatalogKey: nil,
+            modelCatalogModelID: nil,
+            modelCatalogRevision: nil,
+            modelCatalogSHA256: nil,
+            modelCatalogVersion: nil,
+            modelCatalogHash: nil,
             coordinatorURL: nil,
             providerID: nil,
             endpointURL: nil,
@@ -89,6 +106,7 @@ public struct AppConfig: Equatable, Sendable {
             swapDrainTimeoutSeconds: 30,
             ctlSocketPath: nil,
             switchStatePath: nil,
+            donorMode: false,
             providerToken: nil
         )
     }
@@ -236,6 +254,14 @@ public enum ConfigLoader {
         var config = base
         try assign(&config.port, from: dict, key: "port", expected: "integer")
         try assign(&config.model, from: dict, key: "model", expected: "string")
+        try assign(&config.modelArtifactPath, from: dict, key: "model_artifact_path", expected: "string")
+        try assign(&config.modelArtifactSHA256, from: dict, key: "model_artifact_sha256", expected: "string")
+        try assign(&config.modelCatalogKey, from: dict, key: "model_catalog_key", expected: "string")
+        try assign(&config.modelCatalogModelID, from: dict, key: "model_catalog_model_id", expected: "string")
+        try assign(&config.modelCatalogRevision, from: dict, key: "model_catalog_revision", expected: "string")
+        try assign(&config.modelCatalogSHA256, from: dict, key: "model_catalog_sha256", expected: "string")
+        try assign(&config.modelCatalogVersion, from: dict, key: "model_catalog_version", expected: "string")
+        try assign(&config.modelCatalogHash, from: dict, key: "model_catalog_hash", expected: "string")
         try assign(&config.coordinatorURL, from: dict, key: "coordinator_url", expected: "string")
         try assign(&config.providerID, from: dict, key: "provider_id", expected: "string")
         try assign(&config.endpointURL, from: dict, key: "endpoint_url", expected: "string")
@@ -260,6 +286,7 @@ public enum ConfigLoader {
         try assign(&config.swapDrainTimeoutSeconds, from: dict, key: "swap_drain_timeout_s", expected: "integer")
         try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
         try assign(&config.switchStatePath, from: dict, key: "switch_state_path", expected: "string")
+        try assign(&config.donorMode, from: dict, key: "donor_mode", expected: "boolean")
         try assign(&config.providerToken, from: dict, key: "provider_token", expected: "string")
         return config
     }
@@ -271,6 +298,7 @@ public enum ConfigLoader {
         var config = base
         try assign(&config.port, from: environment, env: "MACPROVIDER_PORT", expected: "integer")
         try assign(&config.model, from: environment, env: "MACPROVIDER_MODEL", expected: "string")
+        try assign(&config.modelArtifactSHA256, from: environment, env: "MACPROVIDER_MODEL_ARTIFACT_SHA256", expected: "string")
         try assign(&config.coordinatorURL, from: environment, env: "MACPROVIDER_COORDINATOR_URL", expected: "string")
         try assign(&config.providerID, from: environment, env: "MACPROVIDER_PROVIDER_ID", expected: "string")
         try assign(&config.endpointURL, from: environment, env: "MACPROVIDER_ENDPOINT_URL", expected: "string")
@@ -294,6 +322,7 @@ public enum ConfigLoader {
         try assign(&config.swapDrainTimeoutSeconds, from: environment, env: "MACPROVIDER_SWAP_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.ctlSocketPath, from: environment, env: "MACPROVIDER_CTL_SOCKET_PATH", expected: "string")
         try assign(&config.switchStatePath, from: environment, env: "MACPROVIDER_SWITCH_STATE_PATH", expected: "string")
+        try assign(&config.donorMode, from: environment, env: "MACPROVIDER_DONOR_MODE", expected: "boolean")
         try assign(&config.providerToken, from: environment, env: "MACPROVIDER_PROVIDER_TOKEN", expected: "string")
         return config
     }

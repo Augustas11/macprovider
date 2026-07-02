@@ -128,11 +128,137 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    static func runModelArtifactPreflight(
+        _ resolved: AppConfig,
+        joiningCoordinator: Bool = true,
+        staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
+        artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
+    ) async throws {
+        guard let expected = resolved.modelArtifactSHA256 else {
+            if resolved.modelArtifactPath != nil {
+                FileHandle.standardError.write(Data("model_artifact_path requires model_artifact_sha256 for a verified local snapshot\n".utf8))
+                throw ExitCode(2)
+            }
+            if resolved.donorMode {
+                FileHandle.standardError.write(Data("donor_mode requires model_artifact_sha256 for a verified local snapshot\n".utf8))
+                throw ExitCode(2)
+            }
+            if joiningCoordinator {
+                FileHandle.standardError.write(Data("coordinator join requires model_artifact_sha256 from autotune --recommend --apply\n".utf8))
+                throw ExitCode(2)
+            }
+            return
+        }
+        guard expected.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            FileHandle.standardError.write(Data("model_artifact_sha256 must be 64 lowercase hex characters\n".utf8))
+            throw ExitCode(2)
+        }
+        let artifactPath = resolved.modelArtifactPath ?? ((resolved.donorMode || joiningCoordinator) ? nil : resolved.model)
+        guard let artifactPath, artifactPath.hasPrefix("/") else {
+            FileHandle.standardError.write(Data("model_artifact_sha256 requires model_artifact_path to be a verified local snapshot path\n".utf8))
+            throw ExitCode(2)
+        }
+        let actual: String
+        do {
+            actual = try ModelArtifactVerifier.canonicalArtifactHash(directory: URL(fileURLWithPath: artifactPath))
+            guard actual == expected else {
+                FileHandle.standardError.write(Data("model artifact hash mismatch for \(artifactPath)\n".utf8))
+                throw ExitCode(2)
+            }
+        } catch let exit as ExitCode {
+            throw exit
+        } catch {
+            FileHandle.standardError.write(Data("model artifact verification failed for \(artifactPath): \(error)\n".utf8))
+            throw ExitCode(2)
+        }
+        if resolved.donorMode || joiningCoordinator {
+            try await runModelCatalogPreflight(
+                resolved,
+                modelPath: artifactPath,
+                actualArtifactSHA256: actual,
+                requireRecommendable: !resolved.donorMode,
+                staticInputs: staticInputs,
+                artifactResolver: artifactResolver
+            )
+        }
+    }
+
+    private static func runModelCatalogPreflight(
+        _ resolved: AppConfig,
+        modelPath: String,
+        actualArtifactSHA256: String,
+        requireRecommendable: Bool,
+        staticInputs: AutotuneStaticInputs,
+        artifactResolver: CachedModelArtifactResolver
+    ) async throws {
+        guard let key = resolved.modelCatalogKey,
+              let modelID = resolved.modelCatalogModelID,
+              let revision = resolved.modelCatalogRevision,
+              let catalogSHA256 = resolved.modelCatalogSHA256,
+              let version = resolved.modelCatalogVersion,
+              let storedCatalogHash = resolved.modelCatalogHash,
+              !key.isEmpty,
+              !modelID.isEmpty,
+              !revision.isEmpty,
+              !catalogSHA256.isEmpty,
+              !version.isEmpty,
+              !storedCatalogHash.isEmpty
+        else {
+            FileHandle.standardError.write(Data("model_artifact_sha256 requires model_catalog_* provenance from autotune --recommend --apply\n".utf8))
+            throw ExitCode(2)
+        }
+
+        let expectedPublicModel: String
+        if requireRecommendable {
+            let rateCard = await staticInputs.loadRateCard()
+            guard let match = rateCard.value.rowForRecommendation(modelKey: key) else {
+                FileHandle.standardError.write(Data("model artifact is not admitted by the signed rate card\n".utf8))
+                throw ExitCode(2)
+            }
+            expectedPublicModel = match.key
+        } else {
+            expectedPublicModel = key
+        }
+        guard resolved.model == expectedPublicModel else {
+            FileHandle.standardError.write(Data("model must match model_catalog_key/rate-card key from autotune --recommend --apply\n".utf8))
+            throw ExitCode(2)
+        }
+
+        let expectedSnapshot = artifactResolver
+            .snapshotURL(modelID: modelID, revision: revision)
+            .standardizedFileURL
+            .path
+        let configuredSnapshot = URL(fileURLWithPath: modelPath).standardizedFileURL.path
+        guard configuredSnapshot == expectedSnapshot else {
+            FileHandle.standardError.write(Data("model must be the catalog-pinned Hugging Face snapshot path\n".utf8))
+            throw ExitCode(2)
+        }
+
+        let catalog = await staticInputs.loadCandidateCatalog()
+        let actualCatalogHash = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
+        guard catalog.value.version == version, actualCatalogHash == storedCatalogHash else {
+            FileHandle.standardError.write(Data("model catalog provenance is stale; rerun autotune --recommend --apply\n".utf8))
+            throw ExitCode(2)
+        }
+        guard let row = catalog.value.rows[key],
+              (requireRecommendable ? row.runtimeStatus == "recommendable" : ["candidate", "listed", "recommendable"].contains(row.runtimeStatus)),
+              row.modelID == modelID,
+              row.modelRevision == revision,
+              row.modelSHA256 == catalogSHA256,
+              catalogSHA256 == actualArtifactSHA256
+        else {
+            FileHandle.standardError.write(Data("model artifact is not admitted by the signed candidate catalog\n".utf8))
+            throw ExitCode(2)
+        }
+    }
+
     static func makeCoordinatorClient(
         noJoin: Bool,
+        donorMode: Bool = false,
         factory: () -> CoordinatorClient?
     ) -> CoordinatorClient? {
         guard !noJoin else { return nil }
+        guard !donorMode else { return nil }
         return factory()
     }
 
@@ -163,11 +289,13 @@ struct ServeCommand: AsyncParsableCommand {
         try Self.runSupportedModelsPreflight(&resolved)
         try Self.runDrainTimeoutPreflight(resolved)
         try Self.runServingKnobsPreflight(resolved)
+        try await Self.runModelArtifactPreflight(resolved, joiningCoordinator: !noJoin)
 
         printResolvedConfiguration(resolved)
 
         let modelRuntime = try await ModelRuntime(
             modelID: resolved.model,
+            modelLoadPath: resolved.modelArtifactPath,
             maxContextTokensOverride: resolved.maxContextOverride,
             kvBitsOverride: resolved.kvBitsOverride,
             maxBatch: resolved.maxConcurrencyOverride ?? 1,
@@ -205,7 +333,10 @@ struct ServeCommand: AsyncParsableCommand {
         await modelRuntime.setProviderStatus(providerStatus)
         let receiptKeyStore = KeychainReceiptKeyStore()
         let receiptRuntime = try Self.makeReceiptRuntime(config: resolved, keyStore: receiptKeyStore)
-        let coordinatorClient = Self.makeCoordinatorClient(noJoin: noJoin) {
+        if resolved.donorMode {
+            FileHandle.standardError.write(Data("DONOR MODE: coordinator join disabled; serving local HTTP only.\n".utf8))
+        }
+        let coordinatorClient = Self.makeCoordinatorClient(noJoin: noJoin, donorMode: resolved.donorMode) {
             CoordinatorClient(
                 config: resolved,
                 modelRuntime: modelRuntime,
@@ -315,7 +446,26 @@ struct StatusCommand: AsyncParsableCommand {
         )
         let status = try await LocalStatusClient.fetch(port: resolved.port)
         let latest = try? await SelfUpdate(currentVersion: CoordinatorClient.binaryVersion, releasesAPIURL: nil).latestVersionCached()
-        print(LocalStatusFormatter.format(status, latestVersion: latest, ownerLogin: OwnerFileReader.githubLogin(configPath: resolved.configPath)))
+        let staleSince = await Self.staleRecommendationSince(providerID: resolved.providerID)
+        print(LocalStatusFormatter.format(status, latestVersion: latest, ownerLogin: OwnerFileReader.githubLogin(configPath: resolved.configPath), donorMode: resolved.donorMode, staleRecommendationSince: staleSince))
+    }
+
+    static func staleRecommendationSince(
+        staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
+        fingerprint: MachineFingerprint = MachineFingerprinter().sample(),
+        providerID: String? = nil,
+        hmacSecretURL: URL = AutotuneHMACSecretStore.defaultPath,
+        stateURL: URL = RecommendationStateStore.defaultURL,
+        now: Date = Date()
+    ) async -> Date? {
+        await RecommendationFreshnessChecker(
+            staticInputs: staticInputs,
+            fingerprint: fingerprint,
+            providerID: providerID,
+            hmacSecretURL: hmacSecretURL,
+            stateURL: stateURL,
+            now: now
+        ).staleRecommendationSince()
     }
 }
 
@@ -331,12 +481,18 @@ struct SelfTestCommand: AsyncParsableCommand {
     @Option(help: "HuggingFace model identifier or local model path. Overrides MACPROVIDER_MODEL and config file model.")
     var model: String?
 
+    static func modelLoadPath(for resolved: AppConfig) -> String? {
+        resolved.modelArtifactPath
+    }
+
     func run() async throws {
         let resolved = try ConfigLoader.load(
             cli: CLIOverrides(model: model, configPath: config)
         )
+        try await ServeCommand.runModelArtifactPreflight(resolved, joiningCoordinator: false)
         let runtime = try await ModelRuntime(
             modelID: resolved.model,
+            modelLoadPath: Self.modelLoadPath(for: resolved),
             maxContextTokensOverride: resolved.maxContextOverride
         )
         guard await runtime.isLoaded else {
@@ -367,6 +523,15 @@ struct UpdateCommand: AsyncParsableCommand {
             currentVersion: CoordinatorClient.binaryVersion,
             releasesAPIURL: releasesAPIURL
         ).run(checkOnly: check)
+        let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides())
+        if let staleSince = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).staleRecommendationSince() {
+            FileHandle.standardError.write(Data("""
+
+            Recommendation stale: recommendation inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: staleSince)).
+            Run: macprovider-cli autotune --recommend
+
+            """.utf8))
+        }
     }
 }
 

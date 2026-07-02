@@ -40,7 +40,7 @@ func RateFor(rateCard map[string]RateCardEntry, model string) RateCardEntry {
 		if entry, ok := rateCard[model]; ok {
 			return entry
 		}
-		normalized := normalizeModelKey(model)
+		normalized := NormalizeModelKey(model)
 		if normalized != model {
 			if entry, ok := rateCard[normalized]; ok {
 				slog.Info("rate_card_normalized", "event", "rate_card_normalized", "requested", model, "normalized", normalized, "matched", normalized)
@@ -60,7 +60,7 @@ func RateFor(rateCard map[string]RateCardEntry, model string) RateCardEntry {
 	return RateCardEntry{}
 }
 
-func normalizeModelKey(model string) string {
+func NormalizeModelKey(model string) string {
 	key := strings.ToLower(strings.TrimSpace(model))
 	namespace := ""
 	if slash := strings.IndexByte(key, '/'); slash >= 0 {

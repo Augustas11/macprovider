@@ -164,6 +164,7 @@ type Server struct {
 	billing           *billing.Store
 	billingCfg        config.RewardsConfig
 	billingSnapshotID int64
+	rateCardUSDPerM   float64
 	now               func() time.Time
 	version           string
 }
@@ -431,6 +432,16 @@ func WithBillingSnapshotID(snapshotID int64) Option {
 	}
 }
 
+func WithRateCardUSDPerMillionCredits(v float64) Option {
+	return func(s *Server) {
+		s.billingMu.Lock()
+		defer s.billingMu.Unlock()
+		if v >= 0 && !math.IsNaN(v) && !math.IsInf(v, 0) {
+			s.rateCardUSDPerM = v
+		}
+	}
+}
+
 func WithPoolCheckLimiter(maxEntries int, ttl time.Duration) Option {
 	return func(s *Server) {
 		if maxEntries > 0 {
@@ -442,17 +453,26 @@ func WithPoolCheckLimiter(maxEntries int, ttl time.Duration) Option {
 	}
 }
 
-func (s *Server) SetBillingConfig(cfg config.RewardsConfig, snapshotID int64) {
+func (s *Server) SetBillingConfig(cfg config.RewardsConfig, snapshotID int64, usdPerMillionCredits float64) {
 	s.billingMu.Lock()
 	defer s.billingMu.Unlock()
 	s.billingCfg = cfg
 	s.billingSnapshotID = snapshotID
+	if usdPerMillionCredits >= 0 && !math.IsNaN(usdPerMillionCredits) && !math.IsInf(usdPerMillionCredits, 0) {
+		s.rateCardUSDPerM = usdPerMillionCredits
+	}
 }
 
 func (s *Server) billingState() (*billing.Store, config.RewardsConfig, int64) {
 	s.billingMu.RLock()
 	defer s.billingMu.RUnlock()
 	return s.billing, s.billingCfg, s.billingSnapshotID
+}
+
+func (s *Server) recommendationRateCardState() (config.RewardsConfig, float64) {
+	s.billingMu.RLock()
+	defer s.billingMu.RUnlock()
+	return s.billingCfg, s.rateCardUSDPerM
 }
 
 func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Time, opts ...Option) *Server {
@@ -490,9 +510,10 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		// loopback behavior (X-Real-IP / X-Forwarded-For honored only
 		// when r.RemoteAddr is 127.0.0.0/8 or ::1). WithTrustedProxies
 		// replaces this set. Issue #125.
-		trustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
-		now:            func() time.Time { return time.Now().UTC() },
-		version:        "dev",
+		trustedProxies:  []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
+		rateCardUSDPerM: 1.0,
+		now:             func() time.Time { return time.Now().UTC() },
+		version:         "dev",
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -519,6 +540,7 @@ func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/v1/models", s.handleModels)
+	r.Get("/v1/rate-card", s.handleRateCard)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
 	r.Get("/v1/receipt-keys/{provider_id}", s.handleReceiptKeys)
 	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotations.

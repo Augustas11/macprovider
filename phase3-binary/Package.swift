@@ -23,7 +23,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/apple/swift-nio.git",
-            exact: "2.101.0"
+            exact: "2.101.2"
         ),
         .package(
             url: "https://github.com/apple/swift-argument-parser.git",
@@ -31,7 +31,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/jpsim/Yams.git",
-            exact: "5.1.0"
+            exact: "6.2.2"
         )
     ],
     targets: [

@@ -3,14 +3,17 @@ package buyer_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -82,6 +85,305 @@ func TestModelsAggregatesUniqueReadyProviderModels(t *testing.T) {
 	if got.Data[1].ID != "model-b" || got.Data[1].ProviderCount != 1 || got.Data[1].MaxContextTokens != 120000 || got.Data[1].TotalSlots != 1 {
 		t.Fatalf("model-b aggregation wrong: %#v", got.Data[1])
 	}
+}
+
+func TestRateCardProjectionReturnsRecommendationSchema(t *testing.T) {
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.25,
+		ProviderShare:    0.875,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {
+				PromptCreditsPerMtok:     100000,
+				CompletionCreditsPerMtok: 200000,
+			},
+			"mlx-community/gpt-oss-20b-MXFP4-Q8": {
+				PromptCreditsPerMtok:     300000,
+				CompletionCreditsPerMtok: 400000,
+			},
+			"openai/gpt-oss-20b": {
+				PromptCreditsPerMtok:     500000,
+				CompletionCreditsPerMtok: 600000,
+			},
+		},
+	}
+	server := buyer.NewServer(
+		pool.NewRegistry(nil),
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithBilling(nil, rewards),
+		buyer.WithRateCardUSDPerMillionCredits(1.5),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/rate-card", nil)
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Version              string  `json:"version"`
+		GeneratedAt          string  `json:"generated_at"`
+		USDPerMillionCredits float64 `json:"usd_per_million_credits"`
+		Rows                 map[string]struct {
+			PromptRatePerMtok     int64 `json:"prompt_rate_per_mtok"`
+			CompletionRatePerMtok int64 `json:"completion_rate_per_mtok"`
+			ProviderShareBPS      int64 `json:"provider_share_bps"`
+			GlobalMultiplierPPM   int64 `json:"global_multiplier_ppm"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if got.Version == "" {
+		t.Fatalf("version empty: %s", rr.Body.String())
+	}
+	if _, err := time.Parse(time.RFC3339, got.GeneratedAt); err != nil {
+		t.Fatalf("generated_at not RFC3339: %q", got.GeneratedAt)
+	}
+	if got.USDPerMillionCredits != 1.5 {
+		t.Fatalf("usd_per_million_credits=%v want 1.5", got.USDPerMillionCredits)
+	}
+	row, ok := got.Rows["model-a"]
+	if !ok {
+		t.Fatalf("model-a row missing: %s", rr.Body.String())
+	}
+	if row.PromptRatePerMtok != 100000 || row.CompletionRatePerMtok != 200000 || row.ProviderShareBPS != 8750 || row.GlobalMultiplierPPM != 1250000 {
+		t.Fatalf("unexpected row: %+v", row)
+	}
+	if _, ok := got.Rows["mlx-community/gpt-oss-20b-MXFP4-Q8"]; ok {
+		t.Fatalf("raw alias row leaked into recommendation projection: %s", rr.Body.String())
+	}
+	normalized, ok := got.Rows["openai/gpt-oss-20b"]
+	if !ok {
+		t.Fatalf("normalized gpt-oss row missing: %s", rr.Body.String())
+	}
+	if normalized.PromptRatePerMtok != 500000 || normalized.CompletionRatePerMtok != 600000 {
+		t.Fatalf("canonical row did not win normalized collision: %+v", normalized)
+	}
+	canonical := `{"global_multiplier_ppm":1250000,"provider_share_bps":8750,"rows":{"model-a":{"completion_rate_per_mtok":200000,"global_multiplier_ppm":1250000,"prompt_rate_per_mtok":100000,"provider_share_bps":8750},"openai/gpt-oss-20b":{"completion_rate_per_mtok":600000,"global_multiplier_ppm":1250000,"prompt_rate_per_mtok":500000,"provider_share_bps":8750}},"usd_per_million_credits":1.5}`
+	sum := sha256.Sum256([]byte(canonical))
+	if got.Version != hex.EncodeToString(sum[:]) {
+		t.Fatalf("version hash mismatch: got %s want hash of %s", got.Version, canonical)
+	}
+}
+
+func TestRateCardProjectionDoesNotNormalizeDefaultAliases(t *testing.T) {
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1,
+		ProviderShare:    0.9,
+		RateCard: map[string]config.RateCardEntry{
+			"default": {
+				PromptCreditsPerMtok:     100000,
+				CompletionCreditsPerMtok: 200000,
+			},
+			"DEFAULT": {
+				PromptCreditsPerMtok:     300000,
+				CompletionCreditsPerMtok: 400000,
+			},
+			" default ": {
+				PromptCreditsPerMtok:     500000,
+				CompletionCreditsPerMtok: 600000,
+			},
+			"mlx-community/default-4bit": {
+				PromptCreditsPerMtok:     700000,
+				CompletionCreditsPerMtok: 800000,
+			},
+		},
+	}
+	server := buyer.NewServer(
+		pool.NewRegistry(nil),
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithBilling(nil, rewards),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/rate-card", nil)
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Rows map[string]struct {
+			PromptRatePerMtok     int64 `json:"prompt_rate_per_mtok"`
+			CompletionRatePerMtok int64 `json:"completion_rate_per_mtok"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(got.Rows) != 1 {
+		t.Fatalf("rows=%#v, want only literal default", got.Rows)
+	}
+	row, ok := got.Rows["default"]
+	if !ok {
+		t.Fatalf("literal default row missing: %#v", got.Rows)
+	}
+	if row.PromptRatePerMtok != 100000 || row.CompletionRatePerMtok != 200000 {
+		t.Fatalf("default alias overrode literal default: %+v", row)
+	}
+}
+
+func TestRateCardProjectionBuyerMuxOnly(t *testing.T) {
+	server := buyer.NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Unix(1716768000, 0))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/rate-card", nil)
+	buyerRR := httptest.NewRecorder()
+	server.Handler().ServeHTTP(buyerRR, req)
+	if buyerRR.Code != http.StatusOK {
+		t.Fatalf("buyer mux status=%d body=%s", buyerRR.Code, buyerRR.Body.String())
+	}
+
+	internalRR := httptest.NewRecorder()
+	server.InternalHandler().ServeHTTP(internalRR, req)
+	if internalRR.Code != http.StatusNotFound {
+		t.Fatalf("internal/provider mux status=%d want 404", internalRR.Code)
+	}
+}
+
+func TestRateCardProjectionVersionChangesOnlyForProjectionFields(t *testing.T) {
+	base := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {
+				PromptCreditsPerMtok:     100000,
+				CompletionCreditsPerMtok: 200000,
+			},
+		},
+	}
+	baseVersion := rateCardVersionFromServer(t,
+		buyer.NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithBilling(nil, base), buyer.WithRateCardUSDPerMillionCredits(1.0)),
+	)
+
+	rowsChanged := base
+	rowsChanged.RateCard = map[string]config.RateCardEntry{
+		"model-a": {PromptCreditsPerMtok: 100000, CompletionCreditsPerMtok: 200001},
+	}
+	assertRateCardVersionChanged(t, baseVersion, rowsChanged, 1.0)
+
+	shareChanged := base
+	shareChanged.ProviderShare = 0.91
+	assertRateCardVersionChanged(t, baseVersion, shareChanged, 1.0)
+
+	multiplierChanged := base
+	multiplierChanged.GlobalMultiplier = 1.1
+	assertRateCardVersionChanged(t, baseVersion, multiplierChanged, 1.0)
+
+	usdChangedVersion := rateCardVersionFromServer(t,
+		buyer.NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithBilling(nil, base), buyer.WithRateCardUSDPerMillionCredits(2.0)),
+	)
+	if usdChangedVersion == baseVersion {
+		t.Fatalf("version did not change when usd_per_million_credits changed: %s", baseVersion)
+	}
+
+	unrelatedVersion := rateCardVersionFromServer(t,
+		buyer.NewServer(
+			pool.NewRegistry(nil),
+			zerolog.Nop(),
+			time.Unix(1716768000, 0),
+			buyer.WithBilling(nil, base),
+			buyer.WithBillingSnapshotID(999),
+			buyer.WithInternalAuthKey("operator-key-does-not-affect-rate-card"),
+			buyer.WithRateCardUSDPerMillionCredits(1.0),
+		),
+	)
+	if unrelatedVersion != baseVersion {
+		t.Fatalf("version changed for unrelated operator/snapshot state: got %s want %s", unrelatedVersion, baseVersion)
+	}
+}
+
+func TestSetBillingConfigReloadsRateCardUSDCredits(t *testing.T) {
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {PromptCreditsPerMtok: 100000, CompletionCreditsPerMtok: 200000},
+		},
+	}
+	server := buyer.NewServer(
+		pool.NewRegistry(nil),
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithBilling(nil, rewards),
+		buyer.WithRateCardUSDPerMillionCredits(1.0),
+	)
+	baseVersion := rateCardVersionFromServer(t, server)
+
+	server.SetBillingConfig(rewards, 2, 2.0)
+
+	gotVersion := rateCardVersionFromServer(t, server)
+	wantVersion := rateCardVersionFromServer(t,
+		buyer.NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithBilling(nil, rewards), buyer.WithRateCardUSDPerMillionCredits(2.0)),
+	)
+	if gotVersion == baseVersion {
+		t.Fatalf("version did not change after SetBillingConfig usd reload: %s", gotVersion)
+	}
+	if gotVersion != wantVersion {
+		t.Fatalf("reloaded rate-card version=%s want %s", gotVersion, wantVersion)
+	}
+}
+
+func TestNginxRateCardAllowThroughBeforeV1CatchAll(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "dist", "nginx-coordinator.streamvc.live.conf"))
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	cfg := string(b)
+	location := strings.Index(cfg, "location = /v1/rate-card")
+	catchAll := strings.Index(cfg, "location /v1/ {\n        return 404;")
+	if location < 0 {
+		t.Fatalf("rate-card location missing")
+	}
+	if catchAll < 0 {
+		t.Fatalf("/v1/ 404 catch-all missing")
+	}
+	if location > catchAll {
+		t.Fatalf("rate-card location appears after /v1/ catch-all")
+	}
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8443/v1/rate-card$is_args$args;",
+		"proxy_set_header Host $host;",
+		"proxy_set_header X-Real-IP $remote_addr;",
+		"proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+		"proxy_set_header X-Forwarded-Proto $scheme;",
+	} {
+		if !strings.Contains(cfg[location:catchAll], needle) {
+			t.Fatalf("rate-card nginx block missing %q", needle)
+		}
+	}
+}
+
+func assertRateCardVersionChanged(t *testing.T, baseVersion string, rewards config.RewardsConfig, usdPerMillionCredits float64) {
+	t.Helper()
+	got := rateCardVersionFromServer(t,
+		buyer.NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithBilling(nil, rewards), buyer.WithRateCardUSDPerMillionCredits(usdPerMillionCredits)),
+	)
+	if got == baseVersion {
+		t.Fatalf("version did not change: %s", got)
+	}
+}
+
+func rateCardVersionFromServer(t *testing.T, server *buyer.Server) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/rate-card", nil)
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if got.Version == "" {
+		t.Fatalf("version empty: %s", rr.Body.String())
+	}
+	return got.Version
 }
 
 func TestModelsReturnsEmptyListWhenNoReadyProviders(t *testing.T) {

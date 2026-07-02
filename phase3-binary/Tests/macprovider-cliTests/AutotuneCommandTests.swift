@@ -147,4 +147,47 @@ final class AutotuneCommandTests: XCTestCase {
         let command = try AutotuneCommand.parse(["--restart-foreground", "--dry-run"])
         XCTAssertTrue(command.restartForeground)
     }
+
+    func testRecommendFlagsParse() throws {
+        let command = try AutotuneCommand.parse([
+            "--recommend",
+            "--freshness-check",
+            "--donor-mode",
+            "--electricity-usd-per-kwh", "0.21",
+            "--assumed-utilization", "0.75",
+        ])
+
+        XCTAssertTrue(command.recommend)
+        XCTAssertTrue(command.freshnessCheck)
+        XCTAssertTrue(command.donorMode)
+        XCTAssertEqual(command.electricityUSDPerKWH, 0.21)
+        XCTAssertEqual(command.assumedUtilization, 0.75)
+    }
+
+    func testRecommendUsesSpec023FourKProbeContext() throws {
+        let command = try AutotuneCommand.parse(["--recommend"])
+
+        XCTAssertEqual(command.targetContext, 2_000)
+        XCTAssertEqual(AutotuneCommand.spec023RecommendationProbeContext, 4_000)
+    }
+
+    func testFreshnessCheckRequiresRecommend() {
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--freshness-check",
+        ]))
+    }
+
+    func testRecommendRejectsNegativeElectricityPrice() {
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend",
+            "--electricity-usd-per-kwh", "-0.01",
+        ]))
+    }
+
+    func testRecommendRejectsUtilizationOutsideUnitRange() {
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend",
+            "--assumed-utilization", "1.01",
+        ]))
+    }
 }
