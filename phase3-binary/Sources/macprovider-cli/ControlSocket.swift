@@ -30,6 +30,18 @@ public enum ControlSocketFrame: Equatable, Sendable {
     case switchAck(accepted: Bool, reason: SwitchAckReason?, currentTarget: String?, secondsRemaining: Int?)
     case switchProgress(state: SwitchProgressState, elapsedMs: Int, reason: String?)
     case statusResponse(currentModelID: String, runtimeState: SwapState)
+
+    // SPEC-025 §5.2 — additive frames used by the App track (Malibu.app menu bar wrapper).
+    // The stub server acks with accepted:false + reason "not_implemented" when the semantic
+    // is not yet wired end-to-end; the wire format is stable so the app can integrate now.
+    case metricsRequest
+    case metricsResponse(earningsUsdc: Double, malibuAccrued: Double, gpuC: Double?, latencyP50Ms: Int?, uptimeSec: Int)
+    case pauseRequest
+    case pauseAck(accepted: Bool, reason: String?)
+    case resumeRequest
+    case resumeAck(accepted: Bool, reason: String?)
+    case shutdownRequest(graceSeconds: Int)
+    case shutdownAck
 }
 
 public enum ControlSocketCodec {
@@ -90,6 +102,34 @@ public enum ControlSocketCodec {
                 "current_model_id": currentModelID,
                 "runtime_state": runtimeState.rawValue,
             ]
+        case .metricsRequest:
+            object = ["type": "metrics_request"]
+        case let .metricsResponse(earningsUsdc, malibuAccrued, gpuC, latencyP50Ms, uptimeSec):
+            var frame: [String: Any] = [
+                "type": "metrics_response",
+                "earnings_usdc": earningsUsdc,
+                "malibu_accrued": malibuAccrued,
+                "uptime_sec": uptimeSec,
+            ]
+            if let gpuC { frame["gpu_c"] = gpuC }
+            if let latencyP50Ms { frame["latency_p50_ms"] = latencyP50Ms }
+            object = frame
+        case .pauseRequest:
+            object = ["type": "pause_request"]
+        case let .pauseAck(accepted, reason):
+            var frame: [String: Any] = ["type": "pause_ack", "accepted": accepted]
+            if let reason { frame["reason"] = reason }
+            object = frame
+        case .resumeRequest:
+            object = ["type": "resume_request"]
+        case let .resumeAck(accepted, reason):
+            var frame: [String: Any] = ["type": "resume_ack", "accepted": accepted]
+            if let reason { frame["reason"] = reason }
+            object = frame
+        case let .shutdownRequest(graceSeconds):
+            object = ["type": "shutdown_request", "grace_seconds": graceSeconds]
+        case .shutdownAck:
+            object = ["type": "shutdown_ack"]
         }
 
         var data = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
@@ -162,9 +202,55 @@ public enum ControlSocketCodec {
                 currentModelID: try stringField("current_model_id", in: object),
                 runtimeState: state
             )
+        case "metrics_request":
+            return .metricsRequest
+        case "metrics_response":
+            return .metricsResponse(
+                earningsUsdc: try doubleField("earnings_usdc", in: object),
+                malibuAccrued: try doubleField("malibu_accrued", in: object),
+                gpuC: optionalDoubleField("gpu_c", in: object),
+                latencyP50Ms: optionalIntField("latency_p50_ms", in: object),
+                uptimeSec: try intField("uptime_sec", in: object)
+            )
+        case "pause_request":
+            return .pauseRequest
+        case "pause_ack":
+            return .pauseAck(
+                accepted: try boolField("accepted", in: object),
+                reason: object["reason"] as? String
+            )
+        case "resume_request":
+            return .resumeRequest
+        case "resume_ack":
+            return .resumeAck(
+                accepted: try boolField("accepted", in: object),
+                reason: object["reason"] as? String
+            )
+        case "shutdown_request":
+            return .shutdownRequest(graceSeconds: try intField("grace_seconds", in: object))
+        case "shutdown_ack":
+            return .shutdownAck
         default:
             throw ControlSocketError.unknownType(type)
         }
+    }
+
+    private static func doubleField(_ field: String, in object: [String: Any]) throws -> Double {
+        if let value = object[field] as? Double { return value }
+        if let value = object[field] as? NSNumber { return value.doubleValue }
+        throw ControlSocketError.missingRequiredField(field)
+    }
+
+    private static func optionalDoubleField(_ field: String, in object: [String: Any]) -> Double? {
+        if let value = object[field] as? Double { return value }
+        if let value = object[field] as? NSNumber { return value.doubleValue }
+        return nil
+    }
+
+    private static func optionalIntField(_ field: String, in object: [String: Any]) -> Int? {
+        if let value = object[field] as? Int { return value }
+        if let value = object[field] as? NSNumber { return value.intValue }
+        return nil
     }
 
     private static func stringField(_ field: String, in object: [String: Any]) throws -> String {
@@ -470,6 +556,26 @@ actor ControlSocketServer {
                     )
                     await connection.close()
                     return
+                case .metricsRequest:
+                    // SPEC-025 §5.2 — real earnings/uptime source will land with the App track
+                    // rollout (see SPEC-025 §11 P1). Wire format is stable; semantic is stub.
+                    try? await connection.send(.metricsResponse(
+                        earningsUsdc: 0,
+                        malibuAccrued: 0,
+                        gpuC: nil,
+                        latencyP50Ms: nil,
+                        uptimeSec: 0
+                    ))
+                case .pauseRequest:
+                    try? await connection.send(.pauseAck(accepted: false, reason: "not_implemented"))
+                case .resumeRequest:
+                    try? await connection.send(.resumeAck(accepted: false, reason: "not_implemented"))
+                case let .shutdownRequest(graceSeconds):
+                    // Ack immediately so the App track's wrapper can proceed with SIGTERM
+                    // fallback if we don't exit within graceSeconds. Real graceful drain
+                    // lands with SPEC-025 §11 P1 alongside pause/resume semantics.
+                    try? await connection.send(.shutdownAck)
+                    _ = graceSeconds // reserved for graceful drain implementation
                 default:
                     FileHandle.standardError.write(Data("control socket received unexpected frame type; closing connection\n".utf8))
                     await connection.close()

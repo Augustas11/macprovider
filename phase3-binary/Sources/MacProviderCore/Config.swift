@@ -68,6 +68,12 @@ public struct AppConfig: Equatable, Sendable {
     // never logs the token (URL is redacted, headers are not logged).
     public var providerToken: String?
 
+    // SPEC-025 §12 conflict #2 — set to "malibu-app" when the CLI is spawned as a
+    // managed child of Malibu.app. The AutoUpdater checks this and no-ops so the
+    // App track's Sparkle update path owns whole-bundle updates end-to-end. Other
+    // values are reserved (e.g. future MDM wrappers can set their own tag).
+    public var managedBy: String?
+
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
     public static func defaults(configPath: String = defaultConfigPath) -> AppConfig {
@@ -107,7 +113,8 @@ public struct AppConfig: Equatable, Sendable {
             ctlSocketPath: nil,
             switchStatePath: nil,
             donorMode: false,
-            providerToken: nil
+            providerToken: nil,
+            managedBy: nil
         )
     }
 }
@@ -128,6 +135,8 @@ public struct CLIOverrides: Equatable, Sendable {
     public var ctlSocketPath: String?
     public var switchStatePath: String?
     public var providerToken: String?
+    // SPEC-025 §12 conflict #2 — see AppConfig.managedBy.
+    public var managedBy: String?
     // SPEC-013 autoresearch serving knobs. nil ⇒ defer to env / YAML /
     // built-in default (the latter mirrors prior single-slot behavior).
     public var kvBits: Int?
@@ -150,6 +159,7 @@ public struct CLIOverrides: Equatable, Sendable {
         ctlSocketPath: String? = nil,
         switchStatePath: String? = nil,
         providerToken: String? = nil,
+        managedBy: String? = nil,
         kvBits: Int? = nil,
         maxContext: Int? = nil,
         maxBatch: Int? = nil
@@ -169,6 +179,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.ctlSocketPath = ctlSocketPath
         self.switchStatePath = switchStatePath
         self.providerToken = providerToken
+        self.managedBy = managedBy
         self.kvBits = kvBits
         self.maxContext = maxContext
         self.maxBatch = maxBatch
@@ -288,6 +299,7 @@ public enum ConfigLoader {
         try assign(&config.switchStatePath, from: dict, key: "switch_state_path", expected: "string")
         try assign(&config.donorMode, from: dict, key: "donor_mode", expected: "boolean")
         try assign(&config.providerToken, from: dict, key: "provider_token", expected: "string")
+        try assign(&config.managedBy, from: dict, key: "managed_by", expected: "string")
         return config
     }
 
@@ -324,6 +336,7 @@ public enum ConfigLoader {
         try assign(&config.switchStatePath, from: environment, env: "MACPROVIDER_SWITCH_STATE_PATH", expected: "string")
         try assign(&config.donorMode, from: environment, env: "MACPROVIDER_DONOR_MODE", expected: "boolean")
         try assign(&config.providerToken, from: environment, env: "MACPROVIDER_PROVIDER_TOKEN", expected: "string")
+        try assign(&config.managedBy, from: environment, env: "MACPROVIDER_MANAGED_BY", expected: "string")
         return config
     }
 
@@ -373,6 +386,9 @@ public enum ConfigLoader {
         }
         if let providerToken = cli.providerToken {
             config.providerToken = providerToken
+        }
+        if let managedBy = cli.managedBy {
+            config.managedBy = managedBy
         }
         if let kvBits = cli.kvBits {
             config.kvBitsOverride = kvBits

@@ -1221,6 +1221,23 @@ actor CoordinatorClient {
         guard !trimmed.isEmpty else {
             return false
         }
+        // AUDIT R1 SECURITY S4 fix (PR #334) — when the CLI is spawned as a
+        // managed child of Malibu.app, disk persistence of the bearer token
+        // is contrary to the App-track security model: the app stores the
+        // token in Keychain and NEVER wants it landed in
+        // ~/.config/macprovider/config.yaml. We still adopt in-memory so
+        // the current WS session keeps authenticating, and emit an event
+        // so operators can see the skip. Keychain-side rotation lands with
+        // SPEC-025 §11 P1 alongside the "CLI reads Keychain directly" work.
+        if appConfig.managedBy == "malibu-app" {
+            self.providerToken = trimmed
+            Self.emitTokenPersistEvent(
+                event: "provider_token_persist_skipped_managed_by_malibu_app",
+                path: configPath,
+                error: nil
+            )
+            return true
+        }
         let path = configPath
         let result: Result<Void, Error> = await Task.detached(priority: .utility) {
             do {
@@ -1812,6 +1829,23 @@ actor CoordinatorClient {
     }
 
     private func runAutoupdateIfEligible(_ recommended: String) async {
+        // SPEC-025 §12 conflict #2 — when the CLI is spawned as a managed child of
+        // Malibu.app, Sparkle owns whole-bundle updates end-to-end. Two auto-update
+        // paths racing on the same binary would fight over rollback markers and
+        // the launchd LaunchAgent. Skip loudly so we can see it in event history.
+        if appConfig.managedBy == "malibu-app" {
+            let parsedTarget = (try? AutoUpdateRecommendation.validate(recommended))?.normalized ?? "<unvalidated>"
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: UUID().uuidString.lowercased(),
+                currentVersion: Self.binaryVersion,
+                targetVersion: parsedTarget,
+                phase: .eligibility,
+                outcome: .skipped,
+                reason: "managed_by_malibu_app",
+                attempt: 1
+            ))
+            return
+        }
         if let parsed = try? AutoUpdateRecommendation.validate(recommended) {
             let trust = currentAutoupdateTrustState()
             guard trust.isEligible else {

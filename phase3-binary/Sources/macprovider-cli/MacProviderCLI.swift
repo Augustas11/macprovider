@@ -68,6 +68,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Provider authentication token (SPEC-001 / XSEC-1). When set, the binary sends 'Authorization: Bearer <token>' on the coordinator WS connect. Required when the coordinator runs with auth.require_provider_tokens=true. Overrides MACPROVIDER_PROVIDER_TOKEN and config key provider_token. Treat as a secret — the binary never logs it; chmod 0600 the config file containing it.")
     var providerToken: String?
 
+    @Option(help: "Marks this binary as spawned by an outer manager (SPEC-025). Setting this to 'malibu-app' disables the CLI's own AutoUpdater so Sparkle in Malibu.app owns whole-bundle updates. Overrides MACPROVIDER_MANAGED_BY and config key managed_by. Unset for the standalone CLI track.")
+    var managedBy: String?
+
     @Option(help: "KV-cache quantization precision in bits (4 or 8). When set, forwarded to mlx-swift GenerateParameters.kvBits — quantizes the KV cache to reduce per-token memory footprint at a small accuracy cost. Unset (default) keeps the mlx-swift default of no KV quantization. Overrides MACPROVIDER_KV_BITS and config key kv_bits.")
     var kvBits: Int?
 
@@ -289,11 +292,22 @@ struct ServeCommand: AsyncParsableCommand {
                 ctlSocketPath: ctlSocketPath,
                 switchStatePath: switchStatePath,
                 providerToken: providerToken,
+                managedBy: managedBy,
                 kvBits: kvBits,
                 maxContext: maxContext,
                 maxBatch: maxBatch
             )
         )
+
+        // AUDIT R1 SECURITY S2 fix (PR #334): drop MACPROVIDER_PROVIDER_TOKEN
+        // from the process env immediately after we've resolved it. Under
+        // Malibu.app the token arrives via env (see SPEC-025 §7 followup:
+        // eventually via Keychain read here). Same-user malware inspecting
+        // `ps -E <cli-pid>` would otherwise see a payout-bearing bearer token
+        // for the lifetime of the process. Config resolution has already
+        // captured it into `resolved.providerToken`; the env slot is unused
+        // downstream.
+        unsetenv("MACPROVIDER_PROVIDER_TOKEN")
 
         try Self.runSupportedModelsPreflight(&resolved)
         try Self.runDrainTimeoutPreflight(resolved)
