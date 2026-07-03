@@ -1140,6 +1140,7 @@ write_config() {
   model="$1"
   provider_id="$2"
   coordinator_url="$3"
+  existing_provider_token_line="$(read_config_provider_token_line || true)"
   run mkdir -p "$CONFIG_DIR"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "Would write provider_id to $PROVIDER_ID_PATH and config to $CONFIG_PATH"
@@ -1152,7 +1153,20 @@ coordinator_url: "$(yaml_escape "$coordinator_url")"
 provider_id: "$(yaml_escape "$provider_id")"
 port: $PORT
 EOF
+  if [ -n "$existing_provider_token_line" ]; then
+    printf "%s\n" "$existing_provider_token_line" >> "$CONFIG_PATH"
+  fi
   chmod 600 "$CONFIG_PATH" "$PROVIDER_ID_PATH" 2>/dev/null || true
+}
+
+read_config_provider_token_line() {
+  [ -f "$CONFIG_PATH" ] || return 1
+  awk '
+    /^provider_token[[:space:]]*:/ {
+      print
+      exit
+    }
+  ' "$CONFIG_PATH"
 }
 
 read_config_model() {
@@ -1415,6 +1429,7 @@ render_plist() {
   provider_id="$(xml_escape "$2")"
   coordinator_url="$(xml_escape "$3")"
   user_home="$(xml_escape "$HOME")"
+  config_path="$(xml_escape "$CONFIG_PATH")"
   # F-603-V7-4: launchd must invoke the real binary path, not the
   # ~/.local/bin symlink, so Swift Bundle resolution finds adjacent bundles.
   binary_path="$(xml_escape "$INSTALL_DIR/macprovider-cli")"
@@ -1458,6 +1473,8 @@ render_plist() {
     <string>$user_home</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$user_home/.local/bin</string>
+    <key>MACPROVIDER_CONFIG</key>
+    <string>$config_path</string>
   </dict>
   <key>ThrottleInterval</key>
   <integer>10</integer>
