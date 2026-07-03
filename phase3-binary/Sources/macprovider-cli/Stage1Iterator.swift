@@ -459,6 +459,26 @@ struct Stage1Prober: Stage1Probing {
             )
         }
 
+        // v1.7.7 Track A3: prewarm the subprocess before measuring TTFT.
+        // Pre-v1.7.7 the first (and only, since stage1Replicates=1) probeOnce
+        // paid model-load + full 3200-token prefill wall-clock, producing
+        // ttftMS in the 30-90s range on M-Base while catalog max_4k_ttft_ms
+        // gates warm-service latency at 2500-3000ms. Every candidate failed
+        // eligibility despite `.feasible` probes. Send a throwaway request
+        // with the SAME padded prompt so:
+        //   - Model weights are loaded into memory
+        //   - Prefill KV state for the exact prompt is populated
+        // then the real replicates loop measures warm-service latency.
+        // Prewarm failure is NOT a probe failure — the subsequent real
+        // probe iteration will observe whatever error state persists.
+        _ = try? await probeOnce(model: model, port: port, targetContext: targetContext)
+        if case .processExited(let rc, let stderrTail) = try await runner.waitForReady(timeout: 0.05) {
+            return .infeasible(
+                reason: "provider exited during Stage 1 prewarm rc=\(rc): \(stderrTail)",
+                nErr: max(1, replicates)
+            )
+        }
+
         var ttfts: [Double] = []
         var throughputs: [Double] = []
         var nErr = 0
