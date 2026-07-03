@@ -36,6 +36,8 @@ type Mux struct {
 	metrics       *metrics.Metrics // optional; nil → no metric emit
 }
 
+const authFailureMinLatency = 5 * time.Millisecond
+
 func NewMux(reader *store.Store, cors CORSConfig, backfillMode, partialSince string, trustedProxies []string, logger zerolog.Logger) *Mux {
 	return NewMuxWithMetrics(reader, cors, backfillMode, partialSince, trustedProxies, logger, nil)
 }
@@ -99,6 +101,7 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	// /health are §4.3 `Auth: None`; Authorization is ignored.
 	var ar authResult
 	if endpoint == "leaderboard" {
+		authStarted := time.Now()
 		// Layer 4 — auth-failure tier (Authorization-present
 		// only). Round-3 CODE H1: only schedule the refund
 		// AFTER allow returns true.
@@ -135,6 +138,7 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if ar.statusCode == http.StatusUnauthorized {
+			padAuthFailureLatency(authStarted)
 			// Rejected keyed — omit ACAO per §5.7 rows 3/5/6/7.
 			w.Header().Set("Vary", varyForPublic())
 			writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
@@ -248,6 +252,12 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		m.h.handleLeaderboard(rec, r, ar)
 	case "health":
 		m.h.handleHealth(rec, r, ar)
+	}
+}
+
+func padAuthFailureLatency(started time.Time) {
+	if remaining := authFailureMinLatency - time.Since(started); remaining > 0 {
+		time.Sleep(remaining)
 	}
 }
 
