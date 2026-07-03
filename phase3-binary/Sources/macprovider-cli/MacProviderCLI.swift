@@ -215,7 +215,16 @@ struct ServeCommand: AsyncParsableCommand {
                 FileHandle.standardError.write(Data("model artifact is not admitted by the signed rate card\n".utf8))
                 throw ExitCode(2)
             }
-            expectedPublicModel = match.key
+            // v1.7.6 Track A1: when the rate-card row resolves via the
+            // "default" fallthrough, the pricing key is `"default"` but
+            // the served-model identity remains the catalog key — matches
+            // AutotuneRecommend's servedModel split. Without this mirror,
+            // paid serve preflight would reject any default-tier install.
+            if match.key == "default", key != "default" {
+                expectedPublicModel = key
+            } else {
+                expectedPublicModel = match.key
+            }
         } else {
             expectedPublicModel = key
         }
