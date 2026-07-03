@@ -727,14 +727,20 @@ struct AutotuneCommand: AsyncParsableCommand {
             availabilityHoursPerDay: 24,
             donorMode: donorMode
         )
-        request.benchmarks = try await AutotuneRecommendationBenchmarker().benchmarks(
+        let outcomes = try await AutotuneRecommendationBenchmarker().benchmarks(
             request: request,
             targetContext: Self.spec023RecommendationProbeContext,
             gateTTFTMS: gateTTFTMS,
             replicates: stage1Replicates,
             port: port
         )
-        let result = AutotuneRecommendEngine().recommend(request)
+        request.benchmarks = outcomes.benchmarks
+        for modelKey in outcomes.diagnostics.keys.sorted() {
+            let reason = outcomes.diagnostics[modelKey]!
+            FileHandle.standardError.write(Data("[warn] spec-023 probe: \(modelKey): \(reason)\n".utf8))
+        }
+        var result = AutotuneRecommendEngine().recommend(request)
+        result.probeDiagnostics = outcomes.diagnostics
         try RecommendationStateStore.write(result)
         let paidSelected = result.recommendedModel.flatMap { recommendedModel in
             result.selectedCandidate.flatMap { $0.model == recommendedModel ? $0 : nil }
