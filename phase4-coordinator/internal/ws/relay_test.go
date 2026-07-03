@@ -58,6 +58,9 @@ func TestRelayDispatchRoutesChunkAndEndByRequestID(t *testing.T) {
 	if req.Type != "inference_request" || req.RequestID != "req-test" {
 		t.Fatalf("request = %#v", req)
 	}
+	if req.ConversationKey != "" {
+		t.Fatalf("conversation_key = %q, want empty without relay context", req.ConversationKey)
+	}
 
 	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-test", Seq: 0, Data: `{"ok":true}`}))
 	s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-test", Status: "complete", ChunksSent: 1}))
@@ -77,6 +80,46 @@ func TestRelayDispatchRoutesChunkAndEndByRequestID(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("end timeout")
+	}
+}
+
+func TestRelayDispatchCarriesConversationKeyFromContext(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "p1",
+		AssignedID:     "s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, serverConn)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", serverConn, 1)
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+
+	ctx := ContextWithConversationKey(context.Background(), "conv:relay-cache")
+	if _, err := s.DispatchInference(ctx, *provider, "req-conv", []byte(`{"model":"model-a"}`), false); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(providerConn)
+	if err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+	var req InferenceRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("request json: %v", err)
+	}
+	if req.ConversationKey != "conv:relay-cache" {
+		t.Fatalf("conversation_key=%q want conv:relay-cache", req.ConversationKey)
 	}
 }
 
@@ -118,11 +161,56 @@ func TestEncryptedRelayDispatchEncryptsRequestBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open encrypted request: %v", err)
 	}
-	if !bytes.Equal(opened, body) {
-		t.Fatalf("opened request = %s, want %s", opened, body)
+	var plaintext encryptedInferencePlaintext
+	if err := json.Unmarshal(opened, &plaintext); err != nil {
+		t.Fatalf("encrypted plaintext envelope json: %v", err)
+	}
+	if plaintext.Type != "inference_request_plaintext" || plaintext.Body != string(body) || plaintext.ConversationKey != "" {
+		t.Fatalf("encrypted plaintext envelope = %+v, want body without conversation key", plaintext)
 	}
 	if provider.Tier2Session.C2PCounter != 1 {
 		t.Fatalf("c2p counter = %d, want 1", provider.Tier2Session.C2PCounter)
+	}
+}
+
+func TestEncryptedRelayDispatchSealsConversationKeyInsideBodyEnvelope(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"secret prompt"}]}`)
+	ctx := ContextWithConversationKey(context.Background(), "conv:encrypted-cache")
+	if _, err := s.DispatchInference(ctx, *provider, "req-encrypted-cache", body, true); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(providerConn)
+	if err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+	if bytes.Contains(payload, []byte("secret prompt")) || bytes.Contains(payload, []byte("conv:encrypted-cache")) || bytes.Contains(payload, []byte(`"body"`)) {
+		t.Fatalf("encrypted request leaked plaintext material: %s", payload)
+	}
+	var req encryptedInferenceRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("encrypted request json: %v", err)
+	}
+	aad := tier2.AEADFrameAAD{
+		Type:       "inference_request",
+		Direction:  "c2p",
+		RequestID:  "req-encrypted-cache",
+		Stream:     true,
+		ProviderID: provider.ProviderID,
+		AssignedID: provider.AssignedID,
+		Seq:        0,
+	}
+	opened, err := tier2.OpenPillarBFrame(provider.Tier2Session.C2PKey, provider.Tier2Session.C2PNonceBase, provider.Tier2Session.KeyID, 0, aad, tier2.AEADEnvelope{Encrypted: req.Encrypted, Enc: req.Enc})
+	if err != nil {
+		t.Fatalf("open encrypted request: %v", err)
+	}
+	var plaintext encryptedInferencePlaintext
+	if err := json.Unmarshal(opened, &plaintext); err != nil {
+		t.Fatalf("encrypted plaintext envelope json: %v", err)
+	}
+	if plaintext.Type != "inference_request_plaintext" || plaintext.Body != string(body) || plaintext.ConversationKey != "conv:encrypted-cache" {
+		t.Fatalf("encrypted plaintext envelope = %+v, want body + sealed conversation key", plaintext)
 	}
 }
 

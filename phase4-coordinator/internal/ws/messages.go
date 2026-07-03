@@ -203,11 +203,12 @@ type DrainStatus struct {
 }
 
 type InferenceRequest struct {
-	Type       string                     `json:"type"`
-	RequestID  string                     `json:"request_id"`
-	Stream     bool                       `json:"stream"`
-	Body       string                     `json:"body"`
-	Settlement *SettlementReceiptMetadata `json:"settlement,omitempty"`
+	Type            string                     `json:"type"`
+	RequestID       string                     `json:"request_id"`
+	Stream          bool                       `json:"stream"`
+	Body            string                     `json:"body"`
+	Settlement      *SettlementReceiptMetadata `json:"settlement,omitempty"`
+	ConversationKey string                     `json:"conversation_key,omitempty"`
 }
 
 type SettlementReceiptMetadata struct {

@@ -212,6 +212,48 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(endPlaintext["chunks_sent"] as? Int, 1)
     }
 
+    func testEncryptedInferenceRequestUsesOnlySealedConversationKey() async throws {
+        let runtime = FakeCompletionRuntime()
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let session = try testTier2Session()
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            tier2Session: session,
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+
+        let body = #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":false}"#
+        var encrypted = try Tier2ProviderSession.sealRequestForTest(
+            session: session,
+            requestID: "req-encrypted-conv",
+            stream: false,
+            plaintext: body,
+            conversationKey: "conv:sealed"
+        )
+        encrypted["conversation_key"] = "conv:forged-top-level"
+
+        try await relay.handleInferenceRequest(encrypted)
+        _ = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: {
+            await recorder.frames
+        }
+
+        let keys = await runtime.observedConversationKeys()
+        XCTAssertEqual(keys, ["conv:sealed"])
+    }
+
     // SPEC-015 §M.0 / §M.2 — coordinator-WS-mediated non-streaming
     // receipt carries the 9-field v0.3 tuple with
     // `receipt_version == "3"` and `model_hash` matching the
@@ -744,11 +786,18 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
 }
 
 private actor FakeCompletionRuntime: ModelRuntimeServing {
+    private var conversationKeys: [String?] = []
+
+    func observedConversationKeys() -> [String?] {
+        conversationKeys
+    }
+
     func complete(
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool
     ) async throws -> CompletionResult {
-        CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
+        conversationKeys.append(request.conversationKey)
+        return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
     }
 
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
@@ -767,6 +816,7 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
+        conversationKeys.append(request.conversationKey)
         onChunk(.content("encrypted answer"))
         return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
     }

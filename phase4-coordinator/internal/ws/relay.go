@@ -39,6 +39,21 @@ func (r *RelayStream) Cancel(reason string) {
 	}
 }
 
+type conversationKeyContextKey struct{}
+
+func ContextWithConversationKey(ctx context.Context, key string) context.Context {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, conversationKeyContextKey{}, key)
+}
+
+func ConversationKeyFromContext(ctx context.Context) string {
+	key, _ := ctx.Value(conversationKeyContextKey{}).(string)
+	return strings.TrimSpace(key)
+}
+
 type relayActive struct {
 	requestID string
 	stream    bool
@@ -94,6 +109,12 @@ type encryptedInferenceRequest struct {
 	Encrypted  bool                       `json:"encrypted"`
 	Enc        tier2.AEADEnvelopeBody     `json:"enc"`
 	Settlement *SettlementReceiptMetadata `json:"settlement,omitempty"`
+}
+
+type encryptedInferencePlaintext struct {
+	Type            string `json:"type"`
+	Body            string `json:"body"`
+	ConversationKey string `json:"conversation_key,omitempty"`
 }
 
 type encryptedInferenceResponseChunk struct {
@@ -337,17 +358,18 @@ func (ps *providerSession) hasTier2Session() bool {
 	return ps.tier2 != nil
 }
 
-func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata) ([]byte, error) {
+func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestID string, body []byte, stream bool, settlement *SettlementReceiptMetadata, conversationKey string) ([]byte, error) {
 	ps.tier2Mu.Lock()
 	session := ps.tier2
 	if session == nil {
 		ps.tier2Mu.Unlock()
 		msg := InferenceRequest{
-			Type:       "inference_request",
-			RequestID:  requestID,
-			Stream:     stream,
-			Body:       string(body),
-			Settlement: settlement,
+			Type:            "inference_request",
+			RequestID:       requestID,
+			Stream:          stream,
+			Body:            string(body),
+			Settlement:      settlement,
+			ConversationKey: conversationKey,
 		}
 		return json.Marshal(msg)
 	}
@@ -365,7 +387,15 @@ func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestI
 		AssignedID: provider.AssignedID,
 		Seq:        seq,
 	}
-	envelope, err := tier2.SealPillarBFrame(session.C2PKey, session.C2PNonceBase, session.KeyID, seq, aad, body)
+	plaintext, err := json.Marshal(encryptedInferencePlaintext{
+		Type:            "inference_request_plaintext",
+		Body:            string(body),
+		ConversationKey: strings.TrimSpace(conversationKey),
+	})
+	if err != nil {
+		return nil, err
+	}
+	envelope, err := tier2.SealPillarBFrame(session.C2PKey, session.C2PNonceBase, session.KeyID, seq, aad, plaintext)
 	if err != nil {
 		return nil, err
 	}
@@ -555,7 +585,7 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 	if err != nil {
 		return nil, err
 	}
-	payload, err := session.sealInferenceRequest(provider, requestID, body, stream, settlementMetadata)
+	payload, err := session.sealInferenceRequest(provider, requestID, body, stream, settlementMetadata, ConversationKeyFromContext(ctx))
 	if err != nil {
 		session.removeActive(requestID)
 		return nil, err
