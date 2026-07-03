@@ -776,6 +776,34 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(st.st_mode & 0o777, 0o600)
     }
 
+    // Locks the 2026-07-03 fix that removed the keychain code path from
+    // AutotuneHMACSecretStore.loadOrCreate. Any future refactor that
+    // reintroduces `SecItemCopyMatching` / `SecItemAdd` calls against the
+    // legacy `live.streamvc.macprovider.autotune` service in this file
+    // will fail this test. Keychain access is what caused every
+    // auto-updated provider to see a "login keychain password" prompt on
+    // interactive autotune runs after a version bump, because the ACL of
+    // the keychain item is bound to the specific creating binary's
+    // code-signature hash and auto-update replaces the binary.
+    func testHMACSecretStoreDoesNotCallKeychainAPIs() {
+        // Reflect the file bytes for any lingering keychain-service or
+        // account literal so this test tracks the *source*, not just the
+        // runtime behaviour. Fixed-string check keeps the invariant tight.
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/macprovider-cli/AutotuneRecommend.swift")
+        let source = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        XCTAssertFalse(source.contains("SecItemCopyMatching"), "AutotuneRecommend.swift must not call SecItemCopyMatching — see 2026-07-03 keychain-prompt fix")
+        XCTAssertFalse(source.contains("SecItemAdd"), "AutotuneRecommend.swift must not call SecItemAdd — see 2026-07-03 keychain-prompt fix")
+        // Note: the legacy service literal `live.streamvc.macprovider.autotune`
+        // is intentionally allowed in comments (so operators can grep the
+        // source for the name they need to delete via `security` CLI).
+        // Only the runtime `kSecAttrService:` binding must not reappear.
+        XCTAssertFalse(source.contains("kSecAttrService"), "AutotuneRecommend.swift must not bind kSecAttrService — see 2026-07-03 keychain-prompt fix")
+    }
+
     func testHMACSecretFileRotatesRecoverableRegularFileFailuresAndRejectsSymlink() throws {
         let worldDir = try tempDir()
         let worldURL = worldDir.appendingPathComponent("secret")

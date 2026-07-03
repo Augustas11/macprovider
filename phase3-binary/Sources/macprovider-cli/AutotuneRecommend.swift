@@ -200,22 +200,35 @@ struct AutotuneHMACSecretStore {
     var randomBytes: (Int) throws -> Data = Self.secureRandomBytes
 
     func loadOrCreate() throws -> Data {
-        if usesDefaultPath {
-            if let keychainSecret = try? Self.loadKeychainSecret(), keychainSecret.count == 32 {
-                return keychainSecret
-            }
-        }
+        // Keychain path removed 2026-07-03: macOS binds the keychain-item ACL
+        // to the specific creating binary's code-signature hash. Auto-update
+        // replaces the binary with a new hash → ACL check fails → macOS
+        // prompts every operator for the "login" keychain password on the
+        // next interactive autotune run after each release. Under launchd
+        // (non-interactive) the API returns errSecInteractionRequired and
+        // the code silently falls through to file — so the keychain path
+        // was already dead weight for the auto-updated background flow,
+        // and pure UX drag for the interactive foreground flow.
+        //
+        // The file at ~/.config/macprovider/autotune-hmac-secret is created
+        // at 0600 under a 0700 parent (see writeNewFileSecret + ensurePrivate
+        // ParentDirectory). HMAC of autotune log integrity does not need
+        // keychain-level protection — the threat model (someone with code
+        // execution on this Mac forging autotune logs on the same Mac) is
+        // already outside what keychain protects against.
+        //
+        // Existing operators: any legacy `live.streamvc.macprovider.autotune`
+        // keychain item is now orphaned but harmless — it is never read.
+        // They can remove it with:
+        //   security delete-generic-password -s "live.streamvc.macprovider.autotune"
+        // No automatic delete is attempted; SecItemDelete would also trip
+        // the ACL prompt for the exact reason this fix exists.
         if FileManager.default.fileExists(atPath: path.path) {
             do {
                 return try loadExistingFileSecret()
             } catch {
                 return try rotateRecoverableFileSecret()
             }
-        }
-        if usesDefaultPath,
-           let created = try? Self.createKeychainSecret(randomBytes: randomBytes),
-           created.count == 32 {
-            return created
         }
         return try createFileSecret()
     }
@@ -328,43 +341,6 @@ struct AutotuneHMACSecretStore {
         }
         return true
     }
-
-    private static func loadKeychainSecret() throws -> Data {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data, data.count == 32 else {
-            throw AutotuneRecommendError.noHMACSecret
-        }
-        return data
-    }
-
-    private static func createKeychainSecret(randomBytes: (Int) throws -> Data) throws -> Data {
-        let secret = try randomBytes(32)
-        guard secret.count == 32 else { throw AutotuneRecommendError.noHMACSecret }
-        let attributes: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecValueData as String: secret,
-        ]
-        let status = SecItemAdd(attributes as CFDictionary, nil)
-        if status == errSecDuplicateItem {
-            return try loadKeychainSecret()
-        }
-        guard status == errSecSuccess else { throw AutotuneRecommendError.noHMACSecret }
-        return secret
-    }
-
-    private static let keychainService = "live.streamvc.macprovider.autotune"
-    private static let keychainAccount = "hmac-secret-v1"
 
     private static func secureRandomBytes(count: Int) throws -> Data {
         var data = Data(count: count)
