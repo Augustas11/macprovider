@@ -20,6 +20,9 @@ type AuthAttemptState struct {
 	PublishesSupportedModels bool
 	SupportedModelsPresent   bool // initial-stage carried supported_models key
 	PublishesPresent         bool // initial-stage carried publishes_supported_models key
+	BinaryVersion            string
+	ProviderECDHPublicKey    string
+	InitialTranscriptSHA256  [32]byte
 	StartedAt                time.Time
 	ExpiresAt                time.Time
 }

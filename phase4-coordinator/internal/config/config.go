@@ -54,8 +54,21 @@ type Config struct {
 	Endpoints                    EndpointsConfig              `yaml:"endpoints"`
 	Explorer                     ExplorerConfig               `yaml:"explorer"`
 	Stats                        StatsConfig                  `yaml:"stats"`
+	Onboarding                   OnboardingConfig             `yaml:"onboarding"`
 	Proxy                        ProxyConfig                  `yaml:"proxy"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
+}
+
+// OnboardingConfig gates SPEC-026 App-track `/v1/providers/register`.
+// Default-off preserves backward-compatible binary rollout; production
+// traffic enablement waits for the SPEC-026 §4.3 proof-stage verifier.
+type OnboardingConfig struct {
+	AppTrackRegisterEnabled bool              `yaml:"app_track_register_enabled"`
+	PostgresDSN             string            `yaml:"postgres_dsn"`
+	BundleID                string            `yaml:"bundle_id"`
+	AppleTeamID             string            `yaml:"apple_team_id"`
+	CoordinatorDomain       string            `yaml:"coordinator_domain"`
+	ASNPrefixes             map[string]string `yaml:"asn_prefixes"`
 }
 
 // StatsConfig is the SPEC-017 Network Stats API config block.
@@ -344,7 +357,8 @@ type CoordinatorAdvertisedVersion struct {
 }
 
 type AuthConfig struct {
-	OperatorKey string `yaml:"operator_key"`
+	OperatorKey  string            `yaml:"operator_key"`
+	OperatorKeys map[string]string `yaml:"operator_keys"`
 	// GatewayServiceToken is the optional service-to-service credential
 	// the gateway uses when calling internal/admin coordinator endpoints
 	// (M3-2 / SECU-4). When set, the coordinator accepts EITHER
@@ -691,6 +705,11 @@ func Default() Config {
 				AccessControlMaxAgeSeconds: 60,
 			},
 		},
+		Onboarding: OnboardingConfig{
+			AppTrackRegisterEnabled: false,
+			BundleID:                "tech.malibu.app",
+			CoordinatorDomain:       "coordinator.streamvc.live",
+		},
 		Explorer: ExplorerConfig{
 			Enabled:                       false,
 			BindPath:                      "/admin/explorer/",
@@ -763,6 +782,13 @@ func (c *Config) resolveEnv() error {
 	} else {
 		c.Auth.GatewayServiceToken = v
 	}
+	for name, raw := range c.Auth.OperatorKeys {
+		v, err := resolveEnvValue("auth.operator_keys."+name, raw)
+		if err != nil {
+			return err
+		}
+		c.Auth.OperatorKeys[name] = v
+	}
 	// Round-1 SECURITY r1 MEDIUM 1: stats DSN fields go through
 	// the same env-indirection resolver. Operators inject DSNs
 	// at deploy time as `env:STATS_READER_DSN` etc.; storing
@@ -778,6 +804,20 @@ func (c *Config) resolveEnv() error {
 		{"stats.partner_keys_admin_dsn", &c.Stats.PartnerKeysAdminDSN},
 	}
 	for _, f := range statsDSNs {
+		v, err := resolveEnvValue(f.field, *f.dst)
+		if err != nil {
+			return err
+		}
+		*f.dst = v
+	}
+	onboardingSecrets := []struct {
+		field string
+		dst   *string
+	}{
+		{"onboarding.postgres_dsn", &c.Onboarding.PostgresDSN},
+		{"onboarding.apple_team_id", &c.Onboarding.AppleTeamID},
+	}
+	for _, f := range onboardingSecrets {
 		v, err := resolveEnvValue(f.field, *f.dst)
 		if err != nil {
 			return err
@@ -1131,6 +1171,9 @@ func (c Config) Validate() error {
 	if err := c.validateStats(); err != nil {
 		return err
 	}
+	if err := c.validateOnboarding(); err != nil {
+		return err
+	}
 	if _, ok := c.Rewards.RateCard["default"]; !ok {
 		return fmt.Errorf("rewards.rate_card must contain default")
 	}
@@ -1157,6 +1200,77 @@ func (c Config) Validate() error {
 				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
 			}
 		}
+	}
+	return nil
+}
+
+func (c Config) validateOnboarding() error {
+	o := c.Onboarding
+	if strings.TrimSpace(o.BundleID) == "" {
+		return fmt.Errorf("onboarding.bundle_id must be set")
+	}
+	if strings.TrimSpace(o.CoordinatorDomain) == "" {
+		return fmt.Errorf("onboarding.coordinator_domain must be set")
+	}
+	if strings.Contains(o.CoordinatorDomain, "://") || strings.HasSuffix(o.CoordinatorDomain, "/") {
+		return fmt.Errorf("onboarding.coordinator_domain must be a bare lowercase host with no scheme or trailing slash")
+	}
+	if o.CoordinatorDomain != strings.ToLower(o.CoordinatorDomain) {
+		return fmt.Errorf("onboarding.coordinator_domain must be lowercase")
+	}
+	if !o.AppTrackRegisterEnabled {
+		return nil
+	}
+	if strings.TrimSpace(o.PostgresDSN) == "" {
+		return fmt.Errorf("onboarding.postgres_dsn must be set when onboarding.app_track_register_enabled is true")
+	}
+	if strings.TrimSpace(o.AppleTeamID) == "" {
+		return fmt.Errorf("onboarding.apple_team_id must be set when onboarding.app_track_register_enabled is true")
+	}
+	if strings.TrimSpace(c.Auth.OperatorKey) == "" {
+		return fmt.Errorf("auth.operator_key must be set when onboarding.app_track_register_enabled is true")
+	}
+	if len(o.ASNPrefixes) == 0 {
+		return fmt.Errorf("onboarding.asn_prefixes must be set when onboarding.app_track_register_enabled is true")
+	}
+	for prefix, asn := range o.ASNPrefixes {
+		if _, err := netip.ParsePrefix(strings.TrimSpace(prefix)); err != nil {
+			return fmt.Errorf("onboarding.asn_prefixes contains invalid CIDR %q: %w", prefix, err)
+		}
+		if strings.TrimSpace(asn) == "" {
+			return fmt.Errorf("onboarding.asn_prefixes[%q] must be non-empty", prefix)
+		}
+	}
+	if err := validateOperatorKeyMap(c.Auth.OperatorKeys); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateOperatorKeyMap(keys map[string]string) error {
+	if len(keys) < 2 {
+		return fmt.Errorf("auth.operator_keys must contain at least two operators when onboarding.app_track_register_enabled is true")
+	}
+	seenSecrets := map[string]string{}
+	for actor, secret := range keys {
+		trimmedActor := strings.TrimSpace(actor)
+		if trimmedActor == "" || strings.ContainsAny(trimmedActor, " \t\r\n") {
+			return fmt.Errorf("auth.operator_keys contains invalid operator id %q", actor)
+		}
+		if strings.HasPrefix(trimmedActor, "operator:") {
+			trimmedActor = strings.TrimPrefix(trimmedActor, "operator:")
+			if trimmedActor == "" || strings.ContainsAny(trimmedActor, " \t\r\n") {
+				return fmt.Errorf("auth.operator_keys contains invalid operator id %q", actor)
+			}
+		}
+		secret = strings.TrimSpace(secret)
+		if secret == "" {
+			return fmt.Errorf("auth.operator_keys.%s must be non-empty", actor)
+		}
+		if previous, ok := seenSecrets[secret]; ok {
+			return fmt.Errorf("auth.operator_keys.%s must not reuse secret from auth.operator_keys.%s", actor, previous)
+		}
+		seenSecrets[secret] = actor
 	}
 	return nil
 }

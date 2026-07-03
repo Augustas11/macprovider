@@ -19,8 +19,10 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 )
@@ -38,6 +40,116 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 	}
 	if server.IdleTimeout == 0 {
 		t.Fatal("IdleTimeout must be set")
+	}
+}
+
+func TestOperatorMetricsHandlerRequiresOperatorBearer(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := statsmetrics.New(reg)
+	m.IncRegisterSource("app")
+	handler := operatorMetricsHandler("operator-secret", reg)
+
+	for _, tc := range []struct {
+		name   string
+		bearer string
+		want   int
+	}{
+		{name: "missing", want: http.StatusUnauthorized},
+		{name: "gateway token rejected", bearer: "gateway-secret", want: http.StatusUnauthorized},
+		{name: "operator accepted", bearer: "operator-secret", want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/admin/metrics", nil)
+			if tc.bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.bearer)
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("status=%d want=%d body=%s", rr.Code, tc.want, rr.Body.String())
+			}
+			if tc.want == http.StatusOK && !strings.Contains(rr.Body.String(), "provider_register_source_total") {
+				t.Fatalf("/admin/metrics missing register counter: %s", rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "base", http.StatusTeapot)
+	})
+	register := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	disabled := buyerHandlerWithOptionalRegister(base, false, register)
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", nil)
+	rr := httptest.NewRecorder()
+	disabled.ServeHTTP(rr, req)
+	if rr.Code != http.StatusTeapot {
+		t.Fatalf("disabled route status=%d want base handler 418", rr.Code)
+	}
+
+	enabled := buyerHandlerWithOptionalRegister(base, true, register)
+	rr = httptest.NewRecorder()
+	enabled.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("enabled route status=%d want 204", rr.Code)
+	}
+}
+
+func TestNginxRegisterRouteBeforeV1CatchAll(t *testing.T) {
+	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	cfg := string(body)
+	route := strings.Index(cfg, "location = /v1/providers/register")
+	catchAll := strings.Index(cfg, "location /v1/ {\n        return 404;")
+	if route < 0 {
+		t.Fatal("missing exact /v1/providers/register route")
+	}
+	if catchAll < 0 {
+		t.Fatal("missing /v1/ catch-all route")
+	}
+	if route > catchAll {
+		t.Fatal("/v1/providers/register route must appear before /v1/ catch-all")
+	}
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8443/v1/providers/register;",
+		"proxy_set_header Authorization $http_authorization;",
+		"add_header Cache-Control \"no-store\" always;",
+	} {
+		if !strings.Contains(cfg[route:catchAll], needle) {
+			t.Fatalf("register route missing %q", needle)
+		}
+	}
+}
+
+func TestNginxV2ProviderAliasesExistingWSHandler(t *testing.T) {
+	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	cfg := string(body)
+	route := strings.Index(cfg, "location = /v2/provider")
+	if route < 0 {
+		t.Fatal("missing exact /v2/provider route")
+	}
+	next := strings.Index(cfg[route+1:], "location ")
+	block := cfg[route:]
+	if next >= 0 {
+		block = cfg[route : route+1+next]
+	}
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8444/ws/provider;",
+		"proxy_set_header Upgrade $http_upgrade;",
+		"proxy_buffering off;",
+	} {
+		if !strings.Contains(block, needle) {
+			t.Fatalf("/v2/provider route missing %q", needle)
+		}
 	}
 }
 

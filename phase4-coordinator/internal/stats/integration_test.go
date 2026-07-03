@@ -595,6 +595,12 @@ func TestMigrationsConcurrent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	all, err := statsmigrations.All()
+	if err != nil {
+		t.Fatalf("load migrations: %v", err)
+	}
+	wantMigrations := len(all)
+
 	adminDB1, err := sql.Open("postgres", fx.adminDSN())
 	if err != nil {
 		t.Fatalf("open admin1: %v", err)
@@ -632,8 +638,8 @@ func TestMigrationsConcurrent(t *testing.T) {
 	if rows != total {
 		t.Errorf("schema_migrations_spec017 has duplicate version rows: distinct=%d total=%d", rows, total)
 	}
-	if rows != 5 {
-		t.Errorf("schema_migrations_spec017 distinct versions = %d, want 5", rows)
+	if rows != wantMigrations {
+		t.Errorf("schema_migrations_spec017 distinct versions = %d, want %d", rows, wantMigrations)
 	}
 
 	// stats_components_health still has exactly 7 rows.

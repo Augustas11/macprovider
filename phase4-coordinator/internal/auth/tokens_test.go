@@ -195,6 +195,60 @@ func TestTokenIssueValidateRevokeAndList(t *testing.T) {
 	}
 }
 
+func TestMintProviderTokenAppTrackRotatesUnusedAndRequiresProofForUsed(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	const providerID = "p_apptrackprovider"
+
+	first, err := store.MintProviderTokenAppTrack(ctx, providerID, nil)
+	if err != nil {
+		t.Fatalf("first app-track mint: %v", err)
+	}
+	if len(first) != 64 {
+		t.Fatalf("first token len=%d want 64", len(first))
+	}
+
+	second, err := store.MintProviderTokenAppTrack(ctx, providerID, nil)
+	if err != nil {
+		t.Fatalf("unused duplicate should rotate without proof: %v", err)
+	}
+	if second == first {
+		t.Fatal("rotated token matched first token")
+	}
+	if provider, ok, err := store.ValidateToken(ctx, first); err != nil || ok || provider != "" {
+		t.Fatalf("first token should be revoked provider=%q ok=%v err=%v", provider, ok, err)
+	}
+	if err := store.MarkTokenUsed(ctx, second); err != nil {
+		t.Fatalf("mark second used: %v", err)
+	}
+
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, nil); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
+		t.Fatalf("used active without proof err=%v want ErrAppTrackExistingTokenNoProof", err)
+	}
+	wrong := "wrong-token"
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &wrong); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
+		t.Fatalf("used active with wrong proof err=%v want ErrAppTrackExistingTokenNoProof", err)
+	}
+
+	third, err := store.MintProviderTokenAppTrack(ctx, providerID, &second)
+	if err != nil {
+		t.Fatalf("used active with current proof should reissue: %v", err)
+	}
+	if third == second {
+		t.Fatal("proof reissue returned same token")
+	}
+	if err := store.MarkTokenUsed(ctx, third); err != nil {
+		t.Fatalf("mark third used: %v", err)
+	}
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &third); !errors.Is(err, auth.ErrAppTrackReissueCooldown) {
+		t.Fatalf("cooldown reissue err=%v want ErrAppTrackReissueCooldown", err)
+	}
+}
+
 func TestRevokeTokenRejectsAmbiguousPrefix(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
 	store, err := auth.OpenStore(dbPath)
