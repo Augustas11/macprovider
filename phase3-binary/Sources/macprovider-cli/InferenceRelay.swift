@@ -57,13 +57,16 @@ actor InferenceRelay {
             return
         }
         let body: String
+        let decryptedConversationKey: String?
         if let tier2Session {
             guard message["encrypted"] as? Bool == true else {
                 try await sendNAK(inReplyTo: requestID, code: "tier2_encrypted_frame_required", message: "Tier-2 session requires encrypted inference_request frames")
                 return
             }
             do {
-                body = try tier2Session.openRequestBody(message: message, requestID: requestID, stream: stream)
+                let payload = try tier2Session.openRequestPayload(message: message, requestID: requestID, stream: stream)
+                body = payload.body
+                decryptedConversationKey = payload.conversationKey
             } catch {
                 await demoteAutoupdateTrust?("encrypted_leg_invalidated")
                 try await sendNAK(inReplyTo: requestID, code: "tier2_aead_decrypt_failed", message: "Encrypted inference_request failed authentication")
@@ -71,6 +74,7 @@ actor InferenceRelay {
             }
         } else if let cleartextBody = message["body"] as? String {
             body = cleartextBody
+            decryptedConversationKey = nil
         } else {
             try await sendNAK(inReplyTo: "inference_request", code: "invalid_message", message: "inference_request requires request_id, stream, and body")
             return
@@ -107,6 +111,13 @@ actor InferenceRelay {
         } else {
             settlementMetadata = nil
         }
+        let conversationKey: String?
+        if tier2Session != nil {
+            conversationKey = decryptedConversationKey
+        } else {
+            conversationKey = (message["conversation_key"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
 
         guard body.utf8.count <= maxBodyBytes else {
             try await Self.sendEndFrame([
@@ -136,6 +147,7 @@ actor InferenceRelay {
                 receiptBuilder: receiptBuilder,
                 receiptProviderID: receiptProviderID,
                 settlementMetadata: settlementMetadata,
+                conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
                 sendFrame: sendFrame
             )
             await self?.removeActive(requestID)
@@ -217,6 +229,7 @@ actor InferenceRelay {
         receiptBuilder: ReceiptBuilder?,
         receiptProviderID: String?,
         settlementMetadata: SettlementReceiptMetadata?,
+        conversationKey: String?,
         sendFrame: @escaping SendFrame
     ) async {
         let startedAt = await providerStatus.beginRequest(requestID: requestID)
@@ -225,7 +238,7 @@ actor InferenceRelay {
 
         do {
             let requestData = Data(body.utf8)
-            let request = try ChatCompletionRequest.parse(data: requestData)
+            let request = try ChatCompletionRequest.parse(data: requestData).withConversationKey(conversationKey)
             let validationModelID = warmSwapEnabled
                 ? await modelRuntime.currentSnapshot().modelID
                 : loadedModelID
@@ -851,7 +864,7 @@ actor InferenceRelay {
     private static func usage(_ completion: CompletionResult) -> [String: Any] {
         [
             "prompt_tokens": completion.promptTokens,
-            "cached_prompt_tokens": 0,
+            "cached_prompt_tokens": completion.cachedPromptTokens,
             "completion_tokens": completion.completionTokens,
             "total_tokens": completion.promptTokens + completion.completionTokens,
             "macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull(),
@@ -920,7 +933,7 @@ private final class RelayRequestState: @unchecked Sendable {
         lock.lock()
         currentUsage = [
             "prompt_tokens": completion.promptTokens,
-            "cached_prompt_tokens": 0,
+            "cached_prompt_tokens": completion.cachedPromptTokens,
             "completion_tokens": completion.completionTokens,
             "total_tokens": completion.promptTokens + completion.completionTokens,
         ]

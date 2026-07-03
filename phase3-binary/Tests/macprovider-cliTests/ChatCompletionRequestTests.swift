@@ -56,6 +56,18 @@ final class ChatCompletionRequestTests: XCTestCase {
         }
     }
 
+    func testConversationKeyValidationIsProviderSideDefenseInDepth() throws {
+        let request = try makeRequest(model: "m")
+
+        XCTAssertEqual(request.withConversationKey(" conv:valid-key ").conversationKey, "conv:valid-key")
+        XCTAssertNil(request.withConversationKey(nil).conversationKey)
+        XCTAssertNil(request.withConversationKey("").conversationKey)
+        XCTAssertNil(request.withConversationKey("buyer:valid-key").conversationKey)
+        XCTAssertNil(request.withConversationKey("conv:").conversationKey)
+        XCTAssertNil(request.withConversationKey("conv:bad\nkey").conversationKey)
+        XCTAssertNil(request.withConversationKey("conv:" + String(repeating: "x", count: 253)).conversationKey)
+    }
+
     func testJsonSchemaResponseFormatIsAccepted() throws {
         let request = try makeRequest(model: "m", responseFormat: Self.jsonSchemaResponseFormat())
         if case .jsonSchema(let spec) = request.responseFormat {

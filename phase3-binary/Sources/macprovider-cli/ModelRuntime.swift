@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import MLX
 import MLXLLM
 import MLXLMCommon
 import MacProviderCore
@@ -233,6 +234,7 @@ actor ModelRuntime: ModelRuntimeServing {
     // quantization (mlx-swift default). maxBatch defaults to 1, the
     // pre-knob behavior; lifting above 1 widens the autotune search.
     private let kvBitsOverride: Int?
+    private let conversationCache: ConversationCache
     private let inferenceGate: AsyncSemaphore
     private let maxBatch: Int
     private let warmSwapEnabled: Bool
@@ -269,6 +271,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentModelID = modelID
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
+        self.conversationCache = ConversationCache()
         self.maxBatch = max(1, maxBatch)
         self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
         self.warmSwapEnabled = warmSwapEnabled
@@ -323,6 +326,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
+        self.conversationCache = ConversationCache()
         self.maxBatch = max(1, maxBatch)
         self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
         self.warmSwapEnabled = warmSwapEnabled
@@ -571,6 +575,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = kvBitsOverride
+        let conversationCache = conversationCache
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
         let completion = try await Self.withDrainCancellation(drainCancelled) {
@@ -591,54 +596,86 @@ actor ModelRuntime: ModelRuntimeServing {
                         topP: Float(request.topP)
                     )
                     let firstToken = FirstTokenRecorder()
-                    let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
-                        if !tokens.isEmpty {
-                            firstToken.recordIfMissing()
-                        }
-                        if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
-                            return GenerateDisposition.stop
-                        }
-                        return GenerateDisposition.more
-                    }
-                    try drainCancelled.check()
-                    try Task.checkCancellation()
-
-                    guard result.output.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
-                        throw APIError(
-                            status: 502,
-                            message: "Model response exceeded 2097152 bytes",
-                            type: "upstream_provider_error",
-                            code: "response_byte_cap_exceeded",
-                            inferenceRan: true,
-                            settlementRan: true
-                        )
-                    }
-
-                    let filtered = Self.applyOutputFilters(
-                        result.output,
-                        stopTokenFilter: stopTokenFilter,
-                        requestStops: request.stop
+                    let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    let lease = await conversationCache.begin(
+                        conversationKey: request.conversationKey,
+                        incomingTokens: promptTokenIds,
+                        modelID: request.model,
+                        kvBits: kvBitsOverride
                     )
+                    do {
+                        let kvCache: [KVCache]
+                        let iteratorInput: LMInput
+                        if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
+                            kvCache = reusableCache.layers
+                            iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
+                        } else {
+                            kvCache = context.model.newCache(parameters: parameters)
+                            iteratorInput = lmInput
+                        }
 
-                    let parsed = Self.parseToolCallsIfRequested(filtered.text, request: request)
-                    let finishReason: String
-                    if !parsed.toolCalls.isEmpty {
-                        finishReason = "tool_calls"
-                    } else if let maxTokens = request.maxTokens, result.generationTokenCount >= maxTokens, !filtered.hitStop {
-                        finishReason = "length"
-                    } else {
-                        finishReason = "stop"
+                        var generatedTokenIds: [Int32] = []
+                        let iterator = try TokenIterator(input: iteratorInput, model: context.model, cache: kvCache, parameters: parameters)
+                        let result: GenerateResult = generate(input: iteratorInput, context: context, iterator: iterator) { tokens in
+                            if !tokens.isEmpty {
+                                firstToken.recordIfMissing()
+                                generatedTokenIds = tokens.map { Int32($0) }
+                            }
+                            if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
+                                return GenerateDisposition.stop
+                            }
+                            return GenerateDisposition.more
+                        }
+                        try drainCancelled.check()
+                        try Task.checkCancellation()
+
+                        guard result.output.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+                            throw APIError(
+                                status: 502,
+                                message: "Model response exceeded 2097152 bytes",
+                                type: "upstream_provider_error",
+                                code: "response_byte_cap_exceeded",
+                                inferenceRan: true,
+                                settlementRan: true
+                            )
+                        }
+
+                        let filtered = Self.applyOutputFilters(
+                            result.output,
+                            stopTokenFilter: stopTokenFilter,
+                            requestStops: request.stop
+                        )
+
+                        let parsed = Self.parseToolCallsIfRequested(filtered.text, request: request)
+                        let finishReason: String
+                        if !parsed.toolCalls.isEmpty {
+                            finishReason = "tool_calls"
+                        } else if let maxTokens = request.maxTokens, result.generationTokenCount >= maxTokens, !filtered.hitStop {
+                            finishReason = "length"
+                        } else {
+                            finishReason = "stop"
+                        }
+
+                        let completion = try Self.validateStructuredCompletion(CompletionResult(
+                            content: parsed.content,
+                            finishReason: finishReason,
+                            promptTokens: promptTokenIds.count,
+                            cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
+                            completionTokens: result.generationTokenCount,
+                            ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt),
+                            toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+                            modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
+                        ), request: request)
+                        if let lease {
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + generatedTokenIds)
+                        }
+                        return completion
+                    } catch {
+                        if let lease {
+                            await conversationCache.abort(lease)
+                        }
+                        throw error
                     }
-
-                    return try Self.validateStructuredCompletion(CompletionResult(
-                        content: parsed.content,
-                        finishReason: finishReason,
-                        promptTokens: result.promptTokenCount,
-                        completionTokens: result.generationTokenCount,
-                        ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt),
-                        toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
-                        modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
-                    ), request: request)
                 }
             }
         }
@@ -678,6 +715,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = kvBitsOverride
+        let conversationCache = conversationCache
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
         return try await Self.withDrainCancellation(drainCancelled) {
@@ -708,106 +746,138 @@ actor ModelRuntime: ModelRuntimeServing {
                         topP: Float(request.topP)
                     )
 
+                    let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    let lease = await conversationCache.begin(
+                        conversationKey: request.conversationKey,
+                        incomingTokens: promptTokenIds,
+                        modelID: request.model,
+                        kvBits: kvBitsOverride
+                    )
+                    let kvCache: [KVCache]
+                    let iteratorInput: LMInput
+                    if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
+                        kvCache = reusableCache.layers
+                        iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
+                    } else {
+                        kvCache = context.model.newCache(parameters: parameters)
+                        iteratorInput = lmInput
+                    }
+
                     var emittedText = ""
                     var stoppedByRequestStop = false
                     var toolStreamer = NativeToolCallStreamEmitter(modelID: request.model)
+                    var generatedTokenIds: [Int32] = []
 
                     let streamToolsIncrementally = Self.hasEnabledTools(request.promptSource.tools)
-                    let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
-                        if Task.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
-                            return .stop
-                        }
-                        let decoded = context.tokenizer.decode(tokens: tokens)
-                        let candidate = Self.streamingSafePrefix(
-                            decoded,
-                            stopTokenFilter: stopTokenFilter,
-                            requestStops: request.stop
-                        )
-                        if streamToolsIncrementally {
-                            for event in toolStreamer.observe(candidate.text) {
-                                onChunk(event)
+                    let iterator = try TokenIterator(input: iteratorInput, model: context.model, cache: kvCache, parameters: parameters)
+                    do {
+                        let result: GenerateResult = generate(input: iteratorInput, context: context, iterator: iterator) { tokens in
+                            if Task.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
+                                return .stop
                             }
+                            generatedTokenIds = tokens.map { Int32($0) }
+                            let decoded = context.tokenizer.decode(tokens: tokens)
+                            let candidate = Self.streamingSafePrefix(
+                                decoded,
+                                stopTokenFilter: stopTokenFilter,
+                                requestStops: request.stop
+                            )
+                            if streamToolsIncrementally {
+                                for event in toolStreamer.observe(candidate.text) {
+                                    onChunk(event)
+                                }
+                                if candidate.hitStop {
+                                    stoppedByRequestStop = true
+                                    return .stop
+                                }
+                                return .more
+                            }
+
+                            let delta = Self.delta(from: emittedText, to: candidate.text)
+                            if !delta.isEmpty {
+                                if structuredAccumulator.append(delta) != nil {
+                                    return .stop
+                                }
+                                idleState.noteContent()
+                                emittedText = candidate.text
+                                onChunk(.content(delta))
+                            }
+
                             if candidate.hitStop {
                                 stoppedByRequestStop = true
                                 return .stop
                             }
                             return .more
                         }
+                        try drainCancelled.check()
+                        try Task.checkCancellation()
 
-                        let delta = Self.delta(from: emittedText, to: candidate.text)
-                        if !delta.isEmpty {
-                            if structuredAccumulator.append(delta) != nil {
-                                return .stop
+                        let final = Self.applyOutputFilters(
+                            result.output,
+                            stopTokenFilter: stopTokenFilter,
+                            requestStops: request.stop
+                        )
+                        let finalDelta = Self.delta(from: emittedText, to: final.text)
+                        let parsed = Self.parseToolCallsIfRequested(final.text, request: request)
+                        if streamToolsIncrementally {
+                            for event in toolStreamer.observe(final.text) {
+                                onChunk(event)
                             }
-                            idleState.noteContent()
-                            emittedText = candidate.text
-                            onChunk(.content(delta))
-                        }
-
-                        if candidate.hitStop {
-                            stoppedByRequestStop = true
-                            return .stop
-                        }
-                        return .more
-                    }
-                    try drainCancelled.check()
-                    try Task.checkCancellation()
-
-                    let final = Self.applyOutputFilters(
-                        result.output,
-                        stopTokenFilter: stopTokenFilter,
-                        requestStops: request.stop
-                    )
-                    let finalDelta = Self.delta(from: emittedText, to: final.text)
-                    let parsed = Self.parseToolCallsIfRequested(final.text, request: request)
-                    if streamToolsIncrementally {
-                        for event in toolStreamer.observe(final.text) {
-                            onChunk(event)
-                        }
-                        if parsed.toolCalls.isEmpty, !parsed.content.isEmpty {
-                            if let error = structuredAccumulator.append(parsed.content) {
+                            if parsed.toolCalls.isEmpty, !parsed.content.isEmpty {
+                                if let error = structuredAccumulator.append(parsed.content) {
+                                    throw error
+                                }
+                                idleState.noteContent()
+                                onChunk(.content(parsed.content))
+                            }
+                        } else if !finalDelta.isEmpty {
+                            if let error = structuredAccumulator.append(finalDelta) {
                                 throw error
                             }
                             idleState.noteContent()
-                            onChunk(.content(parsed.content))
+                            onChunk(.content(finalDelta))
                         }
-                    } else if !finalDelta.isEmpty {
-                        if let error = structuredAccumulator.append(finalDelta) {
+                        if let error = structuredAccumulator.error {
                             throw error
                         }
-                        idleState.noteContent()
-                        onChunk(.content(finalDelta))
-                    }
-                    if let error = structuredAccumulator.error {
+
+                        let finishReason: String
+                        if !parsed.toolCalls.isEmpty {
+                            finishReason = "tool_calls"
+                        } else if let maxTokens = request.maxTokens,
+                           result.generationTokenCount >= maxTokens,
+                           !stoppedByRequestStop,
+                           !final.hitStop
+                        {
+                            finishReason = "length"
+                        } else {
+                            finishReason = "stop"
+                        }
+
+                        let completion = CompletionResult(
+                            content: parsed.content,
+                            finishReason: finishReason,
+                            promptTokens: promptTokenIds.count,
+                            cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
+                            completionTokens: result.generationTokenCount,
+                            toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+                            modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
+                        )
+                        let validated = try Self.validateStructuredStreamingCompletion(
+                            completion,
+                            request: request,
+                            buyerVisibleContent: structuredAccumulator.content
+                        )
+                        if let lease {
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + generatedTokenIds)
+                        }
+                        return validated
+                    } catch {
+                        if let lease {
+                            await conversationCache.abort(lease)
+                        }
                         throw error
                     }
-
-                    let finishReason: String
-                    if !parsed.toolCalls.isEmpty {
-                        finishReason = "tool_calls"
-                    } else if let maxTokens = request.maxTokens,
-                       result.generationTokenCount >= maxTokens,
-                       !stoppedByRequestStop,
-                       !final.hitStop
-                    {
-                        finishReason = "length"
-                    } else {
-                        finishReason = "stop"
-                    }
-
-                    let completion = CompletionResult(
-                        content: parsed.content,
-                        finishReason: finishReason,
-                        promptTokens: result.promptTokenCount,
-                        completionTokens: result.generationTokenCount,
-                        toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
-                        modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
-                    )
-                    return try Self.validateStructuredStreamingCompletion(
-                        completion,
-                        request: request,
-                        buyerVisibleContent: structuredAccumulator.content
-                    )
                 }
             }
             }
@@ -1130,6 +1200,7 @@ actor ModelRuntime: ModelRuntimeServing {
             content: buyerVisibleContent,
             finishReason: completion.finishReason,
             promptTokens: completion.promptTokens,
+            cachedPromptTokens: completion.cachedPromptTokens,
             completionTokens: completion.completionTokens,
             ttftMilliseconds: completion.ttftMilliseconds,
             toolCalls: completion.toolCalls,
@@ -1598,6 +1669,7 @@ struct CompletionResult: Sendable {
     let content: String
     let finishReason: String
     let promptTokens: Int
+    let cachedPromptTokens: Int
     let completionTokens: Int
     let ttftMilliseconds: Int64?
     let toolCalls: [ToolCall]?
@@ -1607,6 +1679,7 @@ struct CompletionResult: Sendable {
         content: String,
         finishReason: String,
         promptTokens: Int,
+        cachedPromptTokens: Int = 0,
         completionTokens: Int,
         ttftMilliseconds: Int64? = nil,
         toolCalls: [ToolCall]? = nil,
@@ -1615,6 +1688,7 @@ struct CompletionResult: Sendable {
         self.content = content
         self.finishReason = finishReason
         self.promptTokens = promptTokens
+        self.cachedPromptTokens = max(0, min(cachedPromptTokens, promptTokens))
         self.completionTokens = completionTokens
         self.ttftMilliseconds = ttftMilliseconds
         self.toolCalls = toolCalls
@@ -1627,6 +1701,7 @@ struct CompletionResult: Sendable {
             content: content,
             finishReason: finishReason,
             promptTokens: promptTokens,
+            cachedPromptTokens: cachedPromptTokens,
             completionTokens: completionTokens,
             ttftMilliseconds: ttftMilliseconds,
             toolCalls: toolCalls,

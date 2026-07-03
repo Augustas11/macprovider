@@ -2387,6 +2387,11 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
+	if state != nil && state.stickyResult == "hit" {
+		if key := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv")); strings.HasPrefix(key, "conv:") {
+			ctx = providerws.ContextWithConversationKey(ctx, key)
+		}
+	}
 	var relay *providerws.RelayStream
 	var err error
 	if settlementMetadata != nil && s.settlementRelay != nil {

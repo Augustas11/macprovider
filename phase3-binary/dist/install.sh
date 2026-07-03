@@ -48,6 +48,43 @@ die() {
   exit "$code"
 }
 
+# Retry macprovider-cli once if the first post-install invocation is
+# SIGKILL'd by the kernel with a CODESIGNING "Invalid Page" / "Taskgated
+# Invalid Signature" verdict. Observed 2026-07-03 on Apple M5 macOS 26.5
+# with a freshly-installed v1.7.9 pkg: `autotune --recommend
+# --freshness-check` was reported "Killed: 9" (bash exit 137) on the
+# FIRST invocation right after `installer -pkg`, and the immediately-
+# repeated invocation of the SAME command by the SAME shell succeeded.
+# This is a race between the pkg installer's post-install AMFI
+# signature revalidation and our first execve; a brief pause plus one
+# retry is sufficient in practice. Only SIGKILL / bash rc 137 is
+# retried — other non-zero exits (including autotune's exit-10 "stale
+# recommendation" signal, and other signal-terminated codes such as
+# 134 SIGABRT / 138 SIGBUS / 139 SIGSEGV) pass through unchanged so
+# we do not mask real crashes.
+#
+# This helper MUST be called from `if run_..._retry ...; then` or
+# `run_..._retry ... || ...` so that `set -e` (enabled at the top of
+# this script) does not fire on the pass-through non-zero return.
+#
+# Diagnostic lines are written to stderr so they remain visible even
+# when callers redirect the helper's stdout to `/dev/null` (as the
+# freshness-check call site does).
+run_macprovider_cli_with_amfi_retry() {
+  local rc=0
+  "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
+  if [ "$rc" -eq 137 ]; then
+    log "macprovider-cli was SIGKILL'd on first invocation (rc=$rc); likely a transient AMFI code-signature race after pkg install. Retrying once after 2s." >&2
+    sleep 2
+    rc=0
+    "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
+    if [ "$rc" -eq 137 ]; then
+      log "macprovider-cli was SIGKILL'd again on the retry; this may be a genuine signature failure rather than the transient AMFI race." >&2
+    fi
+  fi
+  return "$rc"
+}
+
 detect_existing_port() {
   if [ -f "$CONFIG_PATH" ]; then
     awk -F: '/^port:/ {gsub(/ /, "", $2); print $2; exit}' "$CONFIG_PATH" 2>/dev/null
@@ -1023,7 +1060,7 @@ run_autotune_recommend_apply() {
     die 5 "installed macprovider-cli missing before autotune recommendation"
   fi
   log "Running paid-yield recommendation before service start."
-  if "$INSTALL_DIR/macprovider-cli" autotune --recommend --apply --config "$CONFIG_PATH"; then
+  if run_macprovider_cli_with_amfi_retry autotune --recommend --apply --config "$CONFIG_PATH"; then
     recommended_model="$(read_config_model || true)"
     artifact_path="$(read_config_artifact_path || true)"
     artifact_sha="$(read_config_artifact_sha || true)"
@@ -1044,7 +1081,7 @@ run_autotune_recommend_apply() {
     log "No paid model currently clears the minimum net-yield threshold on this Mac."
     if prompt_yes_no "Enable donor mode? [y/N]" "N"; then
       log "Applying donor-mode configuration."
-      "$INSTALL_DIR/macprovider-cli" autotune --recommend --apply --donor-mode --config "$CONFIG_PATH" \
+      run_macprovider_cli_with_amfi_retry autotune --recommend --apply --donor-mode --config "$CONFIG_PATH" \
         || die 6 "donor-mode recommendation failed before service start"
       recommended_model="$(read_config_model || true)"
       artifact_path="$(read_config_artifact_path || true)"
@@ -1077,7 +1114,7 @@ use_fresh_recommendation_if_available() {
     return 1
   fi
 
-  if "$INSTALL_DIR/macprovider-cli" autotune --recommend --freshness-check --config "$CONFIG_PATH" >/dev/null; then
+  if run_macprovider_cli_with_amfi_retry autotune --recommend --freshness-check --config "$CONFIG_PATH" >/dev/null; then
     recommended_model="$(read_config_model || true)"
     artifact_path="$(read_config_artifact_path || true)"
     artifact_sha="$(read_config_artifact_sha || true)"

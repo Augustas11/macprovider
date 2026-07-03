@@ -204,16 +204,39 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(AutotuneRecommendEngine.cachedBenchmarkAdmitted(stale, request: request, modelKey: modelKey))
     }
 
-    func testNoCoordinatorDefaultFallbackUnlessCandidateKeyIsDefault() throws {
+    func testRateCardFallsThroughToDefaultForArbitraryModelKey() throws {
+        // v1.7.6 Track A1: any model without a specific rate-card row
+        // falls through to the "default" row so probe-feasible models
+        // still receive an earnings estimate. Coord's `RateFor` at
+        // phase4-coordinator/internal/billing/formula.go already pays
+        // the default rate for served inference on unmatched models —
+        // client now agrees.
         let rateCard = try AutotuneStaticInputs.decodeRateCard(Data("""
         {"version":"test","generated_at":"2026-07-01T00:00:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
         """.utf8))
 
-        XCTAssertNil(rateCard.rowForRecommendation(modelKey: "qwen3-coder-30b-a3b-instruct"))
-        XCTAssertNil(rateCard.rowForRecommendation(modelKey: "DEFAULT"))
-        XCTAssertNil(rateCard.rowForRecommendation(modelKey: " default "))
-        XCTAssertNil(rateCard.rowForRecommendation(modelKey: "mlx-community/default-4bit"))
-        XCTAssertNotNil(rateCard.rowForRecommendation(modelKey: "default"))
+        XCTAssertEqual(rateCard.rowForRecommendation(modelKey: "qwen3-coder-30b-a3b-instruct")?.key, "default")
+        XCTAssertEqual(rateCard.rowForRecommendation(modelKey: "meta-llama/llama-3.1-8b-instruct")?.key, "default")
+        XCTAssertEqual(rateCard.rowForRecommendation(modelKey: "default")?.key, "default")
+    }
+
+    func testRateCardReturnsNilWhenNoDefaultAndNoMatch() throws {
+        let rateCard = try AutotuneStaticInputs.decodeRateCard(Data("""
+        {"version":"test","generated_at":"2026-07-01T00:00:00Z","usd_per_million_credits":1.0,"rows":{"qwen3-32b":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
+        """.utf8))
+
+        XCTAssertNil(rateCard.rowForRecommendation(modelKey: "unknown-model"))
+    }
+
+    func testRateCardPrefersSpecificRowOverDefault() throws {
+        // v1.7.6 Track A1: exact/normalized specific row wins over "default".
+        let rateCard = try AutotuneStaticInputs.decodeRateCard(Data("""
+        {"version":"test","generated_at":"2026-07-01T00:00:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":9,"completion_rate_per_mtok":9,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-32b":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
+        """.utf8))
+
+        let match = rateCard.rowForRecommendation(modelKey: "qwen3-32b")
+        XCTAssertEqual(match?.key, "qwen3-32b")
+        XCTAssertEqual(match?.row.promptRatePerMtok, 1)
     }
 
     func testNormalizedRateCardLookupRecordsNormalizedKey() throws {
@@ -1096,6 +1119,152 @@ final class AutotuneRecommendTests: XCTestCase {
 
         XCTAssertNil(staleSince)
         XCTAssertEqual(staleWithDifferentProvider, Optional(Self.date("2026-07-02T00:00:00Z")))
+    }
+
+    // MARK: - Default-tier fallthrough + swap tolerance (v1.7.6 Track A1/A2a)
+
+    func testRecommendationEmitsRateCardDefaultTierWarningWhenSpecificRowMissing() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        // Drop the specific row so the engine has to fall through to "default".
+        request.rateCard.rows.removeValue(forKey: modelKey)
+        // Provide a default row so the fallthrough resolves.
+        request.rateCard.rows["default"] = RateCardProjection.Row(
+            promptRatePerMtok: 500_000,
+            completionRatePerMtok: 1_000_000,
+            providerShareBPS: 9_000,
+            globalMultiplierPPM: 1_000_000
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertTrue(result.warnings.contains(.rateCardDefaultTierUsed))
+        // v1.7.6 Track A1 correction: the SERVED model is the catalog model
+        // (what MLX will actually load), not the pricing key. Only the
+        // rate-card row used for earnings math resolves to "default".
+        XCTAssertEqual(result.recommendedModel, modelKey)
+        XCTAssertEqual(result.selectedCandidate?.catalogKey, modelKey)
+    }
+
+    func testRecommendationNoDefaultTierWarningWhenSpecificRowPresent() throws {
+        let result = AutotuneRecommendEngine().recommend(try makeRequest())
+        XCTAssertFalse(result.warnings.contains(.rateCardDefaultTierUsed))
+    }
+
+    func testSwapDetectedNoLongerBlocksEligibilityButEmitsWarning() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        // Flip swap flag on the existing feasible benchmark fixture.
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        benchmark.swapDetected = true
+        request.benchmarks[modelKey] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.recommendedModel, modelKey, "v1.7.6 Track A2a: swap detected must not veto eligibility")
+        XCTAssertTrue(result.warnings.contains(.swapObservedUnderLoad))
+        XCTAssertFalse(result.warnings.contains(.noEligiblePaidModel))
+    }
+
+    func testThermalThrottleStillHardBlocksEligibility() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        benchmark.thermalThrottleDetected = true
+        request.benchmarks[modelKey] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertNil(result.recommendedModel, "v1.7.6: thermal throttle stays a hard-block (TPS reading unreliable)")
+        XCTAssertTrue(result.warnings.contains(.noEligiblePaidModel))
+    }
+
+    func testDonorModeInheritsSwapRelaxation() throws {
+        var request = try makeRequest(modelKey: "qwen3-32b")
+        request.donorMode = true
+        request.hardware.bandwidthTier = .a
+        var benchmark = try XCTUnwrap(request.benchmarks["qwen3-32b"])
+        benchmark.swapDetected = true
+        request.benchmarks["qwen3-32b"] = benchmark
+
+        XCTAssertTrue(AutotuneRecommendEngine.donorModeAdmitted(
+            modelKey: "qwen3-32b",
+            candidate: request.candidateCatalog.rows["qwen3-32b"],
+            request: request
+        ))
+    }
+
+    func testDonorModeStillRejectsThermalThrottle() throws {
+        var request = try makeRequest(modelKey: "qwen3-32b")
+        request.donorMode = true
+        request.hardware.bandwidthTier = .a
+        var benchmark = try XCTUnwrap(request.benchmarks["qwen3-32b"])
+        benchmark.thermalThrottleDetected = true
+        request.benchmarks["qwen3-32b"] = benchmark
+
+        XCTAssertFalse(AutotuneRecommendEngine.donorModeAdmitted(
+            modelKey: "qwen3-32b",
+            candidate: request.candidateCatalog.rows["qwen3-32b"],
+            request: request
+        ))
+    }
+
+    // MARK: - v1.7.9 Track A5 (Option B) — soft TPS + TTFT gates
+
+    func testTPSBelowGateNoLongerBlocksEligibilityButEmitsWarning() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        // Force TPS below the catalog gate (25 tok/s for qwen3-coder).
+        // Keep it high enough that expected_net_usd_per_hour still
+        // clears the $0.005/hr paid threshold.
+        benchmark.sustainedTPS = 20
+        request.benchmarks[modelKey] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.recommendedModel, modelKey,
+            "v1.7.9 Option B: TPS below catalog gate must not veto eligibility")
+        XCTAssertTrue(result.warnings.contains(.tpsBelowGate))
+        XCTAssertFalse(result.warnings.contains(.noEligiblePaidModel))
+    }
+
+    func testTTFTAboveGateNoLongerBlocksEligibilityButEmitsWarning() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        // Force TTFT above the catalog ceiling (3000ms for qwen3-coder).
+        benchmark.ttftMS = 6_000
+        request.benchmarks[modelKey] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.recommendedModel, modelKey,
+            "v1.7.9 Option B: TTFT above catalog ceiling must not veto eligibility")
+        XCTAssertTrue(result.warnings.contains(.ttftAboveGate))
+    }
+
+    func testNoTPSWarningWhenBenchmarkClearsGate() throws {
+        let result = AutotuneRecommendEngine().recommend(try makeRequest())
+        XCTAssertFalse(result.warnings.contains(.tpsBelowGate))
+        XCTAssertFalse(result.warnings.contains(.ttftAboveGate))
+    }
+
+    func testDonorModeInheritsTPSAndTTFTRelaxation() throws {
+        var request = try makeRequest(modelKey: "qwen3-32b")
+        request.donorMode = true
+        request.hardware.bandwidthTier = .a
+        var benchmark = try XCTUnwrap(request.benchmarks["qwen3-32b"])
+        // Below TPS gate + above TTFT ceiling for qwen3-32b.
+        benchmark.sustainedTPS = 1
+        benchmark.ttftMS = 100_000
+        request.benchmarks["qwen3-32b"] = benchmark
+
+        XCTAssertTrue(AutotuneRecommendEngine.donorModeAdmitted(
+            modelKey: "qwen3-32b",
+            candidate: request.candidateCatalog.rows["qwen3-32b"],
+            request: request
+        ))
     }
 
     // MARK: - Stage1 probe timeout + BenchmarkOutcomes diagnostics (v1.7.5)
