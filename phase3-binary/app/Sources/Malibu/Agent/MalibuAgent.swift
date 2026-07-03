@@ -45,7 +45,7 @@ final class MalibuAgent: ObservableObject {
         // deep-link callback first.
         guard await ProviderConfig.isConfigured else {
             snapshot.state = .error
-            snapshot.lastError = "Not linked yet. Open Set up… and link your node."
+            snapshot.lastError = "Not set up yet. Click Launch Provider to activate."
             return
         }
         // Re-check after the await, since we suspended.

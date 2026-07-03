@@ -34,15 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls where url.scheme == "malibu" {
-            URLSchemeHandler.handle(url) { [weak self] event in
-                Task { @MainActor in
-                    await self?.consume(event)
-                }
-            }
-        }
-    }
+    // SPEC-026 §7.3: malibu:// URL scheme + PendingLinkState handler retired.
+    // The application(_:open:) implementation has been removed in v0.11 impl
+    // step 2. Any deep-link scheme SPEC-027 needs (verified-email flow) is
+    // that spec's normative surface, not SPEC-026's.
 
     // AUDIT R2 CODE H2 + R3 CODE M1 + R4 hardening: intercept every
     // termination (Quit menu, Cmd-Q, logout, killall by name) and route the
@@ -101,37 +96,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // AUDIT R1 SECURITY S1 / CODE H3 / ARCHITECT A3 fix: validate the pending
-    // nonce and refuse if the app is already configured. Any invalid callback
-    // is treated as an attack — surface an error, do not overwrite state.
-    private func consume(_ event: URLSchemeHandler.Event) async {
-        switch event {
-        case let .providerLinked(state, providerID, token):
-            let alreadyConfigured = await ProviderConfig.isConfigured
-            do {
-                try PendingLinkState.consume(state: state, appAlreadyConfigured: alreadyConfigured)
-            } catch {
-                await MainActor.run { self.presentLinkError(error) }
-                return
-            }
-            do {
-                try await ProviderConfig.saveProviderIdentity(providerID: providerID, token: token)
-            } catch {
-                await MainActor.run { self.presentLinkError(error) }
-                return
-            }
-            await agent.start()
-        }
-    }
-
-    private func presentLinkError(_ error: Error) {
-        let alert = NSAlert()
-        alert.messageText = "Link request rejected"
-        alert.informativeText = (error as? LocalizedError)?.errorDescription
-            ?? error.localizedDescription
-        alert.alertStyle = .warning
-        alert.runModal()
-    }
+    // SPEC-026 §7.3: consume(_:) / presentLinkError(_:) retired along with
+    // the malibu:// URL scheme handler. Provider onboarding now happens
+    // in-App via LaunchProviderController (SPEC-026 §7.2, follow-up impl
+    // in this same PR).
 
     private func presentOnboarding() {
         if onboardingWindow == nil {
@@ -160,7 +128,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func performUninstall() async {
         await agent.shutdown(gracefulSeconds: 30)
         let unregisterFailure = await AppLoginItem.unregisterReturningError()
-        PendingLinkState.discard()
+        // SPEC-026 §6.5: also wipe the Ed25519 identity Keychain slot.
+        // Follow-up: LaunchProviderController.deleteIdentity() call lands
+        // with the ProviderIdentity module in this same impl PR.
         let residue = await ProviderConfig.wipeAppOwnedState()
 
         if !residue.clean || unregisterFailure != nil {
