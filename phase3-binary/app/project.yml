@@ -60,5 +60,6 @@ targets:
         PRODUCT_NAME: Malibu
         PRODUCT_BUNDLE_IDENTIFIER: tech.malibu.app
         CODE_SIGN_ENTITLEMENTS: Malibu.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
     dependencies: []

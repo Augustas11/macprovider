@@ -19,7 +19,15 @@ private struct DashboardView: View {
     @ObservedObject var agent: MalibuAgent
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                MalibuBrandTile()
+                    .frame(width: 28, height: 28)
+                Text("Malibu")
+                    .font(.system(size: 15, weight: .semibold))
+                Spacer()
+            }
+
             HStack {
                 VStack(alignment: .leading) {
                     Text("Today").font(.caption).foregroundStyle(.secondary)
@@ -40,6 +48,10 @@ private struct DashboardView: View {
             }
             .padding(24)
             .background(RoundedRectangle(cornerRadius: 12).fill(Color.gray.opacity(0.08)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(MalibuBrand.coral.opacity(0.35), lineWidth: 1)
+            )
 
             Text("Live log")
                 .font(.headline)
@@ -53,8 +65,8 @@ private struct DashboardView: View {
     private func color(for state: AgentSnapshot.State) -> Color {
         switch state {
         case .serving: return .green
-        case .starting, .reconnecting: return .orange
-        case .paused: return .yellow
+        case .starting, .reconnecting: return MalibuBrand.coral
+        case .paused: return MalibuBrand.sunnyYellow
         case .error: return .red
         case .idle: return .secondary
         }

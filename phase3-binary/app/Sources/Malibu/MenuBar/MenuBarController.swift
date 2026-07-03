@@ -26,7 +26,8 @@ final class MenuBarController {
 
     private func configureButton() {
         guard let button = statusItem.button else { return }
-        button.image = NSImage(systemSymbolName: "wave.3.right.circle", accessibilityDescription: "Malibu")
+        button.image = MalibuMenuBarIcon.makeTemplate(pointSize: 18)
+        button.image?.accessibilityDescription = "Malibu"
         button.imagePosition = .imageLeft
         button.title = ""
         statusItem.menu = buildMenu()

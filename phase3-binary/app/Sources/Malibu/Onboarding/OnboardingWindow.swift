@@ -28,8 +28,18 @@ private struct OnboardingRootView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("Earn from your Mac.")
-                .font(.system(size: 28, weight: .semibold))
+            HStack(spacing: 14) {
+                MalibuBrandTile()
+                    .frame(width: 44, height: 44)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Malibu")
+                        .font(.system(size: 13, weight: .medium))
+                        .tracking(0.5)
+                        .foregroundStyle(.secondary)
+                    Text("Earn from your Mac.")
+                        .font(.system(size: 28, weight: .semibold))
+                }
+            }
             Text("Three quick steps and you're a node.")
                 .foregroundStyle(.secondary)
 
@@ -41,6 +51,7 @@ private struct OnboardingRootView: View {
                     NSWorkspace.shared.open(url)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(MalibuBrand.coral)
             }
 
             step(number: 2, title: "Payout wallet address") {
@@ -57,6 +68,7 @@ private struct OnboardingRootView: View {
                     else { Text("Start earning") }
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(MalibuBrand.coral)
                 .disabled(busy)
             }
 
@@ -73,8 +85,8 @@ private struct OnboardingRootView: View {
     private func step<Content: View>(number: Int, title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Circle().fill(.orange).frame(width: 22, height: 22)
-                    .overlay(Text("\(number)").font(.caption.bold()).foregroundStyle(.white))
+                Circle().fill(MalibuBrand.coral).frame(width: 22, height: 22)
+                    .overlay(Text("\(number)").font(.caption.bold()).foregroundStyle(MalibuBrand.cream))
                 Text(title).font(.headline)
             }
             content().padding(.leading, 32)

@@ -8,11 +8,17 @@ Swift + SwiftUI menu-bar wrapper around `macprovider-cli`. See [SPEC-025](../../
 app/
 ├── project.yml                    # XcodeGen input — generates Malibu.xcodeproj
 ├── Malibu.entitlements
+├── scripts/
+│   └── generate-app-icon.sh       # SVG → 10 PNG sizes via qlmanage (no deps)
 └── Sources/Malibu/
     ├── MalibuApp.swift            # @main + AppDelegate + URL-scheme routing
     ├── Info.plist                 # merged with keys from project.yml
+    ├── Resources/
+    │   ├── Brand/malibu-icon.svg  # canonical brand mark, mirrors malibu.tech/favicon.svg
+    │   └── Assets.xcassets/       # AppIcon.appiconset (10 PNGs, generated)
     ├── MenuBar/
-    │   └── MenuBarController.swift
+    │   ├── MenuBarController.swift
+    │   └── BrandMark.swift        # MalibuBrandTile + MalibuMenuBarIcon (template) + palette
     ├── Agent/
     │   ├── MalibuAgent.swift      # ObservableObject; snapshot published to menu bar + dashboard
     │   ├── CLIChildProcess.swift  # owns the macprovider-cli child + restart backoff
