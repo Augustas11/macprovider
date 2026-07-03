@@ -2072,7 +2072,18 @@ func TestNonStreamingBillingDiscountsCachedPromptTokensOnSingleProviderStickyHit
 	}
 }
 
-func TestWSTunneledStickyHitForwardsConversationKeyOnlyOnHit(t *testing.T) {
+// TestWSTunneledStickyEligibleForwardsConversationKeyOnBothMissAndHit asserts
+// the corrected behavior: coord forwards X-MacProvider-Internal-Conv to the
+// provider on every sticky-eligible request, not just on sticky_hit. The
+// original PR #332 gated forwarding on state.stickyResult == "hit"; that
+// gate made the provider-side ConversationCache architecturally incapable
+// of populating (turn 1 is always a sticky miss, so the provider never got
+// a key to store the KV state under; turn 2 was a hit and looked up an
+// empty cache). Prod verify against api.streamvc.live on 2026-07-03 with
+// binary v1.7.9 + coord fe175d0 reproduced this: sticky_hit confirmed in
+// coord logs, both turns on same provider mac, but cached_prompt_tokens=0
+// on turn 2. This test codifies the fix.
+func TestWSTunneledStickyEligibleForwardsConversationKeyOnBothMissAndHit(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
 
@@ -2106,14 +2117,23 @@ func TestWSTunneledStickyHitForwardsConversationKeyOnlyOnHit(t *testing.T) {
 		"X-MacProvider-Account":       []string{"acct_cache"},
 	}
 
+	// Turn 1: sticky miss (nothing established yet). Provider MUST still
+	// receive the conversation_key so its ConversationCache.begin() can
+	// enter the populate-on-first-turn path (cold_start miss lease → commit
+	// on inference completion).
 	seed := postChat(t, server, body, headers)
 	if seed.Code != http.StatusOK {
 		t.Fatalf("seed status=%d body=%s", seed.Code, seed.Body.String())
 	}
+	// Turn 2: sticky hit (state established after turn 1). Provider looks up
+	// under the same key and finds the entry stored on turn 1.
 	hit := postChat(t, server, body, headers)
 	if hit.Code != http.StatusOK {
 		t.Fatalf("hit status=%d body=%s", hit.Code, hit.Body.String())
 	}
+	// Turn 3: different conversation key (sticky miss for THIS key). Same
+	// contract as turn 1 — provider must receive the new key to start a
+	// separate cache bucket for it.
 	missHeaders := http.Header{
 		"Authorization":               []string{"Bearer operator-key"},
 		"X-MacProvider-Internal-Conv": []string{"conv:ws-cache-miss"},
@@ -2127,14 +2147,110 @@ func TestWSTunneledStickyHitForwardsConversationKeyOnlyOnHit(t *testing.T) {
 	if len(forwardedKeys) != 3 {
 		t.Fatalf("forwarded keys = %#v, want 3 calls", forwardedKeys)
 	}
-	if forwardedKeys[0] != "" {
-		t.Fatalf("seed forwarded conversation_key=%q, want empty on sticky miss", forwardedKeys[0])
+	// All three calls must forward the conversation_key present in the
+	// header. Empty on seed would recreate the "cache never populates" bug.
+	if forwardedKeys[0] != "conv:ws-cache" {
+		t.Fatalf("seed forwarded conversation_key=%q, want conv:ws-cache (must populate turn 1 for turn 2 to hit)", forwardedKeys[0])
 	}
 	if forwardedKeys[1] != "conv:ws-cache" {
 		t.Fatalf("hit forwarded conversation_key=%q, want conv:ws-cache", forwardedKeys[1])
 	}
-	if forwardedKeys[2] != "" {
-		t.Fatalf("miss forwarded conversation_key=%q, want empty on sticky miss", forwardedKeys[2])
+	if forwardedKeys[2] != "conv:ws-cache-miss" {
+		t.Fatalf("miss forwarded conversation_key=%q, want conv:ws-cache-miss", forwardedKeys[2])
+	}
+}
+
+// TestStickyEligibleWithoutInternalConvHeaderForwardsEmpty locks in the
+// header-presence check: if the gateway did not set X-MacProvider-Internal-Conv
+// (e.g. demo path, buyer did not send X-MacProvider-Conversation), coord
+// MUST NOT invent a key. Empty string forwarded → provider bypasses cache
+// entirely (ConversationCache.begin() returns nil on empty key). Prevents
+// cache-poisoning by a downstream that never opted into sticky routing.
+func TestStickyEligibleWithoutInternalConvHeaderForwardsEmpty(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+
+	var forwardedKeys []string
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			StickyEnabled:    true,
+			StickyTTLS:       1800,
+			StickyMaxEntries: 10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			forwardedKeys = append(forwardedKeys, providerws.ConversationKeyFromContext(ctx))
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{
+				Type:      "inference_response_chunk",
+				RequestID: requestID,
+				Seq:       0,
+				Data:      `{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`,
+			}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`)
+	headers := http.Header{
+		"Authorization":         []string{"Bearer operator-key"},
+		"X-MacProvider-Account": []string{"acct_no_conv"},
+	}
+	resp := postChat(t, server, body, headers)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if len(forwardedKeys) != 1 || forwardedKeys[0] != "" {
+		t.Fatalf("forwardedKeys=%#v, want single empty entry (no header → no key)", forwardedKeys)
+	}
+}
+
+// TestStickyEligibleRejectsInternalConvWithoutConvPrefix locks in the
+// "conv:" prefix check: gateway-issued keys start with "conv:", so a header
+// with any other shape is a spoof from an unexpected downstream. Coord must
+// not forward it — otherwise a downstream could inject a raw string that
+// might collide with a legitimate cache key on the provider.
+func TestStickyEligibleRejectsInternalConvWithoutConvPrefix(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+
+	var forwardedKeys []string
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			StickyEnabled:    true,
+			StickyTTLS:       1800,
+			StickyMaxEntries: 10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			forwardedKeys = append(forwardedKeys, providerws.ConversationKeyFromContext(ctx))
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{
+				Type:      "inference_response_chunk",
+				RequestID: requestID,
+				Seq:       0,
+				Data:      `{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`,
+			}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`)
+	headers := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"raw-string-not-a-conv-key"},
+		"X-MacProvider-Account":       []string{"acct_bad"},
+	}
+	resp := postChat(t, server, body, headers)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if len(forwardedKeys) != 1 || forwardedKeys[0] != "" {
+		t.Fatalf("forwardedKeys=%#v, want single empty entry (header not conv:-prefixed → no key)", forwardedKeys)
 	}
 }
 

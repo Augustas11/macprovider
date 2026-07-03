@@ -2387,10 +2387,18 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
-	if state != nil && state.stickyResult == "hit" {
-		if key := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv")); strings.HasPrefix(key, "conv:") {
-			ctx = providerws.ContextWithConversationKey(ctx, key)
-		}
+	// Forward conversation_key on every sticky-eligible request (miss AND hit),
+	// not just on sticky_hit. Turn 1 must store the KV cache under this key for
+	// turn 2's sticky_hit lookup to find anything. The original hit-only gate
+	// (PR #332) made the cache architecturally incapable of ever populating —
+	// zero cached_prompt_tokens in production for any conversation. Security
+	// posture is unchanged: the key stays inside the AEAD-authenticated
+	// inference_request envelope (PR #332 relay/messages.go); gateway still
+	// gates the X-MacProvider-Internal-Conv header on !authn.Demo &&
+	// StickyEnabled && buyer set X-MacProvider-Conversation (phase5-gateway
+	// chat_proxy.go), so unauthenticated demo IPs cannot poison a bucket.
+	if key := strings.TrimSpace(r.Header.Get("X-MacProvider-Internal-Conv")); strings.HasPrefix(key, "conv:") {
+		ctx = providerws.ContextWithConversationKey(ctx, key)
 	}
 	var relay *providerws.RelayStream
 	var err error
