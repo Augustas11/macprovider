@@ -1,0 +1,64 @@
+# XcodeGen spec for Malibu.app
+#
+# Generate: brew install xcodegen && (cd phase3-binary/app && xcodegen generate)
+# Build:    xcodebuild -project Malibu.xcodeproj -scheme Malibu -configuration Release
+#
+# The CLI binary (macprovider-cli) is built separately from the SwiftPM
+# package one directory up, then copied into Contents/MacOS/ at the
+# release-signing step (see SPEC-025 §6.2). Locally, developers build
+# the CLI with `swift build -c release --package-path ..` and set the
+# MALIBU_CLI_PATH env var so the app can find it.
+
+name: Malibu
+options:
+  bundleIdPrefix: tech.malibu
+  deploymentTarget:
+    macOS: "14.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Manual
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    OTHER_SWIFT_FLAGS: "-strict-concurrency=complete"
+
+targets:
+  Malibu:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Sources/Malibu
+        excludes:
+          - "**/*.md"
+    resources:
+      - Sources/Malibu/Resources
+    entitlements:
+      path: Malibu.entitlements
+    info:
+      path: Sources/Malibu/Info.plist
+      properties:
+        CFBundleName: Malibu
+        CFBundleDisplayName: Malibu
+        CFBundleIdentifier: tech.malibu.app
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: "14.0"
+        LSUIElement: true                # menu bar only, no Dock icon
+        NSHumanReadableCopyright: "Copyright © 2026 Malibu AI, Inc."
+        CFBundleURLTypes:
+          - CFBundleURLName: tech.malibu.app.deeplink
+            CFBundleURLSchemes: [malibu]
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_NAME: Malibu
+        PRODUCT_BUNDLE_IDENTIFIER: tech.malibu.app
+        CODE_SIGN_ENTITLEMENTS: Malibu.entitlements
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
+    dependencies: []
