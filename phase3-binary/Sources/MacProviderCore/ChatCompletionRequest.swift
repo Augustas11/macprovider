@@ -13,6 +13,7 @@ public struct ChatCompletionRequest: Sendable {
     public let seed: Int?
     public let responseFormat: ResponseFormat
     public let promptSource: ChatCompletionPromptSource
+    public let conversationKey: String?
 
     public static func parse(data: Data) throws -> ChatCompletionRequest {
         guard data.count <= RequestValidation.rawBodyByteCap else {
@@ -110,8 +111,73 @@ public struct ChatCompletionRequest: Sendable {
             frequencyPenalty: frequencyPenalty,
             seed: seed,
             responseFormat: responseFormat,
-            promptSource: promptSource
+            promptSource: promptSource,
+            conversationKey: nil
         )
+    }
+
+    public func withConversationKey(_ key: String?) -> ChatCompletionRequest {
+        return ChatCompletionRequest(
+            model: model,
+            messages: messages,
+            maxTokens: maxTokens,
+            temperature: temperature,
+            topP: topP,
+            stream: stream,
+            stop: stop,
+            presencePenalty: presencePenalty,
+            frequencyPenalty: frequencyPenalty,
+            seed: seed,
+            responseFormat: responseFormat,
+            promptSource: promptSource,
+            conversationKey: Self.validConversationKey(key)
+        )
+    }
+
+    private static func validConversationKey(_ key: String?) -> String? {
+        guard let trimmed = key?.trimmingCharacters(in: .whitespacesAndNewlines),
+              trimmed.hasPrefix("conv:"),
+              trimmed.count > "conv:".count,
+              trimmed.utf8.count <= 256
+        else {
+            return nil
+        }
+        guard trimmed.unicodeScalars.allSatisfy({ scalar in
+            scalar.value >= 0x20 && scalar.value != 0x7f
+        }) else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private init(
+        model: String,
+        messages: [ChatMessage],
+        maxTokens: Int?,
+        temperature: Double,
+        topP: Double,
+        stream: Bool,
+        stop: [String],
+        presencePenalty: Double,
+        frequencyPenalty: Double,
+        seed: Int?,
+        responseFormat: ResponseFormat,
+        promptSource: ChatCompletionPromptSource,
+        conversationKey: String?
+    ) {
+        self.model = model
+        self.messages = messages
+        self.maxTokens = maxTokens
+        self.temperature = temperature
+        self.topP = topP
+        self.stream = stream
+        self.stop = stop
+        self.presencePenalty = presencePenalty
+        self.frequencyPenalty = frequencyPenalty
+        self.seed = seed
+        self.responseFormat = responseFormat
+        self.promptSource = promptSource
+        self.conversationKey = conversationKey
     }
 
     public func validateModelMatches(_ loadedModel: String?) throws {

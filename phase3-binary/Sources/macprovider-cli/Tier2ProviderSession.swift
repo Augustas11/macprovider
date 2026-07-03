@@ -16,6 +16,11 @@ struct Tier2AuthAttempt: @unchecked Sendable {
 final class Tier2ProviderSession: @unchecked Sendable {
     static let aeadSuite = "A256GCM"
 
+    struct RequestPayload: Sendable {
+        let body: String
+        let conversationKey: String?
+    }
+
     let providerID: String
     let assignedID: String
     let selectedAEAD: String
@@ -102,6 +107,10 @@ final class Tier2ProviderSession: @unchecked Sendable {
     }
 
     func openRequestBody(message: [String: Any], requestID: String, stream: Bool) throws -> String {
+        try openRequestPayload(message: message, requestID: requestID, stream: stream).body
+    }
+
+    func openRequestPayload(message: [String: Any], requestID: String, stream: Bool) throws -> RequestPayload {
         guard message["encrypted"] as? Bool == true,
               let enc = message["enc"] as? [String: Any]
         else {
@@ -121,10 +130,20 @@ final class Tier2ProviderSession: @unchecked Sendable {
         )
         let plaintext = try Self.openEnvelope(enc, key: c2pKey, nonceBase: c2pNonceBase, keyID: keyID, expectedAAD: aad, expectedSeq: seq)
         c2pCounter += 1
-        guard let body = String(data: plaintext, encoding: .utf8) else {
+        guard String(data: plaintext, encoding: .utf8) != nil else {
             throw Tier2ProviderError.invalidPlaintext
         }
-        return body
+        guard let envelope = try? JSONSerialization.jsonObject(with: plaintext) as? [String: Any],
+              envelope["type"] as? String == "inference_request_plaintext",
+              let envelopeBody = envelope["body"] as? String else {
+            throw Tier2ProviderError.invalidPlaintext
+        }
+        let conversationKey = (envelope["conversation_key"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return RequestPayload(
+            body: envelopeBody,
+            conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil
+        )
     }
 
     func sealResponseChunk(requestID: String, stream: Bool, plaintext: String) throws -> [String: Any] {
@@ -188,7 +207,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
         ]
     }
 
-    static func sealRequestForTest(session: Tier2ProviderSession, requestID: String, stream: Bool, plaintext: String, seq: UInt64 = 0) throws -> [String: Any] {
+    static func sealRequestForTest(session: Tier2ProviderSession, requestID: String, stream: Bool, plaintext: String, conversationKey: String? = nil, seq: UInt64 = 0) throws -> [String: Any] {
         let aad = Tier2FrameAAD(
             type: "inference_request",
             direction: "c2p",
@@ -198,8 +217,16 @@ final class Tier2ProviderSession: @unchecked Sendable {
             assignedID: session.assignedID,
             seq: seq
         )
+        var plaintextEnvelope: [String: Any] = [
+            "type": "inference_request_plaintext",
+            "body": plaintext,
+        ]
+        if let conversationKey = conversationKey?.trimmingCharacters(in: .whitespacesAndNewlines), !conversationKey.isEmpty {
+            plaintextEnvelope["conversation_key"] = conversationKey
+        }
+        let plaintextData = try JSONSerialization.data(withJSONObject: plaintextEnvelope, options: [.sortedKeys])
         let enc = try sealEnvelope(
-            Data(plaintext.utf8),
+            plaintextData,
             key: session.c2pKey,
             nonceBase: session.c2pNonceBase,
             keyID: session.keyID,

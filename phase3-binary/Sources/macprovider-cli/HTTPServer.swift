@@ -227,6 +227,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         do {
             try Self.validateContentEncoding(requestHead?.headers["Content-Encoding"] ?? [])
             let request = try ChatCompletionRequest.parse(data: data)
+                .withConversationKey(requestHead?.headers.first(name: "X-MacProvider-Provider-Conversation"))
             parsedRequest = request
             if !warmSwapEnabled {
                 try request.validateModelMatches(modelID)
@@ -1100,7 +1101,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private static func usage(_ completion: CompletionResult) -> [String: Any] {
         [
             "prompt_tokens": completion.promptTokens,
-            "cached_prompt_tokens": 0,
+            "cached_prompt_tokens": completion.cachedPromptTokens,
             "completion_tokens": completion.completionTokens,
             "total_tokens": completion.promptTokens + completion.completionTokens,
             "macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull(),

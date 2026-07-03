@@ -2072,6 +2072,72 @@ func TestNonStreamingBillingDiscountsCachedPromptTokensOnSingleProviderStickyHit
 	}
 }
 
+func TestWSTunneledStickyHitForwardsConversationKeyOnlyOnHit(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+
+	var forwardedKeys []string
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			StickyEnabled:    true,
+			StickyTTLS:       1800,
+			StickyMaxEntries: 10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			forwardedKeys = append(forwardedKeys, providerws.ConversationKeyFromContext(ctx))
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{
+				Type:      "inference_response_chunk",
+				RequestID: requestID,
+				Seq:       0,
+				Data:      `{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`,
+			}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`)
+	headers := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"conv:ws-cache"},
+		"X-MacProvider-Account":       []string{"acct_cache"},
+	}
+
+	seed := postChat(t, server, body, headers)
+	if seed.Code != http.StatusOK {
+		t.Fatalf("seed status=%d body=%s", seed.Code, seed.Body.String())
+	}
+	hit := postChat(t, server, body, headers)
+	if hit.Code != http.StatusOK {
+		t.Fatalf("hit status=%d body=%s", hit.Code, hit.Body.String())
+	}
+	missHeaders := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"conv:ws-cache-miss"},
+		"X-MacProvider-Account":       []string{"acct_cache"},
+	}
+	miss := postChat(t, server, body, missHeaders)
+	if miss.Code != http.StatusOK {
+		t.Fatalf("miss status=%d body=%s", miss.Code, miss.Body.String())
+	}
+
+	if len(forwardedKeys) != 3 {
+		t.Fatalf("forwarded keys = %#v, want 3 calls", forwardedKeys)
+	}
+	if forwardedKeys[0] != "" {
+		t.Fatalf("seed forwarded conversation_key=%q, want empty on sticky miss", forwardedKeys[0])
+	}
+	if forwardedKeys[1] != "conv:ws-cache" {
+		t.Fatalf("hit forwarded conversation_key=%q, want conv:ws-cache", forwardedKeys[1])
+	}
+	if forwardedKeys[2] != "" {
+		t.Fatalf("miss forwarded conversation_key=%q, want empty on sticky miss", forwardedKeys[2])
+	}
+}
+
 func TestNonStreamingBillingQuarantinesCachedPromptTokensWhenStickyProviderPreflightRejected(t *testing.T) {
 	p1Upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
