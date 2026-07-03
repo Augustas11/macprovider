@@ -60,12 +60,19 @@ final class MalibuAgent: ObservableObject {
             snapshot.state = .error; snapshot.lastError = "CLI binary not found"; return
         }
 
+        var extraEnv: [String: String] = [:]
+        if let providerID = ProviderConfig.readProviderID(),
+           let token = await KeychainStore.readProviderToken(providerID: providerID) {
+            extraEnv["MACPROVIDER_PROVIDER_TOKEN"] = token
+        }
+
         let launch = CLIChildProcess.Launch(
             executable: cliURL,
             configPath: paths.configFile,
             controlSocketPath: paths.controlSocket,
             httpPort: nil,
-            logFileURL: paths.cliLogFile
+            logFileURL: paths.cliLogFile,
+            extraEnvironment: extraEnv
         )
         let child = CLIChildProcess(launch: launch)
         child.onUnexpectedExit = { [weak self] code in

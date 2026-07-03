@@ -16,9 +16,9 @@ enum ControlFrame: Sendable, Equatable {
     case metricsResponse(earningsUsdc: Double, malibuAccrued: Double, gpuC: Double?, latencyP50Ms: Int?, uptimeSec: Int)
 
     case pauseRequest
-    case pauseAck(accepted: Bool)
+    case pauseAck(accepted: Bool, reason: String?)
     case resumeRequest
-    case resumeAck(accepted: Bool)
+    case resumeAck(accepted: Bool, reason: String?)
 
     case shutdownRequest(graceSeconds: Int)
     case shutdownAck
@@ -71,9 +71,15 @@ enum ControlCodec {
             if let latency { obj["latency_p50_ms"] = latency }
             return obj
         case .pauseRequest: return ["type": "pause_request"]
-        case let .pauseAck(accepted): return ["type": "pause_ack", "accepted": accepted]
+        case let .pauseAck(accepted, reason):
+            var obj: [String: Any] = ["type": "pause_ack", "accepted": accepted]
+            if let reason { obj["reason"] = reason }
+            return obj
         case .resumeRequest: return ["type": "resume_request"]
-        case let .resumeAck(accepted): return ["type": "resume_ack", "accepted": accepted]
+        case let .resumeAck(accepted, reason):
+            var obj: [String: Any] = ["type": "resume_ack", "accepted": accepted]
+            if let reason { obj["reason"] = reason }
+            return obj
         case let .shutdownRequest(grace): return ["type": "shutdown_request", "grace_seconds": grace]
         case .shutdownAck: return ["type": "shutdown_ack"]
         }
@@ -108,8 +114,16 @@ enum ControlCodec {
                 latencyP50Ms: dict["latency_p50_ms"] as? Int,
                 uptimeSec: dict["uptime_sec"] as? Int ?? 0
             )
-        case "pause_ack": return .pauseAck(accepted: dict["accepted"] as? Bool ?? false)
-        case "resume_ack": return .resumeAck(accepted: dict["accepted"] as? Bool ?? false)
+        case "pause_ack":
+            return .pauseAck(
+                accepted: dict["accepted"] as? Bool ?? false,
+                reason: dict["reason"] as? String
+            )
+        case "resume_ack":
+            return .resumeAck(
+                accepted: dict["accepted"] as? Bool ?? false,
+                reason: dict["reason"] as? String
+            )
         case "shutdown_ack": return .shutdownAck
         default: throw DecodeError.unknownType(type)
         }

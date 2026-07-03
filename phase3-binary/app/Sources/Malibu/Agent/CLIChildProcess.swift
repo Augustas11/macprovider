@@ -11,6 +11,10 @@ final class CLIChildProcess {
         let controlSocketPath: URL
         let httpPort: Int?
         let logFileURL: URL
+        // Merged over the parent process's env (which supplies PATH/HOME/etc).
+        // MACPROVIDER_PROVIDER_TOKEN belongs here so the token never touches
+        // config.yaml or the argv (which is visible in `ps`).
+        let extraEnvironment: [String: String]
     }
 
     private let launch: Launch
@@ -40,15 +44,26 @@ final class CLIChildProcess {
 
         let proc = Process()
         proc.executableURL = launch.executable
+        // Flag names must match phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
+        // (ArgumentParser derives kebab-case from the camelCase @Option name).
+        //
+        // --enable-warm-swap is required: the CLI only opens the control socket when
+        // warm-swap is enabled (see ServeCommand comment on `enableWarmSwap`).
         var args = [
             "--config", launch.configPath.path,
-            "--control-socket", launch.controlSocketPath.path,
+            "--ctl-socket-path", launch.controlSocketPath.path,
+            "--enable-warm-swap",
             "--managed-by", "malibu-app"
         ]
         if let port = launch.httpPort {
-            args.append(contentsOf: ["--http-port", "\(port)"])
+            args.append(contentsOf: ["--port", "\(port)"])
         }
         proc.arguments = args
+
+        var env = ProcessInfo.processInfo.environment
+        for (k, v) in launch.extraEnvironment { env[k] = v }
+        proc.environment = env
+
         proc.standardOutput = handle
         proc.standardError = handle
 

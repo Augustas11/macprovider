@@ -61,10 +61,8 @@ open build/Release/Malibu.app
 ## Known P0 gaps (tracked in SPEC-025 §12)
 
 1. **`ControlFrame` is duplicated**, not shared. Extract the wire-format frames from `phase3-binary/Sources/macprovider-cli/ControlSocket.swift` into a new `MacProviderControl` library target so both CLI and app import one source of truth.
-2. **CLI-side frames missing.** `metrics_request`, `pause_request`, `resume_request`, `shutdown_request` are defined here but not yet in the CLI. Add them to `ControlSocket.swift` + `ControlSocketCodec` and unit-test.
-3. **`--managed-by malibu-app` CLI flag.** The wrapper passes it; the CLI must (a) accept it and (b) disable its own `AutoUpdater` when present so Sparkle owns updates end-to-end.
-4. **`--control-socket <path>` CLI flag.** Confirm the CLI already accepts this; if not, add.
-5. **URL scheme state validation.** `URLSchemeHandler` currently accepts any well-formed `malibu://link`. Add nonce challenge tied to the outbound portal URL.
-6. **CLI-track config migration dialog.** If `~/.config/macprovider/config.yaml` exists without the App-track marker, `ProviderConfig` currently overwrites `provider_id` lines silently. Add the migration dialog described in SPEC-025 §7.
-7. **Sparkle** not wired up yet — separate P3 pass.
-8. **Signed release pipeline** — extends `.github/workflows/release.yml` per SPEC-025 §6.2. Not part of this skeleton.
+2. **CLI-side handler semantics.** Frames + wire format are wired end-to-end (`feat(control-socket): add metrics/pause/resume/shutdown frames`), but the server-side handlers are stubs — `pause_ack`/`resume_ack` return `accepted:false, reason:"not_implemented"` and `metrics_response` returns zeros. Real earnings / uptime source + pause gating land in P1.
+3. **URL scheme state validation.** `URLSchemeHandler` currently accepts any well-formed `malibu://link`. Add nonce challenge tied to the outbound portal URL.
+4. **CLI-track config migration dialog.** If `~/.config/macprovider/config.yaml` exists without the App-track marker, `ProviderConfig` currently overwrites `provider_id` lines silently. Add the migration dialog described in SPEC-025 §7.
+5. **Sparkle** not wired up yet — separate P3 pass.
+6. **Signed release pipeline** — extends `.github/workflows/release.yml` per SPEC-025 §6.2. Not part of this skeleton.

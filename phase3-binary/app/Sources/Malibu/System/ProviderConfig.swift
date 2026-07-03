@@ -15,6 +15,21 @@ enum ProviderConfig {
         }
     }
 
+    static func readProviderID() -> String? {
+        let paths = ProviderPaths.current
+        guard let contents = try? String(contentsOf: paths.configFile) else { return nil }
+        for rawLine in contents.split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("provider_id:") else { continue }
+            let value = line
+                .dropFirst("provider_id:".count)
+                .trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            return value.isEmpty ? nil : value
+        }
+        return nil
+    }
+
     static func saveProviderIdentity(providerID: String, token: String) async throws {
         let paths = ProviderPaths.current
         try paths.ensureDirectories()

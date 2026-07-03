@@ -39,6 +39,26 @@ enum KeychainStore {
         }
     }
 
+    static func readProviderToken(providerID: String) async -> String? {
+        await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+            DispatchQueue.global().async {
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: providerService,
+                    kSecAttrAccount as String: providerID,
+                    kSecReturnData as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitOne
+                ]
+                var out: CFTypeRef?
+                let status = SecItemCopyMatching(query as CFDictionary, &out)
+                guard status == errSecSuccess, let data = out as? Data else {
+                    cont.resume(returning: nil); return
+                }
+                cont.resume(returning: String(data: data, encoding: .utf8))
+            }
+        }
+    }
+
     static func deleteAllAppItems() async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             DispatchQueue.global().async {
