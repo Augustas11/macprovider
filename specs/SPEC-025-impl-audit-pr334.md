@@ -16,6 +16,14 @@ lane (code, security, architect). LOW/INFO can ship documented.
 | R3 | 0 / 0 / 2 / 1 | **0 / 0 / 0** ✅ | **0 / 0 / 0** ✅ | SEC + ARCH converge |
 | R4 | 0 / 0 / 1 / 0 | (skipped) | (skipped) | re-entrant termination edge |
 | R5 | **0 / 0 / 0** ✅ | (skipped) | (skipped) | CODE converges |
+| R6 | 0 / 0 / 1 / 0 | 0 / 0 / 1 / 0 | (skipped) | independent fourth-lane review (Claude); see R6 section below |
+
+## R6 fourth-lane findings (post-convergence)
+
+Ran as an independent sanity check that the R1–R5 fixes actually hold.
+
+- **CODE M** — `MalibuAgent.connectControl` failure path orphaned `self.child`, blocking `start()`'s `guard child == nil else { return }` on any retry within the session. Fixed: on connect failure, stop the child, nil it, and route through `scheduleReconnect()` — same recovery path an unexpected exit takes.
+- **SECURITY M** — S2 was overstated: `unsetenv` scrubs libc's `environ` but not the `KERN_PROCARGS2` snapshot that `ps -Eww` reads on macOS. The token remains visible to same-user malware via `ps -Eww $CLI_PID` for the CLI's lifetime. Downgraded here from "closed" to "attack surface reduced, not closed"; the real fix (CLI reads Keychain directly) is already tracked in the app README's known-gaps list. Narrative in the R1 SECURITY table below updated in-place.
 
 ## Prompt files
 
@@ -43,7 +51,7 @@ lane (code, security, architect). LOW/INFO can ship documented.
 | Id | Severity | Summary | Fix |
 |---|---|---|---|
 | S1 | CRITICAL | Unauthenticated `malibu://link` deep-link identity replay. | New `PendingLinkState`: SecRandom 32-byte nonce, single-use, 15-min expiry, refused when already configured. `URLSchemeHandler` requires `state`. `MalibuApp.consume` validates + surfaces errors. |
-| S2 | HIGH | Bearer token exposed via `MACPROVIDER_PROVIDER_TOKEN` in child env. | CLI calls `unsetenv("MACPROVIDER_PROVIDER_TOKEN")` immediately after `ConfigLoader.load` in `ServeCommand.run`. |
+| S2 | HIGH | Bearer token exposed via `MACPROVIDER_PROVIDER_TOKEN` in child env. | **Partial.** CLI calls `unsetenv("MACPROVIDER_PROVIDER_TOKEN")` immediately after `ConfigLoader.load` in `ServeCommand.run`. This scrubs libc's `environ` chain — anything reading `/proc`-equivalent live-environ APIs no longer sees the token. It does **NOT** scrub `ps -Eww $CLI_PID` output on macOS: `ps -E` reads the exec-time env via `sysctl KERN_PROCARGS2`, which is a kernel-captured snapshot placed on the user stack at `execve` and is unreachable from `unsetenv`. Same-user malware calling `sysctl` (or plain `ps -Eww`) can still read the payout-bearing bearer token for the CLI's lifetime. Real fix: teach the CLI to read the token from Keychain directly and eliminate the env-var path entirely (already tracked). Until that lands, treat S2 as "attack surface reduced, not closed." |
 | S3 | MEDIUM | Uninstall Keychain wipe race (dup of CODE M2). | See M2. |
 | S4 | MEDIUM | CLI persisted `assigned_provider_token` to disk under `managed_by=malibu-app`. | `CoordinatorClient.adoptAssignedProviderTokenIfPresent` skips `ProviderTokenPersist.write` under managed_by; adopts in-memory only; emits `provider_token_persist_skipped_managed_by_malibu_app` event. |
 | S5 | MEDIUM | Keychain accessible policy too weak for money-path bearer token. | `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` → `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. |

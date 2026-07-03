@@ -147,7 +147,21 @@ final class MalibuAgent: ObservableObject {
         do {
             try await client.connect(timeout: 10)
         } catch {
-            snapshot.state = .error; snapshot.lastError = "Control socket: \(error)"; return
+            // AUDIT R6 CODE M-connect fix: previously we set .error and returned,
+            // leaving `self.child` pointing at a running CLI. `start()`'s
+            // `guard child == nil` then blocked every subsequent restart, and
+            // the orphan kept holding the model in memory. Stop the child
+            // cleanly and route through the same reconnect backoff as an
+            // unexpected exit so the user (or model-load recovery) can retry.
+            snapshot.state = .error
+            snapshot.lastError = "Control socket: \(error)"
+            child?.markStopping()
+            await child?.stop(gracePeriod: 5)
+            child = nil
+            guard !isShuttingDown else { return }
+            snapshot.state = .reconnecting
+            await scheduleReconnect()
+            return
         }
         guard !isShuttingDown else { await client.close(); return }
         self.control = client
