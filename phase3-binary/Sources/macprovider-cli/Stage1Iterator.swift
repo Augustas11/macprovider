@@ -569,6 +569,12 @@ struct Stage1Prober: Stage1Probing {
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         var generatedText = ""
         var firstTokenAt: Date?
+        // v1.7.8 Track A4: count SSE content deltas as a token-count proxy.
+        // MLX serve emits one delta per generated token, so this closely
+        // tracks the actual token count. Pre-v1.7.8 code counted
+        // whitespace-separated English words (English averages ~0.75
+        // words/token, under-counting by ~1.3x).
+        var deltaCount = 0
 
         for try await rawLine in bytes.lines {
             guard rawLine.hasPrefix("data:") else {
@@ -585,6 +591,7 @@ struct Stage1Prober: Stage1Probing {
                 firstTokenAt = clock()
             }
             generatedText += content
+            deltaCount += 1
         }
 
         guard let firstTokenAt else {
@@ -596,14 +603,23 @@ struct Stage1Prober: Stage1Probing {
             )
         }
 
+        // v1.7.8 Track A4: measure generation-only throughput.
+        // Pre-v1.7.8 the denominator was `ended - started`, which
+        // included TTFT (the full prefill wall-clock, 5-30s on M-Base
+        // even after v1.7.7's prewarm on a 3200-token prompt).
+        // That inflated the denominator by ~4-10x and drove reported
+        // TPS to 3-4 tok/s for candidates that actually stream 25-40
+        // tok/s in warm generation. Catalog `min_sustained_tps`
+        // (20-30 range) expresses warm-generation throughput, so this
+        // is the semantics the gate expects.
         let ended = clock()
-        let outputTokens = max(1, generatedText.split(whereSeparator: \.isWhitespace).count)
-        let elapsed = max(0.001, ended.timeIntervalSince(started))
+        let generationElapsed = max(0.001, ended.timeIntervalSince(firstTokenAt))
+        let outputTokens = max(1, deltaCount)
         return SingleProbeResult(
             statusCode: statusCode,
             ttftMS: max(0, firstTokenAt.timeIntervalSince(started) * 1_000),
             generatedText: generatedText,
-            throughputTPS: Double(outputTokens) / elapsed
+            throughputTPS: Double(outputTokens) / generationElapsed
         )
     }
 
