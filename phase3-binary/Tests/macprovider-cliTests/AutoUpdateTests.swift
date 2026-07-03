@@ -508,6 +508,220 @@ final class AutoUpdateTests: XCTestCase {
         try store.writePending(marker)
         return (marker, binary, backup)
     }
+
+    // MARK: — Provisional-tier auto-update graduation (2026-07-03)
+
+    // Before this fix: `guard tier == "pinned" else { return .provisional }`
+    // architecturally blocked every self-service (curl|bash-onboarded) provider
+    // from ever receiving auto-updates. After the fix, `acceptProvisional`
+    // (fed from `auto_update_accept_provisional` in the provider config or
+    // MACPROVIDER_AUTO_UPDATE_ACCEPT_PROVISIONAL env var) is an explicit
+    // operator opt-in that flips only the auto-update tier gate — pool cap,
+    // rate limit, routing-weight halving, and the other provisional-tier
+    // restrictions remain untouched (those live in the coordinator, not in
+    // this trust state).
+
+    func testTrustVerdictProvisionalWithoutAcceptFlagStaysIneligible() {
+        let state = AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "provisional",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: false,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true
+            // acceptProvisional defaults to false
+        )
+        XCTAssertEqual(state.verdict, .provisional)
+        XCTAssertFalse(state.isEligible)
+    }
+
+    func testTrustVerdictProvisionalWithAcceptFlagBecomesEligible() {
+        let state = AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "provisional",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: false,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true,
+            acceptProvisional: true
+        )
+        XCTAssertEqual(state.verdict, .eligible)
+        XCTAssertTrue(state.isEligible)
+    }
+
+    // Belt-and-suspenders: acceptProvisional must NOT loosen anything else.
+    // Even with acceptProvisional=true, encryptedLegFailed / attestationFailed
+    // / tokenRejected / bearerlessDuplicate must still block.
+    func testAcceptProvisionalDoesNotBypassEncryptedLegGate() {
+        let state = AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "provisional",
+            encryptedLegValid: false,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: false,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true,
+            acceptProvisional: true
+        )
+        XCTAssertEqual(state.verdict, .encryptedLegFailed)
+    }
+
+    func testAcceptProvisionalDoesNotBypassBearerlessDuplicateGate() {
+        let state = AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "provisional",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: true,
+            tokenValidated: false,
+            bearerlessDuplicate: true,
+            connected: true,
+            acceptProvisional: true
+        )
+        XCTAssertEqual(state.verdict, .bearerlessDuplicate)
+    }
+
+    func testAcceptProvisionalDoesNotBypassTokenRejectionGate() {
+        let state = AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "provisional",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: true,
+            tokenValidated: false,
+            bearerlessDuplicate: false,
+            connected: true,
+            acceptProvisional: true
+        )
+        XCTAssertEqual(state.verdict, .tokenRejected)
+    }
+
+    // Rejected tier is a hard-refuse from the coordinator; acceptProvisional
+    // must not turn it into eligible. Only "pinned" and "provisional+opt-in"
+    // pass the gate.
+    func testAcceptProvisionalDoesNotEscalateRejectedTier() {
+        let state = AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "rejected",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: false,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true,
+            acceptProvisional: true
+        )
+        XCTAssertEqual(state.verdict, .provisional)
+    }
+
+    // Pinned providers must remain eligible with or without the flag — flag
+    // affects only the provisional tier gate.
+    func testPinnedRemainsEligibleWhenAcceptProvisionalIsFalse() {
+        let state = AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "pinned",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: false,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true,
+            acceptProvisional: false
+        )
+        XCTAssertEqual(state.verdict, .eligible)
+    }
+
+    // fromCoordinatorPayload must forward the flag intact. Prior version
+    // silently dropped it (missing param → default false), which was the
+    // shape of the trust-orphan bug the fix closes.
+    func testFromCoordinatorPayloadForwardsAcceptProvisional() throws {
+        let payload: [String: Any] = [
+            "type": "auth_response",
+            "status": "accepted",
+            "tier": "provisional",
+        ]
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-test",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+            p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+        )
+        let state = AutoUpdateTrustState.fromCoordinatorPayload(
+            payload,
+            isV2: true,
+            session: session,
+            providerToken: "test-token",
+            assignedProviderTokenAdopted: false,
+            acceptProvisional: true
+        )
+        XCTAssertEqual(state.tier, "provisional")
+        XCTAssertTrue(state.acceptProvisional)
+        XCTAssertEqual(state.verdict, .eligible)
+    }
+
+    // Config loader must accept the flag from both YAML flat key,
+    // YAML nested `autoupdate.accept_provisional`, and the env var.
+    func testConfigLoaderReadsAcceptProvisionalFromYAMLFlatAndNestedAndEnv() throws {
+        // 1. Flat YAML key.
+        let flatYAML = """
+        auto_update_accept_provisional: true
+        """
+        let fromFlat = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: "/tmp/provider.yaml"),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in flatYAML }
+        )
+        XCTAssertEqual(fromFlat.autoUpdateAcceptProvisional, true)
+
+        // 2. Nested YAML block.
+        let nestedYAML = """
+        autoupdate:
+          accept_provisional: true
+        """
+        let fromNested = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: "/tmp/provider.yaml"),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in nestedYAML }
+        )
+        XCTAssertEqual(fromNested.autoUpdateAcceptProvisional, true)
+
+        // 3. Env var overrides YAML (matches existing precedence).
+        let fromEnv = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: "/tmp/provider.yaml"),
+            environment: ["MACPROVIDER_AUTO_UPDATE_ACCEPT_PROVISIONAL": "false"],
+            fileExists: { _ in true },
+            readFile: { _ in flatYAML }
+        )
+        XCTAssertEqual(fromEnv.autoUpdateAcceptProvisional, false)
+
+        // 4. Default is nil (unset), preserving the pinned-only trust
+        //    posture for existing deployments that haven't opted in.
+        let fromDefault = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: "/tmp/provider.yaml"),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "port: 8080" }
+        )
+        XCTAssertNil(fromDefault.autoUpdateAcceptProvisional)
+    }
 }
 
 private extension ISO8601DateFormatter {

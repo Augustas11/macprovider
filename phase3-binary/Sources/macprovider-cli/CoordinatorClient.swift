@@ -165,7 +165,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 actor CoordinatorClient {
     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
 
-    static let binaryVersion = "1.7.10"
+    static let binaryVersion = "1.7.11"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -1309,7 +1309,8 @@ actor CoordinatorClient {
             isV2: isV2,
             session: tier2Session,
             providerToken: providerToken,
-            assignedProviderTokenAdopted: assignedProviderTokenAdopted
+            assignedProviderTokenAdopted: assignedProviderTokenAdopted,
+            acceptProvisional: appConfig.autoUpdateAcceptProvisional == true
         )
         autoupdateDrainExtensions = payload["autoupdate_drain_extensions"] as? Bool == true
         autoupdateAttemptedTargets.removeAll()
@@ -1919,7 +1920,8 @@ actor CoordinatorClient {
             isV2: autoupdateCoordinatorPayloadIsV2,
             session: tier2Session,
             providerToken: providerToken,
-            assignedProviderTokenAdopted: autoupdateAssignedProviderTokenAdopted
+            assignedProviderTokenAdopted: autoupdateAssignedProviderTokenAdopted,
+            acceptProvisional: appConfig.autoUpdateAcceptProvisional == true
         )
         if let reason = autoupdateDemotionReason {
             switch reason {
@@ -1934,7 +1936,8 @@ actor CoordinatorClient {
                     tokenValidated: state.tokenValidated,
                     bearerlessDuplicate: state.bearerlessDuplicate,
                     connected: state.connected,
-                    stableReason: reason
+                    stableReason: reason,
+                    acceptProvisional: state.acceptProvisional
                 )
             case "tier_demoted":
                 state = AutoUpdateTrustState(
@@ -1947,7 +1950,8 @@ actor CoordinatorClient {
                     tokenValidated: state.tokenValidated,
                     bearerlessDuplicate: state.bearerlessDuplicate,
                     connected: state.connected,
-                    stableReason: reason
+                    stableReason: reason,
+                    acceptProvisional: state.acceptProvisional
                 )
             case "token_revoked":
                 state = AutoUpdateTrustState(
@@ -1960,7 +1964,8 @@ actor CoordinatorClient {
                     tokenValidated: false,
                     bearerlessDuplicate: state.bearerlessDuplicate,
                     connected: state.connected,
-                    stableReason: reason
+                    stableReason: reason,
+                    acceptProvisional: state.acceptProvisional
                 )
             case "attestation_state_degraded":
                 state = AutoUpdateTrustState(
@@ -1973,7 +1978,8 @@ actor CoordinatorClient {
                     tokenValidated: state.tokenValidated,
                     bearerlessDuplicate: state.bearerlessDuplicate,
                     connected: state.connected,
-                    stableReason: reason
+                    stableReason: reason,
+                    acceptProvisional: state.acceptProvisional
                 )
             default:
                 state = AutoUpdateTrustState(
@@ -1986,7 +1992,8 @@ actor CoordinatorClient {
                     tokenValidated: state.tokenValidated,
                     bearerlessDuplicate: state.bearerlessDuplicate,
                     connected: false,
-                    stableReason: reason
+                    stableReason: reason,
+                    acceptProvisional: state.acceptProvisional
                 )
             }
         }
