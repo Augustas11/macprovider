@@ -197,6 +197,30 @@ tier2:
   # When empty, /poolz falls back to scheme + request Host. For Pearl:
   public_catalog_base_url: "https://coordinator.streamvc.live"
 
+# Auto-update recommendation surface. The coordinator forwards
+# `latest_binary_version` to every connected provider in its
+# `auth_response` / `state_update` frame as `recommended_binary_version`.
+# Provider CLIs whose auto-update trust-state gate accepts the coordinator
+# (pinned tier, OR provisional + operator opt-in via
+# `auto_update_accept_provisional: true` on the provider config — added
+# 2026-07-03 to unblock self-service providers from being trust-orphaned
+# from fixes) will then fetch + install the target release.
+#
+# WHEN THIS BLOCK IS UNSET the field is omitted from the wire frame and
+# providers receive no recommendation → auto-update never fires. This
+# block was silently missing from Pearl's `/opt/macprovider/coordinator.yaml`
+# at the 2026-07-03 KV-cache detection cutover: `air5` sat on v1.7.0 while
+# v1.7.9 was already released, because coord had nothing to advertise.
+# Landing it in the checked-in example prevents re-discovery on a fresh
+# clone deploy.
+#
+# `required_binary_version` (optional) hard-rejects providers below the
+# version, closing WS with CloseVersionTooOld. Use for security fixes
+# that must not be optional. Leave unset for advisory releases.
+coordinator_advertised_version:
+  latest_binary_version: "1.7.9"
+  # required_binary_version: "1.7.0"
+
 # Enumerated providers (SPEC-002 v1.0.4 Finding F-2: every provider_id that
 # may connect MUST be listed here). Edit this list locally — DO NOT
 # add providers by SSHing to the VPS and appending to /opt/macprovider/

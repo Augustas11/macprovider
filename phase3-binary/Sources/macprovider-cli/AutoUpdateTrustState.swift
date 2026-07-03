@@ -25,6 +25,15 @@ struct AutoUpdateTrustState: Sendable {
     let bearerlessDuplicate: Bool
     let connected: Bool
     let stableReason: String?
+    // Operator opt-in: accept auto-updates while the provider is in the
+    // provisional tier. Default false preserves the pre-existing
+    // pinned-only trust posture. Flipping this at the provider config layer
+    // is a deliberate operator choice — the semantic contract is "I trust
+    // the coordinator I chose to connect to enough to apply its version
+    // recommendations even before this provider is operator-promoted to
+    // pinned." This unblocks self-service (curl|bash) providers on the
+    // network from being trust-orphaned from fixes.
+    let acceptProvisional: Bool
 
     init(
         v2Accepted: Bool,
@@ -36,7 +45,8 @@ struct AutoUpdateTrustState: Sendable {
         tokenValidated: Bool,
         bearerlessDuplicate: Bool,
         connected: Bool,
-        stableReason: String? = nil
+        stableReason: String? = nil,
+        acceptProvisional: Bool = false
     ) {
         self.v2Accepted = v2Accepted
         self.tier = tier
@@ -48,13 +58,22 @@ struct AutoUpdateTrustState: Sendable {
         self.bearerlessDuplicate = bearerlessDuplicate
         self.connected = connected
         self.stableReason = stableReason
+        self.acceptProvisional = acceptProvisional
     }
 
     var verdict: AutoUpdateTrustVerdict {
         guard connected else { return .coordinatorDisconnected }
         guard v2Accepted else { return .legacyHelloAck }
         if bearerlessDuplicate { return .bearerlessDuplicate }
-        guard tier == "pinned" else { return .provisional }
+        // Tier gate: pinned providers always pass. Provisional providers
+        // pass only when the operator has explicitly opted the provider in
+        // via `auto_update_accept_provisional: true` in the local YAML
+        // config (or the MACPROVIDER_AUTO_UPDATE_ACCEPT_PROVISIONAL env
+        // var). Any other tier (empty / rejected) falls through to
+        // .provisional.
+        if tier != "pinned" {
+            guard tier == "provisional" && acceptProvisional else { return .provisional }
+        }
         guard encryptedLegValid else { return .encryptedLegFailed }
         guard !attestationRequired || attestationSatisfied else { return .attestationFailed }
         guard !tokenConfigured || tokenValidated else { return .tokenRejected }
@@ -74,7 +93,8 @@ struct AutoUpdateTrustState: Sendable {
         isV2: Bool,
         session: Tier2ProviderSession?,
         providerToken: String?,
-        assignedProviderTokenAdopted: Bool
+        assignedProviderTokenAdopted: Bool,
+        acceptProvisional: Bool = false
     ) -> AutoUpdateTrustState {
         let tier = payload["tier"] as? String
         let attestationStatus = (((payload["tier2_session"] as? [String: Any])?["attestation"] as? [String: Any])?["status"] as? String)
@@ -88,7 +108,8 @@ struct AutoUpdateTrustState: Sendable {
             tokenConfigured: tokenConfigured,
             tokenValidated: !tokenConfigured || providerToken?.isEmpty == false || assignedProviderTokenAdopted,
             bearerlessDuplicate: tokenConfigured && providerToken == nil && !assignedProviderTokenAdopted,
-            connected: true
+            connected: true,
+            acceptProvisional: acceptProvisional
         )
     }
 }
