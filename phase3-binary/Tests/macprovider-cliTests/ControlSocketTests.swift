@@ -120,6 +120,58 @@ final class ControlSocketTests: XCTestCase {
         }
     }
 
+    // MARK: - SPEC-025 App-track frames
+
+    func testEncodeDecodeMetricsRequest() throws {
+        try assertRoundTrip(.metricsRequest)
+    }
+
+    func testEncodeDecodeMetricsResponseFull() throws {
+        try assertRoundTrip(.metricsResponse(
+            earningsUsdc: 0.42,
+            malibuAccrued: 0.14,
+            gpuC: 58.5,
+            latencyP50Ms: 180,
+            uptimeSec: 3600
+        ))
+    }
+
+    func testEncodeDecodeMetricsResponseOptionalsOmitted() throws {
+        let data = try ControlSocketCodec.encode(.metricsResponse(
+            earningsUsdc: 0,
+            malibuAccrued: 0,
+            gpuC: nil,
+            latencyP50Ms: nil,
+            uptimeSec: 0
+        ))
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(text.contains("gpu_c"))
+        XCTAssertFalse(text.contains("latency_p50_ms"))
+        XCTAssertEqual(try ControlSocketCodec.decode(data), .metricsResponse(
+            earningsUsdc: 0, malibuAccrued: 0, gpuC: nil, latencyP50Ms: nil, uptimeSec: 0
+        ))
+    }
+
+    func testEncodeDecodePauseAndResume() throws {
+        try assertRoundTrip(.pauseRequest)
+        try assertRoundTrip(.pauseAck(accepted: false, reason: "not_implemented"))
+        try assertRoundTrip(.pauseAck(accepted: true, reason: nil))
+        try assertRoundTrip(.resumeRequest)
+        try assertRoundTrip(.resumeAck(accepted: false, reason: "not_implemented"))
+        try assertRoundTrip(.resumeAck(accepted: true, reason: nil))
+    }
+
+    func testEncodeDecodeShutdown() throws {
+        try assertRoundTrip(.shutdownRequest(graceSeconds: 30))
+        try assertRoundTrip(.shutdownAck)
+    }
+
+    func testAckOmitsReasonWhenNil() throws {
+        let data = try ControlSocketCodec.encode(.pauseAck(accepted: true, reason: nil))
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(text.contains("reason"))
+    }
+
     func testEncodedBytesHaveNoForwardSlashEscaping() throws {
         let data = try ControlSocketCodec.encode(.switchRequest(
             targetModelID: "mlx-community/Llama",
