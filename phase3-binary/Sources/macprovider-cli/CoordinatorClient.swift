@@ -1812,6 +1812,23 @@ actor CoordinatorClient {
     }
 
     private func runAutoupdateIfEligible(_ recommended: String) async {
+        // SPEC-025 §12 conflict #2 — when the CLI is spawned as a managed child of
+        // Malibu.app, Sparkle owns whole-bundle updates end-to-end. Two auto-update
+        // paths racing on the same binary would fight over rollback markers and
+        // the launchd LaunchAgent. Skip loudly so we can see it in event history.
+        if appConfig.managedBy == "malibu-app" {
+            let parsedTarget = (try? AutoUpdateRecommendation.validate(recommended))?.normalized ?? "<unvalidated>"
+            await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                updateID: UUID().uuidString.lowercased(),
+                currentVersion: Self.binaryVersion,
+                targetVersion: parsedTarget,
+                phase: .eligibility,
+                outcome: .skipped,
+                reason: "managed_by_malibu_app",
+                attempt: 1
+            ))
+            return
+        }
         if let parsed = try? AutoUpdateRecommendation.validate(recommended) {
             let trust = currentAutoupdateTrustState()
             guard trust.isEligible else {
