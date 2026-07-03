@@ -1,19 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict>
-	<!--
-	  AUDIT R1 SECURITY S6 fix: the menu-bar UI shell is not the mlx-swift host —
-	  the CLI child (Contents/MacOS/macprovider-cli) is signed separately with the
-	  JIT / unsigned-exec-mem / library-validation exceptions it actually needs
-	  (see SPEC-025 §6.2). Removing them here shrinks the exploitation surface if
-	  the app process is ever the entry point for a memory-corruption foothold.
-
-	  network.client stays for Sparkle appcast checks (SPEC-025 §11 P3).
-	  network.server is removed — the app is a Unix-socket CLIENT to the CLI's
-	  ControlSocket server; it does not bind any TCP listener.
-	-->
-	<key>com.apple.security.network.client</key>
-	<true/>
-</dict>
+<dict/>
 </plist>

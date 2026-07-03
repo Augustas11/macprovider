@@ -27,9 +27,14 @@ enum ProviderConfig {
     static func readProviderID() -> String? {
         let paths = ProviderPaths.current
         guard let contents = try? String(contentsOf: paths.configFile) else { return nil }
-        // AUDIT R1 CODE M1 fix: split on both CR and LF so CRLF files round-trip.
-        // .whitespacesAndNewlines trim covers any stray \r left after the split.
-        for rawLine in contents.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+        // AUDIT R1 CODE M1 fix, corrected in E2E:
+        // Swift's Character treats `\r\n` as a single grapheme cluster, so a
+        // predicate `$0 == "\n" || $0 == "\r"` on Character never matches
+        // inside CRLF sequences. Normalize CRLF → LF first, then split.
+        let normalized = contents
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        for rawLine in normalized.split(separator: "\n") {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard line.hasPrefix("provider_id:") else { continue }
             let value = line
@@ -71,7 +76,11 @@ enum ProviderConfig {
         // ran install.sh first might have coordinator overrides here.
         var lines: [String] = []
         if let existing = try? String(contentsOf: paths.configFile) {
-            lines = existing.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).map(String.init)
+            // Same CRLF-grapheme note as readProviderID above.
+            let normalized = existing
+                .replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+            lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
                 .filter { !$0.hasPrefix("provider_id:") && !$0.hasPrefix("provider_token:") }
         }
         lines.append("provider_id: \(providerID)")

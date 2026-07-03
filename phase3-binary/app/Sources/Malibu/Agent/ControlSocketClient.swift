@@ -41,10 +41,16 @@ actor ControlSocketClient {
                     }
                     var addr = sockaddr_un()
                     addr.sun_family = sa_family_t(AF_UNIX)
-                    _ = self.socketPath.withCString { src in
+                    // E2E note: Xcode 26 -strict-concurrency=complete flagged
+                    // an exclusive-access overlap here — MemoryLayout.size(ofValue:)
+                    // was evaluated inside the same closure that held
+                    // &addr.sun_path. Hoist the size to a local so the
+                    // read/write don't overlap.
+                    let pathCapacity = MemoryLayout.size(ofValue: addr.sun_path)
+                    self.socketPath.withCString { src in
                         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-                            ptr.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: addr.sun_path)) { dst in
-                                _ = strncpy(dst, src, MemoryLayout.size(ofValue: addr.sun_path) - 1)
+                            ptr.withMemoryRebound(to: CChar.self, capacity: pathCapacity) { dst in
+                                _ = strncpy(dst, src, pathCapacity - 1)
                             }
                         }
                     }

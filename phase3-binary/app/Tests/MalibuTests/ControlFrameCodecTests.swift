@@ -42,9 +42,16 @@ final class ControlFrameCodecTests: XCTestCase {
         XCTAssertEqual(decoded, f)
     }
 
-    func testShutdownRequestGraceRoundTrip() throws {
-        let f = ControlFrame.shutdownRequest(graceSeconds: 30)
-        XCTAssertEqual(try roundTrip(f), f)
+    func testShutdownRequestEncodesGraceField() throws {
+        // The app is a control-socket CLIENT — it only encodes request
+        // frames (never decodes them). Assert the wire shape rather than a
+        // round-trip; attempting to decode a request type throws
+        // unknownType, which is the correct asymmetry.
+        let data = try ControlCodec.encode(.shutdownRequest(graceSeconds: 30))
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "shutdown_request")
+        XCTAssertEqual(obj?["grace_seconds"] as? Int, 30)
+        XCTAssertThrowsError(try ControlCodec.decode(data))
     }
 
     func testUnknownTypeIsRejected() {

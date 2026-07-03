@@ -15,10 +15,17 @@ final class ProviderConfigParserTests: XCTestCase {
         try "provider_id: p-abc\r\nprovider_token: t\r\n".data(using: .utf8)!.write(to: cfg)
 
         // Not calling ProviderConfig.readProviderID because it reads
-        // ProviderPaths.current. Assert the parser algorithm directly here.
+        // ProviderPaths.current. Assert the parser algorithm directly here —
+        // must match the production implementation exactly. Note: Swift's
+        // Character treats \r\n as ONE grapheme, so a naive
+        // split(whereSeparator: { $0 == "\n" || $0 == "\r" }) is a no-op on
+        // CRLF files; production code normalizes CRLF → LF first.
         let contents = try String(contentsOf: cfg)
+        let normalized = contents
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
         var got: String?
-        for rawLine in contents.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+        for rawLine in normalized.split(separator: "\n") {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("provider_id:") {
                 got = String(line.dropFirst("provider_id:".count))
