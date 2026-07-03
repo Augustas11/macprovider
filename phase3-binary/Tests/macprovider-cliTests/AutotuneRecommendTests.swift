@@ -1209,6 +1209,64 @@ final class AutotuneRecommendTests: XCTestCase {
         ))
     }
 
+    // MARK: - v1.7.9 Track A5 (Option B) — soft TPS + TTFT gates
+
+    func testTPSBelowGateNoLongerBlocksEligibilityButEmitsWarning() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        // Force TPS below the catalog gate (25 tok/s for qwen3-coder).
+        // Keep it high enough that expected_net_usd_per_hour still
+        // clears the $0.005/hr paid threshold.
+        benchmark.sustainedTPS = 20
+        request.benchmarks[modelKey] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.recommendedModel, modelKey,
+            "v1.7.9 Option B: TPS below catalog gate must not veto eligibility")
+        XCTAssertTrue(result.warnings.contains(.tpsBelowGate))
+        XCTAssertFalse(result.warnings.contains(.noEligiblePaidModel))
+    }
+
+    func testTTFTAboveGateNoLongerBlocksEligibilityButEmitsWarning() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        // Force TTFT above the catalog ceiling (3000ms for qwen3-coder).
+        benchmark.ttftMS = 6_000
+        request.benchmarks[modelKey] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.recommendedModel, modelKey,
+            "v1.7.9 Option B: TTFT above catalog ceiling must not veto eligibility")
+        XCTAssertTrue(result.warnings.contains(.ttftAboveGate))
+    }
+
+    func testNoTPSWarningWhenBenchmarkClearsGate() throws {
+        let result = AutotuneRecommendEngine().recommend(try makeRequest())
+        XCTAssertFalse(result.warnings.contains(.tpsBelowGate))
+        XCTAssertFalse(result.warnings.contains(.ttftAboveGate))
+    }
+
+    func testDonorModeInheritsTPSAndTTFTRelaxation() throws {
+        var request = try makeRequest(modelKey: "qwen3-32b")
+        request.donorMode = true
+        request.hardware.bandwidthTier = .a
+        var benchmark = try XCTUnwrap(request.benchmarks["qwen3-32b"])
+        // Below TPS gate + above TTFT ceiling for qwen3-32b.
+        benchmark.sustainedTPS = 1
+        benchmark.ttftMS = 100_000
+        request.benchmarks["qwen3-32b"] = benchmark
+
+        XCTAssertTrue(AutotuneRecommendEngine.donorModeAdmitted(
+            modelKey: "qwen3-32b",
+            candidate: request.candidateCatalog.rows["qwen3-32b"],
+            request: request
+        ))
+    }
+
     // MARK: - Stage1 probe timeout + BenchmarkOutcomes diagnostics (v1.7.5)
 
     func testStage1ProberDefaultIdleTimeoutIsSafeForLargePrefill() {

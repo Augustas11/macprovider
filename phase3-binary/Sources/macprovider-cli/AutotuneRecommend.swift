@@ -46,6 +46,18 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     /// should be aware that heavy real-world context loads may push
     /// this Mac into swap.
     case swapObservedUnderLoad = "swap_observed_under_load"
+    /// v1.7.9 Track A5 (Option B): the recommended candidate's measured
+    /// sustained TPS was below the catalog's `min_sustained_tps` gate
+    /// for its row. The gate is now a soft signal — the ACTUAL gate is
+    /// `expected_net_usd_per_hour >= $0.005/hr`, since a provider with
+    /// slower-than-nominal TPS still earns at the reduced measured rate.
+    /// Buyers routing to this provider get slower inference than the
+    /// catalog gate implied.
+    case tpsBelowGate = "tps_below_gate"
+    /// v1.7.9 Track A5 (Option B): the recommended candidate's measured
+    /// 4K TTFT was above the catalog's `max_4k_ttft_ms` ceiling. Same
+    /// soft-signal reasoning as `tpsBelowGate`.
+    case ttftAboveGate = "ttft_above_gate"
 }
 
 enum BandwidthTier: String, Codable, CaseIterable, Comparable {
@@ -991,6 +1003,18 @@ struct AutotuneRecommendEngine {
             if request.benchmarks[target.catalogKey]?.swapDetected == true {
                 warnings.insert(.swapObservedUnderLoad)
             }
+            // v1.7.9 Track A5: catalog TPS/TTFT gates are soft signals.
+            // Surface the gap when the recommended candidate misses either
+            // gate so the operator sees the QoS delta vs catalog expectation.
+            if let benchmark = request.benchmarks[target.catalogKey],
+               let candidateRow = request.candidateCatalog.rows[target.catalogKey] {
+                if benchmark.sustainedTPS < Double(candidateRow.benchGate.minSustainedTPS) {
+                    warnings.insert(.tpsBelowGate)
+                }
+                if benchmark.ttftMS > candidateRow.benchGate.max4KTTFTMS {
+                    warnings.insert(.ttftAboveGate)
+                }
+            }
         }
 
         let resultCandidates = eligible.isEmpty ? Array(scored.prefix(5)) : Array(eligible.prefix(5))
@@ -1035,22 +1059,20 @@ struct AutotuneRecommendEngine {
         guard candidate.minRAMGB <= request.hardware.memoryGB - Self.safetyMarginGB else { return false }
         guard request.hardware.bandwidthTier.satisfies(minimum: candidate.minBandwidthTier) else { return false }
         guard let benchmark else { return false }
-        // v1.7.6 Track A2a: swapDetected relaxed from hard-block to
-        // soft-signal. Probe hit swap under a 4000-token prefill on this
-        // Mac, but the candidate still cleared its TPS/TTFT bench gates.
-        // Real production demand often runs shorter than 4K context, so
-        // blocking the model would strand a capable provider. The engine
-        // now inserts a `swapObservedUnderLoad` warning at scoring time
-        // (see recommend() loop) to surface the risk to the operator.
+        // v1.7.6 Track A2a: swapDetected relaxed to soft-signal.
+        // v1.7.9 Track A5 (Option B): sustainedTPS < min_sustained_tps
+        // and ttftMS > max_4k_ttft_ms both relaxed to soft-signals too.
+        // These catalog gates express warm-service QoS targets — a
+        // provider that misses them still EARNS at the rate implied by
+        // its measured TPS via `expected_net_usd_per_hour`. The real
+        // financial gate that decides "paid vs donor" is
+        // `expected_net_usd_per_hour >= $0.005/hr` (paidThreshold),
+        // applied later in recommend().
         // thermalThrottleDetected stays a hard-block because throttled
-        // TPS measurements are unreliable (they may be optimistic).
-        guard benchmark.sustainedTPS >= candidate.benchGate.minSustainedTPS,
-              benchmark.ttftMS <= candidate.benchGate.max4KTTFTMS,
-              !benchmark.thermalThrottleDetected
-        else {
-            return false
-        }
-        return Self.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey)
+        // TPS measurements are unreliable (may be optimistically low
+        // and rebound in production, but also may mask real degradation).
+        return !benchmark.thermalThrottleDetected
+            && Self.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey)
     }
 
     static func donorModeAdmitted(
@@ -1066,9 +1088,8 @@ struct AutotuneRecommendEngine {
         candidate: CandidateCatalog.Row?,
         request: AutotuneRecommendRequest
     ) -> Bool {
-        // v1.7.6 Track A2a: donor mode inherits the paid-tier swap
-        // relaxation (see isEligible above). Thermal throttle stays
-        // a hard-block for both tiers.
+        // v1.7.6 Track A2a + v1.7.9 Track A5: donor mode inherits the
+        // paid-tier relaxations. Only thermal throttle stays a hard-block.
         guard let candidate,
               ["candidate", "listed", "recommendable"].contains(candidate.runtimeStatus),
               candidate.modelRevision != nil,
@@ -1076,8 +1097,6 @@ struct AutotuneRecommendEngine {
               candidate.minRAMGB <= request.hardware.memoryGB - safetyMarginGB,
               request.hardware.bandwidthTier.satisfies(minimum: candidate.minBandwidthTier),
               let benchmark = request.benchmarks[modelKey],
-              benchmark.sustainedTPS >= candidate.benchGate.minSustainedTPS,
-              benchmark.ttftMS <= candidate.benchGate.max4KTTFTMS,
               !benchmark.thermalThrottleDetected
         else {
             return false
