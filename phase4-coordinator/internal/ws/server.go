@@ -30,18 +30,19 @@ import (
 )
 
 const (
-	CloseUnrecognizedAuthMessage gobwas.StatusCode = 4000
-	CloseInvalidHello            gobwas.StatusCode = 4001
-	CloseUnknownProviderID       gobwas.StatusCode = 4002
-	CloseTierUnsupported         gobwas.StatusCode = 4003
-	CloseVersionUnsupported      gobwas.StatusCode = 4004
-	CloseInvalidToken            gobwas.StatusCode = 4005
-	CloseProvisionalPoolFull     gobwas.StatusCode = 4007
-	CloseProvisionalRateLimited  gobwas.StatusCode = 4008
-	CloseBanned                  gobwas.StatusCode = 4009
-	CloseTier2AttestationFailed  gobwas.StatusCode = 4012
-	CloseTier2KeyExchangeFailed  gobwas.StatusCode = 4013
-	ClosePoolFull                gobwas.StatusCode = 4429
+	CloseUnrecognizedAuthMessage   gobwas.StatusCode = 4000
+	CloseInvalidHello              gobwas.StatusCode = 4001
+	CloseUnknownProviderID         gobwas.StatusCode = 4002
+	CloseTierUnsupported           gobwas.StatusCode = 4003
+	CloseIdentitySignatureRequired gobwas.StatusCode = 4003
+	CloseVersionUnsupported        gobwas.StatusCode = 4004
+	CloseInvalidToken              gobwas.StatusCode = 4005
+	CloseProvisionalPoolFull       gobwas.StatusCode = 4007
+	CloseProvisionalRateLimited    gobwas.StatusCode = 4008
+	CloseBanned                    gobwas.StatusCode = 4009
+	CloseTier2AttestationFailed    gobwas.StatusCode = 4012
+	CloseTier2KeyExchangeFailed    gobwas.StatusCode = 4013
+	ClosePoolFull                  gobwas.StatusCode = 4429
 )
 
 type Server struct {
@@ -84,7 +85,9 @@ type Server struct {
 	// catalog holds an explicitly-injected tier2.Catalog for tests that
 	// want isolation from the package-singleton; nil means "use
 	// tier2.Default()". M3-8d (audit TEST-4). See s.catalogRef().
-	catalog *tier2.Catalog
+	catalog            *tier2.Catalog
+	identitySignatures IdentitySignatureStore
+	authPolicyAdmin    ProviderAuthPolicyAdminStore
 }
 
 // TokenValidator handles inspection of a Bearer header on the WS connect.
@@ -154,6 +157,17 @@ type providerAuth struct {
 	token      string
 }
 
+type IdentitySignatureStore interface {
+	LookupProviderAuthPolicy(ctx context.Context, providerID string) (signatureExemptUntil *time.Time, grantedBy string, ok bool, err error)
+	LookupProviderIdentityPubkey(ctx context.Context, providerID string) ([]byte, bool, error)
+}
+
+type ProviderAuthPolicyAdminStore interface {
+	RequestProviderAuthPolicyExemption(ctx context.Context, pendingID, providerID, requestedBy string, requestedUntil time.Time, reason, incidentID string) error
+	ApproveProviderAuthPolicyExemption(ctx context.Context, pendingID, approvedBy string) (providerID, requestedBy string, requestedUntil time.Time, reason, incidentID string, err error)
+	SeedProviderAuthPolicyCutover(ctx context.Context, cutover time.Time, cliProviderIDs []string) (int64, error)
+}
+
 type Option func(*Server)
 
 // WithCatalog injects a specific tier2.Catalog instance for this server.
@@ -186,6 +200,18 @@ func WithTokenIssuer(issuer TokenIssuer) Option {
 func WithGitHubAuthStore(store *auth.Store) Option {
 	return func(s *Server) {
 		s.authStore = store
+	}
+}
+
+func WithIdentitySignatureStore(store IdentitySignatureStore) Option {
+	return func(s *Server) {
+		s.identitySignatures = store
+	}
+}
+
+func WithProviderAuthPolicyAdminStore(store ProviderAuthPolicyAdminStore) Option {
+	return func(s *Server) {
+		s.authPolicyAdmin = store
 	}
 }
 
@@ -380,6 +406,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/provisional", s.handleAdminProvisional)
 	mux.HandleFunc("/admin/promote/", s.handleAdminPromote)
 	mux.HandleFunc("/admin/reject/", s.handleAdminReject)
+	mux.HandleFunc("/admin/provider-auth-policy/seed-cutover", s.handleProviderAuthPolicySeedCutover)
+	mux.HandleFunc("/admin/provider-auth-policy/exempt", s.handleProviderAuthPolicyExemptRequest)
+	mux.HandleFunc("/admin/provider-auth-policy/exempt/", s.handleProviderAuthPolicyExemptApprove)
 	if s.cfg.Auth.GitHubOAuth.Enabled {
 		mux.HandleFunc("/v1/auth/github/start", s.handleGitHubStart)
 		mux.HandleFunc("/v1/auth/github/callback", s.handleGitHubCallback)
@@ -698,7 +727,7 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_encrypted_leg_required")
 		return "", ""
 	}
-	entry, ok := s.prepareProviderAdmission(conn, auth, hello)
+	entry, ok := s.prepareProviderAdmission(conn, auth, hello, true)
 	if !ok {
 		return "", ""
 	}
@@ -776,6 +805,11 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return "", ""
 	}
+	initialTranscriptHash, err := initialAuthTranscriptHash(payload)
+	if err != nil {
+		s.close(conn, CloseInvalidHello, "invalid_auth_request: transcript")
+		return "", ""
+	}
 	tier2Cfg := s.tier2Config()
 	selectedAEAD, ok := negotiateAEAD(initial.Tier2Capabilities.AEADSuites, tier2Cfg)
 	if !ok || !initial.Tier2Capabilities.EncryptedLeg {
@@ -787,7 +821,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_key_exchange_failed")
 		return "", ""
 	}
-	entry, ok := s.prepareProviderAdmission(conn, auth, initial.Hello())
+	entry, ok := s.prepareProviderAdmission(conn, auth, initial.Hello(), false)
 	if !ok {
 		return "", ""
 	}
@@ -816,7 +850,8 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	supportedModelsPresent := initialPresence.SupportedModels
 	publishesPresent := initialPresence.PublishesSupportedModels
 	retainSpec010 := supportedModelsPresent || publishesPresent
-	if retainSpec010 {
+	retainAuthAttempt := retainSpec010 || s.identitySignatures != nil
+	if retainAuthAttempt {
 		state := AuthAttemptState{
 			AuthAttemptID:            authAttemptID,
 			ProviderID:               initial.ProviderID,
@@ -824,6 +859,9 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 			PublishesSupportedModels: initial.PublishesSupportedModels,
 			SupportedModelsPresent:   supportedModelsPresent,
 			PublishesPresent:         publishesPresent,
+			BinaryVersion:            initial.BinaryVersion,
+			ProviderECDHPublicKey:    initial.ProviderECDHPublicKey,
+			InitialTranscriptSHA256:  initialTranscriptHash,
 			StartedAt:                s.now(),
 			ExpiresAt:                challengeExpiresAt,
 		}
@@ -889,6 +927,20 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
 		return "", ""
 	}
+	retained, retainedOK := AuthAttemptState{}, false
+	if retainAuthAttempt {
+		retained, retainedOK = s.authAttempts.lookup(authAttemptID)
+		if !retainedOK {
+			s.sendAuthRejection(conn, "attestation_failed", "attestation failed")
+			s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
+			return "", ""
+		}
+	}
+	if s.identitySignatures != nil && !s.verifyIdentitySignature(context.Background(), initial, proof, retained) {
+		s.sendAuthRejection(conn, "identity_signature_required", "identity_signature_required")
+		s.close(conn, CloseIdentitySignatureRequired, "identity_signature_required")
+		return "", ""
+	}
 	// SPEC-002 v1.3.5 §7.8 R-7.8.7 + AC-K.3 — when proof carries
 	// SPEC-010 fields, they MUST byte-identical-compare to the
 	// retained initial-stage values after NFC + ASCII case-fold.
@@ -896,15 +948,14 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	// test oracle is the exact substring
 	// "supported_models mismatch between auth_request stages".
 	if retainSpec010 {
-		retained, ok := s.authAttempts.lookup(authAttemptID)
-		if ok && proofPresence.SupportedModels {
+		if retainedOK && proofPresence.SupportedModels {
 			if !supportedModelsEqualUnderNFCASCIIFold(retained.SupportedModels, proof.SupportedModels) {
 				s.sendAuthRejection(conn, "bad_request", "supported_models mismatch between auth_request stages")
 				s.close(conn, CloseInvalidHello, "supported_models mismatch between auth_request stages")
 				return "", ""
 			}
 		}
-		if ok && proofPresence.PublishesSupportedModels {
+		if retainedOK && proofPresence.PublishesSupportedModels {
 			if proof.PublishesSupportedModels != retained.PublishesSupportedModels {
 				s.sendAuthRejection(conn, "bad_request", "publishes_supported_models mismatch between auth_request stages")
 				s.close(conn, CloseInvalidHello, "publishes_supported_models mismatch between auth_request stages")
@@ -917,6 +968,11 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.sendAuthRejection(conn, string(attestationStatus), string(attestationStatus))
 		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
 		return "", ""
+	}
+	if tier, ok := s.recordProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
+		return "", ""
+	} else {
+		entry.Tier = tier
 	}
 
 	entry.EncryptedLeg = true
@@ -950,7 +1006,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		KeyID:        keys.KeyID,
 		StartedAt:    s.now(),
 	}
-	if retainSpec010 {
+	if retainAuthAttempt {
 		// SPEC-002 v1.3.5 §7.9 — explicit early release so the
 		// retention entry does not persist for the WS-session lifetime
 		// (handleV2Conn does not return until readProviderLoop exits,
@@ -1029,7 +1085,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	return entry.ProviderID, entry.AssignedID
 }
 
-func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hello Hello) (*pool.Provider, bool) {
+func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hello Hello, recordAdmission bool) (*pool.Provider, bool) {
 	if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" {
 		cmp, ok := compareSemver(hello.BinaryVersion, required)
 		if !ok || cmp < 0 {
@@ -1054,7 +1110,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		// a TOCTOU window where a concurrent tokenless self-heal could
 		// revoke the row before the mark.
 	}
-	tier, closeCode, closeReason := s.admission.Admit(hello, pinned, s.connectedProvisional())
+	tier, closeCode, closeReason := s.checkOrRecordAdmission(hello, pinned, recordAdmission)
 	if closeCode != 0 {
 		s.close(conn, closeCode, closeReason)
 		return nil, false
@@ -1124,6 +1180,22 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		ModelHash:             hello.ModelHash,
 		HashStatus:            hashStatus,
 	}, true
+}
+
+func (s *Server) recordProviderAdmission(conn net.Conn, hello Hello, pinned bool) (pool.Tier, bool) {
+	tier, closeCode, closeReason := s.checkOrRecordAdmission(hello, pinned, true)
+	if closeCode != 0 {
+		s.close(conn, closeCode, closeReason)
+		return "", false
+	}
+	return tier, true
+}
+
+func (s *Server) checkOrRecordAdmission(hello Hello, pinned bool, record bool) (pool.Tier, gobwas.StatusCode, string) {
+	if record {
+		return s.admission.Admit(hello, pinned, s.connectedProvisional())
+	}
+	return s.admission.CheckAdmit(hello, pinned, s.connectedProvisional())
 }
 
 func compareSemver(lhs, rhs string) (int, bool) {

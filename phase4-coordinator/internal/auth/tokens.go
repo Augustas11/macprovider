@@ -41,6 +41,8 @@ var ErrPairOTInvalid = errors.New("pair_ot invalid")
 var ErrPairOTAlreadyOwned = errors.New("pair_ot provider already owned by another account")
 var ErrSessionInvalid = errors.New("mp_session invalid")
 var ErrPendingPairOTMissing = errors.New("pending pair_ot missing")
+var ErrAppTrackExistingTokenNoProof = errors.New("existing active token requires current_provider_token proof")
+var ErrAppTrackReissueCooldown = errors.New("app-track provider token reissue cooldown active")
 
 type Store struct {
 	db *sql.DB
@@ -322,6 +324,12 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 			ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_mint_log_provider_ts ON pair_ot_mint_log(provider_id, ts)`,
+		`CREATE TABLE IF NOT EXISTS apptrack_register_reissues (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			provider_id TEXT NOT NULL,
+			ts TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_apptrack_register_reissues_provider_ts ON apptrack_register_reissues(provider_id, ts)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
@@ -453,6 +461,95 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 	return TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: createdAt}, token, nil
 }
 
+func (s *Store) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (string, error) {
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return "", err
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return "", err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+
+	nowText := nowString()
+	var active struct {
+		ID         int64
+		TokenHash  string
+		LastUsedAt sql.NullString
+	}
+	err = conn.QueryRowContext(ctx, `
+SELECT id, token_hash, last_used_at
+  FROM provider_tokens
+ WHERE provider_id = ? AND revoked_at IS NULL
+ LIMIT 1`, providerID).Scan(&active.ID, &active.TokenHash, &active.LastUsedAt)
+	if err != nil && err != sql.ErrNoRows {
+		return "", err
+	}
+
+	requiresProof := err == nil && active.LastUsedAt.Valid
+	if requiresProof {
+		if currentBearer == nil || strings.TrimSpace(*currentBearer) == "" || tokenHash(strings.TrimSpace(*currentBearer)) != active.TokenHash {
+			return "", ErrAppTrackExistingTokenNoProof
+		}
+		var recent int
+		if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1)
+  FROM apptrack_register_reissues
+ WHERE provider_id = ? AND ts >= ?`,
+			providerID, timeText(time.Now().UTC().Add(-5*time.Minute)),
+		).Scan(&recent); err != nil {
+			return "", err
+		}
+		if recent > 0 {
+			return "", ErrAppTrackReissueCooldown
+		}
+	}
+
+	if err == nil {
+		if _, err := conn.ExecContext(ctx, `
+UPDATE provider_tokens
+   SET revoked_at = ?
+ WHERE id = ? AND revoked_at IS NULL`, nowText, active.ID); err != nil {
+			return "", err
+		}
+	}
+
+	token, err := randomHex(32)
+	if err != nil {
+		return "", err
+	}
+	prefix := token[:tokenDisplayPrefixLength]
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at)
+VALUES (?, ?, ?, ?, ?)`, tokenHash(token), prefix, providerID, "malibu-app", nowText); err != nil {
+		if isActiveProviderTokenConstraintFailure(err) {
+			return "", ErrActiveTokenAlreadyExists
+		}
+		return "", err
+	}
+	if requiresProof {
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO apptrack_register_reissues (provider_id, ts)
+VALUES (?, ?)`, providerID, nowText); err != nil {
+			return "", err
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return "", err
+	}
+	committed = true
+	return token, nil
+}
+
 // HasActiveTokenForProvider returns true when at least one unrevoked
 // token row exists for `providerID`. Exposed on both the concrete Store
 // AND the `internal/ws.TokenIssuer` interface (v0.8.4 composition, PR #69
@@ -488,6 +585,32 @@ func (s *Store) HasActiveTokenForProvider(ctx context.Context, providerID string
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (s *Store) ListActiveProviderIDsCreatedBefore(ctx context.Context, cutoff time.Time) ([]string, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("auth store is nil")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT provider_id
+  FROM provider_tokens
+ WHERE revoked_at IS NULL
+   AND provider_id <> ''
+   AND created_at <= ?
+ ORDER BY provider_id`, timeText(cutoff.UTC()))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var providerID string
+		if err := rows.Scan(&providerID); err != nil {
+			return nil, err
+		}
+		out = append(out, providerID)
+	}
+	return out, rows.Err()
 }
 
 // RevokeUnusedTokenForProvider implements SPEC-003 v0.8.3 FR-C9.4

@@ -1,5 +1,6 @@
 // Package metrics declares the SPEC-017 v0.1.8 §8 Prometheus
-// metric surface. Wired by Step 4.C per BUILD §2:
+// metric surface plus SPEC-026 register counters. Wired by Step 4.C
+// per BUILD §2:
 //
 //	stats_request_total{endpoint,status,tier}                — Counter
 //	stats_partner_key_request_total{partner_key_id}           — Counter
@@ -29,8 +30,14 @@
 //
 //   - `status` is the HTTP status code as a decimal string.
 //
-// No label takes an operator- or attacker-controllable string
-// directly. A `Reset` method exists for test isolation.
+//   - `provider_register_rate_limit_hits_total{scope}` uses closed
+//     scope values "ip" / "asn".
+//
+//   - `provider_register_source_total{track}` uses closed track values
+//     "app" / "cli" / "portal".
+//
+// No label takes an operator- or attacker-controllable string directly.
+// A `Reset` method exists for test isolation.
 package metrics
 
 import (
@@ -48,6 +55,8 @@ type Metrics struct {
 	RollupLagSeconds       *prometheus.GaugeVec
 	RollupErrorsTotal      *prometheus.CounterVec
 	RateLimitExceededTotal *prometheus.CounterVec
+	RegisterRateLimitHits  *prometheus.CounterVec
+	RegisterSource         *prometheus.CounterVec
 }
 
 // New registers all five metrics against reg and returns the
@@ -94,5 +103,43 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"tier", "endpoint"},
 		),
+		RegisterRateLimitHits: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "provider_register_rate_limit_hits_total",
+				Help: "Count of SPEC-026 /v1/providers/register requests rejected by register rate limit scope.",
+			},
+			[]string{"scope"},
+		),
+		RegisterSource: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "provider_register_source_total",
+				Help: "Count of provider register attempts by onboarding track.",
+			},
+			[]string{"track"},
+		),
 	}
+}
+
+func (m *Metrics) IncRegisterRateLimitHit(scope string) {
+	if m == nil || m.RegisterRateLimitHits == nil {
+		return
+	}
+	switch scope {
+	case "ip", "asn":
+	default:
+		return
+	}
+	m.RegisterRateLimitHits.WithLabelValues(scope).Inc()
+}
+
+func (m *Metrics) IncRegisterSource(track string) {
+	if m == nil || m.RegisterSource == nil {
+		return
+	}
+	switch track {
+	case "app", "cli", "portal":
+	default:
+		return
+	}
+	m.RegisterSource.WithLabelValues(track).Inc()
 }

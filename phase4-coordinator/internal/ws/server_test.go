@@ -3,6 +3,8 @@ package ws_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -18,7 +20,9 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/audit"
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
@@ -154,6 +158,197 @@ func TestProviderAuthV2AcceptsMockAttestationToken(t *testing.T) {
 		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
 		return ok && provider.EncryptedLeg && provider.AttestationStatus == pool.AttestationStatusAttested
 	})
+}
+
+func TestProviderAuthV2IdentitySignatureRequiredWithoutPolicyExemption(t *testing.T) {
+	pub, _, providerID := testIdentityKey(t)
+	store := &fakeIdentitySignatureStore{identityPubkey: pub, identityOK: true}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	conn, challenge, _ := writeIdentityInitial(t, h.HTTP.URL, providerID)
+	defer conn.Close()
+
+	writeAuthProof(t, conn, challenge, providerID, nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	frame, err := gobwas.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read close: %v", err)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseIdentitySignatureRequired || reason != "identity_signature_required" {
+		t.Fatalf("close = %d %q", code, reason)
+	}
+}
+
+func TestProviderAuthV2IdentitySignatureRejectDoesNotConsumeProvisionalAdmission(t *testing.T) {
+	pub, _, providerID := testIdentityKey(t)
+	store := &fakeIdentitySignatureStore{identityPubkey: pub, identityOK: true}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{providerws.WithIdentitySignatureStore(store)}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Admission.ProvisionalAdmissionRatePerHour = 1
+	})
+	defer h.HTTP.Close()
+	conn, challenge, _ := writeIdentityInitial(t, h.HTTP.URL, providerID)
+	defer conn.Close()
+
+	writeAuthProof(t, conn, challenge, providerID, nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	if records := h.Provider.Admission().Records(nil); len(records) != 0 {
+		t.Fatalf("provisional records after rejected proof = %+v, want none", records)
+	}
+}
+
+func TestProviderAuthV2IdentitySignaturePolicyExemptionAcceptsBearerOnly(t *testing.T) {
+	_, _, providerID := testIdentityKey(t)
+	exemptUntil := time.Now().Add(time.Hour)
+	store := &fakeIdentitySignatureStore{policyOK: true, exemptUntil: &exemptUntil, grantedBy: "migration"}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	conn, challenge, _ := writeIdentityInitial(t, h.HTTP.URL, providerID)
+	defer conn.Close()
+
+	writeAuthProof(t, conn, challenge, providerID, nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		t.Fatalf("auth_response = %+v", response)
+	}
+}
+
+func TestProviderAuthV2IdentitySignatureValidAppTrackProofAccepts(t *testing.T) {
+	pub, priv, providerID := testIdentityKey(t)
+	store := &fakeIdentitySignatureStore{identityPubkey: pub, identityOK: true}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	conn, challenge, initial := writeIdentityInitial(t, h.HTTP.URL, providerID)
+	defer conn.Close()
+
+	fields := signedIdentityProofFields(t, priv, providerID, challenge.AuthAttemptID, initial)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil, fields)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		t.Fatalf("auth_response = %+v", response)
+	}
+}
+
+func TestProviderAuthV2IdentitySignatureValidCLIReceiptProofAccepts(t *testing.T) {
+	receiptPub, receiptPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("receipt key: %v", err)
+	}
+	providerID := "m4-anon"
+	store := &fakeIdentitySignatureStore{}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	h.Registry.Register(&pool.Provider{
+		ProviderID:    providerID,
+		AssignedID:    "existing-cli",
+		ReceiptPubkey: receiptPub,
+		ReceiptPubkeyPrev: &pool.ReceiptPubkeyPrevious{
+			Pubkey:    bytes.Repeat([]byte{0x77}, 32),
+			RotatedAt: time.Now().Add(-time.Hour),
+			ExpiresAt: time.Now().Add(time.Hour),
+		},
+	}, nil)
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(receiptPub)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	fields := signedIdentityProofFields(t, receiptPriv, providerID, challenge.AuthAttemptID, initial)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil, fields)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		t.Fatalf("auth_response = %+v", response)
+	}
+}
+
+func TestProviderAuthV2IdentitySignatureRejectsSelfDeclaredCLIReceiptProof(t *testing.T) {
+	storedReceiptPub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("stored receipt key: %v", err)
+	}
+	attackerPub, attackerPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("attacker receipt key: %v", err)
+	}
+	providerID := "m4-anon"
+	store := &fakeIdentitySignatureStore{}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	h.Registry.Register(&pool.Provider{
+		ProviderID:    providerID,
+		AssignedID:    "existing-cli",
+		ReceiptPubkey: storedReceiptPub,
+	}, nil)
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(attackerPub)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	fields := signedIdentityProofFields(t, attackerPriv, providerID, challenge.AuthAttemptID, initial)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil, fields)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+}
+
+func TestProviderAuthV2IdentitySignatureRejectsCLIWithoutStoredReceiptKey(t *testing.T) {
+	receiptPub, receiptPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("receipt key: %v", err)
+	}
+	providerID := "m4-anon"
+	store := &fakeIdentitySignatureStore{}
+	h := newIdentitySignatureHarness(t, providerID, store)
+	defer h.HTTP.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(receiptPub)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	fields := signedIdentityProofFields(t, receiptPriv, providerID, challenge.AuthAttemptID, initial)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil, fields)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("auth_response = %+v", response)
+	}
 }
 
 func TestProviderAuthV2L1NoRetentionEntry(t *testing.T) {
@@ -3184,6 +3379,98 @@ func validAuthInitialWithFreshKey(t *testing.T, providerID string) map[string]an
 		t.Fatalf("provider keypair: %v", err)
 	}
 	return validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+}
+
+func testIdentityKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey, string) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("identity key: %v", err)
+	}
+	return pub, priv, onboarding.ProviderIDForIdentityPubkey(pub)
+}
+
+func newIdentitySignatureHarness(t *testing.T, providerID string, store providerws.IdentitySignatureStore) providerHarness {
+	t.Helper()
+	return newProviderHarnessWithServerOptions(t, nil, []providerws.Option{providerws.WithIdentitySignatureStore(store)}, func(cfg *config.Config) {
+		cfg.Providers[0].ProviderID = providerID
+		cfg.Providers[0].EndpointURL = ""
+	})
+}
+
+func writeIdentityInitial(t *testing.T, serverURL, providerID string) (net.Conn, providerws.AuthChallenge, map[string]any) {
+	t.Helper()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(serverURL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		conn.Close()
+		t.Fatalf("write auth initial: %v", err)
+	}
+	return conn, readAuthChallenge(t, conn), initial
+}
+
+func signedIdentityProofFields(t *testing.T, priv ed25519.PrivateKey, providerID, authAttemptID string, initial map[string]any) map[string]any {
+	t.Helper()
+	normalizedInitial := normalizeForJCS(t, initial)
+	canonicalInitial, err := billing.CanonicalJSON(normalizedInitial)
+	if err != nil {
+		t.Fatalf("canonical initial: %v", err)
+	}
+	transcriptHash := sha256.Sum256(canonicalInitial)
+	transcriptB64 := base64.StdEncoding.EncodeToString(transcriptHash[:])
+	tuple := map[string]any{
+		"auth_attempt_id":          authAttemptID,
+		"provider_id":              providerID,
+		"binary_version":           normalizedInitial["binary_version"],
+		"provider_ecdh_public_key": normalizedInitial["provider_ecdh_public_key"],
+		"transcript_sha256":        transcriptB64,
+	}
+	canonicalTuple, err := billing.CanonicalJSON(tuple)
+	if err != nil {
+		t.Fatalf("canonical tuple: %v", err)
+	}
+	return map[string]any{
+		"identity_signature":                   base64.StdEncoding.EncodeToString(ed25519.Sign(priv, canonicalTuple)),
+		"identity_signature_transcript_sha256": transcriptB64,
+	}
+}
+
+func normalizeForJCS(t *testing.T, in map[string]any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal normalize: %v", err)
+	}
+	var out map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("decode normalize: %v", err)
+	}
+	return out
+}
+
+type fakeIdentitySignatureStore struct {
+	policyOK       bool
+	exemptUntil    *time.Time
+	grantedBy      string
+	identityPubkey []byte
+	identityOK     bool
+}
+
+func (f *fakeIdentitySignatureStore) LookupProviderAuthPolicy(ctx context.Context, providerID string) (*time.Time, string, bool, error) {
+	return f.exemptUntil, f.grantedBy, f.policyOK, nil
+}
+
+func (f *fakeIdentitySignatureStore) LookupProviderIdentityPubkey(ctx context.Context, providerID string) ([]byte, bool, error) {
+	return append([]byte(nil), f.identityPubkey...), f.identityOK, nil
 }
 
 func assertInitialCatalogRejectedWithLockedSubstring(t *testing.T, initial map[string]any, substring string) {

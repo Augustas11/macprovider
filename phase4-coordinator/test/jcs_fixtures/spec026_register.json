@@ -1,0 +1,84 @@
+{
+  "schema": "spec026_register_jcs_v1",
+  "objects": [
+    {
+      "id": "minimal_valid_http_body",
+      "body": {
+        "provider_id": "p_abcdefghijklmnopqrstuvwxyz234567abcdefghijklm",
+        "identity_pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "hardware_summary": {
+          "chip": "M4",
+          "unified_memory_gb": 24,
+          "macos_version": "15.5",
+          "app_version": "1.0.0"
+        },
+        "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ts_utc": "2026-07-03T12:00:00Z"
+      },
+      "expected_canonical": "{\"hardware_summary\":{\"app_version\":\"1.0.0\",\"chip\":\"M4\",\"macos_version\":\"15.5\",\"unified_memory_gb\":24},\"identity_pubkey\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"nonce\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"provider_id\":\"p_abcdefghijklmnopqrstuvwxyz234567abcdefghijklm\",\"ts_utc\":\"2026-07-03T12:00:00Z\"}"
+    },
+    {
+      "id": "app_attest_present_valid_shape",
+      "body": {
+        "provider_id": "p_abcdefghijklmnopqrstuvwxyz234567abcdefghijklm",
+        "identity_pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "hardware_summary": {
+          "chip": "M4 Pro",
+          "unified_memory_gb": 48,
+          "macos_version": "15.5",
+          "app_version": "1.0.0"
+        },
+        "app_attest_object": "oA==",
+        "app_attest_key_id": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        "nonce": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ts_utc": "2026-07-03T12:00:01Z"
+      },
+      "expected_canonical": "{\"app_attest_key_id\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\",\"app_attest_object\":\"oA==\",\"hardware_summary\":{\"app_version\":\"1.0.0\",\"chip\":\"M4 Pro\",\"macos_version\":\"15.5\",\"unified_memory_gb\":48},\"identity_pubkey\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"nonce\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"provider_id\":\"p_abcdefghijklmnopqrstuvwxyz234567abcdefghijklm\",\"ts_utc\":\"2026-07-03T12:00:01Z\"}"
+    },
+    {
+      "id": "unicode_hardware_chip",
+      "body": {
+        "provider_id": "p_abcdefghijklmnopqrstuvwxyz234567abcdefghijklm",
+        "identity_pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "hardware_summary": {
+          "chip": "M4 Pro Café",
+          "unified_memory_gb": 36,
+          "macos_version": "15.5",
+          "app_version": "1.0.0"
+        },
+        "nonce": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "ts_utc": "2026-07-03T12:00:02Z"
+      },
+      "expected_canonical": "{\"hardware_summary\":{\"app_version\":\"1.0.0\",\"chip\":\"M4 Pro Café\",\"macos_version\":\"15.5\",\"unified_memory_gb\":36},\"identity_pubkey\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"nonce\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"provider_id\":\"p_abcdefghijklmnopqrstuvwxyz234567abcdefghijklm\",\"ts_utc\":\"2026-07-03T12:00:02Z\"}"
+    },
+    {
+      "id": "jcs_only_nested_object_variant",
+      "body": {
+        "z": "last",
+        "a": {
+          "b": [3, "two", true],
+          "a": "first"
+        },
+        "m": null
+      },
+      "expected_canonical": "{\"a\":{\"a\":\"first\",\"b\":[3,\"two\",true]},\"m\":null,\"z\":\"last\"}"
+    },
+    {
+      "id": "signature_stripped_current_token_variant",
+      "body": {
+        "provider_id": "p_abcdefghijklmnopqrstuvwxyz234567abcdefghijklm",
+        "identity_pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "current_provider_token": "existing-token-proof",
+        "hardware_summary": {
+          "chip": "M4",
+          "unified_memory_gb": 24,
+          "macos_version": "15.5",
+          "app_version": "1.0.0"
+        },
+        "nonce": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "ts_utc": "2026-07-03T12:00:03Z"
+      },
+      "expected_canonical": "{\"current_provider_token\":\"existing-token-proof\",\"hardware_summary\":{\"app_version\":\"1.0.0\",\"chip\":\"M4\",\"macos_version\":\"15.5\",\"unified_memory_gb\":24},\"identity_pubkey\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"nonce\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"provider_id\":\"p_abcdefghijklmnopqrstuvwxyz234567abcdefghijklm\",\"ts_utc\":\"2026-07-03T12:00:03Z\"}"
+    }
+  ]
+}

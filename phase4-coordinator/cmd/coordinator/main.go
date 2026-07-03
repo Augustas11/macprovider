@@ -20,6 +20,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/explorer"
+	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
@@ -121,6 +122,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "tier2: %v\n", err)
 		os.Exit(1)
 	}
+	metricsRegistry := prom.NewRegistry()
+	metricsHandle := statsmetrics.New(metricsRegistry)
 	registry := pool.NewRegistry(cfg.Providers)
 	startedAt := time.Now().UTC()
 	tokenStore, err := auth.OpenStore(cfg.Storage.DBPath)
@@ -355,6 +358,19 @@ func main() {
 	// segregation MINOR).
 	wsOpts = append(wsOpts, providerws.WithTokenIssuer(tokenStore))
 	wsOpts = append(wsOpts, providerws.WithGitHubAuthStore(tokenStore))
+	var onboardingStore *onboarding.PGStore
+	if cfg.Onboarding.AppTrackRegisterEnabled {
+		onboardingStore, err = onboarding.OpenPGStore(cfg.Onboarding.PostgresDSN)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("open onboarding postgres store")
+		}
+		defer onboardingStore.Close()
+		if err := onboardingStore.Smoke(context.Background()); err != nil {
+			logger.Fatal().Err(err).Msg("onboarding postgres smoke failed")
+		}
+		wsOpts = append(wsOpts, providerws.WithIdentitySignatureStore(onboardingStore))
+		wsOpts = append(wsOpts, providerws.WithProviderAuthPolicyAdminStore(onboardingStore))
+	}
 	if cfg.Auth.RequireProviderTokens {
 		logger.Info().
 			Bool("allow_tokenless_provisional_bootstrap", cfg.Auth.AllowTokenlessProvisionalBootstrap).
@@ -576,13 +592,8 @@ func main() {
 		// SPEC-017 v0.1.8 Step 4.C — Prometheus metrics. The
 		// coordinator owns its own registry (not the global
 		// DefaultRegisterer) so concurrent test runs don't
-		// double-register. The /metrics handler is mounted on
-		// the provider port (8444) which is loopback-only per
-		// Pearl posture (nginx fronts the public ports; the
-		// metrics endpoint is reachable only via SSH/operator
-		// tunnel).
-		statsRegistry := prom.NewRegistry()
-		statsMetrics := statsmetrics.New(statsRegistry)
+		// double-register. SPEC-026 adds /admin/metrics below;
+		// /metrics remains as a loopback-compatible alias only.
 		statsHandler := stats.NewMuxWithMetrics(
 			statsstore.New(statsPools.Reader),
 			stats.CORSConfig{
@@ -593,10 +604,10 @@ func main() {
 			cfg.Stats.Rollup.PartialHistorySince,
 			cfg.Stats.TrustedProxies,
 			logger.With().Str("subsystem", "stats_handlers").Logger(),
-			statsMetrics,
+			metricsHandle,
 		).Handler()
 		providerMux.Handle("/v1/stats/", statsHandler)
-		providerMux.Handle("/metrics", promhttp.HandlerFor(statsRegistry, promhttp.HandlerOpts{}))
+		providerMux.Handle("/metrics", promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{}))
 		logger.Info().Msg("SPEC-017 stats handlers + /metrics mounted on provider port")
 
 		// Wire rollup lag observation periodically — gauge value
@@ -604,13 +615,47 @@ func main() {
 		// component. Background goroutine; cancelled with
 		// shutdownCtx.
 		if statsRollup != nil {
-			statsRollup.WithMetrics(statsMetrics)
-			go observeRollupLag(shutdownCtx, statsPools.Reader, statsMetrics, logger)
+			statsRollup.WithMetrics(metricsHandle)
+			go observeRollupLag(shutdownCtx, statsPools.Reader, metricsHandle, logger)
 		}
+	}
+	providerMux.Handle("/admin/metrics", operatorMetricsHandler(cfg.Auth.OperatorKey, metricsRegistry))
+
+	var buyerHandler http.Handler = buyerServer.Handler()
+	if cfg.Onboarding.AppTrackRegisterEnabled {
+		asnResolver, err := onboarding.NewStaticASNResolver(cfg.Onboarding.ASNPrefixes)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("onboarding ASN resolver config invalid")
+		}
+		registerHandler := &onboarding.Handler{
+			StatsDB:           onboardingStore,
+			AuthTokenStore:    tokenStore,
+			CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
+			CoordinatorWSURL:  "wss://" + cfg.Onboarding.CoordinatorDomain + "/v2/provider",
+			TrustedProxies:    mustParseTrustedProxies(cfg, logger),
+			IPRateLimiter:     onboarding.NewMemoryRateLimiter(5, time.Minute),
+			ASNRateLimiter:    onboarding.NewMemoryRateLimiter(30, time.Minute),
+			ASNResolver:       asnResolver,
+			AppAttestVerifier: onboarding.AppleAppAttestVerifier{
+				Config: onboarding.AppAttestConfig{
+					CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
+					BundleID:          cfg.Onboarding.BundleID,
+					TeamID:            cfg.Onboarding.AppleTeamID,
+				},
+			},
+			Metrics: metricsHandle,
+			AppAttestConfig: onboarding.AppAttestConfig{
+				CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
+				BundleID:          cfg.Onboarding.BundleID,
+				TeamID:            cfg.Onboarding.AppleTeamID,
+			},
+		}
+		buyerHandler = buyerHandlerWithOptionalRegister(buyerHandler, true, registerHandler.HandleAppTrackRegister)
+		logger.Info().Msg("SPEC-026 app-track register route mounted on buyer port")
 	}
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
-	buyerHTTP := newHTTPServer(buyerAddr, buyerServer.Handler())
+	buyerHTTP := newHTTPServer(buyerAddr, buyerHandler)
 	errs := make(chan error, 2)
 
 	if err := billingStore.StartStartupScan(context.Background(), cfg.Settlement, time.Now().UTC()); err != nil {
@@ -868,6 +913,29 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		ReadTimeout:       310 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+}
+
+func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Handler {
+	metrics := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !auth.OperatorOnlyBearerMatches(r.Header, operatorKey) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"operator bearer token required"}}` + "\n"))
+			return
+		}
+		metrics.ServeHTTP(w, r)
+	})
+}
+
+func buyerHandlerWithOptionalRegister(base http.Handler, enabled bool, register http.HandlerFunc) http.Handler {
+	if !enabled {
+		return base
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/providers/register", register)
+	mux.Handle("/", base)
+	return mux
 }
 
 func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, billingStores ...*billing.Store) {

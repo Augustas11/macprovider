@@ -68,6 +68,8 @@ type AuthRequest struct {
 	ProviderReceiptPubkey    []byte          `json:"-"`
 	Tier2Capabilities        Tier2Caps       `json:"tier2_capabilities,omitempty"`
 	AttestationToken         json.RawMessage `json:"attestation_token,omitempty"`
+	IdentitySignature        string          `json:"identity_signature,omitempty"`
+	IdentityTranscriptSHA256 string          `json:"identity_signature_transcript_sha256,omitempty"`
 	SupportedModels          []string        `json:"supported_models,omitempty"`
 	PublishesSupportedModels bool            `json:"publishes_supported_models,omitempty"`
 }
@@ -565,6 +567,16 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 	}
 	if token, ok := raw["attestation_token"]; ok {
 		req.AttestationToken = token
+	}
+	if v, ok := raw["identity_signature"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.IdentitySignature); err != nil {
+			return AuthRequest{}, Spec010Presence{}, "identity_signature", err
+		}
+	}
+	if v, ok := raw["identity_signature_transcript_sha256"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.IdentityTranscriptSHA256); err != nil {
+			return AuthRequest{}, Spec010Presence{}, "identity_signature_transcript_sha256", err
+		}
 	}
 	// Proof-stage MUST keep the bare "supported_models" badField (NOT
 	// the locked initial-stage substring) — AC-K.15's surfacing
