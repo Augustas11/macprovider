@@ -1,8 +1,82 @@
 import Foundation
 import CryptoKit
+import MLX
 import MLXLLM
 import MLXLMCommon
 import MacProviderCore
+
+// SPIKE v2: LCP + KVCache.trim() reuse. Single-conversation static, NOT production.
+// See specs/BUILD_KV_CACHE_HIT_DETECTION_PROMPT.md "Spike findings" for the
+// tokenizer non-canonicity trap that killed v1's strict prefix match.
+private enum SpikeConvCache {
+    static let lock = NSLock()
+    static var kvCache: [KVCache]?
+    static var storedTokens: [Int32] = []
+    static var storedModelID: String?
+    static let LCP_MIN_THRESHOLD = 32
+
+    struct Reuse {
+        let trimmedCache: [KVCache]
+        let lcp: Int
+    }
+
+    /// Compute LCP between stored and incoming; if it meets the threshold AND
+    /// all cache layers are trimmable, trim in place and return the trimmed
+    /// cache + LCP. On MISS, returns nil (caller allocates fresh cache).
+    /// Diagnostic stderr lines emitted for every decision.
+    static func maybeReuse(
+        incomingTokens: [Int32],
+        modelID: String
+    ) -> Reuse? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let existing = kvCache,
+              storedModelID == modelID,
+              !storedTokens.isEmpty
+        else {
+            FileHandle.standardError.write(Data("SPIKE conv_cache MISS reason=cold_start incoming=\(incomingTokens.count)\n".utf8))
+            return nil
+        }
+        // LCP
+        let maxCheck = min(storedTokens.count, incomingTokens.count)
+        var lcp = 0
+        while lcp < maxCheck && storedTokens[lcp] == incomingTokens[lcp] { lcp += 1 }
+        if lcp < LCP_MIN_THRESHOLD {
+            FileHandle.standardError.write(Data("SPIKE conv_cache MISS reason=lcp_below_threshold lcp=\(lcp) threshold=\(LCP_MIN_THRESHOLD) stored=\(storedTokens.count) incoming=\(incomingTokens.count)\n".utf8))
+            return nil
+        }
+        if lcp == incomingTokens.count {
+            // Buyer replayed a fully-cached request; nothing new to generate.
+            FileHandle.standardError.write(Data("SPIKE conv_cache MISS reason=nothing_new lcp=\(lcp) incoming=\(incomingTokens.count)\n".utf8))
+            return nil
+        }
+        // All layers must be trimmable.
+        for layer in existing where !layer.isTrimmable {
+            FileHandle.standardError.write(Data("SPIKE conv_cache MISS reason=cache_not_trimmable stored=\(storedTokens.count) lcp=\(lcp)\n".utf8))
+            return nil
+        }
+        let trimBy = storedTokens.count - lcp
+        if trimBy > 0 {
+            for layer in existing {
+                let trimmed = layer.trim(trimBy)
+                if trimmed != trimBy {
+                    FileHandle.standardError.write(Data("SPIKE conv_cache TRIM_UNDERFLOW asked=\(trimBy) got=\(trimmed) layer_offset_now=\(layer.offset)\n".utf8))
+                }
+            }
+        }
+        FileHandle.standardError.write(Data("SPIKE conv_cache HIT lcp=\(lcp) trim_by=\(trimBy) new_tokens=\(incomingTokens.count - lcp) cache_offset_now=\(existing.first?.offset ?? -1)\n".utf8))
+        return Reuse(trimmedCache: existing, lcp: lcp)
+    }
+
+    static func store(cache: [KVCache], fullTokens: [Int32], modelID: String) {
+        lock.lock()
+        kvCache = cache
+        storedTokens = fullTokens
+        storedModelID = modelID
+        FileHandle.standardError.write(Data("SPIKE conv_cache STORE tokens=\(fullTokens.count) cache_offset=\(cache.first?.offset ?? -1)\n".utf8))
+        lock.unlock()
+    }
+}
 
 protocol ModelRuntimeServing: Actor {
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult
@@ -591,9 +665,33 @@ actor ModelRuntime: ModelRuntimeServing {
                         topP: Float(request.topP)
                     )
                     let firstToken = FirstTokenRecorder()
-                    let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
+
+                    // SPIKE v2: LCP + cache-trim reuse.
+                    let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    let modelID = request.model
+                    let kvCache: [KVCache]
+                    let cachedPromptTokens: Int
+                    let iteratorInput: LMInput
+                    if let reuse = SpikeConvCache.maybeReuse(incomingTokens: promptTokenIds, modelID: modelID) {
+                        kvCache = reuse.trimmedCache
+                        cachedPromptTokens = reuse.lcp
+                        // Feed only the suffix to the iterator. Cache is already at offset = lcp.
+                        let suffixIds = Array(promptTokenIds[reuse.lcp...])
+                        iteratorInput = LMInput(tokens: MLXArray(suffixIds))
+                    } else {
+                        kvCache = context.model.newCache(parameters: parameters)
+                        cachedPromptTokens = 0
+                        iteratorInput = lmInput
+                    }
+
+                    var generatedTokenIds: [Int32] = []
+                    let iterator = try TokenIterator(input: iteratorInput, model: context.model, cache: kvCache, parameters: parameters)
+                    let result: GenerateResult = generate(input: iteratorInput, context: context, iterator: iterator) { tokens in
                         if !tokens.isEmpty {
                             firstToken.recordIfMissing()
+                            // mlx-swift's didGenerate passes the ACCUMULATED tokens list every tick,
+                            // not the delta — assign, don't append.
+                            generatedTokenIds = tokens.map { Int32($0) }
                         }
                         if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
                             return GenerateDisposition.stop
@@ -630,10 +728,19 @@ actor ModelRuntime: ModelRuntimeServing {
                         finishReason = "stop"
                     }
 
+                    // SPIKE v2: store the full sequence (prompt + generated) so the next
+                    // turn's LCP has something to match against.
+                    SpikeConvCache.store(
+                        cache: kvCache,
+                        fullTokens: promptTokenIds + generatedTokenIds,
+                        modelID: modelID
+                    )
+
                     return try Self.validateStructuredCompletion(CompletionResult(
                         content: parsed.content,
                         finishReason: finishReason,
                         promptTokens: result.promptTokenCount,
+                        cachedPromptTokens: cachedPromptTokens,
                         completionTokens: result.generationTokenCount,
                         ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt),
                         toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
@@ -1598,6 +1705,7 @@ struct CompletionResult: Sendable {
     let content: String
     let finishReason: String
     let promptTokens: Int
+    let cachedPromptTokens: Int
     let completionTokens: Int
     let ttftMilliseconds: Int64?
     let toolCalls: [ToolCall]?
@@ -1607,6 +1715,7 @@ struct CompletionResult: Sendable {
         content: String,
         finishReason: String,
         promptTokens: Int,
+        cachedPromptTokens: Int = 0,
         completionTokens: Int,
         ttftMilliseconds: Int64? = nil,
         toolCalls: [ToolCall]? = nil,
@@ -1615,6 +1724,7 @@ struct CompletionResult: Sendable {
         self.content = content
         self.finishReason = finishReason
         self.promptTokens = promptTokens
+        self.cachedPromptTokens = cachedPromptTokens
         self.completionTokens = completionTokens
         self.ttftMilliseconds = ttftMilliseconds
         self.toolCalls = toolCalls
@@ -1627,6 +1737,7 @@ struct CompletionResult: Sendable {
             content: content,
             finishReason: finishReason,
             promptTokens: promptTokens,
+            cachedPromptTokens: cachedPromptTokens,
             completionTokens: completionTokens,
             ttftMilliseconds: ttftMilliseconds,
             toolCalls: toolCalls,

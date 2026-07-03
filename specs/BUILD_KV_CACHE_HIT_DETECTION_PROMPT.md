@@ -6,6 +6,64 @@ Your job is to make the phase3 provider actually **detect KV-cache hits on stick
 
 **~1 week of provider Swift work + one codex audit round. Not directly money-path (SPEC-024's `CHECK(cached_prompt_tokens <= prompt_tokens)` constraint prevents any incorrect report from being credited), but wire-adjacent enough that a reasonable audit round earns its cost.**
 
+## Spike findings — read this before you design (2026-07-03)
+
+A ~30-minute standalone HTTP spike on branch `spike/kv-cache-hit-detection` (against `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` locally, no coord, single-conversation static cache) verified the mechanism and surfaced ONE non-obvious trap. Read this before you commit to a design.
+
+**What the spike proved:**
+- mlx-swift `TokenIterator(input:model:cache:parameters:)` accepts a pre-populated cache. Correct API.
+- `[KVCache]` retains state across successive `generate()` calls in the same `ModelContext`. Turn 1 stored 69 tokens (58 prompt + 11 generated), still readable at turn 2.
+- The `didGenerate: ([Int]) -> GenerateDisposition` callback receives the **accumulated** token list on each tick, NOT the delta. Use `generatedTokens = tokens.map { … }` (assign), never `append(contentsOf:)`, or you N²-count and stored counts explode.
+- The tokenizer surface `lmInput.text.tokens.asArray(Int32.self)` gives the prompt token IDs needed for prefix comparison.
+
+**What the spike broke — the tokenizer round-trip trap (critical, must design around):**
+
+Naïve token-ID prefix matching FAILS due to non-canonical whitespace tokenization. Diagnostic evidence from the spike:
+
+```
+first_diff_at=57
+stored[54..<62]   = [128006, 78191, 128007, 1432, 41, 20089, 374, 279]
+incoming[54..<62] = [128006, 78191, 128007,  271, 41, 20089, 374, 279]
+                                              ^^^^
+                                              (stored=1432, incoming=271)
+```
+
+Tokens 0..56 match exactly. At position 57, stored=**1432** and incoming=**271** — BOTH decode to `"\n\n"`. Same string, different token ID.
+
+Cause: at turn 1, the model **generated** the newline after `<|end_header_id|>` as token 1432 (BPE-merged with what followed). At turn 2, when the chat template **re-tokenizes** the assistant history, the tokenizer canonicalizes the same `\n\n` as token 271. Same bytes, different token, strict prefix match fails.
+
+This affects every Llama-3 / Qwen-3 family chat template — expect similar off-by-a-few-tokens divergence at every assistant-message boundary. NOT a bug in mlx-swift, NOT a bug in the chat template, NOT a data-corruption issue. It's the inescapable "tokenizers are not idempotent under generate→re-tokenize" reality.
+
+**Required design pivot: use longest-common-prefix (LCP) + `KVCache.trim(_ n: Int)`, NOT strict prefix match.**
+
+1. Compute LCP between stored tokens and incoming prompt tokens
+2. If LCP > some minimum threshold (e.g. 32 tokens — below that the reuse win doesn't offset the trim cost):
+   - Call `KVCache.trim(storedTokens.count - LCP)` on each layer of the cached `[KVCache]` to roll the KV state back to position LCP
+   - Report `cached_prompt_tokens = LCP` (not `storedTokens.count`)
+   - Construct a new `LMInput` from just the suffix `incomingTokens[LCP...]` and pass to `TokenIterator(input:, model:, cache: trimmedCache, parameters:)`
+3. If LCP < threshold: full miss, allocate fresh cache, report `cached_prompt_tokens = 0`
+
+The `KVCache` protocol at `phase3-binary/.build/checkouts/mlx-swift-examples/Libraries/MLXLMCommon/KVCache.swift:56` exposes `func trim(_ n: Int) -> Int` and `var isTrimmable: Bool`. `KVCacheSimple` implements it; `RotatingKVCache` may not (`isTrimmable` returns false for windowed caches — treat as MISS in v1).
+
+**Rollout impact:** expect LCP to be ~2-4 tokens short of full stored length on every turn boundary due to the whitespace trap. Buyer receives ~2-4 tokens of "uncached" charge per turn boundary even when the cache is genuinely warm. That's <1% overhead on typical prompt sizes — acceptable, and SPEC-024's `CHECK(cached_prompt_tokens <= prompt_tokens)` constraint holds trivially since LCP ≤ prompt_tokens.
+
+**Spike v2 (LCP + trim) — proven end-to-end 2026-07-03:**
+- Turn 1: `cached_prompt_tokens: 0`, response "Jupiter is the largest planet in the solar system."
+- Turn 2 (same system + user + assistant history + follow-up "And its most well-known moon?"): `cached_prompt_tokens: 57`, response **"Io is the most well-known moon of Jupiter."**
+- The response correctly references Jupiter — established only in turn 1's context — proving the trimmed cache produces semantically correct output, not garbage.
+- Trace: `SPIKE conv_cache HIT lcp=57 trim_by=12 new_tokens=29 cache_offset_now=58` — LCP fell exactly on the turn-1 prefix minus the whitespace-canonicity trap.
+- Cache offset lags actual token count by 1 (`store tokens=69 cache_offset=70`) because mlx-swift's `prepare()` `step()` primes one extra token. Design implication: don't assert `cache.offset == LCP` exactly after trim — allow ±1.
+
+**Second correctness trap the spike surfaced: `prompt_tokens` in the response.**
+
+When the LCP+trim path feeds only the suffix to `TokenIterator`, the resulting `GenerateResult.promptTokenCount` reports the SUFFIX length (in the spike: 29), not the buyer's FULL prompt length (86). The current spike naively returns `promptTokens: result.promptTokenCount` in the response, which is WRONG:
+- The buyer sent 86 tokens; they should see `prompt_tokens: 86`
+- SPEC-024's ledger `CHECK(cached_prompt_tokens <= prompt_tokens)` would be VIOLATED (57 > 29) if the buggy value shipped to the coord
+
+**IMPL fix:** report `prompt_tokens = incomingTokenIds.count` (the FULL prompt length as tokenized before trim), NOT `result.promptTokenCount`. Add a unit test that fails if `cached_prompt_tokens > prompt_tokens` at emission time.
+
+**Spike code lives at:** branch `spike/kv-cache-hit-detection`, `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` (additive changes only, `SpikeConvCache` enum at file top, single-conversation static, no LRU/TTL/actor). Read it for the shape and copy the LCP + trim + suffix-input pattern; the store-side needs the `prompt_tokens` fix above for production.
+
 ## Pre-flight: confirm the gap
 
 Verify against the current tree before touching code:
@@ -55,18 +113,29 @@ New Swift file `phase3-binary/Sources/macprovider-cli/ConversationCache.swift` (
   - Any GenerateParameters affecting tokenization/prefill differ (tools list mutated, system message mutated — the canonical-token check in §3 catches these)
   - Entry age > 15 minutes (memory bound; conversations that idle out don't wedge memory)
 
-### 3. Cache-hit detection = canonical-prompt-prefix match
+### 3. Cache-hit detection = LCP + KVCache.trim() (updated per 2026-07-03 spike)
+
+**Do NOT use strict token-ID prefix matching.** Per the spike-findings section above, chat templates re-tokenize whitespace non-canonically after generation, so stored tokens diverge from incoming tokens by ~1-4 tokens at every turn boundary even when the conversation is a legitimate continuation. Strict prefix match would treat every real turn as a miss.
 
 On each request that arrives with `X-MacProvider-Provider-Conversation: <key>`:
 
 1. Look up the stored entry in `ConversationCache` by key. If none → cache miss, `cached_prompt_tokens = 0`, proceed normally.
-2. Canonicalize the incoming prompt to token IDs via the same path `PromptCanonicalizer.swift` uses, PLUS running through the model's chat template to produce the token sequence the model will actually see.
-3. Verify the stored `canonicalPromptTokens + canonicalCompletionTokens` is a strict PREFIX of the new canonical token sequence. If not → cache miss (the buyer replayed a modified prior turn, or the assistant response was edited buyer-side).
-4. If it IS a strict prefix, the cached KV state covers `len(canonicalPromptTokens) + len(canonicalCompletionTokens)` tokens. That's `cached_prompt_tokens` for this request.
-5. Pass the stored `[KVCache]` to `generate()` alongside a `UserInput` built ONLY from the NEW tokens (the tokens after the shared prefix). Let mlx-swift's KVCache mechanism resume from the pinned state.
-6. After generation completes, UPDATE the stored entry with the new turn's canonical tokens + KVCache (so turn N+2 can build on it), refresh `storedAt`, refresh `tokenCount`.
+2. Canonicalize the incoming prompt to `LMInput` via `context.processor.prepare(input:)` (same as today's non-caching path). Extract `promptTokenIds = lmInput.text.tokens.asArray(Int32.self)`.
+3. Compute LCP (longest common prefix, in tokens) between stored tokens and `promptTokenIds`. This is one pass, O(min(stored.count, prompt.count)).
+4. **LCP threshold check.** If `LCP < 32` OR `LCP == promptTokenIds.count` (nothing new to generate — buyer sent an already-cached request verbatim) → treat as MISS, allocate fresh cache. The 32-token floor amortizes trim cost against the reuse win; the "nothing new" case avoids feeding an empty suffix to TokenIterator (which would fail or produce nothing).
+5. **Cache trim.** Compute `trimBy = storedTokens.count - LCP`. For each `KVCache` in the cached `[KVCache]`:
+   - If `cache.isTrimmable == false` (RotatingKVCache with windowSize set) → treat as MISS, allocate fresh cache.
+   - Otherwise call `cache.trim(trimBy)`, verify the returned actual-trimmed matches expected, and confirm `cache.offset == LCP` after trim.
+6. **Report `cached_prompt_tokens = LCP`.** SPEC-024 §3 constraint `0 <= cached <= prompt_tokens` holds by construction.
+7. **Feed only the suffix to TokenIterator.** Construct a new `LMInput` from `promptTokenIds[LCP...]` (~`incomingTokens.count - LCP` new tokens). Pass to `TokenIterator(input: suffix, model: context.model, cache: trimmedCache, parameters: parameters)`. The model's `prepare()` will process the suffix on top of the pre-populated cache, avoiding re-prefill of the LCP-shared prefix.
+8. **After generation** completes successfully, UPDATE the stored entry with:
+   - `storedTokens = promptTokenIds + generatedTokens` (the FULL new state as the model saw it — includes any non-canonical model-generated whitespace tokens that will fail to match the NEXT turn's chat-template re-tokenization; that's expected and LCP handles it)
+   - `storedAt = now`
+   - `kvCache = trimmedCache` (the same reference, now mutated by generation to reflect the new end-state)
 
-**Critical:** the mlx-swift `generate()` API takes the KVCache by reference and mutates it as it processes new tokens. You MUST snapshot the cache state BEFORE generation if you want to keep it available for concurrent turns on the same conversation. Realistically conversations are single-threaded per buyer, so serializing per-key with the actor lock is fine and probably the right first-order design.
+**Concurrency:** the mlx-swift `TokenIterator` mutates the passed KVCache in place. Serialize per-key via the actor to prevent two concurrent turns on the same conversation from corrupting each other's KV state. First-order design — real production may need more sophisticated concurrency later.
+
+**Verification requirement for the IMPL PR:** the two-turn `openai-python` integration test at temperature=0 MUST show the turn-2 response is semantically consistent with the turn-1 context (i.e. references what turn 1 established). The spike did not validate this because it hit the prefix-diverge trap first. First proof of correctness lives with this IMPL.
 
 ### 4. Wire it into all four emission sites
 
