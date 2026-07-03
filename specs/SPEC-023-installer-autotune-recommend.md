@@ -1,8 +1,77 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.1
+version: v0.2
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-07-01
+last-locked: 2026-07-03
+
+## Change log
+
+- **v0.2 (2026-07-03)** — Two-part amendment ratifying the 5 client-side
+  fixes shipped between v1.7.5 and v1.7.9 and the accompanying
+  autotune-static keypair rotation.
+  1. **`min_sustained_tps` and `max_4k_ttft_ms` are advisory QoS
+     targets, not hard eligibility gates.** v1.7.9 (PR #335) reclassified
+     these fields as soft signals — a benchmark below/above the target
+     emits `.tps_below_gate` / `.ttft_above_gate` warnings but does not
+     veto the recommendation. `thermalThrottleDetected` remains a hard
+     block; the real financial gate stays `expected_net_usd_per_hour ≥
+     paidThreshold ($0.005/hr)`. `swapDetected` similarly went soft in
+     v1.7.6 (`.swap_observed_under_load`). Motivation: on M-Base 32GB
+     Tier C hardware (M5), every candidate had positive net income but
+     was hard-blocked by TPS gates calibrated for M-Pro/M-Max. The
+     first-install drop-out cliff (donor-mode-only recommendation
+     despite paid eligibility) was closed by making the gates soft.
+     The catalog field name `min_sustained_tps` is now semantically
+     "advisory floor" rather than "hard minimum"; if a future policy
+     ever wants a genuine hard floor, use a distinct field name (e.g.
+     `hard_min_sustained_tps`) rather than overloading this one.
+  2. **Static-feed keypair rotated v2 → v3.** New keyID
+     `streamvc-autotune-static-v3`; new base64 pubkey
+     `1qzXegR2OEu0TaQNWjUkN4PamQAHdpvBcYW/pJ4h6oE=` baked into
+     `AutotuneRecommend.swift`. The v3 **private** key is held off-repo
+     by the operator (default path
+     `~/.config/macprovider/keys/autotune-static-v3.private.base64`,
+     `chmod 0600`); the resign script at
+     `scripts/resign-autotune-static.sh` refuses to run if the key
+     file is world-readable. Runtime signature verification remains
+     unchanged: the client fetches from `coordinator.streamvc.live/static/*`,
+     verifies against the baked v3 pubkey, and falls back to the
+     compiled-in baked catalog on verification failure. Older v1.7.9-
+     clients that still bake the v2 pubkey `sidecarIsValid`-fail on
+     v3 sigs, fall back to their baked catalog, and stay online
+     thanks to the v0.2 soft-signal gates above. See
+     `phase3-binary/dist/static/keys/README.md` for the full trust
+     model and the v3 → v4 rotation procedure.
+  3. **Live catalog `min_sustained_tps` cuts.** With gates now
+     advisory, the v3-signed live catalog at
+     `coordinator.streamvc.live/static/autotune-candidates.json` was
+     re-published with M-Base-realistic advisory values so
+     `tps_below_gate` becomes a rare warning rather than the common
+     case on M-Base hardware:
+
+     | model                              | v2 (2026-07-02) | v3 (2026-07-03) | rationale |
+     |------------------------------------|:---------------:|:---------------:|---|
+     | qwen3-coder-30b-a3b-instruct       | 25              | **20**          | M5 measured ~23.4 tok/s cold-start; new gate has headroom |
+     | openai/gpt-oss-20b                 | 30              | **15**          | M5 measured ~16.7 tok/s cold-start; large cut needed |
+     | meta-llama/llama-3.1-8b-instruct   | 20              | **15**          | keep M-Base-lite (8/16GB) eligible |
+     | qwen2.5-coder-32b-instruct         | 25              | **20**          | broaden eligibility while keeping M-Max/Ultra tier signal |
+     | qwen3-32b                          | 15              | 15              | unchanged |
+
+     Baked catalog values in `AutotuneRecommend.swift` mirror the live
+     feed for the 4 M-Base-relevant rows we lowered (qwen3-coder-30b-a3b,
+     openai/gpt-oss-20b, meta-llama/llama-3.1-8b, qwen2.5-coder-32b) so
+     fallback semantics match the intended M-Base UX. Baked and live
+     intentionally drift on two other axes: (i) baked keeps
+     `runtime_status="listed"` (qwen3-32b, qwen2.5-coder-32b) and
+     `runtime_status="blocked"` (google-gemma, nvidia-nemotron) rows that
+     the live feed omits — baked serves as an offline superset for
+     correct "listed but not currently sold" and "blocked at client"
+     semantics; (ii) baked keeps qwen3-32b at `min_sustained_tps=30`
+     (M-Max floor) while live sets it to `15` (recommendable to
+     M-Pro 48GB) — offline recommendation on a compiled-in fallback
+     stays conservative.
+
+- **v0.1 (2026-07-01)** — Initial lock. See §1-§10.
 
 ## 1. Mission
 
@@ -38,8 +107,8 @@ Required hardware fields:
 | `diversification_id` | string | HMAC-SHA256-derived provider ID if configured, otherwise HMAC-SHA256-derived stable machine identity | Input to deterministic diversification. Raw machine fingerprints MUST NOT be persisted, logged, emitted in JSON, included in support bundles, or sent to coordinator/gateway as part of v0.1 recommendation. |
 | `candidate_benchmarks[model_key].sustained_tps` | float | local autotune benchmark | Warm steady-state decode tokens/sec for each candidate. |
 | `candidate_benchmarks[model_key].ttft_ms` | integer | local autotune benchmark | Time to first token under the v0.1 benchmark prompt shape. |
-| `candidate_benchmarks[model_key].swap_detected` | boolean | local probe | Any swap observed during the candidate probe fails eligibility. |
-| `candidate_benchmarks[model_key].thermal_throttle_detected` | boolean | local probe | Thermal throttle during probe fails eligibility. |
+| `candidate_benchmarks[model_key].swap_detected` | boolean | local probe | **[amended v0.2]** Observed swap emits `swap_observed_under_load` warning; does not fail eligibility. |
+| `candidate_benchmarks[model_key].thermal_throttle_detected` | boolean | local probe | Thermal throttle during probe fails eligibility. **[unchanged v0.2: hard block]** |
 
 HMAC identity rules:
 
@@ -70,7 +139,7 @@ Optional hardware fields:
 |---|---|---|
 | `machine` | string | Human-readable Mac product name if available. |
 | `power_watts` | float | Used only when an electricity estimate is available. Absence must not fail recommendation. |
-| `measured_memory_pressure` | string enum | May be used for confidence; hard failure remains `swap_detected == true`. |
+| `measured_memory_pressure` | string enum | May be used for confidence. **[amended v0.2: the only runtime hard failure is `thermal_throttle_detected == true`; swap is advisory per change log v0.2 point 1]**. |
 | `benchmark_id` | string | Stable ID of the local benchmark run, included when available. |
 
 ### 3.2 Candidate/admission catalog
@@ -315,15 +384,15 @@ A row is eligible only if every gate passes:
 - The signed candidate catalog must expose `min_bandwidth_tier`. Dense 32B/70B and developer dense rows must honor their tier gates; small-active MoE rows may pass on Tier-C when RAM and local probes pass.
 - Unknown hardware tier is treated as `C`; `min_bandwidth_tier` comparison uses the §3.1 order `S >= A >= B >= C`.
 
-`local_autotune_passes(model, mac)` rules:
+`local_autotune_passes(model, mac)` rules (v0.1 rules with v0.2 amendments applied — see change log v0.2 point 1):
 
-- `sustained_tps >= model.bench_gate.min_sustained_tps`.
-- `ttft_ms <= model.bench_gate.max_4k_ttft_ms`.
-- `swap_detected == false`.
-- `thermal_throttle_detected == false`.
+- `sustained_tps >= model.bench_gate.min_sustained_tps` **[v0.2 amendment: advisory; missing emits `tps_below_gate` warning but does not veto eligibility]**.
+- `ttft_ms <= model.bench_gate.max_4k_ttft_ms` **[v0.2 amendment: advisory; missing emits `ttft_above_gate` warning but does not veto eligibility]**.
+- `swap_detected == false` **[v0.2 amendment (originally shipped v1.7.6): advisory; observed swap emits `swap_observed_under_load` warning but does not veto eligibility]**.
+- `thermal_throttle_detected == false` **[unchanged from v0.1: hard block; the ONLY runtime hard eligibility gate in v0.2]**.
 - The candidate benchmark must be from the current `benchmark_id` or from a cached run whose candidate catalog hash, binary version, model ID, and HMAC-derived hardware identity hash match and whose `generated_at` is no older than 7 days.
 
-If no rows pass all gates, or if the best selected row fails the `$0.0050/hr` paid-yield threshold in §7, `autotune --recommend` must emit no paid recommendation, JSON `recommended_model = null`, and the donor-tier transcript in §7.2.
+The real financial gate in v0.2 is `expected_net_usd_per_hour >= $0.0050/hr` (§7). If no rows clear that threshold, or if `thermal_throttle_detected == true` on all rows, `autotune --recommend` must emit no paid recommendation, JSON `recommended_model = null`, and the donor-tier transcript in §7.2.
 
 ## 6. Output JSON contract (`autotune --recommend`)
 
@@ -549,9 +618,9 @@ AC-10: A row with demand `recommendable: false` or candidate `runtime_status != 
 
 AC-11: A row whose `model.min_ram_gb > mac.ram_gb - 4` fails `hardware_fits` and is not benchmarked. v0.1 has no arbitrary local-model or custom donor-mode path override; any donor-mode selection must still select a row from the signed selected candidate catalog and pass §3.2, §5, §8, and AC-22 controls.
 
-AC-12: A row whose local benchmark records swap or thermal throttle fails eligibility even if its raw TPS is highest.
+AC-12 **[amended v0.2]**: A row whose local benchmark records `thermal_throttle_detected == true` fails eligibility (hard block). A row whose local benchmark records `swap_detected == true` emits `swap_observed_under_load` warning but does NOT fail eligibility on that basis alone; the `expected_net_usd_per_hour >= $0.0050/hr` financial gate remains the paid-vs-donor arbiter.
 
-AC-13: A row whose benchmark misses either `min_sustained_tps` or `max_4k_ttft_ms` fails eligibility.
+AC-13 **[amended v0.2]**: A row whose benchmark misses `min_sustained_tps` or `max_4k_ttft_ms` emits `tps_below_gate` / `ttft_above_gate` warnings but does NOT fail eligibility on that basis alone. See change log v0.2 point 1 for the rationale (M-Base hardware had every candidate net-positive but hard-blocked by M-Pro/M-Max-calibrated gates).
 
 AC-14: A buyer/model string that matches the rate-card only after `normalizeModelKey` is treated as rate-card-enabled and records the normalized key in the candidate model field.
 
@@ -569,7 +638,7 @@ AC-20: The happy-path transcript exactly matches §7.1 with `$%.4f/hr` formattin
 
 AC-21: The donor-tier transcript exactly matches §7.2 with threshold `$0.0050/hr` and prompt default No.
 
-AC-22: `--donor-mode` allows a non-recommendable or below-threshold model to be locally committed only after printing the §8 warning, writing `donor_mode: true`, and verifying signed catalog metadata, immutable model revision, canonical artifact-set digest, `runtime_status != "blocked"`, model allowlist, RAM headroom, no-swap, no-thermal, and runtime support.
+AC-22 **[amended v0.2]**: `--donor-mode` allows a non-recommendable or below-threshold model to be locally committed only after printing the §8 warning, writing `donor_mode: true`, and verifying signed catalog metadata, immutable model revision, canonical artifact-set digest, `runtime_status != "blocked"`, model allowlist, RAM headroom, no-thermal-throttle, and runtime support. Swap and TPS/TTFT gates are advisory per AC-12/AC-13 amendments; observing them emits warnings but does not block donor-mode commit.
 
 AC-23: Applying donor mode for a non-recommendable row does not auto-start or auto-register a network-connected paid provider. Any network-connected donor serving is blocked until a separate donor-routing/settlement prerequisite exists.
 

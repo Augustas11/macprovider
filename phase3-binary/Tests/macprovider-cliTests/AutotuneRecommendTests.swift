@@ -390,10 +390,10 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticFallbackAndStaleWarnings() async throws {
         let validFetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "baked-2026-07-02", with: "fetched-2026-07-10")
+            .replacingOccurrences(of: "baked-2026-07-03", with: "fetched-2026-07-10")
             .replacingOccurrences(of: "2026-07-01T00:00:00Z", with: "2026-07-10T00:00:00Z")
             .utf8)
-        let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v2","alg":"ed25519","signature":"AA=="}"#.utf8)
+        let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v3","alg":"ed25519","signature":"AA=="}"#.utf8)
         let staleInputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : validFetched },
             verifySignature: { _, _ in true },
@@ -418,10 +418,10 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticRejectsSidecarWithExtraFields() async throws {
         let fetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "baked-2026-07-02", with: "fetched-2026-07-10")
+            .replacingOccurrences(of: "baked-2026-07-03", with: "fetched-2026-07-10")
             .replacingOccurrences(of: "2026-07-01T00:00:00Z", with: "2026-07-10T00:00:00Z")
             .utf8)
-        let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v2","alg":"ed25519","signature":"AA==","extra":true}"#.utf8)
+        let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v3","alg":"ed25519","signature":"AA==","extra":true}"#.utf8)
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : fetched },
             verifySignature: { _, _ in true },
@@ -435,7 +435,7 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testPinnedPublicKeyIsValidCurve25519SigningKey() {
-        let keyData = Data(base64Encoded: AutotuneStaticInputs.autotune_static_json_ed25519_v2)
+        let keyData = Data(base64Encoded: AutotuneStaticInputs.autotune_static_json_ed25519_v3)
 
         XCTAssertEqual(keyData?.count, 32)
         XCTAssertNotNil(try? Curve25519.Signing.PublicKey(rawRepresentation: try XCTUnwrap(keyData)))
@@ -1037,7 +1037,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(chmod(secretURL.path, 0o600), 0)
         let stateURL = dir.appendingPathComponent("last-recommendation.json")
         try Data("""
-        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"old","demand_rank_version":"baked-2026-07-02","candidate_catalog_version":"baked-2026-07-02","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"old","demand_rank_version":"baked-2026-07-03","candidate_catalog_version":"baked-2026-07-03","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
         let staticInputs = AutotuneStaticInputs(
             fetch: { _ in throw AutotuneRecommendError.invalidStaticJSON("offline") },
@@ -1063,7 +1063,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(chmod(secretURL.path, 0o644), 0)
         let stateURL = dir.appendingPathComponent("last-recommendation.json")
         try Data("""
-        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"baked-2026-07-02","demand_rank_version":"baked-2026-07-02","candidate_catalog_version":"baked-2026-07-02","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"baked-2026-07-03","demand_rank_version":"baked-2026-07-03","candidate_catalog_version":"baked-2026-07-03","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
         let staticInputs = AutotuneStaticInputs(
             fetch: { _ in throw AutotuneRecommendError.invalidStaticJSON("offline") },
@@ -1097,7 +1097,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: "provider-a")
         try Data("""
-        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-02","demand_rank_version":"baked-2026-07-02","candidate_catalog_version":"baked-2026-07-02","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-03","demand_rank_version":"baked-2026-07-03","candidate_catalog_version":"baked-2026-07-03","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
 
         let staleSince = await StatusCommand.staleRecommendationSince(
@@ -1215,10 +1215,11 @@ final class AutotuneRecommendTests: XCTestCase {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
-        // Force TPS below the catalog gate (25 tok/s for qwen3-coder).
-        // Keep it high enough that expected_net_usd_per_hour still
-        // clears the $0.005/hr paid threshold.
-        benchmark.sustainedTPS = 20
+        // Force TPS below the catalog gate (20 tok/s for qwen3-coder in
+        // baked-2026-07-03; was 25 in baked-2026-07-02). Keep it high
+        // enough that expected_net_usd_per_hour still clears the
+        // $0.005/hr paid threshold.
+        benchmark.sustainedTPS = 15
         request.benchmarks[modelKey] = benchmark
 
         let result = AutotuneRecommendEngine().recommend(request)
