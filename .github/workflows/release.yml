@@ -10,6 +10,11 @@ on:
         description: "Release tag, for example v1.2.1"
         required: true
         type: string
+      prerelease:
+        description: "Publish as a prerelease canary and do not mark latest"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -245,6 +250,9 @@ jobs:
             mkdir -p "$PKG_ROOT"
             mkdir -p "$PKG_SCRIPTS"
             cp "$WORK/macprovider-cli" "$PKG_ROOT/macprovider-cli"
+            if [ -f "$WORK/mlx.metallib" ]; then
+              cp "$WORK/mlx.metallib" "$PKG_ROOT/mlx.metallib"
+            fi
             find "$WORK" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$PKG_ROOT"/ \;
             if [ -f "$WORK/THIRD-PARTY-NOTICES.txt" ]; then
               cp "$WORK/THIRD-PARTY-NOTICES.txt" "$PKG_ROOT/THIRD-PARTY-NOTICES.txt"
@@ -346,6 +354,8 @@ jobs:
                   ;;
                 macprovider-cli)
                   has_binary=1
+                  ;;
+                mlx.metallib)
                   ;;
                 THIRD-PARTY-NOTICES.txt)
                   ;;
@@ -462,6 +472,7 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE_INPUT: ${{ github.event.inputs.prerelease || 'false' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -470,13 +481,17 @@ jobs:
           while IFS= read -r release_asset; do
             [ -n "$release_asset" ] && release_assets+=("$release_asset")
           done < release-assets.txt
+          release_flags=(--latest)
+          if [ "$PRERELEASE_INPUT" = "true" ]; then
+            release_flags=(--prerelease --latest=false)
+          fi
           gh release create "$tag" \
             "${release_assets[@]}" \
             checksums.txt \
             checksums.txt.sig \
             --title "macprovider-cli $tag" \
             --notes-file release-notes.md \
-            --latest
+            "${release_flags[@]}"
 
       - name: Verify published Tier-2 Release assets
         shell: bash

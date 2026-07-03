@@ -31,19 +31,28 @@ xcodebuild -scheme macprovider-cli \
 
 PRODUCTS="$RELEASE_DIR/Build/Products/Release"
 
-# Sanity: binary + metallib present?
+# Sanity: binary + Metal kernels present.
 if [ ! -x "$PRODUCTS/macprovider-cli" ]; then
   echo "FATAL: macprovider-cli not found at $PRODUCTS"
   exit 1
 fi
-if [ ! -f "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
-  echo "FATAL: default.metallib not found — Metal toolchain may be missing"
-  exit 1
+if [ ! -f "$PRODUCTS/mlx.metallib" ]; then
+  if [ -f "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
+    cp "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" "$PRODUCTS/mlx.metallib"
+  else
+    echo "==> Building mlx.metallib for CLI artifact..."
+    MLX_SWIFT_CHECKOUT="$RELEASE_DIR/SourcePackages/checkouts/mlx-swift" \
+      "$PHASE3_DIR/scripts/build-mlx-metallib.sh" "$PRODUCTS"
+  fi
 fi
+[ -f "$PRODUCTS/mlx.metallib" ] || {
+  echo "FATAL: mlx.metallib not found — Metal toolchain may be missing"
+  exit 1
+}
 
 echo "==> Build products:"
 ls -la "$PRODUCTS/macprovider-cli"
-ls -la "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
+ls -la "$PRODUCTS/mlx.metallib"
 
 echo "==> Gathering third-party license notices..."
 NOTICES_FILE="$OUT_DIR/THIRD-PARTY-NOTICES.txt"
@@ -54,16 +63,18 @@ echo "==> Staging tarball contents..."
 STAGE_DIR=$(mktemp -d)
 trap 'rm -rf "$STAGE_DIR"' EXIT
 cp "$PRODUCTS/macprovider-cli" "$STAGE_DIR/"
-cp -r "$PRODUCTS/mlx-swift_Cmlx.bundle" "$STAGE_DIR/"
+cp "$PRODUCTS/mlx.metallib" "$STAGE_DIR/"
+if [ -d "$PRODUCTS/mlx-swift_Cmlx.bundle" ]; then
+    cp -r "$PRODUCTS/mlx-swift_Cmlx.bundle" "$STAGE_DIR/"
+fi
 if [ -d "$PRODUCTS/swift-nio_NIOPosix.bundle" ]; then
     cp -r "$PRODUCTS/swift-nio_NIOPosix.bundle" "$STAGE_DIR/"
 fi
 cp "$NOTICES_FILE" "$STAGE_DIR/THIRD-PARTY-NOTICES.txt"
 
 echo "==> Packaging tarball: $TARBALL"
-# Include the binary + all *.bundle resources that SwiftPM produced
-# (mlx-swift_Cmlx.bundle is the critical one; others contain privacy
-# manifests etc. and are small), plus THIRD-PARTY-NOTICES.txt.
+# Include the binary, mlx.metallib, any SwiftPM bundle resources, and
+# THIRD-PARTY-NOTICES.txt.
 tar czf "$TARBALL" -C "$STAGE_DIR" .
 
 echo "==> Tarball stats:"

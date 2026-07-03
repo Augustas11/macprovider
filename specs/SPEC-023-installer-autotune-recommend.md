@@ -65,8 +65,9 @@ last-locked: 2026-07-03
      `runtime_status="listed"` (qwen3-32b, qwen2.5-coder-32b) and
      `runtime_status="blocked"` (google-gemma, nvidia-nemotron) rows that
      the live feed omits — baked serves as an offline superset for
-     correct "listed but not currently sold" and "blocked at client"
-     semantics; (ii) baked keeps qwen3-32b at `min_sustained_tps=30`
+     correct "listed but not currently sold" and "blocked pending
+     migration validation/rate-card rollout" semantics; (ii) baked keeps
+     qwen3-32b at `min_sustained_tps=30`
      (M-Max floor) while live sets it to `15` (recommendable to
      M-Pro 48GB) — offline recommendation on a compiled-in fallback
      stays conservative.
@@ -209,7 +210,7 @@ The v0.1 baked catalog MUST contain at least these rows:
 | `google-gemma-4-26b-a4b-it` | `mlx-community/gemma-4-26b-a4b-it-4bit` | 32 | `C` | 30 | 3000 | `blocked` |
 | `nvidia/nemotron-3-nano-30b-a3b` | `mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit` | 32 | `C` | 30 | 3000 | `blocked` |
 
-`blocked` rows may be shown only as diagnostics when useful; they are never downloaded, benchmarked, or recommended by default in v0.1.
+`blocked` rows may be shown only as diagnostics when useful; they are never downloaded, benchmarked, or recommended by default in v0.1. The Gemma/Nemotron blocked status means pending `mlx-swift-lm` migration validation and rate-card rollout, not an upstream architecture absence.
 
 ### 3.3 Rate card
 

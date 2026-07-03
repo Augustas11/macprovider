@@ -52,6 +52,54 @@ check_sha256() {
   log "provider artifact sha256 ok: $actual"
 }
 
+validate_artifact_entries() {
+  local entries="$1"
+  local has_binary=0
+  local has_metal=0
+  local entry normalized_entry
+  while IFS= read -r entry; do
+    normalized_entry="$entry"
+    while :; do
+      case "$normalized_entry" in
+        ./*) normalized_entry="${normalized_entry#./}" ;;
+        *) break ;;
+      esac
+    done
+    case "$normalized_entry" in
+      ""|.) continue ;;
+    esac
+    case "$normalized_entry" in
+      /*|*"/../"*|../*|*/..|..)
+        die "unsafe provider artifact path: $entry"
+        ;;
+      macprovider-cli)
+        has_binary=1
+        ;;
+      mlx.metallib|mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib)
+        has_metal=1
+        ;;
+      THIRD-PARTY-NOTICES.txt)
+        ;;
+      *.bundle|*.bundle/*)
+        ;;
+      *)
+        die "unexpected provider artifact member: $entry"
+        ;;
+    esac
+  done <<EOF
+$entries
+EOF
+
+  [ "$has_binary" -eq 1 ] || die "provider artifact does not contain macprovider-cli"
+  [ "$has_metal" -eq 1 ] || die "provider artifact lacks MLX Metal kernels (mlx.metallib or mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib)"
+}
+
+validate_artifact_member_types() {
+  if tar tvzf "$PROVIDER_ARTIFACT" | awk '{print substr($1,1,1), $0}' | grep -E '^[lhbcp]' >/dev/null; then
+    die "provider artifact contains unsafe link or device members"
+  fi
+}
+
 tmpdir=""
 temp_parent=""
 cleanup() {
@@ -69,15 +117,21 @@ require_command grep
 require_file "$PROVIDER_ARTIFACT"
 
 check_sha256 "$PROVIDER_ARTIFACT" "$PROVIDER_SHA256"
+artifact_entries="$(tar tzf "$PROVIDER_ARTIFACT")" || die "failed to list provider artifact"
+[ -n "$artifact_entries" ] || die "provider artifact is empty"
+validate_artifact_member_types
+validate_artifact_entries "$artifact_entries"
 
 temp_parent="${TMPDIR:-/tmp}"
 [ -d "$temp_parent" ] || die "temporary directory parent does not exist: $temp_parent"
 temp_parent="$(cd "$temp_parent" && pwd -P)"
 tmpdir="$(mktemp -d "$temp_parent/tier2-provider-artifact.XXXXXX")"
 
-tar -xzf "$PROVIDER_ARTIFACT" -C "$tmpdir" macprovider-cli
+tar -xzf "$PROVIDER_ARTIFACT" -C "$tmpdir"
 provider_binary="$tmpdir/macprovider-cli"
 [ -x "$provider_binary" ] || die "extracted provider binary is not executable: $provider_binary"
+
+log "provider artifact includes MLX Metal kernels"
 
 provider_version="$("$provider_binary" --version)"
 if [ "$provider_version" != "$PROVIDER_VERSION" ]; then
