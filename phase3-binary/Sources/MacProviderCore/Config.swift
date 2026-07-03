@@ -33,6 +33,15 @@ public struct AppConfig: Equatable, Sendable {
     public var wsTunneledMode: Bool?
     public var autoUpdateEnabled: Bool?
     public var autoupdateEnabled: Bool?
+    // Operator opt-in: when true, provisional-tier providers apply
+    // coordinator-recommended auto-updates. Default nil (== false) preserves
+    // the pinned-only trust posture. Landed to unblock the trust-orphan
+    // pattern where self-service (curl|bash) providers, which are always
+    // provisional at admission, would otherwise never receive fixes without
+    // manual operator SSH intervention. Flipping this to true is an explicit
+    // operator statement of trust in the connected coordinator's version
+    // recommendation surface.
+    public var autoUpdateAcceptProvisional: Bool?
     public var configPath: String
     public var logLevel: LogLevel
     public var logFormat: LogFormat
@@ -94,6 +103,7 @@ public struct AppConfig: Equatable, Sendable {
             wsTunneledMode: nil,
             autoUpdateEnabled: nil,
             autoupdateEnabled: nil,
+            autoUpdateAcceptProvisional: nil,
             configPath: configPath,
             logLevel: .info,
             logFormat: .json,
@@ -278,8 +288,10 @@ public enum ConfigLoader {
         try assign(&config.endpointURL, from: dict, key: "endpoint_url", expected: "string")
         try assign(&config.wsTunneledMode, from: dict, key: "ws_tunneled_mode", expected: "boolean")
         try assign(&config.autoUpdateEnabled, from: dict, key: "auto_update_enabled", expected: "boolean")
+        try assign(&config.autoUpdateAcceptProvisional, from: dict, key: "auto_update_accept_provisional", expected: "boolean")
         if let nested = dict["autoupdate"] as? [String: Any] {
             try assign(&config.autoupdateEnabled, from: nested, key: "enabled", expected: "boolean")
+            try assign(&config.autoUpdateAcceptProvisional, from: nested, key: "accept_provisional", expected: "boolean")
         }
         try assign(&config.logFormat, from: dict, key: "log_format", expected: "json or text")
         try assign(&config.logFile, from: dict, key: "log_file", expected: "string")
@@ -317,6 +329,7 @@ public enum ConfigLoader {
         try assign(&config.wsTunneledMode, from: environment, env: "MACPROVIDER_WS_TUNNELED_MODE", expected: "boolean")
         try assign(&config.autoUpdateEnabled, from: environment, env: "MACPROVIDER_AUTO_UPDATE_ENABLED", expected: "boolean")
         try assign(&config.autoupdateEnabled, from: environment, env: "MACPROVIDER_AUTOUPDATE", expected: "boolean")
+        try assign(&config.autoUpdateAcceptProvisional, from: environment, env: "MACPROVIDER_AUTO_UPDATE_ACCEPT_PROVISIONAL", expected: "boolean")
         try assign(&config.logLevel, from: environment, env: "MACPROVIDER_LOG_LEVEL", expected: "valid log level")
         try assign(&config.logFormat, from: environment, env: "MACPROVIDER_LOG_FORMAT", expected: "json or text")
         try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")
