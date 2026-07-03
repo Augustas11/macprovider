@@ -34,6 +34,18 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     case rateCardFallbackUsed = "rate_card_fallback_used"
     case recommendationBelowThreshold = "recommendation_below_threshold"
     case noEligiblePaidModel = "no_eligible_paid_model"
+    /// v1.7.6 Track A1: at least one recommended candidate had no
+    /// specific rate-card row and is being priced against the coord's
+    /// "default" fallback tier. Coord's `RateFor` already falls through
+    /// to this row for served inference, so credits still flow — the
+    /// warning surfaces the discovery-tier pricing to the operator.
+    case rateCardDefaultTierUsed = "rate_card_default_tier_used"
+    /// v1.7.6 Track A2a: at least one recommended candidate observed
+    /// swap pageouts during the Stage 1 probe. The candidate still
+    /// cleared TPS/TTFT gates so eligibility passes, but the operator
+    /// should be aware that heavy real-world context loads may push
+    /// this Mac into swap.
+    case swapObservedUnderLoad = "swap_observed_under_load"
 }
 
 enum BandwidthTier: String, Codable, CaseIterable, Comparable {
@@ -569,13 +581,18 @@ struct RateCardProjection: Decodable, Equatable {
             return (modelKey, row)
         }
         let normalized = AutotuneModelKeyNormalizer.normalize(modelKey)
-        if normalized == "default", modelKey != "default" {
-            return nil
-        }
-        if normalized != modelKey, let row = rows[normalized] {
+        if normalized != modelKey, normalized != "default", let row = rows[normalized] {
             return (normalized, row)
         }
-        if modelKey == "default", let row = rows["default"] {
+        // v1.7.6 Track A1: fall through to the "default" rate-card row when
+        // no specific row exists for this model. Matches the coord's
+        // `RateFor` fallback semantics (phase4-coordinator/internal/billing/
+        // formula.go), which pays the default rate for served inference on
+        // any model not explicitly listed. Prior behavior blocked probe-
+        // feasible models from recommendation just because the rate-card
+        // hadn't caught up — the classic "provider drops out after install"
+        // cliff.
+        if let row = rows["default"] {
             return ("default", row)
         }
         return nil
@@ -871,6 +888,10 @@ struct AutotuneRecommendEngine {
                 benchmark: benchmark,
                 request: request
             )
+            // Warning insertion deferred until final selection is known —
+            // scoring EVERY eligible row here would falsely warn when a
+            // lower-ranked default-tier or swap-detected candidate is not
+            // the one actually recommended. See warning attach block below.
             let tps = benchmark?.sustainedTPS ?? 0
             let rateRow = rateMatch?.row
             let usdPerMillionCompletion = Double(rateRow?.completionRatePerMtok ?? 0)
@@ -887,10 +908,23 @@ struct AutotuneRecommendEngine {
             let raw = tps * 3600.0 * usdPerMillionCompletion * providerShare * demandWeight
             let headroom = Double(request.hardware.memoryGB - Self.safetyMarginGB - candidate.minRAMGB)
             let confidence = confidence(warnings: warnings, benchmark: benchmark)
+            // v1.7.6 Track A1 correction: when the rate-card lookup resolves
+            // via the "default" fallthrough (rate key == "default" but the
+            // catalog model isn't literally "default"), the served-model
+            // identity must remain the catalog model. Otherwise `--apply`
+            // writes `config.model = "default"` at ConfigApplier — which is
+            // the pricing key, not a real model runtime identity — and the
+            // HTTP server would reject buyer requests for the real model.
+            let servedModel: String
+            if let match = rateMatch, match.key == "default", modelKey != "default" {
+                servedModel = modelKey
+            } else {
+                servedModel = rateMatch?.key ?? modelKey
+            }
             return AutotuneCandidateScore(
                 rank: 0,
                 catalogKey: modelKey,
-                model: rateMatch?.key ?? modelKey,
+                model: servedModel,
                 eligible: eligible,
                 expectedGrossUSDPerHour: gross.rounded6,
                 expectedNetUSDPerHour: net.rounded6,
@@ -940,6 +974,24 @@ struct AutotuneRecommendEngine {
                 request: request
             )
         }
+        // v1.7.6 Track A1/A2a: only surface default-tier and swap warnings when
+        // they apply to the ACTUALLY-recommended candidate (or donor fallback
+        // when no paid recommendation lands). Prior placement inside the score
+        // loop would warn based on any lower-ranked eligible candidate — false
+        // positive per codex CODE-LOW-1.
+        let attachTargets: [(catalogKey: String, model: String)] = [
+            recommended.map { ($0.catalogKey, $0.model) },
+            recommended == nil ? donorFallback.map { ($0.catalogKey, $0.model) } : nil,
+        ].compactMap { $0 }
+        for target in attachTargets {
+            let rateMatch = request.rateCard.rowForRecommendation(modelKey: target.catalogKey)
+            if rateMatch?.key == "default", target.catalogKey != "default" {
+                warnings.insert(.rateCardDefaultTierUsed)
+            }
+            if request.benchmarks[target.catalogKey]?.swapDetected == true {
+                warnings.insert(.swapObservedUnderLoad)
+            }
+        }
 
         let resultCandidates = eligible.isEmpty ? Array(scored.prefix(5)) : Array(eligible.prefix(5))
 
@@ -983,9 +1035,17 @@ struct AutotuneRecommendEngine {
         guard candidate.minRAMGB <= request.hardware.memoryGB - Self.safetyMarginGB else { return false }
         guard request.hardware.bandwidthTier.satisfies(minimum: candidate.minBandwidthTier) else { return false }
         guard let benchmark else { return false }
+        // v1.7.6 Track A2a: swapDetected relaxed from hard-block to
+        // soft-signal. Probe hit swap under a 4000-token prefill on this
+        // Mac, but the candidate still cleared its TPS/TTFT bench gates.
+        // Real production demand often runs shorter than 4K context, so
+        // blocking the model would strand a capable provider. The engine
+        // now inserts a `swapObservedUnderLoad` warning at scoring time
+        // (see recommend() loop) to surface the risk to the operator.
+        // thermalThrottleDetected stays a hard-block because throttled
+        // TPS measurements are unreliable (they may be optimistic).
         guard benchmark.sustainedTPS >= candidate.benchGate.minSustainedTPS,
               benchmark.ttftMS <= candidate.benchGate.max4KTTFTMS,
-              !benchmark.swapDetected,
               !benchmark.thermalThrottleDetected
         else {
             return false
@@ -1006,6 +1066,9 @@ struct AutotuneRecommendEngine {
         candidate: CandidateCatalog.Row?,
         request: AutotuneRecommendRequest
     ) -> Bool {
+        // v1.7.6 Track A2a: donor mode inherits the paid-tier swap
+        // relaxation (see isEligible above). Thermal throttle stays
+        // a hard-block for both tiers.
         guard let candidate,
               ["candidate", "listed", "recommendable"].contains(candidate.runtimeStatus),
               candidate.modelRevision != nil,
@@ -1015,7 +1078,6 @@ struct AutotuneRecommendEngine {
               let benchmark = request.benchmarks[modelKey],
               benchmark.sustainedTPS >= candidate.benchGate.minSustainedTPS,
               benchmark.ttftMS <= candidate.benchGate.max4KTTFTMS,
-              !benchmark.swapDetected,
               !benchmark.thermalThrottleDetected
         else {
             return false
