@@ -48,20 +48,43 @@ die() {
   exit "$code"
 }
 
-# Retry macprovider-cli once if the first post-install invocation is
-# SIGKILL'd by the kernel with a CODESIGNING "Invalid Page" / "Taskgated
-# Invalid Signature" verdict. Observed 2026-07-03 on Apple M5 macOS 26.5
-# with a freshly-installed v1.7.9 pkg: `autotune --recommend
-# --freshness-check` was reported "Killed: 9" (bash exit 137) on the
-# FIRST invocation right after `installer -pkg`, and the immediately-
-# repeated invocation of the SAME command by the SAME shell succeeded.
-# This is a race between the pkg installer's post-install AMFI
-# signature revalidation and our first execve; a brief pause plus one
-# retry is sufficient in practice. Only SIGKILL / bash rc 137 is
-# retried — other non-zero exits (including autotune's exit-10 "stale
-# recommendation" signal, and other signal-terminated codes such as
-# 134 SIGABRT / 138 SIGBUS / 139 SIGSEGV) pass through unchanged so
-# we do not mask real crashes.
+# Retry macprovider-cli up to two additional times if the first
+# post-install invocation is SIGKILL'd by the kernel with a CODESIGNING
+# "Invalid Page" / "Taskgated Invalid Signature" verdict. Two failure
+# flavors have been observed:
+#
+#   FLAVOR 1 — Transient AMFI race. Observed 2026-07-03 on Apple M5
+#     macOS 26.5 with a freshly-installed v1.7.9 pkg: `autotune
+#     --recommend --freshness-check` was reported "Killed: 9" (bash
+#     exit 137) on the FIRST invocation right after `installer -pkg`,
+#     and the immediately-repeated invocation of the SAME command by
+#     the SAME shell succeeded. This is a race between the pkg
+#     installer's post-install AMFI signature revalidation and our
+#     first execve; the 2s sleep is sufficient to let AMFI settle.
+#
+#   FLAVOR 2 — AMFI cache pinned to the pkg-installer inode. Observed
+#     2026-07-03 on the same M5 during the v1.7.10 install: BOTH the
+#     first invocation AND the 2s-later retry were SIGKILL'd, but the
+#     binary's `codesign --verify --deep --strict` passed cleanly and
+#     the SAME binary content ran fine when copied to a different
+#     path. The AMFI kernel cache had a stuck rejection tied to the
+#     specific inode that `installer -pkg` created. The fix is to
+#     `rm` the file (releasing the inode) and `cp` the binary back
+#     in from a tempfile, which gives it a new inode and forces AMFI
+#     to re-evaluate. See PR #339 for the reproduction and root cause.
+#
+# The helper's escalation ladder for bash rc 137:
+#   attempt 1: run
+#     └── 137 → log + sleep 2 + attempt 2 (FLAVOR 1 fix)
+#         └── 137 → log + inode-refresh via cp/rm/cp + attempt 3
+#             │           (FLAVOR 2 fix)
+#             └── 137 → log "genuine signature failure" + return 137
+# Any non-137 rc anywhere in the ladder returns immediately.
+#
+# Only SIGKILL / bash rc 137 is retried — other non-zero exits
+# (including autotune's exit-10 "stale recommendation" signal, and
+# other signal-terminated codes such as 134 SIGABRT / 138 SIGBUS /
+# 139 SIGSEGV) pass through unchanged so we do not mask real crashes.
 #
 # This helper MUST be called from `if run_..._retry ...; then` or
 # `run_..._retry ... || ...` so that `set -e` (enabled at the top of
@@ -73,14 +96,46 @@ die() {
 run_macprovider_cli_with_amfi_retry() {
   local rc=0
   "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
+  if [ "$rc" -ne 137 ]; then
+    return "$rc"
+  fi
+  log "macprovider-cli was SIGKILL'd on first invocation (rc=$rc); likely a transient AMFI code-signature race after pkg install. Retrying once after 2s." >&2
+  sleep 2
+  rc=0
+  "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
+  if [ "$rc" -ne 137 ]; then
+    return "$rc"
+  fi
+  log "macprovider-cli was SIGKILL'd again on the 2s retry; the AMFI cache may be pinned to the pkg-installer inode. Refreshing the binary inode via cp/rm/cp and retrying once more." >&2
+  local tmp
+  tmp="$(mktemp -t macprovider-cli-inode-refresh 2>/dev/null || mktemp)"
+  if [ -z "$tmp" ]; then
+    log "inode refresh: mktemp failed; leaving the original binary in place." >&2
+    return "$rc"
+  fi
+  if ! cp "$INSTALL_DIR/macprovider-cli" "$tmp" 2>/dev/null; then
+    log "inode refresh: cp to $tmp failed; leaving the original binary in place." >&2
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  if ! rm -f "$INSTALL_DIR/macprovider-cli"; then
+    log "inode refresh: rm of $INSTALL_DIR/macprovider-cli failed; the binary is still there but the inode was not refreshed." >&2
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  if ! cp "$tmp" "$INSTALL_DIR/macprovider-cli"; then
+    log "inode refresh: cp-back of $tmp -> $INSTALL_DIR/macprovider-cli failed; the binary at $INSTALL_DIR/macprovider-cli is now missing. Restore from $tmp: cp \"$tmp\" \"$INSTALL_DIR/macprovider-cli\" && chmod +x \"$INSTALL_DIR/macprovider-cli\"." >&2
+    return "$rc"
+  fi
+  if ! chmod +x "$INSTALL_DIR/macprovider-cli"; then
+    log "inode refresh: chmod +x on $INSTALL_DIR/macprovider-cli failed; the binary is present but may not be executable. Run: chmod +x \"$INSTALL_DIR/macprovider-cli\"." >&2
+    return "$rc"
+  fi
+  rm -f "$tmp"
+  rc=0
+  "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
   if [ "$rc" -eq 137 ]; then
-    log "macprovider-cli was SIGKILL'd on first invocation (rc=$rc); likely a transient AMFI code-signature race after pkg install. Retrying once after 2s." >&2
-    sleep 2
-    rc=0
-    "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
-    if [ "$rc" -eq 137 ]; then
-      log "macprovider-cli was SIGKILL'd again on the retry; this may be a genuine signature failure rather than the transient AMFI race." >&2
-    fi
+    log "macprovider-cli was SIGKILL'd after the inode refresh; this is likely a genuine signature failure rather than the AMFI cache." >&2
   fi
   return "$rc"
 }
