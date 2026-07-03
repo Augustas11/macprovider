@@ -75,12 +75,60 @@ EOF
 EOF
   fi
   chmod +x "$dir/macprovider-cli"
+  printf 'fake metallib\n' >"$dir/mlx.metallib"
 }
 
 make_tarball() {
   local src_dir="$1"
   local out="$2"
-  tar -czf "$out" -C "$src_dir" macprovider-cli
+  tar -czf "$out" -C "$src_dir" .
+}
+
+make_malicious_tarball() {
+  local out="$1"
+  local kind="$2"
+  python3 - "$out" "$kind" <<'PY'
+import io
+import stat
+import sys
+import tarfile
+
+out, kind = sys.argv[1], sys.argv[2]
+
+def add_file(tar, name, data, mode=0o644):
+    payload = data.encode()
+    info = tarfile.TarInfo(name)
+    info.size = len(payload)
+    info.mode = mode
+    tar.addfile(info, io.BytesIO(payload))
+
+with tarfile.open(out, "w:gz") as tar:
+    add_file(tar, "macprovider-cli", "#!/usr/bin/env bash\nprintf '1.2.6\\n'\n", 0o755)
+    if kind != "symlink-metallib":
+        add_file(tar, "mlx.metallib", "fake metallib\n")
+
+    if kind == "traversal":
+        add_file(tar, "../evil", "evil\n")
+    elif kind == "absolute":
+        add_file(tar, "/tmp/evil", "evil\n")
+    elif kind == "symlink-metallib":
+        info = tarfile.TarInfo("mlx.metallib")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        tar.addfile(info)
+    elif kind == "hardlink":
+        info = tarfile.TarInfo("hardlink")
+        info.type = tarfile.LNKTYPE
+        info.linkname = "macprovider-cli"
+        tar.addfile(info)
+    elif kind == "fifo":
+        info = tarfile.TarInfo("fifo")
+        info.type = tarfile.FIFOTYPE
+        info.mode = stat.S_IFIFO | 0o644
+        tar.addfile(info)
+    else:
+        raise SystemExit(f"unknown malicious tar kind: {kind}")
+PY
 }
 
 good_dir="$WORKDIR/good"
@@ -130,6 +178,47 @@ if PROVIDER_ARTIFACT="$missing_surface_tar" \
   die "missing Tier-2 surface unexpectedly passed"
 fi
 assert_contains "$WORKDIR/surface.err" "provider binary lacks Tier-2 surface string"
+
+missing_metallib_dir="$WORKDIR/missing-metallib"
+missing_metallib_tar="$WORKDIR/missing-metallib.tar.gz"
+make_fake_binary "$missing_metallib_dir" "1.2.6" "1"
+rm -f "$missing_metallib_dir/mlx.metallib"
+make_tarball "$missing_metallib_dir" "$missing_metallib_tar"
+missing_metallib_sha="$(sha256_file "$missing_metallib_tar")"
+
+if PROVIDER_ARTIFACT="$missing_metallib_tar" \
+  PROVIDER_VERSION="1.2.6" \
+  PROVIDER_SHA256="$missing_metallib_sha" \
+  "$CHECKER" >"$WORKDIR/metallib.out" 2>"$WORKDIR/metallib.err"; then
+  die "missing MLX Metal kernels unexpectedly passed"
+fi
+assert_contains "$WORKDIR/metallib.err" "provider artifact lacks MLX Metal kernels"
+
+for kind in traversal absolute; do
+  bad_tar="$WORKDIR/${kind}.tar.gz"
+  make_malicious_tarball "$bad_tar" "$kind"
+  bad_sha="$(sha256_file "$bad_tar")"
+  if PROVIDER_ARTIFACT="$bad_tar" \
+    PROVIDER_VERSION="1.2.6" \
+    PROVIDER_SHA256="$bad_sha" \
+    "$CHECKER" >"$WORKDIR/${kind}.out" 2>"$WORKDIR/${kind}.err"; then
+    die "$kind artifact unexpectedly passed"
+  fi
+  assert_contains "$WORKDIR/${kind}.err" "unsafe provider artifact path"
+done
+
+for kind in symlink-metallib hardlink fifo; do
+  bad_tar="$WORKDIR/${kind}.tar.gz"
+  make_malicious_tarball "$bad_tar" "$kind"
+  bad_sha="$(sha256_file "$bad_tar")"
+  if PROVIDER_ARTIFACT="$bad_tar" \
+    PROVIDER_VERSION="1.2.6" \
+    PROVIDER_SHA256="$bad_sha" \
+    "$CHECKER" >"$WORKDIR/${kind}.out" 2>"$WORKDIR/${kind}.err"; then
+    die "$kind artifact unexpectedly passed"
+  fi
+  assert_contains "$WORKDIR/${kind}.err" "provider artifact contains unsafe link or device members"
+done
 
 PROVIDER_ARTIFACT="$missing_surface_tar" \
   PROVIDER_VERSION="1.2.6" \

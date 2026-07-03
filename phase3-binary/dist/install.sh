@@ -12,6 +12,7 @@
 set -euo pipefail
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
+MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
 COORDINATOR_URL_DEFAULT="wss://coordinator.streamvc.live/ws/provider"
 COORDINATOR_BASE_DEFAULT="https://coordinator.streamvc.live"
 INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
@@ -164,6 +165,8 @@ Usage: bash install.sh [--dry-run]
 
 Environment overrides:
   MACPROVIDER_GITHUB_REPO        owner/repo for GitHub Releases
+  MACPROVIDER_VERSION            pin installer to vMAJOR.MINOR.PATCH
+                                 (pipe-side form: curl ... | MACPROVIDER_VERSION=v1.7.11 bash)
   MACPROVIDER_MODEL              model id to install
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
   MACPROVIDER_PORT               local HTTP port
@@ -845,12 +848,108 @@ latest_release_tag() {
   # under tag verify-vX.Y.Z) silently hijacks the installer.
   api_url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30"
   json="$(curl -fsSL "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
-  tag="$(printf "%s" "$json" \
-    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-    | grep -E '^v[0-9]' \
-    | head -1)"
-  [ -n "$tag" ] || die 3 "no macprovider-cli release (tag ^v[0-9]) found in recent GitHub Releases"
+  tag="$(
+    printf "%s" "$json" \
+      | awk '
+          function maybe_print_release(obj, tag, prerelease) {
+            tag = ""
+            prerelease = "false"
+            if (match(obj, /"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+              tag = substr(obj, RSTART, RLENGTH)
+              sub(/^"tag_name"[[:space:]]*:[[:space:]]*"/, "", tag)
+              sub(/"$/, "", tag)
+            }
+            if (match(obj, /"prerelease"[[:space:]]*:[[:space:]]*true/)) {
+              prerelease = "true"
+            }
+            if (tag ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ && prerelease != "true") {
+              print tag
+              exit
+            }
+          }
+          {
+            data = data $0 "\n"
+          }
+          END {
+            depth = 0
+            in_string = 0
+            escaped = 0
+            start = 0
+            for (i = 1; i <= length(data); i++) {
+              ch = substr(data, i, 1)
+              if (in_string) {
+                if (escaped) {
+                  escaped = 0
+                } else if (ch == "\\") {
+                  escaped = 1
+                } else if (ch == "\"") {
+                  in_string = 0
+                }
+                continue
+              }
+              if (ch == "\"") {
+                in_string = 1
+              } else if (ch == "{") {
+                depth++
+                if (depth == 1) {
+                  start = i
+                }
+              } else if (ch == "}") {
+                if (depth == 1 && start > 0) {
+                  maybe_print_release(substr(data, start, i - start + 1))
+                  start = 0
+                }
+                depth--
+              }
+            }
+          }
+        '
+  )"
+  [ -n "$tag" ] || die 3 "no non-prerelease macprovider-cli release (tag ^v[0-9]) found in recent GitHub Releases"
   printf "%s" "$tag"
+}
+
+version_at_least() (
+  candidate_version="$1"
+  floor_version="$2"
+  IFS=.
+  set -- ${candidate_version#v}
+  a_major="$1"
+  a_minor="$2"
+  a_patch="$3"
+  set -- ${floor_version#v}
+  b_major="$1"
+  b_minor="$2"
+  b_patch="$3"
+
+  [ "$a_major" -gt "$b_major" ] && exit 0
+  [ "$a_major" -lt "$b_major" ] && exit 1
+  [ "$a_minor" -gt "$b_minor" ] && exit 0
+  [ "$a_minor" -lt "$b_minor" ] && exit 1
+  [ "$a_patch" -ge "$b_patch" ]
+)
+
+validate_macprovider_version_tag() {
+  tag="$1"
+  case "$tag" in
+    *[[:space:]]*|*[[:cntrl:]]*) die 7 "MACPROVIDER_VERSION must not contain whitespace or control characters" ;;
+  esac
+  if ! [[ "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+    die 7 "MACPROVIDER_VERSION must look like vMAJOR.MINOR.PATCH"
+  fi
+  if ! version_at_least "$tag" "$MACPROVIDER_MIN_SUPPORTED_VERSION"; then
+    die 7 "MACPROVIDER_VERSION $tag is below supported rollback floor $MACPROVIDER_MIN_SUPPORTED_VERSION"
+  fi
+}
+
+resolve_release_tag() {
+  if [ -n "${MACPROVIDER_VERSION:-}" ]; then
+    validate_macprovider_version_tag "$MACPROVIDER_VERSION"
+    printf "%s" "$MACPROVIDER_VERSION"
+  else
+    tag="$(latest_release_tag)"
+    printf "%s" "$tag"
+  fi
 }
 
 download_release() {
@@ -967,6 +1066,8 @@ validate_staged_entries() {
         ;;
       macprovider-cli)
         has_binary=1
+        ;;
+      mlx.metallib)
         ;;
       THIRD-PARTY-NOTICES.txt)
         ;;
@@ -1210,10 +1311,10 @@ install_binary() {
   fi
   stage_release_payload
 
-  # CRITICAL: mlx-swift loads Metal kernels from .bundle directories
-  # adjacent to the binary. We install the REAL binary into $INSTALL_DIR
-  # alongside the bundles, then place a symlink at $BINARY_PATH so PATH
-  # users + the launchd plist still find it via the canonical
+  # CRITICAL: mlx-swift loads Metal kernels from mlx.metallib and/or
+  # .bundle directories adjacent to the binary. We install the REAL binary
+  # into $INSTALL_DIR alongside those resources, then place a symlink at
+  # $BINARY_PATH so PATH users + the launchd plist still find it via the canonical
   # SPEC-003 FR-C2 location (~/.local/bin/macprovider-cli).
   # Prior v1.2.1 install separated them and Metal failed with
   # "library not found" at runtime.
@@ -1221,7 +1322,11 @@ install_binary() {
   cp "$staging_dir/macprovider-cli" "$real_binary"
   chmod +x "$real_binary" 2>/dev/null || true
 
-  # Bundles live alongside the real binary (where mlx-swift looks).
+  # Metal resources live alongside the real binary (where mlx-swift looks).
+  rm -f "$INSTALL_DIR/mlx.metallib"
+  if [ -f "$staging_dir/mlx.metallib" ]; then
+    cp "$staging_dir/mlx.metallib" "$INSTALL_DIR/mlx.metallib"
+  fi
   find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec rm -rf {} +
   find "$staging_dir" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$INSTALL_DIR"/ \;
 
@@ -1240,7 +1345,7 @@ check_install_dir_clean() {
   local entries
   # F-603-V7-7: warn on mixed-state directories such as leftover Python
   # virtualenvs, but do not block an otherwise valid partner upgrade.
-  entries=$(ls -A "$INSTALL_DIR" 2>/dev/null | grep -vE '^(macprovider-cli(\.v[0-9.]+\.bak)?|.*\.bundle)$' | head -20 || true)
+  entries=$(ls -A "$INSTALL_DIR" 2>/dev/null | grep -vE '^(macprovider-cli(\.v[0-9.]+\.bak)?|mlx\.metallib|.*\.bundle)$' | head -20 || true)
   if [ -n "$entries" ]; then
     log "WARNING: $INSTALL_DIR contains non-macprovider entries:"
     while IFS= read -r entry; do
@@ -2050,7 +2155,7 @@ start_manual_service() {
   (
     cd "$INSTALL_DIR"
     # F-603-V7-4: direct background self-test also invokes the real binary
-    # so Bundle resolution sees the adjacent .bundle directories.
+    # so MLX resolves adjacent Metal resources.
     nohup "$INSTALL_DIR/macprovider-cli" \
       --port "$PORT" \
       --model "$model" \
@@ -2310,8 +2415,12 @@ main() {
 
   check_catalog_ram_metadata "$coordinator_base" "$model" "$ram_gb" || true
 
-  tag="$(latest_release_tag)"
-  log "Latest release: $tag"
+  tag="$(resolve_release_tag)"
+  if [ -n "${MACPROVIDER_VERSION:-}" ]; then
+    log "Using operator-pinned version: $tag (via MACPROVIDER_VERSION)"
+  else
+    log "Latest release: $tag"
+  fi
   download_release "$tag"
   verify_sha256
   validate_release_payload
