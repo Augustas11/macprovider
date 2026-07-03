@@ -47,7 +47,22 @@ private struct OnboardingRootView: View {
 
             step(number: 1, title: "Link your node") {
                 Button("Continue in browser") {
-                    guard let url = URL(string: "https://portal.streamvc.live/onboard?client=mac") else { return }
+                    // AUDIT R1 SECURITY S1: generate a one-time nonce and pass
+                    // it as `state=...`. The portal echoes it in the malibu://
+                    // redirect and MalibuApp.consume rejects any callback that
+                    // does not match this exact value.
+                    let nonce: String
+                    do { nonce = try PendingLinkState.beginLink() }
+                    catch {
+                        self.error = "Could not start link: \(error.localizedDescription)"
+                        return
+                    }
+                    var comps = URLComponents(string: "https://portal.streamvc.live/onboard")!
+                    comps.queryItems = [
+                        URLQueryItem(name: "client", value: "mac"),
+                        URLQueryItem(name: "state", value: nonce)
+                    ]
+                    guard let url = comps.url else { return }
                     NSWorkspace.shared.open(url)
                 }
                 .buttonStyle(.borderedProminent)
@@ -93,9 +108,19 @@ private struct OnboardingRootView: View {
         }
     }
 
+    // AUDIT R3 CODE M2 fix: refuse to close the onboarding window or register
+    // the login item unless the deep-link callback has actually landed AND
+    // saved a matching Keychain token. Previously the user could click
+    // "Start earning" before linking, the login item would register, the
+    // onboarding window would close, and the app would sit in the menu bar
+    // with no daemon running and no obvious next step.
     private func finish() async {
         busy = true
         defer { busy = false }
+        guard await ProviderConfig.isConfigured else {
+            self.error = "Not linked yet — click \"Continue in browser\" above and finish the portal step first."
+            return
+        }
         do {
             try AppLoginItem.register()
         } catch {

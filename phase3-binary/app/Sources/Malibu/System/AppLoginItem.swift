@@ -11,11 +11,21 @@ enum AppLoginItem {
         try SMAppService.mainApp.register()
     }
 
-    static func unregister() async {
+    // AUDIT R1 SECURITY S7 fix: surface unregister failures so the uninstall
+    // path can report them instead of the app auto-launching on next login
+    // while the user believed it was gone.
+    static func unregisterReturningError() async -> Error? {
         do {
             try await SMAppService.mainApp.unregister()
+            return nil
         } catch {
-            // If the service was never registered, macOS returns an error we can swallow.
+            // Was-never-registered is a legitimately-swallowed case; anything
+            // else is residue the user should see.
+            let ns = error as NSError
+            if ns.domain == "SMAppServiceErrorDomain" && ns.code == 108 /* not registered */ {
+                return nil
+            }
+            return error
         }
     }
 }

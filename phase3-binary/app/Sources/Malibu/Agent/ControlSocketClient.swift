@@ -3,12 +3,23 @@ import Foundation
 
 // Newline-delimited JSON framing over a Unix domain socket connected to
 // macprovider-cli's ControlSocket server. One connection, one writer, one reader.
+//
+// AUDIT R2 CODE H1 fix: the read loop no longer runs on the actor. Previously
+// `Task { await self.readLoop(...) }` was actor-isolated, so a blocking
+// `Darwin.read` held the actor and starved every other call (`send`, `close`).
+// The typical failure was Quit-and-Uninstall — the shutdown_request send would
+// queue behind the blocked read, and NSApp.terminate never fired.
+//
+// The new design: reads happen on a detached background task that yields
+// decoded frames directly through the actor-independent
+// AsyncStream.Continuation. The actor still owns the fd (for send/close) but
+// never awaits the read.
 
 actor ControlSocketClient {
     private let socketPath: String
     private var fd: Int32 = -1
-    private var reader: Task<Void, Never>?
     private var streamContinuation: AsyncStream<ControlFrame>.Continuation?
+    private var readerTask: Task<Void, Never>?
 
     let stream: AsyncStream<ControlFrame>
 
@@ -72,8 +83,14 @@ actor ControlSocketClient {
     }
 
     func close() {
-        reader?.cancel()
-        if fd >= 0 { Darwin.close(fd); fd = -1 }
+        // Cancel reader FIRST so the detached task exits before we free the fd.
+        readerTask?.cancel(); readerTask = nil
+        if fd >= 0 {
+            // Shutdown wakes any blocked read(); close finalizes.
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+            fd = -1
+        }
         streamContinuation?.finish()
     }
 
@@ -81,28 +98,37 @@ actor ControlSocketClient {
 
     private func attach(fd: Int32) {
         self.fd = fd
-        reader = Task { await readLoop(fd: fd) }
+        // AUDIT R2 CODE H1 fix: detach the read loop from the actor. Capture
+        // the fd and the Sendable continuation; do the blocking read + parse
+        // on a background thread without ever awaiting the actor.
+        let capturedContinuation = self.streamContinuation
+        readerTask = Task.detached(priority: .utility) {
+            Self.blockingReadLoop(fd: fd, continuation: capturedContinuation)
+        }
     }
 
-    private func readLoop(fd: Int32) async {
+    private static func blockingReadLoop(
+        fd: Int32,
+        continuation: AsyncStream<ControlFrame>.Continuation?
+    ) {
         var buffer = Data()
         let chunk = 4096
+        // AUDIT R1 LOW L1 hardening carried into R2: cap the accumulated
+        // pre-newline buffer at 1 MiB so a malformed peer cannot OOM the app.
+        let maxFrameBytes = 1 << 20
         var raw = [UInt8](repeating: 0, count: chunk)
         while !Task.isCancelled {
             let n = raw.withUnsafeMutableBufferPointer { Darwin.read(fd, $0.baseAddress, chunk) }
             if n <= 0 { break }
             buffer.append(raw, count: n)
+            if buffer.count > maxFrameBytes { break }
             while let nl = buffer.firstIndex(of: 0x0A) {
                 let line = buffer.subdata(in: 0..<nl)
                 buffer.removeSubrange(0...nl)
                 guard !line.isEmpty, let frame = try? ControlCodec.decode(line) else { continue }
-                deliver(frame)
+                continuation?.yield(frame)
             }
         }
-        streamContinuation?.finish()
-    }
-
-    private func deliver(_ frame: ControlFrame) {
-        streamContinuation?.yield(frame)
+        continuation?.finish()
     }
 }

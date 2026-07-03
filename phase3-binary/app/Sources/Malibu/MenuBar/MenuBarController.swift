@@ -80,10 +80,12 @@ final class MenuBarController {
     }
 
     private func render(_ snapshot: AgentSnapshot) {
-        statusItem.button?.title = snapshot.short
+        // AUDIT R1 ARCHITECT A5: view strings live in the presenter, not the
+        // snapshot data type. This lets locale/currency work touch one place.
+        statusItem.button?.title = AgentSnapshotPresenter.short(snapshot)
         guard let menu = statusItem.menu else { return }
-        menu.item(withIdentifier: .statusRow)?.title = snapshot.stateLine
-        menu.item(withIdentifier: .earningsRow)?.title = snapshot.earningsLine
+        menu.item(withIdentifier: .statusRow)?.title = AgentSnapshotPresenter.stateLine(snapshot)
+        menu.item(withIdentifier: .earningsRow)?.title = AgentSnapshotPresenter.earningsLine(snapshot)
     }
 }
 

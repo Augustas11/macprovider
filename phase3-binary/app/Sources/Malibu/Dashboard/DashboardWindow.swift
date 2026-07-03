@@ -31,9 +31,15 @@ private struct DashboardView: View {
             HStack {
                 VStack(alignment: .leading) {
                     Text("Today").font(.caption).foregroundStyle(.secondary)
-                    Text(String(format: "$%.2f", agent.snapshot.earningsUsdcToday))
+                    // AUDIT R1 ARCHITECT A1: distinguish "not reported yet" from
+                    // "$0.00". The CLI stub returns 0 for metrics_response until
+                    // SPEC-025 §11 P1 wires real earnings; showing "$0.00" as
+                    // authoritative would mislead the user.
+                    Text(agent.snapshot.earningsUsdcToday.map { String(format: "$%.2f", $0) } ?? "$—")
                         .font(.system(size: 36, weight: .semibold, design: .rounded))
-                    Text(String(format: "%.2f MALIBU accrued", agent.snapshot.malibuAccruedToday))
+                    Text(agent.snapshot.malibuAccruedToday
+                            .map { String(format: "%.2f MALIBU accrued", $0) }
+                            ?? "— MALIBU (metrics not implemented)")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()

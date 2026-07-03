@@ -20,14 +20,20 @@ final class CLIChildProcess {
     private let launch: Launch
     private var process: Process?
     private var logHandle: FileHandle?
-    private var restartAttempts: Int = 0
-    private var restartBackoffSeconds: [TimeInterval] = [1, 2, 5, 15, 60]
+    // AUDIT R1 CODE H2 fix: set by the owner before an intentional stop so the
+    // terminationHandler does not fire onUnexpectedExit and race a reconnect.
+    private var isStopping: Bool = false
 
     var onUnexpectedExit: (@Sendable (Int32) -> Void)?
 
     init(launch: Launch) {
         self.launch = launch
     }
+
+    // Called by MalibuAgent.shutdown before terminate() to suppress the
+    // reconnect scheduling that would otherwise re-launch after "Quit and
+    // Uninstall".
+    func markStopping() { isStopping = true }
 
     func start() throws {
         guard process == nil else { return }
@@ -72,13 +78,16 @@ final class CLIChildProcess {
             let code = terminated.terminationStatus
             Task { @MainActor in
                 self.process = nil
+                // AUDIT R1 CODE H2: an intentional stop must not schedule a
+                // reconnect. Otherwise Quit-and-Uninstall re-launches the
+                // daemon during the delay before NSApp.terminate lands.
+                guard !self.isStopping else { return }
                 self.onUnexpectedExit?(code)
             }
         }
 
         try proc.run()
         process = proc
-        restartAttempts = 0
     }
 
     func stop(gracePeriod: TimeInterval) async {
@@ -96,10 +105,4 @@ final class CLIChildProcess {
         logHandle = nil
     }
 
-    func scheduleRestartWithBackoff(_ launcher: @Sendable @escaping () async -> Void) async {
-        let delay = restartBackoffSeconds[min(restartAttempts, restartBackoffSeconds.count - 1)]
-        restartAttempts += 1
-        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-        await launcher()
-    }
 }

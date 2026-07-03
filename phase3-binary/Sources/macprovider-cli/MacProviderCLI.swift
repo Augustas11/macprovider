@@ -290,6 +290,16 @@ struct ServeCommand: AsyncParsableCommand {
             )
         )
 
+        // AUDIT R1 SECURITY S2 fix (PR #334): drop MACPROVIDER_PROVIDER_TOKEN
+        // from the process env immediately after we've resolved it. Under
+        // Malibu.app the token arrives via env (see SPEC-025 §7 followup:
+        // eventually via Keychain read here). Same-user malware inspecting
+        // `ps -E <cli-pid>` would otherwise see a payout-bearing bearer token
+        // for the lifetime of the process. Config resolution has already
+        // captured it into `resolved.providerToken`; the env slot is unused
+        // downstream.
+        unsetenv("MACPROVIDER_PROVIDER_TOKEN")
+
         try Self.runSupportedModelsPreflight(&resolved)
         try Self.runDrainTimeoutPreflight(resolved)
         try Self.runServingKnobsPreflight(resolved)

@@ -63,3 +63,20 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
     dependencies: []
+
+  # AUDIT R1 ARCHITECT A8 fix: unit-test the audit-critical app-side surfaces
+  # (codec parity vs CLI, URL-scheme nonce validation, snapshot presenter,
+  # config CRLF handling). Runs under xcodebuild test -scheme Malibu.
+  MalibuTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Tests/MalibuTests
+    dependencies:
+      - target: Malibu
+    settings:
+      base:
+        PRODUCT_NAME: MalibuTests
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Malibu.app/Contents/MacOS/Malibu"
