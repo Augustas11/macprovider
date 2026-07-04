@@ -28,7 +28,7 @@ A lot of the most interesting LLM applications — long-running personal agents,
 | Run MLX models locally on any M1+ Mac | OpenAI-compatible `/v1/chat/completions` endpoint |
 | Outbound WebSocket only — no port-forwarding needed | Route to the full pool or pin to a specific provider |
 | Choose which models to serve from your Mac | Pay only for compute, no subscription required |
-| Manage your node at [portal.streamvc.live](https://portal.streamvc.live) | Chat and monitor at [console.streamvc.live](https://console.streamvc.live) |
+| Manage your provider at [portal.streamvc.live](https://portal.streamvc.live) | Chat and monitor at [console.streamvc.live](https://console.streamvc.live) |
 
 ## Console
 

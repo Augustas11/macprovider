@@ -106,20 +106,18 @@ func TestCheckI1_GatewayOverbillVsHarness_Fails(t *testing.T) {
 	}
 }
 
-func TestCheckI1_GatewayOverbillVsHarness_AppliesScenarioTolerance(t *testing.T) {
+func TestCheckI1_GatewayOverbillVsHarness_ToleranceIsDiagnosticOnly(t *testing.T) {
 	sc := &scenario.Scenario{ChargedDeliveredToleranceTokens: 10}
 	ledger := &reconcile.Result{
 		GatewayOverbillVsHarnessTokens: 10,
 		OverbilledPairs:                []string{"OVERBILLED"},
 	}
 	c := checkI1(sc, ledger)
-	if !c.Passed {
-		t.Fatalf("I1 should pass overbill within scenario tolerance: %+v", c)
-	}
-	sc.ChargedDeliveredToleranceTokens = 9
-	c = checkI1(sc, ledger)
 	if c.Passed {
-		t.Fatal("I1 should fail overbill above scenario tolerance")
+		t.Fatal("I1 should fail any positive gateway-vs-harness overbill; tolerance is diagnostic only")
+	}
+	if !strings.Contains(c.Detail, "diagnostic only") {
+		t.Fatalf("I1 detail should make tolerance diagnostic-only status clear: %s", c.Detail)
 	}
 }
 
@@ -226,8 +224,8 @@ func TestCheckI2_PassesWhen5xxSettlementMatchesHarnessAccount(t *testing.T) {
 	}
 }
 
-func TestCheckI3_FailsWhenGatewayOverbillExceedsTolerance(t *testing.T) {
-	sc := &scenario.Scenario{ChargedDeliveredToleranceTokens: 2}
+func TestCheckI3_FailsWhenGatewayOverbillIsPositive(t *testing.T) {
+	sc := &scenario.Scenario{ChargedDeliveredToleranceTokens: 10}
 	ledger := &reconcile.Result{
 		GatewayOverbillVsHarnessTokens: 3,
 		OverbilledPairs:                []string{"overbilled-req"},
@@ -236,21 +234,24 @@ func TestCheckI3_FailsWhenGatewayOverbillExceedsTolerance(t *testing.T) {
 	c := checkI3(sc, ledger)
 
 	if c.Passed || c.Skipped {
-		t.Fatalf("I3 should fail overbill above tolerance: %+v", c)
+		t.Fatalf("I3 should fail any positive overbill: %+v", c)
 	}
 	if !contains(c.OffendingIDs, "overbilled-req") {
 		t.Fatalf("offending IDs=%v want overbilled-req", c.OffendingIDs)
 	}
 }
 
-func TestCheckI3_AllowsConfiguredTolerance(t *testing.T) {
+func TestCheckI3_ToleranceIsDiagnosticOnly(t *testing.T) {
 	sc := &scenario.Scenario{ChargedDeliveredToleranceTokens: 3}
 	ledger := &reconcile.Result{GatewayOverbillVsHarnessTokens: 3}
 
 	c := checkI3(sc, ledger)
 
-	if !c.Passed {
-		t.Fatalf("I3 should pass at tolerance: %+v", c)
+	if c.Passed || c.Skipped {
+		t.Fatalf("I3 should fail at tolerance because tolerance is diagnostic only: %+v", c)
+	}
+	if !strings.Contains(c.Detail, "diagnostic only") {
+		t.Fatalf("I3 detail should make tolerance diagnostic-only status clear: %s", c.Detail)
 	}
 }
 

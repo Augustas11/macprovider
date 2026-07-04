@@ -1,8 +1,28 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.11 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.12 · Owner: augstar · Target: 2026 Q3
 
 ## Change log
+
+**v0.12 (2026-07-03, Step-2 build-prompt audit closure).** The Step-2
+implementation prompt audit found that v0.11 still promised
+flag-off SPEC-025 browser-OAuth parity while §7.3 simultaneously
+retired the `malibu://` URL scheme and `PendingLinkState` machinery
+that the old browser-OAuth path used. v0.12 closes the
+implementation contradiction:
+
+- **Fresh flag-off behavior no longer invokes SPEC-025 browser OAuth.**
+  Fresh installs with `MALIBU_ONBOARD_V2=0` show a local setup-paused
+  state and do not invoke a browser tab, portal URL, URL scheme, or
+  `PendingLinkState`. Existing configured v1 installs continue to run
+  because `MalibuAgent.start()` still gates on `ProviderConfig.isConfigured`.
+- **AC-026-09 retargeted to rollback safety.** It now verifies env-var
+  precedence, default-off behavior, and absence of retired URL-scheme
+  invocation, not byte-for-byte fresh-install browser-OAuth parity.
+- **§8.2/§8.3 aligned with URL-scheme retirement.** Rollback to flag-off
+  does not restore the deleted browser flow for fresh installs; it only
+  preserves already configured installs and auto-presents v2-partial
+  installs for completion.
 
 **v0.11 (2026-07-03, adversarial + product-design critique
 closure pass).** After R10 audit converged, Claude adversarial
@@ -138,13 +158,13 @@ reduction). v0.8 targeted fixes:
   but `provider_tokens` stores only `token_hash`, not the
   cleartext bearer. Coordinator cannot recompute the HMAC. v0.8
   drops the HMAC scheme and requires the request to carry the
-  raw bearer via one of two paths: (a) HTTP
+  raw bearer via HTTP
   `Authorization: Bearer <current_provider_token>` on the
   `/register` call itself (in addition to the request-body
-  signature), OR (b) an explicit `current_provider_token`
-  field in the JSON body. Coordinator SHA-256 hashes the
-  provided cleartext and compares against `token_hash` on the
-  active row.
+  signature). v0.12 removes the App-track JSON-body bearer path
+  so signed JCS bodies never contain bearer material.
+  Coordinator SHA-256 hashes the provided cleartext and compares
+  against `token_hash` on the active row.
 - **§4.1 SQLite locking corrected (CODE MEDIUM).** v0.7 used
   `SELECT ... FOR UPDATE`, but the `provider_tokens` store is
   SQLite (which doesn't support that). v0.8 replaces with
@@ -509,9 +529,9 @@ against v0.3 landed 0 CRITICAL / 4 HIGH / 18 MEDIUM
 - **§4.1 rotate-on-duplicate hardened against DoS.** v0.3 revoked
   the live token on every duplicate `/register`. v0.4 requires
   the duplicate `/register` to prove current token possession
-  (via a `current_token_proof` field carrying an HMAC over
-  `(provider_id, nonce, current_provider_token)`) or the request
-  is rejected `409 CONFLICT existing_active_token_no_proof`. This
+  (v0.12: via HTTP `Authorization: Bearer <current_provider_token>`,
+  not a JSON body field) or the request is rejected
+  `409 CONFLICT existing_active_token_no_proof`. This
   closes the "spam-register to invalidate live session" DoS.
 - **§5.1 emission ledger named.** v0.3 was generic. v0.4 pins the
   target as `phase4-coordinator/internal/stats/migrations/001_stats_tables.up.sql:170`
@@ -667,7 +687,8 @@ against v0.1. v0.2 closes each. Load-bearing changes:
   until Trusted unlock; wallet-balance criterion is continuously
   re-checked (not one-shot); per-wallet emission cap added.
 - **Migration matrix and rollback path.** §8 now enumerates each of
-  {fresh, v1-complete, v2-partial, v2-complete} × {flag-on, flag-off}.
+  {fresh, CLI-owned config, v1-complete, v2-partial, v2-complete} ×
+  {flag-on, flag-off}.
 
 **v0.1 (2026-07-03).** Initial draft.
 
@@ -774,9 +795,12 @@ and without entering a wallet address unless they want to.
   autotune with signed catalog. Runs on-device inside `macprovider-cli
   autotune --recommend --json`. SPEC-026 §6.1 step 7c invokes it
   post-identity-mint.
-- [SPEC-025 §3.1](./SPEC-025-native-mac-app.md) — first-run browser
-  OAuth flow. SPEC-026 §6 REPLACES this section when
-  `MALIBU_ONBOARD_V2` flag is on; when off, §3.1 runs unchanged.
+- [SPEC-025 §3.1](./SPEC-025-native-mac-app.md) — historical first-run
+  browser OAuth flow. SPEC-026 §7.3 retires the `malibu://` /
+  `PendingLinkState` machinery, so fresh flag-off installs do not run
+  this flow after v0.12. Existing configured SPEC-025 installs still run
+  because `MalibuAgent.start()` remains gated by
+  `ProviderConfig.isConfigured`.
 - `phase3-binary/Sources/MacProviderCore/ProviderTokenPersist.swift:42-113`
   — CLI-track atomic write of `provider_token` to YAML. NOT the
   App-track persistence path. App-track uses
@@ -825,7 +849,7 @@ receipt key. Two separate Keychain slots, two separate lifetimes:
 | Keychain account     | `provider_identity_v1`             | `receipt_key_v1`            |
 | Generated by         | App target on first `Malibu.app` launch | CLI on first `serve`    |
 | Rotation             | NOT rotated in v0.2 (open question §13) | SPEC-015 rotate-key       |
-| Signs                | `/register` body + WS `identity_signature` + wallet-binding intent | receipt frames |
+| Signs                | `/register` body + WS `identity_signature` | receipt frames |
 | provider_id anchor   | YES — `provider_id = p_ + base32(sha256(identity_pubkey))` | NO |
 | Exposed to child processes | NO                          | Via SPEC-015 mechanisms unchanged |
 
@@ -860,12 +884,13 @@ provider_id            = "p_" + base32(digest, alphabet, no-pad)
 - The alphabet is deterministic; both Swift and Go implementations
   MUST use `abcdefghijklmnopqrstuvwxyz234567` and no `=` padding.
   **Go implementation MUST** use
-  `base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)`
-  from `encoding/base32`. **Swift implementation MUST** add a
-  tested no-pad lowercase RFC 4648 §6 encoder in `MacProviderCore`;
-  Foundation does not ship a stdlib base32 encoder. A parity
-  fixture (§10 gate) covers a matrix of inputs 0/1/many-bytes to
-  prove both encoders agree byte-for-byte.
+	  `base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)`
+	  from `encoding/base32`. **Swift App implementation MUST** add the
+	  tested no-pad lowercase RFC 4648 §6 encoder as
+	  `ProviderIdentity.base32LowercaseNoPad()` in the App target;
+	  Foundation does not ship a stdlib base32 encoder. A parity vector
+	  set distinct from the `/register` JCS fixture covers a matrix of
+	  inputs 0/1/many-bytes to prove both encoders agree byte-for-byte.
 - Buyer-facing UI MUST render `provider_id` verbatim from the
   canonical string. v0.2 does not introduce a user-controlled display
   name; a homoglyph-substitution attack is impossible against
@@ -911,10 +936,10 @@ returns `400 Bad Request` (distinct from "parsed but did not verify"
 which continues with `trust.attested = false` per step 5 below).
 
 `signature` is Ed25519 over `JCS(body_without_signature)` per RFC
-8785. The canonicalizer is
-`phase3-binary/Sources/macprovider-cli/RFC8785JCS.swift` on the
-Swift side; the Go side is `phase4-coordinator/internal/billing.CanonicalJSON`.
-A parity-fixture test at
+8785. The App target owns an App-local Swift canonicalizer under
+`phase3-binary/app/Sources/Malibu/System/` for this PR; it MUST NOT
+depend on the SwiftPM CLI target. The Go side is
+`phase4-coordinator/internal/billing.CanonicalJSON`. A parity-fixture test at
 `phase4-coordinator/test/jcs_fixtures/spec026_register.json` MUST
 pass in both languages before this endpoint ships (§10 gate).
 
@@ -967,11 +992,11 @@ Coordinator MUST:
      token was never used. Log `apptrack_register_reissue_fresh`.
    - **Same `identity_pubkey`, prior row with `last_used_at IS NOT
      NULL` (live session may exist):** the request MUST prove
-     current-token possession by ONE of:
-     - HTTP `Authorization: Bearer <current_provider_token>` header
-       on this `/register` call (in addition to the request-body
-       Ed25519 identity signature), OR
-     - explicit `current_provider_token` field in the JSON body.
+	     current-token possession via HTTP
+	     `Authorization: Bearer <current_provider_token>` header on this
+	     `/register` call (in addition to the request-body Ed25519
+	     identity signature). The App MUST NOT put bearer material in the
+	     JSON body, signed JCS payload, fixtures, or logs.
      Coordinator SHA-256 hashes the provided cleartext bearer
      and compares against the active row's `token_hash`. Mismatch
      or absence → `409 CONFLICT existing_active_token_no_proof`.
@@ -1028,11 +1053,13 @@ sessions, not gating wallet binding.
 Un-bound `provider_id`s accrue earnings as SPEC-016
 `ledger_payout_ready` rows (see §9.1). Earnings are reported via
 the existing SPEC-005 §11.4
-`GET /providers/{provider_id}/earnings` endpoint unchanged.
-SPEC-026 adds only two additive response fields to that endpoint's
-existing JSON body — `unpaid_ledger_backlog_usdc` and
-`unpaid_ledger_backlog_malibu` — mirroring the ledger rows for
-easier App-track UI rendering. The auth model
+	`GET /providers/{provider_id}/earnings` endpoint remains the App's
+	steady-state source of truth and is additively extended by SPEC-026
+	with the fields the App needs to render §6.2 invariants:
+	`wallet_bound` (bool), `trust_tier` (`"Provisional"` or
+	`"Trusted"`), `unpaid_ledger_backlog_usdc`, and
+	`unpaid_ledger_backlog_malibu`. The backlog fields mirror ledger rows
+	for App-track UI rendering. The auth model
 (`Authorization: Bearer <provider_token>` where the token's subject
 equals `{provider_id}`; 401/403/404 per SPEC-005 §11.4) is
 inherited unchanged; SPEC-026 does not introduce a new endpoint or
@@ -1103,6 +1130,41 @@ transcript hash prevents replay of a valid proof against a
 different initial-stage frame. Verification MUST run inside
 SPEC-001's existing single-use `auth_attempt_id` lifecycle, which
 releases retention on either success or reject.
+
+For App-track `p_` provider_ids, the CLI obtains this signature through
+the existing local App control socket; the App never exports
+`provider_identity_v1` key material to the child process. The control
+protocol adds:
+
+```json
+{
+  "type": "identity_signature_request",
+  "auth_attempt_id": "<server-issued from auth_challenge>",
+  "provider_id": "p_…",
+  "binary_version": 2,
+  "provider_ecdh_public_key": "<base64-32-byte>",
+  "transcript_sha256": "<base64-32-byte>"
+}
+```
+
+The App verifies `provider_id` matches the configured provider, loads
+`provider_identity_v1` from Keychain, computes the exact JCS payload
+above, signs in-process, and responds:
+
+```json
+{
+  "type": "identity_signature_response",
+  "accepted": true,
+  "identity_signature": "<base64-64-byte-ed25519>",
+  "identity_signature_transcript_sha256": "<base64-32-byte>"
+}
+```
+
+On refusal, the response is
+`{"type":"identity_signature_response","accepted":false,"reason":"..."}`
+and contains no signature. Neither side logs the signed payload,
+signature, bearer token, or private key material, and the App never
+caches signatures across `auth_attempt_id`s.
 
 **Cutover — server-side authoritative, client-declared version
 untrusted:**
@@ -1418,7 +1480,7 @@ clientDataHash = SHA256(JCS({
   coordinator_domain,      // canonical "coordinator.streamvc.live" (bare host, lowercase, no scheme, no trailing slash)
   bundle_id,               // "tech.malibu.app"
   team_id,                 // Apple Developer Team ID that signed the app
-  ts_utc                   // the /register ts_utc, unix seconds int
+  ts_utc                   // the /register `ts_utc` RFC3339 UTC string
 }))
 ```
 
@@ -1522,8 +1584,10 @@ slower payout release. Not required for this spec to ship.
       privacy invariants.
    d. Persist `provider_id` + `provider_token` via existing
       `ProviderConfig.saveProviderIdentity(providerID:token:)`.
-      Additionally write `onboardingSchemaVersion = 2` to the config
-      YAML (see §8 migration matrix).
+      Additionally write `onboardingSchemaVersion = 2` to
+      `~/Library/Application Support/Malibu/onboarding.json` (see
+      §7.5 and §8 migration matrix). The config YAML is not the v2
+      schema authority.
    e. Download `macprovider-cli` binary if not bundled with `.app`
       (SPEC-025 bundles it, so this is a no-op in v1).
    f. Download model weights per autotune output. Resumable partial
@@ -1690,7 +1754,6 @@ final class LaunchProviderController: ObservableObject {
     }
 
     @Published private(set) var stage: Stage = .idle
-    @Published var walletDraft: String = ""
 
     func launch() async     // fires the state machine; safe to re-invoke
     func retry() async      // retries from last-failed stage
@@ -1732,11 +1795,13 @@ SPEC-027's normative surface; v0.8 requires only that `malibu://`
 be deleted per the list above. No new scheme is registered by
 SPEC-026.
 
-The follow-up implementation PR that lands §7.3 MUST leave the
-`swift build --target Malibu` command exit 0 with no dead references
-to `PendingLinkState` or `.providerLinked`. A CI grep for
-`\bPendingLinkState\b` or `\.providerLinked\b` outside SPEC-026
-itself must return zero hits.
+The follow-up implementation PR that lands §7.3 MUST leave the App
+Xcode build/test gate green with no retired deep-link residue. A CI
+grep scoped to App source, App tests, `phase3-binary/app/project.yml`,
+generated project files, and `phase3-binary/app/README.md` MUST return
+zero hits for `PendingLinkState`, `URLSchemeHandler`, `malibu://`,
+`CFBundleURLSchemes: [malibu]`, or `.providerLinked`. SPEC and audit
+files may mention the retired symbols as history.
 
 ### 7.4 Rename: "node" → "provider"
 
@@ -1757,6 +1822,7 @@ Grep and replace across the App-track sources. Notable strings:
   "provider_id": "p_abcd…",
   "created_at":  "2026-07-03T09:41:00Z",
   "last_stage":  "downloadingModel",
+  "first_serving_at": null,
   "model_download": {
     "model_id": "llama-3.3-70b-instruct",
     "target_url": "https://…",
@@ -1771,6 +1837,9 @@ those live in Keychain (which handles encryption + ACL).
 
 `onboardingSchemaVersion` is the migration disambiguator (§8). v1
 installs have no such file, or a file without this field.
+`first_serving_at` is the v2-complete marker: null or absent means
+v2-partial; a timestamp means the agent has seen `.serving` at least
+once.
 
 ### 7.6 `MalibuAgent.start()` — unchanged gate, add identity-mint side effect
 
@@ -1818,17 +1887,19 @@ after the deploy checklist in §10 passes.
 
 | Install state → | Flag OFF (current default)      | Flag ON (post-cutover)              |
 |-----------------|----------------------------------|--------------------------------------|
-| **Fresh** (no config, no identity, no onboarding.json) | Run SPEC-025 §3.1 browser OAuth. Persist as v1. | Run SPEC-026 §6 flow. Persist as v2. |
+| **Fresh** (no config, no identity, no onboarding.json) | Show a local setup-paused state: "Provider launch is not enabled in this build." Do not open browser OAuth, portal URLs, `malibu://`, or any URL-scheme handler. Persist nothing. Existing configured installs are unaffected. | Run SPEC-026 §6 flow. Persist as v2. |
 | **CLI-owned config, no App marker** (`config.yaml` exists but `.installed-by-app` marker absent — `ProviderConfig.saveProviderIdentity` throws `existingConfigNotOwnedByApp` at `ProviderConfig.swift:69-72`) | Run the **import/migration dialog defined in §8.4 below**: user chooses "Import existing CLI provider" (adds marker file, becomes v1-complete) or "Start fresh" (moves aside CLI config, becomes Fresh). No SPEC-026 v2 flow attempts to write here. | Same import/migration dialog. If user picks "Start fresh," proceeds to v2 flow. If user picks "Import existing CLI provider," becomes v1-complete. |
 | **v1-complete** (`ProviderConfig.isConfigured == true`, no v2 identity) | Live. No re-onboarding. | Live. Menu-bar affordance to migrate to a v2 identity is NOT surfaced in v0.3 (deferred to a follow-up spec that defines the migration invariants: old + new provider_ids coexist, no automatic ledger transfer, explicit wallet rebinding). |
-| **v2-partial** (Keychain identity set, `onboardingSchemaVersion=2`, but agent never reached `.serving`) | **Auto-present the onboarding window on next app foreground** with "Complete Malibu onboarding" as the primary action, regardless of flag. User can't miss it via menu-bar-only discovery. Alternative: uninstall via SPEC-025 §3.4. | Auto-present + resume v2 flow from last stage. |
-| **v2-complete** (`ProviderConfig.isConfigured == true` AND agent has seen `.serving` at least once AND `onboardingSchemaVersion=2`) | Live. Sparkle rollback to a flag-off build does NOT force re-onboarding — `MalibuAgent.start()` gate is `ProviderConfig.isConfigured` which stays true (§7.6). | Live. |
+| **v2-partial** (Keychain identity set, `onboardingSchemaVersion=2`, but `first_serving_at` is null/absent) | **Auto-present the onboarding window on next app foreground** with "Complete Malibu onboarding" as the primary action, regardless of flag. User can't miss it via menu-bar-only discovery. Alternative: uninstall via SPEC-025 §3.4. | Auto-present + resume v2 flow from last stage. |
+| **v2-complete** (`ProviderConfig.isConfigured == true` AND `onboardingSchemaVersion=2` AND `first_serving_at` is set) | Live. Sparkle rollback to a flag-off build does NOT force re-onboarding — `MalibuAgent.start()` gate is `ProviderConfig.isConfigured` which stays true (§7.6). | Live. |
 
 ### 8.2 Rollback
 
 If v2 ships with a bug and Sparkle flips the flag back to off:
 
-- Fresh installs revert to SPEC-025 §3.1 browser flow.
+- Fresh installs return to the local setup-paused state from §8.1; the
+  retired SPEC-025 browser-OAuth/deep-link path is not restored by
+  rollback.
 - v2-complete installs continue running unchanged (per matrix cell
   above).
 - v2-partial installs **auto-present the onboarding window on next
@@ -1839,8 +1910,12 @@ If v2 ships with a bug and Sparkle flips the flag back to off:
 
 ### 8.3 Existing SPEC-025 §3.1 installs
 
-Byte-for-byte behavior parity when flag is off. `AC-026-09` verifies
-this.
+Existing configured SPEC-025 §3.1 installs keep running when the flag
+is off because `ProviderConfig.isConfigured` still drives
+`MalibuAgent.start()`. Fresh flag-off installs do not run browser
+OAuth; v0.12 retired that path along with `malibu://`.
+`AC-026-09` verifies default-off/env precedence and absence of retired
+URL-scheme invocation.
 
 ### 8.4 Import/migration dialog (CLI-owned config, no App marker)
 
@@ -2002,8 +2077,9 @@ runs.
    grace clock anchors from cutover, not from the earlier
    schema migration.
 2. **`POST /v1/providers/register` deployed to staging.** Verified:
-   Ed25519 signature verify, JCS parity with Swift RFC8785JCS via a
-   `spec026_register.json` fixture that both Swift and Go tests load,
+   Ed25519 signature verify, JCS parity with the App-local Swift
+   canonicalizer via a `spec026_register.json` fixture that both Swift
+   and Go tests load,
    per-IP + per-ASN rate-limit behavior, `(provider_id, nonce)`
    replay-cache rejection over 65s.
 3. **App Attest verification implemented** with the SPEC-026 §5.3
@@ -2187,9 +2263,12 @@ criteria in §5.2 by 25%.
   prior one), landing the user back at the launch screen. The
   SPEC-015 receipt-key Keychain slot is untouched and its rotation
   history is preserved.
-- **AC-026-09.** With `MALIBU_ONBOARD_V2=0` (env var overrides user
-  default), the app runs the current SPEC-025 §3.1 browser flow
-  unchanged (byte-for-byte behavior parity).
+- **AC-026-09.** `MALIBU_ONBOARD_V2=0` overrides UserDefaults
+  `onboardingFlow = "v2"` and keeps fresh installs in the local
+  setup-paused state: no browser tab, portal URL, `malibu://` URL
+  scheme, URL-scheme handler, or `PendingLinkState` path is invoked.
+  Existing configured installs still run through
+  `ProviderConfig.isConfigured`.
 - **AC-026-10.** Uninstall wipes the `provider_identity_v1` Keychain
   item and all onboarding artifacts under
   `Application Support/Malibu/`, but does NOT wipe the SPEC-015
@@ -2219,11 +2298,15 @@ criteria in §5.2 by 25%.
     CLI-track provider_ids (issued after cutover), the signature
     is verified against the SPEC-015 receipt public key per
     §4.3's CLI-track hardening path.
-- **AC-026-13.** JCS parity between Swift `RFC8785JCS.swift` and Go
-  `billing.CanonicalJSON` is verified by a shared fixture at
+- **AC-026-13.** JCS parity between the App-local Swift canonicalizer
+  and Go `billing.CanonicalJSON` is verified by a shared fixture at
   `phase4-coordinator/test/jcs_fixtures/spec026_register.json`;
   identical `/register` bodies canonicalize byte-for-byte identically
   in both languages.
+- **AC-026-13a.** Provider ID base32 parity is verified by a separate
+  lowercase/no-padding vector set covering empty, 1-byte, 2-byte,
+  multi-byte, and 32-byte digest inputs. The register JCS fixture is
+  not used as a substitute for base32 coverage.
 - **AC-026-14.** A Trusted provider whose only remaining unlock
   criterion is wallet-balance-≥-100-USDC and whose wallet drops
   below 100 USDC is demoted to Provisional on the next payout batch
@@ -2252,10 +2335,10 @@ criteria in §5.2 by 25%.
   covers three scenarios against a `provider_tokens` row seeded
   with `last_used_at IS NOT NULL, revoked_at IS NULL` for the
   same `identity_pubkey`:
-  - No `Authorization: Bearer` header AND no
-    `current_provider_token` body field → coordinator returns
+  - No `Authorization: Bearer` header → coordinator returns
     `409 existing_active_token_no_proof` and does NOT touch the
-    existing token row.
+    existing token row. The App-track request body never carries
+    `current_provider_token`.
   - Wrong bearer (arbitrary 32-byte cleartext that doesn't
     match `token_hash`) → same `409` response, same no-mutation
     behavior.

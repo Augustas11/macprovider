@@ -22,9 +22,19 @@ enum OnboardingWindow {
 private struct OnboardingRootView: View {
     @ObservedObject var agent: MalibuAgent
     let onDone: () -> Void
-    @State private var walletAddress: String = ""
-    @State private var busy = false
-    @State private var error: String?
+    @StateObject private var controller: LaunchProviderController
+
+    init(agent: MalibuAgent, onDone: @escaping () -> Void) {
+        self.agent = agent
+        self.onDone = onDone
+        let bundled = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/macprovider-cli")
+        _controller = StateObject(wrappedValue: LaunchProviderController(
+            coordinatorBaseURL: URL(string: "https://coordinator.streamvc.live")!,
+            bundledCLIPath: bundled,
+            agent: agent
+        ))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -40,56 +50,13 @@ private struct OnboardingRootView: View {
                         .font(.system(size: 28, weight: .semibold))
                 }
             }
-            Text("Three quick steps and you're a node.")
+            Text("Three quick steps to launch a provider.")
+            Text("Create a provider identity, register this Mac, and start serving from the bundled provider.")
                 .foregroundStyle(.secondary)
 
             Divider()
 
-            step(number: 1, title: "Link your node") {
-                Button("Continue in browser") {
-                    // AUDIT R1 SECURITY S1: generate a one-time nonce and pass
-                    // it as `state=...`. The portal echoes it in the malibu://
-                    // redirect and MalibuApp.consume rejects any callback that
-                    // does not match this exact value.
-                    let nonce: String
-                    do { nonce = try PendingLinkState.beginLink() }
-                    catch {
-                        self.error = "Could not start link: \(error.localizedDescription)"
-                        return
-                    }
-                    var comps = URLComponents(string: "https://portal.streamvc.live/onboard")!
-                    comps.queryItems = [
-                        URLQueryItem(name: "client", value: "mac"),
-                        URLQueryItem(name: "state", value: nonce)
-                    ]
-                    guard let url = comps.url else { return }
-                    NSWorkspace.shared.open(url)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(MalibuBrand.coral)
-            }
-
-            step(number: 2, title: "Payout wallet address") {
-                TextField("0x…", text: $walletAddress)
-                    .textFieldStyle(.roundedBorder)
-                    .disableAutocorrection(true)
-            }
-
-            step(number: 3, title: "Start earning") {
-                Button {
-                    Task { await finish() }
-                } label: {
-                    if busy { ProgressView().controlSize(.small) }
-                    else { Text("Start earning") }
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(MalibuBrand.coral)
-                .disabled(busy)
-            }
-
-            if let error {
-                Text(error).font(.callout).foregroundStyle(.red)
-            }
+            content
             Spacer(minLength: 0)
         }
         .padding(28)
@@ -97,37 +64,102 @@ private struct OnboardingRootView: View {
     }
 
     @ViewBuilder
-    private func step<Content: View>(number: Int, title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Circle().fill(MalibuBrand.coral).frame(width: 22, height: 22)
-                    .overlay(Text("\(number)").font(.caption.bold()).foregroundStyle(MalibuBrand.cream))
-                Text(title).font(.headline)
+    private var content: some View {
+        switch controller.stage {
+        case .idle:
+            stageRow(title: "Ready", detail: "The app will create a local identity key and register this provider.") {
+                launchButton(title: "Launch Provider")
             }
-            content().padding(.leading, 32)
+        case .identityReady:
+            stageRow(title: "Identity ready", detail: "Local provider identity created in Keychain.") {
+                ProgressView().controlSize(.small)
+            }
+        case .registering:
+            stageRow(title: "Registering", detail: "Requesting a provider token from the coordinator.") {
+                ProgressView().controlSize(.small)
+            }
+        case .autotuning:
+            stageRow(title: "Autotuning", detail: "Selecting the recommended local model.") {
+                ProgressView().controlSize(.small)
+            }
+        case let .downloadingCLI(progress):
+            stageRow(title: "Provider binary", detail: "Bundled provider binary is ready.") {
+                ProgressView(value: progress)
+            }
+        case let .downloadingModel(name, progress):
+            stageRow(title: "Model", detail: "Preparing \(name).") {
+                ProgressView(value: progress)
+            }
+        case .startingAgent:
+            stageRow(title: "Starting", detail: "Registering the login item and starting the provider.") {
+                ProgressView().controlSize(.small)
+            }
+        case .authenticating:
+            stageRow(title: "Authenticating", detail: "Completing provider authentication.") {
+                ProgressView().controlSize(.small)
+            }
+        case let .live(model, tier):
+            VStack(alignment: .leading, spacing: 16) {
+                stageRow(title: "Provider live", detail: "Serving \(model). Trust tier: \(tier.rawValue).") {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                }
+                HStack(spacing: 12) {
+                    metric(title: "USDC", value: "$—")
+                    metric(title: "MALIBU", value: "Locked", footnote: "Unlocks at Trusted")
+                    Button("Add wallet") { }
+                        .buttonStyle(.bordered)
+                        .disabled(true)
+                }
+                Button("Open Dashboard") { onDone() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(MalibuBrand.coral)
+            }
+        case let .failed(_, retryable, message):
+            stageRow(title: retryable ? "Needs retry" : "Setup paused", detail: message) {
+                if retryable {
+                    launchButton(title: "Retry")
+                }
+            }
         }
     }
 
-    // AUDIT R3 CODE M2 fix: refuse to close the onboarding window or register
-    // the login item unless the deep-link callback has actually landed AND
-    // saved a matching Keychain token. Previously the user could click
-    // "Start earning" before linking, the login item would register, the
-    // onboarding window would close, and the app would sit in the menu bar
-    // with no daemon running and no obvious next step.
-    private func finish() async {
-        busy = true
-        defer { busy = false }
-        guard await ProviderConfig.isConfigured else {
-            self.error = "Not linked yet — click \"Continue in browser\" above and finish the portal step first."
-            return
+    @ViewBuilder
+    private func stageRow<Content: View>(title: String, detail: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Text(title).font(.headline)
+            }
+            Text(detail).font(.callout).foregroundStyle(.secondary)
+            content()
         }
-        do {
-            try AppLoginItem.register()
-        } catch {
-            self.error = "Login item registration failed: \(error.localizedDescription)"
-            return
+    }
+
+    private func metric(title: String, value: String, footnote: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 20, weight: .semibold, design: .rounded))
+            if let footnote {
+                Text(footnote).font(.caption2).foregroundStyle(.secondary)
+            }
         }
-        await agent.start()
-        onDone()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
+    }
+
+    private func launchButton(title: String) -> some View {
+        Button {
+            Task {
+                if case .failed = controller.stage {
+                    await controller.retry()
+                } else {
+                    await controller.launch()
+                }
+            }
+        } label: {
+            Text(title)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(MalibuBrand.coral)
     }
 }

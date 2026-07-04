@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -25,24 +26,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handle(action)
         }
 
-        Task { [agent] in
-            if await ProviderConfig.isConfigured {
-                await agent.start()
-            } else {
-                await MainActor.run { self.presentOnboarding() }
-            }
+        Task { @MainActor [weak self] in
+            await self?.handleStartup()
         }
     }
 
-    func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls where url.scheme == "malibu" {
-            URLSchemeHandler.handle(url) { [weak self] event in
-                Task { @MainActor in
-                    await self?.consume(event)
-                }
-            }
-        }
-    }
+    // SPEC-026 §7.3: browser deep-link onboarding retired.
+    // The application(_:open:) implementation has been removed in v0.11 impl
+    // step 2. Any deep-link scheme SPEC-027 needs (verified-email flow) is
+    // that spec's normative surface, not SPEC-026's.
 
     // AUDIT R2 CODE H2 + R3 CODE M1 + R4 hardening: intercept every
     // termination (Quit menu, Cmd-Q, logout, killall by name) and route the
@@ -101,37 +93,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // AUDIT R1 SECURITY S1 / CODE H3 / ARCHITECT A3 fix: validate the pending
-    // nonce and refuse if the app is already configured. Any invalid callback
-    // is treated as an attack — surface an error, do not overwrite state.
-    private func consume(_ event: URLSchemeHandler.Event) async {
-        switch event {
-        case let .providerLinked(state, providerID, token):
-            let alreadyConfigured = await ProviderConfig.isConfigured
-            do {
-                try PendingLinkState.consume(state: state, appAlreadyConfigured: alreadyConfigured)
-            } catch {
-                await MainActor.run { self.presentLinkError(error) }
-                return
-            }
-            do {
-                try await ProviderConfig.saveProviderIdentity(providerID: providerID, token: token)
-            } catch {
-                await MainActor.run { self.presentLinkError(error) }
-                return
-            }
-            await agent.start()
-        }
-    }
-
-    private func presentLinkError(_ error: Error) {
-        let alert = NSAlert()
-        alert.messageText = "Link request rejected"
-        alert.informativeText = (error as? LocalizedError)?.errorDescription
-            ?? error.localizedDescription
-        alert.alertStyle = .warning
-        alert.runModal()
-    }
+    // SPEC-026 §7.3: consume(_:) / presentLinkError(_:) retired along with
+    // the browser callback handler. Provider onboarding now happens
+    // in-App via LaunchProviderController (SPEC-026 §7.2, follow-up impl
+    // in this same PR).
 
     private func presentOnboarding() {
         if onboardingWindow == nil {
@@ -142,6 +107,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         onboardingWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func handleStartup() async {
+        let route = await StartupState.detect().route()
+        await handleStartupRoute(route)
+    }
+
+    private func handleStartupRoute(_ route: StartupRoute) async {
+        switch route {
+        case .startAgent:
+            await agent.start()
+        case .showOnboarding, .resumeOnboarding:
+            presentOnboarding()
+        case .setupPaused:
+            presentSetupPaused()
+        case .quit:
+            NSApp.terminate(nil)
+        case .showImportDialog:
+            let decision = presentMigrationDialog()
+            do {
+                let result = try await StartupState.applyMigrationDecision(decision)
+                if let backupPath = result.backupPath {
+                    presentStartFreshBackup(path: backupPath)
+                }
+                await handleStartupRoute(result.route)
+            } catch {
+                presentMigrationError(error)
+            }
+        }
+    }
+
+    private func presentMigrationDialog() -> MigrationDecision {
+        let alert = NSAlert()
+        alert.messageText = "Existing provider config found"
+        alert.informativeText = """
+        Malibu found a macprovider config that was not installed by the app. Import saves the existing provider token to Keychain and removes it from config.yaml. Start fresh moves the old config aside.
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Import")
+        alert.addButton(withTitle: "Start Fresh")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .importExisting
+        case .alertSecondButtonReturn: return .startFresh
+        default: return .cancel
+        }
+    }
+
+    private func presentSetupPaused() {
+        let alert = NSAlert()
+        alert.messageText = "Setup paused"
+        alert.informativeText = "App-track onboarding is disabled for this build. Existing configured providers still start normally."
+        alert.alertStyle = .informational
+        alert.runModal()
+    }
+
+    private func presentStartFreshBackup(path: String) {
+        let alert = NSAlert()
+        alert.messageText = "Old provider config moved aside"
+        alert.informativeText = "Backup: \(path)\n\nTo reclaim it manually, run:\nmacprovider-cli --config \"\(path)\""
+        alert.alertStyle = .informational
+        alert.runModal()
+    }
+
+    private func presentMigrationError(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Could not migrate provider config"
+        alert.informativeText = error.localizedDescription
+        alert.alertStyle = .warning
+        alert.runModal()
     }
 
     private func presentDashboard() {
@@ -160,7 +195,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func performUninstall() async {
         await agent.shutdown(gracefulSeconds: 30)
         let unregisterFailure = await AppLoginItem.unregisterReturningError()
-        PendingLinkState.discard()
+        // SPEC-026 §6.5: also wipe the Ed25519 identity Keychain slot.
+        do { try await ProviderIdentity.deleteFromKeychain() }
+        catch { NSLog("[malibu] provider identity delete failed: %@", error.localizedDescription) }
         let residue = await ProviderConfig.wipeAppOwnedState()
 
         if !residue.clean || unregisterFailure != nil {

@@ -2040,12 +2040,12 @@ func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
 		t.Fatalf("decode summary: %v", err)
 	}
-	if summary.Scanned != 3 || summary.Refunded != 1 || summary.StaleHeld != 1 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
-		t.Fatalf("summary=%+v, want refund/hold/stale-coordinator-404 split", summary)
+	if summary.Scanned != 3 || summary.Refunded != 1 || summary.Expired != 1 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v, want refund/hold/expired-coordinator-404 split", summary)
 	}
 	got := gatewaySettlementSnapshot(t, dbPath, "acct_spec022_reconcile")
-	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 3 || got.expiredRows != 0 || got.activeReserved != 60 {
-		t.Fatalf("settlement snapshot=%+v, want one refund, one stale coordinator-404 hold, one held pending reservation, and one ordinary active reservation", got)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 2 || got.expiredRows != 1 || got.activeReserved != 40 {
+		t.Fatalf("settlement snapshot=%+v, want one refund, one expired coordinator-404 hold, one held pending reservation, and one ordinary active reservation", got)
 	}
 	if got := gatewayReservationExpiresAtUnixMSForRequest(t, dbPath, "acct_spec022_reconcile", "req_hold"); got != pendingDeadlineUnixMS {
 		t.Fatalf("held reservation expires_at=%d want %d", got, pendingDeadlineUnixMS)

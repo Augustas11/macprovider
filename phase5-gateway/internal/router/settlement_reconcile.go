@@ -43,7 +43,6 @@ type SettlementReconcileSummary struct {
 	Verified       int `json:"verified"`
 	Refunded       int `json:"refunded"`
 	Expired        int `json:"expired"`
-	StaleHeld      int `json:"stale_held"`
 	Held           int `json:"held"`
 	Skipped        int `json:"skipped"`
 	Errors         int `json:"errors"`
@@ -111,7 +110,7 @@ func (s *Server) ReconcileSettlementHolds(ctx context.Context, limit int) (Settl
 			summary.Held++
 		case "coordinator_404_expired":
 			summary.Coordinator404++
-			summary.StaleHeld++
+			summary.Expired++
 		case "coordinator_404":
 			summary.Coordinator404++
 			summary.Skipped++
@@ -142,6 +141,12 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		if !found {
 			now := s.now()
 			if !reservation.ExpiresAt.IsZero() && !now.Before(reservation.ExpiresAt) {
+				if err := s.store.ExpireReservation(ctx, reservation.AccountID, reservation.RequestID, now); err != nil {
+					if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+						return "already_terminal", nil
+					}
+					return "", err
+				}
 				return "coordinator_404_expired", nil
 			}
 			return "coordinator_404", nil

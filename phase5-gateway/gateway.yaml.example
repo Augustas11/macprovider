@@ -93,6 +93,15 @@ timeouts:
   coordinator_header_timeout_seconds: 300
   streaming_cancel_ms: 500
 
+retry_503:
+  # Retries only coordinator 503 no_provider_available responses (including
+  # empty-body fast refusals). Tier-2 policy and null-usage provider errors
+  # pass through unchanged.
+  enabled: true
+  max_attempts: 3
+  backoff_base_ms: 100
+  backoff_max_ms: 500
+
 settlement:
   # SPEC-022: automatically close held buyer reservations once coordinator
   # settlement finality is available. Disable only for emergency operator

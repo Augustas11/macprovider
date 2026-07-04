@@ -38,9 +38,16 @@ private struct DashboardView: View {
                     Text(agent.snapshot.earningsUsdcToday.map { String(format: "$%.2f", $0) } ?? "$—")
                         .font(.system(size: 36, weight: .semibold, design: .rounded))
                     Text(agent.snapshot.malibuAccruedToday
-                            .map { String(format: "%.2f MALIBU accrued", $0) }
+                            .map { _ in AgentSnapshotPresenter.earningsLine(agent.snapshot) }
                             ?? "— MALIBU (metrics not implemented)")
                         .foregroundStyle(.secondary)
+                    if let backlog = AgentSnapshotPresenter.backlogLine(agent.snapshot) {
+                        Text(backlog)
+                            .font(.caption)
+                            .foregroundStyle(MalibuBrand.coral)
+                    }
+                    Button("Add wallet") { }
+                        .disabled(agent.snapshot.walletBound)
                 }
                 Spacer()
                 VStack(alignment: .trailing) {
