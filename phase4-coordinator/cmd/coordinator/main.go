@@ -541,6 +541,7 @@ func main() {
 		buyer.WithTrustedProxies(mustParseTrustedProxies(cfg, logger)),
 		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
 		buyer.WithGatewayServiceToken(cfg.Auth.GatewayServiceToken),
+		buyer.WithRequireGatewayContext(cfg.Coordinator.RequireGatewayContext),
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
 		buyer.WithSettlementRelay(wsServer.DispatchInferenceWithSettlement),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),

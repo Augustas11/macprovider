@@ -72,8 +72,10 @@ type billingRecorder struct {
 	// cross-account X-Request-ID collisions after #196. Empty when the
 	// inbound request carried no header (direct legacy buyer, demo
 	// without gateway, pre-v0.9.1 gateway).
-	accountID             string
-	promptTokenUpperBound *int64
+	accountID               string
+	authenticatedAccount    requestlog.AuthenticatedAccount
+	hasAuthenticatedAccount bool
+	promptTokenUpperBound   *int64
 
 	// attemptN is the running per-provider-attempt counter. Pre-refactor
 	// this was billingAttemptN, incremented via deferred closure on
@@ -97,15 +99,17 @@ type billingRecorder struct {
 // forwardState pointer the sequence helpers will mutate; the recorder
 // reads state.routingDone at write time to compute RoutingMs (matching
 // the pre-refactor closure's live-capture semantics).
-func (s *Server) newBillingRecorder(r *http.Request, state *forwardState, startedAt time.Time, requestID, externalRequestID, accountID string) *billingRecorder {
+func (s *Server) newBillingRecorder(r *http.Request, state *forwardState, startedAt time.Time, requestID, externalRequestID, accountID string, authenticatedAccount requestlog.AuthenticatedAccount, hasAuthenticatedAccount bool) *billingRecorder {
 	return &billingRecorder{
-		server:            s,
-		state:             state,
-		req:               r,
-		startedAt:         startedAt,
-		requestID:         requestID,
-		externalRequestID: externalRequestID,
-		accountID:         accountID,
+		server:                  s,
+		state:                   state,
+		req:                     r,
+		startedAt:               startedAt,
+		requestID:               requestID,
+		externalRequestID:       externalRequestID,
+		accountID:               accountID,
+		authenticatedAccount:    authenticatedAccount,
+		hasAuthenticatedAccount: hasAuthenticatedAccount,
 	}
 }
 
@@ -264,12 +268,23 @@ func (b *billingRecorder) recordRow(
 			SettlementPolicyVersion:    settlementVersion,
 			RoutingDecisionLog:         s.logCacheBillingRoutingDecision,
 		}
-		err := billingStore.WriteHotPath(ctx, s.reqLogStore, row, billingInput)
+		var err error
+		if b.hasAuthenticatedAccount {
+			err = billingStore.WriteHotPathForAccount(ctx, s.reqLogStore, b.authenticatedAccount, row, billingInput)
+		} else {
+			err = billingStore.WriteHotPath(ctx, s.reqLogStore, row, billingInput)
+		}
 		if err != nil {
 			s.log.Warn().Err(err).Str("request_id", b.requestID).Msg("billing hot-path insert failed")
 			fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 			defer fallbackCancel()
-			if fallbackErr := billingStore.WriteRequestLogWithIdentity(fallbackCtx, s.reqLogStore, row, billingInput); fallbackErr != nil {
+			var fallbackErr error
+			if b.hasAuthenticatedAccount {
+				fallbackErr = billingStore.WriteRequestLogWithIdentityForAccount(fallbackCtx, s.reqLogStore, b.authenticatedAccount, row, billingInput)
+			} else {
+				fallbackErr = billingStore.WriteRequestLogWithIdentity(fallbackCtx, s.reqLogStore, row, billingInput)
+			}
+			if fallbackErr != nil {
 				s.log.Warn().Err(fallbackErr).Str("request_id", b.requestID).Msg("request_log identity fallback insert failed")
 				return fmt.Errorf("billing hot-path insert failed: %w; fallback failed: %v", err, fallbackErr)
 			}
@@ -279,7 +294,13 @@ func (b *billingRecorder) recordRow(
 		}
 		return nil
 	}
-	if err := s.reqLog.Insert(ctx, row); err != nil {
+	var err error
+	if b.hasAuthenticatedAccount {
+		err = s.reqLog.InsertForAccount(ctx, b.authenticatedAccount, row)
+	} else {
+		err = s.reqLog.Insert(ctx, row)
+	}
+	if err != nil {
 		s.log.Warn().Err(err).Str("request_id", b.requestID).Msg("request_log insert failed")
 		return err
 	}

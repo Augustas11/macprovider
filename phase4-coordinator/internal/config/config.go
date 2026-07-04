@@ -37,11 +37,13 @@ const minAuditLogRetentionDays = 90
 
 type Config struct {
 	Listen                       ListenConfig                 `yaml:"listen"`
+	Coordinator                  CoordinatorConfig            `yaml:"coordinator"`
 	Pool                         PoolConfig                   `yaml:"pool"`
 	Routing                      RoutingConfig                `yaml:"routing"`
 	ProviderHTTP                 ProviderHTTPConfig           `yaml:"provider_http"`
 	Limits                       LimitsConfig                 `yaml:"limits"`
 	WS                           WSConfig                     `yaml:"ws"`
+	Relay                        RelayConfig                  `yaml:"relay"`
 	Admission                    AdmissionConfig              `yaml:"admission"`
 	Tier2                        Tier2Config                  `yaml:"tier2"`
 	CoordinatorAdvertisedVersion CoordinatorAdvertisedVersion `yaml:"coordinator_advertised_version"`
@@ -57,6 +59,10 @@ type Config struct {
 	Onboarding                   OnboardingConfig             `yaml:"onboarding"`
 	Proxy                        ProxyConfig                  `yaml:"proxy"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
+}
+
+type CoordinatorConfig struct {
+	RequireGatewayContext bool `yaml:"require_gateway_context"`
 }
 
 // OnboardingConfig gates SPEC-026 App-track `/v1/providers/register`.
@@ -299,6 +305,10 @@ type WSConfig struct {
 	// host starving all provider readmissions even if it slips past nginx's
 	// limit_conn (M1-4 / SECU-1). Default 4. Must be > 0.
 	MaxUnauthenticatedConnPerIP int `yaml:"max_unauthenticated_conn_per_ip"`
+}
+
+type RelayConfig struct {
+	MaxRequestBufferBytes int64 `yaml:"max_request_buffer_bytes"`
 }
 
 type AdmissionConfig struct {
@@ -575,6 +585,9 @@ func Default() Config {
 			ProviderPort: 8444,
 			BindAddress:  "127.0.0.1",
 		},
+		Coordinator: CoordinatorConfig{
+			RequireGatewayContext: true,
+		},
 		Pool: PoolConfig{
 			HeartbeatIntervalS:      30,
 			DisconnectGracePeriodS:  30,
@@ -624,6 +637,9 @@ func Default() Config {
 			MaxFrameBytes:               4 << 20,
 			MaxUnauthenticatedConn:      64,
 			MaxUnauthenticatedConnPerIP: 4,
+		},
+		Relay: RelayConfig{
+			MaxRequestBufferBytes: 16 * 1024 * 1024,
 		},
 		Admission: AdmissionConfig{
 			PinnedOnly:                      false,
@@ -932,6 +948,14 @@ func (c Config) ProviderWSMaxUnauthenticatedConnPerIP() int {
 	return count
 }
 
+func (c Config) RelayMaxRequestBufferBytes() int64 {
+	bytes := c.Relay.MaxRequestBufferBytes
+	if bytes <= 0 {
+		bytes = Default().Relay.MaxRequestBufferBytes
+	}
+	return bytes
+}
+
 // TrustedProxyPrefixes parses c.Proxy.TrustedProxies into a slice of
 // netip.Prefix values for the buyer Server's rate-limit-key derivation.
 // Returns an error if any CIDR is malformed OR if the operator has
@@ -981,6 +1005,9 @@ func (c Config) Validate() error {
 	if c.Auth.OperatorKey == "" {
 		return fmt.Errorf("auth.operator_key must be set")
 	}
+	if c.Coordinator.RequireGatewayContext && c.Auth.GatewayServiceToken == "" && c.Auth.OperatorKey == "" {
+		return fmt.Errorf("auth.gateway_service_token or auth.operator_key must be set when coordinator.require_gateway_context is true")
+	}
 	if _, err := c.TrustedProxyPrefixes(); err != nil {
 		return err
 	}
@@ -998,6 +1025,12 @@ func (c Config) Validate() error {
 	}
 	if c.WS.MaxFrameBytes > 64<<20 {
 		return fmt.Errorf("ws.max_frame_bytes must be <= 67108864")
+	}
+	if c.Relay.MaxRequestBufferBytes <= 0 {
+		return fmt.Errorf("relay.max_request_buffer_bytes must be > 0")
+	}
+	if c.Relay.MaxRequestBufferBytes > 128<<20 {
+		return fmt.Errorf("relay.max_request_buffer_bytes must be <= 134217728")
 	}
 	if c.Routing.PreflightTimeoutS <= 0 || c.Routing.RequestTimeoutS <= 0 || c.Routing.FailoverTimeoutS <= 0 {
 		return fmt.Errorf("routing timeouts must be > 0")

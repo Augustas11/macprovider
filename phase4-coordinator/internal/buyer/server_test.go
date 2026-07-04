@@ -88,6 +88,61 @@ func TestModelsAggregatesUniqueReadyProviderModels(t *testing.T) {
 	}
 }
 
+func TestGatewayContextRequiredRejectsChatBeforeIdempotency(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	store, err := requestlog.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-secret"),
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+		buyer.WithRequestLog(store),
+	)
+
+	body := `{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Idempotency-Key", "idem-direct")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s, want 401 before idempotency reservation", rr.Code, rr.Body.String())
+	}
+
+	replayReqID, replay, err := store.ReserveIdempotencyKey(context.Background(), "acct_test", "idem-direct", buyerTestHash, "req-later", time.Now())
+	if err != nil {
+		t.Fatalf("ReserveIdempotencyKey after rejected request: %v", err)
+	}
+	if replay || replayReqID != "req-later" {
+		t.Fatalf("reservation replay=%v request_id=%q, want fresh req-later", replay, replayReqID)
+	}
+}
+
+func TestGatewayContextRequiredAllowsAuthenticatedGatewayContext(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-secret"),
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+	)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{`))
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	req.Header.Set("X-MacProvider-Account", "acct_gateway")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code == http.StatusUnauthorized {
+		t.Fatalf("authenticated gateway context was rejected: body=%s", rr.Body.String())
+	}
+}
+
 func TestRateCardProjectionReturnsRecommendationSchema(t *testing.T) {
 	rewards := config.RewardsConfig{
 		GlobalMultiplier: 1.25,

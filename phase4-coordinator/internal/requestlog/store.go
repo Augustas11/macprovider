@@ -20,6 +20,21 @@ type Store struct {
 
 var ErrIdempotencyConflict = errors.New("idempotency key body hash mismatch")
 
+type AuthenticatedAccount struct {
+	id string
+}
+
+func NewAuthenticatedAccount(id string) (AuthenticatedAccount, error) {
+	if id == "" {
+		return AuthenticatedAccount{}, fmt.Errorf("authenticated account is required")
+	}
+	return AuthenticatedAccount{id: id}, nil
+}
+
+func (a AuthenticatedAccount) ID() string {
+	return a.id
+}
+
 type execer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -247,6 +262,11 @@ func (s *Store) Insert(ctx context.Context, row Row) error {
 	return insert(ctx, conn, row)
 }
 
+func (s *Store) InsertForAccount(ctx context.Context, account AuthenticatedAccount, row Row) error {
+	row.AccountID = account.ID()
+	return s.Insert(ctx, row)
+}
+
 func (s *Store) ReserveIdempotencyKey(ctx context.Context, accountID, key, bodySHA256, requestID string, now time.Time) (string, bool, error) {
 	if s == nil || s.db == nil {
 		return "", false, fmt.Errorf("store is closed")
@@ -288,6 +308,10 @@ VALUES (?, ?, ?, ?, ?)`,
 	}
 	committed = true
 	return requestID, false, nil
+}
+
+func (s *Store) ReserveIdempotencyKeyForAccount(ctx context.Context, account AuthenticatedAccount, key, bodySHA256, requestID string, now time.Time) (string, bool, error) {
+	return s.ReserveIdempotencyKey(ctx, account.ID(), key, bodySHA256, requestID, now)
 }
 
 // pruneBatchSize bounds a single retention DELETE to keep the write lock
