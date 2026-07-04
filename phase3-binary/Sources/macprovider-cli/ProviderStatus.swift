@@ -89,6 +89,8 @@ struct ProviderSnapshot: Sendable {
     let recommendedBinaryVersion: String?
     let activeRequestIDCount: Int
     let thermallyThrottled: Bool
+    let lastActivityAt: Date
+    let lastPrewarmAt: Date?
 
     var slotsFree: Int {
         if thermallyThrottled { return 0 }
@@ -121,6 +123,9 @@ actor ProviderStatus {
     private var recommendedBinaryVersion: String?
     private var activeRequestIDs = Set<String>()
     private let thermalGate: ThermalGate?
+    private var lastActivityAt = Date()
+    private var lastPrewarmAt: Date?
+    private var lastPrewarmElapsedMS: Double?
 
     init(modelID: String?, modelLoaded: Bool, capacity: ProviderCapacity, modelHash: String? = nil, thermalGate: ThermalGate? = nil) {
         self.modelID = modelID
@@ -132,6 +137,7 @@ actor ProviderStatus {
     }
 
     func beginRequest(requestID: String? = nil) -> Date {
+        noteRealRequestStart()
         requestsInFlight += 1
         if let requestID {
             activeRequestIDs.insert(requestID)
@@ -141,6 +147,7 @@ actor ProviderStatus {
     }
 
     func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil) {
+        noteRealRequestEnd()
         requestsInFlight = max(0, requestsInFlight - 1)
         if let requestID {
             activeRequestIDs.remove(requestID)
@@ -162,6 +169,30 @@ actor ProviderStatus {
 
     func recordError() {
         errorsTotal += 1
+    }
+
+    func noteRealRequestStart() {
+        lastActivityAt = Date()
+    }
+
+    func noteRealRequestEnd() {
+        lastActivityAt = Date()
+    }
+
+    func secondsSinceLastRealActivity() -> Double {
+        max(0, Date().timeIntervalSince(lastActivityAt))
+    }
+
+    func secondsSinceLastActivityOrPrewarm() -> Double {
+        let now = Date()
+        let secondsSinceActivity = max(0, now.timeIntervalSince(lastActivityAt))
+        guard let lastPrewarmAt else { return secondsSinceActivity }
+        return min(secondsSinceActivity, max(0, now.timeIntervalSince(lastPrewarmAt)))
+    }
+
+    func noteInternalPrewarm(at: Date = Date(), elapsedMS: Double) {
+        lastPrewarmAt = at
+        lastPrewarmElapsedMS = elapsedMS
     }
 
     func setState(_ newState: ProviderHealthState) {
@@ -210,7 +241,9 @@ actor ProviderStatus {
             coordinatorTier: coordinatorTier,
             recommendedBinaryVersion: recommendedBinaryVersion,
             activeRequestIDCount: activeRequestIDs.count,
-            thermallyThrottled: throttled
+            thermallyThrottled: throttled,
+            lastActivityAt: lastActivityAt,
+            lastPrewarmAt: lastPrewarmAt
         )
         if resetWindow {
             windowRequests = 0
