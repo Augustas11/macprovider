@@ -100,6 +100,8 @@ func (s *Store) Ping(ctx context.Context) error {
 //	     admin reconciliation does not scan ordinary in-flight reservations.
 //	v7 — SPEC-022 D13: quota_reservations accepts stale_held terminal holds
 //	     for coordinator-missing ambiguity that must release active quota.
+//	v8 — public issuance reservation events for atomic per-IP signup/demo/
+//	     feedback ceilings.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -110,7 +112,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 7
+const maxKnownSchemaVersion = 8
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -140,6 +142,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, demoUsageEventsAuxiliaryDDL); err != nil {
+		return err
+	}
+	if err := s.ensureOAuthStateExpiresAtColumn(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureOAuthStateActionColumn(ctx); err != nil {
@@ -192,7 +197,48 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(7, ?)", now); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(8, ?)", now); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) ensureOAuthStateExpiresAtColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(oauth_states)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasExpiresAt := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "expires_at" {
+			hasExpiresAt = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasExpiresAt {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE oauth_states ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE oauth_states SET expires_at = strftime('%Y-%m-%dT%H:%M:%SZ', created_at, '+10 minutes') WHERE expires_at = ''`); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_oauth_states_session ON oauth_states(session_id, expires_at);
+		CREATE INDEX IF NOT EXISTS idx_oauth_states_client_ip_expires ON oauth_states(client_ip, expires_at);
+	`)
+	return err
 }
 
 // checkSchemaVersionGate refuses to run Migrate when the DB carries
@@ -816,18 +862,45 @@ func (s *Store) RotateAPIKey(ctx context.Context, oldKeyID, accountID string, ne
 }
 
 func (s *Store) StoreOAuthState(ctx context.Context, state storage.OAuthState) error {
+	return s.StoreOAuthStateWithCap(ctx, state, 0, time.Now().UTC())
+}
+
+func (s *Store) StoreOAuthStateWithCap(ctx context.Context, state storage.OAuthState, maxPerIP int, now time.Time) error {
 	if state.CreatedAt.IsZero() {
-		state.CreatedAt = time.Now().UTC()
+		if now.IsZero() {
+			now = time.Now().UTC()
+		}
+		state.CreatedAt = now.UTC()
 	}
 	if state.ExpiresAt.IsZero() {
 		state.ExpiresAt = state.CreatedAt.Add(10 * time.Minute)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if maxPerIP > 0 && state.ClientIP != "" {
+		var count int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM oauth_states
+			WHERE client_ip = ? AND consumed_at = '' AND expires_at > ?`,
+			state.ClientIP, encodeTime(now.UTC())).Scan(&count); err != nil {
+			return err
+		}
+		if count >= maxPerIP {
+			return storage.ErrOAuthStateCap
+		}
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO oauth_states(state_hash, session_id, redirect_uri, client_ip, created_at, expires_at, action)
 		VALUES(?, ?, ?, ?, ?, ?, ?)`,
 		state.StateHash, state.SessionID, state.RedirectURI, state.ClientIP,
 		encodeTime(state.CreatedAt), encodeTime(state.ExpiresAt), state.Action)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (string, string, error) {
@@ -858,6 +931,97 @@ func (s *Store) ConsumeOAuthState(ctx context.Context, stateHash []byte, session
 		return "", "", err
 	}
 	return redirectURI, action, tx.Commit()
+}
+
+func (s *Store) PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM oauth_states
+		WHERE expires_at <= ?`, encodeTime(now.UTC()))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) ReservePublicIssuance(ctx context.Context, reservation storage.PublicIssuanceReservation) error {
+	if reservation.Limit <= 0 {
+		return storage.ErrRateLimit
+	}
+	if reservation.CreatedAt.IsZero() {
+		reservation.CreatedAt = time.Now().UTC()
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	windowStart := encodeTime(reservation.WindowStart.UTC())
+	createdAt := encodeTime(reservation.CreatedAt.UTC())
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM public_issuance_events
+		WHERE surface = ? AND created_at < ?`, reservation.Surface, windowStart); err != nil {
+		return err
+	}
+
+	var count int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM public_issuance_events
+		WHERE surface = ? AND client_ip = ? AND created_at >= ?`,
+		reservation.Surface, reservation.ClientIP, windowStart).Scan(&count); err != nil {
+		return err
+	}
+
+	legacyCount, err := s.legacyPublicIssuanceCountTx(ctx, tx, reservation.Surface, reservation.ClientIP, windowStart)
+	if err != nil {
+		return err
+	}
+	count += legacyCount
+	if count >= reservation.Limit {
+		return storage.ErrRateLimit
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO public_issuance_events(surface, client_ip, created_at)
+		VALUES(?, ?, ?)`, reservation.Surface, reservation.ClientIP, createdAt)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) legacyPublicIssuanceCountTx(ctx context.Context, tx *immediateTx, surface, clientIP, windowStart string) (int, error) {
+	var firstReservation sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+		SELECT MIN(created_at) FROM public_issuance_events
+		WHERE surface = ? AND client_ip = ?`, surface, clientIP).Scan(&firstReservation); err != nil {
+		return 0, err
+	}
+	legacyUpperBound := ""
+	if firstReservation.Valid {
+		legacyUpperBound = firstReservation.String
+	}
+	var query string
+	switch surface {
+	case "signup":
+		query = `SELECT COUNT(*) FROM signup_events WHERE client_ip = ? AND created_at >= ?`
+	case "demo_session":
+		query = `SELECT COUNT(*) FROM demo_session_events WHERE client_ip = ? AND created_at >= ?`
+	default:
+		return 0, nil
+	}
+	args := []any{clientIP, windowStart}
+	if legacyUpperBound != "" {
+		query += ` AND created_at < ?`
+		args = append(args, legacyUpperBound)
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Store) RecordSignupEvent(ctx context.Context, event storage.SignupEvent) error {
@@ -1519,11 +1683,21 @@ func (s *Store) InsertFeedbackEvent(ctx context.Context, event storage.FeedbackE
 }
 
 func (s *Store) ListFeedbackEventsSince(ctx context.Context, since time.Time) ([]storage.FeedbackSummaryEvent, error) {
+	return s.ListFeedbackEventsSinceLimit(ctx, since, 0)
+}
+
+func (s *Store) ListFeedbackEventsSinceLimit(ctx context.Context, since time.Time, limit int) ([]storage.FeedbackSummaryEvent, error) {
+	limitClause := ""
+	args := []any{encodeTime(since)}
+	if limit > 0 {
+		limitClause = " LIMIT ?"
+		args = append(args, limit)
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT event_id, request_id, account_id, scope, rating, comment, created_at
 		FROM feedback_events
 		WHERE created_at >= ?
-		ORDER BY created_at ASC`, encodeTime(since))
+		ORDER BY created_at DESC`+limitClause, args...)
 	if err != nil {
 		return nil, err
 	}

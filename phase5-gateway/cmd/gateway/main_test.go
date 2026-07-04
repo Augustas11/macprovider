@@ -35,6 +35,42 @@ func (f *fakeSettlementReconciler) ReconcileSettlementHolds(ctx context.Context,
 	}
 }
 
+type fakeOAuthPruner struct {
+	calls chan time.Time
+}
+
+func (f *fakeOAuthPruner) PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case f.calls <- now:
+		return 1, nil
+	}
+}
+
+func TestRunOAuthStatePrunerRunsAndStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	fake := &fakeOAuthPruner{calls: make(chan time.Time, 2)}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runOAuthStatePruner(ctx, fake, time.Hour)
+	}()
+
+	select {
+	case <-fake.calls:
+	case <-time.After(time.Second):
+		t.Fatal("oauth state pruner did not run immediately")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("oauth state pruner did not stop after context cancellation")
+	}
+}
+
 func TestRunSettlementReconcilerRunsImmediately(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	fake := &fakeSettlementReconciler{calls: make(chan int, 2)}

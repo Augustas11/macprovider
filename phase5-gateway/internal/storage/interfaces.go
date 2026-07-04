@@ -17,7 +17,10 @@ type AuthStore interface {
 	RevokeAPIKeyForAccount(ctx context.Context, accountID, keyID, actor, requestID string) error
 	RotateAPIKey(ctx context.Context, oldKeyID, accountID string, newKey APIKey, actor, requestID string) error
 	StoreOAuthState(ctx context.Context, state OAuthState) error
+	StoreOAuthStateWithCap(ctx context.Context, state OAuthState, maxPerIP int, now time.Time) error
 	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action string, err error)
+	PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error)
+	ReservePublicIssuance(ctx context.Context, reservation PublicIssuanceReservation) error
 	RecordSignupEvent(ctx context.Context, event SignupEvent) error
 	CountSignupEventsSince(ctx context.Context, clientIP string, since time.Time) (int, error)
 	RecordDemoSessionEvent(ctx context.Context, event DemoSessionEvent) error
@@ -31,6 +34,7 @@ type AccountStore interface {
 	LookupAccount(ctx context.Context, accountID string) (Account, error)
 	RecordSignupEvent(ctx context.Context, event SignupEvent) error
 	CountSignupEventsSince(ctx context.Context, clientIP string, since time.Time) (int, error)
+	ReservePublicIssuance(ctx context.Context, reservation PublicIssuanceReservation) error
 }
 
 type KeyStore interface {
@@ -44,7 +48,9 @@ type KeyStore interface {
 
 type OAuthStateStore interface {
 	StoreOAuthState(ctx context.Context, state OAuthState) error
+	StoreOAuthStateWithCap(ctx context.Context, state OAuthState, maxPerIP int, now time.Time) error
 	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action string, err error)
+	PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error)
 }
 
 type DemoSessionStore interface {
@@ -111,6 +117,7 @@ type HealthStore interface {
 type FeedbackStore interface {
 	InsertFeedbackEvent(ctx context.Context, event FeedbackEvent) error
 	ListFeedbackEventsSince(ctx context.Context, since time.Time) ([]FeedbackSummaryEvent, error)
+	ListFeedbackEventsSinceLimit(ctx context.Context, since time.Time, limit int) ([]FeedbackSummaryEvent, error)
 }
 
 type AuditStore interface {

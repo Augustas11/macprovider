@@ -72,11 +72,13 @@ func main() {
 	}()
 
 	slog.Info("gateway initialized", "address", cfg.Address(), "db_path", cfg.Storage.DBPath)
+	slog.Info("gateway oauth", "github_oauth", cfg.Auth.GitHubOAuthEnabled)
 	if *checkOnly {
 		return
 	}
 
 	go runReservationReaper(ctx, store, time.Duration(cfg.Quotas.ReaperIntervalHours)*time.Hour)
+	go runOAuthStatePruner(ctx, store, time.Minute)
 
 	// coordinatorTransport clones the default transport and adds
 	// ResponseHeaderTimeout so buyers get a bounded failure if the coordinator
@@ -190,6 +192,35 @@ const terminalReservationRetention = 7 * 24 * time.Hour
 type reservationReaper interface {
 	ReapExpiredReservations(context.Context, time.Time) (int64, error)
 	DeleteTerminalQuotaReservations(context.Context, time.Time) (int64, error)
+}
+
+type oauthStatePruner interface {
+	PruneExpiredOAuthState(context.Context, time.Time) (int64, error)
+}
+
+func runOAuthStatePruner(ctx context.Context, store oauthStatePruner, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	prune := func() {
+		deleted, err := store.PruneExpiredOAuthState(ctx, time.Now().UTC())
+		if err != nil {
+			slog.Warn("oauth state prune failed", "error", err)
+		} else if deleted > 0 {
+			slog.Info("expired oauth states pruned", "count", deleted)
+		}
+	}
+	prune()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		}
+	}
 }
 
 func runReservationReaper(ctx context.Context, store reservationReaper, interval time.Duration) {

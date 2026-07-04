@@ -714,6 +714,7 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 			"github_oauth_enabled":     false,
 			"email_magic_link_enabled": false,
 			"oauth": map[string]any{
+				"state_max_per_ip": 20,
 				"callback_allowlist": []string{
 					fmt.Sprintf("http://127.0.0.1:%d/auth/github/callback", gwPort),
 				},
@@ -733,10 +734,12 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 			"reservation_max_age_hours":      24,
 		},
 		"limits": map[string]any{
-			"max_tokens_per_request":      4096,
-			"demo_max_tokens_per_request": 512,
-			"max_feedback_comment_bytes":  2000,
-			"request_body_bytes":          1048576,
+			"max_tokens_per_request":            4096,
+			"demo_max_tokens_per_request":       512,
+			"max_feedback_comment_bytes":        2000,
+			"max_feedback_body_bytes":           16384,
+			"feedback_requests_per_ip_per_hour": 10,
+			"request_body_bytes":                1048576,
 		},
 		"capacity": map[string]any{
 			"monthly_budget_usd":                500,

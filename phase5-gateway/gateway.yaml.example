@@ -39,6 +39,7 @@ auth:
   github_oauth_enabled: true
   email_magic_link_enabled: false
   oauth:
+    state_max_per_ip: 20
     callback_allowlist:
       - https://api.streamvc.live/auth/github/callback
       - http://localhost:9443/auth/github/callback
@@ -65,6 +66,8 @@ limits:
   max_tokens_per_request: 4096
   demo_max_tokens_per_request: 512
   max_feedback_comment_bytes: 2000
+  max_feedback_body_bytes: 16384
+  feedback_requests_per_ip_per_hour: 10
   request_body_bytes: 1048576
 
 kill_switch:
