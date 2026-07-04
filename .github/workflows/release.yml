@@ -329,6 +329,7 @@ jobs:
         shell: bash
         env:
           APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 }}
           APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
           APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
           APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
@@ -395,14 +396,71 @@ jobs:
           spctl -a -vvv -t exec "$APP"
 
           tag="${{ steps.version.outputs.tag }}"
-          DIST_ZIP="phase3-binary/app/dist/Malibu-${tag}.zip"
           mkdir -p "phase3-binary/app/dist"
-          (cd "$RUNNER_TEMP" && /usr/bin/ditto -c -k --keepParent Malibu.app "$GITHUB_WORKSPACE/$DIST_ZIP")
+
+          # Wrap the signed+notarized+stapled Malibu.app in a user-installable
+          # .pkg (matches CLI pattern; delivers double-click install to
+          # /Applications instead of manual drag from a .zip). Requires the
+          # Developer ID Installer cert — if absent, fail loud rather than
+          # silently ship a .zip (mismatches the CLI convention and gives
+          # beta providers no double-click install path).
+          if [ -z "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64" ]; then
+            echo "::error::APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 required for Malibu.app.pkg;" >&2
+            echo "::error::the same secret is used for the CLI .pkg — populate it." >&2
+            exit 1
+          fi
+
+          INSTALLER_ID=$(security find-identity -v build.keychain \
+                        | awk -F'"' '/Developer ID Installer/ {print $2; exit}')
+          [ -n "$INSTALLER_ID" ] || {
+            echo "::error::No Developer ID Installer identity in build.keychain" >&2
+            exit 1
+          }
+
+          APP_PKG_ROOT="$RUNNER_TEMP/malibu-pkg-root"
+          mkdir -p "$APP_PKG_ROOT"
+          cp -R "$APP" "$APP_PKG_ROOT/Malibu.app"
+
+          UNSIGNED_PKG="$RUNNER_TEMP/Malibu-unsigned.pkg"
+          DIST_PKG="phase3-binary/app/dist/Malibu-${tag}.pkg"
+
+          # pkgbuild wraps Malibu.app into a flat installer package.
+          # --install-location "/Applications" makes double-click install
+          # place Malibu.app directly in /Applications with no user
+          # interaction beyond consent.
+          # --identifier is the CFBundleIdentifier of the package, distinct
+          # from the app bundle's tech.malibu.app.
+          pkgbuild \
+            --root "$APP_PKG_ROOT" \
+            --install-location "/Applications" \
+            --identifier tech.malibu.app.installer \
+            --version "${tag#v}" \
+            "$UNSIGNED_PKG"
+
+          productsign --sign "$INSTALLER_ID" \
+            "$UNSIGNED_PKG" "$GITHUB_WORKSPACE/$DIST_PKG"
+
+          # Notarize the .pkg separately from the .app inside — Apple
+          # notary treats the two as distinct submissions.
+          xcrun notarytool submit "$GITHUB_WORKSPACE/$DIST_PKG" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" \
+            --wait
+
+          xcrun stapler staple "$GITHUB_WORKSPACE/$DIST_PKG"
+          xcrun stapler validate "$GITHUB_WORKSPACE/$DIST_PKG"
+          spctl -a -vvv -t install "$GITHUB_WORKSPACE/$DIST_PKG"
+
+          rm -rf "$APP_PKG_ROOT" "$UNSIGNED_PKG"
 
           echo "  Malibu.app signed by: $SIGNING_ID"
           echo "  Malibu.app notarization: accepted"
           echo "  Malibu.app stapling: validated"
-          echo "  Malibu.app.zip: $DIST_ZIP"
+          echo "  Malibu.app.pkg signed by: $INSTALLER_ID"
+          echo "  Malibu.app.pkg notarization: accepted"
+          echo "  Malibu.app.pkg stapling: validated"
+          echo "  Malibu.app.pkg: $DIST_PKG"
 
       - name: Clean signing material
         if: always()
@@ -536,10 +594,10 @@ jobs:
           tag="${{ steps.version.outputs.tag }}"
           src="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
           pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
-          app_src="phase3-binary/app/dist/Malibu-${tag}.zip"
+          app_src="phase3-binary/app/dist/Malibu-${tag}.pkg"
           tar_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
           pkg_asset="macprovider-cli-${tag}-darwin-arm64.pkg"
-          app_asset="Malibu-${tag}.zip"
+          app_asset="Malibu-${tag}.pkg"
           test -f "$src"
           if [ -z "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" ]; then
             echo "MACPROVIDER_RELEASE_SIGNING_KEY_PEM secret is required" >&2
@@ -588,14 +646,14 @@ jobs:
           a stapled .pkg asset in addition to the compatibility tarball.
           EOF
           fi
-          if [ -f "phase3-binary/app/dist/Malibu-${tag}.zip" ]; then
+          if [ -f "phase3-binary/app/dist/Malibu-${tag}.pkg" ]; then
             cat >> release-notes.md <<EOF
 
           **Malibu.app (App-track provider onboarding)** - this release also
-          ships a Developer ID-signed, notarized, and stapled Malibu.app
+          ships a Developer ID-signed, notarized, and stapled Malibu.app.pkg
           for the SPEC-026 browserless one-click provider onboarding flow.
-          Download Malibu-${tag}.zip, unzip, and drag Malibu.app to
-          /Applications. First launch drives the whole registration ->
+          Download Malibu-${tag}.pkg and double-click to install Malibu.app
+          to /Applications. First launch drives the whole registration ->
           autotune -> download -> live flow with no browser and no CLI setup.
           EOF
           fi
