@@ -58,6 +58,7 @@ type UsageStore interface {
 	SettleDemoReservation(ctx context.Context, settlement ReservationSettlement, demo DemoUsageEvent) error
 	RefundReservation(ctx context.Context, accountID, requestID string, refundedAt int64) error
 	ExpireReservation(ctx context.Context, accountID, requestID string, expiredAt time.Time) error
+	MarkReservationStaleHeld(ctx context.Context, accountID, requestID string, staleAt time.Time) error
 	MarkReservationSettlementHold(ctx context.Context, accountID, requestID string) error
 	ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error
 	ListSettlementHeldReservations(ctx context.Context, limit int) ([]ActiveReservation, error)

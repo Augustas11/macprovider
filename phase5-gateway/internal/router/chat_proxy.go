@@ -1256,7 +1256,7 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 	finality := coordinatorStreamingSettlementFinality(resp)
 	switch finality.Action {
 	case settlementFinalityLegacy:
-		if source == "gateway_estimated" && outcome == "ok" {
+		if outcome == "ok" {
 			outcome = "unverified_streaming"
 		}
 		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)

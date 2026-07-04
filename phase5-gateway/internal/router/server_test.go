@@ -2040,12 +2040,12 @@ func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
 		t.Fatalf("decode summary: %v", err)
 	}
-	if summary.Scanned != 3 || summary.Refunded != 1 || summary.Expired != 1 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
-		t.Fatalf("summary=%+v, want refund/hold/expired-coordinator-404 split", summary)
+	if summary.Scanned != 3 || summary.Refunded != 1 || summary.StaleHeld != 1 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v, want refund/hold/stale-held coordinator-404 split", summary)
 	}
 	got := gatewaySettlementSnapshot(t, dbPath, "acct_spec022_reconcile")
-	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 2 || got.expiredRows != 1 || got.activeReserved != 40 {
-		t.Fatalf("settlement snapshot=%+v, want one refund, one expired coordinator-404 hold, one held pending reservation, and one ordinary active reservation", got)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 2 || got.expiredRows != 0 || got.staleHeldRows != 1 || got.activeReserved != 40 {
+		t.Fatalf("settlement snapshot=%+v, want one refund, one stale-held coordinator-404 hold, one held pending reservation, and one ordinary active reservation", got)
 	}
 	if got := gatewayReservationExpiresAtUnixMSForRequest(t, dbPath, "acct_spec022_reconcile", "req_hold"); got != pendingDeadlineUnixMS {
 		t.Fatalf("held reservation expires_at=%d want %d", got, pendingDeadlineUnixMS)
@@ -4084,7 +4084,7 @@ func TestStreamingReadErrorAfterBuyerCancelSettlesClientDisconnect(t *testing.T)
 	}
 }
 
-func TestStreamingCleanEOFSettlesOK(t *testing.T) {
+func TestStreamingCleanEOFLegacySettlesUnverified(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"ok"}]}`
 	accountID := "acct_stream_ok"
 	// Content payload aligned with the reported completion_tokens so the
@@ -4114,8 +4114,8 @@ func TestStreamingCleanEOFSettlesOK(t *testing.T) {
 		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "ok" || source != "provider_reported" {
-		t.Fatalf("usage outcome/source = %s/%s, want ok/provider_reported", outcome, source)
+	if outcome != "unverified_streaming" || source != "provider_reported" {
+		t.Fatalf("usage outcome/source = %s/%s, want unverified_streaming/provider_reported", outcome, source)
 	}
 }
 
@@ -4669,8 +4669,8 @@ func TestStreamingSanitizesInvalidCachedPromptTokensWithoutRejectingUsage(t *tes
 		t.Fatalf("stream body did not sanitize cached_prompt_tokens: %s", resp.Body.String())
 	}
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
-	if outcome != "ok" || source != "provider_reported" || prompt != 3 || completion != 2 {
-		t.Fatalf("usage event outcome/source/prompt/completion = %s/%s/%d/%d, want ok/provider_reported/3/2", outcome, source, prompt, completion)
+	if outcome != "unverified_streaming" || source != "provider_reported" || prompt != 3 || completion != 2 {
+		t.Fatalf("usage event outcome/source/prompt/completion = %s/%s/%d/%d, want unverified_streaming/provider_reported/3/2", outcome, source, prompt, completion)
 	}
 }
 
@@ -4763,7 +4763,7 @@ func TestSettleFromUsage_Qwen3_32B_Legacy_Baseline(t *testing.T) {
 		reportedPrompt: 12,
 		reportedComp:   32,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "provider_reported",
 		wantCompletion: 32,
 		wantPrompt:     12,
@@ -4778,7 +4778,7 @@ func TestSettleFromUsage_Llama_31_8B_NoOverbill(t *testing.T) {
 		reportedPrompt: 46,
 		reportedComp:   69,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "provider_reported",
 		wantCompletion: 69,
 		wantPrompt:     46,
@@ -4793,7 +4793,7 @@ func TestSettleFromUsage_Qwen25_Coder_32B_NoDownclamp(t *testing.T) {
 		reportedPrompt: 42,
 		reportedComp:   128,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "provider_reported",
 		wantCompletion: 128,
 		wantPrompt:     42,
@@ -4809,7 +4809,7 @@ func TestSettleFromUsage_GptOss_20B_NoMidStreamByteCap(t *testing.T) {
 		reportedPrompt: 42,
 		reportedComp:   128,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "provider_reported",
 		wantCompletion: 128,
 		wantPrompt:     42,
@@ -4825,7 +4825,7 @@ func TestSettleFromUsage_Qwen3Coder_30B_A3B_NoMidStreamByteCap(t *testing.T) {
 		reportedPrompt: 52,
 		reportedComp:   128,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "provider_reported",
 		wantCompletion: 128,
 		wantPrompt:     52,
@@ -5277,6 +5277,7 @@ type gatewaySettlementState struct {
 	settledRows    int64
 	refundedRows   int64
 	expiredRows    int64
+	staleHeldRows  int64
 	activeRows     int64
 	activeReserved int64
 }
@@ -5300,6 +5301,9 @@ func gatewaySettlementSnapshot(t *testing.T, dbPath, accountID string) gatewaySe
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'expired'`, accountID).Scan(&state.expiredRows); err != nil {
 		t.Fatalf("query expired reservations count: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'stale_held'`, accountID).Scan(&state.staleHeldRows); err != nil {
+		t.Fatalf("query stale-held reservations count: %v", err)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(reserved_tokens), 0) FROM quota_reservations WHERE account_id = ? AND status = 'active'`, accountID).Scan(&state.activeRows, &state.activeReserved); err != nil {
 		t.Fatalf("query active reservations: %v", err)

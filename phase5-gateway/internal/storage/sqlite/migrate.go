@@ -42,6 +42,31 @@ const demoUsageEventsTableDDL = `CREATE TABLE IF NOT EXISTS demo_usage_events (
 	PRIMARY KEY (demo_token_hash, request_id)
 )`
 
+const quotaReservationsTableDDL = `CREATE TABLE IF NOT EXISTS quota_reservations (
+	account_id TEXT NOT NULL,
+	request_id TEXT NOT NULL,
+	window_date TEXT NOT NULL,
+	reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
+	settled_tokens INTEGER NOT NULL DEFAULT 0 CHECK (settled_tokens >= 0),
+	status TEXT NOT NULL CHECK (status IN ('active', 'settled', 'refunded', 'expired', 'stale_held')),
+	settlement_hold INTEGER NOT NULL DEFAULT 0 CHECK (settlement_hold IN (0, 1)),
+	expires_at TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	settled_at TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (account_id, request_id)
+)`
+
+const quotaReservationsAuxiliaryDDL = `
+CREATE INDEX IF NOT EXISTS idx_quota_active_account_date ON quota_reservations(account_id, window_date, status);
+CREATE INDEX IF NOT EXISTS idx_quota_expires_at ON quota_reservations(expires_at);
+-- #231 R3 SEC MEDIUM closure: request_id-leading index so the
+-- §6.4 explorerAccountIDsForRequest ambiguity probe uses an index
+-- lookup instead of a full table scan on quota_reservations.
+-- Composite PK is (account_id, request_id); without this auxiliary
+-- index the ambiguity SELECT goes to SCAN under EXPLAIN QUERY PLAN.
+CREATE INDEX IF NOT EXISTS idx_quota_request ON quota_reservations(request_id);
+`
+
 // demoUsageEventsAuxiliaryDDL covers the secondary index + append-only
 // triggers for demo_usage_events. Mirrors usageEventsAuxiliaryDDL.
 const demoUsageEventsAuxiliaryDDL = `
@@ -148,29 +173,6 @@ CREATE INDEX IF NOT EXISTS idx_api_key_events_key ON api_key_events(key_id);
 -- usage_events table: see usageEventsTableDDL constant for the canonical
 -- shape. Executed alongside schemaSQL in Migrate() so both paths share
 -- one source of truth post-#196.
-
-CREATE TABLE IF NOT EXISTS quota_reservations (
-	account_id TEXT NOT NULL,
-	request_id TEXT NOT NULL,
-	window_date TEXT NOT NULL,
-	reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
-	settled_tokens INTEGER NOT NULL DEFAULT 0 CHECK (settled_tokens >= 0),
-	status TEXT NOT NULL CHECK (status IN ('active', 'settled', 'refunded', 'expired')),
-	settlement_hold INTEGER NOT NULL DEFAULT 0 CHECK (settlement_hold IN (0, 1)),
-	expires_at TEXT NOT NULL,
-	created_at TEXT NOT NULL,
-	settled_at TEXT NOT NULL DEFAULT '',
-	PRIMARY KEY (account_id, request_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_quota_active_account_date ON quota_reservations(account_id, window_date, status);
-CREATE INDEX IF NOT EXISTS idx_quota_expires_at ON quota_reservations(expires_at);
--- #231 R3 SEC MEDIUM closure: request_id-leading index so the
--- §6.4 explorerAccountIDsForRequest ambiguity probe uses an index
--- lookup instead of a full table scan on quota_reservations.
--- Composite PK is (account_id, request_id); without this auxiliary
--- index the ambiguity SELECT goes to SCAN under EXPLAIN QUERY PLAN.
-CREATE INDEX IF NOT EXISTS idx_quota_request ON quota_reservations(request_id);
 
 CREATE TABLE IF NOT EXISTS concurrency_reservations (
 	account_id TEXT NOT NULL,

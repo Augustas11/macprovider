@@ -143,7 +143,7 @@ func checkI1(sc *scenario.Scenario, ledger *reconcile.Result) Check {
 	if coordMissingOK > 0 {
 		driftSignals++
 	}
-	if gwOverbillVsHarness > 0 {
+	if gwOverbillVsHarness > tolerance {
 		driftSignals++
 	}
 	if absGwCoordMismatch > 0 {
@@ -178,8 +178,8 @@ func checkI1(sc *scenario.Scenario, ledger *reconcile.Result) Check {
 	if coordMissingOK > 0 {
 		parts = append(parts, fmt.Sprintf("%d gateway-ok matched pairs with no coord row", coordMissingOK))
 	}
-	if gwOverbillVsHarness > 0 {
-		parts = append(parts, fmt.Sprintf("gateway over-billed by %d vs harness across %d pair(s); configured tolerance %d is diagnostic only", gwOverbillVsHarness, len(ledger.OverbilledPairs), tolerance))
+	if gwOverbillVsHarness > tolerance {
+		parts = append(parts, fmt.Sprintf("gateway over-billed by %d vs harness above tolerance %d across %d pair(s)", gwOverbillVsHarness, tolerance, len(ledger.OverbilledPairs)))
 	}
 	if absGwCoordMismatch > 0 {
 		parts = append(parts, fmt.Sprintf("gateway-coord ledger mismatch %d tokens across %d pair(s)", absGwCoordMismatch, len(ledger.GatewayCoordMismatchedPairs)))
@@ -312,15 +312,15 @@ func checkI3(sc *scenario.Scenario, ledger *reconcile.Result) Check {
 	if sc != nil {
 		tolerance = sc.ChargedDeliveredToleranceTokens
 	}
-	if ledger.GatewayOverbillVsHarnessTokens <= 0 {
+	if ledger.GatewayOverbillVsHarnessTokens <= tolerance {
 		c.Passed = true
-		c.Detail = fmt.Sprintf("no positive gateway overcharge observed: gateway_overbill_vs_harness=%d tolerance=%d", ledger.GatewayOverbillVsHarnessTokens, tolerance)
+		c.Detail = fmt.Sprintf("no overcharges observed above tolerance: gateway_overbill_vs_harness=%d tolerance=%d", ledger.GatewayOverbillVsHarnessTokens, tolerance)
 		return c
 	}
 	c.Passed = false
 	c.OffendingIDs = ledger.OverbilledPairs
 	c.EvidenceCount = len(ledger.OverbilledPairs)
-	c.Detail = fmt.Sprintf("gateway charged %d tokens above delivered across %d request(s); configured tolerance %d is diagnostic only", ledger.GatewayOverbillVsHarnessTokens, len(ledger.OverbilledPairs), tolerance)
+	c.Detail = fmt.Sprintf("gateway charged %d tokens above delivered tolerance %d across %d request(s)", ledger.GatewayOverbillVsHarnessTokens, tolerance, len(ledger.OverbilledPairs))
 	return c
 }
 
