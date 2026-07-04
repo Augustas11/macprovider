@@ -11,6 +11,8 @@ struct ProviderPaths {
     let cliLogFile: URL          // ~/Library/Logs/malibu/malibu-cli.log
     let appSupport: URL          // ~/Library/Application Support/Malibu
     let appMarkerFile: URL       // ~/Library/Application Support/Malibu/.installed-by-app
+    let onboardingStateFile: URL // ~/Library/Application Support/Malibu/onboarding.json
+    let downloadsDirectory: URL  // ~/Library/Application Support/Malibu/Downloads
 
     static let current: ProviderPaths = {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -21,13 +23,16 @@ struct ProviderPaths {
             controlSocket: appSupport.appendingPathComponent("agent.sock"),
             cliLogFile: home.appendingPathComponent("Library/Logs/malibu/malibu-cli.log"),
             appSupport: appSupport,
-            appMarkerFile: appSupport.appendingPathComponent(".installed-by-app")
+            appMarkerFile: appSupport.appendingPathComponent(".installed-by-app"),
+            onboardingStateFile: appSupport.appendingPathComponent("onboarding.json"),
+            downloadsDirectory: appSupport.appendingPathComponent("Downloads", isDirectory: true)
         )
     }()
 
     func ensureDirectories() throws {
         let fm = FileManager.default
         try fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        try fm.createDirectory(at: downloadsDirectory, withIntermediateDirectories: true)
         try fm.createDirectory(at: configFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try fm.createDirectory(at: cliLogFile.deletingLastPathComponent(), withIntermediateDirectories: true)
     }

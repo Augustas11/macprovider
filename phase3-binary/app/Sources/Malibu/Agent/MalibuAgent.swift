@@ -28,6 +28,7 @@ final class MalibuAgent: ObservableObject {
     private var eventStreamTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var reconnect = ReconnectPolicy()
+    private let earningsClient = EarningsClient()
     // AUDIT R2 CODE H3 fix: once shutdown begins, refuse any subsequent start()
     // — including a reconnect Task that already slept past its cancellation
     // check but hadn't yet re-entered the MainActor.
@@ -45,7 +46,7 @@ final class MalibuAgent: ObservableObject {
         // deep-link callback first.
         guard await ProviderConfig.isConfigured else {
             snapshot.state = .error
-            snapshot.lastError = "Not linked yet. Open Set up… and link your node."
+            snapshot.lastError = "Not set up yet. Click Launch Provider to activate."
             return
         }
         // Re-check after the await, since we suspended.
@@ -165,7 +166,7 @@ final class MalibuAgent: ObservableObject {
         }
         guard !isShuttingDown else { await client.close(); return }
         self.control = client
-        snapshot.state = .serving
+        snapshot.state = .starting
 
         eventStreamTask = Task { [weak self] in
             guard let client = await self?.control else { return }
@@ -179,11 +180,13 @@ final class MalibuAgent: ObservableObject {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 try? await self?.control?.send(.metricsRequest)
                 try? await self?.control?.send(.statusRequest)
+                await self?.refreshEarnings()
             }
         }
 
         try? await control?.send(.statusRequest)
         try? await control?.send(.metricsRequest)
+        await refreshEarnings()
     }
 
     private func consume(_ frame: ControlFrame) {
@@ -224,8 +227,88 @@ final class MalibuAgent: ObservableObject {
             } else {
                 snapshot.lastError = reason ?? "Resume was refused"
             }
+        case let .identitySignatureRequest(authAttemptID, providerID, binaryVersion, ecdhKey, transcriptSHA256):
+            Task { [weak self] in
+                await self?.handleIdentitySignatureRequest(
+                    authAttemptID: authAttemptID,
+                    providerID: providerID,
+                    binaryVersion: binaryVersion,
+                    providerECDHPublicKey: ecdhKey,
+                    transcriptSHA256: transcriptSHA256
+                )
+            }
         default:
             break
+        }
+    }
+
+    private func refreshEarnings() async {
+        guard let providerID = ProviderConfig.readProviderID(),
+              let token = await KeychainStore.readProviderToken(providerID: providerID) else {
+            return
+        }
+        do {
+            let earnings = try await earningsClient.fetch(providerID: providerID, bearerToken: token)
+            snapshot.walletBound = earnings.walletBound
+            snapshot.trustTier = earnings.trustTier
+            snapshot.unpaidLedgerBacklogUSDC = earnings.unpaidLedgerBacklogUSDC
+            snapshot.unpaidLedgerBacklogMALIBU = earnings.unpaidLedgerBacklogMALIBU
+        } catch {
+            // Earnings is not part of the daemon liveness path. Keep existing
+            // metrics visible and retry on the next poll without logging bearer
+            // material or the request payload.
+        }
+    }
+
+    private func handleIdentitySignatureRequest(
+        authAttemptID: String,
+        providerID: String,
+        binaryVersion: Int,
+        providerECDHPublicKey: String,
+        transcriptSHA256: String
+    ) async {
+        guard ProviderConfig.readProviderID() == providerID else {
+            try? await control?.send(.identitySignatureResponse(
+                accepted: false,
+                identitySignature: nil,
+                transcriptSHA256: nil,
+                reason: "provider_id_mismatch"
+            ))
+            return
+        }
+
+        do {
+            let key = try await ProviderIdentity.loadExisting()
+            guard ProviderIdentity.providerID(for: key) == providerID else {
+                try? await control?.send(.identitySignatureResponse(
+                    accepted: false,
+                    identitySignature: nil,
+                    transcriptSHA256: nil,
+                    reason: "provider_identity_mismatch"
+                ))
+                return
+            }
+            let payload = try RegisterClient.identitySignaturePayload(
+                authAttemptID: authAttemptID,
+                providerID: providerID,
+                binaryVersion: binaryVersion,
+                providerECDHPublicKey: providerECDHPublicKey,
+                transcriptSHA256: transcriptSHA256
+            )
+            let signature = try ProviderIdentity.sign(payload, using: key).base64EncodedString()
+            try await control?.send(.identitySignatureResponse(
+                accepted: true,
+                identitySignature: signature,
+                transcriptSHA256: transcriptSHA256,
+                reason: nil
+            ))
+        } catch {
+            try? await control?.send(.identitySignatureResponse(
+                accepted: false,
+                identitySignature: nil,
+                transcriptSHA256: nil,
+                reason: "identity_signature_failed"
+            ))
         }
     }
 

@@ -11,10 +11,28 @@ import Foundation
 
 struct AgentSnapshot: Equatable {
     enum State: String { case idle, starting, serving, paused, reconnecting, error }
+    enum TrustTier: String, Codable {
+        case provisional
+        case trusted
+
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self).lowercased()
+            self = raw == "trusted" ? .trusted : .provisional
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
+    }
     var state: State
     var currentModelID: String?
     var earningsUsdcToday: Double?
     var malibuAccruedToday: Double?
+    var unpaidLedgerBacklogUSDC: Double?
+    var unpaidLedgerBacklogMALIBU: Double?
+    var walletBound: Bool
+    var trustTier: TrustTier
     var uptimeSec: Int?
     var lastError: String?
 
@@ -28,6 +46,10 @@ struct AgentSnapshot: Equatable {
         currentModelID: nil,
         earningsUsdcToday: nil,
         malibuAccruedToday: nil,
+        unpaidLedgerBacklogUSDC: nil,
+        unpaidLedgerBacklogMALIBU: nil,
+        walletBound: false,
+        trustTier: .provisional,
         uptimeSec: nil,
         lastError: nil,
         pauseAcknowledged: false
@@ -64,11 +86,47 @@ enum AgentSnapshotPresenter {
         case (nil, nil):
             return "Today: — USDC · — MALIBU (metrics not implemented)"
         case let (usdc?, malibu?):
-            return String(format: "Today: $%.2f USDC · %.2f MALIBU", usdc, malibu)
+            return String(format: "Today: $%.2f USDC · %@", usdc, malibuDisplay(malibu, tier: s.trustTier))
         case let (usdc?, nil):
             return String(format: "Today: $%.2f USDC · — MALIBU", usdc)
         case let (nil, malibu?):
-            return String(format: "Today: — USDC · %.2f MALIBU", malibu)
+            return "Today: — USDC · \(malibuDisplay(malibu, tier: s.trustTier))"
+        }
+    }
+
+    static func backlogLine(_ s: AgentSnapshot) -> String? {
+        guard s.walletBound == false,
+              let usdc = s.unpaidLedgerBacklogUSDC,
+              let malibu = s.unpaidLedgerBacklogMALIBU,
+              usdc + malibu > 0 else {
+            return nil
+        }
+        return String(format: "Unclaimed: $%.2f USDC · %@", usdc, malibuDisplay(malibu, tier: s.trustTier))
+    }
+
+    static func unclaimedBadge(_ s: AgentSnapshot, dismissedThreshold: Double?) -> String? {
+        guard let total = unclaimedBacklogTotal(s),
+              let threshold = UnclaimedBadgePolicy.visibleThreshold(
+                totalBacklog: total,
+                dismissedThreshold: dismissedThreshold
+              ) else {
+            return nil
+        }
+        return threshold >= 100 ? "$100+" : String(format: "$%.0f+", threshold)
+    }
+
+    static func unclaimedBacklogTotal(_ s: AgentSnapshot) -> Double? {
+        guard s.walletBound == false else { return nil }
+        let total = (s.unpaidLedgerBacklogUSDC ?? 0) + (s.unpaidLedgerBacklogMALIBU ?? 0)
+        return total > 0 ? total : nil
+    }
+
+    private static func malibuDisplay(_ amount: Double, tier: AgentSnapshot.TrustTier) -> String {
+        switch tier {
+        case .trusted:
+            return String(format: "%.2f MALIBU", amount)
+        case .provisional:
+            return String(format: "[locked] %.2f MALIBU (unlocks at Trusted)", amount)
         }
     }
 }

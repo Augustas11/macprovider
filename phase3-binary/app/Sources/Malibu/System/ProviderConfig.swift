@@ -24,8 +24,7 @@ enum ProviderConfig {
         }
     }
 
-    static func readProviderID() -> String? {
-        let paths = ProviderPaths.current
+    static func readProviderID(paths: ProviderPaths = .current) -> String? {
         guard let contents = try? String(contentsOf: paths.configFile) else { return nil }
         // AUDIT R1 CODE M1 fix, corrected in E2E:
         // Swift's Character treats `\r\n` as a single grapheme cluster, so a
@@ -52,25 +51,69 @@ enum ProviderConfig {
     // explicit user decision (import into app track vs cancel).
     enum SaveError: Error, LocalizedError {
         case existingConfigNotOwnedByApp
+        case missingProviderID
+        case missingProviderToken
+        case importBackupProviderMismatch
+        case importRollbackFailed(importError: Error, rollbackError: Error)
+        case appMarkerCreateFailed
+        case savedIdentityNotConfigured
         var errorDescription: String? {
             switch self {
             case .existingConfigNotOwnedByApp:
                 return "A macprovider config already exists on this Mac and was not installed by the app. Uninstall the CLI track or import its provider_id manually before continuing."
+            case .missingProviderID:
+                return "The existing macprovider config does not contain a provider_id."
+            case .missingProviderToken:
+                return "The existing macprovider config does not contain a provider_token."
+            case .importBackupProviderMismatch:
+                return "The import backup does not match the current provider_id."
+            case let .importRollbackFailed(importError, rollbackError):
+                return "Import failed (\(importError.localizedDescription)) and the original config could not be restored (\(rollbackError.localizedDescription))."
+            case .appMarkerCreateFailed:
+                return "The app ownership marker could not be written."
+            case .savedIdentityNotConfigured:
+                return "The provider identity was not fully persisted."
             }
         }
     }
 
     static func saveProviderIdentity(providerID: String, token: String) async throws {
-        let paths = ProviderPaths.current
+        try await saveProviderIdentity(providerID: providerID, token: token, paths: .current)
+    }
+
+    static func saveProviderIdentity(providerID: String, token: String, paths: ProviderPaths) async throws {
+        try await saveProviderIdentity(
+            providerID: providerID,
+            token: token,
+            paths: paths,
+            readToken: { await KeychainStore.readProviderToken(providerID: $0) },
+            saveToken: { try await KeychainStore.saveProviderToken(providerID: $0, token: $1) },
+            deleteToken: { try await KeychainStore.deleteProviderToken(providerID: $0) }
+        )
+    }
+
+    static func saveProviderIdentity(
+        providerID: String,
+        token: String,
+        paths: ProviderPaths,
+        readToken: @escaping (String) async -> String?,
+        saveToken: @escaping (String, String) async throws -> Void,
+        deleteToken: @escaping (String) async throws -> Void,
+        createAppMarker: (() throws -> Void)? = nil,
+        verifyConfigured: (() async -> Bool)? = nil
+    ) async throws {
         try paths.ensureDirectories()
+        let fm = FileManager.default
 
         // AUDIT R1 ARCHITECT A2: fail-fast on config collision instead of
         // silently rewriting a file the CLI track owns.
-        let configExists = FileManager.default.fileExists(atPath: paths.configFile.path)
-        let markerExists = FileManager.default.fileExists(atPath: paths.appMarkerFile.path)
+        let configExists = fm.fileExists(atPath: paths.configFile.path)
+        let markerExists = fm.fileExists(atPath: paths.appMarkerFile.path)
         if configExists && !markerExists {
             throw SaveError.existingConfigNotOwnedByApp
         }
+        let originalData = configExists ? try Data(contentsOf: paths.configFile) : nil
+        let originalToken = await readToken(providerID)
 
         // Merge into any existing YAML rather than clobbering — a developer who
         // ran install.sh first might have coordinator overrides here.
@@ -90,12 +133,132 @@ enum ProviderConfig {
         // Followup: teach the CLI to read the token from Keychain directly so
         // the environment-variable path can be removed.
         let joined = lines.joined(separator: "\n") + "\n"
-        try joined.data(using: .utf8)?.write(to: paths.configFile, options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
+        do {
+            try await saveToken(providerID, token)
+            try Data(joined.utf8).write(to: paths.configFile, options: [.atomic])
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
+            if let createAppMarker {
+                try createAppMarker()
+            } else {
+                try writeAppMarker(paths: paths, fileManager: fm)
+            }
+            let configured: Bool
+            if let verifyConfigured {
+                configured = await verifyConfigured()
+            } else {
+                configured = await isConfigured(paths: paths)
+            }
+            guard configured else { throw SaveError.savedIdentityNotConfigured }
+        } catch {
+            if let originalToken {
+                try? await saveToken(providerID, originalToken)
+            } else {
+                try? await deleteToken(providerID)
+            }
+            if let originalData {
+                try? originalData.write(to: paths.configFile, options: [.atomic])
+            } else {
+                try? fm.removeItem(at: paths.configFile)
+            }
+            if !markerExists {
+                try? fm.removeItem(at: paths.appMarkerFile)
+            }
+            throw error
+        }
+    }
 
-        try await KeychainStore.saveProviderToken(providerID: providerID, token: token)
+    static func importExistingCLIConfig() async throws {
+        try await importExistingCLIConfig(paths: .current)
+    }
 
-        FileManager.default.createFile(atPath: paths.appMarkerFile.path, contents: Data())
+    static func importExistingCLIConfig(paths: ProviderPaths) async throws {
+        try paths.ensureDirectories()
+        let fm = FileManager.default
+        let backup = paths.configFile.appendingPathExtension("import-backup")
+        let backupExisted = fm.fileExists(atPath: backup.path)
+        let originalData = try Data(contentsOf: paths.configFile)
+        let current = String(decoding: originalData, as: UTF8.self)
+        let backupData = backupExisted ? try Data(contentsOf: backup) : nil
+        let backupContents = backupData.map { String(decoding: $0, as: UTF8.self) }
+        let secretSource = backupContents ?? current
+
+        let currentProviderID = parseTopLevelValue(named: "provider_id", from: current)
+        let backupProviderID = backupContents.flatMap { parseTopLevelValue(named: "provider_id", from: $0) }
+        if let currentProviderID, let backupProviderID, currentProviderID != backupProviderID {
+            throw SaveError.importBackupProviderMismatch
+        }
+        guard let providerID = currentProviderID ?? backupProviderID else {
+            throw SaveError.missingProviderID
+        }
+        guard let token = parseTopLevelValue(named: "provider_token", from: secretSource) else {
+            throw SaveError.missingProviderToken
+        }
+
+        let rewritten = removingTopLevelValue(named: "provider_token", from: current)
+        do {
+            try await KeychainStore.saveProviderToken(providerID: providerID, token: token)
+            if !backupExisted {
+                try? fm.removeItem(at: backup)
+                try fm.copyItem(at: paths.configFile, to: backup)
+            }
+            try rewritten.data(using: .utf8)?.write(to: paths.configFile, options: [.atomic])
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
+            try writeAppMarker(paths: paths, fileManager: fm)
+            guard await isConfigured(paths: paths) else { throw SaveError.existingConfigNotOwnedByApp }
+            try? fm.removeItem(at: backup)
+        } catch {
+            try? await KeychainStore.deleteProviderToken(providerID: providerID)
+            try? fm.removeItem(at: paths.appMarkerFile)
+            do {
+                try originalData.write(to: paths.configFile, options: [.atomic])
+                if !backupExisted {
+                    try? fm.removeItem(at: backup)
+                }
+            } catch let rollbackError {
+                throw SaveError.importRollbackFailed(importError: error, rollbackError: rollbackError)
+            }
+            throw error
+        }
+    }
+
+    static func repairMarkerlessAppOwnedConfig(providerID: String, paths: ProviderPaths = .current) async throws {
+        try paths.ensureDirectories()
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: paths.configFile.path) else {
+            throw SaveError.missingProviderID
+        }
+        if fm.fileExists(atPath: paths.appMarkerFile.path) {
+            guard await isConfigured(paths: paths) else { throw SaveError.savedIdentityNotConfigured }
+            return
+        }
+        guard readProviderID(paths: paths) == providerID else {
+            throw SaveError.existingConfigNotOwnedByApp
+        }
+        guard await KeychainStore.readProviderToken(providerID: providerID) != nil else {
+            throw SaveError.missingProviderToken
+        }
+        try writeAppMarker(paths: paths, fileManager: fm)
+        guard await isConfigured(paths: paths) else { throw SaveError.savedIdentityNotConfigured }
+    }
+
+    static func startFreshMovingCLIConfigAside(now: Date = Date()) throws -> URL? {
+        try startFreshMovingCLIConfigAside(now: now, paths: .current)
+    }
+
+    static func startFreshMovingCLIConfigAside(now: Date = Date(), paths: ProviderPaths) throws -> URL? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: paths.configFile.path) else { return nil }
+        try paths.ensureDirectories()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        let suffix = formatter.string(from: now)
+            .replacingOccurrences(of: ":", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        let backup = paths.configFile.deletingLastPathComponent()
+            .appendingPathComponent("config.yaml.cli-backup-\(suffix)")
+        try fm.moveItem(at: paths.configFile, to: backup)
+        return backup
     }
 
     // AUDIT R1 CODE M2 / SECURITY S3 / ARCHITECT A6 fix: uninstall must complete
@@ -135,5 +298,48 @@ enum ProviderConfig {
         do { try await KeychainStore.deleteAllAppItems() }
         catch { residue.keychainDeleteFailed = error }
         return residue
+    }
+
+    static func isConfigured(paths: ProviderPaths) async -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: paths.configFile.path),
+              fm.fileExists(atPath: paths.appMarkerFile.path),
+              let providerID = readProviderID(paths: paths) else {
+            return false
+        }
+        return await KeychainStore.readProviderToken(providerID: providerID) != nil
+    }
+
+    private static func writeAppMarker(paths: ProviderPaths, fileManager fm: FileManager) throws {
+        if fm.fileExists(atPath: paths.appMarkerFile.path) { return }
+        guard fm.createFile(atPath: paths.appMarkerFile.path, contents: Data()) else {
+            throw SaveError.appMarkerCreateFailed
+        }
+    }
+
+    private static func parseTopLevelValue(named key: String, from contents: String) -> String? {
+        normalizedLines(contents).compactMap { line -> String? in
+            guard line.hasPrefix("\(key):") else { return nil }
+            let value = line
+                .dropFirst("\(key):".count)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            return value.isEmpty ? nil : value
+        }.first
+    }
+
+    private static func removingTopLevelValue(named key: String, from contents: String) -> String {
+        normalizedLines(contents)
+            .filter { !$0.hasPrefix("\(key):") }
+            .joined(separator: "\n") + "\n"
+    }
+
+    private static func normalizedLines(_ contents: String) -> [String] {
+        contents
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 }

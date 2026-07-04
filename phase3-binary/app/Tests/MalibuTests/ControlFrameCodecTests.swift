@@ -70,4 +70,31 @@ final class ControlFrameCodecTests: XCTestCase {
             XCTFail("expected statusResponse")
         }
     }
+
+    func testIdentitySignatureRequestRoundTrip() throws {
+        let frame = ControlFrame.identitySignatureRequest(
+            authAttemptID: "auth-1",
+            providerID: "p_abc",
+            binaryVersion: 2,
+            providerECDHPublicKey: "ecdh",
+            transcriptSHA256: "hash"
+        )
+        XCTAssertEqual(try roundTrip(frame), frame)
+    }
+
+    func testIdentitySignatureResponseOmitsSignatureOnRefusal() throws {
+        let frame = ControlFrame.identitySignatureResponse(
+            accepted: false,
+            identitySignature: nil,
+            transcriptSHA256: nil,
+            reason: "provider_id_mismatch"
+        )
+        let data = try ControlCodec.encode(frame)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(obj?["type"] as? String, "identity_signature_response")
+        XCTAssertEqual(obj?["accepted"] as? Bool, false)
+        XCTAssertEqual(obj?["reason"] as? String, "provider_id_mismatch")
+        XCTAssertNil(obj?["identity_signature"])
+        XCTAssertEqual(try ControlCodec.decode(data), frame)
+    }
 }
