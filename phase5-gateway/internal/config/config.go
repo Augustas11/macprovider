@@ -26,6 +26,7 @@ type Config struct {
 	Settlement  SettlementConfig  `yaml:"settlement"`
 	CORS        CORSConfig        `yaml:"cors"`
 	Routing     RoutingConfig     `yaml:"routing"`
+	Retry503    Retry503Config    `yaml:"retry_503"`
 	Explorer    ExplorerConfig    `yaml:"explorer"`
 }
 
@@ -143,6 +144,13 @@ type RoutingConfig struct {
 	StickyTTLS    int  `yaml:"sticky_ttl_s"`
 }
 
+type Retry503Config struct {
+	Enabled       bool `yaml:"enabled"`
+	MaxAttempts   int  `yaml:"max_attempts"`
+	BackoffBaseMs int  `yaml:"backoff_base_ms"`
+	BackoffMaxMs  int  `yaml:"backoff_max_ms"`
+}
+
 type ExplorerConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
@@ -209,6 +217,7 @@ func Default() Config {
 		},
 		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.streamvc.live", "https://streamvc.live"}},
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
+		Retry503: Retry503Config{Enabled: true, MaxAttempts: 3, BackoffBaseMs: 100, BackoffMaxMs: 500},
 		Explorer: ExplorerConfig{Enabled: false},
 	}
 }
@@ -411,6 +420,18 @@ func (c Config) Validate() error {
 	}
 	if c.Routing.StickyTTLS <= 0 {
 		return fmt.Errorf("routing.sticky_ttl_s must be > 0")
+	}
+	if c.Retry503.MaxAttempts < 1 || c.Retry503.MaxAttempts > 10 {
+		return fmt.Errorf("retry_503.max_attempts must be between 1 and 10")
+	}
+	if c.Retry503.BackoffBaseMs < 10 || c.Retry503.BackoffBaseMs > 5000 {
+		return fmt.Errorf("retry_503.backoff_base_ms must be between 10 and 5000")
+	}
+	if c.Retry503.BackoffMaxMs < 10 || c.Retry503.BackoffMaxMs > 10000 {
+		return fmt.Errorf("retry_503.backoff_max_ms must be between 10 and 10000")
+	}
+	if c.Retry503.BackoffMaxMs < c.Retry503.BackoffBaseMs {
+		return fmt.Errorf("retry_503.backoff_max_ms must be >= retry_503.backoff_base_ms")
 	}
 	for i, origin := range c.CORS.AllowedOrigins {
 		if origin == "*" || origin == "null" {
