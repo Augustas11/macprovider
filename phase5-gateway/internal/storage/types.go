@@ -77,6 +77,14 @@ type DemoSessionEvent struct {
 	CreatedAt time.Time
 }
 
+type PublicIssuanceReservation struct {
+	Surface     string
+	ClientIP    string
+	WindowStart time.Time
+	Limit       int
+	CreatedAt   time.Time
+}
+
 type DemoUsageEvent struct {
 	RequestID     string
 	ClientIP      string

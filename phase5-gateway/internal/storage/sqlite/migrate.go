@@ -143,7 +143,14 @@ CREATE TABLE IF NOT EXISTS oauth_states (
 	action TEXT NOT NULL DEFAULT ''
 );
 
-CREATE INDEX IF NOT EXISTS idx_oauth_states_session ON oauth_states(session_id, expires_at);
+CREATE TABLE IF NOT EXISTS public_issuance_events (
+	event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+	surface TEXT NOT NULL,
+	client_ip TEXT NOT NULL,
+	created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_public_issuance_surface_ip_created ON public_issuance_events(surface, client_ip, created_at);
 
 CREATE TABLE IF NOT EXISTS api_keys (
 	key_id TEXT PRIMARY KEY,

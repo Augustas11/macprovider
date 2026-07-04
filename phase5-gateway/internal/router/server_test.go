@@ -86,6 +86,44 @@ func TestOAuthStateCSRF(t *testing.T) {
 	}
 }
 
+func TestGitHubOAuthDisabledRoutesAreUnmounted(t *testing.T) {
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Auth.GitHubOAuthEnabled = false
+		cfg.Auth.OAuth.GitHub.ClientID = ""
+		cfg.Auth.OAuth.GitHub.ClientSecret = ""
+	})
+
+	for _, path := range []string{"/auth/github/start", "/auth/github/callback"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		resp := httptest.NewRecorder()
+		h.ServeHTTP(resp, req)
+		if resp.Code != http.StatusNotFound {
+			t.Fatalf("%s status=%d want 404 body=%s", path, resp.Code, resp.Body.String())
+		}
+	}
+}
+
+func TestGitHubOAuthHandlersFailClosedWhenDisabled(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.GitHubOAuthEnabled = false
+	s := &Server{cfg: cfg}
+
+	for name, handler := range map[string]http.HandlerFunc{
+		"start":    s.handleGitHubStart,
+		"callback": s.handleGitHubCallback,
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/auth/github/"+name, nil)
+		resp := httptest.NewRecorder()
+		handler(resp, req)
+		if resp.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s status=%d want 503 body=%s", name, resp.Code, resp.Body.String())
+		}
+		if !strings.Contains(resp.Body.String(), "oauth_disabled") {
+			t.Fatalf("%s body=%q want oauth_disabled", name, resp.Body.String())
+		}
+	}
+}
+
 func TestOAuthScopeMinimization(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{ProviderUserID: "44", Scopes: []string{"read:user"}}})
 	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
@@ -1299,6 +1337,77 @@ func TestFeedbackSummaryAggregation(t *testing.T) {
 	}
 	if countRows(t, dbPath, "feedback_events") != 5 {
 		t.Fatalf("feedback append-only event count mismatch")
+	}
+}
+
+func TestFeedbackRequiresSourceAndBoundsWrites(t *testing.T) {
+	h, store, _, cfg := newTestHarness(t, fakeOAuth{})
+	fullKey := createAccountAndKey(t, store, cfg, "acct_feedback_bounds")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/feedback", strings.NewReader(`{"rating":4,"comment":"ok","scope":"account"}`))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("missing source status=%d want 400 body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "invalid_feedback_source")
+
+	tooLargeBody := `{"rating":4,"comment":"` + strings.Repeat("x", int(cfg.Limits.MaxFeedbackBodyBytes)) + `","scope":"account"}`
+	resp = postFeedback(t, h, fullKey, "", tooLargeBody)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("oversize body status=%d want 400 body=%s", resp.Code, resp.Body.String())
+	}
+
+	tooLongComment := `{"rating":4,"comment":"` + strings.Repeat("x", cfg.Limits.MaxFeedbackCommentBytes+1) + `","scope":"account"}`
+	resp = postFeedback(t, h, fullKey, "", tooLongComment)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("long comment status=%d want 400 body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "comment_too_long")
+}
+
+func TestFeedbackRateLimitPerIP(t *testing.T) {
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Limits.FeedbackRequestsPerIPPerHour = 10
+	})
+	fullKey := createAccountAndKey(t, store, cfg, "acct_feedback_rate")
+	for i := 0; i < 10; i++ {
+		submitFeedback(t, h, fullKey, "", fmt.Sprintf(`{"rating":4,"comment":"ok %d","scope":"account"}`, i))
+	}
+	resp := postFeedback(t, h, fullKey, "", `{"rating":4,"comment":"blocked","scope":"account"}`)
+	if resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("11th feedback status=%d want 429 body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "feedback_rate_limited")
+}
+
+func TestFeedbackSummaryLimitsRawScan(t *testing.T) {
+	h, store, _, cfg := newTestHarness(t, fakeOAuth{})
+	for i := 0; i < 1100; i++ {
+		if err := store.InsertFeedbackEvent(context.Background(), storage.FeedbackEvent{
+			EventID: fmt.Sprintf("fb_limit_%04d", i), RequestID: "", AccountID: "acct_summary_limit",
+			Scope: "account", Rating: 4, Comment: "", CreatedAt: fixedNow().Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatalf("InsertFeedbackEvent %d: %v", i, err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/feedback-summary", nil)
+	req.Header.Set("Authorization", "Bearer "+cfg.Coordinator.OperatorKey)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("summary status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		RatingCount int `json:"rating_count"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("summary json: %v body=%s", err, resp.Body.String())
+	}
+	if body.RatingCount != 1000 {
+		t.Fatalf("rating_count=%d want 1000 limited raw scan", body.RatingCount)
 	}
 }
 
@@ -5414,6 +5523,7 @@ func postFeedback(t *testing.T, h http.Handler, bearer, demoToken, body string) 
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/feedback", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Feedback-Source", "test")
 	req.Header.Set("X-Real-IP", "1.2.3.4")
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
@@ -6097,14 +6207,7 @@ func TestStickyDeleteIsAccountScopedRegardlessOfQueryParam(t *testing.T) {
 	}
 }
 
-// TestInternalHeaderStripAndAuditEventOnUnauthenticatedRequest pins that
-// the strip-before-auth middleware fires AND audit-logs a buyer-supplied
-// X-MacProvider-Internal-Conv even when the request is unauthenticated
-// (no bearer at all). The strip MUST run before auth so a 401-returning
-// path is still audited; otherwise an attacker can probe the gateway with
-// throwaway tokens or no tokens and the injection attempt goes unlogged.
-// Regression-locks the code-review MAJOR (strip-on-unauthenticated path).
-func TestInternalHeaderStripAndAuditEventOnUnauthenticatedRequest(t *testing.T) {
+func TestInternalHeaderStripDoesNotAuditUnauthenticatedRequest(t *testing.T) {
 	h, _, dbPath, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
 		cfg.Coordinator.OperatorURL = "http://operator.test"
@@ -6122,9 +6225,29 @@ func TestInternalHeaderStripAndAuditEventOnUnauthenticatedRequest(t *testing.T) 
 	if resp.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for missing bearer, got %d body=%s", resp.Code, resp.Body.String())
 	}
-	// Strip-before-auth must STILL have fired and audited; otherwise an
-	// attacker can probe injection without ever appearing in audit logs.
+	if got := countAuditEvents(t, dbPath, "internal_header_injection_stripped"); got != 0 {
+		t.Fatalf("audit event count = %d, want 0 for unauthenticated probe", got)
+	}
+}
+
+func TestInternalHeaderStripAuditsAuthenticatedRequest(t *testing.T) {
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Routing.StickyEnabled = true
+	}, WithHTTPClient(modelsOKClient()))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_internal_header_auth")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("X-MacProvider-Internal-Conv", "conv:attacker")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 for authenticated models request, got %d body=%s", resp.Code, resp.Body.String())
+	}
 	if got := countAuditEvents(t, dbPath, "internal_header_injection_stripped"); got != 1 {
-		t.Fatalf("audit event count = %d, want 1 (strip MUST run before auth and emit audit on 401 path)", got)
+		t.Fatalf("audit event count = %d, want 1 for authenticated probe", got)
 	}
 }

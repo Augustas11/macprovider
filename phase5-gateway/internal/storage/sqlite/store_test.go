@@ -304,6 +304,103 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	assertSQLFails(t, store, `DELETE FROM demo_session_events WHERE event_id = 'demo_1'`)
 }
 
+func TestOAuthStateCapAndPrune(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	for i := 0; i < 20; i++ {
+		hash := keyHash(fmt.Sprintf("state-%02d", i))
+		if err := store.StoreOAuthStateWithCap(ctx, storage.OAuthState{
+			StateHash: hash[:], SessionID: fmt.Sprintf("session_%02d", i), RedirectURI: "https://api.streamvc.live/auth/github/callback",
+			ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+		}, 20, now); err != nil {
+			t.Fatalf("StoreOAuthStateWithCap %d: %v", i, err)
+		}
+	}
+	overflow := keyHash("state-overflow")
+	if err := store.StoreOAuthStateWithCap(ctx, storage.OAuthState{
+		StateHash: overflow[:], SessionID: "session_overflow", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}, 20, now); !errors.Is(err, storage.ErrOAuthStateCap) {
+		t.Fatalf("overflow err=%v want ErrOAuthStateCap", err)
+	}
+	deleted, err := store.PruneExpiredOAuthState(ctx, now.Add(11*time.Minute))
+	if err != nil {
+		t.Fatalf("PruneExpiredOAuthState: %v", err)
+	}
+	if deleted != 20 {
+		t.Fatalf("deleted=%d want 20", deleted)
+	}
+}
+
+func TestReservePublicIssuanceConcurrentCeiling(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	const limit = 1
+	const attempts = 16
+	var admitted atomic.Int64
+	var limited atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := store.ReservePublicIssuance(ctx, storage.PublicIssuanceReservation{
+				Surface: "signup", ClientIP: "1.2.3.4", WindowStart: now.Add(-24 * time.Hour), Limit: limit, CreatedAt: now,
+			})
+			if err == nil {
+				admitted.Add(1)
+				return
+			}
+			if errors.Is(err, storage.ErrRateLimit) {
+				limited.Add(1)
+				return
+			}
+			t.Errorf("ReservePublicIssuance unexpected err: %v", err)
+		}()
+	}
+	wg.Wait()
+	if admitted.Load() != limit {
+		t.Fatalf("admitted=%d want %d", admitted.Load(), limit)
+	}
+	if limited.Load() != attempts-limit {
+		t.Fatalf("limited=%d want %d", limited.Load(), attempts-limit)
+	}
+}
+
+func TestReservePublicIssuanceCountsLegacyWindowWithoutDoubleCountingNewEvents(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	if err := store.RecordSignupEvent(ctx, storage.SignupEvent{
+		EventID: "signup_legacy_1", AccountID: "acct_legacy_1", ClientIP: "1.2.3.4", Provider: "github", CreatedAt: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("RecordSignupEvent legacy 1: %v", err)
+	}
+	if err := store.RecordSignupEvent(ctx, storage.SignupEvent{
+		EventID: "signup_legacy_2", AccountID: "acct_legacy_2", ClientIP: "1.2.3.4", Provider: "github", CreatedAt: now.Add(-30 * time.Minute),
+	}); err != nil {
+		t.Fatalf("RecordSignupEvent legacy 2: %v", err)
+	}
+	if err := store.ReservePublicIssuance(ctx, storage.PublicIssuanceReservation{
+		Surface: "signup", ClientIP: "1.2.3.4", WindowStart: now.Add(-24 * time.Hour), Limit: 3, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("ReservePublicIssuance with legacy room: %v", err)
+	}
+	if err := store.RecordSignupEvent(ctx, storage.SignupEvent{
+		EventID: "signup_new_1", AccountID: "acct_new_1", ClientIP: "1.2.3.4", Provider: "github", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("RecordSignupEvent new: %v", err)
+	}
+	err := store.ReservePublicIssuance(ctx, storage.PublicIssuanceReservation{
+		Surface: "signup", ClientIP: "1.2.3.4", WindowStart: now.Add(-24 * time.Hour), Limit: 3, CreatedAt: now.Add(time.Minute),
+	})
+	if !errors.Is(err, storage.ErrRateLimit) {
+		t.Fatalf("second reservation err=%v want ErrRateLimit", err)
+	}
+}
+
 func TestQuotaReservationLedgerSemantics(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

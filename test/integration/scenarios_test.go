@@ -84,6 +84,20 @@ func TestHappyPathChatCompletion(t *testing.T) {
 	}
 }
 
+func TestGatewayGitHubOAuthDisabledRoutesReturn404(t *testing.T) {
+	s := newScenario(t, scenarioOpts{seedAccount: false})
+	for _, path := range []string{"/auth/github/start", "/auth/github/callback"} {
+		resp, err := http.Get(s.gatewayBaseURL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s status=%d want 404", path, resp.StatusCode)
+		}
+	}
+}
+
 // TestInternalBearerWrongTokenRejected pins the auth boundary directly
 // at the SERVICE-TO-SERVICE endpoint the gateway calls (/internal/routing
 // on the provider port, mounted by InternalHandler at buyer/server.go:388-393).

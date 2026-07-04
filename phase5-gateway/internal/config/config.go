@@ -77,6 +77,7 @@ type AuthConfig struct {
 
 type OAuthConfig struct {
 	CallbackAllowlist []string          `yaml:"callback_allowlist"`
+	StateMaxPerIP     int               `yaml:"state_max_per_ip"`
 	GitHub            GitHubOAuthConfig `yaml:"github"`
 }
 
@@ -104,10 +105,12 @@ type QuotasConfig struct {
 }
 
 type LimitsConfig struct {
-	MaxTokensPerRequest     int64 `yaml:"max_tokens_per_request"`
-	DemoMaxTokensPerRequest int64 `yaml:"demo_max_tokens_per_request"`
-	MaxFeedbackCommentBytes int   `yaml:"max_feedback_comment_bytes"`
-	RequestBodyBytes        int64 `yaml:"request_body_bytes"`
+	MaxTokensPerRequest          int64 `yaml:"max_tokens_per_request"`
+	DemoMaxTokensPerRequest      int64 `yaml:"demo_max_tokens_per_request"`
+	MaxFeedbackCommentBytes      int   `yaml:"max_feedback_comment_bytes"`
+	MaxFeedbackBodyBytes         int64 `yaml:"max_feedback_body_bytes"`
+	FeedbackRequestsPerIPPerHour int   `yaml:"feedback_requests_per_ip_per_hour"`
+	RequestBodyBytes             int64 `yaml:"request_body_bytes"`
 }
 
 type KillSwitchConfig struct {
@@ -169,7 +172,7 @@ func Default() Config {
 			KeyHash:               "hmac_sha256",
 			GitHubOAuthEnabled:    true,
 			EmailMagicLinkEnabled: false,
-			OAuth: OAuthConfig{CallbackAllowlist: []string{
+			OAuth: OAuthConfig{StateMaxPerIP: 20, CallbackAllowlist: []string{
 				"https://api.streamvc.live/auth/github/callback",
 			}, GitHub: GitHubOAuthConfig{
 				AuthorizeURL: "https://github.com/login/oauth/authorize",
@@ -200,10 +203,12 @@ func Default() Config {
 			ReservationMaxAgeHours:    24,
 		},
 		Limits: LimitsConfig{
-			MaxTokensPerRequest:     4096,
-			DemoMaxTokensPerRequest: 512,
-			MaxFeedbackCommentBytes: 2000,
-			RequestBodyBytes:        1048576,
+			MaxTokensPerRequest:          4096,
+			DemoMaxTokensPerRequest:      512,
+			MaxFeedbackCommentBytes:      2000,
+			MaxFeedbackBodyBytes:         16 * 1024,
+			FeedbackRequestsPerIPPerHour: 10,
+			RequestBodyBytes:             1048576,
 		},
 		Capacity: CapacityConfig{
 			MonthlyBudgetUSD: 500, ReadyProviderDegradedThreshold: 1, ProjectedCostTier1Percent: 80, TierCooldownSeconds: 3600,
@@ -369,6 +374,9 @@ func (c Config) Validate() error {
 			return err
 		}
 	}
+	if c.Auth.OAuth.StateMaxPerIP <= 0 {
+		return fmt.Errorf("auth.oauth.state_max_per_ip must be > 0")
+	}
 	if c.Quotas.AccountDailyTokens <= 0 || c.Quotas.DemoDailyTokensPerIP <= 0 {
 		return fmt.Errorf("quotas must be positive")
 	}
@@ -387,8 +395,11 @@ func (c Config) Validate() error {
 	if c.Limits.MaxTokensPerRequest <= 0 || c.Limits.DemoMaxTokensPerRequest <= 0 || c.Limits.RequestBodyBytes <= 0 {
 		return fmt.Errorf("limits must be positive")
 	}
-	if c.Limits.MaxFeedbackCommentBytes <= 0 {
-		return fmt.Errorf("limits.max_feedback_comment_bytes must be > 0")
+	if c.Limits.MaxFeedbackCommentBytes <= 0 || c.Limits.MaxFeedbackBodyBytes <= 0 || c.Limits.FeedbackRequestsPerIPPerHour <= 0 {
+		return fmt.Errorf("feedback limits must be positive")
+	}
+	if int64(c.Limits.MaxFeedbackCommentBytes) > c.Limits.MaxFeedbackBodyBytes {
+		return fmt.Errorf("limits.max_feedback_comment_bytes must be <= limits.max_feedback_body_bytes")
 	}
 	if c.Capacity.MonthlyBudgetUSD <= 0 || c.Capacity.ReadyProviderDegradedThreshold <= 0 || c.Capacity.ProjectedCostTier1Percent <= 0 || c.Capacity.TierCooldownSeconds <= 0 {
 		return fmt.Errorf("capacity thresholds must be positive")
