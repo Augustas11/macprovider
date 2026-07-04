@@ -370,6 +370,26 @@ func TestQuotaReservationLedgerSemantics(t *testing.T) {
 	}
 }
 
+func TestReserveQuotaDuplicateBeatsQuotaExceeded(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_duplicate_quota")
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_duplicate_quota", RequestID: "req_duplicate", WindowDate: "2026-05-29",
+		RequestedTokens: 100, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("ReserveQuota original: %v", err)
+	}
+
+	_, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_duplicate_quota", RequestID: "req_duplicate", WindowDate: "2026-05-29",
+		RequestedTokens: 1, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	})
+	if !errors.Is(err, storage.ErrReservationExists) {
+		t.Fatalf("ReserveQuota duplicate err=%v, want ErrReservationExists even when quota is exhausted", err)
+	}
+}
+
 func TestExpiredReservationsReclaimedAfter24h(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -448,15 +468,15 @@ func TestClampReservationExpiryBoundsActiveHold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReapExpiredReservations: %v", err)
 	}
-	if reaped != 1 {
-		t.Fatalf("reaped=%d want 1", reaped)
+	if reaped != 0 {
+		t.Fatalf("reaped=%d want 0 for settlement hold", reaped)
 	}
 	_, reserved, err := store.DailyUsage(ctx, "acct_clamp_expiry", "2026-05-29")
 	if err != nil {
 		t.Fatalf("DailyUsage: %v", err)
 	}
-	if reserved != 0 {
-		t.Fatalf("reserved after clamped expiry reap=%d want 0", reserved)
+	if reserved != 40 {
+		t.Fatalf("reserved after held expiry reap=%d want 40", reserved)
 	}
 }
 
@@ -485,6 +505,47 @@ func TestMarkReservationSettlementHoldPreservesExpiry(t *testing.T) {
 	}
 	if settlementHold != 1 {
 		t.Fatalf("settlement_hold=%d want 1", settlementHold)
+	}
+}
+
+func TestMarkReservationStaleHeldReleasesActiveQuotaButKeepsAuditState(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_stale_hold")
+	created := fixedTime()
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_stale_hold", RequestID: "req_stale_hold", WindowDate: "2026-05-29",
+		RequestedTokens: 40, DailyQuota: 100, CreatedAt: created, ExpiresAt: created.Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(ctx, "acct_stale_hold", "req_stale_hold"); err != nil {
+		t.Fatalf("MarkReservationSettlementHold: %v", err)
+	}
+	if err := store.MarkReservationStaleHeld(ctx, "acct_stale_hold", "req_stale_hold", created.Add(10*time.Minute)); err != nil {
+		t.Fatalf("MarkReservationStaleHeld: %v", err)
+	}
+	_, reserved, err := store.DailyUsage(ctx, "acct_stale_hold", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage: %v", err)
+	}
+	if reserved != 0 {
+		t.Fatalf("reserved after stale-held transition=%d want 0", reserved)
+	}
+	var status string
+	var settlementHold int
+	if err := store.db.QueryRow(`SELECT status, settlement_hold FROM quota_reservations WHERE account_id = ? AND request_id = ?`, "acct_stale_hold", "req_stale_hold").Scan(&status, &settlementHold); err != nil {
+		t.Fatalf("query stale-held reservation: %v", err)
+	}
+	if status != "stale_held" || settlementHold != 1 {
+		t.Fatalf("status/settlement_hold=%s/%d want stale_held/1", status, settlementHold)
+	}
+	held, err := store.ListSettlementHeldReservations(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListSettlementHeldReservations: %v", err)
+	}
+	if len(held) != 0 {
+		t.Fatalf("active held reservations=%+v want none after stale-held transition", held)
 	}
 }
 
@@ -565,8 +626,13 @@ func TestQuotaSettlementHoldColumnMigration(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&maxVer); err != nil {
 		t.Fatalf("read schema_migrations: %v", err)
 	}
-	if maxVer < 6 {
-		t.Fatalf("schema_migrations max version=%d want >=6", maxVer)
+	if maxVer < 7 {
+		t.Fatalf("schema_migrations max version=%d want >=7", maxVer)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO quota_reservations(account_id, request_id, window_date, reserved_tokens, status, settlement_hold, expires_at, created_at)
+		VALUES('acct_v5', 'req_stale_v7', '2026-05-29', 10, 'stale_held', 1, '2026-05-30T00:00:00Z', '2026-05-29T00:00:00Z')`); err != nil {
+		t.Fatalf("insert stale_held after v7 migration: %v", err)
 	}
 }
 

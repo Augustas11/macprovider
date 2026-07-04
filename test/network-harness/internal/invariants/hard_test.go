@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/augstar/macprovider-network-harness/internal/buyer"
 	"github.com/augstar/macprovider-network-harness/internal/reconcile"
+	"github.com/augstar/macprovider-network-harness/internal/scenario"
 )
 
 func TestCheckI1_CleanRun_AllSignalsZero(t *testing.T) {
@@ -19,7 +21,7 @@ func TestCheckI1_CleanRun_AllSignalsZero(t *testing.T) {
 		CoordinatorRows2xx: 10,
 		MatchedSuccesses:   []reconcile.MatchedPair{{}, {}, {}, {}, {}, {}, {}, {}, {}, {}},
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if !c.Passed {
 		t.Fatalf("clean run should pass, got fail: %s", c.Detail)
 	}
@@ -29,7 +31,7 @@ func TestCheckI1_CleanRun_AllSignalsZero(t *testing.T) {
 }
 
 func TestCheckI1_NoReconcile_Skips(t *testing.T) {
-	c := checkI1(nil)
+	c := checkI1(nil, nil)
 	if !c.Skipped {
 		t.Errorf("nil ledger should SKIP, got: %s", c.Detail)
 	}
@@ -39,7 +41,7 @@ func TestCheckI1_UnmatchedHarnessSuccess_Fails(t *testing.T) {
 	ledger := &reconcile.Result{
 		UnmatchedSuccesses: []string{"h1", "h2"},
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if c.Passed {
 		t.Fatal("should fail on unmatched harness successes")
 	}
@@ -55,7 +57,7 @@ func TestCheckI1_OrphanCoord2xx_Fails(t *testing.T) {
 	ledger := &reconcile.Result{
 		UnmatchedCoordinator2xxRows: []string{"COORD_ORPHAN"},
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if c.Passed {
 		t.Fatal("should fail on orphan coord 2xx rows")
 	}
@@ -68,7 +70,7 @@ func TestCheckI1_OrphanGatewayOK_Fails(t *testing.T) {
 	ledger := &reconcile.Result{
 		UnmatchedGatewayOKRows: []string{"GW_ORPHAN"},
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if c.Passed {
 		t.Fatal("should fail on orphan gateway-ok rows")
 	}
@@ -81,7 +83,7 @@ func TestCheckI1_CoordMissingOnOK_Fails(t *testing.T) {
 	ledger := &reconcile.Result{
 		MatchedCoordMissing: []string{"h_OK_no_coord"},
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if c.Passed {
 		t.Fatal("should fail when gateway-ok pair has no coord row")
 	}
@@ -95,12 +97,29 @@ func TestCheckI1_GatewayOverbillVsHarness_Fails(t *testing.T) {
 		GatewayOverbillVsHarnessTokens: 10,
 		OverbilledPairs:                []string{"OVERBILLED"},
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if c.Passed {
 		t.Fatal("should fail on gateway-vs-harness overbill")
 	}
 	if !contains(c.OffendingIDs, "OVERBILLED") {
 		t.Errorf("offending should include overbilled pair: %v", c.OffendingIDs)
+	}
+}
+
+func TestCheckI1_GatewayOverbillVsHarness_AppliesScenarioTolerance(t *testing.T) {
+	sc := &scenario.Scenario{ChargedDeliveredToleranceTokens: 10}
+	ledger := &reconcile.Result{
+		GatewayOverbillVsHarnessTokens: 10,
+		OverbilledPairs:                []string{"OVERBILLED"},
+	}
+	c := checkI1(sc, ledger)
+	if !c.Passed {
+		t.Fatalf("I1 should pass overbill within scenario tolerance: %+v", c)
+	}
+	sc.ChargedDeliveredToleranceTokens = 9
+	c = checkI1(sc, ledger)
+	if c.Passed {
+		t.Fatal("I1 should fail overbill above scenario tolerance")
 	}
 }
 
@@ -112,7 +131,7 @@ func TestCheckI1_CoordOverbill_Fails(t *testing.T) {
 		AbsGatewayCoordinatorMismatchTokens: 10,
 		GatewayCoordMismatchedPairs:         []string{"MISMATCH"},
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if c.Passed {
 		t.Fatal("should fail on absolute gateway-coord mismatch (either direction)")
 	}
@@ -126,14 +145,14 @@ func TestCheckI1_CoordOverbill_Fails(t *testing.T) {
 // failing I1 — only the positive-overbill sum is the headline gate.
 func TestCheckI1_HarnessUnderbillAlone_Passes(t *testing.T) {
 	ledger := &reconcile.Result{
-		HarnessSuccessful:                10,
-		GatewayRowsOK:                    10,
-		CoordinatorRows2xx:               10,
-		MatchedSuccesses:                 []reconcile.MatchedPair{{}, {}, {}, {}, {}, {}, {}, {}, {}, {}},
-		NetGatewayMinusHarnessTokens:     -5, // underbill only
-		GatewayOverbillVsHarnessTokens:   0,
+		HarnessSuccessful:              10,
+		GatewayRowsOK:                  10,
+		CoordinatorRows2xx:             10,
+		MatchedSuccesses:               []reconcile.MatchedPair{{}, {}, {}, {}, {}, {}, {}, {}, {}, {}},
+		NetGatewayMinusHarnessTokens:   -5, // underbill only
+		GatewayOverbillVsHarnessTokens: 0,
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if !c.Passed {
 		t.Errorf("underbill alone should not fail I1: %s", c.Detail)
 	}
@@ -148,9 +167,103 @@ func TestCheckI1_NetZeroButHiddenOverbill_Fails(t *testing.T) {
 		GatewayOverbillVsHarnessTokens: 10, // but one pair really overbilled
 		OverbilledPairs:                []string{"hidden"},
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if c.Passed {
 		t.Fatal("net-zero must not hide per-pair overbill — this is the headline #229 R1 CRITICAL")
+	}
+}
+
+func TestCheckI2_FailsWhen5xxHasNoGatewaySettlementRow(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 502, RequestID: "req-5xx"}}
+	ledger := &reconcile.Result{GatewaySettlementRequestIDs: []string{"other-req"}}
+
+	c := checkI2(results, ledger)
+
+	if c.Passed || c.Skipped {
+		t.Fatalf("I2 should fail missing 5xx settlement row: %+v", c)
+	}
+	if !contains(c.OffendingIDs, "req-5xx") {
+		t.Fatalf("offending IDs=%v want req-5xx", c.OffendingIDs)
+	}
+}
+
+func TestCheckI2_FailsWhen5xxSettlementBelongsToForeignAccount(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 502, RequestID: "req-5xx"}}
+	ledger := &reconcile.Result{
+		GatewayHasAccountID: true,
+		HarnessAccountID:    "acct-harness",
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			AccountID: "acct-foreign",
+			RequestID: "req-5xx",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if c.Passed || c.Skipped {
+		t.Fatalf("I2 should fail foreign-account 5xx settlement row: %+v", c)
+	}
+	if !contains(c.OffendingIDs, "req-5xx") {
+		t.Fatalf("offending IDs=%v want req-5xx", c.OffendingIDs)
+	}
+}
+
+func TestCheckI2_PassesWhen5xxSettlementMatchesHarnessAccount(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 502, RequestID: "req-5xx"}}
+	ledger := &reconcile.Result{
+		GatewayHasAccountID: true,
+		HarnessAccountID:    "acct-harness",
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			AccountID: "acct-harness",
+			RequestID: "req-5xx",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if !c.Passed {
+		t.Fatalf("I2 should pass account-scoped 5xx settlement row: %+v", c)
+	}
+}
+
+func TestCheckI3_FailsWhenGatewayOverbillExceedsTolerance(t *testing.T) {
+	sc := &scenario.Scenario{ChargedDeliveredToleranceTokens: 2}
+	ledger := &reconcile.Result{
+		GatewayOverbillVsHarnessTokens: 3,
+		OverbilledPairs:                []string{"overbilled-req"},
+	}
+
+	c := checkI3(sc, ledger)
+
+	if c.Passed || c.Skipped {
+		t.Fatalf("I3 should fail overbill above tolerance: %+v", c)
+	}
+	if !contains(c.OffendingIDs, "overbilled-req") {
+		t.Fatalf("offending IDs=%v want overbilled-req", c.OffendingIDs)
+	}
+}
+
+func TestCheckI3_AllowsConfiguredTolerance(t *testing.T) {
+	sc := &scenario.Scenario{ChargedDeliveredToleranceTokens: 3}
+	ledger := &reconcile.Result{GatewayOverbillVsHarnessTokens: 3}
+
+	c := checkI3(sc, ledger)
+
+	if !c.Passed {
+		t.Fatalf("I3 should pass at tolerance: %+v", c)
+	}
+}
+
+func TestCheckI2_FailsClosedWhen5xxHasNoLedger(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 502, RequestID: "req-5xx"}}
+
+	c := checkI2(results, nil)
+
+	if c.Passed || c.Skipped {
+		t.Fatalf("I2 should fail closed without settlement DB evidence: %+v", c)
+	}
+	if !contains(c.OffendingIDs, "req-5xx") {
+		t.Fatalf("offending IDs=%v want req-5xx", c.OffendingIDs)
 	}
 }
 
@@ -163,7 +276,7 @@ func TestCheckI1_ReconcileError_Fails(t *testing.T) {
 	ledger := &reconcile.Result{
 		ReconcileError: "coordinator query: no such column: account_id",
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if c.Passed {
 		t.Fatal("reconcile error must fail I1 closed")
 	}
@@ -183,7 +296,7 @@ func TestCheckI1_AmbiguousExactGatewayIDs_Fails(t *testing.T) {
 	ledger := &reconcile.Result{
 		AmbiguousExactGatewayIDs: []string{"AMBIG_GW"},
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if c.Passed {
 		t.Fatal("ambiguous exact-id must fail I1")
 	}
@@ -199,7 +312,7 @@ func TestCheckI1_AmbiguousExactCoordIDs_Fails(t *testing.T) {
 	ledger := &reconcile.Result{
 		AmbiguousExactCoordIDs: []string{"AMBIG_COORD"},
 	}
-	c := checkI1(ledger)
+	c := checkI1(nil, ledger)
 	if c.Passed {
 		t.Fatal("ambiguous coord exact-id must fail I1")
 	}

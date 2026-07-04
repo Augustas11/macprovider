@@ -192,19 +192,22 @@ func TestComputePerPairDrift_UnderbillNotFlagged(t *testing.T) {
 }
 
 // TestCollectUnmatchedGatewayOK takes a leftover gateway pool (what
-// matchPairs did NOT consume) and surfaces only the "ok"-outcome
-// rows. Fallback outcomes and not-ok are noise on a live network.
+// matchPairs did NOT consume) and surfaces complete settlement rows,
+// including fallback settlements.
 func TestCollectUnmatchedGatewayOK(t *testing.T) {
 	now := time.Now()
 	leftoverGw := []gwRow{
 		{RequestID: "ORPHAN_OK", Outcome: "ok", CreatedAt: now},
-		{RequestID: "fallback_left", Outcome: "stream_truncated", CreatedAt: now}, // EXCLUDED (noisy)
-		{RequestID: "notok_left", Outcome: "upstream_error", CreatedAt: now},      // EXCLUDED (not ok)
+		{RequestID: "fallback_left", Outcome: "stream_truncated", CreatedAt: now},
+		{RequestID: "notok_left", Outcome: "upstream_error", CreatedAt: now}, // EXCLUDED (not ok)
 	}
 	r := &Result{}
 	collectUnmatchedGatewayOK(r, leftoverGw)
-	if len(r.UnmatchedGatewayOKRows) != 1 || r.UnmatchedGatewayOKRows[0] != "ORPHAN_OK" {
-		t.Errorf("want [ORPHAN_OK], got %v", r.UnmatchedGatewayOKRows)
+	if len(r.UnmatchedGatewayOKRows) != 3 ||
+		r.UnmatchedGatewayOKRows[0] != "ORPHAN_OK" ||
+		r.UnmatchedGatewayOKRows[1] != "fallback_left" ||
+		r.UnmatchedGatewayOKRows[2] != "notok_left" {
+		t.Errorf("want all complete settlement leftovers, got %v", r.UnmatchedGatewayOKRows)
 	}
 }
 
@@ -218,22 +221,9 @@ func TestCollectUnmatchedGatewayOK_NoLeftovers(t *testing.T) {
 	}
 }
 
-// TestComputePerPairDrift_FallbackPairsDontCountAsOverbill_R5HIGH:
-// the production scenario 07 shape has gateway settle most successful
-// streams as stream_output_exceeded with gateway tokens >> harness
-// tokens (F-8 SSE undercount). Pre-R5 this counted as gateway overbill
-// and false-failed I1 on exactly the shape #226 was filed to fix.
-// Post-R5 + #232: suppression applies when buyer ALSO corroborated the
-// truncation via the gateway's terminal SSE error envelope.
-func TestComputePerPairDrift_FallbackPairsDontCountAsOverbill_R5HIGH(t *testing.T) {
+func TestComputePerPairDrift_FallbackPairsCountBuyerVisibleOverbill(t *testing.T) {
 	r := &Result{
 		MatchedSuccesses: []MatchedPair{
-			// Fallback pair: gateway recorded 64 bytes' worth of tokens
-			// before the upstream error, harness's SSE parser only saw 8
-			// AND received the gateway's terminal SSE error envelope
-			// (writeSSEError → error + [DONE]) → corroborated truncation,
-			// suppression applies (the post-R5 + #232 happy path for
-			// legitimate F-8 cases).
 			{HarnessRequestID: "fallback_undercount", HarnessCompletionTokens: 8, GatewayCompletionTokens: 64,
 				GatewayOutcome: "stream_output_exceeded", HarnessSawSSEErrorEvent: true, HarnessSSEErrorCode: "stream_output_exceeded"},
 			// OK pair: clean billing.
@@ -241,11 +231,11 @@ func TestComputePerPairDrift_FallbackPairsDontCountAsOverbill_R5HIGH(t *testing.
 		},
 	}
 	computePerPairDrift(r)
-	if r.GatewayOverbillVsHarnessTokens != 0 {
-		t.Errorf("fallback pair must not count as gateway overbill, got %d", r.GatewayOverbillVsHarnessTokens)
+	if r.GatewayOverbillVsHarnessTokens != 56 {
+		t.Errorf("fallback pair must count buyer-visible overbill 56, got %d", r.GatewayOverbillVsHarnessTokens)
 	}
-	if len(r.OverbilledPairs) != 0 {
-		t.Errorf("fallback pair must not appear in OverbilledPairs: %v", r.OverbilledPairs)
+	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "fallback_undercount" {
+		t.Errorf("fallback pair must appear in OverbilledPairs: %v", r.OverbilledPairs)
 	}
 }
 
@@ -318,8 +308,8 @@ func TestComputePerPairDrift_FallbackUnlistedCodeMismatch_232_R6_HIGH(t *testing
 // the SPEC-006 §17.7.1 named-mapping exception path. Buyer-visible
 // `error.code=provider_disconnected` while gateway outcome is
 // `stream_truncated` is an EXPLICITLY allowed divergence (matches
-// gateway writeProviderDisconnectedSSE behavior). Suppression must
-// apply.
+// gateway writeProviderDisconnectedSSE behavior). The mapping may suppress
+// coord-mismatch noise, but it must not suppress buyer-visible overbill.
 func TestComputePerPairDrift_FallbackNamedMappingException_232_R6(t *testing.T) {
 	r := &Result{
 		MatchedSuccesses: []MatchedPair{
@@ -330,11 +320,11 @@ func TestComputePerPairDrift_FallbackNamedMappingException_232_R6(t *testing.T) 
 		},
 	}
 	computePerPairDrift(r)
-	if r.GatewayOverbillVsHarnessTokens != 0 {
-		t.Errorf("provider_disconnected↔stream_truncated named mapping MUST suppress overbill, got %d", r.GatewayOverbillVsHarnessTokens)
+	if r.GatewayOverbillVsHarnessTokens != 56 {
+		t.Errorf("provider_disconnected↔stream_truncated named mapping must still count overbill 56, got %d", r.GatewayOverbillVsHarnessTokens)
 	}
-	if len(r.OverbilledPairs) != 0 {
-		t.Errorf("named-mapping exception must NOT surface pair, got %v", r.OverbilledPairs)
+	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "named_exception" {
+		t.Errorf("named-mapping exception must surface buyer-visible overbill, got %v", r.OverbilledPairs)
 	}
 }
 
@@ -367,11 +357,10 @@ func TestSseErrorCorroboratesOutcome_232_R6(t *testing.T) {
 }
 
 // TestComputePerPairDrift_FallbackPairSuppressedWithSSEErrorEvent_232:
-// the legitimate F-8 case: gateway labeled the pair as a fallback AND
-// the buyer received the matching terminal SSE error envelope. Both
-// signals agree the stream truncated, so the F-8 SSE-undercount delta
-// is suppressed (preserves R5 production happy path).
-func TestComputePerPairDrift_FallbackPairSuppressedWithSSEErrorEvent_232(t *testing.T) {
+// the legitimate fallback case: gateway labeled the pair as a fallback AND
+// the buyer received the matching terminal SSE error envelope. This can
+// suppress coord mismatch noise, but not buyer-visible overbill.
+func TestComputePerPairDrift_FallbackPairCountsHarnessOverbillWithSSEErrorEvent_232(t *testing.T) {
 	r := &Result{
 		MatchedSuccesses: []MatchedPair{
 			{HarnessRequestID: "legit_truncation", HarnessCompletionTokens: 8, GatewayCompletionTokens: 64,
@@ -381,10 +370,8 @@ func TestComputePerPairDrift_FallbackPairSuppressedWithSSEErrorEvent_232(t *test
 	}
 	computePerPairDrift(r)
 
-	// Both axes: suppression preserves I1 from false-failing on the
-	// known F-8 production shape (#229 R5 architect HIGH).
-	if r.GatewayOverbillVsHarnessTokens != 0 {
-		t.Errorf("legit truncation must keep harness-axis suppression, got %d", r.GatewayOverbillVsHarnessTokens)
+	if r.GatewayOverbillVsHarnessTokens != 56 {
+		t.Errorf("legit truncation must count harness-axis overbill 56, got %d", r.GatewayOverbillVsHarnessTokens)
 	}
 	if r.GatewayOverbillVsCoordinatorTokens != 0 {
 		t.Errorf("legit truncation must keep coord-axis suppression, got %d", r.GatewayOverbillVsCoordinatorTokens)
@@ -392,8 +379,8 @@ func TestComputePerPairDrift_FallbackPairSuppressedWithSSEErrorEvent_232(t *test
 	if r.AbsGatewayCoordinatorMismatchTokens != 0 {
 		t.Errorf("legit truncation must keep coord-mismatch suppression, got %d", r.AbsGatewayCoordinatorMismatchTokens)
 	}
-	if len(r.OverbilledPairs) != 0 || len(r.GatewayCoordMismatchedPairs) != 0 {
-		t.Errorf("legit truncation must not surface in either pair list, got %v / %v",
+	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "legit_truncation" || len(r.GatewayCoordMismatchedPairs) != 0 {
+		t.Errorf("legit truncation must surface overbill only, got %v / %v",
 			r.OverbilledPairs, r.GatewayCoordMismatchedPairs)
 	}
 }
@@ -1011,7 +998,7 @@ func TestMatchPairs_MixedExactAndFuzzyPool(t *testing.T) {
 
 // TestMatchPairs_FallbackExactMatchEndToEnd is the R1 code-lane LOW:
 // a harness OK whose exact gateway match is a fallback outcome must
-// (a) match by exact id, (b) NOT count as gateway overbill,
+// (a) match by exact id, (b) count buyer-visible gateway overbill,
 // (c) NOT trigger MatchedCoordMissing, (d) NOT leak into
 // UnmatchedGatewayOKRows.
 func TestMatchPairs_FallbackExactMatchEndToEnd(t *testing.T) {
@@ -1038,8 +1025,11 @@ func TestMatchPairs_FallbackExactMatchEndToEnd(t *testing.T) {
 	if r.MatchedSuccesses[0].GatewayMatchMethod != "exact_id" {
 		t.Errorf("want exact_id match on fallback row, got %q", r.MatchedSuccesses[0].GatewayMatchMethod)
 	}
-	if r.GatewayOverbillVsHarnessTokens != 0 {
-		t.Errorf("fallback exact-match must not count as overbill, got %d", r.GatewayOverbillVsHarnessTokens)
+	if r.GatewayOverbillVsHarnessTokens != 56 {
+		t.Errorf("fallback exact-match must count buyer-visible overbill 56, got %d", r.GatewayOverbillVsHarnessTokens)
+	}
+	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "h1" {
+		t.Errorf("fallback exact-match must surface in OverbilledPairs, got %v", r.OverbilledPairs)
 	}
 	if len(r.MatchedCoordMissing) != 0 {
 		t.Errorf("fallback pair must not trigger coord-missing, got %v", r.MatchedCoordMissing)
@@ -1340,6 +1330,67 @@ func insertCoordRow(t *testing.T, path, requestID, externalRequestID, accountID,
 		requestID, externalRequestID, accountID, model, completionTokens, status, ts.UTC().Format(time.RFC3339Nano),
 	); err != nil {
 		t.Fatalf("insert coord row: %v", err)
+	}
+}
+
+func TestQueryCoordinatorUsesLedgerChargedPromptTokens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coord-ledger.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open coord db: %v", err)
+	}
+	now := time.Date(2026, 7, 4, 5, 30, 0, 0, time.UTC)
+	if _, err := db.Exec(`CREATE TABLE request_log (
+		request_id          TEXT NOT NULL,
+		external_request_id TEXT NULL,
+		account_id          TEXT NULL,
+		attempt_n           INTEGER NULL
+	)`); err != nil {
+		t.Fatalf("create request_log: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE ledger_request_credits (
+		request_id                      TEXT NOT NULL,
+		attempt_n                       INTEGER NOT NULL,
+		provider_id                     TEXT NOT NULL,
+		ts_utc                          TEXT NOT NULL,
+		model                           TEXT NOT NULL,
+		status                          INTEGER NOT NULL,
+		prompt_tokens                   INTEGER NULL,
+		charged_prompt_tokens           INTEGER NULL,
+		provider_reported_prompt_tokens INTEGER NULL,
+		completion_tokens               INTEGER NULL
+	)`); err != nil {
+		t.Fatalf("create ledger_request_credits: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO request_log(request_id, external_request_id, account_id, attempt_n) VALUES ('coord-internal', 'gw-request', 'acct-A', 0)`); err != nil {
+		t.Fatalf("insert request_log: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO ledger_request_credits(
+		request_id, attempt_n, provider_id, ts_utc, model, status,
+		prompt_tokens, charged_prompt_tokens, provider_reported_prompt_tokens, completion_tokens
+	) VALUES ('coord-internal', 0, 'provider-A', ?, 'test-model', 200, 100, 8, 100, 7)`, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert ledger_request_credits: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close coord db: %v", err)
+	}
+
+	rows, hasAccountID, err := queryCoordinator(path, now.Add(-time.Second), now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("queryCoordinator: %v", err)
+	}
+	if !hasAccountID {
+		t.Fatal("queryCoordinator should report account_id metadata from joined request_log")
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1: %+v", len(rows), rows)
+	}
+	got := rows[0]
+	if got.ExternalRequestID != "gw-request" || got.AccountID != "acct-A" {
+		t.Fatalf("joined metadata = external %q account %q, want gw-request/acct-A", got.ExternalRequestID, got.AccountID)
+	}
+	if got.PromptTokens != 8 || got.CompletionTokens != 7 || got.TotalTokens != 15 {
+		t.Fatalf("tokens = prompt %d completion %d total %d, want charged prompt 8 + completion 7 = 15", got.PromptTokens, got.CompletionTokens, got.TotalTokens)
 	}
 }
 

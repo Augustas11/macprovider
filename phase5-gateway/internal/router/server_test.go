@@ -1624,7 +1624,7 @@ func TestSPEC022GatewayStreamingSettlementTrailersControlBuyerDebit(t *testing.T
 			name:           "verified-closed-trailer-holds-for-reconcile",
 			trailer:        settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "verified", "valid", "true", "receipt_verified"),
 			wantActive:     1,
-			wantActiveHold: 20,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
 		},
 		{
 			name:         "quarantined-closed-trailer-refunds",
@@ -1632,16 +1632,22 @@ func TestSPEC022GatewayStreamingSettlementTrailersControlBuyerDebit(t *testing.T
 			wantRefunded: 1,
 		},
 		{
+			name:         "overlap-blocked-terminal-closed-trailer-refunds",
+			trailer:      settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "overlap_blocked_terminal", "valid", "true", "overlap_blocked"),
+			wantRefunded: 1,
+		},
+		{
 			name:           "pending-open-trailer-holds",
 			trailer:        settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "pending_recovery", pendingDeadlineUnixMS),
 			wantActive:     1,
-			wantActiveHold: 20,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
 			wantExpiresAt:  pendingDeadlineUnixMS,
 		},
 		{
-			name:         "declared-missing-trailer-refunds",
-			declareOnly:  true,
-			wantRefunded: 1,
+			name:          "declared-missing-trailer-settles-unverified",
+			declareOnly:   true,
+			wantUsageRows: 1,
+			wantSettled:   1,
 		},
 	}
 	for _, tc := range cases {
@@ -1724,7 +1730,7 @@ func TestSPEC022GatewayStreamingNonOKFinalityBoundsHold(t *testing.T) {
 		}
 	}
 	got := gatewaySettlementSnapshot(t, dbPath, accountID)
-	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != 20 {
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != promptCapTokens([]byte(body))+20 {
 		t.Fatalf("settlement snapshot = %+v, want non-OK streaming pending finality to hold reservation without debit", got)
 	}
 	if got := gatewayReservationExpiresAtUnixMS(t, dbPath, accountID); got != pendingDeadlineUnixMS {
@@ -1992,6 +1998,10 @@ func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
 		cfg.Coordinator.OperatorKey = "operator-key"
 	}, WithHTTPClient(coordinator.Client()))
 	for _, requestID := range []string{"req_refund", "req_hold", "req_missing"} {
+		expiresAt := now.Add(5 * time.Minute)
+		if requestID == "req_missing" {
+			expiresAt = now.Add(-time.Minute)
+		}
 		if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
 			AccountID:       "acct_spec022_reconcile",
 			RequestID:       requestID,
@@ -2003,7 +2013,7 @@ func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("ReserveQuota %s: %v", requestID, err)
 		}
-		if err := store.ClampReservationExpiry(context.Background(), "acct_spec022_reconcile", requestID, now.Add(5*time.Minute)); err != nil {
+		if err := store.ClampReservationExpiry(context.Background(), "acct_spec022_reconcile", requestID, expiresAt); err != nil {
 			t.Fatalf("ClampReservationExpiry %s: %v", requestID, err)
 		}
 	}
@@ -2030,12 +2040,12 @@ func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
 		t.Fatalf("decode summary: %v", err)
 	}
-	if summary.Scanned != 3 || summary.Refunded != 2 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
-		t.Fatalf("summary=%+v, want refund/refund404/hold split", summary)
+	if summary.Scanned != 3 || summary.Refunded != 1 || summary.StaleHeld != 1 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v, want refund/hold/stale-held coordinator-404 split", summary)
 	}
 	got := gatewaySettlementSnapshot(t, dbPath, "acct_spec022_reconcile")
-	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 2 || got.activeRows != 2 || got.activeReserved != 40 {
-		t.Fatalf("settlement snapshot=%+v, want two refunds, one held active reservation, and one ordinary active reservation", got)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 2 || got.expiredRows != 0 || got.staleHeldRows != 1 || got.activeReserved != 40 {
+		t.Fatalf("settlement snapshot=%+v, want one refund, one stale-held coordinator-404 hold, one held pending reservation, and one ordinary active reservation", got)
 	}
 	if got := gatewayReservationExpiresAtUnixMSForRequest(t, dbPath, "acct_spec022_reconcile", "req_hold"); got != pendingDeadlineUnixMS {
 		t.Fatalf("held reservation expires_at=%d want %d", got, pendingDeadlineUnixMS)
@@ -2403,13 +2413,15 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			wantSettled:   1,
 		},
 		{
-			name:          "verified-closed-debits",
-			mode:          "enforce",
-			outcome:       "verified",
-			receiptResult: "valid",
-			closed:        "true",
-			wantUsageRows: 1,
-			wantSettled:   1,
+			name:           "verified-closed-holds-for-reconcile",
+			mode:           "enforce",
+			outcome:        "verified",
+			receiptResult:  "valid",
+			closed:         "true",
+			wantUsageRows:  0,
+			wantActive:     1,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
+			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
 			name:          "quarantined-closed-refunds",
@@ -2430,6 +2442,15 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			wantUsageRows: 0,
 		},
 		{
+			name:          "overlap-blocked-terminal-closed-refunds",
+			mode:          "enforce",
+			outcome:       "overlap_blocked_terminal",
+			receiptResult: "valid",
+			closed:        "true",
+			wantRefunded:  1,
+			wantUsageRows: 0,
+		},
+		{
 			name:           "pending-without-deadline-holds-with-fallback-deadline",
 			mode:           "enforce",
 			outcome:        "pending",
@@ -2437,7 +2458,7 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			closed:         "false",
 			wantUsageRows:  0,
 			wantActive:     1,
-			wantActiveHold: 20,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
 			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
@@ -2448,7 +2469,7 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			closed:         "false",
 			wantUsageRows:  0,
 			wantActive:     1,
-			wantActiveHold: 20,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
 			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
@@ -2459,7 +2480,7 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			closed:         "true",
 			wantUsageRows:  0,
 			wantActive:     1,
-			wantActiveHold: 20,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
 			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
@@ -2478,7 +2499,7 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			closed:         "true",
 			wantUsageRows:  0,
 			wantActive:     1,
-			wantActiveHold: 20,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
 			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
@@ -2490,7 +2511,7 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			closed:         "true",
 			wantUsageRows:  0,
 			wantActive:     1,
-			wantActiveHold: 20,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
 			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
@@ -2502,7 +2523,7 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			closed:         "true",
 			wantUsageRows:  0,
 			wantActive:     1,
-			wantActiveHold: 20,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
 			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 		{
@@ -2513,7 +2534,7 @@ func TestSPEC022GatewaySettlementOutcomeControlsBuyerDebit(t *testing.T) {
 			closed:         "true",
 			wantUsageRows:  0,
 			wantActive:     1,
-			wantActiveHold: 20,
+			wantActiveHold: promptCapTokens([]byte(body)) + 20,
 			wantExpiresAt:  fixedNow().Add(settlementHoldFallbackTTL).UnixMilli(),
 		},
 	}
@@ -2593,7 +2614,7 @@ func TestSPEC022GatewayProviderErrorFinalityHoldsBuyerDebit(t *testing.T) {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
 	got := gatewaySettlementSnapshot(t, dbPath, accountID)
-	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != 20 {
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != promptCapTokens([]byte(body))+20 {
 		t.Fatalf("settlement snapshot = %+v, want pending provider error to hold reservation without debit", got)
 	}
 	holds, err := store.ListSettlementHeldReservations(context.Background(), 10)
@@ -2605,6 +2626,38 @@ func TestSPEC022GatewayProviderErrorFinalityHoldsBuyerDebit(t *testing.T) {
 	}
 	if got := holds[0].ExpiresAt.UnixMilli(); got != pendingDeadline.UnixMilli() {
 		t.Fatalf("held reservation expires_at_unix_ms=%d want %d", got, pendingDeadline.UnixMilli())
+	}
+}
+
+func TestSPEC022GatewayVerifiedProviderErrorFinalityHoldsForReconcile(t *testing.T) {
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		h := http.Header{}
+		h.Set("Content-Type", "application/json")
+		h.Set(settlementModeHeader, "enforce")
+		h.Set(settlementPolicyVersionHeader, settlementPolicyVersion)
+		h.Set(settlementOutcomeHeader, "verified")
+		h.Set(settlementReceiptResultHeader, "valid")
+		h.Set(settlementReasonHeader, "verified_provider_error")
+		h.Set(settlementClosedHeader, "true")
+		return responseWithBody(http.StatusBadGateway, h, `{"error":{"message":"upstream failed","type":"api_error","param":null,"code":"provider_error"}}`), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	accountID := "acct_spec022_provider_error_verified"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != promptCapTokens([]byte(body))+20 {
+		t.Fatalf("settlement snapshot = %+v, want verified provider error to hold reservation for reconciler", got)
+	}
+	if got := gatewayReservationExpiresAtUnixMS(t, dbPath, accountID); got != fixedNow().Add(settlementHoldFallbackTTL).UnixMilli() {
+		t.Fatalf("reservation expires_at=%d want fallback hold deadline %d", got, fixedNow().Add(settlementHoldFallbackTTL).UnixMilli())
 	}
 }
 
@@ -3256,6 +3309,30 @@ func TestEstimatePromptTokensHeadroomCoversAir5(t *testing.T) {
 	}
 }
 
+func TestQuotaAdmissionUsesPromptCapExposure(t *testing.T) {
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	var called bool
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		called = true
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Quotas.AccountDailyTokens = estimatePromptTokens([]byte(body)) + 20
+		cfg.Limits.MaxTokensPerRequest = 20
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_prompt_cap_quota")
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s, want quota rejection before coordinator", resp.Code, resp.Body.String())
+	}
+	if called {
+		t.Fatal("coordinator was called even though prompt-cap reservation exceeded quota")
+	}
+}
+
 // TestCompletionFromHeaderCapsAtMaxTokens — R2 CODE HIGH: the
 // X-MacProvider-Completion-Tokens header path is used on the
 // upstream-error settlement paths. With the +64 prompt-cap
@@ -3507,8 +3584,9 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 		}
 		reservedAtFirstByte = reserved
 		pr, pw := io.Pipe()
+		streamLine := fmt.Sprintf("data: {\"id\":\"chatcmpl\",\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\n", strings.Repeat("x", 120))
 		go func() {
-			_, _ = fmt.Fprintf(pw, "data: {\"id\":\"chatcmpl\",\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\n\n", strings.Repeat("x", 120))
+			_, _ = fmt.Fprint(pw, streamLine+"\n")
 			close(firstByte)
 			<-r.Context().Done()
 			close(cancelSeen)
@@ -3538,8 +3616,9 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 		t.Fatal("timed out waiting for first upstream byte")
 	}
 	time.Sleep(25 * time.Millisecond)
-	if reservedAtFirstByte != 200 {
-		t.Fatalf("reserved at first byte=%d want 200", reservedAtFirstByte)
+	wantReservedAtFirstByte := promptCapTokens([]byte(body)) + 200
+	if reservedAtFirstByte != wantReservedAtFirstByte {
+		t.Fatalf("reserved at first byte=%d want %d", reservedAtFirstByte, wantReservedAtFirstByte)
 	}
 	cancel()
 	select {
@@ -3560,7 +3639,8 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
-	wantUsed := float64(estimatePromptTokens([]byte(body)) + 30)
+	wantCompletion := estimateStreamingCompletionTokens(boundedStreamingFallbackFrameBytes([]byte(fmt.Sprintf("data: {\"id\":\"chatcmpl\",\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\n", strings.Repeat("x", 120)))), 200)
+	wantUsed := float64(estimatePromptTokens([]byte(body)) + wantCompletion)
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
 	}
@@ -4004,7 +4084,7 @@ func TestStreamingReadErrorAfterBuyerCancelSettlesClientDisconnect(t *testing.T)
 	}
 }
 
-func TestStreamingCleanEOFSettlesOK(t *testing.T) {
+func TestStreamingCleanEOFLegacySettlesUnverified(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"ok"}]}`
 	accountID := "acct_stream_ok"
 	// Content payload aligned with the reported completion_tokens so the
@@ -4034,8 +4114,8 @@ func TestStreamingCleanEOFSettlesOK(t *testing.T) {
 		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "ok" || source != "provider_reported" {
-		t.Fatalf("usage outcome/source = %s/%s, want ok/provider_reported", outcome, source)
+	if outcome != "unverified_streaming" || source != "provider_reported" {
+		t.Fatalf("usage outcome/source = %s/%s, want unverified_streaming/provider_reported", outcome, source)
 	}
 }
 
@@ -4060,8 +4140,8 @@ func TestStreamingPreservesSSELineBytes(t *testing.T) {
 		t.Fatalf("stream body bytes changed:\ngot  %q\nwant %q", got, streamBody)
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "ok" || source != "gateway_estimated" {
-		t.Fatalf("usage outcome/source = %s/%s, want ok/gateway_estimated", outcome, source)
+	if outcome != "unverified_streaming" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want unverified_streaming/gateway_estimated", outcome, source)
 	}
 }
 
@@ -4216,7 +4296,7 @@ func TestStreamingGatewayEstimateCountsGeneratedDeltaStrings(t *testing.T) {
 	}
 }
 
-func TestStreamingGatewayEstimateCountsDeltaContentNotMetadata(t *testing.T) {
+func TestStreamingGatewayEstimateCountsSerializedFrameExposure(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":1,"messages":[{"role":"user","content":"ok"}]}`
 	accountID := "acct_stream_metadata"
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -4238,12 +4318,12 @@ func TestStreamingGatewayEstimateCountsDeltaContentNotMetadata(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
 	}
-	if strings.Contains(resp.Body.String(), "stream_output_exceeded") {
-		t.Fatalf("stream body unexpectedly exceeded output cap: %s", resp.Body.String())
+	if !strings.HasSuffix(resp.Body.String(), "data: [DONE]\n\n") {
+		t.Fatalf("stream body missing DONE terminator: %s", resp.Body.String())
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "ok" || source != "gateway_estimated" {
-		t.Fatalf("usage outcome/source = %s/%s, want ok/gateway_estimated", outcome, source)
+	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want stream_output_exceeded/gateway_estimated", outcome, source)
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
@@ -4282,8 +4362,8 @@ func TestStreamingGatewayEstimateCountsToolCallArguments(t *testing.T) {
 		t.Fatalf("stream body unexpectedly exceeded output cap: %s", resp.Body.String())
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "ok" || source != "gateway_estimated" {
-		t.Fatalf("usage outcome/source = %s/%s, want ok/gateway_estimated", outcome, source)
+	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want stream_output_exceeded/gateway_estimated", outcome, source)
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
@@ -4552,8 +4632,8 @@ func TestStreamingInvalidUsageAfterValidFallsBackToGatewayEstimate(t *testing.T)
 		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "ok" || source != "gateway_estimated" {
-		t.Fatalf("usage outcome/source = %s/%s, want ok/gateway_estimated", outcome, source)
+	if outcome != "unverified_streaming" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want unverified_streaming/gateway_estimated", outcome, source)
 	}
 	if strings.Contains(resp.Body.String(), `"usage":{}`) {
 		t.Fatalf("invalid usage frame was forwarded: %s", resp.Body.String())
@@ -4589,8 +4669,8 @@ func TestStreamingSanitizesInvalidCachedPromptTokensWithoutRejectingUsage(t *tes
 		t.Fatalf("stream body did not sanitize cached_prompt_tokens: %s", resp.Body.String())
 	}
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
-	if outcome != "ok" || source != "provider_reported" || prompt != 3 || completion != 2 {
-		t.Fatalf("usage event outcome/source/prompt/completion = %s/%s/%d/%d, want ok/provider_reported/3/2", outcome, source, prompt, completion)
+	if outcome != "unverified_streaming" || source != "provider_reported" || prompt != 3 || completion != 2 {
+		t.Fatalf("usage event outcome/source/prompt/completion = %s/%s/%d/%d, want unverified_streaming/provider_reported/3/2", outcome, source, prompt, completion)
 	}
 }
 
@@ -4618,8 +4698,8 @@ func TestStreamingProviderReportedUsageCannotUnderstateObservedOutput(t *testing
 		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "ok" || source != "gateway_estimated" {
-		t.Fatalf("usage outcome/source = %s/%s, want ok/gateway_estimated", outcome, source)
+	if outcome != "unverified_streaming" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want unverified_streaming/gateway_estimated", outcome, source)
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
@@ -4660,8 +4740,8 @@ func TestStreamingUnderreportedUsageWithHighProviderPromptFallsBackToGatewayEsti
 		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "ok" || source != "gateway_estimated" {
-		t.Fatalf("usage outcome/source = %s/%s, want ok/gateway_estimated", outcome, source)
+	if outcome != "unverified_streaming" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want unverified_streaming/gateway_estimated", outcome, source)
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
@@ -4683,7 +4763,7 @@ func TestSettleFromUsage_Qwen3_32B_Legacy_Baseline(t *testing.T) {
 		reportedPrompt: 12,
 		reportedComp:   32,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "provider_reported",
 		wantCompletion: 32,
 		wantPrompt:     12,
@@ -4698,7 +4778,7 @@ func TestSettleFromUsage_Llama_31_8B_NoOverbill(t *testing.T) {
 		reportedPrompt: 46,
 		reportedComp:   69,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "provider_reported",
 		wantCompletion: 69,
 		wantPrompt:     46,
@@ -4713,7 +4793,7 @@ func TestSettleFromUsage_Qwen25_Coder_32B_NoDownclamp(t *testing.T) {
 		reportedPrompt: 42,
 		reportedComp:   128,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "provider_reported",
 		wantCompletion: 128,
 		wantPrompt:     42,
@@ -4729,7 +4809,7 @@ func TestSettleFromUsage_GptOss_20B_NoMidStreamByteCap(t *testing.T) {
 		reportedPrompt: 42,
 		reportedComp:   128,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "provider_reported",
 		wantCompletion: 128,
 		wantPrompt:     42,
@@ -4745,7 +4825,7 @@ func TestSettleFromUsage_Qwen3Coder_30B_A3B_NoMidStreamByteCap(t *testing.T) {
 		reportedPrompt: 52,
 		reportedComp:   128,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "provider_reported",
 		wantCompletion: 128,
 		wantPrompt:     52,
@@ -4759,9 +4839,9 @@ func TestSettleFromUsage_NoUsageChunk_FallsBackToByteEstimate(t *testing.T) {
 		contentBytes:   120,
 		noUsage:        true,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "gateway_estimated",
-		wantCompletion: 30,
+		wantCompletion: 51,
 	})
 }
 
@@ -4772,9 +4852,9 @@ func TestSettleFromUsage_InvalidUsageChunk_FallsBackToByteEstimate(t *testing.T)
 		contentBytes:   120,
 		invalidUsage:   true,
 		maxTokens:      128,
-		wantOutcome:    "ok",
+		wantOutcome:    "unverified_streaming",
 		wantSource:     "gateway_estimated",
-		wantCompletion: 30,
+		wantCompletion: 51,
 	})
 }
 
@@ -5196,6 +5276,8 @@ type gatewaySettlementState struct {
 	usageRows      int64
 	settledRows    int64
 	refundedRows   int64
+	expiredRows    int64
+	staleHeldRows  int64
 	activeRows     int64
 	activeReserved int64
 }
@@ -5216,6 +5298,12 @@ func gatewaySettlementSnapshot(t *testing.T, dbPath, accountID string) gatewaySe
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'refunded'`, accountID).Scan(&state.refundedRows); err != nil {
 		t.Fatalf("query refunded reservations count: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'expired'`, accountID).Scan(&state.expiredRows); err != nil {
+		t.Fatalf("query expired reservations count: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'stale_held'`, accountID).Scan(&state.staleHeldRows); err != nil {
+		t.Fatalf("query stale-held reservations count: %v", err)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(reserved_tokens), 0) FROM quota_reservations WHERE account_id = ? AND status = 'active'`, accountID).Scan(&state.activeRows, &state.activeReserved); err != nil {
 		t.Fatalf("query active reservations: %v", err)
@@ -5689,6 +5777,60 @@ func TestCoordinator404ModelNotFoundPassesThroughAndDoesNotChargeQuota(t *testin
 	}
 }
 
+func TestCoordinatorGenericValidationErrorsPassThroughAndDoNotChargeQuota(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{"bad_request", http.StatusBadRequest, "invalid_request"},
+		{"unprocessable", http.StatusUnprocessableEntity, "invalid_payload"},
+	}
+	for _, tc := range cases {
+		for _, stream := range []bool{false, true} {
+			name := tc.name + "_non_stream"
+			if stream {
+				name = tc.name + "_stream"
+			}
+			t.Run(name, func(t *testing.T) {
+				coordBody := fmt.Sprintf(`{"error":{"code":%q,"message":"invalid buyer request","param":"messages","type":"invalid_request_error"}}`, tc.code)
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return responseWithBody(tc.status, http.Header{"Content-Type": []string{"application/json"}}, coordBody), nil
+				})}
+				h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+					cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				}, WithHTTPClient(client))
+				fullKey := createAccountAndKey(t, store, cfg, "acct_generic_validation_"+name)
+
+				body := `{"model":"model-a","max_tokens":1000,"messages":[{"role":"user","content":"x"}]}`
+				if stream {
+					body = `{"model":"model-a","max_tokens":1000,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+				}
+				resp := postChat(t, h, fullKey, body, nil)
+
+				if resp.Code != tc.status {
+					t.Fatalf("status=%d, want %d body=%s", resp.Code, tc.status, resp.Body.String())
+				}
+				if !strings.Contains(resp.Body.String(), `"code":"`+tc.code+`"`) ||
+					!strings.Contains(resp.Body.String(), `"type":"invalid_request_error"`) {
+					t.Fatalf("body did not preserve coordinator validation envelope: %s", resp.Body.String())
+				}
+				if strings.Contains(resp.Body.String(), "upstream_provider_error") {
+					t.Fatalf("body remapped coordinator validation error: %s", resp.Body.String())
+				}
+				usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+				quota := readQuota(t, usageResp)
+				if used := quota["daily_tokens_used"].(float64); used != 0 {
+					t.Fatalf("daily_tokens_used=%v, want 0", used)
+				}
+				if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+					t.Fatalf("daily_tokens_reserved=%v, want 0", reserved)
+				}
+			})
+		}
+	}
+}
+
 func TestCoordinatorTier2PolicyErrorsPassThroughAndDoNotChargeQuota(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -5834,6 +5976,46 @@ func TestCoordinatorIdempotencyReplayPassesThroughAndRefunds(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestDuplicateGatewayReservationReturnsConflictWithoutRefund(t *testing.T) {
+	requestID := "77777777-7777-4777-8777-777777777777"
+	body := `{"model":"model-a","max_tokens":20,"messages":[{"role":"user","content":"x"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Fatalf("coordinator should not be called after duplicate reservation")
+		return nil, nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	accountID := "acct_duplicate_reservation"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      fixedNow().UTC().Format("2006-01-02"),
+		RequestedTokens: 37,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       fixedNow(),
+		ExpiresAt:       fixedNow().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("pre-create reservation: %v", err)
+	}
+
+	resp := postChat(t, h, fullKey, body, map[string]string{"X-Request-ID": requestID})
+
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("status=%d want 409 body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "duplicate_request_id")
+	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	quota := readQuota(t, usageResp)
+	if reserved := quota["daily_tokens_reserved"].(float64); reserved != 37 {
+		t.Fatalf("daily_tokens_reserved=%v want original duplicate reservation to remain active", reserved)
+	}
+	if used := quota["daily_tokens_used"].(float64); used != 0 {
+		t.Fatalf("daily_tokens_used=%v want 0", used)
 	}
 }
 

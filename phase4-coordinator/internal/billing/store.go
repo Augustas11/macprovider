@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS ledger_request_credits (
     status INTEGER NOT NULL,
     stream INTEGER NOT NULL CHECK(stream IN (0,1)),
     prompt_tokens INTEGER NULL CHECK(prompt_tokens IS NULL OR prompt_tokens >= 0),
+    charged_prompt_tokens INTEGER NULL CHECK(charged_prompt_tokens IS NULL OR charged_prompt_tokens >= 0),
+    provider_reported_prompt_tokens INTEGER NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0),
     cached_prompt_tokens INTEGER NULL CHECK(cached_prompt_tokens IS NULL OR (cached_prompt_tokens >= 0 AND cached_prompt_tokens <= prompt_tokens)),
     completion_tokens INTEGER NULL CHECK(completion_tokens IS NULL OR completion_tokens >= 0),
     estimated_completion_tokens INTEGER NULL CHECK(estimated_completion_tokens IS NULL OR estimated_completion_tokens >= 0),
@@ -174,18 +176,19 @@ CREATE TABLE IF NOT EXISTS ledger_config_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_lcs_effective_at ON ledger_config_snapshots(effective_at_utc);
 
-CREATE TABLE IF NOT EXISTS ledger_provider_identity_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    request_id TEXT NOT NULL,
-    attempt_n INTEGER NOT NULL CHECK(attempt_n >= 0),
-    provider_assigned_id TEXT NOT NULL,
-    provider_id TEXT NOT NULL,
-    resolved_from TEXT NOT NULL CHECK(resolved_from IN ('pool_entry','response_header','admin_recovery')),
-    pool_session_started_at_utc TEXT NULL,
-    config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0),
-    created_at_utc TEXT NOT NULL,
-    UNIQUE(request_id, attempt_n, provider_assigned_id)
-);
+	CREATE TABLE IF NOT EXISTS ledger_provider_identity_snapshots (
+	    id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    request_id TEXT NOT NULL,
+	    attempt_n INTEGER NOT NULL CHECK(attempt_n >= 0),
+	    provider_assigned_id TEXT NOT NULL,
+	    provider_id TEXT NOT NULL,
+	    resolved_from TEXT NOT NULL CHECK(resolved_from IN ('pool_entry','response_header','admin_recovery')),
+	    pool_session_started_at_utc TEXT NULL,
+	    config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0),
+	    provider_reported_prompt_tokens INTEGER NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0),
+	    created_at_utc TEXT NOT NULL,
+	    UNIQUE(request_id, attempt_n, provider_assigned_id)
+	);
 CREATE INDEX IF NOT EXISTS idx_lpis_request ON ledger_provider_identity_snapshots(request_id, attempt_n);
 CREATE INDEX IF NOT EXISTS idx_lpis_provider ON ledger_provider_identity_snapshots(provider_id, created_at_utc);
 
@@ -323,10 +326,16 @@ CREATE INDEX IF NOT EXISTS idx_lqr_kind_created ON ledger_quarantine_resolutions
 	if err := s.ensureCachedPromptTokensColumn(ctx); err != nil {
 		return err
 	}
-	if err := s.ensureLedgerProviderIdentityConfigSnapshotColumn(ctx); err != nil {
+	if err := s.ensureLedgerRequestCreditPromptSplitColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureLedgerProviderIdentityColumns(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureLedgerRequestCreditSettlementColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.normalizeBillingTimeTextColumns(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureLedgerRequestCreditSettlementPolicyGuards(ctx); err != nil {
@@ -408,12 +417,170 @@ ADD COLUMN cached_prompt_tokens INTEGER NULL CHECK(cached_prompt_tokens IS NULL 
 	return err
 }
 
-func (s *Store) ensureLedgerProviderIdentityConfigSnapshotColumn(ctx context.Context) error {
+func (s *Store) ensureLedgerRequestCreditPromptSplitColumns(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(ledger_request_credits)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !cols["charged_prompt_tokens"] {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE ledger_request_credits ADD COLUMN charged_prompt_tokens INTEGER NULL CHECK(charged_prompt_tokens IS NULL OR charged_prompt_tokens >= 0)`); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE ledger_request_credits SET charged_prompt_tokens = prompt_tokens WHERE charged_prompt_tokens IS NULL AND prompt_tokens IS NOT NULL`); err != nil {
+		return err
+	}
+	if !cols["provider_reported_prompt_tokens"] {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE ledger_request_credits ADD COLUMN provider_reported_prompt_tokens INTEGER NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0)`); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE ledger_request_credits SET provider_reported_prompt_tokens = prompt_tokens WHERE provider_reported_prompt_tokens IS NULL AND prompt_tokens IS NOT NULL`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) normalizeBillingTimeTextColumns(ctx context.Context) error {
+	for _, target := range []struct {
+		table  string
+		column string
+	}{
+		{"request_log", "ts_utc"},
+		{"ledger_request_credits", "ts_utc"},
+		{"ledger_request_credits", "created_at_utc"},
+		{"ledger_request_credits", "updated_at_utc"},
+		{"ledger_provider_identity_snapshots", "created_at_utc"},
+		{"ledger_config_snapshots", "effective_at_utc"},
+		{"ledger_config_audit_events", "created_at_utc"},
+		{"ledger_payout_ready", "window_start_utc"},
+		{"ledger_payout_ready", "window_end_utc"},
+		{"ledger_payout_ready", "created_at_utc"},
+		{"ledger_payout_ready", "updated_at_utc"},
+	} {
+		if err := s.normalizeTimeColumn(ctx, target.table, target.column); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type timeColumnUpdate struct {
+	rowid int64
+	value string
+}
+
+func (s *Store) normalizeTimeColumn(ctx context.Context, table, column string) error {
+	exists, err := s.columnExists(ctx, table, column)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	const batchSize = 500
+	lastRowID := int64(0)
+	for {
+		rows, err := s.db.QueryContext(ctx, "SELECT rowid, "+column+" FROM "+table+" WHERE rowid > ? AND "+column+" IS NOT NULL AND "+column+" != '' ORDER BY rowid LIMIT ?", lastRowID, batchSize)
+		if err != nil {
+			return fmt.Errorf("scan %s.%s timestamps: %w", table, column, err)
+		}
+		var updates []timeColumnUpdate
+		scanned := 0
+		for rows.Next() {
+			var rowid int64
+			var raw string
+			if err := rows.Scan(&rowid, &raw); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			scanned++
+			lastRowID = rowid
+			normalized, ok := normalizeSQLiteTimeText(raw)
+			if ok && normalized != raw {
+				updates = append(updates, timeColumnUpdate{rowid: rowid, value: normalized})
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if len(updates) > 0 {
+			if err := s.applyTimeColumnNormalizations(ctx, table, column, updates); err != nil {
+				return err
+			}
+		}
+		if scanned < batchSize {
+			return nil
+		}
+	}
+}
+
+func (s *Store) applyTimeColumnNormalizations(ctx context.Context, table, column string, updates []timeColumnUpdate) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, "UPDATE "+table+" SET "+column+" = ? WHERE rowid = ?")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, u := range updates {
+		if _, err := stmt.ExecContext(ctx, u.value, u.rowid); err != nil {
+			return fmt.Errorf("normalize %s.%s rowid %d: %w", table, column, u.rowid, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) columnExists(ctx context.Context, table, column string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+func (s *Store) ensureLedgerProviderIdentityColumns(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(ledger_provider_identity_snapshots)`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
+	cols := map[string]bool{}
 	for rows.Next() {
 		var cid int
 		var name, typ string
@@ -423,17 +590,26 @@ func (s *Store) ensureLedgerProviderIdentityConfigSnapshotColumn(ctx context.Con
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
 			return err
 		}
-		if name == "config_snapshot_id" {
-			return nil
-		}
+		cols[name] = true
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	if !cols["config_snapshot_id"] {
+		if _, err := s.db.ExecContext(ctx, `
 ALTER TABLE ledger_provider_identity_snapshots
-ADD COLUMN config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0)`)
-	return err
+ADD COLUMN config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0)`); err != nil {
+			return err
+		}
+	}
+	if !cols["provider_reported_prompt_tokens"] {
+		if _, err := s.db.ExecContext(ctx, `
+ALTER TABLE ledger_provider_identity_snapshots
+ADD COLUMN provider_reported_prompt_tokens INTEGER NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0)`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ensureLedgerRequestCreditSettlementPolicyGuards(ctx context.Context) error {
@@ -478,6 +654,7 @@ DROP TRIGGER IF EXISTS trg_lrc_settled_money_immutable;
 DROP TRIGGER IF EXISTS trg_lrc_settled_link_immutable;
 CREATE TRIGGER trg_lrc_settled_money_immutable
 BEFORE UPDATE OF prompt_tokens, completion_tokens, estimated_completion_tokens,
+                 charged_prompt_tokens, provider_reported_prompt_tokens,
                  usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
                  cached_prompt_tokens,
                  global_multiplier_ppm, gross_credits, provider_share_bps,
@@ -485,6 +662,8 @@ BEFORE UPDATE OF prompt_tokens, completion_tokens, estimated_completion_tokens,
 WHEN (OLD.settled = 1 OR NEW.settled = 1)
   AND (
       COALESCE(OLD.prompt_tokens, -1) != COALESCE(NEW.prompt_tokens, -1)
+      OR COALESCE(OLD.charged_prompt_tokens, -1) != COALESCE(NEW.charged_prompt_tokens, -1)
+      OR COALESCE(OLD.provider_reported_prompt_tokens, -1) != COALESCE(NEW.provider_reported_prompt_tokens, -1)
       OR COALESCE(OLD.completion_tokens, -1) != COALESCE(NEW.completion_tokens, -1)
       OR COALESCE(OLD.estimated_completion_tokens, -1) != COALESCE(NEW.estimated_completion_tokens, -1)
       OR OLD.usage_source != NEW.usage_source
@@ -632,7 +811,12 @@ func (s *Store) rebuildLegacyConfigSnapshots(ctx context.Context) error {
 	if !hasLegacyUnique {
 		return nil
 	}
-	_, err = s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
 DROP TABLE IF EXISTS ledger_config_snapshots_rebuild;
 CREATE TABLE ledger_config_snapshots_rebuild (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -654,7 +838,10 @@ DROP TABLE ledger_config_snapshots;
 ALTER TABLE ledger_config_snapshots_rebuild RENAME TO ledger_config_snapshots;
 CREATE INDEX IF NOT EXISTS idx_lcs_effective_at ON ledger_config_snapshots(effective_at_utc);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SetSettlementConfig(cfg SettlementConfig) {
@@ -800,6 +987,12 @@ func (s *Store) SetForceVoidEnabled(ctx context.Context, newValue bool, reloadSo
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return fmt.Errorf("begin immediate for flag-change audit: %w", err)
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
 	now := payload["ts_utc"].(string)
 	if _, err := conn.ExecContext(ctx, `
 INSERT INTO audit_log (ts_utc, event_type, provider_id, payload_json)
@@ -813,6 +1006,7 @@ VALUES (?, 'billing_config_flag_changed', NULL, ?)`, now, string(payloadJSON)); 
 		// can re-attempt.
 		return fmt.Errorf("commit flag-change audit: %w", err)
 	}
+	committed = true
 	// Audit is durable: publish the new value. No handler could
 	// observe newValue before this point because the only reader is
 	// h.store.ForceVoidEnabled() which reads s.forceVoidEnabled.

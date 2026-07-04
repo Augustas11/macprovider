@@ -165,7 +165,7 @@ func TestQuotaExhaustionReturns429(t *testing.T) {
 	})}
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
-		cfg.Quotas.AccountDailyTokens = 50
+		cfg.Quotas.AccountDailyTokens = 130
 		cfg.Limits.MaxTokensPerRequest = 50
 	}, WithHTTPClient(client))
 	fullKey := createAccountAndKey(t, store, cfg, "acct_quota_exhaust")
@@ -195,7 +195,7 @@ func TestDemoChatQuotaExhaustionIsSeparateFromAccountQuota(t *testing.T) {
 	})}
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
-		cfg.Quotas.DemoDailyTokensPerIP = 10
+		cfg.Quotas.DemoDailyTokensPerIP = 95
 		cfg.Limits.DemoMaxTokensPerRequest = 10
 	}, WithHTTPClient(client))
 	demo := issueDemoToken(t, h, "1.2.3.4")

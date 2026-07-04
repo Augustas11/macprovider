@@ -68,6 +68,80 @@ func TestIngestSettlementReceiptPersistsVerifiedStateAndRedactedAudit(t *testing
 	assertSettlementReceiptVerdictSchemaRedacted(t, store.db)
 }
 
+func TestSyncVerifiedReceiptLedgerCreditUpdatesPromptSplitColumns(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	_, store := newRequestAndBillingStores(t)
+	seedSettlementReceiptEvidence(t, store, input)
+	boundedPrompt := input.ExpectedUsage.BillableInputTokens - 1
+	if boundedPrompt < 0 {
+		t.Fatalf("fixture billable input tokens=%d too small for bounded prompt regression", input.ExpectedUsage.BillableInputTokens)
+	}
+	providerReportedPrompt := input.ExpectedUsage.BillableInputTokens + 500
+	rateEntry := RateCardEntry{PromptCreditsPerMtok: 1, CompletionCreditsPerMtok: 1}
+	stale := ComputeCredits(&boundedPrompt, nil, nil, UsageProviderReported, FaultNone, rateEntry, 1_000_000, 10_000)
+	insertSPEC022LedgerCredit(t, store.db, input, stale.ProviderCredits)
+	if _, err := store.db.Exec(`
+	UPDATE ledger_request_credits
+   SET prompt_tokens = ?,
+       charged_prompt_tokens = ?,
+       provider_reported_prompt_tokens = ?,
+       gross_credits = ?,
+	       provider_credits = ?
+	 WHERE request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		stale.PromptTokens,
+		stale.PromptTokens,
+		providerReportedPrompt,
+		stale.GrossCredits,
+		stale.ProviderCredits,
+		input.RequestID,
+		input.AttemptN,
+		input.ProviderID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	markSPEC022ReceiptVerified(t, store.db, input)
+
+	reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(context.Background(), store.db, input.RequestID, int64(input.AttemptN), input.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != "" {
+		t.Fatalf("sync reason=%q want empty successful sync", reason)
+	}
+	var prompt, charged, reported int64
+	if err := store.db.QueryRow(`
+SELECT prompt_tokens, charged_prompt_tokens, provider_reported_prompt_tokens
+  FROM ledger_request_credits
+ WHERE request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		input.RequestID, input.AttemptN, input.ProviderID,
+	).Scan(&prompt, &charged, &reported); err != nil {
+		t.Fatal(err)
+	}
+	if prompt != boundedPrompt ||
+		charged != boundedPrompt ||
+		reported != providerReportedPrompt {
+		t.Fatalf("prompt split=%d/%d/%d want charged %d and provider-reported %d",
+			prompt, charged, reported, boundedPrompt, providerReportedPrompt)
+	}
+	finality, found, err := store.RequestSettlementFinality(context.Background(), input.AccountScope, input.RequestID, input.ReceiptReceivedUnixMS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("settlement finality not found")
+	}
+	if finality.Outcome != SettlementOutcomeVerified ||
+		finality.PromptTokens != boundedPrompt ||
+		finality.CompletionTokens != input.ExpectedUsage.BillableOutputTokens ||
+		finality.TotalTokens != boundedPrompt+input.ExpectedUsage.BillableOutputTokens {
+		t.Fatalf("finality=%#v want verified charged prompt %d", finality, boundedPrompt)
+	}
+}
+
 func TestRecordMissingSettlementReceiptQuarantinesAfterDeadlineAndLateReceiptNoops(t *testing.T) {
 	fixtures := loadSettlementVerifierFixtures(t)
 	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
@@ -76,6 +150,7 @@ func TestRecordMissingSettlementReceiptQuarantinesAfterDeadlineAndLateReceiptNoo
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
 	seedSettlementReceiptEvidence(t, store, input)
+	insertSPEC022LedgerCredit(t, store.db, input, 700)
 	id := SettlementReceiptIdentity{
 		AccountScope: input.AccountScope,
 		RequestID:    input.RequestID,
@@ -131,6 +206,7 @@ func TestSettlementReceiptPendingCanCloseWithValidReceiptBeforeDeadline(t *testi
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
 	seedSettlementReceiptEvidence(t, store, input)
+	insertSPEC022LedgerCredit(t, store.db, input, 700)
 	id := SettlementReceiptIdentity{
 		AccountScope: input.AccountScope,
 		RequestID:    input.RequestID,
@@ -169,6 +245,7 @@ func TestRequestSettlementFinalityAggregatesVerifiedUsageAfterPending(t *testing
 	_, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
 	seedSettlementReceiptEvidence(t, store, input)
+	insertSPEC022LedgerCredit(t, store.db, input, 700)
 	id := SettlementReceiptIdentity{
 		AccountScope: input.AccountScope,
 		RequestID:    input.RequestID,
@@ -221,6 +298,7 @@ func TestRequestSettlementFinalityForAccountResolvesGatewayExternalRequestID(t *
 	reqStore, store := newRequestAndBillingStores(t)
 	createSettlementReceiptAuditLog(t, store.db)
 	seedSettlementReceiptEvidence(t, store, input)
+	insertSPEC022LedgerCredit(t, store.db, input, 700)
 	markSPEC022ReceiptVerified(t, store.db, input)
 	if err := reqStore.Insert(context.Background(), requestlog.Row{
 		TSUtc:              time.UnixMilli(input.TerminalStateTSUnixMS).UTC(),
@@ -258,6 +336,62 @@ func TestRequestSettlementFinalityForAccountResolvesGatewayExternalRequestID(t *
 		finality.CompletionTokens != input.ExpectedUsage.BillableOutputTokens ||
 		finality.TotalTokens != input.ExpectedUsage.BillableInputTokens+input.ExpectedUsage.BillableOutputTokens {
 		t.Fatalf("finality tokens=%#v, want receipt-bound usage %#v", finality, input.ExpectedUsage)
+	}
+}
+
+func TestRequestSettlementFinalityForAccountReturnsExternalOverlapBlockedTerminal(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	accountID := "acct_spec022_external_overlap"
+	externalRequestID := "99999999-9999-4999-8999-999999999999"
+	input.AccountScope = AccountScopeForSettlement(accountID)
+	input.RouteSnapshot.AccountScope = input.AccountScope
+	reqStore, store := newRequestAndBillingStores(t)
+	createSettlementReceiptAuditLog(t, store.db)
+	seedSettlementReceiptEvidence(t, store, input)
+	insertSPEC022LedgerCredit(t, store.db, input, 700)
+	markSPEC022ReceiptVerified(t, store.db, input)
+	if _, err := store.db.Exec(`
+UPDATE settlement_attempt_outputs
+   SET overlapping_or_duplicate = 1
+ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		input.AccountScope, input.RequestID, input.AttemptN, input.ProviderID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc:              time.UnixMilli(input.TerminalStateTSUnixMS).UTC(),
+		RequestID:          input.RequestID,
+		ExternalRequestID:  externalRequestID,
+		AccountID:          accountID,
+		Model:              input.RouteSnapshot.ModelID,
+		ProviderAssignedID: "assigned",
+		PromptTokens:       &input.ExpectedUsage.BillableInputTokens,
+		CompletionTokens:   &input.ExpectedUsage.BillableOutputTokens,
+		Status:             200,
+		Stream:             true,
+		BuyerIP:            "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	finality, found, err := store.RequestSettlementFinalityForAccount(context.Background(), accountID, externalRequestID, input.ReceiptReceivedUnixMS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("settlement finality not found through gateway external request id")
+	}
+	if finality.RequestID != externalRequestID ||
+		finality.Outcome != SettlementOutcomeOverlapBlockedTerminal ||
+		finality.ReceiptResult != SettlementReceiptResultValid ||
+		!finality.Closed ||
+		finality.TotalTokens != 0 ||
+		finality.TokenSource != UsageSourceCoordinatorObserved ||
+		finality.OverlappingBlockedTokens == 0 {
+		t.Fatalf("finality=%#v, want closed external overlap-blocked zero-token finality", finality)
 	}
 }
 

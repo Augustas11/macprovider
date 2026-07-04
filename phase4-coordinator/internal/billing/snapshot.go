@@ -41,7 +41,7 @@ func (s *Store) InsertConfigSnapshot(ctx context.Context, cfg RewardsConfig, now
 	}
 	sum := sha256.Sum256(fullJSON)
 	hash := hex.EncodeToString(sum[:])
-	ts := now.UTC().Format(time.RFC3339Nano)
+	ts := sqliteTimeText(now)
 	res, err := s.db.ExecContext(ctx, `
 INSERT INTO ledger_config_snapshots (
     effective_at_utc, config_hash, provider_share_bps, global_multiplier_ppm,
@@ -105,7 +105,7 @@ func (s *Store) ReloadBillingConfig(ctx context.Context, cfg RewardsConfig, forc
 	}
 	sum := sha256.Sum256(fullJSON)
 	hash := hex.EncodeToString(sum[:])
-	ts := now.UTC().Format(time.RFC3339Nano)
+	ts := sqliteTimeText(now)
 
 	oldFlag := s.forceVoidEnabled.Load()
 	flagChanged := oldFlag != forceVoidEnabled
@@ -179,8 +179,8 @@ func (s *Store) LatestConfigSnapshotAt(ctx context.Context, t time.Time) (int64,
 	var id int64
 	err := s.db.QueryRowContext(ctx, `
 SELECT id FROM ledger_config_snapshots
- WHERE julianday(effective_at_utc) <= julianday(?)
- ORDER BY julianday(effective_at_utc) DESC, id DESC
+ WHERE effective_at_utc <= ?
+ ORDER BY effective_at_utc DESC, id DESC
  LIMIT 1`, sqliteTimeText(t)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNoSnapshot
@@ -232,8 +232,8 @@ func snapshotAtQueryer(ctx context.Context, q snapshotQueryer, t time.Time) (int
 	err := q.QueryRowContext(ctx, `
 SELECT id, provider_share_bps, global_multiplier_ppm, rate_card_json
   FROM ledger_config_snapshots
- WHERE julianday(effective_at_utc) <= julianday(?)
- ORDER BY julianday(effective_at_utc) DESC, id DESC
+ WHERE effective_at_utc <= ?
+ ORDER BY effective_at_utc DESC, id DESC
  LIMIT 1`, sqliteTimeText(t)).Scan(&id, &providerShareBps, &multiplierPPM, &rateJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, RewardsConfig{}, 0, 0, ErrNoSnapshot

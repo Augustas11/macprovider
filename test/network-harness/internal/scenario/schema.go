@@ -21,6 +21,8 @@ import (
 // any required field that's empty.
 var envVarPattern = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
 
+const maxChargedDeliveredToleranceTokens int64 = 16
+
 func expandEnv(input []byte) []byte {
 	return envVarPattern.ReplaceAllFunc(input, func(match []byte) []byte {
 		name := envVarPattern.FindSubmatch(match)[1]
@@ -49,6 +51,10 @@ type Scenario struct {
 	// SilentHangThreshold defines invariant I4: a stream that stays open
 	// this long with zero bytes and no terminating error is a silent hang.
 	SilentHangThreshold time.Duration `yaml:"silent_hang_threshold"`
+
+	// ChargedDeliveredToleranceTokens allows scenarios with known tokenizer
+	// drift to permit a small charged-vs-delivered delta. Default 0.
+	ChargedDeliveredToleranceTokens int64 `yaml:"charged_delivered_tolerance_tokens"`
 
 	// RequestTimeout is a per-request hard cap. Default 120s if unset.
 	RequestTimeout time.Duration `yaml:"request_timeout"`
@@ -188,10 +194,10 @@ type Buyers struct {
 // modulo len(prompts) so the harness output is deterministic given the
 // same scenario + buyer count.
 type Prompt struct {
-	Model    string `yaml:"model"`
-	System   string `yaml:"system"`
-	User     string `yaml:"user"`
-	MaxTokens int   `yaml:"max_tokens"`
+	Model     string `yaml:"model"`
+	System    string `yaml:"system"`
+	User      string `yaml:"user"`
+	MaxTokens int    `yaml:"max_tokens"`
 }
 
 // Load reads and unmarshals a scenario YAML file.
@@ -245,6 +251,12 @@ func (s *Scenario) Validate() error {
 	}
 	if (s.Target.CoordinatorDBSSH != "") != (s.Target.GatewayDBSSH != "") {
 		return fmt.Errorf("target.coordinator_db_ssh and target.gateway_db_ssh must be set together")
+	}
+	if s.ChargedDeliveredToleranceTokens < 0 {
+		return fmt.Errorf("charged_delivered_tolerance_tokens must be >= 0")
+	}
+	if s.ChargedDeliveredToleranceTokens > maxChargedDeliveredToleranceTokens {
+		return fmt.Errorf("charged_delivered_tolerance_tokens must be <= %d", maxChargedDeliveredToleranceTokens)
 	}
 	if s.Target.CoordinatorDBSSH != "" && s.Target.CoordinatorDBPath != "" {
 		return fmt.Errorf("target.coordinator_db_ssh and target.coordinator_db_path are mutually exclusive")

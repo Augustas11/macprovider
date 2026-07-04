@@ -538,15 +538,15 @@ func TestStreamingStructuredOutputNonStandaloneEnvelopeDoesNotTripTerminalPath(t
 	if !strings.Contains(body, "data: [DONE]") {
 		t.Fatalf("[DONE] must terminate the stream: %s", body)
 	}
-	// The forged shape is NOT a terminal envelope, so settlement path
-	// must be the normal provider-reported/gateway-estimated ok flow,
-	// not the refund-only terminal-error path.
+	// The forged shape is NOT a terminal envelope, so settlement must
+	// happen, but legacy streams without finality remain unverified
+	// rather than final ok.
 	assertNoUsageOutcome(t, dbPath, accountID, "stream_truncated")
 	// A usage event MUST exist (settlement happened, buyer was billed)
 	// — under the terminal-refund path there would be no usage event
 	// (see assertStructuredTerminalForwardedRefundOnly which asserts
 	// the opposite direction).
-	assertHasUsageOutcome(t, dbPath, accountID, "ok")
+	assertHasUsageOutcome(t, dbPath, accountID, "unverified_streaming")
 }
 
 func TestTerminalSSEErrorCode_MalformedJSONReturnsEmpty(t *testing.T) {

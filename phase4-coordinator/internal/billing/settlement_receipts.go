@@ -381,11 +381,15 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		return "", fmt.Errorf("decode settlement receipt-bound usage: %w", err)
 	}
 	prompt := usage.BillableInputTokens
+	chargedPrompt := prompt
+	if ledgerPrompt.Valid && chargedPrompt > ledgerPrompt.Int64 {
+		chargedPrompt = ledgerPrompt.Int64
+	}
 	completion := usage.BillableOutputTokens
 	rateEntry := RateCardEntry{PromptCreditsPerMtok: promptRate, CompletionCreditsPerMtok: completionRate}
 	var cached *int64
 	if cachedPromptTokens.Valid && cachedPromptTokens.Int64 > 0 {
-		if cachedPromptTokens.Int64 > prompt {
+		if cachedPromptTokens.Int64 > chargedPrompt {
 			reason := "invalid_cached_prompt_tokens"
 			if err := markVerifiedReceiptCacheQuarantinedTx(ctx, db, requestCreditID, reason); err != nil {
 				return "", err
@@ -460,7 +464,7 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 		cached = &cachedPromptTokens.Int64
 	}
 	result := ComputeCreditsWithCache(
-		&prompt,
+		&chargedPrompt,
 		cached,
 		&completion,
 		nil,
@@ -472,16 +476,18 @@ SELECT lrc.id, lrc.model, lrc.cached_prompt_tokens,
 	)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := db.ExecContext(ctx, `
-UPDATE ledger_request_credits
-   SET prompt_tokens = ?,
-       completion_tokens = ?,
-       estimated_completion_tokens = NULL,
-       usage_source = ?,
+		UPDATE ledger_request_credits
+		   SET prompt_tokens = ?,
+		       charged_prompt_tokens = ?,
+		       completion_tokens = ?,
+		       estimated_completion_tokens = NULL,
+		       usage_source = ?,
        gross_credits = ?,
        provider_credits = ?,
        fault_flag = ?,
        updated_at_utc = ?
- WHERE id = ?`,
+		 WHERE id = ?`,
+		nullInt64(result.PromptTokens),
 		nullInt64(result.PromptTokens),
 		nullInt64(result.CompletionTokens),
 		result.UsageSource,

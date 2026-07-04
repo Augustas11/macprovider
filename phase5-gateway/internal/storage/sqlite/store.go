@@ -98,6 +98,8 @@ func (s *Store) Ping(ctx context.Context) error {
 //	     rows after coordinator receipt finality verifies canonical usage.
 //	v6 — SPEC-022 D12: quota_reservations marks receipt-finality holds so
 //	     admin reconciliation does not scan ordinary in-flight reservations.
+//	v7 — SPEC-022 D13: quota_reservations accepts stale_held terminal holds
+//	     for coordinator-missing ambiguity that must release active quota.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -108,7 +110,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 6
+const maxKnownSchemaVersion = 7
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -126,6 +128,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, usageEventsAuxiliaryDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, quotaReservationsTableDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, quotaReservationsAuxiliaryDDL); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, demoUsageEventsTableDDL); err != nil {
@@ -147,6 +155,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureQuotaSettlementHoldColumn(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureQuotaReservationStaleHeldStatus(ctx); err != nil {
 		return err
 	}
 	// Stamp the schema version. We always insert v1 (preserves
@@ -176,6 +187,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(6, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(7, ?)", now); err != nil {
 		return err
 	}
 	return nil
@@ -548,6 +562,51 @@ func (s *Store) ensureQuotaSettlementHoldColumn(ctx context.Context) error {
 	return tx.Commit()
 }
 
+func (s *Store) ensureQuotaReservationStaleHeldStatus(ctx context.Context) error {
+	var sqlText string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT sql FROM sqlite_master
+		WHERE type = 'table' AND name = 'quota_reservations'`).Scan(&sqlText)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(sqlText, "stale_held") {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE quota_reservations RENAME TO quota_reservations_legacy`); err != nil {
+		return fmt.Errorf("rename quota_reservations for stale_held migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, quotaReservationsTableDDL); err != nil {
+		return fmt.Errorf("create quota_reservations with stale_held status: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO quota_reservations
+			(account_id, request_id, window_date, reserved_tokens, settled_tokens,
+			 status, settlement_hold, expires_at, created_at, settled_at)
+		SELECT account_id, request_id, window_date, reserved_tokens, settled_tokens,
+		       status, settlement_hold, expires_at, created_at, settled_at
+		FROM quota_reservations_legacy`); err != nil {
+		return fmt.Errorf("copy quota_reservations rows for stale_held migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE quota_reservations_legacy`); err != nil {
+		return fmt.Errorf("drop legacy quota_reservations after stale_held migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, quotaReservationsAuxiliaryDDL); err != nil {
+		return fmt.Errorf("recreate quota_reservations indexes after stale_held migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(7, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v7 inside stale_held migration tx: %w", err)
+	}
+	return tx.Commit()
+}
+
 func (s *Store) CreateAccount(ctx context.Context, account storage.Account) error {
 	if account.CreatedAt.IsZero() {
 		account.CreatedAt = time.Now().UTC()
@@ -849,6 +908,17 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 	if _, err := reapExpiredReservationsTx(ctx, tx, req.CreatedAt); err != nil {
 		return storage.QuotaDecision{}, err
 	}
+	var existingStatus string
+	err = tx.QueryRowContext(ctx, `
+		SELECT status FROM quota_reservations
+		WHERE account_id = ? AND request_id = ?`,
+		req.AccountID, req.RequestID).Scan(&existingStatus)
+	if err == nil {
+		return storage.QuotaDecision{}, storage.ErrReservationExists
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return storage.QuotaDecision{}, err
+	}
 	used, reserved, err := dailyUsageTx(ctx, tx, req.AccountID, req.WindowDate)
 	if err != nil {
 		return storage.QuotaDecision{}, err
@@ -870,12 +940,24 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 		VALUES(?, ?, ?, ?, 'active', ?, ?)`,
 		req.AccountID, req.RequestID, req.WindowDate, req.RequestedTokens, encodeTime(req.ExpiresAt), encodeTime(req.CreatedAt))
 	if err != nil {
+		if isUniqueConstraintError(err) {
+			return storage.QuotaDecision{}, storage.ErrReservationExists
+		}
 		return storage.QuotaDecision{}, err
 	}
 	decision.Admitted = true
 	decision.ReservedTokens += req.RequestedTokens
 	decision.RemainingTokens = max64(0, remaining-req.RequestedTokens)
 	return decision, tx.Commit()
+}
+
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "constraint failed") &&
+		(strings.Contains(msg, "unique") || strings.Contains(msg, "primary key"))
 }
 
 func (s *Store) SettleReservation(ctx context.Context, settlement storage.ReservationSettlement) error {
@@ -994,6 +1076,60 @@ func (s *Store) RefundReservation(ctx context.Context, accountID, requestID stri
 		SET status = 'refunded', settled_tokens = 0, settled_at = ?
 		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
 		encodeTime(when), accountID, requestID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return storage.ErrReservationNotFound
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ExpireReservation(ctx context.Context, accountID, requestID string, expiredAt time.Time) error {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if expiredAt.IsZero() {
+		expiredAt = time.Now().UTC()
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET status = 'expired', settled_tokens = 0, settled_at = ?
+		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+		encodeTime(expiredAt.UTC()), accountID, requestID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return storage.ErrReservationNotFound
+	}
+	return tx.Commit()
+}
+
+func (s *Store) MarkReservationStaleHeld(ctx context.Context, accountID, requestID string, staleAt time.Time) error {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if staleAt.IsZero() {
+		staleAt = time.Now().UTC()
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET status = 'stale_held', settled_tokens = 0, settled_at = ?, settlement_hold = 1
+		WHERE account_id = ? AND request_id = ? AND status = 'active' AND settlement_hold = 1`,
+		encodeTime(staleAt.UTC()), accountID, requestID)
 	if err != nil {
 		return err
 	}
@@ -1562,9 +1698,9 @@ func reapExpiredReservationsTx(ctx context.Context, q execer, now time.Time) (in
 		now = time.Now().UTC()
 	}
 	res, err := q.ExecContext(ctx, `
-		UPDATE quota_reservations
-		SET status = 'expired', settled_tokens = 0, settled_at = ?
-		WHERE status = 'active' AND expires_at <= ?`,
+			UPDATE quota_reservations
+			SET status = 'expired', settled_tokens = 0, settled_at = ?
+			WHERE status = 'active' AND settlement_hold = 0 AND expires_at <= ?`,
 		encodeTime(now), encodeTime(now))
 	if err != nil {
 		return 0, err

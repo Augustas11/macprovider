@@ -921,8 +921,9 @@ func TestSPEC022PayableCreditGateBlocksQuarantineAndOverlap(t *testing.T) {
 	baseInput.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
 
 	for _, tc := range []struct {
-		name string
-		mark func(t *testing.T, store *Store, input SettlementVerifyInput)
+		name                         string
+		expectOverlapBlockedFinality bool
+		mark                         func(t *testing.T, store *Store, input SettlementVerifyInput)
 	}{
 		{
 			name: "deadline quarantine",
@@ -942,7 +943,8 @@ func TestSPEC022PayableCreditGateBlocksQuarantineAndOverlap(t *testing.T) {
 			},
 		},
 		{
-			name: "verified receipt later marked overlapping",
+			name:                         "verified receipt later marked overlapping",
+			expectOverlapBlockedFinality: true,
 			mark: func(t *testing.T, store *Store, input SettlementVerifyInput) {
 				t.Helper()
 				markSPEC022ReceiptVerified(t, store.db, input)
@@ -966,6 +968,15 @@ UPDATE settlement_attempt_outputs
 			seedSettlementReceiptEvidence(t, store, input)
 			insertSPEC022LedgerCredit(t, store.db, input, 700)
 			tc.mark(t, store, input)
+			if tc.expectOverlapBlockedFinality {
+				finality, found, err := store.RequestSettlementFinality(context.Background(), input.AccountScope, input.RequestID, input.ReceiptReceivedUnixMS)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !found || finality.Outcome != SettlementOutcomeOverlapBlockedTerminal || !finality.Closed || finality.TotalTokens != 0 {
+					t.Fatalf("finality=%#v found=%v, want closed overlap-blocked zero-token finality", finality, found)
+				}
+			}
 			if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits`); got != 0 {
 				t.Fatalf("payable rows=%d want 0", got)
 			}
@@ -1700,15 +1711,19 @@ func insertSPEC022LedgerCreditWithMode(t *testing.T, db *sql.DB, input Settlemen
 		accountScopeHash = SettlementAccountScopeHash(input.AccountScope)
 	}
 	ts := time.UnixMilli(input.TerminalStateTSUnixMS).UTC()
+	prompt := input.ExpectedUsage.BillableInputTokens
+	completion := input.ExpectedUsage.BillableOutputTokens
 	_, err := db.Exec(`
-INSERT INTO ledger_request_credits (
-    request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
-    status, stream, usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
-    global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
-    fault_flag, settlement_account_scope_hash, settlement_policy_mode,
-    settlement_policy_version, recovery_source, created_at_utc
-) VALUES (?, ?, ?, 'assigned', ?, ?, 200, 0, 'provider_reported', 1, 1, 1000000, ?, 10000, ?, 'none', ?, ?, ?, 'hot_path', ?)`,
+	INSERT INTO ledger_request_credits (
+	    request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
+	    status, stream, prompt_tokens, charged_prompt_tokens, provider_reported_prompt_tokens,
+	    completion_tokens, usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
+	    global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
+	    fault_flag, settlement_account_scope_hash, settlement_policy_mode,
+	    settlement_policy_version, recovery_source, created_at_utc
+	) VALUES (?, ?, ?, 'assigned', ?, ?, 200, 0, ?, ?, ?, ?, 'provider_reported', 1, 1, 1000000, ?, 10000, ?, 'none', ?, ?, ?, 'hot_path', ?)`,
 		input.RequestID, input.AttemptN, input.ProviderID, ts.Format(time.RFC3339Nano), input.RouteSnapshot.ModelID,
+		prompt, prompt, prompt, completion,
 		providerCredits, providerCredits, accountScopeHash, mode, input.RouteSnapshot.RouteSnapshotPolicyVersion, ts.Format(time.RFC3339Nano))
 	if err != nil {
 		t.Fatal(err)

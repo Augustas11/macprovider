@@ -1,12 +1,12 @@
 // Package reconcile compares the harness's per-request observations
-// against the coordinator's request_log and the gateway's usage_events.
+// against coordinator charged ledger rows and the gateway's usage_events.
 //
 // Cross-service request_id semantics:
 //   - Gateway's usage_events.request_id is the gateway-issued PK.
 //     The gateway echoes it back to the buyer via the X-Request-Id
 //     response header, so the harness records it as
 //     buyer.Result.RequestID (loadgen.go:199).
-//   - Coordinator's request_log.request_id is INTERNAL and not
+//   - Coordinator ledger_request_credits.request_id is INTERNAL and not
 //     correlatable across services. The gateway-issued id is
 //     persisted on coord side as
 //     request_log.external_request_id (phase4-coordinator/internal/
@@ -14,7 +14,8 @@
 //
 // matchPairs uses exact id correlation when available:
 //   - gateway: buyer.Result.RequestID == gateway.usage_events.request_id
-//   - coord:   buyer.Result.RequestID == coord.request_log.external_request_id
+//   - coord:   buyer.Result.RequestID == request_log.external_request_id
+//     joined through ledger_request_credits.request_id
 //
 // Falls back to fuzzy (completion_tokens, ts ± window) match when no
 // exact-id candidate is found, or when an exact-id hit is ambiguous
@@ -123,12 +124,14 @@ type Result struct {
 	// UnmatchedGatewayOKRows lists gateway settlement rows with outcome="ok"
 	// that did NOT match any harness success. These represent either
 	// orphan / leaked gateway settlements (real bugs) or concurrent
-	// background traffic from other buyers; triage decides. Fallback-
-	// outcome leftovers are EXCLUDED here because they're noisy on a
-	// live network.
-	UnmatchedGatewayOKRows []string `json:"unmatched_gateway_ok_rows,omitempty"`
+	// background traffic from other buyers; triage decides. Despite the
+	// legacy field name, fallback settlements are included too: they are
+	// still settlement rows and must not be invisible to the hard gate.
+	UnmatchedGatewayOKRows      []string                    `json:"unmatched_gateway_ok_rows,omitempty"`
+	GatewaySettlementRequestIDs []string                    `json:"gateway_settlement_request_ids,omitempty"`
+	GatewaySettlementRequests   []SettlementRequestIdentity `json:"gateway_settlement_requests,omitempty"`
 
-	// UnmatchedCoordinator2xxRows lists coord request_log rows with
+	// UnmatchedCoordinator2xxRows lists coord charged ledger rows with
 	// 2xx status that did NOT match any harness success. Symmetric with
 	// UnmatchedGatewayOKRows on the coordinator side: orphan settlement
 	// or concurrent traffic. #229 R5 security HIGH — without this signal,
@@ -137,7 +140,7 @@ type Result struct {
 	UnmatchedCoordinator2xxRows []string `json:"unmatched_coordinator_2xx_rows,omitempty"`
 
 	// MatchedCoordMissing lists matched-pair harness request_ids where the
-	// gateway row has outcome="ok" but no coordinator request_log row was
+	// gateway row has outcome="ok" but no coordinator charged ledger row was
 	// found in the window. This is suspicious for "ok" outcomes — a
 	// successfully-billed request should leave a coord trail. Fallback
 	// outcomes legitimately lack a coord row (provider died mid-stream)
@@ -234,11 +237,14 @@ type MatchedPair struct {
 	HarnessCompletionTokens     int64  `json:"harness_completion_tokens"`
 	GatewayRequestID            string `json:"gateway_request_id"`
 	GatewayAccountID            string `json:"gateway_account_id,omitempty"`
+	HarnessTotalTokens          int64  `json:"harness_total_tokens"`
+	GatewayTotalTokens          int64  `json:"gateway_total_tokens"`
 	GatewayCompletionTokens     int64  `json:"gateway_completion_tokens"`
 	GatewayOutcome              string `json:"gateway_outcome"`                // "ok" or SPEC-006 §17.7 fallback name; distinguishes coord-missing severity
 	GatewayMatchMethod          string `json:"gateway_match_method,omitempty"` // "exact_id" | "fuzzy_token_ts"
 	CoordinatorRequestID        string `json:"coordinator_request_id,omitempty"`
 	CoordinatorAccountID        string `json:"coordinator_account_id,omitempty"`
+	CoordinatorTotalTokens      int64  `json:"coordinator_total_tokens"`
 	CoordinatorCompletionTokens int64  `json:"coordinator_completion_tokens"`
 	CoordinatorMatchMethod      string `json:"coordinator_match_method,omitempty"` // "exact_id" | "fuzzy_token_ts"
 	GatewayLagMs                int64  `json:"gateway_lag_ms"`
@@ -285,6 +291,11 @@ type MatchedPair struct {
 	HarnessSSEErrorCode string `json:"harness_sse_error_code,omitempty"`
 }
 
+type SettlementRequestIdentity struct {
+	AccountID string `json:"account_id,omitempty"`
+	RequestID string `json:"request_id"`
+}
+
 // snapshotWindow returns the SQL query bounds for a reconcile run.
 // Forward-only pad: gateway settlement happens AFTER the harness
 // observes the response, so the upper bound extends `endUTC` forward
@@ -311,6 +322,10 @@ type MatchedPair struct {
 // causal divergence is moot for harness-owned rows.
 func snapshotWindow(startUTC, endUTC time.Time) (time.Time, time.Time) {
 	return startUTC, endUTC.Add(SnapshotForwardPad)
+}
+
+func sqliteTimeText(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05.000000000Z")
 }
 
 // Run pulls coordinator + gateway SQLite (locally or via SSH snapshot)
@@ -387,6 +402,13 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 	}
 	r.GatewayRows = len(gwRows)
 	for _, g := range gwRows {
+		if isSettlementComplete(g.Outcome) {
+			r.GatewaySettlementRequestIDs = append(r.GatewaySettlementRequestIDs, g.RequestID)
+			r.GatewaySettlementRequests = append(r.GatewaySettlementRequests, SettlementRequestIdentity{
+				AccountID: g.AccountID,
+				RequestID: g.RequestID,
+			})
+		}
 		switch {
 		case g.Outcome == "ok":
 			r.GatewayRowsOK++
@@ -403,6 +425,7 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 	}
 
 	r.DriftBasis = "per_matched_pair_v2"
+	seedHarnessAccountIDFromGatewaySettlements(r, results, gwRows)
 	leftoverGw, leftoverCoord := matchPairs(r, results, gwRows, coordRows)
 	computePerPairDrift(r)
 	collectUnmatchedGatewayOK(r, leftoverGw)
@@ -451,32 +474,13 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 // signal.
 func computePerPairDrift(r *Result) {
 	for _, p := range r.MatchedSuccesses {
-		// Gateway vs Harness — fold the delta into the headline overbill
-		// signal for gateway "ok" pairs OR for fallback pairs where the
-		// buyer did NOT see the gateway's SSE error envelope (#232).
-		//
-		// SPEC-006 §17.7 fallback outcomes (stream_truncated etc.) have a
-		// known asymmetry: the gateway records the bytes it actually emitted
-		// before the upstream error, while the harness's SSE parser
-		// undercounts (F-8). The #229 R5 fix suppressed fallback pairs to
-		// stop false-failing I1 on the production #226 shape. But suppressing
-		// every fallback pair makes the gateway outcome label a trust gate:
-		// a buggy or attacker-controlled gateway that labels a real overbill
-		// as `stream_truncated` would hide it from I1 (#229 R6 security HIGH,
-		// tracked as #232).
-		//
-		// Resolution (#232): use the buyer's own observation as a
-		// corroboration check. fallbackOverbillSuppressed() returns true
-		// only when the buyer ALSO saw the gateway's terminal SSE error
-		// envelope (writeSSEError on every fallback path). If the gateway
-		// claims a fallback but the buyer never received an error envelope,
-		// the truncation is uncorroborated and the overbill is fed into I1
-		// — flagging exactly the trust-gap scenario the audit raised. See
-		// the helper docstring for why SawTerminator alone was the wrong
-		// anchor (#232 R1 SEC HIGH).
-		dh := p.GatewayCompletionTokens - p.HarnessCompletionTokens
+		// Gateway vs Harness — fold every positive buyer-visible delta into
+		// the headline overbill signal. Fallback/SSE-error corroboration can
+		// explain why a stream ended, but it must not hide a gateway row that
+		// charged more completion tokens than the harness observed.
+		dh := pairGatewayTokens(p) - pairHarnessTokens(p)
 		r.NetGatewayMinusHarnessTokens += dh
-		if dh > 0 && !fallbackOverbillSuppressed(p) {
+		if dh > 0 {
 			r.GatewayOverbillVsHarnessTokens += dh
 			r.OverbilledPairs = append(r.OverbilledPairs, p.HarnessRequestID)
 		}
@@ -505,9 +509,9 @@ func computePerPairDrift(r *Result) {
 		// gateway settled cleanly but no coord trail), surface separately
 		// in MatchedCoordMissing rather than dropping the signal.
 		if p.CoordinatorRequestID != "" {
-			dc := p.GatewayCompletionTokens - p.CoordinatorCompletionTokens
+			dc := pairGatewayTokens(p) - pairCoordinatorTokens(p)
 			r.NetGatewayMinusCoordinatorTokens += dc
-			if dc > 0 && !fallbackOverbillSuppressed(p) {
+			if dc > 0 {
 				r.GatewayOverbillVsCoordinatorTokens += dc
 			}
 			if dc != 0 && !fallbackOverbillSuppressed(p) {
@@ -522,6 +526,49 @@ func computePerPairDrift(r *Result) {
 			r.MatchedCoordMissing = append(r.MatchedCoordMissing, p.HarnessRequestID)
 		}
 	}
+}
+
+func harnessTotalTokens(h buyer.Result) int64 {
+	total := h.PromptTokensReported + h.CompletionTokensReceived
+	if total > 0 {
+		return total
+	}
+	return h.CompletionTokensReceived
+}
+
+func gatewayTotalTokens(g gwRow) int64 {
+	if g.TotalTokens > 0 {
+		return g.TotalTokens
+	}
+	return g.PromptTokens + g.CompletionTokens
+}
+
+func coordinatorTotalTokens(c coordRow) int64 {
+	if c.TotalTokens > 0 {
+		return c.TotalTokens
+	}
+	return c.PromptTokens + c.CompletionTokens
+}
+
+func pairHarnessTokens(p MatchedPair) int64 {
+	if p.HarnessTotalTokens > 0 {
+		return p.HarnessTotalTokens
+	}
+	return p.HarnessCompletionTokens
+}
+
+func pairGatewayTokens(p MatchedPair) int64 {
+	if p.GatewayTotalTokens > 0 {
+		return p.GatewayTotalTokens
+	}
+	return p.GatewayCompletionTokens
+}
+
+func pairCoordinatorTokens(p MatchedPair) int64 {
+	if p.CoordinatorTotalTokens > 0 {
+		return p.CoordinatorTotalTokens
+	}
+	return p.CoordinatorCompletionTokens
 }
 
 // fallbackOverbillSuppressed returns true when the per-pair drift should
@@ -605,13 +652,12 @@ func sseErrorCorroboratesOutcome(code, outcome string) bool {
 	return false
 }
 
-// collectUnmatchedGatewayOK lists gateway rows with outcome="ok" that
+// collectUnmatchedGatewayOK lists complete gateway settlement rows that
 // matchPairs did NOT consume into a MatchedSuccesses pair. These are
 // either orphan gateway settlements (real bugs — gateway billed for a
 // request the harness never fired) or concurrent background traffic
 // from other buyers. Triage decides. Fallback-outcome leftovers are
-// EXCLUDED because they are noisy on a live network where streams can
-// truncate without involving the harness.
+// included because fallback settlements are still billing records.
 //
 // IMPORTANT: this takes the leftover gwPool returned by matchPairs,
 // not the original gwRows. The pool is identity-tracked by slice
@@ -619,7 +665,7 @@ func sseErrorCorroboratesOutcome(code, outcome string) bool {
 // (account_id, request_id) row consumed (#229 R3 security HIGH).
 func collectUnmatchedGatewayOK(r *Result, leftoverGw []gwRow) {
 	for _, g := range leftoverGw {
-		if g.Outcome != "ok" {
+		if !isSettlementComplete(g.Outcome) {
 			continue
 		}
 		r.UnmatchedGatewayOKRows = append(r.UnmatchedGatewayOKRows, g.RequestID)
@@ -702,6 +748,35 @@ func matchPairs(r *Result, results []buyer.Result, gwRows []gwRow, coordRows []c
 	return gwPool, coordPool
 }
 
+func seedHarnessAccountIDFromGatewaySettlements(r *Result, results []buyer.Result, gwRows []gwRow) {
+	if r == nil || !r.GatewayHasAccountID || r.HarnessAccountID != "" {
+		return
+	}
+	ids := make(map[string]bool, len(results))
+	for _, h := range results {
+		if h.RequestID != "" {
+			ids[h.RequestID] = true
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	accounts := map[string]bool{}
+	for _, g := range gwRows {
+		if !ids[g.RequestID] || !isSettlementComplete(g.Outcome) || g.AccountID == "" {
+			continue
+		}
+		accounts[g.AccountID] = true
+	}
+	if len(accounts) != 1 {
+		return
+	}
+	for accountID := range accounts {
+		r.HarnessAccountID = accountID
+		return
+	}
+}
+
 // exactPickStatus distinguishes "no exact candidate" from "ambiguous"
 // so the caller can decide between fuzzy fallback and skipping the row
 // with a hard signal.
@@ -746,12 +821,14 @@ func matchExactPass(r *Result, ordered []buyer.Result, gwPool *[]gwRow, coordPoo
 		pair := MatchedPair{
 			HarnessRequestID:        h.RequestID,
 			HarnessCompletionTokens: h.CompletionTokensReceived,
+			HarnessTotalTokens:      harnessTotalTokens(h),
 			HarnessSawSSEErrorEvent: h.SawSSEErrorEvent,
 			HarnessSSEErrorCode:     h.SSEErrorCode,
 			GatewayMatchMethod:      methodExactID,
 			GatewayRequestID:        g.RequestID,
 			GatewayAccountID:        g.AccountID,
 			GatewayCompletionTokens: g.CompletionTokens,
+			GatewayTotalTokens:      gatewayTotalTokens(g),
 			GatewayOutcome:          g.Outcome,
 			GatewayLagMs:            g.CreatedAt.Sub(h.StartUTC).Milliseconds(),
 		}
@@ -786,12 +863,14 @@ func matchFuzzyPass(r *Result, deferred []buyer.Result, gwPool *[]gwRow, coordPo
 		pair := MatchedPair{
 			HarnessRequestID:        h.RequestID,
 			HarnessCompletionTokens: h.CompletionTokensReceived,
+			HarnessTotalTokens:      harnessTotalTokens(h),
 			HarnessSawSSEErrorEvent: h.SawSSEErrorEvent,
 			HarnessSSEErrorCode:     h.SSEErrorCode,
 			GatewayMatchMethod:      methodFuzzy,
 			GatewayRequestID:        g.RequestID,
 			GatewayAccountID:        g.AccountID,
 			GatewayCompletionTokens: g.CompletionTokens,
+			GatewayTotalTokens:      gatewayTotalTokens(g),
 			GatewayOutcome:          g.Outcome,
 			GatewayLagMs:            g.CreatedAt.Sub(h.StartUTC).Milliseconds(),
 		}
@@ -823,6 +902,7 @@ func attachCoord(r *Result, pair *MatchedPair, h buyer.Result, coordPool *[]coor
 		pair.CoordinatorRequestID = c.RequestID
 		pair.CoordinatorAccountID = c.AccountID
 		pair.CoordinatorCompletionTokens = c.CompletionTokens
+		pair.CoordinatorTotalTokens = coordinatorTotalTokens(c)
 		pair.CoordinatorMatchMethod = methodExactID
 		*coordPool = append((*coordPool)[:coordIdx], (*coordPool)[coordIdx+1:]...)
 		return
@@ -838,6 +918,7 @@ func attachCoord(r *Result, pair *MatchedPair, h buyer.Result, coordPool *[]coor
 		pair.CoordinatorRequestID = c.RequestID
 		pair.CoordinatorAccountID = c.AccountID
 		pair.CoordinatorCompletionTokens = c.CompletionTokens
+		pair.CoordinatorTotalTokens = coordinatorTotalTokens(c)
 		pair.CoordinatorMatchMethod = methodFuzzy
 		*coordPool = append((*coordPool)[:fuzzyIdx], (*coordPool)[fuzzyIdx+1:]...)
 	}
@@ -1058,6 +1139,8 @@ func isGatewayOKOutcome(outcome string) bool {
 func isSettlementComplete(outcome string) bool {
 	switch outcome {
 	case "ok",
+		"spec022_verified",
+		"unverified_streaming",
 		"stream_truncated",
 		"stream_malformed",
 		"stream_output_exceeded",
@@ -1092,7 +1175,9 @@ type coordRow struct {
 	// as a noop on the account constraint.
 	AccountID        string
 	Model            string
+	PromptTokens     int64
 	CompletionTokens int64
+	TotalTokens      int64
 	Status           int
 	TsUTC            time.Time
 }
@@ -1105,13 +1190,15 @@ type gwRow struct {
 	// string means the snapshot pre-dates the column (legacy / partial
 	// migration), in which case the matcher treats it as a noop.
 	AccountID        string
+	PromptTokens     int64
 	CompletionTokens int64
+	TotalTokens      int64
 	Outcome          string
 	CreatedAt        time.Time
 }
 
 // queryCoordinator returns coordinator rows + a schema flag reporting
-// whether the request_log.account_id column exists in this snapshot.
+// whether coordinator account_id metadata exists in this snapshot.
 // Callers thread the flag through the matcher: column present → blank
 // per-row account_ids are real data (NULL = unknown buyer; matcher
 // skips), column absent → constraint is a global noop.
@@ -1121,6 +1208,17 @@ func queryCoordinator(path string, start, end time.Time) ([]coordRow, bool, erro
 		return nil, false, err
 	}
 	defer db.Close()
+	hasLedger, err := tableExists(db, "ledger_request_credits")
+	if err != nil {
+		return nil, false, fmt.Errorf("probe ledger_request_credits: %w", err)
+	}
+	if hasLedger {
+		return queryCoordinatorLedger(db, start, end)
+	}
+	return queryCoordinatorRequestLog(db, start, end)
+}
+
+func queryCoordinatorRequestLog(db *sql.DB, start, end time.Time) ([]coordRow, bool, error) {
 	// SELECT external_request_id and account_id when the columns exist.
 	// Schema flags are returned to the matcher so it can distinguish
 	// "column absent globally" (legacy snapshot → relax constraint)
@@ -1142,11 +1240,14 @@ func queryCoordinator(path string, start, end time.Time) ([]coordRow, bool, erro
 	if hasAcct {
 		acctExpr = "COALESCE(account_id, '')"
 	}
+	promptExpr, completionExpr, totalExpr, err := requestLogTokenExprs(db)
+	if err != nil {
+		return nil, false, err
+	}
 	rows, err := db.Query(fmt.Sprintf(`
-		SELECT request_id, %s, %s, model, COALESCE(completion_tokens, 0), status, ts_utc
-		FROM request_log
-		WHERE ts_utc >= ? AND ts_utc <= ?
-	`, extExpr, acctExpr), start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
+				SELECT request_id, %s, %s, model, %s, %s, %s, status, ts_utc
+				FROM request_log
+			`, extExpr, acctExpr, promptExpr, completionExpr, totalExpr))
 	if err != nil {
 		return nil, false, err
 	}
@@ -1155,10 +1256,75 @@ func queryCoordinator(path string, start, end time.Time) ([]coordRow, bool, erro
 	for rows.Next() {
 		var c coordRow
 		var ts string
-		if err := rows.Scan(&c.RequestID, &c.ExternalRequestID, &c.AccountID, &c.Model, &c.CompletionTokens, &c.Status, &ts); err != nil {
+		if err := rows.Scan(&c.RequestID, &c.ExternalRequestID, &c.AccountID, &c.Model, &c.PromptTokens, &c.CompletionTokens, &c.TotalTokens, &c.Status, &ts); err != nil {
 			return nil, false, err
 		}
 		c.TsUTC, _ = time.Parse(time.RFC3339Nano, ts)
+		if c.TsUTC.Before(start) || c.TsUTC.After(end) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, hasAcct, rows.Err()
+}
+
+func queryCoordinatorLedger(db *sql.DB, start, end time.Time) ([]coordRow, bool, error) {
+	hasRequestLog, err := tableExists(db, "request_log")
+	if err != nil {
+		return nil, false, fmt.Errorf("probe request_log: %w", err)
+	}
+	hasExt, hasAcct := false, false
+	if hasRequestLog {
+		hasExt, err = columnExists(db, "request_log", "external_request_id")
+		if err != nil {
+			return nil, false, fmt.Errorf("probe request_log.external_request_id: %w", err)
+		}
+		hasAcct, err = columnExists(db, "request_log", "account_id")
+		if err != nil {
+			return nil, false, fmt.Errorf("probe request_log.account_id: %w", err)
+		}
+	}
+	joinWhere := "rl.request_id = lrc.request_id"
+	if hasRequestLog {
+		hasAttempt, err := columnExists(db, "request_log", "attempt_n")
+		if err != nil {
+			return nil, false, fmt.Errorf("probe request_log.attempt_n: %w", err)
+		}
+		if hasAttempt {
+			joinWhere += " AND COALESCE(rl.attempt_n, lrc.attempt_n) = lrc.attempt_n"
+		}
+	}
+	extExpr := "''"
+	if hasRequestLog && hasExt {
+		extExpr = fmt.Sprintf("(SELECT COALESCE(rl.external_request_id, '') FROM request_log rl WHERE %s ORDER BY rl.rowid LIMIT 1)", joinWhere)
+	}
+	acctExpr := "''"
+	if hasRequestLog && hasAcct {
+		acctExpr = fmt.Sprintf("(SELECT COALESCE(rl.account_id, '') FROM request_log rl WHERE %s ORDER BY rl.rowid LIMIT 1)", joinWhere)
+	}
+	promptExpr, completionExpr, totalExpr, err := ledgerTokenExprs(db)
+	if err != nil {
+		return nil, false, err
+	}
+	rows, err := db.Query(fmt.Sprintf(`
+				SELECT lrc.request_id, %s, %s, lrc.model, %s, %s, %s, lrc.status, lrc.ts_utc
+				FROM ledger_request_credits lrc
+			`, extExpr, acctExpr, promptExpr, completionExpr, totalExpr))
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	var out []coordRow
+	for rows.Next() {
+		var c coordRow
+		var ts string
+		if err := rows.Scan(&c.RequestID, &c.ExternalRequestID, &c.AccountID, &c.Model, &c.PromptTokens, &c.CompletionTokens, &c.TotalTokens, &c.Status, &ts); err != nil {
+			return nil, false, err
+		}
+		c.TsUTC, _ = time.Parse(time.RFC3339Nano, ts)
+		if c.TsUTC.Before(start) || c.TsUTC.After(end) {
+			continue
+		}
 		out = append(out, c)
 	}
 	return out, hasAcct, rows.Err()
@@ -1194,6 +1360,91 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 	return false, rows.Err()
 }
 
+func tableExists(db *sql.DB, table string) (bool, error) {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func requestLogTokenExprs(db *sql.DB) (string, string, string, error) {
+	hasPrompt, err := columnExists(db, "request_log", "prompt_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe request_log.prompt_tokens: %w", err)
+	}
+	hasCompletion, err := columnExists(db, "request_log", "completion_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe request_log.completion_tokens: %w", err)
+	}
+	promptExpr := "0"
+	if hasPrompt {
+		promptExpr = "COALESCE(prompt_tokens, 0)"
+	}
+	completionExpr := "0"
+	if hasCompletion {
+		completionExpr = "COALESCE(completion_tokens, 0)"
+	}
+	return promptExpr, completionExpr, promptExpr + " + " + completionExpr, nil
+}
+
+func ledgerTokenExprs(db *sql.DB) (string, string, string, error) {
+	hasChargedPrompt, err := columnExists(db, "ledger_request_credits", "charged_prompt_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe ledger_request_credits.charged_prompt_tokens: %w", err)
+	}
+	hasPrompt, err := columnExists(db, "ledger_request_credits", "prompt_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe ledger_request_credits.prompt_tokens: %w", err)
+	}
+	hasCompletion, err := columnExists(db, "ledger_request_credits", "completion_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe ledger_request_credits.completion_tokens: %w", err)
+	}
+	promptExpr := "0"
+	switch {
+	case hasChargedPrompt && hasPrompt:
+		promptExpr = "COALESCE(charged_prompt_tokens, prompt_tokens, 0)"
+	case hasChargedPrompt:
+		promptExpr = "COALESCE(charged_prompt_tokens, 0)"
+	case hasPrompt:
+		promptExpr = "COALESCE(prompt_tokens, 0)"
+	}
+	completionExpr := "0"
+	if hasCompletion {
+		completionExpr = "COALESCE(completion_tokens, 0)"
+	}
+	return promptExpr, completionExpr, promptExpr + " + " + completionExpr, nil
+}
+
+func gatewayTokenExprs(db *sql.DB) (string, string, string, error) {
+	hasPrompt, err := columnExists(db, "usage_events", "prompt_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe usage_events.prompt_tokens: %w", err)
+	}
+	hasCompletion, err := columnExists(db, "usage_events", "completion_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe usage_events.completion_tokens: %w", err)
+	}
+	hasTotal, err := columnExists(db, "usage_events", "total_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe usage_events.total_tokens: %w", err)
+	}
+	promptExpr := "0"
+	if hasPrompt {
+		promptExpr = "COALESCE(prompt_tokens, 0)"
+	}
+	completionExpr := "0"
+	if hasCompletion {
+		completionExpr = "COALESCE(completion_tokens, 0)"
+	}
+	totalExpr := promptExpr + " + " + completionExpr
+	if hasTotal {
+		totalExpr = "COALESCE(total_tokens, " + totalExpr + ")"
+	}
+	return promptExpr, completionExpr, totalExpr, nil
+}
+
 // queryGateway returns gateway usage_events rows + a schema flag
 // reporting whether the usage_events.account_id column exists in the
 // snapshot. Same shape as queryCoordinator.
@@ -1215,11 +1466,14 @@ func queryGateway(path string, start, end time.Time) ([]gwRow, bool, error) {
 	if hasAcct {
 		acctExpr = "COALESCE(account_id, '')"
 	}
+	promptExpr, completionExpr, totalExpr, err := gatewayTokenExprs(db)
+	if err != nil {
+		return nil, false, err
+	}
 	rows, err := db.Query(fmt.Sprintf(`
-		SELECT request_id, %s, completion_tokens, outcome, created_at
-		FROM usage_events
-		WHERE created_at >= ? AND created_at <= ?
-	`, acctExpr), start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
+				SELECT request_id, %s, %s, %s, %s, outcome, created_at
+				FROM usage_events
+			`, acctExpr, promptExpr, completionExpr, totalExpr))
 	if err != nil {
 		return nil, false, err
 	}
@@ -1228,10 +1482,13 @@ func queryGateway(path string, start, end time.Time) ([]gwRow, bool, error) {
 	for rows.Next() {
 		var g gwRow
 		var ts string
-		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.CompletionTokens, &g.Outcome, &ts); err != nil {
+		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.PromptTokens, &g.CompletionTokens, &g.TotalTokens, &g.Outcome, &ts); err != nil {
 			return nil, false, err
 		}
 		g.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
+		if g.CreatedAt.Before(start) || g.CreatedAt.After(end) {
+			continue
+		}
 		out = append(out, g)
 	}
 	return out, hasAcct, rows.Err()
@@ -1277,12 +1534,16 @@ func queryGatewayByIDs(path string, ids []string) ([]gwRow, error) {
 	if hasAcct {
 		acctExpr = "COALESCE(account_id, '')"
 	}
+	promptExpr, completionExpr, totalExpr, err := gatewayTokenExprs(db)
+	if err != nil {
+		return nil, err
+	}
 	placeholders, args := inClause(ids)
 	rows, err := db.Query(fmt.Sprintf(`
-		SELECT request_id, %s, completion_tokens, outcome, created_at
-		FROM usage_events
-		WHERE request_id IN (%s)
-	`, acctExpr, placeholders), args...)
+				SELECT request_id, %s, %s, %s, %s, outcome, created_at
+				FROM usage_events
+			WHERE request_id IN (%s)
+		`, acctExpr, promptExpr, completionExpr, totalExpr, placeholders), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1291,7 +1552,7 @@ func queryGatewayByIDs(path string, ids []string) ([]gwRow, error) {
 	for rows.Next() {
 		var g gwRow
 		var ts string
-		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.CompletionTokens, &g.Outcome, &ts); err != nil {
+		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.PromptTokens, &g.CompletionTokens, &g.TotalTokens, &g.Outcome, &ts); err != nil {
 			return nil, err
 		}
 		g.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
@@ -1314,6 +1575,17 @@ func queryCoordinatorByIDs(path string, ids []string) ([]coordRow, error) {
 		return nil, err
 	}
 	defer db.Close()
+	hasLedger, err := tableExists(db, "ledger_request_credits")
+	if err != nil {
+		return nil, fmt.Errorf("probe ledger_request_credits: %w", err)
+	}
+	if hasLedger {
+		return queryCoordinatorLedgerByIDs(db, ids)
+	}
+	return queryCoordinatorRequestLogByIDs(db, ids)
+}
+
+func queryCoordinatorRequestLogByIDs(db *sql.DB, ids []string) ([]coordRow, error) {
 	hasExt, err := columnExists(db, "request_log", "external_request_id")
 	if err != nil {
 		return nil, fmt.Errorf("probe request_log.external_request_id: %w", err)
@@ -1329,12 +1601,16 @@ func queryCoordinatorByIDs(path string, ids []string) ([]coordRow, error) {
 	if hasAcct {
 		acctExpr = "COALESCE(account_id, '')"
 	}
+	promptExpr, completionExpr, totalExpr, err := requestLogTokenExprs(db)
+	if err != nil {
+		return nil, err
+	}
 	placeholders, args := inClause(ids)
 	rows, err := db.Query(fmt.Sprintf(`
-		SELECT request_id, COALESCE(external_request_id, ''), %s, model, COALESCE(completion_tokens, 0), status, ts_utc
-		FROM request_log
-		WHERE external_request_id IN (%s)
-	`, acctExpr, placeholders), args...)
+			SELECT request_id, COALESCE(external_request_id, ''), %s, model, %s, %s, %s, status, ts_utc
+			FROM request_log
+			WHERE external_request_id IN (%s)
+		`, acctExpr, promptExpr, completionExpr, totalExpr, placeholders), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1343,7 +1619,70 @@ func queryCoordinatorByIDs(path string, ids []string) ([]coordRow, error) {
 	for rows.Next() {
 		var c coordRow
 		var ts string
-		if err := rows.Scan(&c.RequestID, &c.ExternalRequestID, &c.AccountID, &c.Model, &c.CompletionTokens, &c.Status, &ts); err != nil {
+		if err := rows.Scan(&c.RequestID, &c.ExternalRequestID, &c.AccountID, &c.Model, &c.PromptTokens, &c.CompletionTokens, &c.TotalTokens, &c.Status, &ts); err != nil {
+			return nil, err
+		}
+		c.TsUTC, _ = time.Parse(time.RFC3339Nano, ts)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func queryCoordinatorLedgerByIDs(db *sql.DB, ids []string) ([]coordRow, error) {
+	hasRequestLog, err := tableExists(db, "request_log")
+	if err != nil {
+		return nil, fmt.Errorf("probe request_log: %w", err)
+	}
+	if !hasRequestLog {
+		return nil, nil
+	}
+	hasExt, err := columnExists(db, "request_log", "external_request_id")
+	if err != nil {
+		return nil, fmt.Errorf("probe request_log.external_request_id: %w", err)
+	}
+	if !hasExt {
+		return nil, nil
+	}
+	hasAcct, err := columnExists(db, "request_log", "account_id")
+	if err != nil {
+		return nil, fmt.Errorf("probe request_log.account_id: %w", err)
+	}
+	hasAttempt, err := columnExists(db, "request_log", "attempt_n")
+	if err != nil {
+		return nil, fmt.Errorf("probe request_log.attempt_n: %w", err)
+	}
+	joinWhere := "rl.request_id = lrc.request_id"
+	if hasAttempt {
+		joinWhere += " AND COALESCE(rl.attempt_n, lrc.attempt_n) = lrc.attempt_n"
+	}
+	acctExpr := "''"
+	if hasAcct {
+		acctExpr = fmt.Sprintf("(SELECT COALESCE(rl.account_id, '') FROM request_log rl WHERE %s ORDER BY rl.rowid LIMIT 1)", joinWhere)
+	}
+	promptExpr, completionExpr, totalExpr, err := ledgerTokenExprs(db)
+	if err != nil {
+		return nil, err
+	}
+	placeholders, args := inClause(ids)
+	rows, err := db.Query(fmt.Sprintf(`
+			SELECT lrc.request_id,
+			       (SELECT COALESCE(rl.external_request_id, '') FROM request_log rl WHERE %s ORDER BY rl.rowid LIMIT 1),
+			       %s, lrc.model, %s, %s, %s, lrc.status, lrc.ts_utc
+			FROM ledger_request_credits lrc
+			WHERE EXISTS (
+				SELECT 1 FROM request_log rl
+				WHERE %s AND rl.external_request_id IN (%s)
+			)
+		`, joinWhere, acctExpr, promptExpr, completionExpr, totalExpr, joinWhere, placeholders), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []coordRow
+	for rows.Next() {
+		var c coordRow
+		var ts string
+		if err := rows.Scan(&c.RequestID, &c.ExternalRequestID, &c.AccountID, &c.Model, &c.PromptTokens, &c.CompletionTokens, &c.TotalTokens, &c.Status, &ts); err != nil {
 			return nil, err
 		}
 		c.TsUTC, _ = time.Parse(time.RFC3339Nano, ts)
