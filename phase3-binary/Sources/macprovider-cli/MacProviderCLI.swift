@@ -65,8 +65,11 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "CLI-side cooldown state file. Overrides MACPROVIDER_SWITCH_STATE_PATH and config switch_state_path. Default $HOME/Library/Application Support/macprovider-cli/last-switch.ts. Cooldown soft guard lands in Phase 1E.")
     var switchStatePath: String?
 
-    @Option(help: "Provider authentication token (SPEC-001 / XSEC-1). When set, the binary sends 'Authorization: Bearer <token>' on the coordinator WS connect. Required when the coordinator runs with auth.require_provider_tokens=true. Overrides MACPROVIDER_PROVIDER_TOKEN and config key provider_token. Treat as a secret — the binary never logs it; chmod 0600 the config file containing it.")
+    @Option(name: [.customLong("provider-token"), .customLong("token")], help: "Deprecated inline provider token. This is rejected because argv is visible to same-user process inspection; use MACPROVIDER_PROVIDER_TOKEN, provider_token in a 0600 config file, or --token-file.")
     var providerToken: String?
+
+    @Option(help: "Read provider authentication token from a 0600 file. Overrides MACPROVIDER_PROVIDER_TOKEN and config key provider_token without exposing the token in process arguments.")
+    var tokenFile: String?
 
     @Option(help: "Marks this binary as spawned by an outer manager (SPEC-025). Setting this to 'malibu-app' disables the CLI's own AutoUpdater so Sparkle in Malibu.app owns whole-bundle updates. Overrides MACPROVIDER_MANAGED_BY and config key managed_by. Unset for the standalone CLI track.")
     var managedBy: String?
@@ -310,6 +313,7 @@ struct ServeCommand: AsyncParsableCommand {
                 ctlSocketPath: ctlSocketPath,
                 switchStatePath: switchStatePath,
                 providerToken: providerToken,
+                providerTokenFile: tokenFile,
                 managedBy: managedBy,
                 kvBits: kvBits,
                 maxContext: maxContext,

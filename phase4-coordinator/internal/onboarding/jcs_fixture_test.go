@@ -59,7 +59,7 @@ func TestSpec026RegisterJCSFixtureParity(t *testing.T) {
 		"app_attest_present_valid_shape",
 		"unicode_hardware_chip",
 		"jcs_only_nested_object_variant",
-		"signature_stripped_current_token_variant",
+		"signature_stripped_register_body_variant",
 	} {
 		if !seen[id] {
 			t.Fatalf("missing required fixture row %q", id)

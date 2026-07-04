@@ -199,11 +199,66 @@ final class ClaimCommandTests: XCTestCase {
         XCTAssertTrue(command is ClaimCommand)
     }
 
+    func testClaimRefreshRedirectGuardStripsAuthorizationOnCrossOriginHTTPSRedirect() throws {
+        let redirected = decideRedirect(
+            originalURL: URL(string: "https://coordinator.example/v1/provider/claim/refresh")!,
+            redirectTo: URL(string: "https://other.example/v1/provider/claim/refresh")!
+        )
+
+        XCTAssertEqual(redirected?.url?.host, "other.example")
+        XCTAssertNil(redirected?.value(forHTTPHeaderField: "Authorization"))
+    }
+
+    func testClaimRefreshRedirectGuardStripsAuthorizationOnSameHostDifferentPortRedirect() throws {
+        let redirected = decideRedirect(
+            originalURL: URL(string: "https://coordinator.example/v1/provider/claim/refresh")!,
+            redirectTo: URL(string: "https://coordinator.example:4443/v1/provider/claim/refresh")!
+        )
+
+        XCTAssertEqual(redirected?.url?.port, 4443)
+        XCTAssertNil(redirected?.value(forHTTPHeaderField: "Authorization"))
+    }
+
+    func testClaimRefreshRedirectGuardRejectsNonHTTPSRedirect() throws {
+        let redirected = decideRedirect(
+            originalURL: URL(string: "https://coordinator.example/v1/provider/claim/refresh")!,
+            redirectTo: URL(string: "http://coordinator.example/v1/provider/claim/refresh")!
+        )
+
+        XCTAssertNil(redirected)
+    }
+
     private func refreshCountingRefresher(_ calls: LockedBox<Int>) -> ClaimRefresher {
         ClaimRefresher { _ in
             calls.update { $0 += 1 }
             throw ClaimRefreshError.httpStatus(500)
         }
+    }
+
+    private func decideRedirect(originalURL: URL, redirectTo newURL: URL) -> URLRequest? {
+        let session = URLSession.shared
+        let task = session.dataTask(with: originalURL)
+        var request = URLRequest(url: newURL)
+        request.setValue("Bearer provider-token", forHTTPHeaderField: "Authorization")
+        let response = HTTPURLResponse(
+            url: originalURL,
+            statusCode: 302,
+            httpVersion: nil,
+            headerFields: ["Location": newURL.absoluteString]
+        )!
+        let waiter = expectation(description: "redirect completion")
+        var redirected: URLRequest?
+        ClaimRefreshRedirectGuard().urlSession(
+            session,
+            task: task,
+            willPerformHTTPRedirection: response,
+            newRequest: request
+        ) { result in
+            redirected = result
+            waiter.fulfill()
+        }
+        wait(for: [waiter], timeout: 1)
+        return redirected
     }
 
     private func makeFixture(prefix: String) throws -> ClaimFixture {

@@ -824,7 +824,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	for _, p := range providers {
 		switch p.State {
 		case pool.StateReady:
-			if p.AuthState != pool.AuthBearerlessDuplicate && len(p.PendingReceiptPubkey) == 0 {
+			if p.CapacityEligible() {
 				resp.PoolReady++
 			}
 		case pool.StateDegraded, pool.StateBusy:
@@ -1281,7 +1281,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		if pillarAActive && !p.RoutingEligible() {
 			continue
 		}
-		if !pillarAActive && (p.State != pool.StateReady || p.AuthState == pool.AuthBearerlessDuplicate || len(p.PendingReceiptPubkey) > 0) {
+		if !pillarAActive && (p.State != pool.StateReady || !p.CapacityEligible()) {
 			continue
 		}
 		excluded := tier2Active && s.tier2ProviderExcludedForConfig(p, cfg)
@@ -5520,7 +5520,7 @@ func validatePinnedProvider(p pool.Provider, model string, estimatedTokens int, 
 // For routing decisions, use pool.Provider.RoutingEligible() — that is the
 // single authority on whether a provider may receive traffic.
 func hasAvailableSlot(p pool.Provider) bool {
-	if p.AuthState == pool.AuthBearerlessDuplicate {
+	if !p.CapacityEligible() {
 		return false
 	}
 	return p.State == pool.StateReady && p.SlotsFree > 0

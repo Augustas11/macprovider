@@ -935,8 +935,23 @@ func buyerHandlerWithOptionalRegister(base http.Handler, enabled bool, register 
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/providers/register", register)
+	mux.HandleFunc("/v1/provider/wallet", appTrackWalletNotImplementedHandler)
 	mux.Handle("/", base)
 	return mux
+}
+
+func appTrackWalletNotImplementedHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = w.Write([]byte(`{"error":"method_not_allowed"}` + "\n"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNotImplemented)
+	_, _ = w.Write([]byte(`{"error":"wallet_change_requires_spec_027"}` + "\n"))
 }
 
 func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, billingStores ...*billing.Store) {

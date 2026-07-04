@@ -20,17 +20,11 @@ type RecoveryReason string
 type HashStatus string
 type AttestationStatus string
 
-// AuthState records HOW a provider session was admitted. Added in
-// SPEC-003 v0.8.3 fix-pass-3 (codex security audit on PR #69 MAJOR-1)
-// so the post-PR-#69 admit-tokenless-on-duplicate behavior can be
-// distinguished from a legitimate self-mint or Bearer-validated
-// session for routing, billing, and operator audit purposes. The zero
-// value (empty string) is intentionally "no special marking" so
-// pre-FR-C9 providers and pinned-tier admissions don't need to set it
-// explicitly; the registry, routing, and billing all treat empty +
-// AuthBearerValidated + AuthSelfMinted as routable. Only
-// AuthBearerlessDuplicate triggers the eviction-defense + non-routable
-// gates.
+// AuthState records HOW a provider session was admitted. The zero value
+// (empty string) is intentionally "no special marking" so pre-FR-C9 providers
+// and pinned-tier admissions don't need to set it explicitly. Bearer-validated
+// sessions are trusted for routing. Self-minted sessions remain visible but are
+// not money-path eligible until they return with a credential proof.
 type AuthState string
 
 const (
@@ -67,11 +61,16 @@ const (
 	// auth.Store.ValidateToken matched. Post-flag-flip this is the
 	// only admitted state.
 	AuthBearerValidated AuthState = "bearer_validated"
-	// AuthSelfMinted — connect arrived tokenless and the coordinator
-	// minted a fresh provider_tokens row + returned the cleartext in
-	// the ack frame (FR-C9.1). Provider can persist it and reconnect
-	// authenticated next time.
+	// AuthSelfMinted — connect arrived tokenless and the coordinator minted a
+	// fresh provider_tokens row + returned the cleartext in the ack frame.
+	// Provider can persist it and reconnect authenticated next time. The
+	// current tokenless session is not routing or payout eligible.
 	AuthSelfMinted AuthState = "self_minted"
+	// AuthSelfMintedVerified is reserved for explicit proof-of-ownership
+	// challenge completion. Today, the production path reaches equivalent
+	// trust by reconnecting with the minted Bearer and becoming
+	// AuthBearerValidated.
+	AuthSelfMintedVerified AuthState = "self_minted_verified"
 	// AuthBearerlessDuplicate — connect arrived tokenless for a
 	// provider_id that already has an unrevoked token row in
 	// provider_tokens (FR-C9.4 v0.8.3). The connection is admitted
@@ -215,13 +214,27 @@ type ReceiptPubkeyPrevious struct {
 // health surfaces separately exclude pending receipt-key publication while
 // preserving ready providers that are temporarily out of free slots.
 func (p Provider) RoutingEligible() bool {
-	if p.AuthState == AuthBearerlessDuplicate {
+	if p.AuthState == AuthBearerlessDuplicate || p.AuthState == AuthSelfMinted {
 		return false
 	}
 	if len(p.PendingReceiptPubkey) > 0 {
 		return false
 	}
 	return p.State == StateReady && p.SlotsFree > 0
+}
+
+// CapacityEligible reports whether a provider may be counted on serving and
+// capacity surfaces. It deliberately omits SlotsFree so busy providers still
+// count as online capacity while tokenless, duplicate, and receipt-key-rotation
+// sessions stay visible but not advertised as usable serving capacity.
+func (p Provider) CapacityEligible() bool {
+	if p.AuthState == AuthBearerlessDuplicate || p.AuthState == AuthSelfMinted {
+		return false
+	}
+	if len(p.PendingReceiptPubkey) > 0 {
+		return false
+	}
+	return p.State == StateReady || p.State == StateBusy
 }
 
 func (p Provider) IsWSTunneled() bool {
@@ -464,10 +477,9 @@ func (r *Registry) Endpoint(providerID string) (config.ProviderConfig, bool) {
 //     non-Bearer-validated session (AuthSelfMinted / AuthMintFailed /
 //     empty) is refused whenever the existing session is a routing-
 //     eligible AuthBearerValidated session. Without this rule, a
-//     concurrent tokenless self-heal during a victim's first-mint
-//     window could mint a fresh bearer and then register as
+//     tokenless admission racing a proven session could register as
 //     AuthSelfMinted, last-writer-wins evicting the victim's
-//     validated session (security audit, PR #69 fix-pass-5 MAJOR-2).
+//     validated session.
 //     Bearer-validated incoming connects always succeed because
 //     their proof-of-bearer is independently strong.
 //
@@ -509,11 +521,9 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 		if p.AuthState == AuthBearerlessDuplicate {
 			return nil, false, RegisterRefusalBearerlessDuplicate
 		}
-		// SPEC-003 v0.8.4 FR-C9.4 (fix-pass-5) — protect proven
-		// (Bearer-validated, routing-eligible) sessions from non-
-		// Bearer-validated replacement. Under composition, a tokenless
-		// connect that hits self-heal becomes AuthSelfMinted; without
-		// this check, the attacker could last-writer-wins evict the
+		// Protect proven (Bearer-validated, routing-eligible) sessions
+		// from non-Bearer-validated replacement. Without this check, a
+		// tokenless admission could last-writer-wins evict the
 		// legitimate Bearer-validated session. A legitimate provider
 		// reconnect with a valid Bearer always wins because their
 		// AuthState is AuthBearerValidated.

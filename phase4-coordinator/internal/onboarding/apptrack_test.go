@@ -177,6 +177,25 @@ func TestHandleAppTrackRegisterAppAttestPresentRequiresVerifier(t *testing.T) {
 	}
 }
 
+func TestHandleAppTrackRegisterAppAttestRequiresPinnedTeamAndBundle(t *testing.T) {
+	body, _ := signedRegisterBody(t, func(m map[string]any) {
+		m["app_attest_object"] = base64.StdEncoding.EncodeToString([]byte{0xa0})
+		m["app_attest_key_id"] = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	})
+	handler := testRegisterHandler(&fakeStatsDB{}, &fakeAuthStore{token: "provider-token"}, nil)
+	handler.AppAttestVerifier = &fakeAppAttestVerifier{ok: true}
+	handler.AppAttestConfig = AppAttestConfig{}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	rr := httptest.NewRecorder()
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable || !strings.Contains(rr.Body.String(), "app_attest_pin_unconfigured") {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestHandleAppTrackRegisterAcceptsVerifiedAppAttest(t *testing.T) {
 	keyID := bytes.Repeat([]byte{1}, 32)
 	body, _ := signedRegisterBody(t, func(m map[string]any) {
@@ -311,16 +330,14 @@ func TestHandleAppTrackRegisterDuplicateBearerProofPaths(t *testing.T) {
 			wantBody:   "existing_active_token_no_proof",
 		},
 		{
-			name:       "body proof",
+			name:       "body proof rejected",
 			bodyToken:  &current,
-			wantStatus: http.StatusOK,
-			wantBearer: &current,
-			wantBody:   "provider-token",
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "bearer_proof_in_body",
 		},
 		{
-			name:       "authorization header takes precedence",
+			name:       "authorization header proof",
 			header:     "Bearer header-token",
-			bodyToken:  &current,
 			wantStatus: http.StatusOK,
 			wantBearer: stringPtr("header-token"),
 			wantBody:   "provider-token",
@@ -463,7 +480,11 @@ func testRegisterHandler(stats *fakeStatsDB, authStore *fakeAuthStore, metrics *
 		CoordinatorWSURL:  "wss://coordinator.streamvc.live/v2/provider",
 		IPRateLimiter:     limiter,
 		ASNRateLimiter:    allowLimiter{},
-		Metrics:           metrics,
+		AppAttestConfig: AppAttestConfig{
+			BundleID: "live.streamvc.Malibu",
+			TeamID:   "MALIBU1234",
+		},
+		Metrics: metrics,
 		Now: func() time.Time {
 			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 		},

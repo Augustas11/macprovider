@@ -67,6 +67,7 @@ final class LaunchProviderController: ObservableObject {
         var repairMarkerlessAppConfig: (String) async throws -> Void
         var saveState: (OnboardingState) throws -> Void
         var updateState: (String, String, Date?, OnboardingState.ModelDownloadState?) throws -> Void
+        var markLinkState: (ProviderConfig.LinkState) throws -> Void
         var runAutotune: (String) async throws -> ModelDownloadPlan
         var ensureCLIReady: () throws -> Void
         var downloadModel: (ModelDownloadPlan) async throws -> OnboardingState.ModelDownloadState?
@@ -102,6 +103,7 @@ final class LaunchProviderController: ObservableObject {
                         modelDownload: modelDownload
                     )
                 },
+                markLinkState: { state in try ProviderConfig.writeLinkState(state) },
                 runAutotune: { _ in
                     (try? await AutotuneRecommendationRunner.run(cliURL: bundledCLIPath)) ?? .recommended
                 },
@@ -391,7 +393,9 @@ final class LaunchProviderController: ObservableObject {
 
         stage = .startingAgent
         try dependencies.updateState(providerID, "startingAgent", nil, nil)
+        try dependencies.markLinkState(.pendingLink)
         try await dependencies.registerLoginItem()
+        try dependencies.markLinkState(.linked)
         await dependencies.startAgent()
 
         stage = .authenticating
@@ -540,6 +544,7 @@ struct StartupState: Equatable {
     let configExists: Bool
     let appMarkerExists: Bool
     let providerTokenExists: Bool
+    let linkState: ProviderConfig.LinkState?
     let identityExists: Bool
     let onboardingStateExists: Bool
     let firstServingAtExists: Bool
@@ -563,6 +568,7 @@ struct StartupState: Equatable {
             configExists: configExists,
             appMarkerExists: markerExists,
             providerTokenExists: tokenExists,
+            linkState: ProviderConfig.readLinkState(paths: paths),
             identityExists: identityExists,
             onboardingStateExists: onboarding != nil,
             firstServingAtExists: onboarding?.firstServingAt != nil,
@@ -572,6 +578,9 @@ struct StartupState: Equatable {
 
     func route() -> StartupRoute {
         if onboardingStateExists && !firstServingAtExists {
+            return .resumeOnboarding
+        }
+        if configExists && appMarkerExists && providerTokenExists && linkState == .pendingLink {
             return .resumeOnboarding
         }
         if configExists && appMarkerExists && providerTokenExists {
@@ -610,6 +619,7 @@ struct StartupState: Equatable {
                 configExists: false,
                 appMarkerExists: false,
                 providerTokenExists: false,
+                linkState: nil,
                 identityExists: false,
                 onboardingStateExists: false,
                 firstServingAtExists: false,

@@ -1,6 +1,6 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.19 (2026-06-25, draft — audit-narrative split. Splits the inlined codex round-9..19 audit findings out of this SPEC body into per-round `specs/SPEC-016-rN-audit.md` files per the established repo convention ([[feedback-spec-audit-file-convention]] / cf. SPEC-005-r1-audit.md, SPEC-005-r2-audit.md). NO normative changes — only reorganization of audit-narrative artifacts. The body shrinks from ~5,860 lines back to its normative core. Round-by-round audit detail now lives in `specs/SPEC-016-r9-audit.md` through `specs/SPEC-016-r19-audit.md`. Round-19 codex declared CONVERGED at 0/0/0 against v0.1.17; v0.1.18 swept 4 deferred LOWs; v0.1.19 is hygiene-only.)
+**Version:** 0.1.20 (2026-07-04, draft — Wave 2 provider-token custody. Payout attempts require provider-token trust: pinned/operator-issued, bearer-validated, or explicit self_minted_verified proof. Tokenless self-minted sessions are not payout eligible.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -28,6 +28,12 @@ live in this SPEC body.
 inlined codex round-9..19 audit findings out of this SPEC body into
 per-round `specs/SPEC-016-rN-audit.md` files. NO normative changes.
 Body shrinks from ~5,860 lines to its normative core.
+
+**v0.1.20 (2026-07-04, draft — Wave 2 provider-token custody):**
+Payout attempts require provider-token trust: pinned/operator-issued,
+bearer-validated, or explicit `self_minted_verified` proof. A
+tokenless `self_minted` provider session remains visible but MUST NOT
+enter payout selection.
 
 **v0.1.18 (2026-06-25, draft — post-convergence LOW sweep, no
 audit fix pass):** Swept the 4 LOWs deferred since round-11
@@ -753,8 +759,13 @@ could fall back to (first-ever registration during
 cooling-off), OR with `registered_against_hot_wallet !=
 payout.security.hot_wallet_address` (row registered against
 a prior hot wallet pre-§6.4 rotation, awaiting
-re-registration per §6.4 step 5), MUST NOT have any payout
-attempt initiated on their behalf. Their
+re-registration per §6.4 step 5), OR whose provider-token
+trust state is only tokenless `self_minted` / unverified,
+MUST NOT have any payout attempt initiated on their behalf.
+Eligible trust states are pinned/operator-issued provider
+configuration, a WebSocket session admitted with
+`bearer_validated`, or an explicit `self_minted_verified`
+proof-of-custody state. Their
 `ledger_payout_ready` rows remain in `status='ready'`.
 
 If a rotation is `pending_until_utc > now()` AND

@@ -1,10 +1,7 @@
-// Package onboarding implements SPEC-026 v0.11 App-track provider onboarding.
+// Package onboarding implements SPEC-026 App-track provider onboarding.
 //
 // The primary entry point is HandleAppTrackRegister (SPEC-026 §4.1). The
-// full contract is documented in the spec + BUILD prompt at
-// specs/BUILD_SPEC_026_IMPL_STEP_1_COORD_REGISTER_PROMPT.md — the
-// implementation body of the handler is intentionally left as a
-// stub in this scaffold PR; codex fills it in via the audit-loop pass.
+// full contract is documented in specs/SPEC-026-browserless-provider-onboarding.md.
 package onboarding
 
 import (
@@ -31,15 +28,14 @@ import (
 // RegisterRequest is the JSON body of POST /v1/providers/register.
 // SPEC-026 §4.1. All fields required except AppAttestObject / AppAttestKeyID.
 type RegisterRequest struct {
-	ProviderID           string          `json:"provider_id"`
-	IdentityPubkey       string          `json:"identity_pubkey"` // base64 32-byte Ed25519
-	HardwareSummary      HardwareSummary `json:"hardware_summary"`
-	AppAttestObject      *string         `json:"app_attest_object,omitempty"` // base64 CBOR
-	AppAttestKeyID       *string         `json:"app_attest_key_id,omitempty"` // base64 32-byte
-	Nonce                string          `json:"nonce"`                       // 64-hex = 32 random bytes
-	TSUTC                string          `json:"ts_utc"`                      // RFC3339
-	CurrentProviderToken *string         `json:"current_provider_token,omitempty"`
-	Signature            string          `json:"signature"` // base64 64-byte Ed25519 over JCS(body\signature)
+	ProviderID      string          `json:"provider_id"`
+	IdentityPubkey  string          `json:"identity_pubkey"` // base64 32-byte Ed25519
+	HardwareSummary HardwareSummary `json:"hardware_summary"`
+	AppAttestObject *string         `json:"app_attest_object,omitempty"` // base64 CBOR
+	AppAttestKeyID  *string         `json:"app_attest_key_id,omitempty"` // base64 32-byte
+	Nonce           string          `json:"nonce"`                       // 64-hex = 32 random bytes
+	TSUTC           string          `json:"ts_utc"`                      // RFC3339
+	Signature       string          `json:"signature"`                   // base64 64-byte Ed25519 over JCS(body\signature)
 }
 
 type HardwareSummary struct {
@@ -116,14 +112,9 @@ type StatsDB interface {
 // AuthTokenStore is the SQLite-side dependency (existing
 // phase4-coordinator/internal/auth/tokens.go).
 type AuthTokenStore interface {
-	// MintProviderTokenAppTrack mints per SPEC-026 §4.1 step 7 semantics:
-	// same-identity_pubkey duplicate register rotates the token; different
-	// identity_pubkey rejects with ErrProviderIDPubkeyMismatch.
-	//
-	// The `current_provider_token` bearer-proof path is enforced against
-	// last_used_at IS NOT NULL rows: caller must pass the raw cleartext
-	// so this store can SHA-256 hash and compare against token_hash.
-	//
+	// MintProviderTokenAppTrack mints per SPEC-026 §4.1 step 7 semantics.
+	// Duplicate registration with any active token requires bearer proof from
+	// the Authorization header; request bodies must never carry bearer material.
 	// provider_name is the tenant literal "malibu-app" for App-track.
 	MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (cleartext string, err error)
 }
@@ -195,6 +186,10 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+		return
+	}
+	if _, ok := raw["current_provider_token"]; ok {
+		writeJSONError(w, http.StatusBadRequest, "bearer_proof_in_body", "current_provider_token is not allowed in request body")
 		return
 	}
 	var req RegisterRequest
@@ -315,6 +310,10 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 			writeJSONError(w, http.StatusBadRequest, "app_attest_unverified", "app attest verifier unavailable")
 			return
 		}
+		if strings.TrimSpace(h.AppAttestConfig.TeamID) == "" || strings.TrimSpace(h.AppAttestConfig.BundleID) == "" {
+			writeJSONError(w, http.StatusServiceUnavailable, "app_attest_pin_unconfigured", "app attest team and bundle pins are required")
+			return
+		}
 		verifyCtx, cancelVerify := context.WithTimeout(r.Context(), 2*time.Second)
 		ok, err := h.AppAttestVerifier.Verify(verifyCtx, AppAttestEvidence{
 			Object:         obj,
@@ -347,9 +346,6 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	currentBearer := bearerFromRequest(r)
-	if currentBearer == nil {
-		currentBearer = req.CurrentProviderToken
-	}
 	token, err := h.AuthTokenStore.MintProviderTokenAppTrack(r.Context(), req.ProviderID, currentBearer)
 	if err != nil {
 		switch {
