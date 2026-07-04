@@ -47,6 +47,12 @@ final class MenuBarController {
         earningsItem.isEnabled = false
         menu.addItem(earningsItem)
 
+        let backlogItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        backlogItem.identifier = .backlogRow
+        backlogItem.isEnabled = false
+        backlogItem.isHidden = true
+        menu.addItem(backlogItem)
+
         menu.addItem(.separator())
         menu.addItem(action("Open Dashboard", key: "d") { self.onAction(.openDashboard) })
         menu.addItem(action("Set up…", key: "o") { self.onAction(.openOnboarding) })
@@ -86,12 +92,20 @@ final class MenuBarController {
         guard let menu = statusItem.menu else { return }
         menu.item(withIdentifier: .statusRow)?.title = AgentSnapshotPresenter.stateLine(snapshot)
         menu.item(withIdentifier: .earningsRow)?.title = AgentSnapshotPresenter.earningsLine(snapshot)
+        if let backlog = AgentSnapshotPresenter.backlogLine(snapshot),
+           let item = menu.item(withIdentifier: .backlogRow) {
+            item.title = backlog
+            item.isHidden = false
+        } else {
+            menu.item(withIdentifier: .backlogRow)?.isHidden = true
+        }
     }
 }
 
 private extension NSUserInterfaceItemIdentifier {
     static let statusRow = NSUserInterfaceItemIdentifier("malibu.menubar.status")
     static let earningsRow = NSUserInterfaceItemIdentifier("malibu.menubar.earnings")
+    static let backlogRow = NSUserInterfaceItemIdentifier("malibu.menubar.backlog")
 }
 
 private extension NSMenu {

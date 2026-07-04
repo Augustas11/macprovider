@@ -52,10 +52,16 @@ enum ProviderConfig {
     // explicit user decision (import into app track vs cancel).
     enum SaveError: Error, LocalizedError {
         case existingConfigNotOwnedByApp
+        case missingProviderID
+        case missingProviderToken
         var errorDescription: String? {
             switch self {
             case .existingConfigNotOwnedByApp:
                 return "A macprovider config already exists on this Mac and was not installed by the app. Uninstall the CLI track or import its provider_id manually before continuing."
+            case .missingProviderID:
+                return "The existing macprovider config does not contain a provider_id."
+            case .missingProviderToken:
+                return "The existing macprovider config does not contain a provider_token."
             }
         }
     }
@@ -98,6 +104,55 @@ enum ProviderConfig {
         FileManager.default.createFile(atPath: paths.appMarkerFile.path, contents: Data())
     }
 
+    static func importExistingCLIConfig() async throws {
+        let paths = ProviderPaths.current
+        try paths.ensureDirectories()
+        let existing = try String(contentsOf: paths.configFile)
+        guard let providerID = parseTopLevelValue(named: "provider_id", from: existing) else {
+            throw SaveError.missingProviderID
+        }
+        guard let token = parseTopLevelValue(named: "provider_token", from: existing) else {
+            throw SaveError.missingProviderToken
+        }
+
+        let rewritten = removingTopLevelValue(named: "provider_token", from: existing)
+        let backup = paths.configFile.appendingPathExtension("import-backup")
+        do {
+            try? FileManager.default.removeItem(at: backup)
+            try FileManager.default.copyItem(at: paths.configFile, to: backup)
+            try rewritten.data(using: .utf8)?.write(to: paths.configFile, options: [.atomic])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
+            try await KeychainStore.saveProviderToken(providerID: providerID, token: token)
+            FileManager.default.createFile(atPath: paths.appMarkerFile.path, contents: Data())
+            guard await isConfigured else { throw SaveError.existingConfigNotOwnedByApp }
+            try? FileManager.default.removeItem(at: backup)
+        } catch {
+            try? FileManager.default.removeItem(at: paths.configFile)
+            try? FileManager.default.copyItem(at: backup, to: paths.configFile)
+            try? FileManager.default.removeItem(at: backup)
+            try? await KeychainStore.deleteProviderToken(providerID: providerID)
+            try? FileManager.default.removeItem(at: paths.appMarkerFile)
+            throw error
+        }
+    }
+
+    static func startFreshMovingCLIConfigAside(now: Date = Date()) throws -> URL? {
+        let paths = ProviderPaths.current
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: paths.configFile.path) else { return nil }
+        try paths.ensureDirectories()
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        let suffix = formatter.string(from: now)
+            .replacingOccurrences(of: ":", with: "")
+            .replacingOccurrences(of: "-", with: "")
+        let backup = paths.configFile.deletingLastPathComponent()
+            .appendingPathComponent("config.yaml.cli-backup-\(suffix)")
+        try fm.moveItem(at: paths.configFile, to: backup)
+        return backup
+    }
+
     // AUDIT R1 CODE M2 / SECURITY S3 / ARCHITECT A6 fix: uninstall must complete
     // before we terminate the process. Previously the Keychain delete ran in an
     // unstructured Task and NSApp.terminate raced past it, leaving the payout-
@@ -135,5 +190,31 @@ enum ProviderConfig {
         do { try await KeychainStore.deleteAllAppItems() }
         catch { residue.keychainDeleteFailed = error }
         return residue
+    }
+
+    private static func parseTopLevelValue(named key: String, from contents: String) -> String? {
+        normalizedLines(contents).compactMap { line -> String? in
+            guard line.hasPrefix("\(key):") else { return nil }
+            let value = line
+                .dropFirst("\(key):".count)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            return value.isEmpty ? nil : value
+        }.first
+    }
+
+    private static func removingTopLevelValue(named key: String, from contents: String) -> String {
+        normalizedLines(contents)
+            .filter { !$0.hasPrefix("\(key):") }
+            .joined(separator: "\n") + "\n"
+    }
+
+    private static func normalizedLines(_ contents: String) -> [String] {
+        contents
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 }

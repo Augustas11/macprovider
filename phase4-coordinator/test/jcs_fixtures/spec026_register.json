@@ -1,0 +1,18 @@
+{
+  "description": "SPEC-026 App-track register JCS parity fixture. Body intentionally excludes signature before canonicalization.",
+  "body_without_signature": {
+    "provider_id": "p_fixtureproviderid",
+    "identity_pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "hardware_summary": {
+      "app_version": "1.0.3",
+      "chip": "M3 Max",
+      "macos_version": "14.5",
+      "unified_memory_gb": "64"
+    },
+    "app_attest_object": null,
+    "app_attest_key_id": null,
+    "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ts_utc": "2026-07-03T09:41:00Z"
+  },
+  "canonical_without_signature": "{\"app_attest_key_id\":null,\"app_attest_object\":null,\"hardware_summary\":{\"app_version\":\"1.0.3\",\"chip\":\"M3 Max\",\"macos_version\":\"14.5\",\"unified_memory_gb\":\"64\"},\"identity_pubkey\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"nonce\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"provider_id\":\"p_fixtureproviderid\",\"ts_utc\":\"2026-07-03T09:41:00Z\"}"
+}

@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Security
 
 // SPEC-026 v0.11 §7.1: ProviderIdentity — Ed25519 keypair in the App-track
 // Keychain slot `provider_identity_v1`.
@@ -15,9 +16,18 @@ import CryptoKit
 // See specs/BUILD_SPEC_026_IMPL_STEP_2_APP_BUNDLE_PROMPT.md for the full
 // impl contract that codex fills in via the audit loop.
 
-enum ProviderIdentityError: Error {
+enum ProviderIdentityError: Error, LocalizedError {
     case keychainUnavailable(status: OSStatus)
     case invalidKeyMaterial
+
+    var errorDescription: String? {
+        switch self {
+        case let .keychainUnavailable(status):
+            return "Provider identity Keychain operation failed with status \(status)."
+        case .invalidKeyMaterial:
+            return "Provider identity key material was invalid."
+        }
+    }
 }
 
 enum ProviderIdentity {
@@ -40,10 +50,7 @@ enum ProviderIdentity {
     /// LaunchProviderController + §8.1 migration matrix state
     /// classification. Does NOT load the private key material.
     static func isReady() async -> Bool {
-        // IMPLEMENTER: SecItemCopyMatching with kSecMatchLimitOne and
-        // kSecReturnAttributes to check for presence without exporting the
-        // key. Return false on errSecItemNotFound; throw on other errors.
-        false
+        await ProviderIdentityKeychain.shared.isReady()
     }
 
     /// Loads the existing identity key if present, otherwise generates
@@ -52,13 +59,7 @@ enum ProviderIdentity {
     /// the key. Idempotent — safe to call from LaunchProviderController
     /// on every launch, but concurrent calls MUST serialize.
     static func loadOrGenerate() async throws -> Curve25519.Signing.PrivateKey {
-        // IMPLEMENTER: See SPEC-026 §3.1 for the Keychain attribute set
-        // (kSecClassGenericPassword + kSecAttrService + kSecAttrAccount
-        // + kSecAttrAccessible). Use privkey.rawRepresentation (32 bytes)
-        // as the stored blob. Serialize concurrent loadOrGenerate() calls
-        // via an actor or NSLock to prevent double-generate races on
-        // first launch.
-        throw ProviderIdentityError.keychainUnavailable(status: errSecNotAvailable)
+        try await ProviderIdentityKeychain.shared.loadOrGenerate()
     }
 
     /// Derives `provider_id = "p_" + base32_lc(sha256(pubkey.rawRepresentation))`
@@ -82,8 +83,7 @@ enum ProviderIdentity {
     /// (SPEC-026 §6.5) BEFORE the ProviderConfig.wipeAppOwnedState()
     /// call. Idempotent — errSecItemNotFound is treated as success.
     static func deleteFromKeychain() async throws {
-        // IMPLEMENTER: SecItemDelete with the same attribute set as
-        // loadOrGenerate. Idempotent: swallow errSecItemNotFound.
+        try await ProviderIdentityKeychain.shared.delete()
     }
 
     // MARK: - Internals
@@ -94,11 +94,107 @@ enum ProviderIdentity {
     /// (see phase4-coordinator/internal/onboarding/apptrack.go).
     /// Parity fixture: `phase4-coordinator/test/jcs_fixtures/spec026_register.json`.
     static func base32LowercaseNoPad(_ data: Data) -> String {
-        // IMPLEMENTER: Foundation doesn't ship a stdlib base32; add a
-        // tested no-pad lowercase RFC 4648 §6 encoder. Bit-level
-        // implementation walks 5-bit groups off the input byte stream.
-        // See tests: parity fixture verifies against Go output for
-        // inputs 0/1/2/.../31 bytes.
-        ""
+        guard !data.isEmpty else { return "" }
+
+        var output = ""
+        output.reserveCapacity((data.count * 8 + 4) / 5)
+
+        var buffer = 0
+        var bitsLeft = 0
+        for byte in data {
+            buffer = (buffer << 8) | Int(byte)
+            bitsLeft += 8
+            while bitsLeft >= 5 {
+                let index = (buffer >> (bitsLeft - 5)) & 0x1f
+                output.append(base32Alphabet[index])
+                bitsLeft -= 5
+            }
+        }
+
+        if bitsLeft > 0 {
+            let index = (buffer << (5 - bitsLeft)) & 0x1f
+            output.append(base32Alphabet[index])
+        }
+
+        return output
+    }
+}
+
+private actor ProviderIdentityKeychain {
+    static let shared = ProviderIdentityKeychain()
+
+    func isReady() -> Bool {
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(Self.presenceQuery() as CFDictionary, &result)
+        return status == errSecSuccess
+    }
+
+    func loadOrGenerate() throws -> Curve25519.Signing.PrivateKey {
+        if let existing = try readExisting() {
+            return existing
+        }
+
+        let key = Curve25519.Signing.PrivateKey()
+        let status = SecItemAdd(Self.insertQuery(key.rawRepresentation) as CFDictionary, nil)
+        if status == errSecDuplicateItem, let existing = try readExisting() {
+            return existing
+        }
+        guard status == errSecSuccess else {
+            throw ProviderIdentityError.keychainUnavailable(status: status)
+        }
+        return key
+    }
+
+    func delete() throws {
+        let status = SecItemDelete(Self.baseQuery() as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw ProviderIdentityError.keychainUnavailable(status: status)
+        }
+    }
+
+    private func readExisting() throws -> Curve25519.Signing.PrivateKey? {
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(Self.readQuery() as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else {
+            throw ProviderIdentityError.keychainUnavailable(status: status)
+        }
+        guard let data = result as? Data, data.count == 32 else {
+            throw ProviderIdentityError.invalidKeyMaterial
+        }
+        do {
+            return try Curve25519.Signing.PrivateKey(rawRepresentation: data)
+        } catch {
+            throw ProviderIdentityError.invalidKeyMaterial
+        }
+    }
+
+    private static func baseQuery() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: ProviderIdentity.keychainService,
+            kSecAttrAccount as String: ProviderIdentity.keychainAccount
+        ]
+    }
+
+    private static func presenceQuery() -> [String: Any] {
+        var query = baseQuery()
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecReturnAttributes as String] = true
+        return query
+    }
+
+    private static func readQuery() -> [String: Any] {
+        var query = baseQuery()
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecReturnData as String] = true
+        return query
+    }
+
+    private static func insertQuery(_ keyBytes: Data) -> [String: Any] {
+        var query = baseQuery()
+        query[kSecValueData as String] = keyBytes
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        return query
     }
 }

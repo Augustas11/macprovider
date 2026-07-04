@@ -34,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // SPEC-026 §7.3: malibu:// URL scheme + PendingLinkState handler retired.
+    // SPEC-026 §7.3: browser deep-link onboarding retired.
     // The application(_:open:) implementation has been removed in v0.11 impl
     // step 2. Any deep-link scheme SPEC-027 needs (verified-email flow) is
     // that spec's normative surface, not SPEC-026's.
@@ -97,7 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // SPEC-026 §7.3: consume(_:) / presentLinkError(_:) retired along with
-    // the malibu:// URL scheme handler. Provider onboarding now happens
+    // the browser callback handler. Provider onboarding now happens
     // in-App via LaunchProviderController (SPEC-026 §7.2, follow-up impl
     // in this same PR).
 
@@ -129,8 +129,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         await agent.shutdown(gracefulSeconds: 30)
         let unregisterFailure = await AppLoginItem.unregisterReturningError()
         // SPEC-026 §6.5: also wipe the Ed25519 identity Keychain slot.
-        // Follow-up: LaunchProviderController.deleteIdentity() call lands
-        // with the ProviderIdentity module in this same impl PR.
+        do { try await ProviderIdentity.deleteFromKeychain() }
+        catch { NSLog("[malibu] provider identity delete failed: %@", error.localizedDescription) }
         let residue = await ProviderConfig.wipeAppOwnedState()
 
         if !residue.clean || unregisterFailure != nil {

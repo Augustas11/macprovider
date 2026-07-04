@@ -31,4 +31,24 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         s.lastError = "boom"
         XCTAssertEqual(AgentSnapshotPresenter.stateLine(s), "boom")
     }
+
+    func testProvisionalMalibuIsRenderedLocked() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.earningsUsdcToday = 1
+        s.malibuAccruedToday = 2
+        s.trustTier = .provisional
+        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("[locked] 2.00 MALIBU"))
+        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("unlocks at Trusted"))
+    }
+
+    func testBacklogLineOnlyWhenWalletUnbound() {
+        var s = AgentSnapshot.empty
+        s.unpaidLedgerBacklogUSDC = 10
+        s.unpaidLedgerBacklogMALIBU = 5
+        s.walletBound = false
+        XCTAssertNotNil(AgentSnapshotPresenter.backlogLine(s))
+        s.walletBound = true
+        XCTAssertNil(AgentSnapshotPresenter.backlogLine(s))
+    }
 }

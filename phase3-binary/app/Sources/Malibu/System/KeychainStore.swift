@@ -47,6 +47,21 @@ enum KeychainStore {
         }
     }
 
+    static func deleteProviderToken(providerID: String) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global().async {
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: providerService,
+                    kSecAttrAccount as String: providerID
+                ]
+                let status = SecItemDelete(query as CFDictionary)
+                if status == errSecSuccess || status == errSecItemNotFound { cont.resume() }
+                else { cont.resume(throwing: NSError(domain: NSOSStatusErrorDomain, code: Int(status))) }
+            }
+        }
+    }
+
     // AUDIT R1 CODE M2 / SECURITY S3 fix: delete synchronously (awaited by caller)
     // so uninstall can report residue instead of racing against NSApp.terminate.
     // Any non-noop non-notFound OSStatus is surfaced so the caller can decide.

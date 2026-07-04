@@ -22,6 +22,20 @@ enum ControlFrame: Sendable, Equatable {
 
     case shutdownRequest(graceSeconds: Int)
     case shutdownAck
+
+    case identitySignatureRequest(
+        authAttemptID: String,
+        providerID: String,
+        binaryVersion: Int,
+        providerECDHPublicKey: String,
+        transcriptSHA256: String
+    )
+    case identitySignatureResponse(
+        accepted: Bool,
+        identitySignature: String?,
+        transcriptSHA256: String?,
+        reason: String?
+    )
 }
 
 enum ControlCodec {
@@ -82,6 +96,24 @@ enum ControlCodec {
             return obj
         case let .shutdownRequest(grace): return ["type": "shutdown_request", "grace_seconds": grace]
         case .shutdownAck: return ["type": "shutdown_ack"]
+        case let .identitySignatureRequest(authAttemptID, providerID, binaryVersion, ecdhKey, transcriptSHA256):
+            return [
+                "type": "identity_signature_request",
+                "auth_attempt_id": authAttemptID,
+                "provider_id": providerID,
+                "binary_version": binaryVersion,
+                "provider_ecdh_public_key": ecdhKey,
+                "transcript_sha256": transcriptSHA256
+            ]
+        case let .identitySignatureResponse(accepted, signature, transcriptSHA256, reason):
+            var obj: [String: Any] = [
+                "type": "identity_signature_response",
+                "accepted": accepted
+            ]
+            if let signature { obj["identity_signature"] = signature }
+            if let transcriptSHA256 { obj["identity_signature_transcript_sha256"] = transcriptSHA256 }
+            if let reason { obj["reason"] = reason }
+            return obj
         }
     }
 
@@ -125,6 +157,21 @@ enum ControlCodec {
                 reason: dict["reason"] as? String
             )
         case "shutdown_ack": return .shutdownAck
+        case "identity_signature_request":
+            return .identitySignatureRequest(
+                authAttemptID: dict["auth_attempt_id"] as? String ?? "",
+                providerID: dict["provider_id"] as? String ?? "",
+                binaryVersion: dict["binary_version"] as? Int ?? 0,
+                providerECDHPublicKey: dict["provider_ecdh_public_key"] as? String ?? "",
+                transcriptSHA256: dict["transcript_sha256"] as? String ?? ""
+            )
+        case "identity_signature_response":
+            return .identitySignatureResponse(
+                accepted: dict["accepted"] as? Bool ?? false,
+                identitySignature: dict["identity_signature"] as? String,
+                transcriptSHA256: dict["identity_signature_transcript_sha256"] as? String,
+                reason: dict["reason"] as? String
+            )
         default: throw DecodeError.unknownType(type)
         }
     }

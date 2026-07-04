@@ -224,8 +224,61 @@ final class MalibuAgent: ObservableObject {
             } else {
                 snapshot.lastError = reason ?? "Resume was refused"
             }
+        case let .identitySignatureRequest(authAttemptID, providerID, binaryVersion, ecdhKey, transcriptSHA256):
+            Task { [weak self] in
+                await self?.handleIdentitySignatureRequest(
+                    authAttemptID: authAttemptID,
+                    providerID: providerID,
+                    binaryVersion: binaryVersion,
+                    providerECDHPublicKey: ecdhKey,
+                    transcriptSHA256: transcriptSHA256
+                )
+            }
         default:
             break
+        }
+    }
+
+    private func handleIdentitySignatureRequest(
+        authAttemptID: String,
+        providerID: String,
+        binaryVersion: Int,
+        providerECDHPublicKey: String,
+        transcriptSHA256: String
+    ) async {
+        guard ProviderConfig.readProviderID() == providerID else {
+            try? await control?.send(.identitySignatureResponse(
+                accepted: false,
+                identitySignature: nil,
+                transcriptSHA256: nil,
+                reason: "provider_id_mismatch"
+            ))
+            return
+        }
+
+        do {
+            let key = try await ProviderIdentity.loadOrGenerate()
+            let payload = try RegisterClient.identitySignaturePayload(
+                authAttemptID: authAttemptID,
+                providerID: providerID,
+                binaryVersion: binaryVersion,
+                providerECDHPublicKey: providerECDHPublicKey,
+                transcriptSHA256: transcriptSHA256
+            )
+            let signature = try ProviderIdentity.sign(payload, using: key).base64EncodedString()
+            try await control?.send(.identitySignatureResponse(
+                accepted: true,
+                identitySignature: signature,
+                transcriptSHA256: transcriptSHA256,
+                reason: nil
+            ))
+        } catch {
+            try? await control?.send(.identitySignatureResponse(
+                accepted: false,
+                identitySignature: nil,
+                transcriptSHA256: nil,
+                reason: "identity_signature_failed"
+            ))
         }
     }
 

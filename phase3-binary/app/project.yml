@@ -50,9 +50,6 @@ targets:
         LSMinimumSystemVersion: "14.0"
         LSUIElement: true                # menu bar only, no Dock icon
         NSHumanReadableCopyright: "Copyright © 2026 Malibu AI, Inc."
-        CFBundleURLTypes:
-          - CFBundleURLName: tech.malibu.app.deeplink
-            CFBundleURLSchemes: [malibu]
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
     settings:

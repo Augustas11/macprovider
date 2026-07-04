@@ -18,9 +18,6 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
-	<!-- SPEC-026 §7.3: malibu:// URL scheme retired. Deep-link scheme
-	     registration for SPEC-027 verified-email flow, if any, is
-	     SPEC-027's normative surface. -->
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSMinimumSystemVersion</key>

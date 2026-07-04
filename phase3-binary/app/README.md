@@ -11,7 +11,7 @@ app/
 ├── scripts/
 │   └── generate-app-icon.sh       # SVG → 10 PNG sizes via qlmanage (no deps)
 └── Sources/Malibu/
-    ├── MalibuApp.swift            # @main + AppDelegate + URL-scheme routing
+    ├── MalibuApp.swift            # @main + AppDelegate + menu/onboarding routing
     ├── Info.plist                 # merged with keys from project.yml
     ├── Resources/
     │   ├── Brand/malibu-icon.svg  # canonical brand mark, mirrors malibu.tech/favicon.svg
@@ -25,15 +25,16 @@ app/
     │   ├── ControlSocketClient.swift  # unix-socket JSON framing client
     │   └── ControlSocketFrame.swift   # wire-format mirror of CLI's frames (DUPLICATED — see below)
     ├── Onboarding/
-    │   └── OnboardingWindow.swift # 3-step SwiftUI onboarding
+    │   ├── LaunchProviderController.swift # browserless provider launch state machine
+    │   └── OnboardingWindow.swift         # SwiftUI onboarding
     ├── Dashboard/
     │   └── DashboardWindow.swift  # SwiftUI dashboard
     └── System/
         ├── ProviderPaths.swift    # ~/.config/macprovider/... vs ~/Library/Application Support/Malibu/...
         ├── ProviderConfig.swift   # writes shared config.yaml, tracks App-track ownership marker
         ├── KeychainStore.swift    # provider_token in Keychain, service tech.malibu.provider
-        ├── AppLoginItem.swift     # SMAppService.mainApp wrapper
-        └── URLSchemeHandler.swift # malibu:// deep links
+        ├── ProviderIdentity.swift # App-track Ed25519 identity in Keychain
+        └── AppLoginItem.swift     # SMAppService.mainApp wrapper
 ```
 
 ## Build
@@ -68,7 +69,6 @@ open build/Release/Malibu.app
 
 1. **`ControlFrame` is duplicated**, not shared. Extract the wire-format frames from `phase3-binary/Sources/macprovider-cli/ControlSocket.swift` into a new `MacProviderControl` library target so both CLI and app import one source of truth.
 2. **CLI-side handler semantics.** Frames + wire format are wired end-to-end (`feat(control-socket): add metrics/pause/resume/shutdown frames`), but the server-side handlers are stubs — `pause_ack`/`resume_ack` return `accepted:false, reason:"not_implemented"` and `metrics_response` returns zeros. Real earnings / uptime source + pause gating land in P1.
-3. **URL scheme state validation.** `URLSchemeHandler` currently accepts any well-formed `malibu://link`. Add nonce challenge tied to the outbound portal URL.
-4. **CLI-track config migration dialog.** If `~/.config/macprovider/config.yaml` exists without the App-track marker, `ProviderConfig` currently overwrites `provider_id` lines silently. Add the migration dialog described in SPEC-025 §7.
+3. **CLI-track config migration dialog.** If `~/.config/macprovider/config.yaml` exists without the App-track marker, the App routes to the SPEC-026 migration surface instead of overwriting it silently.
 5. **Sparkle** not wired up yet — separate P3 pass.
 6. **Signed release pipeline** — extends `.github/workflows/release.yml` per SPEC-025 §6.2. Not part of this skeleton.
