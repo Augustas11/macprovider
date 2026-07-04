@@ -63,6 +63,32 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertEqual(importedToken, "secret-token")
     }
 
+    func testSaveProviderIdentityRollsBackWhenTokenSaveFails() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+
+        do {
+            try await ProviderConfig.saveProviderIdentity(
+                providerID: "p_failed",
+                token: "provider-token",
+                paths: paths,
+                readToken: { _ in nil },
+                saveToken: { _, _ in
+                    throw NSError(domain: "tests", code: 1, userInfo: [NSLocalizedDescriptionKey: "keychain failed"])
+                },
+                deleteToken: { _ in }
+            )
+            XCTFail("Expected token save failure")
+        } catch {
+            XCTAssertEqual((error as NSError).localizedDescription, "keychain failed")
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+    }
+
     private func makeTempDir() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("malibu-tests-\(UUID().uuidString)", isDirectory: true)

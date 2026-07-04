@@ -76,15 +76,36 @@ enum ProviderConfig {
     }
 
     static func saveProviderIdentity(providerID: String, token: String, paths: ProviderPaths) async throws {
+        try await saveProviderIdentity(
+            providerID: providerID,
+            token: token,
+            paths: paths,
+            readToken: { await KeychainStore.readProviderToken(providerID: $0) },
+            saveToken: { try await KeychainStore.saveProviderToken(providerID: $0, token: $1) },
+            deleteToken: { try await KeychainStore.deleteProviderToken(providerID: $0) }
+        )
+    }
+
+    static func saveProviderIdentity(
+        providerID: String,
+        token: String,
+        paths: ProviderPaths,
+        readToken: @escaping (String) async -> String?,
+        saveToken: @escaping (String, String) async throws -> Void,
+        deleteToken: @escaping (String) async throws -> Void
+    ) async throws {
         try paths.ensureDirectories()
+        let fm = FileManager.default
 
         // AUDIT R1 ARCHITECT A2: fail-fast on config collision instead of
         // silently rewriting a file the CLI track owns.
-        let configExists = FileManager.default.fileExists(atPath: paths.configFile.path)
-        let markerExists = FileManager.default.fileExists(atPath: paths.appMarkerFile.path)
+        let configExists = fm.fileExists(atPath: paths.configFile.path)
+        let markerExists = fm.fileExists(atPath: paths.appMarkerFile.path)
         if configExists && !markerExists {
             throw SaveError.existingConfigNotOwnedByApp
         }
+        let originalData = configExists ? try Data(contentsOf: paths.configFile) : nil
+        let originalToken = await readToken(providerID)
 
         // Merge into any existing YAML rather than clobbering — a developer who
         // ran install.sh first might have coordinator overrides here.
@@ -104,12 +125,27 @@ enum ProviderConfig {
         // Followup: teach the CLI to read the token from Keychain directly so
         // the environment-variable path can be removed.
         let joined = lines.joined(separator: "\n") + "\n"
-        try joined.data(using: .utf8)?.write(to: paths.configFile, options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
-
-        try await KeychainStore.saveProviderToken(providerID: providerID, token: token)
-
-        FileManager.default.createFile(atPath: paths.appMarkerFile.path, contents: Data())
+        do {
+            try await saveToken(providerID, token)
+            try Data(joined.utf8).write(to: paths.configFile, options: [.atomic])
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
+            fm.createFile(atPath: paths.appMarkerFile.path, contents: Data())
+        } catch {
+            if let originalToken {
+                try? await saveToken(providerID, originalToken)
+            } else {
+                try? await deleteToken(providerID)
+            }
+            if let originalData {
+                try? originalData.write(to: paths.configFile, options: [.atomic])
+            } else {
+                try? fm.removeItem(at: paths.configFile)
+            }
+            if !markerExists {
+                try? fm.removeItem(at: paths.appMarkerFile)
+            }
+            throw error
+        }
     }
 
     static func importExistingCLIConfig() async throws {
