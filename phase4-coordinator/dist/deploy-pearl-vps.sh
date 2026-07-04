@@ -28,6 +28,7 @@
 #   STRICT_PROVENANCE default: 0  fail if /healthz lacks `version` field
 #   SKIP_C2_CHECK    default: 0   skip C2 cross-check (development only)
 #   ALLOW_CONFIG_DRIFT default: 0 push local coordinator.yaml over live one
+#   SKIP_TCP_TUNING default: 0    skip Pearl TCP sysctl install/apply step
 #
 # Note: DOMAIN and STATS_DOMAIN are validated up-front (step 0) against
 # DNS-name regex AND against the baked-in vhost-template hostnames. The
@@ -125,6 +126,8 @@ CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
 CONFIG="$DIST_DIR/coordinator.yaml"
 SERVICE="$DIST_DIR/macprovider-coordinator.service"
 NGINX_SITE="$DIST_DIR/nginx-coordinator.streamvc.live.conf"
+TCP_SYSCTL="$DIST_DIR/sysctl.d/99-macprovider-tcp.conf"
+TCP_BBR_MODULES_LOAD="$DIST_DIR/modules-load.d/tcp_bbr.conf"
 # SPEC-017 v0.1.8 Step 4.B — additional nginx artifacts the
 # coordinator vhost depends on:
 #   - stats-shared.conf is the http-context snippet declaring the
@@ -492,6 +495,135 @@ $SSH 'set -e
     echo "  /etc/macprovider/coordinator.env not yet present; operator must drop it with mode 0640 (root:macprovider)"
   fi
 '
+
+log "step 3b/9: install TCP sysctl overrides"
+if [ "${SKIP_TCP_TUNING:-0}" = "1" ]; then
+  log "  SKIP_TCP_TUNING=1 set — skipping TCP sysctl overrides"
+else
+  [ -f "$TCP_SYSCTL" ] || { echo "missing required file: $TCP_SYSCTL" >&2; exit 1; }
+  [ -f "$TCP_BBR_MODULES_LOAD" ] || { echo "missing required file: $TCP_BBR_MODULES_LOAD" >&2; exit 1; }
+  TCP_SYSCTL_UNEXPECTED=$($SSH 'for path in /etc/sysctl.d/*macprovider*; do
+    [ -e "$path" ] || continue
+    [ "$(basename "$path")" = "99-macprovider-tcp.conf" ] && continue
+    printf "%s\n" "$path"
+  done
+  exit 0')
+  if [ -n "$TCP_SYSCTL_UNEXPECTED" ]; then
+    log "  WARN: found unexpected macprovider sysctl artifacts on Pearl:"
+    while IFS= read -r unexpected_sysctl; do
+      [ -n "$unexpected_sysctl" ] || continue
+      log "    $unexpected_sysctl"
+    done <<EOF
+$TCP_SYSCTL_UNEXPECTED
+EOF
+    log "  These are not managed by this deploy; consider removing after verifying they are stale."
+  fi
+  TCP_SYSCTL_TMP=$($SSH 'umask 077 && mktemp -d -t macprovider-tcp.XXXXXXXX') || {
+    echo "failed to create remote TCP sysctl staging directory" >&2; exit 1;
+  }
+  case "$TCP_SYSCTL_TMP" in
+    /tmp/macprovider-tcp.*) ;;
+    *)
+      echo "aborting deploy: TCP sysctl mktemp produced unexpected path: '$TCP_SYSCTL_TMP'" >&2
+      exit 1
+      ;;
+  esac
+  if ! $SCP "$TCP_SYSCTL" "$VPS_USER@$VPS_HOST:$TCP_SYSCTL_TMP/macprovider-tcp.conf"; then
+    $SSH "rm -rf $TCP_SYSCTL_TMP" 2>/dev/null || true
+    exit 1
+  fi
+  if ! $SCP "$TCP_BBR_MODULES_LOAD" "$VPS_USER@$VPS_HOST:$TCP_SYSCTL_TMP/tcp_bbr.conf"; then
+    $SSH "rm -rf $TCP_SYSCTL_TMP" 2>/dev/null || true
+    exit 1
+  fi
+  TCP_SYSCTL_RESULT=$($SSH "bash -s -- '$TCP_SYSCTL_TMP'" <<'REMOTE_TCP_SYSCTL'
+    set -e
+    tmp_dir="$1"
+    tmp_conf="$tmp_dir/macprovider-tcp.conf"
+    tmp_modules_load="$tmp_dir/tcp_bbr.conf"
+    dst="/etc/sysctl.d/99-macprovider-tcp.conf"
+    modules_load_dst="/etc/modules-load.d/tcp_bbr.conf"
+    trap 'rm -rf "$tmp_dir"' EXIT
+
+    fail_tcp_tuning_partial_apply() {
+      echo "ABORT:   step 3b/9 failure — kernel TCP state may be partially mutated." >&2
+      echo "         Rollback: sudo rm /etc/sysctl.d/99-macprovider-tcp.conf /etc/modules-load.d/tcp_bbr.conf && sudo sysctl --system" >&2
+      echo "         Then investigate the failure above before re-running the deploy." >&2
+      exit 10
+    }
+
+    kernel="$(uname -r)"
+    if ! modprobe -n -v tcp_bbr >/dev/null 2>&1; then
+      echo "ABORT: tcp_bbr kernel module is not available on $(hostname) (kernel $kernel)." >&2
+      echo "       Install linux-modules-extra-$kernel or upgrade the kernel before deploying TCP tuning." >&2
+      exit 10
+    fi
+    if ! modprobe tcp_bbr >/dev/null 2>&1; then
+      echo "ABORT: tcp_bbr kernel module exists but failed to load on $(hostname) (kernel $kernel)." >&2
+      exit 10
+    fi
+
+    expect_sysctl() {
+      key="$1"
+      expected="$2"
+      actual="$(sysctl -n "$key" 2>/dev/null || true)"
+      if [ "$actual" != "$expected" ]; then
+        echo "ABORT: sysctl $key mismatch: expected $expected, got ${actual:-<unset>}" >&2
+        return 1
+      fi
+      return 0
+    }
+
+    all_tcp_sysctls_applied() {
+      while IFS='=' read -r key expected; do
+        key="$(printf '%s' "$key" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+        expected="$(printf '%s' "$expected" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+        [ -n "$key" ] || continue
+        [ "${key:0:1}" = "#" ] && continue
+        expect_sysctl "$key" "$expected" || return 1
+      done < "$tmp_conf"
+      return 0
+    }
+
+    if [ -f /etc/sysctl.d/99-macprovider-tcp.conf ] &&
+       [ -f /etc/modules-load.d/tcp_bbr.conf ] &&
+       cmp -s "$tmp_conf" /etc/sysctl.d/99-macprovider-tcp.conf &&
+       cmp -s "$tmp_modules_load" /etc/modules-load.d/tcp_bbr.conf &&
+       all_tcp_sysctls_applied >/dev/null 2>&1; then
+      echo "already"
+      exit 0
+    fi
+
+    install -m 0644 -o root -g root "$tmp_conf" "$dst"
+    # modules-load.d ensures tcp_bbr is loaded before systemd-sysctl at boot.
+    install -m 0644 -o root -g root "$tmp_modules_load" "$modules_load_dst"
+    if ! sysctl -p "$dst" >/dev/null; then
+      echo "ABORT: failed to apply $dst" >&2
+      fail_tcp_tuning_partial_apply
+    fi
+
+    if ! all_tcp_sysctls_applied; then
+      fail_tcp_tuning_partial_apply
+    fi
+    if ! expect_sysctl net.ipv4.tcp_congestion_control bbr; then
+      fail_tcp_tuning_partial_apply
+    fi
+    echo "applied"
+REMOTE_TCP_SYSCTL
+  )
+  case "$TCP_SYSCTL_RESULT" in
+    already)
+      log "  TCP sysctl overrides — already applied"
+      ;;
+    applied)
+      log "  TCP sysctl overrides applied: bbr + slow_start_after_idle=0 + 16MB buffers"
+      ;;
+    *)
+      echo "unexpected TCP sysctl deploy result: $TCP_SYSCTL_RESULT" >&2
+      exit 10
+      ;;
+  esac
+fi
 
 log "step 4/9: upload binary + config + nginx site (with rollback snapshot)"
 # Backup the live binary BEFORE the install so a rollback is one mv away.
