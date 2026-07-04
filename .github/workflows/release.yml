@@ -58,12 +58,51 @@ jobs:
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           xcodebuild -version
 
+      - name: Install XcodeGen
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" ]; then
+            echo "Developer ID Application cert absent; skipping Malibu.app build tools."
+            exit 0
+          fi
+          # XcodeGen is a build-only generator here; rely on the macos-15
+          # Homebrew version instead of pinning a second supply-chain surface.
+          brew install xcodegen
+          xcodegen --version
+
       - name: Build package
         shell: bash
         run: |
           set -euo pipefail
           cd phase3-binary/dist
           ./package.sh "${{ steps.version.outputs.tag }}"
+
+      - name: Build Malibu.app
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" ]; then
+            echo "Developer ID Application cert absent; skipping Malibu.app archive."
+            exit 0
+          fi
+          cd phase3-binary/app
+          xcodegen generate
+          xcodebuild \
+            -project Malibu.xcodeproj \
+            -scheme Malibu \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -archivePath "$RUNNER_TEMP/Malibu.xcarchive" \
+            archive \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO
+          cp -R "$RUNNER_TEMP/Malibu.xcarchive/Products/Applications/Malibu.app" \
+            "$RUNNER_TEMP/Malibu.app"
 
       # SPEC-003 v0.8.2 follow-up: macOS 26.3.1+ tightened launchd's AMFI policy
       # to reject adhoc-signed binaries under `launchctl bootstrap`. Earlier
@@ -97,22 +136,9 @@ jobs:
           APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
         run: |
           set -euo pipefail
-          KEYCHAIN_CREATED=0
           WORK=""
           SIGNING_TMP=""
           NOTARIZE_ZIP=""
-          cleanup_signing_material() {
-            if [ -n "$SIGNING_TMP" ]; then
-              rm -rf "$SIGNING_TMP"
-            fi
-            if [ "$KEYCHAIN_CREATED" = "1" ]; then
-              security delete-keychain build.keychain >/dev/null 2>&1 || true
-            fi
-            if [ -n "$WORK" ]; then
-              rm -rf "$WORK"
-            fi
-          }
-          trap cleanup_signing_material EXIT
 
           tag="${{ steps.version.outputs.tag }}"
           src="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
@@ -151,8 +177,8 @@ jobs:
           # Installer identity signs the staplable .pkg artifact.
           KEYCHAIN_PASS=$(openssl rand -hex 16)
           SIGNING_TMP=$(mktemp -d)
+          echo "SIGNING_TMP=$SIGNING_TMP" >> "$GITHUB_ENV"
           security create-keychain -p "$KEYCHAIN_PASS" build.keychain
-          KEYCHAIN_CREATED=1
           security default-keychain -s build.keychain
           security unlock-keychain -p "$KEYCHAIN_PASS" build.keychain
           security set-keychain-settings -lut 3600 build.keychain
@@ -199,6 +225,7 @@ jobs:
 
           # Extract tarball so we can sign the binary in place, then repack.
           WORK=$(mktemp -d)
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
           tar xzf "$src" -C "$WORK"
           test -x "$WORK/macprovider-cli"
 
@@ -289,10 +316,6 @@ jobs:
             echo "::warning::APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 not set; skipping signed/stapled .pkg artifact."
           fi
 
-          # Clean up keychain so secrets do not linger on the runner.
-          cleanup_signing_material
-          trap - EXIT
-
           echo "  binary signed by: $SIGNING_ID"
           echo "  notarization: accepted"
           echo "  stapling: skipped for standalone executable tarball"
@@ -301,6 +324,93 @@ jobs:
             echo "  pkg notarization: accepted"
             echo "  pkg stapling: validated"
           fi
+
+      - name: Sign + notarize + staple Malibu.app (conditional on operator secrets)
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/Malibu.app"
+
+          if [ -z "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" ]; then
+            echo "::warning::APPLE_DEVELOPER_ID_CERT_P12_BASE64 not set;"
+            echo "::warning::skipping signed Malibu.app artifact."
+            echo "::warning::adhoc-signed Malibu.app cannot register SMAppService"
+            echo "::warning::login-items on macOS 26.3.1+."
+            exit 0
+          fi
+          test -d "$APP"
+
+          security list-keychains | grep -q build.keychain || {
+            echo "::error::build.keychain absent; CLI signing step cleanup ran too early." >&2
+            exit 1
+          }
+          [ -n "${WORK:-}" ] && [ -x "$WORK/macprovider-cli" ] || {
+            echo "::error::signed macprovider-cli not available for Malibu.app bundling" >&2
+            exit 1
+          }
+
+          SIGNING_ID=$(security find-identity -v -p codesigning build.keychain \
+                      | awk -F'"' '/Developer ID Application/ {print $2; exit}')
+          [ -n "$SIGNING_ID" ] || {
+            echo "::error::No Developer ID Application identity in build.keychain" >&2
+            exit 1
+          }
+
+          cp "$WORK/macprovider-cli" "$APP/Contents/MacOS/macprovider-cli"
+          chmod 755 "$APP/Contents/MacOS/macprovider-cli"
+          [ -f "$WORK/mlx.metallib" ] || {
+            echo "::error::signed CLI payload lacks mlx.metallib for Malibu.app bundling" >&2
+            exit 1
+          }
+          cp "$WORK/mlx.metallib" "$APP/Contents/MacOS/mlx.metallib"
+          find "$WORK" -mindepth 1 -maxdepth 1 -name '*.bundle' \
+            -exec cp -R {} "$APP/Contents/MacOS"/ \;
+
+          codesign --force --deep \
+            --options runtime \
+            --timestamp \
+            --entitlements phase3-binary/app/Malibu.entitlements \
+            --sign "$SIGNING_ID" \
+            "$APP"
+
+          codesign --verify --strict --verbose=2 --deep "$APP"
+
+          NOTARIZE_ZIP="$RUNNER_TEMP/Malibu-notary.zip"
+          /usr/bin/ditto -c -k --keepParent "$APP" "$NOTARIZE_ZIP"
+
+          xcrun notarytool submit "$NOTARIZE_ZIP" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" \
+            --wait
+          rm -f "$NOTARIZE_ZIP"
+
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl -a -vvv -t exec "$APP"
+
+          tag="${{ steps.version.outputs.tag }}"
+          DIST_ZIP="phase3-binary/app/dist/Malibu-${tag}.zip"
+          mkdir -p "phase3-binary/app/dist"
+          (cd "$RUNNER_TEMP" && /usr/bin/ditto -c -k --keepParent Malibu.app "$GITHUB_WORKSPACE/$DIST_ZIP")
+
+          echo "  Malibu.app signed by: $SIGNING_ID"
+          echo "  Malibu.app notarization: accepted"
+          echo "  Malibu.app stapling: validated"
+          echo "  Malibu.app.zip: $DIST_ZIP"
+
+      - name: Clean signing material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          security delete-keychain build.keychain >/dev/null 2>&1 || true
+          rm -rf "${SIGNING_TMP:-}" "${WORK:-}" 2>/dev/null || true
 
       - name: Tier-2 provider artifact preflight
         shell: bash
@@ -426,28 +536,38 @@ jobs:
           tag="${{ steps.version.outputs.tag }}"
           src="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
           pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
+          app_src="phase3-binary/app/dist/Malibu-${tag}.zip"
           tar_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
           pkg_asset="macprovider-cli-${tag}-darwin-arm64.pkg"
+          app_asset="Malibu-${tag}.zip"
           test -f "$src"
           if [ -z "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" ]; then
             echo "MACPROVIDER_RELEASE_SIGNING_KEY_PEM secret is required" >&2
             exit 1
           fi
+          release_signing_key="$(mktemp "$RUNNER_TEMP/release-signing-private.XXXXXX.pem")"
+          cleanup_release_signing_key() {
+            rm -f "$release_signing_key"
+          }
+          trap cleanup_release_signing_key EXIT
           cp "$src" "$tar_asset"
           release_assets=("$tar_asset")
           if [ -f "$pkg_src" ]; then
             cp "$pkg_src" "$pkg_asset"
             release_assets+=("$pkg_asset")
           fi
+          if [ -f "$app_src" ]; then
+            cp "$app_src" "$app_asset"
+            release_assets+=("$app_asset")
+          fi
           : > checksums.txt
           for release_asset in "${release_assets[@]}"; do
             shasum -a 256 "$release_asset" >> checksums.txt
           done
           printf "%s\n" "${release_assets[@]}" > release-assets.txt
-          printf "%s\n" "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > release-signing-private.pem
-          chmod 600 release-signing-private.pem
-          openssl dgst -sha256 -sign release-signing-private.pem -out checksums.txt.sig checksums.txt
-          rm -f release-signing-private.pem
+          printf "%s\n" "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > "$release_signing_key"
+          chmod 600 "$release_signing_key"
+          openssl dgst -sha256 -sign "$release_signing_key" -out checksums.txt.sig checksums.txt
           echo "asset=$tar_asset" >> "$GITHUB_OUTPUT"
 
       - name: Prepare release notes
@@ -466,6 +586,17 @@ jobs:
           This release is Developer ID signed and notarized when the
           release operator secrets are populated. New releases may include
           a stapled .pkg asset in addition to the compatibility tarball.
+          EOF
+          fi
+          if [ -f "phase3-binary/app/dist/Malibu-${tag}.zip" ]; then
+            cat >> release-notes.md <<EOF
+
+          **Malibu.app (App-track provider onboarding)** - this release also
+          ships a Developer ID-signed, notarized, and stapled Malibu.app
+          for the SPEC-026 browserless one-click provider onboarding flow.
+          Download Malibu-${tag}.zip, unzip, and drag Malibu.app to
+          /Applications. First launch drives the whole registration ->
+          autotune -> download -> live flow with no browser and no CLI setup.
           EOF
           fi
 
