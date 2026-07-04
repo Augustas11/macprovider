@@ -75,9 +75,10 @@ and `pool.breaker_window_s` (default 120).
 - A buyer-canceled request does not degrade the provider (regression test).
 - The previously-unused `degraded_*` config keys now take effect.
 
-**Tests.** Extend `internal/buyer/server_test.go` fault doubles
-(`internal/testfaults/`): simulate repeated dead-WS → assert degrade + no
-routing + recovery; simulate buyer-cancel → assert NO degrade.
+**Tests.** Extend the inline fault doubles in `internal/buyer/server_test.go`
+(see `deadMidInferenceRelay` and neighbors, wired via `WithRelay`): simulate
+repeated dead-WS → assert degrade + no routing + recovery; simulate
+buyer-cancel → assert NO degrade.
 
 **Touch points.** `internal/buyer/server.go` (`handleProviderFailure`,
 `logWSDeadMidRequest`, the WS-dead + timeout paths), `internal/pool/provider.go`
@@ -178,8 +179,9 @@ routing tie-breaker.
 - Gate is skippable via config for trusted/pinned providers if needed.
 
 **Tests.** `internal/ws/server_test.go`: provider that never returns a token →
-stays out of pool; provider that returns within timeout → Ready. Fault double
-in `internal/testfaults/` for "accepts inference but never produces a token."
+stays out of pool; provider that returns within timeout → Ready. Inline fault
+double in `internal/ws/server_test.go` (alongside the existing warm-up /
+timeout / zero-token cases) for "accepts inference but never produces a token."
 
 **Touch points.** `internal/ws/server.go` (`handleConn` admission, new
 capability-probe flow, `warmupFallback`), `internal/pool/provider.go` (state),

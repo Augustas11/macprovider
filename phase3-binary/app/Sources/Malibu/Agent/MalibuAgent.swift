@@ -417,11 +417,16 @@ final class MalibuAgent: ObservableObject {
         }
     }
 
-    private static func resolveCLIExecutable() throws -> URL {
-        if let override = ProcessInfo.processInfo.environment["MALIBU_CLI_PATH"] {
+    static func resolveCLIExecutable(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundleURL: URL = Bundle.main.bundleURL
+    ) throws -> URL {
+        if let override = environment["MALIBU_CLI_PATH"], !override.isEmpty {
+            #if DEBUG
             return URL(fileURLWithPath: override)
+            #endif
         }
-        let bundled = Bundle.main.bundleURL
+        let bundled = bundleURL
             .appendingPathComponent("Contents/MacOS/macprovider-cli")
         if FileManager.default.isExecutableFile(atPath: bundled.path) { return bundled }
         throw POSIXError(.ENOENT)

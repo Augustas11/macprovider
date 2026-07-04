@@ -195,7 +195,7 @@ func TestTokenIssueValidateRevokeAndList(t *testing.T) {
 	}
 }
 
-func TestMintProviderTokenAppTrackRotatesUnusedAndRequiresProofForUsed(t *testing.T) {
+func TestMintProviderTokenAppTrackRequiresProofForAnyActiveToken(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -212,39 +212,28 @@ func TestMintProviderTokenAppTrackRotatesUnusedAndRequiresProofForUsed(t *testin
 		t.Fatalf("first token len=%d want 64", len(first))
 	}
 
-	second, err := store.MintProviderTokenAppTrack(ctx, providerID, nil)
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, nil); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
+		t.Fatalf("unused active without proof err=%v want ErrAppTrackExistingTokenNoProof", err)
+	}
+	if provider, ok, err := store.ValidateToken(ctx, first); err != nil || !ok || provider != providerID {
+		t.Fatalf("first token should remain active provider=%q ok=%v err=%v", provider, ok, err)
+	}
+	wrong := "wrong-token"
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &wrong); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
+		t.Fatalf("active token with wrong proof err=%v want ErrAppTrackExistingTokenNoProof", err)
+	}
+
+	second, err := store.MintProviderTokenAppTrack(ctx, providerID, &first)
 	if err != nil {
-		t.Fatalf("unused duplicate should rotate without proof: %v", err)
+		t.Fatalf("active token with current proof should reissue: %v", err)
 	}
 	if second == first {
-		t.Fatal("rotated token matched first token")
-	}
-	if provider, ok, err := store.ValidateToken(ctx, first); err != nil || ok || provider != "" {
-		t.Fatalf("first token should be revoked provider=%q ok=%v err=%v", provider, ok, err)
+		t.Fatal("proof reissue returned same token")
 	}
 	if err := store.MarkTokenUsed(ctx, second); err != nil {
 		t.Fatalf("mark second used: %v", err)
 	}
-
-	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, nil); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
-		t.Fatalf("used active without proof err=%v want ErrAppTrackExistingTokenNoProof", err)
-	}
-	wrong := "wrong-token"
-	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &wrong); !errors.Is(err, auth.ErrAppTrackExistingTokenNoProof) {
-		t.Fatalf("used active with wrong proof err=%v want ErrAppTrackExistingTokenNoProof", err)
-	}
-
-	third, err := store.MintProviderTokenAppTrack(ctx, providerID, &second)
-	if err != nil {
-		t.Fatalf("used active with current proof should reissue: %v", err)
-	}
-	if third == second {
-		t.Fatal("proof reissue returned same token")
-	}
-	if err := store.MarkTokenUsed(ctx, third); err != nil {
-		t.Fatalf("mark third used: %v", err)
-	}
-	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &third); !errors.Is(err, auth.ErrAppTrackReissueCooldown) {
+	if _, err := store.MintProviderTokenAppTrack(ctx, providerID, &second); !errors.Is(err, auth.ErrAppTrackReissueCooldown) {
 		t.Fatalf("cooldown reissue err=%v want ErrAppTrackReissueCooldown", err)
 	}
 }

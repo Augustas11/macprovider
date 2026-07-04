@@ -913,10 +913,11 @@ Primary files:
     `retry_per_attempt_timeout_s`, `max_providers_faulted_per_request`, and
     tiebreak config with default-preserving values.
   - Add validation for class aliases/objectives and safe retry/epsilon bounds.
-- `phase4-coordinator/internal/testfaults` (or existing equivalent harness)
+- Inline fault doubles in `phase4-coordinator/internal/buyer/server_test.go`
+  (see `deadMidInferenceRelay` and neighbors; wired via `WithRelay`)
   - Add deterministic provider-disconnect, 502, 504, pre-commit stream failure,
     post-commit stream failure, buyer cancel, warm-up-held, and breaker-held
-    scenarios.
+    scenarios alongside the existing dead-WS/failover doubles.
 - `phase4-coordinator/tools/mockprovider/`
   - Reuse mock providers for multi-provider routing, class, retry, and
     randomized-distribution acceptance tests.

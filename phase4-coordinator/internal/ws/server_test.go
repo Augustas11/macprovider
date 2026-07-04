@@ -2690,6 +2690,38 @@ func TestProviderHealthzDefaultVersion(t *testing.T) {
 	}
 }
 
+func TestProviderHealthzAndPoolzExcludeSelfMintedFromPublishedCapacity(t *testing.T) {
+	harness := newProviderHarness(t)
+	defer harness.HTTP.Close()
+	now := time.Now().UTC()
+	harness.Registry.Register(&pool.Provider{
+		ProviderID:       "m4-anon",
+		AssignedID:       "self-minted-session",
+		Hostname:         "self-minted.local",
+		ModelID:          "model-a",
+		MaxContextTokens: 20000,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		EndpointURL:      "https://m4.streamvc.live",
+		Tier:             pool.TierPinned,
+		State:            pool.StateReady,
+		LastHeartbeatAt:  now,
+		LastActivityAt:   now,
+		ConnectedAt:      now,
+		BinaryVersion:    "0.1.0",
+		AuthState:        pool.AuthSelfMinted,
+	}, nil)
+
+	healthz := fetchProviderHealthz(t, harness.HTTP.URL)
+	if healthz.PoolSize != 1 || healthz.PoolReady != 0 || healthz.PoolPolicyReady != 0 {
+		t.Fatalf("self-minted healthz = %+v, want visible but not ready/policy-ready", healthz)
+	}
+	poolz := fetchPoolz(t, harness.HTTP.URL)
+	if poolz.Summary.TotalProviders != 1 || poolz.Summary.Ready != 0 || poolz.Summary.FreeSlots != 0 {
+		t.Fatalf("self-minted poolz summary = %+v, want visible but not ready/free capacity", poolz.Summary)
+	}
+}
+
 func TestOperatorEndpointsBlacklistTwoPhaseDrain(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()

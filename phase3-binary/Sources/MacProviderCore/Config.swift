@@ -78,7 +78,7 @@ public struct AppConfig: Equatable, Sendable {
     // coordinator validates against its store when
     // auth.require_provider_tokens=true. Triple-exposed per house
     // convention: yaml key `provider_token`, env
-    // MACPROVIDER_PROVIDER_TOKEN, CLI --provider-token. Operator should
+    // MACPROVIDER_PROVIDER_TOKEN or CLI --token-file. Operator should
     // chmod 0600 the config file containing this value; the binary
     // never logs the token (URL is redacted, headers are not logged).
     public var providerToken: String?
@@ -157,6 +157,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var ctlSocketPath: String?
     public var switchStatePath: String?
     public var providerToken: String?
+    public var providerTokenFile: String?
     // SPEC-025 §12 conflict #2 — see AppConfig.managedBy.
     public var managedBy: String?
     // SPEC-013 autoresearch serving knobs. nil ⇒ defer to env / YAML /
@@ -187,6 +188,7 @@ public struct CLIOverrides: Equatable, Sendable {
         ctlSocketPath: String? = nil,
         switchStatePath: String? = nil,
         providerToken: String? = nil,
+        providerTokenFile: String? = nil,
         managedBy: String? = nil,
         kvBits: Int? = nil,
         maxContext: Int? = nil,
@@ -213,6 +215,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.ctlSocketPath = ctlSocketPath
         self.switchStatePath = switchStatePath
         self.providerToken = providerToken
+        self.providerTokenFile = providerTokenFile
         self.managedBy = managedBy
         self.kvBits = kvBits
         self.maxContext = maxContext
@@ -443,7 +446,14 @@ public enum ConfigLoader {
             config.switchStatePath = switchStatePath
         }
         if let providerToken = cli.providerToken {
-            config.providerToken = providerToken
+            throw ConfigError.invalidValue(
+                key: "--provider-token",
+                value: providerToken.isEmpty ? "<empty>" : "<redacted>",
+                expected: "use MACPROVIDER_PROVIDER_TOKEN, provider_token in a 0600 config file, or --token-file"
+            )
+        }
+        if let providerTokenFile = cli.providerTokenFile {
+            config.providerToken = try readProviderTokenFile(providerTokenFile)
         }
         if let managedBy = cli.managedBy {
             config.managedBy = managedBy
@@ -476,6 +486,31 @@ public enum ConfigLoader {
             config.idlePrewarmRunOnBattery = idlePrewarmRunOnBattery
         }
         return config
+    }
+
+    private static func readProviderTokenFile(_ path: String) throws -> String {
+        let expanded = expandTilde(path)
+        let attrs: [FileAttributeKey: Any]
+        do {
+            attrs = try FileManager.default.attributesOfItem(atPath: expanded)
+        } catch {
+            throw ConfigError.unreadableConfig(path: expanded, underlying: String(describing: error))
+        }
+        let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        guard mode & 0o077 == 0 else {
+            throw ConfigError.invalidValue(key: "--token-file", value: expanded, expected: "file mode 0600 or stricter")
+        }
+        let contents: String
+        do {
+            contents = try String(contentsOfFile: expanded, encoding: .utf8)
+        } catch {
+            throw ConfigError.unreadableConfig(path: expanded, underlying: String(describing: error))
+        }
+        let token = contents.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            throw ConfigError.invalidValue(key: "--token-file", value: expanded, expected: "non-empty token")
+        }
+        return token
     }
 
     private static func assign(_ field: inout Int, from dict: [String: Any], key: String, expected: String) throws {

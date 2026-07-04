@@ -5,6 +5,38 @@ import XCTest
 @testable import macprovider_cli
 
 final class ServeCommandTests: XCTestCase {
+    func testServeCommandRejectsInlineProviderTokenArguments() throws {
+        let deprecated = try ServeCommand.parse(["--token", "secret"])
+        XCTAssertThrowsError(try ConfigLoader.load(cli: CLIOverrides(providerToken: deprecated.providerToken), environment: [:])) { error in
+            XCTAssertTrue(String(describing: error).contains("--provider-token"))
+        }
+
+        let legacy = try ServeCommand.parse(["--provider-token", "secret"])
+        XCTAssertThrowsError(try ConfigLoader.load(cli: CLIOverrides(providerToken: legacy.providerToken), environment: [:])) { error in
+            XCTAssertTrue(String(describing: error).contains("--provider-token"))
+        }
+    }
+
+    func testConfigLoaderReadsProviderTokenFromPrivateTokenFile() throws {
+        let dir = try tempDir()
+        let tokenFile = dir.appendingPathComponent("token")
+        try "file-token\n".write(to: tokenFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenFile.path)
+
+        let config = try ConfigLoader.load(cli: CLIOverrides(providerTokenFile: tokenFile.path), environment: [:])
+
+        XCTAssertEqual(config.providerToken, "file-token")
+    }
+
+    func testConfigLoaderRejectsWorldReadableProviderTokenFile() throws {
+        let dir = try tempDir()
+        let tokenFile = dir.appendingPathComponent("token")
+        try "file-token\n".write(to: tokenFile, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: tokenFile.path)
+
+        XCTAssertThrowsError(try ConfigLoader.load(cli: CLIOverrides(providerTokenFile: tokenFile.path), environment: [:]))
+    }
+
     func testNoJoinFlagParses() throws {
         let command = try ServeCommand.parse([
             "--no-join",

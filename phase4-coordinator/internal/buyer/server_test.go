@@ -1097,6 +1097,23 @@ func TestHealthzExcludesPendingReceiptCandidateFromReadyCapacity(t *testing.T) {
 	}
 }
 
+func TestHealthzExcludesAuthSelfMintedFromReadyCapacity(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "https://p1.example"}})
+	registerAuthState(registry, "p1", "session-1", "model-a", "https://p1.example", pool.AuthSelfMinted)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_size":1`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_ready":0`)) {
+		t.Fatalf("self-minted provider must remain visible but not ready capacity; body=%s", rr.Body.String())
+	}
+}
+
 func TestHealthzReportsInjectedVersion(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithVersion("v1.3.0-7-gabcdef0"))
@@ -6314,6 +6331,10 @@ func TestSPEC004DefaultConfigRegression_ContextTooSmall(t *testing.T) {
 // pool.Provider.RoutingEligible(). Mirrors the v1.2.5 bearer-less reconnect case
 // that v0.8.3 admits and quarantines.
 func registerBearerlessDuplicate(registry *pool.Registry, providerID, assignedID, modelID, endpointURL string) {
+	registerAuthState(registry, providerID, assignedID, modelID, endpointURL, pool.AuthBearerlessDuplicate)
+}
+
+func registerAuthState(registry *pool.Registry, providerID, assignedID, modelID, endpointURL string, authState pool.AuthState) {
 	now := time.Now().UTC()
 	registry.Register(&pool.Provider{
 		ProviderID:            providerID,
@@ -6335,7 +6356,7 @@ func registerBearerlessDuplicate(registry *pool.Registry, providerID, assignedID
 		LastActivityAt:        now,
 		ConnectedAt:           now,
 		BinaryVersion:         "0.1.0",
-		AuthState:             pool.AuthBearerlessDuplicate,
+		AuthState:             authState,
 	}, nil)
 }
 
@@ -6455,6 +6476,46 @@ func TestModelsExcludesAuthBearerlessDuplicateFromCapacity(t *testing.T) {
 	if modelA.TotalSlots != 1 {
 		t.Fatalf("total_slots = %d, want 1 (good only)", modelA.TotalSlots)
 	}
+}
+
+func TestModelsExcludesAuthSelfMintedFromCapacity(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "good", EndpointURL: "https://good.example"},
+		{ProviderID: "bad", EndpointURL: "https://bad.example"},
+	})
+	register(registry, "good", "session-good", "model-a", pool.StateReady, 20000, 1)
+	registerAuthState(registry, "bad", "session-bad", "model-a", "https://bad.example", pool.AuthSelfMinted)
+
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Data []struct {
+			ID            string `json:"id"`
+			ProviderCount int    `json:"provider_count"`
+			TotalSlots    int    `json:"total_slots"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	for _, m := range resp.Data {
+		if m.ID == "model-a" {
+			if m.ProviderCount != 1 {
+				t.Fatalf("provider_count = %d, want 1 (good only; self-minted excluded)", m.ProviderCount)
+			}
+			if m.TotalSlots != 1 {
+				t.Fatalf("total_slots = %d, want 1 (good only; self-minted excluded)", m.TotalSlots)
+			}
+			return
+		}
+	}
+	t.Fatalf("model-a not in response; body=%s", rr.Body.String())
 }
 
 func TestModelsExcludesPendingReceiptCandidateFromCapacity(t *testing.T) {

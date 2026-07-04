@@ -48,11 +48,11 @@ struct ProviderEarnings: Decodable, Equatable {
 
 struct EarningsClient {
     let coordinatorBaseURL: URL
-    let session: URLSession
+    private let session: URLSession?
 
     init(
         coordinatorBaseURL: URL = URL(string: "https://coordinator.streamvc.live")!,
-        session: URLSession = .shared
+        session: URLSession? = nil
     ) {
         self.coordinatorBaseURL = coordinatorBaseURL
         self.session = session
@@ -67,7 +67,15 @@ struct EarningsClient {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        if let session {
+            (data, response) = try await session.data(for: request)
+        } else {
+            let guarded = ProviderBearerURLSession.make()
+            defer { guarded.finishTasksAndInvalidate() }
+            (data, response) = try await guarded.data(for: request)
+        }
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw EarningsClientError.httpStatus(http.statusCode)
         }
