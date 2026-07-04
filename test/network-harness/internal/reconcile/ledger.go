@@ -1099,6 +1099,8 @@ func isGatewayOKOutcome(outcome string) bool {
 func isSettlementComplete(outcome string) bool {
 	switch outcome {
 	case "ok",
+		"spec022_verified",
+		"unverified_streaming",
 		"stream_truncated",
 		"stream_malformed",
 		"stream_output_exceeded",

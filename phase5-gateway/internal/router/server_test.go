@@ -2040,12 +2040,12 @@ func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
 		t.Fatalf("decode summary: %v", err)
 	}
-	if summary.Scanned != 3 || summary.Refunded != 1 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 1 || summary.Errors != 0 {
-		t.Fatalf("summary=%+v, want refund/hold/nonterminal-coordinator-404 split", summary)
+	if summary.Scanned != 3 || summary.Refunded != 1 || summary.Expired != 1 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v, want refund/hold/expired-coordinator-404 split", summary)
 	}
 	got := gatewaySettlementSnapshot(t, dbPath, "acct_spec022_reconcile")
-	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 3 || got.expiredRows != 0 || got.activeReserved != 60 {
-		t.Fatalf("settlement snapshot=%+v, want one refund, one held pending reservation, one nonterminal coordinator-404 hold, and one ordinary active reservation", got)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 2 || got.expiredRows != 1 || got.activeReserved != 40 {
+		t.Fatalf("settlement snapshot=%+v, want one refund, one expired coordinator-404 hold, one held pending reservation, and one ordinary active reservation", got)
 	}
 	if got := gatewayReservationExpiresAtUnixMSForRequest(t, dbPath, "acct_spec022_reconcile", "req_hold"); got != pendingDeadlineUnixMS {
 		t.Fatalf("held reservation expires_at=%d want %d", got, pendingDeadlineUnixMS)
@@ -2626,6 +2626,38 @@ func TestSPEC022GatewayProviderErrorFinalityHoldsBuyerDebit(t *testing.T) {
 	}
 	if got := holds[0].ExpiresAt.UnixMilli(); got != pendingDeadline.UnixMilli() {
 		t.Fatalf("held reservation expires_at_unix_ms=%d want %d", got, pendingDeadline.UnixMilli())
+	}
+}
+
+func TestSPEC022GatewayVerifiedProviderErrorFinalityHoldsForReconcile(t *testing.T) {
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		h := http.Header{}
+		h.Set("Content-Type", "application/json")
+		h.Set(settlementModeHeader, "enforce")
+		h.Set(settlementPolicyVersionHeader, settlementPolicyVersion)
+		h.Set(settlementOutcomeHeader, "verified")
+		h.Set(settlementReceiptResultHeader, "valid")
+		h.Set(settlementReasonHeader, "verified_provider_error")
+		h.Set(settlementClosedHeader, "true")
+		return responseWithBody(http.StatusBadGateway, h, `{"error":{"message":"upstream failed","type":"api_error","param":null,"code":"provider_error"}}`), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	accountID := "acct_spec022_provider_error_verified"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 || got.activeReserved != promptCapTokens([]byte(body))+20 {
+		t.Fatalf("settlement snapshot = %+v, want verified provider error to hold reservation for reconciler", got)
+	}
+	if got := gatewayReservationExpiresAtUnixMS(t, dbPath, accountID); got != fixedNow().Add(settlementHoldFallbackTTL).UnixMilli() {
+		t.Fatalf("reservation expires_at=%d want fallback hold deadline %d", got, fixedNow().Add(settlementHoldFallbackTTL).UnixMilli())
 	}
 }
 
@@ -3552,8 +3584,9 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 		}
 		reservedAtFirstByte = reserved
 		pr, pw := io.Pipe()
+		streamLine := fmt.Sprintf("data: {\"id\":\"chatcmpl\",\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\n", strings.Repeat("x", 120))
 		go func() {
-			_, _ = fmt.Fprintf(pw, "data: {\"id\":\"chatcmpl\",\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\n\n", strings.Repeat("x", 120))
+			_, _ = fmt.Fprint(pw, streamLine+"\n")
 			close(firstByte)
 			<-r.Context().Done()
 			close(cancelSeen)
@@ -3606,7 +3639,8 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
-	wantUsed := float64(estimatePromptTokens([]byte(body)) + 30)
+	wantCompletion := estimateStreamingCompletionTokens(boundedStreamingFallbackFrameBytes([]byte(fmt.Sprintf("data: {\"id\":\"chatcmpl\",\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\n", strings.Repeat("x", 120)))), 200)
+	wantUsed := float64(estimatePromptTokens([]byte(body)) + wantCompletion)
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
 	}
@@ -4262,7 +4296,7 @@ func TestStreamingGatewayEstimateCountsGeneratedDeltaStrings(t *testing.T) {
 	}
 }
 
-func TestStreamingGatewayEstimateCountsDeltaContentNotMetadata(t *testing.T) {
+func TestStreamingGatewayEstimateCountsSerializedFrameExposure(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":1,"messages":[{"role":"user","content":"ok"}]}`
 	accountID := "acct_stream_metadata"
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -4284,12 +4318,12 @@ func TestStreamingGatewayEstimateCountsDeltaContentNotMetadata(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
 	}
-	if strings.Contains(resp.Body.String(), "stream_output_exceeded") {
-		t.Fatalf("stream body unexpectedly exceeded output cap: %s", resp.Body.String())
+	if !strings.HasSuffix(resp.Body.String(), "data: [DONE]\n\n") {
+		t.Fatalf("stream body missing DONE terminator: %s", resp.Body.String())
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "unverified_streaming" || source != "gateway_estimated" {
-		t.Fatalf("usage outcome/source = %s/%s, want unverified_streaming/gateway_estimated", outcome, source)
+	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want stream_output_exceeded/gateway_estimated", outcome, source)
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
@@ -4328,8 +4362,8 @@ func TestStreamingGatewayEstimateCountsToolCallArguments(t *testing.T) {
 		t.Fatalf("stream body unexpectedly exceeded output cap: %s", resp.Body.String())
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "unverified_streaming" || source != "gateway_estimated" {
-		t.Fatalf("usage outcome/source = %s/%s, want unverified_streaming/gateway_estimated", outcome, source)
+	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want stream_output_exceeded/gateway_estimated", outcome, source)
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
@@ -4807,7 +4841,7 @@ func TestSettleFromUsage_NoUsageChunk_FallsBackToByteEstimate(t *testing.T) {
 		maxTokens:      128,
 		wantOutcome:    "unverified_streaming",
 		wantSource:     "gateway_estimated",
-		wantCompletion: 30,
+		wantCompletion: 51,
 	})
 }
 
@@ -4820,7 +4854,7 @@ func TestSettleFromUsage_InvalidUsageChunk_FallsBackToByteEstimate(t *testing.T)
 		maxTokens:      128,
 		wantOutcome:    "unverified_streaming",
 		wantSource:     "gateway_estimated",
-		wantCompletion: 30,
+		wantCompletion: 51,
 	})
 }
 

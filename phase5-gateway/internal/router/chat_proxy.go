@@ -602,16 +602,19 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	gatewayContentEstimatedCompletion := func() int64 {
 		return estimateStreamingCompletionTokens(emitted, maxTokens)
 	}
+	gatewaySerializedEstimatedCompletion := func() int64 {
+		return estimateStreamingCompletionTokens(maxInt64(emitted, serializedEmitted), maxTokens)
+	}
 	settleTruncated := func() {
 		if reported != nil {
 			settleReported("stream_truncated")
 			return
 		}
-		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "stream_truncated", reservationWindow, resp)
+		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewaySerializedEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "stream_truncated", reservationWindow, resp)
 	}
 	settleCancelled := func() {
 		cancelCoordinator()
-		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "client_disconnect", reservationWindow, resp)
+		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewaySerializedEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "client_disconnect", reservationWindow, resp)
 	}
 	forwardLine := func(line []byte) bool {
 		select {
@@ -674,38 +677,6 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow, resp)
 					return false
 				}
-				if deltaBytes > 0 || frameBytes > 0 {
-					projectedContentBytes := emitted + deltaBytes
-					projectedSerializedBytes := serializedEmitted + frameBytes
-					projectedCompletion := estimateTokensFromBytes(projectedContentBytes)
-					maxCompletion := maxStreamingCompletionTokens(maxTokens)
-					hardByteCeiling := maxCompletion * 8
-					if hardByteCeiling < 1 {
-						hardByteCeiling = 1
-					}
-					if projectedContentBytes > hardByteCeiling {
-						slog.Warn("streaming gateway estimate exceeded hard byte ceiling; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", projectedCompletion, "max_completion_tokens", maxCompletion, "emitted_bytes", projectedContentBytes, "hard_byte_ceiling", hardByteCeiling)
-						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
-						if flusher != nil {
-							flusher.Flush()
-						}
-						cancelCoordinator()
-						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow, resp)
-						return false
-					}
-					if projectedSerializedBytes-projectedContentBytes > maxStreamingFallbackMetadataBytes {
-						slog.Warn("streaming gateway estimate exceeded serialized metadata ceiling; truncating stream", "request_id", requestID(r), "serialized_bytes", projectedSerializedBytes, "content_bytes", projectedContentBytes, "metadata_ceiling", maxStreamingFallbackMetadataBytes)
-						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
-						if flusher != nil {
-							flusher.Flush()
-						}
-						cancelCoordinator()
-						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow, resp)
-						return false
-					}
-					emitted = projectedContentBytes
-					serializedEmitted = projectedSerializedBytes
-				}
 				if usage, ok, err := usageFromJSON([]byte(data), maxUsageTokens, maxTokens, true); ok {
 					if err != nil {
 						invalidReportedUsage = true
@@ -728,6 +699,38 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					completion := gatewayContentEstimatedCompletion()
 					s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow, resp)
 					return false
+				}
+				if len(line) > 0 && (deltaBytes > 0 || frameBytes > 0) {
+					frameBytes = boundedStreamingFallbackFrameBytes(line)
+					projectedContentBytes := emitted + deltaBytes
+					projectedSerializedBytes := serializedEmitted + frameBytes
+					maxCompletion := maxStreamingCompletionTokens(maxTokens)
+					hardByteCeiling := maxCompletion * 8
+					if hardByteCeiling < 1 {
+						hardByteCeiling = 1
+					}
+					if projectedContentBytes > hardByteCeiling {
+						slog.Warn("streaming gateway estimate exceeded hard byte ceiling; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", estimateTokensFromBytes(projectedContentBytes), "max_completion_tokens", maxCompletion, "emitted_bytes", projectedContentBytes, "hard_byte_ceiling", hardByteCeiling)
+						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
+						if flusher != nil {
+							flusher.Flush()
+						}
+						cancelCoordinator()
+						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow, resp)
+						return false
+					}
+					if projectedSerializedBytes-projectedContentBytes > maxStreamingFallbackMetadataBytes {
+						slog.Warn("streaming gateway estimate exceeded serialized metadata ceiling; truncating stream", "request_id", requestID(r), "serialized_bytes", projectedSerializedBytes, "content_bytes", projectedContentBytes, "metadata_ceiling", maxStreamingFallbackMetadataBytes)
+						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
+						if flusher != nil {
+							flusher.Flush()
+						}
+						cancelCoordinator()
+						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow, resp)
+						return false
+					}
+					emitted = projectedContentBytes
+					serializedEmitted = projectedSerializedBytes
 				}
 			}
 		}
@@ -817,7 +820,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			if flusher != nil {
 				flusher.Flush()
 			}
-			s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "provider_timeout", reservationWindow, resp)
+			s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewaySerializedEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "provider_timeout", reservationWindow, resp)
 			return
 		}
 		writeProviderDisconnectedSSE(w)
@@ -843,9 +846,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		settleReported("ok")
 		return
 	}
-	completion := gatewayContentEstimatedCompletion()
+	completion := gatewaySerializedEstimatedCompletion()
 	outcome := "ok"
-	if estimateTokensFromBytes(emitted) > maxStreamingCompletionTokens(maxTokens) {
+	if estimateTokensFromBytes(maxInt64(emitted, serializedEmitted)) > maxStreamingCompletionTokens(maxTokens) {
 		outcome = "stream_output_exceeded"
 	}
 	s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
@@ -860,7 +863,6 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 }
 
 func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens, maxTokens int64) {
-	completion := completionFromHeaderCapped(resp.Header, maxTokens)
 	finality := coordinatorSettlementFinalityFromHeaders(resp.Header)
 	switch finality.Action {
 	case settlementFinalityLegacy, settlementFinalityRefund:
@@ -876,9 +878,18 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 			return
 		}
 	case settlementFinalityDebit:
-		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "upstream_error") {
+		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
+			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
 			return
 		}
+		slog.Info("gateway deferred verified provider-error buyer settlement to SPEC-022 reconciler",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"settlement_outcome", finality.Outcome,
+			"settlement_reason", finality.Reason,
+		)
 	case settlementFinalityHold:
 		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

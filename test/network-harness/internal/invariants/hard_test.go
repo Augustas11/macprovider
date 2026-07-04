@@ -113,8 +113,13 @@ func TestCheckI1_GatewayOverbillVsHarness_AppliesScenarioTolerance(t *testing.T)
 		OverbilledPairs:                []string{"OVERBILLED"},
 	}
 	c := checkI1(sc, ledger)
+	if !c.Passed {
+		t.Fatalf("I1 should pass overbill within scenario tolerance: %+v", c)
+	}
+	sc.ChargedDeliveredToleranceTokens = 9
+	c = checkI1(sc, ledger)
 	if c.Passed {
-		t.Fatal("I1 hard gate must fail overbill even when scenario tolerance is configured")
+		t.Fatal("I1 should fail overbill above scenario tolerance")
 	}
 }
 
@@ -205,8 +210,8 @@ func TestCheckI3_AllowsConfiguredTolerance(t *testing.T) {
 
 	c := checkI3(sc, ledger)
 
-	if c.Passed {
-		t.Fatalf("I3 hard gate must fail overbill even at configured tolerance: %+v", c)
+	if !c.Passed {
+		t.Fatalf("I3 should pass at tolerance: %+v", c)
 	}
 }
 

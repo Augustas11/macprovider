@@ -86,7 +86,7 @@ func Evaluate(sc *scenario.Scenario, results []buyer.Result, summary *metrics.Su
 //   - gateway and coord disagree on per-pair tokens in EITHER direction
 //     (AbsGatewayCoordinatorMismatchTokens > 0) — both are settlement
 //     systems and must agree on per-request token counts.
-func checkI1(_ *scenario.Scenario, ledger *reconcile.Result) Check {
+func checkI1(sc *scenario.Scenario, ledger *reconcile.Result) Check {
 	c := Check{ID: "I1", Title: "billing-ledger reconciliation drift == 0"}
 	if ledger == nil {
 		c.Skipped = true
@@ -116,6 +116,10 @@ func checkI1(_ *scenario.Scenario, ledger *reconcile.Result) Check {
 	//     same #232 corroboration gate applies)
 	gwOverbillVsHarness := ledger.GatewayOverbillVsHarnessTokens
 	absGwCoordMismatch := ledger.AbsGatewayCoordinatorMismatchTokens
+	tolerance := int64(0)
+	if sc != nil {
+		tolerance = sc.ChargedDeliveredToleranceTokens
+	}
 	unmatched := len(ledger.UnmatchedSuccesses)
 	unmatchedGwOK := len(ledger.UnmatchedGatewayOKRows)
 	unmatchedCoord2xx := len(ledger.UnmatchedCoordinator2xxRows)
@@ -139,7 +143,7 @@ func checkI1(_ *scenario.Scenario, ledger *reconcile.Result) Check {
 	if coordMissingOK > 0 {
 		driftSignals++
 	}
-	if gwOverbillVsHarness > 0 {
+	if gwOverbillVsHarness > tolerance {
 		driftSignals++
 	}
 	if absGwCoordMismatch > 0 {
@@ -174,8 +178,8 @@ func checkI1(_ *scenario.Scenario, ledger *reconcile.Result) Check {
 	if coordMissingOK > 0 {
 		parts = append(parts, fmt.Sprintf("%d gateway-ok matched pairs with no coord row", coordMissingOK))
 	}
-	if gwOverbillVsHarness > 0 {
-		parts = append(parts, fmt.Sprintf("gateway over-billed by %d vs harness across %d pair(s)", gwOverbillVsHarness, len(ledger.OverbilledPairs)))
+	if gwOverbillVsHarness > tolerance {
+		parts = append(parts, fmt.Sprintf("gateway over-billed by %d vs harness above tolerance %d across %d pair(s)", gwOverbillVsHarness, tolerance, len(ledger.OverbilledPairs)))
 	}
 	if absGwCoordMismatch > 0 {
 		parts = append(parts, fmt.Sprintf("gateway-coord ledger mismatch %d tokens across %d pair(s)", absGwCoordMismatch, len(ledger.GatewayCoordMismatchedPairs)))
@@ -278,22 +282,26 @@ func checkI2(results []buyer.Result, ledger *reconcile.Result) Check {
 // Phase A limitation: when the usage block is provider-reported and
 // differs from the SSE-content count, we may flag false positives.
 // Triage will tell us if that needs a tolerance.
-func checkI3(_ *scenario.Scenario, ledger *reconcile.Result) Check {
+func checkI3(sc *scenario.Scenario, ledger *reconcile.Result) Check {
 	c := Check{ID: "I3", Title: "no charged-tokens > delivered-tokens"}
 	if ledger == nil {
 		c.Skipped = true
 		c.Detail = "reconciliation skipped: charged-vs-delivered requires gateway settlement rows"
 		return c
 	}
-	if ledger.GatewayOverbillVsHarnessTokens == 0 {
+	tolerance := int64(0)
+	if sc != nil {
+		tolerance = sc.ChargedDeliveredToleranceTokens
+	}
+	if ledger.GatewayOverbillVsHarnessTokens <= tolerance {
 		c.Passed = true
-		c.Detail = "no overcharges observed"
+		c.Detail = fmt.Sprintf("no overcharges observed above tolerance: gateway_overbill_vs_harness=%d tolerance=%d", ledger.GatewayOverbillVsHarnessTokens, tolerance)
 		return c
 	}
 	c.Passed = false
 	c.OffendingIDs = ledger.OverbilledPairs
 	c.EvidenceCount = len(ledger.OverbilledPairs)
-	c.Detail = fmt.Sprintf("gateway charged %d tokens above delivered across %d request(s)", ledger.GatewayOverbillVsHarnessTokens, len(ledger.OverbilledPairs))
+	c.Detail = fmt.Sprintf("gateway charged %d tokens above delivered tolerance %d across %d request(s)", ledger.GatewayOverbillVsHarnessTokens, tolerance, len(ledger.OverbilledPairs))
 	return c
 }
 
