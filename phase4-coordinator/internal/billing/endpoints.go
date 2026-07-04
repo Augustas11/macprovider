@@ -559,7 +559,7 @@ SELECT rl.request_id, rl.ts_utc, rl.model, COALESCE(rl.provider_assigned_id, '')
        ), 0) AS attempt_n
   FROM request_log rl
  WHERE `+sqliteTimeRange("rl.ts_utc")+`
- ORDER BY julianday(rl.ts_utc), rl.id`, sqliteTimeText(from), sqliteTimeText(to))
+ ORDER BY rl.ts_utc, rl.id`, sqliteTimeText(from), sqliteTimeText(to))
 	if err != nil {
 		return 0, err
 	}
@@ -1050,7 +1050,7 @@ func (h *handler) modelsServed(ctx context.Context, providerID string, rangeSQL 
 
 func (h *handler) rateCardExcerpt(ctx context.Context, models []string) map[string]RateCardEntry {
 	var raw string
-	if err := h.store.db.QueryRowContext(ctx, `SELECT rate_card_json FROM ledger_config_snapshots ORDER BY julianday(effective_at_utc) DESC, id DESC LIMIT 1`).Scan(&raw); err != nil {
+	if err := h.store.db.QueryRowContext(ctx, `SELECT rate_card_json FROM ledger_config_snapshots ORDER BY effective_at_utc DESC, id DESC LIMIT 1`).Scan(&raw); err != nil {
 		return map[string]RateCardEntry{}
 	}
 	var card map[string]RateCardEntry
@@ -1065,7 +1065,7 @@ func (h *handler) rateCardExcerpt(ctx context.Context, models []string) map[stri
 }
 
 func (h *handler) latestShareBps(ctx context.Context) int64 {
-	return h.sum(ctx, `SELECT provider_share_bps FROM ledger_config_snapshots ORDER BY julianday(effective_at_utc) DESC, id DESC LIMIT 1`)
+	return h.sum(ctx, `SELECT provider_share_bps FROM ledger_config_snapshots ORDER BY effective_at_utc DESC, id DESC LIMIT 1`)
 }
 
 func (h *handler) lastPayout(ctx context.Context, providerID string) any {

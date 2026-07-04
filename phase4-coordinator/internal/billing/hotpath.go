@@ -3,36 +3,39 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 )
 
 type HotPathInput struct {
-	RequestID                  string
-	AttemptN                   int
-	ProviderAssignedID         string
-	ProviderID                 string
-	Model                      string
-	Status                     int
-	Stream                     bool
-	TSUtc                      time.Time
-	PromptTokens               *int64
-	CachedPromptTokens         *int64
-	CompletionTokens           *int64
-	EstimatedCompTokens        *int64
-	ErrorCode                  string
-	FaultFlag                  string
-	StickyResult               string
-	StickyMissReason           string
-	ConfigSnapshotID           int64
-	RateEntry                  RateCardEntry
-	MultiplierPPM              int64
-	ProviderShareBps           int64
-	SettlementAccountScopeHash string
-	SettlementPolicyMode       string
-	SettlementPolicyVersion    string
-	RoutingDecisionLog         func(CacheBillingRoutingDecision)
+	RequestID                    string
+	AttemptN                     int
+	ProviderAssignedID           string
+	ProviderID                   string
+	Model                        string
+	Status                       int
+	Stream                       bool
+	TSUtc                        time.Time
+	PromptTokens                 *int64
+	PromptTokenUpperBound        *int64
+	ProviderReportedPromptTokens *int64
+	CachedPromptTokens           *int64
+	CompletionTokens             *int64
+	EstimatedCompTokens          *int64
+	ErrorCode                    string
+	FaultFlag                    string
+	StickyResult                 string
+	StickyMissReason             string
+	ConfigSnapshotID             int64
+	RateEntry                    RateCardEntry
+	MultiplierPPM                int64
+	ProviderShareBps             int64
+	SettlementAccountScopeHash   string
+	SettlementPolicyMode         string
+	SettlementPolicyVersion      string
+	RoutingDecisionLog           func(CacheBillingRoutingDecision)
 }
 
 type CacheBillingRoutingDecision struct {
@@ -47,6 +50,8 @@ type CacheBillingRoutingDecision struct {
 }
 
 func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
+	boundProviderReportedPromptTokens(&in)
+	reqRow = requestLogRowWithBoundedPrompt(reqRow, in)
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
@@ -239,6 +244,35 @@ func normalizeCachedPromptTokens(in *HotPathInput) string {
 	return ""
 }
 
+func boundProviderReportedPromptTokens(in *HotPathInput) {
+	in.ProviderReportedPromptTokens = cloneInt64Ptr(in.PromptTokens)
+	if in.PromptTokens == nil || in.PromptTokenUpperBound == nil {
+		return
+	}
+	bound := *in.PromptTokenUpperBound
+	if bound < 0 {
+		bound = 0
+	}
+	if *in.PromptTokens > bound {
+		slog.Warn("provider reported prompt tokens exceeded independent bound; charging bounded prompt tokens",
+			"request_id", in.RequestID,
+			"attempt_n", in.AttemptN,
+			"provider_id", in.ProviderID,
+			"provider_reported_prompt_tokens", *in.PromptTokens,
+			"charged_prompt_tokens", bound,
+		)
+		in.PromptTokens = &bound
+	}
+}
+
+func cloneInt64Ptr(v *int64) *int64 {
+	if v == nil {
+		return nil
+	}
+	cloned := *v
+	return &cloned
+}
+
 func logCacheBillingRoutingDecision(in HotPathInput, validationReason string) {
 	if in.RoutingDecisionLog == nil {
 		return
@@ -260,6 +294,13 @@ func logCacheBillingRoutingDecision(in HotPathInput, validationReason string) {
 }
 
 func (s *Store) WriteRequestLogWithIdentity(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
+	if in.ProviderReportedPromptTokens == nil {
+		in.ProviderReportedPromptTokens = cloneInt64Ptr(in.PromptTokens)
+		if in.ProviderReportedPromptTokens == nil {
+			in.ProviderReportedPromptTokens = cloneInt64Ptr(reqRow.PromptTokens)
+		}
+	}
+	reqRow = requestLogRowWithBoundedPrompt(reqRow, in)
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
@@ -288,14 +329,41 @@ func (s *Store) WriteRequestLogWithIdentity(ctx context.Context, reqLogStore *re
 	return err
 }
 
+func requestLogRowWithBoundedPrompt(row requestlog.Row, in HotPathInput) requestlog.Row {
+	if row.PromptTokens == nil || in.PromptTokenUpperBound == nil {
+		return row
+	}
+	bound := *in.PromptTokenUpperBound
+	if bound < 0 {
+		bound = 0
+	}
+	if *row.PromptTokens <= bound {
+		return row
+	}
+	reported := *row.PromptTokens
+	row.PromptTokens = &bound
+	if row.CachedPromptTokens != nil && *row.CachedPromptTokens > bound {
+		row.CachedPromptTokens = nil
+	}
+	slog.Warn("provider reported prompt tokens exceeded independent bound during request_log identity fallback; writing bounded prompt tokens for recovery",
+		"request_id", in.RequestID,
+		"attempt_n", in.AttemptN,
+		"provider_id", in.ProviderID,
+		"provider_reported_prompt_tokens", reported,
+		"charged_prompt_tokens", bound,
+	)
+	return row
+}
+
 func insertProviderIdentitySnapshotTx(ctx context.Context, db sqlExecutor, in HotPathInput, now string) error {
 	_, err := db.ExecContext(ctx, `
-INSERT INTO ledger_provider_identity_snapshots (
-    request_id, attempt_n, provider_assigned_id, provider_id, resolved_from,
-    pool_session_started_at_utc, config_snapshot_id, created_at_utc
-) VALUES (?, ?, ?, ?, 'pool_entry', NULL, ?, ?)
-ON CONFLICT(request_id, attempt_n, provider_assigned_id) DO NOTHING`,
-		in.RequestID, in.AttemptN, in.ProviderAssignedID, in.ProviderID, nullPositiveInt64(in.ConfigSnapshotID), now,
+	INSERT INTO ledger_provider_identity_snapshots (
+	    request_id, attempt_n, provider_assigned_id, provider_id, resolved_from,
+	    pool_session_started_at_utc, config_snapshot_id, provider_reported_prompt_tokens,
+	    created_at_utc
+	) VALUES (?, ?, ?, ?, 'pool_entry', NULL, ?, ?, ?)
+	ON CONFLICT(request_id, attempt_n, provider_assigned_id) DO NOTHING`,
+		in.RequestID, in.AttemptN, in.ProviderAssignedID, in.ProviderID, nullPositiveInt64(in.ConfigSnapshotID), nullInt64(in.ProviderReportedPromptTokens), now,
 	)
 	return err
 }
@@ -308,22 +376,25 @@ func insertRequestCreditTx(ctx context.Context, db sqlExecutor, in HotPathInput,
 	res, err := db.ExecContext(ctx, `
 INSERT INTO ledger_request_credits (
     request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
-    status, stream, prompt_tokens, cached_prompt_tokens, completion_tokens, estimated_completion_tokens,
+    status, stream, prompt_tokens, charged_prompt_tokens, provider_reported_prompt_tokens,
+    cached_prompt_tokens, completion_tokens, estimated_completion_tokens,
     usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
     global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
     fault_flag, settlement_account_scope_hash, settlement_policy_mode,
     settlement_policy_version, recovery_source, created_at_utc, quarantined,
     quarantine_reason
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.RequestID,
 		in.AttemptN,
 		in.ProviderID,
 		nullString(in.ProviderAssignedID),
-		in.TSUtc.UTC().Format(time.RFC3339Nano),
+		sqliteTimeText(in.TSUtc),
 		in.Model,
 		in.Status,
 		boolInt(in.Stream),
 		nullInt64(result.PromptTokens),
+		nullInt64(result.PromptTokens),
+		nullInt64(in.ProviderReportedPromptTokens),
 		nullInt64(result.CachedPromptTokens),
 		nullInt64(result.CompletionTokens),
 		nullInt64(result.EstimatedCompTokens),
@@ -368,7 +439,7 @@ INSERT INTO ledger_operator_credits (
 		in.RequestID,
 		in.AttemptN,
 		in.ProviderID,
-		in.TSUtc.UTC().Format(time.RFC3339Nano),
+		sqliteTimeText(in.TSUtc),
 		result.GrossCredits,
 		10000-result.ProviderShareBps,
 		result.OperatorCredits,

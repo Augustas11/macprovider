@@ -1557,6 +1557,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// re-tokenising req.raw on each advance. Issue #266 T1 R1 audit
 	// MEDIUM fix.
 	state.estimatedTokens = estimateTokens(req.raw)
+	rec.setPromptTokenUpperBound(int64(state.estimatedTokens))
 	provider, routeErr := s.selectProvider(routingRequestID, req, r.Header, state.dailyKey, state)
 	if routeErr != nil {
 		state.routingDone = s.now()

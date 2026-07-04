@@ -14,18 +14,18 @@ func (s *Store) RunSettlement(ctx context.Context, cfg SettlementConfig, windowS
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := sqliteTimeText(time.Now().UTC())
 	if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET quarantined = 1,
        quarantine_reason = COALESCE(quarantine_reason, 'conflicting_settlement_id'),
        updated_at_utc = ?
- WHERE ts_utc < ?
+ WHERE `+sqliteTimeBefore("ts_utc")+`
    AND settled = 0
    AND settlement_id IS NOT NULL
    AND quarantined = 0`,
 		now,
-		windowEnd.UTC().Format(time.RFC3339Nano),
+		sqliteTimeText(windowEnd),
 	); err != nil {
 		return err
 	}
@@ -34,7 +34,7 @@ UPDATE ledger_request_credits
    SET quarantined = 1,
        quarantine_reason = COALESCE(quarantine_reason, 'operator_split_mismatch'),
        updated_at_utc = ?
- WHERE ts_utc < ?
+ WHERE `+sqliteTimeBefore("ts_utc")+`
    AND settled = 0
    AND settlement_id IS NULL
    AND quarantined = 0
@@ -51,17 +51,17 @@ UPDATE ledger_request_credits
        ) + provider_credits != gross_credits
    )`,
 		now,
-		windowEnd.UTC().Format(time.RFC3339Nano),
+		sqliteTimeText(windowEnd),
 	); err != nil {
 		return err
 	}
 	rows, err := tx.QueryContext(ctx, `
 SELECT provider_id, COUNT(*), SUM(gross_credits), SUM(provider_credits), SUM(gross_credits - provider_credits)
   FROM spec022_payable_request_credits
- WHERE ts_utc < ? AND settled = 0 AND settlement_id IS NULL
+ WHERE `+sqliteTimeBefore("ts_utc")+` AND settled = 0 AND settlement_id IS NULL
  GROUP BY provider_id
 HAVING SUM(provider_credits) >= ?`,
-		windowEnd.UTC().Format(time.RFC3339Nano),
+		sqliteTimeText(windowEnd),
 		cfg.MinPayoutCredits,
 	)
 	if err != nil {
@@ -74,7 +74,7 @@ HAVING SUM(provider_credits) >= ?`,
 		if err := rows.Scan(&providerID, &count, &gross, &providerCredits, &operatorCredits); err != nil {
 			return err
 		}
-		key := providerID + "|" + windowStart.UTC().Format(time.RFC3339Nano) + "|" + windowEnd.UTC().Format(time.RFC3339Nano)
+		key := providerID + "|" + sqliteTimeText(windowStart) + "|" + sqliteTimeText(windowEnd)
 		res, err := tx.ExecContext(ctx, `
 INSERT INTO ledger_payout_ready (
     provider_id, window_start_utc, window_end_utc, cadence_days, source_credit_count,
@@ -88,8 +88,8 @@ ON CONFLICT(idempotency_key) DO UPDATE SET
     operator_credits = operator_credits + excluded.operator_credits
 WHERE ledger_payout_ready.status = 'ready'`,
 			providerID,
-			windowStart.UTC().Format(time.RFC3339Nano),
-			windowEnd.UTC().Format(time.RFC3339Nano),
+			sqliteTimeText(windowStart),
+			sqliteTimeText(windowEnd),
 			cfg.CadenceDays,
 			count,
 			gross,
@@ -117,12 +117,12 @@ WHERE ledger_payout_ready.status = 'ready'`,
 		if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET settled = 1, settlement_id = ?, updated_at_utc = ?
- WHERE provider_id = ? AND ts_utc < ? AND settled = 0 AND settlement_id IS NULL AND quarantined = 0
+ WHERE provider_id = ? AND `+sqliteTimeBefore("ts_utc")+` AND settled = 0 AND settlement_id IS NULL AND quarantined = 0
    AND id IN (SELECT id FROM spec022_payable_request_credits)`,
 			settlementID,
 			now,
 			providerID,
-			windowEnd.UTC().Format(time.RFC3339Nano),
+			sqliteTimeText(windowEnd),
 		); err != nil {
 			return err
 		}
@@ -178,5 +178,5 @@ func nullIntFromRow(row *sql.Row) (int64, error) {
 }
 
 func idempotencyKey(providerID string, start, end time.Time) string {
-	return fmt.Sprintf("%s|%s|%s", providerID, start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano))
+	return fmt.Sprintf("%s|%s|%s", providerID, sqliteTimeText(start), sqliteTimeText(end))
 }

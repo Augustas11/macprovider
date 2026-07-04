@@ -398,16 +398,17 @@ func (c Config) Validate() error {
 		return fmt.Errorf("timeouts.coordinator_header_timeout_seconds (%d) must be >= timeouts.coordinator_request_seconds (%d) — see SPEC-002 FR-P11a (post-#92)",
 			c.Timeouts.CoordinatorHeaderTimeoutSeconds, c.Timeouts.CoordinatorRequestSeconds)
 	}
-	if c.Settlement.ReconcileEnabled {
-		if c.Settlement.ReconcileIntervalSeconds <= 0 {
-			return fmt.Errorf("settlement.reconcile_interval_s must be > 0 when settlement.reconcile_enabled is true")
-		}
-		if c.Settlement.ReconcileBatchLimit <= 0 || c.Settlement.ReconcileBatchLimit > 500 {
-			return fmt.Errorf("settlement.reconcile_batch_limit must be between 1 and 500 when settlement.reconcile_enabled is true")
-		}
-		if c.Settlement.ReconcileRequestTimeoutSeconds <= 0 {
-			return fmt.Errorf("settlement.reconcile_request_timeout_s must be > 0 when settlement.reconcile_enabled is true")
-		}
+	if !c.Settlement.ReconcileEnabled {
+		return fmt.Errorf("settlement.reconcile_enabled must be true")
+	}
+	if c.Settlement.ReconcileIntervalSeconds <= 0 {
+		return fmt.Errorf("settlement.reconcile_interval_s must be > 0 when settlement.reconcile_enabled is true")
+	}
+	if c.Settlement.ReconcileBatchLimit <= 0 || c.Settlement.ReconcileBatchLimit > 500 {
+		return fmt.Errorf("settlement.reconcile_batch_limit must be between 1 and 500 when settlement.reconcile_enabled is true")
+	}
+	if c.Settlement.ReconcileRequestTimeoutSeconds <= 0 {
+		return fmt.Errorf("settlement.reconcile_request_timeout_s must be > 0 when settlement.reconcile_enabled is true")
 	}
 	if c.Routing.StickyTTLS <= 0 {
 		return fmt.Errorf("routing.sticky_ttl_s must be > 0")

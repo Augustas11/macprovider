@@ -293,12 +293,9 @@ VALUES (?, ?, ?, ?, ?)`,
 // pruneBatchSize bounds a single retention DELETE to keep the write lock
 // short while billing's 6s hot path is sharing the same SQLite handle.
 // The pruner loops until a partial batch comes back. PERF-3 (M3-1): the
-// comparison stays on julianday() because every ts_utc / created_at_utc
-// write in this package uses time.RFC3339Nano, which strips trailing
-// zeros in the fractional seconds — variable widths break lexicographic
-// `<` ordering (".000…Z" sorts before "Z"). Normalizing writes to a
-// fixed-width format would touch the billing tables on the money path
-// and is deferred to a follow-up.
+// comparison stays on julianday() for backwards compatibility with legacy
+// variable-width ts_utc rows; new request_log writes use fixed-width UTC
+// nanosecond text for billing range scans.
 const pruneBatchSize = 500
 
 func (s *Store) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error) {
@@ -463,7 +460,7 @@ INSERT INTO request_log (
     retried,
     attempt_n
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		row.TSUtc.UTC().Format(time.RFC3339Nano),
+		sqliteTimeText(row.TSUtc),
 		row.RequestID,
 		nullString(row.ExternalRequestID),
 		nullString(row.AccountID),
@@ -488,6 +485,10 @@ INSERT INTO request_log (
 		*attemptN,
 	)
 	return err
+}
+
+func sqliteTimeText(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05.000000000Z")
 }
 
 func (s *Store) ensureColumns(ctx context.Context) error {

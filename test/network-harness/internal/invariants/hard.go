@@ -1,11 +1,11 @@
 // Package invariants holds the 4 hard pass/fail checks the harness
 // enforces in phase A, before any routing-contract addendum exists:
 //
-//   I1  ledger reconciliation drift == 0
-//   I2  no 5xx response without billing settlement (orphan check)
-//   I3  no charged-tokens > delivered-tokens
-//   I4  no silent hang (stream stayed open past threshold with no bytes
-//       and no terminating error)
+//	I1  ledger reconciliation drift == 0
+//	I2  no 5xx response without billing settlement (orphan check)
+//	I3  no charged-tokens > delivered-tokens
+//	I4  no silent hang (stream stayed open past threshold with no bytes
+//	    and no terminating error)
 //
 // Each check produces a structured verdict with the evidence it relied
 // on, so triage can re-examine the artifact bundle and judge whether a
@@ -51,9 +51,9 @@ func (r *Result) AnyFailed() bool {
 func Evaluate(sc *scenario.Scenario, results []buyer.Result, summary *metrics.Summary, ledger *reconcile.Result) *Result {
 	return &Result{
 		Checks: []Check{
-			checkI1(ledger),
-			checkI2(results),
-			checkI3(results),
+			checkI1(sc, ledger),
+			checkI2(results, ledger),
+			checkI3(sc, ledger),
 			checkI4(sc, results),
 		},
 	}
@@ -71,22 +71,22 @@ func Evaluate(sc *scenario.Scenario, results []buyer.Result, summary *metrics.Su
 // consumers know what algorithm produced the numbers.
 //
 // Drift here means ANY of:
-//   * harness success unmatched on gateway (UnmatchedSuccesses) —
+//   - harness success unmatched on gateway (UnmatchedSuccesses) —
 //     billing-bypass risk
-//   * gateway "ok"-outcome row unmatched on any harness success
+//   - gateway "ok"-outcome row unmatched on any harness success
 //     (UnmatchedGatewayOKRows) — orphan/leaked settlement or
 //     concurrent buyer traffic
-//   * gateway "ok" matched pair with no coord row (MatchedCoordMissing)
+//   - gateway "ok" matched pair with no coord row (MatchedCoordMissing)
 //     — fallback outcomes legitimately lack coord rows and are NOT
 //     flagged here
-//   * gateway over-billed vs harness across matched pairs
+//   - gateway over-billed vs harness across matched pairs
 //     (GatewayOverbillVsHarnessTokens > 0, positive-only sum so a
 //     +N overbill is not hidden by a -N underbill). Underbill alone
 //     is allowed — gateway-side streaming rounding is legitimate.
-//   * gateway and coord disagree on per-pair tokens in EITHER direction
+//   - gateway and coord disagree on per-pair tokens in EITHER direction
 //     (AbsGatewayCoordinatorMismatchTokens > 0) — both are settlement
 //     systems and must agree on per-request token counts.
-func checkI1(ledger *reconcile.Result) Check {
+func checkI1(sc *scenario.Scenario, ledger *reconcile.Result) Check {
 	c := Check{ID: "I1", Title: "billing-ledger reconciliation drift == 0"}
 	if ledger == nil {
 		c.Skipped = true
@@ -110,12 +110,14 @@ func checkI1(ledger *reconcile.Result) Check {
 	//   - matched gateway-ok pairs with no coord row (suspicious; fallback
 	//     outcomes legitimately lack coord rows and are excluded upstream)
 	//   - gateway-vs-harness positive overbill across pairs (signed-safe;
-	//     underbill alone is allowed per streaming rounding semantics;
-	//     fallback outcomes are suppressed ONLY when the buyer's stream
-	//     carried the gateway's terminal SSE error envelope per #232)
+	//     underbill alone is allowed per streaming rounding semantics)
 	//   - gateway-vs-coord absolute mismatch (any direction; both are
 	//     settlement systems and MUST agree on per-pair token counts;
 	//     same #232 corroboration gate applies)
+	tolerance := int64(0)
+	if sc != nil {
+		tolerance = sc.ChargedDeliveredToleranceTokens
+	}
 	gwOverbillVsHarness := ledger.GatewayOverbillVsHarnessTokens
 	absGwCoordMismatch := ledger.AbsGatewayCoordinatorMismatchTokens
 	unmatched := len(ledger.UnmatchedSuccesses)
@@ -141,7 +143,7 @@ func checkI1(ledger *reconcile.Result) Check {
 	if coordMissingOK > 0 {
 		driftSignals++
 	}
-	if gwOverbillVsHarness > 0 {
+	if gwOverbillVsHarness > tolerance {
 		driftSignals++
 	}
 	if absGwCoordMismatch > 0 {
@@ -176,8 +178,8 @@ func checkI1(ledger *reconcile.Result) Check {
 	if coordMissingOK > 0 {
 		parts = append(parts, fmt.Sprintf("%d gateway-ok matched pairs with no coord row", coordMissingOK))
 	}
-	if gwOverbillVsHarness > 0 {
-		parts = append(parts, fmt.Sprintf("gateway over-billed by %d vs harness across %d pair(s)", gwOverbillVsHarness, len(ledger.OverbilledPairs)))
+	if gwOverbillVsHarness > tolerance {
+		parts = append(parts, fmt.Sprintf("gateway over-billed by %d vs harness above tolerance %d across %d pair(s)", gwOverbillVsHarness, tolerance, len(ledger.OverbilledPairs)))
 	}
 	if absGwCoordMismatch > 0 {
 		parts = append(parts, fmt.Sprintf("gateway-coord ledger mismatch %d tokens across %d pair(s)", absGwCoordMismatch, len(ledger.GatewayCoordMismatchedPairs)))
@@ -209,20 +211,16 @@ func checkI1(ledger *reconcile.Result) Check {
 // is there a usage_events row for it? Coordinator-side request_log may
 // legitimately omit 5xx that never reached coordinator routing (e.g.,
 // gateway-side quota reject).
-func checkI2(results []buyer.Result) Check {
+func checkI2(results []buyer.Result, ledger *reconcile.Result) Check {
 	c := Check{ID: "I2", Title: "no 5xx response without billing settlement"}
-	// We can only check this when the gateway exposes the settlement
-	// state. In phase A we treat the presence of the X-Request-Id echo
-	// on a 5xx as evidence the gateway intends to settle (since it
-	// reached settleBeforeResponse). Without DB access we can't fully
-	// verify — but if reconcile ran it's already covered by I1's
-	// missing_on_gateway list for ok responses. For 5xx, we emit a
-	// soft signal: count and list 5xx request ids for triage.
-	//
-	// Hard failure only when no request id was echoed on a 5xx —
-	// that's an unambiguous logging gap.
 	var orphans []string
 	var fiveXX int
+	settled := map[string]bool{}
+	if ledger != nil {
+		for _, id := range ledger.GatewaySettlementRequestIDs {
+			settled[id] = true
+		}
+	}
 	for _, r := range results {
 		if r.HTTPStatus < 500 || r.HTTPStatus >= 600 {
 			continue
@@ -230,6 +228,10 @@ func checkI2(results []buyer.Result) Check {
 		fiveXX++
 		if r.RequestID == "" {
 			orphans = append(orphans, fmt.Sprintf("buyer=%d req=%d", r.BuyerIndex, r.RequestIndex))
+			continue
+		}
+		if ledger != nil && !settled[r.RequestID] {
+			orphans = append(orphans, r.RequestID)
 		}
 	}
 	if fiveXX == 0 {
@@ -239,7 +241,11 @@ func checkI2(results []buyer.Result) Check {
 	}
 	if len(orphans) == 0 {
 		c.Passed = true
-		c.Detail = fmt.Sprintf("%d 5xx responses, all carried a request id (settle-path eligible)", fiveXX)
+		if ledger != nil {
+			c.Detail = fmt.Sprintf("%d 5xx responses, all have gateway settlement rows", fiveXX)
+		} else {
+			c.Detail = fmt.Sprintf("%d 5xx responses, all carried a request id (settlement DB not configured)", fiveXX)
+		}
 		return c
 	}
 	c.Passed = false
@@ -260,39 +266,35 @@ func checkI2(results []buyer.Result) Check {
 // Phase A limitation: when the usage block is provider-reported and
 // differs from the SSE-content count, we may flag false positives.
 // Triage will tell us if that needs a tolerance.
-func checkI3(results []buyer.Result) Check {
+func checkI3(sc *scenario.Scenario, ledger *reconcile.Result) Check {
 	c := Check{ID: "I3", Title: "no charged-tokens > delivered-tokens"}
-	var offenders []string
-	for _, r := range results {
-		if r.Outcome != "ok" {
-			continue
-		}
-		if r.CompletionTokensReceived == 0 {
-			continue
-		}
-		// We can't separate the two sources in this layer — both end
-		// up in CompletionTokensReceived. The DB-level overcharge check
-		// is in reconcile.TokenMismatches. This invariant is structured
-		// so a future PR can compare gateway-usage vs SSE-delta when
-		// both are available.
+	if ledger == nil {
+		c.Skipped = true
+		c.Detail = "reconciliation skipped: charged-vs-delivered requires gateway settlement rows"
+		return c
 	}
-	if len(offenders) == 0 {
+	tolerance := int64(0)
+	if sc != nil {
+		tolerance = sc.ChargedDeliveredToleranceTokens
+	}
+	if ledger.GatewayOverbillVsHarnessTokens <= tolerance {
 		c.Passed = true
-		c.Detail = "no overcharges observed (phase A: structural check only; reconcile.OverbilledPairs + GatewayOverbillVsHarnessTokens carry the DB-level signal)"
+		c.Detail = fmt.Sprintf("no overcharges observed: gateway_overbill_vs_harness=%d tolerance=%d", ledger.GatewayOverbillVsHarnessTokens, tolerance)
 		return c
 	}
 	c.Passed = false
-	c.OffendingIDs = offenders
-	c.EvidenceCount = len(offenders)
-	c.Detail = fmt.Sprintf("%d requests where charged > delivered tokens", len(offenders))
+	c.OffendingIDs = ledger.OverbilledPairs
+	c.EvidenceCount = len(ledger.OverbilledPairs)
+	c.Detail = fmt.Sprintf("gateway charged %d tokens above delivered tolerance %d across %d request(s)", ledger.GatewayOverbillVsHarnessTokens, tolerance, len(ledger.OverbilledPairs))
 	return c
 }
 
 // I4 — silent hang. For each result, if:
-//   * the stream stayed open long enough that (EndUTC - LastByteUTC) exceeds threshold, AND
-//   * the request was streaming, AND
-//   * we did NOT see the terminator, AND
-//   * outcome is "ok"
+//   - the stream stayed open long enough that (EndUTC - LastByteUTC) exceeds threshold, AND
+//   - the request was streaming, AND
+//   - we did NOT see the terminator, AND
+//   - outcome is "ok"
+//
 // then the buyer was left waiting on dead air without an error. That's
 // the worst-shaped UX failure — buyer thinks something's happening when
 // nothing is. Promote Outcome to "silent_hang" in evidence.

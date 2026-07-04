@@ -113,7 +113,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
  WHERE `+sqliteTimeRange("rl.ts_utc")+`
    AND rl.provider_assigned_id IS NOT NULL
    AND rl.status != 503
- ORDER BY julianday(rl.ts_utc), rl.id`,
+ ORDER BY rl.ts_utc, rl.id`,
 		sqliteTimeText(in.ScanFrom),
 		sqliteTimeText(in.ScanTo),
 	)
@@ -174,11 +174,11 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		// distinguished from a buggy duplicate INSERT.
 		ambiguousAttempt := attemptN == 1 && retried == 0
 		var providerID string
-		var identityConfigSnapshotID sql.NullInt64
+		var identityConfigSnapshotID, providerReportedPrompt sql.NullInt64
 		err = tx.QueryRowContext(ctx, `
-SELECT provider_id, config_snapshot_id FROM ledger_provider_identity_snapshots
- WHERE request_id = ? AND attempt_n = ? AND provider_assigned_id = ?
-	 ORDER BY id DESC LIMIT 1`, requestID, attemptN, assignedID).Scan(&providerID, &identityConfigSnapshotID)
+	SELECT provider_id, config_snapshot_id, provider_reported_prompt_tokens FROM ledger_provider_identity_snapshots
+	 WHERE request_id = ? AND attempt_n = ? AND provider_assigned_id = ?
+		 ORDER BY id DESC LIMIT 1`, requestID, attemptN, assignedID).Scan(&providerID, &identityConfigSnapshotID, &providerReportedPrompt)
 		if err != nil {
 			reason := "missing_provider_identity"
 			if ambiguousAttempt {
@@ -256,6 +256,11 @@ SELECT provider_id, config_snapshot_id FROM ledger_provider_identity_snapshots
 			v := prompt.Int64
 			pp = &v
 		}
+		reportedPP := pp
+		if providerReportedPrompt.Valid {
+			v := providerReportedPrompt.Int64
+			reportedPP = &v
+		}
 		if cached.Valid && attemptN == 0 {
 			v := cached.Int64
 			cachedP = &v
@@ -273,27 +278,28 @@ SELECT provider_id, config_snapshot_id FROM ledger_provider_identity_snapshots
 			return err
 		}
 		input := HotPathInput{
-			RequestID:                  requestID,
-			AttemptN:                   attemptN,
-			ProviderAssignedID:         assignedID,
-			ProviderID:                 providerID,
-			Model:                      model,
-			Status:                     status,
-			Stream:                     stream == 1,
-			TSUtc:                      ts,
-			PromptTokens:               pp,
-			CachedPromptTokens:         cachedP,
-			CompletionTokens:           cp,
-			EstimatedCompTokens:        ep,
-			ErrorCode:                  errorCode.String,
-			FaultFlag:                  FaultNone,
-			ConfigSnapshotID:           snapshotID,
-			RateEntry:                  RateFor(rewards.RateCard, model),
-			MultiplierPPM:              multiplier,
-			ProviderShareBps:           share,
-			SettlementAccountScopeHash: settlementHash,
-			SettlementPolicyMode:       settlementMode,
-			SettlementPolicyVersion:    settlementVersion,
+			RequestID:                    requestID,
+			AttemptN:                     attemptN,
+			ProviderAssignedID:           assignedID,
+			ProviderID:                   providerID,
+			Model:                        model,
+			Status:                       status,
+			Stream:                       stream == 1,
+			TSUtc:                        ts,
+			PromptTokens:                 pp,
+			ProviderReportedPromptTokens: reportedPP,
+			CachedPromptTokens:           cachedP,
+			CompletionTokens:             cp,
+			EstimatedCompTokens:          ep,
+			ErrorCode:                    errorCode.String,
+			FaultFlag:                    FaultNone,
+			ConfigSnapshotID:             snapshotID,
+			RateEntry:                    RateFor(rewards.RateCard, model),
+			MultiplierPPM:                multiplier,
+			ProviderShareBps:             share,
+			SettlementAccountScopeHash:   settlementHash,
+			SettlementPolicyMode:         settlementMode,
+			SettlementPolicyVersion:      settlementVersion,
 		}
 		result := ComputeCreditsWithCache(pp, cachedP, cp, ep, usageFor(errorCode.String, ep), FaultNone, input.RateEntry, multiplier, share)
 		// SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168): the v0.3.1

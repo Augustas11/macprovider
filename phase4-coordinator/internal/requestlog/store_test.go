@@ -112,6 +112,32 @@ WHERE request_id = ?`, "req-roundtrip").Scan(
 	}
 }
 
+func TestRequestLogInsertWritesFixedWidthTimestampText(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	ts := time.Date(2026, 5, 31, 12, 34, 56, 0, time.UTC)
+
+	if err := store.Insert(ctx, Row{
+		TSUtc:              ts,
+		RequestID:          "req-fixed-ts",
+		Model:              "model-a",
+		ProviderAssignedID: "session-1",
+		Status:             200,
+		BuyerIP:            "203.0.113.1:41234",
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	var got string
+	if err := store.db.QueryRowContext(ctx, `SELECT ts_utc FROM request_log WHERE request_id = ?`, "req-fixed-ts").Scan(&got); err != nil {
+		t.Fatalf("query timestamp: %v", err)
+	}
+	if got != "2026-05-31T12:34:56.000000000Z" {
+		t.Fatalf("ts_utc=%q want fixed-width UTC nanosecond text", got)
+	}
+}
+
 func TestRequestLogTotalTokensOverflowStoresNull(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()

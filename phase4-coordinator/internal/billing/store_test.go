@@ -51,6 +51,9 @@ func TestBillingMigration(t *testing.T) {
 	if !columnExists(t, db, "ledger_provider_identity_snapshots", "config_snapshot_id") {
 		t.Fatalf("missing ledger_provider_identity_snapshots.config_snapshot_id")
 	}
+	if !columnExists(t, db, "ledger_provider_identity_snapshots", "provider_reported_prompt_tokens") {
+		t.Fatalf("missing ledger_provider_identity_snapshots.provider_reported_prompt_tokens")
+	}
 	if columnExists(t, db, "ledger_request_credits", "prompt_cache_hit_rate_per_mtok") {
 		t.Fatalf("ledger_request_credits.prompt_cache_hit_rate_per_mtok must not be persisted")
 	}
@@ -88,6 +91,33 @@ UPDATE ledger_request_credits
 	}
 	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_request_credits WHERE request_id = 'settled-money-upgrade' AND settled = 0 AND settlement_id IS NULL`); got != 500 {
 		t.Fatalf("source row after failed upgraded trigger mutation=%d want 500", got)
+	}
+}
+
+func TestBillingMigration_BackfillsExistingPromptSplitColumns(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ts := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	insertCreditWithRequest(t, store.db, "partial-prompt-split-migration", "provider-a", ts, 500)
+	if _, err := store.db.Exec(`
+UPDATE ledger_request_credits
+   SET prompt_tokens = 100,
+       charged_prompt_tokens = NULL,
+       provider_reported_prompt_tokens = NULL
+ WHERE request_id = 'partial-prompt-split-migration'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(store.db); err != nil {
+		t.Fatal(err)
+	}
+	var prompt, charged, reported int64
+	if err := store.db.QueryRow(`
+SELECT prompt_tokens, charged_prompt_tokens, provider_reported_prompt_tokens
+  FROM ledger_request_credits
+ WHERE request_id = 'partial-prompt-split-migration'`).Scan(&prompt, &charged, &reported); err != nil {
+		t.Fatal(err)
+	}
+	if prompt != 100 || charged != prompt || reported != prompt {
+		t.Fatalf("prompt split after rerun migration=%d/%d/%d want 100/100/100", prompt, charged, reported)
 	}
 }
 
@@ -194,6 +224,53 @@ SELECT cached_prompt_tokens, gross_credits, provider_credits
 	}
 }
 
+func TestWriteHotPath_BoundsProviderReportedPromptTokens(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	bound := int64(100)
+	input.PromptTokenUpperBound = &bound
+
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+
+	var prompt, charged, reported, gross int64
+	if err := store.db.QueryRow(`
+SELECT prompt_tokens, charged_prompt_tokens, provider_reported_prompt_tokens, gross_credits
+  FROM ledger_request_credits
+ WHERE request_id = ? AND quarantined = 0`, row.RequestID).Scan(&prompt, &charged, &reported, &gross); err != nil {
+		t.Fatal(err)
+	}
+	if prompt != bound || charged != bound || reported != 1000 || gross != 4100 {
+		t.Fatalf("prompt/charged/reported/gross=%d/%d/%d/%d want 100/100/1000/4100", prompt, charged, reported, gross)
+	}
+	if got := scalar(t, store.db, `SELECT prompt_tokens FROM request_log WHERE request_id = ?`, row.RequestID); got != bound {
+		t.Fatalf("request_log prompt_tokens=%d want bounded %d for recovery", got, bound)
+	}
+}
+
+func TestRunSettlementUsesNanosecondOrderedTimestampText(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "nanosecond-boundary"
+	input.RequestID = row.RequestID
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	row.TSUtc = base.Add(time.Nanosecond)
+	input.TSUtc = row.TSUtc
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET ts_utc = ? WHERE request_id = ?`, row.TSUtc.Format(time.RFC3339Nano), row.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RunSettlement(context.Background(), SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}, base, base.Add(2*time.Nanosecond)); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND settled = 1`, row.RequestID); got != 1 {
+		t.Fatalf("settled nanosecond boundary rows=%d want 1", got)
+	}
+}
+
 func TestWriteHotPath_EmitsCacheBillingRoutingDecision(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)
@@ -279,6 +356,8 @@ func TestWriteRequestLogWithIdentity_AllowsRecoveryAfterHotPathFailure(t *testin
 	input, row := testHotPathInput(t, store)
 	row.RequestID = "fallback-recover"
 	input.RequestID = row.RequestID
+	bound := int64(100)
+	input.PromptTokenUpperBound = &bound
 	if err := store.WriteRequestLogWithIdentity(context.Background(), reqStore, row, input); err != nil {
 		t.Fatal(err)
 	}
@@ -291,6 +370,17 @@ func TestWriteRequestLogWithIdentity_AllowsRecoveryAfterHotPathFailure(t *testin
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND provider_id = ? AND quarantined = 0`, row.RequestID, input.ProviderID); got != 1 {
 		t.Fatalf("recovered ledger rows=%d want 1", got)
+	}
+	var prompt, charged, reported int64
+	if err := store.db.QueryRow(`
+SELECT prompt_tokens, charged_prompt_tokens, provider_reported_prompt_tokens
+  FROM ledger_request_credits
+ WHERE request_id = ? AND quarantined = 0`, row.RequestID).Scan(&prompt, &charged, &reported); err != nil {
+		t.Fatal(err)
+	}
+	rawProviderPrompt := int64(1000)
+	if prompt != bound || charged != bound || reported != rawProviderPrompt {
+		t.Fatalf("recovered prompt split=%d/%d/%d want charged %d and reported %d", prompt, charged, reported, bound, rawProviderPrompt)
 	}
 }
 

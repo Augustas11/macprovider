@@ -41,16 +41,27 @@ type requestSettlementVerdictRow struct {
 }
 
 const externalRequestFinalityLookupSkew = 5 * time.Minute
+const SettlementOutcomeOverlapBlockedTerminal = "overlap_blocked_terminal"
 
 func (s *Store) RequestSettlementFinalityForAccount(ctx context.Context, accountID, requestID string, nowUnixMS int64, notBeforeUnixMS ...int64) (RequestSettlementFinality, bool, error) {
 	accountScope := AccountScopeForSettlement(accountID)
-	finality, found, err := s.RequestSettlementFinality(ctx, accountScope, requestID, nowUnixMS)
-	if err != nil || found {
-		return finality, found, err
-	}
 	notBefore := int64(0)
 	if len(notBeforeUnixMS) > 0 {
 		notBefore = notBeforeUnixMS[0]
+	}
+	directLookupAllowed := true
+	if notBefore > 0 {
+		var err error
+		directLookupAllowed, err = s.directRequestIDWithinReservationWindow(ctx, accountID, requestID, notBefore)
+		if err != nil {
+			return RequestSettlementFinality{}, false, err
+		}
+	}
+	if directLookupAllowed {
+		finality, found, err := s.RequestSettlementFinality(ctx, accountScope, requestID, nowUnixMS)
+		if err != nil || found {
+			return finality, found, err
+		}
 	}
 	internalRequestIDs, err := s.requestIDsForExternalRequest(ctx, accountID, requestID, notBefore)
 	if err != nil || len(internalRequestIDs) == 0 {
@@ -72,7 +83,7 @@ func (s *Store) RequestSettlementFinalityForAccount(ctx context.Context, account
 	if len(finalities) == 0 {
 		return RequestSettlementFinality{}, false, nil
 	}
-	finality = aggregateExternalRequestFinality(requestID, finalities)
+	finality := aggregateExternalRequestFinality(requestID, finalities)
 	if missingFinality && finality.Outcome == SettlementOutcomeVerified && finality.Closed {
 		finality.Outcome = SettlementOutcomePending
 		finality.ReceiptResult = SettlementReceiptResultInconclusive
@@ -201,11 +212,45 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 		finality.Closed = true
 		return finality, true, nil
 	}
+	if finality.OverlappingBlockedTokens > 0 {
+		finality.Outcome = SettlementOutcomeOverlapBlockedTerminal
+		finality.ReceiptResult = SettlementReceiptResultValid
+		finality.Reason = "overlap_blocked_terminal"
+		finality.Closed = true
+		finality.TokenSource = UsageSourceCoordinatorObserved
+		finality.TotalTokens = 0
+		return finality, true, nil
+	}
 	finality.Outcome = SettlementOutcomePending
 	finality.ReceiptResult = SettlementReceiptResultInconclusive
 	finality.Reason = "no_settlement_candidate"
 	finality.Closed = false
 	return finality, true, nil
+}
+
+func (s *Store) directRequestIDWithinReservationWindow(ctx context.Context, accountID, requestID string, notBeforeUnixMS int64) (bool, error) {
+	if notBeforeUnixMS <= 0 {
+		return true, nil
+	}
+	notBeforeUnixMS -= externalRequestFinalityLookupSkew.Milliseconds()
+	if notBeforeUnixMS < 0 {
+		notBeforeUnixMS = 0
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+  FROM request_log
+ WHERE account_id = ?
+   AND request_id = ?
+   AND `+sqliteTimeSince("ts_utc"),
+		accountID,
+		requestID,
+		sqliteTimeText(time.UnixMilli(notBeforeUnixMS)),
+	).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (s *Store) requestSettlementVerdicts(ctx context.Context, accountScope, requestID string) ([]requestSettlementVerdictRow, error) {
@@ -235,14 +280,24 @@ SELECT attempt_n, provider_id, receipt_result, settlement_outcome, reason, close
 func (s *Store) requestSettlementUsage(ctx context.Context, accountScope, requestID string, attemptN int64, providerID string) (SettlementUsage, bool, error) {
 	var raw string
 	var overlap int
+	var ledgerPrompt, ledgerChargedPrompt, ledgerCompletion sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
-SELECT usage_canonical_json, overlapping_or_duplicate
-  FROM settlement_attempt_outputs
- WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
-		accountScope, requestID, attemptN, providerID).Scan(&raw, &overlap)
+	SELECT sao.usage_canonical_json, sao.overlapping_or_duplicate,
+	       lrc.prompt_tokens, lrc.charged_prompt_tokens, lrc.completion_tokens
+	  FROM settlement_attempt_outputs sao
+	  JOIN ledger_request_credits lrc
+	    ON lrc.settlement_account_scope_hash = ?
+	   AND lrc.request_id = sao.request_id
+	   AND lrc.attempt_n = sao.attempt_n
+	   AND lrc.provider_id = sao.provider_id
+	   AND lrc.quarantined = 0
+	 WHERE sao.account_scope = ? AND sao.request_id = ? AND sao.attempt_n = ? AND sao.provider_id = ?
+	 ORDER BY lrc.id DESC
+	 LIMIT 1`,
+		SettlementAccountScopeHash(accountScope), accountScope, requestID, attemptN, providerID).Scan(&raw, &overlap, &ledgerPrompt, &ledgerChargedPrompt, &ledgerCompletion)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return SettlementUsage{}, false, fmt.Errorf("verified settlement attempt output missing for request %s attempt %d provider %s", requestID, attemptN, providerID)
+			return SettlementUsage{}, false, fmt.Errorf("verified charged ledger usage missing for request %s attempt %d provider %s", requestID, attemptN, providerID)
 		}
 		return SettlementUsage{}, false, err
 	}
@@ -257,8 +312,8 @@ SELECT usage_canonical_json, overlapping_or_duplicate
 		return SettlementUsage{}, false, err
 	}
 	out := SettlementUsage{
-		BillableInputTokens:  usage.BillableInputTokens,
-		BillableOutputTokens: usage.BillableOutputTokens,
+		BillableInputTokens:  chargedPromptTokensFromLedger(ledgerChargedPrompt, ledgerPrompt),
+		BillableOutputTokens: int64FromNull(ledgerCompletion),
 		DeliveredOutputBytes: usage.DeliveredOutputBytes,
 		ObservedInputTokens:  usage.ObservedInputTokens,
 		ObservedOutputTokens: usage.ObservedOutputTokens,
@@ -267,6 +322,20 @@ SELECT usage_canonical_json, overlapping_or_duplicate
 		return SettlementUsage{}, false, err
 	}
 	return out, overlap == 1, nil
+}
+
+func chargedPromptTokensFromLedger(charged, prompt sql.NullInt64) int64 {
+	if charged.Valid {
+		return charged.Int64
+	}
+	return int64FromNull(prompt)
+}
+
+func int64FromNull(v sql.NullInt64) int64 {
+	if !v.Valid {
+		return 0
+	}
+	return v.Int64
 }
 
 func minPositiveDeadline(current, candidate int64) int64 {
@@ -370,6 +439,15 @@ func aggregateExternalRequestFinality(externalRequestID string, finalities []Req
 		out.ReceiptResult = firstTerminalRefund.ReceiptResult
 		out.Reason = firstTerminalRefund.Reason
 		out.Closed = true
+		return out
+	}
+	if out.OverlappingBlockedTokens > 0 {
+		out.Outcome = SettlementOutcomeOverlapBlockedTerminal
+		out.ReceiptResult = SettlementReceiptResultValid
+		out.Reason = "overlap_blocked_terminal"
+		out.Closed = true
+		out.TokenSource = UsageSourceCoordinatorObserved
+		out.TotalTokens = 0
 		return out
 	}
 	out.Outcome = SettlementOutcomePending

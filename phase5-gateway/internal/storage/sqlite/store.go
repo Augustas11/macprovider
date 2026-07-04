@@ -849,6 +849,17 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 	if _, err := reapExpiredReservationsTx(ctx, tx, req.CreatedAt); err != nil {
 		return storage.QuotaDecision{}, err
 	}
+	var existingStatus string
+	err = tx.QueryRowContext(ctx, `
+		SELECT status FROM quota_reservations
+		WHERE account_id = ? AND request_id = ?`,
+		req.AccountID, req.RequestID).Scan(&existingStatus)
+	if err == nil {
+		return storage.QuotaDecision{}, storage.ErrReservationExists
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return storage.QuotaDecision{}, err
+	}
 	used, reserved, err := dailyUsageTx(ctx, tx, req.AccountID, req.WindowDate)
 	if err != nil {
 		return storage.QuotaDecision{}, err
@@ -870,12 +881,24 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 		VALUES(?, ?, ?, ?, 'active', ?, ?)`,
 		req.AccountID, req.RequestID, req.WindowDate, req.RequestedTokens, encodeTime(req.ExpiresAt), encodeTime(req.CreatedAt))
 	if err != nil {
+		if isUniqueConstraintError(err) {
+			return storage.QuotaDecision{}, storage.ErrReservationExists
+		}
 		return storage.QuotaDecision{}, err
 	}
 	decision.Admitted = true
 	decision.ReservedTokens += req.RequestedTokens
 	decision.RemainingTokens = max64(0, remaining-req.RequestedTokens)
 	return decision, tx.Commit()
+}
+
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "constraint failed") &&
+		(strings.Contains(msg, "unique") || strings.Contains(msg, "primary key"))
 }
 
 func (s *Store) SettleReservation(ctx context.Context, settlement storage.ReservationSettlement) error {
@@ -994,6 +1017,33 @@ func (s *Store) RefundReservation(ctx context.Context, accountID, requestID stri
 		SET status = 'refunded', settled_tokens = 0, settled_at = ?
 		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
 		encodeTime(when), accountID, requestID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return storage.ErrReservationNotFound
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ExpireReservation(ctx context.Context, accountID, requestID string, expiredAt time.Time) error {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if expiredAt.IsZero() {
+		expiredAt = time.Now().UTC()
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET status = 'expired', settled_tokens = 0, settled_at = ?
+		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
+		encodeTime(expiredAt.UTC()), accountID, requestID)
 	if err != nil {
 		return err
 	}
@@ -1562,9 +1612,9 @@ func reapExpiredReservationsTx(ctx context.Context, q execer, now time.Time) (in
 		now = time.Now().UTC()
 	}
 	res, err := q.ExecContext(ctx, `
-		UPDATE quota_reservations
-		SET status = 'expired', settled_tokens = 0, settled_at = ?
-		WHERE status = 'active' AND expires_at <= ?`,
+			UPDATE quota_reservations
+			SET status = 'expired', settled_tokens = 0, settled_at = ?
+			WHERE status = 'active' AND settlement_hold = 0 AND expires_at <= ?`,
 		encodeTime(now), encodeTime(now))
 	if err != nil {
 		return 0, err

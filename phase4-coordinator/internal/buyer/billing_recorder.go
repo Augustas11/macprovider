@@ -72,7 +72,8 @@ type billingRecorder struct {
 	// cross-account X-Request-ID collisions after #196. Empty when the
 	// inbound request carried no header (direct legacy buyer, demo
 	// without gateway, pre-v0.9.1 gateway).
-	accountID string
+	accountID             string
+	promptTokenUpperBound *int64
 
 	// attemptN is the running per-provider-attempt counter. Pre-refactor
 	// this was billingAttemptN, incremented via deferred closure on
@@ -139,6 +140,13 @@ func (b *billingRecorder) setModel(model string) {
 // setStream updates the stream field. See setModel for contract.
 func (b *billingRecorder) setStream(stream bool) {
 	b.stream = stream
+}
+
+func (b *billingRecorder) setPromptTokenUpperBound(tokens int64) {
+	if tokens < 0 {
+		tokens = 0
+	}
+	b.promptTokenUpperBound = &tokens
 }
 
 // setRequestID updates the requestID field after idempotency-key
@@ -239,6 +247,7 @@ func (b *billingRecorder) recordRow(
 			Stream:                     row.Stream,
 			TSUtc:                      row.TSUtc,
 			PromptTokens:               promptTok,
+			PromptTokenUpperBound:      b.promptTokenUpperBound,
 			CachedPromptTokens:         cachedPromptTok,
 			CompletionTokens:           completionTok,
 			EstimatedCompTokens:        estimatedCompTokens,
@@ -287,6 +296,7 @@ func (b *billingRecorder) recordRow(
 			Stream:                     row.Stream,
 			TSUtc:                      row.TSUtc,
 			PromptTokens:               promptTok,
+			PromptTokenUpperBound:      b.promptTokenUpperBound,
 			CachedPromptTokens:         cachedPromptTok,
 			CompletionTokens:           completionTok,
 			EstimatedCompTokens:        estimatedCompTokens,

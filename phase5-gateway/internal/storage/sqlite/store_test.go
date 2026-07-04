@@ -370,6 +370,26 @@ func TestQuotaReservationLedgerSemantics(t *testing.T) {
 	}
 }
 
+func TestReserveQuotaDuplicateBeatsQuotaExceeded(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_duplicate_quota")
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_duplicate_quota", RequestID: "req_duplicate", WindowDate: "2026-05-29",
+		RequestedTokens: 100, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("ReserveQuota original: %v", err)
+	}
+
+	_, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_duplicate_quota", RequestID: "req_duplicate", WindowDate: "2026-05-29",
+		RequestedTokens: 1, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	})
+	if !errors.Is(err, storage.ErrReservationExists) {
+		t.Fatalf("ReserveQuota duplicate err=%v, want ErrReservationExists even when quota is exhausted", err)
+	}
+}
+
 func TestExpiredReservationsReclaimedAfter24h(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -448,15 +468,15 @@ func TestClampReservationExpiryBoundsActiveHold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReapExpiredReservations: %v", err)
 	}
-	if reaped != 1 {
-		t.Fatalf("reaped=%d want 1", reaped)
+	if reaped != 0 {
+		t.Fatalf("reaped=%d want 0 for settlement hold", reaped)
 	}
 	_, reserved, err := store.DailyUsage(ctx, "acct_clamp_expiry", "2026-05-29")
 	if err != nil {
 		t.Fatalf("DailyUsage: %v", err)
 	}
-	if reserved != 0 {
-		t.Fatalf("reserved after clamped expiry reap=%d want 0", reserved)
+	if reserved != 40 {
+		t.Fatalf("reserved after held expiry reap=%d want 40", reserved)
 	}
 }
 

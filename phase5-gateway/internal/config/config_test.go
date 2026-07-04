@@ -76,6 +76,10 @@ func TestSettlementReconcileConfigValidation(t *testing.T) {
 		mutate func(*Config)
 		want   string
 	}{
+		"disabled reconciler": {
+			mutate: func(cfg *Config) { cfg.Settlement.ReconcileEnabled = false },
+			want:   "settlement.reconcile_enabled must be true",
+		},
 		"zero interval": {
 			mutate: func(cfg *Config) { cfg.Settlement.ReconcileIntervalSeconds = 0 },
 			want:   "settlement.reconcile_interval_s must be > 0",
@@ -101,15 +105,6 @@ func TestSettlementReconcileConfigValidation(t *testing.T) {
 				t.Fatalf("Validate error=%v want containing %q", err, tc.want)
 			}
 		})
-	}
-
-	cfg := validTestConfig()
-	cfg.Settlement.ReconcileEnabled = false
-	cfg.Settlement.ReconcileIntervalSeconds = 0
-	cfg.Settlement.ReconcileBatchLimit = 0
-	cfg.Settlement.ReconcileRequestTimeoutSeconds = 0
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate rejected disabled settlement reconciler: %v", err)
 	}
 }
 
