@@ -188,23 +188,31 @@ final class LaunchProviderController: ObservableObject {
     ///   j. Show success card (owned by the SwiftUI view; controller
     ///      transitions to .live)
     func launch() async {
-        guard Self.isOnboardingV2Enabled else {
-            stage = .failed(
-                stage: "featureFlag",
-                retryable: false,
-                message: "App-track onboarding is not enabled in this build."
-            )
-            return
-        }
-
+        let existingState = try? dependencies.loadState()
         if await dependencies.isConfigured() {
-            if let existing = try? dependencies.loadState(),
+            if let existing = existingState,
                existing.onboardingSchemaVersion == 2,
                existing.firstServingAt == nil {
                 await resumePartialOnboarding(existing)
             } else {
                 await startConfiguredAgent(model: "configured")
             }
+            return
+        }
+
+        if let existing = existingState,
+           existing.onboardingSchemaVersion == 2,
+           existing.firstServingAt == nil {
+            await resumePartialOnboarding(existing)
+            return
+        }
+
+        guard Self.isOnboardingV2Enabled else {
+            stage = .failed(
+                stage: "featureFlag",
+                retryable: false,
+                message: "App-track onboarding is not enabled in this build."
+            )
             return
         }
 
@@ -448,6 +456,7 @@ enum StartupRoute: Equatable {
     case showImportDialog
     case setupPaused
     case resumeOnboarding
+    case quit
 }
 
 enum MigrationDecision: Equatable {
@@ -497,13 +506,13 @@ struct StartupState: Equatable {
 
     func route() -> StartupRoute {
         if onboardingStateExists && !firstServingAtExists {
-            return onboardingV2Enabled ? .resumeOnboarding : .setupPaused
+            return .resumeOnboarding
         }
         if configExists && appMarkerExists && providerTokenExists {
             return .startAgent
         }
         if configExists && !appMarkerExists {
-            return onboardingV2Enabled ? .showImportDialog : .setupPaused
+            return .showImportDialog
         }
         if identityExists && onboardingV2Enabled {
             return .resumeOnboarding
@@ -524,7 +533,7 @@ struct StartupState: Equatable {
             let backup = try ProviderConfig.startFreshMovingCLIConfigAside(now: now, paths: paths)
             return MigrationResult(route: .showOnboarding, backupPath: backup?.path)
         case .cancel:
-            return MigrationResult(route: .setupPaused, backupPath: nil)
+            return MigrationResult(route: .quit, backupPath: nil)
         }
     }
 }

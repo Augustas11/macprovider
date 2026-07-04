@@ -53,6 +53,7 @@ enum ProviderConfig {
         case existingConfigNotOwnedByApp
         case missingProviderID
         case missingProviderToken
+        case importRollbackFailed(importError: Error, rollbackError: Error)
         var errorDescription: String? {
             switch self {
             case .existingConfigNotOwnedByApp:
@@ -61,6 +62,8 @@ enum ProviderConfig {
                 return "The existing macprovider config does not contain a provider_id."
             case .missingProviderToken:
                 return "The existing macprovider config does not contain a provider_token."
+            case let .importRollbackFailed(importError, rollbackError):
+                return "Import failed (\(importError.localizedDescription)) and the original config could not be restored (\(rollbackError.localizedDescription))."
             }
         }
     }
@@ -112,7 +115,8 @@ enum ProviderConfig {
 
     static func importExistingCLIConfig(paths: ProviderPaths) async throws {
         try paths.ensureDirectories()
-        let existing = try String(contentsOf: paths.configFile)
+        let originalData = try Data(contentsOf: paths.configFile)
+        let existing = String(decoding: originalData, as: UTF8.self)
         guard let providerID = parseTopLevelValue(named: "provider_id", from: existing) else {
             throw SaveError.missingProviderID
         }
@@ -132,11 +136,14 @@ enum ProviderConfig {
             guard await isConfigured(paths: paths) else { throw SaveError.existingConfigNotOwnedByApp }
             try? FileManager.default.removeItem(at: backup)
         } catch {
-            try? FileManager.default.removeItem(at: paths.configFile)
-            try? FileManager.default.copyItem(at: backup, to: paths.configFile)
-            try? FileManager.default.removeItem(at: backup)
             try? await KeychainStore.deleteProviderToken(providerID: providerID)
             try? FileManager.default.removeItem(at: paths.appMarkerFile)
+            do {
+                try originalData.write(to: paths.configFile, options: [.atomic])
+                try? FileManager.default.removeItem(at: backup)
+            } catch let rollbackError {
+                throw SaveError.importRollbackFailed(importError: error, rollbackError: rollbackError)
+            }
             throw error
         }
     }

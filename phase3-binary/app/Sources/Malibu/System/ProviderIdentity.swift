@@ -19,6 +19,7 @@ import Security
 enum ProviderIdentityError: Error, LocalizedError {
     case keychainUnavailable(status: OSStatus)
     case invalidKeyMaterial
+    case missingIdentity
 
     var errorDescription: String? {
         switch self {
@@ -26,6 +27,8 @@ enum ProviderIdentityError: Error, LocalizedError {
             return "Provider identity Keychain operation failed with status \(status)."
         case .invalidKeyMaterial:
             return "Provider identity key material was invalid."
+        case .missingIdentity:
+            return "Provider identity key material was not found."
         }
     }
 }
@@ -60,6 +63,13 @@ enum ProviderIdentity {
     /// on every launch, but concurrent calls MUST serialize.
     static func loadOrGenerate() async throws -> Curve25519.Signing.PrivateKey {
         try await ProviderIdentityKeychain.shared.loadOrGenerate()
+    }
+
+    /// Loads an existing identity key without generating a replacement.
+    /// Proof-stage signing must use this so a corrupted/imported config cannot
+    /// silently bind a new identity to an old provider_id.
+    static func loadExisting() async throws -> Curve25519.Signing.PrivateKey {
+        try await ProviderIdentityKeychain.shared.loadExisting()
     }
 
     /// Derives `provider_id = "p_" + base32_lc(sha256(pubkey.rawRepresentation))`
@@ -143,6 +153,13 @@ private actor ProviderIdentityKeychain {
             throw ProviderIdentityError.keychainUnavailable(status: status)
         }
         return key
+    }
+
+    func loadExisting() throws -> Curve25519.Signing.PrivateKey {
+        guard let existing = try readExisting() else {
+            throw ProviderIdentityError.missingIdentity
+        }
+        return existing
     }
 
     func delete() throws {

@@ -122,6 +122,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             presentOnboarding()
         case .setupPaused:
             presentSetupPaused()
+        case .quit:
+            NSApp.terminate(nil)
         case .showImportDialog:
             let decision = presentMigrationDialog()
             do {
@@ -164,7 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func presentStartFreshBackup(path: String) {
         let alert = NSAlert()
         alert.messageText = "Old provider config moved aside"
-        alert.informativeText = "Backup: \(path)\n\nTo reclaim it manually, move that file back to ~/.config/macprovider/config.yaml."
+        alert.informativeText = "Backup: \(path)\n\nTo reclaim it manually, run:\nmacprovider-cli --config \"\(path)\""
         alert.alertStyle = .informational
         alert.runModal()
     }

@@ -19,9 +19,9 @@ final class StartupRouteTests: XCTestCase {
     func testStartupRouteFiveInstallStatesByFlagPosition() {
         let cases: [(String, StartupState, StartupRoute, StartupRoute)] = [
             ("configured", state(config: true, marker: true, token: true, identity: true, onboarding: true, firstServing: true), .startAgent, .startAgent),
-            ("configured-v2-partial", state(config: true, marker: true, token: true, identity: true, onboarding: true, firstServing: false), .setupPaused, .resumeOnboarding),
-            ("cli-owned", state(config: true, marker: false, token: false, identity: false, onboarding: false, firstServing: false), .setupPaused, .showImportDialog),
-            ("v2-partial", state(config: false, marker: false, token: false, identity: true, onboarding: true, firstServing: false), .setupPaused, .resumeOnboarding),
+            ("configured-v2-partial", state(config: true, marker: true, token: true, identity: true, onboarding: true, firstServing: false), .resumeOnboarding, .resumeOnboarding),
+            ("cli-owned", state(config: true, marker: false, token: false, identity: false, onboarding: false, firstServing: false), .showImportDialog, .showImportDialog),
+            ("v2-partial", state(config: false, marker: false, token: false, identity: true, onboarding: true, firstServing: false), .resumeOnboarding, .resumeOnboarding),
             ("fresh", state(config: false, marker: false, token: false, identity: false, onboarding: false, firstServing: false), .setupPaused, .showOnboarding),
             ("identity-only", state(config: false, marker: false, token: false, identity: true, onboarding: false, firstServing: false), .setupPaused, .resumeOnboarding)
         ]
@@ -99,7 +99,7 @@ final class StartupRouteTests: XCTestCase {
 
         let before = try String(contentsOf: paths.configFile)
         let result = try await StartupState.applyMigrationDecision(.cancel, paths: paths)
-        XCTAssertEqual(result.route, .setupPaused)
+        XCTAssertEqual(result.route, .quit)
         XCTAssertNil(result.backupPath)
         XCTAssertEqual(try String(contentsOf: paths.configFile), before)
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))

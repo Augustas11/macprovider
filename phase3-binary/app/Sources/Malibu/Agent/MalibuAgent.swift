@@ -166,7 +166,7 @@ final class MalibuAgent: ObservableObject {
         }
         guard !isShuttingDown else { await client.close(); return }
         self.control = client
-        snapshot.state = .serving
+        snapshot.state = .starting
 
         eventStreamTask = Task { [weak self] in
             guard let client = await self?.control else { return }
@@ -278,7 +278,16 @@ final class MalibuAgent: ObservableObject {
         }
 
         do {
-            let key = try await ProviderIdentity.loadOrGenerate()
+            let key = try await ProviderIdentity.loadExisting()
+            guard ProviderIdentity.providerID(for: key) == providerID else {
+                try? await control?.send(.identitySignatureResponse(
+                    accepted: false,
+                    identitySignature: nil,
+                    transcriptSHA256: nil,
+                    reason: "provider_identity_mismatch"
+                ))
+                return
+            }
             let payload = try RegisterClient.identitySignaturePayload(
                 authAttemptID: authAttemptID,
                 providerID: providerID,

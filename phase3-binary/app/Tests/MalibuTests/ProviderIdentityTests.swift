@@ -39,4 +39,20 @@ final class ProviderIdentityTests: XCTestCase {
             throw XCTSkip("Keychain unavailable in this test host: \(error.localizedDescription)")
         }
     }
+
+    func testLoadExistingDoesNotGenerateMissingIdentity() async throws {
+        do {
+            try await ProviderIdentity.deleteFromKeychain()
+            do {
+                _ = try await ProviderIdentity.loadExisting()
+                XCTFail("Expected missing identity to throw")
+            } catch ProviderIdentityError.missingIdentity {
+                // Expected.
+            }
+            let ready = await ProviderIdentity.isReady()
+            XCTAssertFalse(ready)
+        } catch {
+            throw XCTSkip("Keychain unavailable in this test host: \(error.localizedDescription)")
+        }
+    }
 }

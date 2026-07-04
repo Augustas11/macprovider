@@ -16,7 +16,7 @@ final class MenuBarController {
     private let onAction: (Action) -> Void
     private var cancellables: Set<AnyCancellable> = []
     private var latestSnapshot: AgentSnapshot = .empty
-    private let badgeDefaultsKey = "malibu.unclaimed.dismissedThreshold"
+    private var dismissedUnclaimedThreshold: Double?
 
     init(agent: MalibuAgent, onAction: @escaping (Action) -> Void) {
         self.agent = agent
@@ -96,8 +96,7 @@ final class MenuBarController {
         // AUDIT R1 ARCHITECT A5: view strings live in the presenter, not the
         // snapshot data type. This lets locale/currency work touch one place.
         latestSnapshot = snapshot
-        let dismissed = dismissedUnclaimedThreshold()
-        let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissed)
+        let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissedUnclaimedThreshold)
         statusItem.button?.title = [AgentSnapshotPresenter.short(snapshot), badge].compactMap { $0 }.joined(separator: " ")
         guard let menu = statusItem.menu else { return }
         menu.item(withIdentifier: .statusRow)?.title = AgentSnapshotPresenter.stateLine(snapshot)
@@ -112,17 +111,12 @@ final class MenuBarController {
         menu.item(withIdentifier: .dismissBacklogBadge)?.isHidden = badge == nil
     }
 
-    private func dismissedUnclaimedThreshold() -> Double? {
-        let value = UserDefaults.standard.double(forKey: badgeDefaultsKey)
-        return value > 0 ? value : nil
-    }
-
     private func dismissUnclaimedBadge() {
         guard let total = AgentSnapshotPresenter.unclaimedBacklogTotal(latestSnapshot),
               let threshold = UnclaimedBadgePolicy.nextDismissedThreshold(totalBacklog: total) else {
             return
         }
-        UserDefaults.standard.set(threshold, forKey: badgeDefaultsKey)
+        dismissedUnclaimedThreshold = threshold
         render(latestSnapshot)
     }
 }
