@@ -18,8 +18,12 @@ let package = Package(
     ],
     dependencies: [
         .package(
-            url: "https://github.com/ml-explore/mlx-swift-examples.git",
-            exact: "2.29.1"
+            url: "https://github.com/ml-explore/mlx-swift-lm.git",
+            exact: "3.31.4"
+        ),
+        .package(
+            url: "https://github.com/huggingface/swift-transformers.git",
+            exact: "1.0.0"
         ),
         .package(
             url: "https://github.com/apple/swift-nio.git",
@@ -49,8 +53,10 @@ let package = Package(
             name: "macprovider-cli",
             dependencies: [
                 "MacProviderCore",
-                .product(name: "MLXLLM", package: "mlx-swift-examples"),
-                .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),

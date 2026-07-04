@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Hermetic regression guard for install.sh's post-install
-# AMFI/Taskgated SIGKILL retry helper.
+# AMFI/Taskgated SIGKILL retry + inode-refresh helper.
 #
 # Extracts `run_macprovider_cli_with_amfi_retry` from install.sh, wires
 # it against a mock `macprovider-cli` whose exit behavior is scripted
@@ -11,11 +11,12 @@
 #   2. Exit 10 pass-through: autotune's "recommendation stale" signal
 #      must reach the caller unchanged; must NOT be retried as if it
 #      were a SIGKILL.
-#   3. SIGKILL-then-success: rc 137 first try, rc 0 on retry → helper
-#      returns 0, emits the transient-race log.
-#   4. SIGKILL-twice: rc 137 both tries → helper returns 137, emits
-#      both the first-retry log and the distinct "still SIGKILL'd on
-#      retry — may be a genuine signature failure" log.
+#   3. SIGKILL-then-success (FLAVOR 1): rc 137 first try, rc 0 on 2s
+#      retry → helper returns 0, emits the transient-race log only.
+#   4. SIGKILL-thrice: rc 137 on all three attempts (initial, 2s
+#      retry, inode-refresh retry) → helper returns 137, emits all
+#      three diagnostic lines (transient-race, inode-refresh,
+#      genuine-signature-failure).
 #   5. Non-137 non-zero pass-through: rc 1 first try → helper returns
 #      1, no retry.
 #   6. Caller pattern A — `if HELPER; then ...; else rc=$?; ...`: the
@@ -28,15 +29,29 @@
 #      or `||`), the enclosing shell's -e state is unchanged. The
 #      helper must NOT accidentally leak `set +e/-e` toggles into the
 #      caller.
+#   9. SIGKILL-twice-then-success (FLAVOR 2): rc 137 on initial + 2s
+#      retry, rc 0 on the inode-refresh retry → helper returns 0,
+#      emits the transient-race + inode-refresh logs, does NOT emit
+#      the genuine-signature-failure log. The binary's inode must
+#      differ before vs. after (proving cp/rm/cp actually ran).
+#  10. Inode-refresh idempotent on non-137 rc: if attempt 2 succeeds
+#      via FLAVOR 1 fix, the inode is NOT touched (proving the helper
+#      does not do unnecessary filesystem work).
 #
-# Motivating incident: 2026-07-03 fresh v1.7.9 install on Apple M5
-# macOS 26.5. `installer -pkg` succeeded, Gatekeeper accepted the
-# package, but the first `autotune --recommend --freshness-check`
-# was SIGKILL'd with a CODESIGNING "Taskgated Invalid Signature"
-# verdict and the install aborted. The same command re-run manually
-# by the same shell moments later succeeded. Root cause: race
-# between the pkg installer's post-install AMFI signature
-# revalidation and the first execve of the freshly-written binary.
+# Motivating incidents:
+#   - 2026-07-03 fresh v1.7.9 install on Apple M5 macOS 26.5.
+#     `installer -pkg` succeeded, Gatekeeper accepted the package,
+#     but the first `autotune --recommend --freshness-check` was
+#     SIGKILL'd with a CODESIGNING "Taskgated Invalid Signature"
+#     verdict and the install aborted. FLAVOR 1: the same command
+#     re-run manually by the same shell moments later succeeded.
+#   - 2026-07-03 fresh v1.7.10 install on the same M5. This time BOTH
+#     the first invocation AND the 2s-later retry were SIGKILL'd
+#     persistently, but the SAME binary content ran cleanly when
+#     copied to a different path. FLAVOR 2: the AMFI kernel cache
+#     had a stuck rejection tied to the specific inode
+#     `installer -pkg` created; `rm` + fresh `cp` gave the file a
+#     new inode and AMFI re-evaluated successfully.
 
 set -euo pipefail
 
@@ -131,7 +146,7 @@ report "case2-exit-10-stale-passthrough" 10 "$rc"
 report "case2-no-retry-log-on-exit-10" 0 "$(log_line_count)"
 
 ################################################################
-# Case 3 — SIGKILL on first, success on retry
+# Case 3 — SIGKILL on first, success on 2s retry (FLAVOR 1)
 ################################################################
 reset_log
 rm -f "$COUNTER_FILE"
@@ -150,30 +165,36 @@ if log_contains "Retrying once after 2s"; then
 else
   report "case3-first-retry-log-emitted" yes no
 fi
-if log_contains "SIGKILL'd again on the retry"; then
-  report "case3-second-failure-log-not-emitted" no yes
+if log_contains "AMFI cache may be pinned to the pkg-installer inode"; then
+  report "case3-inode-refresh-log-not-emitted" no yes
 else
-  report "case3-second-failure-log-not-emitted" no no
+  report "case3-inode-refresh-log-not-emitted" no no
 fi
 
 ################################################################
-# Case 4 — SIGKILL twice, both logs emitted
+# Case 4 — SIGKILL thrice (initial + 2s retry + inode-refresh retry)
+# → rc 137 with all three diagnostic lines emitted.
 ################################################################
 reset_log
 rm -f "$COUNTER_FILE"
 install_mock 'kill -KILL $$'
 rc=0
 run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
-report "case4-sigkill-both-times-rc" 137 "$rc"
+report "case4-sigkill-thrice-rc" 137 "$rc"
 if log_contains "Retrying once after 2s"; then
   report "case4-first-retry-log-emitted" yes yes
 else
   report "case4-first-retry-log-emitted" yes no
 fi
-if log_contains "SIGKILL'd again on the retry"; then
-  report "case4-second-failure-log-emitted" yes yes
+if log_contains "AMFI cache may be pinned to the pkg-installer inode"; then
+  report "case4-inode-refresh-log-emitted" yes yes
 else
-  report "case4-second-failure-log-emitted" yes no
+  report "case4-inode-refresh-log-emitted" yes no
+fi
+if log_contains "SIGKILL'd after the inode refresh"; then
+  report "case4-genuine-signature-failure-log-emitted" yes yes
+else
+  report "case4-genuine-signature-failure-log-emitted" yes no
 fi
 
 ################################################################
@@ -226,6 +247,80 @@ install_mock 'exit 10'
 if run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1; then :; else :; fi
 case "$-" in *e*) e_after_nonzero=1 ;; *) e_after_nonzero=0 ;; esac
 report "case8-set-e-preserved-after-nonzero" 1 "$e_after_nonzero"
+
+################################################################
+# Case 9 — SIGKILL-twice-then-success (FLAVOR 2). Initial + 2s
+# retry both SIGKILL. After the inode refresh, the third attempt
+# succeeds. Helper must return 0, emit the transient-race +
+# inode-refresh logs, and NOT emit the genuine-signature-failure
+# log. The binary's inode must differ before vs. after the refresh
+# (proving cp/rm/cp actually ran).
+################################################################
+reset_log
+rm -f "$COUNTER_FILE"
+install_mock "
+n=\$(cat \"$COUNTER_FILE\" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo \"\$n\" > \"$COUNTER_FILE\"
+if [ \"\$n\" -le 2 ]; then kill -KILL \$\$; fi
+echo \"third-attempt-ok\"
+exit 0
+"
+inode_before="$(ls -i "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')"
+rc=0
+out="$(run_macprovider_cli_with_amfi_retry autotune --recommend 2>&1)" || rc=$?
+inode_after="$(ls -i "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')"
+report "case9-sigkill-twice-then-success-rc" 0 "$rc"
+if [ "$inode_before" != "$inode_after" ]; then
+  report "case9-inode-changed-after-refresh" changed changed
+else
+  report "case9-inode-changed-after-refresh" changed same
+fi
+if log_contains "Retrying once after 2s"; then
+  report "case9-first-retry-log-emitted" yes yes
+else
+  report "case9-first-retry-log-emitted" yes no
+fi
+if log_contains "AMFI cache may be pinned to the pkg-installer inode"; then
+  report "case9-inode-refresh-log-emitted" yes yes
+else
+  report "case9-inode-refresh-log-emitted" yes no
+fi
+if log_contains "SIGKILL'd after the inode refresh"; then
+  report "case9-genuine-signature-failure-log-not-emitted" no yes
+else
+  report "case9-genuine-signature-failure-log-not-emitted" no no
+fi
+if echo "$out" | grep -q "third-attempt-ok"; then
+  report "case9-third-attempt-output-visible" yes yes
+else
+  report "case9-third-attempt-output-visible" yes no
+fi
+
+################################################################
+# Case 10 — FLAVOR 1 success does NOT touch the inode. If the 2s
+# retry succeeds, we must NOT do the cp/rm/cp dance (defends against
+# unnecessary filesystem work).
+################################################################
+reset_log
+rm -f "$COUNTER_FILE"
+install_mock "
+n=\$(cat \"$COUNTER_FILE\" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo \"\$n\" > \"$COUNTER_FILE\"
+if [ \"\$n\" -eq 1 ]; then kill -KILL \$\$; fi
+exit 0
+"
+inode_before="$(ls -i "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')"
+rc=0
+run_macprovider_cli_with_amfi_retry autotune --recommend >/dev/null 2>&1 || rc=$?
+inode_after="$(ls -i "$INSTALL_DIR/macprovider-cli" | awk '{print $1}')"
+report "case10-flavor1-success-rc" 0 "$rc"
+if [ "$inode_before" = "$inode_after" ]; then
+  report "case10-inode-unchanged-on-flavor1-success" same same
+else
+  report "case10-inode-unchanged-on-flavor1-success" same changed
+fi
 
 ################################################################
 # Summary

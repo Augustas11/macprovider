@@ -53,6 +53,13 @@ func TestLabelHygiene(t *testing.T) {
 	m.RollupErrorsTotal.WithLabelValues("timeseries_rpm").Inc()
 	m.RateLimitExceededTotal.WithLabelValues("public", "overview").Inc()
 	m.RateLimitExceededTotal.WithLabelValues("partner", "leaderboard").Inc()
+	m.IncRegisterRateLimitHit("ip")
+	m.IncRegisterRateLimitHit("asn")
+	m.IncRegisterRateLimitHit("raw-attacker-value")
+	m.IncRegisterSource("app")
+	m.IncRegisterSource("cli")
+	m.IncRegisterSource("portal")
+	m.IncRegisterSource("raw-attacker-value")
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -99,6 +106,14 @@ func TestLabelHygiene(t *testing.T) {
 					n, err := strconv.Atoi(val)
 					if err != nil || n < 100 || n > 599 {
 						t.Errorf("metric %s status=%q is not a valid HTTP status code", mf.GetName(), val)
+					}
+				case "scope":
+					if val != "ip" && val != "asn" {
+						t.Errorf("metric %s scope=%q not in allowed set", mf.GetName(), val)
+					}
+				case "track":
+					if val != "app" && val != "cli" && val != "portal" {
+						t.Errorf("metric %s track=%q not in allowed set", mf.GetName(), val)
 					}
 				}
 			}

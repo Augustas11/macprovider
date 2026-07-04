@@ -2,8 +2,10 @@ import Foundation
 import CryptoKit
 import MLX
 import MLXLLM
+import MLXHuggingFace
 import MLXLMCommon
 import MacProviderCore
+import Tokenizers
 
 protocol ModelRuntimeServing: Actor {
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult
@@ -213,6 +215,14 @@ public struct WarmSwapDisabledError: Error, CustomStringConvertible {
 
 public struct DrainCancelledError: Error { }
 
+struct ModelRuntimeLoadError: Error, CustomStringConvertible {
+    let target: String
+
+    var description: String {
+        "model load target must resolve to a local snapshot directory: \(target)"
+    }
+}
+
 actor ModelRuntime: ModelRuntimeServing {
     // AC-V2-9b (LOCKED): SPEC-019 v0.2.4 §6 normative 2 MiB streaming
     // content cap. Byte domain is post-stop-token-filter buyer-visible
@@ -277,9 +287,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.loader = { targetModelID in
-            let configuration = Self.configuration(for: targetModelID)
-            let container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
-            let directory = configuration.modelDirectory()
+            let (container, directory) = try await Self.loadLocalContainer(from: targetModelID)
             let modelHash = try? Self.modelWeightArtifactManifestHash(in: directory)
             return (container, targetModelID, modelHash)
         }
@@ -293,11 +301,9 @@ actor ModelRuntime: ModelRuntimeServing {
             return
         }
 
-        let configuration = Self.configuration(for: modelLoadPath ?? modelID)
-        let container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
+        let (container, directory) = try await Self.loadLocalContainer(from: modelLoadPath ?? modelID)
         self.currentContainer = container
 
-        let directory = configuration.modelDirectory()
         let tokenizerConfigURL = directory.appendingPathComponent("tokenizer_config.json")
         if FileManager.default.fileExists(atPath: tokenizerConfigURL.path) {
             self.stopTokenFilter = try StopTokenConfigExtractor.extract(fromTokenizerConfigAt: tokenizerConfigURL)
@@ -776,7 +782,7 @@ actor ModelRuntime: ModelRuntimeServing {
                                 return .stop
                             }
                             generatedTokenIds = tokens.map { Int32($0) }
-                            let decoded = context.tokenizer.decode(tokens: tokens)
+                            let decoded = context.tokenizer.decode(tokenIds: tokens)
                             let candidate = Self.streamingSafePrefix(
                                 decoded,
                                 stopTokenFilter: stopTokenFilter,
@@ -908,14 +914,32 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
-    private static func configuration(for modelID: String) -> ModelConfiguration {
-        if modelID.hasPrefix("/") || FileManager.default.fileExists(atPath: modelID) {
-            return ModelConfiguration(directory: URL(fileURLWithPath: modelID))
+    private static func loadLocalContainer(from target: String) async throws -> (ModelContainer, URL) {
+        let directory = try localModelDirectory(for: target)
+        // mlx-swift-lm 3.x requires an explicit tokenizer loader. The provider
+        // preflight has already verified model_artifact_path/model_artifact_sha256,
+        // so load directly from the resolved local snapshot instead of downloading.
+        let container = try await LLMModelFactory.shared.loadContainer(
+            from: directory,
+            using: #huggingFaceTokenizerLoader()
+        )
+        return (container, directory)
+    }
+
+    private static func localModelDirectory(for target: String) throws -> URL {
+        let expanded = (target as NSString).expandingTildeInPath
+        if expanded.hasPrefix("/") || FileManager.default.fileExists(atPath: expanded) {
+            let url = URL(fileURLWithPath: expanded)
+            var isDirectory = ObjCBool(false)
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                return url
+            }
         }
-        if let cachedSnapshot = localHuggingFaceSnapshot(for: modelID) {
-            return ModelConfiguration(directory: cachedSnapshot)
+        if let cachedSnapshot = localHuggingFaceSnapshot(for: target) {
+            return cachedSnapshot
         }
-        return LLMModelFactory.shared.configuration(id: modelID)
+        throw ModelRuntimeLoadError(target: target)
     }
 
     static func validatePromptTokenCount(_ promptTokens: Int, maxContextTokens: Int) throws {

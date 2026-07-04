@@ -361,3 +361,73 @@ func TestTrustedProxyPrefixesEmptyAllowed(t *testing.T) {
 		t.Fatalf("empty trusted_proxies Validate err=%v, want nil (empty list is strictest posture, valid)", err)
 	}
 }
+
+func TestOnboardingDefaultsProductionDisabled(t *testing.T) {
+	cfg := Default()
+	if cfg.Onboarding.AppTrackRegisterEnabled {
+		t.Fatal("app-track register should default disabled")
+	}
+	if cfg.Onboarding.BundleID != "tech.malibu.app" {
+		t.Fatalf("bundle_id=%q", cfg.Onboarding.BundleID)
+	}
+	if cfg.Onboarding.CoordinatorDomain != "coordinator.streamvc.live" {
+		t.Fatalf("coordinator_domain=%q", cfg.Onboarding.CoordinatorDomain)
+	}
+}
+
+func TestOnboardingEnabledRequiresStartupSecrets(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Onboarding.AppTrackRegisterEnabled = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.postgres_dsn") {
+		t.Fatalf("enabled without postgres_dsn err=%v", err)
+	}
+
+	cfg.Onboarding.PostgresDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.apple_team_id") {
+		t.Fatalf("enabled without apple_team_id err=%v", err)
+	}
+
+	cfg.Onboarding.AppleTeamID = "TEAM12345"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.asn_prefixes") {
+		t.Fatalf("enabled without asn_prefixes err=%v", err)
+	}
+
+	cfg.Onboarding.ASNPrefixes = map[string]string{"198.51.100.0/24": "AS64500"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "auth.operator_keys") {
+		t.Fatalf("enabled without per-operator keys err=%v", err)
+	}
+
+	cfg.Auth.OperatorKeys = map[string]string{"alice": "alice-secret", "bob": "bob-secret"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("enabled with required secrets should validate: %v", err)
+	}
+
+	cfg.Auth.OperatorKey = ""
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "auth.operator_key") {
+		t.Fatalf("enabled without operator_key err=%v", err)
+	}
+}
+
+func TestOnboardingOperatorKeysRejectSharedDualControlSecrets(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Onboarding.AppTrackRegisterEnabled = true
+	cfg.Onboarding.PostgresDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	cfg.Onboarding.AppleTeamID = "TEAM12345"
+	cfg.Onboarding.ASNPrefixes = map[string]string{"198.51.100.0/24": "AS64500"}
+
+	cfg.Auth.OperatorKeys = map[string]string{"alice": "same-secret", "bob": "same-secret"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must not reuse secret") {
+		t.Fatalf("duplicate operator secret err=%v", err)
+	}
+}
+
+func TestOnboardingCoordinatorDomainMustBeBareLowercaseHost(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Onboarding.CoordinatorDomain = "https://Coordinator.streamvc.live/"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "bare lowercase host") {
+		t.Fatalf("domain validation err=%v", err)
+	}
+}

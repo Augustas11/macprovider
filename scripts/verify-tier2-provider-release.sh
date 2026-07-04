@@ -138,6 +138,8 @@ validate_payload_entries() {
       macprovider-cli)
         has_binary=1
         ;;
+      mlx.metallib)
+        ;;
       THIRD-PARTY-NOTICES.txt)
         ;;
       *.bundle|*.bundle/*)

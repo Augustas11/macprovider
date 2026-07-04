@@ -1,6 +1,7 @@
 package migrations
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -13,9 +14,9 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	// Step 1 ships exactly these 5 versions. Adjusting this
-	// count is a Step 2/3/4 concern; if the slice grows in
-	// Step 1 we want a forcing function to update the test.
+	// Step 1 now ships SPEC-017 stats migrations plus SPEC-026
+	// identity/onboarding schema. Adjusting this count is a
+	// forcing function to update the schema-shape assertions.
 	want := []struct {
 		ver  int
 		name string
@@ -25,6 +26,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{3, "roles"},
 		{4, "grants"},
 		{5, "oltp_source_grants"},
+		{6, "spec_026_identity"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -61,13 +63,15 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	var schema, bootstrap string
+	var schema, bootstrap, spec026 string
 	for _, m := range all {
 		switch m.Name {
 		case "stats_tables":
 			schema = m.SQL
 		case "bootstrap_health_and_rewards":
 			bootstrap = m.SQL
+		case "spec_026_identity":
+			spec026 = m.SQL
 		}
 	}
 	if schema == "" {
@@ -109,6 +113,64 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 		"leaderboard_24h", "leaderboard_7d", "leaderboard_30d", "leaderboard_all"} {
 		mustContain(t, bootstrap, "'"+c+"'",
 			"bootstrap row for component "+c)
+	}
+
+	if spec026 == "" {
+		t.Fatal("spec_026_identity migration body is empty")
+	}
+	for _, needle := range []string{
+		"CREATE TABLE IF NOT EXISTS provider_identities",
+		"app_attest_key_id BYTEA NULL UNIQUE",
+		"CREATE TABLE IF NOT EXISTS provider_register_nonces",
+		"provider_id, nonce, ts_utc",
+		"source_ip, nonce, ts_utc",
+		"CREATE OR REPLACE FUNCTION prune_provider_register_nonces",
+		"retain_for must be at least 65 seconds",
+		"CREATE TABLE IF NOT EXISTS provider_auth_policy",
+		"CREATE TABLE IF NOT EXISTS provider_auth_policy_cutover_runs",
+		"CREATE TABLE IF NOT EXISTS provider_auth_policy_pending",
+		"CREATE TABLE IF NOT EXISTS provider_auth_policy_grants",
+		"grant_source     TEXT NOT NULL DEFAULT 'operator'",
+		"'spec-026-cutover-legacy'",
+		"pg_advisory_xact_lock(26026, hashtext",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_auth_policy_pending_open_incident",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_auth_policy_grants_incident",
+		"CREATE OR REPLACE FUNCTION seed_provider_auth_policy_cutover",
+		"CREATE OR REPLACE FUNCTION request_provider_auth_policy_exemption",
+		"CREATE OR REPLACE FUNCTION approve_provider_auth_policy_exemption",
+		"CREATE ROLE provider_onboarding LOGIN",
+		"ALTER ROLE provider_onboarding LOGIN",
+		"GRANT SELECT, INSERT, UPDATE ON provider_identities TO provider_onboarding",
+		"GRANT SELECT, INSERT ON provider_register_nonces TO provider_onboarding",
+		"GRANT SELECT ON provider_auth_policy TO provider_onboarding",
+		"REVOKE ALL ON FUNCTION prune_provider_register_nonces(INTERVAL) FROM provider_onboarding",
+		"REVOKE ALL ON provider_auth_policy_pending FROM provider_onboarding",
+		"REVOKE ALL ON provider_auth_policy_grants FROM provider_onboarding",
+		"GRANT EXECUTE ON FUNCTION seed_provider_auth_policy_cutover(TIMESTAMPTZ, TEXT[]) TO provider_onboarding",
+		"GRANT EXECUTE ON FUNCTION request_provider_auth_policy_exemption(UUID, TEXT, TEXT, TIMESTAMPTZ, TEXT, TEXT) TO provider_onboarding",
+		"GRANT EXECUTE ON FUNCTION approve_provider_auth_policy_exemption(UUID, TEXT) TO provider_onboarding",
+	} {
+		mustContain(t, spec026, needle, "SPEC-026 schema/grant shape")
+	}
+	down, err := os.ReadFile("006_spec_026_identity.down.sql")
+	if err != nil {
+		t.Fatalf("read SPEC-026 rollback artifact: %v", err)
+	}
+	downSQL := string(down)
+	for _, needle := range []string{
+		"DROP TABLE IF EXISTS provider_auth_policy_pending",
+		"DROP TABLE IF EXISTS provider_auth_policy_grants",
+		"DROP TABLE IF EXISTS provider_auth_policy_cutover_runs",
+		"DROP TABLE IF EXISTS provider_auth_policy",
+		"DROP FUNCTION IF EXISTS seed_provider_auth_policy_cutover(TIMESTAMPTZ, TEXT[])",
+		"DROP FUNCTION IF EXISTS request_provider_auth_policy_exemption(UUID, TEXT, TEXT, TIMESTAMPTZ, TEXT, TEXT)",
+		"DROP FUNCTION IF EXISTS approve_provider_auth_policy_exemption(UUID, TEXT)",
+		"DROP FUNCTION IF EXISTS prune_provider_register_nonces(INTERVAL)",
+		"DROP TABLE IF EXISTS provider_register_nonces",
+		"DROP TABLE IF EXISTS provider_identities",
+		"DROP ROLE IF EXISTS provider_onboarding",
+	} {
+		mustContain(t, downSQL, needle, "SPEC-026 rollback artifact")
 	}
 }
 

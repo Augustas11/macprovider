@@ -200,22 +200,35 @@ struct AutotuneHMACSecretStore {
     var randomBytes: (Int) throws -> Data = Self.secureRandomBytes
 
     func loadOrCreate() throws -> Data {
-        if usesDefaultPath {
-            if let keychainSecret = try? Self.loadKeychainSecret(), keychainSecret.count == 32 {
-                return keychainSecret
-            }
-        }
+        // Keychain path removed 2026-07-03: macOS binds the keychain-item ACL
+        // to the specific creating binary's code-signature hash. Auto-update
+        // replaces the binary with a new hash → ACL check fails → macOS
+        // prompts every operator for the "login" keychain password on the
+        // next interactive autotune run after each release. Under launchd
+        // (non-interactive) the API returns errSecInteractionRequired and
+        // the code silently falls through to file — so the keychain path
+        // was already dead weight for the auto-updated background flow,
+        // and pure UX drag for the interactive foreground flow.
+        //
+        // The file at ~/.config/macprovider/autotune-hmac-secret is created
+        // at 0600 under a 0700 parent (see writeNewFileSecret + ensurePrivate
+        // ParentDirectory). HMAC of autotune log integrity does not need
+        // keychain-level protection — the threat model (someone with code
+        // execution on this Mac forging autotune logs on the same Mac) is
+        // already outside what keychain protects against.
+        //
+        // Existing operators: any legacy `live.streamvc.macprovider.autotune`
+        // keychain item is now orphaned but harmless — it is never read.
+        // They can remove it with:
+        //   security delete-generic-password -s "live.streamvc.macprovider.autotune"
+        // No automatic delete is attempted; SecItemDelete would also trip
+        // the ACL prompt for the exact reason this fix exists.
         if FileManager.default.fileExists(atPath: path.path) {
             do {
                 return try loadExistingFileSecret()
             } catch {
                 return try rotateRecoverableFileSecret()
             }
-        }
-        if usesDefaultPath,
-           let created = try? Self.createKeychainSecret(randomBytes: randomBytes),
-           created.count == 32 {
-            return created
         }
         return try createFileSecret()
     }
@@ -328,43 +341,6 @@ struct AutotuneHMACSecretStore {
         }
         return true
     }
-
-    private static func loadKeychainSecret() throws -> Data {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data, data.count == 32 else {
-            throw AutotuneRecommendError.noHMACSecret
-        }
-        return data
-    }
-
-    private static func createKeychainSecret(randomBytes: (Int) throws -> Data) throws -> Data {
-        let secret = try randomBytes(32)
-        guard secret.count == 32 else { throw AutotuneRecommendError.noHMACSecret }
-        let attributes: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecValueData as String: secret,
-        ]
-        let status = SecItemAdd(attributes as CFDictionary, nil)
-        if status == errSecDuplicateItem {
-            return try loadKeychainSecret()
-        }
-        guard status == errSecSuccess else { throw AutotuneRecommendError.noHMACSecret }
-        return secret
-    }
-
-    private static let keychainService = "live.streamvc.macprovider.autotune"
-    private static let keychainAccount = "hmac-secret-v1"
 
     private static func secureRandomBytes(count: Int) throws -> Data {
         var data = Data(count: count)
@@ -1768,7 +1744,7 @@ struct AutotuneRecommendationBenchmarker {
                 continue
             }
             if row.runtimeStatus == "blocked" {
-                diagnostics[modelKey] = "catalog row blocked by upstream"
+                diagnostics[modelKey] = "catalog row blocked pending migration validation/rate-card rollout"
                 continue
             }
             if row.minRAMGB > request.hardware.memoryGB - AutotuneRecommendEngine.safetyMarginGB {
@@ -1950,7 +1926,7 @@ extension AutotuneStaticInputs {
     """
 
     static let bakedCandidateCatalogJSON = """
-    {"version":"baked-2026-07-03","generated_at":"2026-07-03T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"meta-llama/llama-3.1-8b-instruct":{"model_id":"mlx-community/Meta-Llama-3.1-8B-Instruct-4bit","model_revision":"241a666dad6cb93c8ff213d39a7f34a36bf26db4","model_sha256":"67b26d6b1c50dc8836ab3705b06276a43c74c8f66247f9b112e232b58abbd99f","min_ram_gb":16,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 20->15 for M-Base-lite eligibility."},"openai/gpt-oss-20b":{"model_id":"mlx-community/gpt-oss-20b-MXFP4-Q8","model_revision":"773a7da77e569019bb0fd17a554b263738d669a3","model_sha256":"f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1","min_ram_gb":24,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 30->15 to reflect M-Base cold-start (~16.7 tok/s measured on M5)."},"qwen3-32b":{"model_id":"mlx-community/Qwen3-32B-4bit","model_revision":"bcaaf7f538adf166c1080a2befdb4f6019f66639","model_sha256":"69169cceb643f108755f96dba26d8647862e38a7f82cb1b5b25aff8f204967aa","min_ram_gb":32,"min_bandwidth_tier":"A","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"listed","notes":"baked"},"qwen3-coder-30b-a3b-instruct":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","model_revision":"6e302ea604ad9ab206367e2c501d1571023e7b6d","model_sha256":"10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0","min_ram_gb":28,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3000},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 25->20 for M5 cold-start (~23.4 tok/s measured) headroom."},"qwen2.5-coder-32b-instruct":{"model_id":"mlx-community/Qwen2.5-Coder-32B-Instruct-4bit","model_revision":"d1e3b690c8e225d7795bccddf971ca6be68b2012","model_sha256":"b7749cc57f37f7e9239d0f9b091bcffe6d7629e48af75e8cb84c1cdca1780973","min_ram_gb":64,"min_bandwidth_tier":"A","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500},"runtime_status":"listed","notes":"baked-2026-07-03: min_sustained_tps 30->20 to broaden eligibility."},"google-gemma-4-26b-a4b-it":{"model_id":"mlx-community/gemma-4-26b-a4b-it-4bit","min_ram_gb":32,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"blocked","notes":"baked"},"nvidia/nemotron-3-nano-30b-a3b":{"model_id":"mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit","min_ram_gb":32,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"blocked","notes":"baked"}}}
+    {"version":"baked-2026-07-03","generated_at":"2026-07-03T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"meta-llama/llama-3.1-8b-instruct":{"model_id":"mlx-community/Meta-Llama-3.1-8B-Instruct-4bit","model_revision":"241a666dad6cb93c8ff213d39a7f34a36bf26db4","model_sha256":"67b26d6b1c50dc8836ab3705b06276a43c74c8f66247f9b112e232b58abbd99f","min_ram_gb":16,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 20->15 for M-Base-lite eligibility."},"openai/gpt-oss-20b":{"model_id":"mlx-community/gpt-oss-20b-MXFP4-Q8","model_revision":"773a7da77e569019bb0fd17a554b263738d669a3","model_sha256":"f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1","min_ram_gb":24,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 30->15 to reflect M-Base cold-start (~16.7 tok/s measured on M5)."},"qwen3-32b":{"model_id":"mlx-community/Qwen3-32B-4bit","model_revision":"bcaaf7f538adf166c1080a2befdb4f6019f66639","model_sha256":"69169cceb643f108755f96dba26d8647862e38a7f82cb1b5b25aff8f204967aa","min_ram_gb":32,"min_bandwidth_tier":"A","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"listed","notes":"baked"},"qwen3-coder-30b-a3b-instruct":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","model_revision":"6e302ea604ad9ab206367e2c501d1571023e7b6d","model_sha256":"10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0","min_ram_gb":28,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3000},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 25->20 for M5 cold-start (~23.4 tok/s measured) headroom."},"qwen2.5-coder-32b-instruct":{"model_id":"mlx-community/Qwen2.5-Coder-32B-Instruct-4bit","model_revision":"d1e3b690c8e225d7795bccddf971ca6be68b2012","model_sha256":"b7749cc57f37f7e9239d0f9b091bcffe6d7629e48af75e8cb84c1cdca1780973","min_ram_gb":64,"min_bandwidth_tier":"A","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500},"runtime_status":"listed","notes":"baked-2026-07-03: min_sustained_tps 30->20 to broaden eligibility."},"google-gemma-4-26b-a4b-it":{"model_id":"mlx-community/gemma-4-26b-a4b-it-4bit","min_ram_gb":32,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"blocked","notes":"baked-2026-07-03: blocked pending mlx-swift-lm migration validation and rate-card rollout."},"nvidia/nemotron-3-nano-30b-a3b":{"model_id":"mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit","min_ram_gb":32,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"blocked","notes":"baked-2026-07-03: blocked pending mlx-swift-lm migration validation and rate-card rollout."}}}
     """
 
     static let bakedRateCardJSON = """

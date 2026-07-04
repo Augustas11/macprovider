@@ -58,7 +58,7 @@ normalize() {
 # (R2 architect MEDIUM).
 expected_shebang="#!/usr/bin/env bash"
 standalone_shebang="$(head -1 "$STANDALONE")"
-inline_shebang="$(printf "%s\n" "$extracted_inline" | head -1)"
+inline_shebang="${extracted_inline%%$'\n'*}"
 if [ "$standalone_shebang" != "$expected_shebang" ]; then
   echo "ERROR: $STANDALONE missing/wrong shebang: $standalone_shebang" >&2
   exit 1

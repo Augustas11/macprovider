@@ -12,6 +12,7 @@
 set -euo pipefail
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
+MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
 COORDINATOR_URL_DEFAULT="wss://coordinator.streamvc.live/ws/provider"
 COORDINATOR_BASE_DEFAULT="https://coordinator.streamvc.live"
 INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
@@ -48,20 +49,43 @@ die() {
   exit "$code"
 }
 
-# Retry macprovider-cli once if the first post-install invocation is
-# SIGKILL'd by the kernel with a CODESIGNING "Invalid Page" / "Taskgated
-# Invalid Signature" verdict. Observed 2026-07-03 on Apple M5 macOS 26.5
-# with a freshly-installed v1.7.9 pkg: `autotune --recommend
-# --freshness-check` was reported "Killed: 9" (bash exit 137) on the
-# FIRST invocation right after `installer -pkg`, and the immediately-
-# repeated invocation of the SAME command by the SAME shell succeeded.
-# This is a race between the pkg installer's post-install AMFI
-# signature revalidation and our first execve; a brief pause plus one
-# retry is sufficient in practice. Only SIGKILL / bash rc 137 is
-# retried — other non-zero exits (including autotune's exit-10 "stale
-# recommendation" signal, and other signal-terminated codes such as
-# 134 SIGABRT / 138 SIGBUS / 139 SIGSEGV) pass through unchanged so
-# we do not mask real crashes.
+# Retry macprovider-cli up to two additional times if the first
+# post-install invocation is SIGKILL'd by the kernel with a CODESIGNING
+# "Invalid Page" / "Taskgated Invalid Signature" verdict. Two failure
+# flavors have been observed:
+#
+#   FLAVOR 1 — Transient AMFI race. Observed 2026-07-03 on Apple M5
+#     macOS 26.5 with a freshly-installed v1.7.9 pkg: `autotune
+#     --recommend --freshness-check` was reported "Killed: 9" (bash
+#     exit 137) on the FIRST invocation right after `installer -pkg`,
+#     and the immediately-repeated invocation of the SAME command by
+#     the SAME shell succeeded. This is a race between the pkg
+#     installer's post-install AMFI signature revalidation and our
+#     first execve; the 2s sleep is sufficient to let AMFI settle.
+#
+#   FLAVOR 2 — AMFI cache pinned to the pkg-installer inode. Observed
+#     2026-07-03 on the same M5 during the v1.7.10 install: BOTH the
+#     first invocation AND the 2s-later retry were SIGKILL'd, but the
+#     binary's `codesign --verify --deep --strict` passed cleanly and
+#     the SAME binary content ran fine when copied to a different
+#     path. The AMFI kernel cache had a stuck rejection tied to the
+#     specific inode that `installer -pkg` created. The fix is to
+#     `rm` the file (releasing the inode) and `cp` the binary back
+#     in from a tempfile, which gives it a new inode and forces AMFI
+#     to re-evaluate. See PR #339 for the reproduction and root cause.
+#
+# The helper's escalation ladder for bash rc 137:
+#   attempt 1: run
+#     └── 137 → log + sleep 2 + attempt 2 (FLAVOR 1 fix)
+#         └── 137 → log + inode-refresh via cp/rm/cp + attempt 3
+#             │           (FLAVOR 2 fix)
+#             └── 137 → log "genuine signature failure" + return 137
+# Any non-137 rc anywhere in the ladder returns immediately.
+#
+# Only SIGKILL / bash rc 137 is retried — other non-zero exits
+# (including autotune's exit-10 "stale recommendation" signal, and
+# other signal-terminated codes such as 134 SIGABRT / 138 SIGBUS /
+# 139 SIGSEGV) pass through unchanged so we do not mask real crashes.
 #
 # This helper MUST be called from `if run_..._retry ...; then` or
 # `run_..._retry ... || ...` so that `set -e` (enabled at the top of
@@ -73,14 +97,46 @@ die() {
 run_macprovider_cli_with_amfi_retry() {
   local rc=0
   "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
+  if [ "$rc" -ne 137 ]; then
+    return "$rc"
+  fi
+  log "macprovider-cli was SIGKILL'd on first invocation (rc=$rc); likely a transient AMFI code-signature race after pkg install. Retrying once after 2s." >&2
+  sleep 2
+  rc=0
+  "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
+  if [ "$rc" -ne 137 ]; then
+    return "$rc"
+  fi
+  log "macprovider-cli was SIGKILL'd again on the 2s retry; the AMFI cache may be pinned to the pkg-installer inode. Refreshing the binary inode via cp/rm/cp and retrying once more." >&2
+  local tmp
+  tmp="$(mktemp -t macprovider-cli-inode-refresh 2>/dev/null || mktemp)"
+  if [ -z "$tmp" ]; then
+    log "inode refresh: mktemp failed; leaving the original binary in place." >&2
+    return "$rc"
+  fi
+  if ! cp "$INSTALL_DIR/macprovider-cli" "$tmp" 2>/dev/null; then
+    log "inode refresh: cp to $tmp failed; leaving the original binary in place." >&2
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  if ! rm -f "$INSTALL_DIR/macprovider-cli"; then
+    log "inode refresh: rm of $INSTALL_DIR/macprovider-cli failed; the binary is still there but the inode was not refreshed." >&2
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  if ! cp "$tmp" "$INSTALL_DIR/macprovider-cli"; then
+    log "inode refresh: cp-back of $tmp -> $INSTALL_DIR/macprovider-cli failed; the binary at $INSTALL_DIR/macprovider-cli is now missing. Restore from $tmp: cp \"$tmp\" \"$INSTALL_DIR/macprovider-cli\" && chmod +x \"$INSTALL_DIR/macprovider-cli\"." >&2
+    return "$rc"
+  fi
+  if ! chmod +x "$INSTALL_DIR/macprovider-cli"; then
+    log "inode refresh: chmod +x on $INSTALL_DIR/macprovider-cli failed; the binary is present but may not be executable. Run: chmod +x \"$INSTALL_DIR/macprovider-cli\"." >&2
+    return "$rc"
+  fi
+  rm -f "$tmp"
+  rc=0
+  "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
   if [ "$rc" -eq 137 ]; then
-    log "macprovider-cli was SIGKILL'd on first invocation (rc=$rc); likely a transient AMFI code-signature race after pkg install. Retrying once after 2s." >&2
-    sleep 2
-    rc=0
-    "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
-    if [ "$rc" -eq 137 ]; then
-      log "macprovider-cli was SIGKILL'd again on the retry; this may be a genuine signature failure rather than the transient AMFI race." >&2
-    fi
+    log "macprovider-cli was SIGKILL'd after the inode refresh; this is likely a genuine signature failure rather than the AMFI cache." >&2
   fi
   return "$rc"
 }
@@ -109,6 +165,8 @@ Usage: bash install.sh [--dry-run]
 
 Environment overrides:
   MACPROVIDER_GITHUB_REPO        owner/repo for GitHub Releases
+  MACPROVIDER_VERSION            pin installer to vMAJOR.MINOR.PATCH
+                                 (pipe-side form: curl ... | MACPROVIDER_VERSION=v1.7.11 bash)
   MACPROVIDER_MODEL              model id to install
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
   MACPROVIDER_PORT               local HTTP port
@@ -790,12 +848,108 @@ latest_release_tag() {
   # under tag verify-vX.Y.Z) silently hijacks the installer.
   api_url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30"
   json="$(curl -fsSL "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
-  tag="$(printf "%s" "$json" \
-    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-    | grep -E '^v[0-9]' \
-    | head -1)"
-  [ -n "$tag" ] || die 3 "no macprovider-cli release (tag ^v[0-9]) found in recent GitHub Releases"
+  tag="$(
+    printf "%s" "$json" \
+      | awk '
+          function maybe_print_release(obj, tag, prerelease) {
+            tag = ""
+            prerelease = "false"
+            if (match(obj, /"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+              tag = substr(obj, RSTART, RLENGTH)
+              sub(/^"tag_name"[[:space:]]*:[[:space:]]*"/, "", tag)
+              sub(/"$/, "", tag)
+            }
+            if (match(obj, /"prerelease"[[:space:]]*:[[:space:]]*true/)) {
+              prerelease = "true"
+            }
+            if (tag ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ && prerelease != "true") {
+              print tag
+              exit
+            }
+          }
+          {
+            data = data $0 "\n"
+          }
+          END {
+            depth = 0
+            in_string = 0
+            escaped = 0
+            start = 0
+            for (i = 1; i <= length(data); i++) {
+              ch = substr(data, i, 1)
+              if (in_string) {
+                if (escaped) {
+                  escaped = 0
+                } else if (ch == "\\") {
+                  escaped = 1
+                } else if (ch == "\"") {
+                  in_string = 0
+                }
+                continue
+              }
+              if (ch == "\"") {
+                in_string = 1
+              } else if (ch == "{") {
+                depth++
+                if (depth == 1) {
+                  start = i
+                }
+              } else if (ch == "}") {
+                if (depth == 1 && start > 0) {
+                  maybe_print_release(substr(data, start, i - start + 1))
+                  start = 0
+                }
+                depth--
+              }
+            }
+          }
+        '
+  )"
+  [ -n "$tag" ] || die 3 "no non-prerelease macprovider-cli release (tag ^v[0-9]) found in recent GitHub Releases"
   printf "%s" "$tag"
+}
+
+version_at_least() (
+  candidate_version="$1"
+  floor_version="$2"
+  IFS=.
+  set -- ${candidate_version#v}
+  a_major="$1"
+  a_minor="$2"
+  a_patch="$3"
+  set -- ${floor_version#v}
+  b_major="$1"
+  b_minor="$2"
+  b_patch="$3"
+
+  [ "$a_major" -gt "$b_major" ] && exit 0
+  [ "$a_major" -lt "$b_major" ] && exit 1
+  [ "$a_minor" -gt "$b_minor" ] && exit 0
+  [ "$a_minor" -lt "$b_minor" ] && exit 1
+  [ "$a_patch" -ge "$b_patch" ]
+)
+
+validate_macprovider_version_tag() {
+  tag="$1"
+  case "$tag" in
+    *[[:space:]]*|*[[:cntrl:]]*) die 7 "MACPROVIDER_VERSION must not contain whitespace or control characters" ;;
+  esac
+  if ! [[ "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+    die 7 "MACPROVIDER_VERSION must look like vMAJOR.MINOR.PATCH"
+  fi
+  if ! version_at_least "$tag" "$MACPROVIDER_MIN_SUPPORTED_VERSION"; then
+    die 7 "MACPROVIDER_VERSION $tag is below supported rollback floor $MACPROVIDER_MIN_SUPPORTED_VERSION"
+  fi
+}
+
+resolve_release_tag() {
+  if [ -n "${MACPROVIDER_VERSION:-}" ]; then
+    validate_macprovider_version_tag "$MACPROVIDER_VERSION"
+    printf "%s" "$MACPROVIDER_VERSION"
+  else
+    tag="$(latest_release_tag)"
+    printf "%s" "$tag"
+  fi
 }
 
 download_release() {
@@ -913,6 +1067,8 @@ validate_staged_entries() {
       macprovider-cli)
         has_binary=1
         ;;
+      mlx.metallib)
+        ;;
       THIRD-PARTY-NOTICES.txt)
         ;;
       *.bundle|*.bundle/*)
@@ -984,6 +1140,7 @@ write_config() {
   model="$1"
   provider_id="$2"
   coordinator_url="$3"
+  existing_provider_token_line="$(read_config_provider_token_line || true)"
   run mkdir -p "$CONFIG_DIR"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "Would write provider_id to $PROVIDER_ID_PATH and config to $CONFIG_PATH"
@@ -996,7 +1153,20 @@ coordinator_url: "$(yaml_escape "$coordinator_url")"
 provider_id: "$(yaml_escape "$provider_id")"
 port: $PORT
 EOF
+  if [ -n "$existing_provider_token_line" ]; then
+    printf "%s\n" "$existing_provider_token_line" >> "$CONFIG_PATH"
+  fi
   chmod 600 "$CONFIG_PATH" "$PROVIDER_ID_PATH" 2>/dev/null || true
+}
+
+read_config_provider_token_line() {
+  [ -f "$CONFIG_PATH" ] || return 1
+  awk '
+    /^provider_token[[:space:]]*:/ {
+      print
+      exit
+    }
+  ' "$CONFIG_PATH"
 }
 
 read_config_model() {
@@ -1155,10 +1325,10 @@ install_binary() {
   fi
   stage_release_payload
 
-  # CRITICAL: mlx-swift loads Metal kernels from .bundle directories
-  # adjacent to the binary. We install the REAL binary into $INSTALL_DIR
-  # alongside the bundles, then place a symlink at $BINARY_PATH so PATH
-  # users + the launchd plist still find it via the canonical
+  # CRITICAL: mlx-swift loads Metal kernels from mlx.metallib and/or
+  # .bundle directories adjacent to the binary. We install the REAL binary
+  # into $INSTALL_DIR alongside those resources, then place a symlink at
+  # $BINARY_PATH so PATH users + the launchd plist still find it via the canonical
   # SPEC-003 FR-C2 location (~/.local/bin/macprovider-cli).
   # Prior v1.2.1 install separated them and Metal failed with
   # "library not found" at runtime.
@@ -1166,7 +1336,11 @@ install_binary() {
   cp "$staging_dir/macprovider-cli" "$real_binary"
   chmod +x "$real_binary" 2>/dev/null || true
 
-  # Bundles live alongside the real binary (where mlx-swift looks).
+  # Metal resources live alongside the real binary (where mlx-swift looks).
+  rm -f "$INSTALL_DIR/mlx.metallib"
+  if [ -f "$staging_dir/mlx.metallib" ]; then
+    cp "$staging_dir/mlx.metallib" "$INSTALL_DIR/mlx.metallib"
+  fi
   find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec rm -rf {} +
   find "$staging_dir" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$INSTALL_DIR"/ \;
 
@@ -1185,7 +1359,7 @@ check_install_dir_clean() {
   local entries
   # F-603-V7-7: warn on mixed-state directories such as leftover Python
   # virtualenvs, but do not block an otherwise valid partner upgrade.
-  entries=$(ls -A "$INSTALL_DIR" 2>/dev/null | grep -vE '^(macprovider-cli(\.v[0-9.]+\.bak)?|.*\.bundle)$' | head -20 || true)
+  entries=$(ls -A "$INSTALL_DIR" 2>/dev/null | grep -vE '^(macprovider-cli(\.v[0-9.]+\.bak)?|mlx\.metallib|.*\.bundle)$' | head -20 || true)
   if [ -n "$entries" ]; then
     log "WARNING: $INSTALL_DIR contains non-macprovider entries:"
     while IFS= read -r entry; do
@@ -1255,6 +1429,7 @@ render_plist() {
   provider_id="$(xml_escape "$2")"
   coordinator_url="$(xml_escape "$3")"
   user_home="$(xml_escape "$HOME")"
+  config_path="$(xml_escape "$CONFIG_PATH")"
   # F-603-V7-4: launchd must invoke the real binary path, not the
   # ~/.local/bin symlink, so Swift Bundle resolution finds adjacent bundles.
   binary_path="$(xml_escape "$INSTALL_DIR/macprovider-cli")"
@@ -1298,6 +1473,8 @@ render_plist() {
     <string>$user_home</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$user_home/.local/bin</string>
+    <key>MACPROVIDER_CONFIG</key>
+    <string>$config_path</string>
   </dict>
   <key>ThrottleInterval</key>
   <integer>10</integer>
@@ -1995,7 +2172,7 @@ start_manual_service() {
   (
     cd "$INSTALL_DIR"
     # F-603-V7-4: direct background self-test also invokes the real binary
-    # so Bundle resolution sees the adjacent .bundle directories.
+    # so MLX resolves adjacent Metal resources.
     nohup "$INSTALL_DIR/macprovider-cli" \
       --port "$PORT" \
       --model "$model" \
@@ -2255,8 +2432,12 @@ main() {
 
   check_catalog_ram_metadata "$coordinator_base" "$model" "$ram_gb" || true
 
-  tag="$(latest_release_tag)"
-  log "Latest release: $tag"
+  tag="$(resolve_release_tag)"
+  if [ -n "${MACPROVIDER_VERSION:-}" ]; then
+    log "Using operator-pinned version: $tag (via MACPROVIDER_VERSION)"
+  else
+    log "Latest release: $tag"
+  fi
   download_release "$tag"
   verify_sha256
   validate_release_payload
