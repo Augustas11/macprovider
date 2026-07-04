@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
 const (
@@ -220,84 +222,70 @@ func (s *Store) RecordMissingSettlementReceipt(ctx context.Context, input Settle
 }
 
 func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id SettlementReceiptIdentity, receiptPresent bool, receivedAtUnixMS int64, verify func(settlementEvidence, bool) SettlementVerifyResult) (SettlementReceiptState, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return SettlementReceiptState{}, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return SettlementReceiptState{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	var outcome SettlementReceiptState
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		existing, found, err := loadSettlementReceiptStateConn(ctx, conn, id)
+		if err != nil {
+			return err
 		}
-	}()
+		if found && existing.Closed {
+			existing.IdempotencyStatus = settlementReceiptIDTerminalNoop
+			if err := hydrateSettlementReceiptRouteAuditFieldsConn(ctx, conn, &existing); err != nil {
+				return err
+			}
+			if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, existing, nil, receivedAtUnixMS); err != nil {
+				return err
+			}
+			outcome = existing
+			return nil
+		}
+		evidence, err := loadSettlementEvidenceConn(ctx, conn, id)
+		if err != nil {
+			return err
+		}
 
-	existing, found, err := loadSettlementReceiptStateConn(ctx, conn, id)
+		result := verify(evidence, false)
+		state, err := settlementReceiptStateFromResult(id, evidence, result, receiptPresent, receivedAtUnixMS, found)
+		if err != nil {
+			return err
+		}
+		persisted, err := settlementReceiptPersistedFromState(state, result)
+		if err != nil {
+			return err
+		}
+		if found {
+			if err := updateSettlementReceiptStateConn(ctx, conn, persisted); err != nil {
+				return err
+			}
+		} else if err := insertSettlementReceiptStateConn(ctx, conn, persisted); err != nil {
+			return err
+		}
+		if reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, state.RequestID, state.AttemptN, state.ProviderID); err != nil {
+			return err
+		} else if reason != "" {
+			state.ReceiptResult = SettlementReceiptResultInvalid
+			state.SettlementOutcome = SettlementOutcomeQuarantined
+			state.Reason = reason
+			state.Closed = true
+			if err := markSettlementReceiptCacheQuarantinedConn(ctx, conn, state, reason); err != nil {
+				return err
+			}
+		}
+		if receiptPresent {
+			if err := insertSettlementReceiptIngestedAuditConn(ctx, conn, state); err != nil {
+				return err
+			}
+		}
+		if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, state, &result.Checks, receivedAtUnixMS); err != nil {
+			return err
+		}
+		outcome = state
+		return nil
+	})
 	if err != nil {
 		return SettlementReceiptState{}, err
 	}
-	if found && existing.Closed {
-		existing.IdempotencyStatus = settlementReceiptIDTerminalNoop
-		if err := hydrateSettlementReceiptRouteAuditFieldsConn(ctx, conn, &existing); err != nil {
-			return SettlementReceiptState{}, err
-		}
-		if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, existing, nil, receivedAtUnixMS); err != nil {
-			return SettlementReceiptState{}, err
-		}
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return SettlementReceiptState{}, err
-		}
-		committed = true
-		return existing, nil
-	}
-	evidence, err := loadSettlementEvidenceConn(ctx, conn, id)
-	if err != nil {
-		return SettlementReceiptState{}, err
-	}
-
-	result := verify(evidence, false)
-	state, err := settlementReceiptStateFromResult(id, evidence, result, receiptPresent, receivedAtUnixMS, found)
-	if err != nil {
-		return SettlementReceiptState{}, err
-	}
-	persisted, err := settlementReceiptPersistedFromState(state, result)
-	if err != nil {
-		return SettlementReceiptState{}, err
-	}
-	if found {
-		if err := updateSettlementReceiptStateConn(ctx, conn, persisted); err != nil {
-			return SettlementReceiptState{}, err
-		}
-	} else if err := insertSettlementReceiptStateConn(ctx, conn, persisted); err != nil {
-		return SettlementReceiptState{}, err
-	}
-	if reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, state.RequestID, state.AttemptN, state.ProviderID); err != nil {
-		return SettlementReceiptState{}, err
-	} else if reason != "" {
-		state.ReceiptResult = SettlementReceiptResultInvalid
-		state.SettlementOutcome = SettlementOutcomeQuarantined
-		state.Reason = reason
-		state.Closed = true
-		if err := markSettlementReceiptCacheQuarantinedConn(ctx, conn, state, reason); err != nil {
-			return SettlementReceiptState{}, err
-		}
-	}
-	if receiptPresent {
-		if err := insertSettlementReceiptIngestedAuditConn(ctx, conn, state); err != nil {
-			return SettlementReceiptState{}, err
-		}
-	}
-	if err := insertSettlementReceiptVerdictAuditConn(ctx, conn, state, &result.Checks, receivedAtUnixMS); err != nil {
-		return SettlementReceiptState{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return SettlementReceiptState{}, err
-	}
-	committed = true
-	return state, nil
+	return outcome, nil
 }
 
 type settlementReceiptCreditSyncDB interface {

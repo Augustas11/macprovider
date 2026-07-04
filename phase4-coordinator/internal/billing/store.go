@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	_ "modernc.org/sqlite"
 )
 
@@ -979,34 +980,17 @@ func (s *Store) SetForceVoidEnabled(ctx context.Context, newValue bool, reloadSo
 	if err != nil {
 		return fmt.Errorf("marshal flag-change payload: %w", err)
 	}
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire conn for flag-change audit: %w", err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return fmt.Errorf("begin immediate for flag-change audit: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-	now := payload["ts_utc"].(string)
-	if _, err := conn.ExecContext(ctx, `
+	if err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		now := payload["ts_utc"].(string)
+		if _, err := conn.ExecContext(ctx, `
 INSERT INTO audit_log (ts_utc, event_type, provider_id, payload_json)
 VALUES (?, 'billing_config_flag_changed', NULL, ?)`, now, string(payloadJSON)); err != nil {
-		_, _ = conn.ExecContext(ctx, `ROLLBACK`)
-		return fmt.Errorf("insert flag-change audit: %w", err)
+			return fmt.Errorf("insert flag-change audit: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		// Audit row may or may not be durable; assume not. Leave the
-		// route flag unchanged and surface the error so the operator
-		// can re-attempt.
-		return fmt.Errorf("commit flag-change audit: %w", err)
-	}
-	committed = true
 	// Audit is durable: publish the new value. No handler could
 	// observe newValue before this point because the only reader is
 	// h.store.ForceVoidEnabled() which reads s.forceVoidEnabled.
