@@ -89,6 +89,67 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
     }
 
+    func testSaveProviderIdentityRollsBackWhenMarkerCreateFails() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        var savedToken: String?
+
+        do {
+            try await ProviderConfig.saveProviderIdentity(
+                providerID: "p_marker_failed",
+                token: "provider-token",
+                paths: paths,
+                readToken: { _ in nil },
+                saveToken: { _, token in savedToken = token },
+                deleteToken: { _ in savedToken = nil },
+                createAppMarker: {
+                    throw NSError(domain: "tests", code: 2, userInfo: [NSLocalizedDescriptionKey: "marker failed"])
+                }
+            )
+            XCTFail("Expected marker creation failure")
+        } catch {
+            XCTAssertEqual((error as NSError).localizedDescription, "marker failed")
+        }
+
+        XCTAssertNil(savedToken)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+    }
+
+    func testSaveProviderIdentityRollsBackWhenVerificationFails() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        var savedToken: String?
+
+        do {
+            try await ProviderConfig.saveProviderIdentity(
+                providerID: "p_verify_failed",
+                token: "provider-token",
+                paths: paths,
+                readToken: { _ in nil },
+                saveToken: { _, token in savedToken = token },
+                deleteToken: { _ in savedToken = nil },
+                createAppMarker: {
+                    _ = FileManager.default.createFile(atPath: paths.appMarkerFile.path, contents: Data())
+                },
+                verifyConfigured: { false }
+            )
+            XCTFail("Expected verification failure")
+        } catch ProviderConfig.SaveError.savedIdentityNotConfigured {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertNil(savedToken)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+    }
+
     private func makeTempDir() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("malibu-tests-\(UUID().uuidString)", isDirectory: true)

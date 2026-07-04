@@ -55,6 +55,8 @@ enum ProviderConfig {
         case missingProviderToken
         case importBackupProviderMismatch
         case importRollbackFailed(importError: Error, rollbackError: Error)
+        case appMarkerCreateFailed
+        case savedIdentityNotConfigured
         var errorDescription: String? {
             switch self {
             case .existingConfigNotOwnedByApp:
@@ -67,6 +69,10 @@ enum ProviderConfig {
                 return "The import backup does not match the current provider_id."
             case let .importRollbackFailed(importError, rollbackError):
                 return "Import failed (\(importError.localizedDescription)) and the original config could not be restored (\(rollbackError.localizedDescription))."
+            case .appMarkerCreateFailed:
+                return "The app ownership marker could not be written."
+            case .savedIdentityNotConfigured:
+                return "The provider identity was not fully persisted."
             }
         }
     }
@@ -92,7 +98,9 @@ enum ProviderConfig {
         paths: ProviderPaths,
         readToken: @escaping (String) async -> String?,
         saveToken: @escaping (String, String) async throws -> Void,
-        deleteToken: @escaping (String) async throws -> Void
+        deleteToken: @escaping (String) async throws -> Void,
+        createAppMarker: (() throws -> Void)? = nil,
+        verifyConfigured: (() async -> Bool)? = nil
     ) async throws {
         try paths.ensureDirectories()
         let fm = FileManager.default
@@ -129,7 +137,18 @@ enum ProviderConfig {
             try await saveToken(providerID, token)
             try Data(joined.utf8).write(to: paths.configFile, options: [.atomic])
             try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
-            fm.createFile(atPath: paths.appMarkerFile.path, contents: Data())
+            if let createAppMarker {
+                try createAppMarker()
+            } else {
+                try writeAppMarker(paths: paths, fileManager: fm)
+            }
+            let configured: Bool
+            if let verifyConfigured {
+                configured = await verifyConfigured()
+            } else {
+                configured = await isConfigured(paths: paths)
+            }
+            guard configured else { throw SaveError.savedIdentityNotConfigured }
         } catch {
             if let originalToken {
                 try? await saveToken(providerID, originalToken)
@@ -184,7 +203,7 @@ enum ProviderConfig {
             }
             try rewritten.data(using: .utf8)?.write(to: paths.configFile, options: [.atomic])
             try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
-            fm.createFile(atPath: paths.appMarkerFile.path, contents: Data())
+            try writeAppMarker(paths: paths, fileManager: fm)
             guard await isConfigured(paths: paths) else { throw SaveError.existingConfigNotOwnedByApp }
             try? fm.removeItem(at: backup)
         } catch {
@@ -269,6 +288,13 @@ enum ProviderConfig {
             return false
         }
         return await KeychainStore.readProviderToken(providerID: providerID) != nil
+    }
+
+    private static func writeAppMarker(paths: ProviderPaths, fileManager fm: FileManager) throws {
+        if fm.fileExists(atPath: paths.appMarkerFile.path) { return }
+        guard fm.createFile(atPath: paths.appMarkerFile.path, contents: Data()) else {
+            throw SaveError.appMarkerCreateFailed
+        }
     }
 
     private static func parseTopLevelValue(named key: String, from contents: String) -> String? {
