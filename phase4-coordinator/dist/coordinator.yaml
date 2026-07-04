@@ -1,0 +1,166 @@
+# Production coordinator config — Pearl VPS deployment (159.223.165.194)
+# Binds loopback only; nginx terminates TLS at coordinator.streamvc.live
+# and reverse-proxies /v1/* to buyer_port and /ws/provider + /admin/* + /poolz
+# + /healthz to provider_port.
+
+listen:
+  buyer_port: 8443
+  provider_port: 8444
+  bind_address: "127.0.0.1"
+
+pool:
+  heartbeat_interval_s: 30
+  disconnect_grace_period_s: 30
+  # Liveness threshold (any inbound frame, not just heartbeats). 90s tolerates
+  # a provider busy with a long single-slot generation that cannot heartbeat
+  # mid-inference; its response chunks count as activity. See SPEC-002.
+  heartbeat_miss_threshold_s: 90
+  wake_gap_threshold_s: 120
+  degraded_backoff_s: 30
+  degraded_max_retries: 3
+  degraded_probe_after_502: true
+  warmup_fallback_s: 60
+  warmup_gate_enabled: true    # STAGE 2: gate ON (live test)
+  warmup_gate_timeout_s: 90
+  warmup_gate_max_tokens: 2
+  breaker_failure_threshold: 2
+  breaker_window_s: 120
+
+routing:
+  preflight_threshold_tokens: 4096
+  preflight_timeout_s: 5
+  request_timeout_s: 280
+  failover_enabled: true
+  failover_timeout_s: 5
+  # PR #302 (2026-07-01) — sticky conversation affinity via X-MacProvider-Conversation.
+  # StickyTTLS + StickyMaxEntries defaults live in code (1800s / 10000 entries).
+  # Enabled on Pearl directly after #302 landed; restored here 2026-07-02 after
+  # ALLOW_CONFIG_DRIFT=1 SPEC-023 deploy stripped the live-only value.
+  sticky_enabled: true
+
+provider_http:
+  timeout_s: 300  # 5 min provider HTTP forwarding timeout
+
+limits:
+  max_chat_request_body_bytes: 1048576  # 1 MiB default; raise for buyers with large tools arrays
+
+auth:
+  # Operator bearer token for /poolz and /admin/*.
+  # Resolved from /etc/macprovider/coordinator.env on Pearl; do not inline.
+  operator_key: env:OPERATOR_KEY
+  # Optional gateway-to-coordinator service credential; resolved from the same
+  # env file so the gateway can avoid using the operator admin key.
+  gateway_service_token: env:GATEWAY_SERVICE_TOKEN
+  # Public provider websocket admission must fail closed. Existing providers
+  # must carry a top-level provider_token persisted by the macprovider binary.
+  require_provider_tokens: true
+  allow_tokenless_provisional_bootstrap: true
+  operator_keys:
+    spec026_a: env:OPERATOR_AUTH_POLICY_A
+    spec026_b: env:OPERATOR_AUTH_POLICY_B
+
+# SPEC-007 v0.2 — internal read-only operator explorer.
+# Reuses auth.operator_key (D15). Disable by setting enabled: false.
+# Mounted at /admin/explorer/ on provider_port (8444); already proxied by nginx.
+explorer:
+  enabled: true
+  bind_path: "/admin/explorer/"
+  gateway_base_url: ""           # set to gateway internal URL to enable buyer panels
+  gateway_timeout_ms: 1500
+  query_timeout_ms: 3000
+  poll_min_interval_seconds: 5
+  activity_max_window_days: 7
+  activity_default_window_hours: 24
+  buyers_max_window_days: 31
+  buyers_default_window_hours: 168
+  ledger_max_window_days: 31
+  ledger_default_window_hours: 168
+  sessions_max_window_days: 7
+  sessions_default_window_hours: 24
+  settlements_max_window_days: 180
+  settlements_default_window_hours: 720
+  requests_per_minute_cap: 60
+
+onboarding:
+  app_track_register_enabled: true
+  postgres_dsn: env:ONBOARDING_POSTGRES_DSN
+  bundle_id: "tech.malibu.app"
+  apple_team_id: env:APPLE_TEAM_ID
+  coordinator_domain: "coordinator.streamvc.live"
+  asn_prefixes:
+    "0.0.0.0/0": "AS0"
+    "::/0": "AS0"
+
+storage:
+  db_path: "/var/lib/macprovider/coordinator.db"
+  snapshot_interval_s: 300
+  request_log_retention_days: 90
+
+logging:
+  level: "info"
+  format: "json"
+
+# Wave 1 subset — Entry 92 v2 rate-card rows for canary rollout (2026-07-01).
+# Units: credits_per_mtok; stats_rollup.usd_per_million_credits=1.0 → 1M credits = $1.00.
+# Keys must match Wave 0b normalizeModelKey() output (phase4-coordinator/internal/billing/formula.go).
+#   mlx-community/Qwen3-32B-4bit          → normalized to `qwen3-32b`
+#   mlx-community/gpt-oss-20b-MXFP4-Q8    → normalized to `openai/gpt-oss-20b`
+# `default` row preserved for fall-through on unmatched buyer strings.
+rewards:
+  global_multiplier: 1.0
+  provider_share: 0.90
+  # Prefix-cache hit pricing is shown at 25% of prompt pricing.
+  # Omitted prompt_cache_hit_credits_per_mtok values default to prompt_credits_per_mtok.
+  rate_card:
+    default:
+      prompt_credits_per_mtok: 500000        # $0.50/M (preserved code default)
+      prompt_cache_hit_credits_per_mtok: 125000 # $0.125/M prefix-cache hit
+      completion_credits_per_mtok: 1000000   # $1.00/M (preserved code default)
+    qwen3-32b:
+      prompt_credits_per_mtok: 110000        # $0.110/M
+      prompt_cache_hit_credits_per_mtok: 27500 # $0.0275/M prefix-cache hit
+      completion_credits_per_mtok: 220000    # $0.220/M (Entry 92 v2 target, 21% undercut vs $0.28/M market)
+    openai/gpt-oss-20b:
+      prompt_credits_per_mtok: 50000         # $0.050/M
+      prompt_cache_hit_credits_per_mtok: 12500 # $0.0125/M prefix-cache hit
+      completion_credits_per_mtok: 100000    # $0.100/M (Entry 92 v2 target, 23% undercut vs $0.13/M WandB)
+    qwen3-coder-30b-a3b-instruct:            # v3 expansion 2026-07-01 (Entry 97) — developer coding MoE lane
+      prompt_credits_per_mtok: 117500        # $0.1175/M
+      prompt_cache_hit_credits_per_mtok: 29375 # $0.029375/M prefix-cache hit
+      completion_credits_per_mtok: 235000    # $0.235/M (RESEARCH_227 developer-coding target, MoE-small-active)
+    meta-llama/llama-3.1-8b-instruct:        # v3 expansion — low-tier / broad-compatibility row
+      prompt_credits_per_mtok: 13500         # $0.0135/M
+      prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
+      completion_credits_per_mtok: 27000     # $0.027/M (RESEARCH_227 target, cheapest publicly-served 8B)
+    qwen2.5-coder-32b-instruct:              # v3 expansion — M-Max/Ultra only per Entry 92 admission gate
+      prompt_credits_per_mtok: 425000        # $0.425/M
+      prompt_cache_hit_credits_per_mtok: 106250 # $0.10625/M prefix-cache hit
+      completion_credits_per_mtok: 850000    # $0.850/M (RESEARCH_227 dev-coding premium, dense 32B UX painful on M-base)
+
+# Admission tier (SPEC-002 v1.1.2 § 7.1 amendment to F-2).
+# Pinned providers are enumerated below in `providers:`. Provisional
+# providers connect dynamically (curl-install path) up to these caps.
+admission:
+  provisional_admission_rate_per_hour: 10
+  provisional_pool_max: 100
+  provisional_quota_per_hour: 100
+  provisional_tier_weight: 0.3
+
+tier2:
+  catalog_path: /opt/macprovider/tier2-catalog.json
+  catalog_public_key: IVH2aAlTudARJSK3e7XGmcGjxAqwm6lReGiS-0U9aFQ
+  require_hash_verified: false
+  # SPEC-015 v0.3 §M.4 — absolute base URL the coordinator advertises
+  # as `catalog_url` / `catalog_pubkey_url` in /poolz when a catalog
+  # is effectively active. Empty → falls back to scheme + request Host.
+  # Entry 80 preserved: require_hash_verified stays at false.
+  public_catalog_base_url: "https://coordinator.streamvc.live"
+
+# Enumerated PINNED providers (SPEC-002 v1.0.4 Finding F-2: every pinned
+# provider_id MUST be listed here). M4 + M1 today; provisional providers
+# admitted dynamically per `admission` config above.
+providers: []
+
+# Auto-update recommendation surface (2026-07-03 — added post-#332 to unblock air5 v1.7.0 -> v1.7.9)
+coordinator_advertised_version:
+  latest_binary_version: "1.7.11"

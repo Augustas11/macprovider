@@ -1,0 +1,25 @@
+CRITICAL (0):
+  None.
+      Evidence: Independent blob/userinfo/JWT/PEM scans of `phase4-coordinator/dist/coordinator.yaml` found no private-key, JWT, PEM, embedded-credential URL, or inline secret value. The only raw blob-shaped scalar is `tier2.catalog_public_key` at `phase4-coordinator/dist/coordinator.yaml:151`, which is an Ed25519 public trust anchor and is already present in tracked files (`scripts/check-tier2-release-artifacts.sh:18`, `specs/SPEC-008-PHASE1-ACCEPTANCE-RUNBOOK.md:28`). The long non-env scalar review found only public constants or local paths: `coordinator_domain` (`phase4-coordinator/dist/coordinator.yaml:89`), `db_path` (`phase4-coordinator/dist/coordinator.yaml:95`), `catalog_path` (`phase4-coordinator/dist/coordinator.yaml:150`), `catalog_public_key` (`phase4-coordinator/dist/coordinator.yaml:151`), and `public_catalog_base_url` (`phase4-coordinator/dist/coordinator.yaml:157`). `git log --all --full-history -- phase4-coordinator/dist/coordinator.yaml` returned no commits, so there is no prior committed copy of this path to incident-review.
+
+HIGH (0):
+  None.
+      Evidence: The file's secret-bearing runtime values are env-indirected: `OPERATOR_KEY` (`phase4-coordinator/dist/coordinator.yaml:50`), `GATEWAY_SERVICE_TOKEN` (`phase4-coordinator/dist/coordinator.yaml:53`), `OPERATOR_AUTH_POLICY_A` (`phase4-coordinator/dist/coordinator.yaml:59`), `OPERATOR_AUTH_POLICY_B` (`phase4-coordinator/dist/coordinator.yaml:60`), `ONBOARDING_POSTGRES_DSN` (`phase4-coordinator/dist/coordinator.yaml:86`), and `APPLE_TEAM_ID` (`phase4-coordinator/dist/coordinator.yaml:88`). The coordinator service loads `/etc/macprovider/coordinator.env` (`phase4-coordinator/dist/macprovider-coordinator.service:16`), deploy creates `/etc/macprovider` and enforces `coordinator.env` as `root:macprovider 0640` (`phase4-coordinator/dist/deploy-pearl-vps.sh:486`), and config loading fails closed on unset/empty env sentinels (`phase4-coordinator/internal/config/config.go:813`, `phase4-coordinator/internal/config/config.go:857`).
+
+MEDIUM (1):
+  M1. catalog_public_key is not mirrored as an actual value in dist/coordinator.yaml.example
+      Evidence: `phase4-coordinator/dist/coordinator.yaml:151` sets `catalog_public_key: IVH2aAlTudARJSK3e7XGmcGjxAqwm6lReGiS-0U9aFQ`, but `phase4-coordinator/dist/coordinator.yaml.example:192` contains only a placeholder comment for a 43-char public key, not the corresponding actual public trust anchor. The key is public and already tracked elsewhere, so this is not a secrecy issue.
+      Attack:  A reviewer cannot detect a catalog trust-anchor rotation by diffing the production YAML against the example, making an accidental or malicious public-key rotation easier to miss.
+      Fix:     Update `phase4-coordinator/dist/coordinator.yaml.example` or another checked reference to carry the same public trust-anchor value, and optionally add a small CI assertion that the tracked production key matches the documented example/reference.
+
+LOW (1):
+  L1. The no-inline-secret convention is advisory, not enforced at PR time
+      Evidence: `.gitignore:50` warns never to commit inline secrets, but CI only runs deploy-tooling tests (`.github/workflows/ci.yml:287`) and the deploy sanity gate validates `operator_key` as either env-indirected or a valid inline 64-hex value (`phase4-coordinator/dist/check-deploy-config.sh:128`). It does not enforce env-only values for every `*_key`, `*_secret`, `*_token`, `*_password`, or `*_dsn` field in the newly tracked production YAML. Coordinator-only validation did pass with `SKIP_C2_CHECK=1 phase4-coordinator/dist/check-deploy-config.sh phase4-coordinator/dist/coordinator.yaml`, confirming the current file defers `operator_key` and keeps `require_provider_tokens=true`.
+      Attack:  A future contributor can commit `operator_key: <64-hex-secret>` or another inline credential, CI can pass, and the secret becomes unrecoverable in git history after push.
+      Fix:     Add a pre-commit hook or CI guard that rejects inline values for secret-shaped keys in `phase4-coordinator/dist/coordinator.yaml`, with explicit allowlist exceptions such as `catalog_public_key`.
+
+QUESTIONS (1):
+  Q1. The prompt table says `gateway_base_url` is a literal public URL, but the workspace file has it empty
+      Evidence: `phase4-coordinator/dist/coordinator.yaml:68` is `gateway_base_url: ""`; the only live URL scalar in the file is `public_catalog_base_url: "https://coordinator.streamvc.live"` at `phase4-coordinator/dist/coordinator.yaml:157`. No admin/backdoor hostname or URL with a `user:pass@` component appears in the YAML. DNS currently resolves `coordinator.streamvc.live` and `stats.streamvc.live` to `159.223.165.194`; `gateway.streamvc.live` did not return an A/AAAA answer in this worktree check.
+      Attack:  Audit prompts that describe a different deployed URL can cause reviewers to miss real config drift or recon-surface changes.
+      Fix:     Align the audit prompt/source table with the tracked YAML, or set the intended public gateway URL before merge if buyer panels are supposed to be enabled.
