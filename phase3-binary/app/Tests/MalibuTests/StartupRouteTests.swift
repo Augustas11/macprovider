@@ -16,47 +16,130 @@ final class StartupRouteTests: XCTestCase {
         ))
     }
 
-    func testStartupRouteCellsForFlagOffAndOn() {
-        let configured = StartupState(
-            configExists: true,
-            appMarkerExists: true,
-            providerTokenExists: true,
-            identityExists: true,
-            onboardingStateExists: true,
-            firstServingAtExists: true,
-            onboardingV2Enabled: false
-        )
-        XCTAssertEqual(configured.route(), .startAgent)
+    func testStartupRouteFiveInstallStatesByFlagPosition() {
+        let cases: [(String, StartupState, StartupRoute, StartupRoute)] = [
+            ("configured", state(config: true, marker: true, token: true, identity: true, onboarding: true, firstServing: true), .startAgent, .startAgent),
+            ("configured-v2-partial", state(config: true, marker: true, token: true, identity: true, onboarding: true, firstServing: false), .setupPaused, .resumeOnboarding),
+            ("cli-owned", state(config: true, marker: false, token: false, identity: false, onboarding: false, firstServing: false), .setupPaused, .showImportDialog),
+            ("v2-partial", state(config: false, marker: false, token: false, identity: true, onboarding: true, firstServing: false), .setupPaused, .resumeOnboarding),
+            ("fresh", state(config: false, marker: false, token: false, identity: false, onboarding: false, firstServing: false), .setupPaused, .showOnboarding),
+            ("identity-only", state(config: false, marker: false, token: false, identity: true, onboarding: false, firstServing: false), .setupPaused, .resumeOnboarding)
+        ]
 
-        let cliOwned = StartupState(
-            configExists: true,
-            appMarkerExists: false,
-            providerTokenExists: false,
-            identityExists: false,
-            onboardingStateExists: false,
-            firstServingAtExists: false,
-            onboardingV2Enabled: true
-        )
-        XCTAssertEqual(cliOwned.route(), .showImportDialog)
-        XCTAssertEqual(StartupState(
-            configExists: cliOwned.configExists,
-            appMarkerExists: cliOwned.appMarkerExists,
-            providerTokenExists: cliOwned.providerTokenExists,
-            identityExists: cliOwned.identityExists,
-            onboardingStateExists: cliOwned.onboardingStateExists,
-            firstServingAtExists: cliOwned.firstServingAtExists,
-            onboardingV2Enabled: false
-        ).route(), .setupPaused)
+        for (name, base, flagOffRoute, flagOnRoute) in cases {
+            var off = base
+            off = StartupState(
+                configExists: off.configExists,
+                appMarkerExists: off.appMarkerExists,
+                providerTokenExists: off.providerTokenExists,
+                identityExists: off.identityExists,
+                onboardingStateExists: off.onboardingStateExists,
+                firstServingAtExists: off.firstServingAtExists,
+                onboardingV2Enabled: false
+            )
+            XCTAssertEqual(off.route(), flagOffRoute, name)
 
-        let partial = StartupState(
-            configExists: false,
-            appMarkerExists: false,
-            providerTokenExists: false,
-            identityExists: true,
-            onboardingStateExists: true,
-            firstServingAtExists: false,
-            onboardingV2Enabled: true
-        )
-        XCTAssertEqual(partial.route(), .resumeOnboarding)
+            let on = StartupState(
+                configExists: base.configExists,
+                appMarkerExists: base.appMarkerExists,
+                providerTokenExists: base.providerTokenExists,
+                identityExists: base.identityExists,
+                onboardingStateExists: base.onboardingStateExists,
+                firstServingAtExists: base.firstServingAtExists,
+                onboardingV2Enabled: true
+            )
+            XCTAssertEqual(on.route(), flagOnRoute, name)
+        }
     }
+
+    func testMigrationImportMovesTokenToKeychainAndRemovesBearerFromConfig() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        try "provider_id: p_import\nprovider_token: secret-token\nmodel: test\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        defer { Task { try? await KeychainStore.deleteProviderToken(providerID: "p_import") } }
+
+        let result = try await StartupState.applyMigrationDecision(.importExisting, paths: paths)
+        XCTAssertEqual(result.route, .startAgent)
+        XCTAssertNil(result.backupPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+        let rewritten = try String(contentsOf: paths.configFile)
+        XCTAssertTrue(rewritten.contains("provider_id: p_import"))
+        XCTAssertTrue(rewritten.contains("model: test"))
+        XCTAssertFalse(rewritten.contains("provider_token"))
+        let importedToken = await KeychainStore.readProviderToken(providerID: "p_import")
+        XCTAssertEqual(importedToken, "secret-token")
+    }
+
+    func testMigrationStartFreshMovesConfigAside() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        try "provider_id: p_old\nprovider_token: old-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+
+        let result = try await StartupState.applyMigrationDecision(
+            .startFresh,
+            paths: paths,
+            now: Date(timeIntervalSince1970: 1_783_082_460)
+        )
+        XCTAssertEqual(result.route, .showOnboarding)
+        XCTAssertNotNil(result.backupPath)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: result.backupPath!))
+    }
+
+    func testMigrationCancelTouchesNoFiles() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        try "provider_id: p_keep\nprovider_token: keep-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+
+        let before = try String(contentsOf: paths.configFile)
+        let result = try await StartupState.applyMigrationDecision(.cancel, paths: paths)
+        XCTAssertEqual(result.route, .setupPaused)
+        XCTAssertNil(result.backupPath)
+        XCTAssertEqual(try String(contentsOf: paths.configFile), before)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+        let untouchedToken = await KeychainStore.readProviderToken(providerID: "p_keep")
+        XCTAssertNil(untouchedToken)
+    }
+
+    private func state(
+        config: Bool,
+        marker: Bool,
+        token: Bool,
+        identity: Bool,
+        onboarding: Bool,
+        firstServing: Bool
+    ) -> StartupState {
+        StartupState(
+            configExists: config,
+            appMarkerExists: marker,
+            providerTokenExists: token,
+            identityExists: identity,
+            onboardingStateExists: onboarding,
+            firstServingAtExists: firstServing,
+            onboardingV2Enabled: false
+        )
+    }
+
+    private func makeTempPaths() throws -> ProviderPaths {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-startup-tests-\(UUID().uuidString)", isDirectory: true)
+        let configRoot = root.appendingPathComponent("config", isDirectory: true)
+        let appSupport = root.appendingPathComponent("app-support", isDirectory: true)
+        return ProviderPaths(
+            configFile: configRoot.appendingPathComponent("config.yaml"),
+            controlSocket: appSupport.appendingPathComponent("agent.sock"),
+            cliLogFile: root.appendingPathComponent("logs/malibu-cli.log"),
+            appSupport: appSupport,
+            appMarkerFile: appSupport.appendingPathComponent(".installed-by-app"),
+            onboardingStateFile: appSupport.appendingPathComponent("onboarding.json"),
+            downloadsDirectory: appSupport.appendingPathComponent("Downloads", isDirectory: true)
+        )
+    }
+
 }

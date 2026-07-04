@@ -15,6 +15,8 @@ final class MenuBarController {
     private let agent: MalibuAgent
     private let onAction: (Action) -> Void
     private var cancellables: Set<AnyCancellable> = []
+    private var latestSnapshot: AgentSnapshot = .empty
+    private let badgeDefaultsKey = "malibu.unclaimed.dismissedThreshold"
 
     init(agent: MalibuAgent, onAction: @escaping (Action) -> Void) {
         self.agent = agent
@@ -53,6 +55,11 @@ final class MenuBarController {
         backlogItem.isHidden = true
         menu.addItem(backlogItem)
 
+        let dismissBadgeItem = action("Dismiss Unclaimed Badge", key: "") { self.dismissUnclaimedBadge() }
+        dismissBadgeItem.identifier = .dismissBacklogBadge
+        dismissBadgeItem.isHidden = true
+        menu.addItem(dismissBadgeItem)
+
         menu.addItem(.separator())
         menu.addItem(action("Open Dashboard", key: "d") { self.onAction(.openDashboard) })
         menu.addItem(action("Set up…", key: "o") { self.onAction(.openOnboarding) })
@@ -88,7 +95,10 @@ final class MenuBarController {
     private func render(_ snapshot: AgentSnapshot) {
         // AUDIT R1 ARCHITECT A5: view strings live in the presenter, not the
         // snapshot data type. This lets locale/currency work touch one place.
-        statusItem.button?.title = AgentSnapshotPresenter.short(snapshot)
+        latestSnapshot = snapshot
+        let dismissed = dismissedUnclaimedThreshold()
+        let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissed)
+        statusItem.button?.title = [AgentSnapshotPresenter.short(snapshot), badge].compactMap { $0 }.joined(separator: " ")
         guard let menu = statusItem.menu else { return }
         menu.item(withIdentifier: .statusRow)?.title = AgentSnapshotPresenter.stateLine(snapshot)
         menu.item(withIdentifier: .earningsRow)?.title = AgentSnapshotPresenter.earningsLine(snapshot)
@@ -99,6 +109,21 @@ final class MenuBarController {
         } else {
             menu.item(withIdentifier: .backlogRow)?.isHidden = true
         }
+        menu.item(withIdentifier: .dismissBacklogBadge)?.isHidden = badge == nil
+    }
+
+    private func dismissedUnclaimedThreshold() -> Double? {
+        let value = UserDefaults.standard.double(forKey: badgeDefaultsKey)
+        return value > 0 ? value : nil
+    }
+
+    private func dismissUnclaimedBadge() {
+        guard let total = AgentSnapshotPresenter.unclaimedBacklogTotal(latestSnapshot),
+              let threshold = UnclaimedBadgePolicy.nextDismissedThreshold(totalBacklog: total) else {
+            return
+        }
+        UserDefaults.standard.set(threshold, forKey: badgeDefaultsKey)
+        render(latestSnapshot)
     }
 }
 
@@ -106,6 +131,7 @@ private extension NSUserInterfaceItemIdentifier {
     static let statusRow = NSUserInterfaceItemIdentifier("malibu.menubar.status")
     static let earningsRow = NSUserInterfaceItemIdentifier("malibu.menubar.earnings")
     static let backlogRow = NSUserInterfaceItemIdentifier("malibu.menubar.backlog")
+    static let dismissBacklogBadge = NSUserInterfaceItemIdentifier("malibu.menubar.dismissBacklogBadge")
 }
 
 private extension NSMenu {

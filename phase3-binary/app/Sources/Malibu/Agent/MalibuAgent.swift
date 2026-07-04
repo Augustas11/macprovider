@@ -28,6 +28,7 @@ final class MalibuAgent: ObservableObject {
     private var eventStreamTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var reconnect = ReconnectPolicy()
+    private let earningsClient = EarningsClient()
     // AUDIT R2 CODE H3 fix: once shutdown begins, refuse any subsequent start()
     // — including a reconnect Task that already slept past its cancellation
     // check but hadn't yet re-entered the MainActor.
@@ -179,11 +180,13 @@ final class MalibuAgent: ObservableObject {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 try? await self?.control?.send(.metricsRequest)
                 try? await self?.control?.send(.statusRequest)
+                await self?.refreshEarnings()
             }
         }
 
         try? await control?.send(.statusRequest)
         try? await control?.send(.metricsRequest)
+        await refreshEarnings()
     }
 
     private func consume(_ frame: ControlFrame) {
@@ -236,6 +239,24 @@ final class MalibuAgent: ObservableObject {
             }
         default:
             break
+        }
+    }
+
+    private func refreshEarnings() async {
+        guard let providerID = ProviderConfig.readProviderID(),
+              let token = await KeychainStore.readProviderToken(providerID: providerID) else {
+            return
+        }
+        do {
+            let earnings = try await earningsClient.fetch(providerID: providerID, bearerToken: token)
+            snapshot.walletBound = earnings.walletBound
+            snapshot.trustTier = earnings.trustTier
+            snapshot.unpaidLedgerBacklogUSDC = earnings.unpaidLedgerBacklogUSDC
+            snapshot.unpaidLedgerBacklogMALIBU = earnings.unpaidLedgerBacklogMALIBU
+        } catch {
+            // Earnings is not part of the daemon liveness path. Keep existing
+            // metrics visible and retry on the next poll without logging bearer
+            // material or the request payload.
         }
     }
 

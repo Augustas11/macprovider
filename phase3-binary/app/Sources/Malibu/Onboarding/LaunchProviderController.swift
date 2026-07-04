@@ -43,8 +43,92 @@ final class LaunchProviderController: ObservableObject {
     /// it, so this is not a fresh download in v1 — see SPEC-026 §6.1
     /// step 7e).
     let bundledCLIPath: URL
-    private let agent: MalibuAgent?
     private let registerClient: RegisterClient
+    private let dependencies: Dependencies
+
+    struct ModelDownloadPlan: Equatable {
+        let modelName: String
+        let state: OnboardingState.ModelDownloadState?
+
+        static let recommended = ModelDownloadPlan(modelName: "recommended", state: nil)
+    }
+
+    struct Dependencies {
+        var isConfigured: () async -> Bool
+        var loadState: () throws -> OnboardingState?
+        var loadOrGenerateIdentity: () async throws -> Curve25519.Signing.PrivateKey
+        var providerID: (Curve25519.Signing.PrivateKey) -> String
+        var currentProviderToken: (String) async -> String?
+        var registerProvider: (Curve25519.Signing.PrivateKey, String?) async throws -> RegisterResponse
+        var saveProviderIdentity: (String, String) async throws -> Void
+        var saveState: (OnboardingState) throws -> Void
+        var updateState: (String, String, Date?, OnboardingState.ModelDownloadState?) throws -> Void
+        var runAutotune: (String) async throws -> ModelDownloadPlan
+        var ensureCLIReady: () throws -> Void
+        var downloadModel: (ModelDownloadPlan) async throws -> OnboardingState.ModelDownloadState?
+        var registerLoginItem: @MainActor () async throws -> Void
+        var startAgent: @MainActor () async -> Void
+        var waitForFirstServing: @MainActor () async throws -> Date
+        var readProviderID: () -> String?
+
+        static func live(registerClient: RegisterClient, bundledCLIPath: URL, agent: MalibuAgent?) -> Dependencies {
+            Dependencies(
+                isConfigured: { await ProviderConfig.isConfigured },
+                loadState: { try OnboardingStateStore.load() },
+                loadOrGenerateIdentity: { try await ProviderIdentity.loadOrGenerate() },
+                providerID: { ProviderIdentity.providerID(for: $0) },
+                currentProviderToken: { providerID in await KeychainStore.readProviderToken(providerID: providerID) },
+                registerProvider: { key, bearerProof in
+                    let request = try registerClient.makeSignedRequest(identityKey: key)
+                    return try await registerClient.postRegister(request, bearerProof: bearerProof)
+                },
+                saveProviderIdentity: { providerID, token in
+                    try await ProviderConfig.saveProviderIdentity(providerID: providerID, token: token)
+                },
+                saveState: { try OnboardingStateStore.save($0) },
+                updateState: { providerID, lastStage, firstServingAt, modelDownload in
+                    try OnboardingStateStore.update(
+                        providerID: providerID,
+                        lastStage: lastStage,
+                        firstServingAt: firstServingAt,
+                        modelDownload: modelDownload
+                    )
+                },
+                runAutotune: { _ in .recommended },
+                ensureCLIReady: {
+                    guard FileManager.default.isExecutableFile(atPath: bundledCLIPath.path) else {
+                        throw POSIXError(.ENOENT)
+                    }
+                },
+                downloadModel: { plan in plan.state },
+                registerLoginItem: { try AppLoginItem.register() },
+                startAgent: { await agent?.start() },
+                waitForFirstServing: {
+                    guard let agent else { return Date() }
+                    for _ in 0..<60 {
+                        switch agent.snapshot.state {
+                        case .serving:
+                            return Date()
+                        case .error:
+                            throw NSError(
+                                domain: "Malibu.LaunchProviderController",
+                                code: 1,
+                                userInfo: [NSLocalizedDescriptionKey: agent.snapshot.lastError ?? "Provider failed to start."]
+                            )
+                        default:
+                            try await Task.sleep(nanoseconds: 500_000_000)
+                        }
+                    }
+                    throw NSError(
+                        domain: "Malibu.LaunchProviderController",
+                        code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for the first serving frame."]
+                    )
+                },
+                readProviderID: { ProviderConfig.readProviderID() }
+            )
+        }
+    }
 
     /// Feature-flag guard from §8: env var MALIBU_ONBOARD_V2 wins over
     /// UserDefaults `onboardingFlow == "v2"`.
@@ -68,11 +152,21 @@ final class LaunchProviderController: ObservableObject {
 
     // MARK: - Init
 
-    init(coordinatorBaseURL: URL, bundledCLIPath: URL, agent: MalibuAgent? = nil) {
+    init(
+        coordinatorBaseURL: URL,
+        bundledCLIPath: URL,
+        agent: MalibuAgent? = nil,
+        dependencies: Dependencies? = nil
+    ) {
         self.coordinatorBaseURL = coordinatorBaseURL
         self.bundledCLIPath = bundledCLIPath
-        self.agent = agent
-        self.registerClient = RegisterClient(coordinatorBaseURL: coordinatorBaseURL)
+        let registerClient = RegisterClient(coordinatorBaseURL: coordinatorBaseURL)
+        self.registerClient = registerClient
+        self.dependencies = dependencies ?? .live(
+            registerClient: registerClient,
+            bundledCLIPath: bundledCLIPath,
+            agent: agent
+        )
     }
 
     // MARK: - Public API
@@ -103,16 +197,22 @@ final class LaunchProviderController: ObservableObject {
             return
         }
 
-        if await ProviderConfig.isConfigured {
-            await startConfiguredAgent(model: "configured")
+        if await dependencies.isConfigured() {
+            if let existing = try? dependencies.loadState(),
+               existing.onboardingSchemaVersion == 2,
+               existing.firstServingAt == nil {
+                await resumePartialOnboarding(existing)
+            } else {
+                await startConfiguredAgent(model: "configured")
+            }
             return
         }
 
         do {
-            let key = try await ProviderIdentity.loadOrGenerate()
-            let providerID = ProviderIdentity.providerID(for: key)
+            let key = try await dependencies.loadOrGenerateIdentity()
+            let providerID = dependencies.providerID(key)
             stage = .identityReady
-            try OnboardingStateStore.save(OnboardingState(
+            try dependencies.saveState(OnboardingState(
                 onboardingSchemaVersion: 2,
                 providerID: providerID,
                 createdAt: Date(),
@@ -122,27 +222,12 @@ final class LaunchProviderController: ObservableObject {
             ))
 
             stage = .registering
-            let bearerProof = await KeychainStore.readProviderToken(providerID: providerID)
-            let request = try registerClient.makeSignedRequest(identityKey: key)
-            let response = try await registerClient.postRegister(request, bearerProof: bearerProof)
-            try await ProviderConfig.saveProviderIdentity(
-                providerID: response.providerID,
-                token: response.providerToken
-            )
-            try OnboardingStateStore.update(providerID: response.providerID, lastStage: "registered")
+            let bearerProof = await dependencies.currentProviderToken(providerID)
+            let response = try await dependencies.registerProvider(key, bearerProof)
+            try await dependencies.saveProviderIdentity(response.providerID, response.providerToken)
+            try dependencies.updateState(response.providerID, "registered", nil, nil)
 
-            stage = .autotuning
-            try OnboardingStateStore.update(providerID: response.providerID, lastStage: "autotuning")
-
-            stage = .downloadingCLI(progressPct: 1)
-            try OnboardingStateStore.update(providerID: response.providerID, lastStage: "cliReady")
-
-            stage = .downloadingModel(name: "recommended", progressPct: 1)
-            try OnboardingStateStore.update(providerID: response.providerID, lastStage: "modelReady")
-
-            stage = .startingAgent
-            try AppLoginItem.register()
-            await startConfiguredAgent(model: "recommended")
+            try await finishLaunch(providerID: response.providerID, from: .autotune, plan: nil)
         } catch {
             stage = .failed(stage: stageName(stage), retryable: true, message: error.localizedDescription)
         }
@@ -165,16 +250,80 @@ final class LaunchProviderController: ObservableObject {
     }
 
     private func startConfiguredAgent(model: String) async {
-        await agent?.start()
+        await dependencies.startAgent()
         let now = Date()
-        if let providerID = ProviderConfig.readProviderID() {
-            try? OnboardingStateStore.update(
-                providerID: providerID,
-                lastStage: "live",
-                firstServingAt: now
-            )
+        if let providerID = dependencies.readProviderID() {
+            try? dependencies.updateState(providerID, "live", now, nil)
         }
         stage = .live(model: model, tier: .provisional)
+    }
+
+    private enum ResumePoint {
+        case autotune
+        case cliReady
+        case downloadingModel
+        case modelReady
+    }
+
+    private func resumePartialOnboarding(_ existing: OnboardingState) async {
+        do {
+            let point: ResumePoint
+            switch existing.lastStage {
+            case "registered", "autotuning":
+                point = .autotune
+            case "cliReady":
+                point = .cliReady
+            case "downloadingModel":
+                point = .downloadingModel
+            case "modelReady", "startingAgent":
+                point = .modelReady
+            default:
+                point = .autotune
+            }
+            let plan = existing.modelDownload.map {
+                ModelDownloadPlan(modelName: $0.modelID, state: $0)
+            }
+            try await finishLaunch(providerID: existing.providerID, from: point, plan: plan)
+        } catch {
+            stage = .failed(stage: stageName(stage), retryable: true, message: error.localizedDescription)
+        }
+    }
+
+    private func finishLaunch(
+        providerID: String,
+        from resumePoint: ResumePoint,
+        plan resumePlan: ModelDownloadPlan?
+    ) async throws {
+        var plan = resumePlan ?? .recommended
+
+        if resumePoint == .autotune {
+            stage = .autotuning
+            try dependencies.updateState(providerID, "autotuning", nil, nil)
+            plan = try await dependencies.runAutotune(providerID)
+
+            stage = .downloadingCLI(progressPct: 1)
+            try dependencies.ensureCLIReady()
+            try dependencies.updateState(providerID, "cliReady", nil, nil)
+        }
+
+        if resumePoint == .cliReady || resumePoint == .downloadingModel || resumePoint == .autotune {
+            let progress = plan.state.map { $0.partialBytes > 0 ? 0.5 : 0 } ?? 0
+            stage = .downloadingModel(name: plan.modelName, progressPct: progress)
+            try dependencies.updateState(providerID, "downloadingModel", nil, plan.state)
+            let completedDownload = try await dependencies.downloadModel(plan)
+            stage = .downloadingModel(name: plan.modelName, progressPct: 1)
+            try dependencies.updateState(providerID, "modelReady", nil, completedDownload)
+        }
+
+        stage = .startingAgent
+        try dependencies.updateState(providerID, "startingAgent", nil, nil)
+        try await dependencies.registerLoginItem()
+        await dependencies.startAgent()
+
+        stage = .authenticating
+        let firstServingAt = try await dependencies.waitForFirstServing()
+        try dependencies.updateState(providerID, "live", firstServingAt, nil)
+        stage = .live(model: plan.modelName, tier: .provisional)
     }
 
     private func stageName(_ stage: Stage) -> String {
@@ -217,7 +366,7 @@ struct OnboardingState: Codable {
         case modelDownload = "model_download"
     }
 
-    struct ModelDownloadState: Codable {
+    struct ModelDownloadState: Codable, Equatable {
         let modelID: String
         let targetURL: URL
         let targetSHA256: String
@@ -233,15 +382,14 @@ struct OnboardingState: Codable {
 }
 
 enum OnboardingStateStore {
-    static func load() throws -> OnboardingState? {
-        let url = ProviderPaths.current.onboardingStateFile
+    static func load(paths: ProviderPaths = .current) throws -> OnboardingState? {
+        let url = paths.onboardingStateFile
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let data = try Data(contentsOf: url)
         return try decoder.decode(OnboardingState.self, from: data)
     }
 
-    static func save(_ state: OnboardingState) throws {
-        let paths = ProviderPaths.current
+    static func save(_ state: OnboardingState, paths: ProviderPaths = .current) throws {
         try paths.ensureDirectories()
         let data = try encoder.encode(state)
         try data.write(to: paths.onboardingStateFile, options: [.atomic])
@@ -255,9 +403,10 @@ enum OnboardingStateStore {
         providerID: String,
         lastStage: String,
         firstServingAt: Date? = nil,
-        modelDownload: OnboardingState.ModelDownloadState? = nil
+        modelDownload: OnboardingState.ModelDownloadState? = nil,
+        paths: ProviderPaths = .current
     ) throws {
-        let existing = try load()
+        let existing = try load(paths: paths)
         try save(OnboardingState(
             onboardingSchemaVersion: 2,
             providerID: providerID,
@@ -265,11 +414,11 @@ enum OnboardingStateStore {
             lastStage: lastStage,
             firstServingAt: firstServingAt ?? existing?.firstServingAt,
             modelDownload: modelDownload ?? existing?.modelDownload
-        ))
+        ), paths: paths)
     }
 
-    static func delete() throws {
-        let url = ProviderPaths.current.onboardingStateFile
+    static func delete(paths: ProviderPaths = .current) throws {
+        let url = paths.onboardingStateFile
         do { try FileManager.default.removeItem(at: url) }
         catch {
             let ns = error as NSError
@@ -301,6 +450,17 @@ enum StartupRoute: Equatable {
     case resumeOnboarding
 }
 
+enum MigrationDecision: Equatable {
+    case importExisting
+    case startFresh
+    case cancel
+}
+
+struct MigrationResult: Equatable {
+    let route: StartupRoute
+    let backupPath: String?
+}
+
 struct StartupState: Equatable {
     let configExists: Bool
     let appMarkerExists: Bool
@@ -310,19 +470,61 @@ struct StartupState: Equatable {
     let firstServingAtExists: Bool
     let onboardingV2Enabled: Bool
 
+    @MainActor
+    static func detect(paths: ProviderPaths = .current) async -> StartupState {
+        let fm = FileManager.default
+        let configExists = fm.fileExists(atPath: paths.configFile.path)
+        let markerExists = fm.fileExists(atPath: paths.appMarkerFile.path)
+        let providerID = ProviderConfig.readProviderID(paths: paths)
+        let tokenExists: Bool
+        if let providerID {
+            tokenExists = await KeychainStore.readProviderToken(providerID: providerID) != nil
+        } else {
+            tokenExists = false
+        }
+        let identityExists = await ProviderIdentity.isReady()
+        let onboarding = try? OnboardingStateStore.load(paths: paths)
+        return StartupState(
+            configExists: configExists,
+            appMarkerExists: markerExists,
+            providerTokenExists: tokenExists,
+            identityExists: identityExists,
+            onboardingStateExists: onboarding != nil,
+            firstServingAtExists: onboarding?.firstServingAt != nil,
+            onboardingV2Enabled: LaunchProviderController.isOnboardingV2Enabled
+        )
+    }
+
     func route() -> StartupRoute {
+        if onboardingStateExists && !firstServingAtExists {
+            return onboardingV2Enabled ? .resumeOnboarding : .setupPaused
+        }
         if configExists && appMarkerExists && providerTokenExists {
             return .startAgent
         }
         if configExists && !appMarkerExists {
             return onboardingV2Enabled ? .showImportDialog : .setupPaused
         }
-        if onboardingStateExists && !firstServingAtExists {
-            return onboardingV2Enabled ? .resumeOnboarding : .setupPaused
-        }
         if identityExists && onboardingV2Enabled {
             return .resumeOnboarding
         }
         return onboardingV2Enabled ? .showOnboarding : .setupPaused
+    }
+
+    static func applyMigrationDecision(
+        _ decision: MigrationDecision,
+        paths: ProviderPaths = .current,
+        now: Date = Date()
+    ) async throws -> MigrationResult {
+        switch decision {
+        case .importExisting:
+            try await ProviderConfig.importExistingCLIConfig(paths: paths)
+            return MigrationResult(route: .startAgent, backupPath: nil)
+        case .startFresh:
+            let backup = try ProviderConfig.startFreshMovingCLIConfigAside(now: now, paths: paths)
+            return MigrationResult(route: .showOnboarding, backupPath: backup?.path)
+        case .cancel:
+            return MigrationResult(route: .setupPaused, backupPath: nil)
+        }
     }
 }

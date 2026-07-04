@@ -51,4 +51,36 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         s.walletBound = true
         XCTAssertNil(AgentSnapshotPresenter.backlogLine(s))
     }
+
+    func testUnclaimedBadgeThresholdsResurfaceAfterDismissal() {
+        var s = AgentSnapshot.empty
+        s.walletBound = false
+        s.unpaidLedgerBacklogUSDC = 9
+        s.unpaidLedgerBacklogMALIBU = 0
+        XCTAssertEqual(AgentSnapshotPresenter.unclaimedBadge(s, dismissedThreshold: nil), "$1+")
+        XCTAssertNil(AgentSnapshotPresenter.unclaimedBadge(s, dismissedThreshold: 10))
+
+        s.unpaidLedgerBacklogUSDC = 10
+        XCTAssertEqual(AgentSnapshotPresenter.unclaimedBadge(s, dismissedThreshold: 1), "$10+")
+        XCTAssertNil(AgentSnapshotPresenter.unclaimedBadge(s, dismissedThreshold: 10))
+
+        s.unpaidLedgerBacklogUSDC = 100
+        XCTAssertEqual(AgentSnapshotPresenter.unclaimedBadge(s, dismissedThreshold: 10), "$100+")
+    }
+
+    func testProviderEarningsDecodesSpec026ExtendedFields() throws {
+        let data = Data("""
+        {
+          "wallet_bound": false,
+          "trust_tier": "Trusted",
+          "unpaid_ledger_backlog_usdc": 12.5,
+          "unpaid_ledger_backlog_malibu": 7.25
+        }
+        """.utf8)
+        let decoded = try JSONDecoder().decode(ProviderEarnings.self, from: data)
+        XCTAssertFalse(decoded.walletBound)
+        XCTAssertEqual(decoded.trustTier, .trusted)
+        XCTAssertEqual(decoded.unpaidLedgerBacklogUSDC, 12.5)
+        XCTAssertEqual(decoded.unpaidLedgerBacklogMALIBU, 7.25)
+    }
 }

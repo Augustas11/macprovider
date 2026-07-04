@@ -11,7 +11,20 @@ import Foundation
 
 struct AgentSnapshot: Equatable {
     enum State: String { case idle, starting, serving, paused, reconnecting, error }
-    enum TrustTier: String { case provisional, trusted }
+    enum TrustTier: String, Codable {
+        case provisional
+        case trusted
+
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self).lowercased()
+            self = raw == "trusted" ? .trusted : .provisional
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
+    }
     var state: State
     var currentModelID: String?
     var earningsUsdcToday: Double?
@@ -89,6 +102,23 @@ enum AgentSnapshotPresenter {
             return nil
         }
         return String(format: "Unclaimed: $%.2f USDC · %@", usdc, malibuDisplay(malibu, tier: s.trustTier))
+    }
+
+    static func unclaimedBadge(_ s: AgentSnapshot, dismissedThreshold: Double?) -> String? {
+        guard let total = unclaimedBacklogTotal(s),
+              let threshold = UnclaimedBadgePolicy.visibleThreshold(
+                totalBacklog: total,
+                dismissedThreshold: dismissedThreshold
+              ) else {
+            return nil
+        }
+        return threshold >= 100 ? "$100+" : String(format: "$%.0f+", threshold)
+    }
+
+    static func unclaimedBacklogTotal(_ s: AgentSnapshot) -> Double? {
+        guard s.walletBound == false else { return nil }
+        let total = (s.unpaidLedgerBacklogUSDC ?? 0) + (s.unpaidLedgerBacklogMALIBU ?? 0)
+        return total > 0 ? total : nil
     }
 
     private static func malibuDisplay(_ amount: Double, tier: AgentSnapshot.TrustTier) -> String {

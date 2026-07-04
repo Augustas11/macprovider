@@ -24,8 +24,7 @@ enum ProviderConfig {
         }
     }
 
-    static func readProviderID() -> String? {
-        let paths = ProviderPaths.current
+    static func readProviderID(paths: ProviderPaths = .current) -> String? {
         guard let contents = try? String(contentsOf: paths.configFile) else { return nil }
         // AUDIT R1 CODE M1 fix, corrected in E2E:
         // Swift's Character treats `\r\n` as a single grapheme cluster, so a
@@ -67,7 +66,10 @@ enum ProviderConfig {
     }
 
     static func saveProviderIdentity(providerID: String, token: String) async throws {
-        let paths = ProviderPaths.current
+        try await saveProviderIdentity(providerID: providerID, token: token, paths: .current)
+    }
+
+    static func saveProviderIdentity(providerID: String, token: String, paths: ProviderPaths) async throws {
         try paths.ensureDirectories()
 
         // AUDIT R1 ARCHITECT A2: fail-fast on config collision instead of
@@ -105,7 +107,10 @@ enum ProviderConfig {
     }
 
     static func importExistingCLIConfig() async throws {
-        let paths = ProviderPaths.current
+        try await importExistingCLIConfig(paths: .current)
+    }
+
+    static func importExistingCLIConfig(paths: ProviderPaths) async throws {
         try paths.ensureDirectories()
         let existing = try String(contentsOf: paths.configFile)
         guard let providerID = parseTopLevelValue(named: "provider_id", from: existing) else {
@@ -124,7 +129,7 @@ enum ProviderConfig {
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
             try await KeychainStore.saveProviderToken(providerID: providerID, token: token)
             FileManager.default.createFile(atPath: paths.appMarkerFile.path, contents: Data())
-            guard await isConfigured else { throw SaveError.existingConfigNotOwnedByApp }
+            guard await isConfigured(paths: paths) else { throw SaveError.existingConfigNotOwnedByApp }
             try? FileManager.default.removeItem(at: backup)
         } catch {
             try? FileManager.default.removeItem(at: paths.configFile)
@@ -137,7 +142,10 @@ enum ProviderConfig {
     }
 
     static func startFreshMovingCLIConfigAside(now: Date = Date()) throws -> URL? {
-        let paths = ProviderPaths.current
+        try startFreshMovingCLIConfigAside(now: now, paths: .current)
+    }
+
+    static func startFreshMovingCLIConfigAside(now: Date = Date(), paths: ProviderPaths) throws -> URL? {
         let fm = FileManager.default
         guard fm.fileExists(atPath: paths.configFile.path) else { return nil }
         try paths.ensureDirectories()
@@ -190,6 +198,16 @@ enum ProviderConfig {
         do { try await KeychainStore.deleteAllAppItems() }
         catch { residue.keychainDeleteFailed = error }
         return residue
+    }
+
+    static func isConfigured(paths: ProviderPaths) async -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: paths.configFile.path),
+              fm.fileExists(atPath: paths.appMarkerFile.path),
+              let providerID = readProviderID(paths: paths) else {
+            return false
+        }
+        return await KeychainStore.readProviderToken(providerID: providerID) != nil
     }
 
     private static func parseTopLevelValue(named key: String, from contents: String) -> String? {

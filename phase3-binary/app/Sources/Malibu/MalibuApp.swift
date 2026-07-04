@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -25,12 +26,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handle(action)
         }
 
-        Task { [agent] in
-            if await ProviderConfig.isConfigured {
-                await agent.start()
-            } else {
-                await MainActor.run { self.presentOnboarding() }
-            }
+        Task { @MainActor [weak self] in
+            await self?.handleStartup()
         }
     }
 
@@ -110,6 +107,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         onboardingWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func handleStartup() async {
+        let route = await StartupState.detect().route()
+        await handleStartupRoute(route)
+    }
+
+    private func handleStartupRoute(_ route: StartupRoute) async {
+        switch route {
+        case .startAgent:
+            await agent.start()
+        case .showOnboarding, .resumeOnboarding:
+            presentOnboarding()
+        case .setupPaused:
+            presentSetupPaused()
+        case .showImportDialog:
+            let decision = presentMigrationDialog()
+            do {
+                let result = try await StartupState.applyMigrationDecision(decision)
+                if let backupPath = result.backupPath {
+                    presentStartFreshBackup(path: backupPath)
+                }
+                await handleStartupRoute(result.route)
+            } catch {
+                presentMigrationError(error)
+            }
+        }
+    }
+
+    private func presentMigrationDialog() -> MigrationDecision {
+        let alert = NSAlert()
+        alert.messageText = "Existing provider config found"
+        alert.informativeText = """
+        Malibu found a macprovider config that was not installed by the app. Import saves the existing provider token to Keychain and removes it from config.yaml. Start fresh moves the old config aside.
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Import")
+        alert.addButton(withTitle: "Start Fresh")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .importExisting
+        case .alertSecondButtonReturn: return .startFresh
+        default: return .cancel
+        }
+    }
+
+    private func presentSetupPaused() {
+        let alert = NSAlert()
+        alert.messageText = "Setup paused"
+        alert.informativeText = "App-track onboarding is disabled for this build. Existing configured providers still start normally."
+        alert.alertStyle = .informational
+        alert.runModal()
+    }
+
+    private func presentStartFreshBackup(path: String) {
+        let alert = NSAlert()
+        alert.messageText = "Old provider config moved aside"
+        alert.informativeText = "Backup: \(path)\n\nTo reclaim it manually, move that file back to ~/.config/macprovider/config.yaml."
+        alert.alertStyle = .informational
+        alert.runModal()
+    }
+
+    private func presentMigrationError(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Could not migrate provider config"
+        alert.informativeText = error.localizedDescription
+        alert.alertStyle = .warning
+        alert.runModal()
     }
 
     private func presentDashboard() {
