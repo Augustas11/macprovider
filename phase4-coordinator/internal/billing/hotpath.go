@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
 type HotPathInput struct {
@@ -52,112 +53,116 @@ type CacheBillingRoutingDecision struct {
 func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
 	boundProviderReportedPromptTokens(&in)
 	reqRow = requestLogRowWithBoundedPrompt(reqRow, in)
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		if err := reqLogStore.InsertExec(ctx, conn, reqRow); err != nil {
+			return err
 		}
-	}()
-	if err := reqLogStore.InsertExec(ctx, conn, reqRow); err != nil {
-		return err
-	}
-	if in.ProviderAssignedID == "" {
-		_, err := conn.ExecContext(ctx, `COMMIT`)
-		committed = err == nil
-		return err
-	}
-	if in.SettlementAccountScopeHash == "" {
-		in.SettlementAccountScopeHash = SettlementAccountScopeHashForAccountID(reqRow.AccountID)
-	}
-	if in.SettlementPolicyMode == "" {
-		in.SettlementPolicyMode = "legacy"
-	}
-	// SPEC-002 v1.5.0 / issue #211 money-path defense-in-depth:
-	// scope the AttemptN-derivation COUNT by (account_id, request_id)
-	// using SQLite `IS` semantics so all three sites (this one,
-	// recovery.go, endpoints.go admin-reconcile) compute the same
-	// attempt ordinal for any given row. Note that request_log.request_id
-	// is coordinator-internal (server-minted UUID v4); the buyer-
-	// supplied #211 collision class lives on external_request_id and
-	// is addressed by the composite (account_id, external_request_id)
-	// reconciliation key. This account scoping is defense-in-depth:
-	// if a UUID v4 collision or retry-loop bug ever causes the same
-	// internal request_id to recur across accounts, each account's
-	// attempt sequence is computed within its own scope. NULL-
-	// account_id legacy rows cluster with NULL-account_id legacy
-	// rows only (NULL = NULL under `IS`). For an empty in-memory
-	// AccountID, pass an explicit nil so SQLite matches IS NULL.
-	var accountIDArg any
-	if reqRow.AccountID != "" {
-		accountIDArg = reqRow.AccountID
-	}
-	var requestCount int
-	countErr := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log WHERE account_id IS ? AND request_id = ?`, accountIDArg, in.RequestID).Scan(&requestCount)
-	if countErr == nil && requestCount > 0 {
-		if derived := requestCount - 1; derived > in.AttemptN {
-			if in.AttemptN != derived {
+		if in.ProviderAssignedID == "" {
+			return nil
+		}
+		if in.SettlementAccountScopeHash == "" {
+			in.SettlementAccountScopeHash = SettlementAccountScopeHashForAccountID(reqRow.AccountID)
+		}
+		if in.SettlementPolicyMode == "" {
+			in.SettlementPolicyMode = "legacy"
+		}
+		// SPEC-002 v1.5.0 / issue #211 money-path defense-in-depth:
+		// scope the AttemptN-derivation COUNT by (account_id, request_id)
+		// using SQLite `IS` semantics so all three sites (this one,
+		// recovery.go, endpoints.go admin-reconcile) compute the same
+		// attempt ordinal for any given row. Note that request_log.request_id
+		// is coordinator-internal (server-minted UUID v4); the buyer-
+		// supplied #211 collision class lives on external_request_id and
+		// is addressed by the composite (account_id, external_request_id)
+		// reconciliation key. This account scoping is defense-in-depth:
+		// if a UUID v4 collision or retry-loop bug ever causes the same
+		// internal request_id to recur across accounts, each account's
+		// attempt sequence is computed within its own scope. NULL-
+		// account_id legacy rows cluster with NULL-account_id legacy
+		// rows only (NULL = NULL under `IS`). For an empty in-memory
+		// AccountID, pass an explicit nil so SQLite matches IS NULL.
+		var accountIDArg any
+		if reqRow.AccountID != "" {
+			accountIDArg = reqRow.AccountID
+		}
+		var requestCount int
+		countErr := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log WHERE account_id IS ? AND request_id = ?`, accountIDArg, in.RequestID).Scan(&requestCount)
+		if countErr == nil && requestCount > 0 {
+			if derived := requestCount - 1; derived > in.AttemptN {
+				if in.AttemptN != derived {
+					in.AttemptN = derived
+					if in.TSUtc.IsZero() {
+						in.TSUtc = time.Now().UTC()
+					}
+					if in.FaultFlag == "" {
+						in.FaultFlag = FaultNone
+					}
+					result := ComputeCredits(
+						in.PromptTokens,
+						in.CompletionTokens,
+						in.EstimatedCompTokens,
+						usageFor(in.ErrorCode, in.EstimatedCompTokens),
+						in.FaultFlag,
+						in.RateEntry,
+						in.MultiplierPPM,
+						in.ProviderShareBps,
+					)
+					result = zeroCredits(result)
+					now := time.Now().UTC().Format(time.RFC3339Nano)
+					if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, "ambiguous_attempt_n"); err != nil {
+						return err
+					}
+					if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+						return err
+					}
+					return nil
+				}
 				in.AttemptN = derived
-				if in.TSUtc.IsZero() {
-					in.TSUtc = time.Now().UTC()
-				}
-				if in.FaultFlag == "" {
-					in.FaultFlag = FaultNone
-				}
-				result := ComputeCredits(
-					in.PromptTokens,
-					in.CompletionTokens,
-					in.EstimatedCompTokens,
-					usageFor(in.ErrorCode, in.EstimatedCompTokens),
-					in.FaultFlag,
-					in.RateEntry,
-					in.MultiplierPPM,
-					in.ProviderShareBps,
-				)
-				result = zeroCredits(result)
-				now := time.Now().UTC().Format(time.RFC3339Nano)
-				if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, "ambiguous_attempt_n"); err != nil {
-					return err
-				}
-				if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
-					return err
-				}
-				_, err := conn.ExecContext(ctx, `COMMIT`)
-				committed = err == nil
+			}
+		}
+		if in.TSUtc.IsZero() {
+			in.TSUtc = time.Now().UTC()
+		}
+		if in.FaultFlag == "" {
+			in.FaultFlag = FaultNone
+		}
+		cacheQuarantineReason := normalizeCachedPromptTokens(&in)
+		logCacheBillingRoutingDecision(in, cacheQuarantineReason)
+		// SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168) quarantine rule:
+		// with persisted monotonic attempt_n, row 3+ (attempt_n >= 2) is
+		// credited normally — the v0.3.1 "row 3+ MUST quarantine until
+		// SPEC-002 gains monotonic attempt_n" rule is now satisfied. The
+		// remaining quarantine class is attempt_n==1 with retried==0:
+		// legitimate-retry-without-explicit-marker that cannot be safely
+		// distinguished from a buggy duplicate INSERT. This narrowing is
+		// safe in the hot path because reqRow.AttemptN here is the value
+		// just persisted by InsertExec (v1.5.2 always writes a non-NULL
+		// value); the in.AttemptN was already aligned to the persisted
+		// value by the post-INSERT COUNT-1 derivation above.
+		if in.AttemptN == 1 && reqRow.Retried == 0 {
+			result := ComputeCredits(
+				in.PromptTokens,
+				in.CompletionTokens,
+				in.EstimatedCompTokens,
+				usageFor(in.ErrorCode, in.EstimatedCompTokens),
+				in.FaultFlag,
+				in.RateEntry,
+				in.MultiplierPPM,
+				in.ProviderShareBps,
+			)
+			result = zeroCredits(result)
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, "ambiguous_attempt_n"); err != nil {
 				return err
 			}
-			in.AttemptN = derived
+			if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+				return err
+			}
+			return nil
 		}
-	}
-	if in.TSUtc.IsZero() {
-		in.TSUtc = time.Now().UTC()
-	}
-	if in.FaultFlag == "" {
-		in.FaultFlag = FaultNone
-	}
-	cacheQuarantineReason := normalizeCachedPromptTokens(&in)
-	logCacheBillingRoutingDecision(in, cacheQuarantineReason)
-	// SPEC-005 v0.3.3 / SPEC-002 v1.5.2 (issue #168) quarantine rule:
-	// with persisted monotonic attempt_n, row 3+ (attempt_n >= 2) is
-	// credited normally — the v0.3.1 "row 3+ MUST quarantine until
-	// SPEC-002 gains monotonic attempt_n" rule is now satisfied. The
-	// remaining quarantine class is attempt_n==1 with retried==0:
-	// legitimate-retry-without-explicit-marker that cannot be safely
-	// distinguished from a buggy duplicate INSERT. This narrowing is
-	// safe in the hot path because reqRow.AttemptN here is the value
-	// just persisted by InsertExec (v1.5.2 always writes a non-NULL
-	// value); the in.AttemptN was already aligned to the persisted
-	// value by the post-INSERT COUNT-1 derivation above.
-	if in.AttemptN == 1 && reqRow.Retried == 0 {
-		result := ComputeCredits(
+		result := ComputeCreditsWithCache(
 			in.PromptTokens,
+			in.CachedPromptTokens,
 			in.CompletionTokens,
 			in.EstimatedCompTokens,
 			usageFor(in.ErrorCode, in.EstimatedCompTokens),
@@ -166,58 +171,32 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 			in.MultiplierPPM,
 			in.ProviderShareBps,
 		)
-		result = zeroCredits(result)
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, "ambiguous_attempt_n"); err != nil {
+		if cacheQuarantineReason != "" {
+			result = zeroCredits(result)
+			if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, cacheQuarantineReason); err != nil {
+				return err
+			}
+			if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+				return err
+			}
+			return nil
+		}
+		requestCreditID, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, false, "")
+		if err != nil {
+			return err
+		}
+		if err := insertOperatorCreditTx(ctx, conn, requestCreditID, in, result, now); err != nil {
 			return err
 		}
 		if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
 			return err
 		}
-		_, err := conn.ExecContext(ctx, `COMMIT`)
-		committed = err == nil
-		return err
-	}
-	result := ComputeCreditsWithCache(
-		in.PromptTokens,
-		in.CachedPromptTokens,
-		in.CompletionTokens,
-		in.EstimatedCompTokens,
-		usageFor(in.ErrorCode, in.EstimatedCompTokens),
-		in.FaultFlag,
-		in.RateEntry,
-		in.MultiplierPPM,
-		in.ProviderShareBps,
-	)
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if cacheQuarantineReason != "" {
-		result = zeroCredits(result)
-		if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, cacheQuarantineReason); err != nil {
+		if _, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
 			return err
 		}
-		if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
-			return err
-		}
-		_, err := conn.ExecContext(ctx, `COMMIT`)
-		committed = err == nil
-		return err
-	}
-	requestCreditID, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, false, "")
-	if err != nil {
-		return err
-	}
-	if err := insertOperatorCreditTx(ctx, conn, requestCreditID, in, result, now); err != nil {
-		return err
-	}
-	if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
-		return err
-	}
-	if _, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, conn, in.RequestID, int64(in.AttemptN), in.ProviderID); err != nil {
-		return err
-	}
-	_, err = conn.ExecContext(ctx, `COMMIT`)
-	committed = err == nil
-	return err
+		return nil
+	})
 }
 
 func normalizeCachedPromptTokens(in *HotPathInput) string {
@@ -301,32 +280,18 @@ func (s *Store) WriteRequestLogWithIdentity(ctx context.Context, reqLogStore *re
 		}
 	}
 	reqRow = requestLogRowWithBoundedPrompt(reqRow, in)
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-	if err := reqLogStore.InsertExec(ctx, conn, reqRow); err != nil {
-		return err
-	}
-	if in.ProviderAssignedID != "" && in.ProviderID != "" {
-		now := time.Now().UTC().Format(time.RFC3339Nano)
-		if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		if err := reqLogStore.InsertExec(ctx, conn, reqRow); err != nil {
 			return err
 		}
-	}
-	_, err = conn.ExecContext(ctx, `COMMIT`)
-	committed = err == nil
-	return err
+		if in.ProviderAssignedID != "" && in.ProviderID != "" {
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func requestLogRowWithBoundedPrompt(row requestlog.Row, in HotPathInput) requestlog.Row {

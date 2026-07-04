@@ -465,87 +465,76 @@ func (s *Store) MintProviderTokenAppTrack(ctx context.Context, providerID string
 	if err := config.ValidateProviderID(providerID); err != nil {
 		return "", err
 	}
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return "", err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	var token string
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		nowText := nowString()
+		var active struct {
+			ID        int64
+			TokenHash string
 		}
-	}()
-
-	nowText := nowString()
-	var active struct {
-		ID        int64
-		TokenHash string
-	}
-	err = conn.QueryRowContext(ctx, `
+		lookupErr := conn.QueryRowContext(ctx, `
 SELECT id, token_hash
   FROM provider_tokens
  WHERE provider_id = ? AND revoked_at IS NULL
  LIMIT 1`, providerID).Scan(&active.ID, &active.TokenHash)
-	if err != nil && err != sql.ErrNoRows {
-		return "", err
-	}
-
-	requiresProof := err == nil
-	if requiresProof {
-		if currentBearer == nil || strings.TrimSpace(*currentBearer) == "" || tokenHash(strings.TrimSpace(*currentBearer)) != active.TokenHash {
-			return "", ErrAppTrackExistingTokenNoProof
+		if lookupErr != nil && lookupErr != sql.ErrNoRows {
+			return lookupErr
 		}
-		var recent int
-		if err := conn.QueryRowContext(ctx, `
+
+		requiresProof := lookupErr == nil
+		if requiresProof {
+			if currentBearer == nil || strings.TrimSpace(*currentBearer) == "" || tokenHash(strings.TrimSpace(*currentBearer)) != active.TokenHash {
+				return ErrAppTrackExistingTokenNoProof
+			}
+			var recent int
+			if err := conn.QueryRowContext(ctx, `
 SELECT COUNT(1)
   FROM apptrack_register_reissues
  WHERE provider_id = ? AND ts >= ?`,
-			providerID, timeText(time.Now().UTC().Add(-5*time.Minute)),
-		).Scan(&recent); err != nil {
-			return "", err
+				providerID, timeText(time.Now().UTC().Add(-5*time.Minute)),
+			).Scan(&recent); err != nil {
+				return err
+			}
+			if recent > 0 {
+				return ErrAppTrackReissueCooldown
+			}
 		}
-		if recent > 0 {
-			return "", ErrAppTrackReissueCooldown
-		}
-	}
 
-	if err == nil {
-		if _, err := conn.ExecContext(ctx, `
+		if lookupErr == nil {
+			if _, err := conn.ExecContext(ctx, `
 UPDATE provider_tokens
    SET revoked_at = ?
  WHERE id = ? AND revoked_at IS NULL`, nowText, active.ID); err != nil {
-			return "", err
+				return err
+			}
 		}
-	}
 
-	token, err := randomHex(32)
+		newToken, err := randomHex(32)
+		if err != nil {
+			return err
+		}
+		prefix := newToken[:tokenDisplayPrefixLength]
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at)
+VALUES (?, ?, ?, ?, ?)`, tokenHash(newToken), prefix, providerID, "malibu-app", nowText); err != nil {
+			if isActiveProviderTokenConstraintFailure(err) {
+				return ErrActiveTokenAlreadyExists
+			}
+			return err
+		}
+		if requiresProof {
+			if _, err := conn.ExecContext(ctx, `
+INSERT INTO apptrack_register_reissues (provider_id, ts)
+VALUES (?, ?)`, providerID, nowText); err != nil {
+				return err
+			}
+		}
+		token = newToken
+		return nil
+	})
 	if err != nil {
 		return "", err
 	}
-	prefix := token[:tokenDisplayPrefixLength]
-	if _, err := conn.ExecContext(ctx, `
-INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at)
-VALUES (?, ?, ?, ?, ?)`, tokenHash(token), prefix, providerID, "malibu-app", nowText); err != nil {
-		if isActiveProviderTokenConstraintFailure(err) {
-			return "", ErrActiveTokenAlreadyExists
-		}
-		return "", err
-	}
-	if requiresProof {
-		if _, err := conn.ExecContext(ctx, `
-INSERT INTO apptrack_register_reissues (provider_id, ts)
-VALUES (?, ?)`, providerID, nowText); err != nil {
-			return "", err
-		}
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return "", err
-	}
-	committed = true
 	return token, nil
 }
 
@@ -1046,73 +1035,59 @@ func (s *Store) MintPairOTRefresh(ctx context.Context, providerID, sourceIP, use
 	if providerID == "" {
 		return PairOTRefreshResult{}, fmt.Errorf("provider id is required")
 	}
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return PairOTRefreshResult{}, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return PairOTRefreshResult{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+	var result PairOTRefreshResult
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		rows, err := conn.QueryContext(ctx, `SELECT ts FROM pair_ot_mint_log WHERE provider_id = ? AND outcome = 200 AND ts >= ? ORDER BY ts ASC`, providerID, timeText(now.Add(-time.Hour)))
+		if err != nil {
+			return err
 		}
-	}()
-
-	rows, err := conn.QueryContext(ctx, `SELECT ts FROM pair_ot_mint_log WHERE provider_id = ? AND outcome = 200 AND ts >= ? ORDER BY ts ASC`, providerID, timeText(now.Add(-time.Hour)))
-	if err != nil {
-		return PairOTRefreshResult{}, err
-	}
-	count := 0
-	var oldest sql.NullString
-	for rows.Next() {
-		var ts string
-		if err := rows.Scan(&ts); err != nil {
+		count := 0
+		var oldest sql.NullString
+		for rows.Next() {
+			var ts string
+			if err := rows.Scan(&ts); err != nil {
+				rows.Close()
+				return err
+			}
+			if count == 0 {
+				oldest = sql.NullString{String: ts, Valid: true}
+			}
+			count++
+		}
+		if err := rows.Err(); err != nil {
 			rows.Close()
-			return PairOTRefreshResult{}, err
+			return err
 		}
-		if count == 0 {
-			oldest = sql.NullString{String: ts, Valid: true}
-		}
-		count++
-	}
-	if err := rows.Err(); err != nil {
 		rows.Close()
-		return PairOTRefreshResult{}, err
-	}
-	rows.Close()
 
-	if count >= 5 {
+		if count >= 5 {
+			if _, err := conn.ExecContext(ctx, `INSERT INTO pair_ot_mint_log (provider_id, source_ip, user_agent, outcome, ts) VALUES (?, ?, ?, ?, ?)`,
+				providerID, nullString(sourceIP), nullString(userAgent), http.StatusTooManyRequests, timeText(now)); err != nil {
+				return err
+			}
+			result = PairOTRefreshResult{RetryAfter: retryAfterSeconds(oldest, now), RateLimited: true}
+			return nil
+		}
+
+		pairOT, err := randomHex(32)
+		if err != nil {
+			return err
+		}
+		expires := now.Add(10 * time.Minute).UTC()
+		if _, err := conn.ExecContext(ctx, `INSERT INTO pair_ots (id, provider_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, pairOT, providerID, timeText(expires), timeText(now)); err != nil {
+			return err
+		}
 		if _, err := conn.ExecContext(ctx, `INSERT INTO pair_ot_mint_log (provider_id, source_ip, user_agent, outcome, ts) VALUES (?, ?, ?, ?, ?)`,
-			providerID, nullString(sourceIP), nullString(userAgent), http.StatusTooManyRequests, timeText(now)); err != nil {
-			return PairOTRefreshResult{}, err
+			providerID, nullString(sourceIP), nullString(userAgent), http.StatusOK, timeText(now)); err != nil {
+			return err
 		}
-		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-			return PairOTRefreshResult{}, err
-		}
-		committed = true
-		return PairOTRefreshResult{RetryAfter: retryAfterSeconds(oldest, now), RateLimited: true}, nil
-	}
-
-	pairOT, err := randomHex(32)
+		result = PairOTRefreshResult{Mint: PairOTMint{PairOT: pairOT, ExpiresAt: expires}}
+		return nil
+	})
 	if err != nil {
 		return PairOTRefreshResult{}, err
 	}
-	expires := now.Add(10 * time.Minute).UTC()
-	if _, err := conn.ExecContext(ctx, `INSERT INTO pair_ots (id, provider_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, pairOT, providerID, timeText(expires), timeText(now)); err != nil {
-		return PairOTRefreshResult{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `INSERT INTO pair_ot_mint_log (provider_id, source_ip, user_agent, outcome, ts) VALUES (?, ?, ?, ?, ?)`,
-		providerID, nullString(sourceIP), nullString(userAgent), http.StatusOK, timeText(now)); err != nil {
-		return PairOTRefreshResult{}, err
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
-		return PairOTRefreshResult{}, err
-	}
-	committed = true
-	return PairOTRefreshResult{Mint: PairOTMint{PairOT: pairOT, ExpiresAt: expires}}, nil
+	return result, nil
 }
 
 func (s *Store) ConsumePendingPairOT(ctx context.Context, sessionID string, now time.Time) (string, error) {
