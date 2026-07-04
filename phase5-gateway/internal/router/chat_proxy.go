@@ -14,12 +14,14 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/augstar/macprovider-gateway/internal/config"
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
@@ -271,50 +273,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.ReleaseConcurrency(context.Background(), subject.AccountID, requestID(r), s.now())
 	}()
 
-	upReq, err := http.NewRequestWithContext(upCtx, http.MethodPost, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/v1/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
-		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
-		return
-	}
-	copyForwardHeaders(upReq.Header, r.Header)
-	upReq.Header.Set("Content-Type", "application/json")
-	// SPEC-002 §11 + v1.4.2 R-2: forward the gateway-visible request id
-	// (which itself was honored from the buyer's inbound X-Request-ID
-	// when present, else minted by the gateway middleware) so the
-	// coordinator can store it in request_log.external_request_id and
-	// out-of-process auditors can join gateway usage_events with
-	// coordinator request_log on this shared id. Earlier code minted a
-	// fresh UUID here, breaking that join.
-	upReq.Header.Set("X-Request-ID", requestID(r))
-	upReq.Header.Set("X-MacProvider-Gateway-FirstByte-Unix-Ms", strconv.FormatInt(start.UnixMilli(), 10))
-	// SPEC-006 v0.9.1 / SPEC-002 v1.5.0 / issue #211: forward the
-	// gateway's authenticated account id on EVERY forwarded buyer
-	// request — bearer-authenticated and demo subjects alike, both on
-	// the sticky and non-sticky paths. The coordinator persists this
-	// into request_log.account_id; the composite
-	// (account_id, external_request_id) is the reconciliation key
-	// joining gateway usage_events to coordinator request_log (the
-	// composite-PK addendum from #196). Earlier code emitted this
-	// header only inside the sticky-routing conditional below, leaving
-	// the non-sticky hot path account-blind and reopening the
-	// cross-account request_id-collision class on the coordinator
-	// audit-trail side.
-	//
-	// The coordinator treats X-MacProvider-Account as an internal-
-	// routing header (see hasInternalRoutingHeader / selectProviderExcluding
-	// in phase4-coordinator/internal/buyer/server.go) gated by the
-	// gateway-service-token Authorization bearer. To avoid the
-	// coordinator rejecting every non-sticky chat with 400
-	// invalid_request, the upstream Authorization bearer is hoisted
-	// alongside the account header — same pair the sticky path
-	// already sends. M3-2 / SECU-4: prefer ServiceToken when set;
-	// falls back to OperatorKey so a not-yet-upgraded coordinator
-	// keeps accepting us. ISS-211 R1 security audit HIGH.
-	if subject.AccountID != "" {
-		upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
-		upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
-	}
+	internalConversation := ""
 	if s.cfg.Routing.StickyEnabled && !authn.Demo {
 		if tag := strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")); tag != "" {
 			if !validConversationTag(tag) {
@@ -323,12 +282,60 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if metadata, ok := s.coordinatorRoutingMetadata(upCtx); ok && metadata.Sticky.Enabled && metadata.Sticky.TTLSeconds == s.cfg.Routing.StickyTTLS {
-				// Authorization + X-MacProvider-Account already set
-				// unconditionally above (SPEC-006 v0.9.1). The sticky
-				// path's distinguishing header is X-MacProvider-Internal-Conv.
-				upReq.Header.Set("X-MacProvider-Internal-Conv", s.deriveConversationKey(subject.AccountID, tag))
+				internalConversation = s.deriveConversationKey(subject.AccountID, tag)
 			}
 		}
+	}
+	buildUpReq := func() (*http.Request, error) {
+		upReq, err := http.NewRequestWithContext(upCtx, http.MethodPost, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/v1/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		copyForwardHeaders(upReq.Header, r.Header)
+		upReq.Header.Set("Content-Type", "application/json")
+		// SPEC-002 §11 + v1.4.2 R-2: forward the gateway-visible request id
+		// (which itself was honored from the buyer's inbound X-Request-ID
+		// when present, else minted by the gateway middleware) so the
+		// coordinator can store it in request_log.external_request_id and
+		// out-of-process auditors can join gateway usage_events with
+		// coordinator request_log on this shared id. Earlier code minted a
+		// fresh UUID here, breaking that join.
+		upReq.Header.Set("X-Request-ID", requestID(r))
+		upReq.Header.Set("X-MacProvider-Gateway-FirstByte-Unix-Ms", strconv.FormatInt(start.UnixMilli(), 10))
+		// SPEC-006 v0.9.1 / SPEC-002 v1.5.0 / issue #211: forward the
+		// gateway's authenticated account id on EVERY forwarded buyer
+		// request — bearer-authenticated and demo subjects alike, both on
+		// the sticky and non-sticky paths. The coordinator persists this
+		// into request_log.account_id; the composite
+		// (account_id, external_request_id) is the reconciliation key
+		// joining gateway usage_events to coordinator request_log (the
+		// composite-PK addendum from #196). Earlier code emitted this
+		// header only inside the sticky-routing conditional below, leaving
+		// the non-sticky hot path account-blind and reopening the
+		// cross-account request_id-collision class on the coordinator
+		// audit-trail side.
+		//
+		// The coordinator treats X-MacProvider-Account as an internal-
+		// routing header (see hasInternalRoutingHeader / selectProviderExcluding
+		// in phase4-coordinator/internal/buyer/server.go) gated by the
+		// gateway-service-token Authorization bearer. To avoid the
+		// coordinator rejecting every non-sticky chat with 400
+		// invalid_request, the upstream Authorization bearer is hoisted
+		// alongside the account header — same pair the sticky path
+		// already sends. M3-2 / SECU-4: prefer ServiceToken when set;
+		// falls back to OperatorKey so a not-yet-upgraded coordinator
+		// keeps accepting us. ISS-211 R1 security audit HIGH.
+		if subject.AccountID != "" {
+			upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
+			upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
+		}
+		if internalConversation != "" {
+			// Authorization + X-MacProvider-Account are set
+			// unconditionally above (SPEC-006 v0.9.1). The sticky
+			// path's distinguishing header is X-MacProvider-Internal-Conv.
+			upReq.Header.Set("X-MacProvider-Internal-Conv", internalConversation)
+		}
+		return upReq, nil
 	}
 	promptEstimate := estimatePromptTokens(body)
 	// Validation cap uses promptCapTokens (with chat-template headroom)
@@ -337,7 +344,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// promptEstimate so error-path settlement does not over-charge.
 	maxUsageTokens := promptCapTokens(body) + maxTokens
 	structuredStreaming := chat.Stream && chat.hasStructuredOutput()
-	resp, err := s.client.Do(upReq)
+	resp, err := s.doCoordinatorChatWithRetry(upCtx, r, buildUpReq)
 	if err != nil {
 		if structuredStreaming && errors.Is(upCtx.Err(), context.DeadlineExceeded) {
 			if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout") {
@@ -363,6 +370,147 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens)
 }
+
+func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Request, buildUpReq func() (*http.Request, error)) (*http.Response, error) {
+	maxAttempts := 1
+	if s.cfg.Retry503.Enabled {
+		maxAttempts = s.cfg.Retry503.MaxAttempts
+	}
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	totalBackoffMS := int64(0)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := upCtx.Err(); err != nil {
+			return nil, err
+		}
+		upReq, err := buildUpReq()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := s.client.Do(upReq)
+		if err != nil {
+			return nil, err
+		}
+		if !s.cfg.Retry503.Enabled || maxAttempts == 1 || resp.StatusCode != http.StatusServiceUnavailable {
+			if attempt > 1 && resp.StatusCode == http.StatusOK {
+				slog.Info("gateway coord 503 retry recovered",
+					"request_id", requestID(r),
+					"attempt", attempt,
+					"total_backoff_ms", totalBackoffMS,
+				)
+			}
+			return resp, nil
+		}
+		body, readErr := readCoordRetryBody(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			// CODE R1 MEDIUM: preserve the body read-error semantic for
+			// downstream. Wrapping partial bytes in io.NopCloser would
+			// give forwardNonStreamingChat's readLimitedBody a clean EOF
+			// and skip the 502 upstream_provider_error branch, so a
+			// coordinator with a truncated body would be treated as a
+			// complete response. Replay the prefix then surface readErr.
+			resp.Body = &coord503PrefixErrBody{prefix: body, err: readErr}
+		} else {
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		resp.ContentLength = int64(len(body))
+		if readErr != nil || !isCoordNoProviderAvailable503(resp.StatusCode, body) {
+			return resp, nil
+		}
+		if attempt == maxAttempts {
+			slog.Warn("gateway coord 503 retry exhausted",
+				"request_id", requestID(r),
+				"attempts", maxAttempts,
+				"total_backoff_ms", totalBackoffMS,
+			)
+			return resp, nil
+		}
+		if err := upCtx.Err(); err != nil {
+			return resp, nil
+		}
+		backoff := coord503RetryBackoff(attempt, s.cfg.Retry503)
+		slog.Info("gateway coord 503 retry",
+			"request_id", requestID(r),
+			"attempt", attempt+1,
+			"backoff_ms", backoff.Milliseconds(),
+			"body_code", openAIErrorCode(body),
+		)
+		select {
+		case <-time.After(backoff):
+			totalBackoffMS += backoff.Milliseconds()
+			if err := upCtx.Err(); err != nil {
+				return resp, nil
+			}
+			_ = resp.Body.Close()
+		case <-upCtx.Done():
+			return resp, nil
+		}
+	}
+	return nil, upCtx.Err()
+}
+
+func coord503RetryBackoff(attempt int, cfg config.Retry503Config) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	sleepMS := cfg.BackoffBaseMs
+	for i := 1; i < attempt; i++ {
+		if sleepMS >= cfg.BackoffMaxMs {
+			sleepMS = cfg.BackoffMaxMs
+			break
+		}
+		sleepMS *= 2
+		if sleepMS > cfg.BackoffMaxMs {
+			sleepMS = cfg.BackoffMaxMs
+			break
+		}
+	}
+	jittered := int64(sleepMS) + (int64(sleepMS)*int64(rand.IntN(51)-25))/100
+	if jittered < 0 {
+		jittered = 0
+	}
+	return time.Duration(jittered) * time.Millisecond
+}
+
+func readCoordRetryBody(r io.Reader) ([]byte, error) {
+	lr := &io.LimitedReader{R: r, N: maxUpstreamResponseBodyBytes + 1}
+	body, err := io.ReadAll(lr)
+	if err != nil {
+		return body, err
+	}
+	if int64(len(body)) > maxUpstreamResponseBodyBytes {
+		return body, fmt.Errorf("upstream response body exceeds %d bytes", maxUpstreamResponseBodyBytes)
+	}
+	return body, nil
+}
+
+// coord503PrefixErrBody replays a captured body prefix and then surfaces a
+// deferred read error on the next Read call. It is used when the retry loop
+// buffered partial bytes from the coordinator response before hitting a
+// read error; downstream handlers must observe that same error so they can
+// take their upstream-error branch instead of treating a truncated body as
+// complete.
+type coord503PrefixErrBody struct {
+	prefix []byte
+	err    error
+	pos    int
+}
+
+func (b *coord503PrefixErrBody) Read(p []byte) (int, error) {
+	if b.pos < len(b.prefix) {
+		n := copy(p, b.prefix[b.pos:])
+		b.pos += n
+		return n, nil
+	}
+	if b.err != nil {
+		return 0, b.err
+	}
+	return 0, io.EOF
+}
+
+func (b *coord503PrefixErrBody) Close() error { return nil }
 
 func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64) {
 	body, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
@@ -928,6 +1076,34 @@ func coordinatorTier2PolicyError(status int, body []byte) bool {
 	default:
 		return false
 	}
+}
+
+// isCoordNoProviderAvailable503 returns true when the coordinator's
+// response indicates the request MAY succeed on a retry — i.e. the
+// provider pool was momentarily busy. It intentionally does NOT
+// retry:
+//   - null-usage provider errors (billable failures)
+//   - tier2 policy errors (permanent for this request)
+//   - any 5xx other than 503
+func isCoordNoProviderAvailable503(status int, body []byte) bool {
+	if status != http.StatusServiceUnavailable {
+		return false
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return true
+	}
+	var raw any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return true
+	}
+	if isNullUsageProviderError(body) {
+		return false
+	}
+	if coordinatorTier2PolicyError(status, body) {
+		return false
+	}
+	code := openAIErrorCode(body)
+	return code == "" || code == "no_provider_available"
 }
 
 func openAIErrorCode(body []byte) string {
