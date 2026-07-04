@@ -99,3 +99,30 @@ func TestSettlementStreamOutputLatchesDoneAndRejectsPostDoneData(t *testing.T) {
 		t.Fatal("post-[DONE] settlement data accepted")
 	}
 }
+
+func TestSettlementOutputRejectsDuplicateJSONKeys(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"content":"first","tool_calls":[]},"finish_reason":"stop"}],"usage":{"prompt_tokens":1},"usage":{"prompt_tokens":999}}`)
+	if output, ok := settlementOutputFromChatResponseAt(body, billing.TerminalStateNormalDone, 1710000000000); ok || output != nil {
+		t.Fatalf("duplicate-key response accepted: output=%#v ok=%v", output, ok)
+	}
+}
+
+func TestSettlementOutputRejectsDuplicateToolArgumentKeys(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"a\":1,\"a\":2}"}}]},"finish_reason":"tool_calls"}]}`)
+	if output, ok := settlementOutputFromChatResponseAt(body, billing.TerminalStateNormalDone, 1710000000000); ok || output != nil {
+		t.Fatalf("duplicate-key tool arguments accepted: output=%#v ok=%v", output, ok)
+	}
+}
+
+func TestSettlementStreamOutputQuarantinesDuplicateToolArgumentKeys(t *testing.T) {
+	tracker := newSettlementStreamOutputTracker()
+	line := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"a\":1,\"a\":2}"}}]}}]}` + "\n\n")
+	if err := tracker.observeLine(line); err != nil {
+		t.Fatalf("observeLine: %v", err)
+	}
+
+	output := tracker.output(billing.TerminalStateNormalDone)
+	if output.Available {
+		t.Fatalf("output.Available=true, want unavailable for duplicate-key tool arguments: %#v", output)
+	}
+}

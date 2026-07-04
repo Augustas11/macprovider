@@ -3,6 +3,11 @@ listen:
   provider_port: 8444
   bind_address: "127.0.0.1"
 
+coordinator:
+  # Require gateway-supplied internal bearer auth plus X-MacProvider-Account
+  # before accepting buyer chat completions directly on the coordinator.
+  require_gateway_context: true
+
 proxy:
   # CIDR ranges whose X-Forwarded-For / X-Real-IP headers the
   # coordinator honors when deriving the per-source rate-limit key for
@@ -66,6 +71,11 @@ provider_http:
 
 limits:
   max_chat_request_body_bytes: 1048576  # 1 MiB default; raise for buyers with large tools arrays
+
+relay:
+  # Maximum request bytes the coordinator will keep buffered for a provider
+  # websocket relay before dropping the in-flight request.
+  max_request_buffer_bytes: 16777216
 
 ws:
   write_buffer_size: 64

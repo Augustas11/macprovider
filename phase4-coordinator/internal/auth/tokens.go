@@ -43,6 +43,7 @@ var ErrSessionInvalid = errors.New("mp_session invalid")
 var ErrPendingPairOTMissing = errors.New("pending pair_ot missing")
 var ErrAppTrackExistingTokenNoProof = errors.New("existing active token requires current bearer proof")
 var ErrAppTrackReissueCooldown = errors.New("app-track provider token reissue cooldown active")
+var ErrOAuthStateRateLimited = errors.New("oauth state rate limited")
 
 type Store struct {
 	db *sql.DB
@@ -78,6 +79,7 @@ type OAuthState struct {
 	ReturnTo      string
 	PendingPairOT sql.NullString
 	ExpiresAt     string
+	OriginHash    sql.NullString
 }
 
 type MPSession struct {
@@ -312,6 +314,7 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 			state TEXT PRIMARY KEY,
 			return_to TEXT NOT NULL,
 			pending_pair_ot TEXT,
+			origin_hash TEXT,
 			expires_at TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 		)`,
@@ -336,7 +339,34 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := ensureColumnTx(ctx, tx, "oauth_states", "origin_hash", `ALTER TABLE oauth_states ADD COLUMN origin_hash TEXT`); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func ensureColumnTx(ctx context.Context, tx *sql.Tx, table, column, alter string) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, alter)
+	return err
 }
 
 // ensureActiveProviderIDUniqueness installs the SPEC-003 v0.8.2 partial
@@ -818,32 +848,69 @@ ON CONFLICT(github_user_id) DO UPDATE SET github_login = excluded.github_login, 
 }
 
 func (s *Store) CreateOAuthState(ctx context.Context, state, returnTo string, pendingPairOT *string, now time.Time) error {
+	return s.CreateOAuthStateBound(ctx, state, returnTo, pendingPairOT, "", now)
+}
+
+func (s *Store) CreateOAuthStateBound(ctx context.Context, state, returnTo string, pendingPairOT *string, originHash string, now time.Time) error {
 	if state == "" || returnTo == "" {
 		return fmt.Errorf("oauth state and return_to are required")
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var pending any
 	if pendingPairOT != nil {
 		pending = *pendingPairOT
 	}
-	_, err := s.db.ExecContext(ctx, `
-INSERT INTO oauth_states (state, return_to, pending_pair_ot, expires_at, created_at)
-VALUES (?, ?, ?, ?, ?)`,
-		state, returnTo, pending, timeText(now.Add(10*time.Minute)), timeText(now))
-	return err
+	var origin any
+	if originHash != "" {
+		origin = originHash
+		if _, err := tx.ExecContext(ctx, `DELETE FROM oauth_states WHERE expires_at <= ?`, timeText(now)); err != nil {
+			return err
+		}
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM oauth_states WHERE origin_hash = ? AND created_at > ?`, originHash, timeText(now.Add(-10*time.Minute))).Scan(&active); err != nil {
+			return err
+		}
+		if active >= 20 {
+			return ErrOAuthStateRateLimited
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO oauth_states (state, return_to, pending_pair_ot, origin_hash, expires_at, created_at)
+VALUES (?, ?, ?, ?, ?, ?)`,
+		state, returnTo, pending, origin, timeText(now.Add(10*time.Minute)), timeText(now)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ConsumeOAuthState(ctx context.Context, state string, now time.Time) (OAuthState, bool, error) {
+	return s.ConsumeOAuthStateBound(ctx, state, "", now)
+}
+
+func (s *Store) ConsumeOAuthStateBound(ctx context.Context, state, originHash string, now time.Time) (OAuthState, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return OAuthState{}, false, err
 	}
 	defer tx.Rollback()
 	var out OAuthState
-	err = tx.QueryRowContext(ctx, `
+	query := `
 DELETE FROM oauth_states
  WHERE state = ? AND expires_at > ?
-RETURNING return_to, pending_pair_ot, expires_at`,
-		state, timeText(now)).Scan(&out.ReturnTo, &out.PendingPairOT, &out.ExpiresAt)
+RETURNING return_to, pending_pair_ot, expires_at, origin_hash`
+	args := []any{state, timeText(now)}
+	if originHash != "" {
+		query = `
+DELETE FROM oauth_states
+ WHERE state = ? AND expires_at > ? AND (origin_hash = ? OR origin_hash IS NULL OR origin_hash = '')
+RETURNING return_to, pending_pair_ot, expires_at, origin_hash`
+		args = append(args, originHash)
+	}
+	err = tx.QueryRowContext(ctx, query, args...).Scan(&out.ReturnTo, &out.PendingPairOT, &out.ExpiresAt, &out.OriginHash)
 	if err == sql.ErrNoRows {
 		return OAuthState{}, false, nil
 	}

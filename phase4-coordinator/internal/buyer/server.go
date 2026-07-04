@@ -137,6 +137,7 @@ type Server struct {
 	stickyMismatchLimiter *stickyMismatchLimiter
 	internalAuthKey       string
 	gatewayServiceToken   string
+	requireGatewayContext bool
 	tier2Mu               sync.RWMutex
 	tier2                 config.Tier2Config
 	reqLog                requestLogInserter
@@ -187,6 +188,7 @@ type Option func(*Server)
 
 type requestLogInserter interface {
 	Insert(context.Context, requestlog.Row) error
+	InsertForAccount(context.Context, requestlog.AuthenticatedAccount, requestlog.Row) error
 }
 
 type wsForwardResult string
@@ -375,6 +377,12 @@ func WithGatewayServiceToken(token string) Option {
 	}
 }
 
+func WithRequireGatewayContext(require bool) Option {
+	return func(s *Server) {
+		s.requireGatewayContext = require
+	}
+}
+
 func WithRelay(fn RelayFunc, timeout time.Duration) Option {
 	return func(s *Server) {
 		s.relay = fn
@@ -553,8 +561,36 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/catalog/pubkey", s.handleCatalogPubkey)
 	r.Get("/catalog/{catalog_id}", s.handleCatalogFile)
 	r.Get("/metrics/streaming", s.handleStreamingMetrics)
-	r.Post("/v1/chat/completions", s.handleChatCompletions)
+	r.With(s.gatewayContextMiddleware).Post("/v1/chat/completions", s.handleChatCompletions)
 	return r
+}
+
+type authenticatedAccountContextKey struct{}
+
+func (s *Server) gatewayContextMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireGatewayContext {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !s.internalBearerAuthorizedRemote(r.Header, r.RemoteAddr) {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Gateway context is required")
+			return
+		}
+		accountID := sanitizeAccountID(r.Header.Get("X-MacProvider-Account"))
+		account, err := requestlog.NewAuthenticatedAccount(accountID)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Gateway account context is required")
+			return
+		}
+		ctx := context.WithValue(r.Context(), authenticatedAccountContextKey{}, account)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func authenticatedAccountFromContext(ctx context.Context) (requestlog.AuthenticatedAccount, bool) {
+	account, ok := ctx.Value(authenticatedAccountContextKey{}).(requestlog.AuthenticatedAccount)
+	return account, ok
 }
 
 func (s *Server) handleStreamingMetrics(w http.ResponseWriter, r *http.Request) {
@@ -1415,6 +1451,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// pre-SPEC-006 v0.9.1 gateways that only emit this header on the
 	// sticky path.
 	accountID := sanitizeAccountID(r.Header.Get("X-MacProvider-Account"))
+	authenticatedAccount, hasAuthenticatedAccount := authenticatedAccountFromContext(r.Context())
+	if hasAuthenticatedAccount {
+		accountID = authenticatedAccount.ID()
+	}
 	requestID := requestIDForBuyerRequest()
 	routingRequestID := uuid.NewString()
 	originalRequestID := requestID
@@ -1444,7 +1484,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// setRequestID land before the first provider-bound recordRow call,
 	// preserving the pre-refactor closure's "latest value at fire time"
 	// semantics for what used to be captured outer-scope variables.
-	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID)
+	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID, authenticatedAccount, hasAuthenticatedAccount)
 	if !contentEncodingSupported(r.Header.Values("Content-Encoding")) {
 		msg := "v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding` header; compressed request bodies are deferred to v0.2 per §10."
 		rec.logBuyerFailure(http.StatusUnsupportedMediaType, msg)
@@ -1479,7 +1519,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		bodyHash := sha256.Sum256(body)
-		reservedRequestID, replay, err := s.reqLogStore.ReserveIdempotencyKey(r.Context(), accountID, idempotencyKey, hex.EncodeToString(bodyHash[:]), originalRequestID, startedAt)
+		var reservedRequestID string
+		var replay bool
+		var err error
+		if hasAuthenticatedAccount {
+			reservedRequestID, replay, err = s.reqLogStore.ReserveIdempotencyKeyForAccount(r.Context(), authenticatedAccount, idempotencyKey, hex.EncodeToString(bodyHash[:]), originalRequestID, startedAt)
+		} else {
+			reservedRequestID, replay, err = s.reqLogStore.ReserveIdempotencyKey(r.Context(), accountID, idempotencyKey, hex.EncodeToString(bodyHash[:]), originalRequestID, startedAt)
+		}
 		if err != nil {
 			if errors.Is(err, requestlog.ErrIdempotencyConflict) {
 				rec.logBuyerFailure(http.StatusConflict, "Idempotency-Key was already used with a different request body")

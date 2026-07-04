@@ -18,6 +18,9 @@ func settlementOutputFromChatResponse(body []byte, terminalState string) (*billi
 }
 
 func settlementOutputFromChatResponseAt(body []byte, terminalState string, terminalStateTSUnixMS int64) (*billing.SettlementOutput, bool) {
+	if hasDuplicateJSONKeys(body) {
+		return nil, false
+	}
 	var resp struct {
 		Choices []struct {
 			Message struct {
@@ -103,7 +106,7 @@ func settlementToolCallsFromRaw(raw []json.RawMessage) ([]billing.SettlementTool
 		if err := json.Unmarshal(item, &call); err != nil {
 			return nil, false
 		}
-		if call.ID == "" || call.Type != "function" || call.Function.Name == "" || !json.Valid([]byte(call.Function.Arguments)) {
+		if call.ID == "" || call.Type != "function" || call.Function.Name == "" || !validSettlementToolArguments(call.Function.Arguments) {
 			return nil, false
 		}
 		out = append(out, billing.SettlementToolCall{
@@ -152,6 +155,9 @@ func (t *settlementStreamOutputTracker) observeLine(line []byte) error {
 	}
 	if !strings.HasPrefix(strings.TrimSpace(data), "{") {
 		return fmt.Errorf("settlement stream data is not JSON")
+	}
+	if hasDuplicateJSONKeys([]byte(data)) {
+		return fmt.Errorf("settlement stream data contains duplicate JSON object keys")
 	}
 	var chunk struct {
 		Choices []struct {
@@ -206,6 +212,56 @@ func (t *settlementStreamOutputTracker) observeLine(line []byte) error {
 	return nil
 }
 
+func hasDuplicateJSONKeys(data []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	return objectHasDuplicateJSONKeys(dec)
+}
+
+func validSettlementToolArguments(arguments string) bool {
+	data := []byte(arguments)
+	return json.Valid(data) && !hasDuplicateJSONKeys(data)
+}
+
+func objectHasDuplicateJSONKeys(dec *json.Decoder) bool {
+	tok, err := dec.Token()
+	if err != nil {
+		return false
+	}
+	switch delim := tok.(type) {
+	case json.Delim:
+		switch delim {
+		case '{':
+			seen := map[string]struct{}{}
+			for dec.More() {
+				keyTok, err := dec.Token()
+				if err != nil {
+					return false
+				}
+				key, ok := keyTok.(string)
+				if !ok {
+					return false
+				}
+				if _, exists := seen[key]; exists {
+					return true
+				}
+				seen[key] = struct{}{}
+				if objectHasDuplicateJSONKeys(dec) {
+					return true
+				}
+			}
+			_, _ = dec.Token()
+		case '[':
+			for dec.More() {
+				if objectHasDuplicateJSONKeys(dec) {
+					return true
+				}
+			}
+			_, _ = dec.Token()
+		}
+	}
+	return false
+}
+
 func settlementSSEDataValue(line string) (string, bool) {
 	if !strings.HasPrefix(line, "data:") {
 		return "", false
@@ -252,7 +308,7 @@ func (t *settlementStreamOutputTracker) outputAt(terminalState string, terminalS
 		if call == nil || call.id == "" || call.name == "" {
 			return settlementOutputUnavailableFor(terminalState)
 		}
-		if !json.Valid([]byte(call.arguments)) {
+		if !validSettlementToolArguments(call.arguments) {
 			return settlementOutputUnavailableFor(terminalState)
 		}
 		typ := call.typ

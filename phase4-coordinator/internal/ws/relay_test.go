@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -334,6 +335,178 @@ func TestEncryptedRelayDecryptsResponseEnd(t *testing.T) {
 	}
 }
 
+func TestEncryptedRelayRoutesEndByAADWhenPlaintextRequestIDDiffers(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-aad", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+	before := RelayEndFrameAADMismatchTotalForTest()
+	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-aad", false, 0, InferenceResponseEnd{
+		Type:      "inference_response_end",
+		RequestID: "req-plaintext",
+		Status:    "complete",
+	}))
+	select {
+	case end := <-relay.Done:
+		if end.RequestID != "req-aad" || end.Status != "complete" {
+			t.Fatalf("end=%#v, want AAD-routed request id", end)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("decrypted end timeout")
+	}
+	if got := RelayEndFrameAADMismatchTotalForTest(); got != before+1 {
+		t.Fatalf("mismatch counter=%d, want %d", got, before+1)
+	}
+}
+
+func TestRelayRequestBufferCapDropsRequest(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+	cfg := config.Default()
+	cfg.Relay.MaxRequestBufferBytes = 4
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "p1",
+		AssignedID:     "s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, serverConn)
+	s := NewServer(cfg, registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", serverConn, 4)
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-cap", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+	before := RelayBufferExceededTotalForTest()
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-cap", Seq: 0, Data: "12345"}))
+	select {
+	case err := <-relay.Errors:
+		if !errors.Is(err, ErrRelayBufferExceeded) {
+			t.Fatalf("err=%v, want ErrRelayBufferExceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("buffer exceeded error timeout")
+	}
+	if got := RelayBufferExceededTotalForTest(); got != before+1 {
+		t.Fatalf("buffer counter=%d, want %d", got, before+1)
+	}
+}
+
+func TestRelayRequestBufferCapCountsChunksUntilBuyerReads(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+	cfg := config.Default()
+	cfg.Relay.MaxRequestBufferBytes = 4
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "p1",
+		AssignedID:     "s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, serverConn)
+	s := NewServer(cfg, registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", serverConn, 4)
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-cap-slow", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-cap-slow", Seq: 0, Data: "1234"}))
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-cap-slow", Seq: 1, Data: "x"}))
+	select {
+	case err := <-relay.Errors:
+		if !errors.Is(err, ErrRelayBufferExceeded) {
+			t.Fatalf("err=%v, want ErrRelayBufferExceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("buffer exceeded error timeout")
+	}
+}
+
+func TestRelayRequestBufferCapReleasesDeliveredChunks(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+	cfg := config.Default()
+	cfg.Relay.MaxRequestBufferBytes = 4
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "p1",
+		AssignedID:     "s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, serverConn)
+	s := NewServer(cfg, registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", serverConn, 4)
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-cap-release", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-cap-release", Seq: 0, Data: "1234"}))
+	select {
+	case chunk := <-relay.Chunks:
+		if chunk.Data != "1234" {
+			t.Fatalf("chunk data=%q, want 1234", chunk.Data)
+		}
+	case err := <-relay.Errors:
+		t.Fatalf("unexpected relay error before release: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("first chunk timeout")
+	}
+
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{Type: "inference_response_chunk", RequestID: "req-cap-release", Seq: 1, Data: "abcd"}))
+	select {
+	case chunk := <-relay.Chunks:
+		if chunk.Data != "abcd" {
+			t.Fatalf("chunk data=%q, want abcd", chunk.Data)
+		}
+	case err := <-relay.Errors:
+		t.Fatalf("buffer accounting did not release delivered chunk: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("second chunk timeout")
+	}
+}
+
 func TestEncryptedRelayDropsLateEndForRetiredRequest(t *testing.T) {
 	var logs bytes.Buffer
 	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, config.Default(), zerolog.New(&logs), time.Now())
@@ -460,6 +633,11 @@ func TestEncryptedRelayRekeysAfterRequestThreshold(t *testing.T) {
 		t.Fatalf("read encrypted inference_request: %v", err)
 	}
 	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-rekey", false, 0, []byte(`{"ok":true}`)))
+	select {
+	case <-relay.Chunks:
+	case <-time.After(time.Second):
+		t.Fatal("chunk timeout")
+	}
 	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-rekey", false, 1, InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-rekey", Status: "complete", ChunksSent: 1}))
 
 	select {
@@ -507,6 +685,11 @@ func TestEncryptedRelayDefersRekeyCloseUntilActiveCompletes(t *testing.T) {
 	}
 
 	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-rekey-active", false, 0, []byte(`{"ok":true}`)))
+	select {
+	case <-relay.Chunks:
+	case <-time.After(time.Second):
+		t.Fatal("chunk timeout")
+	}
 	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-rekey-active", false, 1, InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-rekey-active", Status: "complete", ChunksSent: 1}))
 
 	select {

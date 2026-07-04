@@ -51,8 +51,19 @@ type CacheBillingRoutingDecision struct {
 }
 
 func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
+	return s.writeHotPath(ctx, reqLogStore, nil, reqRow, in)
+}
+
+func (s *Store) WriteHotPathForAccount(ctx context.Context, reqLogStore *requestlog.Store, account requestlog.AuthenticatedAccount, reqRow requestlog.Row, in HotPathInput) error {
+	return s.writeHotPath(ctx, reqLogStore, &account, reqRow, in)
+}
+
+func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store, account *requestlog.AuthenticatedAccount, reqRow requestlog.Row, in HotPathInput) error {
 	boundProviderReportedPromptTokens(&in)
 	reqRow = requestLogRowWithBoundedPrompt(reqRow, in)
+	if account != nil {
+		reqRow.AccountID = account.ID()
+	}
 	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		if err := reqLogStore.InsertExec(ctx, conn, reqRow); err != nil {
 			return err
@@ -273,6 +284,14 @@ func logCacheBillingRoutingDecision(in HotPathInput, validationReason string) {
 }
 
 func (s *Store) WriteRequestLogWithIdentity(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
+	return s.writeRequestLogWithIdentity(ctx, reqLogStore, nil, reqRow, in)
+}
+
+func (s *Store) WriteRequestLogWithIdentityForAccount(ctx context.Context, reqLogStore *requestlog.Store, account requestlog.AuthenticatedAccount, reqRow requestlog.Row, in HotPathInput) error {
+	return s.writeRequestLogWithIdentity(ctx, reqLogStore, &account, reqRow, in)
+}
+
+func (s *Store) writeRequestLogWithIdentity(ctx context.Context, reqLogStore *requestlog.Store, account *requestlog.AuthenticatedAccount, reqRow requestlog.Row, in HotPathInput) error {
 	if in.ProviderReportedPromptTokens == nil {
 		in.ProviderReportedPromptTokens = cloneInt64Ptr(in.PromptTokens)
 		if in.ProviderReportedPromptTokens == nil {
@@ -280,6 +299,9 @@ func (s *Store) WriteRequestLogWithIdentity(ctx context.Context, reqLogStore *re
 		}
 	}
 	reqRow = requestLogRowWithBoundedPrompt(reqRow, in)
+	if account != nil {
+		reqRow.AccountID = account.ID()
+	}
 	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		if err := reqLogStore.InsertExec(ctx, conn, reqRow); err != nil {
 			return err
