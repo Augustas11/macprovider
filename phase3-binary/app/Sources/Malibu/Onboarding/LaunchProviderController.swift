@@ -523,7 +523,8 @@ struct StartupState: Equatable {
     static func applyMigrationDecision(
         _ decision: MigrationDecision,
         paths: ProviderPaths = .current,
-        now: Date = Date()
+        now: Date = Date(),
+        onboardingV2Enabled: Bool? = nil
     ) async throws -> MigrationResult {
         switch decision {
         case .importExisting:
@@ -531,7 +532,24 @@ struct StartupState: Equatable {
             return MigrationResult(route: .startAgent, backupPath: nil)
         case .startFresh:
             let backup = try ProviderConfig.startFreshMovingCLIConfigAside(now: now, paths: paths)
-            return MigrationResult(route: .showOnboarding, backupPath: backup?.path)
+            let effectiveOnboardingV2Enabled: Bool
+            if let onboardingV2Enabled {
+                effectiveOnboardingV2Enabled = onboardingV2Enabled
+            } else {
+                effectiveOnboardingV2Enabled = await MainActor.run {
+                    LaunchProviderController.isOnboardingV2Enabled
+                }
+            }
+            let fresh = StartupState(
+                configExists: false,
+                appMarkerExists: false,
+                providerTokenExists: false,
+                identityExists: false,
+                onboardingStateExists: false,
+                firstServingAtExists: false,
+                onboardingV2Enabled: effectiveOnboardingV2Enabled
+            )
+            return MigrationResult(route: fresh.route(), backupPath: backup?.path)
         case .cancel:
             return MigrationResult(route: .quit, backupPath: nil)
         }

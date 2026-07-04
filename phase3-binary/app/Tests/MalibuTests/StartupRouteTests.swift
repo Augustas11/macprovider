@@ -72,22 +72,25 @@ final class StartupRouteTests: XCTestCase {
         XCTAssertEqual(importedToken, "secret-token")
     }
 
-    func testMigrationStartFreshMovesConfigAside() async throws {
-        let paths = try makeTempPaths()
-        try paths.ensureDirectories()
-        try "provider_id: p_old\nprovider_token: old-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
-        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+    func testMigrationStartFreshMovesConfigAsideAndReclassifiesFreshByFlag() async throws {
+        for (enabled, expectedRoute) in [(false, StartupRoute.setupPaused), (true, .showOnboarding)] {
+            let paths = try makeTempPaths()
+            try paths.ensureDirectories()
+            try "provider_id: p_old\nprovider_token: old-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+            defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+            defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
 
-        let result = try await StartupState.applyMigrationDecision(
-            .startFresh,
-            paths: paths,
-            now: Date(timeIntervalSince1970: 1_783_082_460)
-        )
-        XCTAssertEqual(result.route, .showOnboarding)
-        XCTAssertNotNil(result.backupPath)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: result.backupPath!))
+            let result = try await StartupState.applyMigrationDecision(
+                .startFresh,
+                paths: paths,
+                now: Date(timeIntervalSince1970: 1_783_082_460),
+                onboardingV2Enabled: enabled
+            )
+            XCTAssertEqual(result.route, expectedRoute)
+            XCTAssertNotNil(result.backupPath)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: result.backupPath!))
+        }
     }
 
     func testMigrationCancelTouchesNoFiles() async throws {
