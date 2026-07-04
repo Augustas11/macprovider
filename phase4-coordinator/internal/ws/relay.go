@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -16,14 +17,18 @@ import (
 )
 
 var (
-	ErrRelayBackpressure = errors.New("provider websocket write buffer full")
-	ErrRelayNAKFallback  = errors.New("provider rejected ws-tunneled inference")
-	ErrRelayClosed       = errors.New("provider websocket closed")
-	ErrRelayTimeout      = errors.New("provider websocket inference timed out")
-	ErrRelayAEADFailed   = errors.New("tier2 aead decrypt failed")
+	ErrRelayBackpressure   = errors.New("provider websocket write buffer full")
+	ErrRelayNAKFallback    = errors.New("provider rejected ws-tunneled inference")
+	ErrRelayClosed         = errors.New("provider websocket closed")
+	ErrRelayTimeout        = errors.New("provider websocket inference timed out")
+	ErrRelayAEADFailed     = errors.New("tier2 aead decrypt failed")
+	ErrRelayBufferExceeded = errors.New("relay_buffer_exceeded")
 )
 
 const retiredRelayRequestTTL = 5 * time.Minute
+
+var relayEndFrameAADMismatchTotal atomic.Uint64
+var relayBufferExceededTotal atomic.Uint64
 
 type RelayStream struct {
 	RequestID string
@@ -55,11 +60,74 @@ func ConversationKeyFromContext(ctx context.Context) string {
 }
 
 type relayActive struct {
-	requestID string
-	stream    bool
-	chunks    chan InferenceResponseChunk
-	done      chan InferenceResponseEnd
-	errs      chan error
+	requestID     string
+	stream        bool
+	bufferMu      sync.Mutex
+	bufferedBytes int64
+	chunks        chan InferenceResponseChunk
+	done          chan InferenceResponseEnd
+	errs          chan error
+}
+
+func (a *relayActive) delivered(ctx context.Context) (<-chan InferenceResponseChunk, <-chan InferenceResponseEnd) {
+	outChunks := make(chan InferenceResponseChunk)
+	outDone := make(chan InferenceResponseEnd, 1)
+	go func() {
+		defer close(outChunks)
+		for chunk := range a.chunks {
+			n := len([]byte(chunk.Data))
+			select {
+			case outChunks <- chunk:
+				a.releaseBufferedBytes(n)
+			case <-ctx.Done():
+				a.releaseBufferedBytes(n)
+				return
+			}
+		}
+		select {
+		case end := <-a.done:
+			select {
+			case outDone <- end:
+			case <-ctx.Done():
+			}
+		default:
+		}
+	}()
+	return outChunks, outDone
+}
+
+func (a *relayActive) reserveBufferedBytes(limit int64, n int) bool {
+	if a == nil || n <= 0 || limit <= 0 {
+		return true
+	}
+	a.bufferMu.Lock()
+	defer a.bufferMu.Unlock()
+	next := a.bufferedBytes + int64(n)
+	if next > limit {
+		return false
+	}
+	a.bufferedBytes = next
+	return true
+}
+
+func (a *relayActive) releaseBufferedBytes(n int) {
+	if a == nil || n <= 0 {
+		return
+	}
+	a.bufferMu.Lock()
+	defer a.bufferMu.Unlock()
+	a.bufferedBytes -= int64(n)
+	if a.bufferedBytes < 0 {
+		a.bufferedBytes = 0
+	}
+}
+
+func RelayEndFrameAADMismatchTotalForTest() uint64 {
+	return relayEndFrameAADMismatchTotal.Load()
+}
+
+func RelayBufferExceededTotalForTest() uint64 {
+	return relayBufferExceededTotal.Load()
 }
 
 type retiredRelayRequest struct {
@@ -612,10 +680,11 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 			session.cancelActive(requestID, "buyer_disconnected", ErrRelayClosed)
 		}
 	}()
+	chunks, done := active.delivered(ctx)
 	return &RelayStream{
 		RequestID: requestID,
-		Chunks:    active.chunks,
-		Done:      active.done,
+		Chunks:    chunks,
+		Done:      done,
 		Errors:    active.errs,
 		cancel:    cancel,
 	}, nil
@@ -703,6 +772,12 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 		s.log.Warn().Str("provider_id", providerID).Str("request_id", chunk.RequestID).Msg("unknown inference_response_chunk request_id")
 		return
 	}
+	if s.relayChunkWouldExceed(active, len([]byte(chunk.Data))) {
+		relayBufferExceededTotal.Add(1)
+		s.log.Warn().Str("provider_id", providerID).Str("assigned_id", assignedID).Str("request_id", chunk.RequestID).Msg("relay buffer cap exceeded")
+		session.cancelActive(chunk.RequestID, "relay_buffer_exceeded", ErrRelayBufferExceeded)
+		return
+	}
 	select {
 	case active.chunks <- chunk:
 	default:
@@ -714,6 +789,10 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 			close(active.chunks)
 		}
 	}
+}
+
+func (s *Server) relayChunkWouldExceed(active *relayActive, n int) bool {
+	return !active.reserveBufferedBytes(s.cfg.RelayMaxRequestBufferBytes(), n)
 }
 
 func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byte) {
@@ -767,6 +846,16 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
 			return
 		}
+		if opened.RequestID != "" && opened.RequestID != requestID {
+			relayEndFrameAADMismatchTotal.Add(1)
+			s.log.Warn().
+				Str("provider_id", providerID).
+				Str("assigned_id", assignedID).
+				Str("aad_request_id", requestID).
+				Str("plaintext_request_id", opened.RequestID).
+				Msg("encrypted inference_response_end request_id mismatch; routing by AAD")
+		}
+		opened.RequestID = requestID
 		end = opened
 	} else if session.hasTier2Session() {
 		requestID := envelope.RequestID
