@@ -127,8 +127,9 @@ type Result struct {
 	// background traffic from other buyers; triage decides. Despite the
 	// legacy field name, fallback settlements are included too: they are
 	// still settlement rows and must not be invisible to the hard gate.
-	UnmatchedGatewayOKRows      []string `json:"unmatched_gateway_ok_rows,omitempty"`
-	GatewaySettlementRequestIDs []string `json:"gateway_settlement_request_ids,omitempty"`
+	UnmatchedGatewayOKRows      []string                    `json:"unmatched_gateway_ok_rows,omitempty"`
+	GatewaySettlementRequestIDs []string                    `json:"gateway_settlement_request_ids,omitempty"`
+	GatewaySettlementRequests   []SettlementRequestIdentity `json:"gateway_settlement_requests,omitempty"`
 
 	// UnmatchedCoordinator2xxRows lists coord charged ledger rows with
 	// 2xx status that did NOT match any harness success. Symmetric with
@@ -290,6 +291,11 @@ type MatchedPair struct {
 	HarnessSSEErrorCode string `json:"harness_sse_error_code,omitempty"`
 }
 
+type SettlementRequestIdentity struct {
+	AccountID string `json:"account_id,omitempty"`
+	RequestID string `json:"request_id"`
+}
+
 // snapshotWindow returns the SQL query bounds for a reconcile run.
 // Forward-only pad: gateway settlement happens AFTER the harness
 // observes the response, so the upper bound extends `endUTC` forward
@@ -398,6 +404,10 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 	for _, g := range gwRows {
 		if isSettlementComplete(g.Outcome) {
 			r.GatewaySettlementRequestIDs = append(r.GatewaySettlementRequestIDs, g.RequestID)
+			r.GatewaySettlementRequests = append(r.GatewaySettlementRequests, SettlementRequestIdentity{
+				AccountID: g.AccountID,
+				RequestID: g.RequestID,
+			})
 		}
 		switch {
 		case g.Outcome == "ok":
@@ -415,6 +425,7 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 	}
 
 	r.DriftBasis = "per_matched_pair_v2"
+	seedHarnessAccountIDFromGatewaySettlements(r, results, gwRows)
 	leftoverGw, leftoverCoord := matchPairs(r, results, gwRows, coordRows)
 	computePerPairDrift(r)
 	collectUnmatchedGatewayOK(r, leftoverGw)
@@ -735,6 +746,35 @@ func matchPairs(r *Result, results []buyer.Result, gwRows []gwRow, coordRows []c
 	stillDeferred := matchExactPass(r, deferredResults, &gwPool, &coordPool)
 	matchFuzzyPass(r, stillDeferred, &gwPool, &coordPool)
 	return gwPool, coordPool
+}
+
+func seedHarnessAccountIDFromGatewaySettlements(r *Result, results []buyer.Result, gwRows []gwRow) {
+	if r == nil || !r.GatewayHasAccountID || r.HarnessAccountID != "" {
+		return
+	}
+	ids := make(map[string]bool, len(results))
+	for _, h := range results {
+		if h.RequestID != "" {
+			ids[h.RequestID] = true
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	accounts := map[string]bool{}
+	for _, g := range gwRows {
+		if !ids[g.RequestID] || !isSettlementComplete(g.Outcome) || g.AccountID == "" {
+			continue
+		}
+		accounts[g.AccountID] = true
+	}
+	if len(accounts) != 1 {
+		return
+	}
+	for accountID := range accounts {
+		r.HarnessAccountID = accountID
+		return
+	}
 }
 
 // exactPickStatus distinguishes "no exact candidate" from "ambiguous"

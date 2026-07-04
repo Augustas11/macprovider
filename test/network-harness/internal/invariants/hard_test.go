@@ -187,6 +187,45 @@ func TestCheckI2_FailsWhen5xxHasNoGatewaySettlementRow(t *testing.T) {
 	}
 }
 
+func TestCheckI2_FailsWhen5xxSettlementBelongsToForeignAccount(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 502, RequestID: "req-5xx"}}
+	ledger := &reconcile.Result{
+		GatewayHasAccountID: true,
+		HarnessAccountID:    "acct-harness",
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			AccountID: "acct-foreign",
+			RequestID: "req-5xx",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if c.Passed || c.Skipped {
+		t.Fatalf("I2 should fail foreign-account 5xx settlement row: %+v", c)
+	}
+	if !contains(c.OffendingIDs, "req-5xx") {
+		t.Fatalf("offending IDs=%v want req-5xx", c.OffendingIDs)
+	}
+}
+
+func TestCheckI2_PassesWhen5xxSettlementMatchesHarnessAccount(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 502, RequestID: "req-5xx"}}
+	ledger := &reconcile.Result{
+		GatewayHasAccountID: true,
+		HarnessAccountID:    "acct-harness",
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			AccountID: "acct-harness",
+			RequestID: "req-5xx",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if !c.Passed {
+		t.Fatalf("I2 should pass account-scoped 5xx settlement row: %+v", c)
+	}
+}
+
 func TestCheckI3_FailsWhenGatewayOverbillExceedsTolerance(t *testing.T) {
 	sc := &scenario.Scenario{ChargedDeliveredToleranceTokens: 2}
 	ledger := &reconcile.Result{

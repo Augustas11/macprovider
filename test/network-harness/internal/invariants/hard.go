@@ -238,8 +238,17 @@ func checkI2(results []buyer.Result, ledger *reconcile.Result) Check {
 		return c
 	}
 	settled := map[string]bool{}
-	for _, id := range ledger.GatewaySettlementRequestIDs {
-		settled[id] = true
+	if ledger.GatewayHasAccountID {
+		for _, row := range ledger.GatewaySettlementRequests {
+			if row.AccountID == "" || row.RequestID == "" {
+				continue
+			}
+			settled[row.AccountID+"|"+row.RequestID] = true
+		}
+	} else {
+		for _, id := range ledger.GatewaySettlementRequestIDs {
+			settled[id] = true
+		}
 	}
 	for _, r := range results {
 		if r.HTTPStatus < 500 || r.HTTPStatus >= 600 {
@@ -248,6 +257,16 @@ func checkI2(results []buyer.Result, ledger *reconcile.Result) Check {
 		fiveXX++
 		if r.RequestID == "" {
 			orphans = append(orphans, fmt.Sprintf("buyer=%d req=%d", r.BuyerIndex, r.RequestIndex))
+			continue
+		}
+		if ledger.GatewayHasAccountID {
+			if ledger.HarnessAccountID == "" {
+				orphans = append(orphans, r.RequestID)
+				continue
+			}
+			if !settled[ledger.HarnessAccountID+"|"+r.RequestID] {
+				orphans = append(orphans, r.RequestID)
+			}
 			continue
 		}
 		if !settled[r.RequestID] {

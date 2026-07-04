@@ -365,6 +365,9 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 	}
 	billableInput := observedInput
 	billableOutput := observedOutput
+	if in.PromptTokenUpperBound != nil && billableInput > *in.PromptTokenUpperBound {
+		billableInput = *in.PromptTokenUpperBound
+	}
 	if usageSource == billing.UsageSourceByteEstimated {
 		billableInput = 0
 		billableOutput = 0
