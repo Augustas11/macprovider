@@ -26,6 +26,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
+	"github.com/augstar/macprovider-coordinator/internal/stats/poolsnapshot"
 	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
 	statsstore "github.com/augstar/macprovider-coordinator/internal/stats/store"
 
@@ -260,12 +261,12 @@ func main() {
 	// SPEC §7.2.5 the rollup MUST NOT use Reader / ProviderPortal
 	// pools — `New(statsPools.Rollup, ...)` enforces.
 	//
-	// The default SnapshotProvider (ZeroSnapshotProvider) returns
-	// zero values for the §5.1.1 live-snapshot fields (nodes_*,
-	// bandwidth_*, network_*, *_cores_total, models_serving).
-	// Operators with a real pool.Registry-derived snapshot wire
-	// it by injecting a custom SnapshotProvider here. v0.1 IMPL
-	// ships the zero default with an OPS.md note.
+	// poolsnapshot.New wires the live §5.1.1 snapshot fields
+	// (nodes_online, nodes_hardware_attested, utilization, RAM,
+	// models_serving) from the in-process pool.Registry. Fields that
+	// need per-chip hardware profiles (bandwidth, power, GPU/CPU cores)
+	// stay at zero until a chip-identity join with SPEC-026 onboarding
+	// lands — see poolsnapshot package docs.
 	var statsRollup *statsrollup.Runner
 	if statsPools != nil {
 		// Round-1 ARCH r1 HIGH 2 fix: BackfillMode must be the
@@ -318,7 +319,7 @@ func main() {
 			LateEventsLookbackHours: cfg.Stats.Rollup.LateEventsLookbackHours,
 		}
 		var err error
-		statsRollup, err = statsrollup.New(statsPools.Rollup, rollupCfg, statsrollup.ZeroSnapshotProvider{}, logger.With().Str("subsystem", "stats_rollup").Logger())
+		statsRollup, err = statsrollup.New(statsPools.Rollup, rollupCfg, poolsnapshot.New(registry), logger.With().Str("subsystem", "stats_rollup").Logger())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "stats rollup: %v\n", err)
 			os.Exit(1)
