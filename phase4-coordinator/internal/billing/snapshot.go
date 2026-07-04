@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
 var ErrNoSnapshot = errors.New("no config snapshot found")
@@ -125,46 +127,34 @@ func (s *Store) ReloadBillingConfig(ctx context.Context, cfg RewardsConfig, forc
 		}
 	}
 
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
-		return 0, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-		}
-	}()
-
-	res, err := conn.ExecContext(ctx, `
+	var snapshotID int64
+	if err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		res, err := conn.ExecContext(ctx, `
 INSERT INTO ledger_config_snapshots (
     effective_at_utc, config_hash, provider_share_bps, global_multiplier_ppm,
     rate_card_json, created_at_utc
 ) VALUES (?, ?, ?, ?, ?, ?)`,
-		ts, hash, canon.ProviderShareBps, canon.GlobalMultiplierPPM, string(rateJSON), ts,
-	)
-	if err != nil {
-		return 0, err
-	}
-	snapshotID, err := res.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	if flagChanged {
-		if _, err := conn.ExecContext(ctx, `
+			ts, hash, canon.ProviderShareBps, canon.GlobalMultiplierPPM, string(rateJSON), ts,
+		)
+		if err != nil {
+			return err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		if flagChanged {
+			if _, err := conn.ExecContext(ctx, `
 INSERT INTO audit_log (ts_utc, event_type, provider_id, payload_json)
 VALUES (?, 'billing_config_flag_changed', NULL, ?)`, ts, string(flagPayloadJSON)); err != nil {
-			return 0, err
+				return err
+			}
 		}
-	}
-	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		snapshotID = id
+		return nil
+	}); err != nil {
 		return 0, err
 	}
-	committed = true
 	// Only after the snapshot row and (optional) flag-change audit
 	// row are durably committed do we publish the in-memory force-
 	// void flag. Handlers cannot observe the new value before the
