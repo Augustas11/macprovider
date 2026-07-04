@@ -37,10 +37,52 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertEqual(got, "p-abc", "CRLF file must not leave a \\r in provider_id")
     }
 
+    func testImportExistingCLIConfigRecoversInterruptedTokenlessConfigFromBackup() async throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        try "provider_id: p_recover\nmodel: test\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+        let backup = paths.configFile.appendingPathExtension("import-backup")
+        try "provider_id: p_recover\nprovider_token: secret-token\nmodel: test\n".write(to: backup, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        defer { Task { try? await KeychainStore.deleteProviderToken(providerID: "p_recover") } }
+
+        do {
+            try await ProviderConfig.importExistingCLIConfig(paths: paths)
+        } catch {
+            throw XCTSkip("Keychain unavailable in this test host: \(error.localizedDescription)")
+        }
+
+        let rewritten = try String(contentsOf: paths.configFile)
+        XCTAssertTrue(rewritten.contains("provider_id: p_recover"))
+        XCTAssertTrue(rewritten.contains("model: test"))
+        XCTAssertFalse(rewritten.contains("provider_token"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        let importedToken = await KeychainStore.readProviderToken(providerID: "p_recover")
+        XCTAssertEqual(importedToken, "secret-token")
+    }
+
     private func makeTempDir() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("malibu-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private func makeTempPaths() throws -> ProviderPaths {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("malibu-provider-config-tests-\(UUID().uuidString)", isDirectory: true)
+        let configRoot = root.appendingPathComponent("config", isDirectory: true)
+        let appSupport = root.appendingPathComponent("app-support", isDirectory: true)
+        return ProviderPaths(
+            configFile: configRoot.appendingPathComponent("config.yaml"),
+            controlSocket: appSupport.appendingPathComponent("agent.sock"),
+            cliLogFile: root.appendingPathComponent("logs/malibu-cli.log"),
+            appSupport: appSupport,
+            appMarkerFile: appSupport.appendingPathComponent(".installed-by-app"),
+            onboardingStateFile: appSupport.appendingPathComponent("onboarding.json"),
+            downloadsDirectory: appSupport.appendingPathComponent("Downloads", isDirectory: true)
+        )
     }
 }

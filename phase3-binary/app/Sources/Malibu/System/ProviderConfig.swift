@@ -53,6 +53,7 @@ enum ProviderConfig {
         case existingConfigNotOwnedByApp
         case missingProviderID
         case missingProviderToken
+        case importBackupProviderMismatch
         case importRollbackFailed(importError: Error, rollbackError: Error)
         var errorDescription: String? {
             switch self {
@@ -62,6 +63,8 @@ enum ProviderConfig {
                 return "The existing macprovider config does not contain a provider_id."
             case .missingProviderToken:
                 return "The existing macprovider config does not contain a provider_token."
+            case .importBackupProviderMismatch:
+                return "The import backup does not match the current provider_id."
             case let .importRollbackFailed(importError, rollbackError):
                 return "Import failed (\(importError.localizedDescription)) and the original config could not be restored (\(rollbackError.localizedDescription))."
             }
@@ -115,32 +118,47 @@ enum ProviderConfig {
 
     static func importExistingCLIConfig(paths: ProviderPaths) async throws {
         try paths.ensureDirectories()
+        let fm = FileManager.default
+        let backup = paths.configFile.appendingPathExtension("import-backup")
+        let backupExisted = fm.fileExists(atPath: backup.path)
         let originalData = try Data(contentsOf: paths.configFile)
-        let existing = String(decoding: originalData, as: UTF8.self)
-        guard let providerID = parseTopLevelValue(named: "provider_id", from: existing) else {
+        let current = String(decoding: originalData, as: UTF8.self)
+        let backupData = backupExisted ? try Data(contentsOf: backup) : nil
+        let backupContents = backupData.map { String(decoding: $0, as: UTF8.self) }
+        let secretSource = backupContents ?? current
+
+        let currentProviderID = parseTopLevelValue(named: "provider_id", from: current)
+        let backupProviderID = backupContents.flatMap { parseTopLevelValue(named: "provider_id", from: $0) }
+        if let currentProviderID, let backupProviderID, currentProviderID != backupProviderID {
+            throw SaveError.importBackupProviderMismatch
+        }
+        guard let providerID = currentProviderID ?? backupProviderID else {
             throw SaveError.missingProviderID
         }
-        guard let token = parseTopLevelValue(named: "provider_token", from: existing) else {
+        guard let token = parseTopLevelValue(named: "provider_token", from: secretSource) else {
             throw SaveError.missingProviderToken
         }
 
-        let rewritten = removingTopLevelValue(named: "provider_token", from: existing)
-        let backup = paths.configFile.appendingPathExtension("import-backup")
+        let rewritten = removingTopLevelValue(named: "provider_token", from: current)
         do {
-            try? FileManager.default.removeItem(at: backup)
-            try FileManager.default.copyItem(at: paths.configFile, to: backup)
-            try rewritten.data(using: .utf8)?.write(to: paths.configFile, options: [.atomic])
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
             try await KeychainStore.saveProviderToken(providerID: providerID, token: token)
-            FileManager.default.createFile(atPath: paths.appMarkerFile.path, contents: Data())
+            if !backupExisted {
+                try? fm.removeItem(at: backup)
+                try fm.copyItem(at: paths.configFile, to: backup)
+            }
+            try rewritten.data(using: .utf8)?.write(to: paths.configFile, options: [.atomic])
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
+            fm.createFile(atPath: paths.appMarkerFile.path, contents: Data())
             guard await isConfigured(paths: paths) else { throw SaveError.existingConfigNotOwnedByApp }
-            try? FileManager.default.removeItem(at: backup)
+            try? fm.removeItem(at: backup)
         } catch {
             try? await KeychainStore.deleteProviderToken(providerID: providerID)
-            try? FileManager.default.removeItem(at: paths.appMarkerFile)
+            try? fm.removeItem(at: paths.appMarkerFile)
             do {
                 try originalData.write(to: paths.configFile, options: [.atomic])
-                try? FileManager.default.removeItem(at: backup)
+                if !backupExisted {
+                    try? fm.removeItem(at: backup)
+                }
             } catch let rollbackError {
                 throw SaveError.importRollbackFailed(importError: error, rollbackError: rollbackError)
             }

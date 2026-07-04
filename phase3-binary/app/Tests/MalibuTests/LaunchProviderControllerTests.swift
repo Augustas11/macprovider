@@ -88,6 +88,48 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .live(model: "Qwen2.5-7B-Instruct", tier: .provisional))
     }
 
+    func testLaunchStartsConfiguredInstallWithoutSynthesizingFirstServingState() async {
+        let harness = Harness()
+        harness.configured = true
+        let controller = LaunchProviderController(
+            coordinatorBaseURL: URL(string: "https://coordinator.streamvc.live")!,
+            bundledCLIPath: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.agentStarts, 1)
+        XCTAssertTrue(harness.stageUpdates.isEmpty)
+        XCTAssertEqual(controller.stage, .live(model: "configured", tier: .provisional))
+    }
+
+    func testLaunchResumesIdentityReadyByRegisteringBeforeAutotune() async {
+        let harness = Harness()
+        harness.loadedState = OnboardingState(
+            onboardingSchemaVersion: 2,
+            providerID: "p_test",
+            createdAt: Date(timeIntervalSince1970: 1),
+            lastStage: "identityReady",
+            firstServingAt: nil,
+            modelDownload: nil
+        )
+        let controller = LaunchProviderController(
+            coordinatorBaseURL: URL(string: "https://coordinator.streamvc.live")!,
+            bundledCLIPath: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.savedProviderID, "p_test")
+        XCTAssertEqual(harness.savedToken, "provider-token")
+        XCTAssertEqual(harness.stageUpdates, ["registered", "autotuning", "cliReady", "downloadingModel", "modelReady", "startingAgent", "live"])
+        XCTAssertEqual(harness.autotuneRuns, 1)
+        XCTAssertEqual(harness.agentStarts, 1)
+        XCTAssertEqual(controller.stage, .live(model: "recommended", tier: .provisional))
+    }
+
     private final class Harness {
         var savedProviderID: String?
         var savedToken: String?

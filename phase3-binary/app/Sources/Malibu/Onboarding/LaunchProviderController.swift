@@ -259,10 +259,6 @@ final class LaunchProviderController: ObservableObject {
 
     private func startConfiguredAgent(model: String) async {
         await dependencies.startAgent()
-        let now = Date()
-        if let providerID = dependencies.readProviderID() {
-            try? dependencies.updateState(providerID, "live", now, nil)
-        }
         stage = .live(model: model, tier: .provisional)
     }
 
@@ -277,6 +273,9 @@ final class LaunchProviderController: ObservableObject {
         do {
             let point: ResumePoint
             switch existing.lastStage {
+            case "identityReady", "registering":
+                try await resumeRegistration(existing)
+                return
             case "registered", "autotuning":
                 point = .autotune
             case "cliReady":
@@ -295,6 +294,27 @@ final class LaunchProviderController: ObservableObject {
         } catch {
             stage = .failed(stage: stageName(stage), retryable: true, message: error.localizedDescription)
         }
+    }
+
+    private func resumeRegistration(_ existing: OnboardingState) async throws {
+        let key = try await dependencies.loadOrGenerateIdentity()
+        let providerID = dependencies.providerID(key)
+        guard providerID == existing.providerID else {
+            throw NSError(
+                domain: "SPEC-026",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Stored provider identity does not match the onboarding state."]
+            )
+        }
+
+        stage = .registering
+        let bearerProof = await dependencies.currentProviderToken(providerID)
+        let response = try await dependencies.registerProvider(key, bearerProof)
+        try await dependencies.saveProviderIdentity(response.providerID, response.providerToken)
+        try dependencies.updateState(response.providerID, "registered", nil, nil)
+        try await finishLaunch(providerID: response.providerID, from: .autotune, plan: existing.modelDownload.map {
+            ModelDownloadPlan(modelName: $0.modelID, state: $0)
+        })
     }
 
     private func finishLaunch(
