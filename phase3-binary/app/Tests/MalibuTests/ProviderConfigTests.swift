@@ -59,8 +59,24 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertFalse(rewritten.contains("provider_token"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
+        XCTAssertEqual(ProviderConfig.readLinkState(paths: paths), .linked)
         let importedToken = await KeychainStore.readProviderToken(providerID: "p_recover")
         XCTAssertEqual(importedToken, "secret-token")
+    }
+
+    func testWriteAndReadLinkState() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try "provider_id: p_link\nmodel: test\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+
+        try ProviderConfig.writeLinkState(.pendingLink, paths: paths)
+
+        XCTAssertEqual(ProviderConfig.readLinkState(paths: paths), .pendingLink)
+        let contents = try String(contentsOf: paths.configFile)
+        XCTAssertTrue(contents.contains("link_state: pending_link"))
     }
 
     func testSaveProviderIdentityRollsBackWhenTokenSaveFails() async throws {

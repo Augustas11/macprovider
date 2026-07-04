@@ -1,8 +1,34 @@
 # SPEC-026 — Browserless Provider Onboarding (one-click Launch Provider)
 
-Status: DRAFT v0.12 · Owner: augstar · Target: 2026 Q3
+Status: DRAFT v0.13 · Owner: augstar · Target: 2026 Q3
 
 ## Change log
+
+**v0.13 (2026-07-04, Wave 2 token-custody hardening).** Wave 2
+keeps App-track wallet and non-bearer proof surfaces fail-closed
+until SPEC-027 exists:
+
+- **App-track wallet changes are blocked pending SPEC-027.**
+  `POST /v1/provider/wallet` MUST return
+  `501 {"error":"wallet_change_requires_spec_027"}` for App-track
+  providers until SPEC-027 defines the required non-bearer proof and
+  cancellation semantics.
+- **CLI-track receipt-key rotation proof is old-key signed.**
+  Rotation requests MUST prove control of the currently-published
+  receipt key. A signature that verifies only against the proposed
+  replacement key is self-declared proof and MUST be rejected.
+- **WebSocket `identity_signature` challenge excludes the signature
+  field.** The coordinator challenge is the pre-auth
+  `auth_challenge`; the response signature covers the retained initial
+  transcript plus the coordinator challenge and MUST NOT include the
+  signature value itself in its own signed input.
+- **App Attest pins are required when App Attest evidence is present.**
+  The coordinator MUST reject App Attest verification when the Malibu
+  team ID or bundle ID pin is unset; production pins are loaded from
+  deployment config and must match the Malibu app identity.
+- **Provider-token custody is fail-closed.** Tokenless reconnects MUST
+  NOT revoke or replace an existing `provider_tokens` row. Mutation
+  requires proof of the existing token or an operator recovery action.
 
 **v0.12 (2026-07-03, Step-2 build-prompt audit closure).** The Step-2
 implementation prompt audit found that v0.11 still promised

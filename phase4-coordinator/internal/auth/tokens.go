@@ -41,7 +41,7 @@ var ErrPairOTInvalid = errors.New("pair_ot invalid")
 var ErrPairOTAlreadyOwned = errors.New("pair_ot provider already owned by another account")
 var ErrSessionInvalid = errors.New("mp_session invalid")
 var ErrPendingPairOTMissing = errors.New("pending pair_ot missing")
-var ErrAppTrackExistingTokenNoProof = errors.New("existing active token requires current_provider_token proof")
+var ErrAppTrackExistingTokenNoProof = errors.New("existing active token requires current bearer proof")
 var ErrAppTrackReissueCooldown = errors.New("app-track provider token reissue cooldown active")
 
 type Store struct {
@@ -482,20 +482,19 @@ func (s *Store) MintProviderTokenAppTrack(ctx context.Context, providerID string
 
 	nowText := nowString()
 	var active struct {
-		ID         int64
-		TokenHash  string
-		LastUsedAt sql.NullString
+		ID        int64
+		TokenHash string
 	}
 	err = conn.QueryRowContext(ctx, `
-SELECT id, token_hash, last_used_at
+SELECT id, token_hash
   FROM provider_tokens
  WHERE provider_id = ? AND revoked_at IS NULL
- LIMIT 1`, providerID).Scan(&active.ID, &active.TokenHash, &active.LastUsedAt)
+ LIMIT 1`, providerID).Scan(&active.ID, &active.TokenHash)
 	if err != nil && err != sql.ErrNoRows {
 		return "", err
 	}
 
-	requiresProof := err == nil && active.LastUsedAt.Valid
+	requiresProof := err == nil
 	if requiresProof {
 		if currentBearer == nil || strings.TrimSpace(*currentBearer) == "" || tokenHash(strings.TrimSpace(*currentBearer)) != active.TokenHash {
 			return "", ErrAppTrackExistingTokenNoProof
@@ -550,24 +549,9 @@ VALUES (?, ?)`, providerID, nowText); err != nil {
 	return token, nil
 }
 
-// HasActiveTokenForProvider returns true when at least one unrevoked
-// token row exists for `providerID`. Exposed on both the concrete Store
-// AND the `internal/ws.TokenIssuer` interface (v0.8.4 composition, PR #69
-// merge with PR #78) so `resolveProvisionalToken` can disambiguate
-// "no row at all (mint OK)" from "active row with last_used_at IS NOT
-// NULL (strict TOFU reject)" after `RevokeUnusedTokenForProvider`
-// returned (false, nil).
-//
-// Under v0.8.4 the TOCTOU concern the v0.8.2 codex security re-audit
-// (PR #44 MAJOR-1) flagged is no longer applicable: the partial unique
-// index `idx_provider_tokens_one_active_per_provider` remains the atomic
-// mint-or-collide invariant. This method is purely a read-only
-// disambiguation step that runs AFTER the self-heal write; the
-// subsequent `IssueToken` INSERT is what actually commits the
-// at-most-one-bearer rule. A concurrent reconnect that races between
-// our HasActive check and our INSERT is caught by the unique index
-// (returns `ErrActiveTokenAlreadyExists` → race-loss admit-quarantined
-// path).
+// HasActiveTokenForProvider returns true when at least one unrevoked token row
+// exists for providerID. The Wave 2 custody gate treats every active row as
+// proof-required; last_used_at is not a recovery signal.
 //
 // Also used for operator tooling — e.g. `coordinator-cli list-tokens`
 // presence checks and pre-flag-flip audit scripts.

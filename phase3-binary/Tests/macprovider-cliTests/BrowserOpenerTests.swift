@@ -51,4 +51,25 @@ final class BrowserOpenerTests: XCTestCase {
         XCTAssertEqual(decision, .opened)
         XCTAssertEqual(openedURL.get(), "https://portal.example/claim?ot=PAIR")
     }
+
+    func testSanitizedBrowserEnvironmentDropsMacProviderSecrets() throws {
+        let sanitized = try ProcessEnvironmentSanitizer.sanitized(from: [
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/Users/test",
+            "LC_CTYPE": "UTF-8",
+            "MACPROVIDER_PROVIDER_TOKEN": "secret",
+            "MACPROVIDER_NO_BROWSER": "1"
+        ])
+
+        XCTAssertEqual(sanitized["PATH"], "/usr/bin:/bin")
+        XCTAssertEqual(sanitized["LC_CTYPE"], "UTF-8")
+        XCTAssertNil(sanitized["MACPROVIDER_PROVIDER_TOKEN"])
+        XCTAssertNil(sanitized["MACPROVIDER_NO_BROWSER"])
+    }
+
+    func testSanitizedBrowserEnvironmentRejectsMetacharacters() {
+        XCTAssertThrowsError(try ProcessEnvironmentSanitizer.sanitized(from: [
+            "PATH": "/usr/bin;evil"
+        ]))
+    }
 }

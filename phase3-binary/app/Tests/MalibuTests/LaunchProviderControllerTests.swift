@@ -200,6 +200,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         var loginItemRegistrations = 0
         var agentStarts = 0
         var markerRepairs: [String] = []
+        var linkStates: [ProviderConfig.LinkState] = []
         var stageUpdates: [String] = []
         var modelDownloads: [LaunchProviderController.ModelDownloadPlan] = []
         var autotuneRuns = 0
@@ -238,6 +239,9 @@ final class LaunchProviderControllerTests: XCTestCase {
                 saveState: { _ in },
                 updateState: { _, lastStage, _, _ in
                     self.stageUpdates.append(lastStage)
+                },
+                markLinkState: { state in
+                    self.linkStates.append(state)
                 },
                 runAutotune: { _ in
                     self.autotuneRuns += 1

@@ -114,13 +114,13 @@ struct RegisterResponse: Decodable, Equatable {
 }
 
 struct RegisterClient {
-    let coordinatorBaseURL: URL
-    let session: URLSession
+	let coordinatorBaseURL: URL
+	private let session: URLSession?
 
-    init(coordinatorBaseURL: URL, session: URLSession = .shared) {
-        self.coordinatorBaseURL = coordinatorBaseURL
-        self.session = session
-    }
+	init(coordinatorBaseURL: URL, session: URLSession? = nil) {
+		self.coordinatorBaseURL = coordinatorBaseURL
+		self.session = session
+	}
 
     func makeSignedRequest(
         identityKey: Curve25519.Signing.PrivateKey,
@@ -164,10 +164,18 @@ struct RegisterClient {
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody.jsonObject, options: [.sortedKeys])
 
-        let (data, response) = try await session.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw RegisterClientError.httpStatus(http.statusCode)
-        }
+		let data: Data
+		let response: URLResponse
+		if let session {
+			(data, response) = try await session.data(for: request)
+		} else {
+			let guarded = ProviderBearerURLSession.make()
+			defer { guarded.finishTasksAndInvalidate() }
+			(data, response) = try await guarded.data(for: request)
+		}
+		if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+			throw RegisterClientError.httpStatus(http.statusCode)
+		}
         return try JSONDecoder().decode(RegisterResponse.self, from: data)
     }
 
@@ -251,4 +259,54 @@ struct RegisterClient {
 
 enum RegisterClientError: Error {
     case httpStatus(Int)
+}
+
+enum ProviderBearerURLSession {
+    static func make() -> URLSession {
+        URLSession(configuration: .ephemeral, delegate: ProviderBearerRedirectGuard(), delegateQueue: nil)
+    }
+}
+
+final class ProviderBearerRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let originalURL = task.originalRequest?.url,
+              let newURL = request.url,
+              let originalOrigin = Self.origin(for: originalURL),
+              let newOrigin = Self.origin(for: newURL),
+              originalOrigin.scheme == "https",
+              newOrigin.scheme == "https"
+        else {
+            completionHandler(nil)
+            return
+        }
+        guard originalOrigin != newOrigin else {
+            completionHandler(request)
+            return
+        }
+        var stripped = request
+        stripped.setValue(nil, forHTTPHeaderField: "Authorization")
+        completionHandler(stripped)
+    }
+
+    private struct Origin: Equatable {
+        let scheme: String
+        let host: String
+        let port: Int
+    }
+
+    private static func origin(for url: URL) -> Origin? {
+        guard let scheme = url.scheme?.lowercased(),
+              let host = url.host?.lowercased()
+        else {
+            return nil
+        }
+        let port = url.port ?? (scheme == "https" ? 443 : scheme == "http" ? 80 : -1)
+        return Origin(scheme: scheme, host: host, port: port)
+    }
 }

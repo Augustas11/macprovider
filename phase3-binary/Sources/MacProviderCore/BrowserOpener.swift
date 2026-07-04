@@ -106,7 +106,8 @@ public final class BrowserOpener: @unchecked Sendable {
         let executable = strdup("/usr/bin/open")
         let arg0 = strdup("open")
         let arg1 = strdup(claimURL)
-        let environment = ProcessInfo.processInfo.environment.map { key, value in
+        let sanitized = try ProcessEnvironmentSanitizer.sanitized()
+        let environment = sanitized.map { key, value in
             strdup("\(key)=\(value)")
         }
         defer {

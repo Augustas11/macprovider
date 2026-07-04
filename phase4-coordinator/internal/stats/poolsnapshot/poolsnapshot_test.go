@@ -72,6 +72,23 @@ func TestExcludesBearerlessDuplicate(t *testing.T) {
 	}
 }
 
+func TestExcludesSelfMintedFromPublicCapacity(t *testing.T) {
+	src := fakeSrc{
+		{ProviderID: "a", State: pool.StateReady, RAMGB: 16, ModelID: "m1"},
+		{ProviderID: "b", State: pool.StateReady, RAMGB: 32, ModelID: "m2", AuthState: pool.AuthSelfMinted},
+	}
+	got := newFixed(src).OverviewSnapshot()
+	if got.NodesOnline != 1 {
+		t.Fatalf("NodesOnline=%d want 1 (self-minted excluded)", got.NodesOnline)
+	}
+	if got.UnifiedRAMGBTotal != 16 {
+		t.Fatalf("UnifiedRAMGBTotal=%d want 16", got.UnifiedRAMGBTotal)
+	}
+	if got.ModelsServing != 1 {
+		t.Fatalf("ModelsServing=%d want 1", got.ModelsServing)
+	}
+}
+
 func TestExcludesPendingReceiptPubkey(t *testing.T) {
 	src := fakeSrc{
 		{ProviderID: "a", State: pool.StateReady, RAMGB: 16, ModelID: "m1", PendingReceiptPubkey: []byte{1, 2, 3}},
