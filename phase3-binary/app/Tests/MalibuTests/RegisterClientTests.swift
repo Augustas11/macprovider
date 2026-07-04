@@ -62,19 +62,52 @@ final class RegisterClientTests: XCTestCase {
         )
     }
 
+    func testProviderBearerRedirectGuardStripsAuthorizationOnSameHostDifferentPortRedirect() throws {
+        let redirected = decideProviderBearerRedirect(
+            originalURL: URL(string: "https://coordinator.example/v1/providers/register")!,
+            redirectTo: URL(string: "https://coordinator.example:4443/v1/providers/register")!
+        )
+
+        XCTAssertEqual(redirected?.url?.port, 4443)
+        XCTAssertNil(redirected?.value(forHTTPHeaderField: "Authorization"))
+    }
+
+    func testProviderBearerRedirectGuardRejectsNonHTTPSRedirect() throws {
+        let redirected = decideProviderBearerRedirect(
+            originalURL: URL(string: "https://coordinator.example/v1/providers/register")!,
+            redirectTo: URL(string: "http://coordinator.example/v1/providers/register")!
+        )
+
+        XCTAssertNil(redirected)
+    }
+
     func testSharedSpec026RegisterFixtureCanonicalizes() throws {
         let fixture = try loadRegisterFixture()
-        let canonical = try CanonicalJSON.encode(try canonicalValue(from: fixture.bodyWithoutSignature))
-        XCTAssertEqual(String(data: canonical, encoding: .utf8), fixture.canonicalWithoutSignature)
+        XCTAssertEqual(fixture.schema, "spec026_register_jcs_v1")
+        XCTAssertGreaterThanOrEqual(fixture.objects.count, 5)
+        for row in fixture.objects {
+            let canonical = try CanonicalJSON.encode(try canonicalValue(from: row.body))
+            XCTAssertEqual(String(data: canonical, encoding: .utf8), row.expectedCanonical, row.id)
+            if case let .object(body) = row.body {
+                XCTAssertNil(body["current_provider_token"], row.id)
+            }
+        }
     }
 
     private struct RegisterFixture: Decodable {
-        let bodyWithoutSignature: JSONValue
-        let canonicalWithoutSignature: String
+        let schema: String
+        let objects: [RegisterFixtureRow]
+    }
+
+    private struct RegisterFixtureRow: Decodable {
+        let id: String
+        let body: JSONValue
+        let expectedCanonical: String
 
         enum CodingKeys: String, CodingKey {
-            case bodyWithoutSignature = "body_without_signature"
-            case canonicalWithoutSignature = "canonical_without_signature"
+            case id
+            case body
+            case expectedCanonical = "expected_canonical"
         }
     }
 
@@ -110,6 +143,32 @@ final class RegisterClientTests: XCTestCase {
         url.appendPathComponent("phase4-coordinator/test/jcs_fixtures/spec026_register.json")
         let data = try Data(contentsOf: url)
         return try JSONDecoder().decode(RegisterFixture.self, from: data)
+    }
+
+    private func decideProviderBearerRedirect(originalURL: URL, redirectTo newURL: URL) -> URLRequest? {
+        let session = URLSession.shared
+        let task = session.dataTask(with: originalURL)
+        var request = URLRequest(url: newURL)
+        request.setValue("Bearer provider-token", forHTTPHeaderField: "Authorization")
+        let response = HTTPURLResponse(
+            url: originalURL,
+            statusCode: 302,
+            httpVersion: nil,
+            headerFields: ["Location": newURL.absoluteString]
+        )!
+        let waiter = expectation(description: "redirect completion")
+        var redirected: URLRequest?
+        ProviderBearerRedirectGuard().urlSession(
+            session,
+            task: task,
+            willPerformHTTPRedirection: response,
+            newRequest: request
+        ) { result in
+            redirected = result
+            waiter.fulfill()
+        }
+        wait(for: [waiter], timeout: 1)
+        return redirected
     }
 
     private func canonicalValue(from value: JSONValue) throws -> CanonicalJSONValue {

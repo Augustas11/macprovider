@@ -230,10 +230,26 @@ func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 	if bearerless.RoutingEligible() {
 		t.Fatal("AuthBearerlessDuplicate MUST be excluded — SPEC-003 v0.8.3 FR-C9.4 credential trust gate")
 	}
+	selfMinted := base
+	selfMinted.AuthState = AuthSelfMinted
+	if selfMinted.RoutingEligible() {
+		t.Fatal("AuthSelfMinted MUST be excluded until the provider proves custody of the minted bearer")
+	}
+	if selfMinted.CapacityEligible() {
+		t.Fatal("AuthSelfMinted MUST be excluded from published serving capacity")
+	}
+	selfMintedVerified := base
+	selfMintedVerified.AuthState = AuthSelfMintedVerified
+	if !selfMintedVerified.RoutingEligible() {
+		t.Fatal("AuthSelfMintedVerified should be route eligible once proof-of-custody has completed")
+	}
 	pendingReceiptKey := base
 	pendingReceiptKey.PendingReceiptPubkey = []byte("pending")
 	if pendingReceiptKey.RoutingEligible() {
 		t.Fatal("pending receipt pubkey sessions must be excluded from routing until state_update publishes the key")
+	}
+	if pendingReceiptKey.CapacityEligible() {
+		t.Fatal("pending receipt pubkey sessions must be excluded from published serving capacity")
 	}
 }
 

@@ -55,7 +55,13 @@ struct ClaimRefresher: Sendable {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            let session = URLSession(
+                configuration: .ephemeral,
+                delegate: ClaimRefreshRedirectGuard(),
+                delegateQueue: nil
+            )
+            defer { session.finishTasksAndInvalidate() }
+            (data, response) = try await session.data(for: request)
         } catch {
             throw ClaimRefreshError.network(String(describing: error))
         }
@@ -80,6 +86,50 @@ struct ClaimRefresher: Sendable {
         default:
             throw ClaimRefreshError.httpStatus(http.statusCode)
         }
+    }
+}
+
+final class ClaimRefreshRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let originalURL = task.originalRequest?.url,
+              let newURL = request.url,
+              let originalOrigin = Self.origin(for: originalURL),
+              let newOrigin = Self.origin(for: newURL),
+              originalOrigin.scheme == "https",
+              newOrigin.scheme == "https"
+        else {
+            completionHandler(nil)
+            return
+        }
+        guard originalOrigin != newOrigin else {
+            completionHandler(request)
+            return
+        }
+        var stripped = request
+        stripped.setValue(nil, forHTTPHeaderField: "Authorization")
+        completionHandler(stripped)
+    }
+
+    private struct Origin: Equatable {
+        let scheme: String
+        let host: String
+        let port: Int
+    }
+
+    private static func origin(for url: URL) -> Origin? {
+        guard let scheme = url.scheme?.lowercased(),
+              let host = url.host?.lowercased()
+        else {
+            return nil
+        }
+        let port = url.port ?? (scheme == "https" ? 443 : scheme == "http" ? 80 : -1)
+        return Origin(scheme: scheme, host: host, port: port)
     }
 }
 

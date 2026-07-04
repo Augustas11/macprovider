@@ -5,6 +5,12 @@ import Foundation
 // Keychain (never persisted to disk in this track). See SPEC-025 §7.
 
 enum ProviderConfig {
+    enum LinkState: String, Equatable {
+        case pendingLink = "pending_link"
+        case linked
+        case unlinkPending = "unlink_pending"
+    }
+
     // AUDIT R1 CODE H4 / SECURITY S1 / ARCHITECT A2 fix:
     //   * config exists AND
     //   * app-ownership marker exists (we did not inherit a CLI-track config) AND
@@ -26,23 +32,25 @@ enum ProviderConfig {
 
     static func readProviderID(paths: ProviderPaths = .current) -> String? {
         guard let contents = try? String(contentsOf: paths.configFile) else { return nil }
-        // AUDIT R1 CODE M1 fix, corrected in E2E:
-        // Swift's Character treats `\r\n` as a single grapheme cluster, so a
-        // predicate `$0 == "\n" || $0 == "\r"` on Character never matches
-        // inside CRLF sequences. Normalize CRLF → LF first, then split.
-        let normalized = contents
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        for rawLine in normalized.split(separator: "\n") {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard line.hasPrefix("provider_id:") else { continue }
-            let value = line
-                .dropFirst("provider_id:".count)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            return value.isEmpty ? nil : value
+        return parseTopLevelValue(named: "provider_id", from: contents)
+    }
+
+    static func readLinkState(paths: ProviderPaths = .current) -> LinkState? {
+        guard let contents = try? String(contentsOf: paths.configFile),
+              let value = parseTopLevelValue(named: "link_state", from: contents)
+        else {
+            return nil
         }
-        return nil
+        return LinkState(rawValue: value)
+    }
+
+    static func writeLinkState(_ state: LinkState, paths: ProviderPaths = .current) throws {
+        let contents = (try? String(contentsOf: paths.configFile)) ?? ""
+        var lines = normalizedLines(contents)
+            .filter { !$0.hasPrefix("link_state:") }
+        lines.append("link_state: \(state.rawValue)")
+        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: paths.configFile, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
     }
 
     // AUDIT R1 ARCHITECT A2: raised when the shared config exists on disk
@@ -124,9 +132,14 @@ enum ProviderConfig {
                 .replacingOccurrences(of: "\r\n", with: "\n")
                 .replacingOccurrences(of: "\r", with: "\n")
             lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-                .filter { !$0.hasPrefix("provider_id:") && !$0.hasPrefix("provider_token:") }
+                .filter {
+                    !$0.hasPrefix("provider_id:")
+                        && !$0.hasPrefix("provider_token:")
+                        && !$0.hasPrefix("link_state:")
+                }
         }
         lines.append("provider_id: \(providerID)")
+        lines.append("link_state: \(LinkState.pendingLink.rawValue)")
         // We deliberately do NOT write the token to disk. The CLI must be
         // launched with the token in the environment (MACPROVIDER_PROVIDER_TOKEN),
         // which MalibuAgent will set from Keychain before spawning the process.
@@ -175,6 +188,7 @@ enum ProviderConfig {
         try paths.ensureDirectories()
         let fm = FileManager.default
         let backup = paths.configFile.appendingPathExtension("import-backup")
+        let marker = importPendingMarker(paths: paths)
         let backupExisted = fm.fileExists(atPath: backup.path)
         let originalData = try Data(contentsOf: paths.configFile)
         let current = String(decoding: originalData, as: UTF8.self)
@@ -196,6 +210,8 @@ enum ProviderConfig {
 
         let rewritten = removingTopLevelValue(named: "provider_token", from: current)
         do {
+            try Data("pending\n".utf8).write(to: marker, options: [.atomic])
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: marker.path)
             try await KeychainStore.saveProviderToken(providerID: providerID, token: token)
             if !backupExisted {
                 try? fm.removeItem(at: backup)
@@ -204,8 +220,10 @@ enum ProviderConfig {
             try rewritten.data(using: .utf8)?.write(to: paths.configFile, options: [.atomic])
             try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
             try writeAppMarker(paths: paths, fileManager: fm)
+            try writeLinkState(.linked, paths: paths)
             guard await isConfigured(paths: paths) else { throw SaveError.existingConfigNotOwnedByApp }
             try? fm.removeItem(at: backup)
+            try? fm.removeItem(at: marker)
         } catch {
             try? await KeychainStore.deleteProviderToken(providerID: providerID)
             try? fm.removeItem(at: paths.appMarkerFile)
@@ -214,6 +232,7 @@ enum ProviderConfig {
                 if !backupExisted {
                     try? fm.removeItem(at: backup)
                 }
+                try? fm.removeItem(at: marker)
             } catch let rollbackError {
                 throw SaveError.importRollbackFailed(importError: error, rollbackError: rollbackError)
             }
@@ -315,6 +334,10 @@ enum ProviderConfig {
         guard fm.createFile(atPath: paths.appMarkerFile.path, contents: Data()) else {
             throw SaveError.appMarkerCreateFailed
         }
+    }
+
+    static func importPendingMarker(paths: ProviderPaths) -> URL {
+        paths.appSupport.appendingPathComponent(".import-pending")
     }
 
     private static func parseTopLevelValue(named key: String, from contents: String) -> String? {

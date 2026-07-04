@@ -11,9 +11,8 @@ final class CLIChildProcess {
         let controlSocketPath: URL
         let httpPort: Int?
         let logFileURL: URL
-        // Merged over the parent process's env (which supplies PATH/HOME/etc).
-        // MACPROVIDER_PROVIDER_TOKEN belongs here so the token never touches
-        // config.yaml or the argv (which is visible in `ps`).
+        // Merged over an allowlisted parent env. MACPROVIDER_PROVIDER_TOKEN
+        // belongs here so the token never touches config.yaml or argv.
         let extraEnvironment: [String: String]
     }
 
@@ -66,9 +65,7 @@ final class CLIChildProcess {
         }
         proc.arguments = args
 
-        var env = ProcessInfo.processInfo.environment
-        for (k, v) in launch.extraEnvironment { env[k] = v }
-        proc.environment = env
+        proc.environment = try ProcessEnvironmentSanitizer.sanitized(extraEnvironment: launch.extraEnvironment)
 
         proc.standardOutput = handle
         proc.standardError = handle

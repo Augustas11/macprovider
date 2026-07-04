@@ -97,6 +97,13 @@ func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("enabled route status=%d want 204", rr.Code)
 	}
+
+	walletReq := httptest.NewRequest(http.MethodPost, "/v1/provider/wallet", nil)
+	rr = httptest.NewRecorder()
+	enabled.ServeHTTP(rr, walletReq)
+	if rr.Code != http.StatusNotImplemented || !strings.Contains(rr.Body.String(), "wallet_change_requires_spec_027") {
+		t.Fatalf("wallet route status=%d body=%s, want 501 wallet_change_requires_spec_027", rr.Code, rr.Body.String())
+	}
 }
 
 func TestNginxRegisterRouteBeforeV1CatchAll(t *testing.T) {
@@ -123,6 +130,34 @@ func TestNginxRegisterRouteBeforeV1CatchAll(t *testing.T) {
 	} {
 		if !strings.Contains(cfg[route:catchAll], needle) {
 			t.Fatalf("register route missing %q", needle)
+		}
+	}
+}
+
+func TestNginxWalletRouteBeforeV1CatchAll(t *testing.T) {
+	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	cfg := string(body)
+	route := strings.Index(cfg, "location = /v1/provider/wallet")
+	catchAll := strings.Index(cfg, "location /v1/ {\n        return 404;")
+	if route < 0 {
+		t.Fatal("missing exact /v1/provider/wallet route")
+	}
+	if catchAll < 0 {
+		t.Fatal("missing /v1/ catch-all route")
+	}
+	if route > catchAll {
+		t.Fatal("/v1/provider/wallet route must appear before /v1/ catch-all")
+	}
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8443/v1/provider/wallet;",
+		"proxy_set_header Authorization $http_authorization;",
+		"add_header Cache-Control \"no-store\" always;",
+	} {
+		if !strings.Contains(cfg[route:catchAll], needle) {
+			t.Fatalf("wallet route missing %q", needle)
 		}
 	}
 }

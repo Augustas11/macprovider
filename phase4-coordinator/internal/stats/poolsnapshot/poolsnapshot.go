@@ -76,16 +76,9 @@ func (p *Provider) OverviewSnapshot() statsrollup.OverviewSnapshot {
 	return snap
 }
 
-// onlineForStats mirrors "genuinely serving traffic" for the public
-// stats surface: ready or busy (a busy provider is online, just out
-// of free slots), and not one of the excluded auth states or key-
-// rotation-pending states that RoutingEligible filters out.
+// onlineForStats mirrors "genuinely serving traffic" for the public stats
+// surface: ready or busy (a busy provider is online, just out of free slots),
+// while reusing the pool-level capacity trust predicate.
 func onlineForStats(p pool.Provider) bool {
-	if p.AuthState == pool.AuthBearerlessDuplicate {
-		return false
-	}
-	if len(p.PendingReceiptPubkey) > 0 {
-		return false
-	}
-	return p.State == pool.StateReady || p.State == pool.StateBusy
+	return p.CapacityEligible()
 }

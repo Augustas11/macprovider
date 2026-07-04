@@ -32,6 +32,7 @@ final class StartupRouteTests: XCTestCase {
                 configExists: off.configExists,
                 appMarkerExists: off.appMarkerExists,
                 providerTokenExists: off.providerTokenExists,
+                linkState: off.linkState,
                 identityExists: off.identityExists,
                 onboardingStateExists: off.onboardingStateExists,
                 firstServingAtExists: off.firstServingAtExists,
@@ -43,6 +44,7 @@ final class StartupRouteTests: XCTestCase {
                 configExists: base.configExists,
                 appMarkerExists: base.appMarkerExists,
                 providerTokenExists: base.providerTokenExists,
+                linkState: base.linkState,
                 identityExists: base.identityExists,
                 onboardingStateExists: base.onboardingStateExists,
                 firstServingAtExists: base.firstServingAtExists,
@@ -110,6 +112,21 @@ final class StartupRouteTests: XCTestCase {
         XCTAssertNil(untouchedToken)
     }
 
+    func testConfiguredPendingLinkStateResumesOnboarding() {
+        let state = StartupState(
+            configExists: true,
+            appMarkerExists: true,
+            providerTokenExists: true,
+            linkState: .pendingLink,
+            identityExists: true,
+            onboardingStateExists: false,
+            firstServingAtExists: false,
+            onboardingV2Enabled: true
+        )
+
+        XCTAssertEqual(state.route(), .resumeOnboarding)
+    }
+
     private func state(
         config: Bool,
         marker: Bool,
@@ -122,6 +139,7 @@ final class StartupRouteTests: XCTestCase {
             configExists: config,
             appMarkerExists: marker,
             providerTokenExists: token,
+            linkState: nil,
             identityExists: identity,
             onboardingStateExists: onboarding,
             firstServingAtExists: firstServing,
