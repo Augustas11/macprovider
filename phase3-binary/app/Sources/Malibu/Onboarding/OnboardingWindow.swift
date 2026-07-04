@@ -68,7 +68,12 @@ private struct OnboardingRootView: View {
         switch controller.stage {
         case .idle:
             stageRow(title: "Ready", detail: "The app will create a local identity key and register this provider.") {
-                launchButton(title: "Launch Provider")
+                VStack(alignment: .leading, spacing: 8) {
+                    launchButton(title: "Launch Provider")
+                    Text("No wallet needed to start — add one anytime after.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
             }
         case .identityReady:
             stageRow(title: "Identity ready", detail: "Local provider identity created in Keychain.") {
@@ -89,6 +94,14 @@ private struct OnboardingRootView: View {
         case let .downloadingModel(name, progress):
             stageRow(title: "Model", detail: "Preparing \(name).") {
                 ProgressView(value: progress)
+                if let line = EarningsEstimateFormatter.line(
+                    modelName: name,
+                    range: controller.currentEarningsEstimate
+                ) {
+                    Text(line)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
             }
         case .startingAgent:
             stageRow(title: "Starting", detail: "Registering the login item and starting the provider.") {

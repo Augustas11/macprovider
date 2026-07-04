@@ -13,7 +13,23 @@ enum ControlFrame: Sendable, Equatable {
     case switchProgress(state: String, elapsedMs: Int, reason: String?)
 
     case metricsRequest                                     // added by SPEC-025 §5.2
-    case metricsResponse(earningsUsdc: Double, malibuAccrued: Double, gpuC: Double?, latencyP50Ms: Int?, uptimeSec: Int)
+    case metricsResponse(
+        earningsUsdc: Double?,
+        malibuAccrued: Double?,
+        gpuC: Double?,
+        gpuUtilizationPct: Double?,
+        latencyP50Ms: Int?,
+        latencyP99Ms: Int?,
+        queueDepth: Int?,
+        requestsServedToday: Int?,
+        requestsServedAllTime: Int?,
+        requestsPerMinute: Double?,
+        inputTokensToday: Int64?,
+        outputTokensToday: Int64?,
+        inputTokensAllTime: Int64?,
+        outputTokensAllTime: Int64?,
+        uptimeSec: Int?
+    )
 
     case pauseRequest
     case pauseAck(accepted: Bool, reason: String?)
@@ -74,15 +90,39 @@ enum ControlCodec {
             return obj
         case .metricsRequest:
             return ["type": "metrics_request"]
-        case let .metricsResponse(earnings, malibu, gpu, latency, uptime):
-            var obj: [String: Any] = [
-                "type": "metrics_response",
-                "earnings_usdc": earnings,
-                "malibu_accrued": malibu,
-                "uptime_sec": uptime
-            ]
+        case let .metricsResponse(
+            earnings,
+            malibu,
+            gpu,
+            gpuUtilization,
+            latencyP50,
+            latencyP99,
+            queueDepth,
+            requestsToday,
+            requestsAllTime,
+            requestsPerMinute,
+            inputTokensToday,
+            outputTokensToday,
+            inputTokensAllTime,
+            outputTokensAllTime,
+            uptime
+        ):
+            var obj: [String: Any] = ["type": "metrics_response"]
+            if let earnings { obj["earnings_usdc"] = earnings }
+            if let malibu { obj["malibu_accrued"] = malibu }
             if let gpu { obj["gpu_c"] = gpu }
-            if let latency { obj["latency_p50_ms"] = latency }
+            if let gpuUtilization { obj["gpu_utilization_pct"] = gpuUtilization }
+            if let latencyP50 { obj["latency_p50_ms"] = latencyP50 }
+            if let latencyP99 { obj["latency_p99_ms"] = latencyP99 }
+            if let queueDepth { obj["queue_depth"] = queueDepth }
+            if let requestsToday { obj["requests_served_today"] = requestsToday }
+            if let requestsAllTime { obj["requests_served_all_time"] = requestsAllTime }
+            if let requestsPerMinute { obj["requests_per_minute"] = requestsPerMinute }
+            if let inputTokensToday { obj["input_tokens_today"] = inputTokensToday }
+            if let outputTokensToday { obj["output_tokens_today"] = outputTokensToday }
+            if let inputTokensAllTime { obj["input_tokens_all_time"] = inputTokensAllTime }
+            if let outputTokensAllTime { obj["output_tokens_all_time"] = outputTokensAllTime }
+            if let uptime { obj["uptime_sec"] = uptime }
             return obj
         case .pauseRequest: return ["type": "pause_request"]
         case let .pauseAck(accepted, reason):
@@ -140,11 +180,21 @@ enum ControlCodec {
             )
         case "metrics_response":
             return .metricsResponse(
-                earningsUsdc: dict["earnings_usdc"] as? Double ?? 0,
-                malibuAccrued: dict["malibu_accrued"] as? Double ?? 0,
-                gpuC: dict["gpu_c"] as? Double,
-                latencyP50Ms: dict["latency_p50_ms"] as? Int,
-                uptimeSec: dict["uptime_sec"] as? Int ?? 0
+                earningsUsdc: doubleValue(dict["earnings_usdc"]),
+                malibuAccrued: doubleValue(dict["malibu_accrued"]),
+                gpuC: doubleValue(dict["gpu_c"]),
+                gpuUtilizationPct: doubleValue(dict["gpu_utilization_pct"]),
+                latencyP50Ms: intValue(dict["latency_p50_ms"]),
+                latencyP99Ms: intValue(dict["latency_p99_ms"]),
+                queueDepth: intValue(dict["queue_depth"]),
+                requestsServedToday: intValue(dict["requests_served_today"]),
+                requestsServedAllTime: intValue(dict["requests_served_all_time"]),
+                requestsPerMinute: doubleValue(dict["requests_per_minute"]),
+                inputTokensToday: int64Value(dict["input_tokens_today"]),
+                outputTokensToday: int64Value(dict["output_tokens_today"]),
+                inputTokensAllTime: int64Value(dict["input_tokens_all_time"]),
+                outputTokensAllTime: int64Value(dict["output_tokens_all_time"]),
+                uptimeSec: intValue(dict["uptime_sec"])
             )
         case "pause_ack":
             return .pauseAck(
@@ -174,5 +224,24 @@ enum ControlCodec {
             )
         default: throw DecodeError.unknownType(type)
         }
+    }
+
+    private static func doubleValue(_ value: Any?) -> Double? {
+        if let value = value as? Double { return value }
+        if let value = value as? NSNumber { return value.doubleValue }
+        return nil
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? NSNumber { return value.intValue }
+        return nil
+    }
+
+    private static func int64Value(_ value: Any?) -> Int64? {
+        if let value = value as? Int64 { return value }
+        if let value = value as? Int { return Int64(value) }
+        if let value = value as? NSNumber { return value.int64Value }
+        return nil
     }
 }
