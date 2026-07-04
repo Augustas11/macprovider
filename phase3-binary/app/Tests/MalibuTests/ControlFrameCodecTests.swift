@@ -19,7 +19,17 @@ final class ControlFrameCodecTests: XCTestCase {
             earningsUsdc: 1.25,
             malibuAccrued: 3.5,
             gpuC: 48.2,
+            gpuUtilizationPct: 62,
             latencyP50Ms: 120,
+            latencyP99Ms: 280,
+            queueDepth: 3,
+            requestsServedToday: 142,
+            requestsServedAllTime: 8_204,
+            requestsPerMinute: 3.1,
+            inputTokensToday: 1_200_000,
+            outputTokensToday: 3_800_000,
+            inputTokensAllTime: 12_000_000,
+            outputTokensAllTime: 38_000_000,
             uptimeSec: 3600
         )
         XCTAssertEqual(try roundTrip(f), f)
@@ -27,13 +37,89 @@ final class ControlFrameCodecTests: XCTestCase {
 
     func testMetricsResponseOmitsOptionalNils() throws {
         let f = ControlFrame.metricsResponse(
-            earningsUsdc: 0, malibuAccrued: 0, gpuC: nil, latencyP50Ms: nil, uptimeSec: 0
+            earningsUsdc: nil,
+            malibuAccrued: nil,
+            gpuC: nil,
+            gpuUtilizationPct: nil,
+            latencyP50Ms: nil,
+            latencyP99Ms: nil,
+            queueDepth: nil,
+            requestsServedToday: nil,
+            requestsServedAllTime: nil,
+            requestsPerMinute: nil,
+            inputTokensToday: nil,
+            outputTokensToday: nil,
+            inputTokensAllTime: nil,
+            outputTokensAllTime: nil,
+            uptimeSec: nil
         )
         let data = try ControlCodec.encode(f)
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         XCTAssertNotNil(obj)
+        XCTAssertNil(obj?["earnings_usdc"])
+        XCTAssertNil(obj?["malibu_accrued"])
         XCTAssertNil(obj?["gpu_c"])
+        XCTAssertNil(obj?["gpu_utilization_pct"])
         XCTAssertNil(obj?["latency_p50_ms"])
+        XCTAssertNil(obj?["latency_p99_ms"])
+        XCTAssertNil(obj?["queue_depth"])
+        XCTAssertNil(obj?["uptime_sec"])
+    }
+
+    func testMetricsResponseDecodesAbsentCoreMetricsAsNil() throws {
+        let data = Data("""
+        {
+          "type": "metrics_response",
+          "queue_depth": 3
+        }
+        """.utf8)
+        let decoded = try ControlCodec.decode(data)
+        if case let .metricsResponse(usdc, malibu, _, _, _, _, queue, _, _, _, _, _, _, _, uptime) = decoded {
+            XCTAssertNil(usdc)
+            XCTAssertNil(malibu)
+            XCTAssertEqual(queue, 3)
+            XCTAssertNil(uptime)
+        } else {
+            XCTFail("expected metricsResponse")
+        }
+    }
+
+    func testMetricsResponseDecodesGpuLatencyAndQueueDepth() throws {
+        let data = Data("""
+        {
+          "type": "metrics_response",
+          "earnings_usdc": 1.0,
+          "malibu_accrued": 2.0,
+          "gpu_utilization_pct": 62,
+          "latency_p50_ms": 42,
+          "latency_p99_ms": 180,
+          "queue_depth": 3,
+          "requests_served_today": 4,
+          "requests_served_all_time": 9,
+          "requests_per_minute": 1.5,
+          "input_tokens_today": 1200,
+          "output_tokens_today": 2400,
+          "input_tokens_all_time": 12000,
+          "output_tokens_all_time": 24000,
+          "uptime_sec": 30
+        }
+        """.utf8)
+        let decoded = try ControlCodec.decode(data)
+        if case let .metricsResponse(_, _, _, gpu, p50, p99, queue, today, allTime, rpm, inToday, outToday, inAll, outAll, _) = decoded {
+            XCTAssertEqual(gpu, 62)
+            XCTAssertEqual(p50, 42)
+            XCTAssertEqual(p99, 180)
+            XCTAssertEqual(queue, 3)
+            XCTAssertEqual(today, 4)
+            XCTAssertEqual(allTime, 9)
+            XCTAssertEqual(rpm, 1.5)
+            XCTAssertEqual(inToday, 1200)
+            XCTAssertEqual(outToday, 2400)
+            XCTAssertEqual(inAll, 12000)
+            XCTAssertEqual(outAll, 24000)
+        } else {
+            XCTFail("expected metricsResponse")
+        }
     }
 
     func testPauseAckAcceptedFalseCarriesReason() throws {

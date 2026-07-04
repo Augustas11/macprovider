@@ -21,18 +21,32 @@ import Foundation
 @MainActor
 final class MalibuAgent: ObservableObject {
     @Published private(set) var snapshot: AgentSnapshot = .empty
+    @Published private(set) var logLines: [String] = []
 
     private var child: CLIChildProcess?
     private var control: ControlSocketClient?
     private var metricsPoller: Task<Void, Never>?
     private var eventStreamTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var logTailReader: LogTailReader?
     private var reconnect = ReconnectPolicy()
     private let earningsClient = EarningsClient()
+    private let thermalMonitor = ThermalMonitor()
+    private var cancellables: Set<AnyCancellable> = []
+    private var logTailCancellable: AnyCancellable?
     // AUDIT R2 CODE H3 fix: once shutdown begins, refuse any subsequent start()
     // — including a reconnect Task that already slept past its cancellation
     // check but hadn't yet re-entered the MainActor.
     private var isShuttingDown: Bool = false
+
+    init() {
+        thermalMonitor.$state
+            .sink { [weak self] state in
+                self?.snapshot.thermalState = state
+            }
+            .store(in: &cancellables)
+        snapshot.thermalState = thermalMonitor.state
+    }
 
     // MARK: - Lifecycle
 
@@ -101,6 +115,7 @@ final class MalibuAgent: ObservableObject {
 
         do {
             try child.start()
+            startLogTail(fileURL: paths.cliLogFile)
         } catch {
             snapshot.state = .error; snapshot.lastError = "Failed to launch: \(error)"
             self.child = nil
@@ -136,14 +151,25 @@ final class MalibuAgent: ObservableObject {
         await control?.close()
         metricsPoller?.cancel(); metricsPoller = nil
         eventStreamTask?.cancel(); eventStreamTask = nil
+        logTailCancellable?.cancel(); logTailCancellable = nil
+        logTailReader?.stop(); logTailReader = nil
+        logLines = []
         child = nil
         control = nil
         snapshot = .empty
+        snapshot.thermalState = thermalMonitor.state
     }
 
     // MARK: - Private
 
     private func connectControl(socketPath: String) async {
+        metricsPoller?.cancel(); metricsPoller = nil
+        eventStreamTask?.cancel(); eventStreamTask = nil
+        if let control {
+            await control.close()
+            self.control = nil
+        }
+
         let client = ControlSocketClient(socketPath: socketPath)
         do {
             try await client.connect(timeout: 10)
@@ -166,26 +192,26 @@ final class MalibuAgent: ObservableObject {
         }
         guard !isShuttingDown else { await client.close(); return }
         self.control = client
+        reconnect.reset()
         snapshot.state = .starting
 
         eventStreamTask = Task { [weak self] in
-            guard let client = await self?.control else { return }
             for await frame in client.stream {
-                await self?.consume(frame)
+                self?.consume(frame)
             }
         }
 
         metricsPoller = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
-                try? await self?.control?.send(.metricsRequest)
-                try? await self?.control?.send(.statusRequest)
+                try? await client.send(.metricsRequest)
+                try? await client.send(.statusRequest)
                 await self?.refreshEarnings()
             }
         }
 
-        try? await control?.send(.statusRequest)
-        try? await control?.send(.metricsRequest)
+        try? await client.send(.statusRequest)
+        try? await client.send(.metricsRequest)
         await refreshEarnings()
     }
 
@@ -194,7 +220,23 @@ final class MalibuAgent: ObservableObject {
         case let .statusResponse(model, state):
             snapshot.currentModelID = model
             if state == "serving" { snapshot.state = .serving }
-        case let .metricsResponse(usdc, malibu, gpu, latency, uptime):
+        case let .metricsResponse(
+            usdc,
+            malibu,
+            gpuTemperature,
+            gpuUtilization,
+            latencyP50,
+            latencyP99,
+            queueDepth,
+            requestsToday,
+            requestsAllTime,
+            requestsPerMinute,
+            inputTokensToday,
+            outputTokensToday,
+            inputTokensAllTime,
+            outputTokensAllTime,
+            uptime
+        ):
             // AUDIT R2 ARCHITECT A1 fix: the CLI stub emits earnings_usdc=0,
             // malibu_accrued=0, uptime_sec=0 with no gpu/latency until real
             // metrics land in SPEC-025 §11 P1. Rendering this tuple as
@@ -203,15 +245,30 @@ final class MalibuAgent: ObservableObject {
             // presenter shows "—" instead. Real metric responses populate
             // at least uptime > 0 within seconds of the daemon coming up.
             let looksLikeStub = usdc == 0 && malibu == 0 && uptime == 0
-                                 && gpu == nil && latency == nil
+                                 && gpuTemperature == nil && gpuUtilization == nil
+                                 && latencyP50 == nil && latencyP99 == nil
+                                 && queueDepth == nil && requestsToday == nil
+                                 && requestsAllTime == nil && requestsPerMinute == nil
+                                 && inputTokensToday == nil && outputTokensToday == nil
+                                 && inputTokensAllTime == nil && outputTokensAllTime == nil
             if looksLikeStub {
-                snapshot.earningsUsdcToday = nil
-                snapshot.malibuAccruedToday = nil
-                snapshot.uptimeSec = nil
+                clearRuntimeMetrics()
             } else {
                 snapshot.earningsUsdcToday = usdc
                 snapshot.malibuAccruedToday = malibu
                 snapshot.uptimeSec = uptime
+                snapshot.gpuTemperatureC = gpuTemperature
+                snapshot.gpuUtilizationPct = gpuUtilization
+                snapshot.latencyP50Ms = latencyP50
+                snapshot.latencyP99Ms = latencyP99
+                snapshot.queueDepth = queueDepth
+                snapshot.requestsServedToday = requestsToday
+                snapshot.requestsServedAllTime = requestsAllTime
+                snapshot.requestsPerMinute = requestsPerMinute
+                snapshot.inputTokensToday = inputTokensToday
+                snapshot.outputTokensToday = outputTokensToday
+                snapshot.inputTokensAllTime = inputTokensAllTime
+                snapshot.outputTokensAllTime = outputTokensAllTime
             }
         case let .pauseAck(accepted, reason):
             if accepted {
@@ -242,6 +299,24 @@ final class MalibuAgent: ObservableObject {
         }
     }
 
+    private func clearRuntimeMetrics() {
+        snapshot.earningsUsdcToday = nil
+        snapshot.malibuAccruedToday = nil
+        snapshot.uptimeSec = nil
+        snapshot.gpuTemperatureC = nil
+        snapshot.gpuUtilizationPct = nil
+        snapshot.latencyP50Ms = nil
+        snapshot.latencyP99Ms = nil
+        snapshot.queueDepth = nil
+        snapshot.requestsServedToday = nil
+        snapshot.requestsServedAllTime = nil
+        snapshot.requestsPerMinute = nil
+        snapshot.inputTokensToday = nil
+        snapshot.outputTokensToday = nil
+        snapshot.inputTokensAllTime = nil
+        snapshot.outputTokensAllTime = nil
+    }
+
     private func refreshEarnings() async {
         guard let providerID = ProviderConfig.readProviderID(),
               let token = await KeychainStore.readProviderToken(providerID: providerID) else {
@@ -253,11 +328,31 @@ final class MalibuAgent: ObservableObject {
             snapshot.trustTier = earnings.trustTier
             snapshot.unpaidLedgerBacklogUSDC = earnings.unpaidLedgerBacklogUSDC
             snapshot.unpaidLedgerBacklogMALIBU = earnings.unpaidLedgerBacklogMALIBU
+            snapshot.earningsUsdcToday = earnings.usdcToday
+            snapshot.earningsUsdcWeek = earnings.usdcWeek
+            snapshot.earningsUsdcPending = earnings.usdcPending
+            snapshot.earningsUsdcLifetime = earnings.usdcLifetime
+            snapshot.malibuAccruedToday = earnings.malibuToday
+            snapshot.malibuAccruedAllTime = earnings.malibuAllTime
+            snapshot.trustCriteriaMet = earnings.trustCriteriaMet
+            snapshot.trustCriteriaRequired = earnings.trustCriteriaRequired
         } catch {
             // Earnings is not part of the daemon liveness path. Keep existing
             // metrics visible and retry on the next poll without logging bearer
             // material or the request payload.
         }
+    }
+
+    private func startLogTail(fileURL: URL) {
+        logTailCancellable?.cancel()
+        logTailReader?.stop()
+        let reader = LogTailReader(fileURL: fileURL)
+        logTailCancellable = reader.$lines
+            .sink { [weak self] lines in
+                self?.logLines = lines
+            }
+        logTailReader = reader
+        reader.start()
     }
 
     private func handleIdentitySignatureRequest(
