@@ -66,6 +66,12 @@ public struct AppConfig: Equatable, Sendable {
     public var ctlSocketPath: String?
     public var switchStatePath: String?
     public var donorMode: Bool
+    public var idlePrewarmEnabled: Bool
+    public var idlePrewarmIdleThresholdSeconds: Double
+    public var idlePrewarmTickSeconds: Double
+    public var idlePrewarmMaxTokens: Int
+    public var idlePrewarmPrompt: String
+    public var idlePrewarmRunOnBattery: Bool
     // SPEC-001: provider authentication token (closes XSEC-1 from
     // audits/2026-06-10/REPO_AUDIT.md). When set, the binary sends
     // "Authorization: Bearer <token>" on the WS connect and the
@@ -123,6 +129,12 @@ public struct AppConfig: Equatable, Sendable {
             ctlSocketPath: nil,
             switchStatePath: nil,
             donorMode: false,
+            idlePrewarmEnabled: true,
+            idlePrewarmIdleThresholdSeconds: 30,
+            idlePrewarmTickSeconds: 5,
+            idlePrewarmMaxTokens: 1,
+            idlePrewarmPrompt: "warm",
+            idlePrewarmRunOnBattery: false,
             providerToken: nil,
             managedBy: nil
         )
@@ -152,6 +164,12 @@ public struct CLIOverrides: Equatable, Sendable {
     public var kvBits: Int?
     public var maxContext: Int?
     public var maxBatch: Int?
+    public var idlePrewarmEnabled: Bool?
+    public var idlePrewarmIdleThresholdSeconds: Double?
+    public var idlePrewarmTickSeconds: Double?
+    public var idlePrewarmMaxTokens: Int?
+    public var idlePrewarmPrompt: String?
+    public var idlePrewarmRunOnBattery: Bool?
 
     public init(
         port: Int? = nil,
@@ -172,7 +190,13 @@ public struct CLIOverrides: Equatable, Sendable {
         managedBy: String? = nil,
         kvBits: Int? = nil,
         maxContext: Int? = nil,
-        maxBatch: Int? = nil
+        maxBatch: Int? = nil,
+        idlePrewarmEnabled: Bool? = nil,
+        idlePrewarmIdleThresholdSeconds: Double? = nil,
+        idlePrewarmTickSeconds: Double? = nil,
+        idlePrewarmMaxTokens: Int? = nil,
+        idlePrewarmPrompt: String? = nil,
+        idlePrewarmRunOnBattery: Bool? = nil
     ) {
         self.port = port
         self.model = model
@@ -193,6 +217,12 @@ public struct CLIOverrides: Equatable, Sendable {
         self.kvBits = kvBits
         self.maxContext = maxContext
         self.maxBatch = maxBatch
+        self.idlePrewarmEnabled = idlePrewarmEnabled
+        self.idlePrewarmIdleThresholdSeconds = idlePrewarmIdleThresholdSeconds
+        self.idlePrewarmTickSeconds = idlePrewarmTickSeconds
+        self.idlePrewarmMaxTokens = idlePrewarmMaxTokens
+        self.idlePrewarmPrompt = idlePrewarmPrompt
+        self.idlePrewarmRunOnBattery = idlePrewarmRunOnBattery
     }
 }
 
@@ -235,6 +265,7 @@ public enum ConfigLoader {
         config = try applyEnvironment(config, environment: environment)
         config = try applyCLI(config, cli: cli)
         config.configPath = configPath
+        try validateIdlePrewarm(config)
         return config
     }
 
@@ -310,6 +341,14 @@ public enum ConfigLoader {
         try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
         try assign(&config.switchStatePath, from: dict, key: "switch_state_path", expected: "string")
         try assign(&config.donorMode, from: dict, key: "donor_mode", expected: "boolean")
+        if let nested = dict["idle_prewarm"] as? [String: Any] {
+            try assign(&config.idlePrewarmEnabled, from: nested, key: "enabled", expected: "boolean")
+            try assign(&config.idlePrewarmIdleThresholdSeconds, from: nested, key: "idle_threshold_seconds", expected: "number")
+            try assign(&config.idlePrewarmTickSeconds, from: nested, key: "tick_seconds", expected: "number")
+            try assign(&config.idlePrewarmMaxTokens, from: nested, key: "max_tokens", expected: "integer")
+            try assign(&config.idlePrewarmPrompt, from: nested, key: "prompt", expected: "string")
+            try assign(&config.idlePrewarmRunOnBattery, from: nested, key: "run_on_battery", expected: "boolean")
+        }
         try assign(&config.providerToken, from: dict, key: "provider_token", expected: "string")
         try assign(&config.managedBy, from: dict, key: "managed_by", expected: "string")
         return config
@@ -348,6 +387,12 @@ public enum ConfigLoader {
         try assign(&config.ctlSocketPath, from: environment, env: "MACPROVIDER_CTL_SOCKET_PATH", expected: "string")
         try assign(&config.switchStatePath, from: environment, env: "MACPROVIDER_SWITCH_STATE_PATH", expected: "string")
         try assign(&config.donorMode, from: environment, env: "MACPROVIDER_DONOR_MODE", expected: "boolean")
+        try assign(&config.idlePrewarmEnabled, from: environment, env: "MACPROVIDER_IDLE_PREWARM_ENABLED", expected: "boolean")
+        try assign(&config.idlePrewarmIdleThresholdSeconds, from: environment, env: "MACPROVIDER_IDLE_PREWARM_IDLE_THRESHOLD_S", expected: "number")
+        try assign(&config.idlePrewarmTickSeconds, from: environment, env: "MACPROVIDER_IDLE_PREWARM_TICK_S", expected: "number")
+        try assign(&config.idlePrewarmMaxTokens, from: environment, env: "MACPROVIDER_IDLE_PREWARM_MAX_TOKENS", expected: "integer")
+        try assign(&config.idlePrewarmPrompt, from: environment, env: "MACPROVIDER_IDLE_PREWARM_PROMPT", expected: "string")
+        try assign(&config.idlePrewarmRunOnBattery, from: environment, env: "MACPROVIDER_IDLE_PREWARM_ON_BATTERY", expected: "boolean")
         try assign(&config.providerToken, from: environment, env: "MACPROVIDER_PROVIDER_TOKEN", expected: "string")
         try assign(&config.managedBy, from: environment, env: "MACPROVIDER_MANAGED_BY", expected: "string")
         return config
@@ -412,6 +457,24 @@ public enum ConfigLoader {
         if let maxBatch = cli.maxBatch {
             config.maxConcurrencyOverride = maxBatch
         }
+        if let idlePrewarmEnabled = cli.idlePrewarmEnabled {
+            config.idlePrewarmEnabled = idlePrewarmEnabled
+        }
+        if let idlePrewarmIdleThresholdSeconds = cli.idlePrewarmIdleThresholdSeconds {
+            config.idlePrewarmIdleThresholdSeconds = idlePrewarmIdleThresholdSeconds
+        }
+        if let idlePrewarmTickSeconds = cli.idlePrewarmTickSeconds {
+            config.idlePrewarmTickSeconds = idlePrewarmTickSeconds
+        }
+        if let idlePrewarmMaxTokens = cli.idlePrewarmMaxTokens {
+            config.idlePrewarmMaxTokens = idlePrewarmMaxTokens
+        }
+        if let idlePrewarmPrompt = cli.idlePrewarmPrompt {
+            config.idlePrewarmPrompt = idlePrewarmPrompt
+        }
+        if let idlePrewarmRunOnBattery = cli.idlePrewarmRunOnBattery {
+            config.idlePrewarmRunOnBattery = idlePrewarmRunOnBattery
+        }
         return config
     }
 
@@ -447,6 +510,31 @@ public enum ConfigLoader {
             throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
         }
         field = string
+    }
+
+    private static func assign(_ field: inout String, from dict: [String: Any], key: String, expected: String) throws {
+        guard let value = dict[key], !(value is NSNull) else { return }
+        guard let string = value as? String else {
+            throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
+        }
+        field = string
+    }
+
+    private static func assign(_ field: inout Double, from dict: [String: Any], key: String, expected: String) throws {
+        guard let value = dict[key], !(value is NSNull) else { return }
+        if let double = value as? Double {
+            field = double
+            return
+        }
+        if let int = value as? Int {
+            field = Double(int)
+            return
+        }
+        if let string = value as? String, let double = Double(string) {
+            field = double
+            return
+        }
+        throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
     }
 
     private static func assign(_ field: inout [String]?, from dict: [String: Any], key: String, expected: String) throws {
@@ -517,6 +605,19 @@ public enum ConfigLoader {
         field = value
     }
 
+    private static func assign(_ field: inout String, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        field = value
+    }
+
+    private static func assign(_ field: inout Double, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        guard let double = Double(value) else {
+            throw ConfigError.invalidValue(key: key, value: value, expected: expected)
+        }
+        field = double
+    }
+
     private static func assign(_ field: inout Bool, from env: [String: String], env key: String, expected: String) throws {
         guard let value = env[key] else { return }
         guard let bool = parseBool(value) else {
@@ -557,6 +658,42 @@ public enum ConfigLoader {
             return false
         default:
             return nil
+        }
+    }
+
+    private static func validateIdlePrewarm(_ config: AppConfig) throws {
+        try validateRange(
+            key: "idle_prewarm.idle_threshold_seconds",
+            value: config.idlePrewarmIdleThresholdSeconds,
+            range: 5...3600
+        )
+        try validateRange(
+            key: "idle_prewarm.tick_seconds",
+            value: config.idlePrewarmTickSeconds,
+            range: 1...60
+        )
+        try validateRange(
+            key: "idle_prewarm.max_tokens",
+            value: Double(config.idlePrewarmMaxTokens),
+            range: 1...8
+        )
+        let promptBytes = config.idlePrewarmPrompt.utf8.count
+        guard (1...64).contains(promptBytes) else {
+            throw ConfigError.invalidValue(
+                key: "idle_prewarm.prompt",
+                value: "\(promptBytes) bytes",
+                expected: "1...64 UTF-8 bytes"
+            )
+        }
+    }
+
+    private static func validateRange(key: String, value: Double, range: ClosedRange<Double>) throws {
+        guard range.contains(value) else {
+            throw ConfigError.invalidValue(
+                key: key,
+                value: String(value),
+                expected: "\(range.lowerBound)...\(range.upperBound)"
+            )
         }
     }
 }

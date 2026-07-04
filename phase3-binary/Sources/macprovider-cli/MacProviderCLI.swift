@@ -80,6 +80,24 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Maximum concurrent in-flight inferences. Defaults to 1 (single-slot, the only safe value while mlx-swift parallel generation remains unproven). Lifting this above 1 is an autotune knob — the binary itself does not enforce safety beyond the AsyncSemaphore. Overrides MACPROVIDER_MAX_CONCURRENCY_OVERRIDE and config key max_concurrency_override.")
     var maxBatch: Int?
 
+    @Flag(name: .customLong("idle-prewarm"), inversion: .prefixedNo, help: "Enable provider-side idle MLX Metal prewarm. Default on.")
+    var idlePrewarm: Bool?
+
+    @Option(name: .customLong("idle-prewarm-idle-threshold-s"), help: "Seconds of no real requests before idle prewarm may fire. Default 30; range 5...3600.")
+    var idlePrewarmIdleThresholdSeconds: Double?
+
+    @Option(name: .customLong("idle-prewarm-tick-s"), help: "Idle prewarm check interval in seconds. Default 5; range 1...60.")
+    var idlePrewarmTickSeconds: Double?
+
+    @Option(name: .customLong("idle-prewarm-max-tokens"), help: "Synthetic warmup max tokens. Default 1; range 1...8.")
+    var idlePrewarmMaxTokens: Int?
+
+    @Option(name: .customLong("idle-prewarm-prompt"), help: "Synthetic warmup prompt. Default 'warm'; range 1...64 UTF-8 bytes.")
+    var idlePrewarmPrompt: String?
+
+    @Flag(name: .customLong("idle-prewarm-on-battery"), inversion: .prefixedNo, help: "Allow idle prewarm while running on battery. Default off.")
+    var idlePrewarmRunOnBattery: Bool?
+
     @Flag(help: "Run only the local HTTP server; do not establish a coordinator WebSocket session.")
     var noJoin = false
 
@@ -295,7 +313,13 @@ struct ServeCommand: AsyncParsableCommand {
                 managedBy: managedBy,
                 kvBits: kvBits,
                 maxContext: maxContext,
-                maxBatch: maxBatch
+                maxBatch: maxBatch,
+                idlePrewarmEnabled: idlePrewarm,
+                idlePrewarmIdleThresholdSeconds: idlePrewarmIdleThresholdSeconds,
+                idlePrewarmTickSeconds: idlePrewarmTickSeconds,
+                idlePrewarmMaxTokens: idlePrewarmMaxTokens,
+                idlePrewarmPrompt: idlePrewarmPrompt,
+                idlePrewarmRunOnBattery: idlePrewarmRunOnBattery
             )
         )
 
@@ -354,6 +378,13 @@ struct ServeCommand: AsyncParsableCommand {
             thermalGate: thermalGate
         )
         await modelRuntime.setProviderStatus(providerStatus)
+        let idlePrewarmer = IdlePrewarmer(
+            modelRuntime: modelRuntime,
+            providerStatus: providerStatus,
+            thermalGate: thermalGate,
+            powerSource: SystemPowerSourceReporter(),
+            config: IdlePrewarmConfig(appConfig: resolved)
+        )
         let receiptKeyStore = KeychainReceiptKeyStore()
         let receiptRuntime = try Self.makeReceiptRuntime(config: resolved, keyStore: receiptKeyStore)
         if resolved.donorMode {
@@ -407,15 +438,18 @@ struct ServeCommand: AsyncParsableCommand {
             controlSocket = nil
         }
         await coordinatorClient?.start()
+        await idlePrewarmer.start()
         let server = HTTPServer(
             config: resolved,
             modelRuntime: modelRuntime,
             providerStatus: providerStatus,
-            receiptBuilder: receiptRuntime.builder
+            receiptBuilder: receiptRuntime.builder,
+            idlePrewarmer: idlePrewarmer
         )
-        let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket)
+        let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket, idlePrewarmer: idlePrewarmer)
         defer {
             Task {
+                await idlePrewarmer.stop()
                 await controlSocket?.stop()
                 await coordinatorClient?.stop()
             }
@@ -560,13 +594,15 @@ struct UpdateCommand: AsyncParsableCommand {
 
 private func installTerminationHandlers(
     coordinatorClient: CoordinatorClient?,
-    controlSocket: ControlSocketServer?
+    controlSocket: ControlSocketServer?,
+    idlePrewarmer: IdlePrewarmer?
 ) -> [DispatchSourceSignal] {
     [SIGTERM, SIGINT].map { signalNumber in
         signal(signalNumber, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global(qos: .userInitiated))
         source.setEventHandler {
             Task {
+                await idlePrewarmer?.stop()
                 await controlSocket?.stop()
                 await coordinatorClient?.drainAndExit(reason: "\(signalName(signalNumber)) received")
                 Darwin.exit(0)
@@ -603,4 +639,10 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  max_context: \(config.maxContextOverride.map(String.init) ?? "<unset, per-tier default>")")
     print("  max_batch: \(config.maxConcurrencyOverride.map(String.init) ?? "1")")
     print("  enable_receipts: \(config.enableReceipts)")
+    print("  idle_prewarm.enabled: \(config.idlePrewarmEnabled)")
+    print("  idle_prewarm.idle_threshold_seconds: \(config.idlePrewarmIdleThresholdSeconds)")
+    print("  idle_prewarm.tick_seconds: \(config.idlePrewarmTickSeconds)")
+    print("  idle_prewarm.max_tokens: \(config.idlePrewarmMaxTokens)")
+    print("  idle_prewarm.prompt: \(config.idlePrewarmPrompt)")
+    print("  idle_prewarm.run_on_battery: \(config.idlePrewarmRunOnBattery)")
 }

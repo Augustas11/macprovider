@@ -8,6 +8,21 @@ struct HTTPServer: Sendable {
     let modelRuntime: ModelRuntime
     let providerStatus: ProviderStatus
     let receiptBuilder: ReceiptBuilder?
+    let idlePrewarmer: IdlePrewarmer?
+
+    init(
+        config: AppConfig,
+        modelRuntime: ModelRuntime,
+        providerStatus: ProviderStatus,
+        receiptBuilder: ReceiptBuilder?,
+        idlePrewarmer: IdlePrewarmer? = nil
+    ) {
+        self.config = config
+        self.modelRuntime = modelRuntime
+        self.providerStatus = providerStatus
+        self.receiptBuilder = receiptBuilder
+        self.idlePrewarmer = idlePrewarmer
+    }
 
     func run() throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
@@ -29,7 +44,8 @@ struct HTTPServer: Sendable {
                             providerStatus: providerStatus,
                             warmSwapEnabled: config.enableWarmSwap,
                             maxBodyBytes: config.maxRequestBodyBytes,
-                            receiptBuilder: receiptBuilder
+                            receiptBuilder: receiptBuilder,
+                            idlePrewarmer: idlePrewarmer
                         )
                     )
                 }
@@ -54,6 +70,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private let warmSwapEnabled: Bool
     private let maxBodyBytes: Int
     private let receiptBuilder: ReceiptBuilder?
+    private let idlePrewarmer: IdlePrewarmer?
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
     private var bodyTooLarge = false
@@ -66,7 +83,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         providerStatus: ProviderStatus,
         warmSwapEnabled: Bool,
         maxBodyBytes: Int,
-        receiptBuilder: ReceiptBuilder? = nil
+        receiptBuilder: ReceiptBuilder? = nil,
+        idlePrewarmer: IdlePrewarmer? = nil
     ) {
         self.modelID = modelID
         self.providerID = providerID
@@ -76,6 +94,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         self.warmSwapEnabled = warmSwapEnabled
         self.maxBodyBytes = maxBodyBytes
         self.receiptBuilder = receiptBuilder
+        self.idlePrewarmer = idlePrewarmer
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -245,14 +264,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     receiptBuilder: receiptBuilder,
                     providerID: providerID,
                     requestID: auditRequestID,
-                    settlementMetadata: settlementMetadata
+                    settlementMetadata: settlementMetadata,
+                    idlePrewarmer: idlePrewarmer
                 )
                 return
             }
 
             let providerStatus = providerStatus
-            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, settlementMetadata] in
+            let idlePrewarmer = idlePrewarmer
+            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, settlementMetadata, idlePrewarmer] in
                 let startedAt = await providerStatus.beginRequest()
+                await idlePrewarmer?.cancelInflightPrewarm()
                 // SPEC-015 §M.2.2 atomic-read invariant — capture
                 // the pre-snapshot for warm-swap validation, then
                 // call `completeWithServedSnapshot` which returns
@@ -539,14 +561,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         receiptBuilder: ReceiptBuilder?,
         providerID: String?,
         requestID: String,
-        settlementMetadata: SettlementReceiptMetadata?
+        settlementMetadata: SettlementReceiptMetadata?,
+        idlePrewarmer: IdlePrewarmer?
     ) {
         let created = Int(Date().timeIntervalSince1970)
         let id = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
         let providerStatus = providerStatus
-        Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, settlementMetadata] in
+        Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, settlementMetadata, idlePrewarmer] in
             let startedAt = await providerStatus.beginRequest()
+            await idlePrewarmer?.cancelInflightPrewarm()
             var sseStarted = false
             do {
                 let snapshot = await modelRuntime.currentSnapshot()

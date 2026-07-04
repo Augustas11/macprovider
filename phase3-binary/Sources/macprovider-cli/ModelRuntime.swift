@@ -223,6 +223,12 @@ struct ModelRuntimeLoadError: Error, CustomStringConvertible {
     }
 }
 
+struct InternalWarmupResult: Sendable {
+    let tokensGenerated: Int
+    let firstTokenElapsedMS: Double
+    let totalElapsedMS: Double
+}
+
 actor ModelRuntime: ModelRuntimeServing {
     // AC-V2-9b (LOCKED): SPEC-019 v0.2.4 §6 normative 2 MiB streaming
     // content cap. Byte domain is post-stop-token-filter buyer-visible
@@ -266,7 +272,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     var isLoaded: Bool {
-        currentContainer != nil
+        currentContainer != nil || (testCompletion != nil && currentModelID != nil)
     }
 
     init(
@@ -549,6 +555,113 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async throws -> CompletionResult {
         let (result, _) = try await completeWithServedSnapshot(request, shouldCancel: shouldCancel)
         return result
+    }
+
+    /// Runs a synthetic, coordinator-invisible inference against the loaded
+    /// runtime. This intentionally bypasses ProviderStatus request accounting,
+    /// receipt emission, and conversation-cache reads/writes.
+    func runInternalWarmup(
+        maxTokens: Int,
+        prompt: String,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> InternalWarmupResult {
+        let boundedMaxTokens = min(8, max(1, maxTokens))
+        guard (1...64).contains(prompt.utf8.count) else {
+            throw APIError(
+                status: 400,
+                message: "internal warmup prompt must be 1...64 UTF-8 bytes",
+                type: "invalid_request_error",
+                code: "invalid_request",
+                param: "prompt"
+            )
+        }
+
+        let startedAt = Date()
+        let snapshot = await currentSnapshot()
+        try Self.validateReady(snapshot.state)
+        guard snapshot.modelHash != nil else {
+            throw APIError(status: 503, message: "Model hash unavailable", type: "server_error", code: "model_not_loaded")
+        }
+
+        if let testCompletion {
+            let request = try Self.internalWarmupRequest(modelID: snapshot.modelID, prompt: prompt, maxTokens: boundedMaxTokens)
+            let completion = try await withThrowingTaskGroup(of: CompletionResult.self) { group in
+                group.addTask {
+                    try await testCompletion(snapshot, request)
+                }
+                group.addTask {
+                    while !Task.isCancelled {
+                        if shouldCancel() {
+                            throw CancellationError()
+                        }
+                        try await Task.sleep(nanoseconds: 5_000_000)
+                    }
+                    throw CancellationError()
+                }
+                guard let completion = try await group.next() else {
+                    throw CancellationError()
+                }
+                group.cancelAll()
+                return completion
+            }
+            let elapsed = Date().timeIntervalSince(startedAt) * 1000.0
+            return InternalWarmupResult(
+                tokensGenerated: completion.completionTokens,
+                firstTokenElapsedMS: Double(completion.ttftMilliseconds ?? Int64(elapsed)),
+                totalElapsedMS: elapsed
+            )
+        }
+
+        guard let container = snapshot.container else {
+            throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+        }
+
+        let maxContextTokens = maxContextTokens
+        let kvBitsOverride = kvBitsOverride
+        let inferenceGate = inferenceGate
+        let firstToken = FirstTokenRecorder()
+        let cancellation = WarmupCancellationRecorder()
+        let result: GenerateResult = try await inferenceGate.withPermit {
+            if Task.isCancelled || shouldCancel() {
+                throw CancellationError()
+            }
+            return try await container.perform { context in
+                if Task.isCancelled || shouldCancel() {
+                    throw CancellationError()
+                }
+                let input = UserInput(chat: [.user(prompt)])
+                let lmInput = try await context.processor.prepare(input: input)
+                try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+                let parameters = GenerateParameters(
+                    maxTokens: boundedMaxTokens,
+                    maxKVSize: maxContextTokens,
+                    kvBits: kvBitsOverride,
+                    temperature: 0.0,
+                    topP: 1.0
+                )
+                let kvCache = context.model.newCache(parameters: parameters)
+                let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
+                return try generate(input: lmInput, context: context, iterator: iterator) { tokens in
+                    if !tokens.isEmpty {
+                        firstToken.recordIfMissing()
+                    }
+                    if Task.isCancelled || shouldCancel() {
+                        cancellation.record()
+                        return .stop
+                    }
+                    return .more
+                }
+            }
+        }
+        if cancellation.wasCancelled || Task.isCancelled || shouldCancel() {
+            throw CancellationError()
+        }
+        let elapsed = Date().timeIntervalSince(startedAt) * 1000.0
+        return InternalWarmupResult(
+            tokensGenerated: result.generationTokenCount,
+            firstTokenElapsedMS: Double(firstToken.elapsedMilliseconds(since: startedAt) ?? Int64(elapsed)),
+            totalElapsedMS: elapsed
+        )
     }
 
     /// SPEC-015 §M.2.2 — atomic snapshot capture inside the actor
@@ -1181,6 +1294,22 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    private static func internalWarmupRequest(modelID: String?, prompt: String, maxTokens: Int) throws -> ChatCompletionRequest {
+        let body: [String: Any] = [
+            "model": modelID ?? "internal-warmup",
+            "messages": [
+                [
+                    "role": "user",
+                    "content": prompt,
+                ],
+            ],
+            "max_tokens": maxTokens,
+            "temperature": 0,
+            "top_p": 1,
+        ]
+        return try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
+    }
+
     private static func validateStructuredCompletion(_ completion: CompletionResult, request: ChatCompletionRequest) throws -> CompletionResult {
         if completion.toolCalls?.isEmpty == false {
             return completion
@@ -1753,6 +1882,23 @@ private final class FirstTokenRecorder: @unchecked Sendable {
             return nil
         }
         return max(0, Int64(timestamp.timeIntervalSince(start) * 1000))
+    }
+}
+
+private final class WarmupCancellationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var wasCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func record() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
     }
 }
 
