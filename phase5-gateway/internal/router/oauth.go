@@ -14,6 +14,10 @@ import (
 )
 
 func (s *Server) handleGitHubStart(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Auth.GitHubOAuthEnabled {
+		http.Error(w, "oauth_disabled", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
@@ -49,10 +53,14 @@ func (s *Server) handleGitHubStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.now()
-	if err := s.store.StoreOAuthState(r.Context(), storage.OAuthState{
+	if err := s.store.StoreOAuthStateWithCap(r.Context(), storage.OAuthState{
 		StateHash: auth.StateHash(state), SessionID: sessionID, RedirectURI: redirectURI,
 		ClientIP: s.clientIP(r), Action: action, CreatedAt: now, ExpiresAt: auth.OAuthStateExpiry(now),
-	}); err != nil {
+	}, s.cfg.Auth.OAuth.StateMaxPerIP, now); err != nil {
+		if errors.Is(err, storage.ErrOAuthStateCap) {
+			writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "oauth_state_rate_limited", "OAuth start limit exceeded")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "server_error", "oauth_state_store_failed", "Could not start OAuth flow")
 		return
 	}
@@ -64,6 +72,10 @@ func (s *Server) handleGitHubStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Auth.GitHubOAuthEnabled {
+		http.Error(w, "oauth_disabled", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
@@ -159,29 +171,31 @@ func (s *Server) createSignupAccount(w http.ResponseWriter, ctx context.Context,
 		return storage.Account{}, storage.ErrQuotaExceeded
 	}
 	ip := s.clientIP(r)
-	count, err := s.store.CountSignupEventsSince(ctx, ip, s.now().Add(-24*time.Hour))
-	if err != nil {
+	now := s.now()
+	if err := s.store.ReservePublicIssuance(ctx, storage.PublicIssuanceReservation{
+		Surface: "signup", ClientIP: ip, WindowStart: now.Add(-24 * time.Hour), Limit: s.cfg.Quotas.SignupAccountsPerIPPerDay, CreatedAt: now,
+	}); err != nil {
+		if errors.Is(err, storage.ErrRateLimit) {
+			writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "signup_rate_limited", "Signup limit exceeded")
+			return storage.Account{}, err
+		}
 		writeError(w, http.StatusInternalServerError, "server_error", "signup_limit_check_failed", "Could not check signup limit")
 		return storage.Account{}, err
 	}
-	if count >= s.cfg.Quotas.SignupAccountsPerIPPerDay {
-		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "signup_rate_limited", "Signup limit exceeded")
-		return storage.Account{}, storage.ErrQuotaExceeded
-	}
 	accountID := mustID("acct")
-	account := storage.Account{AccountID: accountID, Status: "active", QuotaClass: "default", ConcurrencyClass: "default", CreatedAt: s.now()}
+	account := storage.Account{AccountID: accountID, Status: "active", QuotaClass: "default", ConcurrencyClass: "default", CreatedAt: now}
 	if err := s.store.CreateAccount(ctx, account); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "account_create_failed", "Could not create account")
 		return storage.Account{}, err
 	}
 	if err := s.store.AddAccountIdentity(ctx, storage.AccountIdentity{
-		AccountID: accountID, Provider: "github", ProviderUserID: identity.ProviderUserID, Email: identity.Email, CreatedAt: s.now(),
+		AccountID: accountID, Provider: "github", ProviderUserID: identity.ProviderUserID, Email: identity.Email, CreatedAt: now,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "identity_create_failed", "Could not create identity")
 		return storage.Account{}, err
 	}
 	if err := s.store.RecordSignupEvent(ctx, storage.SignupEvent{
-		EventID: mustID("signup"), AccountID: accountID, ClientIP: ip, Provider: "github", CreatedAt: s.now(),
+		EventID: mustID("signup"), AccountID: accountID, ClientIP: ip, Provider: "github", CreatedAt: now,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "signup_event_failed", "Could not record signup")
 		return storage.Account{}, err
@@ -199,21 +213,23 @@ func (s *Server) handleDemoSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := s.clientIP(r)
-	count, err := s.store.CountDemoSessionEventsSince(r.Context(), ip, s.now().Add(-time.Hour))
-	if err != nil {
+	now := s.now()
+	if err := s.store.ReservePublicIssuance(r.Context(), storage.PublicIssuanceReservation{
+		Surface: "demo_session", ClientIP: ip, WindowStart: now.Add(-time.Hour), Limit: s.cfg.Quotas.DemoSessionsPerIPPerHour, CreatedAt: now,
+	}); err != nil {
+		if errors.Is(err, storage.ErrRateLimit) {
+			writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "demo_session_rate_limited", "Demo session limit exceeded")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "server_error", "demo_session_check_failed", "Could not check demo session limit")
 		return
 	}
-	if count >= s.cfg.Quotas.DemoSessionsPerIPPerHour {
-		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "demo_session_rate_limited", "Demo session limit exceeded")
-		return
-	}
-	token, expires, err := s.demoMgr.Issue(ip, s.now(), 24*time.Hour)
+	token, expires, err := s.demoMgr.Issue(ip, now, 24*time.Hour)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "demo_token_issuance_failed", "Could not issue demo token")
 		return
 	}
-	if err := s.store.RecordDemoSessionEvent(r.Context(), storage.DemoSessionEvent{EventID: mustID("demo"), ClientIP: ip, CreatedAt: s.now()}); err != nil {
+	if err := s.store.RecordDemoSessionEvent(r.Context(), storage.DemoSessionEvent{EventID: mustID("demo"), ClientIP: ip, CreatedAt: now}); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "demo_session_record_failed", "Could not record demo session")
 		return
 	}

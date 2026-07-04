@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"expvar"
 	"fmt"
 	"log/slog"
 	"net"
@@ -21,6 +23,8 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/config"
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
+
+var unauthenticatedInternalProbes = expvar.NewInt("unauthenticated_internal_probes_total")
 
 type Server struct {
 	cfg     config.Config
@@ -180,8 +184,10 @@ func (s *Server) loadRuntimeKillSwitch(ctx context.Context) {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/auth/github/start", s.handleGitHubStart)
-	mux.HandleFunc("/auth/github/callback", s.handleGitHubCallback)
+	if s.cfg.Auth.GitHubOAuthEnabled {
+		mux.HandleFunc("/auth/github/start", s.handleGitHubStart)
+		mux.HandleFunc("/auth/github/callback", s.handleGitHubCallback)
+	}
 	mux.Handle("/auth/demo-session", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleDemoSession)))
 	mux.HandleFunc("/auth/api-keys", s.handleAPIKeys)
 	mux.HandleFunc("/auth/api-keys/", s.handleAPIKeyAction)
@@ -224,6 +230,8 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 					EventID: mustID("audit"), RequestID: requestID, Actor: "public_ingress", Type: "internal_header_injection_stripped",
 					Payload: fmt.Sprintf(`{"headers":%q}`, strings.Join(stripped, ",")), CreatedAt: s.now(),
 				})
+			} else {
+				unauthenticatedInternalProbes.Add(1)
 			}
 		}
 		w.Header().Set("X-Request-ID", requestID)
@@ -411,13 +419,19 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
 	}
+	if !validFeedbackSource(r.Header.Get("X-Feedback-Source")) {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_feedback_source", "feedback source is required")
+		return
+	}
+	ip := s.clientIP(r)
+	now := s.now()
 	var req struct {
 		Rating    int    `json:"rating"`
 		Comment   string `json:"comment"`
 		RequestID string `json:"request_id"`
 		Scope     string `json:"scope"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, int64(s.cfg.Limits.MaxFeedbackCommentBytes)+4096)).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, s.cfg.Limits.MaxFeedbackBodyBytes)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_feedback", "Invalid feedback")
 		return
 	}
@@ -464,7 +478,16 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		}
 		accountID = validation.AccountID
 	}
-	now := s.now()
+	if err := s.store.ReservePublicIssuance(r.Context(), storage.PublicIssuanceReservation{
+		Surface: "feedback", ClientIP: ip, WindowStart: now.Add(-time.Hour), Limit: s.cfg.Limits.FeedbackRequestsPerIPPerHour, CreatedAt: now,
+	}); err != nil {
+		if errors.Is(err, storage.ErrRateLimit) {
+			writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "feedback_rate_limited", "Feedback rate limit exceeded")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "server_error", "feedback_limit_check_failed", "Could not check feedback limit")
+		return
+	}
 	event := storage.FeedbackEvent{
 		EventID: mustID("fb"), RequestID: req.RequestID, AccountID: accountID, Scope: req.Scope,
 		Rating: req.Rating, Comment: req.Comment, CreatedAt: now,
@@ -755,6 +778,20 @@ func sortedKeys(set map[string]struct{}) []string {
 
 func validFeedbackScope(scope string) bool {
 	return scope == "request" || scope == "session" || scope == "account" || scope == "playground"
+}
+
+func validFeedbackSource(source string) bool {
+	source = strings.TrimSpace(source)
+	if source == "" || len(source) > 64 {
+		return false
+	}
+	for _, r := range source {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func safeID(v string) bool {

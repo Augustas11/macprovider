@@ -30,7 +30,7 @@ func (s *Server) handleFeedbackSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	end := s.now()
 	start := end.AddDate(0, 0, -days)
-	events, err := s.store.ListFeedbackEventsSince(r.Context(), start)
+	events, err := s.store.ListFeedbackEventsSinceLimit(r.Context(), start, 1000)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "feedback_summary_failed", "Could not summarize feedback")
 		return
@@ -198,7 +198,9 @@ func buildFeedbackSummary(events []storage.FeedbackSummaryEvent, start, end time
 		if event.RequestID != "" {
 			key = event.AccountID + "\x00" + event.RequestID
 		}
-		latest[key] = event
+		if existing, ok := latest[key]; !ok || event.CreatedAt.After(existing.CreatedAt) {
+			latest[key] = event
+		}
 	}
 	distribution := map[string]int{"1": 0, "2": 0, "3": 0, "4": 0}
 	type scopeAgg struct {

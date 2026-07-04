@@ -23,10 +23,19 @@ func (s *Server) operatorAuthorized(w http.ResponseWriter, r *http.Request) bool
 }
 
 func (s *Server) shouldPersistInternalHeaderAudit(r *http.Request) bool {
-	if strings.HasPrefix(r.URL.Path, "/admin/explorer/") || r.URL.Path == "/admin/explorer" {
+	if strings.HasPrefix(r.URL.Path, "/admin/") {
 		return operatorBearerAuthorized(r.Header, s.cfg.Coordinator.OperatorKey)
 	}
-	return true
+	if token := r.Header.Get("X-Demo-Token"); token != "" {
+		_, err := s.demoMgr.Validate(token, s.clientIP(r), s.now())
+		return err == nil
+	}
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, "Bearer ") {
+		return false
+	}
+	_, err := s.keyMgr.Validate(r.Context(), s.store, strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")))
+	return err == nil
 }
 
 func operatorBearerAuthorized(headers http.Header, expected string) bool {
