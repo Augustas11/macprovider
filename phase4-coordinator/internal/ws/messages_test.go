@@ -123,6 +123,18 @@ func TestParseHeartbeatRejectsOversizedLastAutoupdateEvent(t *testing.T) {
 	}
 }
 
+func TestParseHeartbeatRejectsOversizedModelID(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"` + strings.Repeat("m", 257) + `","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5}`)
+
+	_, _, field, err := ParseHeartbeat(payload)
+	if err == nil {
+		t.Fatal("ParseHeartbeat err = nil")
+	}
+	if field != "model_id" {
+		t.Fatalf("field = %q", field)
+	}
+}
+
 func TestParseStateUpdateAcceptsLastAutoupdateEvent(t *testing.T) {
 	payload := []byte(`{"type":"state_update","state":"draining","reason":"autoupdate_to_1.7.0","since":"2026-06-29T15:00:00Z","metrics_snapshot":{"slots_free":0,"slots_total":1},"last_autoupdate_event":{"event":"provider_autoupdate","phase":"drain","outcome":"in_progress"}}`)
 
@@ -480,5 +492,78 @@ func TestParseHelloRejectsControlCharsInRequiredStrings(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestParseHelloRejectsOversizedHandshakeFields(t *testing.T) {
+	base := map[string]any{
+		"type":                    "hello",
+		"version":                 1,
+		"tier":                    1,
+		"provider_id":             "p-ok",
+		"hostname":                "h-ok",
+		"model_id":                "m-ok",
+		"model_params_b":          7.0,
+		"ram_gb":                  16,
+		"max_context_tokens":      50000,
+		"max_concurrency":         1,
+		"throughput_tps_estimate": 19.8,
+		"binary_version":          "0.1.0",
+		"attestation":             nil,
+	}
+	for _, tc := range []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "hostname", field: "hostname", value: strings.Repeat("h", 254)},
+		{name: "model_id", field: "model_id", value: strings.Repeat("m", 257)},
+		{name: "binary_version", field: "binary_version", value: strings.Repeat("1", 33)},
+		{name: "attestation", field: "attestation", value: strings.Repeat("a", 1025)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := make(map[string]any, len(base))
+			for k, v := range base {
+				payload[k] = v
+			}
+			payload[tc.field] = tc.value
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			_, badField, err := ParseHello(raw)
+			if err == nil {
+				t.Fatalf("ParseHello accepted oversized %s", tc.field)
+			}
+			if badField != tc.field {
+				t.Fatalf("badField=%q, want %q", badField, tc.field)
+			}
+		})
+	}
+}
+
+func TestParseAuthRequestRejectsOversizedHandshakeFields(t *testing.T) {
+	initial := validAuthRequestInitial()
+	initial["hostname"] = strings.Repeat("h", 254)
+	if _, _, field, err := ParseAuthRequest(mustAuthJSON(t, initial)); err == nil || field != "hostname" {
+		t.Fatalf("oversized hostname field=%q err=%v, want hostname error", field, err)
+	}
+
+	initial = validAuthRequestInitial()
+	initial["model_id"] = strings.Repeat("m", 257)
+	if _, _, field, err := ParseAuthRequest(mustAuthJSON(t, initial)); err == nil || field != "model_id" {
+		t.Fatalf("oversized model_id field=%q err=%v, want model_id error", field, err)
+	}
+
+	initial = validAuthRequestInitial()
+	initial["binary_version"] = strings.Repeat("1", 33)
+	if _, _, field, err := ParseAuthRequest(mustAuthJSON(t, initial)); err == nil || field != "binary_version" {
+		t.Fatalf("oversized binary_version field=%q err=%v, want binary_version error", field, err)
+	}
+
+	proof := validAuthRequestProof()
+	proof["attestation_token"] = strings.Repeat("a", 1025)
+	if _, _, field, err := ParseAuthRequest(mustAuthJSON(t, proof)); err == nil || field != "attestation_token" {
+		t.Fatalf("oversized attestation_token field=%q err=%v, want attestation_token error", field, err)
 	}
 }

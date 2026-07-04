@@ -15,6 +15,7 @@ type AdmissionManager struct {
 	cfg            config.AdmissionConfig
 	now            func() time.Time
 	admissions     []time.Time
+	pending        int
 	records        map[string]*ProvisionalRecord
 	rejected       map[string]string
 	requestWindows map[string][]time.Time
@@ -103,7 +104,7 @@ func (a *AdmissionManager) evaluateAdmissionLocked(hello Hello, connectedProvisi
 	now := a.now()
 	cutoff := now.Add(-time.Hour)
 	a.admissions = keepAfter(a.admissions, cutoff)
-	if connectedProvisional >= a.cfg.ProvisionalPoolMax {
+	if connectedProvisional+a.pending >= a.cfg.ProvisionalPoolMax {
 		return pool.TierProvisional, CloseProvisionalPoolFull, "provisional_pool_full: max " + itoa(a.cfg.ProvisionalPoolMax) + " provisional providers reached"
 	}
 	if _, known := a.records[hello.ProviderID]; !known && len(a.admissions) >= a.cfg.ProvisionalAdmissionRatePerHour {
@@ -112,6 +113,7 @@ func (a *AdmissionManager) evaluateAdmissionLocked(hello Hello, connectedProvisi
 	if !record {
 		return pool.TierProvisional, 0, ""
 	}
+	a.pending++
 	rec := a.records[hello.ProviderID]
 	if rec == nil {
 		rec = &ProvisionalRecord{
@@ -128,6 +130,14 @@ func (a *AdmissionManager) evaluateAdmissionLocked(hello Hello, connectedProvisi
 	rec.BinaryVersion = hello.BinaryVersion
 	a.persistLocked()
 	return pool.TierProvisional, 0, ""
+}
+
+func (a *AdmissionManager) ReleasePendingProvisional() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pending > 0 {
+		a.pending--
+	}
 }
 
 func (a *AdmissionManager) CheckQuota(provider pool.Provider) bool {

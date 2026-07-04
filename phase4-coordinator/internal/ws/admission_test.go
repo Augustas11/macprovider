@@ -64,6 +64,31 @@ func TestAdmissionManagerTiersRateLimitAndQuota(t *testing.T) {
 	}
 }
 
+func TestAdmissionManagerPendingReservationsEnforcePoolCap(t *testing.T) {
+	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	adm := NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 100,
+		ProvisionalPoolMax:              1,
+		ProvisionalQuotaPerHour:         100,
+		ProvisionalTierWeight:           0.3,
+	}, func() time.Time { return now })
+
+	tier, code, reason := adm.Admit(Hello{ProviderID: "new-1", Hostname: "host", ModelID: "model", BinaryVersion: "1.2.0"}, false, 0)
+	if tier != pool.TierProvisional || code != 0 || reason != "" {
+		t.Fatalf("first admit = tier:%s code:%d reason:%q", tier, code, reason)
+	}
+	_, code, reason = adm.Admit(Hello{ProviderID: "new-2", Hostname: "host", ModelID: "model", BinaryVersion: "1.2.0"}, false, 0)
+	if code != CloseProvisionalPoolFull {
+		t.Fatalf("second admit code=%d reason=%q, want pool full", code, reason)
+	}
+
+	adm.ReleasePendingProvisional()
+	_, code, reason = adm.Admit(Hello{ProviderID: "new-2", Hostname: "host", ModelID: "model", BinaryVersion: "1.2.0"}, false, 0)
+	if code != 0 || reason != "" {
+		t.Fatalf("admit after release code=%d reason=%q, want success", code, reason)
+	}
+}
+
 func TestAdmissionManagerPersistenceSurvivesRestart(t *testing.T) {
 	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "coordinator.db"))

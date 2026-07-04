@@ -27,6 +27,13 @@ type Hello struct {
 	EndpointURL           *string         `json:"endpoint_url,omitempty"`
 }
 
+const (
+	maxHandshakeHostnameBytes      = 253
+	maxHandshakeModelIDBytes       = 256
+	maxHandshakeBinaryVersionBytes = 32
+	maxHandshakeMetadataBytes      = 1024
+)
+
 type HelloAck struct {
 	Type                      string `json:"type"`
 	CoordinatorVersion        int    `json:"coordinator_version"`
@@ -321,8 +328,14 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	if err := requireString(raw, "hostname", &h.Hostname); err != nil {
 		return Hello{}, err.Field, err
 	}
+	if len([]byte(h.Hostname)) > maxHandshakeHostnameBytes {
+		return Hello{}, "hostname", fmt.Errorf("hostname exceeds %d bytes", maxHandshakeHostnameBytes)
+	}
 	if err := requireString(raw, "model_id", &h.ModelID); err != nil {
 		return Hello{}, err.Field, err
+	}
+	if len([]byte(h.ModelID)) > maxHandshakeModelIDBytes {
+		return Hello{}, "model_id", fmt.Errorf("model_id exceeds %d bytes", maxHandshakeModelIDBytes)
 	}
 	if v, ok := raw["model_hash"]; ok && string(v) != "null" {
 		if err := json.Unmarshal(v, &h.ModelHash); err != nil {
@@ -355,8 +368,14 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	if err := requireString(raw, "binary_version", &h.BinaryVersion); err != nil {
 		return Hello{}, err.Field, err
 	}
+	if len([]byte(h.BinaryVersion)) > maxHandshakeBinaryVersionBytes {
+		return Hello{}, "binary_version", fmt.Errorf("binary_version exceeds %d bytes", maxHandshakeBinaryVersionBytes)
+	}
 	attestation, ok := raw["attestation"]
 	if ok {
+		if len(attestation) > maxHandshakeMetadataBytes {
+			return Hello{}, "attestation", fmt.Errorf("attestation exceeds %d bytes", maxHandshakeMetadataBytes)
+		}
 		h.Attestation = attestation
 	}
 	if v, ok := raw["endpoint_url"]; ok && string(v) != "null" {
@@ -430,8 +449,14 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 	if err := requireString(raw, "hostname", &req.Hostname); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
+	if len([]byte(req.Hostname)) > maxHandshakeHostnameBytes {
+		return AuthRequest{}, Spec010Presence{}, "hostname", fmt.Errorf("hostname exceeds %d bytes", maxHandshakeHostnameBytes)
+	}
 	if err := requireString(raw, "model_id", &req.ModelID); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
+	}
+	if len([]byte(req.ModelID)) > maxHandshakeModelIDBytes {
+		return AuthRequest{}, Spec010Presence{}, "model_id", fmt.Errorf("model_id exceeds %d bytes", maxHandshakeModelIDBytes)
 	}
 	if v, ok := raw["model_hash"]; ok && string(v) != "null" {
 		if err := json.Unmarshal(v, &req.ModelHash); err != nil {
@@ -463,6 +488,9 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 	}
 	if err := requireString(raw, "binary_version", &req.BinaryVersion); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
+	}
+	if len([]byte(req.BinaryVersion)) > maxHandshakeBinaryVersionBytes {
+		return AuthRequest{}, Spec010Presence{}, "binary_version", fmt.Errorf("binary_version exceeds %d bytes", maxHandshakeBinaryVersionBytes)
 	}
 	if v, ok := raw["endpoint_url"]; ok && string(v) != "null" {
 		var endpoint string
@@ -566,6 +594,9 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 		return AuthRequest{}, Spec010Presence{}, "provider_id", err
 	}
 	if token, ok := raw["attestation_token"]; ok {
+		if len(token) > maxHandshakeMetadataBytes {
+			return AuthRequest{}, Spec010Presence{}, "attestation_token", fmt.Errorf("attestation_token exceeds %d bytes", maxHandshakeMetadataBytes)
+		}
 		req.AttestationToken = token
 	}
 	if v, ok := raw["identity_signature"]; ok && string(v) != "null" {
@@ -706,6 +737,9 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 	}
 	if err := requireString(raw, "model_id", &hb.ModelID); err != nil {
 		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
+	}
+	if len([]byte(hb.ModelID)) > maxHandshakeModelIDBytes {
+		return Heartbeat{}, HeartbeatPresence{}, "model_id", fmt.Errorf("model_id exceeds %d bytes", maxHandshakeModelIDBytes)
 	}
 	if err := requireFloat(raw, "model_params_b", &hb.ModelParamsB); err != nil {
 		return Heartbeat{}, HeartbeatPresence{}, err.Field, err

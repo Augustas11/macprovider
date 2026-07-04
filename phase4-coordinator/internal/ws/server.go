@@ -696,6 +696,12 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	if !ok {
 		return "", ""
 	}
+	registered := false
+	defer func() {
+		if !registered && entry.Tier == pool.TierProvisional {
+			s.admission.ReleasePendingProvisional()
+		}
+	}()
 	// SPEC-003 FR-C9.1/FR-C9.2 plus Wave 2 token custody:
 	// reject any tokenless connect for a provider_id that already has
 	// an active token; keep the race-loss quarantine for concurrent
@@ -717,6 +723,8 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		return "", ""
 	}
+	registered = true
+	s.admission.ReleasePendingProvisional()
 	releaseUnauth()
 
 	ack := HelloAck{
@@ -940,6 +948,12 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	} else {
 		entry.Tier = tier
 	}
+	registered := false
+	defer func() {
+		if !registered && entry.Tier == pool.TierProvisional {
+			s.admission.ReleasePendingProvisional()
+		}
+	}()
 
 	entry.EncryptedLeg = true
 	entry.AttestationStatus = attestationStatus
@@ -1003,6 +1017,8 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		}
 		return "", ""
 	}
+	registered = true
+	s.admission.ReleasePendingProvisional()
 	releaseUnauth()
 	response := AuthResponse{
 		Type:                      "auth_response",
