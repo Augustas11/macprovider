@@ -2,7 +2,9 @@ package ws
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -63,7 +65,12 @@ func (s *Server) handleGitHubStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	returnTo := normalizeReturnTo(q.Get("return_to"))
-	if err := s.authStore.CreateOAuthState(r.Context(), state, returnTo, pending, s.now()); err != nil {
+	originHash := s.oauthStateOriginHash(r)
+	if err := s.authStore.CreateOAuthStateBound(r.Context(), state, returnTo, pending, originHash, s.now()); err != nil {
+		if errors.Is(err, auth.ErrOAuthStateRateLimited) {
+			writeAuthError(w, http.StatusTooManyRequests, "rate_limited")
+			return
+		}
 		s.log.Warn().Err(err).Msg("oauth state create failed")
 		writeAuthError(w, http.StatusInternalServerError, "internal_error")
 		return
@@ -88,7 +95,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, http.StatusBadRequest, "state_invalid")
 		return
 	}
-	consumed, ok, err := s.authStore.ConsumeOAuthState(r.Context(), state, s.now())
+	consumed, ok, err := s.authStore.ConsumeOAuthStateBound(r.Context(), state, s.oauthStateOriginHash(r), s.now())
 	if err != nil {
 		s.log.Warn().Err(err).Msg("oauth state consume failed")
 		writeAuthError(w, http.StatusInternalServerError, "internal_error")
@@ -128,6 +135,22 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	session.SetCookie(w, sessionID, s.cfg.Auth.GitHubOAuth.SessionCookieDomain)
 	http.Redirect(w, r, consumed.ReturnTo, http.StatusFound)
+}
+
+func (s *Server) oauthStateOriginHash(r *http.Request) string {
+	secret := strings.TrimSpace(s.cfg.Auth.OperatorKey)
+	if secret == "" {
+		secret = strings.TrimSpace(s.cfg.Auth.GitHubOAuth.ClientSecret)
+	}
+	if secret == "" {
+		return ""
+	}
+	ipHash := sha256.Sum256([]byte(oauthStatePeerIP(r)))
+	uaHash := sha256.Sum256([]byte(r.UserAgent()))
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(ipHash[:])
+	_, _ = mac.Write(uaHash[:])
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func (s *Server) handleAuthMeProviders(w http.ResponseWriter, r *http.Request) {
@@ -426,6 +449,14 @@ func remoteIP(r *http.Request) string {
 			return ip.String()
 		}
 	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func oauthStatePeerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host

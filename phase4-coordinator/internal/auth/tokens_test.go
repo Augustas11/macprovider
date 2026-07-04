@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 )
@@ -130,6 +131,42 @@ func TestGatewayInternalBearerMatchesEvaluatesBoth(t *testing.T) {
 	headers.Set("Authorization", "Bearer nope")
 	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindNone {
 		t.Fatalf("nope: %v", got)
+	}
+}
+
+func TestCreateOAuthStateBoundRateLimitIsConcurrentSafe(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	const attempts = 50
+	var wg sync.WaitGroup
+	errs := make(chan error, attempts)
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs <- store.CreateOAuthStateBound(context.Background(), "state-"+string(rune('a'+i)), "/", nil, "origin", now)
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	var created, limited int
+	for err := range errs {
+		switch {
+		case err == nil:
+			created++
+		case errors.Is(err, auth.ErrOAuthStateRateLimited):
+			limited++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if created != 20 || limited != attempts-20 {
+		t.Fatalf("created=%d limited=%d, want 20/%d", created, limited, attempts-20)
 	}
 }
 
