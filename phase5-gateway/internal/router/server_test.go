@@ -2040,12 +2040,12 @@ func TestSPEC022GatewaySettlementReconcileRefundsAndHolds(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
 		t.Fatalf("decode summary: %v", err)
 	}
-	if summary.Scanned != 3 || summary.Refunded != 1 || summary.Expired != 1 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 0 || summary.Errors != 0 {
-		t.Fatalf("summary=%+v, want refund/hold/expired-coordinator-404 split", summary)
+	if summary.Scanned != 3 || summary.Refunded != 1 || summary.Held != 1 || summary.Coordinator404 != 1 || summary.Skipped != 1 || summary.Errors != 0 {
+		t.Fatalf("summary=%+v, want refund/hold/nonterminal-coordinator-404 split", summary)
 	}
 	got := gatewaySettlementSnapshot(t, dbPath, "acct_spec022_reconcile")
-	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 2 || got.expiredRows != 1 || got.activeReserved != 40 {
-		t.Fatalf("settlement snapshot=%+v, want one refund, one expired coordinator-404 hold, one held pending reservation, and one ordinary active reservation", got)
+	if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 3 || got.expiredRows != 0 || got.activeReserved != 60 {
+		t.Fatalf("settlement snapshot=%+v, want one refund, one held pending reservation, one nonterminal coordinator-404 hold, and one ordinary active reservation", got)
 	}
 	if got := gatewayReservationExpiresAtUnixMSForRequest(t, dbPath, "acct_spec022_reconcile", "req_hold"); got != pendingDeadlineUnixMS {
 		t.Fatalf("held reservation expires_at=%d want %d", got, pendingDeadlineUnixMS)
@@ -4288,8 +4288,8 @@ func TestStreamingGatewayEstimateCountsDeltaContentNotMetadata(t *testing.T) {
 		t.Fatalf("stream body unexpectedly exceeded output cap: %s", resp.Body.String())
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
-		t.Fatalf("usage outcome/source = %s/%s, want stream_output_exceeded/gateway_estimated", outcome, source)
+	if outcome != "unverified_streaming" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want unverified_streaming/gateway_estimated", outcome, source)
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
@@ -4328,8 +4328,8 @@ func TestStreamingGatewayEstimateCountsToolCallArguments(t *testing.T) {
 		t.Fatalf("stream body unexpectedly exceeded output cap: %s", resp.Body.String())
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
-	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
-		t.Fatalf("usage outcome/source = %s/%s, want stream_output_exceeded/gateway_estimated", outcome, source)
+	if outcome != "unverified_streaming" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want unverified_streaming/gateway_estimated", outcome, source)
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)

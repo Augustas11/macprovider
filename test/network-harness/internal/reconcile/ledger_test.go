@@ -1333,6 +1333,67 @@ func insertCoordRow(t *testing.T, path, requestID, externalRequestID, accountID,
 	}
 }
 
+func TestQueryCoordinatorUsesLedgerChargedPromptTokens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coord-ledger.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open coord db: %v", err)
+	}
+	now := time.Date(2026, 7, 4, 5, 30, 0, 0, time.UTC)
+	if _, err := db.Exec(`CREATE TABLE request_log (
+		request_id          TEXT NOT NULL,
+		external_request_id TEXT NULL,
+		account_id          TEXT NULL,
+		attempt_n           INTEGER NULL
+	)`); err != nil {
+		t.Fatalf("create request_log: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE ledger_request_credits (
+		request_id                      TEXT NOT NULL,
+		attempt_n                       INTEGER NOT NULL,
+		provider_id                     TEXT NOT NULL,
+		ts_utc                          TEXT NOT NULL,
+		model                           TEXT NOT NULL,
+		status                          INTEGER NOT NULL,
+		prompt_tokens                   INTEGER NULL,
+		charged_prompt_tokens           INTEGER NULL,
+		provider_reported_prompt_tokens INTEGER NULL,
+		completion_tokens               INTEGER NULL
+	)`); err != nil {
+		t.Fatalf("create ledger_request_credits: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO request_log(request_id, external_request_id, account_id, attempt_n) VALUES ('coord-internal', 'gw-request', 'acct-A', 0)`); err != nil {
+		t.Fatalf("insert request_log: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO ledger_request_credits(
+		request_id, attempt_n, provider_id, ts_utc, model, status,
+		prompt_tokens, charged_prompt_tokens, provider_reported_prompt_tokens, completion_tokens
+	) VALUES ('coord-internal', 0, 'provider-A', ?, 'test-model', 200, 100, 8, 100, 7)`, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("insert ledger_request_credits: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close coord db: %v", err)
+	}
+
+	rows, hasAccountID, err := queryCoordinator(path, now.Add(-time.Second), now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("queryCoordinator: %v", err)
+	}
+	if !hasAccountID {
+		t.Fatal("queryCoordinator should report account_id metadata from joined request_log")
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1: %+v", len(rows), rows)
+	}
+	got := rows[0]
+	if got.ExternalRequestID != "gw-request" || got.AccountID != "acct-A" {
+		t.Fatalf("joined metadata = external %q account %q, want gw-request/acct-A", got.ExternalRequestID, got.AccountID)
+	}
+	if got.PromptTokens != 8 || got.CompletionTokens != 7 || got.TotalTokens != 15 {
+		t.Fatalf("tokens = prompt %d completion %d total %d, want charged prompt 8 + completion 7 = 15", got.PromptTokens, got.CompletionTokens, got.TotalTokens)
+	}
+}
+
 func makeScenario(coordPath, gwPath string) *scenario.Scenario {
 	return &scenario.Scenario{
 		Target: scenario.Target{

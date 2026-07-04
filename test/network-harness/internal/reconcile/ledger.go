@@ -1,12 +1,12 @@
 // Package reconcile compares the harness's per-request observations
-// against the coordinator's request_log and the gateway's usage_events.
+// against coordinator charged ledger rows and the gateway's usage_events.
 //
 // Cross-service request_id semantics:
 //   - Gateway's usage_events.request_id is the gateway-issued PK.
 //     The gateway echoes it back to the buyer via the X-Request-Id
 //     response header, so the harness records it as
 //     buyer.Result.RequestID (loadgen.go:199).
-//   - Coordinator's request_log.request_id is INTERNAL and not
+//   - Coordinator ledger_request_credits.request_id is INTERNAL and not
 //     correlatable across services. The gateway-issued id is
 //     persisted on coord side as
 //     request_log.external_request_id (phase4-coordinator/internal/
@@ -14,7 +14,8 @@
 //
 // matchPairs uses exact id correlation when available:
 //   - gateway: buyer.Result.RequestID == gateway.usage_events.request_id
-//   - coord:   buyer.Result.RequestID == coord.request_log.external_request_id
+//   - coord:   buyer.Result.RequestID == request_log.external_request_id
+//     joined through ledger_request_credits.request_id
 //
 // Falls back to fuzzy (completion_tokens, ts ± window) match when no
 // exact-id candidate is found, or when an exact-id hit is ambiguous
@@ -129,7 +130,7 @@ type Result struct {
 	UnmatchedGatewayOKRows      []string `json:"unmatched_gateway_ok_rows,omitempty"`
 	GatewaySettlementRequestIDs []string `json:"gateway_settlement_request_ids,omitempty"`
 
-	// UnmatchedCoordinator2xxRows lists coord request_log rows with
+	// UnmatchedCoordinator2xxRows lists coord charged ledger rows with
 	// 2xx status that did NOT match any harness success. Symmetric with
 	// UnmatchedGatewayOKRows on the coordinator side: orphan settlement
 	// or concurrent traffic. #229 R5 security HIGH — without this signal,
@@ -138,7 +139,7 @@ type Result struct {
 	UnmatchedCoordinator2xxRows []string `json:"unmatched_coordinator_2xx_rows,omitempty"`
 
 	// MatchedCoordMissing lists matched-pair harness request_ids where the
-	// gateway row has outcome="ok" but no coordinator request_log row was
+	// gateway row has outcome="ok" but no coordinator charged ledger row was
 	// found in the window. This is suspicious for "ok" outcomes — a
 	// successfully-billed request should leave a coord trail. Fallback
 	// outcomes legitimately lack a coord row (provider died mid-stream)
@@ -1155,7 +1156,7 @@ type gwRow struct {
 }
 
 // queryCoordinator returns coordinator rows + a schema flag reporting
-// whether the request_log.account_id column exists in this snapshot.
+// whether coordinator account_id metadata exists in this snapshot.
 // Callers thread the flag through the matcher: column present → blank
 // per-row account_ids are real data (NULL = unknown buyer; matcher
 // skips), column absent → constraint is a global noop.
@@ -1165,6 +1166,17 @@ func queryCoordinator(path string, start, end time.Time) ([]coordRow, bool, erro
 		return nil, false, err
 	}
 	defer db.Close()
+	hasLedger, err := tableExists(db, "ledger_request_credits")
+	if err != nil {
+		return nil, false, fmt.Errorf("probe ledger_request_credits: %w", err)
+	}
+	if hasLedger {
+		return queryCoordinatorLedger(db, start, end)
+	}
+	return queryCoordinatorRequestLog(db, start, end)
+}
+
+func queryCoordinatorRequestLog(db *sql.DB, start, end time.Time) ([]coordRow, bool, error) {
 	// SELECT external_request_id and account_id when the columns exist.
 	// Schema flags are returned to the matcher so it can distinguish
 	// "column absent globally" (legacy snapshot → relax constraint)
@@ -1186,10 +1198,76 @@ func queryCoordinator(path string, start, end time.Time) ([]coordRow, bool, erro
 	if hasAcct {
 		acctExpr = "COALESCE(account_id, '')"
 	}
+	promptExpr, completionExpr, totalExpr, err := requestLogTokenExprs(db)
+	if err != nil {
+		return nil, false, err
+	}
 	rows, err := db.Query(fmt.Sprintf(`
-				SELECT request_id, %s, %s, model, COALESCE(prompt_tokens, 0), COALESCE(completion_tokens, 0), COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0), status, ts_utc
+				SELECT request_id, %s, %s, model, %s, %s, %s, status, ts_utc
 				FROM request_log
-			`, extExpr, acctExpr))
+			`, extExpr, acctExpr, promptExpr, completionExpr, totalExpr))
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	var out []coordRow
+	for rows.Next() {
+		var c coordRow
+		var ts string
+		if err := rows.Scan(&c.RequestID, &c.ExternalRequestID, &c.AccountID, &c.Model, &c.PromptTokens, &c.CompletionTokens, &c.TotalTokens, &c.Status, &ts); err != nil {
+			return nil, false, err
+		}
+		c.TsUTC, _ = time.Parse(time.RFC3339Nano, ts)
+		if c.TsUTC.Before(start) || c.TsUTC.After(end) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, hasAcct, rows.Err()
+}
+
+func queryCoordinatorLedger(db *sql.DB, start, end time.Time) ([]coordRow, bool, error) {
+	hasRequestLog, err := tableExists(db, "request_log")
+	if err != nil {
+		return nil, false, fmt.Errorf("probe request_log: %w", err)
+	}
+	hasExt, hasAcct := false, false
+	if hasRequestLog {
+		hasExt, err = columnExists(db, "request_log", "external_request_id")
+		if err != nil {
+			return nil, false, fmt.Errorf("probe request_log.external_request_id: %w", err)
+		}
+		hasAcct, err = columnExists(db, "request_log", "account_id")
+		if err != nil {
+			return nil, false, fmt.Errorf("probe request_log.account_id: %w", err)
+		}
+	}
+	joinWhere := "rl.request_id = lrc.request_id"
+	if hasRequestLog {
+		hasAttempt, err := columnExists(db, "request_log", "attempt_n")
+		if err != nil {
+			return nil, false, fmt.Errorf("probe request_log.attempt_n: %w", err)
+		}
+		if hasAttempt {
+			joinWhere += " AND COALESCE(rl.attempt_n, lrc.attempt_n) = lrc.attempt_n"
+		}
+	}
+	extExpr := "''"
+	if hasRequestLog && hasExt {
+		extExpr = fmt.Sprintf("(SELECT COALESCE(rl.external_request_id, '') FROM request_log rl WHERE %s ORDER BY rl.rowid LIMIT 1)", joinWhere)
+	}
+	acctExpr := "''"
+	if hasRequestLog && hasAcct {
+		acctExpr = fmt.Sprintf("(SELECT COALESCE(rl.account_id, '') FROM request_log rl WHERE %s ORDER BY rl.rowid LIMIT 1)", joinWhere)
+	}
+	promptExpr, completionExpr, totalExpr, err := ledgerTokenExprs(db)
+	if err != nil {
+		return nil, false, err
+	}
+	rows, err := db.Query(fmt.Sprintf(`
+				SELECT lrc.request_id, %s, %s, lrc.model, %s, %s, %s, lrc.status, lrc.ts_utc
+				FROM ledger_request_credits lrc
+			`, extExpr, acctExpr, promptExpr, completionExpr, totalExpr))
 	if err != nil {
 		return nil, false, err
 	}
@@ -1240,6 +1318,91 @@ func columnExists(db *sql.DB, table, column string) (bool, error) {
 	return false, rows.Err()
 }
 
+func tableExists(db *sql.DB, table string) (bool, error) {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func requestLogTokenExprs(db *sql.DB) (string, string, string, error) {
+	hasPrompt, err := columnExists(db, "request_log", "prompt_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe request_log.prompt_tokens: %w", err)
+	}
+	hasCompletion, err := columnExists(db, "request_log", "completion_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe request_log.completion_tokens: %w", err)
+	}
+	promptExpr := "0"
+	if hasPrompt {
+		promptExpr = "COALESCE(prompt_tokens, 0)"
+	}
+	completionExpr := "0"
+	if hasCompletion {
+		completionExpr = "COALESCE(completion_tokens, 0)"
+	}
+	return promptExpr, completionExpr, promptExpr + " + " + completionExpr, nil
+}
+
+func ledgerTokenExprs(db *sql.DB) (string, string, string, error) {
+	hasChargedPrompt, err := columnExists(db, "ledger_request_credits", "charged_prompt_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe ledger_request_credits.charged_prompt_tokens: %w", err)
+	}
+	hasPrompt, err := columnExists(db, "ledger_request_credits", "prompt_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe ledger_request_credits.prompt_tokens: %w", err)
+	}
+	hasCompletion, err := columnExists(db, "ledger_request_credits", "completion_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe ledger_request_credits.completion_tokens: %w", err)
+	}
+	promptExpr := "0"
+	switch {
+	case hasChargedPrompt && hasPrompt:
+		promptExpr = "COALESCE(charged_prompt_tokens, prompt_tokens, 0)"
+	case hasChargedPrompt:
+		promptExpr = "COALESCE(charged_prompt_tokens, 0)"
+	case hasPrompt:
+		promptExpr = "COALESCE(prompt_tokens, 0)"
+	}
+	completionExpr := "0"
+	if hasCompletion {
+		completionExpr = "COALESCE(completion_tokens, 0)"
+	}
+	return promptExpr, completionExpr, promptExpr + " + " + completionExpr, nil
+}
+
+func gatewayTokenExprs(db *sql.DB) (string, string, string, error) {
+	hasPrompt, err := columnExists(db, "usage_events", "prompt_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe usage_events.prompt_tokens: %w", err)
+	}
+	hasCompletion, err := columnExists(db, "usage_events", "completion_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe usage_events.completion_tokens: %w", err)
+	}
+	hasTotal, err := columnExists(db, "usage_events", "total_tokens")
+	if err != nil {
+		return "", "", "", fmt.Errorf("probe usage_events.total_tokens: %w", err)
+	}
+	promptExpr := "0"
+	if hasPrompt {
+		promptExpr = "COALESCE(prompt_tokens, 0)"
+	}
+	completionExpr := "0"
+	if hasCompletion {
+		completionExpr = "COALESCE(completion_tokens, 0)"
+	}
+	totalExpr := promptExpr + " + " + completionExpr
+	if hasTotal {
+		totalExpr = "COALESCE(total_tokens, " + totalExpr + ")"
+	}
+	return promptExpr, completionExpr, totalExpr, nil
+}
+
 // queryGateway returns gateway usage_events rows + a schema flag
 // reporting whether the usage_events.account_id column exists in the
 // snapshot. Same shape as queryCoordinator.
@@ -1261,10 +1424,14 @@ func queryGateway(path string, start, end time.Time) ([]gwRow, bool, error) {
 	if hasAcct {
 		acctExpr = "COALESCE(account_id, '')"
 	}
+	promptExpr, completionExpr, totalExpr, err := gatewayTokenExprs(db)
+	if err != nil {
+		return nil, false, err
+	}
 	rows, err := db.Query(fmt.Sprintf(`
-				SELECT request_id, %s, COALESCE(prompt_tokens, 0), COALESCE(completion_tokens, 0), COALESCE(total_tokens, COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), outcome, created_at
+				SELECT request_id, %s, %s, %s, %s, outcome, created_at
 				FROM usage_events
-			`, acctExpr))
+			`, acctExpr, promptExpr, completionExpr, totalExpr))
 	if err != nil {
 		return nil, false, err
 	}
@@ -1325,12 +1492,16 @@ func queryGatewayByIDs(path string, ids []string) ([]gwRow, error) {
 	if hasAcct {
 		acctExpr = "COALESCE(account_id, '')"
 	}
+	promptExpr, completionExpr, totalExpr, err := gatewayTokenExprs(db)
+	if err != nil {
+		return nil, err
+	}
 	placeholders, args := inClause(ids)
 	rows, err := db.Query(fmt.Sprintf(`
-			SELECT request_id, %s, COALESCE(prompt_tokens, 0), COALESCE(completion_tokens, 0), COALESCE(total_tokens, COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)), outcome, created_at
-			FROM usage_events
-		WHERE request_id IN (%s)
-	`, acctExpr, placeholders), args...)
+				SELECT request_id, %s, %s, %s, %s, outcome, created_at
+				FROM usage_events
+			WHERE request_id IN (%s)
+		`, acctExpr, promptExpr, completionExpr, totalExpr, placeholders), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1362,6 +1533,17 @@ func queryCoordinatorByIDs(path string, ids []string) ([]coordRow, error) {
 		return nil, err
 	}
 	defer db.Close()
+	hasLedger, err := tableExists(db, "ledger_request_credits")
+	if err != nil {
+		return nil, fmt.Errorf("probe ledger_request_credits: %w", err)
+	}
+	if hasLedger {
+		return queryCoordinatorLedgerByIDs(db, ids)
+	}
+	return queryCoordinatorRequestLogByIDs(db, ids)
+}
+
+func queryCoordinatorRequestLogByIDs(db *sql.DB, ids []string) ([]coordRow, error) {
 	hasExt, err := columnExists(db, "request_log", "external_request_id")
 	if err != nil {
 		return nil, fmt.Errorf("probe request_log.external_request_id: %w", err)
@@ -1377,12 +1559,79 @@ func queryCoordinatorByIDs(path string, ids []string) ([]coordRow, error) {
 	if hasAcct {
 		acctExpr = "COALESCE(account_id, '')"
 	}
+	promptExpr, completionExpr, totalExpr, err := requestLogTokenExprs(db)
+	if err != nil {
+		return nil, err
+	}
 	placeholders, args := inClause(ids)
 	rows, err := db.Query(fmt.Sprintf(`
-		SELECT request_id, COALESCE(external_request_id, ''), %s, model, COALESCE(prompt_tokens, 0), COALESCE(completion_tokens, 0), COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0), status, ts_utc
-		FROM request_log
-		WHERE external_request_id IN (%s)
-	`, acctExpr, placeholders), args...)
+			SELECT request_id, COALESCE(external_request_id, ''), %s, model, %s, %s, %s, status, ts_utc
+			FROM request_log
+			WHERE external_request_id IN (%s)
+		`, acctExpr, promptExpr, completionExpr, totalExpr, placeholders), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []coordRow
+	for rows.Next() {
+		var c coordRow
+		var ts string
+		if err := rows.Scan(&c.RequestID, &c.ExternalRequestID, &c.AccountID, &c.Model, &c.PromptTokens, &c.CompletionTokens, &c.TotalTokens, &c.Status, &ts); err != nil {
+			return nil, err
+		}
+		c.TsUTC, _ = time.Parse(time.RFC3339Nano, ts)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func queryCoordinatorLedgerByIDs(db *sql.DB, ids []string) ([]coordRow, error) {
+	hasRequestLog, err := tableExists(db, "request_log")
+	if err != nil {
+		return nil, fmt.Errorf("probe request_log: %w", err)
+	}
+	if !hasRequestLog {
+		return nil, nil
+	}
+	hasExt, err := columnExists(db, "request_log", "external_request_id")
+	if err != nil {
+		return nil, fmt.Errorf("probe request_log.external_request_id: %w", err)
+	}
+	if !hasExt {
+		return nil, nil
+	}
+	hasAcct, err := columnExists(db, "request_log", "account_id")
+	if err != nil {
+		return nil, fmt.Errorf("probe request_log.account_id: %w", err)
+	}
+	hasAttempt, err := columnExists(db, "request_log", "attempt_n")
+	if err != nil {
+		return nil, fmt.Errorf("probe request_log.attempt_n: %w", err)
+	}
+	joinWhere := "rl.request_id = lrc.request_id"
+	if hasAttempt {
+		joinWhere += " AND COALESCE(rl.attempt_n, lrc.attempt_n) = lrc.attempt_n"
+	}
+	acctExpr := "''"
+	if hasAcct {
+		acctExpr = fmt.Sprintf("(SELECT COALESCE(rl.account_id, '') FROM request_log rl WHERE %s ORDER BY rl.rowid LIMIT 1)", joinWhere)
+	}
+	promptExpr, completionExpr, totalExpr, err := ledgerTokenExprs(db)
+	if err != nil {
+		return nil, err
+	}
+	placeholders, args := inClause(ids)
+	rows, err := db.Query(fmt.Sprintf(`
+			SELECT lrc.request_id,
+			       (SELECT COALESCE(rl.external_request_id, '') FROM request_log rl WHERE %s ORDER BY rl.rowid LIMIT 1),
+			       %s, lrc.model, %s, %s, %s, lrc.status, lrc.ts_utc
+			FROM ledger_request_credits lrc
+			WHERE EXISTS (
+				SELECT 1 FROM request_log rl
+				WHERE %s AND rl.external_request_id IN (%s)
+			)
+		`, joinWhere, acctExpr, promptExpr, completionExpr, totalExpr, joinWhere, placeholders), args...)
 	if err != nil {
 		return nil, err
 	}

@@ -880,10 +880,6 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 			return
 		}
 	case settlementFinalityHold:
-		if finality.Reason == "missing_settlement_finality_trailer" {
-			s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, "unverified_streaming", reservationWindow)
-			return
-		}
 		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {
@@ -1090,6 +1086,10 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 			)
 		}
 	case settlementFinalityHold:
+		if finality.Reason == "missing_settlement_finality_trailer" {
+			s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, "unverified_streaming", reservationWindow)
+			return
+		}
 		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if !s.boundStreamingSettlementHold(holdCtx, r, subject, finality) {

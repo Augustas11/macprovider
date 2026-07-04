@@ -110,16 +110,11 @@ func TestCheckI1_GatewayOverbillVsHarness_AppliesScenarioTolerance(t *testing.T)
 	sc := &scenario.Scenario{ChargedDeliveredToleranceTokens: 10}
 	ledger := &reconcile.Result{
 		GatewayOverbillVsHarnessTokens: 10,
-		OverbilledPairs:                []string{"WITHIN_TOLERANCE"},
+		OverbilledPairs:                []string{"OVERBILLED"},
 	}
 	c := checkI1(sc, ledger)
-	if !c.Passed {
-		t.Fatalf("I1 should pass overbill within scenario tolerance: %+v", c)
-	}
-	sc.ChargedDeliveredToleranceTokens = 9
-	c = checkI1(sc, ledger)
 	if c.Passed {
-		t.Fatal("I1 should fail overbill above scenario tolerance")
+		t.Fatal("I1 hard gate must fail overbill even when scenario tolerance is configured")
 	}
 }
 
@@ -210,8 +205,21 @@ func TestCheckI3_AllowsConfiguredTolerance(t *testing.T) {
 
 	c := checkI3(sc, ledger)
 
-	if !c.Passed {
-		t.Fatalf("I3 should pass at tolerance: %+v", c)
+	if c.Passed {
+		t.Fatalf("I3 hard gate must fail overbill even at configured tolerance: %+v", c)
+	}
+}
+
+func TestCheckI2_FailsClosedWhen5xxHasNoLedger(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 502, RequestID: "req-5xx"}}
+
+	c := checkI2(results, nil)
+
+	if c.Passed || c.Skipped {
+		t.Fatalf("I2 should fail closed without settlement DB evidence: %+v", c)
+	}
+	if !contains(c.OffendingIDs, "req-5xx") {
+		t.Fatalf("offending IDs=%v want req-5xx", c.OffendingIDs)
 	}
 }
 
