@@ -161,32 +161,6 @@ tier2:
 # admitted dynamically per `admission` config above.
 providers: []
 
-# SPEC-017 Network Stats API. Enabled 2026-07-04 to unblock the malibu.tech
-# stats page. Postgres backs the rollup (see phase4-coordinator/internal/stats/
-# migrations/); all migrations already applied on macprovider_stats DB. The
-# reader/rollup/provider_portal roles are LOGIN + scram-sha-256 password-auth
-# roles; passwords stored in /etc/macprovider/coordinator.env and referenced
-# below via env: indirection.
-#
-# `stats.enabled=true` requires listen.bind_address to be loopback (enforced
-# by config.Validate — see internal/config/config.go); this coordinator is
-# already 127.0.0.1-bound above.
-stats:
-  enabled: true
-  reader_dsn: env:STATS_READER_DSN
-  rollup_dsn: env:STATS_ROLLUP_DSN
-  provider_portal_dsn: env:STATS_PROVIDER_PORTAL_DSN
-  rollup:
-    # partial + explicit RFC 3339 boundary. Ledger data before this timestamp
-    # is not rolled up; malibu.tech shows stats from stats-enable onward.
-    backfill_mode: "partial"
-    partial_history_since: "2026-07-04T16:50:00Z"
-    late_events_retention_days: 90
-    usd_per_million_credits: 1.0
-    drift_threshold_ratio: 0.005
-    nightly_rebuild_hour_utc: 9
-    late_events_lookback_hours: 48
-
 # Auto-update recommendation surface (2026-07-03 — added post-#332 to unblock air5 v1.7.0 -> v1.7.9)
 coordinator_advertised_version:
   latest_binary_version: "1.7.11"
