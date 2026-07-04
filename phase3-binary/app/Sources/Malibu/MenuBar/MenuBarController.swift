@@ -14,12 +14,19 @@ final class MenuBarController {
     private let statusItem: NSStatusItem
     private let agent: MalibuAgent
     private let onAction: (Action) -> Void
+    private var dismissalStore: UnclaimedBadgeDismissalStore
     private var cancellables: Set<AnyCancellable> = []
     private var latestSnapshot: AgentSnapshot = .empty
     private var dismissedUnclaimedThreshold: Double?
 
-    init(agent: MalibuAgent, onAction: @escaping (Action) -> Void) {
+    init(
+        agent: MalibuAgent,
+        dismissalStore: UnclaimedBadgeDismissalStore = UnclaimedBadgeDismissalStore(),
+        onAction: @escaping (Action) -> Void
+    ) {
         self.agent = agent
+        self.dismissalStore = dismissalStore
+        self.dismissedUnclaimedThreshold = dismissalStore.dismissedThreshold
         self.onAction = onAction
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         configureButton()
@@ -97,7 +104,12 @@ final class MenuBarController {
         // snapshot data type. This lets locale/currency work touch one place.
         latestSnapshot = snapshot
         let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissedUnclaimedThreshold)
-        statusItem.button?.title = [AgentSnapshotPresenter.short(snapshot), badge].compactMap { $0 }.joined(separator: " ")
+        let queueDot = (snapshot.queueDepth ?? 0) > 0 ? "•" : nil
+        statusItem.button?.title = [AgentSnapshotPresenter.short(snapshot), badge, queueDot].compactMap { $0 }.joined(separator: " ")
+        statusItem.button?.toolTip = menuTooltip(snapshot)
+        statusItem.button?.contentTintColor = snapshot.thermalState?.isMenuBarAttention == true
+            ? NSColor.systemOrange
+            : nil
         guard let menu = statusItem.menu else { return }
         menu.item(withIdentifier: .statusRow)?.title = AgentSnapshotPresenter.stateLine(snapshot)
         menu.item(withIdentifier: .earningsRow)?.title = AgentSnapshotPresenter.earningsLine(snapshot)
@@ -117,7 +129,17 @@ final class MenuBarController {
             return
         }
         dismissedUnclaimedThreshold = threshold
+        dismissalStore.dismissedThreshold = threshold
         render(latestSnapshot)
+    }
+
+    private func menuTooltip(_ snapshot: AgentSnapshot) -> String {
+        [
+            AgentSnapshotPresenter.stateLine(snapshot),
+            AgentSnapshotPresenter.earningsLine(snapshot),
+            AgentSnapshotPresenter.queueChip(snapshot),
+            AgentSnapshotPresenter.thermalChip(snapshot)
+        ].joined(separator: "\n")
     }
 }
 

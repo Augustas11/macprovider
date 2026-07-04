@@ -32,6 +32,7 @@ final class LaunchProviderController: ObservableObject {
     // MARK: - Published state (drives the SwiftUI onboarding view)
 
     @Published private(set) var stage: Stage = .idle
+    @Published private(set) var currentEarningsEstimate: EarningsEstimateRange?
 
     // MARK: - Config
 
@@ -49,8 +50,9 @@ final class LaunchProviderController: ObservableObject {
     struct ModelDownloadPlan: Equatable {
         let modelName: String
         let state: OnboardingState.ModelDownloadState?
+        let earningsEstimate: EarningsEstimateRange?
 
-        static let recommended = ModelDownloadPlan(modelName: "recommended", state: nil)
+        static let recommended = ModelDownloadPlan(modelName: "recommended", state: nil, earningsEstimate: nil)
     }
 
     struct Dependencies {
@@ -100,7 +102,9 @@ final class LaunchProviderController: ObservableObject {
                         modelDownload: modelDownload
                     )
                 },
-                runAutotune: { _ in .recommended },
+                runAutotune: { _ in
+                    (try? await AutotuneRecommendationRunner.run(cliURL: bundledCLIPath)) ?? .recommended
+                },
                 ensureCLIReady: {
                     guard FileManager.default.isExecutableFile(atPath: bundledCLIPath.path) else {
                         throw POSIXError(.ENOENT)
@@ -299,7 +303,7 @@ final class LaunchProviderController: ObservableObject {
                 return
             }
             let plan = existing.modelDownload.map {
-                ModelDownloadPlan(modelName: $0.modelID, state: $0)
+                ModelDownloadPlan(modelName: $0.modelID, state: $0, earningsEstimate: nil)
             }
             try await finishLaunch(providerID: existing.providerID, from: point, plan: plan)
         } catch {
@@ -354,7 +358,7 @@ final class LaunchProviderController: ObservableObject {
         try await dependencies.saveProviderIdentity(response.providerID, response.providerToken)
         try dependencies.updateState(response.providerID, "registered", nil, nil)
         try await finishLaunch(providerID: response.providerID, from: .autotune, plan: existing.modelDownload.map {
-            ModelDownloadPlan(modelName: $0.modelID, state: $0)
+            ModelDownloadPlan(modelName: $0.modelID, state: $0, earningsEstimate: nil)
         })
     }
 
@@ -378,6 +382,7 @@ final class LaunchProviderController: ObservableObject {
         if resumePoint == .cliReady || resumePoint == .downloadingModel || resumePoint == .autotune {
             let progress = plan.state.map { $0.partialBytes > 0 ? 0.5 : 0 } ?? 0
             stage = .downloadingModel(name: plan.modelName, progressPct: progress)
+            currentEarningsEstimate = plan.earningsEstimate
             try dependencies.updateState(providerID, "downloadingModel", nil, plan.state)
             let completedDownload = try await dependencies.downloadModel(plan)
             stage = .downloadingModel(name: plan.modelName, progressPct: 1)
