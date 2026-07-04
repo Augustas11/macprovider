@@ -1,8 +1,17 @@
-# Template for production coordinator config — Pearl VPS deployment.
-# Copy to coordinator.yaml and fill in the operator_key. Real coordinator.yaml
-# is gitignored because it contains a secret.
+# Annotated reference for the coordinator config — Pearl VPS deployment.
 #
-# Generate operator_key with:  openssl rand -hex 32
+# The tracked authoritative production config is
+# `phase4-coordinator/dist/coordinator.yaml`; this file is a heavily-
+# commented reference for operators and future audits. All secret-shaped
+# values (operator_key, gateway_service_token, postgres_dsn, etc.) MUST
+# be `env:NAME` runtime indirections resolved from
+# `/etc/macprovider/*.env` — NEVER commit an inline secret to either
+# file. `catalog_public_key` is the ed25519 PUBLIC trust anchor and is
+# safe (and required) to keep committed verbatim.
+#
+# Generate a fresh operator_key with:  openssl rand -hex 32
+# (Store it in `/etc/macprovider/coordinator.env`, reference as
+# `operator_key: env:OPERATOR_KEY`.)
 
 listen:
   buyer_port: 8443
@@ -189,7 +198,9 @@ tier2:
   # observation-only by default per beta/DECISION_CRITERIA Entry 80.
   # Uncomment + populate to enable.
   #   catalog_path: "/opt/macprovider/tier2-catalog.json"     # deploy-pearl-vps.sh requires this exact path (#244)
-  #   catalog_public_key: "<43-char base64url-unpadded ed25519 pubkey>"
+  #   # The tracked authoritative production value lives in coordinator.yaml
+  #   # and MUST match this reference — any byte-for-byte diff flags a rotation:
+  #   catalog_public_key: "IVH2aAlTudARJSK3e7XGmcGjxAqwm6lReGiS-0U9aFQ"
   #   require_hash_verified: false
   #
   # SPEC-015 v0.3 §M.4 — public absolute base URL the coordinator
