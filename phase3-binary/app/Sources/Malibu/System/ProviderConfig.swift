@@ -221,6 +221,26 @@ enum ProviderConfig {
         }
     }
 
+    static func repairMarkerlessAppOwnedConfig(providerID: String, paths: ProviderPaths = .current) async throws {
+        try paths.ensureDirectories()
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: paths.configFile.path) else {
+            throw SaveError.missingProviderID
+        }
+        if fm.fileExists(atPath: paths.appMarkerFile.path) {
+            guard await isConfigured(paths: paths) else { throw SaveError.savedIdentityNotConfigured }
+            return
+        }
+        guard readProviderID(paths: paths) == providerID else {
+            throw SaveError.existingConfigNotOwnedByApp
+        }
+        guard await KeychainStore.readProviderToken(providerID: providerID) != nil else {
+            throw SaveError.missingProviderToken
+        }
+        try writeAppMarker(paths: paths, fileManager: fm)
+        guard await isConfigured(paths: paths) else { throw SaveError.savedIdentityNotConfigured }
+    }
+
     static func startFreshMovingCLIConfigAside(now: Date = Date()) throws -> URL? {
         try startFreshMovingCLIConfigAside(now: now, paths: .current)
     }

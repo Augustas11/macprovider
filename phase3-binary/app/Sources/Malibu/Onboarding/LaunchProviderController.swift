@@ -57,10 +57,12 @@ final class LaunchProviderController: ObservableObject {
         var isConfigured: () async -> Bool
         var loadState: () throws -> OnboardingState?
         var loadOrGenerateIdentity: () async throws -> Curve25519.Signing.PrivateKey
+        var loadExistingIdentity: () async throws -> Curve25519.Signing.PrivateKey
         var providerID: (Curve25519.Signing.PrivateKey) -> String
         var currentProviderToken: (String) async -> String?
         var registerProvider: (Curve25519.Signing.PrivateKey, String?) async throws -> RegisterResponse
         var saveProviderIdentity: (String, String) async throws -> Void
+        var repairMarkerlessAppConfig: (String) async throws -> Void
         var saveState: (OnboardingState) throws -> Void
         var updateState: (String, String, Date?, OnboardingState.ModelDownloadState?) throws -> Void
         var runAutotune: (String) async throws -> ModelDownloadPlan
@@ -76,6 +78,7 @@ final class LaunchProviderController: ObservableObject {
                 isConfigured: { await ProviderConfig.isConfigured },
                 loadState: { try OnboardingStateStore.load() },
                 loadOrGenerateIdentity: { try await ProviderIdentity.loadOrGenerate() },
+                loadExistingIdentity: { try await ProviderIdentity.loadExisting() },
                 providerID: { ProviderIdentity.providerID(for: $0) },
                 currentProviderToken: { providerID in await KeychainStore.readProviderToken(providerID: providerID) },
                 registerProvider: { key, bearerProof in
@@ -84,6 +87,9 @@ final class LaunchProviderController: ObservableObject {
                 },
                 saveProviderIdentity: { providerID, token in
                     try await ProviderConfig.saveProviderIdentity(providerID: providerID, token: token)
+                },
+                repairMarkerlessAppConfig: { providerID in
+                    try await ProviderConfig.repairMarkerlessAppOwnedConfig(providerID: providerID)
                 },
                 saveState: { try OnboardingStateStore.save($0) },
                 updateState: { providerID, lastStage, firstServingAt, modelDownload in
@@ -287,6 +293,11 @@ final class LaunchProviderController: ObservableObject {
             default:
                 point = .autotune
             }
+            let configurationReady = try await recoverResumeConfigurationIfNeeded(existing)
+            if !configurationReady {
+                try await resumeRegistration(existing)
+                return
+            }
             let plan = existing.modelDownload.map {
                 ModelDownloadPlan(modelName: $0.modelID, state: $0)
             }
@@ -294,6 +305,36 @@ final class LaunchProviderController: ObservableObject {
         } catch {
             stage = .failed(stage: stageName(stage), retryable: true, message: error.localizedDescription)
         }
+    }
+
+    private func recoverResumeConfigurationIfNeeded(_ existing: OnboardingState) async throws -> Bool {
+        if await dependencies.isConfigured() { return true }
+        guard let configProviderID = dependencies.readProviderID() else { return false }
+        guard configProviderID == existing.providerID else {
+            throw NSError(
+                domain: "SPEC-026",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Stored provider config does not match the onboarding state."]
+            )
+        }
+
+        let key = try await dependencies.loadExistingIdentity()
+        guard dependencies.providerID(key) == existing.providerID else {
+            throw NSError(
+                domain: "SPEC-026",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Stored provider identity does not match the onboarding state."]
+            )
+        }
+        guard await dependencies.currentProviderToken(existing.providerID) != nil else {
+            throw ProviderConfig.SaveError.missingProviderToken
+        }
+
+        try await dependencies.repairMarkerlessAppConfig(existing.providerID)
+        guard await dependencies.isConfigured() else {
+            throw ProviderConfig.SaveError.savedIdentityNotConfigured
+        }
+        return true
     }
 
     private func resumeRegistration(_ existing: OnboardingState) async throws {

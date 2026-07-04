@@ -130,15 +130,82 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .live(model: "recommended", tier: .provisional))
     }
 
+    func testLaunchRepairsMarkerlessRegisteredStateBeforeResume() async {
+        let harness = Harness()
+        harness.configured = false
+        harness.configProviderID = "p_test"
+        harness.providerToken = "provider-token"
+        harness.loadedState = OnboardingState(
+            onboardingSchemaVersion: 2,
+            providerID: "p_test",
+            createdAt: Date(timeIntervalSince1970: 1),
+            lastStage: "registered",
+            firstServingAt: nil,
+            modelDownload: nil
+        )
+        let controller = LaunchProviderController(
+            coordinatorBaseURL: URL(string: "https://coordinator.streamvc.live")!,
+            bundledCLIPath: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.markerRepairs, ["p_test"])
+        XCTAssertNil(harness.savedProviderID)
+        XCTAssertEqual(harness.autotuneRuns, 1)
+        XCTAssertEqual(harness.stageUpdates, ["autotuning", "cliReady", "downloadingModel", "modelReady", "startingAgent", "live"])
+        XCTAssertEqual(harness.agentStarts, 1)
+        XCTAssertEqual(controller.stage, .live(model: "recommended", tier: .provisional))
+    }
+
+    func testLaunchRepairsMarkerlessStartingAgentStateBeforeResume() async {
+        let harness = Harness()
+        harness.configured = false
+        harness.configProviderID = "p_test"
+        harness.providerToken = "provider-token"
+        harness.loadedState = OnboardingState(
+            onboardingSchemaVersion: 2,
+            providerID: "p_test",
+            createdAt: Date(timeIntervalSince1970: 1),
+            lastStage: "startingAgent",
+            firstServingAt: nil,
+            modelDownload: OnboardingState.ModelDownloadState(
+                modelID: "Qwen2.5-7B-Instruct",
+                targetURL: URL(string: "https://models.example/qwen")!,
+                targetSHA256: "abc123",
+                partialBytes: 0
+            )
+        )
+        let controller = LaunchProviderController(
+            coordinatorBaseURL: URL(string: "https://coordinator.streamvc.live")!,
+            bundledCLIPath: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.markerRepairs, ["p_test"])
+        XCTAssertNil(harness.savedProviderID)
+        XCTAssertEqual(harness.autotuneRuns, 0)
+        XCTAssertTrue(harness.modelDownloads.isEmpty)
+        XCTAssertEqual(harness.stageUpdates, ["startingAgent", "live"])
+        XCTAssertEqual(harness.agentStarts, 1)
+        XCTAssertEqual(controller.stage, .live(model: "Qwen2.5-7B-Instruct", tier: .provisional))
+    }
+
     private final class Harness {
         var savedProviderID: String?
         var savedToken: String?
         var loginItemRegistrations = 0
         var agentStarts = 0
+        var markerRepairs: [String] = []
         var stageUpdates: [String] = []
         var modelDownloads: [LaunchProviderController.ModelDownloadPlan] = []
         var autotuneRuns = 0
         var configured = false
+        var configProviderID = "p_test"
+        var providerToken: String?
         var loadedState: OnboardingState?
         var registerError: Error?
         let key = Curve25519.Signing.PrivateKey()
@@ -148,8 +215,9 @@ final class LaunchProviderControllerTests: XCTestCase {
                 isConfigured: { self.configured },
                 loadState: { self.loadedState },
                 loadOrGenerateIdentity: { self.key },
+                loadExistingIdentity: { self.key },
                 providerID: { _ in "p_test" },
-                currentProviderToken: { _ in nil },
+                currentProviderToken: { _ in self.providerToken },
                 registerProvider: { _, _ in
                     if let error = self.registerError { throw error }
                     return RegisterResponse(
@@ -162,6 +230,10 @@ final class LaunchProviderControllerTests: XCTestCase {
                 saveProviderIdentity: { providerID, token in
                     self.savedProviderID = providerID
                     self.savedToken = token
+                },
+                repairMarkerlessAppConfig: { providerID in
+                    self.markerRepairs.append(providerID)
+                    self.configured = true
                 },
                 saveState: { _ in },
                 updateState: { _, lastStage, _, _ in
@@ -190,7 +262,7 @@ final class LaunchProviderControllerTests: XCTestCase {
                 waitForFirstServing: {
                     Date(timeIntervalSince1970: 2)
                 },
-                readProviderID: { "p_test" }
+                readProviderID: { self.configProviderID }
             )
         }
     }
