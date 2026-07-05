@@ -1,7 +1,28 @@
 import Foundation
 
 enum AutotuneRecommendationRunner {
-    private static let processTimeout: TimeInterval = 30
+    /// Wall-clock budget for `macprovider-cli autotune --recommend --json`.
+    ///
+    /// Autotune runs Stage-1 probes against 2-3 candidate models. Each probe
+    /// spawns a subprocess of `macprovider-cli serve`, waits for MLX to load
+    /// the model into memory, then measures TTFT + tokens/sec via HTTP.
+    ///
+    /// The CLI's own timings (see `Stage1Prober` in `Stage1Iterator.swift`):
+    ///   * `readyTimeoutSec = 120s` per candidate (model load window)
+    ///   * `probeIdleTimeoutSec = 300s` per candidate (SPEC-023 v1.7.5 pins
+    ///     this at 300s because M-Base 30B MoE prefill can take 60-180s
+    ///     before first byte)
+    ///
+    /// Empirically on this Mac's clean install: 2-5 minutes. Worst-case
+    /// upper bound with 3 candidates hitting the CLI's own timeouts:
+    /// ~21 minutes (3 × 420s). We budget 30 minutes to leave margin
+    /// before failing the user; longer than that means something is
+    /// genuinely stuck (subprocess wedged, disk I/O storm, etc.).
+    ///
+    /// A 30s value was ~60× too short and caused `.timedOut` failure on
+    /// every fresh-install onboarding — see the 2026-07-05 smoke report
+    /// at `/private/tmp/claude-501/.../scratchpad/smoke-v183/`.
+    static let processTimeout: TimeInterval = 1800
 
     private final class ProcessOutputBuffer: @unchecked Sendable {
         private let lock = NSLock()
