@@ -47,6 +47,12 @@ actor ControlSocketClient {
                     // &addr.sun_path. Hoist the size to a local so the
                     // read/write don't overlap.
                     let pathCapacity = MemoryLayout.size(ofValue: addr.sun_path)
+                    let pathBytes = self.socketPath.utf8.count
+                    guard pathBytes < pathCapacity else {
+                        Darwin.close(sock)
+                        cont.resume(throwing: POSIXError(.ENAMETOOLONG))
+                        return
+                    }
                     self.socketPath.withCString { src in
                         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
                             ptr.withMemoryRebound(to: CChar.self, capacity: pathCapacity) { dst in

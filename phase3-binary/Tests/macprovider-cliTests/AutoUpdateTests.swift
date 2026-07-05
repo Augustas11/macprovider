@@ -212,6 +212,29 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(store.cooldown(target: marker.targetVersion, failureClass: .orphanedPendingMarker)?.attempt, 1)
     }
 
+    func testExpiredPendingMarkerStillRestoresFromBackup() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        var (marker, binary, backup) = try makePendingMarkerFixture(store: store, fixture: fixture, backupContents: "old", targetContents: "new")
+        marker = AutoUpdatePendingMarker(
+            updateID: marker.updateID,
+            targetVersion: marker.targetVersion,
+            targetPath: marker.targetPath,
+            backupPath: marker.backupPath,
+            size: marker.size,
+            mode: marker.mode,
+            sha256: marker.sha256,
+            markerDeadline: ISO8601DateFormatter.autoupdateTest.string(from: Date().addingTimeInterval(-3_600))
+        )
+        try store.writePending(marker)
+
+        let outcome = store.recoverOrphanedMarker(marker)
+
+        XCTAssertEqual(outcome, .restored(marker))
+        XCTAssertEqual(try String(contentsOf: binary), "old")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+    }
+
     func testOrphanPendingMarkerWithMissingOrCorruptBackupQuarantinesWithoutRestore() throws {
         let fixture = try TempHome()
         let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
@@ -230,6 +253,34 @@ final class AutoUpdateTests: XCTestCase {
             .filter { $0.hasPrefix("pending-quarantined-") && $0.hasSuffix(".json") }
         XCTAssertEqual(quarantined.count, 1)
         XCTAssertNil(store.cooldown(target: marker.targetVersion, failureClass: .orphanedPendingMarker))
+    }
+
+    func testOrphanPendingMarkerRejectsBackupOutsideDerivedRollbackPath() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        var (marker, binary, backup) = try makePendingMarkerFixture(store: store, fixture: fixture, backupContents: "old", targetContents: "new")
+        let attackerBackup = fixture.url.appendingPathComponent("attacker-backup")
+        try Data("old".utf8).write(to: attackerBackup)
+        marker = AutoUpdatePendingMarker(
+            updateID: marker.updateID,
+            targetVersion: marker.targetVersion,
+            targetPath: marker.targetPath,
+            backupPath: attackerBackup.path,
+            size: marker.size,
+            mode: marker.mode,
+            sha256: marker.sha256,
+            markerDeadline: marker.markerDeadline
+        )
+        try store.writePending(marker)
+
+        let outcome = store.recoverOrphanedMarker(marker)
+
+        guard case .backupCorrupt = outcome else {
+            return XCTFail("expected backupCorrupt, got \(outcome)")
+        }
+        XCTAssertEqual(try String(contentsOf: binary), "new")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: attackerBackup.path))
     }
 
     func testSuccessCleanupIsIdempotentAcrossCrashSteps() throws {
@@ -462,6 +513,22 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(policy.minimum, "1.8.0")
         XCTAssertTrue(policy.revoked.contains("1.6.1"))
         XCTAssertTrue(policy.revoked.contains("1.7.1"))
+    }
+
+    func testUnsignedReleasePolicyMetadataIsIgnored() throws {
+        let data = Data("""
+        {
+          "tag_name": "v1.8.0",
+          "assets": [],
+          "signed_policy_minimum": "9.9.9",
+          "signed_policy_revoked": ["1.8.0"],
+          "body": "```json\\n{\\\"signed_policy_minimum\\\":\\\"9.9.9\\\"}\\n```"
+        }
+        """.utf8)
+
+        let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+
+        XCTAssertNil(release.signedPolicy)
     }
 
     func testSelfUpdateResolvesReleaseByVTagThenBareTag() async throws {

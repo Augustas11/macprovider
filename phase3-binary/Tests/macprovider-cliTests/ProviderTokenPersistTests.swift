@@ -1,4 +1,5 @@
 import MacProviderCore
+import Dispatch
 import XCTest
 
 /// SPEC-003 v0.8 FR-C9.3 — atomic persist of a self-minted provisional
@@ -127,6 +128,31 @@ final class ProviderTokenPersistTests: XCTestCase {
 
         let onDisk = try String(contentsOfFile: configPath, encoding: .utf8)
         XCTAssertTrue(onDisk.contains("provider_token: \(token)"))
+    }
+
+    func testConcurrentWritesSerializeToSingleValidTokenLine() throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: tempDir) }
+        let configPath = tempDir + "/config.yaml"
+        try "port: 8080\nmodel: m\n".write(toFile: configPath, atomically: true, encoding: .utf8)
+
+        let queue = DispatchQueue(label: "token-persist-test", attributes: .concurrent)
+        let group = DispatchGroup()
+        for index in 0..<12 {
+            group.enter()
+            queue.async {
+                defer { group.leave() }
+                let token = String(repeating: String(format: "%x", index % 16), count: 64)
+                try? ProviderTokenPersist.write(token: token, configPath: configPath)
+            }
+        }
+        XCTAssertEqual(group.wait(timeout: .now() + 5), .success)
+
+        let onDisk = try String(contentsOfFile: configPath, encoding: .utf8)
+        let tokenLines = onDisk.split(separator: "\n").filter { $0.hasPrefix("provider_token:") }
+        XCTAssertEqual(tokenLines.count, 1, "serialized writers must leave one canonical provider_token line: \(onDisk)")
+        XCTAssertTrue(onDisk.contains("port: 8080"))
+        XCTAssertTrue(onDisk.contains("model: m"))
     }
 
     // SPEC-003 v0.8 FR-C9.3 — codex code-reviewer MAJOR-1 fix:

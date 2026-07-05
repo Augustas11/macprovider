@@ -1,18 +1,18 @@
 # macprovider-watchdog
 
-External LaunchAgent that catches the silent half-open-TCP wedge of
-the Mac provider's WebSocket to the coordinator. Operator-visibility
-insurance for the failure mode tracked in GitHub issue #189; ships
-alongside every install of `macprovider-cli` via the public
-`get.streamvc.live/install.sh` flow.
+External LaunchAgent that verifies the installed Mac provider process
+is alive and locally healthy. It ships alongside every install of
+`macprovider-cli` via the public `get.streamvc.live/install.sh` flow.
 
 ## What it does
 
-Every 60 seconds, `watchdog.sh` runs `netstat -an -p tcp` and looks
-for an ESTABLISHED outbound connection from the provider process to
-`coordinator.streamvc.live:443`. If none is found, it issues
-`launchctl kickstart -k gui/$UID/live.streamvc.macprovider` so the
-provider LaunchAgent is restarted by launchd.
+Every 60 seconds, `watchdog.sh` checks that exactly one installed
+`macprovider-cli` process is running and that the provider's local
+`/v1/health` endpoint responds successfully. If either check fails,
+it issues `launchctl kickstart -k gui/$UID/live.streamvc.macprovider`
+so launchd restarts the provider. Coordinator TCP state is logged as
+advisory only; another process reaching the coordinator is not treated
+as proof that the provider is healthy.
 
 It reads the provider identity from
 `~/.config/macprovider/config.yaml` (the file
@@ -24,7 +24,7 @@ operator without any hardcoded provider id.
 | File | Purpose |
 |---|---|
 | `watchdog.sh` | The poll script. Idempotent; safe to invoke repeatedly. |
-| `live.streamvc.macprovider-watchdog.plist.template` | LaunchAgent template; substituted by `install.sh`. |
+| `live.streamvc.macprovider-watchdog.template.plist` | LaunchAgent template; substituted by `install.sh`. |
 | `install.sh` | Idempotent installer. Invoked by both the main `get.streamvc.live/install.sh` flow and by an operator running this directory by hand. |
 | `uninstall.sh` | Removes the LaunchAgent and the `~/.local/share/macprovider-watchdog` directory. |
 
