@@ -136,12 +136,23 @@ CREATE TABLE IF NOT EXISTS oauth_states (
 	state_hash BLOB PRIMARY KEY,
 	session_id TEXT NOT NULL,
 	redirect_uri TEXT NOT NULL,
+	return_to TEXT NOT NULL DEFAULT '',
 	client_ip TEXT NOT NULL,
 	created_at TEXT NOT NULL,
 	expires_at TEXT NOT NULL,
 	consumed_at TEXT NOT NULL DEFAULT '',
 	action TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS oauth_handoffs (
+	token_hash BLOB PRIMARY KEY,
+	api_key TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	consumed_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_handoffs_expires ON oauth_handoffs(expires_at);
 
 CREATE TABLE IF NOT EXISTS public_issuance_events (
 	event_id INTEGER PRIMARY KEY AUTOINCREMENT,

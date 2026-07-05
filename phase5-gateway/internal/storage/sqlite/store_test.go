@@ -234,7 +234,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState: %v", err)
 	}
-	redirectURI, action, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(time.Minute))
+	redirectURI, action, returnTo, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ConsumeOAuthState: %v", err)
 	}
@@ -244,7 +244,10 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	if action != "mint" {
 		t.Fatalf("action=%q, want %q", action, "mint")
 	}
-	if _, _, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	if returnTo != "" {
+		t.Fatalf("returnTo=%q, want empty", returnTo)
+	}
+	if _, _, _, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("ConsumeOAuthState replay err=%v, want ErrNotFound", err)
 	}
 
@@ -255,7 +258,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState expired: %v", err)
 	}
-	if _, _, err := store.ConsumeOAuthState(ctx, expiredHash[:], "session_2", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	if _, _, _, err := store.ConsumeOAuthState(ctx, expiredHash[:], "session_2", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("ConsumeOAuthState expired err=%v, want ErrNotFound", err)
 	}
 
@@ -267,7 +270,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState plain: %v", err)
 	}
-	_, action, err = store.ConsumeOAuthState(ctx, plainHash[:], "session_3", now.Add(time.Minute))
+	_, action, _, err = store.ConsumeOAuthState(ctx, plainHash[:], "session_3", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ConsumeOAuthState plain: %v", err)
 	}

@@ -43,6 +43,11 @@ auth:
     callback_allowlist:
       - https://api.streamvc.live/auth/github/callback
       - http://localhost:9443/auth/github/callback
+    return_to_allowlist:
+      - https://malibu.tech/console/auth/callback.html
+      - https://www.malibu.tech/console/auth/callback.html
+      - http://127.0.0.1:5173/console/auth/callback.html
+      - http://localhost:5173/console/auth/callback.html
     github:
       client_id: env:GITHUB_OAUTH_CLIENT_ID
       client_secret: env:GITHUB_OAUTH_CLIENT_SECRET
@@ -122,3 +127,7 @@ cors:
   allowed_origins:
     - https://console.streamvc.live
     - https://streamvc.live
+    - https://malibu.tech
+    - https://www.malibu.tech
+    - http://127.0.0.1:5173
+    - http://localhost:5173

@@ -77,6 +77,7 @@ type AuthConfig struct {
 
 type OAuthConfig struct {
 	CallbackAllowlist []string          `yaml:"callback_allowlist"`
+	ReturnToAllowlist []string          `yaml:"return_to_allowlist"`
 	StateMaxPerIP     int               `yaml:"state_max_per_ip"`
 	GitHub            GitHubOAuthConfig `yaml:"github"`
 }
@@ -357,6 +358,11 @@ func (c Config) Validate() error {
 	}
 	for i, callback := range c.Auth.OAuth.CallbackAllowlist {
 		if err := requireURL(fmt.Sprintf("auth.oauth.callback_allowlist[%d]", i), callback); err != nil {
+			return err
+		}
+	}
+	for i, returnTo := range c.Auth.OAuth.ReturnToAllowlist {
+		if err := requireURL(fmt.Sprintf("auth.oauth.return_to_allowlist[%d]", i), returnTo); err != nil {
 			return err
 		}
 	}
