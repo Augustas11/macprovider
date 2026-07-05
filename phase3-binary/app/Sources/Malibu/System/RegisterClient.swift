@@ -194,14 +194,14 @@ struct RegisterClient {
     static func identitySignaturePayload(
         authAttemptID: String,
         providerID: String,
-        binaryVersion: Int,
+        binaryVersion: String,
         providerECDHPublicKey: String,
         transcriptSHA256: String
     ) throws -> Data {
         try CanonicalJSON.encode(.object([
             "auth_attempt_id": .string(authAttemptID),
             "provider_id": .string(providerID),
-            "binary_version": .number(String(binaryVersion)),
+            "binary_version": .string(binaryVersion),
             "provider_ecdh_public_key": .string(providerECDHPublicKey),
             "transcript_sha256": .string(transcriptSHA256)
         ]))

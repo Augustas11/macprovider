@@ -42,6 +42,29 @@ public enum ControlSocketFrame: Equatable, Sendable {
     case resumeAck(accepted: Bool, reason: String?)
     case shutdownRequest(graceSeconds: Int)
     case shutdownAck
+
+    // SPEC-026 §7 identity-signature challenge. The CLI cannot sign the
+    // Tier-2 auth_request proof itself because the provider Ed25519 key
+    // lives in Malibu.app's Keychain. The CLI PUSHES a request out to
+    // the connected control-socket client (Malibu.app) with the auth
+    // parameters, awaits the response, then relays the signature to the
+    // coordinator in the auth_request proof stage.
+    case identitySignatureRequest(
+        authAttemptID: String,
+        providerID: String,
+        // String NOT Int: must byte-match the initial auth_request
+        // `binary_version` field so coordinator + Malibu.app canonical
+        // tuples agree on JSON type.
+        binaryVersion: String,
+        providerECDHPublicKey: String,
+        transcriptSHA256: String
+    )
+    case identitySignatureResponse(
+        accepted: Bool,
+        identitySignature: String?,
+        transcriptSHA256: String?,
+        reason: String?
+    )
 }
 
 public enum ControlSocketCodec {
@@ -130,6 +153,24 @@ public enum ControlSocketCodec {
             object = ["type": "shutdown_request", "grace_seconds": graceSeconds]
         case .shutdownAck:
             object = ["type": "shutdown_ack"]
+        case let .identitySignatureRequest(authAttemptID, providerID, binaryVersion, ecdhKey, transcriptSHA256):
+            object = [
+                "type": "identity_signature_request",
+                "auth_attempt_id": authAttemptID,
+                "provider_id": providerID,
+                "binary_version": binaryVersion,
+                "provider_ecdh_public_key": ecdhKey,
+                "transcript_sha256": transcriptSHA256,
+            ]
+        case let .identitySignatureResponse(accepted, signature, transcriptSHA256, reason):
+            var frame: [String: Any] = [
+                "type": "identity_signature_response",
+                "accepted": accepted,
+            ]
+            if let signature { frame["identity_signature"] = signature }
+            if let transcriptSHA256 { frame["identity_signature_transcript_sha256"] = transcriptSHA256 }
+            if let reason { frame["reason"] = reason }
+            object = frame
         }
 
         var data = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
@@ -230,6 +271,21 @@ public enum ControlSocketCodec {
             return .shutdownRequest(graceSeconds: try intField("grace_seconds", in: object))
         case "shutdown_ack":
             return .shutdownAck
+        case "identity_signature_request":
+            return .identitySignatureRequest(
+                authAttemptID: try stringField("auth_attempt_id", in: object),
+                providerID: try stringField("provider_id", in: object),
+                binaryVersion: try stringField("binary_version", in: object),
+                providerECDHPublicKey: try stringField("provider_ecdh_public_key", in: object),
+                transcriptSHA256: try stringField("transcript_sha256", in: object)
+            )
+        case "identity_signature_response":
+            return .identitySignatureResponse(
+                accepted: try boolField("accepted", in: object),
+                identitySignature: object["identity_signature"] as? String,
+                transcriptSHA256: object["identity_signature_transcript_sha256"] as? String,
+                reason: object["reason"] as? String
+            )
         default:
             throw ControlSocketError.unknownType(type)
         }
@@ -357,6 +413,7 @@ actor ControlSocketServer {
     private let receiptRotator: (@Sendable () async throws -> Void)?
     private let receiptRotationProviderID: String?
     private let idleTimeoutSeconds: TimeInterval
+    private let identityBridge: IdentitySignatureBridge?
     private let tracker = ControlSocketSwitchTracker()
     private var listenerFD: Int32?
     private var acceptTask: Task<Void, Never>?
@@ -369,7 +426,8 @@ actor ControlSocketServer {
         supportedModels: [String]? = nil,
         receiptRotator: (@Sendable () async throws -> Void)? = nil,
         receiptRotationProviderID: String? = nil,
-        idleTimeoutSeconds: TimeInterval = 30.0
+        idleTimeoutSeconds: TimeInterval = 30.0,
+        identityBridge: IdentitySignatureBridge? = nil
     ) {
         self.socketPath = socketPath
         self.modelRuntime = modelRuntime
@@ -377,6 +435,7 @@ actor ControlSocketServer {
         self.receiptRotator = receiptRotator
         self.receiptRotationProviderID = receiptRotationProviderID
         self.idleTimeoutSeconds = idleTimeoutSeconds
+        self.identityBridge = identityBridge
     }
 
     func start() async throws {
@@ -422,6 +481,7 @@ actor ControlSocketServer {
         let receiptRotator = receiptRotator
         let receiptRotationProviderID = receiptRotationProviderID
         let idleTimeoutSeconds = idleTimeoutSeconds
+        let identityBridge = identityBridge
         acceptTask = Task.detached(priority: .userInitiated) {
             await Self.acceptLoop(
                 listenerFD: fd,
@@ -431,6 +491,7 @@ actor ControlSocketServer {
                 receiptRotator: receiptRotator,
                 receiptRotationProviderID: receiptRotationProviderID,
                 idleTimeoutSeconds: idleTimeoutSeconds,
+                identityBridge: identityBridge,
                 server: self
             )
         }
@@ -483,6 +544,7 @@ actor ControlSocketServer {
         receiptRotator: (@Sendable () async throws -> Void)?,
         receiptRotationProviderID: String?,
         idleTimeoutSeconds: TimeInterval,
+        identityBridge: IdentitySignatureBridge?,
         server: ControlSocketServer
     ) async {
         while !Task.isCancelled {
@@ -510,7 +572,8 @@ actor ControlSocketServer {
                     supportedModels: supportedModels,
                     receiptRotator: receiptRotator,
                     receiptRotationProviderID: receiptRotationProviderID,
-                    idleTimeoutSeconds: idleTimeoutSeconds
+                    idleTimeoutSeconds: idleTimeoutSeconds,
+                    identityBridge: identityBridge
                 )
                 await server.removeClientFD(clientFD)
             }
@@ -525,9 +588,40 @@ actor ControlSocketServer {
         supportedModels: [String]?,
         receiptRotator: (@Sendable () async throws -> Void)?,
         receiptRotationProviderID: String?,
-        idleTimeoutSeconds: TimeInterval
+        idleTimeoutSeconds: TimeInterval,
+        identityBridge: IdentitySignatureBridge? = nil
     ) async {
         let connection = ControlSocketConnection(fd: fd)
+
+        // SPEC-026 §7: if an IdentitySignatureBridge is injected, spawn a
+        // sibling task that awaits pending signature requests from the
+        // CoordinatorClient and pushes them out on this connection. The
+        // ControlSocketConnection actor serialises send/receive so this
+        // pusher is safe to race the main receive loop.
+        var signatureSubscriberID: UUID?
+        var pusherTask: Task<Void, Never>?
+        if let identityBridge {
+            let (subscriberID, stream) = await identityBridge.subscribe()
+            signatureSubscriberID = subscriberID
+            pusherTask = Task.detached(priority: .userInitiated) {
+                for await request in stream {
+                    try? await connection.send(.identitySignatureRequest(
+                        authAttemptID: request.authAttemptID,
+                        providerID: request.providerID,
+                        binaryVersion: request.binaryVersion,
+                        providerECDHPublicKey: request.providerECDHPublicKey,
+                        transcriptSHA256: request.transcriptSHA256
+                    ))
+                }
+            }
+        }
+        defer {
+            pusherTask?.cancel()
+            if let identityBridge, let signatureSubscriberID {
+                Task { await identityBridge.unsubscribe(signatureSubscriberID) }
+            }
+        }
+
         while !Task.isCancelled {
             do {
                 let frame = try await connection.receive(timeout: idleTimeoutSeconds)
@@ -576,6 +670,17 @@ actor ControlSocketServer {
                     // lands with SPEC-025 §11 P1 alongside pause/resume semantics.
                     try? await connection.send(.shutdownAck)
                     _ = graceSeconds // reserved for graceful drain implementation
+                case let .identitySignatureResponse(accepted, signature, transcriptSHA256, reason):
+                    // SPEC-026 §7: Malibu.app answering our earlier
+                    // identity_signature_request. Forward to the
+                    // bridge so the suspended CoordinatorClient.auth_request
+                    // proof builder can proceed.
+                    await identityBridge?.deliverResponse(IdentitySignatureBridge.Response(
+                        accepted: accepted,
+                        identitySignature: signature,
+                        transcriptSHA256: transcriptSHA256,
+                        reason: reason
+                    ))
                 default:
                     FileHandle.standardError.write(Data("control socket received unexpected frame type; closing connection\n".utf8))
                     await connection.close()

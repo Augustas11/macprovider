@@ -52,13 +52,13 @@ final class RegisterClientTests: XCTestCase {
         let payload = try RegisterClient.identitySignaturePayload(
             authAttemptID: "auth-1",
             providerID: "p_abc",
-            binaryVersion: 2,
+            binaryVersion: "1.8.6",
             providerECDHPublicKey: "ecdh",
             transcriptSHA256: "hash"
         )
         XCTAssertEqual(
             String(data: payload, encoding: .utf8),
-            #"{"auth_attempt_id":"auth-1","binary_version":2,"provider_ecdh_public_key":"ecdh","provider_id":"p_abc","transcript_sha256":"hash"}"#
+            #"{"auth_attempt_id":"auth-1","binary_version":"1.8.6","provider_ecdh_public_key":"ecdh","provider_id":"p_abc","transcript_sha256":"hash"}"#
         )
     }
 

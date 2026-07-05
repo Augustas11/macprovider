@@ -366,7 +366,7 @@ final class MalibuAgent: ObservableObject {
     private func handleIdentitySignatureRequest(
         authAttemptID: String,
         providerID: String,
-        binaryVersion: Int,
+        binaryVersion: String,
         providerECDHPublicKey: String,
         transcriptSHA256: String
     ) async {

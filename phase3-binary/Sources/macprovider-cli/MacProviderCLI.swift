@@ -514,6 +514,11 @@ struct ServeCommand: AsyncParsableCommand {
         if resolved.donorMode {
             FileHandle.standardError.write(Data("DONOR MODE: coordinator join disabled; serving local HTTP only.\n".utf8))
         }
+        // SPEC-026 §7: shared bridge for the App-track identity-signature
+        // handshake. CoordinatorClient enqueues signature requests here
+        // when building the auth_request proof stage; ControlSocketServer
+        // drains them onto the connected Malibu.app control socket.
+        let identityBridge = IdentitySignatureBridge()
         let coordinatorClient = Self.makeCoordinatorClient(noJoin: noJoin, donorMode: resolved.donorMode) {
             CoordinatorClient(
                 config: resolved,
@@ -521,7 +526,8 @@ struct ServeCommand: AsyncParsableCommand {
                 providerStatus: providerStatus,
                 attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath),
                 providerReceiptPublicKey: receiptRuntime.publicKeyBase64,
-                receiptBuilder: receiptRuntime.builder
+                receiptBuilder: receiptRuntime.builder,
+                identityBridge: identityBridge
             )
         }
         let controlSocket: ControlSocketServer?
@@ -547,7 +553,8 @@ struct ServeCommand: AsyncParsableCommand {
                 modelRuntime: modelRuntime,
                 supportedModels: resolved.supportedModels,
                 receiptRotator: receiptRotator,
-                receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines)
+                receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                identityBridge: identityBridge
             )
             do {
                 try await controlSocket?.start()

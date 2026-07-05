@@ -161,7 +161,7 @@ final class ControlFrameCodecTests: XCTestCase {
         let frame = ControlFrame.identitySignatureRequest(
             authAttemptID: "auth-1",
             providerID: "p_abc",
-            binaryVersion: 2,
+            binaryVersion: "1.8.6",
             providerECDHPublicKey: "ecdh",
             transcriptSHA256: "hash"
         )

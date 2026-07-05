@@ -165,7 +165,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 actor CoordinatorClient {
     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
 
-    static let binaryVersion = "1.8.5"
+    static let binaryVersion = "1.8.6"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -240,6 +240,13 @@ actor CoordinatorClient {
     private var sleepAssertion: ProviderSleepAssertion?
     private let sendOverride: SendOverride?
 
+    // SPEC-026 §7: optional bridge for delegating identity signature to
+    // Malibu.app via the control socket. `nil` when the CLI runs standalone
+    // (install.sh path) — the coordinator's per-provider exemption
+    // (identity_signature.go:38) covers that case.
+    private let identityBridge: IdentitySignatureBridge?
+    private let identitySignatureTimeoutSeconds: TimeInterval
+
     init?(
         config: AppConfig,
         modelRuntime: ModelRuntime,
@@ -254,6 +261,8 @@ actor CoordinatorClient {
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
         providerReceiptPublicKey: String? = nil,
         receiptBuilder: ReceiptBuilder? = nil,
+        identityBridge: IdentitySignatureBridge? = nil,
+        identitySignatureTimeoutSeconds: TimeInterval = 30,
         // Issue #189: injectable in tests; production uses Darwin.exit(1)
         // so the launchd KeepAlive contract recovers the wedged process.
         watchdogExitHook: @escaping @Sendable (String) -> Void = { reason in
@@ -300,6 +309,8 @@ actor CoordinatorClient {
         self.pairingController = pairingController ?? PairingController(configPath: config.configPath)
         self.connectAndRunOverride = connectAndRunOverride
         self.sendOverride = sendOverride
+        self.identityBridge = identityBridge
+        self.identitySignatureTimeoutSeconds = identitySignatureTimeoutSeconds
         self.watchdogExitHook = watchdogExitHook
     }
 
@@ -645,7 +656,11 @@ actor CoordinatorClient {
         let challenge = try await receiveAuthChallenge(from: socket)
         try Task.checkCancellation()
         let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
-        let proofMessage = try await authProofMessage(challenge: challenge, attempt: authAttempt)
+        let proofMessage = try await authProofMessage(
+            challenge: challenge,
+            attempt: authAttempt,
+            initialMessage: initialMessage
+        )
         try Task.checkCancellation()
         try await send(proofMessage, to: socket)
         let response = try await receiveAuthResponse(from: socket)
@@ -732,7 +747,11 @@ actor CoordinatorClient {
             let challenge = try await receiveAuthChallenge(from: socket)
             try Task.checkCancellation()
             let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
-            let proofMessage = try await authProofMessage(challenge: challenge, attempt: authAttempt)
+            let proofMessage = try await authProofMessage(
+                challenge: challenge,
+                attempt: authAttempt,
+                initialMessage: initialMessage
+            )
             try Task.checkCancellation()
             try await send(proofMessage, to: socket)
             let response = try await receiveAuthResponse(from: socket)
@@ -829,10 +848,15 @@ actor CoordinatorClient {
 
     private func connectAndRunTier2(socket: ProviderWebSocketTask) async throws {
         let authAttempt = Tier2AuthAttempt()
-        try await send(await authInitialMessage(attempt: authAttempt))
+        let initialMessage = await authInitialMessage(attempt: authAttempt)
+        try await send(initialMessage)
         let challenge: [String: Any] = try await receiveAuthChallenge(from: socket)
         let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
-        try await send(try await authProofMessage(challenge: challenge, attempt: authAttempt))
+        try await send(try await authProofMessage(
+            challenge: challenge,
+            attempt: authAttempt,
+            initialMessage: initialMessage
+        ))
         let response = try await receiveAuthResponse(from: socket)
         try await acceptAuthResponse(response, session: session)
         installTier2Session(session, socket: socket)
@@ -1136,7 +1160,11 @@ actor CoordinatorClient {
         )
     }
 
-    func authProofMessage(challenge: [String: Any], attempt: Tier2AuthAttempt) async throws -> [String: Any] {
+    func authProofMessage(
+        challenge: [String: Any],
+        attempt: Tier2AuthAttempt,
+        initialMessage: [String: Any]? = nil
+    ) async throws -> [String: Any] {
         guard let attemptID = challenge["auth_attempt_id"] as? String, !attemptID.isEmpty else {
             throw CoordinatorAuthError.invalidMessage("auth_challenge missing auth_attempt_id")
         }
@@ -1157,7 +1185,46 @@ actor CoordinatorClient {
             "provider_id": providerID,
         ]
         proof["attestation_token"] = token ?? NSNull()
+
+        // SPEC-026 §7: if we have both the initial-stage message (needed
+        // to compute the retained transcript hash) and an
+        // IdentitySignatureBridge (i.e. Malibu.app is attached), ask
+        // Malibu to sign the canonical tuple with its Keychain Ed25519
+        // key. Failure to obtain a signature falls through — the
+        // coordinator's `identitySignatures == nil` gate or per-provider
+        // exemption at `identity_signature.go:38` covers the CLI-track
+        // path.
+        if let identityBridge, let initialMessage,
+           let transcriptSHA256 = try? Self.initialAuthTranscriptHashBase64(initialMessage) {
+            let request = IdentitySignatureBridge.Request(
+                authAttemptID: attemptID,
+                providerID: providerID,
+                binaryVersion: Self.binaryVersion,
+                providerECDHPublicKey: attempt.publicKeyBase64URL,
+                transcriptSHA256: transcriptSHA256
+            )
+            let response = await identityBridge.requestSignature(
+                request,
+                timeout: identitySignatureTimeoutSeconds
+            )
+            if let response, response.accepted,
+               let signature = response.identitySignature,
+               let echoed = response.transcriptSHA256 {
+                proof["identity_signature"] = signature
+                proof["identity_signature_transcript_sha256"] = echoed
+            }
+        }
+
         return proof
+    }
+
+    /// Compute `base64(SHA-256(CanonicalJSON(initialMessage)))`. Matches
+    /// what the coordinator retains from the initial auth_request stage
+    /// via `phase4-coordinator/internal/ws/identity_signature.go:15`.
+    static func initialAuthTranscriptHashBase64(_ message: [String: Any]) throws -> String {
+        let canonical = try CanonicalJSON.encode(CanonicalJSON.fromJSONLike(message))
+        let digest = SHA256.hash(data: canonical)
+        return Data(digest).base64EncodedString()
     }
 
     private func acceptAuthResponse(_ response: [String: Any], session: Tier2ProviderSession) async throws {

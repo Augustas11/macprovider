@@ -42,7 +42,10 @@ enum ControlFrame: Sendable, Equatable {
     case identitySignatureRequest(
         authAttemptID: String,
         providerID: String,
-        binaryVersion: Int,
+        // String NOT Int: must byte-match the CLI's `binary_version` field
+        // in the initial auth_request so coordinator + Malibu canonical
+        // tuples agree on JSON type (SPEC-026 §7).
+        binaryVersion: String,
         providerECDHPublicKey: String,
         transcriptSHA256: String
     )
@@ -211,7 +214,7 @@ enum ControlCodec {
             return .identitySignatureRequest(
                 authAttemptID: dict["auth_attempt_id"] as? String ?? "",
                 providerID: dict["provider_id"] as? String ?? "",
-                binaryVersion: dict["binary_version"] as? Int ?? 0,
+                binaryVersion: dict["binary_version"] as? String ?? "",
                 providerECDHPublicKey: dict["provider_ecdh_public_key"] as? String ?? "",
                 transcriptSHA256: dict["transcript_sha256"] as? String ?? ""
             )
