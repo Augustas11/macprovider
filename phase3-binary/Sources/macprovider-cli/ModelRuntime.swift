@@ -202,6 +202,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     public let draftModelID: String?
     public let draftContainer: ModelContainer?
     public let numDraftTokens: Int?
+    public let specDecodeGeneration: Int
 
     init(
         state: SwapState,
@@ -210,7 +211,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         modelHash: String?,
         draftModelID: String? = nil,
         draftContainer: ModelContainer? = nil,
-        numDraftTokens: Int? = nil
+        numDraftTokens: Int? = nil,
+        specDecodeGeneration: Int = 0
     ) {
         self.state = state
         self.container = container
@@ -219,6 +221,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.draftModelID = draftModelID
         self.draftContainer = draftContainer
         self.numDraftTokens = numDraftTokens
+        self.specDecodeGeneration = specDecodeGeneration
     }
 }
 
@@ -286,12 +289,31 @@ actor ModelRuntime: ModelRuntimeServing {
     // idle-timeout value to v0.2.x; 60 is the IMPL placeholder.
     static let structuredStreamingIdleTimeoutSeconds: TimeInterval = 60
 
+    enum SpeculativeRoute: Equatable {
+        case speculative
+        case tokenIterator
+    }
+
+    static func speculativeRoute(
+        for request: ChatCompletionRequest,
+        draftLoaded: Bool,
+        numDraftTokens: Int?
+    ) -> SpeculativeRoute {
+        guard request.allowsSpeculativeDecoding,
+              draftLoaded,
+              numDraftTokens != nil else {
+            return .tokenIterator
+        }
+        return .speculative
+    }
+
     private var state: SwapState = .ready
     private var targetModelID: String?
     private var currentModelID: String?
     private var currentContainer: ModelContainer?
     private var currentDraftModelID: String?
     private var currentDraftContainer: ModelContainer?
+    private var currentSpecDecodeGeneration = 0
     private let numDraftTokens: Int
     private let stopTokenFilter: StopTokenFilter
     private var currentModelHash: String?
@@ -312,6 +334,8 @@ actor ModelRuntime: ModelRuntimeServing {
     private let loader: @Sendable (String) async throws -> (ModelContainer, String, String?)
     private let testLoader: (@Sendable (String) async throws -> (String, String?))?
     private let testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
+    private let testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
+    private let testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
 
     var loadedModelID: String? {
         currentModelID
@@ -355,6 +379,8 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         self.testLoader = nil
         self.testCompletion = nil
+        self.testSpeculativeCompletion = nil
+        self.testSpeculativeStream = nil
 
         guard let modelID else {
             self.currentContainer = nil
@@ -419,7 +445,9 @@ actor ModelRuntime: ModelRuntimeServing {
         providerStatus: ProviderStatus? = nil,
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
-        testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
+        testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
+        testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
+        testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
     ) {
         self.currentModelID = modelID
         self.currentContainer = nil
@@ -439,6 +467,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.loader = loader
         self.testLoader = testLoader
         self.testCompletion = testCompletion
+        self.testSpeculativeCompletion = testSpeculativeCompletion
+        self.testSpeculativeStream = testSpeculativeStream
     }
 
     func setProviderStatus(_ providerStatus: ProviderStatus) {
@@ -453,7 +483,8 @@ actor ModelRuntime: ModelRuntimeServing {
             modelHash: currentModelHash,
             draftModelID: currentDraftModelID,
             draftContainer: currentDraftContainer,
-            numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens
+            numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens,
+            specDecodeGeneration: currentSpecDecodeGeneration
         )
     }
 
@@ -565,13 +596,15 @@ actor ModelRuntime: ModelRuntimeServing {
         return false
     }
 
-    private func completeSwapAtomically(container: ModelContainer?, modelID: String, modelHash: String?) {
+    private func completeSwapAtomically(container: ModelContainer?, modelID: String, modelHash: String?) async {
         let target = targetModelID ?? modelID
+        await providerStatus?.completeTargetSwap(modelID: modelID, modelHash: modelHash)
         currentContainer = container
         currentModelID = modelID
         currentModelHash = modelHash
         currentDraftModelID = nil
         currentDraftContainer = nil
+        currentSpecDecodeGeneration += 1
         state = .ready
         targetModelID = nil
         signal(SwapSignal(targetModelID: target, outcome: .completed(newModelID: modelID, newModelHash: modelHash)))
@@ -625,7 +658,8 @@ actor ModelRuntime: ModelRuntimeServing {
             modelHash: currentModelHash,
             draftModelID: currentDraftModelID,
             draftContainer: currentDraftContainer,
-            numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens
+            numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens,
+            specDecodeGeneration: currentSpecDecodeGeneration
         )
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
@@ -790,6 +824,25 @@ actor ModelRuntime: ModelRuntimeServing {
         let drainCancelled = DrainCancelToken()
         let registrationID = registerInFlight { drainCancelled.fire() }
         defer { unregisterInFlight(registrationID) }
+        if let testSpeculativeCompletion,
+           Self.speculativeRoute(
+               for: request,
+               draftLoaded: true,
+               numDraftTokens: snapshot.numDraftTokens
+           ) == .speculative {
+            do {
+                let result = try await Self.withDrainCancellation(drainCancelled) {
+                    try await testSpeculativeCompletion(snapshot, request)
+                }
+                return (try Self.validateStructuredCompletion(result, request: request).withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash)), snapshot)
+            } catch let error as DrainCancelledError {
+                throw error
+            } catch let error as CancellationError {
+                throw error
+            } catch let error as SpeculativeGenerationFailure {
+                Self.logSpeculativeFallback(error)
+            }
+        }
         if let testCompletion {
             let result = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
@@ -824,6 +877,41 @@ actor ModelRuntime: ModelRuntimeServing {
                     )
                     let firstToken = FirstTokenRecorder()
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
+                    if Self.speculativeRoute(
+                        for: request,
+                        draftLoaded: snapshot.draftContainer != nil,
+                        numDraftTokens: snapshot.numDraftTokens
+                    ) == .speculative,
+                       let draftContainer = snapshot.draftContainer,
+                       let numDraftTokens = snapshot.numDraftTokens {
+                        do {
+                            return try await Self.runSpeculativeCompletion(
+                                input: lmInput,
+                                parameters: parameters,
+                                targetContext: context,
+                                draft: draftContainer,
+                                numDraftTokens: numDraftTokens,
+                                request: request,
+                                stopTokenFilter: stopTokenFilter,
+                                promptTokenCount: promptTokenIds.count,
+                                completionStartedAt: completionStartedAt,
+                                modelHash: snapshot.modelHash,
+                                specDecodeGeneration: snapshot.specDecodeGeneration,
+                                shouldCancel: shouldCancel,
+                                drainCancelled: drainCancelled
+                            )
+                        } catch let error as DrainCancelledError {
+                            throw error
+                        } catch let error as CancellationError {
+                            throw error
+                        } catch let error as SpeculativeGenerationFailure {
+                            // FR-12 permits one pre-output retry on the existing
+                            // non-speculative target path. This branch happens
+                            // before any buyer-visible response exists for the
+                            // non-streaming endpoint.
+                            Self.logSpeculativeFallback(error)
+                        }
+                    }
                     let lease = await conversationCache.begin(
                         conversationKey: request.conversationKey,
                         incomingTokens: promptTokenIds,
@@ -909,6 +997,158 @@ actor ModelRuntime: ModelRuntimeServing {
         return (completion, snapshot)
     }
 
+    private static func runSpeculativeCompletion(
+        input: LMInput,
+        parameters: GenerateParameters,
+        targetContext: ModelContext,
+        draft: ModelContainer,
+        numDraftTokens: Int,
+        request: ChatCompletionRequest,
+        stopTokenFilter: StopTokenFilter,
+        promptTokenCount: Int,
+        completionStartedAt: Date,
+        modelHash: String?,
+        specDecodeGeneration: Int,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        drainCancelled: DrainCancelToken
+    ) async throws -> CompletionResult {
+        let generated = try await collectSpeculativeText(
+            input: input,
+            cache: nil,
+            parameters: parameters,
+            targetContext: targetContext,
+            draft: draft,
+            numDraftTokens: numDraftTokens,
+            shouldCancel: shouldCancel,
+            drainCancelled: drainCancelled
+        )
+        try drainCancelled.check()
+        try Task.checkCancellation()
+        guard generated.output.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+            throw APIError(
+                status: 502,
+                message: "Model response exceeded 2097152 bytes",
+                type: "upstream_provider_error",
+                code: "response_byte_cap_exceeded",
+                inferenceRan: true,
+                settlementRan: true
+            )
+        }
+
+        let filtered = applyOutputFilters(
+            generated.output,
+            stopTokenFilter: stopTokenFilter,
+            requestStops: request.stop
+        )
+        let parsed = parseToolCallsIfRequested(filtered.text, request: request)
+        let finishReason: String
+        if !parsed.toolCalls.isEmpty {
+            finishReason = "tool_calls"
+        } else if let maxTokens = request.maxTokens,
+                  generated.generationTokenCount >= maxTokens,
+                  !filtered.hitStop {
+            finishReason = "length"
+        } else {
+            finishReason = "stop"
+        }
+        return try validateStructuredCompletion(CompletionResult(
+            content: parsed.content,
+            finishReason: finishReason,
+            promptTokens: promptTokenCount,
+            completionTokens: generated.generationTokenCount,
+            ttftMilliseconds: generated.firstToken.elapsedMilliseconds(since: completionStartedAt),
+            toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+            modelHashObserved: validObservedModelHash(modelHash),
+            specDecodeDraftedTokens: generated.draftedTokens,
+            specDecodeAcceptedTokens: generated.acceptedTokens,
+            specDecodeGeneration: specDecodeGeneration
+        ), request: request)
+    }
+
+    struct SpeculativeGenerationFailure: Error, Sendable {
+        let reason: String
+    }
+
+    private static func logSpeculativeFallback(_ error: SpeculativeGenerationFailure) {
+        let line = "event=spec_decode_fallback reason=\(error.reason)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+
+    private struct SpeculativeTextResult: Sendable {
+        let output: String
+        let generationTokenCount: Int
+        let draftedTokens: Int
+        let acceptedTokens: Int
+        let firstToken: FirstTokenRecorder
+    }
+
+    private static func collectSpeculativeText(
+        input: LMInput,
+        cache: [KVCache]?,
+        parameters: GenerateParameters,
+        targetContext: ModelContext,
+        draft: ModelContainer,
+        numDraftTokens: Int,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        drainCancelled: DrainCancelToken
+    ) async throws -> SpeculativeTextResult {
+        do {
+            return try await draft.perform(nonSendable: (input, targetContext, cache)) { draftContext, values in
+                let (input, targetContext, cache) = values
+                let draftCache = draftContext.model.newCache(parameters: parameters)
+                let stream = try generate(
+                    input: input,
+                    cache: cache,
+                    parameters: parameters,
+                    context: targetContext,
+                    draftModel: draftContext.model,
+                    draftCache: draftCache,
+                    numDraftTokens: numDraftTokens
+                )
+                var output = ""
+                var completionInfo: GenerateCompletionInfo?
+                let firstToken = FirstTokenRecorder()
+                for await generation in stream {
+                    try drainCancelled.check()
+                    try Task.checkCancellation()
+                    if shouldCancel() {
+                        throw CancellationError()
+                    }
+                    switch generation {
+                    case .chunk(let chunk):
+                        if !chunk.isEmpty {
+                            firstToken.recordIfMissing()
+                            output += chunk
+                        }
+                    case .info(let info):
+                        completionInfo = info
+                    case .toolCall:
+                        break
+                    }
+                }
+                guard let completionInfo else {
+                    throw SpeculativeGenerationFailure(reason: "missing_completion_info")
+                }
+                let telemetry = completionInfo.speculativeDecodingTelemetry
+                return SpeculativeTextResult(
+                    output: output,
+                    generationTokenCount: completionInfo.generationTokenCount,
+                    draftedTokens: telemetry?.draftTokenCount ?? 0,
+                    acceptedTokens: telemetry?.acceptedDraftTokenCount ?? 0,
+                    firstToken: firstToken
+                )
+            }
+        } catch let error as DrainCancelledError {
+            throw error
+        } catch let error as CancellationError {
+            throw error
+        } catch let error as SpeculativeGenerationFailure {
+            throw error
+        } catch {
+            throw SpeculativeGenerationFailure(reason: "generation_threw")
+        }
+    }
+
     func stream(
         _ request: ChatCompletionRequest,
         with handle: RequestHandle,
@@ -919,6 +1159,28 @@ actor ModelRuntime: ModelRuntimeServing {
         let drainCancelled = handle.drainCancelled
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
+        if let testSpeculativeStream,
+           Self.speculativeRoute(
+               for: request,
+               draftLoaded: true,
+               numDraftTokens: snapshot.numDraftTokens
+           ) == .speculative {
+            let completion = try await Self.withDrainCancellation(drainCancelled) {
+                try await testSpeculativeStream(snapshot, request)
+            }.withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
+            if !completion.content.isEmpty {
+                if let error = structuredAccumulator.append(completion.content) {
+                    throw error
+                }
+                idleState.noteContent()
+                onChunk(.content(completion.content))
+            }
+            return try Self.validateStructuredStreamingCompletion(
+                completion,
+                request: request,
+                buyerVisibleContent: structuredAccumulator.content
+            )
+        }
         if let testCompletion {
             let completion = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
@@ -996,6 +1258,86 @@ actor ModelRuntime: ModelRuntimeServing {
                     var generatedTokenIds: [Int32] = []
 
                     let streamToolsIncrementally = Self.hasEnabledTools(request.promptSource.tools)
+                    if Self.speculativeRoute(
+                        for: request,
+                        draftLoaded: snapshot.draftContainer != nil,
+                        numDraftTokens: snapshot.numDraftTokens
+                    ) == .speculative,
+                       let draftContainer = snapshot.draftContainer,
+                       let numDraftTokens = snapshot.numDraftTokens {
+                        do {
+                            let generated = try await Self.collectSpeculativeText(
+                                input: iteratorInput,
+                                cache: nil,
+                                parameters: parameters,
+                                targetContext: context,
+                                draft: draftContainer,
+                                numDraftTokens: numDraftTokens,
+                                shouldCancel: shouldCancel,
+                                drainCancelled: drainCancelled
+                            )
+                            try drainCancelled.check()
+                            try Task.checkCancellation()
+
+                            let final = Self.applyOutputFilters(
+                                generated.output,
+                                stopTokenFilter: stopTokenFilter,
+                                requestStops: request.stop
+                            )
+                            let finalDelta = Self.delta(from: emittedText, to: final.text)
+                            let parsed = Self.parseToolCallsIfRequested(final.text, request: request)
+                            if !finalDelta.isEmpty {
+                                if let error = structuredAccumulator.append(finalDelta) {
+                                    throw error
+                                }
+                                idleState.noteContent()
+                                emittedText = final.text
+                                stoppedByRequestStop = final.hitStop
+                                onChunk(.content(finalDelta))
+                            }
+                            if final.hitStop {
+                                stoppedByRequestStop = true
+                            }
+                            if let error = structuredAccumulator.error {
+                                throw error
+                            }
+
+                            let finishReason: String
+                            if !parsed.toolCalls.isEmpty {
+                                finishReason = "tool_calls"
+                            } else if let maxTokens = request.maxTokens,
+                                      generated.generationTokenCount >= maxTokens,
+                                      !stoppedByRequestStop,
+                                      !final.hitStop {
+                                finishReason = "length"
+                            } else {
+                                finishReason = "stop"
+                            }
+
+                            let completion = CompletionResult(
+                                content: parsed.content,
+                                finishReason: finishReason,
+                                promptTokens: promptTokenIds.count,
+                                cachedPromptTokens: 0,
+                                completionTokens: generated.generationTokenCount,
+                                toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+                                modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
+                                specDecodeDraftedTokens: generated.draftedTokens,
+                                specDecodeAcceptedTokens: generated.acceptedTokens,
+                                specDecodeGeneration: snapshot.specDecodeGeneration
+                            )
+                            return try Self.validateStructuredStreamingCompletion(
+                                completion,
+                                request: request,
+                                buyerVisibleContent: structuredAccumulator.content
+                            )
+                        } catch {
+                            if let lease {
+                                await conversationCache.abort(lease)
+                            }
+                            throw error
+                        }
+                    }
                     let iterator = try TokenIterator(input: iteratorInput, model: context.model, cache: kvCache, parameters: parameters)
                     do {
                         let result: GenerateResult = generate(input: iteratorInput, context: context, iterator: iterator) { tokens in
@@ -1688,7 +2030,10 @@ actor ModelRuntime: ModelRuntimeServing {
             completionTokens: completion.completionTokens,
             ttftMilliseconds: completion.ttftMilliseconds,
             toolCalls: completion.toolCalls,
-            modelHashObserved: completion.modelHashObserved
+            modelHashObserved: completion.modelHashObserved,
+            specDecodeDraftedTokens: completion.specDecodeDraftedTokens,
+            specDecodeAcceptedTokens: completion.specDecodeAcceptedTokens,
+            specDecodeGeneration: completion.specDecodeGeneration
         )
         return try validateStructuredCompletion(visibleCompletion, request: request)
     }
@@ -2168,6 +2513,9 @@ struct CompletionResult: Sendable {
     let ttftMilliseconds: Int64?
     let toolCalls: [ToolCall]?
     let modelHashObserved: String?
+    let specDecodeDraftedTokens: Int
+    let specDecodeAcceptedTokens: Int
+    let specDecodeGeneration: Int?
 
     init(
         content: String,
@@ -2177,7 +2525,10 @@ struct CompletionResult: Sendable {
         completionTokens: Int,
         ttftMilliseconds: Int64? = nil,
         toolCalls: [ToolCall]? = nil,
-        modelHashObserved: String? = nil
+        modelHashObserved: String? = nil,
+        specDecodeDraftedTokens: Int = 0,
+        specDecodeAcceptedTokens: Int = 0,
+        specDecodeGeneration: Int? = nil
     ) {
         self.content = content
         self.finishReason = finishReason
@@ -2187,6 +2538,9 @@ struct CompletionResult: Sendable {
         self.ttftMilliseconds = ttftMilliseconds
         self.toolCalls = toolCalls
         self.modelHashObserved = modelHashObserved
+        self.specDecodeDraftedTokens = max(0, specDecodeDraftedTokens)
+        self.specDecodeAcceptedTokens = max(0, min(specDecodeAcceptedTokens, specDecodeDraftedTokens))
+        self.specDecodeGeneration = specDecodeGeneration
     }
 
     func withModelHashObservedIfMissing(_ observed: String?) -> CompletionResult {
@@ -2199,7 +2553,10 @@ struct CompletionResult: Sendable {
             completionTokens: completionTokens,
             ttftMilliseconds: ttftMilliseconds,
             toolCalls: toolCalls,
-            modelHashObserved: observed
+            modelHashObserved: observed,
+            specDecodeDraftedTokens: specDecodeDraftedTokens,
+            specDecodeAcceptedTokens: specDecodeAcceptedTokens,
+            specDecodeGeneration: specDecodeGeneration
         )
     }
 }

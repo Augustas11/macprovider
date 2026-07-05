@@ -49,6 +49,27 @@ func TestParseHeartbeatPreservesRollingMetrics(t *testing.T) {
 	}
 }
 
+func TestParseHeartbeatAcceptsSpecDecodeOptInFieldsAsForwardCompatible(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"spec_decode_enabled":true,"spec_decode_draft_model_id":"mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit","spec_decode_num_draft_tokens":3,"spec_decode_drafted_tokens_since_last":30,"spec_decode_accepted_tokens_since_last":18,"spec_decode_acceptance_rate":0.6}`)
+
+	hb, presence, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if presence != (HeartbeatPresence{}) {
+		t.Fatalf("presence = %+v, want zero", presence)
+	}
+	if hb.RequestsServedSinceLast != 12 {
+		t.Fatalf("requests_served_since_last = %d", hb.RequestsServedSinceLast)
+	}
+	if hb.AvgLatencyMSSinceLast != 450.0 {
+		t.Fatalf("avg_latency_ms_since_last = %v", hb.AvgLatencyMSSinceLast)
+	}
+	if hb.ThroughputTPSSinceLast != 18.5 {
+		t.Fatalf("throughput_tps_since_last = %v", hb.ThroughputTPSSinceLast)
+	}
+}
+
 func TestInferenceResponseEndPreservesSettlementReceiptDeadline(t *testing.T) {
 	payload := []byte(`{"type":"inference_response_end","request_id":"req-1","status":"complete","chunks_sent":1,"terminal_state_ts_unix_ms":1710000000123,"receipt_pending_deadline_seconds":120,"late_receipt_settlement":"not_settled","receipt":"tuple.sig"}`)
 

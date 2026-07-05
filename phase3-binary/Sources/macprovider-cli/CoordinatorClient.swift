@@ -2073,13 +2073,34 @@ actor CoordinatorClient {
             "avg_latency_ms_since_last": nullableNumber(snapshot.avgLatencyMSSinceLast),
             "throughput_tps_since_last": nullableNumber(snapshot.throughputTPSSinceLast),
         ]
+        var specDecodeTelemetryMatchesRuntime = true
         if warmSwapEnabled {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
-            payload["model_id"] = runtimeSnapshot.modelID ?? ""
+            let runtimeModelID = runtimeSnapshot.modelID
+            payload["model_id"] = runtimeModelID ?? ""
+            payload["model_params_b"] = snapshot.capacity.modelParamsB(modelID: runtimeModelID)
             if let modelHash = runtimeSnapshot.modelHash {
                 payload["model_hash"] = modelHash
             }
             payload["loading"] = runtimeSnapshot.state == .loading || runtimeSnapshot.state == .draining
+            specDecodeTelemetryMatchesRuntime = runtimeSnapshot.specDecodeGeneration == snapshot.specDecodeGeneration
+        }
+        if appConfig.publishesSpecDecodeTelemetry {
+            if specDecodeTelemetryMatchesRuntime {
+                payload["spec_decode_enabled"] = snapshot.specDecodeEnabled
+                payload["spec_decode_draft_model_id"] = snapshot.specDecodeDraftModelID ?? NSNull()
+                payload["spec_decode_num_draft_tokens"] = snapshot.specDecodeNumDraftTokens ?? NSNull()
+                payload["spec_decode_drafted_tokens_since_last"] = snapshot.specDecodeDraftedTokensSinceLast
+                payload["spec_decode_accepted_tokens_since_last"] = snapshot.specDecodeAcceptedTokensSinceLast
+                payload["spec_decode_acceptance_rate"] = nullableNumber(snapshot.specDecodeAcceptanceRate)
+            } else {
+                payload["spec_decode_enabled"] = false
+                payload["spec_decode_draft_model_id"] = NSNull()
+                payload["spec_decode_num_draft_tokens"] = NSNull()
+                payload["spec_decode_drafted_tokens_since_last"] = 0
+                payload["spec_decode_accepted_tokens_since_last"] = 0
+                payload["spec_decode_acceptance_rate"] = NSNull()
+            }
         }
         if let event = await AutoUpdateEventStore.shared.lastWireObject() {
             payload["last_autoupdate_event"] = event

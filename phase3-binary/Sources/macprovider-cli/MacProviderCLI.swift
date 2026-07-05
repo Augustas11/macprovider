@@ -11,12 +11,19 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, RotateKeyCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, RotateKeyCommand.self, Spec028CanaryCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
 
 struct ServeCommand: AsyncParsableCommand {
+    // SPEC-028 AC-8: the bundled coordinator decoder and state-update path
+    // accept these optional heartbeat fields without changing routing,
+    // trust, settlement, or admission behavior. Pinned by coordinator tests:
+    // TestParseHeartbeatAcceptsSpecDecodeOptInFieldsAsForwardCompatible and
+    // TestHeartbeatSpecDecodeOptInFieldsPreserveStatePath.
+    static let bundledCoordinatorAcceptsSpecDecodeTelemetry = true
+
     static let configuration = CommandConfiguration(
         commandName: "serve",
         abstract: "Start the local inference server and coordinator client."
@@ -178,8 +185,19 @@ struct ServeCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("draft_model_artifact_sha256 must be 64 lowercase hex characters\n".utf8))
             throw ExitCode(2)
         }
-        if resolved.publishesSpecDecodeTelemetry {
-            FileHandle.standardError.write(Data("spec_decode_heartbeat_incompatible: SPEC-028 heartbeat telemetry is implemented in PR-B\n".utf8))
+    }
+
+    static func runSpecDecodeHeartbeatCompatibilityPreflight(
+        _ resolved: AppConfig,
+        coordinatorAcceptsSpecDecodeTelemetry: Bool
+    ) throws {
+        guard resolved.publishesSpecDecodeTelemetry else {
+            return
+        }
+        guard coordinatorAcceptsSpecDecodeTelemetry else {
+            FileHandle.standardError.write(Data((
+                "spec_decode_heartbeat_incompatible: coordinator does not accept speculative decode heartbeat fields\n"
+            ).utf8))
             throw ExitCode(2)
         }
     }
@@ -431,6 +449,10 @@ struct ServeCommand: AsyncParsableCommand {
         try Self.runSupportedModelsPreflight(&resolved)
         try Self.runDrainTimeoutPreflight(resolved)
         try Self.runServingKnobsPreflight(resolved)
+        try Self.runSpecDecodeHeartbeatCompatibilityPreflight(
+            resolved,
+            coordinatorAcceptsSpecDecodeTelemetry: Self.bundledCoordinatorAcceptsSpecDecodeTelemetry
+        )
         try Self.runSpecDecodeCapacityPreflight(&resolved)
         try await Self.runModelArtifactPreflight(resolved, joiningCoordinator: !noJoin)
         let verifiedDraftModelLoadPath = try Self.runDraftModelArtifactPreflight(resolved, joiningCoordinator: !noJoin)
@@ -475,7 +497,9 @@ struct ServeCommand: AsyncParsableCommand {
             modelLoaded: await modelRuntime.isLoaded,
             capacity: capacityDefaults.withThroughputEstimate(throughputEstimate),
             modelHash: await modelRuntime.loadedModelHash,
-            thermalGate: thermalGate
+            thermalGate: thermalGate,
+            specDecodeDraftModelID: resolved.draftModel,
+            specDecodeNumDraftTokens: resolved.numDraftTokens
         )
         await modelRuntime.setProviderStatus(providerStatus)
         let idlePrewarmer = IdlePrewarmer(

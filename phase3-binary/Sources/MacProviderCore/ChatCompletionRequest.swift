@@ -189,6 +189,74 @@ public struct ChatCompletionRequest: Sendable {
         }
     }
 
+    public var allowsSpeculativeDecoding: Bool {
+        guard temperature == 0.0,
+              topP == 1.0,
+              presencePenalty == 0.0,
+              frequencyPenalty == 0.0,
+              stop.isEmpty,
+              conversationKey == nil,
+              isPlainTextResponseFormat,
+              !hasToolMessagesOrAssistantToolCalls,
+              Self.hasNoToolEntries(promptSource.tools),
+              Self.isAbsentOrNull(promptSource.toolChoice),
+              Self.isAbsentNullOrFalse(promptSource.logprobs),
+              Self.isAbsentOrNull(promptSource.topLogprobs),
+              Self.isAbsentOrNull(promptSource.logitBias)
+        else {
+            return false
+        }
+        return true
+    }
+
+    private var isPlainTextResponseFormat: Bool {
+        if case .text = responseFormat {
+            return true
+        }
+        return false
+    }
+
+    private var hasToolMessagesOrAssistantToolCalls: Bool {
+        messages.contains { message in
+            if message.role == .tool {
+                return true
+            }
+            return message.toolCalls?.isEmpty == false
+        }
+    }
+
+    private static func hasNoToolEntries(_ value: JSONValue?) -> Bool {
+        guard let value else { return true }
+        switch value {
+        case .null:
+            return true
+        case .array(let entries):
+            return entries.isEmpty
+        default:
+            return false
+        }
+    }
+
+    private static func isAbsentOrNull(_ value: JSONValue?) -> Bool {
+        guard let value else { return true }
+        if case .null = value {
+            return true
+        }
+        return false
+    }
+
+    private static func isAbsentNullOrFalse(_ value: JSONValue?) -> Bool {
+        guard let value else { return true }
+        switch value {
+        case .null:
+            return true
+        case .bool(let bool):
+            return !bool
+        default:
+            return false
+        }
+    }
+
     private static func asciiCaseInsensitiveEquals(_ lhs: String, _ rhs: String) -> Bool {
         guard lhs.utf8.count == rhs.utf8.count else { return false }
         return zip(lhs.utf8, rhs.utf8).allSatisfy { asciiFold($0) == asciiFold($1) }

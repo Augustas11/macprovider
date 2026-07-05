@@ -527,6 +527,119 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(helloJSON, expectedHello)
     }
 
+    func testHeartbeatOmitsSpecDecodeTelemetryUnlessOperatorOptsIn() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            specDecodeDraftModelID: "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+            specDecodeNumDraftTokens: 3
+        )
+        let startedAt = await status.beginRequest(requestID: "r-spec")
+        let generation = await status.currentSpecDecodeGeneration()
+        await status.finishRequest(
+            startedAt: startedAt,
+            completion: CompletionResult(
+                content: "ok",
+                finishReason: "stop",
+                promptTokens: 2,
+                completionTokens: 1,
+                specDecodeDraftedTokens: 12,
+                specDecodeAcceptedTokens: 9,
+                specDecodeGeneration: generation
+            ),
+            failed: false,
+            requestID: "r-spec"
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+
+        try await client.sendHeartbeatForTest()
+
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.first)
+        XCTAssertNil(heartbeat["spec_decode_enabled"])
+        XCTAssertNil(heartbeat["spec_decode_draft_model_id"])
+        XCTAssertNil(heartbeat["spec_decode_num_draft_tokens"])
+        XCTAssertNil(heartbeat["spec_decode_drafted_tokens_since_last"])
+        XCTAssertNil(heartbeat["spec_decode_accepted_tokens_since_last"])
+        XCTAssertNil(heartbeat["spec_decode_acceptance_rate"])
+    }
+
+    func testHeartbeatPublishesSpecDecodeTelemetryOnlyWithOperatorOptIn() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            specDecodeDraftModelID: "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+            specDecodeNumDraftTokens: 3
+        )
+        let startedAt = await status.beginRequest(requestID: "r-spec")
+        let generation = await status.currentSpecDecodeGeneration()
+        await status.finishRequest(
+            startedAt: startedAt,
+            completion: CompletionResult(
+                content: "ok",
+                finishReason: "stop",
+                promptTokens: 2,
+                completionTokens: 1,
+                specDecodeDraftedTokens: 12,
+                specDecodeAcceptedTokens: 9,
+                specDecodeGeneration: generation
+            ),
+            failed: false,
+            requestID: "r-spec"
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            publishesSpecDecodeTelemetry: true
+        )
+
+        try await client.sendHeartbeatForTest()
+
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.first)
+        XCTAssertEqual(heartbeat["spec_decode_enabled"] as? Bool, true)
+        XCTAssertEqual(heartbeat["spec_decode_draft_model_id"] as? String, "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit")
+        XCTAssertEqual(heartbeat["spec_decode_num_draft_tokens"] as? Int, 3)
+        XCTAssertEqual(heartbeat["spec_decode_drafted_tokens_since_last"] as? Int, 12)
+        XCTAssertEqual(heartbeat["spec_decode_accepted_tokens_since_last"] as? Int, 9)
+        XCTAssertEqual(try XCTUnwrap(heartbeat["spec_decode_acceptance_rate"] as? Double), 0.75, accuracy: 0.000_001)
+    }
+
+    func testHeartbeatPublishesDisabledSpecDecodeShapeDuringGenerationMismatch() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            specDecodeDraftModelID: "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+            specDecodeNumDraftTokens: 3
+        )
+        await status.setSpecDecodeConfig(draftModelID: nil, numDraftTokens: nil)
+        let runtime = makeRuntime(modelID: "model-a", warmSwapEnabled: true)
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            enableWarmSwap: true,
+            modelRuntime: runtime,
+            publishesSpecDecodeTelemetry: true
+        )
+
+        try await client.sendHeartbeatForTest()
+
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.first)
+        XCTAssertEqual(heartbeat["spec_decode_enabled"] as? Bool, false)
+        XCTAssertTrue(heartbeat["spec_decode_draft_model_id"] is NSNull)
+        XCTAssertTrue(heartbeat["spec_decode_num_draft_tokens"] is NSNull)
+        XCTAssertEqual(heartbeat["spec_decode_drafted_tokens_since_last"] as? Int, 0)
+        XCTAssertEqual(heartbeat["spec_decode_accepted_tokens_since_last"] as? Int, 0)
+        XCTAssertTrue(heartbeat["spec_decode_acceptance_rate"] is NSNull)
+    }
+
     func testHeartbeatEnabledModeReadyEmitsLoadingFalse() async throws {
         let recorder = CoordinatorFrameRecorder()
         let runtimeHash = String(repeating: "1", count: 64)
@@ -1951,7 +2064,8 @@ final class CoordinatorClientTests: XCTestCase {
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
         providerReceiptPublicKey: String? = nil,
         sendOverride: CoordinatorClient.SendOverride? = nil,
-        watchdogExitHook: (@Sendable (String) -> Void)? = nil
+        watchdogExitHook: (@Sendable (String) -> Void)? = nil,
+        publishesSpecDecodeTelemetry: Bool = false
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
@@ -1959,6 +2073,7 @@ final class CoordinatorClientTests: XCTestCase {
         config.model = "model-a"
         config.drainTimeoutSeconds = drainTimeoutSeconds
         config.enableWarmSwap = enableWarmSwap
+        config.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry
         let runtime: ModelRuntime
         if let modelRuntime {
             runtime = modelRuntime

@@ -6,6 +6,27 @@ import XCTest
 @testable import macprovider_cli
 
 final class Spec028PlumbingTests: XCTestCase {
+    private enum TestError: Error {
+        case unexpectedContainerLoader
+    }
+
+    private func makeChatRequest(
+        temperature: Double = 0.0,
+        topP: Double = 1.0,
+        extra: [String: Any] = [:]
+    ) throws -> ChatCompletionRequest {
+        var body: [String: Any] = [
+            "model": "target",
+            "messages": [["role": "user", "content": "hello"]],
+            "temperature": temperature,
+            "top_p": topP,
+        ]
+        for (key, value) in extra {
+            body[key] = value
+        }
+        return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+    }
+
     func testDraftConfigDefaultsAreDisabledAndInert() throws {
         let config = try ConfigLoader.load(
             cli: CLIOverrides(),
@@ -108,11 +129,132 @@ final class Spec028PlumbingTests: XCTestCase {
         }
     }
 
-    func testTelemetryPublishFlagFailsLoudUntilHeartbeatPR() throws {
+    func testTelemetryPublishFlagPassesPreflightAfterHeartbeatPR() throws {
         var config = AppConfig.defaults()
         config.publishesSpecDecodeTelemetry = true
 
-        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
+        XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
+        XCTAssertNoThrow(try ServeCommand.runSpecDecodeHeartbeatCompatibilityPreflight(
+            config,
+            coordinatorAcceptsSpecDecodeTelemetry: ServeCommand.bundledCoordinatorAcceptsSpecDecodeTelemetry
+        ))
+    }
+
+    func testTelemetryPublishFlagFailsClosedWhenCoordinatorCompatibilityMissing() throws {
+        var config = AppConfig.defaults()
+        config.publishesSpecDecodeTelemetry = true
+
+        XCTAssertThrowsError(try ServeCommand.runSpecDecodeHeartbeatCompatibilityPreflight(
+            config,
+            coordinatorAcceptsSpecDecodeTelemetry: false
+        ))
+    }
+
+    func testRuntimeSpeculativeRouteUsesGreedyGateAndDraftAvailability() throws {
+        let greedy = try makeChatRequest()
+        let stochastic = try makeChatRequest(temperature: 0.2)
+        let toolChoice = try makeChatRequest(extra: ["tool_choice": "none"])
+        let stop = try makeChatRequest(extra: ["stop": ["END"]])
+
+        XCTAssertEqual(
+            ModelRuntime.speculativeRoute(for: greedy, draftLoaded: true, numDraftTokens: 3),
+            .speculative
+        )
+        XCTAssertEqual(
+            ModelRuntime.speculativeRoute(for: greedy, draftLoaded: false, numDraftTokens: 3),
+            .tokenIterator
+        )
+        XCTAssertEqual(
+            ModelRuntime.speculativeRoute(for: greedy, draftLoaded: true, numDraftTokens: nil),
+            .tokenIterator
+        )
+        XCTAssertEqual(
+            ModelRuntime.speculativeRoute(for: stochastic, draftLoaded: true, numDraftTokens: 3),
+            .tokenIterator
+        )
+        XCTAssertEqual(
+            ModelRuntime.speculativeRoute(for: toolChoice, draftLoaded: true, numDraftTokens: 3),
+            .tokenIterator
+        )
+        XCTAssertEqual(
+            ModelRuntime.speculativeRoute(for: stop, draftLoaded: true, numDraftTokens: 3),
+            .tokenIterator
+        )
+    }
+
+    func testSpeculativeNonStreamingFailureFallsBackBeforeOutput() async throws {
+        let speculativeCalls = LockedCounter()
+        let fallbackCalls = LockedCounter()
+        let runtime = ModelRuntime(
+            modelID: "target",
+            draftModelID: "draft",
+            warmSwapEnabled: false,
+            loader: { _ in throw TestError.unexpectedContainerLoader },
+            testCompletion: { _, _ in
+                fallbackCalls.increment()
+                return CompletionResult(
+                    content: "fallback",
+                    finishReason: "stop",
+                    promptTokens: 1,
+                    completionTokens: 1
+                )
+            },
+            testSpeculativeCompletion: { _, _ in
+                speculativeCalls.increment()
+                throw ModelRuntime.SpeculativeGenerationFailure(reason: "injected_pre_output")
+            }
+        )
+
+        let completion = try await runtime.complete(try makeChatRequest())
+
+        XCTAssertEqual(completion.content, "fallback")
+        XCTAssertEqual(completion.specDecodeDraftedTokens, 0)
+        XCTAssertEqual(completion.specDecodeAcceptedTokens, 0)
+        XCTAssertEqual(speculativeCalls.value, 1)
+        XCTAssertEqual(fallbackCalls.value, 1)
+    }
+
+    func testSpeculativeStreamingFailureDoesNotRetryOrEmitMixedOutput() async throws {
+        let speculativeCalls = LockedCounter()
+        let fallbackCalls = LockedCounter()
+        let chunkCalls = LockedCounter()
+        let runtime = ModelRuntime(
+            modelID: "target",
+            draftModelID: "draft",
+            warmSwapEnabled: false,
+            loader: { _ in throw TestError.unexpectedContainerLoader },
+            testCompletion: { _, _ in
+                fallbackCalls.increment()
+                return CompletionResult(
+                    content: "fallback",
+                    finishReason: "stop",
+                    promptTokens: 1,
+                    completionTokens: 1
+                )
+            },
+            testSpeculativeStream: { _, _ in
+                speculativeCalls.increment()
+                throw ModelRuntime.SpeculativeGenerationFailure(reason: "injected_after_internal_chunk")
+            }
+        )
+        let request = try makeChatRequest(extra: ["stream": true])
+        let handle = try await runtime.acquireRequestHandle(request)
+        defer {
+            Task { await runtime.unregisterInFlight(handle.registrationID) }
+        }
+
+        do {
+            _ = try await runtime.stream(request, with: handle) { _ in
+                chunkCalls.increment()
+            }
+            XCTFail("expected injected speculative streaming failure")
+        } catch let error as ModelRuntime.SpeculativeGenerationFailure {
+            XCTAssertEqual(error.reason, "injected_after_internal_chunk")
+        }
+
+        XCTAssertEqual(speculativeCalls.value, 1)
+        XCTAssertEqual(fallbackCalls.value, 0)
+        XCTAssertEqual(chunkCalls.value, 0)
     }
 
     func testDraftCapacityHelpersMatchSpec028Tiers() {
@@ -294,6 +436,124 @@ final class Spec028PlumbingTests: XCTestCase {
         let streaming = try jsonObject(root.appendingPathComponent("small-air-streaming-check.json"))
         let request = try XCTUnwrap(streaming["request"] as? [String: Any])
         XCTAssertEqual(request["stream"] as? Bool, true)
+
+        let code = try jsonObject(root.appendingPathComponent("spec028-code-iso8601-v1.json"))
+        XCTAssertEqual(code["fixture_id"] as? String, "spec028-code-iso8601-v1")
+        XCTAssertEqual(code["target_model"] as? String, "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        XCTAssertEqual(code["draft_model"] as? String, "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit")
+        let codeRequest = try XCTUnwrap(code["request"] as? [String: Any])
+        let codeMessages = try XCTUnwrap(codeRequest["messages"] as? [[String: Any]])
+        XCTAssertEqual(codeMessages.count, 2)
+        XCTAssertEqual(codeMessages[0]["role"] as? String, "system")
+        XCTAssertEqual(codeMessages[0]["content"] as? String, "You write production Python. No prose, just code blocks.")
+        XCTAssertEqual(codeMessages[1]["role"] as? String, "user")
+        XCTAssertTrue((codeMessages[1]["content"] as? String)?.contains("def parse_iso8601(s: str) -> datetime:") == true)
+        XCTAssertEqual(codeRequest["temperature"] as? Int, 0)
+        XCTAssertEqual(codeRequest["top_p"] as? Double, 1.0)
+        XCTAssertEqual(codeRequest["max_tokens"] as? Int, 240)
+        XCTAssertEqual(codeRequest["stream"] as? Bool, false)
+        XCTAssertEqual((codeRequest["response_format"] as? [String: Any])?["type"] as? String, "text")
+    }
+
+    func testAC10CanaryFixtureLoadsAndBaselineForcesTokenIterator() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/spec028/spec028-code-iso8601-v1.json")
+        let fixture = try Spec028CanaryFixture.load(path: root.path)
+
+        let spec = try fixture.request(forceTokenIterator: false)
+        let baseline = try fixture.request(forceTokenIterator: true)
+
+        XCTAssertEqual(fixture.fixtureID, "spec028-code-iso8601-v1")
+        XCTAssertEqual(fixture.targetModel, "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        XCTAssertEqual(fixture.draftModel, "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit")
+        XCTAssertTrue(spec.allowsSpeculativeDecoding)
+        XCTAssertFalse(baseline.allowsSpeculativeDecoding)
+        XCTAssertEqual(spec.temperature, baseline.temperature)
+        XCTAssertEqual(spec.topP, baseline.topP)
+        XCTAssertEqual(spec.maxTokens, baseline.maxTokens)
+        XCTAssertEqual(spec.messages.map(\.content), baseline.messages.map(\.content))
+    }
+
+    func testAC10CanaryEvaluationRequiresRatioAcceptanceAndSustainedWindow() throws {
+        let now = Date()
+        let baseline = (0..<5).map { index in
+            Spec028CanarySample(
+                phase: "baseline",
+                generatedTokens: 100,
+                elapsedSeconds: 10,
+                tokensPerSecond: 10 + Double(index % 2),
+                draftedTokens: 0,
+                acceptedTokens: 0,
+                endedAtUnixSeconds: now.timeIntervalSince1970 - 120 + Double(index),
+                thermalState: "nominal"
+            )
+        }
+        let spec = (0..<5).map { index in
+            Spec028CanarySample(
+                phase: "spec",
+                generatedTokens: 160,
+                elapsedSeconds: 10,
+                tokensPerSecond: 15 + Double(index % 2),
+                draftedTokens: 100,
+                acceptedTokens: 45,
+                endedAtUnixSeconds: now.timeIntervalSince1970 - 60 + Double(index),
+                thermalState: "nominal"
+            )
+        }
+        let sustained = (0..<3).map { index in
+            Spec028CanarySample(
+                phase: "sustained",
+                generatedTokens: 130,
+                elapsedSeconds: 10,
+                tokensPerSecond: 13 + Double(index),
+                draftedTokens: 100,
+                acceptedTokens: 45,
+                endedAtUnixSeconds: now.timeIntervalSince1970 - Double(index * 10),
+                thermalState: "nominal"
+            )
+        }
+
+        let passing = try Spec028CanaryEvaluation.evaluate(
+            baselineSamples: baseline,
+            specSamples: spec,
+            sustainedSamples: sustained,
+            sustainedEndedAt: now,
+            lastWindowSeconds: 60,
+            ratioFloor: 1.4,
+            sustainedRatioFloor: 1.2,
+            acceptanceFloor: 0.30
+        )
+        XCTAssertTrue(passing.passed)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(passing.acceptanceRate), 0.30)
+        XCTAssertGreaterThanOrEqual(passing.ratio, 1.4)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(passing.sustainedLastWindowRatio), 1.2)
+
+        let failing = try Spec028CanaryEvaluation.evaluate(
+            baselineSamples: baseline,
+            specSamples: spec.map {
+                Spec028CanarySample(
+                    phase: $0.phase,
+                    generatedTokens: $0.generatedTokens,
+                    elapsedSeconds: $0.elapsedSeconds,
+                    tokensPerSecond: 11,
+                    draftedTokens: 100,
+                    acceptedTokens: 20,
+                    endedAtUnixSeconds: $0.endedAtUnixSeconds,
+                    thermalState: $0.thermalState
+                )
+            },
+            sustainedSamples: sustained,
+            sustainedEndedAt: now,
+            lastWindowSeconds: 60,
+            ratioFloor: 1.4,
+            sustainedRatioFloor: 1.2,
+            acceptanceFloor: 0.30
+        )
+        XCTAssertFalse(failing.passed)
+        XCTAssertTrue(failing.failureReasons.contains { $0.contains("spec ratio") })
+        XCTAssertTrue(failing.failureReasons.contains { $0.contains("acceptance") })
     }
 
     func testSmallAirLlama32CanaryWhenExplicitlyEnabled() async throws {

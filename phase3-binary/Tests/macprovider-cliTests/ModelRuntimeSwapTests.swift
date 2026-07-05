@@ -31,6 +31,46 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(snapshot.modelHash, "new-hash")
     }
 
+    func testProviderStatusIdentityFollowsSuccessfulWarmSwap() async throws {
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
+        let runtime = makeRuntime(modelID: "old-model", modelHash: "old-hash", warmSwapEnabled: true) { target in
+            (target, "new-hash")
+        }
+        await runtime.setProviderStatus(providerStatus)
+
+        let task = try await runtime.beginSwap(targetModelID: "new-model")
+        try await task.value
+
+        let runtimeSnapshot = await runtime.currentSnapshot()
+        let statusSnapshot = await providerStatus.snapshot()
+        XCTAssertEqual(runtimeSnapshot.modelID, "new-model")
+        XCTAssertEqual(statusSnapshot.modelID, "new-model")
+        XCTAssertEqual(statusSnapshot.modelHash, "new-hash")
+        XCTAssertFalse(statusSnapshot.specDecodeEnabled)
+        XCTAssertEqual(statusSnapshot.specDecodeDraftedTokensSinceLast, 0)
+        XCTAssertEqual(statusSnapshot.specDecodeAcceptedTokensSinceLast, 0)
+    }
+
+    func testProviderStatusBecomesLoadedAfterSuccessfulWarmSwapFromIdle() async throws {
+        let providerStatus = ProviderStatus(
+            modelID: nil,
+            modelLoaded: false,
+            capacity: ProviderCapacity(maxContextOverride: 1024, maxConcurrencyOverride: 1)
+        )
+        let runtime = makeRuntime(modelID: nil, warmSwapEnabled: true) { target in
+            (target, "new-hash")
+        }
+        await runtime.setProviderStatus(providerStatus)
+
+        let task = try await runtime.beginSwap(targetModelID: "new-model")
+        try await task.value
+
+        let statusSnapshot = await providerStatus.snapshot()
+        XCTAssertEqual(statusSnapshot.status, .ready)
+        XCTAssertEqual(statusSnapshot.modelID, "new-model")
+        XCTAssertTrue(statusSnapshot.modelLoaded)
+    }
+
     func testInFlightInferenceUsesOldSnapshot() async throws {
         let probe = InFlightProbe()
         let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")

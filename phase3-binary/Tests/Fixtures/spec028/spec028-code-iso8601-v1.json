@@ -1,0 +1,27 @@
+{
+  "fixture_id": "spec028-code-iso8601-v1",
+  "target_model": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+  "draft_model": "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+  "request": {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You write production Python. No prose, just code blocks."
+      },
+      {
+        "role": "user",
+        "content": "Finish the function below. Use only the standard library.\n\n```python\ndef parse_iso8601(s: str) -> datetime:\n    \"\"\"Parse an ISO-8601 timestamp with optional fractional seconds and timezone.\n    Accepts: 2026-05-26T12:34:56, 2026-05-26T12:34:56.789, 2026-05-26T12:34:56Z,\n             2026-05-26T12:34:56+02:00. Rejects anything else with ValueError.\n    \"\"\"\n    # TODO: implement\n```"
+      }
+    ],
+    "temperature": 0,
+    "top_p": 1.0,
+    "max_tokens": 240,
+    "stream": false,
+    "response_format": { "type": "text" }
+  },
+  "canary": {
+    "acceptance_criteria": "AC-10",
+    "baseline_relative_ratio_required": true,
+    "sustained_thermal_window_required": true
+  }
+}

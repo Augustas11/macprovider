@@ -7,6 +7,167 @@ final class ProviderStatusTests: XCTestCase {
         ProviderCapacity(maxContextOverride: 50_000, maxConcurrencyOverride: maxConcurrency)
     }
 
+    func testSpecDecodeStatusFieldsAreDisabledWithoutDraftConfig() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let snap = await status.snapshot()
+        let fields = RouterHandler.specDecodeTelemetryFields(snap)
+
+        XCTAssertFalse(snap.specDecodeEnabled)
+        XCTAssertNil(snap.specDecodeDraftModelID)
+        XCTAssertNil(snap.specDecodeNumDraftTokens)
+        XCTAssertEqual(snap.specDecodeDraftedTokensSinceLast, 0)
+        XCTAssertEqual(snap.specDecodeAcceptedTokensSinceLast, 0)
+        XCTAssertNil(snap.specDecodeAcceptanceRate)
+        XCTAssertEqual(fields["spec_decode_enabled"] as? Bool, false)
+        XCTAssertTrue(fields["spec_decode_draft_model_id"] is NSNull)
+        XCTAssertTrue(fields["spec_decode_num_draft_tokens"] is NSNull)
+        XCTAssertTrue(fields["spec_decode_acceptance_rate"] is NSNull)
+    }
+
+    func testSpecDecodeStatusFieldsExposeEnabledNoWindowShape() async {
+        let status = ProviderStatus(
+            modelID: "m",
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            specDecodeDraftModelID: "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+            specDecodeNumDraftTokens: 3
+        )
+        let snap = await status.snapshot()
+        let body = RouterHandler.statusResponse(snap, providerID: "provider-a", coordinatorURL: nil)
+
+        XCTAssertTrue(snap.specDecodeEnabled)
+        XCTAssertEqual(snap.specDecodeDraftModelID, "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit")
+        XCTAssertEqual(snap.specDecodeNumDraftTokens, 3)
+        XCTAssertEqual(snap.specDecodeDraftedTokensSinceLast, 0)
+        XCTAssertEqual(snap.specDecodeAcceptedTokensSinceLast, 0)
+        XCTAssertNil(snap.specDecodeAcceptanceRate)
+        XCTAssertEqual(body["spec_decode_enabled"] as? Bool, true)
+        XCTAssertEqual(body["spec_decode_draft_model_id"] as? String, "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit")
+        XCTAssertEqual(body["spec_decode_num_draft_tokens"] as? Int, 3)
+        XCTAssertTrue(body["spec_decode_acceptance_rate"] is NSNull)
+    }
+
+    func testSpecDecodeStatusWindowAggregatesAndResetsWithRequestWindow() async {
+        let status = ProviderStatus(
+            modelID: "m",
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            specDecodeDraftModelID: "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+            specDecodeNumDraftTokens: 3
+        )
+        let startedAt = await status.beginRequest(requestID: "r-1")
+        let generation = await status.currentSpecDecodeGeneration()
+        await status.finishRequest(
+            startedAt: startedAt,
+            completion: CompletionResult(
+                content: "ok",
+                finishReason: "stop",
+                promptTokens: 2,
+                completionTokens: 1,
+                specDecodeDraftedTokens: 10,
+                specDecodeAcceptedTokens: 4,
+                specDecodeGeneration: generation
+            ),
+            failed: false,
+            requestID: "r-1"
+        )
+
+        let snap = await status.snapshot(resetWindow: true)
+        XCTAssertEqual(snap.requestsServedSinceLast, 1)
+        XCTAssertEqual(snap.specDecodeDraftedTokensSinceLast, 10)
+        XCTAssertEqual(snap.specDecodeAcceptedTokensSinceLast, 4)
+        XCTAssertEqual(try XCTUnwrap(snap.specDecodeAcceptanceRate), 0.4, accuracy: 0.000_001)
+
+        let afterReset = await status.snapshot()
+        XCTAssertEqual(afterReset.requestsServedSinceLast, 0)
+        XCTAssertEqual(afterReset.specDecodeDraftedTokensSinceLast, 0)
+        XCTAssertEqual(afterReset.specDecodeAcceptedTokensSinceLast, 0)
+        XCTAssertNil(afterReset.specDecodeAcceptanceRate)
+    }
+
+    func testSpecDecodeConfigResetDisablesAndClearsWindowOnTargetSwap() async {
+        let status = ProviderStatus(
+            modelID: "m",
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            specDecodeDraftModelID: "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+            specDecodeNumDraftTokens: 3
+        )
+        let startedAt = await status.beginRequest(requestID: "r-1")
+        let generation = await status.currentSpecDecodeGeneration()
+        await status.finishRequest(
+            startedAt: startedAt,
+            completion: CompletionResult(
+                content: "ok",
+                finishReason: "stop",
+                promptTokens: 2,
+                completionTokens: 1,
+                specDecodeDraftedTokens: 8,
+                specDecodeAcceptedTokens: 6,
+                specDecodeGeneration: generation
+            ),
+            failed: false,
+            requestID: "r-1"
+        )
+
+        await status.setSpecDecodeConfig(draftModelID: nil, numDraftTokens: nil)
+
+        let snap = await status.snapshot()
+        XCTAssertFalse(snap.specDecodeEnabled)
+        XCTAssertNil(snap.specDecodeDraftModelID)
+        XCTAssertNil(snap.specDecodeNumDraftTokens)
+        XCTAssertEqual(snap.specDecodeDraftedTokensSinceLast, 0)
+        XCTAssertEqual(snap.specDecodeAcceptedTokensSinceLast, 0)
+        XCTAssertNil(snap.specDecodeAcceptanceRate)
+    }
+
+    func testSpecDecodeLateOldGenerationCompletionDoesNotPollutePostSwapWindow() async {
+        let status = ProviderStatus(
+            modelID: "m",
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            specDecodeDraftModelID: "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+            specDecodeNumDraftTokens: 3
+        )
+        let oldGeneration = await status.currentSpecDecodeGeneration()
+
+        await status.setSpecDecodeConfig(draftModelID: nil, numDraftTokens: nil)
+        let startedAt = await status.beginRequest(requestID: "old-r-1")
+        await status.finishRequest(
+            startedAt: startedAt,
+            completion: CompletionResult(
+                content: "late",
+                finishReason: "stop",
+                promptTokens: 2,
+                completionTokens: 1,
+                specDecodeDraftedTokens: 12,
+                specDecodeAcceptedTokens: 9,
+                specDecodeGeneration: oldGeneration
+            ),
+            failed: false,
+            requestID: "old-r-1"
+        )
+
+        let snap = await status.snapshot()
+        XCTAssertFalse(snap.specDecodeEnabled)
+        XCTAssertEqual(snap.specDecodeDraftedTokensSinceLast, 0)
+        XCTAssertEqual(snap.specDecodeAcceptedTokensSinceLast, 0)
+        XCTAssertNil(snap.specDecodeAcceptanceRate)
+    }
+
+    func testSpecDecodeDraftModelIDRedactsLocalPaths() {
+        let local = "/Users/test/.cache/huggingface/hub/models--draft"
+        let redacted = ProviderStatus.publicSpecDecodeDraftModelID(local)
+
+        XCTAssertNotEqual(redacted, local)
+        XCTAssertTrue(redacted?.hasPrefix("local:") ?? false)
+        XCTAssertEqual(redacted?.count, "local:".count + 32)
+        XCTAssertEqual(
+            ProviderStatus.publicSpecDecodeDraftModelID("mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit"),
+            "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit"
+        )
+    }
+
     func testSlotsFreeReportsZeroWhenThermallyThrottled() async {
         for state: ProcessInfo.ThermalState in [.serious, .critical] {
             let gate = ThermalGate(stateProvider: FixedThermalProvider(state: state))

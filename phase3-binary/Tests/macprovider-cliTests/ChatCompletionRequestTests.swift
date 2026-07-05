@@ -122,18 +122,99 @@ final class ChatCompletionRequestTests: XCTestCase {
         XCTAssertAPIError(try ChatCompletionRequest.parse(data: Data(raw.utf8)), status: 413, code: "json_schema_too_large")
     }
 
-    private func makeRequest(model: String, responseFormat: [String: Any]? = nil) throws -> ChatCompletionRequest {
+    func testSpeculativeDecodingGateAllowsGreedyTextOnlyRequests() throws {
+        let request = try makeRequest(
+            model: "m",
+            extra: [
+                "temperature": 0,
+                "top_p": 1.0,
+                "presence_penalty": 0,
+                "frequency_penalty": 0,
+                "response_format": ["type": "text"],
+                "tools": [],
+                "logprobs": false,
+            ]
+        )
+
+        XCTAssertTrue(request.allowsSpeculativeDecoding)
+    }
+
+    func testSpeculativeDecodingGateRejectsStochasticAndFeaturefulRequests() throws {
+        let validTool: [String: Any] = [
+            "type": "function",
+            "function": [
+                "name": "lookup",
+                "parameters": ["type": "object", "properties": [:] as [String: Any]],
+            ],
+        ]
+        let assistantWithToolCall: [[String: Any]] = [
+            ["role": "user", "content": "hello"],
+            [
+                "role": "assistant",
+                "content": NSNull(),
+                "tool_calls": [[
+                    "id": "call_1234567890abcdef",
+                    "type": "function",
+                    "function": ["name": "lookup", "arguments": "{}"],
+                ]],
+            ],
+        ]
+        let toolResultMessages: [[String: Any]] = assistantWithToolCall + [
+            ["role": "tool", "tool_call_id": "call_1234567890abcdef", "content": "ok"],
+        ]
+
+        let rejected: [(String, [String: Any], [[String: Any]]?)] = [
+            ("temperature", ["temperature": 0.1], nil),
+            ("top_p", ["top_p": 0.9], nil),
+            ("tools", ["tools": [validTool]], nil),
+            ("tool_choice_auto", ["tool_choice": "auto"], nil),
+            ("assistant_tool_calls", [:], assistantWithToolCall),
+            ("tool_role", [:], toolResultMessages),
+            ("json_object", ["response_format": ["type": "json_object"]], nil),
+            ("logprobs", ["logprobs": true], nil),
+            ("top_logprobs", ["top_logprobs": 1], nil),
+            ("logit_bias", ["logit_bias": ["42": -1]], nil),
+            ("presence_penalty", ["presence_penalty": 0.2], nil),
+            ("frequency_penalty", ["frequency_penalty": 0.2], nil),
+            ("stop", ["stop": ["END"]], nil),
+        ]
+
+        for (name, extra, messages) in rejected {
+            var request = try makeRequest(model: "m", messages: messages, extra: extra)
+            if name == "temperature" {
+                XCTAssertEqual(request.temperature, 0.1)
+            }
+            XCTAssertFalse(request.allowsSpeculativeDecoding, name)
+            request = request.withConversationKey("conv:\(name)")
+            XCTAssertFalse(request.allowsSpeculativeDecoding, "\(name) with conversation cache")
+        }
+
+        let cached = try makeRequest(model: "m").withConversationKey("conv:cached")
+        XCTAssertFalse(cached.allowsSpeculativeDecoding)
+    }
+
+    private func makeRequest(
+        model: String,
+        messages: [[String: Any]]? = nil,
+        responseFormat: [String: Any]? = nil,
+        extra: [String: Any] = [:]
+    ) throws -> ChatCompletionRequest {
         var body: [String: Any] = [
             "model": model,
-            "messages": [
+            "messages": messages ?? [
                 [
                     "role": "user",
                     "content": "hello",
                 ]
             ],
+            "temperature": 0,
+            "top_p": 1.0,
         ]
         if let responseFormat {
             body["response_format"] = responseFormat
+        }
+        for (key, value) in extra {
+            body[key] = value
         }
         let data = try JSONSerialization.data(withJSONObject: body)
         return try ChatCompletionRequest.parse(data: data)

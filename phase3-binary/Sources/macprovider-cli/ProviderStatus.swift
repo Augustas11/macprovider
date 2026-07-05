@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 
 enum ProviderHealthState: String, Sendable {
@@ -119,6 +120,13 @@ struct ProviderSnapshot: Sendable {
     let thermallyThrottled: Bool
     let lastActivityAt: Date
     let lastPrewarmAt: Date?
+    let specDecodeEnabled: Bool
+    let specDecodeDraftModelID: String?
+    let specDecodeNumDraftTokens: Int?
+    let specDecodeDraftedTokensSinceLast: Int
+    let specDecodeAcceptedTokensSinceLast: Int
+    let specDecodeAcceptanceRate: Double?
+    let specDecodeGeneration: Int
 
     var slotsFree: Int {
         if thermallyThrottled { return 0 }
@@ -132,9 +140,9 @@ struct ProviderSnapshot: Sendable {
 
 actor ProviderStatus {
     private let startedAt = Date()
-    private let modelID: String?
-    private let modelHash: String?
-    private let modelLoaded: Bool
+    private var modelID: String?
+    private var modelHash: String?
+    private var modelLoaded: Bool
     private var capacity: ProviderCapacity
     private var status: ProviderHealthState
     private var requestsTotal = 0
@@ -154,14 +162,31 @@ actor ProviderStatus {
     private var lastActivityAt = Date()
     private var lastPrewarmAt: Date?
     private var lastPrewarmElapsedMS: Double?
+    private var specDecodeEnabled: Bool
+    private var specDecodeDraftModelID: String?
+    private var specDecodeNumDraftTokens: Int?
+    private var specDecodeWindowDraftedTokens = 0
+    private var specDecodeWindowAcceptedTokens = 0
+    private var specDecodeGeneration = 0
 
-    init(modelID: String?, modelLoaded: Bool, capacity: ProviderCapacity, modelHash: String? = nil, thermalGate: ThermalGate? = nil) {
+    init(
+        modelID: String?,
+        modelLoaded: Bool,
+        capacity: ProviderCapacity,
+        modelHash: String? = nil,
+        thermalGate: ThermalGate? = nil,
+        specDecodeDraftModelID: String? = nil,
+        specDecodeNumDraftTokens: Int? = nil
+    ) {
         self.modelID = modelID
         self.modelHash = modelHash
         self.modelLoaded = modelLoaded
         self.capacity = capacity
         self.status = modelLoaded ? .ready : .unavailable
         self.thermalGate = thermalGate
+        self.specDecodeEnabled = modelLoaded && specDecodeDraftModelID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        self.specDecodeDraftModelID = Self.publicSpecDecodeDraftModelID(specDecodeDraftModelID)
+        self.specDecodeNumDraftTokens = self.specDecodeEnabled ? specDecodeNumDraftTokens : nil
     }
 
     func beginRequest(requestID: String? = nil) -> Date {
@@ -191,7 +216,40 @@ actor ProviderStatus {
         if let completion {
             windowCompletionTokens += completion.completionTokens
             windowGenerationSeconds += elapsed
+            if completion.specDecodeGeneration == specDecodeGeneration {
+                specDecodeWindowDraftedTokens += completion.specDecodeDraftedTokens
+                specDecodeWindowAcceptedTokens += completion.specDecodeAcceptedTokens
+            }
         }
+        refreshAvailabilityState()
+    }
+
+    func currentSpecDecodeGeneration() -> Int {
+        specDecodeGeneration
+    }
+
+    func resetSpecDecodeWindow() {
+        specDecodeWindowDraftedTokens = 0
+        specDecodeWindowAcceptedTokens = 0
+    }
+
+    func setSpecDecodeConfig(draftModelID: String?, numDraftTokens: Int?) {
+        specDecodeGeneration += 1
+        let enabled = modelLoaded && draftModelID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        specDecodeEnabled = enabled
+        specDecodeDraftModelID = enabled ? Self.publicSpecDecodeDraftModelID(draftModelID) : nil
+        specDecodeNumDraftTokens = enabled ? numDraftTokens : nil
+        resetSpecDecodeWindow()
+    }
+
+    func completeTargetSwap(modelID: String, modelHash: String?) {
+        self.modelID = modelID
+        self.modelHash = modelHash
+        modelLoaded = true
+        if status == .unavailable {
+            status = .ready
+        }
+        setSpecDecodeConfig(draftModelID: nil, numDraftTokens: nil)
         refreshAvailabilityState()
     }
 
@@ -248,6 +306,9 @@ actor ProviderStatus {
         let throttled = await thermalGate?.isThrottled() ?? false
         let avgLatency = windowRequests > 0 ? windowLatencyMS / Double(windowRequests) : nil
         let throughput = windowGenerationSeconds > 0 ? Double(windowCompletionTokens) / windowGenerationSeconds : nil
+        let specAcceptanceRate = specDecodeWindowDraftedTokens > 0
+            ? Double(specDecodeWindowAcceptedTokens) / Double(specDecodeWindowDraftedTokens)
+            : nil
         let effectiveStatus: ProviderHealthState = (throttled && (status == .ready || status == .busy)) ? .busy : status
         let snapshot = ProviderSnapshot(
             status: effectiveStatus,
@@ -271,13 +332,22 @@ actor ProviderStatus {
             activeRequestIDCount: activeRequestIDs.count,
             thermallyThrottled: throttled,
             lastActivityAt: lastActivityAt,
-            lastPrewarmAt: lastPrewarmAt
+            lastPrewarmAt: lastPrewarmAt,
+            specDecodeEnabled: specDecodeEnabled,
+            specDecodeDraftModelID: specDecodeEnabled ? specDecodeDraftModelID : nil,
+            specDecodeNumDraftTokens: specDecodeEnabled ? specDecodeNumDraftTokens : nil,
+            specDecodeDraftedTokensSinceLast: specDecodeWindowDraftedTokens,
+            specDecodeAcceptedTokensSinceLast: specDecodeWindowAcceptedTokens,
+            specDecodeAcceptanceRate: specAcceptanceRate,
+            specDecodeGeneration: specDecodeGeneration
         )
         if resetWindow {
             windowRequests = 0
             windowLatencyMS = 0
             windowCompletionTokens = 0
             windowGenerationSeconds = 0
+            specDecodeWindowDraftedTokens = 0
+            specDecodeWindowAcceptedTokens = 0
         }
         return snapshot
     }
@@ -306,5 +376,30 @@ actor ProviderStatus {
             return 0
         }
         return max(0, Int(usage.ru_maxrss / 1_048_576))
+    }
+
+    static func publicSpecDecodeDraftModelID(_ modelID: String?) -> String? {
+        guard let raw = modelID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+        if isPublicHuggingFaceModelID(raw) {
+            return raw
+        }
+        let expanded = (raw as NSString).expandingTildeInPath
+        let canonical = URL(fileURLWithPath: expanded).standardizedFileURL.path
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        let prefix = digest.map { String(format: "%02x", $0) }.joined().prefix(32)
+        return "local:\(prefix)"
+    }
+
+    private static func isPublicHuggingFaceModelID(_ value: String) -> Bool {
+        guard value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"#, options: .regularExpression) != nil else {
+            return false
+        }
+        let expanded = (value as NSString).expandingTildeInPath
+        return !expanded.hasPrefix("/")
+            && !expanded.hasPrefix(".")
+            && !FileManager.default.fileExists(atPath: expanded)
     }
 }
