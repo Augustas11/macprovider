@@ -160,21 +160,34 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 			CreatedAt: s.now(),
 		})
 	}
+	// The mp_new_api_key cookie is scoped to the gateway origin's /account
+	// path, so it is not readable by any Malibu return_to page. Setting it
+	// on every fullKey!="" path (not just the legacy /account redirect)
+	// keeps the fallback: if the handoff persistence fails after we have
+	// already consumed the OAuth state and issued the key, the user can
+	// still recover the key by visiting api.streamvc.live/account.
+	if fullKey != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name: "mp_new_api_key", Value: fullKey, Path: "/account", HttpOnly: true,
+			Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: 300,
+		})
+	}
 	if returnTo != "" {
 		if fullKey == "" {
 			s.redirectOAuthReturn(w, r, returnTo, "no_key")
 			return
 		}
 		if err := s.redirectOAuthHandoff(r.Context(), w, r, returnTo, fullKey); err != nil {
-			s.redirectOAuthReturn(w, r, returnTo, "handoff_failed")
+			// Handoff-token persistence failed AFTER the OAuth state was
+			// consumed and a fresh API key was minted. The Malibu handoff
+			// contract can no longer complete (there is no token to
+			// exchange), so we anchor the recovery UX in the gateway itself:
+			// redirect to /account, which reads the mp_new_api_key cookie
+			// set above and shows the key. This keeps the recovery path
+			// stable regardless of what the paired client does on error.
+			http.Redirect(w, r, s.cfg.Public.AccountPath, http.StatusFound)
 		}
 		return
-	}
-	if fullKey != "" {
-		http.SetCookie(w, &http.Cookie{
-			Name: "mp_new_api_key", Value: fullKey, Path: "/account", HttpOnly: true,
-			Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: 300,
-		})
 	}
 	http.Redirect(w, r, s.cfg.Public.AccountPath, http.StatusFound)
 }
@@ -360,6 +373,13 @@ func (s *Server) redirectOAuthHandoff(ctx context.Context, w http.ResponseWriter
 	values := target.Query()
 	values.Set("handoff", token)
 	target.RawQuery = values.Encode()
+	// The raw handoff token rides in the redirect URL as a query param, so it
+	// lands in nginx access logs and browser history. Suppress the outbound
+	// referrer from the Malibu callback page so the token does not leak to
+	// third parties Malibu subsequently fetches, and mark the redirect
+	// response as no-store so intermediary proxies do not cache the URL.
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	setNoStoreHeaders(w.Header())
 	http.Redirect(w, r, target.String(), http.StatusFound)
 	return nil
 }
@@ -378,9 +398,25 @@ func (s *Server) redirectOAuthReturn(w http.ResponseWriter, r *http.Request, ret
 	http.Redirect(w, r, target.String(), http.StatusFound)
 }
 
+// returnToAllowed matches a caller-supplied return_to URL against the
+// allowlist. Scheme and Host match case-insensitively. Path semantics:
+//
+//   - Reject any target whose Path contains a "." or ".." segment (before
+//     or after URL-decoding), so `/console/auth/callback.html/../admin`
+//     cannot smuggle a token onto an unintended route on the same host.
+//   - Allowlist path "" or "/" matches any target path on that host.
+//   - Allowlist path with a trailing "/" is an explicit directory prefix
+//     match; the target path must have the allowlist path as a prefix.
+//   - Any other allowlist path requires an exact match — so
+//     `/console/auth/callback.html` does NOT accept
+//     `/console/auth/callback.htmlx` or
+//     `/console/auth/callback.html/other`.
 func (s *Server) returnToAllowed(returnTo string) bool {
 	target, err := url.Parse(returnTo)
 	if err != nil || target.Scheme == "" || target.Host == "" {
+		return false
+	}
+	if hasDotSegment(target.Path) || hasDotSegment(target.EscapedPath()) {
 		return false
 	}
 	for _, allowed := range s.cfg.Auth.OAuth.ReturnToAllowlist {
@@ -388,10 +424,33 @@ func (s *Server) returnToAllowed(returnTo string) bool {
 		if err != nil || u.Scheme == "" || u.Host == "" {
 			continue
 		}
-		if strings.EqualFold(target.Scheme, u.Scheme) && strings.EqualFold(target.Host, u.Host) {
-			if u.Path == "" || u.Path == "/" || strings.HasPrefix(target.Path, u.Path) {
+		if !strings.EqualFold(target.Scheme, u.Scheme) || !strings.EqualFold(target.Host, u.Host) {
+			continue
+		}
+		switch {
+		case u.Path == "" || u.Path == "/":
+			return true
+		case strings.HasSuffix(u.Path, "/"):
+			if strings.HasPrefix(target.Path, u.Path) {
 				return true
 			}
+		default:
+			if target.Path == u.Path {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+		lowered := strings.ToLower(seg)
+		if lowered == "%2e" || lowered == "%2e%2e" {
+			return true
 		}
 	}
 	return false

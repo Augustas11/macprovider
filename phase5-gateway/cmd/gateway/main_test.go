@@ -36,21 +36,31 @@ func (f *fakeSettlementReconciler) ReconcileSettlementHolds(ctx context.Context,
 }
 
 type fakeOAuthPruner struct {
-	calls chan time.Time
+	stateCalls   chan time.Time
+	handoffCalls chan time.Time
 }
 
 func (f *fakeOAuthPruner) PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error) {
 	select {
 	case <-ctx.Done():
 		return 0, ctx.Err()
-	case f.calls <- now:
+	case f.stateCalls <- now:
+		return 1, nil
+	}
+}
+
+func (f *fakeOAuthPruner) PruneExpiredOAuthHandoffs(ctx context.Context, now time.Time) (int64, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case f.handoffCalls <- now:
 		return 1, nil
 	}
 }
 
 func TestRunOAuthStatePrunerRunsAndStops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	fake := &fakeOAuthPruner{calls: make(chan time.Time, 2)}
+	fake := &fakeOAuthPruner{stateCalls: make(chan time.Time, 2), handoffCalls: make(chan time.Time, 2)}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -58,9 +68,14 @@ func TestRunOAuthStatePrunerRunsAndStops(t *testing.T) {
 	}()
 
 	select {
-	case <-fake.calls:
+	case <-fake.stateCalls:
 	case <-time.After(time.Second):
 		t.Fatal("oauth state pruner did not run immediately")
+	}
+	select {
+	case <-fake.handoffCalls:
+	case <-time.After(time.Second):
+		t.Fatal("oauth handoff pruner did not run immediately")
 	}
 
 	cancel()

@@ -451,6 +451,7 @@ func (c Config) Validate() error {
 	if c.Retry503.BackoffMaxMs < c.Retry503.BackoffBaseMs {
 		return fmt.Errorf("retry_503.backoff_max_ms must be >= retry_503.backoff_base_ms")
 	}
+	corsOrigins := make(map[string]struct{}, len(c.CORS.AllowedOrigins))
 	for i, origin := range c.CORS.AllowedOrigins {
 		if origin == "*" || origin == "null" {
 			return fmt.Errorf("cors.allowed_origins[%d] must not be wildcard or null", i)
@@ -458,6 +459,22 @@ func (c Config) Validate() error {
 		u, err := url.Parse(origin)
 		if err != nil || u.Scheme == "" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 			return fmt.Errorf("cors.allowed_origins[%d] must be an exact origin", i)
+		}
+		corsOrigins[strings.ToLower(u.Scheme)+"://"+strings.ToLower(u.Host)] = struct{}{}
+	}
+	// Every return_to allowlist entry must have a matching CORS origin,
+	// otherwise the browser-side POST /auth/handoff/exchange call from the
+	// return-to page's origin fails CORS after the OAuth redirect succeeds,
+	// leaving the user on the return-to page with no API key and no
+	// operator-visible signal beyond a browser console error.
+	for i, returnTo := range c.Auth.OAuth.ReturnToAllowlist {
+		u, err := url.Parse(returnTo)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			continue // requireURL above already covered this.
+		}
+		origin := strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+		if _, ok := corsOrigins[origin]; !ok {
+			return fmt.Errorf("auth.oauth.return_to_allowlist[%d] origin %q missing matching cors.allowed_origins entry", i, origin)
 		}
 	}
 	return nil

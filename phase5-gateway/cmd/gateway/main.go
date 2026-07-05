@@ -196,18 +196,29 @@ type reservationReaper interface {
 
 type oauthStatePruner interface {
 	PruneExpiredOAuthState(context.Context, time.Time) (int64, error)
+	PruneExpiredOAuthHandoffs(context.Context, time.Time) (int64, error)
 }
 
+// runOAuthStatePruner deletes expired oauth_states AND expired oauth_handoffs
+// rows on a fixed cadence. Both tables are populated by /auth/github/*
+// traffic and grow unbounded without this loop; handoffs additionally hold
+// the recently-minted API key until consumed, so timely cleanup limits how
+// long an unclaimed key sits in the DB after its 5-minute validity window.
 func runOAuthStatePruner(ctx context.Context, store oauthStatePruner, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Minute
 	}
 	prune := func() {
-		deleted, err := store.PruneExpiredOAuthState(ctx, time.Now().UTC())
-		if err != nil {
+		now := time.Now().UTC()
+		if deleted, err := store.PruneExpiredOAuthState(ctx, now); err != nil {
 			slog.Warn("oauth state prune failed", "error", err)
 		} else if deleted > 0 {
 			slog.Info("expired oauth states pruned", "count", deleted)
+		}
+		if deleted, err := store.PruneExpiredOAuthHandoffs(ctx, now); err != nil {
+			slog.Warn("oauth handoff prune failed", "error", err)
+		} else if deleted > 0 {
+			slog.Info("expired oauth handoffs pruned", "count", deleted)
 		}
 	}
 	prune()
