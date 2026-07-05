@@ -24,34 +24,68 @@ final class AutotuneInterruptFlag {
     }
 }
 
+/// One-shot latch. `trip()` returns `true` the first time it is called,
+/// `false` on every subsequent call. Thread-safe via `NSLock`.
+final class AutotuneCascadeGate {
+    private let lock = NSLock()
+    private var tripped = false
+
+    func trip() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if tripped { return false }
+        tripped = true
+        return true
+    }
+
+    /// For tests/assertions only.
+    func hasTripped() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return tripped
+    }
+}
+
 final class AutotuneSignalSources {
     private let sigintSource: DispatchSourceSignal
     private let sigtermSource: DispatchSourceSignal
+    let cascadeGate: AutotuneCascadeGate
 
     /// `cascadeToProcessGroup: true` — on SIGINT/SIGTERM the handler re-emits
     /// the signal to the current process group via `killpg(0, ...)`. Combined
     /// with a caller who has already made itself a process-group leader
     /// (`setpgid(0, 0)`), this forwards the shutdown signal to every child
     /// spawned during autotune (e.g. `CandidateProviderRunner` `serve
-    /// --no-join` subprocesses). We remain immune because we've installed
-    /// `SIG_IGN` for our own process before setting up dispatch sources.
+    /// --no-join` subprocesses).
+    ///
+    /// The cascade is **one-shot per instance**. `killpg(0, SIGTERM)` also
+    /// targets THIS process, and `signal(SIGTERM, SIG_IGN)` does NOT prevent
+    /// the `DispatchSourceSignal` from re-firing — dispatch sources sit above
+    /// the disposition layer. Without a gate the handler would fan out a
+    /// second `killpg`, retrigger itself, and so on, burning SIGTERMs at
+    /// grandchildren already exiting until process death. The `cascadeGate`
+    /// guarantees each source instance cascades at most once, closing
+    /// R2 CODE-R2-M-1 / ARCH-R2-M-1.
+    ///
     /// This closes the ARCH-M-1 orphan-child scenario on graceful App quit /
     /// runner-timeout paths: App calls `killpg(cliPid, SIGTERM)` → CLI cascades
-    /// → all `serve --no-join` grandchildren die → CLI unwinds and exits.
+    /// once → all `serve --no-join` grandchildren die → CLI unwinds and exits.
     init(flag: AutotuneInterruptFlag, cascadeToProcessGroup: Bool = false) {
         let signalQueue = DispatchQueue(label: "autotune.signal")
         sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalQueue)
         sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: signalQueue)
+        cascadeGate = AutotuneCascadeGate()
+        let gate = cascadeGate
 
         sigintSource.setEventHandler {
             flag.set()
-            if cascadeToProcessGroup {
+            if cascadeToProcessGroup, gate.trip() {
                 _ = Darwin.killpg(0, SIGTERM)
             }
         }
         sigtermSource.setEventHandler {
             flag.set()
-            if cascadeToProcessGroup {
+            if cascadeToProcessGroup, gate.trip() {
                 _ = Darwin.killpg(0, SIGTERM)
             }
         }

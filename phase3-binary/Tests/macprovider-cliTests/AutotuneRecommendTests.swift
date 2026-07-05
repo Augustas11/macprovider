@@ -1472,6 +1472,42 @@ final class AutotuneRecommendTests: XCTestCase {
         _ = autotuneBecomeProcessGroupLeader()
     }
 
+    func testAutotuneCascadeGateTripsExactlyOnce() {
+        // R2 CODE-R2-M-1 / ARCH-R2-M-1 regression: the cascade must fire once
+        // per AutotuneSignalSources instance, not once per signal event. Without
+        // this gate, `killpg(0, SIGTERM)` from the SIGTERM handler re-enters
+        // the same handler, storming SIGTERMs until process death.
+        let gate = AutotuneCascadeGate()
+        XCTAssertFalse(gate.hasTripped())
+        XCTAssertTrue(gate.trip(), "first trip must return true")
+        XCTAssertTrue(gate.hasTripped())
+        XCTAssertFalse(gate.trip(), "second trip must return false")
+        XCTAssertFalse(gate.trip(), "third trip must return false")
+        XCTAssertTrue(gate.hasTripped())
+    }
+
+    func testAutotuneCascadeGateIsThreadSafeUnderContention() {
+        // Under signal-storm contention (multiple dispatch source events
+        // firing on the signal queue concurrently), exactly one caller must
+        // observe `trip() == true`. NSLock guarantees this; test pins it.
+        let gate = AutotuneCascadeGate()
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var trueCount = 0
+        for _ in 0..<64 {
+            group.enter()
+            DispatchQueue.global().async {
+                let outcome = gate.trip()
+                lock.lock()
+                if outcome { trueCount += 1 }
+                lock.unlock()
+                group.leave()
+            }
+        }
+        group.wait()
+        XCTAssertEqual(trueCount, 1, "exactly one concurrent trip() call must win")
+    }
+
     func testBenchmarksDiagnosesRowsSkippedByBandwidthGate() async throws {
         let modelKey = "qwen3-32b"
         var request = try makeRequest(modelKey: modelKey)
