@@ -123,8 +123,11 @@ fi
 DIST_DIR="$_PEARL_TLS_SCRIPT_DIR"
 BINARY="$DIST_DIR/coordinator-linux-amd64"
 CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
+STATS_INVENTORY_BINARY="$DIST_DIR/stats-inventory-sync-linux-amd64"
 CONFIG="$DIST_DIR/coordinator.yaml"
 SERVICE="$DIST_DIR/macprovider-coordinator.service"
+STATS_INVENTORY_SERVICE="$DIST_DIR/stats-inventory-sync.service"
+STATS_INVENTORY_TIMER="$DIST_DIR/stats-inventory-sync.timer"
 NGINX_SITE="$DIST_DIR/nginx-coordinator.streamvc.live.conf"
 TCP_SYSCTL="$DIST_DIR/sysctl.d/99-macprovider-tcp.conf"
 TCP_BBR_MODULES_LOAD="$DIST_DIR/modules-load.d/tcp_bbr.conf"
@@ -161,7 +164,8 @@ STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
 # prune-tokens / list-tokens also belong on Pearl). If absent, the
 # operator forgot to run build-linux.sh after the M2 update that
 # extended it. Fail closed — do NOT silently deploy with a stale CLI.
-for f in "$BINARY" "$CLI_BINARY" "$CONFIG" "$SERVICE" "$NGINX_SITE" \
+for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" \
+         "$CONFIG" "$SERVICE" "$STATS_INVENTORY_SERVICE" "$STATS_INVENTORY_TIMER" "$NGINX_SITE" \
          "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE" \
          "$STATIC_DEMAND_JSON" "$STATIC_DEMAND_SIG" \
          "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG"; do
@@ -475,6 +479,8 @@ log "step 3/9: create macprovider system user + dirs"
 #     coordinator.env itself ships mode 0640 root:macprovider (LOW-fix).
 $SSH 'set -e
   id macprovider >/dev/null 2>&1 || useradd --system --home /opt/macprovider --shell /usr/sbin/nologin macprovider
+  getent group macprovider-stats >/dev/null 2>&1 || groupadd --system macprovider-stats
+  id macprovider-stats >/dev/null 2>&1 || useradd --system --gid macprovider-stats --home /nonexistent --shell /usr/sbin/nologin macprovider-stats
   # Issue #244 R4 SEC HIGH-1 — /opt/macprovider is root-owned 0750 so
   # the macprovider user (or anything running as it) cannot plant a
   # symlink at the catalog destination that a later root-owned
@@ -483,16 +489,32 @@ $SSH 'set -e
   # config, catalog) are still installed mode-set to macprovider so
   # the daemon can read them.
   install -d -o root -g macprovider -m 0750 /opt/macprovider
+  install -d -o root -g macprovider-stats -m 0750 /opt/macprovider-stats
   install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider
   install -d -o macprovider -g macprovider -m 0750 /var/log/macprovider
   install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider-monitor
   install -d -o root -g macprovider -m 0750 /etc/macprovider
+  install -d -o root -g macprovider-stats -m 0750 /etc/macprovider-stats
   if [ -f /etc/macprovider/coordinator.env ]; then
     chown root:macprovider /etc/macprovider/coordinator.env
     chmod 0640 /etc/macprovider/coordinator.env
     echo "  enforced coordinator.env perms: root:macprovider 0640"
   else
     echo "  /etc/macprovider/coordinator.env not yet present; operator must drop it with mode 0640 (root:macprovider)"
+  fi
+  if [ -f /etc/macprovider-stats/stats-hardware-inventory.yaml ]; then
+    chown root:macprovider-stats /etc/macprovider-stats/stats-hardware-inventory.yaml
+    chmod 0640 /etc/macprovider-stats/stats-hardware-inventory.yaml
+    echo "  enforced stats hardware inventory perms: root:macprovider-stats 0640"
+  else
+    echo "  /etc/macprovider-stats/stats-hardware-inventory.yaml not yet present; stats inventory timer remains opt-in"
+  fi
+  if [ -f /etc/macprovider-stats/stats-inventory-sync.env ]; then
+    chown root:root /etc/macprovider-stats/stats-inventory-sync.env
+    chmod 0600 /etc/macprovider-stats/stats-inventory-sync.env
+    echo "  enforced stats inventory env perms: root:root 0600"
+  else
+    echo "  /etc/macprovider-stats/stats-inventory-sync.env not yet present; stats inventory timer remains opt-in"
   fi
 '
 
@@ -705,8 +727,11 @@ log "  staging dir: $DEPLOY_TMP (root:root 0700)"
 
 $SCP "$BINARY"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-linux-amd64"
 $SCP "$CLI_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-cli-linux-amd64"
+$SCP "$STATS_INVENTORY_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync-linux-amd64"
 $SCP "$CONFIG"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.yaml"
 $SCP "$SERVICE"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/macprovider-coordinator.service"
+$SCP "$STATS_INVENTORY_SERVICE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync.service"
+$SCP "$STATS_INVENTORY_TIMER"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync.timer"
 $SCP "$NGINX_SITE"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-coordinator-full.conf"
 # SPEC-017 v0.1.8 Step 4.B artifacts (snippet must land at
 # /etc/nginx/conf.d/ so the http-context declarations are visible
@@ -752,8 +777,14 @@ $SSH "set -e
   # invoked manually via 'sudo -u macprovider' so it does NOT get a
   # .prev snapshot — re-deploy is the rollback.
   install -o root -g macprovider -m 0750 $DEPLOY_TMP/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli
+  # stats-inventory-sync is an operator sidecar, not a coordinator child.
+  # It runs under its own Unix identity and only receives execute access
+  # to this binary; its Postgres writer DSN lives under /etc/macprovider-stats.
+  install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-inventory-sync-linux-amd64 /opt/macprovider-stats/stats-inventory-sync
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.yaml /opt/macprovider/coordinator.yaml
   install -o root -g root       -m 0644 $DEPLOY_TMP/macprovider-coordinator.service /etc/systemd/system/macprovider-coordinator.service
+  install -o root -g root       -m 0644 $DEPLOY_TMP/stats-inventory-sync.service /etc/systemd/system/stats-inventory-sync.service
+  install -o root -g root       -m 0644 $DEPLOY_TMP/stats-inventory-sync.timer /etc/systemd/system/stats-inventory-sync.timer
   # SPEC-023 v1.7.3 signed static feeds — served by nginx as
   # coordinator.streamvc.live/static/*. Files are world-readable
   # (mode 0644) because they are public signed content; nginx runs as
@@ -1065,6 +1096,16 @@ $SSH 'set -e
   systemctl daemon-reload
   systemctl enable macprovider-coordinator
   systemctl restart macprovider-coordinator
+  if [ -f /etc/macprovider-stats/stats-hardware-inventory.yaml ] && [ -f /etc/macprovider-stats/stats-inventory-sync.env ]; then
+    systemctl enable --now stats-inventory-sync.timer
+    if ! systemctl start stats-inventory-sync.service; then
+      echo "warning: stats-inventory-sync.service failed; leaving coordinator deploy running"
+      journalctl -u stats-inventory-sync.service -n 30 --no-pager || true
+    fi
+    systemctl is-active stats-inventory-sync.timer
+  else
+    echo "stats inventory timer not enabled: missing /etc/macprovider-stats/stats-hardware-inventory.yaml or stats-inventory-sync.env"
+  fi
   sleep 3
   systemctl is-active macprovider-coordinator
   ss -tlnp | grep -E ":8443|:8444"

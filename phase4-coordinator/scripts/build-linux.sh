@@ -4,6 +4,8 @@
 #   dist/coordinator-cli-linux-amd64   — operator token-management CLI
 #                                        (revoke-token / list-tokens /
 #                                         prune-tokens / revoke-and-kick)
+#   dist/stats-inventory-sync-linux-amd64
+#                                      — operator hardware inventory sync
 #
 # Refuses to build with uncommitted changes by default; set FORCE_DIRTY=1
 # to override (the resulting binary's version string will end in "-dirty"
@@ -56,3 +58,7 @@ echo "built $OUT @ ${VERSION}"
 CLI_OUT="dist/coordinator-cli-linux-amd64"
 GOOS=linux GOARCH=amd64 go build -o "$CLI_OUT" ./cmd/coordinator-cli
 echo "built $CLI_OUT @ ${VERSION}"
+
+INVENTORY_OUT="dist/stats-inventory-sync-linux-amd64"
+GOOS=linux GOARCH=amd64 go build -o "$INVENTORY_OUT" ./cmd/stats-inventory-sync
+echo "built $INVENTORY_OUT @ ${VERSION}"

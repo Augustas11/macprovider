@@ -1,0 +1,22 @@
+[Unit]
+Description=MacProvider stats hardware inventory sync
+Documentation=https://github.com/augstar/macprovider-poc
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/macprovider-stats/stats-hardware-inventory.yaml
+
+[Service]
+Type=oneshot
+User=macprovider-stats
+Group=macprovider-stats
+EnvironmentFile=-/etc/macprovider-stats/stats-inventory-sync.env
+ExecStart=/opt/macprovider-stats/stats-inventory-sync --config /etc/macprovider-stats/stats-hardware-inventory.yaml
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/macprovider-stats

@@ -36,6 +36,7 @@ default.profraw
 # Phase 4 dist artifacts that are rebuilt locally
 phase4-coordinator/dist/coordinator-linux-amd64
 phase4-coordinator/dist/coordinator-cli-linux-amd64
+phase4-coordinator/dist/stats-inventory-sync-linux-amd64
 phase4-coordinator/dist/*.bak
 
 # Phase 5 gateway build artifacts
