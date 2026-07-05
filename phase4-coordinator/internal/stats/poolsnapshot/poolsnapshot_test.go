@@ -1,15 +1,24 @@
 package poolsnapshot
 
 import (
+	"math"
 	"testing"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 )
 
 type fakeSrc []pool.Provider
 
 func (f fakeSrc) Snapshot() []pool.Provider { return []pool.Provider(f) }
+
+type fakeHardware map[string]statshardware.Capacity
+
+func (f fakeHardware) LookupProviderHardware(providerID string) (statshardware.Capacity, bool) {
+	c, ok := f[providerID]
+	return c, ok
+}
 
 func fixedTime() time.Time { return time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC) }
 
@@ -160,6 +169,48 @@ func TestModelsServingDistinct(t *testing.T) {
 	got := newFixed(src).OverviewSnapshot()
 	if got.ModelsServing != 2 {
 		t.Fatalf("ModelsServing=%d want 2 (distinct non-empty models across online providers)", got.ModelsServing)
+	}
+}
+
+func TestHardwareCapacityFromMemorySource(t *testing.T) {
+	src := fakeSrc{
+		{ProviderID: "a", State: pool.StateReady},
+		{ProviderID: "b", State: pool.StateBusy},
+		{ProviderID: "c", State: pool.StateDegraded},
+		{ProviderID: "d", State: pool.StateReady},
+	}
+	p := NewWithHardware(src, fakeHardware{
+		"a": {BandwidthGBPerSec: 120, NetworkPowerKW: 0.035, GPUCoresTotal: 10, CPUCoresTotal: 10},
+		"b": {BandwidthGBPerSec: 400, NetworkPowerKW: 0.070, GPUCoresTotal: 32, CPUCoresTotal: 12},
+		"c": {BandwidthGBPerSec: 999, NetworkPowerKW: 9.999, GPUCoresTotal: 99, CPUCoresTotal: 99},
+	})
+	p.now = fixedTime
+
+	got := p.OverviewSnapshot()
+	if got.BandwidthGBPerSec != 520 {
+		t.Fatalf("BandwidthGBPerSec=%d want 520", got.BandwidthGBPerSec)
+	}
+	if math.Abs(got.NetworkPowerKW-0.105) > 0.000001 {
+		t.Fatalf("NetworkPowerKW=%f want 0.105", got.NetworkPowerKW)
+	}
+	if got.GPUCoresTotal != 42 || got.CPUCoresTotal != 22 {
+		t.Fatalf("cores gpu=%d cpu=%d want gpu=42 cpu=22", got.GPUCoresTotal, got.CPUCoresTotal)
+	}
+}
+
+func TestMissingHardwareProfileContributesZero(t *testing.T) {
+	p := NewWithHardware(fakeSrc{
+		{ProviderID: "a", State: pool.StateReady, RAMGB: 24, ModelID: "m4"},
+	}, fakeHardware{})
+	p.now = fixedTime
+
+	got := p.OverviewSnapshot()
+	if got.NodesOnline != 1 || got.UnifiedRAMGBTotal != 24 || got.ModelsServing != 1 {
+		t.Fatalf("missing hardware must not remove provider from live stats: %+v", got)
+	}
+	if got.BandwidthGBPerSec != 0 || got.NetworkPowerKW != 0 ||
+		got.GPUCoresTotal != 0 || got.CPUCoresTotal != 0 {
+		t.Fatalf("missing hardware should contribute zero capacity: %+v", got)
 	}
 }
 

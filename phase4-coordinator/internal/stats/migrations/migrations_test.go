@@ -27,6 +27,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{4, "grants"},
 		{5, "oltp_source_grants"},
 		{6, "spec_026_identity"},
+		{7, "hardware_profiles"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -63,7 +64,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	var schema, bootstrap, spec026 string
+	var schema, bootstrap, spec026, hardware string
 	for _, m := range all {
 		switch m.Name {
 		case "stats_tables":
@@ -72,6 +73,8 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 			bootstrap = m.SQL
 		case "spec_026_identity":
 			spec026 = m.SQL
+		case "hardware_profiles":
+			hardware = m.SQL
 		}
 	}
 	if schema == "" {
@@ -171,6 +174,56 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 		"DROP ROLE IF EXISTS provider_onboarding",
 	} {
 		mustContain(t, downSQL, needle, "SPEC-026 rollback artifact")
+	}
+	if hardware == "" {
+		t.Fatal("hardware_profiles migration body is empty")
+	}
+	hardwareCode := stripSQLComments(hardware)
+	for _, needle := range []string{
+		"CREATE TABLE IF NOT EXISTS provider_hardware_profiles",
+		"chip_normalized      TEXT NOT NULL",
+		"verified             BOOLEAN NOT NULL DEFAULT FALSE",
+		"CREATE TABLE IF NOT EXISTS chip_hardware_profiles",
+		"memory_bandwidth_gb_per_s    BIGINT NOT NULL",
+		"CREATE OR REPLACE FUNCTION provider_hardware_profiles_guard_verification",
+		"current_user <> 'provider_onboarding'",
+		"NEW.verified := FALSE",
+		"NEW.verified := OLD.verified",
+		"CREATE TRIGGER trg_provider_hardware_profiles_guard_verification",
+		"GRANT SELECT (provider_id, last_reported_at) ON provider_hardware_profiles TO provider_onboarding",
+		"GRANT INSERT (",
+		"GRANT UPDATE (",
+		"last_reported_at\n) ON provider_hardware_profiles TO provider_onboarding",
+		"GRANT SELECT ON",
+		"provider_hardware_profiles",
+		"chip_hardware_profiles",
+		"TO stats_rollup",
+		"FROM stats_reader, provider_portal",
+	} {
+		mustContain(t, hardware, needle, "hardware profile schema/grant shape")
+	}
+	mustNotContain(t, hardwareCode,
+		"GRANT SELECT, INSERT, UPDATE ON provider_hardware_profiles TO provider_onboarding",
+		"provider_onboarding must not receive table-wide hardware writes")
+	mustNotContain(t, hardwareCode,
+		"verified\n) ON provider_hardware_profiles TO provider_onboarding",
+		"provider_onboarding must not receive column grants on verified")
+	hardwareDown, err := os.ReadFile("007_hardware_profiles.down.sql")
+	if err != nil {
+		t.Fatalf("read hardware rollback artifact: %v", err)
+	}
+	hardwareDownSQL := string(hardwareDown)
+	for _, needle := range []string{
+		"REVOKE ALL ON provider_hardware_profiles FROM stats_rollup",
+		"REVOKE ALL ON chip_hardware_profiles FROM stats_rollup",
+		"REVOKE ALL ON provider_hardware_profiles FROM provider_onboarding",
+		"REVOKE ALL ON FUNCTION provider_hardware_profiles_guard_verification() FROM PUBLIC",
+		"DROP TRIGGER IF EXISTS trg_provider_hardware_profiles_guard_verification",
+		"DROP FUNCTION IF EXISTS provider_hardware_profiles_guard_verification()",
+		"DROP TABLE IF EXISTS chip_hardware_profiles",
+		"DROP TABLE IF EXISTS provider_hardware_profiles",
+	} {
+		mustContain(t, hardwareDownSQL, needle, "hardware rollback artifact")
 	}
 }
 

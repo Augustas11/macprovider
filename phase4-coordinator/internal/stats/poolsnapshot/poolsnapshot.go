@@ -4,17 +4,18 @@
 // models_serving / hardware_attested counts that ZeroSnapshotProvider
 // leaves at zero.
 //
-// Fields derivable from pool.Provider today are wired here. Fields
-// that need a per-chip hardware profile (bandwidth, power, GPU cores,
-// CPU cores) stay at zero — pool.Provider does not carry chip
-// identity. A follow-up can correlate against SPEC-026 onboarding's
-// `chip` column to fill those in.
+// Fields derivable from pool.Provider today are wired here. Fields that
+// need a per-chip hardware profile (bandwidth, power, GPU cores, CPU
+// cores) are filled only from an optional in-memory hardware source so
+// stats enrichment never performs database work while observing the
+// live provider registry.
 package poolsnapshot
 
 import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
 )
 
@@ -25,11 +26,18 @@ type Source interface {
 	Snapshot() []pool.Provider
 }
 
+// HardwareSource is intentionally memory-only. Implementations must not query
+// databases or external services from LookupProviderHardware.
+type HardwareSource interface {
+	LookupProviderHardware(providerID string) (statshardware.Capacity, bool)
+}
+
 // Provider satisfies statsrollup.SnapshotProvider by computing the
 // live overview snapshot from the current pool state on each tick.
 type Provider struct {
-	src Source
-	now func() time.Time
+	src      Source
+	hardware HardwareSource
+	now      func() time.Time
 }
 
 // New returns a Provider that reads from src. Panics if src is nil.
@@ -38,6 +46,14 @@ func New(src Source) *Provider {
 		panic("poolsnapshot.New: src must not be nil")
 	}
 	return &Provider{src: src, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// NewWithHardware returns a Provider that enriches eligible live providers
+// from a memory-only hardware cache.
+func NewWithHardware(src Source, hardware HardwareSource) *Provider {
+	p := New(src)
+	p.hardware = hardware
+	return p
 }
 
 // OverviewSnapshot implements statsrollup.SnapshotProvider.
@@ -56,6 +72,14 @@ func (p *Provider) OverviewSnapshot() statsrollup.OverviewSnapshot {
 		snap.UnifiedRAMGBTotal += prov.RAMGB
 		if prov.ModelID != "" {
 			models[prov.ModelID] = struct{}{}
+		}
+		if p.hardware != nil {
+			if cap, ok := p.hardware.LookupProviderHardware(prov.ProviderID); ok {
+				snap.BandwidthGBPerSec += cap.BandwidthGBPerSec
+				snap.NetworkPowerKW += cap.NetworkPowerKW
+				snap.GPUCoresTotal += cap.GPUCoresTotal
+				snap.CPUCoresTotal += cap.CPUCoresTotal
+			}
 		}
 		if prov.SlotsTotal > 0 {
 			slotsFree += prov.SlotsFree

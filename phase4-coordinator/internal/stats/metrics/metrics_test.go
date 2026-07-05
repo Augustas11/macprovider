@@ -60,6 +60,7 @@ func TestLabelHygiene(t *testing.T) {
 	m.IncRegisterSource("cli")
 	m.IncRegisterSource("portal")
 	m.IncRegisterSource("raw-attacker-value")
+	m.IncRegisterHardwareProfileError()
 
 	families, err := reg.Gather()
 	if err != nil {

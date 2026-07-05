@@ -36,6 +36,8 @@
 //   - `provider_register_source_total{track}` uses closed track values
 //     "app" / "cli" / "portal".
 //
+//   - `provider_register_hardware_profile_errors_total` has no labels.
+//
 // No label takes an operator- or attacker-controllable string directly.
 // A `Reset` method exists for test isolation.
 package metrics
@@ -57,6 +59,7 @@ type Metrics struct {
 	RateLimitExceededTotal *prometheus.CounterVec
 	RegisterRateLimitHits  *prometheus.CounterVec
 	RegisterSource         *prometheus.CounterVec
+	RegisterHardwareErrors prometheus.Counter
 }
 
 // New registers all five metrics against reg and returns the
@@ -117,6 +120,12 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"track"},
 		),
+		RegisterHardwareErrors: f.NewCounter(
+			prometheus.CounterOpts{
+				Name: "provider_register_hardware_profile_errors_total",
+				Help: "Count of accepted provider register requests whose best-effort hardware profile persistence failed.",
+			},
+		),
 	}
 }
 
@@ -142,4 +151,11 @@ func (m *Metrics) IncRegisterSource(track string) {
 		return
 	}
 	m.RegisterSource.WithLabelValues(track).Inc()
+}
+
+func (m *Metrics) IncRegisterHardwareProfileError() {
+	if m == nil || m.RegisterHardwareErrors == nil {
+		return
+	}
+	m.RegisterHardwareErrors.Inc()
 }
