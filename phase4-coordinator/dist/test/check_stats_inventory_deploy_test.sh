@@ -11,13 +11,14 @@ SERVICE="$DIST_DIR/stats-inventory-sync.service"
 TIMER="$DIST_DIR/stats-inventory-sync.timer"
 ENV_EXAMPLE="$DIST_DIR/stats-inventory-sync.env.example"
 INVENTORY_EXAMPLE="$DIST_DIR/stats-hardware-inventory.yaml.example"
+ROLE_SQL="$DIST_DIR/stats-inventory-writer.sql"
 
 fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
 
-for f in "$DEPLOY_SH" "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE"; do
+for f in "$DEPLOY_SH" "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE" "$ROLE_SQL"; do
   [ -f "$f" ] || fail "missing required file: $f"
 done
 
@@ -72,8 +73,31 @@ grep -qF 'SELECT, INSERT, UPDATE, DELETE on chip_hardware_profiles' "$ENV_EXAMPL
   fail "env example must document chip DELETE privilege for reconciliation"
 grep -qF 'SELECT, INSERT, UPDATE on provider_hardware_profiles' "$ENV_EXAMPLE" ||
   fail "env example must document provider inventory privileges"
+grep -qF 'SELECT on hardware_verification_jobs' "$ENV_EXAMPLE" ||
+  fail "env example must document demotion proof job read privilege"
+grep -qF 'SELECT on hardware_verification_trust' "$ENV_EXAMPLE" ||
+  fail "env example must document demotion proof trust read privilege"
+grep -qF 'STATS_TRUST_INVENTORY_DSN=postgres://stats_trust_inventory_writer:' "$ENV_EXAMPLE" ||
+  fail "env example must document separate trust inventory dsn"
+grep -qF 'SELECT, INSERT, UPDATE, DELETE on hardware_verification_trust' "$ENV_EXAMPLE" ||
+  fail "env example must document trusted hardware inventory privileges"
+grep -qF 'GRANT SELECT ON hardware_verification_jobs TO stats_inventory_writer;' "$ROLE_SQL" ||
+  fail "role sql must grant ordinary inventory writer read-only job evidence access"
+grep -qF 'GRANT SELECT ON hardware_verification_trust TO stats_inventory_writer;' "$ROLE_SQL" ||
+  fail "role sql must grant ordinary inventory writer read-only trust evidence access"
+grep -qF 'GRANT SELECT, INSERT, UPDATE, DELETE ON hardware_verification_trust TO stats_trust_inventory_writer;' "$ROLE_SQL" ||
+  fail "role sql must keep trust writes on separate trust writer role"
+grep -qF "WHERE rolname = 'stats_inventory_writer'" "$ROLE_SQL" ||
+  fail "role sql must be idempotent for existing inventory writer role"
+grep -qF "WHERE rolname = 'stats_trust_inventory_writer'" "$ROLE_SQL" ||
+  fail "role sql must be idempotent for existing trust writer role"
 grep -qF 'operator fixture chip:' "$INVENTORY_EXAMPLE" ||
   fail "inventory example must use a fictional fixture chip key"
+grep -qF '# trusted_hardware:' "$INVENTORY_EXAMPLE" ||
+  fail "inventory example must document commented trusted hardware identity rows"
+if grep -qE '^trusted_hardware:' "$INVENTORY_EXAMPLE"; then
+  fail "inventory example must not ship an active authoritative trusted_hardware section"
+fi
 if grep -qF 'apple m' "$INVENTORY_EXAMPLE"; then
   fail "inventory example must not ship copyable Apple capacity guesses"
 fi

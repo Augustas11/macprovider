@@ -23,3 +23,16 @@ providers:
     # operator; provider-reported sources are intentionally rejected.
     source: operator
     verified: true
+
+# Optional trust-root inventory for provider hardware evidence. If present,
+# this section is authoritative for all rows in hardware_verification_trust and
+# requires STATS_TRUST_INVENTORY_DSN. Omit it to leave trust roots untouched.
+# Uncomment only when this file contains the complete live trust inventory.
+# trusted_hardware:
+#   mac:
+#     - hardware_identity_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#       chip_normalized: operator fixture chip
+#       unified_memory_gb: 32
+#       trusted_by: operator
+#       expires_at: ""
+#       notes: "Fictional 64-hex example row; replace with operator-verified provider evidence."
