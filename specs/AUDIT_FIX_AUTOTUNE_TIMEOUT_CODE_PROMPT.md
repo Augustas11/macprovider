@@ -1,66 +1,70 @@
-# AUDIT_FIX_AUTOTUNE_TIMEOUT — CODE lane (R2)
+# AUDIT_FIX_AUTOTUNE_TIMEOUT — CODE lane (R3)
 
-You are auditing PR `fix/autotune-timeout-progress` (commit `017f505`,
-was `ae23d48` at R1) from the CODE lane. This is round 2 after R1
-returned `CODE-M-1` on the per-candidate timeout math.
+You are auditing PR `fix/autotune-timeout-progress` (commit `8063455`)
+from the CODE lane. This is R3 after R2 returned two MEDIUM findings.
 
-## R1 CODE-M-1 (what was fixed)
+## R2 findings recap
 
-The R1 audit correctly found that the per-candidate math was
-under-counted. Stage1Prober runs THREE HTTP calls per candidate, not
-two:
+- **R2 CODE-M-1**: `--recommend` iterates all non-blocked
+  RAM-eligible catalog rows, not a fixed 2-3. Per-candidate × N
+  under-counts on some tier. Fixed in R3 (this commit) by
+  eliminating candidate-cardinality guessing.
+- **R2 CODE-M-2**: `--recommend` path in CLI does not install signal
+  handlers, so `process.terminate()` from App-side orphans the child
+  `serve` subprocess. This is a **pre-existing CLI-side bug** at
+  `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:131-137,157-161`
+  that is unaffected by any App-side timeout value. **Deferred to
+  follow-up PR** (would require CLI-side signal handler install).
+  Documented in PR body.
 
-- `readyTimeoutSec = 120s` (MLX model load)
-- prewarm `probeOnce` = `probeIdleTimeoutSec = 300s` (Track A3 at
-  `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:474`)
-- measured replicate `probeOnce` = `probeIdleTimeoutSec = 300s` per
-  replicate (default `stage1Replicates = 1` from
-  `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:35-37`)
+## R3 changes to audit
 
-Per-candidate worst case = 120 + 300 + 300 = **720s**.
-3-candidate worst case = **2160s**.
-
-## R2 changes to audit
-
-1. `phase3-binary/app/Sources/Malibu/Onboarding/AutotuneRecommendationRunner.swift:36`
-   raises `processTimeout` from `1800` (30 min) to `2700` (45 min).
+1. `phase3-binary/app/Sources/Malibu/Onboarding/AutotuneRecommendationRunner.swift:52`
+   sets `processTimeout = 7260s` (CLI's own outer `maxDuration =
+   7200s` + 60s grace).
 2. Rationale comment at
-   `phase3-binary/app/Sources/Malibu/Onboarding/AutotuneRecommendationRunner.swift:4-35`
-   updated to reflect the corrected per-candidate math and reference
-   the CLI's outer `AutotuneCommand.maxDuration = 7200s` boundary.
-3. `phase3-binary/app/Tests/MalibuTests/AutotuneRecommendationRunnerTimeoutTests.swift:31`
-   raises `cliPerCandidateWorstCaseSec` from `420` to `720`.
+   `phase3-binary/app/Sources/Malibu/Onboarding/AutotuneRecommendationRunner.swift:4-51`
+   rewritten to explain why candidate-cardinality math was the wrong
+   frame and why mirroring CLI's outer budget is the only principled
+   ceiling.
+3. `phase3-binary/app/Tests/MalibuTests/AutotuneRecommendationRunnerTimeoutTests.swift`
+   entirely rewritten. Two tests now:
+   - `testProcessTimeoutMirrorsCLIOuterBudgetPlusGrace` — invariant
+     is `processTimeout ≥ cliMaxDurationSec (7200) + cliDeadlineGraceSec (60)`.
+   - `testProcessTimeoutIsNotUnbounded` — upper bound raised from 1h
+     to 2.5h to accommodate the new 7260s value while still catching
+     runaway drift.
 
 ## Focus this round
 
-- Is `processTimeout = 2700s` (45 min) enough headroom above the
-  strict 3-candidate worst case of 2160s to survive minor CLI-side
-  drift (e.g. an extra HTTP retry on `waitForReady`)?
-- Does the R2 rationale comment now correctly describe the CLI's
-  three timing sources per candidate (readyTimeout + prewarm probe +
-  measured probe), or did I still miss a step in
-  `Stage1Iterator.swift`?
-- Do the pinning tests
-  (`AutotuneRecommendationRunnerTimeoutTests`) with the new 720s
-  constant still cover the invariant, or does the 60-min upper-bound
-  test now leave too little margin between the cap (2700s) and the
-  ceiling (3600s)?
-- The polling loop `Thread.sleep(forTimeInterval: 0.05)` inside a
-  `while process.isRunning && Date() < deadline` in
-  `phase3-binary/app/Sources/Malibu/Onboarding/AutotuneRecommendationRunner.swift:93-95`
-  now runs up to 2700s of wall-clock. Is this still tolerable, or
-  does the 20×/sec wake-up start being a measurable CPU/battery cost
-  over 45 minutes on Apple silicon?
-- Does the raised timeout expose any new resource-management issue
-  (file handles, keychain sessions, process-group orphans) that
-  the R1 30s value previously masked and R1 didn't catch?
+- Is `processTimeout = 7260s` (CLI maxDuration + 60s grace) the
+  right ceiling, or does the grace window need to be larger (e.g.
+  should we let the CLI have more time to write its exit JSON and
+  drain stdout before we SIGTERM it)?
+- Is mirroring `AutotuneCommand.maxDuration = 7200` from another
+  SwiftPM target as a hardcoded 7200 constant in the App tests an
+  acceptable coupling, or does this need a shared constant module?
+- Does the polling loop `Thread.sleep(forTimeInterval: 0.05)` at
+  `phase3-binary/app/Sources/Malibu/Onboarding/AutotuneRecommendationRunner.swift:120-122`
+  running up to 7260s of wall-clock (145,200 wake-ups over 2h1m)
+  become a measurable CPU/battery cost on Apple silicon, or is this
+  still noise? If it IS a concern, is the fix in scope for this PR
+  or should it wait for the heartbeat protocol follow-up?
+- Is the R3 rationale comment accurate about the `--recommend` path
+  iterating "every non-blocked RAM-eligible catalog row" — verify
+  against
+  `phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:1750-1937`.
+- Does the 2.5h upper-bound test guard leave enough room for CLI's
+  maxDuration to be raised without requiring test churn, or is
+  there a case where a 3h CLI budget would be legitimate?
 - Are there any other callers of `AutotuneRecommendationRunner.run`
-  that would be surprised by a 90× longer max wait vs the original
-  30s (e.g. Swift Concurrency task priority, test injection paths)?
+  (test injection paths, alternate entry points) that would be
+  surprised by the raised timeout?
 
-Do NOT recommend adding progress UI or stderr tailing — those are
-explicitly deferred to a follow-up PR.
-Do NOT re-audit visibility (`static let`) — that was accepted at R1.
+Do NOT flag R2 CODE-M-2 (orphan child subprocess) again — it is
+explicitly deferred to a CLI-side follow-up PR as documented above.
+Do NOT recommend adding progress UI or stderr tailing.
+Do NOT re-audit visibility (`static let`) — accepted at R1.
 
 ## Referenced context
 
