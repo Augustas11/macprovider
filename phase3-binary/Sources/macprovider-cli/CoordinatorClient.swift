@@ -165,7 +165,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 actor CoordinatorClient {
     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
 
-    static let binaryVersion = "1.8.6"
+    static let binaryVersion = "1.8.7"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -262,7 +262,20 @@ actor CoordinatorClient {
         providerReceiptPublicKey: String? = nil,
         receiptBuilder: ReceiptBuilder? = nil,
         identityBridge: IdentitySignatureBridge? = nil,
-        identitySignatureTimeoutSeconds: TimeInterval = 30,
+        // Must sit well below the coordinator's WS handshake timeout
+        // (`Config.ProviderWSHandshakeTimeout` — 10s default in Pearl's
+        // production config). If our identity_signature roundtrip
+        // (CLI → Malibu.app → Ed25519 sign → CLI → coordinator) takes
+        // longer than the coordinator's read deadline, the coordinator
+        // closes the WS with 4001 `invalid_auth_request: read` before we
+        // finish sending the proof. Malibu.app's signing itself is
+        // <100ms; the roundtrip includes control-socket write + read,
+        // typically <200ms. Budget 3s so a truly-wedged Malibu (App
+        // hung, TCC race) falls through to the unsigned proof path
+        // within one coordinator handshake window; the coordinator's
+        // per-provider exemption at `identity_signature.go:38` then
+        // decides whether to admit us.
+        identitySignatureTimeoutSeconds: TimeInterval = 3,
         // Issue #189: injectable in tests; production uses Darwin.exit(1)
         // so the launchd KeepAlive contract recovers the wedged process.
         watchdogExitHook: @escaping @Sendable (String) -> Void = { reason in
