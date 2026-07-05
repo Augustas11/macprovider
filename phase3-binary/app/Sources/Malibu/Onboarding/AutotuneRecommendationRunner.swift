@@ -25,21 +25,28 @@ enum AutotuneRecommendationRunner {
     /// machines can hit 5+. Compounded with 720s per candidate this
     /// exceeds any small App-side guess.
     ///
-    /// The only principled ceiling is the CLI's OWN outer hard budget:
-    /// `AutotuneCommand.maxDuration = 7200s` (2h) at
-    /// `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:47-48`.
-    /// A healthy CLI cannot exceed that regardless of candidate count.
-    /// The App-side timeout should mirror the CLI's cap + a small grace
-    /// window so:
-    ///   1. In the normal case (2-5 min empirically), CLI returns first
-    ///      and this timeout never fires.
-    ///   2. If the CLI itself hits its own maxDuration, it fails-fast and
-    ///      returns a nonzero exit before this timer fires.
-    ///   3. If the CLI is truly wedged (kernel bug, mlx-swift deadlock,
-    ///      disk I/O storm) past its own budget, this fires as the last
-    ///      line of defense.
+    /// **This timeout is the App-side authoritative ceiling.** The CLI's
+    /// declared `AutotuneCommand.maxDuration = 7200s` at
+    /// `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:47-48`
+    /// is only enforced by the non-recommend path (deadline created at
+    /// `AutotuneCommand.swift:157-161`). `runAutotuneRecommend()` at
+    /// `AutotuneCommand.swift:131-139` returns before that deadline is
+    /// installed and calls `AutotuneRecommendationBenchmarker().benchmarks()`
+    /// with no deadline / cancellation input. So this cap is not "CLI cap +
+    /// grace"; it IS the outer bound of autotune runtime, chosen by the
+    /// App.
     ///
-    /// We budget 7260s = CLI's maxDuration + 60s grace.
+    /// Value: 7260s = 2h1m. Rationale:
+    ///   1. Below any per-candidate math ceiling for reasonable N (up to
+    ///      ~10 candidates × 720s = 7200s worst case).
+    ///   2. Well above the empirical 2-5 min median so the UX is never
+    ///      affected in the healthy case.
+    ///   3. Aligned with the CLI's declared `maxDuration` constant so if
+    ///      the recommend path is later fixed to enforce maxDuration
+    ///      (see follow-up items in the PR body), the two ceilings
+    ///      naturally coincide.
+    ///   4. Below 2.5h so a truly wedged subprocess doesn't trap the user
+    ///      in a multi-hour spinner.
     ///
     /// Median UX is unaffected because autotune completes in 2-5 min. Only
     /// a pathologically wedged run reaches this ceiling, at which point
