@@ -25,12 +25,12 @@ enum AutotuneRecommendationRunner {
     static func run(
         cliURL: URL,
         configPath: URL = ProviderPaths.current.configFile
-    ) async throws -> LaunchProviderController.ModelDownloadPlan {
+    ) async throws -> AutotuneRecommendationResult {
         let data = try await runProcess(
             executableURL: cliURL,
             arguments: ["autotune", "--recommend", "--json", "--config", configPath.path]
         )
-        return try LaunchProviderController.ModelDownloadPlan.fromAutotuneJSON(data)
+        return try AutotuneRecommendationResult.fromAutotuneJSON(data)
     }
 
     private static func runProcess(
@@ -107,13 +107,113 @@ enum AutotuneRecommendationError: Error {
     case timedOut
 }
 
+struct AutotuneRecommendationResult: Equatable {
+    let plan: LaunchProviderController.ModelDownloadPlan
+    let serveConfig: ProviderConfig.AutotuneServeConfig
+
+    static func fromAutotuneJSON(_ data: Data) throws -> Self {
+        let rootObject = try JSONSerialization.jsonObject(with: data)
+        guard let root = rootObject as? [String: Any] else {
+            throw AutotuneRecommendationError.invalidJSON
+        }
+        return AutotuneRecommendationResult(
+            plan: try LaunchProviderController.ModelDownloadPlan.fromAutotuneRoot(root),
+            serveConfig: try AutotuneServeConfigEnvelope.decode(from: data)
+        )
+    }
+}
+
+private struct AutotuneServeConfigEnvelope: Decodable {
+    let serveConfig: AutotuneServeConfigPayload
+
+    enum CodingKeys: String, CodingKey {
+        case serveConfig = "serve_config"
+    }
+
+    static func decode(from data: Data) throws -> ProviderConfig.AutotuneServeConfig {
+        do {
+            let envelope = try JSONDecoder().decode(Self.self, from: data)
+            return try envelope.serveConfig.providerConfig()
+        } catch {
+            throw AutotuneRecommendationError.invalidJSON
+        }
+    }
+}
+
+private struct AutotuneServeConfigPayload: Decodable {
+    let model: String
+    let modelArtifactPath: String
+    let modelArtifactSHA256: String
+    let modelCatalogKey: String
+    let modelCatalogModelID: String
+    let modelCatalogRevision: String
+    let modelCatalogSHA256: String
+    let modelCatalogVersion: String
+    let modelCatalogHash: String
+    let kvBits: Int?
+    let maxContextOverride: Int
+    let maxConcurrencyOverride: Int
+    let donorMode: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case model
+        case modelArtifactPath = "model_artifact_path"
+        case modelArtifactSHA256 = "model_artifact_sha256"
+        case modelCatalogKey = "model_catalog_key"
+        case modelCatalogModelID = "model_catalog_model_id"
+        case modelCatalogRevision = "model_catalog_revision"
+        case modelCatalogSHA256 = "model_catalog_sha256"
+        case modelCatalogVersion = "model_catalog_version"
+        case modelCatalogHash = "model_catalog_hash"
+        case kvBits = "kv_bits"
+        case maxContextOverride = "max_context_override"
+        case maxConcurrencyOverride = "max_concurrency_override"
+        case donorMode = "donor_mode"
+    }
+
+    func providerConfig() throws -> ProviderConfig.AutotuneServeConfig {
+        guard [
+            model,
+            modelArtifactPath,
+            modelArtifactSHA256,
+            modelCatalogKey,
+            modelCatalogModelID,
+            modelCatalogRevision,
+            modelCatalogSHA256,
+            modelCatalogVersion,
+            modelCatalogHash,
+        ].allSatisfy({ !$0.isEmpty }) else {
+            throw AutotuneRecommendationError.invalidJSON
+        }
+
+        return ProviderConfig.AutotuneServeConfig(
+            model: model,
+            modelArtifactPath: modelArtifactPath,
+            modelArtifactSHA256: modelArtifactSHA256,
+            modelCatalogKey: modelCatalogKey,
+            modelCatalogModelID: modelCatalogModelID,
+            modelCatalogRevision: modelCatalogRevision,
+            modelCatalogSHA256: modelCatalogSHA256,
+            modelCatalogVersion: modelCatalogVersion,
+            modelCatalogHash: modelCatalogHash,
+            kvBits: kvBits,
+            maxContextOverride: maxContextOverride,
+            maxConcurrencyOverride: maxConcurrencyOverride,
+            donorMode: donorMode ?? false
+        )
+    }
+}
+
 extension LaunchProviderController.ModelDownloadPlan {
     static func fromAutotuneJSON(_ data: Data) throws -> Self {
         let rootObject = try JSONSerialization.jsonObject(with: data)
         guard let root = rootObject as? [String: Any] else {
             throw AutotuneRecommendationError.invalidJSON
         }
+        return try fromAutotuneRoot(root)
+    }
 
+    static func fromAutotuneRoot(_ root: [String: Any]) throws -> Self {
         let modelName = recommendedModel(in: root) ?? Self.recommended.modelName
         let range = earningsEstimate(modelName: modelName, root: root)
         return Self(modelName: modelName, state: nil, earningsEstimate: range)
