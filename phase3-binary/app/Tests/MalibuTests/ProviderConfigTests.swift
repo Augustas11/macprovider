@@ -86,7 +86,7 @@ final class ProviderConfigParserTests: XCTestCase {
 
         let state = await StartupState.detect(paths: paths)
 
-        XCTAssertEqual(state.route(), .startAgent)
+        XCTAssertEqual(state.route(), .resumeOnboarding)
         XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
@@ -242,6 +242,167 @@ final class ProviderConfigParserTests: XCTestCase {
         XCTAssertTrue(contents.contains("link_state: pending_link"))
     }
 
+    func testWriteLinkStatePreservesNestedYamlAndValidServeConfig() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try """
+        provider_id: p_link
+        custom:
+          model: keep-nested-model
+          link_state: keep-nested-link
+        link_state: pending_link
+        """.write(to: paths.configFile, atomically: true, encoding: .utf8)
+        try ProviderConfig.persistAutotuneRecommendation(Self.serveConfig(), paths: paths)
+
+        try ProviderConfig.writeLinkState(.linked, paths: paths)
+
+        try ProviderConfig.validateServeConfigShape(paths: paths)
+        XCTAssertEqual(ProviderConfig.readLinkState(paths: paths), .linked)
+        let contents = try String(contentsOf: paths.configFile)
+        XCTAssertTrue(contents.contains("custom:\n  model: keep-nested-model\n  link_state: keep-nested-link\n"))
+        XCTAssertEqual(contents.components(separatedBy: "\nlink_state:").count - 1, 1)
+        XCTAssertTrue(contents.contains("\nlink_state: linked\n"))
+    }
+
+    func testPersistAutotuneRecommendationUpsertsServeConfigAndPreservesIdentityState() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try """
+        # keep operator note
+        provider_id: p_linked
+        link_state: linked
+        coordinator_url: https://coordinator.streamvc.live
+        model: stale
+        model_artifact_sha256: \(String(repeating: "0", count: 64))
+        """.write(to: paths.configFile, atomically: true, encoding: .utf8)
+
+        try ProviderConfig.persistAutotuneRecommendation(Self.serveConfig(), paths: paths)
+        try ProviderConfig.validateServeConfigShape(paths: paths)
+
+        let contents = try String(contentsOf: paths.configFile)
+        XCTAssertTrue(contents.contains("# keep operator note"))
+        XCTAssertTrue(contents.contains("provider_id: p_linked"))
+        XCTAssertTrue(contents.contains("link_state: linked"))
+        XCTAssertTrue(contents.contains("coordinator_url: https://coordinator.streamvc.live"))
+        XCTAssertTrue(contents.contains("model: meta-llama/llama-3.1-8b-instruct"))
+        XCTAssertTrue(contents.contains("model_artifact_path: /Users/test/snapshots/241a666dad6cb93c8ff213d39a7f34a36bf26db4"))
+        XCTAssertTrue(contents.contains("model_catalog_hash: \(String(repeating: "b", count: 64))"))
+        XCTAssertEqual(contents.components(separatedBy: "model_artifact_sha256:").count - 1, 1)
+        XCTAssertEqual(try fileMode(paths.configFile) & 0o777, 0o600)
+    }
+
+    func testPersistAutotuneRecommendationPreservesNestedUnrelatedYAML() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try """
+        provider_id: p_nested
+        custom:
+          model: keep-nested-model
+          model_artifact_sha256: keep-nested-sha
+        """.write(to: paths.configFile, atomically: true, encoding: .utf8)
+
+        try ProviderConfig.persistAutotuneRecommendation(Self.serveConfig(), paths: paths)
+
+        let contents = try String(contentsOf: paths.configFile)
+        XCTAssertTrue(contents.contains("custom:\n  model: keep-nested-model\n  model_artifact_sha256: keep-nested-sha\n"))
+        XCTAssertTrue(contents.contains("model: meta-llama/llama-3.1-8b-instruct"))
+        XCTAssertTrue(contents.contains("model_artifact_sha256: \(String(repeating: "a", count: 64))"))
+    }
+
+    func testValidateServeConfigShapeRejectsNestedServeFields() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try """
+        provider_id: p_nested
+        serve_config:
+          model: meta-llama/llama-3.1-8b-instruct
+          model_artifact_path: /Users/test/snapshots/241a666dad6cb93c8ff213d39a7f34a36bf26db4
+          model_artifact_sha256: \(String(repeating: "a", count: 64))
+          model_catalog_key: meta-llama/llama-3.1-8b-instruct
+          model_catalog_model_id: mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+          model_catalog_revision: 241a666dad6cb93c8ff213d39a7f34a36bf26db4
+          model_catalog_sha256: \(String(repeating: "a", count: 64))
+          model_catalog_version: baked-2026-07-03
+          model_catalog_hash: \(String(repeating: "b", count: 64))
+          max_context_override: 4000
+          max_concurrency_override: 1
+        """.write(to: paths.configFile, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try ProviderConfig.validateServeConfigShape(paths: paths)) { error in
+            XCTAssertEqual(error as? ProviderConfig.ServeConfigError, .missingField("model"))
+        }
+    }
+
+    func testValidateServeConfigShapeRejectsMissingRequiredFields() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        try "provider_id: p_missing\nmodel: test\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(try ProviderConfig.validateServeConfigShape(paths: paths)) { error in
+            XCTAssertEqual(error as? ProviderConfig.ServeConfigError, .missingField("model_artifact_path"))
+        }
+    }
+
+    func testPersistAutotuneRecommendationRejectsInvalidServeConfigScalars() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+        let maliciousValues = [
+            "bad # comment",
+            "bad: value",
+            "bad'value",
+            "bad\"value",
+            " bad",
+            "bad ",
+            #"bad\value"#,
+            "bad\nvalue",
+        ]
+
+        for value in maliciousValues {
+            XCTAssertThrowsError(
+                try ProviderConfig.persistAutotuneRecommendation(Self.serveConfig(model: value), paths: paths),
+                "value should be rejected: \(value)"
+            )
+        }
+    }
+
+    func testValidateServeConfigShapeRejectsInvalidHashesAndRelativePath() throws {
+        let paths = try makeTempPaths()
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.appSupport.deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: paths.configFile.deletingLastPathComponent()) }
+
+        XCTAssertThrowsError(
+            try ProviderConfig.persistAutotuneRecommendation(
+                Self.serveConfig(modelArtifactPath: "relative/path"),
+                paths: paths
+            )
+        )
+        XCTAssertThrowsError(
+            try ProviderConfig.persistAutotuneRecommendation(
+                Self.serveConfig(modelArtifactSHA256: String(repeating: "A", count: 64)),
+                paths: paths
+            )
+        )
+        XCTAssertThrowsError(
+            try ProviderConfig.persistAutotuneRecommendation(
+                Self.serveConfig(modelCatalogHash: "not-a-hash"),
+                paths: paths
+            )
+        )
+    }
+
     func testSaveProviderIdentityRollsBackWhenTokenSaveFails() async throws {
         let paths = try makeTempPaths()
         try paths.ensureDirectories()
@@ -252,6 +413,7 @@ final class ProviderConfigParserTests: XCTestCase {
             try await ProviderConfig.saveProviderIdentity(
                 providerID: "p_failed",
                 token: "provider-token",
+                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
                 paths: paths,
                 readToken: { _ in nil },
                 saveToken: { _, _ in
@@ -279,6 +441,7 @@ final class ProviderConfigParserTests: XCTestCase {
             try await ProviderConfig.saveProviderIdentity(
                 providerID: "p_marker_failed",
                 token: "provider-token",
+                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
                 paths: paths,
                 readToken: { _ in nil },
                 saveToken: { _, token in savedToken = token },
@@ -308,6 +471,7 @@ final class ProviderConfigParserTests: XCTestCase {
             try await ProviderConfig.saveProviderIdentity(
                 providerID: "p_verify_failed",
                 token: "provider-token",
+                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
                 paths: paths,
                 readToken: { _ in nil },
                 saveToken: { _, token in savedToken = token },
@@ -334,6 +498,29 @@ final class ProviderConfigParserTests: XCTestCase {
             .appendingPathComponent("malibu-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private static func serveConfig(
+        model: String = "meta-llama/llama-3.1-8b-instruct",
+        modelArtifactPath: String = "/Users/test/snapshots/241a666dad6cb93c8ff213d39a7f34a36bf26db4",
+        modelArtifactSHA256: String = String(repeating: "a", count: 64),
+        modelCatalogHash: String = String(repeating: "b", count: 64)
+    ) -> ProviderConfig.AutotuneServeConfig {
+        ProviderConfig.AutotuneServeConfig(
+            model: model,
+            modelArtifactPath: modelArtifactPath,
+            modelArtifactSHA256: modelArtifactSHA256,
+            modelCatalogKey: "meta-llama/llama-3.1-8b-instruct",
+            modelCatalogModelID: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+            modelCatalogRevision: "241a666dad6cb93c8ff213d39a7f34a36bf26db4",
+            modelCatalogSHA256: String(repeating: "a", count: 64),
+            modelCatalogVersion: "baked-2026-07-03",
+            modelCatalogHash: modelCatalogHash,
+            kvBits: nil,
+            maxContextOverride: 4000,
+            maxConcurrencyOverride: 1,
+            donorMode: false
+        )
     }
 
     private func makeTempPaths() throws -> ProviderPaths {

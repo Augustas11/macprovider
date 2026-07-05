@@ -1140,15 +1140,23 @@ struct AutotuneRecommendEngine {
 }
 
 extension AutotuneRecommendResult {
-    func jsonString() -> String {
+    func jsonString(serveConfig: RecommendationCore? = nil, donorMode: Bool = false) -> String {
         let warningsJSON = warnings.map { "\"\($0.rawValue)\"" }.joined(separator: ",")
         let candidatesJSON = candidates.map { candidate in
             """
             {"rank":\(candidate.rank),"model":\(candidate.model.jsonEscaped),"eligible":\(candidate.eligible),"expected_gross_usd_per_hour":\(candidate.expectedGrossUSDPerHour.jsonNumber),"expected_net_usd_per_hour":\(candidate.expectedNetUSDPerHour.jsonNumber),"electricity_usd_per_hour":\(candidate.electricityUSDPerHour?.jsonNumber ?? "null"),"platform_fee_usd_per_hour":\(candidate.platformFeeUSDPerHour.jsonNumber),"tokens_per_second":\(candidate.tokensPerSecond.jsonNumber),"memory_headroom_gb":\(candidate.memoryHeadroomGB.jsonNumber),"confidence":\(candidate.confidence.jsonEscaped),"why":\(candidate.why.jsonEscaped)}
             """
         }.joined(separator: ",")
+        let serveConfigJSON = serveConfig.map { Self.serveConfigJSON($0, donorMode: donorMode) } ?? "null"
         return """
-        {"schema_version":"autotune_recommend.v1","generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"hardware":{"machine":\(hardware.machine?.jsonEscaped ?? "null"),"chip":\(hardware.chip.jsonEscaped),"memory_gb":\(hardware.memoryGB),"bandwidth_tier":\(hardware.bandwidthTier.rawValue.jsonEscaped),"detected":\(hardware.detected),"os_version":\(hardware.osVersion.jsonEscaped),"binary_version":\(hardware.binaryVersion.jsonEscaped)},"inputs":{"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"electricity_usd_per_kwh":\(electricityUSDPerKWH?.jsonNumber ?? "null"),"assumed_utilization":\(assumedUtilization.jsonNumber),"availability_hours_per_day":\(availabilityHoursPerDay)},"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"candidates":[\(candidatesJSON)],"comparison":{"default_model":\(defaultModel?.jsonEscaped ?? "null"),"recommended_delta_usd_per_hour":\(recommendedDeltaUSDPerHour.jsonNumber),"recommended_delta_percent":\(recommendedDeltaPercent.jsonNumber)},"warnings":[\(warningsJSON)]}
+        {"schema_version":"autotune_recommend.v1","generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"hardware":{"machine":\(hardware.machine?.jsonEscaped ?? "null"),"chip":\(hardware.chip.jsonEscaped),"memory_gb":\(hardware.memoryGB),"bandwidth_tier":\(hardware.bandwidthTier.rawValue.jsonEscaped),"detected":\(hardware.detected),"os_version":\(hardware.osVersion.jsonEscaped),"binary_version":\(hardware.binaryVersion.jsonEscaped)},"inputs":{"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"electricity_usd_per_kwh":\(electricityUSDPerKWH?.jsonNumber ?? "null"),"assumed_utilization":\(assumedUtilization.jsonNumber),"availability_hours_per_day":\(availabilityHoursPerDay)},"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"serve_config":\(serveConfigJSON),"candidates":[\(candidatesJSON)],"comparison":{"default_model":\(defaultModel?.jsonEscaped ?? "null"),"recommended_delta_usd_per_hour":\(recommendedDeltaUSDPerHour.jsonNumber),"recommended_delta_percent":\(recommendedDeltaPercent.jsonNumber)},"warnings":[\(warningsJSON)]}
+        """
+    }
+
+    private static func serveConfigJSON(_ core: RecommendationCore, donorMode: Bool) -> String {
+        let kvBits = core.knobs.kvBits.map(String.init) ?? "null"
+        return """
+        {"model":\(core.model.jsonEscaped),"model_artifact_path":\((core.modelArtifactPath ?? "").jsonEscaped),"model_artifact_sha256":\((core.modelArtifactSHA256 ?? "").jsonEscaped),"model_catalog_key":\((core.modelCatalogKey ?? "").jsonEscaped),"model_catalog_model_id":\((core.modelCatalogModelID ?? "").jsonEscaped),"model_catalog_revision":\((core.modelCatalogRevision ?? "").jsonEscaped),"model_catalog_sha256":\((core.modelCatalogSHA256 ?? "").jsonEscaped),"model_catalog_version":\((core.modelCatalogVersion ?? "").jsonEscaped),"model_catalog_hash":\((core.modelCatalogHash ?? "").jsonEscaped),"kv_bits":\(kvBits),"max_context_override":\(core.knobs.maxContext),"max_concurrency_override":\(core.knobs.maxBatch),"donor_mode":\(donorMode)}
         """
     }
 

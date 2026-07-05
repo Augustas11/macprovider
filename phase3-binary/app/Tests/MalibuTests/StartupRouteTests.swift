@@ -63,7 +63,7 @@ final class StartupRouteTests: XCTestCase {
         defer { Task { try? await KeychainStore.deleteProviderToken(providerID: "p_import") } }
 
         let result = try await StartupState.applyMigrationDecision(.importExisting, paths: paths)
-        XCTAssertEqual(result.route, .startAgent)
+        XCTAssertEqual(result.route, .resumeOnboarding)
         XCTAssertNil(result.backupPath)
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
         let rewritten = try String(contentsOf: paths.configFile)
@@ -120,6 +120,22 @@ final class StartupRouteTests: XCTestCase {
             appMarkerExists: true,
             providerTokenExists: true,
             linkState: .pendingLink,
+            identityExists: true,
+            onboardingStateExists: false,
+            firstServingAtExists: false,
+            onboardingV2Enabled: true
+        )
+
+        XCTAssertEqual(state.route(), .resumeOnboarding)
+    }
+
+    func testConfiguredInvalidServeConfigShapeResumesOnboarding() {
+        let state = StartupState(
+            configExists: true,
+            appMarkerExists: true,
+            providerTokenExists: true,
+            linkState: .linked,
+            serveConfigShapeValid: false,
             identityExists: true,
             onboardingStateExists: false,
             firstServingAtExists: false,

@@ -34,6 +34,9 @@ jobs:
       - name: make test-coordinator
         run: make test-coordinator
 
+      - name: make test-dist
+        run: make test-dist
+
   gateway:
     name: phase5-gateway (go vet + test)
     runs-on: ubuntu-latest

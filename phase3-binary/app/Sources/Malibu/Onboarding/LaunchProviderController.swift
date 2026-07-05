@@ -63,12 +63,14 @@ final class LaunchProviderController: ObservableObject {
         var providerID: (Curve25519.Signing.PrivateKey) -> String
         var currentProviderToken: (String) async -> String?
         var registerProvider: (Curve25519.Signing.PrivateKey, String?) async throws -> RegisterResponse
-        var saveProviderIdentity: (String, String) async throws -> Void
+        var saveProviderIdentity: (String, String, URL) async throws -> Void
         var repairMarkerlessAppConfig: (String) async throws -> Void
         var saveState: (OnboardingState) throws -> Void
         var updateState: (String, String, Date?, OnboardingState.ModelDownloadState?) throws -> Void
         var markLinkState: (ProviderConfig.LinkState) throws -> Void
-        var runAutotune: (String) async throws -> ModelDownloadPlan
+        var runAutotune: (String) async throws -> AutotuneRecommendationResult
+        var persistAutotuneRecommendation: (ProviderConfig.AutotuneServeConfig) throws -> Void
+        var validateServeConfigShape: () throws -> Void
         var ensureCLIReady: () throws -> Void
         var downloadModel: (ModelDownloadPlan) async throws -> OnboardingState.ModelDownloadState?
         var registerLoginItem: @MainActor () async throws -> Void
@@ -88,8 +90,8 @@ final class LaunchProviderController: ObservableObject {
                     let request = try registerClient.makeSignedRequest(identityKey: key)
                     return try await registerClient.postRegister(request, bearerProof: bearerProof)
                 },
-                saveProviderIdentity: { providerID, token in
-                    try await ProviderConfig.saveProviderIdentity(providerID: providerID, token: token)
+                saveProviderIdentity: { providerID, token, coordinatorWSURL in
+                    try await ProviderConfig.saveProviderIdentity(providerID: providerID, token: token, coordinatorWSURL: coordinatorWSURL)
                 },
                 repairMarkerlessAppConfig: { providerID in
                     try await ProviderConfig.repairMarkerlessAppOwnedConfig(providerID: providerID)
@@ -105,7 +107,13 @@ final class LaunchProviderController: ObservableObject {
                 },
                 markLinkState: { state in try ProviderConfig.writeLinkState(state) },
                 runAutotune: { _ in
-                    (try? await AutotuneRecommendationRunner.run(cliURL: bundledCLIPath)) ?? .recommended
+                    try await AutotuneRecommendationRunner.run(cliURL: bundledCLIPath)
+                },
+                persistAutotuneRecommendation: { config in
+                    try ProviderConfig.persistAutotuneRecommendation(config)
+                },
+                validateServeConfigShape: {
+                    try ProviderConfig.validateServeConfigShape()
                 },
                 ensureCLIReady: {
                     guard FileManager.default.isExecutableFile(atPath: bundledCLIPath.path) else {
@@ -117,7 +125,9 @@ final class LaunchProviderController: ObservableObject {
                 startAgent: { await agent?.start() },
                 waitForFirstServing: {
                     guard let agent else { return Date() }
-                    for _ in 0..<60 {
+                    let deadline = Date().addingTimeInterval(MalibuOnboardingTimeouts.firstServingFrameSec)
+                    let pollNanos = UInt64(MalibuOnboardingTimeouts.firstServingPollIntervalSec * 1_000_000_000)
+                    while Date() < deadline {
                         switch agent.snapshot.state {
                         case .serving:
                             return Date()
@@ -128,7 +138,7 @@ final class LaunchProviderController: ObservableObject {
                                 userInfo: [NSLocalizedDescriptionKey: agent.snapshot.lastError ?? "Provider failed to start."]
                             )
                         default:
-                            try await Task.sleep(nanoseconds: 500_000_000)
+                            try await Task.sleep(nanoseconds: pollNanos)
                         }
                     }
                     throw NSError(
@@ -244,7 +254,7 @@ final class LaunchProviderController: ObservableObject {
             stage = .registering
             let bearerProof = await dependencies.currentProviderToken(providerID)
             let response = try await dependencies.registerProvider(key, bearerProof)
-            try await dependencies.saveProviderIdentity(response.providerID, response.providerToken)
+            try await dependencies.saveProviderIdentity(response.providerID, response.providerToken, response.coordinatorWebSocketURL)
             try dependencies.updateState(response.providerID, "registered", nil, nil)
 
             try await finishLaunch(providerID: response.providerID, from: .autotune, plan: nil)
@@ -270,8 +280,21 @@ final class LaunchProviderController: ObservableObject {
     }
 
     private func startConfiguredAgent(model: String) async {
-        await dependencies.startAgent()
-        stage = .live(model: model, tier: .provisional)
+        do {
+            try dependencies.validateServeConfigShape()
+            await dependencies.startAgent()
+            stage = .live(model: model, tier: .provisional)
+        } catch {
+            guard let providerID = dependencies.readProviderID() else {
+                stage = .failed(stage: "configured", retryable: true, message: error.localizedDescription)
+                return
+            }
+            do {
+                try await finishLaunch(providerID: providerID, from: .autotune, plan: nil)
+            } catch {
+                stage = .failed(stage: stageName(stage), retryable: true, message: error.localizedDescription)
+            }
+        }
     }
 
     private enum ResumePoint {
@@ -283,7 +306,7 @@ final class LaunchProviderController: ObservableObject {
 
     private func resumePartialOnboarding(_ existing: OnboardingState) async {
         do {
-            let point: ResumePoint
+            var point: ResumePoint
             switch existing.lastStage {
             case "identityReady", "registering":
                 try await resumeRegistration(existing)
@@ -303,6 +326,9 @@ final class LaunchProviderController: ObservableObject {
             if !configurationReady {
                 try await resumeRegistration(existing)
                 return
+            }
+            if point != .autotune && !isServeConfigShapeValid() {
+                point = .autotune
             }
             let plan = existing.modelDownload.map {
                 ModelDownloadPlan(modelName: $0.modelID, state: $0, earningsEstimate: nil)
@@ -357,7 +383,7 @@ final class LaunchProviderController: ObservableObject {
         stage = .registering
         let bearerProof = await dependencies.currentProviderToken(providerID)
         let response = try await dependencies.registerProvider(key, bearerProof)
-        try await dependencies.saveProviderIdentity(response.providerID, response.providerToken)
+        try await dependencies.saveProviderIdentity(response.providerID, response.providerToken, response.coordinatorWebSocketURL)
         try dependencies.updateState(response.providerID, "registered", nil, nil)
         try await finishLaunch(providerID: response.providerID, from: .autotune, plan: existing.modelDownload.map {
             ModelDownloadPlan(modelName: $0.modelID, state: $0, earningsEstimate: nil)
@@ -374,7 +400,10 @@ final class LaunchProviderController: ObservableObject {
         if resumePoint == .autotune {
             stage = .autotuning
             try dependencies.updateState(providerID, "autotuning", nil, nil)
-            plan = try await dependencies.runAutotune(providerID)
+            let recommendation = try await dependencies.runAutotune(providerID)
+            try dependencies.persistAutotuneRecommendation(recommendation.serveConfig)
+            try requireServeConfigShape()
+            plan = recommendation.plan
 
             stage = .downloadingCLI(progressPct: 1)
             try dependencies.ensureCLIReady()
@@ -391,6 +420,7 @@ final class LaunchProviderController: ObservableObject {
             try dependencies.updateState(providerID, "modelReady", nil, completedDownload)
         }
 
+        try requireServeConfigShape()
         stage = .startingAgent
         try dependencies.updateState(providerID, "startingAgent", nil, nil)
         try dependencies.markLinkState(.pendingLink)
@@ -402,6 +432,30 @@ final class LaunchProviderController: ObservableObject {
         let firstServingAt = try await dependencies.waitForFirstServing()
         try dependencies.updateState(providerID, "live", firstServingAt, nil)
         stage = .live(model: plan.modelName, tier: .provisional)
+    }
+
+    private func isServeConfigShapeValid() -> Bool {
+        do {
+            try dependencies.validateServeConfigShape()
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func requireServeConfigShape() throws {
+        do {
+            try dependencies.validateServeConfigShape()
+        } catch {
+            throw NSError(
+                domain: "SPEC-026",
+                code: 4,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "autotune completed but config is missing required serve config shape — file a bug",
+                    NSUnderlyingErrorKey: error,
+                ]
+            )
+        }
     }
 
     private func stageName(_ stage: Stage) -> String {
@@ -545,10 +599,33 @@ struct StartupState: Equatable {
     let appMarkerExists: Bool
     let providerTokenExists: Bool
     let linkState: ProviderConfig.LinkState?
+    let serveConfigShapeValid: Bool
     let identityExists: Bool
     let onboardingStateExists: Bool
     let firstServingAtExists: Bool
     let onboardingV2Enabled: Bool
+
+    init(
+        configExists: Bool,
+        appMarkerExists: Bool,
+        providerTokenExists: Bool,
+        linkState: ProviderConfig.LinkState?,
+        serveConfigShapeValid: Bool = true,
+        identityExists: Bool,
+        onboardingStateExists: Bool,
+        firstServingAtExists: Bool,
+        onboardingV2Enabled: Bool
+    ) {
+        self.configExists = configExists
+        self.appMarkerExists = appMarkerExists
+        self.providerTokenExists = providerTokenExists
+        self.linkState = linkState
+        self.serveConfigShapeValid = serveConfigShapeValid
+        self.identityExists = identityExists
+        self.onboardingStateExists = onboardingStateExists
+        self.firstServingAtExists = firstServingAtExists
+        self.onboardingV2Enabled = onboardingV2Enabled
+    }
 
     @MainActor
     static func detect(paths: ProviderPaths = .current) async -> StartupState {
@@ -563,6 +640,7 @@ struct StartupState: Equatable {
         } else {
             tokenExists = false
         }
+        let serveConfigShapeValid = (try? ProviderConfig.validateServeConfigShape(paths: paths)) != nil
         let identityExists = await ProviderIdentity.isReady()
         let onboarding = try? OnboardingStateStore.load(paths: paths)
         return StartupState(
@@ -570,6 +648,7 @@ struct StartupState: Equatable {
             appMarkerExists: markerExists,
             providerTokenExists: tokenExists,
             linkState: ProviderConfig.readLinkState(paths: paths),
+            serveConfigShapeValid: serveConfigShapeValid,
             identityExists: identityExists,
             onboardingStateExists: onboarding != nil,
             firstServingAtExists: onboarding?.firstServingAt != nil,
@@ -585,7 +664,7 @@ struct StartupState: Equatable {
             return .resumeOnboarding
         }
         if configExists && appMarkerExists && providerTokenExists {
-            return .startAgent
+            return serveConfigShapeValid ? .startAgent : .resumeOnboarding
         }
         if configExists && !appMarkerExists {
             return .showImportDialog
@@ -605,7 +684,8 @@ struct StartupState: Equatable {
         switch decision {
         case .importExisting:
             try await ProviderConfig.importExistingCLIConfig(paths: paths)
-            return MigrationResult(route: .startAgent, backupPath: nil)
+            let state = await StartupState.detect(paths: paths)
+            return MigrationResult(route: state.route(), backupPath: nil)
         case .startFresh:
             let backup = try ProviderConfig.startFreshMovingCLIConfigAside(now: now, paths: paths)
             let effectiveOnboardingV2Enabled: Bool

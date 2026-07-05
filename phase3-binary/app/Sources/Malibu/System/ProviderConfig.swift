@@ -48,10 +48,91 @@ enum ProviderConfig {
 
     static func writeLinkState(_ state: LinkState, paths: ProviderPaths = .current) throws {
         let contents = (try? String(contentsOf: paths.configFile)) ?? ""
-        var lines = normalizedLines(contents)
-            .filter { !$0.hasPrefix("link_state:") }
-        lines.append("link_state: \(state.rawValue)")
-        try atomicWrite0600(Data((lines.joined(separator: "\n") + "\n").utf8), to: paths.configFile)
+        let rewritten = upsertingTopLevelLine(
+            named: "link_state",
+            line: "link_state: \(state.rawValue)",
+            into: contents
+        )
+        try atomicWrite0600(Data(rewritten.utf8), to: paths.configFile)
+    }
+
+    struct AutotuneServeConfig: Equatable {
+        let model: String
+        let modelArtifactPath: String
+        let modelArtifactSHA256: String
+        let modelCatalogKey: String
+        let modelCatalogModelID: String
+        let modelCatalogRevision: String
+        let modelCatalogSHA256: String
+        let modelCatalogVersion: String
+        let modelCatalogHash: String
+        let kvBits: Int?
+        let maxContextOverride: Int
+        let maxConcurrencyOverride: Int
+        let donorMode: Bool
+    }
+
+    enum ServeConfigError: Error, LocalizedError, Equatable {
+        case missingField(String)
+        case invalidField(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .missingField(let key):
+                return "Missing required serve config field: \(key)."
+            case .invalidField(let key):
+                return "Invalid serve config field: \(key)."
+            }
+        }
+    }
+
+    private static let recommendationOwnedKeys = [
+        "model",
+        "model_artifact_path",
+        "model_artifact_sha256",
+        "model_catalog_key",
+        "model_catalog_model_id",
+        "model_catalog_revision",
+        "model_catalog_sha256",
+        "model_catalog_version",
+        "model_catalog_hash",
+        "kv_bits",
+        "max_context_override",
+        "max_concurrency_override",
+        "donor_mode",
+    ]
+
+    static func persistAutotuneRecommendation(
+        _ config: AutotuneServeConfig,
+        paths: ProviderPaths = .current
+    ) throws {
+        try validate(config)
+        try paths.ensureDirectories()
+        let contents = (try? String(contentsOf: paths.configFile)) ?? ""
+        let rewritten = upsertingRecommendationConfigLines(into: contents, config: config)
+        try atomicWrite0600(Data(rewritten.utf8), to: paths.configFile)
+    }
+
+    static func validateServeConfigShape(paths: ProviderPaths = .current) throws {
+        guard let contents = try? String(contentsOf: paths.configFile) else {
+            throw ServeConfigError.missingField("config.yaml")
+        }
+        let config = try AutotuneServeConfig(
+            model: required("model", contents),
+            modelArtifactPath: required("model_artifact_path", contents),
+            modelArtifactSHA256: required("model_artifact_sha256", contents),
+            modelCatalogKey: required("model_catalog_key", contents),
+            modelCatalogModelID: required("model_catalog_model_id", contents),
+            modelCatalogRevision: required("model_catalog_revision", contents),
+            modelCatalogSHA256: required("model_catalog_sha256", contents),
+            modelCatalogVersion: required("model_catalog_version", contents),
+            modelCatalogHash: required("model_catalog_hash", contents),
+            kvBits: optionalInt("kv_bits", contents),
+            maxContextOverride: requiredInt("max_context_override", contents),
+            maxConcurrencyOverride: requiredInt("max_concurrency_override", contents),
+            donorMode: optionalBool("donor_mode", contents) ?? false
+        )
+        try validate(config)
     }
 
     // AUDIT R1 ARCHITECT A2: raised when the shared config exists on disk
@@ -89,14 +170,15 @@ enum ProviderConfig {
         }
     }
 
-    static func saveProviderIdentity(providerID: String, token: String) async throws {
-        try await saveProviderIdentity(providerID: providerID, token: token, paths: .current)
+    static func saveProviderIdentity(providerID: String, token: String, coordinatorWSURL: URL) async throws {
+        try await saveProviderIdentity(providerID: providerID, token: token, coordinatorWSURL: coordinatorWSURL, paths: .current)
     }
 
-    static func saveProviderIdentity(providerID: String, token: String, paths: ProviderPaths) async throws {
+    static func saveProviderIdentity(providerID: String, token: String, coordinatorWSURL: URL, paths: ProviderPaths) async throws {
         try await saveProviderIdentity(
             providerID: providerID,
             token: token,
+            coordinatorWSURL: coordinatorWSURL,
             paths: paths,
             readToken: { await KeychainStore.readProviderToken(providerID: $0) },
             saveToken: { try await KeychainStore.saveProviderToken(providerID: $0, token: $1) },
@@ -107,6 +189,7 @@ enum ProviderConfig {
     static func saveProviderIdentity(
         providerID: String,
         token: String,
+        coordinatorWSURL: URL,
         paths: ProviderPaths,
         readToken: @escaping (String) async -> String?,
         saveToken: @escaping (String, String) async throws -> Void,
@@ -140,9 +223,11 @@ enum ProviderConfig {
                     !$0.hasPrefix("provider_id:")
                         && !$0.hasPrefix("provider_token:")
                         && !$0.hasPrefix("link_state:")
+                        && !$0.hasPrefix("coordinator_url:")
                 }
         }
         lines.append("provider_id: \(providerID)")
+        lines.append("coordinator_url: \(coordinatorWSURL.absoluteString)")
         lines.append("link_state: \(LinkState.pendingLink.rawValue)")
         // We deliberately do NOT write the token to disk. The CLI must be
         // launched with the token in the environment (MACPROVIDER_PROVIDER_TOKEN),
@@ -451,7 +536,7 @@ enum ProviderConfig {
     }
 
     private static func parseTopLevelValue(named key: String, from contents: String) -> String? {
-        normalizedLines(contents).compactMap { line -> String? in
+        topLevelLines(contents).compactMap { line -> String? in
             guard line.hasPrefix("\(key):") else { return nil }
             let value = line
                 .dropFirst("\(key):".count)
@@ -461,10 +546,190 @@ enum ProviderConfig {
         }.first
     }
 
+    private static func configLines(_ config: AutotuneServeConfig) -> [String] {
+        let linesByKey = configLinesByKey(config)
+        return recommendationOwnedKeys.compactMap { linesByKey[$0] }
+    }
+
+    private static func configLinesByKey(_ config: AutotuneServeConfig) -> [String: String] {
+        var lines = [
+            "model": "model: \(config.model)",
+            "model_artifact_path": "model_artifact_path: \(config.modelArtifactPath)",
+            "model_artifact_sha256": "model_artifact_sha256: \(config.modelArtifactSHA256)",
+            "model_catalog_key": "model_catalog_key: \(config.modelCatalogKey)",
+            "model_catalog_model_id": "model_catalog_model_id: \(config.modelCatalogModelID)",
+            "model_catalog_revision": "model_catalog_revision: \(config.modelCatalogRevision)",
+            "model_catalog_sha256": "model_catalog_sha256: \(config.modelCatalogSHA256)",
+            "model_catalog_version": "model_catalog_version: \(config.modelCatalogVersion)",
+            "model_catalog_hash": "model_catalog_hash: \(config.modelCatalogHash)",
+            "max_context_override": "max_context_override: \(config.maxContextOverride)",
+            "max_concurrency_override": "max_concurrency_override: \(config.maxConcurrencyOverride)",
+        ]
+        if let kvBits = config.kvBits {
+            lines["kv_bits"] = "kv_bits: \(kvBits)"
+        }
+        if config.donorMode {
+            lines["donor_mode"] = "donor_mode: true"
+        }
+        return lines
+    }
+
+    private static func upsertingRecommendationConfigLines(into contents: String, config: AutotuneServeConfig) -> String {
+        let newLinesByKey = configLinesByKey(config)
+        guard !contents.isEmpty else {
+            return configLines(config).joined(separator: "\n") + "\n"
+        }
+
+        var seen = Set<String>()
+        var output = ""
+        for (line, rawLine) in normalizedLineRanges(contents) {
+            guard let key = recommendationOwnedKeys.first(where: { topLevelKey($0, matches: line) }) else {
+                output += rawLine
+                continue
+            }
+            seen.insert(key)
+            guard let newLine = newLinesByKey[key] else {
+                continue
+            }
+            output += newLine + lineTerminator(from: rawLine)
+        }
+
+        let missing = recommendationOwnedKeys.compactMap { key -> String? in
+            guard !seen.contains(key) else { return nil }
+            return newLinesByKey[key]
+        }
+        if !missing.isEmpty {
+            if !output.isEmpty, !output.hasSuffix("\n") {
+                output += "\n"
+            }
+            output += missing.joined(separator: "\n") + "\n"
+        }
+        return output
+    }
+
+    private static func upsertingTopLevelLine(named key: String, line newLine: String, into contents: String) -> String {
+        guard !contents.isEmpty else {
+            return newLine + "\n"
+        }
+
+        var replaced = false
+        var output = ""
+        for (line, rawLine) in normalizedLineRanges(contents) {
+            guard topLevelKey(key, matches: line) else {
+                output += rawLine
+                continue
+            }
+            if !replaced {
+                output += newLine + lineTerminator(from: rawLine)
+                replaced = true
+            }
+        }
+
+        if !replaced {
+            if !output.isEmpty, !output.hasSuffix("\n") {
+                output += "\n"
+            }
+            output += newLine + "\n"
+        } else if !output.isEmpty, !output.hasSuffix("\n") {
+            output += "\n"
+        }
+        return output
+    }
+
+    private static func validate(_ config: AutotuneServeConfig) throws {
+        try validateScalar(config.model, key: "model")
+        try validateScalar(config.modelArtifactPath, key: "model_artifact_path")
+        guard config.modelArtifactPath.hasPrefix("/") else {
+            throw ServeConfigError.invalidField("model_artifact_path")
+        }
+        try validateHex(config.modelArtifactSHA256, key: "model_artifact_sha256")
+        try validateScalar(config.modelCatalogKey, key: "model_catalog_key")
+        try validateScalar(config.modelCatalogModelID, key: "model_catalog_model_id")
+        try validateScalar(config.modelCatalogRevision, key: "model_catalog_revision")
+        try validateHex(config.modelCatalogSHA256, key: "model_catalog_sha256")
+        try validateScalar(config.modelCatalogVersion, key: "model_catalog_version")
+        try validateHex(config.modelCatalogHash, key: "model_catalog_hash")
+        if let kvBits = config.kvBits, kvBits != 4 && kvBits != 8 {
+            throw ServeConfigError.invalidField("kv_bits")
+        }
+        guard config.maxContextOverride > 0 else {
+            throw ServeConfigError.invalidField("max_context_override")
+        }
+        guard config.maxConcurrencyOverride > 0 else {
+            throw ServeConfigError.invalidField("max_concurrency_override")
+        }
+    }
+
+    private static func validateScalar(_ value: String, key: String) throws {
+        guard !value.isEmpty, value == value.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            throw ServeConfigError.invalidField(key)
+        }
+        if value.unicodeScalars.contains(where: { scalar in
+            scalar.value < 0x20 || scalar.value == 0x7f
+        }) {
+            throw ServeConfigError.invalidField(key)
+        }
+        for forbidden in ["\n", "\r", "#", ": ", "'", "\"", "\\"] where value.contains(forbidden) {
+            throw ServeConfigError.invalidField(key)
+        }
+    }
+
+    private static func validateHex(_ value: String, key: String) throws {
+        try validateScalar(value, key: key)
+        guard value.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            throw ServeConfigError.invalidField(key)
+        }
+    }
+
+    private static func required(_ key: String, _ contents: String) throws -> String {
+        guard let value = parseTopLevelValue(named: key, from: contents) else {
+            throw ServeConfigError.missingField(key)
+        }
+        return value
+    }
+
+    private static func requiredInt(_ key: String, _ contents: String) throws -> Int {
+        guard let value = parseTopLevelValue(named: key, from: contents) else {
+            throw ServeConfigError.missingField(key)
+        }
+        guard let intValue = Int(value) else {
+            throw ServeConfigError.invalidField(key)
+        }
+        return intValue
+    }
+
+    private static func optionalInt(_ key: String, _ contents: String) throws -> Int? {
+        guard let value = parseTopLevelValue(named: key, from: contents) else {
+            return nil
+        }
+        guard let intValue = Int(value) else {
+            throw ServeConfigError.invalidField(key)
+        }
+        return intValue
+    }
+
+    private static func optionalBool(_ key: String, _ contents: String) throws -> Bool? {
+        guard let value = parseTopLevelValue(named: key, from: contents) else {
+            return nil
+        }
+        switch value {
+        case "true": return true
+        case "false": return false
+        default: throw ServeConfigError.invalidField(key)
+        }
+    }
+
     private static func removingTopLevelValue(named key: String, from contents: String) -> String {
-        normalizedLines(contents)
-            .filter { !$0.hasPrefix("\(key):") }
-            .joined(separator: "\n") + "\n"
+        var output = ""
+        for (line, rawLine) in normalizedLineRanges(contents) {
+            if !topLevelKey(key, matches: line) {
+                output += rawLine
+            }
+        }
+        if !output.isEmpty, !output.hasSuffix("\n") {
+            output += "\n"
+        }
+        return output
     }
 
     private static func normalizedLines(_ contents: String) -> [String] {
@@ -474,6 +739,35 @@ enum ProviderConfig {
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+
+    private static func topLevelLines(_ contents: String) -> [String] {
+        normalizedLineRanges(contents).compactMap { line, _ in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed == line ? trimmed : nil
+        }
+    }
+
+    private static func normalizedLineRanges(_ contents: String) -> [(line: String, rawLine: String)] {
+        let normalized = contents
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        guard !normalized.isEmpty else { return [] }
+        var lines: [(String, String)] = []
+        normalized.enumerateSubstrings(in: normalized.startIndex..<normalized.endIndex, options: .byLines) {
+            line, _, enclosingRange, _ in
+            guard let line else { return }
+            lines.append((line, String(normalized[enclosingRange])))
+        }
+        return lines
+    }
+
+    private static func topLevelKey(_ key: String, matches line: String) -> Bool {
+        line.hasPrefix("\(key):")
+    }
+
+    private static func lineTerminator(from rawLine: String) -> String {
+        rawLine.hasSuffix("\n") ? "\n" : ""
     }
 
     private static func writeExclusive0600(_ data: Data, to destination: URL) throws {

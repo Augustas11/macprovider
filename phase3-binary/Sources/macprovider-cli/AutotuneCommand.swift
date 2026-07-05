@@ -769,20 +769,13 @@ struct AutotuneCommand: AsyncParsableCommand {
         if apply, donorMode, result.donorFallbackModel != nil, donorSelected == nil {
             throw ValidationError("selected donor recommendation was not available for config apply")
         }
-        if apply, let selected = paidSelected ?? donorSelected {
-            let applyingDonorFallback = paidSelected == nil && selected == donorSelected
-            guard let selectedBenchmark = request.benchmarks[selected.catalogKey] else {
-                throw ValidationError("selected recommendation lacks verified benchmark artifact")
-            }
-            guard let selectedRow = catalog.value.rows[selected.catalogKey] else {
-                throw ValidationError("selected recommendation lacks signed catalog row")
-            }
-            if applyingDonorFallback {
-                FileHandle.standardError.write(Data("DONOR MODE: no paid model clears $0.0050/hr on this Mac; \(selected.model) is for network support only.\n".utf8))
-            }
-            let rawPath = config ?? AppConfig.defaultConfigPath
-            let expanded = ConfigLoader.expandTilde(rawPath)
-            let core = RecommendationCore(
+        let selectedForConfig = paidSelected ?? donorSelected
+        let applyingDonorFallback = paidSelected == nil && selectedForConfig == donorSelected
+        let serveConfig: RecommendationCore?
+        if let selected = selectedForConfig,
+           let selectedBenchmark = request.benchmarks[selected.catalogKey],
+           let selectedRow = catalog.value.rows[selected.catalogKey] {
+            serveConfig = RecommendationCore(
                 model: selected.model,
                 targetContext: Self.spec023RecommendationProbeContext,
                 knobs: WinningKnobs(kvBits: nil, maxBatch: 1, maxContext: Self.spec023RecommendationProbeContext),
@@ -798,6 +791,24 @@ struct AutotuneCommand: AsyncParsableCommand {
                 modelCatalogVersion: catalog.value.version,
                 modelCatalogHash: catalogSHA
             )
+        } else {
+            serveConfig = nil
+        }
+        if apply, let selected = selectedForConfig {
+            guard request.benchmarks[selected.catalogKey] != nil else {
+                throw ValidationError("selected recommendation lacks verified benchmark artifact")
+            }
+            guard catalog.value.rows[selected.catalogKey] != nil else {
+                throw ValidationError("selected recommendation lacks signed catalog row")
+            }
+            if applyingDonorFallback {
+                FileHandle.standardError.write(Data("DONOR MODE: no paid model clears $0.0050/hr on this Mac; \(selected.model) is for network support only.\n".utf8))
+            }
+            let rawPath = config ?? AppConfig.defaultConfigPath
+            let expanded = ConfigLoader.expandTilde(rawPath)
+            guard let core = serveConfig else {
+                throw ValidationError("selected recommendation lacks serve config")
+            }
             let applied = try ConfigApplier(configPath: URL(fileURLWithPath: expanded)).apply(
                 recommendation: core,
                 now: now,
@@ -810,7 +821,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             }
         }
         if emitJSON {
-            print(result.jsonString())
+            print(result.jsonString(serveConfig: serveConfig, donorMode: applyingDonorFallback))
         } else {
             print(result.humanTranscript())
         }
