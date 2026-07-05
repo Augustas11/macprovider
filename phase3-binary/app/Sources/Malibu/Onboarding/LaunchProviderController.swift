@@ -553,6 +553,7 @@ struct StartupState: Equatable {
     @MainActor
     static func detect(paths: ProviderPaths = .current) async -> StartupState {
         let fm = FileManager.default
+        try? await ProviderConfig.recoverPendingImportIfNeeded(paths: paths)
         let configExists = fm.fileExists(atPath: paths.configFile.path)
         let markerExists = fm.fileExists(atPath: paths.appMarkerFile.path)
         let providerID = ProviderConfig.readProviderID(paths: paths)

@@ -542,16 +542,9 @@ against v0.3 landed 0 CRITICAL / 4 HIGH / 18 MEDIUM
   receipts, ≥100 USDC continuous 72h balance, manual operator
   promotion} plus a second criterion from the full list. App
   Attest alone is not an economic gate (§11 already reframed this).
-- **§9.3 out-of-band channel hardens the setup path.**
-  `notification_email` setup / change requires: (a) verified via
-  a coordinator-authored confirmation link to the NEW email, (b)
-  notification to the OLD email on change, (c) 24h cooling
-  window before the new email becomes the authoritative
-  cancellation channel. Wallet swap MUST fail closed if no
-  verified email is set and the swap amount exceeds $500 USDC
-  equivalent. Email delivery failure aborts the swap with
-  `wallet_swap_notification_delivery_failed` and holds the swap
-  in a `pending_delivery_retry` state, not "proceed silently."
+- **§9.3 App-track cancellation moved out of SPEC-026.**
+  The older email/HMAC/cancel-channel design is no longer a
+  SPEC-026 active surface; SPEC-027 owns those requirements.
 - **§4.1 rotate-on-duplicate hardened against DoS.** v0.3 revoked
   the live token on every duplicate `/register`. v0.4 requires
   the duplicate `/register` to prove current token possession
@@ -1957,26 +1950,42 @@ would throw `existingConfigNotOwnedByApp` at
 - Header: "Existing macprovider setup detected."
 - Body: "We found a CLI-track macprovider config in this account.
   How do you want to proceed?"
-- Option A (primary): **Import my existing provider** — atomic
-  sequence matching SPEC-025 §7's import contract:
+- Option A (primary): **Import my existing provider** — crash-safe
+  three-phase sequence matching SPEC-025 §7's import contract:
   1. Parse `provider_id` and top-level `provider_token` from
      `config.yaml`.
-  2. Save the `provider_token` to the App-track Keychain slot
+  2. Write an App-support `.import_pending` marker containing the
+     source path, destination Keychain slot, timestamp, provider_id,
+     SHA-256 of the token, SHA-256 of the original config, and the
+     import backup path.
+  3. Save the `provider_token` to the App-track Keychain slot
      under the same account/service that
      `ProviderConfig.saveProviderIdentity(providerID:token:)`
-     uses (`ProviderConfig.swift:63-99`).
-  3. Rewrite `config.yaml` with the `provider_token` field
+     uses, then read it back and verify the SHA-256 matches the
+     pending marker.
+  4. Persist a 0600 `config.yaml.import-backup` copy of the original
+     YAML, then rewrite `config.yaml` with the `provider_token` field
      removed (the disk-side secret is now redundant with the
      Keychain copy).
-  4. Create the `.installed-by-app` marker file at
+  5. Create the `.installed-by-app` marker file at
      `ProviderPaths.appMarkerFile` (per `ProviderPaths.swift:24`
      that path is
      `~/Library/Application Support/Malibu/.installed-by-app`).
-  5. Verify `ProviderConfig.isConfigured == true` before
-     dismissing the dialog. If verification fails, roll back
-     steps 2-4 (delete Keychain item, restore original YAML from
-     an in-memory snapshot, delete marker) and show a support
-     dialog.
+  6. Set `link_state: linked`, verify `ProviderConfig.isConfigured ==
+     true`, then delete the import backup and `.import_pending`
+     marker before dismissing the dialog. If verification fails, roll
+     back by deleting the Keychain item, restoring the original YAML
+     with atomic replace + fsync, deleting any app marker, and keeping
+     startup recovery idempotent via `.import_pending` while the
+     process is still in flight.
+
+  On startup, if `.import_pending` exists, the app verifies the
+  Keychain token hash. If valid, it removes any remaining top-level
+  `provider_token` from YAML, writes the app marker, sets
+  `link_state: linked`, and removes the backup plus marker. If invalid
+  and the backup exists, it atomically restores the backup, deletes the
+  Keychain copy and marker, and leaves the config CLI-owned for the
+  import dialog to reappear.
 
   The install transitions to `v1-complete` state (§8.1). No
   re-onboarding required.
