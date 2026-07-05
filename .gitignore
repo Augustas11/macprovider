@@ -37,6 +37,7 @@ default.profraw
 phase4-coordinator/dist/coordinator-linux-amd64
 phase4-coordinator/dist/coordinator-cli-linux-amd64
 phase4-coordinator/dist/stats-inventory-sync-linux-amd64
+phase4-coordinator/dist/stats-billing-mirror-linux-amd64
 phase4-coordinator/dist/*.bak
 
 # Phase 5 gateway build artifacts
