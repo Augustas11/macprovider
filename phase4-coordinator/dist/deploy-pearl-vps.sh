@@ -496,6 +496,49 @@ $SSH 'set -e
   fi
 '
 
+log "step 3a/9: stats env preflight"
+STATS_ENABLED_LOCAL="$(yaml_block_value stats enabled)"
+if [ "$STATS_ENABLED_LOCAL" = "true" ]; then
+  # stats.enabled=true makes the coordinator fail closed during config load if
+  # any required stats DSN is missing. Check the remote EnvironmentFile before
+  # uploading/restarting so a stats cutover cannot brick the daemon late in
+  # the deploy after artifacts have already been installed.
+  $SSH 'set -e
+    env_file=/etc/macprovider/coordinator.env
+    if [ ! -r "$env_file" ]; then
+      echo "aborting deploy: stats.enabled=true but $env_file is missing or unreadable" >&2
+      exit 12
+    fi
+    missing=""
+    for name in STATS_READER_DSN STATS_ROLLUP_DSN; do
+      if ! awk -v name="$name" '"'"'
+        function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        {
+          line=$0
+          sub(/^[[:space:]]*/, "", line)
+          if (line ~ "^" name "[[:space:]]*=") {
+            found=1
+            sub("^[^=]*=", "", line)
+            line=trim(line)
+            if (line == "" || line == "\"\"" || line == "'\'''\''") exit 2
+          }
+        }
+        END { if (!found) exit 1 }
+      '"'"' "$env_file"; then
+        missing="$missing $name"
+      fi
+    done
+    if [ -n "$missing" ]; then
+      echo "aborting deploy: stats.enabled=true but coordinator.env is missing required non-empty var(s):$missing" >&2
+      exit 12
+    fi
+    echo "  ok: required stats DSN env vars are present in coordinator.env"
+  '
+else
+  echo "  stats.enabled is not true in $CONFIG — skipping stats env preflight"
+fi
+
 log "step 3b/9: install TCP sysctl overrides"
 if [ "${SKIP_TCP_TUNING:-0}" = "1" ]; then
   log "  SKIP_TCP_TUNING=1 set — skipping TCP sysctl overrides"
@@ -1129,26 +1172,55 @@ echo "  SPEC-023 static feeds OK"
 # just deployed; gate the smoke check on it.
 STATS_ENABLED_LOCAL="$(yaml_block_value stats enabled)"
 if [ "$STATS_ENABLED_LOCAL" = "true" ]; then
-  echo "  GET https://$STATS_DOMAIN/v1/stats/health -> expect 200"
+  STATS_SMOKE_NONCE="${BACKUP_TS:-$(date -u +%Y%m%dT%H%M%SZ)}-$$"
+  echo "  GET https://$STATS_DOMAIN/v1/stats/health?deploy_smoke=<nonce> -> expect 200"
   # R4 CODE/SEC convergent HIGH — DON'T use `STATS=$(curl ... || echo 000)`:
   # curl prints `000` to stdout AND exits non-zero on TLS/DNS failure, so
   # the `|| echo 000` appends another `000` producing `STATS=000000` and
   # silently passing the `[ "$STATS" = "000" ]` failure branch.
-  if ! STATS_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$STATS_DOMAIN/v1/stats/health" 2>/dev/null); then
+  if ! STATS_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$STATS_DOMAIN/v1/stats/health?deploy_smoke=$STATS_SMOKE_NONCE" 2>/dev/null); then
     STATS_STATUS="000"
   fi
   if [ "$STATS_STATUS" != "200" ]; then
     if [ "$STATS_STATUS" = "000" ]; then
-      echo "  WARN: $STATS_DOMAIN /v1/stats/health unreachable (TLS handshake or DNS failed)" >&2
+      echo "  ABORT: $STATS_DOMAIN /v1/stats/health unreachable (TLS handshake or DNS failed)" >&2
     else
-      echo "  WARN: $STATS_DOMAIN /v1/stats/health returned status=$STATS_STATUS (expected 200)" >&2
+      echo "  ABORT: $STATS_DOMAIN /v1/stats/health returned status=$STATS_STATUS (expected 200)" >&2
     fi
-    if [ "${STATS_REQUIRED:-0}" = "1" ]; then
-      echo "  STATS_REQUIRED=1 set — aborting." >&2
-      exit 9
-    fi
+    echo "  stats.enabled=true in $CONFIG — public stats smoke is mandatory." >&2
+    exit 9
+  fi
+  echo "  ok: $STATS_DOMAIN /v1/stats/health responded 200"
+
+  echo "  GET https://$STATS_DOMAIN/v1/stats/overview?deploy_smoke=<nonce> with Malibu Origin -> expect 200 + CORS"
+  STATS_HEADERS="$(mktemp -t macprovider-stats-headers.XXXXXX)"
+  if ! STATS_OVERVIEW_STATUS=$(curl -sS -D "$STATS_HEADERS" -o /dev/null -w '%{http_code}' --max-time 10 -H "Origin: https://www.malibu.tech" "https://$STATS_DOMAIN/v1/stats/overview?deploy_smoke=$STATS_SMOKE_NONCE" 2>/dev/null); then
+    STATS_OVERVIEW_STATUS="000"
+  fi
+  if [ "$STATS_OVERVIEW_STATUS" != "200" ]; then
+    echo "  ABORT: $STATS_DOMAIN /v1/stats/overview returned status=$STATS_OVERVIEW_STATUS (expected 200)" >&2
+    rm -f "$STATS_HEADERS"
+    exit 9
+  fi
+  if ! tr -d '\r' < "$STATS_HEADERS" | grep -Eiq '^access-control-allow-origin:[[:space:]]*(\*|https://www\.malibu\.tech)[[:space:]]*$'; then
+    echo "  ABORT: $STATS_DOMAIN /v1/stats/overview did not return a Malibu-compatible Access-Control-Allow-Origin header" >&2
+    sed 's/^/    /' "$STATS_HEADERS" >&2
+    rm -f "$STATS_HEADERS"
+    exit 9
+  fi
+  rm -f "$STATS_HEADERS"
+  echo "  ok: $STATS_DOMAIN /v1/stats/overview responded 200 with Malibu-compatible CORS"
+
+  echo "  GET https://$STATS_DOMAIN/v1/stats/leaderboard?deploy_smoke=<nonce> -> expect 200"
+  if ! STATS_LEADERBOARD_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$STATS_DOMAIN/v1/stats/leaderboard?deploy_smoke=$STATS_SMOKE_NONCE" 2>/dev/null); then
+    STATS_LEADERBOARD_STATUS="000"
+  fi
+  if [ "$STATS_LEADERBOARD_STATUS" != "200" ]; then
+    echo "  ABORT: $STATS_DOMAIN /v1/stats/leaderboard returned status=$STATS_LEADERBOARD_STATUS (expected 200)" >&2
+    echo "  stats.enabled=true in $CONFIG — Malibu stats population smoke is mandatory." >&2
+    exit 9
   else
-    echo "  ok: $STATS_DOMAIN /v1/stats/health responded 200"
+    echo "  ok: $STATS_DOMAIN /v1/stats/leaderboard responded 200"
   fi
 else
   # Stats disabled in deployed config. If STATS_REQUIRED=1, the operator

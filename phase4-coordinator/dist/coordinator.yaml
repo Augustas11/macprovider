@@ -91,6 +91,37 @@ explorer:
   settlements_default_window_hours: 720
   requests_per_minute_cap: 60
 
+# SPEC-017 Network Stats API — public surface consumed by
+# https://www.malibu.tech/network/. These DSNs are resolved from
+# /etc/macprovider/coordinator.env by systemd; never inline them in YAML.
+stats:
+  enabled: true
+  reader_dsn: env:STATS_READER_DSN
+  rollup_dsn: env:STATS_ROLLUP_DSN
+  partner_keys:
+    # Optional last_used_at writes remain disabled for public Malibu stats.
+    # If this is flipped to true, add stats.partner_keys.writer_dsn and
+    # provision STATS_PARTNER_KEYS_WRITER_DSN in coordinator.env first.
+    last_used_at_updates_enabled: false
+    production_signoff_path: "/opt/macprovider/spec017-signoff.txt"
+  rollup:
+    # Full backfill avoids guessing a partial cutover timestamp and lets
+    # Malibu render all-time totals once the SPEC-017 tables are migrated.
+    backfill_mode: "full"
+    late_events_retention_days: 90
+    usd_per_million_credits: 1.0
+    drift_threshold_ratio: 0.005
+    nightly_rebuild_hour_utc: 9
+    late_events_lookback_hours: 48
+  cors:
+    access_control_max_age_seconds: 60
+    partner_origin_allowlist:
+      - "https://www.malibu.tech"
+      - "https://malibu.tech"
+  trusted_proxies:
+    - "127.0.0.0/8"
+    - "::1/128"
+
 onboarding:
   app_track_register_enabled: true
   postgres_dsn: env:ONBOARDING_POSTGRES_DSN

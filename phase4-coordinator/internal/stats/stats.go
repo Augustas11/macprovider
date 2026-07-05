@@ -33,11 +33,12 @@ import (
 type Config struct {
 	Enabled bool
 
-	// DSN per active runtime role. When Enabled = true, the three
-	// always-required DSNs MUST be non-empty.
-	ReaderDSN         string
-	RollupDSN         string
-	ProviderPortalDSN string
+	// DSN per active daemon role. When Enabled = true, reader and
+	// rollup DSNs MUST be non-empty. The provider_portal role is
+	// intentionally not opened by the public stats daemon; it belongs
+	// to provider-authenticated portal/operator flows.
+	ReaderDSN string
+	RollupDSN string
 
 	// PartnerKeys gates the optional `partner_keys_writer` pool.
 	// v0.1 default is LastUsedAtUpdatesEnabled = false; the
@@ -113,17 +114,15 @@ type CORSConfig struct {
 	PartnerOriginAllowlist []string
 }
 
-// Pools holds one *sql.DB per active runtime role. Per SPEC §7.2.5,
+// Pools holds one *sql.DB per active daemon role. Per SPEC §7.2.5,
 // no two roles MAY share a pool.
 //
-// Reader, Rollup, ProviderPortal are non-nil whenever Open returns
-// nil. PartnerKeysWriter is nil unless
-// Config.PartnerKeys.LastUsedAtUpdatesEnabled was true at Open
-// time (BUILD §C.2 + §D.5).
+// Reader and Rollup are non-nil whenever Open returns nil.
+// PartnerKeysWriter is nil unless Config.PartnerKeys.LastUsedAtUpdatesEnabled
+// was true at Open time (BUILD §C.2 + §D.5).
 type Pools struct {
 	Reader            *sql.DB
 	Rollup            *sql.DB
-	ProviderPortal    *sql.DB
 	PartnerKeysWriter *sql.DB
 }
 
@@ -138,7 +137,7 @@ func (p *Pools) Close() error {
 		return nil
 	}
 	var firstErr error
-	for _, db := range []*sql.DB{p.Reader, p.Rollup, p.ProviderPortal, p.PartnerKeysWriter} {
+	for _, db := range []*sql.DB{p.Reader, p.Rollup, p.PartnerKeysWriter} {
 		if db == nil {
 			continue
 		}
@@ -203,13 +202,6 @@ func Open(ctx context.Context, cfg Config) (*Pools, error) {
 	}
 	pools.Rollup = rollup
 
-	portal, err := openPool(cfg.ProviderPortalDSN, poolTuneWrite())
-	if err != nil {
-		_ = pools.Close()
-		return nil, fmt.Errorf("provider_portal: %w", err)
-	}
-	pools.ProviderPortal = portal
-
 	if cfg.PartnerKeys.LastUsedAtUpdatesEnabled {
 		writer, err := openPool(cfg.PartnerKeys.WriterDSN, poolTuneWrite())
 		if err != nil {
@@ -233,9 +225,6 @@ func validateRequiredDSNs(cfg Config) error {
 	}
 	if strTrim(cfg.RollupDSN) == "" {
 		return errors.New("stats_rollup_dsn is required when stats.enabled = true")
-	}
-	if strTrim(cfg.ProviderPortalDSN) == "" {
-		return errors.New("provider_portal_dsn is required when stats.enabled = true")
 	}
 	if cfg.PartnerKeys.LastUsedAtUpdatesEnabled && strTrim(cfg.PartnerKeys.WriterDSN) == "" {
 		return errors.New(
@@ -296,7 +285,7 @@ func openPool(dsn string, tune poolTune) (*sql.DB, error) {
 //
 //  1. SELECT current_user equals the expected role for each
 //     pool (catches miswired DSN).
-//  2. The three required roles are distinct (catches all
+//  2. The required roles are distinct (catches all
 //     pools sharing one role).
 //  3. A positive probe — each role can read a table the
 //     locked SPEC §7.2 says it should be able to read.
@@ -332,13 +321,6 @@ func smoke(ctx context.Context, p *Pools) error {
 			positiveSQL: `SELECT 1 FROM stats_components_health LIMIT 1`,
 			// partner_keys is on the §7.2.2 deny list.
 			denySQL: `SELECT 1 FROM partner_keys LIMIT 1`,
-		},
-		{
-			role:        "provider_portal",
-			db:          p.ProviderPortal,
-			positiveSQL: `SELECT 1`, // no SELECT grants on any SPEC-017 table; trivial probe.
-			// stats_overview_current is on the §7.2.3 deny list.
-			denySQL: `SELECT 1 FROM stats_overview_current LIMIT 1`,
 		},
 	}
 	if p.PartnerKeysWriter != nil {

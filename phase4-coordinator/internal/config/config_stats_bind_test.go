@@ -24,7 +24,6 @@ func TestStatsRequiresLoopbackBind(t *testing.T) {
 		c.Stats.Enabled = true
 		c.Stats.ReaderDSN = "postgres://r@/x"
 		c.Stats.RollupDSN = "postgres://w@/x"
-		c.Stats.ProviderPortalDSN = "postgres://p@/x"
 		return c
 	}
 

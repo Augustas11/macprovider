@@ -218,6 +218,41 @@ tier2:
   # When empty, /poolz falls back to scheme + request Host. For Pearl:
   public_catalog_base_url: "https://coordinator.streamvc.live"
 
+# SPEC-017 Network Stats API.
+#
+# Production `dist/coordinator.yaml` enables this block for
+# https://www.malibu.tech/network/. Keep this example disabled unless you
+# have applied the SPEC-017 migrations and provisioned role-specific Postgres
+# DSNs in /etc/macprovider/coordinator.env.
+stats:
+  enabled: false
+  # Required when enabled=true:
+  # reader_dsn: env:STATS_READER_DSN
+  # rollup_dsn: env:STATS_ROLLUP_DSN
+  partner_keys:
+    last_used_at_updates_enabled: false
+    # Production deploys should set this to
+    # /opt/macprovider/spec017-signoff.txt before issuing partner keys.
+    # Leave unset in staging fixtures.
+    # production_signoff_path: "/opt/macprovider/spec017-signoff.txt"
+    # Required only when last_used_at_updates_enabled=true:
+    # writer_dsn: env:STATS_PARTNER_KEYS_WRITER_DSN
+  rollup:
+    backfill_mode: "full"
+    late_events_retention_days: 90
+    usd_per_million_credits: 1.0
+    drift_threshold_ratio: 0.005
+    nightly_rebuild_hour_utc: 9
+    late_events_lookback_hours: 48
+  cors:
+    access_control_max_age_seconds: 60
+    partner_origin_allowlist:
+      - "https://www.malibu.tech"
+      - "https://malibu.tech"
+  trusted_proxies:
+    - "127.0.0.0/8"
+    - "::1/128"
+
 # Auto-update recommendation surface. The coordinator forwards
 # `latest_binary_version` to every connected provider in its
 # `auth_response` / `state_update` frame as `recommended_binary_version`.
