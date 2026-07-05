@@ -242,14 +242,19 @@ actor ProviderStatus {
         resetSpecDecodeWindow()
     }
 
-    func completeTargetSwap(modelID: String, modelHash: String?) {
+    func completeTargetSwap(
+        modelID: String,
+        modelHash: String?,
+        specDecodeDraftModelID: String? = nil,
+        specDecodeNumDraftTokens: Int? = nil
+    ) {
         self.modelID = modelID
         self.modelHash = modelHash
         modelLoaded = true
         if status == .unavailable {
             status = .ready
         }
-        setSpecDecodeConfig(draftModelID: nil, numDraftTokens: nil)
+        setSpecDecodeConfig(draftModelID: specDecodeDraftModelID, numDraftTokens: specDecodeNumDraftTokens)
         refreshAvailabilityState()
     }
 

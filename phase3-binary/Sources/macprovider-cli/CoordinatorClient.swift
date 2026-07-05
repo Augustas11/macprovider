@@ -2154,6 +2154,7 @@ actor CoordinatorClient {
             "throughput_tps_since_last": nullableNumber(snapshot.throughputTPSSinceLast),
         ]
         var specDecodeTelemetryMatchesRuntime = true
+        var specDecodeTelemetryRuntimeEligible = true
         if warmSwapEnabled {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
             let runtimeModelID = runtimeSnapshot.modelID
@@ -2164,9 +2165,10 @@ actor CoordinatorClient {
             }
             payload["loading"] = runtimeSnapshot.state == .loading || runtimeSnapshot.state == .draining
             specDecodeTelemetryMatchesRuntime = runtimeSnapshot.specDecodeGeneration == snapshot.specDecodeGeneration
+            specDecodeTelemetryRuntimeEligible = runtimeSnapshot.state == .ready && runtimeSnapshot.hasTargetCompatibleDraft
         }
         if appConfig.publishesSpecDecodeTelemetry {
-            if specDecodeTelemetryMatchesRuntime {
+            if specDecodeTelemetryMatchesRuntime && specDecodeTelemetryRuntimeEligible {
                 payload["spec_decode_enabled"] = snapshot.specDecodeEnabled
                 payload["spec_decode_draft_model_id"] = snapshot.specDecodeDraftModelID ?? NSNull()
                 payload["spec_decode_num_draft_tokens"] = snapshot.specDecodeNumDraftTokens ?? NSNull()

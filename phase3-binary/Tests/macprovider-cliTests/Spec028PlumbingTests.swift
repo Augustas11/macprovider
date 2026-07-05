@@ -257,6 +257,30 @@ final class Spec028PlumbingTests: XCTestCase {
         XCTAssertEqual(chunkCalls.value, 0)
     }
 
+    func testRuntimeSnapshotRequiresTargetCompatibleDraft() {
+        let matching = RuntimeSnapshot(
+            state: .ready,
+            container: nil,
+            modelID: "target-a",
+            modelHash: nil,
+            draftModelID: "draft",
+            draftTargetModelID: "target-a",
+            numDraftTokens: 3
+        )
+        let mismatched = RuntimeSnapshot(
+            state: .ready,
+            container: nil,
+            modelID: "target-b",
+            modelHash: nil,
+            draftModelID: "draft",
+            draftTargetModelID: "target-a",
+            numDraftTokens: 3
+        )
+
+        XCTAssertTrue(matching.hasTargetCompatibleDraft)
+        XCTAssertFalse(mismatched.hasTargetCompatibleDraft)
+    }
+
     func testDraftCapacityHelpersMatchSpec028Tiers() {
         XCTAssertEqual(ProviderCapacity.defaultContextTokens(forPhysicalMemoryGB: 8), 20_000)
         XCTAssertEqual(ProviderCapacity.defaultContextTokens(forPhysicalMemoryGB: 16), 50_000)
@@ -556,6 +580,60 @@ final class Spec028PlumbingTests: XCTestCase {
         XCTAssertTrue(failing.failureReasons.contains { $0.contains("acceptance") })
     }
 
+    func testAC11CanaryEvaluationRequiresSpecDecodeAndStreamingEvidence() {
+        let shortChat = ac11FixtureResult(
+            mode: "short_chat",
+            streamed: false,
+            draftedTokens: 12,
+            acceptedTokens: 6,
+            chunks: 0
+        )
+        let streaming = ac11FixtureResult(
+            mode: "streaming_check",
+            streamed: true,
+            draftedTokens: 10,
+            acceptedTokens: 4,
+            chunks: 3
+        )
+
+        XCTAssertTrue(Spec028AC11Evaluation.evaluate(fixtures: [shortChat, streaming]).passed)
+
+        let zeroDraft = Spec028AC11Evaluation.evaluate(fixtures: [
+            ac11FixtureResult(mode: "short_chat", streamed: false, draftedTokens: 0, acceptedTokens: 0, chunks: 0),
+            streaming
+        ])
+        XCTAssertFalse(zeroDraft.passed)
+        XCTAssertTrue(zeroDraft.failureReasons.contains { $0.contains("produced no drafted tokens") })
+        XCTAssertTrue(zeroDraft.failureReasons.contains { $0.contains("accepted no drafted tokens") })
+
+        let zeroChunks = Spec028AC11Evaluation.evaluate(fixtures: [
+            shortChat,
+            ac11FixtureResult(mode: "streaming_check", streamed: true, draftedTokens: 10, acceptedTokens: 4, chunks: 0)
+        ])
+        XCTAssertFalse(zeroChunks.passed)
+        XCTAssertTrue(zeroChunks.failureReasons.contains { $0.contains("streamed no chunks") })
+    }
+
+    func testSpec028CanaryFixtureInvalidShapeDoesNotExposeAbsolutePath() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("spec028-invalid-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixtureURL = directory.appendingPathComponent("bad.json")
+        try Data(#"{"fixture_id":"bad"}"#.utf8).write(to: fixtureURL)
+
+        XCTAssertThrowsError(try Spec028CanaryFixture.load(
+            path: fixtureURL.path,
+            defaultResourceName: "bad",
+            defaultFixturePath: "unused.json",
+            label: "AC-11 bad_fixture"
+        )) { error in
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("invalid AC-11 bad_fixture fixture bad.json"))
+            XCTAssertFalse(message.contains(directory.path))
+        }
+    }
+
     func testSmallAirLlama32CanaryWhenExplicitlyEnabled() async throws {
         guard ProcessInfo.processInfo.environment["SPEC028_RUN_SMALL_AIR_CANARY"] == "1" else {
             throw XCTSkip("Set SPEC028_RUN_SMALL_AIR_CANARY=1 on an M1 8 GB host with local Llama 3.2 3B/1B snapshots to run AC-11.")
@@ -697,5 +775,30 @@ final class Spec028PlumbingTests: XCTestCase {
         request["model"] = model
         let data = try JSONSerialization.data(withJSONObject: request)
         return try ChatCompletionRequest.parse(data: data)
+    }
+
+    private func ac11FixtureResult(
+        mode: String,
+        streamed: Bool,
+        draftedTokens: Int,
+        acceptedTokens: Int,
+        chunks: Int,
+        temperature: Double = 0,
+        completionTokens: Int = 8
+    ) -> Spec028AC11FixtureResult {
+        Spec028AC11FixtureResult(
+            fixtureID: "fixture-\(mode)",
+            mode: mode,
+            temperature: temperature,
+            streamed: streamed,
+            promptTokens: 12,
+            completionTokens: completionTokens,
+            elapsedSeconds: 0.5,
+            draftedTokens: draftedTokens,
+            acceptedTokens: acceptedTokens,
+            acceptanceRate: draftedTokens > 0 ? Double(acceptedTokens) / Double(draftedTokens) : nil,
+            chunks: chunks,
+            thermalState: "nominal"
+        )
     }
 }
