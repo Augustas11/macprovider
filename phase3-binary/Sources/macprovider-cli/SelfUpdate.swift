@@ -502,8 +502,6 @@ struct GitHubRelease: Decodable {
         case tagName = "tag_name"
         case assets
         case body
-        case signedPolicyMinimum = "signed_policy_minimum"
-        case signedPolicyRevoked = "signed_policy_revoked"
     }
 
     init(from decoder: Decoder) throws {
@@ -511,29 +509,12 @@ struct GitHubRelease: Decodable {
         tagName = try container.decode(String.self, forKey: .tagName)
         assets = try container.decode([GitHubAsset].self, forKey: .assets)
         body = try container.decodeIfPresent(String.self, forKey: .body)
-        let directMinimum = try container.decodeIfPresent(String.self, forKey: .signedPolicyMinimum)
-        let directRevoked = try container.decodeIfPresent([String].self, forKey: .signedPolicyRevoked)
-        if directMinimum != nil || directRevoked != nil {
-            signedPolicy = GitHubSignedPolicy(minimum: directMinimum, revoked: directRevoked ?? [])
-        } else {
-            signedPolicy = Self.extractSignedPolicy(from: body)
-        }
-    }
-
-    private static func extractSignedPolicy(from body: String?) -> GitHubSignedPolicy? {
-        guard let body,
-              let range = body.range(of: #"```json\s*(\{[\s\S]*?"signed_policy_[\s\S]*?\})\s*```"#, options: .regularExpression)
-        else { return nil }
-        let block = String(body[range])
-            .replacingOccurrences(of: #"^```json\s*"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"\s*```$"#, with: "", options: .regularExpression)
-        guard let data = block.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        return GitHubSignedPolicy(
-            minimum: object["signed_policy_minimum"] as? String,
-            revoked: object["signed_policy_revoked"] as? [String] ?? []
-        )
+        // Release JSON/body metadata is not covered by checksums.txt.sig.
+        // Persisting policy from those unsigned fields would let a tampered
+        // release response change local trust state before signature proof.
+        // Keep the decoded shape for future signed-policy plumbing, but drop
+        // unsigned metadata on read.
+        signedPolicy = nil
     }
 }
 
