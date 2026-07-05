@@ -63,7 +63,7 @@ final class LaunchProviderController: ObservableObject {
         var providerID: (Curve25519.Signing.PrivateKey) -> String
         var currentProviderToken: (String) async -> String?
         var registerProvider: (Curve25519.Signing.PrivateKey, String?) async throws -> RegisterResponse
-        var saveProviderIdentity: (String, String) async throws -> Void
+        var saveProviderIdentity: (String, String, URL) async throws -> Void
         var repairMarkerlessAppConfig: (String) async throws -> Void
         var saveState: (OnboardingState) throws -> Void
         var updateState: (String, String, Date?, OnboardingState.ModelDownloadState?) throws -> Void
@@ -90,8 +90,8 @@ final class LaunchProviderController: ObservableObject {
                     let request = try registerClient.makeSignedRequest(identityKey: key)
                     return try await registerClient.postRegister(request, bearerProof: bearerProof)
                 },
-                saveProviderIdentity: { providerID, token in
-                    try await ProviderConfig.saveProviderIdentity(providerID: providerID, token: token)
+                saveProviderIdentity: { providerID, token, coordinatorWSURL in
+                    try await ProviderConfig.saveProviderIdentity(providerID: providerID, token: token, coordinatorWSURL: coordinatorWSURL)
                 },
                 repairMarkerlessAppConfig: { providerID in
                     try await ProviderConfig.repairMarkerlessAppOwnedConfig(providerID: providerID)
@@ -125,7 +125,9 @@ final class LaunchProviderController: ObservableObject {
                 startAgent: { await agent?.start() },
                 waitForFirstServing: {
                     guard let agent else { return Date() }
-                    for _ in 0..<60 {
+                    let deadline = Date().addingTimeInterval(MalibuOnboardingTimeouts.firstServingFrameSec)
+                    let pollNanos = UInt64(MalibuOnboardingTimeouts.firstServingPollIntervalSec * 1_000_000_000)
+                    while Date() < deadline {
                         switch agent.snapshot.state {
                         case .serving:
                             return Date()
@@ -136,7 +138,7 @@ final class LaunchProviderController: ObservableObject {
                                 userInfo: [NSLocalizedDescriptionKey: agent.snapshot.lastError ?? "Provider failed to start."]
                             )
                         default:
-                            try await Task.sleep(nanoseconds: 500_000_000)
+                            try await Task.sleep(nanoseconds: pollNanos)
                         }
                     }
                     throw NSError(
@@ -252,7 +254,7 @@ final class LaunchProviderController: ObservableObject {
             stage = .registering
             let bearerProof = await dependencies.currentProviderToken(providerID)
             let response = try await dependencies.registerProvider(key, bearerProof)
-            try await dependencies.saveProviderIdentity(response.providerID, response.providerToken)
+            try await dependencies.saveProviderIdentity(response.providerID, response.providerToken, response.coordinatorWebSocketURL)
             try dependencies.updateState(response.providerID, "registered", nil, nil)
 
             try await finishLaunch(providerID: response.providerID, from: .autotune, plan: nil)
@@ -381,7 +383,7 @@ final class LaunchProviderController: ObservableObject {
         stage = .registering
         let bearerProof = await dependencies.currentProviderToken(providerID)
         let response = try await dependencies.registerProvider(key, bearerProof)
-        try await dependencies.saveProviderIdentity(response.providerID, response.providerToken)
+        try await dependencies.saveProviderIdentity(response.providerID, response.providerToken, response.coordinatorWebSocketURL)
         try dependencies.updateState(response.providerID, "registered", nil, nil)
         try await finishLaunch(providerID: response.providerID, from: .autotune, plan: existing.modelDownload.map {
             ModelDownloadPlan(modelName: $0.modelID, state: $0, earningsEstimate: nil)

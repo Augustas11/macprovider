@@ -331,7 +331,7 @@ final class LaunchProviderControllerTests: XCTestCase {
                         coordinatorWebSocketURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!
                     )
                 },
-                saveProviderIdentity: { providerID, token in
+                saveProviderIdentity: { providerID, token, _ in
                     self.savedProviderID = providerID
                     self.savedToken = token
                 },

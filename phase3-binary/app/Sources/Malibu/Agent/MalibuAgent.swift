@@ -81,11 +81,19 @@ final class MalibuAgent: ObservableObject {
         }
         guard !isShuttingDown else { return }
 
+        // FreePortProbe: ask the kernel for a free 127.0.0.1 TCP port so the
+        // CLI's local HTTP inference endpoint doesn't collide with whatever
+        // else may be on port 8080 (Node dev server, Rails, jaeger). Falling
+        // back to nil lets the CLI use its default 8080; the CLI's own bind
+        // error surfaces the failure with the same context as before, so
+        // this cannot regress.
+        let probedPort = try? FreePortProbe.probe()
+
         let launch = CLIChildProcess.Launch(
             executable: cliURL,
             configPath: paths.configFile,
             controlSocketPath: paths.controlSocket,
-            httpPort: nil,
+            httpPort: probedPort,
             logFileURL: paths.cliLogFile,
             extraEnvironment: extraEnv
         )
@@ -172,7 +180,7 @@ final class MalibuAgent: ObservableObject {
 
         let client = ControlSocketClient(socketPath: socketPath)
         do {
-            try await client.connect(timeout: 10)
+            try await client.connect(timeout: MalibuOnboardingTimeouts.controlSocketConnectSec)
         } catch {
             // AUDIT R6 CODE M-connect fix: previously we set .error and returned,
             // leaving `self.child` pointing at a running CLI. `start()`'s

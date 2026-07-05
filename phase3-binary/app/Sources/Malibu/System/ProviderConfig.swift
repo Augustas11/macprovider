@@ -170,14 +170,15 @@ enum ProviderConfig {
         }
     }
 
-    static func saveProviderIdentity(providerID: String, token: String) async throws {
-        try await saveProviderIdentity(providerID: providerID, token: token, paths: .current)
+    static func saveProviderIdentity(providerID: String, token: String, coordinatorWSURL: URL) async throws {
+        try await saveProviderIdentity(providerID: providerID, token: token, coordinatorWSURL: coordinatorWSURL, paths: .current)
     }
 
-    static func saveProviderIdentity(providerID: String, token: String, paths: ProviderPaths) async throws {
+    static func saveProviderIdentity(providerID: String, token: String, coordinatorWSURL: URL, paths: ProviderPaths) async throws {
         try await saveProviderIdentity(
             providerID: providerID,
             token: token,
+            coordinatorWSURL: coordinatorWSURL,
             paths: paths,
             readToken: { await KeychainStore.readProviderToken(providerID: $0) },
             saveToken: { try await KeychainStore.saveProviderToken(providerID: $0, token: $1) },
@@ -188,6 +189,7 @@ enum ProviderConfig {
     static func saveProviderIdentity(
         providerID: String,
         token: String,
+        coordinatorWSURL: URL,
         paths: ProviderPaths,
         readToken: @escaping (String) async -> String?,
         saveToken: @escaping (String, String) async throws -> Void,
@@ -221,9 +223,11 @@ enum ProviderConfig {
                     !$0.hasPrefix("provider_id:")
                         && !$0.hasPrefix("provider_token:")
                         && !$0.hasPrefix("link_state:")
+                        && !$0.hasPrefix("coordinator_url:")
                 }
         }
         lines.append("provider_id: \(providerID)")
+        lines.append("coordinator_url: \(coordinatorWSURL.absoluteString)")
         lines.append("link_state: \(LinkState.pendingLink.rawValue)")
         // We deliberately do NOT write the token to disk. The CLI must be
         // launched with the token in the environment (MACPROVIDER_PROVIDER_TOKEN),

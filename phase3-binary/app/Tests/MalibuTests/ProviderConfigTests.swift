@@ -413,6 +413,7 @@ final class ProviderConfigParserTests: XCTestCase {
             try await ProviderConfig.saveProviderIdentity(
                 providerID: "p_failed",
                 token: "provider-token",
+                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
                 paths: paths,
                 readToken: { _ in nil },
                 saveToken: { _, _ in
@@ -440,6 +441,7 @@ final class ProviderConfigParserTests: XCTestCase {
             try await ProviderConfig.saveProviderIdentity(
                 providerID: "p_marker_failed",
                 token: "provider-token",
+                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
                 paths: paths,
                 readToken: { _ in nil },
                 saveToken: { _, token in savedToken = token },
@@ -469,6 +471,7 @@ final class ProviderConfigParserTests: XCTestCase {
             try await ProviderConfig.saveProviderIdentity(
                 providerID: "p_verify_failed",
                 token: "provider-token",
+                coordinatorWSURL: URL(string: "wss://coordinator.streamvc.live/v2/provider")!,
                 paths: paths,
                 readToken: { _ in nil },
                 saveToken: { _, token in savedToken = token },
