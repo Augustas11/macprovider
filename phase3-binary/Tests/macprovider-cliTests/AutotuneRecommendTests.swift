@@ -15,6 +15,58 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(result.candidates.first?.expectedNetUSDPerHour), 0.0050)
     }
 
+    func testRecommendationJSONIncludesApplyReadyServeConfigWhenProvided() throws {
+        let request = try makeRequest()
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        let benchmark = try XCTUnwrap(request.benchmarks[selected.catalogKey])
+        let row = try XCTUnwrap(request.candidateCatalog.rows[selected.catalogKey])
+        let core = RecommendationCore(
+            model: selected.model,
+            targetContext: 4000,
+            knobs: WinningKnobs(kvBits: nil, maxBatch: 1, maxContext: 4000),
+            tpsMedian: selected.tokensPerSecond,
+            ttftP95MS: 0,
+            replicates: 0,
+            modelArtifactPath: benchmark.modelArtifactPath,
+            modelArtifactSHA256: benchmark.artifactSHA256,
+            modelCatalogKey: selected.catalogKey,
+            modelCatalogModelID: row.modelID,
+            modelCatalogRevision: row.modelRevision,
+            modelCatalogSHA256: row.modelSHA256,
+            modelCatalogVersion: request.candidateCatalog.version,
+            modelCatalogHash: request.candidateCatalogSHA256
+        )
+
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString(serveConfig: core).utf8)) as? [String: Any])
+        let serveConfig = try XCTUnwrap(root["serve_config"] as? [String: Any])
+
+        XCTAssertEqual(Set(serveConfig.keys), Set(ConfigApplier.recommendationOwnedKeys))
+        XCTAssertEqual(serveConfig["model"] as? String, selected.model)
+        XCTAssertEqual(serveConfig["model_artifact_path"] as? String, benchmark.modelArtifactPath)
+        XCTAssertEqual(serveConfig["model_artifact_sha256"] as? String, benchmark.artifactSHA256)
+        XCTAssertEqual(serveConfig["model_catalog_key"] as? String, selected.catalogKey)
+        XCTAssertEqual(serveConfig["model_catalog_model_id"] as? String, row.modelID)
+        XCTAssertEqual(serveConfig["model_catalog_revision"] as? String, row.modelRevision)
+        XCTAssertEqual(serveConfig["model_catalog_sha256"] as? String, row.modelSHA256)
+        XCTAssertEqual(serveConfig["model_catalog_version"] as? String, request.candidateCatalog.version)
+        XCTAssertEqual(serveConfig["model_catalog_hash"] as? String, request.candidateCatalogSHA256)
+        XCTAssertEqual(serveConfig["max_context_override"] as? Int, 4000)
+        XCTAssertEqual(serveConfig["max_concurrency_override"] as? Int, 1)
+        XCTAssertEqual(serveConfig["donor_mode"] as? Bool, false)
+        XCTAssertEqual(root["recommended_model"] as? String, result.recommendedModel)
+    }
+
+    func testRecommendationJSONUsesNullServeConfigWhenNotProvided() throws {
+        let request = try makeRequest()
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString().utf8)) as? [String: Any])
+
+        XCTAssertTrue(root.keys.contains("serve_config"))
+        XCTAssertTrue(root["serve_config"] is NSNull)
+    }
+
     func testAllRowsFailingEligibilityEmitsNoEligibleWarning() throws {
         var request = try makeRequest()
         request.benchmarks = [:]

@@ -20,7 +20,8 @@ Key evidence:
 
 - `~/.config/macprovider/config.yaml` after autotune completes contains
   ONLY `provider_id` and `link_state: linked`. Missing every field the CLI's
-  `serve` needs: `model_artifact_sha256`, `model_id`, catalog config.
+  `serve` needs: `model`, `model_artifact_path`,
+  `model_artifact_sha256`, and the `model_catalog_*` provenance keys.
 - User-facing failure copy: **"The bundled macprovider-cli is incompatible
   with this Malibu.app version (exit 2 in 0.1s). Please reinstall Malibu.app
   or file a bug."**
@@ -35,45 +36,74 @@ arguments: ["autotune", "--recommend", "--json", "--config", configPath.path]
 ```
 
 `fromAutotuneJSON` (line 111) extracts `recommended_model` and
-`earnings_estimate` for UI display but never touches `model_artifact_sha256`
-or writes to config. The `ModelDownloadPlan` value it returns is passed to
-`downloadModel` and then `startAgent` — but by the time `startAgent` invokes
-the CLI's `serve`, config.yaml still lacks the required fields.
+`earnings_estimate` for UI display but never touches the apply-ready
+config payload that `serve` requires. The `ModelDownloadPlan` value it
+returns is passed to `downloadModel` and then `startAgent` — but by the
+time `startAgent` invokes the CLI's `serve`, config.yaml still lacks the
+required fields.
+
+BUILD audit R1 found one important correction to the original hypothesis:
+the current `autotune --recommend --json` output does **not** include
+`model_artifact_path`, `model_artifact_sha256`, or `model_catalog_*`
+provenance. The CLI constructs those values only in the `--apply` path
+from the selected benchmark plus signed candidate catalog before calling
+`ConfigApplier`. Therefore Malibu.app must not synthesize trusted
+serve-readiness fields from `recommended_model`, candidates, defaults,
+local cache paths, or `onboarding.json`.
 
 ## Scope IN — this PR
 
 ### Item 1 (mandatory). Persist autotune recommendation to `config.yaml` before `startAgent`
 
-The MalibuAgent-spawned `serve` command must find `model_artifact_sha256`
-(and any other fields the CLI's `serve` gates on) in `config.yaml` when it
-starts. Options:
+The MalibuAgent-spawned `serve` command must find the full apply-ready
+recommendation payload in `config.yaml` when it starts. Today that means:
+
+- `model`
+- `model_artifact_path`
+- `model_artifact_sha256`
+- `model_catalog_key`
+- `model_catalog_model_id`
+- `model_catalog_revision`
+- `model_catalog_sha256`
+- `model_catalog_version`
+- `model_catalog_hash`
+- `kv_bits` when selected by autotune
+- `max_context_override`
+- `max_concurrency_override`
+- `donor_mode` only when the recommendation path is explicitly donor mode
+
+Options:
 
 - **Approach A — Chain a second CLI call.** After the existing `--json`
   call, invoke `autotune --recommend --apply --config <path>` to have the
   CLI write the recommendation to config. Advantage: App doesn't touch
   config.yaml schema. Disadvantage: doubles autotune runtime; blocked on P1
   hang (`--apply` currently hangs indefinitely — see below).
-- **Approach B — Parse `--json` and write config.yaml in Swift.** Extract
-  the model_artifact_sha256 from the recommendation JSON (per the CLI's
-  actual --json output, not the abbreviated one `fromAutotuneJSON`
-  currently parses) and write it into `config.yaml` via
-  `ProviderConfig` (or the existing config-write helpers). Advantage: no
-  P1 dependency, single autotune invocation. Disadvantage: App now knows
-  the config.yaml schema for serve-required fields.
-- **Approach C — Introduce `autotune --recommend --apply --json` combined
-  flag.** Requires CLI change: the flag both writes to config AND emits
-  JSON. Advantage: clean API, single invocation, both writes and returns
-  data. Disadvantage: scope creep into macprovider-cli.
+- **Approach B — Extend CLI JSON with an apply-ready payload, then persist
+  that payload in Swift.** Add an explicit JSON object (name suggestion:
+  `serve_config`) emitted by `autotune --recommend --json`. The payload
+  must be produced from the same selected benchmark + signed catalog row
+  values that the current `--apply` path passes to `ConfigApplier`, not
+  recomputed by Malibu.app. Malibu.app parses that typed payload and writes
+  it to `config.yaml` via `ProviderConfig`. Advantage: single autotune
+  invocation; no dependency on the `--apply` hang; CLI remains the owner of
+  recommendation/provenance derivation. Disadvantage: small CLI JSON
+  contract extension plus App-side persistence of serve-required config
+  keys.
+- **Approach C — Use existing `autotune --recommend --apply --json`
+  combination once the P1 apply hang is fixed.** The current CLI already
+  accepts the flag combination and applies before printing JSON; this PR
+  must not spend work adding that combination again. The missing piece is
+  either fixing the `--apply` hang or using Approach B.
 
-**Recommended: Approach B** for this PR. Rationale: (a) surgical, contained
-to LaunchProviderController + AutotuneRecommendationRunner; (b) no
-dependency on P1 CLI hang fix (which is a separate PR); (c) SPEC-026
-already couples the App to config.yaml at other points (`provider_id`,
-`link_state`) so the schema knowledge isn't a new coupling. If codex
-identifies a reason B is unsafe (e.g. --json output doesn't actually
-contain model_artifact_sha256 and the CLI computes it during --apply),
-fall back to Approach A with the P1 hang made a hard blocker for this
-PR. Document the choice in the impl commit body.
+**Recommended: Approach B as corrected by BUILD audit R1.** Rationale:
+(a) avoids the separate P1 `--apply` hang; (b) keeps CLI-owned provenance
+derivation in the CLI; (c) keeps the app's new responsibility limited to
+strictly validating and persisting an explicit apply-ready payload; (d)
+SPEC-026 already couples the App to config.yaml at other points
+(`provider_id`, `link_state`), so this is boundary repair rather than a
+new coordinator surface. Document this choice in the implementation commit
+body and in `beta/DECISION_CRITERIA.md`.
 
 ### Item 2 (mandatory). Verify JSON output field structure vs. what `serve` requires
 
@@ -85,47 +115,133 @@ Before implementing Approach B, codex must inspect the CLI source
 - What fields `serve` reads from config.yaml (in the coordinator-join
   precondition check that produces the "requires model_artifact_sha256"
   error)
-- Whether the JSON output already contains everything `serve` needs, or
-  if `--apply` computes additional fields not present in `--json`
+- Which values the `--apply` path computes from selected benchmark and
+  signed candidate catalog before `ConfigApplier.apply`
 
-If the JSON output already contains model_artifact_sha256, Approach B is
-correct. If it doesn't, the fix must either:
-- Extend `--json` to include the missing fields (touches CLI)
-- OR require `--apply` (blocks on P1)
+Audit R1 already verified that current JSON is incomplete. The
+implementation must extend JSON to include an explicit apply-ready
+`serve_config` payload carrying the fields above. Malibu.app must reject
+the response if that payload is missing, incomplete, or invalid. Malibu.app
+must not synthesize catalog/artifact provenance from `recommended_model`,
+candidate display rows, local defaults, cache paths, or `onboarding.json`.
 
-### Item 3 (mandatory). Extend `LaunchProviderControllerTests`
+The JSON contract must remain backward compatible for existing display
+fields: keep `recommended_model`, `candidates`, comparison, warnings, and
+earnings estimate inputs unchanged.
 
-Add tests covering:
+### Item 3 (mandatory). App-side seam and tests
+
+Add an explicit App-side result type so the typed payload cannot be hidden
+inside the runner or reparsed ad hoc in the controller. Suggested shape:
+
+```swift
+struct AutotuneRecommendationResult {
+    let plan: LaunchProviderController.ModelDownloadPlan
+    let serveConfig: ProviderConfig.AutotuneServeConfig
+}
+```
+
+Change `AutotuneRecommendationRunner.run` and
+`LaunchProviderController.Dependencies.runAutotune` to return that result.
+Add injected dependencies for `persistAutotuneRecommendation` and
+`validateServeConfigShape` backed by `ProviderConfig`. Keep
+`AutotuneRecommendationRunner` as process invocation + JSON parsing only;
+keep `LaunchProviderController` as state-machine orchestration only.
+
+Add `LaunchProviderControllerTests` covering:
 
 - **Test A (regression):** Given a fresh install with no config.yaml, when
-  `launch()` completes autotune stage, then config.yaml MUST contain
-  `model_artifact_sha256` before the state machine transitions to
-  `.downloadingModel`. Failing today.
+  `launch()` completes autotune stage, then the controller must have invoked
+  the new serve-config persistence dependency and verified serve-config
+  shape before transitioning to `.downloadingModel`. Failing today.
 - **Test B (retry loop):** Given a `.failed` state at `.startingAgent`
-  caused by missing config field, when `retry()` fires, the second attempt
-  MUST reach `.live` (not loop into the same failure).
+  caused by missing or invalid serve config, when `retry()` fires, the
+  second attempt MUST rerun the common autotune/persist/validate checkpoint
+  and reach `.live` (not loop into the same failure).
 - **Test C (resume):** Given a partial state (autotune completed but
   process killed before serve started), when `launch()` resumes from the
-  persisted `onboarding.json`, the config is re-verified/re-applied before
-  reaching `.startingAgent`.
+  persisted `onboarding.json`, config shape is validated before reaching
+  `.startingAgent`. If serve-readiness is missing and `onboarding.json`
+  does not contain enough recommendation data to reapply, the implementation
+  MUST demote the resume point back to `.autotune` and regenerate/persist a
+  fresh recommendation. Do not add fields to `onboarding.json`.
 
-### Item 4 (defensive). Fail-loud when autotune succeeds but config is not usable
+Add `ProviderConfigTests` covering:
+
+- Strict parsing/validation of the `serve_config` payload accepted from
+  `AutotuneRecommendationRunner`.
+- Top-level upsert of only the recommendation-owned keys listed in Item 1,
+  preserving existing `provider_id`, `link_state`, token handling semantics,
+  comments/unrelated top-level keys where current helpers preserve them, and
+  unrelated CLI config.
+- `config.yaml` mode `0600` and atomic replace with directory fsync.
+- Serve-readiness validation fails when any required key is missing, when
+  `model_artifact_sha256`/catalog SHA fields are not 64 lowercase hex, when
+  `model_artifact_path` is not absolute, or when string fields contain
+  control characters/newlines that could alter YAML structure. Include
+  malicious scalar fixtures containing `#`, `: `, single quote, double
+  quote, leading/trailing whitespace, and backslash; use either structured
+  YAML serialization with round-trip verification or one quoted/escaped
+  scalar helper for every persisted string field.
+
+Add CLI tests covering:
+
+- `autotune --recommend --json` emits `serve_config` for a paid selected
+  recommendation, populated from the same `RecommendationCore` fields the
+  apply path passes to `ConfigApplier`.
+- `serve_config` is absent or null when there is no selected recommendation
+  and the CLI would not apply config.
+- Existing recommendation display JSON remains backward compatible.
+
+### Item 4 (defensive). Fail-loud when autotune succeeds but config shape is not usable
 
 Add a defensive check between the autotune step and the `.startingAgent`
-transition: verify that config.yaml contains the fields `serve` needs
-(at minimum `model_artifact_sha256`). If not, transition to `.failed`
+transition: verify that config.yaml contains the full syntactic field set
+that `serve` gates on for coordinator join:
+
+- nonempty `model`
+- absolute `model_artifact_path`
+- lowercase-hex `model_artifact_sha256`
+- nonempty `model_catalog_key`
+- nonempty `model_catalog_model_id`
+- nonempty `model_catalog_revision`
+- lowercase-hex `model_catalog_sha256`
+- nonempty `model_catalog_version`
+- lowercase-hex `model_catalog_hash`
+
+This App-side check is intentionally **syntactic shape validation**, not a
+duplicate of CLI semantic admission. It must catch missing/obviously invalid
+local config before spawning `serve`; semantic artifact verification,
+catalog freshness, rate-card/model agreement, and signed catalog admission
+remain owned by the CLI `serve` preflight. Keep the schema aligned by
+centralizing the field list/ranges in one Foundation-only app helper and
+mirroring the CLI `ConfigApplier` owned-key list in tests.
+
+If validation fails after an autotune attempt, transition to `.failed`
 with a specific message ("autotune completed but config is missing
-required fields — file a bug") rather than blindly launching `serve`
-and getting exit 2. This is a belt-and-suspenders check that catches
-future regressions in the wiring.
+required serve config shape — file a bug") rather than blindly launching
+`serve` and getting exit 2. This catches future regressions in the
+wiring.
+
+If validation fails while resuming from persisted `modelReady` or
+`startingAgent`, do not launch `serve`. Since `onboarding.json` schema is
+unchanged and cannot replay the recommendation payload, rerun the
+autotune/persist/validate checkpoint before continuing.
+
+The validation and persistence logic should live behind `ProviderConfig`
+APIs (for example `persistAutotuneRecommendation(...)` and
+`validateServeConfigShape(...)`) and be injected into
+`LaunchProviderController` through dependencies. The controller should
+orchestrate stages and branch on success/failure; it should not inline ad
+hoc config parsing/writing.
 
 ## Scope OUT — deferred to separate PRs
 
 - **P1 — `macprovider-cli autotune --recommend --apply` hangs indefinitely.**
   Independent CLI bug. Users on the CLI-track hit this when trying to
   self-repair. Different subsystem (`phase3-binary/Sources/macprovider-cli/`),
-  different owner. If codex identifies P1 fix is required for Approach A to
-  work, defer Approach A and use Approach B instead.
+  different owner. This PR avoids depending on that path by extending JSON
+  and letting Malibu.app persist the explicit payload.
 - **UI copy improvements** on the error state. Existing "Please reinstall
   Malibu.app or file a bug." is technically correct but demoralizing;
   a better message would name the specific config issue. Deferred to a
@@ -155,6 +271,15 @@ future regressions in the wiring.
 6. **No child-process environment changes.** `sanitizedProcessEnvironment`
    already filters — do not weaken it to fix the config wire-up.
 7. **No new dependencies.** Foundation + existing helpers only.
+8. **No trusted-field synthesis in the App.** Malibu.app may persist only
+   the typed `serve_config` payload emitted by the bundled CLI after strict
+   validation. It must not derive artifact/catalog provenance from display
+   JSON.
+9. **Strict scalar validation.** Reject or safely quote/escape control
+   characters/newlines and YAML-sensitive scalars in persisted string fields.
+   Hash fields must be 64 lowercase hex. Paths must be absolute where
+   `serve` requires absolute paths. Numeric knobs must stay within the same
+   accepted ranges as the CLI writer emits.
 
 ## Audit-loop discipline
 
@@ -168,7 +293,8 @@ Per `[[feedback-audit-build-prompts-before-impl]]`:
 2. Converge prompt to 0 CRITICAL / 0 HIGH / 0 MEDIUM.
 3. **Security lane focus:** Malibu.app now writes to a config file the CLI
    reads — verify no injection surface (path traversal, YAML injection via
-   field values, quote escaping in `model_artifact_sha256` string).
+   field values, quote escaping for every persisted scalar, and strict
+   lowercase-hex validation for SHA fields).
 4. Codex executes audited prompt → IMPL on this branch
    `fix/launch-provider-autotune-apply`.
 5. 3-lane IMPL audit prompts:
@@ -181,21 +307,35 @@ Per `[[feedback-audit-build-prompts-before-impl]]`:
 - On a fresh-slate Mac (or after nuking Malibu.app + `~/.config/macprovider/`
   + `~/Library/Application Support/Malibu/` + `tech.malibu.provider`
   Keychain), install the .pkg built from this branch.
-- Set `MALIBU_ONBOARD_V2=1`.
+- Enable onboarding v2 for a packaged GUI launch with
+  `defaults write tech.malibu.app onboardingFlow -string v2` (or use
+  `launchctl setenv MALIBU_ONBOARD_V2 1` before launching and clean it up
+  after the smoke).
 - Launch Malibu.app → click Launch Provider.
 - Verify state machine reaches `.live` end-to-end without hitting the
   `.failed(startingAgent, ...)` state.
 - Verify `~/.config/macprovider/config.yaml` after the flow contains
-  `model_artifact_sha256`.
+  `model_artifact_sha256`, `model_artifact_path`, `model`, and
+  `model_catalog_*` provenance.
 - Verify menu bar transitions from "Idle" → running state.
 
-## Definition of done
+## Automated implementation definition of done
 
-- `swift test` passes (existing tests + new Test A/B/C from Item 3).
+- `swift test` passes for `phase3-binary` (existing tests + new controller,
+  config, and CLI JSON tests from Item 3).
 - 3-lane codex audit at 0 CRITICAL / 0 HIGH / 0 MEDIUM.
-- Manual smoke on a live Mac (per above) reaches `.live` state.
+- Decision log entry appended to `beta/DECISION_CRITERIA.md` explaining why
+  Malibu.app now persists CLI-emitted autotune serve config, which fields are
+  owned, and what should re-trigger the decision.
+
+## Ready-for-review release gate
+
 - CI green.
-- Ready to convert DRAFT → Ready.
+- Manual smoke on a live Mac (per above) reaches `.live` state.
+- If the live fresh-slate `.pkg` smoke cannot be run from the current
+  automation environment, keep the PR Draft and include
+  `Not-tested: live fresh-slate pkg smoke` in the commit/PR notes.
+- Ready to convert DRAFT → Ready only after the manual smoke is complete.
 
 ## Reference
 

@@ -29,6 +29,8 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(harness.loginItemRegistrations, 1)
         XCTAssertEqual(harness.agentStarts, 1)
         XCTAssertEqual(harness.autotuneRuns, 1)
+        XCTAssertEqual(harness.persistedServeConfigs.count, 1)
+        XCTAssertEqual(harness.validateServeConfigShapeCalls, 2)
         XCTAssertEqual(harness.modelDownloads.map(\.modelName), ["recommended"])
         XCTAssertEqual(harness.stageUpdates, ["registered", "autotuning", "cliReady", "downloadingModel", "modelReady", "startingAgent", "live"])
         XCTAssertEqual(controller.stage, .live(model: "recommended", tier: .provisional))
@@ -100,8 +102,28 @@ final class LaunchProviderControllerTests: XCTestCase {
         await controller.launch()
 
         XCTAssertEqual(harness.agentStarts, 1)
+        XCTAssertEqual(harness.validateServeConfigShapeCalls, 1)
         XCTAssertTrue(harness.stageUpdates.isEmpty)
         XCTAssertEqual(controller.stage, .live(model: "configured", tier: .provisional))
+    }
+
+    func testConfiguredInstallMissingServeConfigRerunsAutotuneBeforeStart() async {
+        let harness = Harness()
+        harness.configured = true
+        harness.serveConfigShapeValid = false
+        let controller = LaunchProviderController(
+            coordinatorBaseURL: URL(string: "https://coordinator.streamvc.live")!,
+            bundledCLIPath: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.autotuneRuns, 1)
+        XCTAssertEqual(harness.persistedServeConfigs, [.valid])
+        XCTAssertEqual(harness.agentStarts, 1)
+        XCTAssertEqual(harness.stageUpdates, ["autotuning", "cliReady", "downloadingModel", "modelReady", "startingAgent", "live"])
+        XCTAssertEqual(controller.stage, .live(model: "recommended", tier: .provisional))
     }
 
     func testLaunchResumesIdentityReadyByRegisteringBeforeAutotune() async {
@@ -194,6 +216,82 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .live(model: "Qwen2.5-7B-Instruct", tier: .provisional))
     }
 
+    func testLaunchPersistsAndValidatesServeConfigBeforeDownloadingModel() async {
+        let harness = Harness()
+        let controller = LaunchProviderController(
+            coordinatorBaseURL: URL(string: "https://coordinator.streamvc.live")!,
+            bundledCLIPath: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.persistedServeConfigs, [.valid])
+        XCTAssertLessThan(
+            harness.events.firstIndex(of: "validateServeConfigShape") ?? Int.max,
+            harness.events.firstIndex(of: "downloadModel") ?? Int.max
+        )
+        XCTAssertEqual(controller.stage, .live(model: "recommended", tier: .provisional))
+    }
+
+    func testRetryRerunsAutotuneAfterServeConfigValidationFailure() async {
+        let harness = Harness()
+        harness.validateFailuresRemaining = 1
+        let controller = LaunchProviderController(
+            coordinatorBaseURL: URL(string: "https://coordinator.streamvc.live")!,
+            bundledCLIPath: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.agentStarts, 0)
+        XCTAssertEqual(harness.autotuneRuns, 1)
+        guard case .failed(_, true, let message) = controller.stage else {
+            XCTFail("expected retryable validation failure")
+            return
+        }
+        XCTAssertEqual(message, "autotune completed but config is missing required serve config shape — file a bug")
+
+        await controller.retry()
+
+        XCTAssertEqual(harness.autotuneRuns, 2)
+        XCTAssertEqual(harness.agentStarts, 1)
+        XCTAssertEqual(controller.stage, .live(model: "recommended", tier: .provisional))
+    }
+
+    func testResumeFromStartingAgentDemotesToAutotuneWhenServeConfigShapeMissing() async {
+        let harness = Harness()
+        harness.configured = true
+        harness.serveConfigShapeValid = false
+        harness.loadedState = OnboardingState(
+            onboardingSchemaVersion: 2,
+            providerID: "p_test",
+            createdAt: Date(timeIntervalSince1970: 1),
+            lastStage: "startingAgent",
+            firstServingAt: nil,
+            modelDownload: OnboardingState.ModelDownloadState(
+                modelID: "Qwen2.5-7B-Instruct",
+                targetURL: URL(string: "https://models.example/qwen")!,
+                targetSHA256: "abc123",
+                partialBytes: 0
+            )
+        )
+        let controller = LaunchProviderController(
+            coordinatorBaseURL: URL(string: "https://coordinator.streamvc.live")!,
+            bundledCLIPath: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.autotuneRuns, 1)
+        XCTAssertEqual(harness.persistedServeConfigs, [.valid])
+        XCTAssertEqual(harness.modelDownloads.map(\.modelName), ["recommended"])
+        XCTAssertEqual(harness.agentStarts, 1)
+        XCTAssertEqual(controller.stage, .live(model: "recommended", tier: .provisional))
+    }
+
     private final class Harness {
         var savedProviderID: String?
         var savedToken: String?
@@ -203,6 +301,11 @@ final class LaunchProviderControllerTests: XCTestCase {
         var linkStates: [ProviderConfig.LinkState] = []
         var stageUpdates: [String] = []
         var modelDownloads: [LaunchProviderController.ModelDownloadPlan] = []
+        var persistedServeConfigs: [ProviderConfig.AutotuneServeConfig] = []
+        var validateServeConfigShapeCalls = 0
+        var validateFailuresRemaining = 0
+        var serveConfigShapeValid = true
+        var events: [String] = []
         var autotuneRuns = 0
         var configured = false
         var configProviderID = "p_test"
@@ -245,10 +348,28 @@ final class LaunchProviderControllerTests: XCTestCase {
                 },
                 runAutotune: { _ in
                     self.autotuneRuns += 1
-                    return .recommended
+                    self.events.append("runAutotune")
+                    return AutotuneRecommendationResult(plan: .recommended, serveConfig: .valid)
+                },
+                persistAutotuneRecommendation: { config in
+                    self.events.append("persistAutotuneRecommendation")
+                    self.persistedServeConfigs.append(config)
+                    self.serveConfigShapeValid = true
+                },
+                validateServeConfigShape: {
+                    self.events.append("validateServeConfigShape")
+                    self.validateServeConfigShapeCalls += 1
+                    if self.validateFailuresRemaining > 0 {
+                        self.validateFailuresRemaining -= 1
+                        throw ProviderConfig.ServeConfigError.missingField("model_artifact_sha256")
+                    }
+                    if !self.serveConfigShapeValid {
+                        throw ProviderConfig.ServeConfigError.missingField("model_artifact_sha256")
+                    }
                 },
                 ensureCLIReady: {},
                 downloadModel: { plan in
+                    self.events.append("downloadModel")
                     self.modelDownloads.append(plan)
                     return plan.state ?? OnboardingState.ModelDownloadState(
                         modelID: plan.modelName,
@@ -270,4 +391,22 @@ final class LaunchProviderControllerTests: XCTestCase {
             )
         }
     }
+}
+
+private extension ProviderConfig.AutotuneServeConfig {
+    static let valid = ProviderConfig.AutotuneServeConfig(
+        model: "meta-llama/llama-3.1-8b-instruct",
+        modelArtifactPath: "/Users/test/.cache/huggingface/hub/models--mlx-community--Meta-Llama-3.1-8B-Instruct-4bit/snapshots/241a666dad6cb93c8ff213d39a7f34a36bf26db4",
+        modelArtifactSHA256: String(repeating: "a", count: 64),
+        modelCatalogKey: "meta-llama/llama-3.1-8b-instruct",
+        modelCatalogModelID: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+        modelCatalogRevision: "241a666dad6cb93c8ff213d39a7f34a36bf26db4",
+        modelCatalogSHA256: String(repeating: "a", count: 64),
+        modelCatalogVersion: "baked-2026-07-03",
+        modelCatalogHash: String(repeating: "b", count: 64),
+        kvBits: nil,
+        maxContextOverride: 4000,
+        maxConcurrencyOverride: 1,
+        donorMode: false
+    )
 }

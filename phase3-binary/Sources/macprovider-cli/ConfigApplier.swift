@@ -177,21 +177,7 @@ struct ConfigApplier {
             "max_concurrency_override": String(recommendation.knobs.maxBatch),
             "donor_mode": donorMode ? "true" : nil,
         ]
-        let ownedKeys = [
-            "model",
-            "model_artifact_path",
-            "model_artifact_sha256",
-            "model_catalog_key",
-            "model_catalog_model_id",
-            "model_catalog_revision",
-            "model_catalog_sha256",
-            "model_catalog_version",
-            "model_catalog_hash",
-            "kv_bits",
-            "max_context_override",
-            "max_concurrency_override",
-            "donor_mode",
-        ]
+        let ownedKeys = Self.recommendationOwnedKeys
 
         if original.isEmpty {
             return renderOwnedConfig(values: values)
@@ -232,6 +218,22 @@ struct ConfigApplier {
         output += "\n"
         return output
     }
+
+    static let recommendationOwnedKeys = [
+        "model",
+        "model_artifact_path",
+        "model_artifact_sha256",
+        "model_catalog_key",
+        "model_catalog_model_id",
+        "model_catalog_revision",
+        "model_catalog_sha256",
+        "model_catalog_version",
+        "model_catalog_hash",
+        "kv_bits",
+        "max_context_override",
+        "max_concurrency_override",
+        "donor_mode",
+    ]
 
     private func renderOwnedConfig(values: [String: String?]) -> String {
         var lines = [
