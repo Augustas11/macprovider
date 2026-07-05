@@ -699,6 +699,16 @@ struct AutotuneCommand: AsyncParsableCommand {
     }
 
     private func runAutotuneRecommend() async throws {
+        // ARCH-M-1 orphan-child fix: become process-group leader BEFORE
+        // spawning any CandidateProviderRunner subprocess. Combined with the
+        // cascading signal handler below, this lets the caller (App) send
+        // one `killpg(cliPid, SIGTERM)` and cleanly tear down every
+        // `serve --no-join` grandchild alongside this process.
+        _ = autotuneBecomeProcessGroupLeader()
+        let interruptFlag = AutotuneInterruptFlag()
+        let signalSources = AutotuneSignalSources(flag: interruptFlag, cascadeToProcessGroup: true)
+        defer { _ = signalSources }
+
         let staticInputs = AutotuneStaticInputs()
         let demand = await staticInputs.loadDemandRank()
         let catalog = await staticInputs.loadCandidateCatalog()
@@ -735,8 +745,13 @@ struct AutotuneCommand: AsyncParsableCommand {
             targetContext: Self.spec023RecommendationProbeContext,
             gateTTFTMS: gateTTFTMS,
             replicates: stage1Replicates,
-            port: port
+            port: port,
+            interruptFlag: interruptFlag
         )
+        if interruptFlag.isSet() {
+            FileHandle.standardError.write(Data("autotune --recommend interrupted; exiting after subtree cleanup\n".utf8))
+            throw ExitCode(130)
+        }
         request.benchmarks = outcomes.benchmarks
         for modelKey in outcomes.diagnostics.keys.sorted() {
             let reason = outcomes.diagnostics[modelKey]!

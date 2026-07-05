@@ -1743,11 +1743,20 @@ struct AutotuneRecommendationBenchmarker {
         targetContext: Int,
         gateTTFTMS: Int,
         replicates: Int,
-        port: Int
+        port: Int,
+        interruptFlag: AutotuneInterruptFlag? = nil
     ) async throws -> BenchmarkOutcomes {
         var results: [String: CandidateBenchmark] = [:]
         var diagnostics: [String: String] = [:]
         for modelKey in request.candidateCatalog.rows.keys.sorted() {
+            // ARCH-M-1: Between candidates, honor SIGTERM/SIGINT so we don't
+            // race into a fresh subprocess spawn after the App has torn the
+            // group down. The cascading signal handler will already have sent
+            // SIGTERM to any currently-running `serve --no-join` child.
+            if interruptFlag?.isSet() == true {
+                diagnostics[modelKey] = "interrupted before probe"
+                break
+            }
             guard let row = request.candidateCatalog.rows[modelKey] else {
                 continue
             }

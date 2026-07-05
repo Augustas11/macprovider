@@ -176,7 +176,55 @@ struct RegisterClient {
 		if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
 			throw RegisterClientError.httpStatus(http.statusCode)
 		}
-        return try JSONDecoder().decode(RegisterResponse.self, from: data)
+        let decoded = try JSONDecoder().decode(RegisterResponse.self, from: data)
+        try Self.validateCoordinatorWSURL(decoded.coordinatorWebSocketURL, expectedBase: coordinatorBaseURL)
+        return decoded
+    }
+
+    /// Validate that the register response's coordinator_ws_url is same-origin
+    /// with the registrar the App used. Guards against a compromised register
+    /// endpoint (or MITM able to tamper with the response body) steering the
+    /// provider bearer token to an attacker-controlled WebSocket origin.
+    static func validateCoordinatorWSURL(_ url: URL, expectedBase: URL) throws {
+        let expectedScheme: String
+        switch expectedBase.scheme?.lowercased() {
+        case "https": expectedScheme = "wss"
+        case "http": expectedScheme = "ws"
+        default:
+            throw RegisterClientError.invalidCoordinatorWSURL(
+                reason: "expected base URL scheme must be http(s)"
+            )
+        }
+        guard let scheme = url.scheme?.lowercased(), scheme == expectedScheme else {
+            throw RegisterClientError.invalidCoordinatorWSURL(
+                reason: "scheme must be \(expectedScheme), got \(url.scheme ?? "<nil>")"
+            )
+        }
+        guard let host = url.host?.lowercased(),
+              let expectedHost = expectedBase.host?.lowercased(),
+              host == expectedHost else {
+            throw RegisterClientError.invalidCoordinatorWSURL(
+                reason: "host must be \(expectedBase.host ?? "<nil>"), got \(url.host ?? "<nil>")"
+            )
+        }
+        let defaultExpectedPort = expectedScheme == "wss" ? 443 : 80
+        let expectedPort = expectedBase.port ?? (expectedScheme == "wss" ? 443 : 80)
+        let actualPort = url.port ?? defaultExpectedPort
+        guard actualPort == expectedPort else {
+            throw RegisterClientError.invalidCoordinatorWSURL(
+                reason: "port must be \(expectedPort), got \(actualPort)"
+            )
+        }
+        guard url.user == nil, url.password == nil else {
+            throw RegisterClientError.invalidCoordinatorWSURL(
+                reason: "userinfo is not permitted"
+            )
+        }
+        guard !url.path.isEmpty else {
+            throw RegisterClientError.invalidCoordinatorWSURL(
+                reason: "path must be non-empty"
+            )
+        }
     }
 
     static func canonicalRegisterPayloadWithoutSignature(_ request: RegisterRequest) throws -> Data {
@@ -257,8 +305,9 @@ struct RegisterClient {
     }
 }
 
-enum RegisterClientError: Error {
+enum RegisterClientError: Error, Equatable {
     case httpStatus(Int)
+    case invalidCoordinatorWSURL(reason: String)
 }
 
 enum ProviderBearerURLSession {

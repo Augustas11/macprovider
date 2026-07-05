@@ -1431,6 +1431,83 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(diagnostic.contains("safety margin"))
     }
 
+    func testBenchmarksBreaksBetweenCandidatesWhenInterruptFlagIsSet() async throws {
+        // ARCH-M-1 regression: once SIGTERM has arrived, the benchmarker must
+        // stop spawning fresh CandidateProviderRunner subprocesses so the App
+        // (or user) can tear down the autotune subtree cleanly. Pre-set the
+        // flag; the loop should exit on its very first iteration, leaving
+        // every model diagnosed as "interrupted before probe".
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: modelKey)
+        request.benchmarks = [:]
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: try tempDir()),
+            runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("must not spawn runner after interrupt") },
+            prober: RecordingStage1Prober(results: [:]),
+            safetySampler: StaticProbeSafetySampler()
+        )
+        let flag = AutotuneInterruptFlag()
+        flag.set()
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080,
+            interruptFlag: flag
+        )
+
+        XCTAssertTrue(outcomes.benchmarks.isEmpty)
+        let diagnostic = try XCTUnwrap(outcomes.diagnostics[modelKey])
+        XCTAssertEqual(diagnostic, "interrupted before probe")
+    }
+
+    func testAutotuneBecomeProcessGroupLeaderIsIdempotent() {
+        // Calling `setpgid(0, 0)` when we already are the process-group
+        // leader is a no-op on macOS (rc 0). This just verifies the helper
+        // does not crash and returns Bool. Not a substitute for an
+        // end-to-end signal-cascade test — those live in the App-side
+        // subprocess integration tests — but pins the helper's contract.
+        _ = autotuneBecomeProcessGroupLeader()
+    }
+
+    func testAutotuneCascadeGateTripsExactlyOnce() {
+        // R2 CODE-R2-M-1 / ARCH-R2-M-1 regression: the cascade must fire once
+        // per AutotuneSignalSources instance, not once per signal event. Without
+        // this gate, `killpg(0, SIGTERM)` from the SIGTERM handler re-enters
+        // the same handler, storming SIGTERMs until process death.
+        let gate = AutotuneCascadeGate()
+        XCTAssertFalse(gate.hasTripped())
+        XCTAssertTrue(gate.trip(), "first trip must return true")
+        XCTAssertTrue(gate.hasTripped())
+        XCTAssertFalse(gate.trip(), "second trip must return false")
+        XCTAssertFalse(gate.trip(), "third trip must return false")
+        XCTAssertTrue(gate.hasTripped())
+    }
+
+    func testAutotuneCascadeGateIsThreadSafeUnderContention() {
+        // Under signal-storm contention (multiple dispatch source events
+        // firing on the signal queue concurrently), exactly one caller must
+        // observe `trip() == true`. NSLock guarantees this; test pins it.
+        let gate = AutotuneCascadeGate()
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var trueCount = 0
+        for _ in 0..<64 {
+            group.enter()
+            DispatchQueue.global().async {
+                let outcome = gate.trip()
+                lock.lock()
+                if outcome { trueCount += 1 }
+                lock.unlock()
+                group.leave()
+            }
+        }
+        group.wait()
+        XCTAssertEqual(trueCount, 1, "exactly one concurrent trip() call must win")
+    }
+
     func testBenchmarksDiagnosesRowsSkippedByBandwidthGate() async throws {
         let modelKey = "qwen3-32b"
         var request = try makeRequest(modelKey: modelKey)
