@@ -102,6 +102,7 @@ func (s *Store) Ping(ctx context.Context) error {
 //	     for coordinator-missing ambiguity that must release active quota.
 //	v8 — public issuance reservation events for atomic per-IP signup/demo/
 //	     feedback ceilings.
+//	v9 — oauth return_to + oauth_handoffs support.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -112,7 +113,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 8
+const maxKnownSchemaVersion = 9
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -148,6 +149,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureOAuthStateActionColumn(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureOAuthStateReturnToColumn(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureOAuthHandoffsTable(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureUsageEventsCompositePK(ctx); err != nil {
@@ -198,6 +205,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(8, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(9, ?)", now); err != nil {
 		return err
 	}
 	return nil
@@ -302,6 +312,50 @@ func (s *Store) ensureOAuthStateActionColumn(ctx context.Context) error {
 		return nil
 	}
 	_, err = s.db.ExecContext(ctx, `ALTER TABLE oauth_states ADD COLUMN action TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+func (s *Store) ensureOAuthStateReturnToColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(oauth_states)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasReturnTo := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "return_to" {
+			hasReturnTo = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasReturnTo {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE oauth_states ADD COLUMN return_to TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+func (s *Store) ensureOAuthHandoffsTable(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS oauth_handoffs (
+			token_hash BLOB PRIMARY KEY,
+			api_key TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			consumed_at TEXT NOT NULL DEFAULT ''
+		);
+		CREATE INDEX IF NOT EXISTS idx_oauth_handoffs_expires ON oauth_handoffs(expires_at);
+	`)
 	return err
 }
 
@@ -893,44 +947,102 @@ func (s *Store) StoreOAuthStateWithCap(ctx context.Context, state storage.OAuthS
 		}
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO oauth_states(state_hash, session_id, redirect_uri, client_ip, created_at, expires_at, action)
-		VALUES(?, ?, ?, ?, ?, ?, ?)`,
-		state.StateHash, state.SessionID, state.RedirectURI, state.ClientIP,
-		encodeTime(state.CreatedAt), encodeTime(state.ExpiresAt), state.Action)
+		INSERT INTO oauth_states(state_hash, session_id, redirect_uri, return_to, client_ip, created_at, expires_at, action)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+		state.StateHash, state.SessionID, state.RedirectURI, state.ReturnTo,
+		state.ClientIP, encodeTime(state.CreatedAt), encodeTime(state.ExpiresAt), state.Action)
 	if err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (s *Store) ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (string, string, error) {
+func (s *Store) ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (string, string, string, error) {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer tx.Rollback()
 	var redirectURI string
+	var returnTo string
 	var expiresAt string
 	var consumedAt string
 	var action string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT redirect_uri, expires_at, consumed_at, action
+		SELECT redirect_uri, return_to, expires_at, consumed_at, action
 		FROM oauth_states
 		WHERE state_hash = ? AND session_id = ?`,
-		stateHash, sessionID).Scan(&redirectURI, &expiresAt, &consumedAt, &action); err != nil {
+		stateHash, sessionID).Scan(&redirectURI, &returnTo, &expiresAt, &consumedAt, &action); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", "", storage.ErrNotFound
+			return "", "", "", storage.ErrNotFound
 		}
-		return "", "", err
+		return "", "", "", err
 	}
 	if consumedAt != "" || !now.Before(decodeTime(expiresAt)) {
-		return "", "", storage.ErrNotFound
+		return "", "", "", storage.ErrNotFound
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE oauth_states SET consumed_at = ? WHERE state_hash = ?`, encodeTime(now.UTC()), stateHash)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return redirectURI, action, tx.Commit()
+	return redirectURI, action, returnTo, tx.Commit()
+}
+
+func (s *Store) StoreOAuthHandoff(ctx context.Context, handoff storage.OAuthHandoff) error {
+	if handoff.CreatedAt.IsZero() {
+		handoff.CreatedAt = time.Now().UTC()
+	}
+	consumedAt := ""
+	if !handoff.ConsumedAt.IsZero() {
+		consumedAt = encodeTime(handoff.ConsumedAt)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO oauth_handoffs(token_hash, api_key, created_at, expires_at, consumed_at)
+		VALUES(?, ?, ?, ?, ?)`,
+		handoff.TokenHash, handoff.APIKey, encodeTime(handoff.CreatedAt), encodeTime(handoff.ExpiresAt), consumedAt)
+	return err
+}
+
+func (s *Store) ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, now time.Time) (string, error) {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var apiKey string
+	var expiresAt string
+	var consumedAt string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT api_key, expires_at, consumed_at
+		FROM oauth_handoffs
+		WHERE token_hash = ?`,
+		tokenHash).Scan(&apiKey, &expiresAt, &consumedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", storage.ErrNotFound
+		}
+		return "", err
+	}
+	if consumedAt != "" || !now.Before(decodeTime(expiresAt)) {
+		return "", storage.ErrNotFound
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE oauth_handoffs SET consumed_at = ? WHERE token_hash = ?`, encodeTime(now.UTC()), tokenHash)
+	if err != nil {
+		return "", err
+	}
+	return apiKey, tx.Commit()
+}
+
+func (s *Store) PruneExpiredOAuthHandoffs(ctx context.Context, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM oauth_handoffs
+		WHERE expires_at <= ?`, encodeTime(now.UTC()))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error) {

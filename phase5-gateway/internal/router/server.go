@@ -188,6 +188,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/auth/github/start", s.handleGitHubStart)
 		mux.HandleFunc("/auth/github/callback", s.handleGitHubCallback)
 	}
+	mux.Handle("/auth/handoff/exchange", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleHandoffExchange)))
 	mux.Handle("/auth/demo-session", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleDemoSession)))
 	mux.HandleFunc("/auth/api-keys", s.handleAPIKeys)
 	mux.HandleFunc("/auth/api-keys/", s.handleAPIKeyAction)

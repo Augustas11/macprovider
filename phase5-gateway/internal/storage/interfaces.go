@@ -18,7 +18,10 @@ type AuthStore interface {
 	RotateAPIKey(ctx context.Context, oldKeyID, accountID string, newKey APIKey, actor, requestID string) error
 	StoreOAuthState(ctx context.Context, state OAuthState) error
 	StoreOAuthStateWithCap(ctx context.Context, state OAuthState, maxPerIP int, now time.Time) error
-	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action string, err error)
+	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action, returnTo string, err error)
+	StoreOAuthHandoff(ctx context.Context, handoff OAuthHandoff) error
+	ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, now time.Time) (apiKey string, err error)
+	PruneExpiredOAuthHandoffs(ctx context.Context, now time.Time) (int64, error)
 	PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error)
 	ReservePublicIssuance(ctx context.Context, reservation PublicIssuanceReservation) error
 	RecordSignupEvent(ctx context.Context, event SignupEvent) error
@@ -49,7 +52,10 @@ type KeyStore interface {
 type OAuthStateStore interface {
 	StoreOAuthState(ctx context.Context, state OAuthState) error
 	StoreOAuthStateWithCap(ctx context.Context, state OAuthState, maxPerIP int, now time.Time) error
-	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action string, err error)
+	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI, action, returnTo string, err error)
+	StoreOAuthHandoff(ctx context.Context, handoff OAuthHandoff) error
+	ConsumeOAuthHandoff(ctx context.Context, tokenHash []byte, now time.Time) (apiKey string, err error)
+	PruneExpiredOAuthHandoffs(ctx context.Context, now time.Time) (int64, error)
 	PruneExpiredOAuthState(ctx context.Context, now time.Time) (int64, error)
 }
 
