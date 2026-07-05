@@ -1,0 +1,28 @@
+[Unit]
+Description=MacProvider stats billing mirror
+Documentation=https://github.com/augstar/macprovider-poc
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/macprovider-stats/stats-billing-mirror.env
+ConditionPathExists=/var/lib/macprovider/request-log.sqlite
+
+[Service]
+Type=oneshot
+User=macprovider-stats
+Group=macprovider-stats
+EnvironmentFile=/etc/macprovider-stats/stats-billing-mirror.env
+ExecStart=/opt/macprovider-stats/stats-billing-mirror --sqlite /var/lib/macprovider/request-log.sqlite --ensure-schema=false
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/macprovider/request-log.sqlite
+ReadOnlyPaths=-/var/lib/macprovider/request-log.sqlite-wal
+ReadOnlyPaths=-/var/lib/macprovider/request-log.sqlite-shm
+InaccessiblePaths=/etc/macprovider
+InaccessiblePaths=-/opt/macprovider/coordinator.yaml
+InaccessiblePaths=-/var/lib/macprovider/coordinator.db

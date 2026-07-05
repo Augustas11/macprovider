@@ -6,6 +6,8 @@
 #                                         prune-tokens / revoke-and-kick)
 #   dist/stats-inventory-sync-linux-amd64
 #                                      — operator hardware inventory sync
+#   dist/stats-billing-mirror-linux-amd64
+#                                      — SQLite→Postgres stats billing mirror
 #
 # Refuses to build with uncommitted changes by default; set FORCE_DIRTY=1
 # to override (the resulting binary's version string will end in "-dirty"
@@ -62,3 +64,7 @@ echo "built $CLI_OUT @ ${VERSION}"
 INVENTORY_OUT="dist/stats-inventory-sync-linux-amd64"
 GOOS=linux GOARCH=amd64 go build -o "$INVENTORY_OUT" ./cmd/stats-inventory-sync
 echo "built $INVENTORY_OUT @ ${VERSION}"
+
+BILLING_MIRROR_OUT="dist/stats-billing-mirror-linux-amd64"
+GOOS=linux GOARCH=amd64 go build -o "$BILLING_MIRROR_OUT" ./cmd/stats-billing-mirror
+echo "built $BILLING_MIRROR_OUT @ ${VERSION}"
