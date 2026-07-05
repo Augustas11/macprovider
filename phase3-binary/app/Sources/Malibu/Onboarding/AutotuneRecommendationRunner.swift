@@ -3,37 +3,55 @@ import Foundation
 enum AutotuneRecommendationRunner {
     /// Wall-clock budget for `macprovider-cli autotune --recommend --json`.
     ///
-    /// Autotune runs Stage-1 probes against 2-3 candidate models. Each probe
-    /// spawns a subprocess of `macprovider-cli serve`, waits for MLX to load
-    /// the model into memory, then does a prewarm HTTP call followed by
-    /// measured TTFT + tokens/sec replicates.
+    /// Autotune runs Stage-1 probes against every non-blocked, RAM-eligible
+    /// row in the catalog. Each probe spawns a subprocess of
+    /// `macprovider-cli serve`, waits for MLX to load the model, then does a
+    /// prewarm HTTP call followed by measured TTFT + tokens/sec replicates.
     ///
-    /// The CLI's own timings (see `Stage1Prober` in `Stage1Iterator.swift`):
-    ///   * `readyTimeoutSec = 120s` per candidate (model load window)
-    ///   * Prewarm `probeOnce` (Track A3, `Stage1Iterator.swift:474`) uses
-    ///     `probeIdleTimeoutSec = 300s` as the URLRequest timeout
-    ///   * Measured `probeOnce` replicate (default `stage1Replicates = 1`,
-    ///     `AutotuneCommand.swift:35-37`) uses `probeIdleTimeoutSec = 300s`
+    /// Per-candidate strict worst case (see `Stage1Prober` in
+    /// `Stage1Iterator.swift`):
+    ///   * `readyTimeoutSec = 120s` — MLX model load
+    ///   * prewarm `probeOnce` = `probeIdleTimeoutSec = 300s` (Track A3,
+    ///     `Stage1Iterator.swift:474`)
+    ///   * measured replicate `probeOnce` = `probeIdleTimeoutSec = 300s`
+    ///     (default `stage1Replicates = 1`, `AutotuneCommand.swift:35-37`)
+    /// = 720s per candidate.
     ///
-    /// So per-candidate strict worst case = 120 + 300 + 300 = **720s**.
-    /// With 3 candidates that is 3 × 720 = **2160s**. SPEC-023 v1.7.5 pins
-    /// `probeIdleTimeoutSec` at 300s because M-Base 30B MoE prefill can take
-    /// 60-180s before first byte, so shrinking those numbers is not on the
-    /// table.
+    /// **The App-side cannot assume a fixed candidate count.** The recommend
+    /// path in `AutotuneRecommend.benchmarks()` iterates every catalog row
+    /// filtered only by `runtime_status == "blocked"` and RAM/tier gates.
+    /// The set of admitted rows scales with `safetyMarginGB = 4` and the
+    /// user's Mac tier, so a 36GB machine may probe 4 rows and larger
+    /// machines can hit 5+. Compounded with 720s per candidate this
+    /// exceeds any small App-side guess.
     ///
-    /// Empirically on this Mac's clean install: 2-5 minutes. We budget 45
-    /// minutes (2700s) to cover the 2160s strict worst case with ~25%
-    /// margin. Longer than that means something is genuinely stuck
-    /// (subprocess wedged, disk I/O storm, etc.).
+    /// The only principled ceiling is the CLI's OWN outer hard budget:
+    /// `AutotuneCommand.maxDuration = 7200s` (2h) at
+    /// `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:47-48`.
+    /// A healthy CLI cannot exceed that regardless of candidate count.
+    /// The App-side timeout should mirror the CLI's cap + a small grace
+    /// window so:
+    ///   1. In the normal case (2-5 min empirically), CLI returns first
+    ///      and this timeout never fires.
+    ///   2. If the CLI itself hits its own maxDuration, it fails-fast and
+    ///      returns a nonzero exit before this timer fires.
+    ///   3. If the CLI is truly wedged (kernel bug, mlx-swift deadlock,
+    ///      disk I/O storm) past its own budget, this fires as the last
+    ///      line of defense.
     ///
-    /// This still sits well below the CLI's own outer
-    /// `AutotuneCommand.maxDuration = 7200s` so a healthy CLI will fail-fast
-    /// internally before this App-side deadline fires.
+    /// We budget 7260s = CLI's maxDuration + 60s grace.
     ///
-    /// A 30s value was ~85× too short and caused `.timedOut` failure on
-    /// every fresh-install onboarding — see the 2026-07-05 smoke report
-    /// at `/private/tmp/claude-501/.../scratchpad/smoke-v183/`.
-    static let processTimeout: TimeInterval = 2700
+    /// Median UX is unaffected because autotune completes in 2-5 min. Only
+    /// a pathologically wedged run reaches this ceiling, at which point
+    /// the user has almost certainly already quit the app.
+    ///
+    /// Prior wrong values in this file's history:
+    ///   * 30s (v1.8.3): ~240× too short; every fresh install failed at
+    ///     `.autotuning` — see 2026-07-05 smoke report at
+    ///     `/private/tmp/claude-501/.../scratchpad/smoke-v183/`.
+    ///   * 1800s / 2700s (R1/R2 audit rounds): under-counted candidate
+    ///     cardinality and per-candidate steps.
+    static let processTimeout: TimeInterval = 7260
 
     private final class ProcessOutputBuffer: @unchecked Sendable {
         private let lock = NSLock()
