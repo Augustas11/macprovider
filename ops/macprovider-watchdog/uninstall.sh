@@ -31,16 +31,19 @@ run() {
   fi
 }
 
-# Refuse to operate outside the expected install prefix so a
-# misconfigured env var cannot rm -rf an arbitrary directory.
-expected_prefix="$HOME/.local/share/macprovider-watchdog"
-case "$WATCHDOG_DIR" in
-  "$expected_prefix"|"$expected_prefix"/*) ;;
-  *)
-    printf "[macprovider-watchdog-uninstall] ERROR: refusing non-standard watchdog dir: %s\n" "$WATCHDOG_DIR" >&2
-    exit 1
-    ;;
-esac
+canonicalize_path() {
+  python3 - "$1" <<'PY'
+import os, sys
+print(os.path.realpath(os.path.expanduser(sys.argv[1])))
+PY
+}
+
+expected_prefix="$(canonicalize_path "$HOME/.local/share/macprovider-watchdog")"
+candidate="$(canonicalize_path "$WATCHDOG_DIR")"
+if [ "$candidate" != "$expected_prefix" ]; then
+  printf "[macprovider-watchdog-uninstall] ERROR: refusing non-standard watchdog dir: %s\n" "$WATCHDOG_DIR" >&2
+  exit 1
+fi
 
 if [ -f "$PLIST_PATH" ]; then
   run launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true

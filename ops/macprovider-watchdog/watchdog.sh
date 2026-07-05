@@ -1,25 +1,17 @@
 #!/usr/bin/env bash
-# macprovider-watchdog: operator-visibility insurance against silent WS
-# disconnection of the local provider, the symptom described in
-# GitHub issue #189.
+# macprovider-watchdog: local provider liveness monitor plus
+# auto-update rollback observer.
 #
-# Failure mode it catches: process up, listening on its local
-# inference port, but the outbound TCP socket to the coordinator
-# has gone half-open and the Swift reconnect loop never re-establishes.
-# We detect this via `netstat -an` (BSD form on macOS) — if no
-# ESTABLISHED outbound connection exists to coordinator.streamvc.live
-# on tcp/443 for `provider_id`'s service, kick the launchd job so
-# launchctl restarts the binary.
-#
-# Companion to the in-process bounded-send + watchdog landed in
-# #189 (PR #204). That fix prevents the wedge from happening; this
-# script catches it if it happens anyway, until every operator is on
-# a binary that includes the Swift fix.
+# Health verdict: exactly one installed macprovider-cli process must be
+# running and its local /v1/health endpoint must answer. Coordinator TCP
+# reachability is advisory logging only; a missing ESTABLISHED coordinator
+# connection no longer causes a kick by itself.
 
 set -euo pipefail
 
 LABEL="${MACPROVIDER_WATCHDOG_LABEL:-live.streamvc.macprovider}"
 CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
+BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
 COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.streamvc.live}"
 COORDINATOR_PORT="${MACPROVIDER_COORDINATOR_PORT:-443}"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
@@ -80,6 +72,21 @@ read_provider_id() {
   ' "$CONFIG_PATH"
 }
 
+read_config_port() {
+  if [ ! -f "$CONFIG_PATH" ]; then
+    return 1
+  fi
+  awk '
+    /^[[:space:]]*port[[:space:]]*:/ {
+      sub(/^[^:]*:[[:space:]]*/, "")
+      sub(/[[:space:]]*#.*$/, "")
+      sub(/[[:space:]]+$/, "")
+      print
+      exit
+    }
+  ' "$CONFIG_PATH"
+}
+
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { printf "[%s] %s\n" "$(ts)" "$*" >> "$LOG_PATH"; }
 
@@ -108,6 +115,46 @@ has_established_conn() {
         $0 ~ /ESTABLISHED/ && $5 == target { found = 1; exit }
         END { exit found ? 0 : 1 }
       '
+}
+
+provider_process_pid() {
+  expected="$BINARY_PATH"
+  if command -v realpath >/dev/null 2>&1 && [ -e "$expected" ]; then
+    expected="$(realpath "$expected" 2>/dev/null || printf "%s" "$expected")"
+  fi
+  matches=""
+  for candidate in $(pgrep -x macprovider-cli 2>/dev/null || true); do
+    cmd="$(ps -p "$candidate" -o command= 2>/dev/null || true)"
+    command_path="${cmd%% *}"
+    if command -v realpath >/dev/null 2>&1 && [ -e "$command_path" ]; then
+      command_path="$(realpath "$command_path" 2>/dev/null || printf "%s" "$command_path")"
+    fi
+    [ "$command_path" = "$expected" ] && matches="${matches}${candidate}
+"
+  done
+  count="$(printf "%s" "$matches" | awk 'NF { n++ } END { print n + 0 }')"
+  [ "$count" -eq 1 ] || return 1
+  printf "%s" "$matches" | awk 'NF { print; exit }'
+}
+
+local_health_listener_owned_by_provider() {
+  provider_pid="$1"
+  port="$2"
+  if ! command -v lsof >/dev/null 2>&1; then
+    return 1
+  fi
+  lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | awk -v pid="$provider_pid" '$1 == pid { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+local_provider_health_ok() {
+  provider_pid="$1"
+  port="$(read_config_port || true)"
+  case "$port" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  local_health_listener_owned_by_provider "$provider_pid" "$port" || return 1
+  curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
+  "$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/health" >/dev/null 2>&1
 }
 
 kick_provider() {
@@ -249,7 +296,7 @@ def validate_marker_strict(marker):
     now = datetime.datetime.now(datetime.timezone.utc)
     post_start_window = 60
     future_tolerance = post_start_window + 30 * 60
-    if deadline < now - datetime.timedelta(seconds=300) or deadline > now + datetime.timedelta(seconds=future_tolerance):
+    if deadline > now + datetime.timedelta(seconds=future_tolerance):
         raise RuntimeError("marker_deadline_out_of_bounds")
 
 def current_binary_version(path):
@@ -277,6 +324,7 @@ def read_success_sentinel(path):
     }
 
 def process_success_sentinel(marker):
+    validate_restore_inputs(marker)
     binary_dir = os.path.dirname(marker["target_path"])
     for name in os.listdir(binary_dir):
         if not name.startswith(".macprovider-cli.success-"):
@@ -416,7 +464,7 @@ def lock_is_held_by_other_process():
             pass
         os.close(fd)
 
-def restore(marker):
+def validate_restore_inputs(marker):
     backup = marker["backup_path"]
     target = marker["target_path"]
     update_id = marker["update_id"]
@@ -443,6 +491,10 @@ def restore(marker):
         raise RuntimeError("backup_size_mismatch")
     if sha256(backup) != str(marker["sha256"]):
         raise RuntimeError("backup_sha256_mismatch")
+    return backup, target
+
+def restore(marker):
+    backup, target = validate_restore_inputs(marker)
     os.chmod(backup, int(marker["mode"]))
     os.replace(backup, target)
     dir_fd = os.open(os.path.dirname(target), os.O_RDONLY)
@@ -532,53 +584,58 @@ main() {
     # operator installs later we'll start working on the next tick.
     exit 0
   fi
-  coord_ip="$(resolve_coordinator_ip)"
-  if [ -z "$coord_ip" ]; then
-    log "DNS resolution for $COORDINATOR_HOST failed; skipping this tick"
+  provider_pid="$(provider_process_pid || true)"
+  if [ -z "$provider_pid" ]; then
+    log "provider process unhealthy: expected exactly one macprovider-cli at $BINARY_PATH"
+    now_epoch > "$LAST_KICK_FILE"
+    kick_provider
     exit 0
   fi
   boot_id="$(current_boot_id)"
-  if has_established_conn "$coord_ip"; then
-    # First time in THIS BOOT we see a healthy ESTABLISHED
-    # connection, arm the watchdog. Subsequent absences will then
-    # trigger a kick.
+  if ! local_provider_health_ok "$provider_pid"; then
     armed_boot=""
     if [ -f "$ARMED_FILE" ]; then
       armed_boot="$(cat "$ARMED_FILE" 2>/dev/null || true)"
     fi
     if [ "$armed_boot" != "$boot_id" ]; then
-      log "arming watchdog (boot=${boot_id}): first observed ESTABLISHED TCP to ${coord_ip}:${COORDINATOR_PORT} for provider_id=${pid}"
-      printf "%s" "$boot_id" > "$ARMED_FILE"
+      log "provider process $provider_pid not locally healthy yet; watchdog remains disarmed for boot=${boot_id}"
+      exit 0
     fi
-    # Healthy. Stay silent so the log file does not bloat.
+    if [ -f "$LAST_KICK_FILE" ]; then
+      last_kick="$(cat "$LAST_KICK_FILE" 2>/dev/null || printf 0)"
+      elapsed=$(( $(now_epoch) - last_kick ))
+      if [ "$elapsed" -lt "$KICK_GRACE_SECONDS" ]; then
+        exit 0
+      fi
+    fi
+    log "provider process $provider_pid failed local /v1/health after arming; kicking $LABEL"
+    now_epoch > "$LAST_KICK_FILE"
+    kick_provider
     exit 0
   fi
-  # No ESTABLISHED connection. If we have not armed THIS BOOT (first
-  # install / post-reboot still loading model / provider never
-  # configured / provider never connected), stay silent — kicking
-  # would break the cold-start flow.
   armed_boot=""
   if [ -f "$ARMED_FILE" ]; then
     armed_boot="$(cat "$ARMED_FILE" 2>/dev/null || true)"
   fi
   if [ "$armed_boot" != "$boot_id" ]; then
+    log "arming watchdog (boot=${boot_id}): first observed local provider health for provider_id=${pid}"
+    printf "%s" "$boot_id" > "$ARMED_FILE"
+  fi
+  coord_ip="$(resolve_coordinator_ip)"
+  if [ -z "$coord_ip" ]; then
+    log "warning: DNS resolution for $COORDINATOR_HOST failed; provider process $provider_pid is locally healthy"
     exit 0
   fi
-  # Post-kick grace: do not kick again until KICK_GRACE_SECONDS has
-  # passed. Covers the launchd-respawn + model-reload + reconnect
-  # window after our prior kick.
-  if [ -f "$LAST_KICK_FILE" ]; then
-    last_kick="$(cat "$LAST_KICK_FILE" 2>/dev/null || printf 0)"
-    elapsed=$(( $(now_epoch) - last_kick ))
-    if [ "$elapsed" -lt "$KICK_GRACE_SECONDS" ]; then
-      # Inside the grace window; silent — operator can spot this in
-      # the previous kick log line if they want.
-      exit 0
-    fi
+  if has_established_conn "$coord_ip"; then
+    # Healthy. Stay silent so the log file does not bloat.
+    exit 0
   fi
-  log "no ESTABLISHED TCP to ${coord_ip}:${COORDINATOR_PORT} for provider_id=${pid}; kicking $LABEL"
-  now_epoch > "$LAST_KICK_FILE"
-  kick_provider
+  log "warning: provider process $provider_pid is locally healthy, but no ESTABLISHED TCP to ${coord_ip}:${COORDINATOR_PORT} for provider_id=${pid}"
+  # No ESTABLISHED connection. Coordinator TCP state is advisory only:
+  # the health verdict is the installed provider process plus local
+  # /v1/health. Do not kick solely because another process can or
+  # cannot reach the coordinator.
+  exit 0
 }
 
 main "$@"

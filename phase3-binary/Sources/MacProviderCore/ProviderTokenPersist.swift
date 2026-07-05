@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// SPEC-003 v0.8 FR-C9.3 — atomically persist a self-minted provisional
 /// `provider_token` into the on-disk YAML config so the next reconnect
@@ -21,6 +22,7 @@ public enum ProviderTokenPersistError: Error, CustomStringConvertible {
     case writeFailed(path: String, underlying: String)
     case renameFailed(path: String, underlying: String)
     case chmodFailed(path: String, underlying: String)
+    case lockFailed(path: String, underlying: String)
     case parentDirectoryMissing(path: String)
 
     public var description: String {
@@ -33,6 +35,8 @@ public enum ProviderTokenPersistError: Error, CustomStringConvertible {
             return "provider_token persist: atomic rename failed at \(path): \(underlying)"
         case let .chmodFailed(path, underlying):
             return "provider_token persist: chmod 0600 failed at \(path): \(underlying)"
+        case let .lockFailed(path, underlying):
+            return "provider_token persist: advisory lock failed at \(path): \(underlying)"
         case let .parentDirectoryMissing(path):
             return "provider_token persist: parent directory missing at \(path)"
         }
@@ -57,6 +61,17 @@ public enum ProviderTokenPersist {
         guard FileManager.default.fileExists(atPath: parent) else {
             throw ProviderTokenPersistError.parentDirectoryMissing(path: parent)
         }
+
+        let lockPath = parent + "/." + ((resolved as NSString).lastPathComponent) + ".lock"
+        let lockFD = open(lockPath, O_CREAT | O_RDWR, mode_t(0o600))
+        guard lockFD >= 0 else {
+            throw ProviderTokenPersistError.lockFailed(path: lockPath, underlying: String(cString: strerror(errno)))
+        }
+        defer { close(lockFD) }
+        guard flock(lockFD, LOCK_EX) == 0 else {
+            throw ProviderTokenPersistError.lockFailed(path: lockPath, underlying: String(cString: strerror(errno)))
+        }
+        defer { flock(lockFD, LOCK_UN) }
 
         let existingText: String
         if FileManager.default.fileExists(atPath: resolved) {

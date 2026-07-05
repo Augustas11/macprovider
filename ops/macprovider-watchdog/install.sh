@@ -11,11 +11,12 @@ set -euo pipefail
 WATCHDOG_DIR_DEFAULT="$HOME/.local/share/macprovider-watchdog"
 WATCHDOG_DIR="${MACPROVIDER_WATCHDOG_DIR:-$WATCHDOG_DIR_DEFAULT}"
 WATCHDOG_PATH="$WATCHDOG_DIR/watchdog.sh"
-PLIST_TEMPLATE_PATH="${MACPROVIDER_WATCHDOG_TEMPLATE:-$(cd "$(dirname "$0")" && pwd)/live.streamvc.macprovider-watchdog.plist.template}"
+PLIST_TEMPLATE_PATH="${MACPROVIDER_WATCHDOG_TEMPLATE:-$(cd "$(dirname "$0")" && pwd)/live.streamvc.macprovider-watchdog.template.plist}"
 SOURCE_WATCHDOG="$(cd "$(dirname "$0")" && pwd)/watchdog.sh"
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
 CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
+BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
 COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.streamvc.live}"
 SERVICE_LABEL="${MACPROVIDER_SERVICE_LABEL:-live.streamvc.macprovider}"
 DRY_RUN=0
@@ -76,6 +77,7 @@ rendered="$(sed \
   -e "s|__USER_HOME__|$(xml_escape "$HOME")|g" \
   -e "s|__SERVICE_LABEL__|$(xml_escape "$SERVICE_LABEL")|g" \
   -e "s|__CONFIG_PATH__|$(xml_escape "$CONFIG_PATH")|g" \
+  -e "s|__BINARY_PATH__|$(xml_escape "$BINARY_PATH")|g" \
   -e "s|__COORDINATOR_HOST__|$(xml_escape "$COORDINATOR_HOST")|g" \
   "$PLIST_TEMPLATE_PATH")"
 

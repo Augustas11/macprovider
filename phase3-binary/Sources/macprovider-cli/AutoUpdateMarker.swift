@@ -2,6 +2,20 @@ import CryptoKit
 import Darwin
 import Foundation
 
+/// Canonical auto-update state machine shared with
+/// ops/macprovider-watchdog/watchdog.sh:
+///
+/// no_update -> download -> pending_install -> committed
+///                                      \-> rolled_back
+///
+/// State is represented by durable filesystem markers. The CLI writes
+/// pending.json only after the rollback backup is fsynced, then swaps the
+/// binary while holding update.lock. The restarted provider commits by writing
+/// a success sentinel and clearing pending.json. If a crash, sleep, or restart
+/// leaves pending.json behind past marker_deadline, both the CLI recovery path
+/// and watchdog treat that as pending_install requiring rollback, not as an
+/// invalid marker. Malformed markers are quarantined; expired but otherwise
+/// valid markers are restored from their backup.
 struct AutoUpdatePendingMarker: Codable, Equatable {
     let updateID: String
     let targetVersion: String
@@ -229,6 +243,7 @@ struct AutoUpdateMarkerStore: Sendable {
 
     func validateBackup(_ marker: AutoUpdatePendingMarker) throws {
         try validateMarker(marker)
+        try validateRollbackTopology(marker)
         let backupURL = URL(fileURLWithPath: marker.backupPath)
         let st = try regularFileStatNoFollow(backupURL)
         guard st.st_size == marker.size,
@@ -290,7 +305,7 @@ struct AutoUpdateMarkerStore: Sendable {
     }
 
     func completeSuccessfulUpdate(_ marker: AutoUpdatePendingMarker) throws {
-        try validateMarker(marker)
+        try validateBackup(marker)
         let binaryURL = URL(fileURLWithPath: marker.targetPath)
         try writeSuccessSentinel(
             binaryURL: binaryURL,
@@ -383,6 +398,19 @@ struct AutoUpdateMarkerStore: Sendable {
         }
     }
 
+    func validateRollbackTopology(_ marker: AutoUpdatePendingMarker) throws {
+        let targetURL = URL(fileURLWithPath: marker.targetPath)
+        let expectedBackup = rollbackBackupPath(binaryURL: targetURL, updateID: marker.updateID)
+        guard marker.backupPath == expectedBackup.path else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("backup_path_derivation_mismatch")
+        }
+        let targetDir = targetURL.deletingLastPathComponent()
+        guard expectedBackup.deletingLastPathComponent().path == targetDir.path else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("backup_dir_mismatch")
+        }
+        try validateTrustedBinaryDirectory(targetDir)
+    }
+
     private func removeLockFile() {
         try? fileManager.removeItem(at: lockURL)
     }
@@ -459,8 +487,7 @@ struct AutoUpdateMarkerStore: Sendable {
         let now = Date()
         let postStartWindowSeconds: TimeInterval = 60
         let futureToleranceSeconds: TimeInterval = postStartWindowSeconds + 30 * 60
-        guard deadline > now.addingTimeInterval(-300),
-              deadline <= now.addingTimeInterval(futureToleranceSeconds)
+        guard deadline <= now.addingTimeInterval(futureToleranceSeconds)
         else {
             throw AutoUpdateMarkerError.invalidMarker
         }
