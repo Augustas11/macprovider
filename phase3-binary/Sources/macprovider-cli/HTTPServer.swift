@@ -1132,8 +1132,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         ]
     }
 
-    private static func statusResponse(_ snapshot: ProviderSnapshot, providerID: String?, coordinatorURL: String?) -> [String: Any] {
-        [
+    static func statusResponse(_ snapshot: ProviderSnapshot, providerID: String?, coordinatorURL: String?) -> [String: Any] {
+        var body: [String: Any] = [
             "binary_version": CoordinatorClient.binaryVersion,
             "provider_id": jsonNullable(providerID),
             "status": snapshot.status.rawValue,
@@ -1160,10 +1160,30 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "recommended_binary_version": jsonNullable(snapshot.recommendedBinaryVersion),
             ],
         ]
+        body.merge(specDecodeTelemetryFields(snapshot)) { _, new in new }
+        return body
+    }
+
+    static func specDecodeTelemetryFields(_ snapshot: ProviderSnapshot) -> [String: Any] {
+        [
+            "spec_decode_enabled": snapshot.specDecodeEnabled,
+            "spec_decode_draft_model_id": snapshot.specDecodeDraftModelID ?? NSNull(),
+            "spec_decode_num_draft_tokens": snapshot.specDecodeNumDraftTokens ?? NSNull(),
+            "spec_decode_drafted_tokens_since_last": snapshot.specDecodeDraftedTokensSinceLast,
+            "spec_decode_accepted_tokens_since_last": snapshot.specDecodeAcceptedTokensSinceLast,
+            "spec_decode_acceptance_rate": nullableNumber(snapshot.specDecodeAcceptanceRate),
+        ]
     }
 
     private static func jsonNullable(_ value: String?) -> Any {
         value ?? NSNull()
+    }
+
+    private static func nullableNumber(_ value: Double?) -> Any {
+        guard let value, value.isFinite else {
+            return NSNull()
+        }
+        return value
     }
 
     private static func chatCompletionChunk(

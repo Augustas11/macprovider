@@ -1539,6 +1539,40 @@ func TestHeartbeatLegacyPathPreservesV134Behavior(t *testing.T) {
 	})
 }
 
+func TestHeartbeatSpecDecodeOptInFieldsPreserveStatePath(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, assignedID := dialAndAuthV2Provider(t, h)
+	defer conn.Close()
+
+	hb := heartbeat()
+	hb["spec_decode_enabled"] = true
+	hb["spec_decode_draft_model_id"] = "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit"
+	hb["spec_decode_num_draft_tokens"] = 3
+	hb["spec_decode_drafted_tokens_since_last"] = 30
+	hb["spec_decode_accepted_tokens_since_last"] = 18
+	hb["spec_decode_acceptance_rate"] = 0.6
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write spec decode heartbeat: %v", err)
+	}
+
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok &&
+			provider.AssignedID == assignedID &&
+			provider.InferencePath == pool.InferencePathWSTunneled &&
+			provider.State == pool.StateReady &&
+			provider.ModelID == hb["model_id"] &&
+			provider.SlotsFree == 1 &&
+			provider.SlotsTotal == 1 &&
+			provider.ThroughputTPSEstimate == 19.8 &&
+			!provider.LastLoadingState &&
+			provider.LoadingStartedAt.IsZero()
+	})
+}
+
 func TestHeartbeatSPEC011PathInvokesVerifier(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Providers[0].EndpointURL = ""
