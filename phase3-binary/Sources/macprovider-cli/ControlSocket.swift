@@ -581,6 +581,28 @@ actor ControlSocketServer {
         }
     }
 
+    /// Direct write of a single control-socket frame to a fd, bypassing
+    /// the `ControlSocketConnection` actor. Safe for concurrent use with
+    /// the actor's own `receive()` loop: POSIX sockets are full-duplex,
+    /// and a single JSON frame (<PIPE_BUF = 512 bytes on Darwin) is
+    /// atomically written by `Darwin.write()`. Used by the SPEC-026 §7
+    /// identity-signature pusher — see `handleClient` above.
+    private nonisolated static func writeFrameDirect(fd: Int32, frame: ControlSocketFrame) throws {
+        let data = try ControlSocketCodec.encode(frame)
+        try data.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            var sent = 0
+            while sent < rawBuffer.count {
+                let count = Darwin.write(fd, base.advanced(by: sent), rawBuffer.count - sent)
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    throw ControlSocketConnectError.other(underlying: String(cString: strerror(errno)))
+                }
+                sent += count
+            }
+        }
+    }
+
     private nonisolated static func handleClient(
         fd: Int32,
         modelRuntime: ModelRuntime,
@@ -595,24 +617,49 @@ actor ControlSocketServer {
 
         // SPEC-026 §7: if an IdentitySignatureBridge is injected, spawn a
         // sibling task that awaits pending signature requests from the
-        // CoordinatorClient and pushes them out on this connection. The
-        // ControlSocketConnection actor serialises send/receive so this
-        // pusher is safe to race the main receive loop.
+        // CoordinatorClient and pushes them out on this connection.
+        //
+        // **Do NOT route the push through `connection.send()`**:
+        // `ControlSocketConnection.receive(timeout:)` does a blocking
+        // `Darwin.read()` inside the actor without any `await` (see
+        // :764-805). While the receive loop is waiting for a frame the
+        // actor's serial queue is HELD; any `await connection.send(...)`
+        // from a sibling task blocks until receive() returns. On an idle
+        // socket that never returns until the 30s idle timeout fires,
+        // so identity_signature_request frames sit in the mailbox for
+        // 30s each — well past our 3s bridge timeout and the coordinator's
+        // 10s WS handshake window.
+        //
+        // POSIX allows full-duplex reads and writes on the same socket
+        // concurrently, and `Darwin.write()` of a single JSON frame
+        // (<PIPE_BUF, i.e. 512 bytes on Darwin) is atomic. So the pusher
+        // writes to the raw fd directly, sidestepping the actor entirely.
         var signatureSubscriberID: UUID?
         var pusherTask: Task<Void, Never>?
         if let identityBridge {
             let (subscriberID, stream) = await identityBridge.subscribe()
             signatureSubscriberID = subscriberID
+            let capturedFD = fd
             pusherTask = Task.detached(priority: .userInitiated) {
                 for await request in stream {
-                    try? await connection.send(.identitySignatureRequest(
-                        authAttemptID: request.authAttemptID,
-                        providerID: request.providerID,
-                        binaryVersion: request.binaryVersion,
-                        providerECDHPublicKey: request.providerECDHPublicKey,
-                        transcriptSHA256: request.transcriptSHA256
-                    ))
+                    FileHandle.standardError.write(Data("[idsig] pusher: dispatching request for \(request.providerID)\n".utf8))
+                    do {
+                        try Self.writeFrameDirect(
+                            fd: capturedFD,
+                            frame: .identitySignatureRequest(
+                                authAttemptID: request.authAttemptID,
+                                providerID: request.providerID,
+                                binaryVersion: request.binaryVersion,
+                                providerECDHPublicKey: request.providerECDHPublicKey,
+                                transcriptSHA256: request.transcriptSHA256
+                            )
+                        )
+                        FileHandle.standardError.write(Data("[idsig] pusher: frame written to fd=\(capturedFD)\n".utf8))
+                    } catch {
+                        FileHandle.standardError.write(Data("[idsig] pusher: write failed err=\(error)\n".utf8))
+                    }
                 }
+                FileHandle.standardError.write(Data("[idsig] pusher: stream ended\n".utf8))
             }
         }
         defer {
