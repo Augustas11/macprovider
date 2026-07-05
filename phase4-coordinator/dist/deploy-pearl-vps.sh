@@ -585,23 +585,99 @@ else
 fi
 
 if [ "$ONBOARDING_ENABLED_LOCAL" = "true" ]; then
-  $SSH 'set -e
+  $SSH "bash -s" <<'REMOTE_ONBOARDING_PREFLIGHT'
+    set -e
     env_file=/etc/macprovider/coordinator.env
     if [ ! -r "$env_file" ]; then
       echo "aborting deploy: onboarding enabled but $env_file is missing or unreadable" >&2
       exit 12
     fi
-    set -a
-    . "$env_file"
-    set +a
-    if [ -z "${ONBOARDING_POSTGRES_DSN:-}" ]; then
-      echo "aborting deploy: onboarding enabled but ONBOARDING_POSTGRES_DSN is missing in coordinator.env" >&2
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "aborting deploy: python3 is required for onboarding DSN preflight" >&2
       exit 12
     fi
     if ! command -v psql >/dev/null 2>&1; then
       echo "aborting deploy: psql is required for onboarding hardware evidence migration preflight" >&2
       exit 12
     fi
+    read_env_value() {
+      ENV_VALUE_FILE="$1" ENV_VALUE_NAME="$2" python3 <<'PY'
+import os
+import re
+import shlex
+import sys
+
+path = os.environ["ENV_VALUE_FILE"]
+want = os.environ["ENV_VALUE_NAME"]
+if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", want):
+    print("invalid requested env var name", file=sys.stderr)
+    sys.exit(2)
+
+try:
+    found = False
+    parsed_value = ""
+    with open(path, "r", encoding="utf-8") as f:
+        for lineno, raw in enumerate(f, 1):
+            if raw.endswith("\n"):
+                raw = raw[:-1]
+            if raw.endswith("\r"):
+                print(f"{path}:{lineno}: CRLF env files are not supported", file=sys.stderr)
+                sys.exit(2)
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                print(f"{path}:{lineno}: malformed env assignment", file=sys.stderr)
+                sys.exit(2)
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                print(f"{path}:{lineno}: malformed env var name", file=sys.stderr)
+                sys.exit(2)
+            if key != want:
+                continue
+            try:
+                parts = shlex.split(value.strip(), comments=False, posix=True)
+            except ValueError as exc:
+                print(f"{path}:{lineno}: malformed env value for {want}: {exc}", file=sys.stderr)
+                sys.exit(2)
+            if len(parts) != 1:
+                print(f"{path}:{lineno}: env value for {want} must be a single token", file=sys.stderr)
+                sys.exit(2)
+            parsed = parts[0]
+            if any(ch in parsed for ch in "\r\n\0"):
+                print(f"{path}:{lineno}: env value for {want} contains an invalid character", file=sys.stderr)
+                sys.exit(2)
+            found = True
+            parsed_value = parsed
+except OSError as exc:
+    print(f"cannot read env file {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+if found:
+    print(parsed_value, end="")
+    sys.exit(0)
+sys.exit(1)
+PY
+    }
+    require_env_value() {
+      env_value_file="$1"
+      env_value_name="$2"
+      if ! env_value="$(read_env_value "$env_value_file" "$env_value_name")"; then
+        echo "aborting deploy: $env_value_file is missing required var or has invalid syntax: $env_value_name" >&2
+        exit 12
+      fi
+      if [ -z "$env_value" ]; then
+        echo "aborting deploy: $env_value_file has empty required var: $env_value_name" >&2
+        exit 12
+      fi
+      printf '%s' "$env_value"
+    }
+    ONBOARDING_POSTGRES_DSN="$(require_env_value "$env_file" ONBOARDING_POSTGRES_DSN)"
+    ONBOARDING_AUTH_POLICY_REQUEST_DSN="$(require_env_value "$env_file" ONBOARDING_AUTH_POLICY_REQUEST_DSN)"
+    ONBOARDING_AUTH_POLICY_APPROVE_DSN="$(require_env_value "$env_file" ONBOARDING_AUTH_POLICY_APPROVE_DSN)"
+    ONBOARDING_AUTH_POLICY_CUTOVER_DSN="$(require_env_value "$env_file" ONBOARDING_AUTH_POLICY_CUTOVER_DSN)"
+    echo "  ok: required onboarding DSN env vars are present in coordinator.env"
     psql_preflight_service() {
       service_name="$1"
       dsn="$2"
@@ -653,28 +729,92 @@ PY
 SELECT 1 FROM hardware_verification_jobs LIMIT 1;
 SQL
     echo "  ok: migration 008 hardware_verification_jobs is visible to provider_onboarding"
+    psql_preflight_service auth_policy_request_preflight "$ONBOARDING_AUTH_POLICY_REQUEST_DSN" <<SQL >/dev/null
+DO \$\$
+BEGIN
+  IF NOT (
+    current_user = 'provider_auth_policy_requester'
+    AND session_user = current_user
+    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles member ON member.oid = m.member WHERE member.rolname = current_user OR granted.rolname = current_user)
+    AND NOT EXISTS (
+      SELECT 1
+        FROM (VALUES ('provider_identities'), ('provider_auth_policy'), ('provider_auth_policy_cutover_runs'), ('provider_auth_policy_pending'), ('provider_auth_policy_grants')) AS t(table_name)
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege_name)
+       WHERE has_table_privilege(current_user, t.table_name, p.privilege_name)
+    )
+    AND has_function_privilege(current_user, 'request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'approve_provider_auth_policy_exemption(uuid,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'seed_provider_auth_policy_cutover(timestamp with time zone,text[])'::regprocedure, 'EXECUTE')
+  ) THEN
+    RAISE EXCEPTION 'auth policy request DSN does not map to the least-privilege requester role';
+  END IF;
+END
+\$\$;
+SQL
+    psql_preflight_service auth_policy_approve_preflight "$ONBOARDING_AUTH_POLICY_APPROVE_DSN" <<SQL >/dev/null
+DO \$\$
+BEGIN
+  IF NOT (
+    current_user = 'provider_auth_policy_approver'
+    AND session_user = current_user
+    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles member ON member.oid = m.member WHERE member.rolname = current_user OR granted.rolname = current_user)
+    AND NOT EXISTS (
+      SELECT 1
+        FROM (VALUES ('provider_identities'), ('provider_auth_policy'), ('provider_auth_policy_cutover_runs'), ('provider_auth_policy_pending'), ('provider_auth_policy_grants')) AS t(table_name)
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege_name)
+       WHERE has_table_privilege(current_user, t.table_name, p.privilege_name)
+    )
+    AND has_function_privilege(current_user, 'approve_provider_auth_policy_exemption(uuid,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'seed_provider_auth_policy_cutover(timestamp with time zone,text[])'::regprocedure, 'EXECUTE')
+  ) THEN
+    RAISE EXCEPTION 'auth policy approve DSN does not map to the least-privilege approver role';
+  END IF;
+END
+\$\$;
+SQL
+    psql_preflight_service auth_policy_cutover_preflight "$ONBOARDING_AUTH_POLICY_CUTOVER_DSN" <<SQL >/dev/null
+DO \$\$
+BEGIN
+  IF NOT (
+    current_user = 'provider_auth_policy_cutover'
+    AND session_user = current_user
+    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles member ON member.oid = m.member WHERE member.rolname = current_user OR granted.rolname = current_user)
+    AND NOT EXISTS (
+      SELECT 1
+        FROM (VALUES ('provider_identities'), ('provider_auth_policy'), ('provider_auth_policy_cutover_runs'), ('provider_auth_policy_pending'), ('provider_auth_policy_grants')) AS t(table_name)
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege_name)
+       WHERE has_table_privilege(current_user, t.table_name, p.privilege_name)
+    )
+    AND has_function_privilege(current_user, 'seed_provider_auth_policy_cutover(timestamp with time zone,text[])'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'approve_provider_auth_policy_exemption(uuid,text)'::regprocedure, 'EXECUTE')
+  ) THEN
+    RAISE EXCEPTION 'auth policy cutover DSN does not map to the least-privilege cutover role';
+  END IF;
+END
+\$\$;
+SQL
+    echo "  ok: auth-policy split DSN roles have expected EXECUTE privileges"
     verifier_env=/etc/macprovider-stats/stats-hardware-verifier.env
     if [ -f "$verifier_env" ]; then
       if grep -Eq "REPLACE_ME|<generated-password>" "$verifier_env"; then
         echo "aborting deploy: stats-hardware-verifier.env still contains placeholder secret material" >&2
         exit 12
       fi
-      set -a
-      . "$verifier_env"
-      set +a
-      if [ -z "${STATS_HARDWARE_VERIFIER_DSN:-}" ]; then
-        echo "aborting deploy: stats-hardware-verifier.env is present but STATS_HARDWARE_VERIFIER_DSN is empty" >&2
-        exit 12
-      fi
+      STATS_HARDWARE_VERIFIER_DSN="$(require_env_value "$verifier_env" STATS_HARDWARE_VERIFIER_DSN)"
       psql_preflight_service hardware_verifier_preflight "$STATS_HARDWARE_VERIFIER_DSN" <<SQL >/dev/null
 SELECT 1 FROM hardware_verification_jobs LIMIT 1;
 SELECT 1 FROM hardware_verification_trust LIMIT 1;
 SELECT 1 FROM chip_hardware_profiles LIMIT 1;
-SELECT 1 WHERE has_schema_privilege(current_user, '\''public'\'', '\''USAGE'\'');
+SELECT 1 WHERE has_schema_privilege(current_user, 'public', 'USAGE');
 SQL
       echo "  ok: stats_hardware_verifier role can read hardware jobs/trust/chip inventory"
     fi
-  '
+REMOTE_ONBOARDING_PREFLIGHT
 else
   echo "  onboarding.app_track_register_enabled is not true — skipping hardware evidence migration preflight"
 fi
