@@ -4,11 +4,15 @@ import XCTest
 /// Pins the wall-clock budget the App gives `macprovider-cli autotune
 /// --recommend --json` on fresh-install onboarding.
 ///
-/// The CLI's Stage-1 prober (`Stage1Iterator.swift:379`) runs
-/// benchmarks against 2-3 candidate models. Each candidate can take
-/// up to `readyTimeoutSec (120s) + probeIdleTimeoutSec (300s)` in the
-/// worst case, per SPEC-023 v1.7.5. Compounded across candidates this
-/// is a real ~10-15 min worst-case wall-clock cost — driven by MLX
+/// The CLI's Stage-1 prober (`Stage1Iterator.swift`) runs benchmarks
+/// against 2-3 candidate models. Per candidate strict worst case:
+///   * `readyTimeoutSec = 120s` — MLX model load
+///   * prewarm `probeOnce` — up to `probeIdleTimeoutSec = 300s` (Track A3,
+///     `Stage1Iterator.swift:474`)
+///   * measured replicate `probeOnce` — up to `probeIdleTimeoutSec = 300s`
+///     (default `stage1Replicates = 1`, `AutotuneCommand.swift:35-37`)
+/// = 720s per candidate, per SPEC-023 v1.7.5. Compounded across 3
+/// candidates this is 2160s (~36 min) worst case — driven by MLX
 /// model loading and prefill latency, not a bug in the CLI.
 ///
 /// The App-side timeout MUST NOT be shorter than the CLI's own combined
@@ -17,12 +21,14 @@ import XCTest
 /// happened on 2026-07-05 v1.8.3 smoke — `processTimeout = 30` killed
 /// autotune ~4 minutes before completion).
 final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
-    /// The CLI's own worst-case per-candidate wall-clock ceiling
-    /// (readyTimeout 120s + probeIdle 300s). See
-    /// `Stage1Prober.defaultProbeIdleTimeoutSec` and
-    /// `Stage1Prober.init(readyTimeoutSec: TimeInterval = 120, ...)`
-    /// in `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift`.
-    private static let cliPerCandidateWorstCaseSec: TimeInterval = 420
+    /// The CLI's own worst-case per-candidate wall-clock ceiling:
+    /// readyTimeout 120s + prewarm probeIdle 300s + measured probeIdle
+    /// 300s = 720s. See `Stage1Prober` in
+    /// `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:396-489`
+    /// and `Stage1Prober.defaultProbeIdleTimeoutSec` at :381-387.
+    /// Default `stage1Replicates = 1` from
+    /// `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:35-37`.
+    private static let cliPerCandidateWorstCaseSec: TimeInterval = 720
 
     /// Realistic minimum candidate count autotune probes on a
     /// fresh install. SPEC-023 selects 2-3 candidates; 2 is the

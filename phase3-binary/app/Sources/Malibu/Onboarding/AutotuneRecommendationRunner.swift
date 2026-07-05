@@ -5,24 +5,35 @@ enum AutotuneRecommendationRunner {
     ///
     /// Autotune runs Stage-1 probes against 2-3 candidate models. Each probe
     /// spawns a subprocess of `macprovider-cli serve`, waits for MLX to load
-    /// the model into memory, then measures TTFT + tokens/sec via HTTP.
+    /// the model into memory, then does a prewarm HTTP call followed by
+    /// measured TTFT + tokens/sec replicates.
     ///
     /// The CLI's own timings (see `Stage1Prober` in `Stage1Iterator.swift`):
     ///   * `readyTimeoutSec = 120s` per candidate (model load window)
-    ///   * `probeIdleTimeoutSec = 300s` per candidate (SPEC-023 v1.7.5 pins
-    ///     this at 300s because M-Base 30B MoE prefill can take 60-180s
-    ///     before first byte)
+    ///   * Prewarm `probeOnce` (Track A3, `Stage1Iterator.swift:474`) uses
+    ///     `probeIdleTimeoutSec = 300s` as the URLRequest timeout
+    ///   * Measured `probeOnce` replicate (default `stage1Replicates = 1`,
+    ///     `AutotuneCommand.swift:35-37`) uses `probeIdleTimeoutSec = 300s`
     ///
-    /// Empirically on this Mac's clean install: 2-5 minutes. Worst-case
-    /// upper bound with 3 candidates hitting the CLI's own timeouts:
-    /// ~21 minutes (3 × 420s). We budget 30 minutes to leave margin
-    /// before failing the user; longer than that means something is
-    /// genuinely stuck (subprocess wedged, disk I/O storm, etc.).
+    /// So per-candidate strict worst case = 120 + 300 + 300 = **720s**.
+    /// With 3 candidates that is 3 × 720 = **2160s**. SPEC-023 v1.7.5 pins
+    /// `probeIdleTimeoutSec` at 300s because M-Base 30B MoE prefill can take
+    /// 60-180s before first byte, so shrinking those numbers is not on the
+    /// table.
     ///
-    /// A 30s value was ~60× too short and caused `.timedOut` failure on
+    /// Empirically on this Mac's clean install: 2-5 minutes. We budget 45
+    /// minutes (2700s) to cover the 2160s strict worst case with ~25%
+    /// margin. Longer than that means something is genuinely stuck
+    /// (subprocess wedged, disk I/O storm, etc.).
+    ///
+    /// This still sits well below the CLI's own outer
+    /// `AutotuneCommand.maxDuration = 7200s` so a healthy CLI will fail-fast
+    /// internally before this App-side deadline fires.
+    ///
+    /// A 30s value was ~85× too short and caused `.timedOut` failure on
     /// every fresh-install onboarding — see the 2026-07-05 smoke report
     /// at `/private/tmp/claude-501/.../scratchpad/smoke-v183/`.
-    static let processTimeout: TimeInterval = 1800
+    static let processTimeout: TimeInterval = 2700
 
     private final class ProcessOutputBuffer: @unchecked Sendable {
         private let lock = NSLock()
