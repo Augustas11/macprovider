@@ -49,6 +49,66 @@ func TestParseHeartbeatPreservesRollingMetrics(t *testing.T) {
 	}
 }
 
+func TestParseHeartbeatAcceptsHardwareSummary(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"hardware_summary":{"chip":"Apple M4 Pro","bandwidth_gb_per_s":273,"network_power_kw":0.065,"gpu_cores_total":20,"cpu_cores_total":14}}`)
+
+	hb, _, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if hb.HardwareSummary == nil {
+		t.Fatal("HardwareSummary = nil")
+	}
+	if hb.HardwareSummary.Chip != "Apple M4 Pro" ||
+		hb.HardwareSummary.BandwidthGBPerSec != 273 ||
+		hb.HardwareSummary.NetworkPowerKW != 0.065 ||
+		hb.HardwareSummary.GPUCoresTotal != 20 ||
+		hb.HardwareSummary.CPUCoresTotal != 14 {
+		t.Fatalf("HardwareSummary = %+v", hb.HardwareSummary)
+	}
+}
+
+func TestParseHeartbeatIgnoresInvalidHardwareSummary(t *testing.T) {
+	cases := []struct {
+		name    string
+		summary string
+	}{
+		{
+			name:    "negative",
+			summary: `{"chip":"Apple M4 Pro","bandwidth_gb_per_s":-1}`,
+		},
+		{
+			name:    "oversized bandwidth",
+			summary: `{"chip":"Apple M4 Pro","bandwidth_gb_per_s":9223372036854775807,"network_power_kw":0.065,"gpu_cores_total":20,"cpu_cores_total":14}`,
+		},
+		{
+			name:    "oversized power",
+			summary: `{"chip":"Apple M4 Pro","bandwidth_gb_per_s":273,"network_power_kw":1000000000000000000000000000000,"gpu_cores_total":20,"cpu_cores_total":14}`,
+		},
+		{
+			name:    "oversized cores",
+			summary: `{"chip":"Apple M4 Pro","bandwidth_gb_per_s":273,"network_power_kw":0.065,"gpu_cores_total":2147483647,"cpu_cores_total":2147483647}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"hardware_summary":` + tc.summary + `}`)
+
+			hb, _, field, err := ParseHeartbeat(payload)
+			if err != nil {
+				t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+			}
+			if field != "" {
+				t.Fatalf("field = %q want empty", field)
+			}
+			if hb.HardwareSummary != nil {
+				t.Fatalf("HardwareSummary = %+v, want nil", hb.HardwareSummary)
+			}
+		})
+	}
+}
+
 func TestParseHeartbeatAcceptsSpecDecodeOptInFieldsAsForwardCompatible(t *testing.T) {
 	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"spec_decode_enabled":true,"spec_decode_draft_model_id":"mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit","spec_decode_num_draft_tokens":3,"spec_decode_drafted_tokens_since_last":30,"spec_decode_accepted_tokens_since_last":18,"spec_decode_acceptance_rate":0.6}`)
 

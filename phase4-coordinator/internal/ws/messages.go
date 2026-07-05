@@ -4,8 +4,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
 
 type Hello struct {
@@ -163,27 +166,36 @@ type AuthModelHashSession struct {
 }
 
 type Heartbeat struct {
-	Type                    string          `json:"type"`
-	Status                  string          `json:"status"`
-	ModelID                 string          `json:"model_id"`
-	ModelParamsB            float64         `json:"model_params_b"`
-	RAMGB                   int             `json:"ram_gb"`
-	MaxContextTokens        int             `json:"max_context_tokens"`
-	MaxConcurrency          int             `json:"max_concurrency"`
-	SlotsFree               int             `json:"slots_free"`
-	SlotsTotal              int             `json:"slots_total"`
-	ThroughputTPSEstimate   float64         `json:"throughput_tps_estimate"`
-	RequestsServedSinceLast int             `json:"requests_served_since_last"`
-	AvgLatencyMSSinceLast   float64         `json:"avg_latency_ms_since_last"`
-	ThroughputTPSSinceLast  float64         `json:"throughput_tps_since_last"`
-	ModelHash               string          `json:"model_hash,omitempty"`
-	Loading                 bool            `json:"loading,omitempty"`
-	LastAutoupdateEvent     json.RawMessage `json:"last_autoupdate_event,omitempty"`
+	Type                    string           `json:"type"`
+	Status                  string           `json:"status"`
+	ModelID                 string           `json:"model_id"`
+	ModelParamsB            float64          `json:"model_params_b"`
+	RAMGB                   int              `json:"ram_gb"`
+	MaxContextTokens        int              `json:"max_context_tokens"`
+	MaxConcurrency          int              `json:"max_concurrency"`
+	SlotsFree               int              `json:"slots_free"`
+	SlotsTotal              int              `json:"slots_total"`
+	ThroughputTPSEstimate   float64          `json:"throughput_tps_estimate"`
+	RequestsServedSinceLast int              `json:"requests_served_since_last"`
+	AvgLatencyMSSinceLast   float64          `json:"avg_latency_ms_since_last"`
+	ThroughputTPSSinceLast  float64          `json:"throughput_tps_since_last"`
+	ModelHash               string           `json:"model_hash,omitempty"`
+	Loading                 bool             `json:"loading,omitempty"`
+	LastAutoupdateEvent     json.RawMessage  `json:"last_autoupdate_event,omitempty"`
+	HardwareSummary         *HardwareSummary `json:"hardware_summary,omitempty"`
 }
 
 type HeartbeatPresence struct {
 	ModelHash bool
 	Loading   bool
+}
+
+type HardwareSummary struct {
+	Chip              string  `json:"chip,omitempty"`
+	BandwidthGBPerSec int64   `json:"bandwidth_gb_per_s,omitempty"`
+	NetworkPowerKW    float64 `json:"network_power_kw,omitempty"`
+	GPUCoresTotal     int     `json:"gpu_cores_total,omitempty"`
+	CPUCoresTotal     int     `json:"cpu_cores_total,omitempty"`
 }
 
 type StateUpdate struct {
@@ -798,6 +810,26 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 			return Heartbeat{}, presence, "last_autoupdate_event", fieldError{Field: "last_autoupdate_event"}
 		}
 		hb.LastAutoupdateEvent = append([]byte(nil), v...)
+	}
+	if v, ok := raw["hardware_summary"]; ok && string(v) != "null" {
+		var summary HardwareSummary
+		if err := json.Unmarshal(v, &summary); err == nil {
+			summary.Chip = strings.TrimSpace(summary.Chip)
+			if len([]byte(summary.Chip)) <= pool.MaxProviderHardwareChipBytes &&
+				!containsControlChar(summary.Chip) &&
+				summary.BandwidthGBPerSec >= 0 &&
+				summary.BandwidthGBPerSec <= pool.MaxProviderHardwareBandwidthGBPerSec &&
+				summary.NetworkPowerKW >= 0 &&
+				!math.IsNaN(summary.NetworkPowerKW) &&
+				!math.IsInf(summary.NetworkPowerKW, 0) &&
+				summary.NetworkPowerKW <= pool.MaxProviderHardwareNetworkPowerKW &&
+				summary.GPUCoresTotal >= 0 &&
+				summary.GPUCoresTotal <= pool.MaxProviderHardwareGPUCoresTotal &&
+				summary.CPUCoresTotal >= 0 &&
+				summary.CPUCoresTotal <= pool.MaxProviderHardwareCPUCoresTotal {
+				hb.HardwareSummary = &summary
+			}
+		}
 	}
 	return hb, presence, "", nil
 }

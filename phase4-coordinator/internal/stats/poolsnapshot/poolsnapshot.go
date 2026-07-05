@@ -12,11 +12,18 @@
 package poolsnapshot
 
 import (
+	"math"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
+)
+
+const (
+	maxOverviewInt            = int(^uint32(0) >> 1)
+	maxOverviewBandwidthGBSec = int64(^uint64(0) >> 1)
+	maxOverviewNetworkPowerKW = 1_000_000.0
 )
 
 // Source is the narrow subset of pool.Registry the snapshot needs.
@@ -73,13 +80,11 @@ func (p *Provider) OverviewSnapshot() statsrollup.OverviewSnapshot {
 		if prov.ModelID != "" {
 			models[prov.ModelID] = struct{}{}
 		}
-		if p.hardware != nil {
-			if cap, ok := p.hardware.LookupProviderHardware(prov.ProviderID); ok {
-				snap.BandwidthGBPerSec += cap.BandwidthGBPerSec
-				snap.NetworkPowerKW += cap.NetworkPowerKW
-				snap.GPUCoresTotal += cap.GPUCoresTotal
-				snap.CPUCoresTotal += cap.CPUCoresTotal
-			}
+		if cap, ok := p.providerHardwareCapacity(prov); ok {
+			snap.BandwidthGBPerSec = saturatingAddInt64(snap.BandwidthGBPerSec, cap.BandwidthGBPerSec, maxOverviewBandwidthGBSec)
+			snap.NetworkPowerKW = saturatingAddFloat64(snap.NetworkPowerKW, cap.NetworkPowerKW, maxOverviewNetworkPowerKW)
+			snap.GPUCoresTotal = saturatingAddInt(snap.GPUCoresTotal, cap.GPUCoresTotal, maxOverviewInt)
+			snap.CPUCoresTotal = saturatingAddInt(snap.CPUCoresTotal, cap.CPUCoresTotal, maxOverviewInt)
 		}
 		if prov.SlotsTotal > 0 {
 			slotsFree += prov.SlotsFree
@@ -98,6 +103,56 @@ func (p *Provider) OverviewSnapshot() statsrollup.OverviewSnapshot {
 		}
 	}
 	return snap
+}
+
+func saturatingAddInt64(a, b, max int64) int64 {
+	if b <= 0 {
+		return a
+	}
+	if a >= max || b > max-a {
+		return max
+	}
+	return a + b
+}
+
+func saturatingAddInt(a, b, max int) int {
+	if b <= 0 {
+		return a
+	}
+	if a >= max || b > max-a {
+		return max
+	}
+	return a + b
+}
+
+func saturatingAddFloat64(a, b, max float64) float64 {
+	if b <= 0 || math.IsNaN(b) || math.IsInf(b, 0) {
+		return a
+	}
+	sum := a + b
+	if math.IsNaN(sum) || math.IsInf(sum, 0) || sum > max {
+		return max
+	}
+	return sum
+}
+
+func (p *Provider) providerHardwareCapacity(prov pool.Provider) (statshardware.Capacity, bool) {
+	if p.hardware != nil {
+		if cap, ok := p.hardware.LookupProviderHardware(prov.ProviderID); ok {
+			return cap, true
+		}
+	}
+	if prov.HardwareCapacity == nil {
+		return statshardware.Capacity{}, false
+	}
+	cap := statshardware.Capacity{
+		BandwidthGBPerSec: prov.HardwareCapacity.BandwidthGBPerSec,
+		NetworkPowerKW:    prov.HardwareCapacity.NetworkPowerKW,
+		GPUCoresTotal:     prov.HardwareCapacity.GPUCoresTotal,
+		CPUCoresTotal:     prov.HardwareCapacity.CPUCoresTotal,
+	}
+	return cap, cap.BandwidthGBPerSec != 0 || cap.NetworkPowerKW != 0 ||
+		cap.GPUCoresTotal != 0 || cap.CPUCoresTotal != 0
 }
 
 // onlineForStats mirrors "genuinely serving traffic" for the public stats

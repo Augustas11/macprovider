@@ -2416,6 +2416,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		Loading:               hb.Loading,
 		LoadingPresent:        presence.Loading,
 		LastAutoupdateEvent:   hb.LastAutoupdateEvent,
+		HardwareCapacity:      poolHardwareCapacity(hb.HardwareSummary),
 		At:                    s.now(),
 	})
 	if !ok {
@@ -2443,6 +2444,19 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Int("slots_free", entry.SlotsFree).
 			Int("slots_total", entry.SlotsTotal).
 			Msg("provider heartbeat")
+	}
+}
+
+func poolHardwareCapacity(summary *HardwareSummary) *pool.ProviderHardwareCapacity {
+	if summary == nil {
+		return nil
+	}
+	return &pool.ProviderHardwareCapacity{
+		Chip:              summary.Chip,
+		BandwidthGBPerSec: summary.BandwidthGBPerSec,
+		NetworkPowerKW:    summary.NetworkPowerKW,
+		GPUCoresTotal:     summary.GPUCoresTotal,
+		CPUCoresTotal:     summary.CPUCoresTotal,
 	}
 }
 
