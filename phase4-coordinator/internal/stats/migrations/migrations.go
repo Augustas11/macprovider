@@ -124,18 +124,19 @@ const advisoryLockKey int64 = 5179378192876502983
 // atomically with their `INSERT INTO schema_migrations_spec017`
 // row, and the lock is released on Conn.Close.
 //
-// The caller MUST pass a connection authenticated as a role with
-// CREATE / GRANT / REVOKE privileges on the public schema. The
-// four runtime roles (stats_reader, stats_rollup, provider_portal,
-// partner_keys_writer) are NOT migration-capable — using one of
-// them here would either fail or improperly widen privileges
-// (BUILD §F.2 SECURITY invariant). Per round-1 SECURITY r1
-// CRITICAL 2 + CODE r1 HIGH C2, the coordinator's runtime boot
-// MUST NOT call Apply through any runtime-role pool; Apply is
-// an operator-side action (manual psql or a separate `coordinator
-// stats migrate --admin-dsn=...` subcommand to be added in a
-// follow-up step) and an integration-test helper. The
-// production coordinator boot does NOT call this function.
+// The caller MUST pass a connection authenticated as an operator/admin role
+// that can create/alter roles, grant/revoke privileges, create objects in the
+// public schema, and transfer SECURITY DEFINER function ownership to no-login
+// definer roles. The runtime roles (stats_reader, stats_rollup,
+// provider_portal, partner_keys_writer, provider_onboarding, and the
+// provider_auth_policy_* split roles) are NOT migration-capable — using one of
+// them here would either fail or improperly widen privileges (BUILD §F.2
+// SECURITY invariant). Per round-1 SECURITY r1 CRITICAL 2 + CODE r1 HIGH C2,
+// the coordinator's runtime boot MUST NOT call Apply through any runtime-role
+// pool; Apply is an operator-side action (manual psql or a separate
+// `coordinator stats migrate --admin-dsn=...` subcommand to be added in a
+// follow-up step) and an integration-test helper. The production coordinator
+// boot does NOT call this function.
 func Apply(ctx context.Context, db *sql.DB) error {
 	conn, err := db.Conn(ctx)
 	if err != nil {

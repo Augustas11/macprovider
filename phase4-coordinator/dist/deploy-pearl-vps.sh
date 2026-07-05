@@ -594,8 +594,15 @@ if [ "$ONBOARDING_ENABLED_LOCAL" = "true" ]; then
     set -a
     . "$env_file"
     set +a
-    if [ -z "${ONBOARDING_POSTGRES_DSN:-}" ]; then
-      echo "aborting deploy: onboarding enabled but ONBOARDING_POSTGRES_DSN is missing in coordinator.env" >&2
+    missing=""
+    for name in ONBOARDING_POSTGRES_DSN ONBOARDING_AUTH_POLICY_REQUEST_DSN ONBOARDING_AUTH_POLICY_APPROVE_DSN ONBOARDING_AUTH_POLICY_CUTOVER_DSN; do
+      eval "value=\${$name:-}"
+      if [ -z "$value" ]; then
+        missing="$missing $name"
+      fi
+    done
+    if [ -n "$missing" ]; then
+      echo "aborting deploy: onboarding enabled but coordinator.env is missing required non-empty var(s):$missing" >&2
       exit 12
     fi
     if ! command -v psql >/dev/null 2>&1; then
@@ -653,6 +660,76 @@ PY
 SELECT 1 FROM hardware_verification_jobs LIMIT 1;
 SQL
     echo "  ok: migration 008 hardware_verification_jobs is visible to provider_onboarding"
+    psql_preflight_service auth_policy_request_preflight "$ONBOARDING_AUTH_POLICY_REQUEST_DSN" <<SQL >/dev/null
+DO \$\$
+BEGIN
+  IF NOT (
+    current_user = 'provider_auth_policy_requester'
+    AND session_user = current_user
+    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles member ON member.oid = m.member WHERE member.rolname = current_user OR granted.rolname = current_user)
+    AND NOT EXISTS (
+      SELECT 1
+        FROM (VALUES ('provider_identities'), ('provider_auth_policy'), ('provider_auth_policy_cutover_runs'), ('provider_auth_policy_pending'), ('provider_auth_policy_grants')) AS t(table_name)
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege_name)
+       WHERE has_table_privilege(current_user, t.table_name, p.privilege_name)
+    )
+    AND has_function_privilege(current_user, 'request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'approve_provider_auth_policy_exemption(uuid,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'seed_provider_auth_policy_cutover(timestamp with time zone,text[])'::regprocedure, 'EXECUTE')
+  ) THEN
+    RAISE EXCEPTION 'auth policy request DSN does not map to the least-privilege requester role';
+  END IF;
+END
+\$\$;
+SQL
+    psql_preflight_service auth_policy_approve_preflight "$ONBOARDING_AUTH_POLICY_APPROVE_DSN" <<SQL >/dev/null
+DO \$\$
+BEGIN
+  IF NOT (
+    current_user = 'provider_auth_policy_approver'
+    AND session_user = current_user
+    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles member ON member.oid = m.member WHERE member.rolname = current_user OR granted.rolname = current_user)
+    AND NOT EXISTS (
+      SELECT 1
+        FROM (VALUES ('provider_identities'), ('provider_auth_policy'), ('provider_auth_policy_cutover_runs'), ('provider_auth_policy_pending'), ('provider_auth_policy_grants')) AS t(table_name)
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege_name)
+       WHERE has_table_privilege(current_user, t.table_name, p.privilege_name)
+    )
+    AND has_function_privilege(current_user, 'approve_provider_auth_policy_exemption(uuid,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'seed_provider_auth_policy_cutover(timestamp with time zone,text[])'::regprocedure, 'EXECUTE')
+  ) THEN
+    RAISE EXCEPTION 'auth policy approve DSN does not map to the least-privilege approver role';
+  END IF;
+END
+\$\$;
+SQL
+    psql_preflight_service auth_policy_cutover_preflight "$ONBOARDING_AUTH_POLICY_CUTOVER_DSN" <<SQL >/dev/null
+DO \$\$
+BEGIN
+  IF NOT (
+    current_user = 'provider_auth_policy_cutover'
+    AND session_user = current_user
+    AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND NOT rolreplication AND NOT rolbypassrls)
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles member ON member.oid = m.member WHERE member.rolname = current_user OR granted.rolname = current_user)
+    AND NOT EXISTS (
+      SELECT 1
+        FROM (VALUES ('provider_identities'), ('provider_auth_policy'), ('provider_auth_policy_cutover_runs'), ('provider_auth_policy_pending'), ('provider_auth_policy_grants')) AS t(table_name)
+        CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege_name)
+       WHERE has_table_privilege(current_user, t.table_name, p.privilege_name)
+    )
+    AND has_function_privilege(current_user, 'seed_provider_auth_policy_cutover(timestamp with time zone,text[])'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)'::regprocedure, 'EXECUTE')
+    AND NOT has_function_privilege(current_user, 'approve_provider_auth_policy_exemption(uuid,text)'::regprocedure, 'EXECUTE')
+  ) THEN
+    RAISE EXCEPTION 'auth policy cutover DSN does not map to the least-privilege cutover role';
+  END IF;
+END
+\$\$;
+SQL
+    echo "  ok: auth-policy split DSN roles have expected EXECUTE privileges"
     verifier_env=/etc/macprovider-stats/stats-hardware-verifier.env
     if [ -f "$verifier_env" ]; then
       if grep -Eq "REPLACE_ME|<generated-password>" "$verifier_env"; then

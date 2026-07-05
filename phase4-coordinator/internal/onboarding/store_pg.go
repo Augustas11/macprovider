@@ -14,30 +14,81 @@ import (
 const registerNonceWindow = 65 * time.Second
 
 type PGStore struct {
-	db *sql.DB
+	db                  *sql.DB
+	authPolicyRequestDB *sql.DB
+	authPolicyApproveDB *sql.DB
+	authPolicyCutoverDB *sql.DB
 }
 
 func OpenPGStore(dsn string) (*PGStore, error) {
+	db, err := openPostgresDB(dsn, "onboarding")
+	if err != nil {
+		return nil, err
+	}
+	return &PGStore{db: db}, nil
+}
+
+func OpenPGStoreWithAuthPolicyDSNs(onboardingDSN, requestDSN, approveDSN, cutoverDSN string) (*PGStore, error) {
+	db, err := openPostgresDB(onboardingDSN, "onboarding")
+	if err != nil {
+		return nil, err
+	}
+	requestDB, err := openPostgresDB(requestDSN, "provider auth policy request")
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	approveDB, err := openPostgresDB(approveDSN, "provider auth policy approve")
+	if err != nil {
+		_ = db.Close()
+		_ = requestDB.Close()
+		return nil, err
+	}
+	cutoverDB, err := openPostgresDB(cutoverDSN, "provider auth policy cutover")
+	if err != nil {
+		_ = db.Close()
+		_ = requestDB.Close()
+		_ = approveDB.Close()
+		return nil, err
+	}
+	return &PGStore{
+		db:                  db,
+		authPolicyRequestDB: requestDB,
+		authPolicyApproveDB: approveDB,
+		authPolicyCutoverDB: cutoverDB,
+	}, nil
+}
+
+func openPostgresDB(dsn, name string) (*sql.DB, error) {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" {
-		return nil, errors.New("onboarding postgres dsn is required")
+		return nil, fmt.Errorf("%s postgres dsn is required", name)
 	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open onboarding postgres: %w", err)
+		return nil, fmt.Errorf("open %s postgres: %w", name, err)
 	}
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(30 * time.Minute)
 	db.SetConnMaxIdleTime(5 * time.Minute)
-	return &PGStore{db: db}, nil
+	return db, nil
 }
 
 func (s *PGStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	var err error
+	seen := map[*sql.DB]bool{}
+	for _, db := range []*sql.DB{s.db, s.authPolicyRequestDB, s.authPolicyApproveDB, s.authPolicyCutoverDB} {
+		if db == nil || seen[db] {
+			continue
+		}
+		seen[db] = true
+		err = errors.Join(err, db.Close())
+	}
+	return err
 }
 
 func (s *PGStore) Smoke(ctx context.Context) error {
@@ -72,6 +123,107 @@ func (s *PGStore) Smoke(ctx context.Context) error {
 		return errors.New("provider_onboarding smoke unexpectedly read provider_auth_policy_pending")
 	} else if !strings.Contains(strings.ToLower(err.Error()), "permission denied") {
 		return fmt.Errorf("provider_onboarding smoke provider_auth_policy_pending deny check: %w", err)
+	}
+	if s.authPolicyRequestDB != nil {
+		if err := smokeAuthPolicyRole(timeout, s.authPolicyRequestDB, "provider_auth_policy_requester",
+			"request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)",
+			"approve_provider_auth_policy_exemption(uuid,text)",
+			"seed_provider_auth_policy_cutover(timestamp with time zone,text[])"); err != nil {
+			return err
+		}
+	}
+	if s.authPolicyApproveDB != nil {
+		if err := smokeAuthPolicyRole(timeout, s.authPolicyApproveDB, "provider_auth_policy_approver",
+			"approve_provider_auth_policy_exemption(uuid,text)",
+			"request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)",
+			"seed_provider_auth_policy_cutover(timestamp with time zone,text[])"); err != nil {
+			return err
+		}
+	}
+	if s.authPolicyCutoverDB != nil {
+		if err := smokeAuthPolicyRole(timeout, s.authPolicyCutoverDB, "provider_auth_policy_cutover",
+			"seed_provider_auth_policy_cutover(timestamp with time zone,text[])",
+			"request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)",
+			"approve_provider_auth_policy_exemption(uuid,text)"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func smokeAuthPolicyRole(ctx context.Context, db *sql.DB, wantUser, allowedFunction string, forbiddenFunctions ...string) error {
+	var currentUser, sessionUser string
+	var superUser, createDB, createRole, inherit, replication, bypassRLS bool
+	if err := db.QueryRowContext(ctx, `
+SELECT current_user, session_user, r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolinherit, r.rolreplication, r.rolbypassrls
+  FROM pg_roles r
+ WHERE r.rolname = current_user`).Scan(&currentUser, &sessionUser, &superUser, &createDB, &createRole, &inherit, &replication, &bypassRLS); err != nil {
+		return fmt.Errorf("%s smoke current_user: %w", wantUser, err)
+	}
+	if currentUser != wantUser {
+		return fmt.Errorf("%s smoke current_user = %q, want %s", wantUser, currentUser, wantUser)
+	}
+	if sessionUser != currentUser {
+		return fmt.Errorf("%s smoke session_user = %q, want same as current_user", wantUser, sessionUser)
+	}
+	if superUser || createDB || createRole || inherit || replication || bypassRLS {
+		return fmt.Errorf("%s smoke role has superuser=%t createdb=%t createrole=%t inherit=%t replication=%t bypassrls=%t",
+			wantUser, superUser, createDB, createRole, inherit, replication, bypassRLS)
+	}
+	var allowed bool
+	if err := db.QueryRowContext(ctx, `
+SELECT has_function_privilege(current_user, $1::regprocedure, 'EXECUTE')`,
+		allowedFunction,
+	).Scan(&allowed); err != nil {
+		return fmt.Errorf("%s smoke function privilege: %w", wantUser, err)
+	}
+	if !allowed {
+		return fmt.Errorf("%s smoke lacks EXECUTE on %s", wantUser, allowedFunction)
+	}
+	var hasMembership bool
+	if err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1
+      FROM pg_auth_members m
+      JOIN pg_roles granted ON granted.oid = m.roleid
+      JOIN pg_roles member ON member.oid = m.member
+     WHERE member.rolname = current_user
+        OR granted.rolname = current_user
+)`).Scan(&hasMembership); err != nil {
+		return fmt.Errorf("%s smoke role membership check: %w", wantUser, err)
+	}
+	if hasMembership {
+		return fmt.Errorf("%s smoke role must not have role memberships", wantUser)
+	}
+	var hasDirectTablePrivilege bool
+	if err := db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1
+      FROM (VALUES
+            ('provider_identities'),
+            ('provider_auth_policy'),
+            ('provider_auth_policy_cutover_runs'),
+            ('provider_auth_policy_pending'),
+            ('provider_auth_policy_grants')
+           ) AS t(table_name)
+      CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE')) AS p(privilege_name)
+     WHERE has_table_privilege(current_user, t.table_name, p.privilege_name)
+)`).Scan(&hasDirectTablePrivilege); err != nil {
+		return fmt.Errorf("%s smoke direct table privilege check: %w", wantUser, err)
+	}
+	if hasDirectTablePrivilege {
+		return fmt.Errorf("%s smoke role must not have direct auth-policy table privileges", wantUser)
+	}
+	for _, functionSignature := range forbiddenFunctions {
+		if err := db.QueryRowContext(ctx, `
+SELECT has_function_privilege(current_user, $1::regprocedure, 'EXECUTE')`,
+			functionSignature,
+		).Scan(&allowed); err != nil {
+			return fmt.Errorf("%s smoke forbidden function privilege: %w", wantUser, err)
+		}
+		if allowed {
+			return fmt.Errorf("%s smoke unexpectedly has EXECUTE on %s", wantUser, functionSignature)
+		}
 	}
 	return nil
 }
@@ -267,11 +419,11 @@ SELECT identity_pubkey
 }
 
 func (s *PGStore) RequestProviderAuthPolicyExemption(ctx context.Context, pendingID, providerID, requestedBy string, requestedUntil time.Time, reason, incidentID string) error {
-	if s == nil || s.db == nil {
-		return errors.New("onboarding postgres store is nil")
+	if s == nil || s.authPolicyRequestDB == nil {
+		return errors.New("provider auth policy request postgres store is nil")
 	}
 	var out string
-	err := s.db.QueryRowContext(ctx, `
+	err := s.authPolicyRequestDB.QueryRowContext(ctx, `
 SELECT request_provider_auth_policy_exemption($1::uuid, $2, $3, $4, $5, NULLIF($6, ''))::text`,
 		pendingID, providerID, requestedBy, requestedUntil.UTC(), reason, incidentID,
 	).Scan(&out)
@@ -285,12 +437,12 @@ SELECT request_provider_auth_policy_exemption($1::uuid, $2, $3, $4, $5, NULLIF($
 }
 
 func (s *PGStore) ApproveProviderAuthPolicyExemption(ctx context.Context, pendingID, approvedBy string) (providerID, requestedBy string, requestedUntil time.Time, reason, incidentID string, err error) {
-	if s == nil || s.db == nil {
-		err = errors.New("onboarding postgres store is nil")
+	if s == nil || s.authPolicyApproveDB == nil {
+		err = errors.New("provider auth policy approve postgres store is nil")
 		return
 	}
 	var incident sql.NullString
-	err = s.db.QueryRowContext(ctx, `
+	err = s.authPolicyApproveDB.QueryRowContext(ctx, `
 SELECT provider_id, requested_by, requested_until, reason, incident_id
   FROM approve_provider_auth_policy_exemption($1::uuid, $2)`,
 		pendingID, approvedBy,
@@ -303,11 +455,11 @@ SELECT provider_id, requested_by, requested_until, reason, incident_id
 }
 
 func (s *PGStore) SeedProviderAuthPolicyCutover(ctx context.Context, cutover time.Time, cliProviderIDs []string) (int64, error) {
-	if s == nil || s.db == nil {
-		return 0, errors.New("onboarding postgres store is nil")
+	if s == nil || s.authPolicyCutoverDB == nil {
+		return 0, errors.New("provider auth policy cutover postgres store is nil")
 	}
 	var seeded int64
-	err := s.db.QueryRowContext(ctx, `
+	err := s.authPolicyCutoverDB.QueryRowContext(ctx, `
 SELECT seed_provider_auth_policy_cutover($1, $2::text[])`,
 		cutover.UTC(), pq.Array(cliProviderIDs),
 	).Scan(&seeded)

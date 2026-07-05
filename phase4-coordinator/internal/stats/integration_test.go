@@ -42,6 +42,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,6 +67,10 @@ const (
 	roleStatsRollup      = "stats_rollup"
 	roleProviderPortal   = "provider_portal"
 	roleProviderOnboard  = "provider_onboarding"
+	roleAuthPolicyReq    = "provider_auth_policy_requester"
+	roleAuthPolicyAppr   = "provider_auth_policy_approver"
+	roleAuthPolicyCut    = "provider_auth_policy_cutover"
+	roleAuthPolicyDef    = "provider_auth_policy_definer"
 	roleHardwareVerifier = "stats_hardware_verifier"
 	roleAdminPassword    = "stepone-admin-password" // local only; container is ephemeral
 	roleRuntimePassword  = "stepone-runtime-pw"
@@ -163,7 +168,7 @@ func runningInCI() bool {
 // the admin DSN, creates the OLTP stub tables that AC-9 reads
 // against, then re-runs the grants migration so stats_rollup has
 // SELECT on the stubs and stats_reader is explicitly DENY'd.
-// After this returns, the four runtime role identities exist and
+// After this returns, the runtime role identities exist and
 // their passwords match `roleRuntimePassword`.
 func applyMigrationsAndStubOLTP(t *testing.T, fx *pgFixture) *sql.DB {
 	t.Helper()
@@ -185,7 +190,16 @@ func applyMigrationsAndStubOLTP(t *testing.T, fx *pgFixture) *sql.DB {
 	// production deploy automation rotates them via
 	// `ALTER ROLE ... WITH LOGIN PASSWORD '...'` from the
 	// secret store; the test harness does the same in-memory.
-	for _, role := range []string{roleStatsReader, roleStatsRollup, roleProviderPortal, roleProviderOnboard, roleHardwareVerifier} {
+	for _, role := range []string{
+		roleStatsReader,
+		roleStatsRollup,
+		roleProviderPortal,
+		roleProviderOnboard,
+		roleAuthPolicyReq,
+		roleAuthPolicyAppr,
+		roleAuthPolicyCut,
+		roleHardwareVerifier,
+	} {
 		if _, err := adminDB.ExecContext(ctx, fmt.Sprintf(
 			`ALTER ROLE %s WITH LOGIN PASSWORD '%s'`, role, roleRuntimePassword,
 		)); err != nil {
@@ -226,6 +240,280 @@ func applyMigrationsAndStubOLTP(t *testing.T, fx *pgFixture) *sql.DB {
 	}
 
 	return adminDB
+}
+
+func TestProviderAuthPolicyExemptionApproveFunctionCommitsGrant(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	providerID := "p_xriseqo2qdf333hzeafrfykwuuzjvlx2huwxjxtg34amqi6tem2a"
+	if _, err := adminDB.ExecContext(ctx, `
+INSERT INTO provider_identities (provider_id, identity_pubkey, first_seen_ts)
+VALUES ($1, decode(repeat('11', 32), 'hex'), NOW())
+ON CONFLICT (provider_id) DO NOTHING`, providerID); err != nil {
+		t.Fatalf("seed provider identity: %v", err)
+	}
+
+	var pendingID string
+	if err := adminDB.QueryRowContext(ctx, `
+SELECT request_provider_auth_policy_exemption(
+    '23adf5df-d040-4102-820d-be02ef7a3f70'::uuid,
+    $1,
+    'operator:spec026_a',
+    NOW() + INTERVAL '2 hours',
+    'live hardware stats v1.8.10 admission while App identity key remediation is pending',
+    NULL
+)::text`, providerID).Scan(&pendingID); err != nil {
+		t.Fatalf("request exemption: %v", err)
+	}
+
+	var gotProviderID, requestedBy, reason string
+	var requestedUntil time.Time
+	var incidentID sql.NullString
+	if err := adminDB.QueryRowContext(ctx, `
+SELECT provider_id, requested_by, requested_until, reason, incident_id
+  FROM approve_provider_auth_policy_exemption($1::uuid, 'operator:spec026_b')`,
+		pendingID,
+	).Scan(&gotProviderID, &requestedBy, &requestedUntil, &reason, &incidentID); err != nil {
+		t.Fatalf("approve exemption: %v", err)
+	}
+	if gotProviderID != providerID || requestedBy != "operator:spec026_a" || reason == "" || incidentID.Valid || !requestedUntil.After(time.Now().UTC()) {
+		t.Fatalf("approval row = provider_id=%q requested_by=%q requested_until=%s reason=%q incident=%#v",
+			gotProviderID, requestedBy, requestedUntil, reason, incidentID)
+	}
+
+	var kind, grantedBy string
+	if err := adminDB.QueryRowContext(ctx, `
+SELECT kind, granted_by FROM provider_auth_policy WHERE provider_id = $1`, providerID).Scan(&kind, &grantedBy); err != nil {
+		t.Fatalf("query committed policy: %v", err)
+	}
+	if kind != "app" || grantedBy != "operator:spec026_b" {
+		t.Fatalf("committed policy kind=%q granted_by=%q, want app/operator:spec026_b", kind, grantedBy)
+	}
+}
+
+func TestProviderAuthPolicyRuntimeRolesSplitRequestAndApproval(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	onboardingDB := openRoleDB(t, fx, roleProviderOnboard)
+	requestDB := openRoleDB(t, fx, roleAuthPolicyReq)
+	approveDB := openRoleDB(t, fx, roleAuthPolicyAppr)
+	cutoverDB := openRoleDB(t, fx, roleAuthPolicyCut)
+
+	providerID := "p_xriseqo2qdf333hzeafrfykwuuzjvlx2huwxjxtg34amqi6tem2a"
+	if _, err := adminDB.ExecContext(ctx, `
+INSERT INTO provider_identities (provider_id, identity_pubkey, first_seen_ts)
+VALUES ($1, decode(repeat('11', 32), 'hex'), NOW())
+ON CONFLICT (provider_id) DO NOTHING`, providerID); err != nil {
+		t.Fatalf("seed provider identity: %v", err)
+	}
+
+	assertCannotExecuteFunction(t, ctx, onboardingDB, "provider_onboarding",
+		"request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)")
+	assertCannotExecuteFunction(t, ctx, onboardingDB, "provider_onboarding",
+		"approve_provider_auth_policy_exemption(uuid,text)")
+	assertCannotExecuteFunction(t, ctx, onboardingDB, "provider_onboarding",
+		"seed_provider_auth_policy_cutover(timestamp with time zone,text[])")
+	assertCannotExecuteFunction(t, ctx, requestDB, "provider_auth_policy_requester",
+		"approve_provider_auth_policy_exemption(uuid,text)")
+	assertCannotExecuteFunction(t, ctx, requestDB, "provider_auth_policy_requester",
+		"seed_provider_auth_policy_cutover(timestamp with time zone,text[])")
+	assertCannotExecuteFunction(t, ctx, approveDB, "provider_auth_policy_approver",
+		"request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)")
+	assertCannotExecuteFunction(t, ctx, approveDB, "provider_auth_policy_approver",
+		"seed_provider_auth_policy_cutover(timestamp with time zone,text[])")
+	assertCannotExecuteFunction(t, ctx, cutoverDB, "provider_auth_policy_cutover",
+		"request_provider_auth_policy_exemption(uuid,text,text,timestamp with time zone,text,text)")
+	assertCannotExecuteFunction(t, ctx, cutoverDB, "provider_auth_policy_cutover",
+		"approve_provider_auth_policy_exemption(uuid,text)")
+
+	pendingID := "23adf5df-d040-4102-820d-be02ef7a3f70"
+	var gotPendingID string
+	if err := requestDB.QueryRowContext(ctx, `
+SELECT request_provider_auth_policy_exemption(
+    $1::uuid,
+    $2,
+    'operator:spec026_a',
+    NOW() + INTERVAL '2 hours',
+    'live hardware stats v1.8.10 admission while App identity key remediation is pending',
+    NULL
+)::text`, pendingID, providerID).Scan(&gotPendingID); err != nil {
+		t.Fatalf("requester role request exemption: %v", err)
+	}
+	if gotPendingID != pendingID {
+		t.Fatalf("pending_id=%q, want %q", gotPendingID, pendingID)
+	}
+
+	var gotProviderID, requestedBy, reason string
+	var requestedUntil time.Time
+	var incidentID sql.NullString
+	if err := approveDB.QueryRowContext(ctx, `
+SELECT provider_id, requested_by, requested_until, reason, incident_id
+  FROM approve_provider_auth_policy_exemption($1::uuid, 'operator:spec026_b')`,
+		pendingID,
+	).Scan(&gotProviderID, &requestedBy, &requestedUntil, &reason, &incidentID); err != nil {
+		t.Fatalf("approver role approve exemption: %v", err)
+	}
+	if gotProviderID != providerID || requestedBy != "operator:spec026_a" || reason == "" || incidentID.Valid || !requestedUntil.After(time.Now().UTC()) {
+		t.Fatalf("approval row = provider_id=%q requested_by=%q requested_until=%s reason=%q incident=%#v",
+			gotProviderID, requestedBy, requestedUntil, reason, incidentID)
+	}
+}
+
+func TestProviderAuthPolicyApproveFixRepairsExistingDeploy(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB, err := sql.Open("postgres", fx.adminDSN())
+	if err != nil {
+		t.Fatalf("open admin: %v", err)
+	}
+	t.Cleanup(func() { _ = adminDB.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if _, err := adminDB.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS schema_migrations_spec017 (
+    version    INT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`); err != nil {
+		t.Fatalf("create migration table: %v", err)
+	}
+	all, err := statsmigrations.All()
+	if err != nil {
+		t.Fatalf("load migrations: %v", err)
+	}
+	var repairSQL string
+	for _, m := range all {
+		if m.Version == 9 {
+			repairSQL = m.SQL
+			continue
+		}
+		if m.Version > 8 {
+			continue
+		}
+		if _, err := adminDB.ExecContext(ctx, m.SQL); err != nil {
+			t.Fatalf("apply setup migration %03d_%s: %v", m.Version, m.Name, err)
+		}
+		if _, err := adminDB.ExecContext(ctx,
+			`INSERT INTO schema_migrations_spec017 (version, name) VALUES ($1, $2)`,
+			m.Version, m.Name,
+		); err != nil {
+			t.Fatalf("record setup migration %03d_%s: %v", m.Version, m.Name, err)
+		}
+	}
+	if repairSQL == "" {
+		t.Fatal("missing version 009 repair migration")
+	}
+
+	brokenApprovalSQL := strings.Replace(
+		repairSQL,
+		"ON CONFLICT ON CONSTRAINT provider_auth_policy_pkey DO UPDATE",
+		"ON CONFLICT (provider_id) DO UPDATE",
+		1,
+	)
+	if brokenApprovalSQL == repairSQL {
+		t.Fatal("failed to synthesize old ambiguous approval function")
+	}
+	if _, err := adminDB.ExecContext(ctx, brokenApprovalSQL); err != nil {
+		t.Fatalf("install old ambiguous approval function: %v", err)
+	}
+
+	providerID := "p_xriseqo2qdf333hzeafrfykwuuzjvlx2huwxjxtg34amqi6tem2a"
+	pendingID := "23adf5df-d040-4102-820d-be02ef7a3f70"
+	seedPendingAuthPolicyExemption(t, ctx, adminDB, providerID, pendingID)
+	var ignored string
+	err = adminDB.QueryRowContext(ctx, `
+SELECT provider_id
+  FROM approve_provider_auth_policy_exemption($1::uuid, 'operator:spec026_b')`,
+		pendingID,
+	).Scan(&ignored)
+	if err == nil || !strings.Contains(err.Error(), `column reference "provider_id" is ambiguous`) {
+		t.Fatalf("old approval function err=%v, want ambiguous provider_id", err)
+	}
+
+	if _, err := adminDB.ExecContext(ctx, `DELETE FROM provider_auth_policy_pending WHERE pending_id = $1`, pendingID); err != nil {
+		t.Fatalf("delete failed pending row: %v", err)
+	}
+	if err := statsmigrations.Apply(ctx, adminDB); err != nil {
+		t.Fatalf("apply repair migration: %v", err)
+	}
+	var versionCount int
+	if err := adminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations_spec017 WHERE version = 9`).Scan(&versionCount); err != nil {
+		t.Fatalf("query version 9: %v", err)
+	}
+	if versionCount != 1 {
+		t.Fatalf("version 9 recorded %d times, want 1", versionCount)
+	}
+
+	seedPendingAuthPolicyExemption(t, ctx, adminDB, providerID, pendingID)
+	var gotProviderID, requestedBy, reason string
+	var requestedUntil time.Time
+	var incidentID sql.NullString
+	if err := adminDB.QueryRowContext(ctx, `
+SELECT provider_id, requested_by, requested_until, reason, incident_id
+  FROM approve_provider_auth_policy_exemption($1::uuid, 'operator:spec026_b')`,
+		pendingID,
+	).Scan(&gotProviderID, &requestedBy, &requestedUntil, &reason, &incidentID); err != nil {
+		t.Fatalf("approve after repair migration: %v", err)
+	}
+	if gotProviderID != providerID || requestedBy != "operator:spec026_a" || reason == "" || incidentID.Valid || !requestedUntil.After(time.Now().UTC()) {
+		t.Fatalf("approval row after repair = provider_id=%q requested_by=%q requested_until=%s reason=%q incident=%#v",
+			gotProviderID, requestedBy, requestedUntil, reason, incidentID)
+	}
+}
+
+func seedPendingAuthPolicyExemption(t *testing.T, ctx context.Context, db *sql.DB, providerID, pendingID string) {
+	t.Helper()
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO provider_identities (provider_id, identity_pubkey, first_seen_ts)
+VALUES ($1, decode(repeat('11', 32), 'hex'), NOW())
+ON CONFLICT (provider_id) DO NOTHING`, providerID); err != nil {
+		t.Fatalf("seed provider identity: %v", err)
+	}
+	var gotPendingID string
+	if err := db.QueryRowContext(ctx, `
+SELECT request_provider_auth_policy_exemption(
+    $1::uuid,
+    $2,
+    'operator:spec026_a',
+    NOW() + INTERVAL '2 hours',
+    'live hardware stats v1.8.10 admission while App identity key remediation is pending',
+    NULL
+)::text`, pendingID, providerID).Scan(&gotPendingID); err != nil {
+		t.Fatalf("request exemption: %v", err)
+	}
+	if gotPendingID != pendingID {
+		t.Fatalf("pending_id=%q, want %q", gotPendingID, pendingID)
+	}
+}
+
+func openRoleDB(t *testing.T, fx *pgFixture, role string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("postgres", fx.roleDSN(role))
+	if err != nil {
+		t.Fatalf("open %s: %v", role, err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func assertCannotExecuteFunction(t *testing.T, ctx context.Context, db *sql.DB, role, signature string) {
+	t.Helper()
+	var allowed bool
+	if err := db.QueryRowContext(ctx, `
+SELECT has_function_privilege(current_user, $1::regprocedure, 'EXECUTE')`,
+		signature,
+	).Scan(&allowed); err != nil {
+		t.Fatalf("%s function privilege %s: %v", role, signature, err)
+	}
+	if allowed {
+		t.Fatalf("%s unexpectedly has EXECUTE on %s", role, signature)
+	}
 }
 
 // ===========================================================================
@@ -732,7 +1020,7 @@ func TestNoLoginRoleDefault(t *testing.T) {
 
 	// Confirm each runtime role has rolcanlogin = false (no
 	// password, no LOGIN) before any rotation.
-	for _, role := range []string{roleStatsReader, roleStatsRollup, roleProviderPortal} {
+	for _, role := range []string{roleStatsReader, roleStatsRollup, roleProviderPortal, roleAuthPolicyReq, roleAuthPolicyAppr, roleAuthPolicyCut, roleAuthPolicyDef} {
 		var canLogin bool
 		if err := adminDB.QueryRowContext(ctx,
 			`SELECT rolcanlogin FROM pg_roles WHERE rolname = $1`, role,

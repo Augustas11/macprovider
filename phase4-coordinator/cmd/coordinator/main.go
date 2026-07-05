@@ -371,7 +371,12 @@ func main() {
 	wsOpts = append(wsOpts, providerws.WithGitHubAuthStore(tokenStore))
 	var onboardingStore *onboarding.PGStore
 	if cfg.Onboarding.AppTrackRegisterEnabled {
-		onboardingStore, err = onboarding.OpenPGStore(cfg.Onboarding.PostgresDSN)
+		onboardingStore, err = onboarding.OpenPGStoreWithAuthPolicyDSNs(
+			cfg.Onboarding.PostgresDSN,
+			cfg.Onboarding.AuthPolicyRequestDSN,
+			cfg.Onboarding.AuthPolicyApproveDSN,
+			cfg.Onboarding.AuthPolicyCutoverDSN,
+		)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("open onboarding postgres store")
 		}

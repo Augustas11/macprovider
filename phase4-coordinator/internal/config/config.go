@@ -71,6 +71,9 @@ type CoordinatorConfig struct {
 type OnboardingConfig struct {
 	AppTrackRegisterEnabled bool              `yaml:"app_track_register_enabled"`
 	PostgresDSN             string            `yaml:"postgres_dsn"`
+	AuthPolicyRequestDSN    string            `yaml:"auth_policy_request_dsn"`
+	AuthPolicyApproveDSN    string            `yaml:"auth_policy_approve_dsn"`
+	AuthPolicyCutoverDSN    string            `yaml:"auth_policy_cutover_dsn"`
 	BundleID                string            `yaml:"bundle_id"`
 	AppleTeamID             string            `yaml:"apple_team_id"`
 	CoordinatorDomain       string            `yaml:"coordinator_domain"`
@@ -833,6 +836,9 @@ func (c *Config) resolveEnv() error {
 		dst   *string
 	}{
 		{"onboarding.postgres_dsn", &c.Onboarding.PostgresDSN},
+		{"onboarding.auth_policy_request_dsn", &c.Onboarding.AuthPolicyRequestDSN},
+		{"onboarding.auth_policy_approve_dsn", &c.Onboarding.AuthPolicyApproveDSN},
+		{"onboarding.auth_policy_cutover_dsn", &c.Onboarding.AuthPolicyCutoverDSN},
 		{"onboarding.apple_team_id", &c.Onboarding.AppleTeamID},
 	}
 	for _, f := range onboardingSecrets {
@@ -1258,6 +1264,15 @@ func (c Config) validateOnboarding() error {
 	}
 	if strings.TrimSpace(o.PostgresDSN) == "" {
 		return fmt.Errorf("onboarding.postgres_dsn must be set when onboarding.app_track_register_enabled is true")
+	}
+	if strings.TrimSpace(o.AuthPolicyRequestDSN) == "" {
+		return fmt.Errorf("onboarding.auth_policy_request_dsn must be set when onboarding.app_track_register_enabled is true")
+	}
+	if strings.TrimSpace(o.AuthPolicyApproveDSN) == "" {
+		return fmt.Errorf("onboarding.auth_policy_approve_dsn must be set when onboarding.app_track_register_enabled is true")
+	}
+	if strings.TrimSpace(o.AuthPolicyCutoverDSN) == "" {
+		return fmt.Errorf("onboarding.auth_policy_cutover_dsn must be set when onboarding.app_track_register_enabled is true")
 	}
 	if strings.TrimSpace(o.AppleTeamID) == "" {
 		return fmt.Errorf("onboarding.apple_team_id must be set when onboarding.app_track_register_enabled is true")

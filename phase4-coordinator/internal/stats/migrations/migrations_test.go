@@ -29,6 +29,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{6, "spec_026_identity"},
 		{7, "hardware_profiles"},
 		{8, "hardware_verification_jobs"},
+		{9, "provider_auth_policy_approve_fix"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -65,7 +66,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	var schema, bootstrap, spec026, hardware, hardwareJobs string
+	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix string
 	for _, m := range all {
 		switch m.Name {
 		case "stats_tables":
@@ -78,6 +79,8 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 			hardware = m.SQL
 		case "hardware_verification_jobs":
 			hardwareJobs = m.SQL
+		case "provider_auth_policy_approve_fix":
+			authPolicyApproveFix = m.SQL
 		}
 	}
 	if schema == "" {
@@ -144,19 +147,94 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 		"CREATE OR REPLACE FUNCTION seed_provider_auth_policy_cutover",
 		"CREATE OR REPLACE FUNCTION request_provider_auth_policy_exemption",
 		"CREATE OR REPLACE FUNCTION approve_provider_auth_policy_exemption",
+		"SET search_path = pg_catalog, public, pg_temp",
 		"CREATE ROLE provider_onboarding LOGIN",
 		"ALTER ROLE provider_onboarding LOGIN",
+		"CREATE ROLE provider_auth_policy_definer NOLOGIN",
+		"CREATE ROLE provider_auth_policy_requester NOLOGIN",
+		"CREATE ROLE provider_auth_policy_approver NOLOGIN",
+		"CREATE ROLE provider_auth_policy_cutover NOLOGIN",
+		"ALTER ROLE provider_auth_policy_definer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS",
+		"ALTER ROLE provider_auth_policy_requester NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS",
+		"FROM pg_auth_members m",
+		"GRANT USAGE, CREATE ON SCHEMA public TO provider_auth_policy_definer",
+		"GRANT SELECT ON provider_identities TO provider_auth_policy_definer",
+		"GRANT SELECT, INSERT, UPDATE ON provider_auth_policy TO provider_auth_policy_definer",
+		"GRANT SELECT, INSERT, UPDATE ON provider_auth_policy_cutover_runs TO provider_auth_policy_definer",
+		"GRANT SELECT, INSERT, UPDATE ON provider_auth_policy_pending TO provider_auth_policy_definer",
+		"GRANT SELECT, INSERT ON provider_auth_policy_grants TO provider_auth_policy_definer",
+		"REVOKE ALL ON provider_auth_policy_pending FROM provider_auth_policy_requester, provider_auth_policy_approver, provider_auth_policy_cutover",
+		"REVOKE ALL ON provider_auth_policy_grants FROM provider_auth_policy_requester, provider_auth_policy_approver, provider_auth_policy_cutover",
 		"GRANT SELECT, INSERT, UPDATE ON provider_identities TO provider_onboarding",
 		"GRANT SELECT, INSERT ON provider_register_nonces TO provider_onboarding",
 		"GRANT SELECT ON provider_auth_policy TO provider_onboarding",
 		"REVOKE ALL ON FUNCTION prune_provider_register_nonces(INTERVAL) FROM provider_onboarding",
 		"REVOKE ALL ON provider_auth_policy_pending FROM provider_onboarding",
 		"REVOKE ALL ON provider_auth_policy_grants FROM provider_onboarding",
-		"GRANT EXECUTE ON FUNCTION seed_provider_auth_policy_cutover(TIMESTAMPTZ, TEXT[]) TO provider_onboarding",
-		"GRANT EXECUTE ON FUNCTION request_provider_auth_policy_exemption(UUID, TEXT, TEXT, TIMESTAMPTZ, TEXT, TEXT) TO provider_onboarding",
-		"GRANT EXECUTE ON FUNCTION approve_provider_auth_policy_exemption(UUID, TEXT) TO provider_onboarding",
+		"REVOKE ALL ON FUNCTION seed_provider_auth_policy_cutover(TIMESTAMPTZ, TEXT[]) FROM provider_onboarding",
+		"REVOKE ALL ON FUNCTION request_provider_auth_policy_exemption(UUID, TEXT, TEXT, TIMESTAMPTZ, TEXT, TEXT) FROM provider_onboarding",
+		"REVOKE ALL ON FUNCTION approve_provider_auth_policy_exemption(UUID, TEXT) FROM provider_onboarding",
+		"GRANT EXECUTE ON FUNCTION seed_provider_auth_policy_cutover(TIMESTAMPTZ, TEXT[]) TO provider_auth_policy_cutover",
+		"GRANT EXECUTE ON FUNCTION request_provider_auth_policy_exemption(UUID, TEXT, TEXT, TIMESTAMPTZ, TEXT, TEXT) TO provider_auth_policy_requester",
+		"GRANT EXECUTE ON FUNCTION approve_provider_auth_policy_exemption(UUID, TEXT) TO provider_auth_policy_approver",
+		"ALTER FUNCTION seed_provider_auth_policy_cutover(TIMESTAMPTZ, TEXT[]) OWNER TO provider_auth_policy_definer",
+		"ALTER FUNCTION request_provider_auth_policy_exemption(UUID, TEXT, TEXT, TIMESTAMPTZ, TEXT, TEXT) OWNER TO provider_auth_policy_definer",
+		"ALTER FUNCTION approve_provider_auth_policy_exemption(UUID, TEXT) OWNER TO provider_auth_policy_definer",
+		"REVOKE CREATE ON SCHEMA public FROM provider_auth_policy_definer",
 	} {
 		mustContain(t, spec026, needle, "SPEC-026 schema/grant shape")
+	}
+	mustContain(t, spec026, "ON CONFLICT ON CONSTRAINT provider_auth_policy_pkey DO UPDATE",
+		"SPEC-026 approval upsert must avoid PL/pgSQL output-column ambiguity")
+	if authPolicyApproveFix == "" {
+		t.Fatal("provider_auth_policy_approve_fix migration body is empty")
+	}
+	mustContain(t, authPolicyApproveFix, "CREATE OR REPLACE FUNCTION approve_provider_auth_policy_exemption",
+		"forward migration must replace the approval function on existing deployments")
+	mustContain(t, authPolicyApproveFix, "CREATE OR REPLACE FUNCTION seed_provider_auth_policy_cutover",
+		"forward migration must replace the cutover seed function on existing deployments")
+	mustContain(t, authPolicyApproveFix, "CREATE OR REPLACE FUNCTION request_provider_auth_policy_exemption",
+		"forward migration must replace the request function on existing deployments")
+	mustContain(t, authPolicyApproveFix, "SET search_path = pg_catalog, public, pg_temp",
+		"forward approval function must use hardened SECURITY DEFINER search path")
+	if got := strings.Count(authPolicyApproveFix, "SET search_path = pg_catalog, public, pg_temp"); got < 3 {
+		t.Fatalf("forward migration has %d hardened auth-policy function search_path clauses, want at least 3", got)
+	}
+	mustContain(t, authPolicyApproveFix, "ON CONFLICT ON CONSTRAINT provider_auth_policy_pkey DO UPDATE",
+		"forward approval fix must avoid PL/pgSQL output-column ambiguity")
+	for _, role := range []string{
+		"provider_auth_policy_requester",
+		"provider_auth_policy_approver",
+		"provider_auth_policy_cutover",
+	} {
+		mustNotContain(t, authPolicyApproveFix, "ALTER ROLE "+role+" NOLOGIN",
+			"forward migration must preserve existing login/password state for "+role)
+	}
+	for _, needle := range []string{
+		"CREATE ROLE provider_auth_policy_definer NOLOGIN",
+		"CREATE ROLE provider_auth_policy_requester NOLOGIN",
+		"CREATE ROLE provider_auth_policy_approver NOLOGIN",
+		"CREATE ROLE provider_auth_policy_cutover NOLOGIN",
+		"ALTER ROLE provider_auth_policy_definer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS",
+		"ALTER ROLE provider_auth_policy_requester NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS",
+		"FROM pg_auth_members m",
+		"GRANT SELECT, INSERT, UPDATE ON provider_auth_policy_pending TO provider_auth_policy_definer",
+		"REVOKE ALL ON provider_auth_policy_pending FROM provider_auth_policy_requester, provider_auth_policy_approver, provider_auth_policy_cutover",
+		"REVOKE ALL ON FUNCTION seed_provider_auth_policy_cutover(TIMESTAMPTZ, TEXT[]) FROM PUBLIC",
+		"REVOKE ALL ON FUNCTION request_provider_auth_policy_exemption(UUID, TEXT, TEXT, TIMESTAMPTZ, TEXT, TEXT) FROM PUBLIC",
+		"REVOKE ALL ON FUNCTION approve_provider_auth_policy_exemption(UUID, TEXT) FROM PUBLIC",
+		"REVOKE ALL ON FUNCTION seed_provider_auth_policy_cutover(TIMESTAMPTZ, TEXT[]) FROM provider_onboarding",
+		"REVOKE ALL ON FUNCTION request_provider_auth_policy_exemption(UUID, TEXT, TEXT, TIMESTAMPTZ, TEXT, TEXT) FROM provider_onboarding",
+		"REVOKE ALL ON FUNCTION approve_provider_auth_policy_exemption(UUID, TEXT) FROM provider_onboarding",
+		"GRANT EXECUTE ON FUNCTION seed_provider_auth_policy_cutover(TIMESTAMPTZ, TEXT[]) TO provider_auth_policy_cutover",
+		"GRANT EXECUTE ON FUNCTION request_provider_auth_policy_exemption(UUID, TEXT, TEXT, TIMESTAMPTZ, TEXT, TEXT) TO provider_auth_policy_requester",
+		"GRANT EXECUTE ON FUNCTION approve_provider_auth_policy_exemption(UUID, TEXT) TO provider_auth_policy_approver",
+		"ALTER FUNCTION seed_provider_auth_policy_cutover(TIMESTAMPTZ, TEXT[]) OWNER TO provider_auth_policy_definer",
+		"ALTER FUNCTION request_provider_auth_policy_exemption(UUID, TEXT, TEXT, TIMESTAMPTZ, TEXT, TEXT) OWNER TO provider_auth_policy_definer",
+		"ALTER FUNCTION approve_provider_auth_policy_exemption(UUID, TEXT) OWNER TO provider_auth_policy_definer",
+		"REVOKE CREATE ON SCHEMA public FROM provider_auth_policy_definer",
+	} {
+		mustContain(t, authPolicyApproveFix, needle, "forward migration auth-policy privilege repair")
 	}
 	down, err := os.ReadFile("006_spec_026_identity.down.sql")
 	if err != nil {
@@ -174,6 +252,10 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 		"DROP FUNCTION IF EXISTS prune_provider_register_nonces(INTERVAL)",
 		"DROP TABLE IF EXISTS provider_register_nonces",
 		"DROP TABLE IF EXISTS provider_identities",
+		"DROP ROLE IF EXISTS provider_auth_policy_cutover",
+		"DROP ROLE IF EXISTS provider_auth_policy_approver",
+		"DROP ROLE IF EXISTS provider_auth_policy_requester",
+		"DROP ROLE IF EXISTS provider_auth_policy_definer",
 		"DROP ROLE IF EXISTS provider_onboarding",
 	} {
 		mustContain(t, downSQL, needle, "SPEC-026 rollback artifact")
