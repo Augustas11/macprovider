@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MacProvider stats hardware evidence verifier
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Unit=stats-hardware-verifier.service
+
+[Install]
+WantedBy=timers.target

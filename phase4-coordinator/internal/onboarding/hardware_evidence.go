@@ -1,0 +1,325 @@
+package onboarding
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"strings"
+	"time"
+)
+
+const hardwareEvidenceSchemaVersion = "hardware_evidence.autotune.v1"
+const hardwareEvidenceRecentWindow = 10 * time.Minute
+
+var ErrHardwareEvidenceRateLimited = errors.New("hardware evidence rate limited")
+
+// HardwareEvidenceRequest is provider-authenticated autotune evidence. The
+// coordinator queues it for the verifier sidecar; public stats only consume it
+// after the sidecar promotes a conservative trusted profile.
+type HardwareEvidenceRequest struct {
+	SchemaVersion          string                      `json:"schema_version"`
+	ProviderID             string                      `json:"provider_id"`
+	GeneratedAt            string                      `json:"generated_at"`
+	Hardware               HardwareEvidenceHardware    `json:"hardware"`
+	CandidateCatalogSHA256 string                      `json:"candidate_catalog_sha256"`
+	RecommendedModel       string                      `json:"recommended_model"`
+	Benchmarks             []HardwareEvidenceBenchmark `json:"benchmarks"`
+}
+
+type HardwareEvidenceHardware struct {
+	Chip                 string `json:"chip"`
+	MemoryGB             int    `json:"memory_gb"`
+	BandwidthTier        string `json:"bandwidth_tier"`
+	Detected             bool   `json:"detected"`
+	OSVersion            string `json:"os_version"`
+	BinaryVersion        string `json:"binary_version"`
+	HardwareIdentityHash string `json:"hardware_identity_hash"`
+}
+
+type HardwareEvidenceBenchmark struct {
+	ModelKey                string  `json:"model_key"`
+	ModelID                 string  `json:"model_id"`
+	SustainedTPS            float64 `json:"sustained_tps"`
+	TTFTMS                  int     `json:"ttft_ms"`
+	SwapDetected            bool    `json:"swap_detected"`
+	ThermalThrottleDetected bool    `json:"thermal_throttle_detected"`
+	ArtifactSHA256          string  `json:"artifact_sha256"`
+	CandidateCatalogSHA256  string  `json:"candidate_catalog_sha256"`
+	BenchmarkID             string  `json:"benchmark_id,omitempty"`
+	GeneratedAt             string  `json:"generated_at"`
+	BinaryVersion           string  `json:"binary_version"`
+	HardwareIdentityHash    string  `json:"hardware_identity_hash"`
+}
+
+type HardwareEvidenceJobRecord struct {
+	JobID       int64
+	EvidenceSHA string
+}
+
+// InsertHardwareVerificationJob queues provider-authenticated evidence for the
+// out-of-band verifier and may persist the untrusted provider hardware profile.
+func (s *PGStore) InsertHardwareVerificationJob(ctx context.Context, providerID string, evidence HardwareEvidenceRequest, generatedAt time.Time) (HardwareEvidenceJobRecord, error) {
+	if s == nil || s.db == nil {
+		return HardwareEvidenceJobRecord{}, errors.New("onboarding postgres store is nil")
+	}
+	raw, err := canonicalEvidenceJSON(evidence)
+	if err != nil {
+		return HardwareEvidenceJobRecord{}, err
+	}
+	sum := sha256.Sum256(raw)
+	evidenceSHA := hex.EncodeToString(sum[:])
+
+	chip := trimForStorage(evidence.Hardware.Chip, 120)
+	normalized := normalizeChip(chip)
+	macosVersion := trimForStorage(evidence.Hardware.OSVersion, 80)
+	appVersion := trimForStorage(evidence.Hardware.BinaryVersion, 80)
+	memoryGB := evidence.Hardware.MemoryGB
+	if memoryGB < 0 {
+		memoryGB = 0
+	}
+	if memoryGB > 4096 {
+		memoryGB = 4096
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return HardwareEvidenceJobRecord{}, err
+	}
+	defer tx.Rollback()
+
+	var recentJobs int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*)
+  FROM hardware_verification_jobs
+ WHERE provider_id = $1
+   AND (status IN ('pending', 'waiting_trust') OR submitted_at > now() - $2::interval)`,
+		providerID,
+		fmt.Sprintf("%d seconds", int(hardwareEvidenceRecentWindow.Seconds())),
+	).Scan(&recentJobs); err != nil {
+		return HardwareEvidenceJobRecord{}, err
+	}
+	if recentJobs > 0 {
+		return HardwareEvidenceJobRecord{}, ErrHardwareEvidenceRateLimited
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO provider_hardware_profiles (
+    provider_id, chip, chip_normalized, unified_memory_gb,
+    macos_version, app_version, source, last_reported_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6, 'cli_hello', $7
+)
+ON CONFLICT (provider_id) DO UPDATE
+   SET chip = EXCLUDED.chip,
+       chip_normalized = EXCLUDED.chip_normalized,
+       unified_memory_gb = EXCLUDED.unified_memory_gb,
+       macos_version = EXCLUDED.macos_version,
+       app_version = EXCLUDED.app_version,
+       source = EXCLUDED.source,
+       last_reported_at = EXCLUDED.last_reported_at
+ WHERE provider_hardware_profiles.last_reported_at <= EXCLUDED.last_reported_at`,
+		providerID, chip, normalized, memoryGB, macosVersion, appVersion, generatedAt.UTC(),
+	); err != nil {
+		return HardwareEvidenceJobRecord{}, err
+	}
+
+	var jobID int64
+	err = tx.QueryRowContext(ctx, `
+WITH inserted AS (
+    INSERT INTO hardware_verification_jobs (
+        provider_id, source, status, chip, chip_normalized, unified_memory_gb,
+        bandwidth_tier, os_version, binary_version, benchmark_count,
+        max_sustained_tps, generated_at, evidence, evidence_sha256
+    ) VALUES (
+        $1, 'autotune', 'pending', $2, $3, $4,
+        $5, $6, $7, $8,
+        $9, $10, $11, $12
+    )
+    ON CONFLICT (evidence_sha256) DO NOTHING
+    RETURNING id
+)
+SELECT id FROM inserted
+UNION ALL
+SELECT id FROM hardware_verification_jobs WHERE evidence_sha256 = $12
+LIMIT 1`,
+		providerID,
+		chip,
+		normalized,
+		memoryGB,
+		trimForStorage(evidence.Hardware.BandwidthTier, 20),
+		macosVersion,
+		appVersion,
+		len(evidence.Benchmarks),
+		maxBenchmarkTPS(evidence.Benchmarks),
+		generatedAt.UTC(),
+		raw,
+		evidenceSHA,
+	).Scan(&jobID)
+	if err != nil {
+		return HardwareEvidenceJobRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return HardwareEvidenceJobRecord{}, err
+	}
+	return HardwareEvidenceJobRecord{JobID: jobID, EvidenceSHA: evidenceSHA}, nil
+}
+
+func (h *Handler) HandleHardwareEvidence(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	if h.StatsDB == nil || h.AuthTokenStore == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "onboarding dependencies unavailable")
+		return
+	}
+	token := bearerToken(r.Header)
+	providerID, ok, err := h.AuthTokenStore.ValidateToken(r.Context(), token)
+	if err != nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "token validation unavailable")
+		return
+	}
+	if !ok {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "provider bearer token required")
+		return
+	}
+	sourceIP := clientIP(r, h.TrustedProxies)
+	if h.HardwareEvidenceIPRateLimiter != nil && !h.HardwareEvidenceIPRateLimiter.Allow(sourceIP) {
+		w.Header().Set("Retry-After", "60")
+		writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "hardware evidence ip rate limit exceeded")
+		return
+	}
+	if h.HardwareEvidenceProviderRateLimiter != nil && !h.HardwareEvidenceProviderRateLimiter.Allow(providerID) {
+		w.Header().Set("Retry-After", "600")
+		writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "hardware evidence provider rate limit exceeded")
+		return
+	}
+	body, err := readBoundedBody(w, r, 128*1024)
+	if err != nil {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large", "body exceeds 128 KiB")
+		return
+	}
+	var req HardwareEvidenceRequest
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_json", "request body is not valid hardware evidence JSON")
+		return
+	}
+	if dec.Decode(&struct{}{}) != io.EOF {
+		writeJSONError(w, http.StatusBadRequest, "invalid_json", "request body must contain exactly one JSON object")
+		return
+	}
+	generatedAt, err := h.validateHardwareEvidence(req, providerID)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_evidence", err.Error())
+		return
+	}
+	store, ok := h.StatsDB.(interface {
+		InsertHardwareVerificationJob(context.Context, string, HardwareEvidenceRequest, time.Time) (HardwareEvidenceJobRecord, error)
+	})
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "hardware evidence queue unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), hardwareProfilePersistTimeout)
+	defer cancel()
+	record, err := store.InsertHardwareVerificationJob(ctx, providerID, req, generatedAt)
+	if err != nil {
+		if errors.Is(err, ErrHardwareEvidenceRateLimited) {
+			w.Header().Set("Retry-After", "600")
+			writeJSONError(w, http.StatusTooManyRequests, "rate_limited", "hardware evidence queue already has a recent job")
+			return
+		}
+		writeJSONError(w, http.StatusServiceUnavailable, "unavailable", "hardware evidence queue unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":       "queued",
+		"provider_id":  providerID,
+		"job_id":       record.JobID,
+		"evidence_sha": record.EvidenceSHA,
+	})
+}
+
+func (h *Handler) validateHardwareEvidence(req HardwareEvidenceRequest, tokenProviderID string) (time.Time, error) {
+	if req.SchemaVersion != hardwareEvidenceSchemaVersion {
+		return time.Time{}, errors.New("schema_version must be hardware_evidence.autotune.v1")
+	}
+	if strings.TrimSpace(req.ProviderID) == "" || len(req.ProviderID) > 128 {
+		return time.Time{}, errors.New("provider_id is required")
+	}
+	if req.ProviderID != tokenProviderID {
+		return time.Time{}, errors.New("provider_id must match bearer token")
+	}
+	generatedAt, err := time.Parse(time.RFC3339, req.GeneratedAt)
+	if err != nil {
+		return time.Time{}, errors.New("generated_at must be RFC3339")
+	}
+	now := time.Now().UTC()
+	if h.Now != nil {
+		now = h.Now().UTC()
+	}
+	if generatedAt.Before(now.Add(-48*time.Hour)) || generatedAt.After(now.Add(5*time.Minute)) {
+		return time.Time{}, errors.New("generated_at is outside the accepted window")
+	}
+	if strings.TrimSpace(req.Hardware.Chip) == "" || len(req.Hardware.Chip) > 120 {
+		return time.Time{}, errors.New("hardware.chip is required")
+	}
+	if req.Hardware.MemoryGB <= 0 || req.Hardware.MemoryGB > 4096 {
+		return time.Time{}, errors.New("hardware.memory_gb must be in 1...4096")
+	}
+	switch strings.ToUpper(strings.TrimSpace(req.Hardware.BandwidthTier)) {
+	case "C", "B", "A", "S", "UNKNOWN":
+	default:
+		return time.Time{}, errors.New("hardware.bandwidth_tier is invalid")
+	}
+	if len(req.Benchmarks) > 64 {
+		return time.Time{}, errors.New("benchmarks exceeds 64 entries")
+	}
+	for _, b := range req.Benchmarks {
+		if strings.TrimSpace(b.ModelKey) == "" || len(b.ModelKey) > 160 {
+			return time.Time{}, errors.New("benchmark.model_key is required")
+		}
+		if math.IsNaN(b.SustainedTPS) || math.IsInf(b.SustainedTPS, 0) || b.SustainedTPS < 0 || b.SustainedTPS > 1_000_000 {
+			return time.Time{}, errors.New("benchmark.sustained_tps is invalid")
+		}
+		if b.TTFTMS < 0 || b.TTFTMS > 3_600_000 {
+			return time.Time{}, errors.New("benchmark.ttft_ms is invalid")
+		}
+	}
+	return generatedAt.UTC(), nil
+}
+
+func canonicalEvidenceJSON(evidence HardwareEvidenceRequest) ([]byte, error) {
+	return json.Marshal(evidence)
+}
+
+func maxBenchmarkTPS(benchmarks []HardwareEvidenceBenchmark) float64 {
+	var max float64
+	for _, b := range benchmarks {
+		if b.SustainedTPS > max && !math.IsNaN(b.SustainedTPS) && !math.IsInf(b.SustainedTPS, 0) {
+			max = b.SustainedTPS
+		}
+	}
+	return max
+}
+
+func bearerToken(headers http.Header) string {
+	auth := strings.TrimSpace(headers.Get("Authorization"))
+	token, ok := strings.CutPrefix(auth, "Bearer ")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(token)
+}

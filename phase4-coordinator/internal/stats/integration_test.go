@@ -62,12 +62,13 @@ const (
 	// bumping the major version.
 	pgImage = "postgres:16.4-alpine3.20@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c"
 
-	roleStatsReader     = "stats_reader"
-	roleStatsRollup     = "stats_rollup"
-	roleProviderPortal  = "provider_portal"
-	roleProviderOnboard = "provider_onboarding"
-	roleAdminPassword   = "stepone-admin-password" // local only; container is ephemeral
-	roleRuntimePassword = "stepone-runtime-pw"
+	roleStatsReader      = "stats_reader"
+	roleStatsRollup      = "stats_rollup"
+	roleProviderPortal   = "provider_portal"
+	roleProviderOnboard  = "provider_onboarding"
+	roleHardwareVerifier = "stats_hardware_verifier"
+	roleAdminPassword    = "stepone-admin-password" // local only; container is ephemeral
+	roleRuntimePassword  = "stepone-runtime-pw"
 )
 
 // pgFixture wraps an ephemeral Postgres container + the four
@@ -184,7 +185,7 @@ func applyMigrationsAndStubOLTP(t *testing.T, fx *pgFixture) *sql.DB {
 	// production deploy automation rotates them via
 	// `ALTER ROLE ... WITH LOGIN PASSWORD '...'` from the
 	// secret store; the test harness does the same in-memory.
-	for _, role := range []string{roleStatsReader, roleStatsRollup, roleProviderPortal, roleProviderOnboard} {
+	for _, role := range []string{roleStatsReader, roleStatsRollup, roleProviderPortal, roleProviderOnboard, roleHardwareVerifier} {
 		if _, err := adminDB.ExecContext(ctx, fmt.Sprintf(
 			`ALTER ROLE %s WITH LOGIN PASSWORD '%s'`, role, roleRuntimePassword,
 		)); err != nil {
@@ -958,6 +959,118 @@ func TestHardwareProfileRoleGrantsAndVerificationGuard(t *testing.T) {
 	}
 	if verified {
 		t.Fatalf("changed-chip provider_onboarding update preserved verified; want cleared")
+	}
+}
+
+func TestHardwareVerifierPromotionGuard(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+
+	verifierDB, err := sql.Open("postgres", fx.roleDSN(roleHardwareVerifier))
+	if err != nil {
+		t.Fatalf("open hardware verifier: %v", err)
+	}
+	defer verifierDB.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO chip_hardware_profiles
+            (chip_normalized, display_chip, memory_bandwidth_gb_per_s, network_power_kw, gpu_cores, cpu_cores)
+        VALUES ('apple m4 max', 'Apple M4 Max', 546, 0.12, 40, 16)
+    `); err != nil {
+		t.Fatalf("seed chip profile: %v", err)
+	}
+
+	staleGeneratedAt := time.Now().UTC().Add(-8 * 24 * time.Hour)
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO hardware_verification_jobs
+            (provider_id, source, status, chip, chip_normalized, unified_memory_gb,
+             bandwidth_tier, os_version, binary_version, benchmark_count, max_sustained_tps,
+             generated_at, evidence, evidence_sha256)
+        VALUES
+            ('p-stale', 'autotune', 'pending', 'Apple M4 Max', 'apple m4 max', 64,
+             'A', '15.0', '1.0.0', 1, 42,
+             $1, '{"provider_id":"p-stale","hardware":{"hardware_identity_hash":"hash-stale"},"benchmarks":[{"model_key":"x","sustained_tps":42}]}'::jsonb, 'sha-stale')
+    `, staleGeneratedAt); err != nil {
+		t.Fatalf("seed stale verification job: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO hardware_verification_trust
+            (provider_id, hardware_identity_hash, chip_normalized, unified_memory_gb, trusted_by)
+        VALUES ('p-stale', 'hash-stale', 'apple m4 max', 64, 'integration-test')
+    `); err != nil {
+		t.Fatalf("seed stale trust: %v", err)
+	}
+	_, err = verifierDB.ExecContext(ctx, `
+        INSERT INTO provider_hardware_profiles
+            (provider_id, chip, chip_normalized, unified_memory_gb,
+             macos_version, app_version, source, verified, last_reported_at)
+        VALUES ('p-stale', 'Apple M4 Max', 'apple m4 max', 64,
+                '15.0', '1.0.0', 'cli_hello', TRUE, $1)
+    `, staleGeneratedAt)
+	if err == nil {
+		t.Fatalf("stats_hardware_verifier promoted stale pending job")
+	}
+	if !contains(err.Error(), "matching trusted hardware evidence") {
+		t.Fatalf("stale promotion error = %q, want trusted evidence guard", err.Error())
+	}
+
+	freshGeneratedAt := time.Now().UTC()
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO hardware_verification_jobs
+            (provider_id, source, status, chip, chip_normalized, unified_memory_gb,
+             bandwidth_tier, os_version, binary_version, benchmark_count, max_sustained_tps,
+             generated_at, evidence, evidence_sha256)
+        VALUES
+            ('p-fresh', 'autotune', 'pending', 'Apple M4 Max', 'apple m4 max', 64,
+             'A', '15.0', '1.0.0', 1, 42,
+             $1, '{"provider_id":"p-fresh","hardware":{"hardware_identity_hash":"hash-fresh"},"benchmarks":[{"model_key":"x","sustained_tps":42}]}'::jsonb, 'sha-fresh')
+    `, freshGeneratedAt); err != nil {
+		t.Fatalf("seed fresh verification job: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO hardware_verification_trust
+            (provider_id, hardware_identity_hash, chip_normalized, unified_memory_gb, trusted_by)
+        VALUES ('p-fresh', 'hash-fresh', 'apple m4 max', 64, 'integration-test')
+    `); err != nil {
+		t.Fatalf("seed fresh trust: %v", err)
+	}
+	if _, err := verifierDB.ExecContext(ctx, `
+        INSERT INTO provider_hardware_profiles
+            (provider_id, chip, chip_normalized, unified_memory_gb,
+             macos_version, app_version, source, verified, last_reported_at)
+        VALUES ('p-fresh', 'Apple M4 Max', 'apple m4 max', 64,
+                '15.0', '1.0.0', 'cli_hello', TRUE, $1)
+    `, freshGeneratedAt); err != nil {
+		t.Fatalf("stats_hardware_verifier fresh trusted promotion: %v", err)
+	}
+
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO hardware_verification_jobs
+            (provider_id, source, status, chip, chip_normalized, unified_memory_gb,
+             bandwidth_tier, os_version, binary_version, benchmark_count, max_sustained_tps,
+             generated_at, evidence, evidence_sha256)
+        VALUES
+            ('p-final', 'autotune', 'verified', 'Apple M4 Max', 'apple m4 max', 64,
+             'A', '15.0', '1.0.0', 1, 42,
+             now(), '{"provider_id":"p-final","hardware":{"hardware_identity_hash":"hash-final"},"benchmarks":[{"model_key":"x","sustained_tps":42}]}'::jsonb, 'sha-final')
+    `); err != nil {
+		t.Fatalf("seed finalized verification job: %v", err)
+	}
+	_, err = verifierDB.ExecContext(ctx, `
+        UPDATE hardware_verification_jobs
+           SET status = 'waiting_trust',
+               processed_at = now(),
+               decision_reason = 'integration-reopen'
+         WHERE evidence_sha256 = 'sha-final'
+    `)
+	if err == nil {
+		t.Fatalf("stats_hardware_verifier reopened finalized job")
+	}
+	if !contains(err.Error(), "may not update finalized") {
+		t.Fatalf("finalized job update error = %q, want finalized guard", err.Error())
 	}
 }
 

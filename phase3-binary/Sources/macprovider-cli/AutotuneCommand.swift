@@ -68,6 +68,9 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "Recommend the best paid-yield model for this Mac from the signed/static market inputs.")
     var recommend = false
 
+    @Flag(name: .customLong("submit-hardware-evidence"), inversion: .prefixedNo, help: "With --recommend, submit local autotune hardware evidence for stats verification when provider credentials are configured.")
+    var submitHardwareEvidence = true
+
     @Flag(help: "With --recommend, check whether the stored recommendation is fresh without benchmarking.")
     var freshnessCheck = false
 
@@ -742,6 +745,20 @@ struct AutotuneCommand: AsyncParsableCommand {
         var result = AutotuneRecommendEngine().recommend(request)
         result.probeDiagnostics = outcomes.diagnostics
         try RecommendationStateStore.write(result)
+        if submitHardwareEvidence {
+            let submission = await AutotuneHardwareEvidenceSubmitter(config: resolvedConfig).submit(
+                result: result,
+                benchmarks: request.benchmarks
+            )
+            switch submission {
+            case .submitted:
+                FileHandle.standardError.write(Data("hardware evidence submitted for stats verification\n".utf8))
+            case .skipped:
+                break
+            case .failed(let reason):
+                FileHandle.standardError.write(Data("[warn] hardware evidence submission failed: \(reason)\n".utf8))
+            }
+        }
         let paidSelected = result.recommendedModel.flatMap { recommendedModel in
             result.selectedCandidate.flatMap { $0.model == recommendedModel ? $0 : nil }
         }
