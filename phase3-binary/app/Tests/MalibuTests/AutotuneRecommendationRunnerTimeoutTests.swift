@@ -63,6 +63,52 @@ final class AutotuneRecommendationRunnerTimeoutTests: XCTestCase {
         )
     }
 
+    func testTerminateAutotuneSubtreeSIGTERMsCooperativeChild() throws {
+        // ARCH-M-1 regression: the runner tears down cooperative CLI
+        // subprocesses via `process.terminate()` (SIGTERM). A well-behaved
+        // shell exits promptly. Confirm the helper returns within grace
+        // and the process is gone.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "sleep 30"]
+        try process.run()
+        // Give macOS a beat to actually start the child.
+        Thread.sleep(forTimeInterval: 0.05)
+        AutotuneRecommendationRunner.terminateAutotuneSubtree(
+            process: process,
+            graceSeconds: 2
+        )
+        XCTAssertFalse(process.isRunning)
+    }
+
+    func testTerminateAutotuneSubtreeSIGKILLEscalatesWhenChildIgnoresSIGTERM() throws {
+        // ARCH-M-1 regression: if the CLI ignores SIGTERM (wedged handler,
+        // pathological state), the runner must escalate to SIGKILL so
+        // orphan grandchildren cannot outlive the timeout. Simulate this
+        // with a shell that traps SIGTERM to a no-op and blocks on wait.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // trap ignores SIGTERM (15); the subshell then wait's forever.
+        process.arguments = ["-c", "trap '' 15; sleep 60 & wait"]
+        try process.run()
+        Thread.sleep(forTimeInterval: 0.1)
+        let before = Date()
+        AutotuneRecommendationRunner.terminateAutotuneSubtree(
+            process: process,
+            graceSeconds: 0.5
+        )
+        let elapsed = Date().timeIntervalSince(before)
+        XCTAssertFalse(process.isRunning)
+        // Must have waited at least the grace window before escalating.
+        XCTAssertGreaterThanOrEqual(elapsed, 0.4)
+        // And must not have waited absurdly long (i.e. SIGKILL landed).
+        XCTAssertLessThan(elapsed, 5.0)
+    }
+
+    func testSubtreeGraceSecondsIsPositive() {
+        XCTAssertGreaterThan(AutotuneRecommendationRunner.subtreeGraceSeconds, 0)
+    }
+
     func testProcessTimeoutIsNotUntenable() {
         // Belt-and-suspenders: if the constant is ever set to some
         // multi-hour value, the user is trapped in an indefinite

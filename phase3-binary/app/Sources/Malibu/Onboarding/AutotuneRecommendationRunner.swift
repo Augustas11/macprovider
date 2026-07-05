@@ -130,7 +130,16 @@ enum AutotuneRecommendationRunner {
                         Thread.sleep(forTimeInterval: 0.05)
                     }
                     if process.isRunning {
-                        process.terminate()
+                        // ARCH-M-1 orphan-child fix: SIGTERM to the CLI first —
+                        // the CLI's `--recommend` path installs a signal
+                        // handler that cascades SIGTERM to its process group
+                        // via `killpg(0, SIGTERM)`, tearing down every
+                        // `CandidateProviderRunner` `serve --no-join` grandchild
+                        // before the CLI exits. If the CLI is wedged and does
+                        // not exit within the grace window, escalate to
+                        // `killpg(cliPid, SIGKILL)` so orphaned probe
+                        // subprocesses cannot outlive the runner.
+                        Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
                         process.waitUntilExit()
                         throw AutotuneRecommendationError.timedOut
                     }
@@ -145,6 +154,14 @@ enum AutotuneRecommendationRunner {
                     }
                     continuation.resume(returning: data)
                 } catch {
+                    // If the process is still running when something else
+                    // failed (e.g. output-buffer error, sanitization mid-flight),
+                    // ensure we also tear down the whole subtree instead of
+                    // leaving a live CLI + grandchildren behind.
+                    if process.isRunning {
+                        Self.terminateAutotuneSubtree(process: process, graceSeconds: subtreeGraceSeconds)
+                        process.waitUntilExit()
+                    }
                     stdout.fileHandleForReading.readabilityHandler = nil
                     stderr.fileHandleForReading.readabilityHandler = nil
                     continuation.resume(throwing: error)
@@ -155,6 +172,40 @@ enum AutotuneRecommendationRunner {
 
     static func sanitizedProcessEnvironment(from environment: [String: String]) throws -> [String: String] {
         try ProcessEnvironmentSanitizer.sanitized(from: environment)
+    }
+
+    /// Wall-clock grace between SIGTERM (via `process.terminate()`) and the
+    /// SIGKILL group escalation. Long enough for the CLI's cascading signal
+    /// handler to fire and every `serve --no-join` grandchild to unwind
+    /// cleanly, short enough that a truly wedged CLI does not delay App
+    /// shutdown by a visible amount.
+    static let subtreeGraceSeconds: TimeInterval = 5
+
+    /// Send SIGTERM to the CLI (Foundation's `process.terminate()` does
+    /// `kill(pid, SIGTERM)`), then poll for grace. If still alive, escalate
+    /// to `killpg(cliPid, SIGKILL)` which reaches every grandchild that
+    /// inherited the CLI's process-group id (the CLI's `--recommend` path
+    /// calls `setpgid(0, 0)` early, making `cliPid == pgid`). Follow up
+    /// with a direct `SIGKILL` to the CLI pid in case `killpg` returned
+    /// ESRCH before `setpgid` ran (race window between fork/exec and the
+    /// CLI installing its group).
+    static func terminateAutotuneSubtree(process: Process, graceSeconds: TimeInterval) {
+        process.terminate()
+        let deadline = Date().addingTimeInterval(max(0, graceSeconds))
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        guard process.isRunning else { return }
+        let cliPid = process.processIdentifier
+        _ = Darwin.killpg(cliPid, SIGKILL)
+        _ = Darwin.kill(cliPid, SIGKILL)
+        // Poll briefly so callers observing `process.isRunning` immediately
+        // after termination don't race the kernel's reap of the SIGKILLed
+        // child. Bounded — SIGKILL is uncatchable, so 1s is generous.
+        let killDeadline = Date().addingTimeInterval(1.0)
+        while process.isRunning && Date() < killDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
     }
 }
 
