@@ -31,7 +31,7 @@ grep -qF '$SCP "$STATS_BILLING_MIRROR_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/s
   fail "deploy script missing billing mirror binary upload"
 grep -qF 'for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRROR_BINARY"' "$DEPLOY_SH" ||
   fail "deploy preflight must require billing mirror binary"
-grep -qF '"$STATS_BILLING_MIRROR_SERVICE" "$STATS_BILLING_MIRROR_TIMER" "$NGINX_SITE"' "$DEPLOY_SH" ||
+grep -qF '"$STATS_BILLING_MIRROR_SERVICE" "$STATS_BILLING_MIRROR_TIMER"' "$DEPLOY_SH" ||
   fail "deploy preflight must require billing mirror unit files"
 grep -qF '$SCP "$STATS_BILLING_MIRROR_SERVICE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-billing-mirror.service"' "$DEPLOY_SH" ||
   fail "deploy script missing billing mirror service upload"
@@ -41,6 +41,8 @@ grep -qF 'install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-billing
   fail "deploy script missing billing mirror binary install"
 grep -qF 'setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite' "$DEPLOY_SH" ||
   fail "deploy script must grant narrow SQLite file ACL"
+grep -qF "echo '  warning: setfacl not available; stats billing mirror will remain disabled until macprovider-stats can read request-log.sqlite'" "$DEPLOY_SH" ||
+  fail "deploy script must keep setfacl warning single-quoted inside SSH install block"
 grep -qF 'su -s /bin/sh -c "test -r /var/lib/macprovider/request-log.sqlite" macprovider-stats' "$DEPLOY_SH" ||
   fail "deploy script must only enable mirror when stats user can read sqlite source"
 grep -qF 'install -o root -g root       -m 0644 $DEPLOY_TMP/stats-billing-mirror.service /etc/systemd/system/stats-billing-mirror.service' "$DEPLOY_SH" ||

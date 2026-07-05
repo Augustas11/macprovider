@@ -602,7 +602,54 @@ if [ "$ONBOARDING_ENABLED_LOCAL" = "true" ]; then
       echo "aborting deploy: psql is required for onboarding hardware evidence migration preflight" >&2
       exit 12
     fi
-    PGDATABASE="$ONBOARDING_POSTGRES_DSN" psql -v ON_ERROR_STOP=1 -qAt <<SQL >/dev/null
+    psql_preflight_service() {
+      service_name="$1"
+      dsn="$2"
+      shift 2
+      service_file="$(umask 077 && mktemp)"
+      if ! PSQL_SERVICE_FILE="$service_file" PSQL_SERVICE_NAME="$service_name" PSQL_SERVICE_DSN="$dsn" python3 <<PY
+import os
+import sys
+from urllib.parse import parse_qsl, unquote, urlparse
+
+path = os.environ["PSQL_SERVICE_FILE"]
+name = os.environ["PSQL_SERVICE_NAME"]
+dsn = os.environ["PSQL_SERVICE_DSN"]
+parsed = urlparse(dsn)
+if parsed.scheme not in ("postgres", "postgresql"):
+    print("unsupported Postgres DSN scheme", file=sys.stderr)
+    sys.exit(2)
+values = {
+    "host": parsed.hostname or "",
+    "user": unquote(parsed.username or ""),
+    "password": unquote(parsed.password or ""),
+    "dbname": unquote(parsed.path[1:] if parsed.path.startswith("/") else parsed.path),
+}
+if parsed.port is not None:
+    values["port"] = str(parsed.port)
+for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+    values[key] = value
+with open(path, "w", encoding="utf-8") as f:
+    f.write("[" + name + "]\n")
+    for key, value in values.items():
+        if any(ch in value for ch in "\r\n"):
+            print("invalid newline in Postgres DSN value", file=sys.stderr)
+            sys.exit(2)
+        if value != "":
+            f.write(key + "=" + value + "\n")
+PY
+      then
+        rm -f "$service_file"
+        return 1
+      fi
+      set +e
+      PGSERVICEFILE="$service_file" PGSERVICE="$service_name" psql -v ON_ERROR_STOP=1 -qAt "$@"
+      rc=$?
+      set -e
+      rm -f "$service_file"
+      return "$rc"
+    }
+    psql_preflight_service onboarding_preflight "$ONBOARDING_POSTGRES_DSN" <<SQL >/dev/null
 SELECT 1 FROM hardware_verification_jobs LIMIT 1;
 SQL
     echo "  ok: migration 008 hardware_verification_jobs is visible to provider_onboarding"
@@ -619,7 +666,7 @@ SQL
         echo "aborting deploy: stats-hardware-verifier.env is present but STATS_HARDWARE_VERIFIER_DSN is empty" >&2
         exit 12
       fi
-      PGDATABASE="$STATS_HARDWARE_VERIFIER_DSN" psql -v ON_ERROR_STOP=1 -qAt <<SQL >/dev/null
+      psql_preflight_service hardware_verifier_preflight "$STATS_HARDWARE_VERIFIER_DSN" <<SQL >/dev/null
 SELECT 1 FROM hardware_verification_jobs LIMIT 1;
 SELECT 1 FROM hardware_verification_trust LIMIT 1;
 SELECT 1 FROM chip_hardware_profiles LIMIT 1;
@@ -879,7 +926,7 @@ $SSH "set -e
     [ -f /var/lib/macprovider/request-log.sqlite-wal ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite-wal
     [ -f /var/lib/macprovider/request-log.sqlite-shm ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite-shm
   elif [ -f /var/lib/macprovider/request-log.sqlite ]; then
-    echo "  warning: setfacl not available; stats billing mirror will remain disabled until macprovider-stats can read request-log.sqlite"
+    echo '  warning: setfacl not available; stats billing mirror will remain disabled until macprovider-stats can read request-log.sqlite'
   fi
   # SPEC-023 v1.7.3 signed static feeds — served by nginx as
   # coordinator.streamvc.live/static/*. Files are world-readable
