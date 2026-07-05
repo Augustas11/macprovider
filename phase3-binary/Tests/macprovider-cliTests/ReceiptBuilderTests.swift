@@ -284,6 +284,9 @@ final class ReceiptBuilderTests: XCTestCase {
             Set(usage.keys),
             ["billable_input_tokens", "billable_output_tokens", "delivered_output_bytes", "observed_input_tokens", "observed_output_tokens"]
         )
+        XCTAssertFalse(usage.keys.contains { $0.hasPrefix("spec_decode") })
+        XCTAssertNil(usage["drafted_tokens"])
+        XCTAssertNil(usage["accepted_tokens"])
         XCTAssertEqual(usage["billable_input_tokens"] as? Int, 8)
         XCTAssertEqual(usage["billable_output_tokens"] as? Int, 3)
     }

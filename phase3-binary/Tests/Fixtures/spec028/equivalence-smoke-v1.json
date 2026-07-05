@@ -1,0 +1,18 @@
+{
+  "fixture_id": "spec028-equivalence-smoke-v1",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a deterministic coding assistant. Answer with concise plain text only."
+    },
+    {
+      "role": "user",
+      "content": "Write a Swift function named iso8601DayPrefix that returns the first 10 characters of an ISO-8601 timestamp if present, otherwise returns nil."
+    }
+  ],
+  "temperature": 0,
+  "top_p": 1.0,
+  "max_tokens": 64,
+  "stream": false,
+  "response_format": { "type": "text" }
+}
