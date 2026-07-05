@@ -92,6 +92,8 @@ final class StartupRouteTests: XCTestCase {
             XCTAssertNotNil(result.backupPath)
             XCTAssertFalse(FileManager.default.fileExists(atPath: paths.configFile.path))
             XCTAssertTrue(FileManager.default.fileExists(atPath: result.backupPath!))
+            let attrs = try FileManager.default.attributesOfItem(atPath: result.backupPath!)
+            XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
         }
     }
 

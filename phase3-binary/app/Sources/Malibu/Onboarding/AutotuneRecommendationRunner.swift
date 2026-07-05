@@ -36,7 +36,8 @@ enum AutotuneRecommendationRunner {
     private static func runProcess(
         executableURL: URL,
         arguments: [String],
-        timeout: TimeInterval = processTimeout
+        timeout: TimeInterval = processTimeout,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
@@ -47,6 +48,12 @@ enum AutotuneRecommendationRunner {
 
                 process.executableURL = executableURL
                 process.arguments = arguments
+                do {
+                    process.environment = try sanitizedProcessEnvironment(from: environment)
+                } catch {
+                    continuation.resume(throwing: error)
+                    return
+                }
                 process.standardOutput = stdout
                 process.standardError = stderr
 
@@ -87,6 +94,10 @@ enum AutotuneRecommendationRunner {
                 }
             }
         }
+    }
+
+    static func sanitizedProcessEnvironment(from environment: [String: String]) throws -> [String: String] {
+        try ProcessEnvironmentSanitizer.sanitized(from: environment)
     }
 }
 

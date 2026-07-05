@@ -1,3 +1,5 @@
+import CryptoKit
+import Darwin
 import Foundation
 
 // Read / write the shared ~/.config/macprovider/config.yaml. We touch the same
@@ -49,8 +51,7 @@ enum ProviderConfig {
         var lines = normalizedLines(contents)
             .filter { !$0.hasPrefix("link_state:") }
         lines.append("link_state: \(state.rawValue)")
-        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: paths.configFile, options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
+        try atomicWrite0600(Data((lines.joined(separator: "\n") + "\n").utf8), to: paths.configFile)
     }
 
     // AUDIT R1 ARCHITECT A2: raised when the shared config exists on disk
@@ -62,6 +63,7 @@ enum ProviderConfig {
         case missingProviderID
         case missingProviderToken
         case importBackupProviderMismatch
+        case importKeychainVerificationFailed
         case importRollbackFailed(importError: Error, rollbackError: Error)
         case appMarkerCreateFailed
         case savedIdentityNotConfigured
@@ -75,6 +77,8 @@ enum ProviderConfig {
                 return "The existing macprovider config does not contain a provider_token."
             case .importBackupProviderMismatch:
                 return "The import backup does not match the current provider_id."
+            case .importKeychainVerificationFailed:
+                return "The imported provider token could not be verified in Keychain."
             case let .importRollbackFailed(importError, rollbackError):
                 return "Import failed (\(importError.localizedDescription)) and the original config could not be restored (\(rollbackError.localizedDescription))."
             case .appMarkerCreateFailed:
@@ -187,12 +191,16 @@ enum ProviderConfig {
     static func importExistingCLIConfig(paths: ProviderPaths) async throws {
         try paths.ensureDirectories()
         let fm = FileManager.default
+        try await recoverPendingImportIfNeeded(paths: paths)
         let backup = paths.configFile.appendingPathExtension("import-backup")
         let marker = importPendingMarker(paths: paths)
         let backupExisted = fm.fileExists(atPath: backup.path)
         let originalData = try Data(contentsOf: paths.configFile)
         let current = String(decoding: originalData, as: UTF8.self)
         let backupData = backupExisted ? try Data(contentsOf: backup) : nil
+        if backupExisted {
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
+        }
         let backupContents = backupData.map { String(decoding: $0, as: UTF8.self) }
         let secretSource = backupContents ?? current
 
@@ -209,16 +217,26 @@ enum ProviderConfig {
         }
 
         let rewritten = removingTopLevelValue(named: "provider_token", from: current)
+        let importMarker = ImportPendingMarker(
+            from: paths.configFile.path,
+            to: "keychain://tech.malibu.provider/\(providerID)",
+            timestamp: importTimestampString(Date()),
+            providerID: providerID,
+            tokenSHA256: sha256String(token),
+            configSHA256: sha256Data(originalData),
+            backupPath: backup.path
+        )
         do {
-            try Data("pending\n".utf8).write(to: marker, options: [.atomic])
-            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: marker.path)
+            try writeImportMarker(importMarker, to: marker)
             try await KeychainStore.saveProviderToken(providerID: providerID, token: token)
+            guard await KeychainStore.readProviderToken(providerID: providerID).map(sha256String) == importMarker.tokenSHA256 else {
+                throw SaveError.importKeychainVerificationFailed
+            }
             if !backupExisted {
                 try? fm.removeItem(at: backup)
-                try fm.copyItem(at: paths.configFile, to: backup)
+                try writeExclusive0600(originalData, to: backup)
             }
-            try rewritten.data(using: .utf8)?.write(to: paths.configFile, options: [.atomic])
-            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.configFile.path)
+            try atomicWrite0600(Data(rewritten.utf8), to: paths.configFile)
             try writeAppMarker(paths: paths, fileManager: fm)
             try writeLinkState(.linked, paths: paths)
             guard await isConfigured(paths: paths) else { throw SaveError.existingConfigNotOwnedByApp }
@@ -228,7 +246,7 @@ enum ProviderConfig {
             try? await KeychainStore.deleteProviderToken(providerID: providerID)
             try? fm.removeItem(at: paths.appMarkerFile)
             do {
-                try originalData.write(to: paths.configFile, options: [.atomic])
+                try atomicWrite0600(originalData, to: paths.configFile)
                 if !backupExisted {
                     try? fm.removeItem(at: backup)
                 }
@@ -238,6 +256,71 @@ enum ProviderConfig {
             }
             throw error
         }
+    }
+
+    static func recoverPendingImportIfNeeded(paths: ProviderPaths) async throws {
+        let fm = FileManager.default
+        let markerURL = importPendingMarker(paths: paths)
+        guard fm.fileExists(atPath: markerURL.path) else { return }
+        guard let markerData = try? Data(contentsOf: markerURL),
+              let marker = try? JSONDecoder().decode(ImportPendingMarker.self, from: markerData)
+        else {
+            try? fm.removeItem(at: markerURL)
+            return
+        }
+        let expectedBackupURL = paths.configFile.appendingPathExtension("import-backup")
+        let expectedKeychainDestination = "keychain://tech.malibu.provider/\(marker.providerID)"
+        guard marker.from == paths.configFile.path,
+              marker.to == expectedKeychainDestination,
+              marker.backupPath == expectedBackupURL.path else {
+            try? fm.removeItem(at: markerURL)
+            return
+        }
+
+        let currentData = try? Data(contentsOf: paths.configFile)
+        let backupData = try? Data(contentsOf: expectedBackupURL)
+        let currentConfigMatches = currentData.map(sha256Data) == marker.configSHA256
+        let backupConfigMatches = backupData.map(sha256Data) == marker.configSHA256
+        let currentProviderID = currentData.flatMap { data in
+            parseTopLevelValue(named: "provider_id", from: String(decoding: data, as: UTF8.self))
+        }
+        let backupProviderID = backupData.flatMap { data in
+            parseTopLevelValue(named: "provider_id", from: String(decoding: data, as: UTF8.self))
+        }
+        guard currentConfigMatches || backupConfigMatches,
+              currentProviderID == marker.providerID || backupProviderID == marker.providerID else {
+            try? fm.removeItem(at: markerURL)
+            return
+        }
+
+        if await KeychainStore.readProviderToken(providerID: marker.providerID).map(sha256String) == marker.tokenSHA256 {
+            if let current = try? String(contentsOf: paths.configFile), current.contains("provider_token:") {
+                try atomicWrite0600(
+                    Data(removingTopLevelValue(named: "provider_token", from: current).utf8),
+                    to: paths.configFile
+                )
+            }
+            try writeAppMarker(paths: paths, fileManager: fm)
+            try writeLinkState(.linked, paths: paths)
+            if await isConfigured(paths: paths) {
+                try? fm.removeItem(atPath: marker.backupPath)
+                try? fm.removeItem(at: markerURL)
+            }
+            return
+        }
+
+        if let backupData, backupConfigMatches, backupProviderID == marker.providerID {
+            try atomicWrite0600(backupData, to: paths.configFile)
+            try? await KeychainStore.deleteProviderToken(providerID: marker.providerID)
+            try? fm.removeItem(at: paths.appMarkerFile)
+            try? fm.removeItem(atPath: marker.backupPath)
+            try? fm.removeItem(at: markerURL)
+            return
+        }
+
+        try? await KeychainStore.deleteProviderToken(providerID: marker.providerID)
+        try? fm.removeItem(at: paths.appMarkerFile)
+        try? fm.removeItem(at: markerURL)
     }
 
     static func repairMarkerlessAppOwnedConfig(providerID: String, paths: ProviderPaths = .current) async throws {
@@ -277,6 +360,7 @@ enum ProviderConfig {
         let backup = paths.configFile.deletingLastPathComponent()
             .appendingPathComponent("config.yaml.cli-backup-\(suffix)")
         try fm.moveItem(at: paths.configFile, to: backup)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
         return backup
     }
 
@@ -337,7 +421,33 @@ enum ProviderConfig {
     }
 
     static func importPendingMarker(paths: ProviderPaths) -> URL {
-        paths.appSupport.appendingPathComponent(".import-pending")
+        paths.appSupport.appendingPathComponent(".import_pending")
+    }
+
+    private struct ImportPendingMarker: Codable, Equatable {
+        let from: String
+        let to: String
+        let timestamp: String
+        let providerID: String
+        let tokenSHA256: String
+        let configSHA256: String
+        let backupPath: String
+
+        enum CodingKeys: String, CodingKey {
+            case from
+            case to
+            case timestamp
+            case providerID = "provider_id"
+            case tokenSHA256 = "token_sha256"
+            case configSHA256 = "config_sha256"
+            case backupPath = "backup_path"
+        }
+    }
+
+    private static func writeImportMarker(_ marker: ImportPendingMarker, to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try atomicWrite0600(try encoder.encode(marker), to: url)
     }
 
     private static func parseTopLevelValue(named key: String, from contents: String) -> String? {
@@ -364,5 +474,109 @@ enum ProviderConfig {
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+
+    private static func writeExclusive0600(_ data: Data, to destination: URL) throws {
+        let fd = open(destination.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        var closed = false
+        do {
+            try writeAll(data, fd: fd)
+            try fsyncFile(fd)
+            try closeFile(fd)
+            closed = true
+            try fsyncDirectory(destination.deletingLastPathComponent())
+        } catch {
+            if !closed {
+                _ = close(fd)
+            }
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+
+    private static func atomicWrite0600(_ data: Data, to destination: URL) throws {
+        let temp = destination.deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).tmp-\(UUID().uuidString)")
+        let fd = open(temp.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        var closed = false
+        do {
+            try writeAll(data, fd: fd)
+            if fchmod(fd, S_IRUSR | S_IWUSR) != 0 {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            try fsyncFile(fd)
+            try closeFile(fd)
+            closed = true
+            if rename(temp.path, destination.path) != 0 {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            try fsyncDirectory(destination.deletingLastPathComponent())
+        } catch {
+            if !closed {
+                _ = close(fd)
+            }
+            try? FileManager.default.removeItem(at: temp)
+            throw error
+        }
+    }
+
+    private static func writeAll(_ data: Data, fd: Int32) throws {
+        try data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var written = 0
+            while written < raw.count {
+                let n = write(fd, base.advanced(by: written), raw.count - written)
+                if n <= 0 {
+                    if errno == EINTR { continue }
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                written += n
+            }
+        }
+    }
+
+    private static func fsyncFile(_ fd: Int32) throws {
+        if fsync(fd) != 0 {
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    private static func closeFile(_ fd: Int32) throws {
+        if close(fd) != 0 {
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    private static func fsyncDirectory(_ url: URL) throws {
+        let fd = open(url.path, O_RDONLY)
+        guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        var closed = false
+        do {
+            try fsyncFile(fd)
+            try closeFile(fd)
+            closed = true
+        } catch {
+            if !closed {
+                _ = close(fd)
+            }
+            throw error
+        }
+    }
+
+    private static func sha256String(_ value: String) -> String {
+        sha256Data(Data(value.utf8))
+    }
+
+    private static func sha256Data(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func importTimestampString(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: date)
     }
 }
