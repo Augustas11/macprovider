@@ -124,10 +124,13 @@ DIST_DIR="$_PEARL_TLS_SCRIPT_DIR"
 BINARY="$DIST_DIR/coordinator-linux-amd64"
 CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
 STATS_INVENTORY_BINARY="$DIST_DIR/stats-inventory-sync-linux-amd64"
+STATS_BILLING_MIRROR_BINARY="$DIST_DIR/stats-billing-mirror-linux-amd64"
 CONFIG="$DIST_DIR/coordinator.yaml"
 SERVICE="$DIST_DIR/macprovider-coordinator.service"
 STATS_INVENTORY_SERVICE="$DIST_DIR/stats-inventory-sync.service"
 STATS_INVENTORY_TIMER="$DIST_DIR/stats-inventory-sync.timer"
+STATS_BILLING_MIRROR_SERVICE="$DIST_DIR/stats-billing-mirror.service"
+STATS_BILLING_MIRROR_TIMER="$DIST_DIR/stats-billing-mirror.timer"
 NGINX_SITE="$DIST_DIR/nginx-coordinator.streamvc.live.conf"
 TCP_SYSCTL="$DIST_DIR/sysctl.d/99-macprovider-tcp.conf"
 TCP_BBR_MODULES_LOAD="$DIST_DIR/modules-load.d/tcp_bbr.conf"
@@ -164,8 +167,9 @@ STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
 # prune-tokens / list-tokens also belong on Pearl). If absent, the
 # operator forgot to run build-linux.sh after the M2 update that
 # extended it. Fail closed — do NOT silently deploy with a stale CLI.
-for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" \
-         "$CONFIG" "$SERVICE" "$STATS_INVENTORY_SERVICE" "$STATS_INVENTORY_TIMER" "$NGINX_SITE" \
+for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRROR_BINARY" \
+         "$CONFIG" "$SERVICE" "$STATS_INVENTORY_SERVICE" "$STATS_INVENTORY_TIMER" \
+         "$STATS_BILLING_MIRROR_SERVICE" "$STATS_BILLING_MIRROR_TIMER" "$NGINX_SITE" \
          "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE" \
          "$STATIC_DEMAND_JSON" "$STATIC_DEMAND_SIG" \
          "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG"; do
@@ -516,6 +520,13 @@ $SSH 'set -e
   else
     echo "  /etc/macprovider-stats/stats-inventory-sync.env not yet present; stats inventory timer remains opt-in"
   fi
+  if [ -f /etc/macprovider-stats/stats-billing-mirror.env ]; then
+    chown root:root /etc/macprovider-stats/stats-billing-mirror.env
+    chmod 0600 /etc/macprovider-stats/stats-billing-mirror.env
+    echo "  enforced stats billing mirror env perms: root:root 0600"
+  else
+    echo "  /etc/macprovider-stats/stats-billing-mirror.env not yet present; stats billing mirror timer remains opt-in"
+  fi
 '
 
 log "step 3a/9: stats env preflight"
@@ -728,10 +739,13 @@ log "  staging dir: $DEPLOY_TMP (root:root 0700)"
 $SCP "$BINARY"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-linux-amd64"
 $SCP "$CLI_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-cli-linux-amd64"
 $SCP "$STATS_INVENTORY_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync-linux-amd64"
+$SCP "$STATS_BILLING_MIRROR_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-billing-mirror-linux-amd64"
 $SCP "$CONFIG"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.yaml"
 $SCP "$SERVICE"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/macprovider-coordinator.service"
 $SCP "$STATS_INVENTORY_SERVICE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync.service"
 $SCP "$STATS_INVENTORY_TIMER"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync.timer"
+$SCP "$STATS_BILLING_MIRROR_SERVICE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-billing-mirror.service"
+$SCP "$STATS_BILLING_MIRROR_TIMER"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-billing-mirror.timer"
 $SCP "$NGINX_SITE"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-coordinator-full.conf"
 # SPEC-017 v0.1.8 Step 4.B artifacts (snippet must land at
 # /etc/nginx/conf.d/ so the http-context declarations are visible
@@ -781,10 +795,24 @@ $SSH "set -e
   # It runs under its own Unix identity and only receives execute access
   # to this binary; its Postgres writer DSN lives under /etc/macprovider-stats.
   install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-inventory-sync-linux-amd64 /opt/macprovider-stats/stats-inventory-sync
+  # stats-billing-mirror is an out-of-band stats sidecar. It runs as the
+  # dedicated macprovider-stats identity and gets read access only to the
+  # SQLite ledger files via file ACLs below.
+  install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-billing-mirror-linux-amd64 /opt/macprovider-stats/stats-billing-mirror
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.yaml /opt/macprovider/coordinator.yaml
   install -o root -g root       -m 0644 $DEPLOY_TMP/macprovider-coordinator.service /etc/systemd/system/macprovider-coordinator.service
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-inventory-sync.service /etc/systemd/system/stats-inventory-sync.service
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-inventory-sync.timer /etc/systemd/system/stats-inventory-sync.timer
+  install -o root -g root       -m 0644 $DEPLOY_TMP/stats-billing-mirror.service /etc/systemd/system/stats-billing-mirror.service
+  install -o root -g root       -m 0644 $DEPLOY_TMP/stats-billing-mirror.timer /etc/systemd/system/stats-billing-mirror.timer
+  if command -v setfacl >/dev/null 2>&1 && [ -f /var/lib/macprovider/request-log.sqlite ]; then
+    setfacl -m u:macprovider-stats:--x /var/lib/macprovider
+    setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite
+    [ -f /var/lib/macprovider/request-log.sqlite-wal ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite-wal
+    [ -f /var/lib/macprovider/request-log.sqlite-shm ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite-shm
+  elif [ -f /var/lib/macprovider/request-log.sqlite ]; then
+    echo "  warning: setfacl not available; stats billing mirror will remain disabled until macprovider-stats can read request-log.sqlite"
+  fi
   # SPEC-023 v1.7.3 signed static feeds — served by nginx as
   # coordinator.streamvc.live/static/*. Files are world-readable
   # (mode 0644) because they are public signed content; nginx runs as
@@ -1105,6 +1133,16 @@ $SSH 'set -e
     systemctl is-active stats-inventory-sync.timer
   else
     echo "stats inventory timer not enabled: missing /etc/macprovider-stats/stats-hardware-inventory.yaml or stats-inventory-sync.env"
+  fi
+  if [ -f /etc/macprovider-stats/stats-billing-mirror.env ] && [ -f /var/lib/macprovider/request-log.sqlite ] && su -s /bin/sh -c "test -r /var/lib/macprovider/request-log.sqlite" macprovider-stats; then
+    systemctl enable --now stats-billing-mirror.timer
+    if ! systemctl start stats-billing-mirror.service; then
+      echo "warning: stats-billing-mirror.service failed; leaving coordinator deploy running"
+      journalctl -u stats-billing-mirror.service -n 30 --no-pager || true
+    fi
+    systemctl is-active stats-billing-mirror.timer
+  else
+    echo "stats billing mirror timer not enabled: missing env/sqlite source or macprovider-stats read ACL"
   fi
   sleep 3
   systemctl is-active macprovider-coordinator
