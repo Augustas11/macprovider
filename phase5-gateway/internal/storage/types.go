@@ -51,6 +51,7 @@ type OAuthState struct {
 	StateHash   []byte
 	SessionID   string
 	RedirectURI string
+	ReturnTo    string
 	ClientIP    string
 	// Action is an optional operator-initiated intent threaded from the
 	// /auth/github/start query string to the /auth/github/callback handler.
@@ -58,6 +59,14 @@ type OAuthState struct {
 	// stale-cookie pollution, parallel-flow races, and uncleared cookies on
 	// early callback errors. Currently the only non-empty value is "mint".
 	Action     string
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	ConsumedAt time.Time
+}
+
+type OAuthHandoff struct {
+	TokenHash  []byte
+	APIKey     string
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	ConsumedAt time.Time

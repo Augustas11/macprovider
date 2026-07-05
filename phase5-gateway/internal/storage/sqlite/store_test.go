@@ -234,7 +234,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState: %v", err)
 	}
-	redirectURI, action, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(time.Minute))
+	redirectURI, action, returnTo, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ConsumeOAuthState: %v", err)
 	}
@@ -244,7 +244,10 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	if action != "mint" {
 		t.Fatalf("action=%q, want %q", action, "mint")
 	}
-	if _, _, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	if returnTo != "" {
+		t.Fatalf("returnTo=%q, want empty", returnTo)
+	}
+	if _, _, _, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("ConsumeOAuthState replay err=%v, want ErrNotFound", err)
 	}
 
@@ -255,7 +258,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState expired: %v", err)
 	}
-	if _, _, err := store.ConsumeOAuthState(ctx, expiredHash[:], "session_2", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	if _, _, _, err := store.ConsumeOAuthState(ctx, expiredHash[:], "session_2", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("ConsumeOAuthState expired err=%v, want ErrNotFound", err)
 	}
 
@@ -267,7 +270,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState plain: %v", err)
 	}
-	_, action, err = store.ConsumeOAuthState(ctx, plainHash[:], "session_3", now.Add(time.Minute))
+	_, action, _, err = store.ConsumeOAuthState(ctx, plainHash[:], "session_3", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ConsumeOAuthState plain: %v", err)
 	}
@@ -330,6 +333,93 @@ func TestOAuthStateCapAndPrune(t *testing.T) {
 	}
 	if deleted != 20 {
 		t.Fatalf("deleted=%d want 20", deleted)
+	}
+}
+
+func TestOAuthStateReturnToRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	stateHash := keyHash("oauth-state-returnto")
+	returnTo := "https://malibu.tech/console/auth/callback.html"
+	if err := store.StoreOAuthStateWithCap(ctx, storage.OAuthState{
+		StateHash: stateHash[:], SessionID: "sess_r", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		ReturnTo: returnTo, ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}, 5, now); err != nil {
+		t.Fatalf("StoreOAuthStateWithCap: %v", err)
+	}
+	_, _, gotReturnTo, err := store.ConsumeOAuthState(ctx, stateHash[:], "sess_r", now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ConsumeOAuthState: %v", err)
+	}
+	if gotReturnTo != returnTo {
+		t.Fatalf("returnTo=%q want %q", gotReturnTo, returnTo)
+	}
+}
+
+func TestOAuthHandoffStoreConsumeReplay(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	tokenHash := keyHash("handoff-token")
+	if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
+		TokenHash: tokenHash[:], APIKey: "mp_abc123", CreatedAt: now, ExpiresAt: now.Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("StoreOAuthHandoff: %v", err)
+	}
+	apiKey, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ConsumeOAuthHandoff: %v", err)
+	}
+	if apiKey != "mp_abc123" {
+		t.Fatalf("apiKey=%q want mp_abc123", apiKey)
+	}
+	if _, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("replay err=%v want ErrNotFound", err)
+	}
+}
+
+func TestOAuthHandoffExpiredReturnsNotFound(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	tokenHash := keyHash("handoff-expired")
+	if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
+		TokenHash: tokenHash[:], APIKey: "mp_expired", CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("StoreOAuthHandoff: %v", err)
+	}
+	if _, err := store.ConsumeOAuthHandoff(ctx, tokenHash[:], now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expired err=%v want ErrNotFound", err)
+	}
+}
+
+func TestPruneExpiredOAuthHandoffs(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+	for i := 0; i < 3; i++ {
+		hash := keyHash(fmt.Sprintf("handoff-fresh-%d", i))
+		if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
+			TokenHash: hash[:], APIKey: fmt.Sprintf("mp_fresh_%d", i), CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+		}); err != nil {
+			t.Fatalf("StoreOAuthHandoff fresh %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		hash := keyHash(fmt.Sprintf("handoff-stale-%d", i))
+		if err := store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
+			TokenHash: hash[:], APIKey: fmt.Sprintf("mp_stale_%d", i), CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+		}); err != nil {
+			t.Fatalf("StoreOAuthHandoff stale %d: %v", i, err)
+		}
+	}
+	deleted, err := store.PruneExpiredOAuthHandoffs(ctx, now.Add(5*time.Minute))
+	if err != nil {
+		t.Fatalf("PruneExpiredOAuthHandoffs: %v", err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted=%d want 2 (fresh rows must survive)", deleted)
 	}
 }
 

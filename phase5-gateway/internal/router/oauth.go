@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -42,6 +43,11 @@ func (s *Server) handleGitHubStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_action_unknown", "Unknown OAuth action")
 		return
 	}
+	returnTo := strings.TrimSpace(r.URL.Query().Get("return_to"))
+	if returnTo != "" && !s.returnToAllowed(returnTo) {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_return_to_not_allowed", "OAuth return URL is not allowed")
+		return
+	}
 	state, err := auth.StateToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "state_generation_failed", "Could not start OAuth flow")
@@ -55,7 +61,7 @@ func (s *Server) handleGitHubStart(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	if err := s.store.StoreOAuthStateWithCap(r.Context(), storage.OAuthState{
 		StateHash: auth.StateHash(state), SessionID: sessionID, RedirectURI: redirectURI,
-		ClientIP: s.clientIP(r), Action: action, CreatedAt: now, ExpiresAt: auth.OAuthStateExpiry(now),
+		ReturnTo: returnTo, ClientIP: s.clientIP(r), Action: action, CreatedAt: now, ExpiresAt: auth.OAuthStateExpiry(now),
 	}, s.cfg.Auth.OAuth.StateMaxPerIP, now); err != nil {
 		if errors.Is(err, storage.ErrOAuthStateCap) {
 			writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "oauth_state_rate_limited", "OAuth start limit exceeded")
@@ -91,7 +97,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	// returns the action bound to it at /auth/github/start time. Action lives
 	// in the state row exactly so it is single-use and impossible to leak
 	// across browser tabs, stale cookies, or early callback failures.
-	redirectURI, action, err := s.store.ConsumeOAuthState(r.Context(), auth.StateHash(state), cookie.Value, s.now())
+	redirectURI, action, returnTo, err := s.store.ConsumeOAuthState(r.Context(), auth.StateHash(state), cookie.Value, s.now())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_state_invalid", "OAuth state is invalid")
 		return
@@ -114,18 +120,18 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var fullKey string
 	account, err := s.store.LookupAccountByIdentity(r.Context(), "github", identity.ProviderUserID)
 	if errors.Is(err, storage.ErrNotFound) {
 		account, err = s.createSignupAccount(w, r.Context(), r, identity)
 		if err != nil {
 			return
 		}
-		fullKey, _, err := s.keyMgr.Issue(r.Context(), s.store, account.AccountID)
+		fullKey, _, err = s.keyMgr.Issue(r.Context(), s.store, account.AccountID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "server_error", "api_key_issuance_failed", "Could not issue API key")
 			return
 		}
-		http.SetCookie(w, &http.Cookie{Name: "mp_new_api_key", Value: fullKey, Path: "/account", HttpOnly: true, Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: 300})
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "account_lookup_failed", "Could not load account")
 		return
@@ -136,15 +142,12 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		// can revoke older keys via POST /auth/api-keys/{key_id}/revoke once
 		// they have a working bearer. Re-issuing (not rotating) preserves
 		// any other still-in-use keys the operator has elsewhere.
-		fullKey, summary, err := s.keyMgr.Issue(r.Context(), s.store, account.AccountID)
+		var summary storage.APIKey
+		fullKey, summary, err = s.keyMgr.Issue(r.Context(), s.store, account.AccountID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "server_error", "api_key_issuance_failed", "Could not issue API key")
 			return
 		}
-		http.SetCookie(w, &http.Cookie{
-			Name: "mp_new_api_key", Value: fullKey, Path: "/account", HttpOnly: true,
-			Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: 300,
-		})
 		// Audit payload includes key_id and key_prefix so the lifecycle of
 		// each minted key is traceable end-to-end alongside the revoke/rotate
 		// events in api_key_events. account_id is in Actor; the action label
@@ -157,7 +160,62 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 			CreatedAt: s.now(),
 		})
 	}
+	// The mp_new_api_key cookie is scoped to the gateway origin's /account
+	// path, so it is not readable by any Malibu return_to page. Setting it
+	// on every fullKey!="" path (not just the legacy /account redirect)
+	// keeps the fallback: if the handoff persistence fails after we have
+	// already consumed the OAuth state and issued the key, the user can
+	// still recover the key by visiting api.streamvc.live/account.
+	if fullKey != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name: "mp_new_api_key", Value: fullKey, Path: "/account", HttpOnly: true,
+			Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: 300,
+		})
+	}
+	if returnTo != "" {
+		if fullKey == "" {
+			s.redirectOAuthReturn(w, r, returnTo, "no_key")
+			return
+		}
+		if err := s.redirectOAuthHandoff(r.Context(), w, r, returnTo, fullKey); err != nil {
+			// Handoff-token persistence failed AFTER the OAuth state was
+			// consumed and a fresh API key was minted. The Malibu handoff
+			// contract can no longer complete (there is no token to
+			// exchange), so we anchor the recovery UX in the gateway itself:
+			// redirect to /account, which reads the mp_new_api_key cookie
+			// set above and shows the key. This keeps the recovery path
+			// stable regardless of what the paired client does on error.
+			http.Redirect(w, r, s.cfg.Public.AccountPath, http.StatusFound)
+		}
+		return
+	}
 	http.Redirect(w, r, s.cfg.Public.AccountPath, http.StatusFound)
+}
+
+func (s *Server) handleHandoffExchange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
+		return
+	}
+	var req struct {
+		Handoff string `json:"handoff"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_handoff", "Handoff token is invalid")
+		return
+	}
+	req.Handoff = strings.TrimSpace(req.Handoff)
+	if req.Handoff == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_handoff", "Handoff token is invalid")
+		return
+	}
+	apiKey, err := s.store.ConsumeOAuthHandoff(r.Context(), auth.StateHash(req.Handoff), s.now())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_handoff", "Handoff token is invalid")
+		return
+	}
+	setNoStoreHeaders(w.Header())
+	writeJSON(w, http.StatusOK, map[string]any{"api_key": apiKey})
 }
 
 func (s *Server) createSignupAccount(w http.ResponseWriter, ctx context.Context, r *http.Request, identity auth.OAuthIdentity) (storage.Account, error) {
@@ -288,6 +346,110 @@ func (s *Server) handleAPIKeyAction(w http.ResponseWriter, r *http.Request) {
 func (s *Server) callbackAllowed(callback string) bool {
 	for _, allowed := range s.cfg.Auth.OAuth.CallbackAllowlist {
 		if callback == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) redirectOAuthHandoff(ctx context.Context, w http.ResponseWriter, r *http.Request, returnTo, apiKey string) error {
+	token, err := auth.StateToken()
+	if err != nil {
+		return err
+	}
+	now := s.now()
+	if err := s.store.StoreOAuthHandoff(ctx, storage.OAuthHandoff{
+		TokenHash: auth.StateHash(token),
+		APIKey:    apiKey,
+		CreatedAt: now,
+		ExpiresAt: now.Add(5 * time.Minute),
+	}); err != nil {
+		return err
+	}
+	target, err := url.Parse(returnTo)
+	if err != nil {
+		return err
+	}
+	values := target.Query()
+	values.Set("handoff", token)
+	target.RawQuery = values.Encode()
+	// The raw handoff token rides in the redirect URL as a query param, so it
+	// lands in nginx access logs and browser history. Suppress the outbound
+	// referrer from the Malibu callback page so the token does not leak to
+	// third parties Malibu subsequently fetches, and mark the redirect
+	// response as no-store so intermediary proxies do not cache the URL.
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	setNoStoreHeaders(w.Header())
+	http.Redirect(w, r, target.String(), http.StatusFound)
+	return nil
+}
+
+func (s *Server) redirectOAuthReturn(w http.ResponseWriter, r *http.Request, returnTo, errCode string) {
+	target, err := url.Parse(returnTo)
+	if err != nil {
+		http.Redirect(w, r, s.cfg.Public.AccountPath, http.StatusFound)
+		return
+	}
+	if errCode != "" {
+		values := target.Query()
+		values.Set("error", errCode)
+		target.RawQuery = values.Encode()
+	}
+	http.Redirect(w, r, target.String(), http.StatusFound)
+}
+
+// returnToAllowed matches a caller-supplied return_to URL against the
+// allowlist. Scheme and Host match case-insensitively. Path semantics:
+//
+//   - Reject any target whose Path contains a "." or ".." segment (before
+//     or after URL-decoding), so `/console/auth/callback.html/../admin`
+//     cannot smuggle a token onto an unintended route on the same host.
+//   - Allowlist path "" or "/" matches any target path on that host.
+//   - Allowlist path with a trailing "/" is an explicit directory prefix
+//     match; the target path must have the allowlist path as a prefix.
+//   - Any other allowlist path requires an exact match — so
+//     `/console/auth/callback.html` does NOT accept
+//     `/console/auth/callback.htmlx` or
+//     `/console/auth/callback.html/other`.
+func (s *Server) returnToAllowed(returnTo string) bool {
+	target, err := url.Parse(returnTo)
+	if err != nil || target.Scheme == "" || target.Host == "" {
+		return false
+	}
+	if hasDotSegment(target.Path) || hasDotSegment(target.EscapedPath()) {
+		return false
+	}
+	for _, allowed := range s.cfg.Auth.OAuth.ReturnToAllowlist {
+		u, err := url.Parse(allowed)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			continue
+		}
+		if !strings.EqualFold(target.Scheme, u.Scheme) || !strings.EqualFold(target.Host, u.Host) {
+			continue
+		}
+		switch {
+		case u.Path == "" || u.Path == "/":
+			return true
+		case strings.HasSuffix(u.Path, "/"):
+			if strings.HasPrefix(target.Path, u.Path) {
+				return true
+			}
+		default:
+			if target.Path == u.Path {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+		lowered := strings.ToLower(seg)
+		if lowered == "%2e" || lowered == "%2e%2e" {
 			return true
 		}
 	}
