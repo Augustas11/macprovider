@@ -12,13 +12,14 @@ TIMER="$DIST_DIR/stats-inventory-sync.timer"
 ENV_EXAMPLE="$DIST_DIR/stats-inventory-sync.env.example"
 INVENTORY_EXAMPLE="$DIST_DIR/stats-hardware-inventory.yaml.example"
 ROLE_SQL="$DIST_DIR/stats-inventory-writer.sql"
+AUTH_POLICY_BOOTSTRAP="$DIST_DIR/provider-auth-policy-roles-bootstrap.sql"
 
 fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
 
-for f in "$DEPLOY_SH" "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE" "$ROLE_SQL"; do
+for f in "$DEPLOY_SH" "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE" "$ROLE_SQL" "$AUTH_POLICY_BOOTSTRAP"; do
   [ -f "$f" ] || fail "missing required file: $f"
 done
 
@@ -54,12 +55,69 @@ grep -qF 'warning: stats-inventory-sync.service failed; leaving coordinator depl
   fail "deploy script must not fail coordinator deploy on sidecar run failure"
 grep -qF 'psql_preflight_service onboarding_preflight "$ONBOARDING_POSTGRES_DSN"' "$DEPLOY_SH" ||
   fail "deploy script must preflight onboarding DSN through root-only service file"
+grep -qF 'psql_preflight_service auth_policy_request_preflight "$ONBOARDING_AUTH_POLICY_REQUEST_DSN"' "$DEPLOY_SH" ||
+  fail "deploy script must preflight auth-policy request DSN through root-only service file"
+grep -qF 'psql_preflight_service auth_policy_approve_preflight "$ONBOARDING_AUTH_POLICY_APPROVE_DSN"' "$DEPLOY_SH" ||
+  fail "deploy script must preflight auth-policy approve DSN through root-only service file"
+grep -qF 'psql_preflight_service auth_policy_cutover_preflight "$ONBOARDING_AUTH_POLICY_CUTOVER_DSN"' "$DEPLOY_SH" ||
+  fail "deploy script must preflight auth-policy cutover DSN through root-only service file"
+grep -qF 'session_user = current_user' "$DEPLOY_SH" ||
+  fail "deploy script must reject SET ROLE based auth-policy DSNs"
+grep -qF 'pg_auth_members' "$DEPLOY_SH" ||
+  fail "deploy script must reject auth-policy roles with role memberships"
 grep -qF 'psql_preflight_service hardware_verifier_preflight "$STATS_HARDWARE_VERIFIER_DSN"' "$DEPLOY_SH" ||
   fail "deploy script must preflight verifier DSN through root-only service file"
 grep -qF 'service_file="$(umask 077 && mktemp)"' "$DEPLOY_SH" ||
   fail "deploy script must create root-only temporary libpq service file"
 grep -qF 'PGSERVICEFILE="$service_file" PGSERVICE="$service_name" psql -v ON_ERROR_STOP=1 -qAt "$@"' "$DEPLOY_SH" ||
   fail "deploy script must invoke psql via service name without DSN argv"
+grep -qF 'read_env_value()' "$DEPLOY_SH" ||
+  fail "deploy script must parse DSN env files as data"
+if grep -qF '. "$env_file"' "$DEPLOY_SH" ||
+   grep -qF '. "$verifier_env"' "$DEPLOY_SH" ||
+   grep -qF 'eval "value=' "$DEPLOY_SH"; then
+  fail "deploy script must not source or eval env files containing DSN secrets"
+fi
+remote_preflight_tmp="$(mktemp)"
+parser_tmp="$(mktemp)"
+env_parse_tmp="$(mktemp)"
+trap 'rm -f "$remote_preflight_tmp" "$parser_tmp" "$env_parse_tmp"' EXIT
+awk '
+  $0 == "REMOTE_ONBOARDING_PREFLIGHT" { in_block=0; end=1; next }
+  in_block { print; next }
+  index($0, "<<'\''REMOTE_ONBOARDING_PREFLIGHT'\''") { in_block=1; start=1; next }
+  END { if (!start || !end || in_block) exit 1 }
+' "$DEPLOY_SH" > "$remote_preflight_tmp" ||
+  fail "deploy script must keep an extractable onboarding preflight remote heredoc"
+if ! bash -n "$remote_preflight_tmp"; then
+  fail "onboarding preflight remote heredoc must be valid bash"
+fi
+awk '
+  $0 == "    read_env_value() {" { in_block=1 }
+  in_block { print }
+  in_block && $0 == "PY" { saw_py_end=1; next }
+  in_block && saw_py_end && $0 == "    }" { exit }
+  END { if (!saw_py_end) exit 1 }
+' "$remote_preflight_tmp" > "$parser_tmp" ||
+  fail "deploy script must keep an extractable env parser"
+printf '%s\n' \
+  'ONBOARDING_POSTGRES_DSN=postgres://first.example/db' \
+  'ONBOARDING_POSTGRES_DSN=postgres://second.example/db' \
+  > "$env_parse_tmp"
+parsed_duplicate="$(
+  . "$parser_tmp"
+  read_env_value "$env_parse_tmp" ONBOARDING_POSTGRES_DSN
+)"
+if [ "$parsed_duplicate" != "postgres://second.example/db" ]; then
+  fail "deploy env parser must use the last duplicate assignment"
+fi
+printf '%s\n' 'export ONBOARDING_POSTGRES_DSN=postgres://export.example/db' > "$env_parse_tmp"
+if (
+  . "$parser_tmp"
+  read_env_value "$env_parse_tmp" ONBOARDING_POSTGRES_DSN >/dev/null 2>&1
+); then
+  fail "deploy env parser must reject shell export syntax that systemd EnvironmentFile does not use"
+fi
 if grep -qF 'PGDATABASE="$ONBOARDING_POSTGRES_DSN" psql' "$DEPLOY_SH" ||
    grep -qF 'PGDATABASE="$STATS_HARDWARE_VERIFIER_DSN" psql' "$DEPLOY_SH" ||
    grep -qF 'psql "$ONBOARDING_POSTGRES_DSN"' "$DEPLOY_SH" ||
@@ -101,6 +159,39 @@ grep -qF 'GRANT SELECT ON hardware_verification_trust TO stats_inventory_writer;
   fail "role sql must grant ordinary inventory writer read-only trust evidence access"
 grep -qF 'GRANT SELECT, INSERT, UPDATE, DELETE ON hardware_verification_trust TO stats_trust_inventory_writer;' "$ROLE_SQL" ||
   fail "role sql must keep trust writes on separate trust writer role"
+grep -qF 'PROVIDER_AUTH_POLICY_REQUESTER_PASSWORD' "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must require requester password env"
+grep -qF 'PROVIDER_AUTH_POLICY_APPROVER_PASSWORD' "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must require approver password env"
+grep -qF 'PROVIDER_AUTH_POLICY_CUTOVER_PASSWORD' "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must require cutover password env"
+grep -qF "NULLIF(:'requester_password', '') IS NOT NULL" "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must reject empty requester password"
+grep -qF "NULLIF(:'approver_password', '') IS NOT NULL" "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must reject empty approver password"
+grep -qF "NULLIF(:'cutover_password', '') IS NOT NULL" "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must reject empty cutover password"
+grep -qF "ALTER ROLE provider_auth_policy_requester LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD :'requester_password';" "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must enable requester login with explicit least-privilege attributes"
+grep -qF "ALTER ROLE provider_auth_policy_approver LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD :'approver_password';" "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must enable approver login with explicit least-privilege attributes"
+grep -qF "ALTER ROLE provider_auth_policy_cutover LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD :'cutover_password';" "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must enable cutover login with explicit least-privilege attributes"
+grep -qF 'FROM pg_auth_members m' "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must remove split-role memberships dynamically"
+grep -qF 'REVOKE ALL ON provider_auth_policy_pending FROM provider_auth_policy_requester, provider_auth_policy_approver, provider_auth_policy_cutover;' "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must remove direct split-role table privileges"
+grep -qF '\set ON_ERROR_STOP on' "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must fail fast on SQL errors"
+grep -qF 'BEGIN;' "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must run role changes in a transaction"
+grep -qF 'COMMIT;' "$AUTH_POLICY_BOOTSTRAP" ||
+  fail "auth-policy bootstrap must commit only after all role repairs succeed"
+alter_line="$(grep -nF "ALTER ROLE provider_auth_policy_requester LOGIN NOSUPERUSER" "$AUTH_POLICY_BOOTSTRAP" | cut -d: -f1 | head -n1)"
+cleanup_line="$(grep -nF 'FROM pg_auth_members m' "$AUTH_POLICY_BOOTSTRAP" | cut -d: -f1 | head -n1)"
+if [ -z "$alter_line" ] || [ -z "$cleanup_line" ] || [ "$cleanup_line" -le "$alter_line" ]; then
+  fail "auth-policy bootstrap must clean memberships after ALTER ROLE password/attribute repair"
+fi
 grep -qF "WHERE rolname = 'stats_inventory_writer'" "$ROLE_SQL" ||
   fail "role sql must be idempotent for existing inventory writer role"
 grep -qF "WHERE rolname = 'stats_trust_inventory_writer'" "$ROLE_SQL" ||
@@ -116,10 +207,10 @@ if grep -qF 'apple m' "$INVENTORY_EXAMPLE"; then
   fail "inventory example must not ship copyable Apple capacity guesses"
 fi
 
-if LC_ALL=C grep -q $'\r' "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE"; then
+if LC_ALL=C grep -q $'\r' "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE" "$AUTH_POLICY_BOOTSTRAP"; then
   fail "sidecar deploy artifacts contain CRLF line endings"
 fi
-if awk '/[^[:space:]]/ && /[[:blank:]]$/ { print FILENAME ":" FNR ":" $0; bad=1 } END { exit bad }' "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE" >&2; then
+if awk '/[^[:space:]]/ && /[[:blank:]]$/ { print FILENAME ":" FNR ":" $0; bad=1 } END { exit bad }' "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE" "$AUTH_POLICY_BOOTSTRAP" >&2; then
   :
 else
   fail "sidecar deploy artifacts contain trailing whitespace"
