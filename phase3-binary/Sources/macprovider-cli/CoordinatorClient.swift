@@ -182,6 +182,7 @@ actor CoordinatorClient {
     private let supportedModels: [String]?
     private let publishesSupportedModels: Bool
     private let warmSwapEnabled: Bool
+    private let hardwareSummary: [String: Any]?
     private var providerReceiptPublicKey: String?
     private let receiptBuilder: ReceiptBuilder?
     private var receiptRotationInFlight = false
@@ -307,6 +308,7 @@ actor CoordinatorClient {
         self.supportedModels = config.supportedModels
         self.publishesSupportedModels = config.publishesSupportedModels
         self.warmSwapEnabled = config.enableWarmSwap
+        self.hardwareSummary = ProviderHardwareSummary.liveWireObject()
         self.providerReceiptPublicKey = providerReceiptPublicKey
         self.receiptBuilder = receiptBuilder
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
@@ -2153,6 +2155,9 @@ actor CoordinatorClient {
             "avg_latency_ms_since_last": nullableNumber(snapshot.avgLatencyMSSinceLast),
             "throughput_tps_since_last": nullableNumber(snapshot.throughputTPSSinceLast),
         ]
+        if let hardwareSummary {
+            payload["hardware_summary"] = hardwareSummary
+        }
         var specDecodeTelemetryMatchesRuntime = true
         var specDecodeTelemetryRuntimeEligible = true
         if warmSwapEnabled {

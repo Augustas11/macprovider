@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -155,6 +156,11 @@ type Provider struct {
 	CanaryLastCheckedAt *time.Time      `json:"canary_last_checked_at,omitempty"`
 	CanaryLastFailedAt  *time.Time      `json:"canary_last_failed_at,omitempty"`
 	LastAutoupdateEvent json.RawMessage `json:"last_autoupdate_event,omitempty"`
+	// HardwareCapacity is live, provider-reported capacity metadata carried on
+	// heartbeats for public aggregate stats. It is deliberately separate from
+	// AttestationStatus and from verified stats hardware inventory: it can make
+	// cores/bandwidth visible without claiming hardware attestation.
+	HardwareCapacity *ProviderHardwareCapacity `json:"hardware_capacity,omitempty"`
 
 	// SPEC-002 v1.3.5 §3.X.1 — populated from v2 auth_request initial-stage
 	// supported_models[] per SPEC-010 v1.5 R-3.3.1; nil for the L-1 baseline.
@@ -173,6 +179,83 @@ type Provider struct {
 	Tier2Session *Tier2Session `json:"-"`
 
 	conn net.Conn
+}
+
+type ProviderHardwareCapacity struct {
+	Chip              string  `json:"chip,omitempty"`
+	BandwidthGBPerSec int64   `json:"bandwidth_gb_per_s,omitempty"`
+	NetworkPowerKW    float64 `json:"network_power_kw,omitempty"`
+	GPUCoresTotal     int     `json:"gpu_cores_total,omitempty"`
+	CPUCoresTotal     int     `json:"cpu_cores_total,omitempty"`
+}
+
+const (
+	MaxProviderHardwareChipBytes         = 120
+	MaxProviderHardwareBandwidthGBPerSec = int64(10_000)
+	MaxProviderHardwareNetworkPowerKW    = 10.0
+	MaxProviderHardwareGPUCoresTotal     = 4_096
+	MaxProviderHardwareCPUCoresTotal     = 1_024
+)
+
+func cloneProviderHardwareCapacity(in *ProviderHardwareCapacity) *ProviderHardwareCapacity {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return sanitizeProviderHardwareCapacity(&out)
+}
+
+func sanitizeProviderHardwareCapacity(in *ProviderHardwareCapacity) *ProviderHardwareCapacity {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Chip = strings.TrimSpace(out.Chip)
+	if len([]byte(out.Chip)) > MaxProviderHardwareChipBytes {
+		out.Chip = truncateUTF8Bytes(out.Chip, MaxProviderHardwareChipBytes)
+	}
+	if out.BandwidthGBPerSec < 0 {
+		out.BandwidthGBPerSec = 0
+	} else if out.BandwidthGBPerSec > MaxProviderHardwareBandwidthGBPerSec {
+		out.BandwidthGBPerSec = MaxProviderHardwareBandwidthGBPerSec
+	}
+	if out.NetworkPowerKW < 0 || math.IsNaN(out.NetworkPowerKW) || math.IsInf(out.NetworkPowerKW, 0) {
+		out.NetworkPowerKW = 0
+	} else if out.NetworkPowerKW > MaxProviderHardwareNetworkPowerKW {
+		out.NetworkPowerKW = MaxProviderHardwareNetworkPowerKW
+	}
+	if out.GPUCoresTotal < 0 {
+		out.GPUCoresTotal = 0
+	} else if out.GPUCoresTotal > MaxProviderHardwareGPUCoresTotal {
+		out.GPUCoresTotal = MaxProviderHardwareGPUCoresTotal
+	}
+	if out.CPUCoresTotal < 0 {
+		out.CPUCoresTotal = 0
+	} else if out.CPUCoresTotal > MaxProviderHardwareCPUCoresTotal {
+		out.CPUCoresTotal = MaxProviderHardwareCPUCoresTotal
+	}
+	if out.Chip == "" && out.BandwidthGBPerSec == 0 && out.NetworkPowerKW == 0 &&
+		out.GPUCoresTotal == 0 && out.CPUCoresTotal == 0 {
+		return nil
+	}
+	return &out
+}
+
+func truncateUTF8Bytes(s string, maxBytes int) string {
+	if maxBytes <= 0 || len([]byte(s)) <= maxBytes {
+		return s
+	}
+	last := 0
+	for i := range s {
+		if i > maxBytes {
+			break
+		}
+		last = i
+	}
+	if last == 0 {
+		return ""
+	}
+	return s[:last]
 }
 
 type Tier2Session struct {
@@ -1182,6 +1265,7 @@ type HeartbeatUpdate struct {
 	Loading             bool
 	LoadingPresent      bool
 	LastAutoupdateEvent json.RawMessage
+	HardwareCapacity    *ProviderHardwareCapacity
 	At                  time.Time
 }
 
@@ -1237,6 +1321,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
 	if len(hb.LastAutoupdateEvent) > 0 {
 		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], hb.LastAutoupdateEvent...)
+	}
+	if hb.HardwareCapacity != nil {
+		p.HardwareCapacity = sanitizeProviderHardwareCapacity(hb.HardwareCapacity)
 	}
 	r.recordSeenModelLocked(p.ProviderID, hb.ModelID)
 	if hb.Status != "" && hb.Status != p.State {
@@ -1479,6 +1566,7 @@ func (r *Registry) Snapshot() []Provider {
 	for _, p := range r.providers {
 		cp := *p
 		cp.conn = nil
+		cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
 		out = append(out, cp)
 	}
 	return out

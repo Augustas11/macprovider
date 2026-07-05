@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -762,6 +763,120 @@ func TestApplyHeartbeatL1ByteIdenticalLegacyPath(t *testing.T) {
 	}
 	if provider.ModelHash != "" || provider.HashStatus != HashStatusUncatalogued {
 		t.Fatalf("legacy model change hash state = (%q, %q), want cleared uncatalogued", provider.ModelHash, provider.HashStatus)
+	}
+}
+
+func TestApplyHeartbeatStoresHardwareCapacity(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "current",
+		State:            StateReady,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		ConnectedAt:      start,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		AuthState:        AuthBearerValidated,
+		ModelID:          "model-a",
+		MaxContextTokens: 8192,
+	}, nil)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status:           StateReady,
+		ModelID:          "model-a",
+		RAMGB:            32,
+		MaxContextTokens: 8192,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		HardwareCapacity: &ProviderHardwareCapacity{
+			Chip:              " Apple M4 Pro ",
+			BandwidthGBPerSec: 273,
+			NetworkPowerKW:    0.065,
+			GPUCoresTotal:     20,
+			CPUCoresTotal:     14,
+		},
+		At: start.Add(time.Minute),
+	})
+	if !ok {
+		t.Fatal("ApplyHeartbeat ok = false")
+	}
+	if provider.HardwareCapacity == nil {
+		t.Fatal("HardwareCapacity = nil")
+	}
+	if provider.HardwareCapacity.Chip != "Apple M4 Pro" ||
+		provider.HardwareCapacity.BandwidthGBPerSec != 273 ||
+		provider.HardwareCapacity.NetworkPowerKW != 0.065 ||
+		provider.HardwareCapacity.GPUCoresTotal != 20 ||
+		provider.HardwareCapacity.CPUCoresTotal != 14 {
+		t.Fatalf("HardwareCapacity = %+v", provider.HardwareCapacity)
+	}
+	snap := registry.Snapshot()
+	if len(snap) != 1 || snap[0].HardwareCapacity == nil || snap[0].HardwareCapacity.GPUCoresTotal != 20 {
+		t.Fatalf("Snapshot hardware capacity = %+v", snap)
+	}
+}
+
+func TestApplyHeartbeatClampsHardwareCapacityBounds(t *testing.T) {
+	registry := NewRegistry(nil, WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
+		return HashStatusVerified
+	}))
+	start := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "current",
+		State:            StateReady,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		ConnectedAt:      start,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		AuthState:        AuthBearerValidated,
+		ModelID:          "model-a",
+		MaxContextTokens: 8192,
+	}, nil)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status:           StateReady,
+		ModelID:          "model-a",
+		RAMGB:            32,
+		MaxContextTokens: 8192,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		HardwareCapacity: &ProviderHardwareCapacity{
+			Chip:              strings.Repeat("x", MaxProviderHardwareChipBytes+20),
+			BandwidthGBPerSec: int64(^uint64(0) >> 1),
+			NetworkPowerKW:    math.Inf(1),
+			GPUCoresTotal:     int(^uint32(0) >> 1),
+			CPUCoresTotal:     int(^uint32(0) >> 1),
+		},
+		At: start.Add(time.Minute),
+	})
+	if !ok {
+		t.Fatal("ApplyHeartbeat ok = false")
+	}
+	if provider.HardwareCapacity == nil {
+		t.Fatal("HardwareCapacity = nil")
+	}
+	if len([]byte(provider.HardwareCapacity.Chip)) > MaxProviderHardwareChipBytes {
+		t.Fatalf("chip length = %d want <= %d", len([]byte(provider.HardwareCapacity.Chip)), MaxProviderHardwareChipBytes)
+	}
+	if provider.HardwareCapacity.BandwidthGBPerSec != MaxProviderHardwareBandwidthGBPerSec {
+		t.Fatalf("BandwidthGBPerSec=%d want %d", provider.HardwareCapacity.BandwidthGBPerSec, MaxProviderHardwareBandwidthGBPerSec)
+	}
+	if provider.HardwareCapacity.NetworkPowerKW != 0 {
+		t.Fatalf("NetworkPowerKW=%f want 0 for non-finite input", provider.HardwareCapacity.NetworkPowerKW)
+	}
+	if provider.HardwareCapacity.GPUCoresTotal != MaxProviderHardwareGPUCoresTotal {
+		t.Fatalf("GPUCoresTotal=%d want %d", provider.HardwareCapacity.GPUCoresTotal, MaxProviderHardwareGPUCoresTotal)
+	}
+	if provider.HardwareCapacity.CPUCoresTotal != MaxProviderHardwareCPUCoresTotal {
+		t.Fatalf("CPUCoresTotal=%d want %d", provider.HardwareCapacity.CPUCoresTotal, MaxProviderHardwareCPUCoresTotal)
 	}
 }
 

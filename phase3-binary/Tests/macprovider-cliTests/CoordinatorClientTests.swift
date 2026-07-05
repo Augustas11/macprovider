@@ -511,7 +511,16 @@ final class CoordinatorClientTests: XCTestCase {
         try await client.sendHeartbeatForTest()
         let frames = await recorder.frames
         let heartbeat = try XCTUnwrap(frames.first)
-        let heartbeatJSON = Self.jsonString(heartbeat)
+        let hardwareSummary = try XCTUnwrap(heartbeat["hardware_summary"] as? [String: Any])
+        XCTAssertTrue(
+            hardwareSummary["cpu_cores_total"] != nil ||
+                hardwareSummary["gpu_cores_total"] != nil ||
+                hardwareSummary["bandwidth_gb_per_s"] != nil,
+            "hardware_summary should publish at least one capacity field: \(hardwareSummary)"
+        )
+        var heartbeatWithoutHardware = heartbeat
+        heartbeatWithoutHardware.removeValue(forKey: "hardware_summary")
+        let heartbeatJSON = Self.jsonString(heartbeatWithoutHardware)
         let helloJSON = Self.jsonString(await client.helloMessage())
         let expectedHeartbeat = """
         {"avg_latency_ms_since_last":null,"max_concurrency":1,"max_context_tokens":20000,"model_id":"model-a","model_params_b":0,"ram_gb":\(capacity.ramGB),"requests_served_since_last":0,"slots_free":1,"slots_total":1,"status":"ready","throughput_tps_estimate":0,"throughput_tps_since_last":null,"type":"heartbeat"}

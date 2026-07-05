@@ -198,6 +198,101 @@ func TestHardwareCapacityFromMemorySource(t *testing.T) {
 	}
 }
 
+func TestHardwareCapacityFallsBackToLiveProviderSummary(t *testing.T) {
+	p := NewWithHardware(fakeSrc{
+		{
+			ProviderID: "a",
+			State:      pool.StateReady,
+			HardwareCapacity: &pool.ProviderHardwareCapacity{
+				Chip:              "Apple M4 Pro",
+				BandwidthGBPerSec: 273,
+				NetworkPowerKW:    0.065,
+				GPUCoresTotal:     20,
+				CPUCoresTotal:     14,
+			},
+		},
+	}, fakeHardware{})
+	p.now = fixedTime
+
+	got := p.OverviewSnapshot()
+	if got.BandwidthGBPerSec != 273 {
+		t.Fatalf("BandwidthGBPerSec=%d want 273", got.BandwidthGBPerSec)
+	}
+	if math.Abs(got.NetworkPowerKW-0.065) > 0.000001 {
+		t.Fatalf("NetworkPowerKW=%f want 0.065", got.NetworkPowerKW)
+	}
+	if got.GPUCoresTotal != 20 || got.CPUCoresTotal != 14 {
+		t.Fatalf("cores gpu=%d cpu=%d want gpu=20 cpu=14", got.GPUCoresTotal, got.CPUCoresTotal)
+	}
+	if got.NodesHardwareAttested != 0 {
+		t.Fatalf("NodesHardwareAttested=%d want 0; live summary is not attestation", got.NodesHardwareAttested)
+	}
+}
+
+func TestHardwareCacheOverridesLiveProviderSummary(t *testing.T) {
+	p := NewWithHardware(fakeSrc{
+		{
+			ProviderID: "a",
+			State:      pool.StateReady,
+			HardwareCapacity: &pool.ProviderHardwareCapacity{
+				BandwidthGBPerSec: 273,
+				NetworkPowerKW:    0.065,
+				GPUCoresTotal:     20,
+				CPUCoresTotal:     14,
+			},
+		},
+	}, fakeHardware{
+		"a": {BandwidthGBPerSec: 546, NetworkPowerKW: 0.095, GPUCoresTotal: 40, CPUCoresTotal: 16},
+	})
+	p.now = fixedTime
+
+	got := p.OverviewSnapshot()
+	if got.BandwidthGBPerSec != 546 ||
+		math.Abs(got.NetworkPowerKW-0.095) > 0.000001 ||
+		got.GPUCoresTotal != 40 ||
+		got.CPUCoresTotal != 16 {
+		t.Fatalf("hardware cache should override live summary, got %+v", got)
+	}
+}
+
+func TestHardwareCapacityAggregationSaturatesLiveSummary(t *testing.T) {
+	hugeInt := int(^uint(0) >> 1)
+	p := NewWithHardware(fakeSrc{
+		{
+			ProviderID: "a",
+			State:      pool.StateReady,
+			HardwareCapacity: &pool.ProviderHardwareCapacity{
+				BandwidthGBPerSec: int64(^uint64(0) >> 1),
+				NetworkPowerKW:    math.MaxFloat64,
+				GPUCoresTotal:     hugeInt,
+				CPUCoresTotal:     hugeInt,
+			},
+		},
+		{
+			ProviderID: "b",
+			State:      pool.StateReady,
+			HardwareCapacity: &pool.ProviderHardwareCapacity{
+				BandwidthGBPerSec: int64(^uint64(0) >> 1),
+				NetworkPowerKW:    math.MaxFloat64,
+				GPUCoresTotal:     hugeInt,
+				CPUCoresTotal:     hugeInt,
+			},
+		},
+	}, fakeHardware{})
+	p.now = fixedTime
+
+	got := p.OverviewSnapshot()
+	if got.BandwidthGBPerSec != maxOverviewBandwidthGBSec {
+		t.Fatalf("BandwidthGBPerSec=%d want saturated %d", got.BandwidthGBPerSec, maxOverviewBandwidthGBSec)
+	}
+	if got.NetworkPowerKW != maxOverviewNetworkPowerKW {
+		t.Fatalf("NetworkPowerKW=%f want saturated %f", got.NetworkPowerKW, maxOverviewNetworkPowerKW)
+	}
+	if got.GPUCoresTotal != maxOverviewInt || got.CPUCoresTotal != maxOverviewInt {
+		t.Fatalf("cores gpu=%d cpu=%d want saturated %d", got.GPUCoresTotal, got.CPUCoresTotal, maxOverviewInt)
+	}
+}
+
 func TestMissingHardwareProfileContributesZero(t *testing.T) {
 	p := NewWithHardware(fakeSrc{
 		{ProviderID: "a", State: pool.StateReady, RAMGB: 24, ModelID: "m4"},
