@@ -384,6 +384,21 @@ func TestOnboardingEnabledRequiresStartupSecrets(t *testing.T) {
 	}
 
 	cfg.Onboarding.PostgresDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.auth_policy_request_dsn") {
+		t.Fatalf("enabled without auth_policy_request_dsn err=%v", err)
+	}
+
+	cfg.Onboarding.AuthPolicyRequestDSN = "postgres://provider_auth_policy_requester@127.0.0.1/db?sslmode=disable"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.auth_policy_approve_dsn") {
+		t.Fatalf("enabled without auth_policy_approve_dsn err=%v", err)
+	}
+
+	cfg.Onboarding.AuthPolicyApproveDSN = "postgres://provider_auth_policy_approver@127.0.0.1/db?sslmode=disable"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.auth_policy_cutover_dsn") {
+		t.Fatalf("enabled without auth_policy_cutover_dsn err=%v", err)
+	}
+
+	cfg.Onboarding.AuthPolicyCutoverDSN = "postgres://provider_auth_policy_cutover@127.0.0.1/db?sslmode=disable"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.apple_team_id") {
 		t.Fatalf("enabled without apple_team_id err=%v", err)
 	}
@@ -414,6 +429,9 @@ func TestOnboardingOperatorKeysRejectSharedDualControlSecrets(t *testing.T) {
 	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Onboarding.AppTrackRegisterEnabled = true
 	cfg.Onboarding.PostgresDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
+	cfg.Onboarding.AuthPolicyRequestDSN = "postgres://provider_auth_policy_requester@127.0.0.1/db?sslmode=disable"
+	cfg.Onboarding.AuthPolicyApproveDSN = "postgres://provider_auth_policy_approver@127.0.0.1/db?sslmode=disable"
+	cfg.Onboarding.AuthPolicyCutoverDSN = "postgres://provider_auth_policy_cutover@127.0.0.1/db?sslmode=disable"
 	cfg.Onboarding.AppleTeamID = "TEAM12345"
 	cfg.Onboarding.ASNPrefixes = map[string]string{"198.51.100.0/24": "AS64500"}
 
