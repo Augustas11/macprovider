@@ -29,6 +29,22 @@ final class ProcessEnvironmentSanitizerTests: XCTestCase {
         ]))
     }
 
+    func testAutotuneRecommendationEnvironmentUsesAllowlist() throws {
+        let sanitized = try AutotuneRecommendationRunner.sanitizedProcessEnvironment(from: [
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/Users/test",
+            "LC_CTYPE": "UTF-8",
+            "MACPROVIDER_PROVIDER_TOKEN": "secret",
+            "PYTHONPATH": "/tmp/injected"
+        ])
+
+        XCTAssertEqual(sanitized["PATH"], "/usr/bin:/bin")
+        XCTAssertEqual(sanitized["HOME"], "/Users/test")
+        XCTAssertEqual(sanitized["LC_CTYPE"], "UTF-8")
+        XCTAssertNil(sanitized["MACPROVIDER_PROVIDER_TOKEN"])
+        XCTAssertNil(sanitized["PYTHONPATH"])
+    }
+
     func testReleaseCLIPathFallsBackWhenPinnedTeamMissing() throws {
         #if !DEBUG
         let root = FileManager.default.temporaryDirectory

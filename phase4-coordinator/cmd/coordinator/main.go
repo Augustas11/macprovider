@@ -633,7 +633,7 @@ func main() {
 	}
 	providerMux.Handle("/admin/metrics", operatorMetricsHandler(cfg.Auth.OperatorKey, metricsRegistry))
 
-	var buyerHandler http.Handler = buyerServer.Handler()
+	var register http.HandlerFunc
 	if cfg.Onboarding.AppTrackRegisterEnabled {
 		asnResolver, err := onboarding.NewStaticASNResolver(cfg.Onboarding.ASNPrefixes)
 		if err != nil {
@@ -662,9 +662,14 @@ func main() {
 				TeamID:            cfg.Onboarding.AppleTeamID,
 			},
 		}
-		buyerHandler = buyerHandlerWithOptionalRegister(buyerHandler, true, registerHandler.HandleAppTrackRegister)
+		register = registerHandler.HandleAppTrackRegister
 		logger.Info().Msg("SPEC-026 app-track register route mounted on buyer port")
 	}
+	buyerHandler := buyerHandlerWithOptionalRegister(
+		buyerServer.Handler(),
+		cfg.Onboarding.AppTrackRegisterEnabled,
+		register,
+	)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerHandler)
@@ -941,11 +946,10 @@ func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Ha
 }
 
 func buyerHandlerWithOptionalRegister(base http.Handler, enabled bool, register http.HandlerFunc) http.Handler {
-	if !enabled {
-		return base
-	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/providers/register", register)
+	if enabled {
+		mux.HandleFunc("/v1/providers/register", register)
+	}
 	mux.HandleFunc("/v1/provider/wallet", appTrackWalletNotImplementedHandler)
 	mux.Handle("/", base)
 	return mux
