@@ -642,24 +642,17 @@ actor ControlSocketServer {
             let capturedFD = fd
             pusherTask = Task.detached(priority: .userInitiated) {
                 for await request in stream {
-                    FileHandle.standardError.write(Data("[idsig] pusher: dispatching request for \(request.providerID)\n".utf8))
-                    do {
-                        try Self.writeFrameDirect(
-                            fd: capturedFD,
-                            frame: .identitySignatureRequest(
-                                authAttemptID: request.authAttemptID,
-                                providerID: request.providerID,
-                                binaryVersion: request.binaryVersion,
-                                providerECDHPublicKey: request.providerECDHPublicKey,
-                                transcriptSHA256: request.transcriptSHA256
-                            )
+                    try? Self.writeFrameDirect(
+                        fd: capturedFD,
+                        frame: .identitySignatureRequest(
+                            authAttemptID: request.authAttemptID,
+                            providerID: request.providerID,
+                            binaryVersion: request.binaryVersion,
+                            providerECDHPublicKey: request.providerECDHPublicKey,
+                            transcriptSHA256: request.transcriptSHA256
                         )
-                        FileHandle.standardError.write(Data("[idsig] pusher: frame written to fd=\(capturedFD)\n".utf8))
-                    } catch {
-                        FileHandle.standardError.write(Data("[idsig] pusher: write failed err=\(error)\n".utf8))
-                    }
+                    )
                 }
-                FileHandle.standardError.write(Data("[idsig] pusher: stream ended\n".utf8))
             }
         }
         defer {

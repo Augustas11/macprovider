@@ -92,7 +92,6 @@ public actor IdentitySignatureBridge {
     /// connected — the caller should proceed WITHOUT the signature and let
     /// the coordinator's per-provider exemption handle it.
     public func requestSignature(_ request: Request, timeout: TimeInterval) async -> Response? {
-        FileHandle.standardError.write(Data("[idsig] bridge: requestSignature listeners=\(listeners.count)\n".utf8))
         if let existing = pending {
             existing.continuation.resume(returning: nil)
             pending = nil
@@ -108,14 +107,12 @@ public actor IdentitySignatureBridge {
                 continuation.yield(request)
             }
         }
-        FileHandle.standardError.write(Data("[idsig] bridge: requestSignature returned response=\(response == nil ? "nil" : "value") accepted=\(response?.accepted.description ?? "nil")\n".utf8))
         return response
     }
 
     /// Called by `ControlSocket.handleClient` after receiving an
     /// `identitySignatureResponse` frame from Malibu.app.
     public func deliverResponse(_ response: Response) {
-        FileHandle.standardError.write(Data("[idsig] bridge: deliverResponse accepted=\(response.accepted) hasSig=\(response.identitySignature != nil) pending=\(pending != nil)\n".utf8))
         guard let existing = pending else { return }
         pending = nil
         existing.continuation.resume(returning: response)
@@ -129,7 +126,6 @@ public actor IdentitySignatureBridge {
         let id = UUID()
         let stream = AsyncStream<Request> { continuation in
             listeners[id] = continuation
-            FileHandle.standardError.write(Data("[idsig] bridge: subscribe id=\(id.uuidString) total_listeners=\(listeners.count) hasPending=\(pending != nil)\n".utf8))
             if let pending {
                 continuation.yield(pending.request)
             }
