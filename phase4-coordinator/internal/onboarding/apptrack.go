@@ -120,6 +120,11 @@ type Handler struct {
 	ASNRateLimiter ASNRateLimiter
 	ASNResolver    ASNResolver
 
+	// Hardware evidence has separate limits from app registration so autotune
+	// telemetry cannot consume the register budget or buyer DB capacity.
+	HardwareEvidenceIPRateLimiter       IPRateLimiter
+	HardwareEvidenceProviderRateLimiter IPRateLimiter
+
 	// App Attest verification seam. Production verifier validates the
 	// Apple attestation object; tests use a fake verifier for replay and
 	// outage behavior.
@@ -165,6 +170,11 @@ type AuthTokenStore interface {
 	// the Authorization header; request bodies must never carry bearer material.
 	// provider_name is the tenant literal "malibu-app" for App-track.
 	MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (cleartext string, err error)
+
+	// ValidateToken validates an existing provider bearer token and returns the
+	// bound provider_id. Evidence submission is read-only with respect to the
+	// SQLite token store, so it does not mark the token used.
+	ValidateToken(ctx context.Context, token string) (providerID string, ok bool, err error)
 }
 
 // IPRateLimiter and ASNRateLimiter both wrap the coordinator's existing

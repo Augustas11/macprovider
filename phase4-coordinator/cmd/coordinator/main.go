@@ -634,20 +634,23 @@ func main() {
 	providerMux.Handle("/admin/metrics", operatorMetricsHandler(cfg.Auth.OperatorKey, metricsRegistry))
 
 	var register http.HandlerFunc
+	var hardwareEvidence http.HandlerFunc
 	if cfg.Onboarding.AppTrackRegisterEnabled {
 		asnResolver, err := onboarding.NewStaticASNResolver(cfg.Onboarding.ASNPrefixes)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("onboarding ASN resolver config invalid")
 		}
 		registerHandler := &onboarding.Handler{
-			StatsDB:           onboardingStore,
-			AuthTokenStore:    tokenStore,
-			CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
-			CoordinatorWSURL:  "wss://" + cfg.Onboarding.CoordinatorDomain + "/v2/provider",
-			TrustedProxies:    mustParseTrustedProxies(cfg, logger),
-			IPRateLimiter:     onboarding.NewMemoryRateLimiter(5, time.Minute),
-			ASNRateLimiter:    onboarding.NewMemoryRateLimiter(30, time.Minute),
-			ASNResolver:       asnResolver,
+			StatsDB:                             onboardingStore,
+			AuthTokenStore:                      tokenStore,
+			CoordinatorDomain:                   cfg.Onboarding.CoordinatorDomain,
+			CoordinatorWSURL:                    "wss://" + cfg.Onboarding.CoordinatorDomain + "/v2/provider",
+			TrustedProxies:                      mustParseTrustedProxies(cfg, logger),
+			IPRateLimiter:                       onboarding.NewMemoryRateLimiter(5, time.Minute),
+			ASNRateLimiter:                      onboarding.NewMemoryRateLimiter(30, time.Minute),
+			ASNResolver:                         asnResolver,
+			HardwareEvidenceIPRateLimiter:       onboarding.NewMemoryRateLimiter(10, time.Minute),
+			HardwareEvidenceProviderRateLimiter: onboarding.NewMemoryRateLimiter(1, 10*time.Minute),
 			AppAttestVerifier: onboarding.AppleAppAttestVerifier{
 				Config: onboarding.AppAttestConfig{
 					CoordinatorDomain: cfg.Onboarding.CoordinatorDomain,
@@ -663,12 +666,14 @@ func main() {
 			},
 		}
 		register = registerHandler.HandleAppTrackRegister
+		hardwareEvidence = registerHandler.HandleHardwareEvidence
 		logger.Info().Msg("SPEC-026 app-track register route mounted on buyer port")
 	}
-	buyerHandler := buyerHandlerWithOptionalRegister(
+	buyerHandler := buyerHandlerWithOptionalProviderEndpoints(
 		buyerServer.Handler(),
 		cfg.Onboarding.AppTrackRegisterEnabled,
 		register,
+		hardwareEvidence,
 	)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
@@ -945,10 +950,11 @@ func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Ha
 	})
 }
 
-func buyerHandlerWithOptionalRegister(base http.Handler, enabled bool, register http.HandlerFunc) http.Handler {
+func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence http.HandlerFunc) http.Handler {
 	mux := http.NewServeMux()
 	if enabled {
 		mux.HandleFunc("/v1/providers/register", register)
+		mux.HandleFunc("/v1/providers/hardware-evidence", hardwareEvidence)
 	}
 	mux.HandleFunc("/v1/provider/wallet", appTrackWalletNotImplementedHandler)
 	mux.Handle("/", base)

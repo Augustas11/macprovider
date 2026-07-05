@@ -125,12 +125,15 @@ BINARY="$DIST_DIR/coordinator-linux-amd64"
 CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
 STATS_INVENTORY_BINARY="$DIST_DIR/stats-inventory-sync-linux-amd64"
 STATS_BILLING_MIRROR_BINARY="$DIST_DIR/stats-billing-mirror-linux-amd64"
+STATS_HARDWARE_VERIFIER_BINARY="$DIST_DIR/stats-hardware-verifier-linux-amd64"
 CONFIG="$DIST_DIR/coordinator.yaml"
 SERVICE="$DIST_DIR/macprovider-coordinator.service"
 STATS_INVENTORY_SERVICE="$DIST_DIR/stats-inventory-sync.service"
 STATS_INVENTORY_TIMER="$DIST_DIR/stats-inventory-sync.timer"
 STATS_BILLING_MIRROR_SERVICE="$DIST_DIR/stats-billing-mirror.service"
 STATS_BILLING_MIRROR_TIMER="$DIST_DIR/stats-billing-mirror.timer"
+STATS_HARDWARE_VERIFIER_SERVICE="$DIST_DIR/stats-hardware-verifier.service"
+STATS_HARDWARE_VERIFIER_TIMER="$DIST_DIR/stats-hardware-verifier.timer"
 NGINX_SITE="$DIST_DIR/nginx-coordinator.streamvc.live.conf"
 TCP_SYSCTL="$DIST_DIR/sysctl.d/99-macprovider-tcp.conf"
 TCP_BBR_MODULES_LOAD="$DIST_DIR/modules-load.d/tcp_bbr.conf"
@@ -167,9 +170,10 @@ STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
 # prune-tokens / list-tokens also belong on Pearl). If absent, the
 # operator forgot to run build-linux.sh after the M2 update that
 # extended it. Fail closed — do NOT silently deploy with a stale CLI.
-for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRROR_BINARY" \
+for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRROR_BINARY" "$STATS_HARDWARE_VERIFIER_BINARY" \
          "$CONFIG" "$SERVICE" "$STATS_INVENTORY_SERVICE" "$STATS_INVENTORY_TIMER" \
-         "$STATS_BILLING_MIRROR_SERVICE" "$STATS_BILLING_MIRROR_TIMER" "$NGINX_SITE" \
+         "$STATS_BILLING_MIRROR_SERVICE" "$STATS_BILLING_MIRROR_TIMER" \
+         "$STATS_HARDWARE_VERIFIER_SERVICE" "$STATS_HARDWARE_VERIFIER_TIMER" "$NGINX_SITE" \
          "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE" \
          "$STATIC_DEMAND_JSON" "$STATIC_DEMAND_SIG" \
          "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG"; do
@@ -527,10 +531,18 @@ $SSH 'set -e
   else
     echo "  /etc/macprovider-stats/stats-billing-mirror.env not yet present; stats billing mirror timer remains opt-in"
   fi
+  if [ -f /etc/macprovider-stats/stats-hardware-verifier.env ]; then
+    chown root:root /etc/macprovider-stats/stats-hardware-verifier.env
+    chmod 0600 /etc/macprovider-stats/stats-hardware-verifier.env
+    echo "  enforced stats hardware verifier env perms: root:root 0600"
+  else
+    echo "  /etc/macprovider-stats/stats-hardware-verifier.env not yet present; stats hardware verifier timer remains opt-in"
+  fi
 '
 
 log "step 3a/9: stats env preflight"
 STATS_ENABLED_LOCAL="$(yaml_block_value stats enabled)"
+ONBOARDING_ENABLED_LOCAL="$(yaml_block_value onboarding app_track_register_enabled)"
 if [ "$STATS_ENABLED_LOCAL" = "true" ]; then
   # stats.enabled=true makes the coordinator fail closed during config load if
   # any required stats DSN is missing. Check the remote EnvironmentFile before
@@ -570,6 +582,54 @@ if [ "$STATS_ENABLED_LOCAL" = "true" ]; then
   '
 else
   echo "  stats.enabled is not true in $CONFIG — skipping stats env preflight"
+fi
+
+if [ "$ONBOARDING_ENABLED_LOCAL" = "true" ]; then
+  $SSH 'set -e
+    env_file=/etc/macprovider/coordinator.env
+    if [ ! -r "$env_file" ]; then
+      echo "aborting deploy: onboarding enabled but $env_file is missing or unreadable" >&2
+      exit 12
+    fi
+    set -a
+    . "$env_file"
+    set +a
+    if [ -z "${ONBOARDING_POSTGRES_DSN:-}" ]; then
+      echo "aborting deploy: onboarding enabled but ONBOARDING_POSTGRES_DSN is missing in coordinator.env" >&2
+      exit 12
+    fi
+    if ! command -v psql >/dev/null 2>&1; then
+      echo "aborting deploy: psql is required for onboarding hardware evidence migration preflight" >&2
+      exit 12
+    fi
+    PGDATABASE="$ONBOARDING_POSTGRES_DSN" psql -v ON_ERROR_STOP=1 -qAt <<SQL >/dev/null
+SELECT 1 FROM hardware_verification_jobs LIMIT 1;
+SQL
+    echo "  ok: migration 008 hardware_verification_jobs is visible to provider_onboarding"
+    verifier_env=/etc/macprovider-stats/stats-hardware-verifier.env
+    if [ -f "$verifier_env" ]; then
+      if grep -Eq "REPLACE_ME|<generated-password>" "$verifier_env"; then
+        echo "aborting deploy: stats-hardware-verifier.env still contains placeholder secret material" >&2
+        exit 12
+      fi
+      set -a
+      . "$verifier_env"
+      set +a
+      if [ -z "${STATS_HARDWARE_VERIFIER_DSN:-}" ]; then
+        echo "aborting deploy: stats-hardware-verifier.env is present but STATS_HARDWARE_VERIFIER_DSN is empty" >&2
+        exit 12
+      fi
+      PGDATABASE="$STATS_HARDWARE_VERIFIER_DSN" psql -v ON_ERROR_STOP=1 -qAt <<SQL >/dev/null
+SELECT 1 FROM hardware_verification_jobs LIMIT 1;
+SELECT 1 FROM hardware_verification_trust LIMIT 1;
+SELECT 1 FROM chip_hardware_profiles LIMIT 1;
+SELECT 1 WHERE has_schema_privilege(current_user, '\''public'\'', '\''USAGE'\'');
+SQL
+      echo "  ok: stats_hardware_verifier role can read hardware jobs/trust/chip inventory"
+    fi
+  '
+else
+  echo "  onboarding.app_track_register_enabled is not true — skipping hardware evidence migration preflight"
 fi
 
 log "step 3b/9: install TCP sysctl overrides"
@@ -740,12 +800,15 @@ $SCP "$BINARY"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-linux-amd64"
 $SCP "$CLI_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator-cli-linux-amd64"
 $SCP "$STATS_INVENTORY_BINARY"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync-linux-amd64"
 $SCP "$STATS_BILLING_MIRROR_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-billing-mirror-linux-amd64"
+$SCP "$STATS_HARDWARE_VERIFIER_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-hardware-verifier-linux-amd64"
 $SCP "$CONFIG"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.yaml"
 $SCP "$SERVICE"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/macprovider-coordinator.service"
 $SCP "$STATS_INVENTORY_SERVICE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync.service"
 $SCP "$STATS_INVENTORY_TIMER"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync.timer"
 $SCP "$STATS_BILLING_MIRROR_SERVICE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-billing-mirror.service"
 $SCP "$STATS_BILLING_MIRROR_TIMER"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-billing-mirror.timer"
+$SCP "$STATS_HARDWARE_VERIFIER_SERVICE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-hardware-verifier.service"
+$SCP "$STATS_HARDWARE_VERIFIER_TIMER"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-hardware-verifier.timer"
 $SCP "$NGINX_SITE"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-coordinator-full.conf"
 # SPEC-017 v0.1.8 Step 4.B artifacts (snippet must land at
 # /etc/nginx/conf.d/ so the http-context declarations are visible
@@ -799,12 +862,17 @@ $SSH "set -e
   # dedicated macprovider-stats identity and gets read access only to the
   # SQLite ledger files via file ACLs below.
   install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-billing-mirror-linux-amd64 /opt/macprovider-stats/stats-billing-mirror
+  # stats-hardware-verifier is an out-of-band stats sidecar. It promotes
+  # queued autotune evidence after conservative verification.
+  install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-hardware-verifier-linux-amd64 /opt/macprovider-stats/stats-hardware-verifier
   install -o root -g macprovider -m 0640 $DEPLOY_TMP/coordinator.yaml /opt/macprovider/coordinator.yaml
   install -o root -g root       -m 0644 $DEPLOY_TMP/macprovider-coordinator.service /etc/systemd/system/macprovider-coordinator.service
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-inventory-sync.service /etc/systemd/system/stats-inventory-sync.service
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-inventory-sync.timer /etc/systemd/system/stats-inventory-sync.timer
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-billing-mirror.service /etc/systemd/system/stats-billing-mirror.service
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-billing-mirror.timer /etc/systemd/system/stats-billing-mirror.timer
+  install -o root -g root       -m 0644 $DEPLOY_TMP/stats-hardware-verifier.service /etc/systemd/system/stats-hardware-verifier.service
+  install -o root -g root       -m 0644 $DEPLOY_TMP/stats-hardware-verifier.timer /etc/systemd/system/stats-hardware-verifier.timer
   if command -v setfacl >/dev/null 2>&1 && [ -f /var/lib/macprovider/request-log.sqlite ]; then
     setfacl -m u:macprovider-stats:--x /var/lib/macprovider
     setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite
@@ -1143,6 +1211,16 @@ $SSH 'set -e
     systemctl is-active stats-billing-mirror.timer
   else
     echo "stats billing mirror timer not enabled: missing env/sqlite source or macprovider-stats read ACL"
+  fi
+  if [ -f /etc/macprovider-stats/stats-hardware-verifier.env ]; then
+    systemctl enable --now stats-hardware-verifier.timer
+    if ! systemctl start stats-hardware-verifier.service; then
+      echo "warning: stats-hardware-verifier.service failed; leaving coordinator deploy running"
+      journalctl -u stats-hardware-verifier.service -n 30 --no-pager || true
+    fi
+    systemctl is-active stats-hardware-verifier.timer
+  else
+    echo "stats hardware verifier timer not enabled: missing /etc/macprovider-stats/stats-hardware-verifier.env"
   fi
   sleep 3
   systemctl is-active macprovider-coordinator

@@ -82,13 +82,22 @@ func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 	register := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
+	hardwareEvidence := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	})
 
-	disabled := buyerHandlerWithOptionalRegister(base, false, register)
+	disabled := buyerHandlerWithOptionalProviderEndpoints(base, false, register, hardwareEvidence)
 	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", nil)
 	rr := httptest.NewRecorder()
 	disabled.ServeHTTP(rr, req)
 	if rr.Code != http.StatusTeapot {
 		t.Fatalf("disabled route status=%d want base handler 418", rr.Code)
+	}
+	evidenceReq := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", nil)
+	rr = httptest.NewRecorder()
+	disabled.ServeHTTP(rr, evidenceReq)
+	if rr.Code != http.StatusTeapot {
+		t.Fatalf("disabled evidence route status=%d want base handler 418", rr.Code)
 	}
 
 	walletReq := httptest.NewRequest(http.MethodPost, "/v1/provider/wallet", nil)
@@ -98,11 +107,16 @@ func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 		t.Fatalf("disabled wallet route status=%d body=%s, want 501 wallet_change_requires_spec_027", rr.Code, rr.Body.String())
 	}
 
-	enabled := buyerHandlerWithOptionalRegister(base, true, register)
+	enabled := buyerHandlerWithOptionalProviderEndpoints(base, true, register, hardwareEvidence)
 	rr = httptest.NewRecorder()
 	enabled.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("enabled route status=%d want 204", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	enabled.ServeHTTP(rr, evidenceReq)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("enabled evidence route status=%d want 202", rr.Code)
 	}
 
 	rr = httptest.NewRecorder()
@@ -112,30 +126,48 @@ func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 	}
 }
 
-func TestNginxRegisterRouteBeforeV1CatchAll(t *testing.T) {
+func TestNginxProviderRoutesBeforeV1CatchAll(t *testing.T) {
 	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
 	if err != nil {
 		t.Fatalf("read nginx config: %v", err)
 	}
 	cfg := string(body)
-	route := strings.Index(cfg, "location = /v1/providers/register")
+	registerRoute := strings.Index(cfg, "location = /v1/providers/register")
+	evidenceRoute := strings.Index(cfg, "location = /v1/providers/hardware-evidence")
 	catchAll := strings.Index(cfg, "location /v1/ {\n        return 404;")
-	if route < 0 {
+	if registerRoute < 0 {
 		t.Fatal("missing exact /v1/providers/register route")
+	}
+	if evidenceRoute < 0 {
+		t.Fatal("missing exact /v1/providers/hardware-evidence route")
 	}
 	if catchAll < 0 {
 		t.Fatal("missing /v1/ catch-all route")
 	}
-	if route > catchAll {
+	if registerRoute > catchAll {
 		t.Fatal("/v1/providers/register route must appear before /v1/ catch-all")
+	}
+	if evidenceRoute > catchAll {
+		t.Fatal("/v1/providers/hardware-evidence route must appear before /v1/ catch-all")
 	}
 	for _, needle := range []string{
 		"proxy_pass http://127.0.0.1:8443/v1/providers/register;",
 		"proxy_set_header Authorization $http_authorization;",
 		"add_header Cache-Control \"no-store\" always;",
 	} {
-		if !strings.Contains(cfg[route:catchAll], needle) {
+		if !strings.Contains(cfg[registerRoute:catchAll], needle) {
 			t.Fatalf("register route missing %q", needle)
+		}
+	}
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8443/v1/providers/hardware-evidence;",
+		"limit_req zone=ws_provider_rate burst=5 nodelay;",
+		"proxy_set_header Authorization $http_authorization;",
+		"client_max_body_size 128k;",
+		"add_header Cache-Control \"no-store\" always;",
+	} {
+		if !strings.Contains(cfg[evidenceRoute:catchAll], needle) {
+			t.Fatalf("hardware evidence route missing %q", needle)
 		}
 	}
 }

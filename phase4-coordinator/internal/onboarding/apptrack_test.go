@@ -61,6 +61,131 @@ func TestHandleAppTrackRegisterSuccess(t *testing.T) {
 	}
 }
 
+func TestHandleHardwareEvidenceQueuesAuthenticatedAutotuneEvidence(t *testing.T) {
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	stats := &fakeStatsDB{}
+	handler := testRegisterHandler(stats, &fakeAuthStore{
+		validateOK:         true,
+		validateProviderID: "mac",
+	}, nil)
+	body := map[string]any{
+		"schema_version":           "hardware_evidence.autotune.v1",
+		"provider_id":              "mac",
+		"generated_at":             now.Format(time.RFC3339),
+		"candidate_catalog_sha256": strings.Repeat("b", 64),
+		"recommended_model":        "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+		"hardware": map[string]any{
+			"chip":                   "Apple M5",
+			"memory_gb":              32,
+			"bandwidth_tier":         "C",
+			"detected":               true,
+			"os_version":             "15.5",
+			"binary_version":         "1.7.9",
+			"hardware_identity_hash": strings.Repeat("c", 64),
+		},
+		"benchmarks": []map[string]any{{
+			"model_key":                 "qwen-7b",
+			"model_id":                  "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+			"sustained_tps":             42.5,
+			"ttft_ms":                   1200,
+			"swap_detected":             false,
+			"thermal_throttle_detected": false,
+			"artifact_sha256":           strings.Repeat("d", 64),
+			"candidate_catalog_sha256":  strings.Repeat("b", 64),
+			"generated_at":              now.Format(time.RFC3339),
+			"binary_version":            "1.7.9",
+			"hardware_identity_hash":    strings.Repeat("c", 64),
+		}},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer provider-token")
+	rr := httptest.NewRecorder()
+
+	handler.HandleHardwareEvidence(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if stats.evidenceProviderID != "mac" {
+		t.Fatalf("evidenceProviderID=%q want mac", stats.evidenceProviderID)
+	}
+	if stats.evidenceRequest.Hardware.Chip != "Apple M5" || stats.evidenceRequest.Hardware.MemoryGB != 32 {
+		t.Fatalf("unexpected evidence request: %+v", stats.evidenceRequest)
+	}
+	if !stats.evidenceGeneratedAt.Equal(now) {
+		t.Fatalf("generatedAt=%s want %s", stats.evidenceGeneratedAt, now)
+	}
+}
+
+func TestHandleHardwareEvidenceRejectsProviderMismatch(t *testing.T) {
+	handler := testRegisterHandler(&fakeStatsDB{}, &fakeAuthStore{
+		validateOK:         true,
+		validateProviderID: "mac",
+	}, nil)
+	body := []byte(`{"schema_version":"hardware_evidence.autotune.v1","provider_id":"other","generated_at":"2026-07-03T12:00:00Z","hardware":{"chip":"Apple M5","memory_gb":32,"bandwidth_tier":"C","detected":true,"os_version":"15.5","binary_version":"1.7.9","hardware_identity_hash":"abc"},"benchmarks":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer provider-token")
+	rr := httptest.NewRecorder()
+
+	handler.HandleHardwareEvidence(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleHardwareEvidenceRequiresBearer(t *testing.T) {
+	handler := testRegisterHandler(&fakeStatsDB{}, &fakeAuthStore{}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", strings.NewReader(`{}`))
+	rr := httptest.NewRecorder()
+
+	handler.HandleHardwareEvidence(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleHardwareEvidenceMapsRateLimitBeforeBodyRead(t *testing.T) {
+	handler := testRegisterHandler(&fakeStatsDB{}, &fakeAuthStore{
+		validateOK:         true,
+		validateProviderID: "mac",
+	}, nil)
+	handler.HardwareEvidenceIPRateLimiter = denyLimiter{}
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", strings.NewReader(`not-json`))
+	req.Header.Set("Authorization", "Bearer provider-token")
+	rr := httptest.NewRecorder()
+
+	handler.HandleHardwareEvidence(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleHardwareEvidenceMapsDBAdmissionCap(t *testing.T) {
+	stats := &fakeStatsDB{evidenceErr: ErrHardwareEvidenceRateLimited}
+	handler := testRegisterHandler(stats, &fakeAuthStore{
+		validateOK:         true,
+		validateProviderID: "mac",
+	}, nil)
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	body := []byte(`{"schema_version":"hardware_evidence.autotune.v1","provider_id":"mac","generated_at":"` + now.Format(time.RFC3339) + `","hardware":{"chip":"Apple M5","memory_gb":32,"bandwidth_tier":"C","detected":true,"os_version":"15.5","binary_version":"1.7.9","hardware_identity_hash":"abc"},"benchmarks":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer provider-token")
+	rr := httptest.NewRecorder()
+
+	handler.HandleHardwareEvidence(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestHandleAppTrackRegisterAcceptsSwiftHardwareSummaryShape(t *testing.T) {
 	body, providerID := signedRegisterBody(t, func(m map[string]any) {
 		m["hardware_summary"] = map[string]any{
@@ -679,6 +804,11 @@ type fakeStatsDB struct {
 	hardwareBlock        <-chan struct{}
 	hardwareStarted      chan struct{}
 	hardwareStartedOnce  sync.Once
+	evidenceProviderID   string
+	evidenceRequest      HardwareEvidenceRequest
+	evidenceGeneratedAt  time.Time
+	evidenceRecord       HardwareEvidenceJobRecord
+	evidenceErr          error
 }
 
 func (f *fakeStatsDB) UpsertProviderIdentity(ctx context.Context, providerID string, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
@@ -723,6 +853,19 @@ func (f *fakeStatsDB) CheckAppAttestKeyIDUnique(ctx context.Context, keyID []byt
 	return f.checkKeyErr
 }
 
+func (f *fakeStatsDB) InsertHardwareVerificationJob(ctx context.Context, providerID string, evidence HardwareEvidenceRequest, generatedAt time.Time) (HardwareEvidenceJobRecord, error) {
+	f.evidenceProviderID = providerID
+	f.evidenceRequest = evidence
+	f.evidenceGeneratedAt = generatedAt
+	if f.evidenceErr != nil {
+		return HardwareEvidenceJobRecord{}, f.evidenceErr
+	}
+	if f.evidenceRecord.JobID == 0 {
+		f.evidenceRecord = HardwareEvidenceJobRecord{JobID: 7, EvidenceSHA: strings.Repeat("a", 64)}
+	}
+	return f.evidenceRecord, nil
+}
+
 type fakeAppAttestVerifier struct {
 	ok       bool
 	err      error
@@ -744,10 +887,13 @@ func (waitForCancelAppAttestVerifier) Verify(ctx context.Context, evidence AppAt
 }
 
 type fakeAuthStore struct {
-	token      string
-	err        error
-	providerID string
-	bearer     *string
+	token              string
+	err                error
+	providerID         string
+	bearer             *string
+	validateProviderID string
+	validateOK         bool
+	validateErr        error
 }
 
 func (f *fakeAuthStore) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (string, error) {
@@ -757,6 +903,19 @@ func (f *fakeAuthStore) MintProviderTokenAppTrack(ctx context.Context, providerI
 		return "", f.err
 	}
 	return f.token, nil
+}
+
+func (f *fakeAuthStore) ValidateToken(ctx context.Context, token string) (string, bool, error) {
+	if f.validateErr != nil {
+		return "", false, f.validateErr
+	}
+	if !f.validateOK {
+		return "", false, nil
+	}
+	if f.validateProviderID != "" {
+		return f.validateProviderID, true, nil
+	}
+	return f.providerID, true, nil
 }
 
 type fakeMetrics struct {

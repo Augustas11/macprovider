@@ -28,6 +28,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{5, "oltp_source_grants"},
 		{6, "spec_026_identity"},
 		{7, "hardware_profiles"},
+		{8, "hardware_verification_jobs"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -64,7 +65,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	var schema, bootstrap, spec026, hardware string
+	var schema, bootstrap, spec026, hardware, hardwareJobs string
 	for _, m := range all {
 		switch m.Name {
 		case "stats_tables":
@@ -75,6 +76,8 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 			spec026 = m.SQL
 		case "hardware_profiles":
 			hardware = m.SQL
+		case "hardware_verification_jobs":
+			hardwareJobs = m.SQL
 		}
 	}
 	if schema == "" {
@@ -224,6 +227,93 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 		"DROP TABLE IF EXISTS provider_hardware_profiles",
 	} {
 		mustContain(t, hardwareDownSQL, needle, "hardware rollback artifact")
+	}
+	if hardwareJobs == "" {
+		t.Fatal("hardware_verification_jobs migration body is empty")
+	}
+	hardwareJobsCode := stripSQLComments(hardwareJobs)
+	for _, needle := range []string{
+		"CREATE TABLE IF NOT EXISTS hardware_verification_jobs",
+		"CREATE TABLE IF NOT EXISTS hardware_verification_trust",
+		"status                     TEXT NOT NULL CHECK (status IN ('pending', 'waiting_trust', 'verified', 'rejected')) DEFAULT 'pending'",
+		"evidence                   JSONB NOT NULL",
+		"evidence_sha256            TEXT NOT NULL UNIQUE",
+		"CREATE ROLE stats_hardware_verifier NOLOGIN",
+		"ALTER ROLE stats_hardware_verifier NOLOGIN",
+		"GRANT USAGE ON SCHEMA public TO stats_hardware_verifier",
+		"GRANT SELECT (",
+		"submitted_at,\n    evidence_sha256\n) ON hardware_verification_jobs TO provider_onboarding",
+		"GRANT INSERT (",
+		"evidence_sha256\n) ON hardware_verification_jobs TO provider_onboarding",
+		"GRANT USAGE, SELECT ON SEQUENCE hardware_verification_jobs_id_seq TO provider_onboarding",
+		"current_user = 'stats_hardware_verifier'",
+		"stats_hardware_verifier promotion requires matching trusted hardware evidence",
+		"stats_hardware_verifier may not move hardware profile timestamps backward",
+		"j.generated_at >= now() - interval '7 days'",
+		"j.status IN ('pending', 'waiting_trust')",
+		"FROM hardware_verification_jobs j",
+		"JOIN hardware_verification_trust t",
+		"JOIN chip_hardware_profiles ch",
+		"CREATE OR REPLACE FUNCTION hardware_verification_jobs_guard_verifier_update()",
+		"stats_hardware_verifier may not update finalized hardware verification jobs",
+		"stats_hardware_verifier may only move jobs to waiting_trust, verified, or rejected",
+		"CREATE TRIGGER trg_hardware_verification_jobs_guard_verifier_update",
+		"REVOKE ALL ON FUNCTION hardware_verification_jobs_guard_verifier_update() FROM PUBLIC",
+		"GRANT SELECT ON hardware_verification_jobs TO stats_hardware_verifier",
+		"GRANT UPDATE (\n    status,\n    processed_at,\n    decision_reason\n) ON hardware_verification_jobs TO stats_hardware_verifier",
+		"GRANT SELECT ON hardware_verification_trust TO stats_hardware_verifier",
+		"GRANT SELECT ON provider_hardware_profiles TO stats_hardware_verifier",
+		"GRANT INSERT (",
+		"verified,\n    last_reported_at\n) ON provider_hardware_profiles TO stats_hardware_verifier",
+		"GRANT UPDATE (",
+		"verified,\n    last_reported_at\n) ON provider_hardware_profiles TO stats_hardware_verifier",
+		"GRANT SELECT ON chip_hardware_profiles TO stats_hardware_verifier",
+	} {
+		mustContain(t, hardwareJobs, needle, "hardware verification job schema/grant shape")
+	}
+	mustNotContain(t, hardwareJobsCode,
+		"PASSWORD 'REPLACE_ME'",
+		"embedded migrations must not create committed placeholder passwords")
+	mustNotContain(t, hardwareJobsCode,
+		"CREATE ROLE stats_hardware_verifier LOGIN",
+		"stats_hardware_verifier login must be enabled only by operator bootstrap with secret material")
+	mustNotContain(t, hardwareJobsCode,
+		"GRANT UPDATE ON hardware_verification_jobs TO provider_onboarding",
+		"provider_onboarding must not process hardware jobs")
+	mustNotContain(t, hardwareJobsCode,
+		"GRANT SELECT, INSERT, UPDATE ON chip_hardware_profiles TO stats_hardware_verifier",
+		"stats_hardware_verifier must not write operator-managed chip capacity inventory")
+	mustNotContain(t, hardwareJobsCode,
+		"GRANT SELECT, UPDATE ON hardware_verification_jobs TO stats_hardware_verifier",
+		"stats_hardware_verifier job writes must be column limited")
+	mustNotContain(t, hardwareJobsCode,
+		"GRANT SELECT, INSERT, UPDATE ON provider_hardware_profiles TO stats_hardware_verifier",
+		"stats_hardware_verifier profile writes must be column limited and trigger guarded")
+	mustNotContain(t, hardwareJobsCode,
+		"j.status IN ('pending', 'waiting_trust', 'verified')",
+		"stats_hardware_verifier must not replay finalized verification jobs")
+	hardwareJobsDown, err := os.ReadFile("008_hardware_verification_jobs.down.sql")
+	if err != nil {
+		t.Fatalf("read hardware verification rollback artifact: %v", err)
+	}
+	hardwareJobsDownSQL := string(hardwareJobsDown)
+	for _, needle := range []string{
+		"REVOKE ALL ON hardware_verification_jobs FROM provider_onboarding",
+		"REVOKE ALL ON hardware_verification_trust FROM provider_onboarding",
+		"REVOKE ALL ON SEQUENCE hardware_verification_jobs_id_seq FROM provider_onboarding",
+		"REVOKE ALL ON hardware_verification_jobs FROM stats_hardware_verifier",
+		"REVOKE ALL ON hardware_verification_trust FROM stats_hardware_verifier",
+		"REVOKE ALL ON provider_hardware_profiles FROM stats_hardware_verifier",
+		"REVOKE ALL ON chip_hardware_profiles FROM stats_hardware_verifier",
+		"REVOKE USAGE ON SCHEMA public FROM stats_hardware_verifier",
+		"REVOKE ALL ON FUNCTION hardware_verification_jobs_guard_verifier_update() FROM PUBLIC",
+		"DROP TRIGGER IF EXISTS trg_hardware_verification_jobs_guard_verifier_update",
+		"DROP FUNCTION IF EXISTS hardware_verification_jobs_guard_verifier_update()",
+		"DROP TABLE IF EXISTS hardware_verification_trust",
+		"DROP TABLE IF EXISTS hardware_verification_jobs",
+		"DROP ROLE IF EXISTS stats_hardware_verifier",
+	} {
+		mustContain(t, hardwareJobsDownSQL, needle, "hardware verification rollback artifact")
 	}
 }
 
