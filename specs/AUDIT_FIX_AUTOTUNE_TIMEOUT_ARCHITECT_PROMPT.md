@@ -1,40 +1,55 @@
-# AUDIT_FIX_AUTOTUNE_TIMEOUT — ARCHITECT lane
+# AUDIT_FIX_AUTOTUNE_TIMEOUT — ARCHITECT lane (R5, final value)
 
-You are auditing PR `fix/autotune-timeout-progress` (commit `ae23d48`) from
-the ARCHITECT lane.
+You are auditing PR `fix/autotune-timeout-progress` (commit `ea4f6c0`)
+from the ARCHITECT lane. Round 5 refire because the final timeout
+value is materially different from what R1 audited.
 
-Focus:
+## Value history for context
 
-- Is 1800 s (30 min) the RIGHT number, or should it be pinned to the
-  CLI's own budget (`Stage1Prober.readyTimeoutSec × N + Stage1Prober.probeIdleTimeoutSec × N`)
-  in code so it drifts together?
-- Should the App-side timeout live in the App at all, or should the
-  CLI signal completion / progress and the App just wait indefinitely
-  with a UI cancel? Consider the SPEC-026 §6.1 state-machine
-  contract.
-- Is there a better place to draw the "give up on autotune" line —
-  e.g. a heartbeat protocol on the CLI's stderr, so a wedged
-  subprocess is caught faster than 30 minutes but a healthy one gets
-  unlimited runway?
-- The BUILD prompt scope-out named this as follow-up. Is now the right
-  time to just bump the constant, or should this PR also open the
-  door for the follow-up work by adding a `runAutotune(timeout:)`
-  parameter for future injection?
-- Does 30 min (or the 60-min upper bound in tests) exceed the
-  spinner-fatigue threshold beyond which users will assume the app is
-  hung and quit? Is that acceptable for this PR, or does the fix
-  create a NEW UX problem (silent multi-minute spinner) worse than
-  the one it's solving?
-- Is `.failed(autotuning, retryable: true, ...)` the right terminal
-  state for a 30-min timeout, or should the message copy be updated
-  to reflect the longer wait (currently the copy is generic)?
-- Are the new tests (`AutotuneRecommendationRunnerTimeoutTests`)
-  correctly modeling the CLI's budget — specifically, does the
-  `cliPerCandidateWorstCaseSec = 420` constant drift risk break
-  the test's usefulness if SPEC-023's timings change?
+R1 audited `processTimeout = 1800` (30 min). Convergence rounds
+raised this through 2700 → 7260s. Final value: **7260s (2h1m)**.
 
-Do NOT recommend new coordinator surface, new SPECs, or expanding
-this PR's scope beyond the timeout constant + tests.
+CODE lane discovered during convergence that the CLI's `--recommend`
+path does NOT enforce its declared `maxDuration=7200s` (only the
+non-recommend path installs a deadline at
+`phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:157-161`).
+So 7260s is the App-side authoritative ceiling, NOT a fallback under
+a CLI-enforced cap.
+
+## Focus this round
+
+- Is 7260s (2h1m) the RIGHT App-side ceiling given the CLI has no
+  independent bound protecting the user? Or does 2h push the user
+  past spinner-fatigue territory where they'll quit the app before
+  autotune returns, making the value effectively useless?
+- Should this PR ALSO wire `maxDuration` enforcement into the CLI
+  `--recommend` path so both ends have a bound, or is that
+  correctly deferred as follow-up? Consider the SPEC-026 §6.1
+  state-machine contract: is `.autotuning → .failed(timedOut)` a
+  reasonable terminal for 2h1m, or should the copy be updated to
+  reflect the longer wait?
+- The rationale comment
+  (`phase3-binary/app/Sources/Malibu/Onboarding/AutotuneRecommendationRunner.swift:4-51`)
+  cites "10 candidates × 720s = 7200s worst case" as the floor
+  rationale. Is 10 candidates a defensible upper bound on catalog
+  cardinality, or should the App instead depend on a CLI-signaled
+  progress heartbeat (deferred)?
+- The tests
+  (`phase3-binary/app/Tests/MalibuTests/AutotuneRecommendationRunnerTimeoutTests.swift`)
+  pin `realisticWorstCaseAutotuneSec = 7200s` and
+  `untenableSpinnerCeilingSec = 2.5h`. Are those constants named
+  well enough that a future dev bumping either can see the impact?
+- The BUILD prompt scope-out named "heartbeat protocol on CLI
+  stderr" as follow-up. Now that we've iterated through 4 rounds,
+  is this PR the right shape to ship (bump-the-constant) or should
+  it evolve to also add a `runAutotune(timeout:)` injection point
+  for the future heartbeat work?
+- Should the 2.5h ceiling really allow a 2.5h spinner, or is that
+  now just permission to defer building progress UI indefinitely?
+
+Do NOT recommend new coordinator surface or new SPECs.
+Do NOT flag R2 CODE-M-2 (orphan child subprocess) — deferred to
+CLI-side follow-up.
 
 ## Referenced context
 
@@ -51,5 +66,5 @@ or:
 `VERDICT: NEEDS REVISION | COUNTS: C=<n> H=<n> M=<n> L=<n>`
 
 Then list ID-prefixed findings, ordered by severity: `ARCH-C-1`,
-`ARCH-H-1`, `ARCH-M-1`, `ARCH-L-1`, etc. Each finding must cite the
-file:line and concrete evidence.
+`ARCH-H-1`, `ARCH-M-1`, `ARCH-L-1`, etc. Each finding must cite
+the file:line and concrete evidence.

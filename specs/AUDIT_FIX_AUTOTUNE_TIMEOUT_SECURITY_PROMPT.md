@@ -1,35 +1,49 @@
-# AUDIT_FIX_AUTOTUNE_TIMEOUT — SECURITY lane
+# AUDIT_FIX_AUTOTUNE_TIMEOUT — SECURITY lane (R5, final value)
 
-You are auditing PR `fix/autotune-timeout-progress` (commit `ae23d48`) from
-the SECURITY lane.
+You are auditing PR `fix/autotune-timeout-progress` (commit `ea4f6c0`)
+from the SECURITY lane. Round 5 refire because the final timeout value
+is materially different from what R1 audited.
 
-Focus:
+## Value history for context
 
-- Is there any secret / token / credential-lifetime concern introduced by
-  keeping the autotune subprocess alive for up to 30 min instead of 30 s?
-  E.g. Keychain session leases, provider-token cache validity, sanitized
-  process environment TTL.
-- Does the longer timeout give more window for a malicious/wedged
-  subprocess to exfiltrate data before Malibu.app terminates it?
-  Consider: what if `macprovider-cli` is compromised or spoofed —
-  does the extra 29 minutes of running matter more than it did at 30 s?
-- `sanitizedProcessEnvironment` still filters env at spawn time — verify
-  the extra runtime doesn't reintroduce env variables (e.g. via
-  `read_environment` from a temp file).
-- The subprocess writes to stdout/stderr pipes. At 1800 s worst case,
-  could a chatty error path fill the pipe buffer + deadlock the
-  parent? Malibu's `ProcessOutputBuffer` is unbounded — is that a
-  memory-safety concern (OOM ⇒ crash ⇒ open onboarding state file
-  half-written)?
-- On failure, is any keychain slot / config.yaml write left half-done
-  such that a retry after the 30-min window creates duplicated /
-  inconsistent state?
-- Does the new test file `AutotuneRecommendationRunnerTimeoutTests`
-  expose any private state (`@testable import Malibu`) beyond what was
-  visible before making `processTimeout` non-private?
+R1 audited `processTimeout = 1800` (30 min). Convergence rounds
+raised this through 2700 → 7260s. Final value: **7260s (2h1m)**.
 
-Do NOT expand scope. Just audit the security surface of the timeout
-bump + new tests.
+## Focus this round
+
+- Does the extended 2h1m subprocess lifetime introduce any new
+  credential / secret / Keychain-session TTL concern that the
+  original 30-min audit didn't cover?
+- The R1 SEC-L-1 finding flagged unbounded `ProcessOutputBuffer`
+  (`phase3-binary/app/Sources/Malibu/Onboarding/AutotuneRecommendationRunner.swift:33-50`)
+  as a local DoS/OOM hardening gap under a 30-min cap. Under a
+  2h1m cap, is this still a LOW or does it graduate to MEDIUM
+  because a chatty stderr / stdout can accumulate more data?
+  Consider realistic autotune output volume (line-per-probe JSON
+  events, ~500 bytes/event × ~10 probes/candidate × ~10 candidates
+  = single-digit MB; not GB).
+- `sanitizedProcessEnvironment` (
+  `phase3-binary/app/Sources/Malibu/Onboarding/AutotuneRecommendationRunner.swift:126-128`)
+  filters env at spawn time. Does the 2h1m runtime give any window
+  for env variables to be re-introduced via a temp file / DYLD
+  path / plist read? Verify against `ProcessEnvironmentSanitizer`
+  behavior.
+- On timeout at 7260s, `process.terminate()` sends SIGTERM. Does
+  half-finished autotune leave any partial keychain slot or
+  partial `config.yaml` write? (Note: onboarding state file
+  hardening is out of scope.)
+- Is the raised timeout an amplification of any spoofed / compromised
+  `macprovider-cli` binary risk? At 30s an attacker had 30s to
+  exfil; at 7260s they have 2h. Is this materially worse or is
+  the code-signing check upstream (bundled CLI path) enough
+  mitigation?
+- Do the new tests (`AutotuneRecommendationRunnerTimeoutTests`)
+  expose any private Malibu state beyond `@testable import Malibu`
+  that already exposed `processTimeout` at R1?
+
+Do NOT flag R2 CODE-M-2 (orphan child subprocess) — that is the
+deferred CLI-side follow-up.
+Do NOT expand scope beyond the timeout value + tests.
 
 ## Referenced context
 
