@@ -37,7 +37,7 @@ enum AutotuneRecommendationRunner {
     /// App.
     ///
     /// Value: 7260s = 2h1m. Rationale:
-    ///   1. Below any per-candidate math ceiling for reasonable N (up to
+    ///   1. Above any per-candidate math ceiling for reasonable N (up to
     ///      ~10 candidates × 720s = 7200s worst case).
     ///   2. Well above the empirical 2-5 min median so the UX is never
     ///      affected in the healthy case.
