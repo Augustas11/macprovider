@@ -52,6 +52,20 @@ grep -qF '[ -f /etc/macprovider-stats/stats-hardware-inventory.yaml ] && [ -f /e
   fail "deploy script must only enable timer when config and env exist"
 grep -qF 'warning: stats-inventory-sync.service failed; leaving coordinator deploy running' "$DEPLOY_SH" ||
   fail "deploy script must not fail coordinator deploy on sidecar run failure"
+grep -qF 'psql_preflight_service onboarding_preflight "$ONBOARDING_POSTGRES_DSN"' "$DEPLOY_SH" ||
+  fail "deploy script must preflight onboarding DSN through root-only service file"
+grep -qF 'psql_preflight_service hardware_verifier_preflight "$STATS_HARDWARE_VERIFIER_DSN"' "$DEPLOY_SH" ||
+  fail "deploy script must preflight verifier DSN through root-only service file"
+grep -qF 'service_file="$(umask 077 && mktemp)"' "$DEPLOY_SH" ||
+  fail "deploy script must create root-only temporary libpq service file"
+grep -qF 'PGSERVICEFILE="$service_file" PGSERVICE="$service_name" psql -v ON_ERROR_STOP=1 -qAt "$@"' "$DEPLOY_SH" ||
+  fail "deploy script must invoke psql via service name without DSN argv"
+if grep -qF 'PGDATABASE="$ONBOARDING_POSTGRES_DSN" psql' "$DEPLOY_SH" ||
+   grep -qF 'PGDATABASE="$STATS_HARDWARE_VERIFIER_DSN" psql' "$DEPLOY_SH" ||
+   grep -qF 'psql "$ONBOARDING_POSTGRES_DSN"' "$DEPLOY_SH" ||
+   grep -qF 'psql "$STATS_HARDWARE_VERIFIER_DSN"' "$DEPLOY_SH"; then
+  fail "deploy script must not expose URI DSNs via PGDATABASE or psql argv"
+fi
 
 grep -qxF 'User=macprovider-stats' "$SERVICE" ||
   fail "sidecar service must run as macprovider-stats"

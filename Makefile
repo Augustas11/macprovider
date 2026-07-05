@@ -48,11 +48,13 @@ test-integration:
 # that an env:NAME-indirected secret is deferred to runtime rather than
 # false-failing the gate (the 2026-06-17 regression that forced SKIP_C2_CHECK=1).
 test-dist:
+	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
 	bash phase4-coordinator/dist/test/check_deploy_config_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_catalog_routes_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_stats_test.sh
 	bash phase4-coordinator/dist/test/check_stats_inventory_deploy_test.sh
+	bash phase4-coordinator/dist/test/check_stats_billing_mirror_deploy_test.sh
 	bash phase4-coordinator/dist/test/check_pearl_tls_test.sh
 	bash phase4-coordinator/dist/test/check_pearl_tcp_test.sh
 	SPEC015_NGINX_LIVE_OPTIONAL=$${SPEC015_NGINX_LIVE_OPTIONAL:-1} bash phase4-coordinator/dist/test/check_nginx_receipt_header_live_test.sh
