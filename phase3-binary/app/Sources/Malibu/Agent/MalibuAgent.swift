@@ -227,7 +227,14 @@ final class MalibuAgent: ObservableObject {
         switch frame {
         case let .statusResponse(model, state):
             snapshot.currentModelID = model
-            if state == "serving" { snapshot.state = .serving }
+            // CLI's `SwapState` (`RuntimeStateMachine.swift:public enum SwapState`)
+            // has only `.loading` / `.ready` / `.draining`; there is no
+            // `.serving`. `.ready` = model loaded + accepting requests, which
+            // matches what SPEC-026 §6.1 j and coordinator heartbeats
+            // (`state:"ready"`) call the "serving" transition. Accept
+            // either spelling so the state contract survives a rename on
+            // either side.
+            if state == "ready" || state == "serving" { snapshot.state = .serving }
         case let .metricsResponse(
             usdc,
             malibu,
