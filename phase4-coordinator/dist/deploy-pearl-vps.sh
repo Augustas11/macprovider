@@ -585,30 +585,99 @@ else
 fi
 
 if [ "$ONBOARDING_ENABLED_LOCAL" = "true" ]; then
-  $SSH 'set -e
+  $SSH "bash -s" <<'REMOTE_ONBOARDING_PREFLIGHT'
+    set -e
     env_file=/etc/macprovider/coordinator.env
     if [ ! -r "$env_file" ]; then
       echo "aborting deploy: onboarding enabled but $env_file is missing or unreadable" >&2
       exit 12
     fi
-    set -a
-    . "$env_file"
-    set +a
-    missing=""
-    for name in ONBOARDING_POSTGRES_DSN ONBOARDING_AUTH_POLICY_REQUEST_DSN ONBOARDING_AUTH_POLICY_APPROVE_DSN ONBOARDING_AUTH_POLICY_CUTOVER_DSN; do
-      eval "value=\${$name:-}"
-      if [ -z "$value" ]; then
-        missing="$missing $name"
-      fi
-    done
-    if [ -n "$missing" ]; then
-      echo "aborting deploy: onboarding enabled but coordinator.env is missing required non-empty var(s):$missing" >&2
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "aborting deploy: python3 is required for onboarding DSN preflight" >&2
       exit 12
     fi
     if ! command -v psql >/dev/null 2>&1; then
       echo "aborting deploy: psql is required for onboarding hardware evidence migration preflight" >&2
       exit 12
     fi
+    read_env_value() {
+      ENV_VALUE_FILE="$1" ENV_VALUE_NAME="$2" python3 <<'PY'
+import os
+import re
+import shlex
+import sys
+
+path = os.environ["ENV_VALUE_FILE"]
+want = os.environ["ENV_VALUE_NAME"]
+if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", want):
+    print("invalid requested env var name", file=sys.stderr)
+    sys.exit(2)
+
+try:
+    found = False
+    parsed_value = ""
+    with open(path, "r", encoding="utf-8") as f:
+        for lineno, raw in enumerate(f, 1):
+            if raw.endswith("\n"):
+                raw = raw[:-1]
+            if raw.endswith("\r"):
+                print(f"{path}:{lineno}: CRLF env files are not supported", file=sys.stderr)
+                sys.exit(2)
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                print(f"{path}:{lineno}: malformed env assignment", file=sys.stderr)
+                sys.exit(2)
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                print(f"{path}:{lineno}: malformed env var name", file=sys.stderr)
+                sys.exit(2)
+            if key != want:
+                continue
+            try:
+                parts = shlex.split(value.strip(), comments=False, posix=True)
+            except ValueError as exc:
+                print(f"{path}:{lineno}: malformed env value for {want}: {exc}", file=sys.stderr)
+                sys.exit(2)
+            if len(parts) != 1:
+                print(f"{path}:{lineno}: env value for {want} must be a single token", file=sys.stderr)
+                sys.exit(2)
+            parsed = parts[0]
+            if any(ch in parsed for ch in "\r\n\0"):
+                print(f"{path}:{lineno}: env value for {want} contains an invalid character", file=sys.stderr)
+                sys.exit(2)
+            found = True
+            parsed_value = parsed
+except OSError as exc:
+    print(f"cannot read env file {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+if found:
+    print(parsed_value, end="")
+    sys.exit(0)
+sys.exit(1)
+PY
+    }
+    require_env_value() {
+      env_value_file="$1"
+      env_value_name="$2"
+      if ! env_value="$(read_env_value "$env_value_file" "$env_value_name")"; then
+        echo "aborting deploy: $env_value_file is missing required var or has invalid syntax: $env_value_name" >&2
+        exit 12
+      fi
+      if [ -z "$env_value" ]; then
+        echo "aborting deploy: $env_value_file has empty required var: $env_value_name" >&2
+        exit 12
+      fi
+      printf '%s' "$env_value"
+    }
+    ONBOARDING_POSTGRES_DSN="$(require_env_value "$env_file" ONBOARDING_POSTGRES_DSN)"
+    ONBOARDING_AUTH_POLICY_REQUEST_DSN="$(require_env_value "$env_file" ONBOARDING_AUTH_POLICY_REQUEST_DSN)"
+    ONBOARDING_AUTH_POLICY_APPROVE_DSN="$(require_env_value "$env_file" ONBOARDING_AUTH_POLICY_APPROVE_DSN)"
+    ONBOARDING_AUTH_POLICY_CUTOVER_DSN="$(require_env_value "$env_file" ONBOARDING_AUTH_POLICY_CUTOVER_DSN)"
+    echo "  ok: required onboarding DSN env vars are present in coordinator.env"
     psql_preflight_service() {
       service_name="$1"
       dsn="$2"
@@ -736,22 +805,16 @@ SQL
         echo "aborting deploy: stats-hardware-verifier.env still contains placeholder secret material" >&2
         exit 12
       fi
-      set -a
-      . "$verifier_env"
-      set +a
-      if [ -z "${STATS_HARDWARE_VERIFIER_DSN:-}" ]; then
-        echo "aborting deploy: stats-hardware-verifier.env is present but STATS_HARDWARE_VERIFIER_DSN is empty" >&2
-        exit 12
-      fi
+      STATS_HARDWARE_VERIFIER_DSN="$(require_env_value "$verifier_env" STATS_HARDWARE_VERIFIER_DSN)"
       psql_preflight_service hardware_verifier_preflight "$STATS_HARDWARE_VERIFIER_DSN" <<SQL >/dev/null
 SELECT 1 FROM hardware_verification_jobs LIMIT 1;
 SELECT 1 FROM hardware_verification_trust LIMIT 1;
 SELECT 1 FROM chip_hardware_profiles LIMIT 1;
-SELECT 1 WHERE has_schema_privilege(current_user, '\''public'\'', '\''USAGE'\'');
+SELECT 1 WHERE has_schema_privilege(current_user, 'public', 'USAGE');
 SQL
       echo "  ok: stats_hardware_verifier role can read hardware jobs/trust/chip inventory"
     fi
-  '
+REMOTE_ONBOARDING_PREFLIGHT
 else
   echo "  onboarding.app_track_register_enabled is not true — skipping hardware evidence migration preflight"
 fi

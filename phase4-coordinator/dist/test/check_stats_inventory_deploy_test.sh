@@ -71,6 +71,53 @@ grep -qF 'service_file="$(umask 077 && mktemp)"' "$DEPLOY_SH" ||
   fail "deploy script must create root-only temporary libpq service file"
 grep -qF 'PGSERVICEFILE="$service_file" PGSERVICE="$service_name" psql -v ON_ERROR_STOP=1 -qAt "$@"' "$DEPLOY_SH" ||
   fail "deploy script must invoke psql via service name without DSN argv"
+grep -qF 'read_env_value()' "$DEPLOY_SH" ||
+  fail "deploy script must parse DSN env files as data"
+if grep -qF '. "$env_file"' "$DEPLOY_SH" ||
+   grep -qF '. "$verifier_env"' "$DEPLOY_SH" ||
+   grep -qF 'eval "value=' "$DEPLOY_SH"; then
+  fail "deploy script must not source or eval env files containing DSN secrets"
+fi
+remote_preflight_tmp="$(mktemp)"
+parser_tmp="$(mktemp)"
+env_parse_tmp="$(mktemp)"
+trap 'rm -f "$remote_preflight_tmp" "$parser_tmp" "$env_parse_tmp"' EXIT
+awk '
+  $0 == "REMOTE_ONBOARDING_PREFLIGHT" { in_block=0; end=1; next }
+  in_block { print; next }
+  index($0, "<<'\''REMOTE_ONBOARDING_PREFLIGHT'\''") { in_block=1; start=1; next }
+  END { if (!start || !end || in_block) exit 1 }
+' "$DEPLOY_SH" > "$remote_preflight_tmp" ||
+  fail "deploy script must keep an extractable onboarding preflight remote heredoc"
+if ! bash -n "$remote_preflight_tmp"; then
+  fail "onboarding preflight remote heredoc must be valid bash"
+fi
+awk '
+  $0 == "    read_env_value() {" { in_block=1 }
+  in_block { print }
+  in_block && $0 == "PY" { saw_py_end=1; next }
+  in_block && saw_py_end && $0 == "    }" { exit }
+  END { if (!saw_py_end) exit 1 }
+' "$remote_preflight_tmp" > "$parser_tmp" ||
+  fail "deploy script must keep an extractable env parser"
+printf '%s\n' \
+  'ONBOARDING_POSTGRES_DSN=postgres://first.example/db' \
+  'ONBOARDING_POSTGRES_DSN=postgres://second.example/db' \
+  > "$env_parse_tmp"
+parsed_duplicate="$(
+  . "$parser_tmp"
+  read_env_value "$env_parse_tmp" ONBOARDING_POSTGRES_DSN
+)"
+if [ "$parsed_duplicate" != "postgres://second.example/db" ]; then
+  fail "deploy env parser must use the last duplicate assignment"
+fi
+printf '%s\n' 'export ONBOARDING_POSTGRES_DSN=postgres://export.example/db' > "$env_parse_tmp"
+if (
+  . "$parser_tmp"
+  read_env_value "$env_parse_tmp" ONBOARDING_POSTGRES_DSN >/dev/null 2>&1
+); then
+  fail "deploy env parser must reject shell export syntax that systemd EnvironmentFile does not use"
+fi
 if grep -qF 'PGDATABASE="$ONBOARDING_POSTGRES_DSN" psql' "$DEPLOY_SH" ||
    grep -qF 'PGDATABASE="$STATS_HARDWARE_VERIFIER_DSN" psql' "$DEPLOY_SH" ||
    grep -qF 'psql "$ONBOARDING_POSTGRES_DSN"' "$DEPLOY_SH" ||
