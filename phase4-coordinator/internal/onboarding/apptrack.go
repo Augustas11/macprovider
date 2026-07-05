@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,45 @@ type HardwareSummary struct {
 	UnifiedMemoryGB int    `json:"unified_memory_gb"`
 	MacOSVersion    string `json:"macos_version"`
 	AppVersion      string `json:"app_version"`
+}
+
+func (h *HardwareSummary) UnmarshalJSON(body []byte) error {
+	var wire struct {
+		Chip            string          `json:"chip"`
+		UnifiedMemoryGB json.RawMessage `json:"unified_memory_gb"`
+		MacOSVersion    string          `json:"macos_version"`
+		AppVersion      string          `json:"app_version"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return err
+	}
+	h.Chip = wire.Chip
+	h.MacOSVersion = wire.MacOSVersion
+	h.AppVersion = wire.AppVersion
+	if len(wire.UnifiedMemoryGB) == 0 || string(wire.UnifiedMemoryGB) == "null" {
+		h.UnifiedMemoryGB = 0
+		return nil
+	}
+	var memoryGB int
+	if err := json.Unmarshal(wire.UnifiedMemoryGB, &memoryGB); err == nil {
+		h.UnifiedMemoryGB = memoryGB
+		return nil
+	}
+	var memoryString string
+	if err := json.Unmarshal(wire.UnifiedMemoryGB, &memoryString); err != nil {
+		return fmt.Errorf("unified_memory_gb must be a number or numeric string")
+	}
+	memoryString = strings.TrimSpace(memoryString)
+	if memoryString == "" {
+		h.UnifiedMemoryGB = 0
+		return nil
+	}
+	parsed, err := strconv.Atoi(memoryString)
+	if err != nil {
+		return fmt.Errorf("unified_memory_gb must be a number or numeric string")
+	}
+	h.UnifiedMemoryGB = parsed
+	return nil
 }
 
 // RegisterResponse is the 200 body. SPEC-026 §4.1 step 8.
@@ -91,6 +131,10 @@ type Handler struct {
 
 	// Clock (test seam)
 	Now func() time.Time
+
+	// HardwareProfilePersistSlots bounds optional async hardware writes.
+	// Nil uses the process-wide default lane; tests may inject a private lane.
+	HardwareProfilePersistSlots chan struct{}
 }
 
 // StatsDB is the Postgres-side dependency surface.
@@ -98,6 +142,10 @@ type StatsDB interface {
 	// UpsertProviderIdentity inserts or updates a provider_identities row.
 	// Returns ErrTOFUConflict if a row exists with a different identity_pubkey.
 	UpsertProviderIdentity(ctx context.Context, providerID string, identityPubkey []byte, attested bool, appAttestKeyID []byte) error
+
+	// UpsertProviderHardwareProfile persists provider-reported hardware identity
+	// for async stats enrichment. This must only run after rate-limit checks pass.
+	UpsertProviderHardwareProfile(ctx context.Context, providerID string, summary HardwareSummary, observedAt time.Time) error
 
 	// InsertRegisterNonce records both (provider_id, nonce) and
 	// (source_ip, nonce) replay keys with true 65s semantics. Returns
@@ -152,6 +200,7 @@ type AppAttestVerifier interface {
 type Metrics interface {
 	IncRegisterRateLimitHit(scope string) // scope = "ip" | "asn"
 	IncRegisterSource(track string)       // track = "app" | "cli" | "portal"
+	IncRegisterHardwareProfileError()
 }
 
 // Sentinel errors surfaced by StatsDB / AuthTokenStore. The HTTP handler
@@ -165,6 +214,11 @@ var (
 	ErrAppAttestBinding         = errors.New("app attest binding failure")
 	ErrAppAttestTransient       = errors.New("app attest transient verification failure")
 )
+
+const hardwareProfilePersistTimeout = 2 * time.Second
+const hardwareProfilePersistConcurrency = 2
+
+var defaultHardwareProfilePersistSlots = make(chan struct{}, hardwareProfilePersistConcurrency)
 
 // HandleAppTrackRegister is the SPEC-026 §4.1 endpoint. Full contract:
 // specs/BUILD_SPEC_026_IMPL_STEP_1_COORD_REGISTER_PROMPT.md.
@@ -359,6 +413,7 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
+	h.persistHardwareProfileAsync(req.ProviderID, req.HardwareSummary, now)
 	if h.Metrics != nil {
 		h.Metrics.IncRegisterSource("app")
 	}
@@ -369,6 +424,37 @@ func (h *Handler) HandleAppTrackRegister(w http.ResponseWriter, r *http.Request)
 		Trust:            TrustState{Attested: attested, RateLimitBucket: "new_ip"},
 		CoordinatorWSURL: h.CoordinatorWSURL,
 	})
+}
+
+func (h *Handler) persistHardwareProfileAsync(providerID string, summary HardwareSummary, observedAt time.Time) {
+	statsDB := h.StatsDB
+	if statsDB == nil {
+		return
+	}
+	if strings.TrimSpace(summary.Chip) == "" {
+		return
+	}
+	metrics := h.Metrics
+	slots := h.HardwareProfilePersistSlots
+	if slots == nil {
+		slots = defaultHardwareProfilePersistSlots
+	}
+	select {
+	case slots <- struct{}{}:
+	default:
+		if metrics != nil {
+			metrics.IncRegisterHardwareProfileError()
+		}
+		return
+	}
+	go func() {
+		defer func() { <-slots }()
+		ctx, cancel := context.WithTimeout(context.Background(), hardwareProfilePersistTimeout)
+		defer cancel()
+		if err := statsDB.UpsertProviderHardwareProfile(ctx, providerID, summary, observedAt); err != nil && metrics != nil {
+			metrics.IncRegisterHardwareProfileError()
+		}
+	}()
 }
 
 // Base32AlphabetLowercase is RFC 4648 §6 lowercased, no padding.

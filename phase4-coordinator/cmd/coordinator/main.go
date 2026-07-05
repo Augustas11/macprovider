@@ -25,6 +25,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
+	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/stats/poolsnapshot"
 	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
@@ -261,12 +262,12 @@ func main() {
 	// SPEC §7.2.5 the rollup MUST NOT use Reader / ProviderPortal
 	// pools — `New(statsPools.Rollup, ...)` enforces.
 	//
-	// poolsnapshot.New wires the live §5.1.1 snapshot fields
+	// poolsnapshot.NewWithHardware wires the live §5.1.1 snapshot fields
 	// (nodes_online, nodes_hardware_attested, utilization, RAM,
-	// models_serving) from the in-process pool.Registry. Fields that
-	// need per-chip hardware profiles (bandwidth, power, GPU/CPU cores)
-	// stay at zero until a chip-identity join with SPEC-026 onboarding
-	// lands — see poolsnapshot package docs.
+	// models_serving) from the in-process pool.Registry and enriches
+	// hardware capacity from an async stats_rollup-side cache. The
+	// snapshot path itself remains memory-only: no DB lookups on buyer,
+	// routing, streaming, heartbeat, or public stats request paths.
 	var statsRollup *statsrollup.Runner
 	if statsPools != nil {
 		// Round-1 ARCH r1 HIGH 2 fix: BackfillMode must be the
@@ -318,8 +319,18 @@ func main() {
 			NightlyRebuildHourUTC:   cfg.Stats.Rollup.NightlyRebuildHourUTC,
 			LateEventsLookbackHours: cfg.Stats.Rollup.LateEventsLookbackHours,
 		}
+		hardwareCache := statshardware.NewCache(statsPools.Rollup)
+		hardwareCtx, cancelHardwareRefresh := context.WithTimeout(shutdownCtx, 2*time.Second)
+		if err := hardwareCache.Refresh(hardwareCtx); err != nil {
+			logger.Warn().Err(err).Msg("stats hardware cache initial refresh failed; hardware overview fields will remain zero until refresh succeeds")
+		}
+		cancelHardwareRefresh()
+		hardwareCache.Start(shutdownCtx, func(err error) {
+			logger.Warn().Err(err).Msg("stats hardware cache refresh failed; retaining previous hardware snapshot")
+		})
+
 		var err error
-		statsRollup, err = statsrollup.New(statsPools.Rollup, rollupCfg, poolsnapshot.New(registry), logger.With().Str("subsystem", "stats_rollup").Logger())
+		statsRollup, err = statsrollup.New(statsPools.Rollup, rollupCfg, poolsnapshot.NewWithHardware(registry, hardwareCache), logger.With().Str("subsystem", "stats_rollup").Logger())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "stats rollup: %v\n", err)
 			os.Exit(1)

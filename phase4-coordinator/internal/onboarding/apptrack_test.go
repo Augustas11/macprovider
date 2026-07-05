@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,8 +34,14 @@ func TestHandleAppTrackRegisterSuccess(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if stats.nonceProviderID != providerID || stats.nonceSourceIP != "198.51.100.10" || stats.upsertProviderID != providerID {
+	waitHardwareCalls(t, stats, 1)
+	hardwareProviderID, hardwareSummary := stats.hardwareSnapshot()
+	if stats.nonceProviderID != providerID || stats.nonceSourceIP != "198.51.100.10" ||
+		stats.upsertProviderID != providerID || hardwareProviderID != providerID {
 		t.Fatalf("stats calls not wired: %+v", stats)
+	}
+	if hardwareSummary.Chip != "M4" || hardwareSummary.UnifiedMemoryGB != 24 {
+		t.Fatalf("unexpected hardware summary: %+v", hardwareSummary)
 	}
 	if authStore.providerID != providerID {
 		t.Fatalf("auth providerID=%q want %q", authStore.providerID, providerID)
@@ -51,6 +58,79 @@ func TestHandleAppTrackRegisterSuccess(t *testing.T) {
 	}
 	if resp.CoordinatorWSURL != "wss://coordinator.streamvc.live/v2/provider" {
 		t.Fatalf("coordinator_ws_url=%q", resp.CoordinatorWSURL)
+	}
+}
+
+func TestHandleAppTrackRegisterAcceptsSwiftHardwareSummaryShape(t *testing.T) {
+	body, providerID := signedRegisterBody(t, func(m map[string]any) {
+		m["hardware_summary"] = map[string]any{
+			"chip":              "Apple Silicon",
+			"unified_memory_gb": "64",
+			"macos_version":     "15.5.0",
+			"app_version":       "1.0.0",
+		}
+	})
+	stats := &fakeStatsDB{}
+	handler := testRegisterHandler(stats, &fakeAuthStore{token: "provider-token"}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	rr := httptest.NewRecorder()
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	waitHardwareCalls(t, stats, 1)
+	hardwareProviderID, hardwareSummary := stats.hardwareSnapshot()
+	if hardwareProviderID != providerID {
+		t.Fatalf("hardware provider_id=%q want %q", hardwareProviderID, providerID)
+	}
+	if hardwareSummary.Chip != "Apple Silicon" || hardwareSummary.UnifiedMemoryGB != 64 {
+		t.Fatalf("unexpected hardware summary: %+v", hardwareSummary)
+	}
+}
+
+func TestHandleAppTrackRegisterSkipsMissingOrEmptyHardwareSummary(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{
+			name: "missing",
+			mutate: func(m map[string]any) {
+				delete(m, "hardware_summary")
+			},
+		},
+		{
+			name: "empty chip",
+			mutate: func(m map[string]any) {
+				m["hardware_summary"] = map[string]any{
+					"chip":              "",
+					"unified_memory_gb": "64",
+					"macos_version":     "15.5.0",
+					"app_version":       "1.0.0",
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := signedRegisterBody(t, tc.mutate)
+			stats := &fakeStatsDB{}
+			handler := testRegisterHandler(stats, &fakeAuthStore{token: "provider-token"}, nil)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+			req.RemoteAddr = "198.51.100.10:4444"
+			rr := httptest.NewRecorder()
+			handler.HandleAppTrackRegister(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			if calls := stats.hardwareCallsCount(); calls != 0 {
+				t.Fatalf("hardware calls=%d, want 0", calls)
+			}
+		})
 	}
 }
 
@@ -92,23 +172,29 @@ func TestHandleAppTrackRegisterMapsRateLimitAndCooldown(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		handler    *Handler
+		stats      *fakeStatsDB
 		wantStatus int
 		wantBody   string
 	}{
 		{
 			name:       "ip rate limit",
-			handler:    testRegisterHandler(&fakeStatsDB{}, &fakeAuthStore{token: "provider-token"}, &fakeMetrics{}, denyLimiter{}),
+			stats:      &fakeStatsDB{},
 			wantStatus: http.StatusTooManyRequests,
 			wantBody:   "rate_limited",
 		},
 		{
 			name:       "reissue cooldown",
-			handler:    testRegisterHandler(&fakeStatsDB{}, &fakeAuthStore{err: auth.ErrAppTrackReissueCooldown}, nil),
+			stats:      &fakeStatsDB{},
 			wantStatus: http.StatusTooManyRequests,
 			wantBody:   "reissue_cooldown",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "ip rate limit" {
+				tc.handler = testRegisterHandler(tc.stats, &fakeAuthStore{token: "provider-token"}, &fakeMetrics{}, denyLimiter{})
+			} else {
+				tc.handler = testRegisterHandler(tc.stats, &fakeAuthStore{err: auth.ErrAppTrackReissueCooldown}, nil)
+			}
 			body, _ := signedRegisterBody(t, nil)
 			req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
 			req.RemoteAddr = "198.51.100.10:4444"
@@ -116,6 +202,9 @@ func TestHandleAppTrackRegisterMapsRateLimitAndCooldown(t *testing.T) {
 			tc.handler.HandleAppTrackRegister(rr, req)
 			if rr.Code != tc.wantStatus || !strings.Contains(rr.Body.String(), tc.wantBody) {
 				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			if calls := tc.stats.hardwareCallsCount(); calls != 0 {
+				t.Fatalf("hardware calls=%d, want 0 for rejected request", calls)
 			}
 		})
 	}
@@ -136,6 +225,78 @@ func TestHandleAppTrackRegisterRateLimitDoesNotWriteReplayNonce(t *testing.T) {
 	}
 	if stats.nonceCalls != 0 {
 		t.Fatalf("nonce calls=%d, want 0 before rate-limit rejection", stats.nonceCalls)
+	}
+	if calls := stats.hardwareCallsCount(); calls != 0 {
+		t.Fatalf("hardware calls=%d, want 0 before rate-limit rejection", calls)
+	}
+}
+
+func TestHandleAppTrackRegisterHardwareFailureDoesNotStrandToken(t *testing.T) {
+	body, providerID := signedRegisterBody(t, nil)
+	stats := &fakeStatsDB{hardwareErr: errors.New("hardware store down")}
+	authStore := &fakeAuthStore{token: "provider-token"}
+	metrics := &fakeMetrics{}
+	handler := testRegisterHandler(stats, authStore, metrics)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	rr := httptest.NewRecorder()
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if authStore.providerID != providerID {
+		t.Fatalf("auth providerID=%q want %q", authStore.providerID, providerID)
+	}
+	waitHardwareCalls(t, stats, 1)
+	waitHardwareErrorMetric(t, metrics, 1)
+}
+
+func TestHandleAppTrackRegisterHardwarePersistenceCannotBlockTokenResponse(t *testing.T) {
+	body, _ := signedRegisterBody(t, nil)
+	block := make(chan struct{})
+	stats := &fakeStatsDB{hardwareBlock: block, hardwareStarted: make(chan struct{})}
+	handler := testRegisterHandler(stats, &fakeAuthStore{token: "provider-token"}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	rr := httptest.NewRecorder()
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	select {
+	case <-stats.hardwareStarted:
+	case <-time.After(time.Second):
+		t.Fatal("hardware persistence did not start")
+	}
+	close(block)
+}
+
+func TestHandleAppTrackRegisterDropsHardwareWhenAsyncLaneFull(t *testing.T) {
+	body, _ := signedRegisterBody(t, nil)
+	stats := &fakeStatsDB{}
+	metrics := &fakeMetrics{}
+	handler := testRegisterHandler(stats, &fakeAuthStore{token: "provider-token"}, metrics)
+	slots := make(chan struct{}, 1)
+	slots <- struct{}{}
+	handler.HardwareProfilePersistSlots = slots
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	rr := httptest.NewRecorder()
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if calls := stats.hardwareCallsCount(); calls != 0 {
+		t.Fatalf("hardware calls=%d, want 0 when async lane is full", calls)
+	}
+	if got := metrics.hardwareProfileErrorCount(); got != 1 {
+		t.Fatalf("hardware profile error metric=%d want 1", got)
 	}
 }
 
@@ -349,8 +510,9 @@ func TestHandleAppTrackRegisterDuplicateBearerProofPaths(t *testing.T) {
 					m["current_provider_token"] = *tc.bodyToken
 				}
 			})
+			stats := &fakeStatsDB{}
 			authStore := &fakeAuthStore{token: "provider-token", err: tc.authErr}
-			handler := testRegisterHandler(&fakeStatsDB{}, authStore, nil)
+			handler := testRegisterHandler(stats, authStore, nil)
 			req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
 			req.RemoteAddr = "198.51.100.10:4444"
 			if tc.header != "" {
@@ -365,6 +527,12 @@ func TestHandleAppTrackRegisterDuplicateBearerProofPaths(t *testing.T) {
 				if authStore.bearer == nil || *authStore.bearer != *tc.wantBearer {
 					t.Fatalf("bearer=%v want %q", authStore.bearer, *tc.wantBearer)
 				}
+				waitHardwareCalls(t, stats, 1)
+				if calls := stats.hardwareCallsCount(); calls != 1 {
+					t.Fatalf("hardware calls=%d, want 1 for accepted duplicate proof", calls)
+				}
+			} else if calls := stats.hardwareCallsCount(); calls != 0 {
+				t.Fatalf("hardware calls=%d, want 0 for rejected duplicate path", calls)
 			}
 		})
 	}
@@ -492,6 +660,7 @@ func testRegisterHandler(stats *fakeStatsDB, authStore *fakeAuthStore, metrics *
 }
 
 type fakeStatsDB struct {
+	mu                   sync.Mutex
 	nonceErr             error
 	upsertErr            error
 	checkKeyErr          error
@@ -502,6 +671,14 @@ type fakeStatsDB struct {
 	upsertProviderID     string
 	upsertAttested       bool
 	upsertAppAttestKeyID []byte
+	hardwareProviderID   string
+	hardwareSummary      HardwareSummary
+	hardwareObservedAt   time.Time
+	hardwareCalls        int
+	hardwareErr          error
+	hardwareBlock        <-chan struct{}
+	hardwareStarted      chan struct{}
+	hardwareStartedOnce  sync.Once
 }
 
 func (f *fakeStatsDB) UpsertProviderIdentity(ctx context.Context, providerID string, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
@@ -509,6 +686,29 @@ func (f *fakeStatsDB) UpsertProviderIdentity(ctx context.Context, providerID str
 	f.upsertAttested = attested
 	f.upsertAppAttestKeyID = append([]byte(nil), appAttestKeyID...)
 	return f.upsertErr
+}
+
+func (f *fakeStatsDB) UpsertProviderHardwareProfile(ctx context.Context, providerID string, summary HardwareSummary, observedAt time.Time) error {
+	f.mu.Lock()
+	f.hardwareCalls++
+	f.hardwareProviderID = providerID
+	f.hardwareSummary = summary
+	f.hardwareObservedAt = observedAt
+	started := f.hardwareStarted
+	block := f.hardwareBlock
+	err := f.hardwareErr
+	f.mu.Unlock()
+	if started != nil {
+		f.hardwareStartedOnce.Do(func() { close(started) })
+	}
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return err
 }
 
 func (f *fakeStatsDB) InsertRegisterNonce(ctx context.Context, providerID, sourceIP, nonce string, tsUtc time.Time) error {
@@ -560,9 +760,11 @@ func (f *fakeAuthStore) MintProviderTokenAppTrack(ctx context.Context, providerI
 }
 
 type fakeMetrics struct {
-	sourceApp int
-	limitIP   int
-	limitASN  int
+	mu                    sync.Mutex
+	sourceApp             int
+	limitIP               int
+	limitASN              int
+	hardwareProfileErrors int
 }
 
 type fakeASNResolver struct {
@@ -596,6 +798,57 @@ func (f *fakeMetrics) IncRegisterSource(track string) {
 	if track == "app" {
 		f.sourceApp++
 	}
+}
+
+func (f *fakeMetrics) IncRegisterHardwareProfileError() {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hardwareProfileErrors++
+}
+
+func (f *fakeStatsDB) hardwareCallsCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hardwareCalls
+}
+
+func (f *fakeStatsDB) hardwareSnapshot() (string, HardwareSummary) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hardwareProviderID, f.hardwareSummary
+}
+
+func (f *fakeMetrics) hardwareProfileErrorCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hardwareProfileErrors
+}
+
+func waitHardwareCalls(t *testing.T, stats *fakeStatsDB, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if stats.hardwareCallsCount() == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("hardware calls=%d want %d", stats.hardwareCallsCount(), want)
+}
+
+func waitHardwareErrorMetric(t *testing.T, metrics *fakeMetrics, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if metrics.hardwareProfileErrorCount() == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("hardware profile error metric=%d want %d", metrics.hardwareProfileErrorCount(), want)
 }
 
 type allowLimiter struct{}

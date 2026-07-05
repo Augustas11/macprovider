@@ -68,5 +68,6 @@ phase4-coordinator/stats.test
 
 # Internal harness — secrets and artifacts (never committed)
 .env.harness
+.deepsec-local/
 test/network-harness/artifacts/
 test/network-harness/harness

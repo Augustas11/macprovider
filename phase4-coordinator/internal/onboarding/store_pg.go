@@ -56,6 +56,9 @@ func (s *PGStore) Smoke(ctx context.Context) error {
 	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_identities LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_identities read: %w", err)
 	}
+	if _, err := s.db.ExecContext(timeout, `SELECT provider_id, last_reported_at FROM provider_hardware_profiles LIMIT 1`); err != nil {
+		return fmt.Errorf("provider_onboarding smoke provider_hardware_profiles read: %w", err)
+	}
 	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_register_nonces LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_register_nonces read: %w", err)
 	}
@@ -99,6 +102,42 @@ RETURNING provider_id`,
 		return err
 	}
 	return nil
+}
+
+func (s *PGStore) UpsertProviderHardwareProfile(ctx context.Context, providerID string, summary HardwareSummary, observedAt time.Time) error {
+	if s == nil || s.db == nil {
+		return errors.New("onboarding postgres store is nil")
+	}
+	chip := trimForStorage(summary.Chip, 120)
+	normalized := normalizeChip(chip)
+	macosVersion := trimForStorage(summary.MacOSVersion, 80)
+	appVersion := trimForStorage(summary.AppVersion, 80)
+	memoryGB := summary.UnifiedMemoryGB
+	if memoryGB < 0 {
+		memoryGB = 0
+	}
+	if memoryGB > 4096 {
+		memoryGB = 4096
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO provider_hardware_profiles (
+    provider_id, chip, chip_normalized, unified_memory_gb,
+    macos_version, app_version, source, last_reported_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6, 'app_register', $7
+)
+ON CONFLICT (provider_id) DO UPDATE
+   SET chip = EXCLUDED.chip,
+       chip_normalized = EXCLUDED.chip_normalized,
+       unified_memory_gb = EXCLUDED.unified_memory_gb,
+       macos_version = EXCLUDED.macos_version,
+       app_version = EXCLUDED.app_version,
+       source = EXCLUDED.source,
+       last_reported_at = EXCLUDED.last_reported_at
+ WHERE provider_hardware_profiles.last_reported_at <= EXCLUDED.last_reported_at`,
+		providerID, chip, normalized, memoryGB, macosVersion, appVersion, observedAt.UTC(),
+	)
+	return err
 }
 
 func (s *PGStore) InsertRegisterNonce(ctx context.Context, providerID, sourceIP, nonce string, observedAt time.Time) error {
@@ -146,6 +185,23 @@ VALUES ($1, $2, $3, $4)`, providerID, sourceIP, nonce, observedAt); err != nil {
 		return err
 	}
 	return nil
+}
+
+func normalizeChip(chip string) string {
+	chip = strings.ToLower(strings.TrimSpace(chip))
+	return strings.Join(strings.Fields(chip), " ")
+}
+
+func trimForStorage(s string, maxRunes int) string {
+	s = strings.TrimSpace(s)
+	if maxRunes <= 0 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes])
 }
 
 func (s *PGStore) CheckAppAttestKeyIDUnique(ctx context.Context, keyID []byte, providerID string) error {

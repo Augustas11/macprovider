@@ -41,6 +41,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -64,6 +65,7 @@ const (
 	roleStatsReader     = "stats_reader"
 	roleStatsRollup     = "stats_rollup"
 	roleProviderPortal  = "provider_portal"
+	roleProviderOnboard = "provider_onboarding"
 	roleAdminPassword   = "stepone-admin-password" // local only; container is ephemeral
 	roleRuntimePassword = "stepone-runtime-pw"
 )
@@ -97,17 +99,35 @@ func startPostgres(t *testing.T) *pgFixture {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	c, err := tcpg.Run(ctx, pgImage,
-		tcpg.WithDatabase("stats_test"),
-		tcpg.WithUsername("postgres"),
-		tcpg.WithPassword(roleAdminPassword),
-		tc.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(60*time.Second),
-		),
-	)
+	var c *tcpg.PostgresContainer
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("start postgres panic: %v", r)
+			}
+		}()
+		c, err = tcpg.Run(ctx, pgImage,
+			tcpg.WithDatabase("stats_test"),
+			tcpg.WithUsername("postgres"),
+			tcpg.WithPassword(roleAdminPassword),
+			tc.WithWaitStrategy(
+				wait.ForLog("database system is ready to accept connections").
+					WithOccurrence(2).
+					WithStartupTimeout(60*time.Second),
+			),
+		)
+	}()
 	if err != nil {
+		msg := err.Error()
+		if contains(msg, "Docker not found") ||
+			contains(msg, "rootless Docker not found") ||
+			contains(msg, "Cannot connect to the Docker daemon") {
+			if runningInCI() {
+				t.Fatalf("Postgres integration requires Docker in CI: %v", err)
+			}
+			t.Skipf("skip local Postgres integration without Docker: %v", err)
+		}
 		t.Fatalf("start postgres: %v", err)
 	}
 	host, err := c.Host(ctx)
@@ -132,6 +152,10 @@ func startPostgres(t *testing.T) *pgFixture {
 		fx.Close(bg)
 	})
 	return fx
+}
+
+func runningInCI() bool {
+	return os.Getenv("CI") == "true" || os.Getenv("GITHUB_ACTIONS") == "true"
 }
 
 // applyMigrationsAndStubOLTP runs the SPEC-017 migrations against
@@ -160,7 +184,7 @@ func applyMigrationsAndStubOLTP(t *testing.T, fx *pgFixture) *sql.DB {
 	// production deploy automation rotates them via
 	// `ALTER ROLE ... WITH LOGIN PASSWORD '...'` from the
 	// secret store; the test harness does the same in-memory.
-	for _, role := range []string{roleStatsReader, roleStatsRollup, roleProviderPortal} {
+	for _, role := range []string{roleStatsReader, roleStatsRollup, roleProviderPortal, roleProviderOnboard} {
 		if _, err := adminDB.ExecContext(ctx, fmt.Sprintf(
 			`ALTER ROLE %s WITH LOGIN PASSWORD '%s'`, role, roleRuntimePassword,
 		)); err != nil {
@@ -783,6 +807,157 @@ func TestStatsRollupCannotTouchPartnerKeys(t *testing.T) {
 		t.Errorf("stats_rollup unexpectedly SELECT'd provider_visibility_audit")
 	} else if !contains(err.Error(), "permission denied") {
 		t.Errorf("stats_rollup provider_visibility_audit: expected 'permission denied', got %q", err.Error())
+	}
+}
+
+// ===========================================================================
+// Hardware profile grants — effective runtime role behavior.
+// ===========================================================================
+func TestHardwareProfileRoleGrantsAndVerificationGuard(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+
+	readerDB, err := sql.Open("postgres", fx.roleDSN(roleStatsReader))
+	if err != nil {
+		t.Fatalf("open reader: %v", err)
+	}
+	defer readerDB.Close()
+	portalDB, err := sql.Open("postgres", fx.roleDSN(roleProviderPortal))
+	if err != nil {
+		t.Fatalf("open portal: %v", err)
+	}
+	defer portalDB.Close()
+	rollupDB, err := sql.Open("postgres", fx.roleDSN(roleStatsRollup))
+	if err != nil {
+		t.Fatalf("open rollup: %v", err)
+	}
+	defer rollupDB.Close()
+	onboardingDB, err := sql.Open("postgres", fx.roleDSN(roleProviderOnboard))
+	if err != nil {
+		t.Fatalf("open onboarding: %v", err)
+	}
+	defer onboardingDB.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, roleDB := range []struct {
+		name string
+		db   *sql.DB
+	}{
+		{name: "stats_reader", db: readerDB},
+		{name: "provider_portal", db: portalDB},
+	} {
+		for _, table := range []string{"provider_hardware_profiles", "chip_hardware_profiles"} {
+			_, err := roleDB.db.QueryContext(ctx, fmt.Sprintf(`SELECT 1 FROM %s LIMIT 1`, table))
+			if err == nil {
+				t.Errorf("%s unexpectedly SELECT'd %s", roleDB.name, table)
+				continue
+			}
+			if !contains(err.Error(), "permission denied") {
+				t.Errorf("%s on %s: expected permission denied, got %q", roleDB.name, table, err.Error())
+			}
+		}
+	}
+
+	if _, err := adminDB.ExecContext(ctx, `
+        INSERT INTO chip_hardware_profiles
+            (chip_normalized, display_chip, memory_bandwidth_gb_per_s, network_power_kw, gpu_cores, cpu_cores)
+        VALUES ('apple m4 max', 'Apple M4 Max', 546, 0.12, 40, 16)
+    `); err != nil {
+		t.Fatalf("seed chip profile: %v", err)
+	}
+
+	if _, err := rollupDB.QueryContext(ctx, `SELECT 1 FROM chip_hardware_profiles LIMIT 1`); err != nil {
+		t.Fatalf("stats_rollup read chip_hardware_profiles: %v", err)
+	}
+	if _, err := rollupDB.QueryContext(ctx, `SELECT 1 FROM provider_hardware_profiles LIMIT 1`); err != nil {
+		t.Fatalf("stats_rollup read provider_hardware_profiles: %v", err)
+	}
+
+	if _, err := onboardingDB.ExecContext(ctx, `
+        INSERT INTO provider_hardware_profiles
+            (provider_id, chip, chip_normalized, unified_memory_gb, macos_version, app_version, source, last_reported_at)
+        VALUES ('p-hw', 'Apple M4 Max', 'apple m4 max', 64, '15.0', '1.0.0', 'app_register', now())
+    `); err != nil {
+		t.Fatalf("provider_onboarding insert hardware profile: %v", err)
+	}
+	var verified bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT verified FROM provider_hardware_profiles WHERE provider_id = 'p-hw'`,
+	).Scan(&verified); err != nil {
+		t.Fatalf("admin scan inserted verified: %v", err)
+	}
+	if verified {
+		t.Fatalf("provider_onboarding insert set verified=true; want default/trigger false")
+	}
+
+	_, err = onboardingDB.QueryContext(ctx,
+		`SELECT verified FROM provider_hardware_profiles WHERE provider_id = 'p-hw'`)
+	if err == nil {
+		t.Fatalf("provider_onboarding unexpectedly selected verified")
+	}
+	if !contains(err.Error(), "permission denied") {
+		t.Fatalf("provider_onboarding select verified: expected permission denied, got %q", err.Error())
+	}
+
+	_, err = onboardingDB.ExecContext(ctx,
+		`UPDATE provider_hardware_profiles SET verified = TRUE WHERE provider_id = 'p-hw'`)
+	if err == nil {
+		t.Fatalf("provider_onboarding unexpectedly updated verified")
+	}
+	if !contains(err.Error(), "permission denied") {
+		t.Fatalf("provider_onboarding update verified: expected permission denied, got %q", err.Error())
+	}
+
+	if _, err := adminDB.ExecContext(ctx,
+		`UPDATE provider_hardware_profiles SET verified = TRUE WHERE provider_id = 'p-hw'`,
+	); err != nil {
+		t.Fatalf("operator verify row: %v", err)
+	}
+
+	if _, err := onboardingDB.ExecContext(ctx, `
+        UPDATE provider_hardware_profiles
+           SET chip = 'Apple M4 Max',
+               chip_normalized = 'apple m4 max',
+               unified_memory_gb = 96,
+               macos_version = '15.1',
+               app_version = '1.0.1',
+               source = 'app_register',
+               last_reported_at = now()
+         WHERE provider_id = 'p-hw'
+    `); err != nil {
+		t.Fatalf("provider_onboarding same-chip update: %v", err)
+	}
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT verified FROM provider_hardware_profiles WHERE provider_id = 'p-hw'`,
+	).Scan(&verified); err != nil {
+		t.Fatalf("admin scan same-chip verified: %v", err)
+	}
+	if !verified {
+		t.Fatalf("same-chip provider_onboarding update cleared verified; want preserved")
+	}
+
+	if _, err := onboardingDB.ExecContext(ctx, `
+        UPDATE provider_hardware_profiles
+           SET chip = 'Apple M3 Max',
+               chip_normalized = 'apple m3 max',
+               unified_memory_gb = 128,
+               macos_version = '15.2',
+               app_version = '1.0.2',
+               source = 'app_register',
+               last_reported_at = now()
+         WHERE provider_id = 'p-hw'
+    `); err != nil {
+		t.Fatalf("provider_onboarding changed-chip update: %v", err)
+	}
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT verified FROM provider_hardware_profiles WHERE provider_id = 'p-hw'`,
+	).Scan(&verified); err != nil {
+		t.Fatalf("admin scan changed-chip verified: %v", err)
+	}
+	if verified {
+		t.Fatalf("changed-chip provider_onboarding update preserved verified; want cleared")
 	}
 }
 
