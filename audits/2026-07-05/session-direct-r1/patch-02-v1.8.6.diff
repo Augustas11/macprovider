@@ -1,0 +1,796 @@
+diff --git a/phase3-binary/Sources/macprovider-cli/CanonicalJSON.swift b/phase3-binary/Sources/macprovider-cli/CanonicalJSON.swift
+new file mode 100644
+index 0000000..14de399
+--- /dev/null
++++ b/phase3-binary/Sources/macprovider-cli/CanonicalJSON.swift
+@@ -0,0 +1,137 @@
++import Foundation
++
++// RFC 8785 JSON Canonicalization Scheme (JCS).
++//
++// Byte-identical mirror of the Malibu.app CanonicalJSON implementation at
++// phase3-binary/app/Sources/Malibu/System/RegisterClient.swift and of the
++// coordinator's Go implementation at phase4-coordinator/internal/billing/jcs.go.
++//
++// Used by the SPEC-026 identity_signature flow to build the canonical bytes
++// whose SHA-256 the coordinator retains from the initial `auth_request`
++// stage and requires echoed back — under the provider's Ed25519 signature
++// — in the proof stage.
++
++enum CanonicalJSONError: Error {
++    case nonFiniteNumber
++    case invalidStringEncoding
++}
++
++enum CanonicalJSONValue: Equatable {
++    case object([String: CanonicalJSONValue])
++    case array([CanonicalJSONValue])
++    case string(String)
++    case number(String)
++    case bool(Bool)
++    case null
++}
++
++enum CanonicalJSON {
++    static func encode(_ value: CanonicalJSONValue) throws -> Data {
++        let text = try canonicalString(value)
++        guard let data = text.data(using: .utf8) else {
++            throw CanonicalJSONError.invalidStringEncoding
++        }
++        return data
++    }
++
++    static func canonicalString(_ value: CanonicalJSONValue) throws -> String {
++        switch value {
++        case let .object(dict):
++            let pairs = try dict.keys.sorted(by: utf16LessThan).map { key -> String in
++                try "\(quote(key)):\(canonicalString(dict[key]!))"
++            }
++            return "{\(pairs.joined(separator: ","))}"
++        case let .array(values):
++            return try "[\(values.map { try canonicalString($0) }.joined(separator: ","))]"
++        case let .string(value):
++            return try quote(value.precomposedStringWithCanonicalMapping)
++        case let .number(value):
++            return value
++        case let .bool(value):
++            return value ? "true" : "false"
++        case .null:
++            return "null"
++        }
++    }
++
++    static func quote(_ raw: String) throws -> String {
++        var out = "\""
++        for scalar in raw.unicodeScalars {
++            switch scalar.value {
++            case 0x22: out += "\\\""
++            case 0x5c: out += "\\\\"
++            case 0x08: out += "\\b"
++            case 0x0c: out += "\\f"
++            case 0x0a: out += "\\n"
++            case 0x0d: out += "\\r"
++            case 0x09: out += "\\t"
++            case 0x00...0x1f:
++                out += String(format: "\\u%04x", scalar.value)
++            default:
++                out.append(Character(scalar))
++            }
++        }
++        out += "\""
++        return out
++    }
++
++    private static func utf16LessThan(_ lhs: String, _ rhs: String) -> Bool {
++        let lhsCodeUnits = Array(lhs.utf16)
++        let rhsCodeUnits = Array(rhs.utf16)
++        let count = min(lhsCodeUnits.count, rhsCodeUnits.count)
++        for index in 0..<count {
++            if lhsCodeUnits[index] != rhsCodeUnits[index] {
++                return lhsCodeUnits[index] < rhsCodeUnits[index]
++            }
++        }
++        return lhsCodeUnits.count < rhsCodeUnits.count
++    }
++}
++
++extension CanonicalJSON {
++    /// Convert a JSON-like Swift dictionary (`[String: Any]`) into a
++    /// `CanonicalJSONValue`. Used by the SPEC-026 auth flow to canonicalise
++    /// the outgoing initial `auth_request` payload for transcript hashing
++    /// without duplicating the field list.
++    static func fromJSONLike(_ any: Any) throws -> CanonicalJSONValue {
++        switch any {
++        case is NSNull:
++            return .null
++        case let bool as Bool:
++            return .bool(bool)
++        case let string as String:
++            return .string(string)
++        case let number as NSNumber:
++            if CFGetTypeID(number) == CFBooleanGetTypeID() {
++                return .bool(number.boolValue)
++            }
++            let raw = String(cString: number.objCType)
++            if raw == "q" || raw == "l" || raw == "i" || raw == "s" || raw == "c" {
++                return .number(String(number.int64Value))
++            }
++            return .number(number.stringValue)
++        case let int as Int:
++            return .number(String(int))
++        case let int64 as Int64:
++            return .number(String(int64))
++        case let double as Double:
++            guard double.isFinite else {
++                throw CanonicalJSONError.nonFiniteNumber
++            }
++            if double == double.rounded() && abs(double) < Double(Int64.max) {
++                return .number(String(Int64(double)))
++            }
++            return .number(String(double))
++        case let array as [Any]:
++            return try .array(array.map { try fromJSONLike($0) })
++        case let dict as [String: Any]:
++            var out: [String: CanonicalJSONValue] = [:]
++            for (key, value) in dict {
++                out[key] = try fromJSONLike(value)
++            }
++            return .object(out)
++        default:
++            throw CanonicalJSONError.invalidStringEncoding
++        }
++    }
++}
+diff --git a/phase3-binary/Sources/macprovider-cli/ControlSocket.swift b/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
+index 337de3c..679cc33 100644
+--- a/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
++++ b/phase3-binary/Sources/macprovider-cli/ControlSocket.swift
+@@ -42,6 +42,29 @@ public enum ControlSocketFrame: Equatable, Sendable {
+     case resumeAck(accepted: Bool, reason: String?)
+     case shutdownRequest(graceSeconds: Int)
+     case shutdownAck
++
++    // SPEC-026 §7 identity-signature challenge. The CLI cannot sign the
++    // Tier-2 auth_request proof itself because the provider Ed25519 key
++    // lives in Malibu.app's Keychain. The CLI PUSHES a request out to
++    // the connected control-socket client (Malibu.app) with the auth
++    // parameters, awaits the response, then relays the signature to the
++    // coordinator in the auth_request proof stage.
++    case identitySignatureRequest(
++        authAttemptID: String,
++        providerID: String,
++        // String NOT Int: must byte-match the initial auth_request
++        // `binary_version` field so coordinator + Malibu.app canonical
++        // tuples agree on JSON type.
++        binaryVersion: String,
++        providerECDHPublicKey: String,
++        transcriptSHA256: String
++    )
++    case identitySignatureResponse(
++        accepted: Bool,
++        identitySignature: String?,
++        transcriptSHA256: String?,
++        reason: String?
++    )
+ }
+ 
+ public enum ControlSocketCodec {
+@@ -130,6 +153,24 @@ public enum ControlSocketCodec {
+             object = ["type": "shutdown_request", "grace_seconds": graceSeconds]
+         case .shutdownAck:
+             object = ["type": "shutdown_ack"]
++        case let .identitySignatureRequest(authAttemptID, providerID, binaryVersion, ecdhKey, transcriptSHA256):
++            object = [
++                "type": "identity_signature_request",
++                "auth_attempt_id": authAttemptID,
++                "provider_id": providerID,
++                "binary_version": binaryVersion,
++                "provider_ecdh_public_key": ecdhKey,
++                "transcript_sha256": transcriptSHA256,
++            ]
++        case let .identitySignatureResponse(accepted, signature, transcriptSHA256, reason):
++            var frame: [String: Any] = [
++                "type": "identity_signature_response",
++                "accepted": accepted,
++            ]
++            if let signature { frame["identity_signature"] = signature }
++            if let transcriptSHA256 { frame["identity_signature_transcript_sha256"] = transcriptSHA256 }
++            if let reason { frame["reason"] = reason }
++            object = frame
+         }
+ 
+         var data = try JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
+@@ -230,6 +271,21 @@ public enum ControlSocketCodec {
+             return .shutdownRequest(graceSeconds: try intField("grace_seconds", in: object))
+         case "shutdown_ack":
+             return .shutdownAck
++        case "identity_signature_request":
++            return .identitySignatureRequest(
++                authAttemptID: try stringField("auth_attempt_id", in: object),
++                providerID: try stringField("provider_id", in: object),
++                binaryVersion: try stringField("binary_version", in: object),
++                providerECDHPublicKey: try stringField("provider_ecdh_public_key", in: object),
++                transcriptSHA256: try stringField("transcript_sha256", in: object)
++            )
++        case "identity_signature_response":
++            return .identitySignatureResponse(
++                accepted: try boolField("accepted", in: object),
++                identitySignature: object["identity_signature"] as? String,
++                transcriptSHA256: object["identity_signature_transcript_sha256"] as? String,
++                reason: object["reason"] as? String
++            )
+         default:
+             throw ControlSocketError.unknownType(type)
+         }
+@@ -357,6 +413,7 @@ actor ControlSocketServer {
+     private let receiptRotator: (@Sendable () async throws -> Void)?
+     private let receiptRotationProviderID: String?
+     private let idleTimeoutSeconds: TimeInterval
++    private let identityBridge: IdentitySignatureBridge?
+     private let tracker = ControlSocketSwitchTracker()
+     private var listenerFD: Int32?
+     private var acceptTask: Task<Void, Never>?
+@@ -369,7 +426,8 @@ actor ControlSocketServer {
+         supportedModels: [String]? = nil,
+         receiptRotator: (@Sendable () async throws -> Void)? = nil,
+         receiptRotationProviderID: String? = nil,
+-        idleTimeoutSeconds: TimeInterval = 30.0
++        idleTimeoutSeconds: TimeInterval = 30.0,
++        identityBridge: IdentitySignatureBridge? = nil
+     ) {
+         self.socketPath = socketPath
+         self.modelRuntime = modelRuntime
+@@ -377,6 +435,7 @@ actor ControlSocketServer {
+         self.receiptRotator = receiptRotator
+         self.receiptRotationProviderID = receiptRotationProviderID
+         self.idleTimeoutSeconds = idleTimeoutSeconds
++        self.identityBridge = identityBridge
+     }
+ 
+     func start() async throws {
+@@ -422,6 +481,7 @@ actor ControlSocketServer {
+         let receiptRotator = receiptRotator
+         let receiptRotationProviderID = receiptRotationProviderID
+         let idleTimeoutSeconds = idleTimeoutSeconds
++        let identityBridge = identityBridge
+         acceptTask = Task.detached(priority: .userInitiated) {
+             await Self.acceptLoop(
+                 listenerFD: fd,
+@@ -431,6 +491,7 @@ actor ControlSocketServer {
+                 receiptRotator: receiptRotator,
+                 receiptRotationProviderID: receiptRotationProviderID,
+                 idleTimeoutSeconds: idleTimeoutSeconds,
++                identityBridge: identityBridge,
+                 server: self
+             )
+         }
+@@ -483,6 +544,7 @@ actor ControlSocketServer {
+         receiptRotator: (@Sendable () async throws -> Void)?,
+         receiptRotationProviderID: String?,
+         idleTimeoutSeconds: TimeInterval,
++        identityBridge: IdentitySignatureBridge?,
+         server: ControlSocketServer
+     ) async {
+         while !Task.isCancelled {
+@@ -510,7 +572,8 @@ actor ControlSocketServer {
+                     supportedModels: supportedModels,
+                     receiptRotator: receiptRotator,
+                     receiptRotationProviderID: receiptRotationProviderID,
+-                    idleTimeoutSeconds: idleTimeoutSeconds
++                    idleTimeoutSeconds: idleTimeoutSeconds,
++                    identityBridge: identityBridge
+                 )
+                 await server.removeClientFD(clientFD)
+             }
+@@ -525,9 +588,40 @@ actor ControlSocketServer {
+         supportedModels: [String]?,
+         receiptRotator: (@Sendable () async throws -> Void)?,
+         receiptRotationProviderID: String?,
+-        idleTimeoutSeconds: TimeInterval
++        idleTimeoutSeconds: TimeInterval,
++        identityBridge: IdentitySignatureBridge? = nil
+     ) async {
+         let connection = ControlSocketConnection(fd: fd)
++
++        // SPEC-026 §7: if an IdentitySignatureBridge is injected, spawn a
++        // sibling task that awaits pending signature requests from the
++        // CoordinatorClient and pushes them out on this connection. The
++        // ControlSocketConnection actor serialises send/receive so this
++        // pusher is safe to race the main receive loop.
++        var signatureSubscriberID: UUID?
++        var pusherTask: Task<Void, Never>?
++        if let identityBridge {
++            let (subscriberID, stream) = await identityBridge.subscribe()
++            signatureSubscriberID = subscriberID
++            pusherTask = Task.detached(priority: .userInitiated) {
++                for await request in stream {
++                    try? await connection.send(.identitySignatureRequest(
++                        authAttemptID: request.authAttemptID,
++                        providerID: request.providerID,
++                        binaryVersion: request.binaryVersion,
++                        providerECDHPublicKey: request.providerECDHPublicKey,
++                        transcriptSHA256: request.transcriptSHA256
++                    ))
++                }
++            }
++        }
++        defer {
++            pusherTask?.cancel()
++            if let identityBridge, let signatureSubscriberID {
++                Task { await identityBridge.unsubscribe(signatureSubscriberID) }
++            }
++        }
++
+         while !Task.isCancelled {
+             do {
+                 let frame = try await connection.receive(timeout: idleTimeoutSeconds)
+@@ -576,6 +670,17 @@ actor ControlSocketServer {
+                     // lands with SPEC-025 §11 P1 alongside pause/resume semantics.
+                     try? await connection.send(.shutdownAck)
+                     _ = graceSeconds // reserved for graceful drain implementation
++                case let .identitySignatureResponse(accepted, signature, transcriptSHA256, reason):
++                    // SPEC-026 §7: Malibu.app answering our earlier
++                    // identity_signature_request. Forward to the
++                    // bridge so the suspended CoordinatorClient.auth_request
++                    // proof builder can proceed.
++                    await identityBridge?.deliverResponse(IdentitySignatureBridge.Response(
++                        accepted: accepted,
++                        identitySignature: signature,
++                        transcriptSHA256: transcriptSHA256,
++                        reason: reason
++                    ))
+                 default:
+                     FileHandle.standardError.write(Data("control socket received unexpected frame type; closing connection\n".utf8))
+                     await connection.close()
+diff --git a/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift b/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
+index 6af68e8..5116a99 100644
+--- a/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
++++ b/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
+@@ -165,7 +165,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
+ actor CoordinatorClient {
+     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
+ 
+-    static let binaryVersion = "1.8.5"
++    static let binaryVersion = "1.8.6"
+     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
+ 
+     private let coordinatorURL: URL
+@@ -240,6 +240,13 @@ actor CoordinatorClient {
+     private var sleepAssertion: ProviderSleepAssertion?
+     private let sendOverride: SendOverride?
+ 
++    // SPEC-026 §7: optional bridge for delegating identity signature to
++    // Malibu.app via the control socket. `nil` when the CLI runs standalone
++    // (install.sh path) — the coordinator's per-provider exemption
++    // (identity_signature.go:38) covers that case.
++    private let identityBridge: IdentitySignatureBridge?
++    private let identitySignatureTimeoutSeconds: TimeInterval
++
+     init?(
+         config: AppConfig,
+         modelRuntime: ModelRuntime,
+@@ -254,6 +261,8 @@ actor CoordinatorClient {
+         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
+         providerReceiptPublicKey: String? = nil,
+         receiptBuilder: ReceiptBuilder? = nil,
++        identityBridge: IdentitySignatureBridge? = nil,
++        identitySignatureTimeoutSeconds: TimeInterval = 30,
+         // Issue #189: injectable in tests; production uses Darwin.exit(1)
+         // so the launchd KeepAlive contract recovers the wedged process.
+         watchdogExitHook: @escaping @Sendable (String) -> Void = { reason in
+@@ -300,6 +309,8 @@ actor CoordinatorClient {
+         self.pairingController = pairingController ?? PairingController(configPath: config.configPath)
+         self.connectAndRunOverride = connectAndRunOverride
+         self.sendOverride = sendOverride
++        self.identityBridge = identityBridge
++        self.identitySignatureTimeoutSeconds = identitySignatureTimeoutSeconds
+         self.watchdogExitHook = watchdogExitHook
+     }
+ 
+@@ -645,7 +656,11 @@ actor CoordinatorClient {
+         let challenge = try await receiveAuthChallenge(from: socket)
+         try Task.checkCancellation()
+         let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
+-        let proofMessage = try await authProofMessage(challenge: challenge, attempt: authAttempt)
++        let proofMessage = try await authProofMessage(
++            challenge: challenge,
++            attempt: authAttempt,
++            initialMessage: initialMessage
++        )
+         try Task.checkCancellation()
+         try await send(proofMessage, to: socket)
+         let response = try await receiveAuthResponse(from: socket)
+@@ -732,7 +747,11 @@ actor CoordinatorClient {
+             let challenge = try await receiveAuthChallenge(from: socket)
+             try Task.checkCancellation()
+             let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
+-            let proofMessage = try await authProofMessage(challenge: challenge, attempt: authAttempt)
++            let proofMessage = try await authProofMessage(
++                challenge: challenge,
++                attempt: authAttempt,
++                initialMessage: initialMessage
++            )
+             try Task.checkCancellation()
+             try await send(proofMessage, to: socket)
+             let response = try await receiveAuthResponse(from: socket)
+@@ -829,10 +848,15 @@ actor CoordinatorClient {
+ 
+     private func connectAndRunTier2(socket: ProviderWebSocketTask) async throws {
+         let authAttempt = Tier2AuthAttempt()
+-        try await send(await authInitialMessage(attempt: authAttempt))
++        let initialMessage = await authInitialMessage(attempt: authAttempt)
++        try await send(initialMessage)
+         let challenge: [String: Any] = try await receiveAuthChallenge(from: socket)
+         let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
+-        try await send(try await authProofMessage(challenge: challenge, attempt: authAttempt))
++        try await send(try await authProofMessage(
++            challenge: challenge,
++            attempt: authAttempt,
++            initialMessage: initialMessage
++        ))
+         let response = try await receiveAuthResponse(from: socket)
+         try await acceptAuthResponse(response, session: session)
+         installTier2Session(session, socket: socket)
+@@ -1136,7 +1160,11 @@ actor CoordinatorClient {
+         )
+     }
+ 
+-    func authProofMessage(challenge: [String: Any], attempt: Tier2AuthAttempt) async throws -> [String: Any] {
++    func authProofMessage(
++        challenge: [String: Any],
++        attempt: Tier2AuthAttempt,
++        initialMessage: [String: Any]? = nil
++    ) async throws -> [String: Any] {
+         guard let attemptID = challenge["auth_attempt_id"] as? String, !attemptID.isEmpty else {
+             throw CoordinatorAuthError.invalidMessage("auth_challenge missing auth_attempt_id")
+         }
+@@ -1157,9 +1185,48 @@ actor CoordinatorClient {
+             "provider_id": providerID,
+         ]
+         proof["attestation_token"] = token ?? NSNull()
++
++        // SPEC-026 §7: if we have both the initial-stage message (needed
++        // to compute the retained transcript hash) and an
++        // IdentitySignatureBridge (i.e. Malibu.app is attached), ask
++        // Malibu to sign the canonical tuple with its Keychain Ed25519
++        // key. Failure to obtain a signature falls through — the
++        // coordinator's `identitySignatures == nil` gate or per-provider
++        // exemption at `identity_signature.go:38` covers the CLI-track
++        // path.
++        if let identityBridge, let initialMessage,
++           let transcriptSHA256 = try? Self.initialAuthTranscriptHashBase64(initialMessage) {
++            let request = IdentitySignatureBridge.Request(
++                authAttemptID: attemptID,
++                providerID: providerID,
++                binaryVersion: Self.binaryVersion,
++                providerECDHPublicKey: attempt.publicKeyBase64URL,
++                transcriptSHA256: transcriptSHA256
++            )
++            let response = await identityBridge.requestSignature(
++                request,
++                timeout: identitySignatureTimeoutSeconds
++            )
++            if let response, response.accepted,
++               let signature = response.identitySignature,
++               let echoed = response.transcriptSHA256 {
++                proof["identity_signature"] = signature
++                proof["identity_signature_transcript_sha256"] = echoed
++            }
++        }
++
+         return proof
+     }
+ 
++    /// Compute `base64(SHA-256(CanonicalJSON(initialMessage)))`. Matches
++    /// what the coordinator retains from the initial auth_request stage
++    /// via `phase4-coordinator/internal/ws/identity_signature.go:15`.
++    static func initialAuthTranscriptHashBase64(_ message: [String: Any]) throws -> String {
++        let canonical = try CanonicalJSON.encode(CanonicalJSON.fromJSONLike(message))
++        let digest = SHA256.hash(data: canonical)
++        return Data(digest).base64EncodedString()
++    }
++
+     private func acceptAuthResponse(_ response: [String: Any], session: Tier2ProviderSession) async throws {
+         try validateAcceptedAuthResponse(response, session: session)
+         tier2Session = session
+diff --git a/phase3-binary/Sources/macprovider-cli/IdentitySignatureBridge.swift b/phase3-binary/Sources/macprovider-cli/IdentitySignatureBridge.swift
+new file mode 100644
+index 0000000..4088c4c
+--- /dev/null
++++ b/phase3-binary/Sources/macprovider-cli/IdentitySignatureBridge.swift
+@@ -0,0 +1,148 @@
++import Foundation
++
++/// Bridges the App-track SPEC-026 identity-signature challenge between the
++/// coordinator WS client (`CoordinatorClient`) and the ControlSocket handler.
++///
++/// **The problem**: SPEC-026 keeps the provider's Ed25519 private key in
++/// Malibu.app's Keychain, not in the CLI. When the coordinator sends a
++/// Tier-2 `auth_challenge`, the CLI's proof stage must include
++/// `identity_signature` + `identity_signature_transcript_sha256`. Those can
++/// only be computed by Malibu.app.
++///
++/// **The flow**:
++/// 1. `CoordinatorClient` receives `auth_challenge`, prepares the proof body,
++///    calls `requestSignature(_:timeout:)` on this bridge.
++/// 2. Bridge stores the request + suspends the caller on a continuation, then
++///    yields the request into a stream consumed by the ControlSocket handler.
++/// 3. `ControlSocket.handleClient` writes an `identitySignatureRequest`
++///    frame onto the connected Malibu.app control socket.
++/// 4. Malibu.app signs with its Keychain key, replies with
++///    `identitySignatureResponse`.
++/// 5. `handleClient` calls `deliverResponse` on this bridge.
++/// 6. Bridge resumes the suspended `requestSignature` call with the response.
++///
++/// **Timeout / no-client case**: if no ControlSocket client is connected
++/// (i.e. CLI running standalone via install.sh), `requestSignature` returns
++/// `nil` after the timeout. `CoordinatorClient` then omits the signature
++/// fields from the proof; the coordinator's per-provider
++/// `provider_auth_policy` exemption (see
++/// `phase4-coordinator/internal/ws/identity_signature.go:38`) covers the
++/// CLI-track path.
++public actor IdentitySignatureBridge {
++    public struct Request: Sendable, Equatable {
++        public let authAttemptID: String
++        public let providerID: String
++        /// String, NOT integer — must byte-match the value the CLI sent in
++        /// the initial auth_request `binary_version` field (`"1.8.6"`), so
++        /// the coordinator's canonical tuple and Malibu.app's signed tuple
++        /// carry the same JSON string type.
++        public let binaryVersion: String
++        public let providerECDHPublicKey: String
++        public let transcriptSHA256: String
++
++        public init(
++            authAttemptID: String,
++            providerID: String,
++            binaryVersion: String,
++            providerECDHPublicKey: String,
++            transcriptSHA256: String
++        ) {
++            self.authAttemptID = authAttemptID
++            self.providerID = providerID
++            self.binaryVersion = binaryVersion
++            self.providerECDHPublicKey = providerECDHPublicKey
++            self.transcriptSHA256 = transcriptSHA256
++        }
++    }
++
++    public struct Response: Sendable, Equatable {
++        public let accepted: Bool
++        public let identitySignature: String?
++        public let transcriptSHA256: String?
++        public let reason: String?
++
++        public init(
++            accepted: Bool,
++            identitySignature: String?,
++            transcriptSHA256: String?,
++            reason: String?
++        ) {
++            self.accepted = accepted
++            self.identitySignature = identitySignature
++            self.transcriptSHA256 = transcriptSHA256
++            self.reason = reason
++        }
++    }
++
++    private struct Pending {
++        let request: Request
++        let continuation: CheckedContinuation<Response?, Never>
++    }
++
++    private var pending: Pending?
++    private var listeners: [UUID: AsyncStream<Request>.Continuation] = [:]
++
++    public init() {}
++
++    /// Called by `CoordinatorClient` from the proof-stage builder. Suspends
++    /// until the matching `identity_signature_response` frame comes back
++    /// from a ControlSocket client, or `timeout` elapses.
++    ///
++    /// Returns `nil` on timeout / when no ControlSocket subscriber is
++    /// connected — the caller should proceed WITHOUT the signature and let
++    /// the coordinator's per-provider exemption handle it.
++    public func requestSignature(_ request: Request, timeout: TimeInterval) async -> Response? {
++        if let existing = pending {
++            existing.continuation.resume(returning: nil)
++            pending = nil
++        }
++        let timeoutTask = Task { [weak self] in
++            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
++            await self?.timeoutIfPending()
++        }
++        defer { timeoutTask.cancel() }
++        let response = await withCheckedContinuation { (cont: CheckedContinuation<Response?, Never>) in
++            pending = Pending(request: request, continuation: cont)
++            for continuation in listeners.values {
++                continuation.yield(request)
++            }
++        }
++        return response
++    }
++
++    /// Called by `ControlSocket.handleClient` after receiving an
++    /// `identitySignatureResponse` frame from Malibu.app.
++    public func deliverResponse(_ response: Response) {
++        guard let existing = pending else { return }
++        pending = nil
++        existing.continuation.resume(returning: response)
++    }
++
++    /// Called by `ControlSocket.handleClient` when it wants to receive
++    /// pending signature requests. Each subscribed connection gets its own
++    /// stream; the same request is yielded to all connected subscribers
++    /// (only one Malibu.app instance is expected at a time in practice).
++    public func subscribe() -> (id: UUID, stream: AsyncStream<Request>) {
++        let id = UUID()
++        let stream = AsyncStream<Request> { continuation in
++            listeners[id] = continuation
++            if let pending {
++                continuation.yield(pending.request)
++            }
++            continuation.onTermination = { [weak self] _ in
++                Task { await self?.unsubscribe(id) }
++            }
++        }
++        return (id, stream)
++    }
++
++    public func unsubscribe(_ id: UUID) {
++        listeners.removeValue(forKey: id)?.finish()
++    }
++
++    private func timeoutIfPending() {
++        guard let existing = pending else { return }
++        pending = nil
++        existing.continuation.resume(returning: nil)
++    }
++}
+diff --git a/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift b/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
+index 0e7f5c3..0d5e928 100644
+--- a/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
++++ b/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift
+@@ -514,6 +514,11 @@ struct ServeCommand: AsyncParsableCommand {
+         if resolved.donorMode {
+             FileHandle.standardError.write(Data("DONOR MODE: coordinator join disabled; serving local HTTP only.\n".utf8))
+         }
++        // SPEC-026 §7: shared bridge for the App-track identity-signature
++        // handshake. CoordinatorClient enqueues signature requests here
++        // when building the auth_request proof stage; ControlSocketServer
++        // drains them onto the connected Malibu.app control socket.
++        let identityBridge = IdentitySignatureBridge()
+         let coordinatorClient = Self.makeCoordinatorClient(noJoin: noJoin, donorMode: resolved.donorMode) {
+             CoordinatorClient(
+                 config: resolved,
+@@ -521,7 +526,8 @@ struct ServeCommand: AsyncParsableCommand {
+                 providerStatus: providerStatus,
+                 attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath),
+                 providerReceiptPublicKey: receiptRuntime.publicKeyBase64,
+-                receiptBuilder: receiptRuntime.builder
++                receiptBuilder: receiptRuntime.builder,
++                identityBridge: identityBridge
+             )
+         }
+         let controlSocket: ControlSocketServer?
+@@ -547,7 +553,8 @@ struct ServeCommand: AsyncParsableCommand {
+                 modelRuntime: modelRuntime,
+                 supportedModels: resolved.supportedModels,
+                 receiptRotator: receiptRotator,
+-                receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines)
++                receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
++                identityBridge: identityBridge
+             )
+             do {
+                 try await controlSocket?.start()
+diff --git a/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift b/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift
+index 9ab0f84..3d32e5b 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift
+@@ -1594,10 +1594,10 @@ final class CoordinatorClientTests: XCTestCase {
+         let hello = await client.helloMessage()
+         let auth = await client.authInitialMessage(attempt: attempt)
+ 
+-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.5")
+-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.5")
+-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.5")
+-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.5")
++        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.6")
++        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.6")
++        XCTAssertEqual(hello["binary_version"] as? String, "1.8.6")
++        XCTAssertEqual(auth["binary_version"] as? String, "1.8.6")
+     }
+ 
+     func testAuthInitialDefaultsToSingleEntryCatalog() async throws {
+diff --git a/phase3-binary/app/Sources/Malibu/Agent/ControlSocketFrame.swift b/phase3-binary/app/Sources/Malibu/Agent/ControlSocketFrame.swift
+index 2b3557e..0568f14 100644
+--- a/phase3-binary/app/Sources/Malibu/Agent/ControlSocketFrame.swift
++++ b/phase3-binary/app/Sources/Malibu/Agent/ControlSocketFrame.swift
+@@ -42,7 +42,10 @@ enum ControlFrame: Sendable, Equatable {
+     case identitySignatureRequest(
+         authAttemptID: String,
+         providerID: String,
+-        binaryVersion: Int,
++        // String NOT Int: must byte-match the CLI's `binary_version` field
++        // in the initial auth_request so coordinator + Malibu canonical
++        // tuples agree on JSON type (SPEC-026 §7).
++        binaryVersion: String,
+         providerECDHPublicKey: String,
+         transcriptSHA256: String
+     )
+@@ -211,7 +214,7 @@ enum ControlCodec {
+             return .identitySignatureRequest(
+                 authAttemptID: dict["auth_attempt_id"] as? String ?? "",
+                 providerID: dict["provider_id"] as? String ?? "",
+-                binaryVersion: dict["binary_version"] as? Int ?? 0,
++                binaryVersion: dict["binary_version"] as? String ?? "",
+                 providerECDHPublicKey: dict["provider_ecdh_public_key"] as? String ?? "",
+                 transcriptSHA256: dict["transcript_sha256"] as? String ?? ""
+             )
+diff --git a/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift b/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
+index f1682e3..882d7ed 100644
+--- a/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
++++ b/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
+@@ -366,7 +366,7 @@ final class MalibuAgent: ObservableObject {
+     private func handleIdentitySignatureRequest(
+         authAttemptID: String,
+         providerID: String,
+-        binaryVersion: Int,
++        binaryVersion: String,
+         providerECDHPublicKey: String,
+         transcriptSHA256: String
+     ) async {
+diff --git a/phase3-binary/app/Sources/Malibu/System/RegisterClient.swift b/phase3-binary/app/Sources/Malibu/System/RegisterClient.swift
+index f5196c6..576b81b 100644
+--- a/phase3-binary/app/Sources/Malibu/System/RegisterClient.swift
++++ b/phase3-binary/app/Sources/Malibu/System/RegisterClient.swift
+@@ -194,14 +194,14 @@ struct RegisterClient {
+     static func identitySignaturePayload(
+         authAttemptID: String,
+         providerID: String,
+-        binaryVersion: Int,
++        binaryVersion: String,
+         providerECDHPublicKey: String,
+         transcriptSHA256: String
+     ) throws -> Data {
+         try CanonicalJSON.encode(.object([
+             "auth_attempt_id": .string(authAttemptID),
+             "provider_id": .string(providerID),
+-            "binary_version": .number(String(binaryVersion)),
++            "binary_version": .string(binaryVersion),
+             "provider_ecdh_public_key": .string(providerECDHPublicKey),
+             "transcript_sha256": .string(transcriptSHA256)
+         ]))
+diff --git a/phase3-binary/app/Tests/MalibuTests/ControlFrameCodecTests.swift b/phase3-binary/app/Tests/MalibuTests/ControlFrameCodecTests.swift
+index 09eb7f1..e2293e6 100644
+--- a/phase3-binary/app/Tests/MalibuTests/ControlFrameCodecTests.swift
++++ b/phase3-binary/app/Tests/MalibuTests/ControlFrameCodecTests.swift
+@@ -161,7 +161,7 @@ final class ControlFrameCodecTests: XCTestCase {
+         let frame = ControlFrame.identitySignatureRequest(
+             authAttemptID: "auth-1",
+             providerID: "p_abc",
+-            binaryVersion: 2,
++            binaryVersion: "1.8.6",
+             providerECDHPublicKey: "ecdh",
+             transcriptSHA256: "hash"
+         )
+diff --git a/phase3-binary/app/Tests/MalibuTests/RegisterClientTests.swift b/phase3-binary/app/Tests/MalibuTests/RegisterClientTests.swift
+index c28b86e..20a6703 100644
+--- a/phase3-binary/app/Tests/MalibuTests/RegisterClientTests.swift
++++ b/phase3-binary/app/Tests/MalibuTests/RegisterClientTests.swift
+@@ -52,13 +52,13 @@ final class RegisterClientTests: XCTestCase {
+         let payload = try RegisterClient.identitySignaturePayload(
+             authAttemptID: "auth-1",
+             providerID: "p_abc",
+-            binaryVersion: 2,
++            binaryVersion: "1.8.6",
+             providerECDHPublicKey: "ecdh",
+             transcriptSHA256: "hash"
+         )
+         XCTAssertEqual(
+             String(data: payload, encoding: .utf8),
+-            #"{"auth_attempt_id":"auth-1","binary_version":2,"provider_ecdh_public_key":"ecdh","provider_id":"p_abc","transcript_sha256":"hash"}"#
++            #"{"auth_attempt_id":"auth-1","binary_version":"1.8.6","provider_ecdh_public_key":"ecdh","provider_id":"p_abc","transcript_sha256":"hash"}"#
+         )
+     }
+ 

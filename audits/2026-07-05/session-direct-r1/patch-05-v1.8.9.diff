@@ -1,0 +1,52 @@
+diff --git a/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift b/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
+index 80614bd..08b9f93 100644
+--- a/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
++++ b/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
+@@ -165,7 +165,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
+ actor CoordinatorClient {
+     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
+ 
+-    static let binaryVersion = "1.8.8"
++    static let binaryVersion = "1.8.9"
+     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
+ 
+     private let coordinatorURL: URL
+diff --git a/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift b/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift
+index 8f1a16b..0c7c2a6 100644
+--- a/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift
++++ b/phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift
+@@ -1594,10 +1594,10 @@ final class CoordinatorClientTests: XCTestCase {
+         let hello = await client.helloMessage()
+         let auth = await client.authInitialMessage(attempt: attempt)
+ 
+-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.8")
+-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.8")
+-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.8")
+-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.8")
++        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.9")
++        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.9")
++        XCTAssertEqual(hello["binary_version"] as? String, "1.8.9")
++        XCTAssertEqual(auth["binary_version"] as? String, "1.8.9")
+     }
+ 
+     func testAuthInitialDefaultsToSingleEntryCatalog() async throws {
+diff --git a/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift b/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
+index 882d7ed..fd50fad 100644
+--- a/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
++++ b/phase3-binary/app/Sources/Malibu/Agent/MalibuAgent.swift
+@@ -227,7 +227,14 @@ final class MalibuAgent: ObservableObject {
+         switch frame {
+         case let .statusResponse(model, state):
+             snapshot.currentModelID = model
+-            if state == "serving" { snapshot.state = .serving }
++            // CLI's `SwapState` (`RuntimeStateMachine.swift:public enum SwapState`)
++            // has only `.loading` / `.ready` / `.draining`; there is no
++            // `.serving`. `.ready` = model loaded + accepting requests, which
++            // matches what SPEC-026 §6.1 j and coordinator heartbeats
++            // (`state:"ready"`) call the "serving" transition. Accept
++            // either spelling so the state contract survives a rename on
++            // either side.
++            if state == "ready" || state == "serving" { snapshot.state = .serving }
+         case let .metricsResponse(
+             usdc,
+             malibu,
