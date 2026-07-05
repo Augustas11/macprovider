@@ -207,7 +207,6 @@ func main() {
 			Enabled:             cfg.Stats.Enabled,
 			ReaderDSN:           cfg.Stats.ReaderDSN,
 			RollupDSN:           cfg.Stats.RollupDSN,
-			ProviderPortalDSN:   cfg.Stats.ProviderPortalDSN,
 			PartnerKeys:         stats.PartnerKeysConfig{LastUsedAtUpdatesEnabled: cfg.Stats.PartnerKeys.LastUsedAtUpdatesEnabled, WriterDSN: cfg.Stats.PartnerKeys.WriterDSN},
 			PartnerKeysAdminDSN: cfg.Stats.PartnerKeysAdminDSN,
 			Rollup: stats.RollupConfig{
@@ -244,7 +243,7 @@ func main() {
 		// `coordinator stats migrate --admin-dsn=...`
 		// subcommand. The integration test harness applies
 		// migrations through its own admin DSN.
-		logger.Info().Msg("SPEC-017 stats pools opened (reader, rollup, provider_portal); migrations are operator-applied; /v1/stats/* will be mounted by Step 3")
+		logger.Info().Msg("SPEC-017 stats pools opened (reader, rollup); migrations are operator-applied; /v1/stats/* will be mounted by Step 3")
 	} else {
 		logger.Info().Msg("SPEC-017 stats DISABLED via config (default); /v1/stats/* not registered")
 	}

@@ -492,6 +492,8 @@ var _ = strings.HasPrefix
 // bucket.
 // ===========================================================================
 func TestAC22_AuthFailureLimiter(t *testing.T) {
+	waitForRateLimitWindowHeadroom(t, 10*time.Second)
+
 	// Round-7 CODE M closure: build the mux against a store
 	// we hold a reference to so we can query
 	// LookupHashCountForTest after the flood to prove the
@@ -533,6 +535,22 @@ func TestAC22_AuthFailureLimiter(t *testing.T) {
 	// (the 50 429s short-circuited BEFORE the auth dispatcher).
 	if got := st.LookupHashCountForTest(); got > 300 {
 		t.Errorf("partner_keys SELECT count = %d, want ≤300 (auth-failure limiter must cap pre-SELECT DB load)", got)
+	}
+}
+
+func waitForRateLimitWindowHeadroom(t *testing.T, minRemaining time.Duration) {
+	t.Helper()
+	if minRemaining <= 0 || minRemaining >= time.Minute {
+		t.Fatalf("invalid rate-limit window headroom %s", minRemaining)
+	}
+	for {
+		now := time.Now()
+		elapsed := time.Duration(now.Second())*time.Second + time.Duration(now.Nanosecond())
+		remaining := time.Minute - elapsed
+		if remaining >= minRemaining {
+			return
+		}
+		time.Sleep(remaining + 20*time.Millisecond)
 	}
 }
 

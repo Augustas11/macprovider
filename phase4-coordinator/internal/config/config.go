@@ -94,8 +94,10 @@ type OnboardingConfig struct {
 type StatsConfig struct {
 	Enabled bool `yaml:"enabled"`
 
-	// DSNs per active runtime role. When Enabled = true, the
-	// three always-required DSNs MUST be non-empty.
+	// DSNs per active daemon role. When Enabled = true, the
+	// reader and rollup DSNs MUST be non-empty. ProviderPortalDSN
+	// is retained for portal/operator tooling compatibility but
+	// is not opened by the public stats daemon.
 	ReaderDSN         string `yaml:"reader_dsn"`
 	RollupDSN         string `yaml:"rollup_dsn"`
 	ProviderPortalDSN string `yaml:"provider_portal_dsn"`
@@ -1393,8 +1395,8 @@ func (c Config) validateExplorer() error {
 // below; an operator that has not flipped the gate cannot brick
 // startup by leaving Stats fields empty.
 //
-// When Stats.Enabled=true the three required runtime DSNs MUST
-// be set (fail-closed per BUILD §C.3). PartnerKeys.WriterDSN is
+// When Stats.Enabled=true the required daemon DSNs MUST be set
+// (fail-closed per BUILD §C.3). PartnerKeys.WriterDSN is
 // only required when last_used_at_updates_enabled=true. The CLI
 // admin DSN is OPTIONAL even when stats is enabled (BUILD §B.2).
 //
@@ -1430,9 +1432,6 @@ func (c Config) validateStats() error {
 	}
 	if strings.TrimSpace(s.RollupDSN) == "" {
 		return fmt.Errorf("stats.rollup_dsn must be set when stats.enabled is true")
-	}
-	if strings.TrimSpace(s.ProviderPortalDSN) == "" {
-		return fmt.Errorf("stats.provider_portal_dsn must be set when stats.enabled is true")
 	}
 	if s.PartnerKeys.LastUsedAtUpdatesEnabled && strings.TrimSpace(s.PartnerKeys.WriterDSN) == "" {
 		return fmt.Errorf("stats.partner_keys.writer_dsn must be set when stats.partner_keys.last_used_at_updates_enabled is true")

@@ -28,40 +28,27 @@ func TestOpenMissingDSNFailClosed(t *testing.T) {
 		{
 			name: "missing reader",
 			cfg: Config{
-				Enabled:           true,
-				ReaderDSN:         "",
-				RollupDSN:         "x",
-				ProviderPortalDSN: "x",
+				Enabled:   true,
+				ReaderDSN: "",
+				RollupDSN: "x",
 			},
 			wantField: "stats_reader",
 		},
 		{
 			name: "missing rollup",
 			cfg: Config{
-				Enabled:           true,
-				ReaderDSN:         "x",
-				RollupDSN:         "",
-				ProviderPortalDSN: "x",
+				Enabled:   true,
+				ReaderDSN: "x",
+				RollupDSN: "",
 			},
 			wantField: "stats_rollup",
 		},
 		{
-			name: "missing portal",
-			cfg: Config{
-				Enabled:           true,
-				ReaderDSN:         "x",
-				RollupDSN:         "x",
-				ProviderPortalDSN: "",
-			},
-			wantField: "provider_portal",
-		},
-		{
 			name: "writer enabled but DSN missing",
 			cfg: Config{
-				Enabled:           true,
-				ReaderDSN:         "x",
-				RollupDSN:         "x",
-				ProviderPortalDSN: "x",
+				Enabled:   true,
+				ReaderDSN: "x",
+				RollupDSN: "x",
 				PartnerKeys: PartnerKeysConfig{
 					LastUsedAtUpdatesEnabled: true,
 					WriterDSN:                "",
