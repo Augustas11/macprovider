@@ -5,27 +5,6 @@ import XCTest
 @testable import macprovider_cli
 
 final class HTTPServerSwapTests: XCTestCase {
-    func testInferenceReturns503WhenLoading() {
-        let snapshot = RuntimeSnapshot(state: .loading, container: nil, modelID: "old-model", modelHash: "old-hash")
-
-        let error = RouterHandler.warmSwapRejectionError(for: snapshot)
-
-        XCTAssertEqual(error?.status, 503)
-        XCTAssertEqual(error?.code, "provider_loading")
-        XCTAssertEqual(error?.type, "service_unavailable")
-        XCTAssertEqual(error?.envelopeJSONString, #"{"error":{"code":"provider_loading","inference_ran":false,"message":"Provider is loading a new model and is temporarily unavailable. Retry after the indicated interval.","param":null,"request_id":null,"retryable":false,"settlement_ran":false,"type":"service_unavailable"}}"#)
-    }
-
-    func testInferenceReturns503WhenDraining() {
-        let snapshot = RuntimeSnapshot(state: .draining, container: nil, modelID: "old-model", modelHash: "old-hash")
-
-        let error = RouterHandler.warmSwapRejectionError(for: snapshot)
-
-        XCTAssertEqual(error?.status, 503)
-        XCTAssertEqual(error?.code, "provider_loading")
-        XCTAssertEqual(error?.type, "service_unavailable")
-    }
-
     func testInferenceProceedsWhenReady() async throws {
         let runtime = ModelRuntime(
             modelID: "ready-model",
@@ -38,7 +17,7 @@ final class HTTPServerSwapTests: XCTestCase {
         )
         let snapshot = await runtime.currentSnapshot()
 
-        XCTAssertNil(RouterHandler.warmSwapRejectionError(for: snapshot))
+        XCTAssertEqual(snapshot.state, .ready)
         let completion = try await runtime.complete(try makeRequest(model: "ready-model"))
         XCTAssertEqual(completion.content, "ready")
     }
@@ -154,7 +133,7 @@ final class HTTPServerSwapTests: XCTestCase {
         )
         let request = try makeRequest(model: "old-model")
         let snapshot = await runtime.currentSnapshot()
-        XCTAssertNil(RouterHandler.warmSwapRejectionError(for: snapshot))
+        XCTAssertEqual(snapshot.state, .ready)
         try request.validateModelMatches(RouterHandler.modelIDForValidation(
             warmSwapEnabled: true,
             bootModelID: "old-model",

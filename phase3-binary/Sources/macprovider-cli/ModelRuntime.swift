@@ -200,6 +200,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     public let modelID: String?
     public let modelHash: String?
     public let draftModelID: String?
+    public let draftTargetModelID: String?
     public let draftContainer: ModelContainer?
     public let numDraftTokens: Int?
     public let specDecodeGeneration: Int
@@ -210,6 +211,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         modelID: String?,
         modelHash: String?,
         draftModelID: String? = nil,
+        draftTargetModelID: String? = nil,
         draftContainer: ModelContainer? = nil,
         numDraftTokens: Int? = nil,
         specDecodeGeneration: Int = 0
@@ -219,9 +221,17 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.modelID = modelID
         self.modelHash = modelHash
         self.draftModelID = draftModelID
+        self.draftTargetModelID = draftTargetModelID
         self.draftContainer = draftContainer
         self.numDraftTokens = numDraftTokens
         self.specDecodeGeneration = specDecodeGeneration
+    }
+
+    var hasTargetCompatibleDraft: Bool {
+        guard draftModelID != nil, let modelID, numDraftTokens != nil else {
+            return false
+        }
+        return draftTargetModelID == modelID
     }
 }
 
@@ -312,7 +322,10 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentModelID: String?
     private var currentContainer: ModelContainer?
     private var currentDraftModelID: String?
+    private var currentDraftTargetModelID: String?
     private var currentDraftContainer: ModelContainer?
+    private let configuredDraftModelID: String?
+    private let configuredDraftModelLoadPath: String?
     private var currentSpecDecodeGeneration = 0
     private let numDraftTokens: Int
     private let stopTokenFilter: StopTokenFilter
@@ -361,9 +374,14 @@ actor ModelRuntime: ModelRuntimeServing {
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30
     ) async throws {
+        let normalizedDraftModelID = Self.nonEmpty(draftModelID)
+        let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
         self.currentModelID = modelID
         self.currentDraftModelID = nil
+        self.currentDraftTargetModelID = nil
         self.currentDraftContainer = nil
+        self.configuredDraftModelID = normalizedDraftModelID
+        self.configuredDraftModelLoadPath = normalizedDraftModelLoadPath
         self.numDraftTokens = numDraftTokens
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
@@ -386,7 +404,7 @@ actor ModelRuntime: ModelRuntimeServing {
             self.currentContainer = nil
             self.stopTokenFilter = StopTokenFilter(tokens: [])
             self.currentModelHash = nil
-            if draftModelID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            if normalizedDraftModelID != nil {
                 throw SpecDecodeStartupError.targetRequired
             }
             return
@@ -403,9 +421,8 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         self.currentModelHash = try? Self.modelWeightArtifactManifestHash(in: directory)
 
-        if let draftModelID = draftModelID?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !draftModelID.isEmpty {
-            let (draftContainer, draftDirectory) = try await Self.loadLocalContainer(from: draftModelLoadPath ?? draftModelID)
+        if let draftModelID = normalizedDraftModelID {
+            let (draftContainer, draftDirectory) = try await Self.loadLocalContainer(from: normalizedDraftModelLoadPath ?? draftModelID)
             try await Self.validateTokenizerCompatibility(
                 target: container,
                 targetDirectory: directory,
@@ -428,6 +445,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 kvBitsOverride: self.kvBitsOverride
             )
             self.currentDraftModelID = draftModelID
+            self.currentDraftTargetModelID = modelID
             self.currentDraftContainer = draftContainer
         }
     }
@@ -449,10 +467,14 @@ actor ModelRuntime: ModelRuntimeServing {
         testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
         testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
     ) {
+        let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         self.currentModelID = modelID
         self.currentContainer = nil
-        self.currentDraftModelID = draftModelID
+        self.currentDraftModelID = normalizedDraftModelID
+        self.currentDraftTargetModelID = normalizedDraftModelID == nil ? nil : modelID
         self.currentDraftContainer = nil
+        self.configuredDraftModelID = normalizedDraftModelID
+        self.configuredDraftModelLoadPath = nil
         self.numDraftTokens = numDraftTokens
         self.currentModelHash = modelHash
         self.stopTokenFilter = StopTokenFilter(tokens: [])
@@ -482,6 +504,34 @@ actor ModelRuntime: ModelRuntimeServing {
             modelID: currentModelID,
             modelHash: currentModelHash,
             draftModelID: currentDraftModelID,
+            draftTargetModelID: currentDraftTargetModelID,
+            draftContainer: currentDraftContainer,
+            numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens,
+            specDecodeGeneration: currentSpecDecodeGeneration
+        )
+    }
+
+    private func requestStartSnapshot() -> RuntimeSnapshot {
+        if state == .loading {
+            return RuntimeSnapshot(
+                state: .ready,
+                container: currentContainer,
+                modelID: currentModelID,
+                modelHash: currentModelHash,
+                draftModelID: nil,
+                draftTargetModelID: nil,
+                draftContainer: nil,
+                numDraftTokens: nil,
+                specDecodeGeneration: currentSpecDecodeGeneration
+            )
+        }
+        return RuntimeSnapshot(
+            state: state,
+            container: currentContainer,
+            modelID: currentModelID,
+            modelHash: currentModelHash,
+            draftModelID: currentDraftModelID,
+            draftTargetModelID: currentDraftTargetModelID,
             draftContainer: currentDraftContainer,
             numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens,
             specDecodeGeneration: currentSpecDecodeGeneration
@@ -503,31 +553,98 @@ actor ModelRuntime: ModelRuntimeServing {
         try transitionToLoading(target: targetModelID)
         let drainTimeoutSeconds = swapDrainTimeoutSeconds
         let providerStatus = providerStatus
-        let loader = loader
         let testLoader = testLoader
-        return Task.detached { [weak self, loader, testLoader, drainTimeoutSeconds, providerStatus] in
+        let configuredDraftModelID = configuredDraftModelID
+        let configuredDraftModelLoadPath = configuredDraftModelLoadPath
+        let numDraftTokens = numDraftTokens
+        let maxContextTokens = maxContextTokens
+        let kvBitsOverride = kvBitsOverride
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride] in
             guard let self else { return }
             do {
                 let container: ModelContainer?
                 let modelID: String
                 let modelHash: String?
+                let draftModelID: String?
+                let draftContainer: ModelContainer?
+                let draftFailureReason: String?
                 if let testLoader {
                     let loaded = try await testLoader(targetModelID)
                     container = nil
                     modelID = loaded.0
                     modelHash = loaded.1
+                    if let configuredDraftModelID {
+                        do {
+                            let loadedDraft = try await testLoader(configuredDraftModelID)
+                            draftModelID = loadedDraft.0
+                            draftContainer = nil
+                            draftFailureReason = nil
+                        } catch {
+                            draftModelID = nil
+                            draftContainer = nil
+                            draftFailureReason = Self.draftSwapFailureReason(for: error)
+                        }
+                    } else {
+                        draftModelID = nil
+                        draftContainer = nil
+                        draftFailureReason = nil
+                    }
                 } else {
-                    let loaded = try await loader(targetModelID)
+                    let loaded = try await Self.loadLocalContainer(from: targetModelID)
                     container = loaded.0
-                    modelID = loaded.1
-                    modelHash = loaded.2
+                    modelID = targetModelID
+                    modelHash = try? Self.modelWeightArtifactManifestHash(in: loaded.1)
+                    if let configuredDraftModelID {
+                        do {
+                            let draftLoaded = try await Self.loadLocalContainer(from: configuredDraftModelLoadPath ?? configuredDraftModelID)
+                            try await Self.validateTokenizerCompatibility(
+                                target: loaded.0,
+                                targetDirectory: loaded.1,
+                                draft: draftLoaded.0,
+                                draftDirectory: draftLoaded.1
+                            )
+                            try await Self.runSpeculativeStartupProbe(
+                                target: loaded.0,
+                                draft: draftLoaded.0,
+                                numDraftTokens: 1,
+                                maxContextTokens: maxContextTokens,
+                                kvBitsOverride: kvBitsOverride
+                            )
+                            try await Self.runSpeculativeEquivalenceCanary(
+                                target: loaded.0,
+                                draft: draftLoaded.0,
+                                targetModelID: modelID,
+                                numDraftTokens: numDraftTokens,
+                                maxContextTokens: maxContextTokens,
+                                kvBitsOverride: kvBitsOverride
+                            )
+                            draftModelID = configuredDraftModelID
+                            draftContainer = draftLoaded.0
+                            draftFailureReason = nil
+                        } catch {
+                            draftModelID = nil
+                            draftContainer = nil
+                            draftFailureReason = Self.draftSwapFailureReason(for: error)
+                        }
+                    } else {
+                        draftModelID = nil
+                        draftContainer = nil
+                        draftFailureReason = nil
+                    }
                 }
                 try await self.enterDrainPhase()
-                let didTimeout = await Self.waitForDrainOrTimeout(providerStatus: providerStatus, timeoutSeconds: drainTimeoutSeconds)
+                let didTimeout = await self.waitForDrainOrTimeout(providerStatus: providerStatus, timeoutSeconds: drainTimeoutSeconds)
                 if didTimeout {
                     await self.cancelAllInFlightForDrainTimeout()
                 }
-                await self.completeSwapAtomically(container: container, modelID: modelID, modelHash: modelHash)
+                await self.completeSwapAtomically(
+                    container: container,
+                    modelID: modelID,
+                    modelHash: modelHash,
+                    draftModelID: draftModelID,
+                    draftContainer: draftContainer,
+                    draftFailureReason: draftFailureReason
+                )
             } catch {
                 await self.failSwap(reason: String(describing: error))
             }
@@ -576,7 +693,7 @@ actor ModelRuntime: ModelRuntimeServing {
         signal(SwapSignal(targetModelID: targetModelID ?? "", outcome: .loadFinished))
     }
 
-    private nonisolated static func waitForDrainOrTimeout(providerStatus: ProviderStatus?, timeoutSeconds: Int) async -> Bool {
+    private func waitForDrainOrTimeout(providerStatus: ProviderStatus?, timeoutSeconds: Int) async -> Bool {
         guard let providerStatus else {
             return false
         }
@@ -584,7 +701,9 @@ actor ModelRuntime: ModelRuntimeServing {
         let timeoutMs = Int64(timeoutSeconds * 1000)
         while !Task.isCancelled {
             let snapshot = await providerStatus.snapshot()
-            if snapshot.requestsInFlight == 0 {
+            let providerInFlight = snapshot.requestsInFlight > 0
+            let runtimeInFlight = !inFlightCancellations.isEmpty
+            if !providerInFlight && !runtimeInFlight {
                 return false
             }
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
@@ -597,16 +716,47 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private func completeSwapAtomically(container: ModelContainer?, modelID: String, modelHash: String?) async {
+        await completeSwapAtomically(
+            container: container,
+            modelID: modelID,
+            modelHash: modelHash,
+            draftModelID: nil,
+            draftContainer: nil,
+            draftFailureReason: nil
+        )
+    }
+
+    private func completeSwapAtomically(
+        container: ModelContainer?,
+        modelID: String,
+        modelHash: String?,
+        draftModelID: String?,
+        draftContainer: ModelContainer?,
+        draftFailureReason: String?
+    ) async {
         let target = targetModelID ?? modelID
-        await providerStatus?.completeTargetSwap(modelID: modelID, modelHash: modelHash)
         currentContainer = container
         currentModelID = modelID
         currentModelHash = modelHash
-        currentDraftModelID = nil
-        currentDraftContainer = nil
+        currentDraftModelID = draftModelID
+        currentDraftTargetModelID = draftModelID == nil ? nil : modelID
+        currentDraftContainer = draftContainer
         currentSpecDecodeGeneration += 1
         state = .ready
         targetModelID = nil
+        if let draftFailureReason {
+            Self.logDraftSwapFailure(
+                targetModelID: modelID,
+                draftModelID: configuredDraftModelID,
+                reason: draftFailureReason
+            )
+        }
+        await providerStatus?.completeTargetSwap(
+            modelID: modelID,
+            modelHash: modelHash,
+            specDecodeDraftModelID: draftModelID,
+            specDecodeNumDraftTokens: draftModelID == nil ? nil : numDraftTokens
+        )
         signal(SwapSignal(targetModelID: target, outcome: .completed(newModelID: modelID, newModelHash: modelHash)))
     }
 
@@ -619,6 +769,59 @@ actor ModelRuntime: ModelRuntimeServing {
         signal(SwapSignal(targetModelID: target, outcome: .failed(reason: reason)))
         state = .ready
         targetModelID = nil
+    }
+
+    private nonisolated static func logDraftSwapFailure(targetModelID: String?, draftModelID: String?, reason: String) {
+        let payload: [String: Any] = [
+            "draft_model_id": redactedOperatorModelID(draftModelID) ?? NSNull(),
+            "event": "spec_decode_draft_swap_failed",
+            "reason": reason,
+            "spec_decode_enabled": false,
+            "target_model_id": redactedOperatorModelID(targetModelID) ?? NSNull(),
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            FileHandle.standardError.write(data)
+            FileHandle.standardError.write(Data("\n".utf8))
+        } catch {
+            let line = "event=spec_decode_draft_swap_failed reason=\(reason) spec_decode_enabled=false\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+    }
+
+    private nonisolated static func redactedOperatorModelID(_ modelID: String?) -> String? {
+        ProviderStatus.publicSpecDecodeDraftModelID(modelID)
+    }
+
+    private nonisolated static func nonEmpty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private nonisolated static func draftSwapFailureReason(for error: Error) -> String {
+        if error is ModelRuntimeLoadError {
+            return "draft_model_load_failed"
+        }
+        if let startupError = error as? SpecDecodeStartupError {
+            switch startupError {
+            case .targetRequired:
+                return "draft_model_target_required"
+            case .tokenizerMismatch:
+                return "draft_model_tokenizer_mismatch"
+            case .probeFailed:
+                return "draft_model_probe_failed"
+            case .fixtureMissing:
+                return "draft_model_equivalence_fixture_missing"
+            case .fixtureInvalid:
+                return "draft_model_equivalence_fixture_invalid"
+            case .equivalenceFailed:
+                return "draft_model_equivalence_failed"
+            }
+        }
+        return "draft_model_verification_failed"
     }
 
     private func signal(_ signal: SwapSignal) {
@@ -651,16 +854,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
-        let snapshot = RuntimeSnapshot(
-            state: state,
-            container: currentContainer,
-            modelID: currentModelID,
-            modelHash: currentModelHash,
-            draftModelID: currentDraftModelID,
-            draftContainer: currentDraftContainer,
-            numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens,
-            specDecodeGeneration: currentSpecDecodeGeneration
-        )
+        let snapshot = requestStartSnapshot()
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
         try Self.validateToolChoiceScope(request)
@@ -674,6 +868,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        try handle.drainCancelled.check()
         guard let container = handle.snapshot.container else {
             if testCompletion != nil {
                 return
@@ -683,9 +878,12 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let maxContextTokens = maxContextTokens
         try await inferenceGate.withPermit {
+            try handle.drainCancelled.check()
             return try await container.perform { context in
+                try handle.drainCancelled.check()
                 let input = try Self.userInput(for: request)
                 let lmInput = try await context.processor.prepare(input: input)
+                try handle.drainCancelled.check()
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             }
         }
@@ -816,18 +1014,24 @@ actor ModelRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        let handle = try acquireRequestHandle(request)
+        defer { unregisterInFlight(handle.registrationID) }
+        return try await completeWithServedSnapshot(request, with: handle, shouldCancel: shouldCancel)
+    }
+
+    func completeWithServedSnapshot(
+        _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) async throws -> (CompletionResult, RuntimeSnapshot) {
         let completionStartedAt = Date()
-        let snapshot = await currentSnapshot()
-        try Self.validateReady(snapshot.state)
-        try request.validateModelMatches(snapshot.modelID)
-        try Self.validateToolChoiceScope(request)
-        let drainCancelled = DrainCancelToken()
-        let registrationID = registerInFlight { drainCancelled.fire() }
-        defer { unregisterInFlight(registrationID) }
+        let snapshot = handle.snapshot
+        let drainCancelled = handle.drainCancelled
+        try drainCancelled.check()
         if let testSpeculativeCompletion,
            Self.speculativeRoute(
                for: request,
-               draftLoaded: true,
+               draftLoaded: snapshot.hasTargetCompatibleDraft,
                numDraftTokens: snapshot.numDraftTokens
            ) == .speculative {
             do {
@@ -879,7 +1083,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     let promptTokenIds: [Int32] = lmInput.text.tokens.asArray(Int32.self)
                     if Self.speculativeRoute(
                         for: request,
-                        draftLoaded: snapshot.draftContainer != nil,
+                        draftLoaded: snapshot.hasTargetCompatibleDraft && snapshot.draftContainer != nil,
                         numDraftTokens: snapshot.numDraftTokens
                     ) == .speculative,
                        let draftContainer = snapshot.draftContainer,
@@ -1162,7 +1366,7 @@ actor ModelRuntime: ModelRuntimeServing {
         if let testSpeculativeStream,
            Self.speculativeRoute(
                for: request,
-               draftLoaded: true,
+               draftLoaded: snapshot.hasTargetCompatibleDraft,
                numDraftTokens: snapshot.numDraftTokens
            ) == .speculative {
             let completion = try await Self.withDrainCancellation(drainCancelled) {
@@ -1260,7 +1464,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     let streamToolsIncrementally = Self.hasEnabledTools(request.promptSource.tools)
                     if Self.speculativeRoute(
                         for: request,
-                        draftLoaded: snapshot.draftContainer != nil,
+                        draftLoaded: snapshot.hasTargetCompatibleDraft && snapshot.draftContainer != nil,
                         numDraftTokens: snapshot.numDraftTokens
                     ) == .speculative,
                        let draftContainer = snapshot.draftContainer,

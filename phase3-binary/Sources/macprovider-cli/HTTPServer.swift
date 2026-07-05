@@ -208,11 +208,26 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private func handleStatus(context: ChannelHandlerContext) {
         let writer = ResponseWriter(context: context)
         let providerStatus = providerStatus
+        let modelRuntime = modelRuntime
+        let warmSwapEnabled = warmSwapEnabled
         let providerID = providerID
         let coordinatorURL = coordinatorURL
-        Task.detached { @Sendable [providerStatus, writer, providerID, coordinatorURL] in
+        Task.detached { @Sendable [providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL] in
             let snapshot = await providerStatus.snapshot()
-            writer.writeJSON(status: .ok, body: Self.statusResponse(snapshot, providerID: providerID, coordinatorURL: coordinatorURL))
+            let runtimeSnapshot = warmSwapEnabled ? await modelRuntime.currentSnapshot() : nil
+            let telemetryMatchesRuntime = runtimeSnapshot.map { $0.specDecodeGeneration == snapshot.specDecodeGeneration } ?? true
+            let telemetryRuntimeEligible = runtimeSnapshot.map { $0.state == .ready && $0.hasTargetCompatibleDraft } ?? true
+            writer.writeJSON(
+                status: .ok,
+                body: Self.statusResponse(
+	                    snapshot,
+	                    providerID: providerID,
+	                    coordinatorURL: coordinatorURL,
+	                    runtimeSnapshot: runtimeSnapshot,
+	                    specDecodeTelemetryMatchesRuntime: telemetryMatchesRuntime,
+	                    specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible
+	                )
+            )
         }
     }
 
@@ -272,9 +287,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
             let providerStatus = providerStatus
             let idlePrewarmer = idlePrewarmer
-            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, settlementMetadata, idlePrewarmer] in
-                let startedAt = await providerStatus.beginRequest()
-                await idlePrewarmer?.cancelInflightPrewarm()
+            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt] in
+                var startedAt = requestAcceptedAt
+                var providerRequestStarted = false
                 // SPEC-015 §M.2.2 atomic-read invariant — capture
                 // the pre-snapshot for warm-swap validation, then
                 // call `completeWithServedSnapshot` which returns
@@ -292,14 +307,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     snapshot: preSnapshot
                 )
                 do {
-                    let snapshot = preSnapshot
-                    if let error = Self.warmSwapRejectionError(for: snapshot) {
-                        throw error
+                    let handle = try await modelRuntime.acquireRequestHandle(request)
+                    defer {
+                        Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                     }
-                    if warmSwapEnabled {
-                        try request.validateModelMatches(snapshot.modelID)
-                    }
-                    let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, shouldCancel: { false })
+                    startedAt = await providerStatus.beginRequest()
+                    providerRequestStarted = true
+                    await idlePrewarmer?.cancelInflightPrewarm()
+                    let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { false })
                     let modelHashSource = Self.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
                         snapshot: servedSnapshot
@@ -348,13 +363,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
                         writer.writeJSON(status: .ok, body: response)
                     }
-                } catch is DrainCancelledError {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .modelSwapViolation)
-                    writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
-                } catch let apiErr as APIError {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                    do {
+	                } catch is DrainCancelledError {
+	                    if providerRequestStarted {
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+	                    }
+	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .modelSwapViolation)
+	                    writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
+	                } catch let apiErr as APIError {
+	                    if providerRequestStarted {
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+	                    }
+	                    do {
                         let receipt = try Self.errorReceiptHeaderResult(
                             providerID: providerID,
                             receiptBuilder: receiptBuilder,
@@ -382,9 +401,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
                         writer.writeAPIError(apiErr)
                     }
-                } catch {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                    let apiError =
+	                } catch {
+	                    if providerRequestStarted {
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+	                    }
+	                    let apiError =
                         APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
                     do {
                         let receipt = try Self.errorReceiptHeaderResult(
@@ -569,21 +590,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let providerStatus = providerStatus
         Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, settlementMetadata, idlePrewarmer] in
-            let startedAt = await providerStatus.beginRequest()
-            await idlePrewarmer?.cancelInflightPrewarm()
+            var startedAt = Date()
+            var providerRequestStarted = false
             var sseStarted = false
             do {
-                let snapshot = await modelRuntime.currentSnapshot()
-                if let error = Self.warmSwapRejectionError(for: snapshot) {
-                    throw error
-                }
-                if warmSwapEnabled {
-                    try request.validateModelMatches(snapshot.modelID)
-                }
                 let handle = try await modelRuntime.acquireRequestHandle(request)
                 defer {
                     Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                 }
+                startedAt = await providerStatus.beginRequest()
+                providerRequestStarted = true
+                await idlePrewarmer?.cancelInflightPrewarm()
                 try await modelRuntime.preflight(request, with: handle)
 
                 writer.startSSE(extraHeaders: Self.streamingSettlementHeadHeaders(settlementMetadata: settlementMetadata) + [
@@ -704,7 +721,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 writer.writeSSEDone(trailers: trailers)
             } catch let error as APIError {
-                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                if providerRequestStarted {
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                }
                 if sseStarted {
                     writer.writeSSEJSON(error.envelope)
                     writer.writeSSEDone()
@@ -712,7 +731,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     writer.writeAPIError(error)
                 }
             } catch is DrainCancelledError {
-                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                if providerRequestStarted {
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                }
                 if sseStarted {
                     writer.writeSSEJSON(Self.swapDrainTimeoutEnvelope())
                     writer.writeSSEDone()
@@ -720,7 +741,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
                 }
             } catch {
-                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                if providerRequestStarted {
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                }
                 if sseStarted {
                     writer.writeSSEJSON(
                         APIError(
@@ -738,10 +761,6 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             }
         }
-    }
-
-    static func warmSwapRejectionError(for snapshot: RuntimeSnapshot) -> APIError? {
-        snapshot.state == .ready ? nil : ModelRuntime.providerLoadingError()
     }
 
     static func modelIDForValidation(warmSwapEnabled: Bool, bootModelID: String?, runtimeSnapshot: RuntimeSnapshot) -> String? {
@@ -1132,13 +1151,22 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         ]
     }
 
-    static func statusResponse(_ snapshot: ProviderSnapshot, providerID: String?, coordinatorURL: String?) -> [String: Any] {
+    static func statusResponse(
+        _ snapshot: ProviderSnapshot,
+        providerID: String?,
+        coordinatorURL: String?,
+        runtimeSnapshot: RuntimeSnapshot? = nil,
+        specDecodeTelemetryMatchesRuntime: Bool = true,
+        specDecodeTelemetryRuntimeEligible: Bool = true
+    ) -> [String: Any] {
+        let effectiveModelID = runtimeSnapshot?.modelID ?? snapshot.modelID
+        let effectiveModelLoaded = runtimeSnapshot.map { $0.container != nil || $0.modelID != nil } ?? snapshot.modelLoaded
         var body: [String: Any] = [
             "binary_version": CoordinatorClient.binaryVersion,
             "provider_id": jsonNullable(providerID),
             "status": snapshot.status.rawValue,
-            "model": snapshot.modelID ?? NSNull(),
-            "model_loaded": snapshot.modelLoaded,
+            "model": effectiveModelID ?? NSNull(),
+            "model_loaded": effectiveModelLoaded,
             "uptime_s": snapshot.uptimeSeconds,
             "requests_total": snapshot.requestsTotal,
             "requests_in_flight": snapshot.requestsInFlight,
@@ -1160,12 +1188,30 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "recommended_binary_version": jsonNullable(snapshot.recommendedBinaryVersion),
             ],
         ]
-        body.merge(specDecodeTelemetryFields(snapshot)) { _, new in new }
+        body.merge(specDecodeTelemetryFields(
+            snapshot,
+            matchesRuntime: specDecodeTelemetryMatchesRuntime,
+            runtimeEligible: specDecodeTelemetryRuntimeEligible
+        )) { _, new in new }
         return body
     }
 
-    static func specDecodeTelemetryFields(_ snapshot: ProviderSnapshot) -> [String: Any] {
-        [
+    static func specDecodeTelemetryFields(
+        _ snapshot: ProviderSnapshot,
+        matchesRuntime: Bool = true,
+        runtimeEligible: Bool = true
+    ) -> [String: Any] {
+        guard matchesRuntime, runtimeEligible else {
+            return [
+                "spec_decode_enabled": false,
+                "spec_decode_draft_model_id": NSNull(),
+                "spec_decode_num_draft_tokens": NSNull(),
+                "spec_decode_drafted_tokens_since_last": 0,
+                "spec_decode_accepted_tokens_since_last": 0,
+                "spec_decode_acceptance_rate": NSNull(),
+            ]
+        }
+        return [
             "spec_decode_enabled": snapshot.specDecodeEnabled,
             "spec_decode_draft_model_id": snapshot.specDecodeDraftModelID ?? NSNull(),
             "spec_decode_num_draft_tokens": snapshot.specDecodeNumDraftTokens ?? NSNull(),

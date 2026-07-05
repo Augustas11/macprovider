@@ -47,6 +47,67 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertTrue(body["spec_decode_acceptance_rate"] is NSNull)
     }
 
+    func testStatusResponseUsesRuntimeModelDuringProviderStatusLag() async {
+        let status = ProviderStatus(modelID: "old-model", modelLoaded: false, capacity: makeCapacity())
+        let snap = await status.snapshot()
+        let runtimeSnapshot = RuntimeSnapshot(state: .ready, container: nil, modelID: "new-model", modelHash: "new-hash")
+
+        let body = RouterHandler.statusResponse(
+            snap,
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            runtimeSnapshot: runtimeSnapshot
+        )
+
+        XCTAssertEqual(body["model"] as? String, "new-model")
+        XCTAssertEqual(body["model_loaded"] as? Bool, true)
+    }
+
+    func testSpecDecodeStatusSuppressesTelemetryOnRuntimeGenerationMismatch() async {
+        let status = ProviderStatus(
+            modelID: "m",
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            specDecodeDraftModelID: "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+            specDecodeNumDraftTokens: 3
+        )
+        let snap = await status.snapshot()
+
+        let body = RouterHandler.statusResponse(
+            snap,
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            specDecodeTelemetryMatchesRuntime: false
+        )
+
+        XCTAssertEqual(body["spec_decode_enabled"] as? Bool, false)
+        XCTAssertTrue(body["spec_decode_draft_model_id"] is NSNull)
+        XCTAssertTrue(body["spec_decode_num_draft_tokens"] is NSNull)
+        XCTAssertEqual(body["spec_decode_drafted_tokens_since_last"] as? Int, 0)
+        XCTAssertEqual(body["spec_decode_accepted_tokens_since_last"] as? Int, 0)
+        XCTAssertTrue(body["spec_decode_acceptance_rate"] is NSNull)
+    }
+
+    func testSpecDecodeStatusSuppressesTelemetryWhenRuntimeNotRequestEligible() async {
+        let status = ProviderStatus(
+            modelID: "m",
+            modelLoaded: true,
+            capacity: makeCapacity(),
+            specDecodeDraftModelID: "mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit",
+            specDecodeNumDraftTokens: 3
+        )
+        let snap = await status.snapshot()
+
+        let fields = RouterHandler.specDecodeTelemetryFields(snap, runtimeEligible: false)
+
+        XCTAssertEqual(fields["spec_decode_enabled"] as? Bool, false)
+        XCTAssertTrue(fields["spec_decode_draft_model_id"] is NSNull)
+        XCTAssertTrue(fields["spec_decode_num_draft_tokens"] is NSNull)
+        XCTAssertEqual(fields["spec_decode_drafted_tokens_since_last"] as? Int, 0)
+        XCTAssertEqual(fields["spec_decode_accepted_tokens_since_last"] as? Int, 0)
+        XCTAssertTrue(fields["spec_decode_acceptance_rate"] is NSNull)
+    }
+
     func testSpecDecodeStatusWindowAggregatesAndResetsWithRequestWindow() async {
         let status = ProviderStatus(
             modelID: "m",

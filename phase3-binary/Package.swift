@@ -63,6 +63,9 @@ let package = Package(
                 .product(name: "Yams", package: "Yams")
             ],
             path: "Sources/macprovider-cli",
+            resources: [
+                .copy("Resources/spec028")
+            ],
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency")
             ]
