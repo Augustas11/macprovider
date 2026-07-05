@@ -2098,17 +2098,23 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     static func tokenizerArtifactFingerprint(in directory: URL) throws -> String? {
-        let tokenizerArtifactNames = [
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "special_tokens_map.json",
-            "tokenizer.model",
-            "vocab.json",
-            "merges.txt",
-            "added_tokens.json",
-            "chat_template.jinja",
-        ]
         let fileManager = FileManager.default
+        let hasFastTokenizer = fileManager.fileExists(atPath: directory.appendingPathComponent("tokenizer.json").path)
+        let tokenizerArtifactNames = hasFastTokenizer
+            ? [
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+                "added_tokens.json",
+            ]
+            : [
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+                "tokenizer.model",
+                "vocab.json",
+                "merges.txt",
+                "added_tokens.json",
+            ]
         let files = try tokenizerArtifactNames.compactMap { name -> TokenizerArtifactManifestFile? in
             let url = directory.appendingPathComponent(name)
             var isDirectory = ObjCBool(false)
@@ -2118,12 +2124,11 @@ actor ModelRuntime: ModelRuntimeServing {
                 return nil
             }
             let contentURL = url.resolvingSymlinksInPath()
-            let attributes = try fileManager.attributesOfItem(atPath: contentURL.path)
-            let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+            let data = try tokenizerArtifactFingerprintData(for: contentURL, name: name)
             return TokenizerArtifactManifestFile(
                 name: name,
-                sha256: try sha256Hex(ofFileAt: contentURL),
-                size: size
+                sha256: hexString(SHA256.hash(data: data)),
+                size: UInt64(data.count)
             )
         }
 
@@ -2134,6 +2139,20 @@ actor ModelRuntime: ModelRuntimeServing {
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(manifest)
         return hexString(SHA256.hash(data: data))
+    }
+
+    private static func tokenizerArtifactFingerprintData(for url: URL, name: String) throws -> Data {
+        let data = try Data(contentsOf: url)
+        guard name == "tokenizer_config.json",
+              var root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return data
+        }
+        // Chat-template default prompt text can differ across same-vocabulary
+        // draft/target repos. Runtime token probes plus the equivalence canary
+        // remain the authority for whether such a pair is actually compatible.
+        root.removeValue(forKey: "chat_template")
+        return try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys, .withoutEscapingSlashes])
     }
 
     private static func sha256Hex(ofFileAt url: URL) throws -> String {
