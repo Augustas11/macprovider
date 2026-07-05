@@ -199,6 +199,27 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     public let container: ModelContainer?
     public let modelID: String?
     public let modelHash: String?
+    public let draftModelID: String?
+    public let draftContainer: ModelContainer?
+    public let numDraftTokens: Int?
+
+    init(
+        state: SwapState,
+        container: ModelContainer?,
+        modelID: String?,
+        modelHash: String?,
+        draftModelID: String? = nil,
+        draftContainer: ModelContainer? = nil,
+        numDraftTokens: Int? = nil
+    ) {
+        self.state = state
+        self.container = container
+        self.modelID = modelID
+        self.modelHash = modelHash
+        self.draftModelID = draftModelID
+        self.draftContainer = draftContainer
+        self.numDraftTokens = numDraftTokens
+    }
 }
 
 public struct RequestHandle: @unchecked Sendable {
@@ -223,6 +244,32 @@ struct ModelRuntimeLoadError: Error, CustomStringConvertible {
     }
 }
 
+enum SpecDecodeStartupError: Error, CustomStringConvertible, Equatable {
+    case targetRequired
+    case tokenizerMismatch
+    case probeFailed(String)
+    case fixtureMissing
+    case fixtureInvalid(String)
+    case equivalenceFailed(plain: [Int], speculative: [Int])
+
+    var description: String {
+        switch self {
+        case .targetRequired:
+            return "draft_model_target_required"
+        case .tokenizerMismatch:
+            return "draft_model_tokenizer_mismatch"
+        case .probeFailed(let reason):
+            return "draft_model_probe_failed: \(reason)"
+        case .fixtureMissing:
+            return "draft_model_equivalence_failed: spec028 equivalence fixture missing"
+        case .fixtureInvalid(let reason):
+            return "draft_model_equivalence_failed: spec028 equivalence fixture invalid: \(reason)"
+        case .equivalenceFailed:
+            return "draft_model_equivalence_failed"
+        }
+    }
+}
+
 struct InternalWarmupResult: Sendable {
     let tokensGenerated: Int
     let firstTokenElapsedMS: Double
@@ -243,6 +290,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private var targetModelID: String?
     private var currentModelID: String?
     private var currentContainer: ModelContainer?
+    private var currentDraftModelID: String?
+    private var currentDraftContainer: ModelContainer?
+    private let numDraftTokens: Int
     private let stopTokenFilter: StopTokenFilter
     private var currentModelHash: String?
     private let maxContextTokens: Int
@@ -278,6 +328,9 @@ actor ModelRuntime: ModelRuntimeServing {
     init(
         modelID: String?,
         modelLoadPath: String? = nil,
+        draftModelID: String? = nil,
+        draftModelLoadPath: String? = nil,
+        numDraftTokens: Int = 3,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
         maxBatch: Int = 1,
@@ -285,6 +338,9 @@ actor ModelRuntime: ModelRuntimeServing {
         swapDrainTimeoutSeconds: Int = 30
     ) async throws {
         self.currentModelID = modelID
+        self.currentDraftModelID = nil
+        self.currentDraftContainer = nil
+        self.numDraftTokens = numDraftTokens
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
         self.conversationCache = ConversationCache()
@@ -304,6 +360,9 @@ actor ModelRuntime: ModelRuntimeServing {
             self.currentContainer = nil
             self.stopTokenFilter = StopTokenFilter(tokens: [])
             self.currentModelHash = nil
+            if draftModelID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                throw SpecDecodeStartupError.targetRequired
+            }
             return
         }
 
@@ -317,11 +376,41 @@ actor ModelRuntime: ModelRuntimeServing {
             self.stopTokenFilter = StopTokenFilter(tokens: [])
         }
         self.currentModelHash = try? Self.modelWeightArtifactManifestHash(in: directory)
+
+        if let draftModelID = draftModelID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !draftModelID.isEmpty {
+            let (draftContainer, draftDirectory) = try await Self.loadLocalContainer(from: draftModelLoadPath ?? draftModelID)
+            try await Self.validateTokenizerCompatibility(
+                target: container,
+                targetDirectory: directory,
+                draft: draftContainer,
+                draftDirectory: draftDirectory
+            )
+            try await Self.runSpeculativeStartupProbe(
+                target: container,
+                draft: draftContainer,
+                numDraftTokens: 1,
+                maxContextTokens: self.maxContextTokens,
+                kvBitsOverride: self.kvBitsOverride
+            )
+            try await Self.runSpeculativeEquivalenceCanary(
+                target: container,
+                draft: draftContainer,
+                targetModelID: modelID,
+                numDraftTokens: numDraftTokens,
+                maxContextTokens: self.maxContextTokens,
+                kvBitsOverride: self.kvBitsOverride
+            )
+            self.currentDraftModelID = draftModelID
+            self.currentDraftContainer = draftContainer
+        }
     }
 
     init(
         modelID: String?,
         modelHash: String? = nil,
+        draftModelID: String? = nil,
+        numDraftTokens: Int = 3,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
         maxBatch: Int = 1,
@@ -334,6 +423,9 @@ actor ModelRuntime: ModelRuntimeServing {
     ) {
         self.currentModelID = modelID
         self.currentContainer = nil
+        self.currentDraftModelID = draftModelID
+        self.currentDraftContainer = nil
+        self.numDraftTokens = numDraftTokens
         self.currentModelHash = modelHash
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
@@ -358,7 +450,10 @@ actor ModelRuntime: ModelRuntimeServing {
             state: state,
             container: currentContainer,
             modelID: currentModelID,
-            modelHash: currentModelHash
+            modelHash: currentModelHash,
+            draftModelID: currentDraftModelID,
+            draftContainer: currentDraftContainer,
+            numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens
         )
     }
 
@@ -426,6 +521,14 @@ actor ModelRuntime: ModelRuntimeServing {
         maxContextTokens
     }
 
+    func draftModelIDForTest() -> String? {
+        currentDraftModelID
+    }
+
+    func numDraftTokensForTest() -> Int {
+        numDraftTokens
+    }
+
     private func transitionToLoading(target: String) throws {
         guard state == .ready else {
             throw RuntimeStateMachineError.notReady(current: state)
@@ -467,6 +570,8 @@ actor ModelRuntime: ModelRuntimeServing {
         currentContainer = container
         currentModelID = modelID
         currentModelHash = modelHash
+        currentDraftModelID = nil
+        currentDraftContainer = nil
         state = .ready
         targetModelID = nil
         signal(SwapSignal(targetModelID: target, outcome: .completed(newModelID: modelID, newModelHash: modelHash)))
@@ -517,7 +622,10 @@ actor ModelRuntime: ModelRuntimeServing {
             state: state,
             container: currentContainer,
             modelID: currentModelID,
-            modelHash: currentModelHash
+            modelHash: currentModelHash,
+            draftModelID: currentDraftModelID,
+            draftContainer: currentDraftContainer,
+            numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens
         )
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
@@ -1027,6 +1135,190 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
+    private static func validateTokenizerCompatibility(
+        target: ModelContainer,
+        targetDirectory: URL,
+        draft: ModelContainer,
+        draftDirectory: URL
+    ) async throws {
+        guard let targetFingerprint = try tokenizerArtifactFingerprint(in: targetDirectory),
+              let draftFingerprint = try tokenizerArtifactFingerprint(in: draftDirectory),
+              targetFingerprint == draftFingerprint
+        else {
+            throw SpecDecodeStartupError.tokenizerMismatch
+        }
+        let targetTokenizer = await target.tokenizer
+        let draftTokenizer = await draft.tokenizer
+        guard tokenizersAreCompatible(targetTokenizer: targetTokenizer, draftTokenizer: draftTokenizer) else {
+            throw SpecDecodeStartupError.tokenizerMismatch
+        }
+    }
+
+    static func tokenizersAreCompatible(
+        targetTokenizer: MLXLMCommon.Tokenizer,
+        draftTokenizer: MLXLMCommon.Tokenizer
+    ) -> Bool {
+        let probes = [
+            "",
+            "hello",
+            "Write a Swift function named iso8601DayPrefix.",
+            "<|endoftext|>",
+            "JSON {\"role\":\"user\",\"content\":\"test\"}",
+        ]
+        guard targetTokenizer.eosToken == draftTokenizer.eosToken,
+              targetTokenizer.unknownToken == draftTokenizer.unknownToken
+        else {
+            return false
+        }
+        for probe in probes {
+            guard targetTokenizer.encode(text: probe, addSpecialTokens: true) == draftTokenizer.encode(text: probe, addSpecialTokens: true),
+                  targetTokenizer.encode(text: probe, addSpecialTokens: false) == draftTokenizer.encode(text: probe, addSpecialTokens: false)
+            else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func runSpeculativeStartupProbe(
+        target: ModelContainer,
+        draft: ModelContainer,
+        numDraftTokens: Int,
+        maxContextTokens: Int,
+        kvBitsOverride: Int?
+    ) async throws {
+        do {
+            _ = try await target.perform { targetContext in
+                let input = UserInput(prompt: "spec028 startup probe")
+                let lmInput = try await targetContext.processor.prepare(input: input)
+                try validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+                let parameters = GenerateParameters(
+                    maxTokens: 1,
+                    maxKVSize: maxContextTokens,
+                    kvBits: kvBitsOverride,
+                    temperature: 0.0,
+                    topP: 1.0
+                )
+                return try await speculativeTokenIDs(
+                    input: lmInput,
+                    parameters: parameters,
+                    targetContext: targetContext,
+                    draft: draft,
+                    numDraftTokens: numDraftTokens
+                )
+            }
+        } catch let error as SpecDecodeStartupError {
+            throw error
+        } catch {
+            throw SpecDecodeStartupError.probeFailed(String(describing: error))
+        }
+    }
+
+    private static func runSpeculativeEquivalenceCanary(
+        target: ModelContainer,
+        draft: ModelContainer,
+        targetModelID: String,
+        numDraftTokens: Int,
+        maxContextTokens: Int,
+        kvBitsOverride: Int?
+    ) async throws {
+        let request = try spec028EquivalenceRequest(targetModelID: targetModelID)
+        let tokenPair = try await target.perform { targetContext in
+            let input = try userInput(for: request)
+            let lmInput = try await targetContext.processor.prepare(input: input)
+            try validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+            let parameters = GenerateParameters(
+                maxTokens: request.maxTokens,
+                maxKVSize: maxContextTokens,
+                kvBits: kvBitsOverride,
+                temperature: 0.0,
+                topP: 1.0
+            )
+            let plain = try plainTokenIDs(input: lmInput, parameters: parameters, context: targetContext)
+            let speculative = try await speculativeTokenIDs(
+                input: lmInput,
+                parameters: parameters,
+                targetContext: targetContext,
+                draft: draft,
+                numDraftTokens: numDraftTokens
+            )
+            return (plain, speculative)
+        }
+        try validateSpeculativeEquivalence(plain: tokenPair.0, speculative: tokenPair.1)
+    }
+
+    static func validateSpeculativeEquivalence(plain: [Int], speculative: [Int]) throws {
+        guard plain == speculative else {
+            throw SpecDecodeStartupError.equivalenceFailed(plain: plain, speculative: speculative)
+        }
+    }
+
+    private static func plainTokenIDs(
+        input: LMInput,
+        parameters: GenerateParameters,
+        context: ModelContext
+    ) throws -> [Int] {
+        let cache = context.model.newCache(parameters: parameters)
+        let iterator = try TokenIterator(input: input, model: context.model, cache: cache, parameters: parameters)
+        return generate(input: input, context: context, iterator: iterator) { _ in
+            .more
+        }.tokenIds
+    }
+
+    private static func speculativeTokenIDs(
+        input: LMInput,
+        parameters: GenerateParameters,
+        targetContext: ModelContext,
+        draft: ModelContainer,
+        numDraftTokens: Int
+    ) async throws -> [Int] {
+        try await draft.perform(nonSendable: (input, targetContext)) { draftContext, values in
+            let (input, targetContext) = values
+            let draftCache = draftContext.model.newCache(parameters: parameters)
+            var tokenIDs: [Int] = []
+            for await generation in try generateTokens(
+                input: input,
+                parameters: parameters,
+                context: targetContext,
+                draftModel: draftContext.model,
+                draftCache: draftCache,
+                numDraftTokens: numDraftTokens
+            ) {
+                if let token = generation.token {
+                    tokenIDs.append(token)
+                }
+            }
+            return tokenIDs
+        }
+    }
+
+    private static func spec028EquivalenceRequest(targetModelID: String) throws -> ChatCompletionRequest {
+        let data = try spec028EquivalenceFixtureBytes()
+        guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw SpecDecodeStartupError.fixtureInvalid("root is not an object")
+        }
+        object["model"] = targetModelID
+        let requestData = try JSONSerialization.data(withJSONObject: object)
+        return try ChatCompletionRequest.parse(data: requestData)
+    }
+
+    private static func spec028EquivalenceFixtureBytes() throws -> Data {
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let candidates = [
+            cwd.appendingPathComponent("Tests/Fixtures/spec028/equivalence-smoke-v1.json"),
+            cwd.appendingPathComponent("phase3-binary/Tests/Fixtures/spec028/equivalence-smoke-v1.json"),
+            URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Tests/Fixtures/spec028/equivalence-smoke-v1.json"),
+        ].compactMap { $0 }
+        for url in candidates where FileManager.default.fileExists(atPath: url.path) {
+            return try Data(contentsOf: url)
+        }
+        throw SpecDecodeStartupError.fixtureMissing
+    }
+
     private static func loadLocalContainer(from target: String) async throws -> (ModelContainer, URL) {
         let directory = try localModelDirectory(for: target)
         // mlx-swift-lm 3.x requires an explicit tokenizer loader. The provider
@@ -1039,7 +1331,7 @@ actor ModelRuntime: ModelRuntimeServing {
         return (container, directory)
     }
 
-    private static func localModelDirectory(for target: String) throws -> URL {
+    static func localModelDirectory(for target: String) throws -> URL {
         let expanded = (target as NSString).expandingTildeInPath
         if expanded.hasPrefix("/") || FileManager.default.fileExists(atPath: expanded) {
             let url = URL(fileURLWithPath: expanded)
@@ -1108,7 +1400,7 @@ actor ModelRuntime: ModelRuntimeServing {
         ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).maxContextTokens
     }
 
-    private static func localHuggingFaceSnapshot(for modelID: String) -> URL? {
+    static func localHuggingFaceSnapshot(for modelID: String) -> URL? {
         let parts = modelID.split(separator: "/", maxSplits: 1).map(String.init)
         guard parts.count == 2 else { return nil }
 
@@ -1157,6 +1449,45 @@ actor ModelRuntime: ModelRuntimeServing {
             )
         }
         let manifest = ModelWeightManifest(files: files)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(manifest)
+        return hexString(SHA256.hash(data: data))
+    }
+
+    static func tokenizerArtifactFingerprint(in directory: URL) throws -> String? {
+        let tokenizerArtifactNames = [
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "tokenizer.model",
+            "vocab.json",
+            "merges.txt",
+            "added_tokens.json",
+            "chat_template.jinja",
+        ]
+        let fileManager = FileManager.default
+        let files = try tokenizerArtifactNames.compactMap { name -> TokenizerArtifactManifestFile? in
+            let url = directory.appendingPathComponent(name)
+            var isDirectory = ObjCBool(false)
+            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                  !isDirectory.boolValue
+            else {
+                return nil
+            }
+            let contentURL = url.resolvingSymlinksInPath()
+            let attributes = try fileManager.attributesOfItem(atPath: contentURL.path)
+            let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+            return TokenizerArtifactManifestFile(
+                name: name,
+                sha256: try sha256Hex(ofFileAt: contentURL),
+                size: size
+            )
+        }
+
+        guard !files.isEmpty else { return nil }
+
+        let manifest = TokenizerArtifactManifest(files: files)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(manifest)
@@ -1813,6 +2144,16 @@ private struct ModelWeightManifest: Encodable {
 }
 
 private struct ModelWeightManifestFile: Encodable {
+    let name: String
+    let sha256: String
+    let size: UInt64
+}
+
+private struct TokenizerArtifactManifest: Encodable {
+    let files: [TokenizerArtifactManifestFile]
+}
+
+private struct TokenizerArtifactManifestFile: Encodable {
     let name: String
     let sha256: String
     let size: UInt64

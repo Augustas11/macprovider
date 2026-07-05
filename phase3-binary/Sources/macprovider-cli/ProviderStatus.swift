@@ -20,17 +20,7 @@ struct ProviderCapacity: Sendable {
         let physicalMemoryGB = Self.systemMemoryGB()
         self.ramGB = physicalMemoryGB
 
-        let defaults: (tier: String, context: Int, concurrency: Int)
-        switch physicalMemoryGB {
-        case ...12:
-            defaults = ("8GB", 20_000, 1)
-        case ...24:
-            defaults = ("16GB", 50_000, 2)
-        case ...48:
-            defaults = ("32GB", 120_000, 4)
-        default:
-            defaults = ("64GB+", 200_000, 8)
-        }
+        let defaults = Self.defaults(forPhysicalMemoryGB: physicalMemoryGB)
 
         self.ramTier = defaults.tier
         self.maxContextTokens = maxContextOverride ?? defaults.context
@@ -65,6 +55,44 @@ struct ProviderCapacity: Sendable {
             return max(1, Int((memsize + 1_073_741_823) / 1_073_741_824))
         }
         return max(1, Int((ProcessInfo.processInfo.physicalMemory + 1_073_741_823) / 1_073_741_824))
+    }
+
+    static func defaults(forPhysicalMemoryGB physicalMemoryGB: Int) -> (tier: String, context: Int, concurrency: Int) {
+        switch physicalMemoryGB {
+        case ...12:
+            return ("8GB", 20_000, 1)
+        case ...24:
+            return ("16GB", 50_000, 2)
+        case ...48:
+            return ("32GB", 120_000, 4)
+        default:
+            return ("64GB+", 200_000, 8)
+        }
+    }
+
+    static func defaultContextTokens(forPhysicalMemoryGB physicalMemoryGB: Int) -> Int {
+        defaults(forPhysicalMemoryGB: physicalMemoryGB).context
+    }
+
+    static func draftContextCap(forPhysicalMemoryGB physicalMemoryGB: Int) -> Int {
+        switch physicalMemoryGB {
+        case ...12:
+            return 8_192
+        case ...24:
+            return 20_000
+        case ...48:
+            return 50_000
+        default:
+            return 120_000
+        }
+    }
+
+    static func defaultContextTokensForCurrentHost() -> Int {
+        defaultContextTokens(forPhysicalMemoryGB: systemMemoryGB())
+    }
+
+    static func draftContextCapForCurrentHost() -> Int {
+        draftContextCap(forPhysicalMemoryGB: systemMemoryGB())
     }
 }
 

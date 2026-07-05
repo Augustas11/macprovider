@@ -28,6 +28,18 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "HuggingFace model identifier or local model path. Overrides MACPROVIDER_MODEL and config file model.")
     var model: String?
 
+    @Option(help: "Optional speculative decoding draft model identifier or local path. Overrides MACPROVIDER_DRAFT_MODEL and config key draft_model.")
+    var draftModel: String?
+
+    @Option(help: "Lowercase SHA-256 artifact hash for the draft model snapshot. Overrides MACPROVIDER_DRAFT_MODEL_ARTIFACT_SHA256 and config key draft_model_artifact_sha256.")
+    var draftModelArtifactSha256: String?
+
+    @Option(help: "Speculative decoding draft tokens per verification round. Default 3 when --draft-model is set; valid range 1...16.")
+    var numDraftTokens: Int?
+
+    @Flag(name: .customLong("publish-spec-decode-telemetry"), inversion: .prefixedNo, help: "Opt into publishing SPEC-028 speculative decoding telemetry on coordinator heartbeats after compatibility is verified. Default off.")
+    var publishSpecDecodeTelemetry: Bool?
+
     @Option(help: "Coordinator WebSocket URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")
     var coordinator: String?
 
@@ -148,6 +160,81 @@ struct ServeCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data((
                 "--max-batch \(maxBatch) must be >= 1\n"
             ).utf8))
+            throw ExitCode(2)
+        }
+        if !(1...16).contains(resolved.numDraftTokens) {
+            FileHandle.standardError.write(Data((
+                "--num-draft-tokens \(resolved.numDraftTokens) out of range 1...16\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+        if let draftModel = resolved.draftModel,
+           draftModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            FileHandle.standardError.write(Data("--draft-model must be non-empty\n".utf8))
+            throw ExitCode(2)
+        }
+        if let hash = resolved.draftModelArtifactSHA256,
+           hash.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) == nil {
+            FileHandle.standardError.write(Data("draft_model_artifact_sha256 must be 64 lowercase hex characters\n".utf8))
+            throw ExitCode(2)
+        }
+        if resolved.publishesSpecDecodeTelemetry {
+            FileHandle.standardError.write(Data("spec_decode_heartbeat_incompatible: SPEC-028 heartbeat telemetry is implemented in PR-B\n".utf8))
+            throw ExitCode(2)
+        }
+    }
+
+    static func runSpecDecodeCapacityPreflight(_ resolved: inout AppConfig) throws {
+        guard resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            return
+        }
+        let defaultContext = ProviderCapacity.defaultContextTokensForCurrentHost()
+        let requestedContext = resolved.maxContextOverride ?? defaultContext
+        let draftCap = ProviderCapacity.draftContextCapForCurrentHost()
+        let effectiveContext = min(requestedContext, draftCap)
+        if let explicit = resolved.maxContextOverride, explicit > effectiveContext {
+            FileHandle.standardError.write(Data("draft_model_capacity_shortfall: --max-context \(explicit) exceeds draft-enabled cap \(effectiveContext)\n".utf8))
+            throw ExitCode(2)
+        }
+        if let explicit = resolved.maxConcurrencyOverride, explicit > 1 {
+            FileHandle.standardError.write(Data("draft_model_capacity_shortfall: --max-batch \(explicit) exceeds draft-enabled cap 1\n".utf8))
+            throw ExitCode(2)
+        }
+        resolved.maxContextOverride = effectiveContext
+        resolved.maxConcurrencyOverride = 1
+    }
+
+    static func runDraftModelArtifactPreflight(
+        _ resolved: AppConfig,
+        joiningCoordinator: Bool = true
+    ) throws -> String? {
+        guard let draftModel = resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !draftModel.isEmpty else {
+            return nil
+        }
+        guard let expected = resolved.draftModelArtifactSHA256 else {
+            if joiningCoordinator || resolved.enableReceipts {
+                FileHandle.standardError.write(Data("draft_model_unverified_artifact: coordinator or receipt-capable serve requires draft_model_artifact_sha256\n".utf8))
+                throw ExitCode(2)
+            }
+            return draftModel
+        }
+        guard expected.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            FileHandle.standardError.write(Data("draft_model_artifact_sha256 must be 64 lowercase hex characters\n".utf8))
+            throw ExitCode(2)
+        }
+        do {
+            let directory = try ModelRuntime.localModelDirectory(for: draftModel)
+            let actual = try ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
+            guard actual == expected else {
+                FileHandle.standardError.write(Data("draft_model_unverified_artifact: draft model artifact hash mismatch for \(directory.path)\n".utf8))
+                throw ExitCode(2)
+            }
+            return directory.standardizedFileURL.path
+        } catch let exit as ExitCode {
+            throw exit
+        } catch {
+            FileHandle.standardError.write(Data("draft_model_unverified_artifact: draft model artifact verification failed for \(draftModel): \(error)\n".utf8))
             throw ExitCode(2)
         }
     }
@@ -300,6 +387,10 @@ struct ServeCommand: AsyncParsableCommand {
             cli: CLIOverrides(
                 port: port,
                 model: model,
+                draftModel: draftModel,
+                draftModelArtifactSHA256: draftModelArtifactSha256,
+                numDraftTokens: numDraftTokens,
+                publishesSpecDecodeTelemetry: publishSpecDecodeTelemetry,
                 coordinatorURL: coordinator,
                 providerID: providerID,
                 endpointURL: endpointURL,
@@ -340,13 +431,18 @@ struct ServeCommand: AsyncParsableCommand {
         try Self.runSupportedModelsPreflight(&resolved)
         try Self.runDrainTimeoutPreflight(resolved)
         try Self.runServingKnobsPreflight(resolved)
+        try Self.runSpecDecodeCapacityPreflight(&resolved)
         try await Self.runModelArtifactPreflight(resolved, joiningCoordinator: !noJoin)
+        let verifiedDraftModelLoadPath = try Self.runDraftModelArtifactPreflight(resolved, joiningCoordinator: !noJoin)
 
         printResolvedConfiguration(resolved)
 
         let modelRuntime = try await ModelRuntime(
             modelID: resolved.model,
             modelLoadPath: resolved.modelArtifactPath,
+            draftModelID: resolved.draftModel,
+            draftModelLoadPath: verifiedDraftModelLoadPath,
+            numDraftTokens: resolved.numDraftTokens,
             maxContextTokensOverride: resolved.maxContextOverride,
             kvBitsOverride: resolved.kvBitsOverride,
             maxBatch: resolved.maxConcurrencyOverride ?? 1,
@@ -632,6 +728,9 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("macprovider-cli config")
     print("  port: \(config.port)")
     print("  model: \(config.model ?? "<unset>")")
+    print("  draft_model: \(config.draftModel ?? "<unset>")")
+    print("  num_draft_tokens: \(config.numDraftTokens)")
+    print("  publishes_spec_decode_telemetry: \(config.publishesSpecDecodeTelemetry)")
     print("  coordinator_url: \(config.coordinatorURL ?? "<unset>")")
     print("  provider_id: \(config.providerID ?? "<unset, will use per-instance UUID>")")
     print("  endpoint_url: \(config.endpointURL ?? "<unset, WS-tunneled>")")

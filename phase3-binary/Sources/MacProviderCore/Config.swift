@@ -21,6 +21,10 @@ public struct AppConfig: Equatable, Sendable {
     public var model: String?
     public var modelArtifactPath: String?
     public var modelArtifactSHA256: String?
+    public var draftModel: String?
+    public var draftModelArtifactSHA256: String?
+    public var numDraftTokens: Int
+    public var publishesSpecDecodeTelemetry: Bool
     public var modelCatalogKey: String?
     public var modelCatalogModelID: String?
     public var modelCatalogRevision: String?
@@ -97,6 +101,10 @@ public struct AppConfig: Equatable, Sendable {
             model: nil,
             modelArtifactPath: nil,
             modelArtifactSHA256: nil,
+            draftModel: nil,
+            draftModelArtifactSHA256: nil,
+            numDraftTokens: 3,
+            publishesSpecDecodeTelemetry: false,
             modelCatalogKey: nil,
             modelCatalogModelID: nil,
             modelCatalogRevision: nil,
@@ -144,6 +152,10 @@ public struct AppConfig: Equatable, Sendable {
 public struct CLIOverrides: Equatable, Sendable {
     public var port: Int?
     public var model: String?
+    public var draftModel: String?
+    public var draftModelArtifactSHA256: String?
+    public var numDraftTokens: Int?
+    public var publishesSpecDecodeTelemetry: Bool?
     public var coordinatorURL: String?
     public var providerID: String?
     public var endpointURL: String?
@@ -175,6 +187,10 @@ public struct CLIOverrides: Equatable, Sendable {
     public init(
         port: Int? = nil,
         model: String? = nil,
+        draftModel: String? = nil,
+        draftModelArtifactSHA256: String? = nil,
+        numDraftTokens: Int? = nil,
+        publishesSpecDecodeTelemetry: Bool? = nil,
         coordinatorURL: String? = nil,
         providerID: String? = nil,
         endpointURL: String? = nil,
@@ -202,6 +218,10 @@ public struct CLIOverrides: Equatable, Sendable {
     ) {
         self.port = port
         self.model = model
+        self.draftModel = draftModel
+        self.draftModelArtifactSHA256 = draftModelArtifactSHA256
+        self.numDraftTokens = numDraftTokens
+        self.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry
         self.coordinatorURL = coordinatorURL
         self.providerID = providerID
         self.endpointURL = endpointURL
@@ -311,6 +331,10 @@ public enum ConfigLoader {
         try assign(&config.model, from: dict, key: "model", expected: "string")
         try assign(&config.modelArtifactPath, from: dict, key: "model_artifact_path", expected: "string")
         try assign(&config.modelArtifactSHA256, from: dict, key: "model_artifact_sha256", expected: "string")
+        try assign(&config.draftModel, from: dict, key: "draft_model", expected: "string")
+        try assign(&config.draftModelArtifactSHA256, from: dict, key: "draft_model_artifact_sha256", expected: "string")
+        try assign(&config.numDraftTokens, from: dict, key: "num_draft_tokens", expected: "integer")
+        try assign(&config.publishesSpecDecodeTelemetry, from: dict, key: "publishes_spec_decode_telemetry", expected: "boolean")
         try assign(&config.modelCatalogKey, from: dict, key: "model_catalog_key", expected: "string")
         try assign(&config.modelCatalogModelID, from: dict, key: "model_catalog_model_id", expected: "string")
         try assign(&config.modelCatalogRevision, from: dict, key: "model_catalog_revision", expected: "string")
@@ -365,6 +389,10 @@ public enum ConfigLoader {
         try assign(&config.port, from: environment, env: "MACPROVIDER_PORT", expected: "integer")
         try assign(&config.model, from: environment, env: "MACPROVIDER_MODEL", expected: "string")
         try assign(&config.modelArtifactSHA256, from: environment, env: "MACPROVIDER_MODEL_ARTIFACT_SHA256", expected: "string")
+        try assign(&config.draftModel, from: environment, env: "MACPROVIDER_DRAFT_MODEL", expected: "string")
+        try assign(&config.draftModelArtifactSHA256, from: environment, env: "MACPROVIDER_DRAFT_MODEL_ARTIFACT_SHA256", expected: "string")
+        try assign(&config.numDraftTokens, from: environment, env: "MACPROVIDER_NUM_DRAFT_TOKENS", expected: "integer")
+        try assign(&config.publishesSpecDecodeTelemetry, from: environment, env: "MACPROVIDER_PUBLISHES_SPEC_DECODE_TELEMETRY", expected: "boolean")
         try assign(&config.coordinatorURL, from: environment, env: "MACPROVIDER_COORDINATOR_URL", expected: "string")
         try assign(&config.providerID, from: environment, env: "MACPROVIDER_PROVIDER_ID", expected: "string")
         try assign(&config.endpointURL, from: environment, env: "MACPROVIDER_ENDPOINT_URL", expected: "string")
@@ -408,6 +436,18 @@ public enum ConfigLoader {
         }
         if let model = cli.model {
             config.model = model
+        }
+        if let draftModel = cli.draftModel {
+            config.draftModel = draftModel
+        }
+        if let draftModelArtifactSHA256 = cli.draftModelArtifactSHA256 {
+            config.draftModelArtifactSHA256 = draftModelArtifactSHA256
+        }
+        if let numDraftTokens = cli.numDraftTokens {
+            config.numDraftTokens = numDraftTokens
+        }
+        if let publishesSpecDecodeTelemetry = cli.publishesSpecDecodeTelemetry {
+            config.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry
         }
         if let coordinatorURL = cli.coordinatorURL {
             config.coordinatorURL = coordinatorURL
