@@ -62,6 +62,79 @@ final class RegisterClientTests: XCTestCase {
         )
     }
 
+    func testValidateCoordinatorWSURLAcceptsExpectedOrigin() throws {
+        let base = URL(string: "https://coordinator.streamvc.live")!
+        let ws = URL(string: "wss://coordinator.streamvc.live/v2/provider")!
+        XCTAssertNoThrow(try RegisterClient.validateCoordinatorWSURL(ws, expectedBase: base))
+    }
+
+    func testValidateCoordinatorWSURLAcceptsExpectedOriginWithExplicitDefaultPort() throws {
+        let base = URL(string: "https://coordinator.streamvc.live")!
+        let ws = URL(string: "wss://coordinator.streamvc.live:443/v2/provider")!
+        XCTAssertNoThrow(try RegisterClient.validateCoordinatorWSURL(ws, expectedBase: base))
+    }
+
+    func testValidateCoordinatorWSURLRejectsInsecureScheme() {
+        let base = URL(string: "https://coordinator.streamvc.live")!
+        let ws = URL(string: "ws://coordinator.streamvc.live/v2/provider")!
+        XCTAssertThrowsError(try RegisterClient.validateCoordinatorWSURL(ws, expectedBase: base)) { error in
+            guard case let RegisterClientError.invalidCoordinatorWSURL(reason) = error else {
+                return XCTFail("expected invalidCoordinatorWSURL, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("scheme must be wss"), reason)
+        }
+    }
+
+    func testValidateCoordinatorWSURLRejectsAttackerHost() {
+        let base = URL(string: "https://coordinator.streamvc.live")!
+        let ws = URL(string: "wss://attacker.example.com/v2/provider")!
+        XCTAssertThrowsError(try RegisterClient.validateCoordinatorWSURL(ws, expectedBase: base)) { error in
+            guard case let RegisterClientError.invalidCoordinatorWSURL(reason) = error else {
+                return XCTFail("expected invalidCoordinatorWSURL, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("host must be"), reason)
+        }
+    }
+
+    func testValidateCoordinatorWSURLRejectsUnexpectedPort() {
+        let base = URL(string: "https://coordinator.streamvc.live")!
+        let ws = URL(string: "wss://coordinator.streamvc.live:8443/v2/provider")!
+        XCTAssertThrowsError(try RegisterClient.validateCoordinatorWSURL(ws, expectedBase: base)) { error in
+            guard case let RegisterClientError.invalidCoordinatorWSURL(reason) = error else {
+                return XCTFail("expected invalidCoordinatorWSURL, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("port must be"), reason)
+        }
+    }
+
+    func testValidateCoordinatorWSURLRejectsUserinfo() {
+        let base = URL(string: "https://coordinator.streamvc.live")!
+        let ws = URL(string: "wss://attacker@coordinator.streamvc.live/v2/provider")!
+        XCTAssertThrowsError(try RegisterClient.validateCoordinatorWSURL(ws, expectedBase: base)) { error in
+            guard case let RegisterClientError.invalidCoordinatorWSURL(reason) = error else {
+                return XCTFail("expected invalidCoordinatorWSURL, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("userinfo"), reason)
+        }
+    }
+
+    func testValidateCoordinatorWSURLRejectsEmptyPath() {
+        let base = URL(string: "https://coordinator.streamvc.live")!
+        let ws = URL(string: "wss://coordinator.streamvc.live")!
+        XCTAssertThrowsError(try RegisterClient.validateCoordinatorWSURL(ws, expectedBase: base)) { error in
+            guard case let RegisterClientError.invalidCoordinatorWSURL(reason) = error else {
+                return XCTFail("expected invalidCoordinatorWSURL, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("path must be non-empty"), reason)
+        }
+    }
+
+    func testValidateCoordinatorWSURLAcceptsHttpToWsForDevBase() throws {
+        let base = URL(string: "http://127.0.0.1:8080")!
+        let ws = URL(string: "ws://127.0.0.1:8080/v2/provider")!
+        XCTAssertNoThrow(try RegisterClient.validateCoordinatorWSURL(ws, expectedBase: base))
+    }
+
     func testProviderBearerRedirectGuardStripsAuthorizationOnSameHostDifferentPortRedirect() throws {
         let redirected = decideProviderBearerRedirect(
             originalURL: URL(string: "https://coordinator.example/v1/providers/register")!,
