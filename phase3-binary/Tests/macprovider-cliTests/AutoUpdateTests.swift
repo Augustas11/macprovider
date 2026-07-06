@@ -343,6 +343,12 @@ final class AutoUpdateTests: XCTestCase {
             providerStatus: status,
             markerStore: store,
             trustProvider: {
+                // Provider config opts out of provisional autoupdate
+                // (`auto_update_accept_provisional: false`), so provisional
+                // trust is "notify only" — the scenario the test name
+                // promises. Without this override, v1.8.16's default
+                // `acceptProvisional=true` treats provisional as eligible
+                // and autoupdate state DOES get created.
                 AutoUpdateTrustState(
                     v2Accepted: true,
                     tier: "provisional",
@@ -353,7 +359,8 @@ final class AutoUpdateTests: XCTestCase {
                     tokenValidated: true,
                     bearerlessDuplicate: false,
                     connected: true,
-                    stableReason: "tier_demoted"
+                    stableReason: "tier_demoted",
+                    acceptProvisional: false
                 )
             },
             drain: { _ in true },
@@ -406,6 +413,13 @@ final class AutoUpdateTests: XCTestCase {
                         connected: true
                     )
                 }
+                // Provider config opts out of provisional autoupdate
+                // (`auto_update_accept_provisional: false`), so the tier
+                // demotion between auth and swap DOES disqualify the
+                // update — the scenario the test name promises. Without
+                // this override, v1.8.16's default `acceptProvisional=true`
+                // treats provisional as eligible and execution falls
+                // through to the release API.
                 return AutoUpdateTrustState(
                     v2Accepted: true,
                     tier: "provisional",
@@ -416,7 +430,8 @@ final class AutoUpdateTests: XCTestCase {
                     tokenValidated: true,
                     bearerlessDuplicate: false,
                     connected: true,
-                    stableReason: "tier_demoted"
+                    stableReason: "tier_demoted",
+                    acceptProvisional: false
                 )
             },
             drain: { _ in true },
