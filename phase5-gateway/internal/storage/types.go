@@ -218,6 +218,7 @@ type CapacityTier struct {
 type KillSwitchState struct {
 	DemoOnly     bool      `json:"demo_only"`
 	AllPublicAPI bool      `json:"all_public_api"`
+	Version      int64     `json:"version"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 

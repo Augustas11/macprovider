@@ -534,7 +534,7 @@ func TestDemoOnlyKillSwitchPausesPlaygroundFeedback(t *testing.T) {
 	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, nil)
 	demoToken := issueDemoToken(t, h, "1.2.3.4")
 
-	postAdminJSON(t, h, "/admin/kill-switch", `{"demo_only":true}`)
+	postAdminJSON(t, h, "/admin/kill-switch", `{"demo_only":true,"version":0}`)
 	resp := postFeedback(t, h, "", demoToken, `{"rating":4,"scope":"playground"}`)
 	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("feedback status=%d body=%s", resp.Code, resp.Body.String())

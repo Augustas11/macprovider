@@ -832,7 +832,7 @@ func TestKillSwitchPersistsAcrossRestart(t *testing.T) {
 	defer store.Close()
 	h := New(cfg, store, fakeOAuth{}, WithNow(fixedNow), WithConfigPath(configPath), WithHTTPClient(noopClient())).Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/kill-switch", strings.NewReader(`{"all_public_api":true}`))
+	req := httptest.NewRequest(http.MethodPost, "/admin/kill-switch", strings.NewReader(`{"all_public_api":true,"version":0}`))
 	req.Header.Set("Authorization", "Bearer operator-key")
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -853,6 +853,9 @@ func TestKillSwitchPersistsAcrossRestart(t *testing.T) {
 	if !runtimeState.AllPublicAPI {
 		t.Fatalf("kill switch did not persist to runtime state")
 	}
+	if runtimeState.Version != 1 {
+		t.Fatalf("kill switch version=%d want 1", runtimeState.Version)
+	}
 	if countAuditEvents(t, cfg.Storage.DBPath, "kill_switch_toggled") != 1 {
 		t.Fatalf("kill_switch_toggled audit missing")
 	}
@@ -865,6 +868,142 @@ func TestKillSwitchPersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("paused chat status=%d body=%s", chatResp.Code, chatResp.Body.String())
 	}
 	assertErrorCode(t, chatResp.Body.String(), "public_api_paused")
+}
+
+func TestKillSwitchVersionConflictRejectsStaleWrite(t *testing.T) {
+	h, store, _, _ := newTestHarness(t, fakeOAuth{})
+
+	first := postAdminJSON(t, h, "/admin/kill-switch", `{"demo_only":true,"version":0}`)
+	var firstBody struct {
+		KillSwitch storage.KillSwitchState `json:"kill_switch"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstBody); err != nil {
+		t.Fatalf("first response json: %v", err)
+	}
+	if firstBody.KillSwitch.Version != 1 {
+		t.Fatalf("first version=%d want 1", firstBody.KillSwitch.Version)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/kill-switch", strings.NewReader(`{"all_public_api":true,"version":0}`))
+	req.Header.Set("Authorization", "Bearer operator-key")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("stale kill switch status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "kill_switch_version_conflict")
+	var conflict struct {
+		CurrentVersion int64 `json:"current_version"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &conflict); err != nil {
+		t.Fatalf("conflict json: %v", err)
+	}
+	if conflict.CurrentVersion != 1 {
+		t.Fatalf("current_version=%d want 1", conflict.CurrentVersion)
+	}
+	state, err := store.GetKillSwitch(context.Background())
+	if err != nil {
+		t.Fatalf("GetKillSwitch: %v", err)
+	}
+	if !state.DemoOnly || state.AllPublicAPI {
+		t.Fatalf("stale write changed state: %+v", state)
+	}
+}
+
+type failCapacitySetStore struct {
+	*sqlite.Store
+}
+
+func (s failCapacitySetStore) SetCapacityTier(ctx context.Context, tier storage.CapacityTier) error {
+	return errors.New("forced capacity write failure")
+}
+
+type failCapacityGetStore struct {
+	*sqlite.Store
+}
+
+func (s failCapacityGetStore) GetCapacityTier(ctx context.Context) (storage.CapacityTier, error) {
+	return storage.CapacityTier{}, errors.New("forced capacity load failure")
+}
+
+func TestCapacityTransitionWriteFailureReturns500AndMetric(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Coordinator.OperatorKey = "operator-key"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+
+	h := New(cfg, failCapacitySetStore{Store: store}, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(noopClient())).Handler()
+	req := httptest.NewRequest(http.MethodPost, "/admin/capacity-signal", strings.NewReader(`{"signal":"cpu","value":80,"threshold":70,"firing":true}`))
+	req.Header.Set("Authorization", "Bearer operator-key")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("capacity failure status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "admin_state_write_failed")
+	tier, err := store.GetCapacityTier(context.Background())
+	if err != nil {
+		t.Fatalf("GetCapacityTier: %v", err)
+	}
+	if tier.Tier != 0 {
+		t.Fatalf("capacity tier=%d want unchanged 0", tier.Tier)
+	}
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsResp := httptest.NewRecorder()
+	h.ServeHTTP(metricsResp, metricsReq)
+	if metricsResp.Code != http.StatusOK {
+		t.Fatalf("metrics status=%d body=%s", metricsResp.Code, metricsResp.Body.String())
+	}
+	if !strings.Contains(metricsResp.Body.String(), `admin_state_write_error_total{handler="capacity"} 1`) {
+		t.Fatalf("metrics missing capacity write error increment:\n%s", metricsResp.Body.String())
+	}
+}
+
+func TestCapacityTierLoadFailureReturns500AndMetric(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Coordinator.OperatorKey = "operator-key"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+
+	h := New(cfg, failCapacityGetStore{Store: store}, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(noopClient())).Handler()
+	req := httptest.NewRequest(http.MethodPost, "/admin/capacity-signal", strings.NewReader(`{"signal":"cpu","value":80,"threshold":70,"firing":true}`))
+	req.Header.Set("Authorization", "Bearer operator-key")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("capacity load failure status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "admin_state_write_failed")
+	tier, err := store.GetCapacityTier(context.Background())
+	if err != nil {
+		t.Fatalf("GetCapacityTier: %v", err)
+	}
+	if tier.Tier != 0 {
+		t.Fatalf("capacity tier=%d want unchanged 0", tier.Tier)
+	}
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsResp := httptest.NewRecorder()
+	h.ServeHTTP(metricsResp, metricsReq)
+	if metricsResp.Code != http.StatusOK {
+		t.Fatalf("metrics status=%d body=%s", metricsResp.Code, metricsResp.Body.String())
+	}
+	if !strings.Contains(metricsResp.Body.String(), `admin_state_write_error_total{handler="capacity"} 1`) {
+		t.Fatalf("metrics missing capacity load error increment:\n%s", metricsResp.Body.String())
+	}
 }
 
 func TestStatusRedactionAndPoolzCacheFlush(t *testing.T) {

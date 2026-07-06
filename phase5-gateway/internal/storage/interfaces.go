@@ -137,6 +137,7 @@ type CapacityStore interface {
 	SetCapacityTier(ctx context.Context, tier CapacityTier) error
 	GetKillSwitch(ctx context.Context) (KillSwitchState, error)
 	SetKillSwitch(ctx context.Context, state KillSwitchState) error
+	CompareAndSwapKillSwitch(ctx context.Context, expectedVersion int64, state KillSwitchState) (bool, error)
 }
 
 type ExplorerStore interface {

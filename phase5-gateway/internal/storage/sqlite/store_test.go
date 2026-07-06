@@ -1297,6 +1297,52 @@ func TestFeedbackSummaryAndCapacityStores(t *testing.T) {
 	if !kill.DemoOnly || !kill.AllPublicAPI || !kill.UpdatedAt.Equal(now) {
 		t.Fatalf("kill switch = %+v", kill)
 	}
+	if kill.Version != 1 {
+		t.Fatalf("kill switch version=%d want 1", kill.Version)
+	}
+	applied, err := store.CompareAndSwapKillSwitch(ctx, 0, storage.KillSwitchState{DemoOnly: false, AllPublicAPI: true, UpdatedAt: now.Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("CompareAndSwapKillSwitch mismatch: %v", err)
+	}
+	if applied {
+		t.Fatal("CompareAndSwapKillSwitch applied stale version")
+	}
+	kill, err = store.GetKillSwitch(ctx)
+	if err != nil {
+		t.Fatalf("GetKillSwitch after stale CAS: %v", err)
+	}
+	if !kill.DemoOnly || !kill.AllPublicAPI || kill.Version != 1 {
+		t.Fatalf("stale CAS changed kill switch = %+v", kill)
+	}
+	applied, err = store.CompareAndSwapKillSwitch(ctx, 1, storage.KillSwitchState{DemoOnly: false, AllPublicAPI: true, UpdatedAt: now.Add(2 * time.Minute)})
+	if err != nil {
+		t.Fatalf("CompareAndSwapKillSwitch match: %v", err)
+	}
+	if !applied {
+		t.Fatal("CompareAndSwapKillSwitch did not apply matching version")
+	}
+	kill, err = store.GetKillSwitch(ctx)
+	if err != nil {
+		t.Fatalf("GetKillSwitch after matching CAS: %v", err)
+	}
+	if kill.DemoOnly || !kill.AllPublicAPI || kill.Version != 2 {
+		t.Fatalf("matching CAS state = %+v", kill)
+	}
+}
+
+func TestKillSwitchCompareAndSwapReturnsErrorAfterClose(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	applied, err := store.CompareAndSwapKillSwitch(ctx, 0, storage.KillSwitchState{DemoOnly: true})
+	if err == nil {
+		t.Fatal("CompareAndSwapKillSwitch after close returned nil error")
+	}
+	if applied {
+		t.Fatal("CompareAndSwapKillSwitch after close reported applied")
+	}
 }
 
 // TestCapacityTierRoundTripSpecialChars verifies that SetCapacityTier/GetCapacityTier

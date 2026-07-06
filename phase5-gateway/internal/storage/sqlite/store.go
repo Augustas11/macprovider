@@ -1941,14 +1941,85 @@ func (s *Store) SetKillSwitch(ctx context.Context, state storage.KillSwitchState
 	if state.UpdatedAt.IsZero() {
 		state.UpdatedAt = time.Now().UTC()
 	}
-	value, err := json.Marshal(struct {
-		DemoOnly     bool `json:"demo_only"`
-		AllPublicAPI bool `json:"all_public_api"`
-	}{DemoOnly: state.DemoOnly, AllPublicAPI: state.AllPublicAPI})
+	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `
+	defer tx.Rollback()
+	if err := func() error {
+		current, err := getKillSwitchTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		state.Version = current.Version + 1
+		return setKillSwitchTx(ctx, tx, state)
+	}(); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CompareAndSwapKillSwitch(ctx context.Context, expectedVersion int64, state storage.KillSwitchState) (bool, error) {
+	if state.UpdatedAt.IsZero() {
+		state.UpdatedAt = time.Now().UTC()
+	}
+	applied := false
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if err := func() error {
+		current, err := getKillSwitchTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if current.Version != expectedVersion {
+			return nil
+		}
+		state.Version = current.Version + 1
+		if err := setKillSwitchTx(ctx, tx, state); err != nil {
+			return err
+		}
+		applied = true
+		return nil
+	}(); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return applied, err
+}
+
+func getKillSwitchTx(ctx context.Context, tx queryer) (storage.KillSwitchState, error) {
+	row := tx.QueryRowContext(ctx, `SELECT value, updated_at FROM runtime_config WHERE key = 'kill_switch'`)
+	var value string
+	var updated string
+	if err := row.Scan(&value, &updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.KillSwitchState{}, nil
+		}
+		return storage.KillSwitchState{}, err
+	}
+	var state storage.KillSwitchState
+	if err := json.Unmarshal([]byte(value), &state); err != nil {
+		return storage.KillSwitchState{}, err
+	}
+	state.UpdatedAt = decodeTime(updated)
+	return state, nil
+}
+
+func setKillSwitchTx(ctx context.Context, tx execer, state storage.KillSwitchState) error {
+	value, err := json.Marshal(struct {
+		DemoOnly     bool  `json:"demo_only"`
+		AllPublicAPI bool  `json:"all_public_api"`
+		Version      int64 `json:"version"`
+	}{DemoOnly: state.DemoOnly, AllPublicAPI: state.AllPublicAPI, Version: state.Version})
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO runtime_config(key, value, updated_at)
 		VALUES('kill_switch', ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
