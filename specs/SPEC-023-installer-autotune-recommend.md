@@ -1,10 +1,16 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.4
+version: v0.5
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-07-06
 
 ## Change log
+
+- **v0.5 (2026-07-06)** — Payout-first scoring for beta supply growth.
+  1. **Rank by provider payout, not buyer throughput.** `raw_score` becomes `completion_rate_per_mtok × provider_share` (credits per million completion tokens after the provider split). `demand_weight` and `measured_sustained_tps` are tiebreakers only, in that order, after payout score.
+  2. **Remove diversification pool for beta.** v0.4's 85% band + `stable_hash(diversification_id) % len(pool)` pick is deferred until supply exceeds demand. `recommended_model` is the strict highest `raw_score` eligible row; `diversification_id` remains for cache identity only.
+  3. **§5 eligibility unchanged.** RAM, bandwidth, thermal, rate-card, catalog, and benchmark gates still run before scoring.
+  4. **Transcript copy.** Eligible-row `why` strings describe payout-per-token leadership, not demand-weighted throughput.
 
 - **v0.4 (2026-07-06)** — Rate-card v4 pivot: SPEC-023 moves from hourly net capacity estimates to per-token transcript semantics.
   1. **Drop hourly-net projection.** `expected_net_usd_per_hour`, `assumed_utilization`, and `electricityUSDPerKWH` inputs are removed. Recommendations now use only real measured tokens from provider transcripts.
@@ -98,7 +104,7 @@ last-locked: 2026-07-06
 
 ## 1. Mission
 
-`autotune --recommend` scores rate-card-eligible models against the operator's detected Mac hardware, local benchmark results, the current rate card, and an operator-curated static demand signal, then recommends the model with the best demand-weighted token throughput among eligible rows. It serves every new provider installer and every operator who runs `macprovider-cli autotune --recommend` after install. Wave 0c lands now because beta launch readiness depends on the 120-provider acquisition cohort reaching a low-friction install path and a correct first-model choice instead of the current donor-default behavior that often selects the largest RAM-fitting dense model rather than the best paid-yield row.
+`autotune --recommend` scores rate-card-eligible models against the operator's detected Mac hardware, local benchmark results, the current rate card, and an operator-curated static demand signal, then recommends the model with the highest provider payout per completion token among eligible rows. It serves every new provider installer and every operator who runs `macprovider-cli autotune --recommend` after install. Wave 0c lands now because beta launch readiness depends on the 120-provider acquisition cohort reaching a low-friction install path and a correct first-model choice instead of the current donor-default behavior that often selects the largest RAM-fitting dense model rather than the best paid-yield row.
 
 ## 2. Non-goals
 
@@ -335,9 +341,9 @@ Fetched `demand-rank.json` and `autotune-candidates.json` MUST be verified befor
 
 Clients MUST keep the public key and key ID release-pinned. Key rotations require a new binary release that embeds the new verifier key and rejects older sidecar key IDs for the active feed generation.
 
-## 4. Formula (updated v0.4)
+## 4. Formula (updated v0.5)
 
-The v0.4 recommendation engine uses per-token throughput scoring independent of rate-card USD volatility:
+The v0.5 recommendation engine ranks eligible rows by provider economics first; buyer QoS signals are tiebreakers only:
 
 ```text
 eligible_rows = rows where:
@@ -346,30 +352,30 @@ eligible_rows = rows where:
   hardware_fits(model, mac) AND
   local_autotune_passes(model, mac)
 
+provider_share(row) = provider_share_bps(row) / 10_000
+
 raw_score(row | mac) =
-  demand_weight(row)
-  × completion_rate_per_mtok(row)
-  × measured_sustained_tps(row, mac)
+  completion_rate_per_mtok(row) × provider_share(row)
 
-recommendation_pool =
-  all eligible rows where raw_score >= 0.85 × max(raw_score)
-
-default_model =
-  pool[ stable_hash(diversification_id) % len(pool) ]
+recommended_model =
+  eligible row with highest raw_score, breaking ties by:
+    1. measured_sustained_tps DESC
+    2. max(demand_weight, cold_start_floor) DESC
+    3. model key ASC
 ```
 
-**Raw score uses `completion_rate_per_mtok` credits** (not USD) to rank candidates independent of rate-card price fluctuations. A model with higher token throughput and demand weight ranks higher. Tiebreaking and diversification logic are unchanged from v0.1.
+**Raw score uses `completion_rate_per_mtok` credits × provider share** (not USD) to rank candidates independent of rate-card USD volatility while reflecting what the provider earns per completion token. `tokens_per_second` and `demand_weight` do not enter the primary score in v0.5; they resolve ties when two rows pay the same per-token rate.
 
-Constants locked in v0.4:
+Constants locked in v0.5:
 
 | Constant | Value | Rule |
 |---|---:|---|
-| `cold_start_floor` | `0.15` | From demand-rank JSON; schema validation fails if the fetched value differs. |
-| `diversification_band` | `0.85` | All eligible rows within 85% of the best raw score join the diversification pool. |
-| `provider_share` | `0.90` | Represented by rate-card row `provider_share_bps = 9000`; the row value is authoritative, but v0.4 rows are expected to use 0.90. |
-| `tier_weight` | `1.0` | Applies to all rows and tiers in v0.4. Tier-specific calibration is deferred to v0.2 follow-up. |
+| `cold_start_floor` | `0.15` | From demand-rank JSON; schema validation fails if the fetched value differs. Used as tiebreaker floor only in v0.5. |
+| `diversification_band` | `0.85` | Retained in demand-rank JSON schema for forward compatibility; **not used for recommendation pick in v0.5**. Re-enable when supply exceeds demand. |
+| `provider_share` | `0.90` | Represented by rate-card row `provider_share_bps = 9000`; the row value is authoritative, but v0.5 rows are expected to use 0.90. |
+| `tier_weight` | `1.0` | Applies to all rows and tiers in v0.5. Tier-specific calibration is deferred to v0.2 follow-up. |
 | ranked output length | `5` | The JSON `candidates[]` array defaults to the top 5 rows after ranking, including eligible rows first and then selected ineligible diagnostic rows only when no eligible row exists. |
-| `stable_hash` | SHA-256 over UTF-8 `diversification_id` | Interpret the first 8 bytes as unsigned big-endian integer for modulo. |
+| `diversification_id` | HMAC-derived stable ID | Used for recommendation-cache identity only in v0.5; does not alter `recommended_model` selection. |
 
 **Real provider earnings** are recorded after tokens are served:
 
@@ -593,8 +599,8 @@ Run: macprovider-cli autotune --recommend
 
 | ID | Mitigation | SPEC-023 implementation |
 |---|---|---|
-| M1 | Deterministic diversification | §4 defines `recommendation_pool` as all eligible rows within 85% of best score and `stable_hash(...) % len(pool)`. |
-| M3 | Cold-start floor | §3.4 and §4 lock `cold_start_floor = 0.15` and `max(demand_weight, cold_start_floor)`. |
+| M1 | Deterministic diversification | **[deferred v0.5]** v0.4's 85% pool + `stable_hash(...) % len(pool)` is suspended for beta supply growth. v0.5 uses strict payout-first argmax + tiebreakers; re-enable diversification when supply exceeds demand. |
+| M3 | Cold-start floor | §3.4 and §4 lock `cold_start_floor = 0.15` as a demand-weight tiebreaker floor in v0.5. |
 | M4 | Row lifecycle states | §3.2 and §3.4 lock `runtime_status` and `recommendable`; §5 requires both before default recommendations. |
 | M7 | Rate-card version binding | §3.3, §6, and §9 persist `rate_card_version`. |
 | M8 | Retune hint | §9 defines upgrade/manual triggers and stale status text. |
@@ -617,11 +623,11 @@ AC-5: When `/v1/rate-card` cannot be fetched, the CLI falls back to the baked ra
 
 AC-6: When `https://coordinator.streamvc.live/static/autotune-candidates.json` returns 404, times out, fails schema validation, fails Ed25519 detached-signature validation, is older than the baked snapshot, is more than 10 minutes in the future, or is more than 30 days old, the CLI falls back to the baked candidate catalog and emits `candidate_catalog_fallback_used`.
 
-AC-7: `stable_hash(diversification_id) % len(pool)` produces the same recommendation for the same stable input and same pool across repeated runs.
+AC-7 **[amended v0.5]**: Repeated runs with identical hardware, catalog, rate-card, demand-rank, and benchmark inputs produce the same `recommended_model` (strict payout-first argmax + tiebreakers).
 
-AC-8: For a pool length of at least 3, a deterministic-hash distribution test over 100 synthetic provider IDs selects at least 2 distinct models.
+AC-8 **[deferred v0.5]**: Diversification distribution across synthetic provider IDs is suspended until supply exceeds demand.
 
-AC-9: Rows outside the 85% diversification band are not chosen as `recommended_model` unless all higher rows become ineligible.
+AC-9 **[superseded v0.5]**: The 85% diversification band no longer applies. `recommended_model` is always the highest `raw_score` eligible row unless tiebreakers select among equal payout rows.
 
 AC-10: A row with demand `recommendable: false` or candidate `runtime_status != "recommendable"` is never selected as the default recommendation.
 
