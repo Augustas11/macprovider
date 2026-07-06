@@ -12,14 +12,14 @@ import (
 // auth.operator_key resolves at Load time against the process
 // environment (M3-2 / DEVE-7).
 func TestLoadResolvesEnvOperatorKey(t *testing.T) {
-	t.Setenv("M3_2_TEST_OPERATOR_KEY", "resolved-secret")
+	t.Setenv("M3_2_TEST_OPERATOR_KEY", "0123456789abcdefABCDEFghijklmnop")
 
 	cfg := writeMinimalConfig(t, `
 auth:
   operator_key: env:M3_2_TEST_OPERATOR_KEY
 `)
-	if cfg.Auth.OperatorKey != "resolved-secret" {
-		t.Fatalf("OperatorKey=%q want %q", cfg.Auth.OperatorKey, "resolved-secret")
+	if cfg.Auth.OperatorKey != "0123456789abcdefABCDEFghijklmnop" {
+		t.Fatalf("OperatorKey=%q want %q", cfg.Auth.OperatorKey, "0123456789abcdefABCDEFghijklmnop")
 	}
 }
 
@@ -45,7 +45,7 @@ auth:
 // TestLoadResolvesEnvGatewayServiceToken covers the new
 // gateway_service_token field on the same env:NAME pathway.
 func TestLoadResolvesEnvGatewayServiceToken(t *testing.T) {
-	t.Setenv("M3_2_TEST_OPERATOR_KEY", "operator-secret")
+	t.Setenv("M3_2_TEST_OPERATOR_KEY", "0123456789abcdefABCDEFghijklmnop")
 	t.Setenv("M3_2_TEST_GATEWAY_TOKEN", "gateway-secret")
 
 	cfg := writeMinimalConfig(t, `
@@ -53,7 +53,7 @@ auth:
   operator_key: env:M3_2_TEST_OPERATOR_KEY
   gateway_service_token: env:M3_2_TEST_GATEWAY_TOKEN
 `)
-	if cfg.Auth.OperatorKey != "operator-secret" {
+	if cfg.Auth.OperatorKey != "0123456789abcdefABCDEFghijklmnop" {
 		t.Fatalf("OperatorKey=%q", cfg.Auth.OperatorKey)
 	}
 	if cfg.Auth.GatewayServiceToken != "gateway-secret" {
@@ -65,7 +65,7 @@ auth:
 // stats runtime DSNs may be env-indirected and resolve before
 // stats.enabled validation runs.
 func TestLoadResolvesEnvStatsDSNs(t *testing.T) {
-	t.Setenv("M3_2_TEST_OPERATOR_KEY", "operator-secret")
+	t.Setenv("M3_2_TEST_OPERATOR_KEY", "0123456789abcdefABCDEFghijklmnop")
 	t.Setenv("TEST_STATS_READER_DSN", "postgres://reader@localhost/macprovider")
 	t.Setenv("TEST_STATS_ROLLUP_DSN", "postgres://rollup@localhost/macprovider")
 
@@ -92,7 +92,7 @@ stats:
 // TestLoadFailsClosedOnMissingStatsEnvDSN ensures stats cutovers fail
 // before boot when a required env-indirected DSN is absent.
 func TestLoadFailsClosedOnMissingStatsEnvDSN(t *testing.T) {
-	t.Setenv("M3_2_TEST_OPERATOR_KEY", "operator-secret")
+	t.Setenv("M3_2_TEST_OPERATOR_KEY", "0123456789abcdefABCDEFghijklmnop")
 	os.Unsetenv("TEST_STATS_MISSING_READER_DSN")
 
 	_, err := loadConfigFromYAML(t, `
@@ -121,10 +121,10 @@ stats:
 // can pass config load with stats enabled when Pearl's env file provides
 // the required values, and that Malibu's browser origin is allowlisted.
 func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
-	t.Setenv("OPERATOR_KEY", "operator-secret")
+	t.Setenv("OPERATOR_KEY", "0123456789abcdefABCDEFghijklmnop")
 	t.Setenv("GATEWAY_SERVICE_TOKEN", "gateway-secret")
-	t.Setenv("OPERATOR_AUTH_POLICY_A", "operator-a")
-	t.Setenv("OPERATOR_AUTH_POLICY_B", "operator-b")
+	t.Setenv("OPERATOR_AUTH_POLICY_A", "0123456789abcdefABCDEFghijklmnop")
+	t.Setenv("OPERATOR_AUTH_POLICY_B", "fedcba9876543210PONMLKJIHGFEDCBA")
 	t.Setenv("STATS_READER_DSN", "postgres://reader@localhost/macprovider")
 	t.Setenv("STATS_ROLLUP_DSN", "postgres://rollup@localhost/macprovider")
 	t.Setenv("ONBOARDING_POSTGRES_DSN", "postgres://onboarding@localhost/macprovider")
@@ -160,6 +160,26 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 		nemotron.EffectivePromptCacheHitCreditsPerMtok() != 29375 ||
 		nemotron.CompletionCreditsPerMtok != 235000 {
 		t.Fatalf("unexpected nemotron rate-card row: %+v", nemotron)
+	}
+}
+
+func TestLoadRejectsWeakEnvNamedOperatorKey(t *testing.T) {
+	t.Setenv("M3_2_TEST_OPERATOR_KEY", "0123456789abcdefABCDEFghijklmnop")
+	t.Setenv("M3_2_TEST_WEAK_OPERATOR_A", "changeme")
+	t.Setenv("M3_2_TEST_STRONG_OPERATOR_B", "fedcba9876543210PONMLKJIHGFEDCBA")
+
+	_, err := loadConfigFromYAML(t, `
+auth:
+  operator_key: env:M3_2_TEST_OPERATOR_KEY
+  operator_keys:
+    alice: env:M3_2_TEST_WEAK_OPERATOR_A
+    bob: env:M3_2_TEST_STRONG_OPERATOR_B
+`)
+	if err == nil {
+		t.Fatal("Load accepted weak env-indirected named operator key")
+	}
+	if !strings.Contains(err.Error(), "auth.operator_keys.alice") || !strings.Contains(err.Error(), "placeholder_denied") {
+		t.Fatalf("error should name weak env-indirected operator key, got %v", err)
 	}
 }
 
