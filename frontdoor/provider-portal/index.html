@@ -1599,6 +1599,7 @@
       wrap.appendChild(el("h1", { class: "surface-title" }, "Machine"));
       wrap.appendChild(renderHeadstrip());
       wrap.appendChild(renderCounters());
+      wrap.appendChild(renderIdlePrewarmPanel());
       wrap.appendChild(renderNeedsAttention());
       return wrap;
     }
@@ -1694,6 +1695,35 @@
           el("div", { class: "val mono" }, lpVal),
           el("div", { class: "sub" }, "last_payout_ready.provider_credits"),
           lpSub ? el("div", { class: "sub mono" }, lpSub) : null));
+    }
+
+    function renderIdlePrewarmPanel() {
+      var idle = state.earn.data && state.earn.data.idle_prewarm ? state.earn.data.idle_prewarm : null;
+      var events = idle && idle.events_last_1h ? idle.events_last_1h : {};
+      var skips = idle && idle.skips_by_reason_last_1h ? idle.skips_by_reason_last_1h : {};
+      var names = [
+        "idle_prewarm_fired",
+        "idle_prewarm_completed",
+        "idle_prewarm_skipped",
+        "idle_prewarm_cancelled_by_real_request",
+        "idle_prewarm_failed",
+      ];
+      var countRows = [];
+      for (var i = 0; i < names.length; i++) {
+        countRows.push(el("div", { class: "row" },
+          el("div", { class: "row-title mono" }, names[i]),
+          el("div", { class: "row-hint mono" }, fmtInt(events[names[i]] || 0))));
+      }
+      var skipKeys = Object.keys(skips).sort();
+      var skipText = skipKeys.length
+        ? skipKeys.map(function (k) { return k + "=" + fmtInt(skips[k] || 0); }).join("  ")
+        : "No skip reasons in the last hour";
+      return el("div", { class: "panel" },
+        el("h2", null, "Idle prewarm"),
+        el("div", { class: "row muted" },
+          el("div", null, "Last hour"),
+          el("div", { class: "row-hint mono" }, skipText)),
+        countRows);
     }
 
     function renderNeedsAttention() {

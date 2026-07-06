@@ -31,6 +31,17 @@ var (
 		"leaderboard_24h": true, "leaderboard_7d": true,
 		"leaderboard_30d": true, "leaderboard_all": true,
 	}
+	allowIdlePrewarmEvent = map[string]bool{
+		"idle_prewarm_fired":                     true,
+		"idle_prewarm_completed":                 true,
+		"idle_prewarm_skipped":                   true,
+		"idle_prewarm_cancelled_by_real_request": true,
+		"idle_prewarm_failed":                    true,
+	}
+	allowIdlePrewarmReason = map[string]bool{
+		"none": true, "disabled": true, "busy": true, "not_idle_yet": true,
+		"thermal_pressure": true, "on_battery": true, "model_not_loaded": true,
+	}
 	// Round-1 ARCH M1 / CODE M1 fix: also scan for an
 	// Origin-fragment to prove no attacker-controlled string
 	// from the request `Origin` header lands in a label value.
@@ -63,6 +74,10 @@ func TestLabelHygiene(t *testing.T) {
 	m.IncRegisterSource("portal")
 	m.IncRegisterSource("raw-attacker-value")
 	m.IncRegisterHardwareProfileError()
+	m.IncIdlePrewarmEvent("idle_prewarm_fired", "")
+	m.IncIdlePrewarmEvent("idle_prewarm_skipped", "not_idle_yet")
+	m.IncIdlePrewarmEvent("raw-attacker-value", "not_idle_yet")
+	m.IncIdlePrewarmEvent("idle_prewarm_skipped", "raw-attacker-value")
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -117,6 +132,14 @@ func TestLabelHygiene(t *testing.T) {
 				case "track":
 					if val != "app" && val != "cli" && val != "portal" {
 						t.Errorf("metric %s track=%q not in allowed set", mf.GetName(), val)
+					}
+				case "event":
+					if !allowIdlePrewarmEvent[val] {
+						t.Errorf("metric %s event=%q not in allowed set", mf.GetName(), val)
+					}
+				case "reason":
+					if !allowIdlePrewarmReason[val] {
+						t.Errorf("metric %s reason=%q not in allowed set", mf.GetName(), val)
 					}
 				}
 			}

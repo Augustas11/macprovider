@@ -125,6 +125,8 @@ func TestStep4C_WiredMux_MetricLabelHygiene(t *testing.T) {
 		"leaderboard_24h", "leaderboard_24h",
 		func(ctx context.Context) error { return errors.New("synthetic step4c tick error") },
 	)
+	m.IncIdlePrewarmEvent("idle_prewarm_fired", "")
+	m.IncIdlePrewarmEvent("idle_prewarm_skipped", "not_idle_yet")
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -141,6 +143,7 @@ func TestStep4C_WiredMux_MetricLabelHygiene(t *testing.T) {
 		"stats_rollup_lag_seconds",
 		"stats_rollup_errors_total",
 		"stats_rate_limit_exceeded_total",
+		"stats_idle_prewarm_event_total",
 	}
 	seenFamilies := map[string]int{}
 	for _, mf := range families {

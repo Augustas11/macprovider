@@ -56,6 +56,9 @@ func TestCountsReadyAndBusyAsOnline(t *testing.T) {
 	if got.NodesOnline != 2 {
 		t.Fatalf("NodesOnline=%d want 2", got.NodesOnline)
 	}
+	if len(got.CapacityEligibleProviderIDs) != 2 || got.CapacityEligibleProviderIDs[0] != "a" || got.CapacityEligibleProviderIDs[1] != "b" {
+		t.Fatalf("CapacityEligibleProviderIDs=%v want [a b]", got.CapacityEligibleProviderIDs)
+	}
 	if got.UnifiedRAMGBTotal != 48 {
 		t.Fatalf("UnifiedRAMGBTotal=%d want 48", got.UnifiedRAMGBTotal)
 	}

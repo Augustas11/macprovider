@@ -13,8 +13,8 @@ import "time"
 // Tests inject a stub. Fields the operator has not wired a real
 // source for default to zero with an OPS.md note.
 //
-// All 8 fields below map 1:1 to the locked SPEC §9.1
-// `stats_overview_current` columns.
+// Fields below map 1:1 to the live-pool columns in
+// `stats_overview_current`.
 type SnapshotProvider interface {
 	OverviewSnapshot() OverviewSnapshot
 }
@@ -32,6 +32,11 @@ type OverviewSnapshot struct {
 	CPUCoresTotal         int
 	UnifiedRAMGBTotal     int
 	ModelsServing         int
+	// CapacityEligibleProviderIDs is the exact provider population counted in
+	// NodesOnline. Optional pool-scoped telemetry percentages must use this
+	// population for their numerator so non-capacity sessions cannot inflate
+	// public pool metrics.
+	CapacityEligibleProviderIDs []string
 	// At is the moment the snapshot was taken; the rollup uses
 	// it as the `stats_overview_current.generated_at` value
 	// when it writes (subject to the tick-time override below).

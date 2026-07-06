@@ -13,6 +13,7 @@ import (
 // stats_reader role has SELECT on stats_overview_current,
 // stats_timeseries_{rpm,tpm}_30m, stats_leaderboard_*,
 // stats_components_health, stats_rewards_populated,
+// stats_idle_prewarm_events,
 // partner_keys, provider_visibility — and is explicitly
 // DENIED on ledger_* + provider_rewards_ledger +
 // provider_tokens + provider_visibility_audit. The Step 1
@@ -152,6 +153,13 @@ type OverviewRow struct {
 	CPUCoresTotal         int
 	UnifiedRAMGBTotal     int
 	ModelsServing         int
+	IdlePrewarm           IdlePrewarmOverview
+}
+
+// IdlePrewarmOverview is the public aggregate block added by issue #381.
+type IdlePrewarmOverview struct {
+	PoolPctWithB1Active     int
+	SkipsByReasonLast1hJSON []byte
 }
 
 func (s *Store) Overview(ctx context.Context) (*OverviewRow, error) {
@@ -162,7 +170,9 @@ func (s *Store) Overview(ctx context.Context) (*OverviewRow, error) {
                bandwidth_gb_per_s, network_power_kw,
                network_utilization_pct,
                gpu_cores_total, cpu_cores_total,
-               unified_ram_gb_total, models_serving
+               unified_ram_gb_total, models_serving,
+               idle_prewarm_pool_pct_with_b1_active,
+               idle_prewarm_skips_by_reason_last_1h
           FROM stats_overview_current
          WHERE singleton = TRUE
          LIMIT 1
@@ -176,6 +186,8 @@ func (s *Store) Overview(ctx context.Context) (*OverviewRow, error) {
 		&r.NetworkUtilizationPct,
 		&r.GPUCoresTotal, &r.CPUCoresTotal,
 		&r.UnifiedRAMGBTotal, &r.ModelsServing,
+		&r.IdlePrewarm.PoolPctWithB1Active,
+		&r.IdlePrewarm.SkipsByReasonLast1hJSON,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -183,6 +195,68 @@ func (s *Store) Overview(ctx context.Context) (*OverviewRow, error) {
 		return nil, fmt.Errorf("overview select: %w", err)
 	}
 	return &r, nil
+}
+
+// ProviderIdlePrewarmSummary is the provider-bound portal projection for the
+// last hour of idle-prewarm activity.
+type ProviderIdlePrewarmSummary struct {
+	EventsLast1h        map[string]int64
+	SkipsByReasonLast1h map[string]int64
+}
+
+func (s *Store) ProviderIdlePrewarm(ctx context.Context, providerID string) (ProviderIdlePrewarmSummary, error) {
+	out := ProviderIdlePrewarmSummary{
+		EventsLast1h:        map[string]int64{},
+		SkipsByReasonLast1h: map[string]int64{},
+	}
+	cutoff := time.Now().UTC().Add(-time.Hour)
+	const eventsQ = `
+        SELECT event, COUNT(*)
+          FROM stats_idle_prewarm_events
+         WHERE provider_id = $1
+           AND recorded_at >= $2
+         GROUP BY event
+    `
+	rows, err := s.db.QueryContext(ctx, eventsQ, providerID, cutoff)
+	if err != nil {
+		return out, fmt.Errorf("provider idle prewarm events select: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var event string
+		var count int64
+		if err := rows.Scan(&event, &count); err != nil {
+			return out, err
+		}
+		out.EventsLast1h[event] = count
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+
+	const skipsQ = `
+        SELECT reason, COUNT(*)
+          FROM stats_idle_prewarm_events
+         WHERE provider_id = $1
+           AND event = 'idle_prewarm_skipped'
+           AND reason IS NOT NULL
+           AND recorded_at >= $2
+         GROUP BY reason
+    `
+	rows, err = s.db.QueryContext(ctx, skipsQ, providerID, cutoff)
+	if err != nil {
+		return out, fmt.Errorf("provider idle prewarm skips select: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var reason string
+		var count int64
+		if err := rows.Scan(&reason, &count); err != nil {
+			return out, err
+		}
+		out.SkipsByReasonLast1h[reason] = count
+	}
+	return out, rows.Err()
 }
 
 // TimeseriesRow is one minute bucket. Missing minutes (NO row

@@ -3,8 +3,12 @@ package rollup
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/lib/pq"
+	"github.com/rs/zerolog"
 )
 
 // runOverviewTick rewrites the singleton `stats_overview_current`
@@ -20,13 +24,25 @@ import (
 // The tick + the corresponding stats_components_health UPDATE
 // run in ONE transaction (BUILD §B.1) so a panic between the
 // data write and the health update cannot lie about freshness.
-func runOverviewTick(ctx context.Context, db *sql.DB, cfg Config, snap SnapshotProvider) error {
+func runOverviewTick(ctx context.Context, db *sql.DB, cfg Config, snap SnapshotProvider, logger zerolog.Logger) error {
 	now := time.Now().UTC()
 	live := snap.OverviewSnapshot()
 
 	var tokensIn, tokensOut, requests int64
 	if err := queryOverviewCumulatives(ctx, db, cfg.PartialHistorySinceUnix, &tokensIn, &tokensOut, &requests); err != nil {
 		return fmt.Errorf("overview cumulatives: %w", err)
+	}
+	if err := pruneIdlePrewarmEvents(ctx, db); err != nil {
+		// Idle-prewarm telemetry is additive. A lock or grant issue on this
+		// optional table must not stale the primary overview component.
+		logger.Warn().Err(err).Msg("idle prewarm overview prune failed; continuing with primary overview rollup")
+	}
+	idle, err := queryIdlePrewarmOverview(ctx, db, live.CapacityEligibleProviderIDs)
+	if err != nil {
+		// Keep the overview contract available with the zero-value
+		// idle-prewarm block when optional telemetry cannot be read.
+		logger.Warn().Err(err).Msg("idle prewarm overview query failed; returning empty optional block")
+		idle = idlePrewarmOverview{SkipsByReasonLast1hJSON: []byte(`{}`)}
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
@@ -48,7 +64,9 @@ func runOverviewTick(ctx context.Context, db *sql.DB, cfg Config, snap SnapshotP
             bandwidth_gb_per_s, network_power_kw,
             network_utilization_pct,
             gpu_cores_total, cpu_cores_total,
-            unified_ram_gb_total, models_serving
+            unified_ram_gb_total, models_serving,
+            idle_prewarm_pool_pct_with_b1_active,
+            idle_prewarm_skips_by_reason_last_1h
         ) VALUES (
             TRUE, $1,
             $2, $3, $4,
@@ -56,7 +74,8 @@ func runOverviewTick(ctx context.Context, db *sql.DB, cfg Config, snap SnapshotP
             $7, $8,
             $9,
             $10, $11,
-            $12, $13
+            $12, $13,
+            $14, $15::jsonb
         )
         ON CONFLICT (singleton) DO UPDATE SET
             generated_at = EXCLUDED.generated_at,
@@ -71,7 +90,9 @@ func runOverviewTick(ctx context.Context, db *sql.DB, cfg Config, snap SnapshotP
             gpu_cores_total = EXCLUDED.gpu_cores_total,
             cpu_cores_total = EXCLUDED.cpu_cores_total,
             unified_ram_gb_total = EXCLUDED.unified_ram_gb_total,
-            models_serving = EXCLUDED.models_serving
+            models_serving = EXCLUDED.models_serving,
+            idle_prewarm_pool_pct_with_b1_active = EXCLUDED.idle_prewarm_pool_pct_with_b1_active,
+            idle_prewarm_skips_by_reason_last_1h = EXCLUDED.idle_prewarm_skips_by_reason_last_1h
     `
 	if _, err := tx.ExecContext(ctx, upsert,
 		now,
@@ -81,6 +102,7 @@ func runOverviewTick(ctx context.Context, db *sql.DB, cfg Config, snap SnapshotP
 		live.NetworkUtilizationPct,
 		live.GPUCoresTotal, live.CPUCoresTotal,
 		live.UnifiedRAMGBTotal, live.ModelsServing,
+		idle.PoolPctWithB1Active, string(idle.SkipsByReasonLast1hJSON),
 	); err != nil {
 		return fmt.Errorf("overview upsert: %w", err)
 	}
@@ -128,4 +150,74 @@ func queryOverviewCumulatives(ctx context.Context, db *sql.DB, sinceUnix int64, 
     `
 	row := db.QueryRowContext(ctx, q, sinceUnix)
 	return row.Scan(tokensIn, tokensOut, requests)
+}
+
+func pruneIdlePrewarmEvents(ctx context.Context, db *sql.DB) error {
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	_, err := db.ExecContext(ctx, `
+        DELETE FROM stats_idle_prewarm_events
+         WHERE recorded_at < $1
+    `, cutoff)
+	return err
+}
+
+type idlePrewarmOverview struct {
+	PoolPctWithB1Active     int
+	SkipsByReasonLast1hJSON []byte
+}
+
+func queryIdlePrewarmOverview(ctx context.Context, db *sql.DB, capacityEligibleProviderIDs []string) (idlePrewarmOverview, error) {
+	out := idlePrewarmOverview{SkipsByReasonLast1hJSON: []byte(`{}`)}
+	if len(capacityEligibleProviderIDs) == 0 {
+		return out, nil
+	}
+	cutoff := time.Now().UTC().Add(-time.Hour)
+	var activeProviders int64
+	if err := db.QueryRowContext(ctx, `
+        SELECT COUNT(DISTINCT provider_id)
+          FROM stats_idle_prewarm_events
+         WHERE event = 'idle_prewarm_fired'
+           AND recorded_at >= $1
+           AND provider_id = ANY($2)
+    `, cutoff, pq.Array(capacityEligibleProviderIDs)).Scan(&activeProviders); err != nil {
+		return out, err
+	}
+	if activeProviders > 0 {
+		out.PoolPctWithB1Active = int((activeProviders * 100) / int64(len(capacityEligibleProviderIDs)))
+		if out.PoolPctWithB1Active > 100 {
+			out.PoolPctWithB1Active = 100
+		}
+	}
+
+	rows, err := db.QueryContext(ctx, `
+        SELECT reason, COUNT(*)
+          FROM stats_idle_prewarm_events
+         WHERE event = 'idle_prewarm_skipped'
+           AND reason IS NOT NULL
+           AND recorded_at >= $1
+           AND provider_id = ANY($2)
+         GROUP BY reason
+    `, cutoff, pq.Array(capacityEligibleProviderIDs))
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	reasons := map[string]int64{}
+	for rows.Next() {
+		var reason string
+		var count int64
+		if err := rows.Scan(&reason, &count); err != nil {
+			return out, err
+		}
+		reasons[reason] = count
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	encoded, err := json.Marshal(reasons)
+	if err != nil {
+		return out, err
+	}
+	out.SkipsByReasonLast1hJSON = encoded
+	return out, nil
 }

@@ -374,6 +374,22 @@ actor CoordinatorClient {
         webSocket = nil
     }
 
+    func sendIdlePrewarmEvent(event rawEvent: String, reason: String?) async {
+        var payload: [String: Any] = [
+            "type": "idle_prewarm_event",
+            "event": rawEvent,
+        ]
+        if rawEvent == "idle_prewarm_skipped", let reason {
+            payload["reason"] = reason
+        }
+        do {
+            try await send(payload)
+        } catch {
+            // Stdout remains the local trail while the coordinator session is
+            // absent or reconnecting.
+        }
+    }
+
     private func consumeSwapSignals() async {
         let stream = await modelRuntime.swapSignals()
         for await signal in stream {

@@ -30,6 +30,7 @@ import (
 	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/stats/poolsnapshot"
+	statsprewarm "github.com/augstar/macprovider-coordinator/internal/stats/prewarm"
 	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
 	statsstore "github.com/augstar/macprovider-coordinator/internal/stats/store"
 
@@ -371,6 +372,10 @@ func main() {
 	// segregation MINOR).
 	wsOpts = append(wsOpts, providerws.WithTokenIssuer(tokenStore))
 	wsOpts = append(wsOpts, providerws.WithGitHubAuthStore(tokenStore))
+	if statsPools != nil {
+		wsOpts = append(wsOpts, providerws.WithIdlePrewarmRecorder(statsprewarm.NewRecorder(statsPools.Rollup)))
+		wsOpts = append(wsOpts, providerws.WithIdlePrewarmMetrics(metricsHandle))
+	}
 	var onboardingStore *onboarding.PGStore
 	if cfg.Onboarding.AppTrackRegisterEnabled {
 		onboardingStore, err = onboarding.OpenPGStoreWithAuthPolicyDSNs(
@@ -584,12 +589,17 @@ func main() {
 	// The flag is held as an atomic on billingStore; SIGHUP reload
 	// calls billingStore.SetForceVoidEnabled which emits the
 	// `billing_config_flag_changed` audit event on real flips.
-	billingHandler := billingStore.HandlersWithQuarantineGate(
+	var idlePrewarmReader *statsprewarm.Reader
+	if statsPools != nil {
+		idlePrewarmReader = statsprewarm.NewReader(statsPools.Reader)
+	}
+	billingHandler := billingStore.HandlersWithQuarantineGateAndIdlePrewarm(
 		cfg.Auth.OperatorKey,
 		tokenStore,
 		cfg.Auth.RequireProviderTokens,
 		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
 		cfg.Billing.QuarantineResolutionForceVoidEnabled,
+		idlePrewarmReader,
 	)
 	// §11.5 launch-gate item 10 — operator-visible startup state.
 	logger.Info().

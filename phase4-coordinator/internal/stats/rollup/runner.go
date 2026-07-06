@@ -86,7 +86,7 @@ func New(db *sql.DB, cfg Config, snap SnapshotProvider, logger zerolog.Logger) (
 // until ctx is cancelled. Use Wait() at shutdown to drain them.
 func (r *Runner) Start(ctx context.Context) {
 	r.spawnTick(ctx, "overview", r.cfg.OverviewInterval, componentOverview, func(c context.Context) error {
-		return runOverviewTick(c, r.db, r.cfg, r.snap)
+		return runOverviewTick(c, r.db, r.cfg, r.snap, r.logger)
 	})
 	r.spawnTick(ctx, "timeseries_rpm", r.cfg.TimeseriesRpmInterval, componentTimeseriesRpm, func(c context.Context) error {
 		return runTimeseriesRpmTick(c, r.db, r.cfg)

@@ -494,13 +494,6 @@ struct ServeCommand: AsyncParsableCommand {
             providerID: resolved.providerID
         )
         await modelRuntime.setProviderStatus(providerStatus)
-        let idlePrewarmer = IdlePrewarmer(
-            modelRuntime: modelRuntime,
-            providerStatus: providerStatus,
-            thermalGate: thermalGate,
-            powerSource: SystemPowerSourceReporter(),
-            config: IdlePrewarmConfig(appConfig: resolved)
-        )
         let receiptKeyStore = KeychainReceiptKeyStore()
         let receiptRuntime = try Self.makeReceiptRuntime(config: resolved, keyStore: receiptKeyStore)
         if resolved.donorMode {
@@ -522,6 +515,23 @@ struct ServeCommand: AsyncParsableCommand {
                 identityBridge: identityBridge
             )
         }
+        let idlePrewarmLogger = IdlePrewarmLogger { object in
+            IdlePrewarmLogger.stdout.emit(object)
+            guard let event = object["event"] as? String else { return }
+            let reason = object["reason"] as? String
+            guard let coordinatorClient else { return }
+            Task {
+                await coordinatorClient.sendIdlePrewarmEvent(event: event, reason: reason)
+            }
+        }
+        let idlePrewarmer = IdlePrewarmer(
+            modelRuntime: modelRuntime,
+            providerStatus: providerStatus,
+            thermalGate: thermalGate,
+            powerSource: SystemPowerSourceReporter(),
+            config: IdlePrewarmConfig(appConfig: resolved),
+            logger: idlePrewarmLogger
+        )
         let controlSocket: ControlSocketServer?
         let receiptRotator: (@Sendable () async throws -> Void)?
         if resolved.enableReceipts,

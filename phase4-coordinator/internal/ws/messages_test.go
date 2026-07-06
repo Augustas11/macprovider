@@ -49,6 +49,74 @@ func TestParseHeartbeatPreservesRollingMetrics(t *testing.T) {
 	}
 }
 
+func TestParseIdlePrewarmEventAcceptsStructuredEvents(t *testing.T) {
+	cases := []string{
+		"idle_prewarm_fired",
+		"idle_prewarm_completed",
+		"idle_prewarm_cancelled_by_real_request",
+		"idle_prewarm_failed",
+	}
+	for _, event := range cases {
+		t.Run(event, func(t *testing.T) {
+			got, field, err := ParseIdlePrewarmEvent([]byte(`{"type":"idle_prewarm_event","event":"` + event + `"}`))
+			if err != nil {
+				t.Fatalf("ParseIdlePrewarmEvent field=%q err=%v", field, err)
+			}
+			if got.Event != event || got.Reason != "" {
+				t.Fatalf("event=%+v", got)
+			}
+		})
+	}
+
+	got, field, err := ParseIdlePrewarmEvent([]byte(`{"type":"idle_prewarm_event","event":"idle_prewarm_skipped","reason":"not_idle_yet"}`))
+	if err != nil {
+		t.Fatalf("ParseIdlePrewarmEvent skipped field=%q err=%v", field, err)
+	}
+	if got.Event != "idle_prewarm_skipped" || got.Reason != "not_idle_yet" {
+		t.Fatalf("skipped event=%+v", got)
+	}
+}
+
+func TestParseIdlePrewarmEventRejectsInvalidReasonShape(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		field   string
+	}{
+		{
+			name:    "missing reason",
+			payload: `{"type":"idle_prewarm_event","event":"idle_prewarm_skipped"}`,
+			field:   "reason",
+		},
+		{
+			name:    "reason on non skip",
+			payload: `{"type":"idle_prewarm_event","event":"idle_prewarm_completed","reason":"busy"}`,
+			field:   "reason",
+		},
+		{
+			name:    "bad reason",
+			payload: `{"type":"idle_prewarm_event","event":"idle_prewarm_skipped","reason":"other"}`,
+			field:   "reason",
+		},
+		{
+			name:    "bad event",
+			payload: `{"type":"idle_prewarm_event","event":"idle_prewarm_started"}`,
+			field:   "event",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, field, err := ParseIdlePrewarmEvent([]byte(tc.payload))
+			if err == nil {
+				t.Fatal("ParseIdlePrewarmEvent err = nil")
+			}
+			if field != tc.field {
+				t.Fatalf("field=%q want %q", field, tc.field)
+			}
+		})
+	}
+}
+
 func TestParseHeartbeatAcceptsHardwareSummary(t *testing.T) {
 	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"hardware_summary":{"chip":"Apple M4 Pro","bandwidth_gb_per_s":273,"network_power_kw":0.065,"gpu_cores_total":20,"cpu_cores_total":14}}`)
 

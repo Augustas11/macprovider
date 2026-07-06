@@ -190,6 +190,12 @@ type HeartbeatPresence struct {
 	Loading   bool
 }
 
+type IdlePrewarmEvent struct {
+	Type   string `json:"type"`
+	Event  string `json:"event"`
+	Reason string `json:"reason,omitempty"`
+}
+
 type HardwareSummary struct {
 	Chip              string  `json:"chip,omitempty"`
 	BandwidthGBPerSec int64   `json:"bandwidth_gb_per_s,omitempty"`
@@ -832,6 +838,63 @@ func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error
 		}
 	}
 	return hb, presence, "", nil
+}
+
+func ParseIdlePrewarmEvent(payload []byte) (IdlePrewarmEvent, string, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return IdlePrewarmEvent{}, "json", err
+	}
+	var ev IdlePrewarmEvent
+	if err := requireString(raw, "type", &ev.Type); err != nil {
+		return IdlePrewarmEvent{}, err.Field, err
+	}
+	if ev.Type != "idle_prewarm_event" {
+		return IdlePrewarmEvent{}, "type", fmt.Errorf("expected idle_prewarm_event, got %q", ev.Type)
+	}
+	if err := requireString(raw, "event", &ev.Event); err != nil {
+		return IdlePrewarmEvent{}, err.Field, err
+	}
+	if !validIdlePrewarmEvent(ev.Event) {
+		return IdlePrewarmEvent{}, "event", fmt.Errorf("invalid idle prewarm event %q", ev.Event)
+	}
+	if v, ok := raw["reason"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &ev.Reason); err != nil {
+			return IdlePrewarmEvent{}, "reason", err
+		}
+		if !validIdlePrewarmReason(ev.Reason) {
+			return IdlePrewarmEvent{}, "reason", fmt.Errorf("invalid idle prewarm reason %q", ev.Reason)
+		}
+	}
+	if ev.Event == "idle_prewarm_skipped" && ev.Reason == "" {
+		return IdlePrewarmEvent{}, "reason", fmt.Errorf("idle_prewarm_skipped requires reason")
+	}
+	if ev.Event != "idle_prewarm_skipped" && ev.Reason != "" {
+		return IdlePrewarmEvent{}, "reason", fmt.Errorf("reason is only valid for idle_prewarm_skipped")
+	}
+	return ev, "", nil
+}
+
+func validIdlePrewarmEvent(event string) bool {
+	switch event {
+	case "idle_prewarm_fired",
+		"idle_prewarm_completed",
+		"idle_prewarm_skipped",
+		"idle_prewarm_cancelled_by_real_request",
+		"idle_prewarm_failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func validIdlePrewarmReason(reason string) bool {
+	switch reason {
+	case "disabled", "busy", "not_idle_yet", "thermal_pressure", "on_battery", "model_not_loaded":
+		return true
+	default:
+		return false
+	}
 }
 
 func ParseStateUpdate(payload []byte) (StateUpdate, string, error) {

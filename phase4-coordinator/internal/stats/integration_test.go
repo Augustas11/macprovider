@@ -51,6 +51,7 @@ import (
 	tcpg "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	stats "github.com/augstar/macprovider-coordinator/internal/stats"
 	statsmigrations "github.com/augstar/macprovider-coordinator/internal/stats/migrations"
 )
 
@@ -1096,6 +1097,62 @@ func TestStatsRollupCannotTouchPartnerKeys(t *testing.T) {
 		t.Errorf("stats_rollup unexpectedly SELECT'd provider_visibility_audit")
 	} else if !contains(err.Error(), "permission denied") {
 		t.Errorf("stats_rollup provider_visibility_audit: expected 'permission denied', got %q", err.Error())
+	}
+}
+
+func TestOpenFailsWhenIdlePrewarmMigrationMissing(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := adminDB.ExecContext(ctx, `
+        DROP TABLE stats_idle_prewarm_events;
+        ALTER TABLE stats_overview_current
+            DROP COLUMN idle_prewarm_pool_pct_with_b1_active,
+            DROP COLUMN idle_prewarm_skips_by_reason_last_1h;
+        DELETE FROM schema_migrations_spec017 WHERE version = 11;
+    `); err != nil {
+		t.Fatalf("remove migration 011 objects: %v", err)
+	}
+
+	pools, err := stats.Open(ctx, stats.Config{
+		Enabled:   true,
+		ReaderDSN: fx.roleDSN(roleStatsReader),
+		RollupDSN: fx.roleDSN(roleStatsRollup),
+	})
+	if err == nil {
+		_ = pools.Close()
+		t.Fatal("stats.Open succeeded without migration 011 objects; want startup smoke failure")
+	}
+	if !strings.Contains(err.Error(), "smoke stats_reader") ||
+		!strings.Contains(err.Error(), "migrations may not have run") {
+		t.Fatalf("stats.Open error = %q, want migration smoke failure", err.Error())
+	}
+}
+
+func TestOpenFailsWhenIdlePrewarmSequenceGrantMissing(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := adminDB.ExecContext(ctx, `REVOKE USAGE ON SEQUENCE stats_idle_prewarm_events_id_seq FROM stats_rollup`); err != nil {
+		t.Fatalf("revoke idle prewarm sequence grant: %v", err)
+	}
+
+	pools, err := stats.Open(ctx, stats.Config{
+		Enabled:   true,
+		ReaderDSN: fx.roleDSN(roleStatsReader),
+		RollupDSN: fx.roleDSN(roleStatsRollup),
+	})
+	if err == nil {
+		_ = pools.Close()
+		t.Fatal("stats.Open succeeded without idle prewarm sequence usage grant; want startup smoke failure")
+	}
+	if !strings.Contains(err.Error(), "smoke stats_rollup") ||
+		!strings.Contains(err.Error(), "privilege probe returned false") {
+		t.Fatalf("stats.Open error = %q, want stats_rollup sequence grant smoke failure", err.Error())
 	}
 }
 

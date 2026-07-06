@@ -78,6 +78,7 @@ func NewMuxWithMetricsAndRateLimit(reader *store.Store, cors CORSConfig, backfil
 			CORS:         cors,
 			BackfillMode: backfillMode,
 			PartialSince: partialSince,
+			Logger:       logger,
 		},
 		logger:         logger,
 		authFailLimit:  newLimiterWithBounds(rl.MaxBuckets, rl.IdleTTL),
