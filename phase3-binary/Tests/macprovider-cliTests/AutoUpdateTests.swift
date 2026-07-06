@@ -588,7 +588,7 @@ final class AutoUpdateTests: XCTestCase {
     // restrictions remain untouched (those live in the coordinator, not in
     // this trust state).
 
-    func testTrustVerdictProvisionalWithoutAcceptFlagStaysIneligible() {
+    func testTrustVerdictProvisionalDefaultsToEligible() {
         let state = AutoUpdateTrustState(
             v2Accepted: true,
             tier: "provisional",
@@ -599,7 +599,23 @@ final class AutoUpdateTests: XCTestCase {
             tokenValidated: true,
             bearerlessDuplicate: false,
             connected: true
-            // acceptProvisional defaults to false
+        )
+        XCTAssertEqual(state.verdict, .eligible)
+        XCTAssertTrue(state.isEligible)
+    }
+
+    func testTrustVerdictProvisionalExplicitOptOutStaysIneligible() {
+        let state = AutoUpdateTrustState(
+            v2Accepted: true,
+            tier: "provisional",
+            encryptedLegValid: true,
+            attestationRequired: false,
+            attestationSatisfied: true,
+            tokenConfigured: false,
+            tokenValidated: true,
+            bearerlessDuplicate: false,
+            connected: true,
+            acceptProvisional: false
         )
         XCTAssertEqual(state.verdict, .provisional)
         XCTAssertFalse(state.isEligible)
@@ -779,8 +795,8 @@ final class AutoUpdateTests: XCTestCase {
         )
         XCTAssertEqual(fromEnv.autoUpdateAcceptProvisional, false)
 
-        // 4. Default is nil (unset), preserving the pinned-only trust
-        //    posture for existing deployments that haven't opted in.
+        // 4. Default is nil in config; runtime treats nil as enabled for
+        //    provisional-tier autoupdate unless explicitly set false.
         let fromDefault = try ConfigLoader.load(
             cli: CLIOverrides(configPath: "/tmp/provider.yaml"),
             environment: [:],
@@ -788,6 +804,10 @@ final class AutoUpdateTests: XCTestCase {
             readFile: { _ in "port: 8080" }
         )
         XCTAssertNil(fromDefault.autoUpdateAcceptProvisional)
+        XCTAssertTrue(AutoUpdateConfig.acceptProvisional(fromDefault))
+        var optedOut = AppConfig.defaults(configPath: "/tmp/provider.yaml")
+        optedOut.autoUpdateAcceptProvisional = false
+        XCTAssertFalse(AutoUpdateConfig.acceptProvisional(optedOut))
     }
 }
 

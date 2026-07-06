@@ -1,6 +1,6 @@
 import Foundation
 
-/// Observes a launchd-managed macprovider-cli via local HTTP /v1/health.
+/// Observes a launchd-managed macprovider-cli via local HTTP /v1/health and /v1/status.
 enum InstalledProviderMonitor {
     struct HealthSnapshot: Equatable {
         let ready: Bool
@@ -13,6 +13,13 @@ enum InstalledProviderMonitor {
         let outputTokensAllTime: Int64?
         let uptimeSeconds: Int?
         let restartCount: Int?
+    }
+
+    struct StatusSnapshot: Equatable {
+        let binaryVersion: String?
+        let recommendedVersion: String?
+        let coordinatorConnected: Bool
+        let coordinatorTier: String?
     }
 
     static func readHTTPPort(paths: ProviderPaths = .current) -> Int? {
@@ -62,6 +69,40 @@ enum InstalledProviderMonitor {
         } catch {
             return nil
         }
+    }
+
+    static func fetchStatus(port: Int, timeout: TimeInterval = 2) async -> StatusSnapshot? {
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/status")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = timeout
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else {
+                return nil
+            }
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return nil
+            }
+            let coordinator = object["coordinator"] as? [String: Any] ?? [:]
+            let recommended = stringValue(coordinator["recommended_binary_version"])
+            return StatusSnapshot(
+                binaryVersion: stringValue(object["binary_version"]),
+                recommendedVersion: recommended,
+                coordinatorConnected: (coordinator["connected"] as? Bool) == true,
+                coordinatorTier: stringValue(coordinator["tier"])
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        guard let value, !(value is NSNull) else { return nil }
+        let text = String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text != "<null>" else { return nil }
+        return text
     }
 
     /// Poll until health responds or deadline elapses.

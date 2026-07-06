@@ -165,7 +165,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 actor CoordinatorClient {
     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
 
-    static let binaryVersion = "1.8.15"
+    static let binaryVersion = "1.8.16"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -1442,7 +1442,7 @@ actor CoordinatorClient {
             session: tier2Session,
             providerToken: providerToken,
             assignedProviderTokenAdopted: assignedProviderTokenAdopted,
-            acceptProvisional: appConfig.autoUpdateAcceptProvisional == true
+            acceptProvisional: AutoUpdateConfig.acceptProvisional(appConfig)
         )
         autoupdateDrainExtensions = payload["autoupdate_drain_extensions"] as? Bool == true
         autoupdateAttemptedTargets.removeAll()
@@ -2053,7 +2053,7 @@ actor CoordinatorClient {
             session: tier2Session,
             providerToken: providerToken,
             assignedProviderTokenAdopted: autoupdateAssignedProviderTokenAdopted,
-            acceptProvisional: appConfig.autoUpdateAcceptProvisional == true
+            acceptProvisional: AutoUpdateConfig.acceptProvisional(appConfig)
         )
         if let reason = autoupdateDemotionReason {
             switch reason {

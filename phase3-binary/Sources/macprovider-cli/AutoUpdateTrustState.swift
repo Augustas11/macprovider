@@ -25,14 +25,8 @@ struct AutoUpdateTrustState: Sendable {
     let bearerlessDuplicate: Bool
     let connected: Bool
     let stableReason: String?
-    // Operator opt-in: accept auto-updates while the provider is in the
-    // provisional tier. Default false preserves the pre-existing
-    // pinned-only trust posture. Flipping this at the provider config layer
-    // is a deliberate operator choice — the semantic contract is "I trust
-    // the coordinator I chose to connect to enough to apply its version
-    // recommendations even before this provider is operator-promoted to
-    // pinned." This unblocks self-service (curl|bash) providers on the
-    // network from being trust-orphaned from fixes.
+    // Provisional-tier autoupdate: enabled by default; set
+    // `auto_update_accept_provisional: false` in provider config to opt out.
     let acceptProvisional: Bool
 
     init(
@@ -46,7 +40,7 @@ struct AutoUpdateTrustState: Sendable {
         bearerlessDuplicate: Bool,
         connected: Bool,
         stableReason: String? = nil,
-        acceptProvisional: Bool = false
+        acceptProvisional: Bool = true
     ) {
         self.v2Accepted = v2Accepted
         self.tier = tier
@@ -65,12 +59,8 @@ struct AutoUpdateTrustState: Sendable {
         guard connected else { return .coordinatorDisconnected }
         guard v2Accepted else { return .legacyHelloAck }
         if bearerlessDuplicate { return .bearerlessDuplicate }
-        // Tier gate: pinned providers always pass. Provisional providers
-        // pass only when the operator has explicitly opted the provider in
-        // via `auto_update_accept_provisional: true` in the local YAML
-        // config (or the MACPROVIDER_AUTO_UPDATE_ACCEPT_PROVISIONAL env
-        // var). Any other tier (empty / rejected) falls through to
-        // .provisional.
+        // Tier gate: pinned always passes. Provisional passes when
+        // acceptProvisional is true (default unless config opts out).
         if tier != "pinned" {
             guard tier == "provisional" && acceptProvisional else { return .provisional }
         }
@@ -94,7 +84,7 @@ struct AutoUpdateTrustState: Sendable {
         session: Tier2ProviderSession?,
         providerToken: String?,
         assignedProviderTokenAdopted: Bool,
-        acceptProvisional: Bool = false
+        acceptProvisional: Bool = true
     ) -> AutoUpdateTrustState {
         let tier = payload["tier"] as? String
         let attestationStatus = (((payload["tier2_session"] as? [String: Any])?["attestation"] as? [String: Any])?["status"] as? String)
@@ -150,5 +140,11 @@ enum AutoUpdateConfig {
         if config.autoUpdateEnabled == false { return false }
         if config.autoupdateEnabled == false { return false }
         return true
+    }
+
+    /// Provisional-tier providers receive coordinator-driven autoupdate unless
+    /// explicitly opted out via `auto_update_accept_provisional: false`.
+    static func acceptProvisional(_ config: AppConfig) -> Bool {
+        config.autoUpdateAcceptProvisional != false
     }
 }

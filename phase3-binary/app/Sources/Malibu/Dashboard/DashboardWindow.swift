@@ -71,6 +71,18 @@ private struct DashboardView: View {
                         MetricRow(title: "Weights path", value: "Managed by provider")
                     }
                     MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
+                    MetricRow(title: "Provider CLI", value: AgentSnapshotPresenter.cliVersionLine(agent.snapshot))
+                    if let status = AgentSnapshotPresenter.cliUpdateStatusLine(agent.snapshot) {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(agent.snapshot.cliUpdateLastError == nil ? Color.secondary : Color.red)
+                    }
+                    if AgentSnapshotPresenter.updateAvailable(agent.snapshot) {
+                        Button(agent.snapshot.cliUpdateInProgress ? "Updating…" : updateButtonTitle) {
+                            Task { await agent.updateCLINow() }
+                        }
+                        .disabled(agent.snapshot.cliUpdateInProgress)
+                    }
                     MetricRow(title: "Requests", value: AgentSnapshotPresenter.requestsLine(agent.snapshot))
                     MetricRow(title: "Tokens", value: AgentSnapshotPresenter.tokenLine(agent.snapshot))
                     MetricRow(title: "Uptime", value: AgentSnapshotPresenter.uptimeLine(agent.snapshot))
@@ -109,6 +121,13 @@ private struct DashboardView: View {
 
     private var queueTone: MetricChip.Tone {
         (agent.snapshot.queueDepth ?? 0) > 0 ? .attention : .neutral
+    }
+
+    private var updateButtonTitle: String {
+        if let target = AgentSnapshotPresenter.updateTargetVersion(agent.snapshot) {
+            return "Update to v\(target)"
+        }
+        return "Update CLI"
     }
 
     private var thermalTone: MetricChip.Tone {
