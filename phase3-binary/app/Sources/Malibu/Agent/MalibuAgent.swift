@@ -187,6 +187,18 @@ final class MalibuAgent: ObservableObject {
         if let total = health.requestsTotal {
             snapshot.requestsServedAllTime = total
         }
+        if let inputToday = health.inputTokensToday {
+            snapshot.inputTokensToday = inputToday
+        }
+        if let outputToday = health.outputTokensToday {
+            snapshot.outputTokensToday = outputToday
+        }
+        if let inputAllTime = health.inputTokensAllTime {
+            snapshot.inputTokensAllTime = inputAllTime
+        }
+        if let outputAllTime = health.outputTokensAllTime {
+            snapshot.outputTokensAllTime = outputAllTime
+        }
         if let uptime = health.uptimeSeconds {
             snapshot.uptimeSec = uptime
         }
