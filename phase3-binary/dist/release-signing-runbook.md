@@ -180,6 +180,26 @@ Common follow-up issues:
 - ~5 minutes added to each release build (notarization wait)
 - No per-release fee
 
+## Malibu.app release artifacts (SPEC-025 P2)
+
+When `APPLE_DEVELOPER_ID_CERT_P12_BASE64` is populated, the same release
+tag also publishes:
+
+- **`Malibu-{tag}.dmg`** — primary consumer download. Drag `Malibu.app`
+  to `/Applications`. Notarized and stapled; validate with:
+  `bash scripts/verify-malibu-release-artifacts.sh Malibu-{tag}.dmg`
+- **`Malibu-{tag}.pkg`** — optional double-click installer when
+  `APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64` is also present.
+
+Fresh-mac acceptance check after each tagged release:
+
+```bash
+bash scripts/verify-malibu-release-artifacts.sh Malibu-vX.Y.Z.dmg
+```
+
+Expect `codesign --verify`, `stapler validate`, and `spctl` to pass
+without `xattr -d`.
+
 ## Related
 
 - Memory: `macprovider-launchd-amfi-blocker-macos-26` — full

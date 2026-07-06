@@ -71,4 +71,4 @@ open build/Release/Malibu.app
 2. **CLI-side handler semantics.** Frames + wire format are wired end-to-end (`feat(control-socket): add metrics/pause/resume/shutdown frames`), but the server-side handlers are stubs — `pause_ack`/`resume_ack` return `accepted:false, reason:"not_implemented"` and `metrics_response` returns zeros. Real earnings / uptime source + pause gating land in P1.
 3. **CLI-track config migration dialog.** If `~/.config/macprovider/config.yaml` exists without the App-track marker, the App routes to the SPEC-026 migration surface instead of overwriting it silently.
 5. **Sparkle** not wired up yet — separate P3 pass.
-6. **Signed release pipeline** — extends `.github/workflows/release.yml` per SPEC-025 §6.2. Not part of this skeleton.
+6. **Signed release pipeline** — `release.yml` ships stapled `Malibu-{tag}.dmg` (primary) and optional `Malibu-{tag}.pkg`. Validate downloads with `scripts/verify-malibu-release-artifacts.sh`.

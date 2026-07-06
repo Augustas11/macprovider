@@ -31,7 +31,9 @@ LOG_DIR="$HOME/Library/Logs/macprovider"
 # the scripts here so the public installer remains a single curl-able
 # artifact.
 WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
-WATCHDOG_PATH="$WATCHDOG_DIR/watchdog.sh"
+# Installed without a .sh suffix so macOS Login Items shows a readable
+# background-item name instead of "watchdog.sh".
+WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
 WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
 WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
 NO_WATCHDOG="${MACPROVIDER_NO_WATCHDOG:-0}"
@@ -810,6 +812,12 @@ choose_provider_id() {
     fi
   fi
 
+  existing="$(read_config_provider_id || true)"
+  if [ -n "$existing" ]; then
+    printf "%s" "$existing"
+    return
+  fi
+
   default_handle="$(sanitize_handle "$(hostname -s 2>/dev/null || hostname)")"
   [ -n "$default_handle" ] || default_handle="macprovider"
   if [ "$NO_PROMPT" = "1" ]; then
@@ -1197,6 +1205,19 @@ read_config_model() {
     /^model:/ {
       value=$0
       sub(/^model:[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }
+  ' "$CONFIG_PATH"
+}
+
+read_config_provider_id() {
+  [ -f "$CONFIG_PATH" ] || return 1
+  awk -F: '
+    /^provider_id:/ {
+      value=$0
+      sub(/^provider_id:[[:space:]]*/, "", value)
       gsub(/^"|"$/, "", value)
       print value
       exit
@@ -2233,6 +2254,10 @@ install_watchdog() {
   fi
   log "Installing watchdog LaunchAgent (operator-visibility safety net for iss-189-class wedges)."
   mkdir -p "$WATCHDOG_DIR" "$LOG_DIR" "$(dirname "$WATCHDOG_PLIST_PATH")"
+  legacy_watchdog="$WATCHDOG_DIR/watchdog.sh"
+  if [ -f "$legacy_watchdog" ] && [ "$legacy_watchdog" != "$WATCHDOG_PATH" ]; then
+    rm -f "$legacy_watchdog"
+  fi
   write_watchdog_script
   render_watchdog_plist "$coordinator_url" > "$WATCHDOG_PLIST_PATH"
   plutil -lint "$WATCHDOG_PLIST_PATH" >/dev/null \
