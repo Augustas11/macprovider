@@ -436,6 +436,20 @@ $SSH "set -e
   # deploy — mitigated by switching to a binary-only swap at the time).
   sed -i 's|# ssl_certificate /etc/letsencrypt|ssl_certificate /etc/letsencrypt|g' /etc/nginx/sites-available/$DOMAIN
   sed -i 's|# ssl_certificate_key /etc/letsencrypt|ssl_certificate_key /etc/letsencrypt|g' /etc/nginx/sites-available/$DOMAIN
+  # C2 nginx tuning: worker_connections is an events-context directive,
+  # so it must be applied in the global nginx.conf rather than the vhost.
+  if ! grep -qE '^[[:space:]]*worker_connections[[:space:]]+' /etc/nginx/nginx.conf; then
+    echo 'aborting deploy: /etc/nginx/nginx.conf has no active worker_connections directive to tune' >&2
+    exit 5
+  fi
+  if [ ! -f /etc/nginx/nginx.conf.bak.macprovider-c2 ]; then
+    install -o root -g root -m 0644 /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak.macprovider-c2
+  fi
+  sed -i -E 's#^([[:space:]]*)worker_connections[[:space:]]+[0-9]+;#\1worker_connections 4096;#' /etc/nginx/nginx.conf
+  grep -qE '^[[:space:]]*worker_connections[[:space:]]+4096;' /etc/nginx/nginx.conf || {
+    echo 'aborting deploy: failed to set worker_connections 4096 in /etc/nginx/nginx.conf' >&2
+    exit 5
+  }
   nginx -t
   systemctl reload nginx
 "
@@ -524,3 +538,10 @@ echo "    '"
 echo
 echo "  Binary-only rollback (gateway.prev only) is SAFE only if no schema"
 echo "  bump happened between the two deploys."
+echo
+echo "  C2 nginx worker tuning rollback, if needed:"
+echo "    ssh $VPS_USER@$VPS_HOST '"
+echo "      sudo test -f /etc/nginx/nginx.conf.bak.macprovider-c2 &&"
+echo "      sudo install -o root -g root -m 0644 /etc/nginx/nginx.conf.bak.macprovider-c2 /etc/nginx/nginx.conf &&"
+echo "      sudo nginx -t && sudo systemctl reload nginx"
+echo "    '"
