@@ -59,6 +59,11 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Malibu.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
+    postBuildScripts:
+      - name: Bundle install.sh
+        basedOnDependencyAnalysis: false
+        script: |
+          install -m 755 "${SRCROOT}/../dist/install.sh" "${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Resources/install.sh"
     dependencies: []
 
   # AUDIT R1 ARCHITECT A8 fix: unit-test the audit-critical app-side surfaces

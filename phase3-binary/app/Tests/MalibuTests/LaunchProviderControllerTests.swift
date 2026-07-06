@@ -7,10 +7,12 @@ final class LaunchProviderControllerTests: XCTestCase {
     override func setUp() {
         super.setUp()
         UserDefaults.standard.set("v2", forKey: "onboardingFlow")
+        LaunchProviderController.prefersCLIInstallTrack = false
     }
 
     override func tearDown() {
         UserDefaults.standard.removeObject(forKey: "onboardingFlow")
+        MalibuOnboardingPolicy.prefersCLIInstallTrack = true
         super.tearDown()
     }
 
@@ -312,6 +314,10 @@ final class LaunchProviderControllerTests: XCTestCase {
         var providerToken: String?
         var loadedState: OnboardingState?
         var registerError: Error?
+        var cliInstallRuns = 0
+        var cliImportRuns = 0
+        var monitorRuns = 0
+        var configModel = "mlx-community/Qwen2.5-7B-Instruct-4bit"
         let key = Curve25519.Signing.PrivateKey()
 
         func dependencies() -> LaunchProviderController.Dependencies {
@@ -387,9 +393,41 @@ final class LaunchProviderControllerTests: XCTestCase {
                 waitForFirstServing: {
                     Date(timeIntervalSince1970: 2)
                 },
-                readProviderID: { self.configProviderID }
+                readProviderID: { self.configProviderID },
+                runCLIInstall: { _ in
+                    self.cliInstallRuns += 1
+                },
+                importCLIConfigAfterInstall: {
+                    self.cliImportRuns += 1
+                    self.configured = true
+                },
+                monitorInstalledProvider: {
+                    self.monitorRuns += 1
+                },
+                readConfigModel: { self.configModel }
             )
         }
+    }
+
+    func testLaunchViaCLIInstallTrackRunsInstallerThenImports() async {
+        MalibuOnboardingPolicy.prefersCLIInstallTrack = true
+        defer { MalibuOnboardingPolicy.prefersCLIInstallTrack = false }
+
+        let harness = Harness()
+        let controller = LaunchProviderController(
+            coordinatorBaseURL: URL(string: "https://coordinator.streamvc.live")!,
+            bundledCLIPath: URL(fileURLWithPath: "/tmp/macprovider-cli"),
+            dependencies: harness.dependencies()
+        )
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(harness.cliImportRuns, 1)
+        XCTAssertEqual(harness.monitorRuns, 1)
+        XCTAssertEqual(harness.loginItemRegistrations, 1)
+        XCTAssertEqual(harness.autotuneRuns, 0)
+        XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 }
 

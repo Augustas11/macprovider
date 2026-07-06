@@ -48,23 +48,24 @@ struct MalibuBrandTile: View {
 /// tints it automatically for light/dark mode and menu bar state.
 enum MalibuMenuBarIcon {
     static func makeTemplate(pointSize: CGFloat = 18) -> NSImage {
-        let size = NSSize(width: pointSize, height: pointSize * 13/18)
+        let size = NSSize(width: pointSize, height: pointSize)
         let image = NSImage(size: size, flipped: false) { rect in
-            let inset = rect.insetBy(dx: rect.width * 0.045, dy: 0)
-            let horizonY = inset.midY + inset.height * 0.12
+            let sunR = rect.width * (13.0 / 64.0)
+            // AppKit origin is bottom-left; SVG y=42 is 22/64 up from the bottom.
+            // Center the sun+horizon band vertically, then nudge up slightly for menu-bar optics.
+            let horizonY = rect.midY - sunR / 2 + rect.height * 0.04
+            let x1 = rect.minX + rect.width * (10.0 / 64.0)
+            let x2 = rect.minX + rect.width * (54.0 / 64.0)
             let path = NSBezierPath()
 
-            // Horizon line
-            path.move(to: NSPoint(x: inset.minX, y: horizonY))
-            path.line(to: NSPoint(x: inset.maxX, y: horizonY))
-            path.lineWidth = rect.height * 0.11
+            path.move(to: NSPoint(x: x1, y: horizonY))
+            path.line(to: NSPoint(x: x2, y: horizonY))
+            path.lineWidth = rect.height * (3.4 / 64.0)
             path.lineCapStyle = .round
-            NSColor.black.setStroke() // will be tinted by template
+            NSColor.black.setStroke()
             path.stroke()
 
-            // Half-sun (filled semicircle sitting on the horizon)
-            let sunR = inset.width * 0.30
-            let center = NSPoint(x: inset.midX, y: horizonY)
+            let center = NSPoint(x: rect.midX, y: horizonY)
             let sun = NSBezierPath()
             sun.appendArc(withCenter: center, radius: sunR, startAngle: 0, endAngle: 180)
             sun.close()

@@ -2,20 +2,27 @@ import XCTest
 @testable import Malibu
 
 final class DashboardViewTests: XCTestCase {
-    func testOptionalDashboardFieldsRenderDashWhenMissing() {
+    func testOptionalDashboardFieldsRenderFriendlyZerosWhenServing() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
 
-        XCTAssertEqual(AgentSnapshotPresenter.modelLine(snapshot), "—")
-        XCTAssertTrue(AgentSnapshotPresenter.requestsLine(snapshot).contains("— today"))
-        XCTAssertTrue(AgentSnapshotPresenter.tokenLine(snapshot).contains("— in / — out today"))
-        XCTAssertTrue(AgentSnapshotPresenter.usdcFullLine(snapshot).contains("$— today"))
-        XCTAssertEqual(AgentSnapshotPresenter.queueChip(snapshot), "— queued")
-        XCTAssertEqual(AgentSnapshotPresenter.thermalChip(snapshot), "Thermal —")
+        XCTAssertEqual(AgentSnapshotPresenter.modelLine(snapshot), "Connected")
+        XCTAssertTrue(AgentSnapshotPresenter.requestsLine(snapshot).contains("0 today"))
+        XCTAssertTrue(AgentSnapshotPresenter.tokenLine(snapshot).contains("0 in / 0 out today"))
+        XCTAssertTrue(AgentSnapshotPresenter.usdcFullLine(snapshot).contains("$0.00 today"))
+        XCTAssertEqual(AgentSnapshotPresenter.usdcTodayDisplay(snapshot), "$0.00")
+        XCTAssertEqual(AgentSnapshotPresenter.queueChip(snapshot), "0 queued")
+        XCTAssertEqual(AgentSnapshotPresenter.thermalChip(snapshot), "Thermal OK")
+        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Serving")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
+            "Provider connected · waiting for first paid job"
+        )
     }
 
     func testPopulatedDashboardFieldsRenderValues() {
         var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
         snapshot.currentModelID = "Llama-3.1-8B · Q4_K_M · 4.2GB"
         snapshot.requestsServedToday = 142
         snapshot.requestsServedAllTime = 8_204

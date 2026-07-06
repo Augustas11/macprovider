@@ -103,15 +103,45 @@ struct AgentSnapshot: Equatable {
 }
 
 enum AgentSnapshotPresenter {
+    private static func isActive(_ s: AgentSnapshot) -> Bool {
+        s.state == .serving || s.state == .paused
+    }
+
     static func short(_ s: AgentSnapshot) -> String {
         switch s.state {
         case .idle, .starting: return "Idle"
         case .serving:
             if let usdc = s.earningsUsdcToday { return String(format: "$%.2f", usdc) }
-            return "—"
+            return "Serving"
         case .paused:         return "Paused"
-        case .reconnecting:   return "…"
+        case .reconnecting:   return "Sync"
         case .error:          return "!"
+        }
+    }
+
+    static func dashboardHeadline(_ s: AgentSnapshot) -> String {
+        switch s.state {
+        case .idle:         return "Not running"
+        case .starting:     return "Starting…"
+        case .serving:      return "Serving"
+        case .paused:       return "Paused"
+        case .reconnecting: return "Reconnecting…"
+        case .error:        return "Error"
+        }
+    }
+
+    static func dashboardSubtitle(_ s: AgentSnapshot) -> String? {
+        switch s.state {
+        case .serving where s.earningsUsdcToday == nil:
+            return "Provider connected · waiting for first paid job"
+        case .serving:
+            return s.currentModelID
+        case .reconnecting:
+            return s.lastError ?? "Checking background provider…"
+        case .error:
+            return s.lastError
+        default:
+            return nil
         }
     }
 
@@ -127,16 +157,18 @@ enum AgentSnapshotPresenter {
     }
 
     static func earningsLine(_ s: AgentSnapshot) -> String {
-        // AUDIT R1 ARCHITECT A1: distinguish "no data yet" from "$0.00".
         switch (s.earningsUsdcToday, s.malibuAccruedToday) {
         case (nil, nil):
-            return "Today: — USDC · — MALIBU (metrics not implemented)"
+            if isActive(s) {
+                return "Today: $0.00 USDC · 0.00 MALIBU (no jobs yet)"
+            }
+            return "Today: not running"
         case let (usdc?, malibu?):
             return String(format: "Today: $%.2f USDC · %@", usdc, malibuDisplay(malibu, tier: s.trustTier))
         case let (usdc?, nil):
-            return String(format: "Today: $%.2f USDC · — MALIBU", usdc)
+            return String(format: "Today: $%.2f USDC · 0.00 MALIBU", usdc)
         case let (nil, malibu?):
-            return "Today: — USDC · \(malibuDisplay(malibu, tier: s.trustTier))"
+            return "Today: $0.00 USDC · \(malibuDisplay(malibu, tier: s.trustTier))"
         }
     }
 
@@ -151,14 +183,18 @@ enum AgentSnapshotPresenter {
     }
 
     static func modelLine(_ s: AgentSnapshot) -> String {
-        s.currentModelID ?? "—"
+        if let model = s.currentModelID { return model }
+        return isActive(s) ? "Connected" : "Not running"
     }
 
     static func requestsLine(_ s: AgentSnapshot) -> String {
         [
-            s.requestsServedToday.map { "\(formatCount($0)) today" } ?? "— today",
-            s.requestsServedAllTime.map { "\(formatCount($0)) all-time" } ?? "— all-time",
-            s.requestsPerMinute.map { String(format: "%.1f req/min", $0) } ?? "— req/min"
+            s.requestsServedToday.map { "\(formatCount($0)) today" }
+                ?? (isActive(s) ? "0 today" : "n/a today"),
+            s.requestsServedAllTime.map { "\(formatCount($0)) all-time" }
+                ?? (isActive(s) ? "0 all-time" : "n/a all-time"),
+            s.requestsPerMinute.map { String(format: "%.1f req/min", $0) }
+                ?? (isActive(s) ? "0.0 req/min" : "n/a req/min")
         ].joined(separator: " · ")
     }
 
@@ -169,17 +205,24 @@ enum AgentSnapshotPresenter {
     }
 
     static func usdcFullLine(_ s: AgentSnapshot) -> String {
-        [
-            s.earningsUsdcToday.map { String(format: "$%.2f today", $0) } ?? "$— today",
-            s.earningsUsdcWeek.map { String(format: "$%.2f wk", $0) } ?? "$— wk",
-            s.earningsUsdcPending.map { String(format: "$%.2f pending", $0) } ?? "$— pending",
-            s.earningsUsdcLifetime.map { String(format: "$%.2f life", $0) } ?? "$— life"
+        let unset = isActive(s) ? "$0.00" : "n/a"
+        return [
+            s.earningsUsdcToday.map { String(format: "$%.2f today", $0) } ?? "\(unset) today",
+            s.earningsUsdcWeek.map { String(format: "$%.2f wk", $0) } ?? "\(unset) wk",
+            s.earningsUsdcPending.map { String(format: "$%.2f pending", $0) } ?? "\(unset) pending",
+            s.earningsUsdcLifetime.map { String(format: "$%.2f life", $0) } ?? "\(unset) life"
         ].joined(separator: " · ")
     }
 
+    static func usdcTodayDisplay(_ s: AgentSnapshot) -> String {
+        s.earningsUsdcToday.map { String(format: "$%.2f", $0) } ?? (isActive(s) ? "$0.00" : "n/a")
+    }
+
     static func malibuFullLine(_ s: AgentSnapshot) -> String {
-        let today = s.malibuAccruedToday.map { malibuDisplay($0, tier: s.trustTier, compact: true) } ?? "— MALIBU today"
-        let allTime = s.malibuAccruedAllTime.map { String(format: "%.2f all-time", $0) } ?? "— all-time"
+        let today = s.malibuAccruedToday.map { malibuDisplay($0, tier: s.trustTier, compact: true) }
+            ?? (isActive(s) ? "0.00 MALIBU today" : "n/a MALIBU today")
+        let allTime = s.malibuAccruedAllTime.map { String(format: "%.2f all-time", $0) }
+            ?? (isActive(s) ? "0.00 all-time" : "n/a all-time")
         switch s.trustTier {
         case .trusted:
             return "\(today) · \(allTime)"
@@ -197,11 +240,20 @@ enum AgentSnapshotPresenter {
     }
 
     static func uptimeLine(_ s: AgentSnapshot) -> String {
-        [
-            s.uptime7dPct.map { String(format: "%.1f%% uptime (7d)", $0) } ?? "— uptime (7d)",
-            s.declinedRequests.map { "\($0) declined" } ?? "— declined",
-            s.restartCount.map { "\($0) restarts" } ?? "— restarts"
-        ].joined(separator: " · ")
+        var parts: [String] = []
+        if let sec = s.uptimeSec, isActive(s) {
+            parts.append("\(formatDuration(sec)) up")
+        } else if isActive(s) {
+            parts.append("uptime n/a")
+        }
+        if let pct = s.uptime7dPct {
+            parts.append(String(format: "%.1f%% uptime (7d)", pct))
+        } else if isActive(s) {
+            parts.append("7d uptime n/a")
+        }
+        parts.append(s.declinedRequests.map { "\($0) declined" } ?? (isActive(s) ? "0 declined" : "n/a declined"))
+        parts.append(s.restartCount.map { "\($0) restarts" } ?? (isActive(s) ? "0 restarts" : "n/a restarts"))
+        return parts.joined(separator: " · ")
     }
 
     static func gpuChip(_ s: AgentSnapshot) -> String {
@@ -211,7 +263,7 @@ enum AgentSnapshotPresenter {
         if let temp = s.gpuTemperatureC {
             return String(format: "GPU %.0f°C", temp)
         }
-        return "GPU —"
+        return "GPU n/a"
     }
 
     static func latencyChip(_ s: AgentSnapshot) -> String {
@@ -219,21 +271,21 @@ enum AgentSnapshotPresenter {
         case let (p50?, p99?):
             return "p50 \(p50)ms · p99 \(p99)ms"
         case let (p50?, nil):
-            return "p50 \(p50)ms · p99 —"
+            return "p50 \(p50)ms · p99 n/a"
         case let (nil, p99?):
-            return "p50 — · p99 \(p99)ms"
+            return "p50 n/a · p99 \(p99)ms"
         case (nil, nil):
-            return "Latency —"
+            return isActive(s) ? "Latency n/a" : "Latency n/a"
         }
     }
 
     static func queueChip(_ s: AgentSnapshot) -> String {
-        guard let depth = s.queueDepth else { return "— queued" }
-        return "\(depth) queued"
+        if let depth = s.queueDepth { return "\(depth) queued" }
+        return isActive(s) ? "0 queued" : "Queue n/a"
     }
 
     static func thermalChip(_ s: AgentSnapshot) -> String {
-        s.thermalState?.label ?? "Thermal —"
+        s.thermalState?.label ?? (isActive(s) ? "Thermal OK" : "Thermal n/a")
     }
 
     static func unclaimedBadge(_ s: AgentSnapshot, dismissedThreshold: Double?) -> String? {
@@ -270,7 +322,7 @@ enum AgentSnapshotPresenter {
     }
 
     private static func formatTokens(_ value: Int64?) -> String {
-        guard let value else { return "—" }
+        guard let value else { return "0" }
         if value >= 1_000_000 {
             return String(format: "%.1fM", Double(value) / 1_000_000)
         }
@@ -287,5 +339,11 @@ enum AgentSnapshotPresenter {
         formatter.usesGroupingSeparator = true
         formatter.groupingSeparator = ","
         return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+
+    private static func formatDuration(_ seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return String(format: "%dm", seconds / 60) }
+        return String(format: "%dh %dm", seconds / 3600, (seconds % 3600) / 60)
     }
 }

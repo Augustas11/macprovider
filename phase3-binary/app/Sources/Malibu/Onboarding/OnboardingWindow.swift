@@ -50,8 +50,8 @@ private struct OnboardingRootView: View {
                         .font(.system(size: 28, weight: .semibold))
                 }
             }
-            Text("Three quick steps to launch a provider.")
-            Text("Create a provider identity, register this Mac, and start serving from the bundled provider.")
+            Text("Launch Provider installs and configures the macprovider CLI on this Mac.")
+            Text("Malibu monitors the background provider and shows earnings here — setup runs via the same installer as the terminal path.")
                 .foregroundStyle(.secondary)
 
             Divider()
@@ -61,18 +61,48 @@ private struct OnboardingRootView: View {
         }
         .padding(28)
         .frame(minWidth: 460, minHeight: 560)
+        .task {
+            await controller.refreshFromExistingInstall()
+        }
     }
 
     @ViewBuilder
     private var content: some View {
         switch controller.stage {
         case .idle:
-            stageRow(title: "Ready", detail: "The app will create a local identity key and register this provider.") {
+            stageRow(title: "Ready", detail: "Installs the provider CLI, picks a model, and registers a background service.") {
                 VStack(alignment: .leading, spacing: 8) {
                     launchButton(title: "Launch Provider")
                     Text("No wallet needed to start — add one anytime after.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                }
+            }
+        case .runningCLIInstall:
+            stageRow(
+                title: "Installing provider",
+                detail: controller.installProgressHint
+                    ?? "Running the macprovider installer. Autotune and first model download can take 10–30 minutes with little log output."
+            ) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 12) {
+                        ProgressView().controlSize(.small)
+                        if let started = controller.installStartedAt {
+                            Text("Elapsed \(formattedElapsed(since: started))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                    if !controller.installLogLines.isEmpty {
+                        ScrollView {
+                            Text(controller.installLogLines.suffix(20).joined(separator: "\n"))
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .frame(maxHeight: 160)
+                    }
                 }
             }
         case .identityReady:
@@ -104,7 +134,7 @@ private struct OnboardingRootView: View {
                 }
             }
         case .startingAgent:
-            stageRow(title: "Starting", detail: "Registering the login item and starting the provider.") {
+            stageRow(title: "Starting", detail: "Waiting for the background provider to become healthy.") {
                 ProgressView().controlSize(.small)
             }
         case .authenticating:
@@ -174,5 +204,17 @@ private struct OnboardingRootView: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(MalibuBrand.coral)
+    }
+
+    private func formattedElapsed(since start: Date) -> String {
+        let seconds = max(0, Int(Date().timeIntervalSince(start)))
+        let minutes = seconds / 60
+        let remainder = seconds % 60
+        if minutes >= 60 {
+            let hours = minutes / 60
+            let mins = minutes % 60
+            return String(format: "%d:%02d:%02d", hours, mins, remainder)
+        }
+        return String(format: "%d:%02d", minutes, remainder)
     }
 }

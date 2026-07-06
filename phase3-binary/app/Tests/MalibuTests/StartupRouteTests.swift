@@ -22,8 +22,8 @@ final class StartupRouteTests: XCTestCase {
             ("configured-v2-partial", state(config: true, marker: true, token: true, identity: true, onboarding: true, firstServing: false), .resumeOnboarding, .resumeOnboarding),
             ("cli-owned", state(config: true, marker: false, token: false, identity: false, onboarding: false, firstServing: false), .showImportDialog, .showImportDialog),
             ("v2-partial", state(config: false, marker: false, token: false, identity: true, onboarding: true, firstServing: false), .resumeOnboarding, .resumeOnboarding),
-            ("fresh", state(config: false, marker: false, token: false, identity: false, onboarding: false, firstServing: false), .setupPaused, .showOnboarding),
-            ("identity-only", state(config: false, marker: false, token: false, identity: true, onboarding: false, firstServing: false), .setupPaused, .resumeOnboarding)
+            ("fresh", state(config: false, marker: false, token: false, identity: false, onboarding: false, firstServing: false), .showOnboarding, .showOnboarding),
+            ("identity-only", state(config: false, marker: false, token: false, identity: true, onboarding: false, firstServing: false), .showOnboarding, .resumeOnboarding)
         ]
 
         for (name, base, flagOffRoute, flagOnRoute) in cases {
@@ -75,7 +75,7 @@ final class StartupRouteTests: XCTestCase {
     }
 
     func testMigrationStartFreshMovesConfigAsideAndReclassifiesFreshByFlag() async throws {
-        for (enabled, expectedRoute) in [(false, StartupRoute.setupPaused), (true, .showOnboarding)] {
+        for (enabled, expectedRoute) in [(false, StartupRoute.showOnboarding), (true, .showOnboarding)] {
             let paths = try makeTempPaths()
             try paths.ensureDirectories()
             try "provider_id: p_old\nprovider_token: old-token\n".write(to: paths.configFile, atomically: true, encoding: .utf8)

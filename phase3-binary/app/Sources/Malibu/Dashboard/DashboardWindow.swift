@@ -23,18 +23,26 @@ private struct DashboardView: View {
             HStack(spacing: 12) {
                 MalibuBrandTile()
                     .frame(width: 28, height: 28)
-                Text("Malibu")
-                    .font(.system(size: 15, weight: .semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Malibu")
+                        .font(.system(size: 15, weight: .semibold))
+                    if let subtitle = AgentSnapshotPresenter.dashboardSubtitle(agent.snapshot) {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
                 Spacer()
-                Text(agent.snapshot.state.rawValue.capitalized)
-                    .font(.caption)
+                Text(AgentSnapshotPresenter.dashboardHeadline(agent.snapshot))
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(color(for: agent.snapshot.state))
             }
 
             HStack(alignment: .top, spacing: 16) {
                 panel {
                     Text("Today").font(.caption).foregroundStyle(.secondary)
-                    Text(agent.snapshot.earningsUsdcToday.map { String(format: "$%.2f", $0) } ?? "$—")
+                    Text(AgentSnapshotPresenter.usdcTodayDisplay(agent.snapshot))
                         .font(.system(size: 36, weight: .semibold, design: .rounded))
                     Text(AgentSnapshotPresenter.usdcFullLine(agent.snapshot))
                         .foregroundStyle(.secondary)
@@ -59,8 +67,8 @@ private struct DashboardView: View {
                                 .font(.caption.monospaced())
                                 .textSelection(.enabled)
                         }
-                    } else {
-                        MetricRow(title: "Weights path", value: "—")
+                    } else if agent.snapshot.state == .serving || agent.snapshot.state == .paused {
+                        MetricRow(title: "Weights path", value: "Managed by provider")
                     }
                     MetricRow(title: "Trust tier", value: AgentSnapshotPresenter.trustLine(agent.snapshot))
                     MetricRow(title: "Requests", value: AgentSnapshotPresenter.requestsLine(agent.snapshot))

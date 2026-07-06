@@ -38,6 +38,8 @@ final class MalibuAgent: ObservableObject {
     // — including a reconnect Task that already slept past its cancellation
     // check but hadn't yet re-entered the MainActor.
     private var isShuttingDown: Bool = false
+    private var healthPollTask: Task<Void, Never>?
+    private var monitorsLaunchdProvider = false
 
     init() {
         thermalMonitor.$state
@@ -54,6 +56,12 @@ final class MalibuAgent: ObservableObject {
         // AUDIT R2 CODE H3 fix.
         guard !isShuttingDown else { return }
         guard child == nil else { return }
+
+        // Option A: when install.sh owns the provider via launchd, monitor it
+        // instead of spawning a second macprovider-cli child.
+        if await monitorInstalledProviderIfPresent() {
+            return
+        }
 
         // AUDIT R2 CODE H4 fix: refuse to spawn the CLI without a validated
         // app-owned config + keychain token. Onboarding must complete the
@@ -152,6 +160,8 @@ final class MalibuAgent: ObservableObject {
     func shutdown(gracefulSeconds: Int) async {
         isShuttingDown = true
         reconnectTask?.cancel(); reconnectTask = nil
+        healthPollTask?.cancel(); healthPollTask = nil
+        monitorsLaunchdProvider = false
         child?.markStopping()
 
         try? await control?.send(.shutdownRequest(graceSeconds: gracefulSeconds))
@@ -169,6 +179,67 @@ final class MalibuAgent: ObservableObject {
     }
 
     // MARK: - Private
+
+    /// Attach to an existing launchd-managed provider (CLI install track).
+    /// Returns true when local /v1/health is reachable on the configured port.
+    @discardableResult
+    func monitorInstalledProviderIfPresent(timeout: TimeInterval = 120) async -> Bool {
+        guard let port = ProviderConfig.readHTTPPort(),
+              ProviderConfig.readProviderID() != nil else {
+            return false
+        }
+        let deadline = Date().addingTimeInterval(max(1, timeout))
+        guard await InstalledProviderMonitor.waitForHealthy(port: port, deadline: deadline) else {
+            return false
+        }
+        monitorsLaunchdProvider = true
+        await applyHealthSnapshot(port: port)
+        snapshot.state = .serving
+        snapshot.lastError = nil
+        startHealthPolling(port: port)
+        await refreshEarnings()
+        return true
+    }
+
+    private func applyHealthSnapshot(port: Int) async {
+        guard let health = await InstalledProviderMonitor.fetchHealth(port: port) else { return }
+        if let model = health.model, !model.isEmpty {
+            snapshot.currentModelID = model
+        }
+        if let total = health.requestsTotal {
+            snapshot.requestsServedAllTime = total
+        }
+        if let uptime = health.uptimeSeconds {
+            snapshot.uptimeSec = uptime
+        }
+        if health.ready {
+            snapshot.state = .serving
+        }
+    }
+
+    private func startHealthPolling(port: Int) {
+        healthPollTask?.cancel()
+        healthPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard let self else { return }
+                if await InstalledProviderMonitor.isHealthy(port: port) {
+                    await self.applyHealthSnapshot(port: port)
+                    await MainActor.run {
+                        if self.snapshot.state != .serving && self.snapshot.state != .paused {
+                            self.snapshot.state = .serving
+                        }
+                    }
+                    await self.refreshEarnings()
+                } else if self.monitorsLaunchdProvider {
+                    await MainActor.run {
+                        self.snapshot.state = .reconnecting
+                        self.snapshot.lastError = "Background provider is not responding on port \(port)."
+                    }
+                }
+            }
+        }
+    }
 
     private func connectControl(socketPath: String) async {
         metricsPoller?.cancel(); metricsPoller = nil

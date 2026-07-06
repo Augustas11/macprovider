@@ -5,17 +5,23 @@ import XCTest
 // authoritative "$0.00" until the CLI moves past the stub metrics_response.
 
 final class AgentSnapshotPresenterTests: XCTestCase {
-    func testEarningsLineShowsDashWhenBothMetricsMissing() {
+    func testEarningsLineShowsZeroWhenBothMetricsMissingWhileServing() {
         var s = AgentSnapshot.empty
         s.state = .serving
-        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("—"))
-        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("not implemented"))
+        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("$0.00"))
+        XCTAssertTrue(AgentSnapshotPresenter.earningsLine(s).contains("no jobs yet"))
     }
 
-    func testShortShowsDashWhenServingButNoEarningsYet() {
+    func testShortShowsServingWhenNoEarningsYet() {
         var s = AgentSnapshot.empty
         s.state = .serving
-        XCTAssertEqual(AgentSnapshotPresenter.short(s), "—")
+        XCTAssertEqual(AgentSnapshotPresenter.short(s), "Serving")
+    }
+
+    func testShortShowsSyncWhenReconnecting() {
+        var s = AgentSnapshot.empty
+        s.state = .reconnecting
+        XCTAssertEqual(AgentSnapshotPresenter.short(s), "Sync")
     }
 
     func testShortShowsFormattedDollarsWhenPopulated() {
