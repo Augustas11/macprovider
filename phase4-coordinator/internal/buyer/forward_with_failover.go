@@ -149,6 +149,7 @@ func (s *Server) forwardWithFailover(
 					state.queueWait = nextQueueWait
 					state.queuedSlotProviderID = nextQueuedSlotProviderID
 					state.provider = next
+					state.phaseTiming.markCoordRoutingDone(phaseTimingNow(s))
 					if tx.afterFailoverHit != nil {
 						if fallThrough := tx.afterFailoverHit(state); fallThrough {
 							return true

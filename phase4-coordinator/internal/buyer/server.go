@@ -1502,6 +1502,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// estimatedTokens is populated below once the body is read +
 		// validated; retry-path PreflightResult derivation reads it.
 	}
+	state.phaseTiming.init(startedAt)
+	w = &phaseTimingResponseWriter{ResponseWriter: w, state: state, now: s.now}
 	// M3-10 (ARCH-6 close-out): the previously-inline logRowWithBilling
 	// closure now lives as *billingRecorder. setModel / setStream /
 	// setRequestID land before the first provider-bound recordRow call,
@@ -1631,11 +1633,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	provider, routeErr := s.selectProvider(r.Context(), routingRequestID, req, r.Header, state.dailyKey, state)
 	if routeErr != nil {
 		state.routingDone = s.now()
+		state.phaseTiming.markCoordRoutingDone(state.routingDone)
 		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", 0)
 		writeRouteError(w, routeErr)
 		return
 	}
 	state.routingDone = s.now()
+	state.phaseTiming.markCoordRoutingDone(state.routingDone)
 	state.provider = provider
 	defer s.releaseQueuedSlotReservation(state)
 	// M2-1c: the three transport loops (streaming, WS-non-streaming, HTTP)
@@ -2143,12 +2147,25 @@ func (s *Server) forwardHTTPSequence(
 			upReq.Header.Set("Content-Type", "application/json")
 			upReq.Header.Set("X-Request-ID", originalRequestID)
 			setSettlementMetadataHeader(upReq.Header, settlementMetadata)
+			state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s))
 			resp, doErr := providerhttp.Client.Do(upReq)
+			dispatchDone := phaseTimingNow(s)
+			state.phaseTiming.markProviderDispatchDone(dispatchDone)
+			if doErr != nil || resp == nil {
+				state.phaseTiming.markProviderDone(dispatchDone)
+			}
 			// 200 success path: render body + receipt headers, log row,
 			// cancelAttempt on every exit.
 			if doErr == nil && resp != nil && resp.StatusCode == http.StatusOK {
-				respBody, readErr := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
+				body := &firstByteTimingReader{
+					r: resp.Body,
+					mark: func() {
+						state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
+					},
+				}
+				respBody, readErr := readLimitedBody(body, maxUpstreamResponseBodyBytes)
 				_ = resp.Body.Close()
+				state.phaseTiming.markProviderDone(phaseTimingNow(s))
 				if readErr != nil {
 					cancelAttempt()
 					rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
@@ -2213,8 +2230,15 @@ func (s *Server) forwardHTTPSequence(
 			var respBody []byte
 			if resp != nil {
 				status = resp.StatusCode
-				respBody, _ = readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
+				body := &firstByteTimingReader{
+					r: resp.Body,
+					mark: func() {
+						state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
+					},
+				}
+				respBody, _ = readLimitedBody(body, maxUpstreamResponseBodyBytes)
 				_ = resp.Body.Close()
+				state.phaseTiming.markProviderDone(phaseTimingNow(s))
 				attempt.ErrorCode = nullUsageProviderErrorCode(respBody)
 				receiptValue := normalizeReceiptHeaderValue(resp.Header.Get("X-MacProvider-Receipt"))
 				terminalState := terminalStateFromAttempt(status, http.StatusText(status), attempt.ErrorCode)
@@ -2421,11 +2445,13 @@ func (s *Server) advanceToNextProvider(
 	picked, routeErr := s.selectProviderExcluding(r.Context(), nextRouteID, req, r.Header, excluded, state.dailyKey, state)
 	if routeErr != nil {
 		state.routingDone = s.now()
+		state.phaseTiming.markCoordRoutingDone(state.routingDone)
 		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", state.explicitRetries)
 		writeRouteError(w, routeErr)
 		return "", false
 	}
 	state.routingDone = s.now()
+	state.phaseTiming.markCoordRoutingDone(state.routingDone)
 	state.explicitRetries++
 	state.faultedProviders++
 	state.provider = picked
@@ -2476,12 +2502,22 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 	}
 	var relay *providerws.RelayStream
 	var err error
+	if state != nil {
+		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s))
+	}
 	if settlementMetadata != nil && s.settlementRelay != nil {
 		relay, err = s.settlementRelay(ctx, provider, requestID, body, stream, settlementMetadata)
 	} else {
 		relay, err = s.relay(ctx, provider, requestID, body, stream)
 	}
+	dispatchDone := phaseTimingNow(s)
+	if state != nil {
+		state.phaseTiming.markProviderDispatchDone(dispatchDone)
+	}
 	if err != nil {
+		if state != nil {
+			state.phaseTiming.markProviderDone(dispatchDone)
+		}
 		if reserved {
 			s.admission.RefundRequest(provider)
 		}
@@ -2528,14 +2564,27 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 	started := time.Now()
 	ttftLogged := false
 	faultFlag := billing.FaultNone
+	markProviderDone := func() {
+		if state != nil {
+			now := phaseTimingNow(s)
+			state.phaseTiming.markProviderDone(now)
+			writePhaseTimingHeaders(w.Header(), state, now)
+		}
+	}
 	estimatedCompletion := func() *int64 {
 		return s.estimatedCompletionTokensFromBytes(body.Len())
 	}
-	observeTTFT := func() {
+	observeTTFT := func(data string) {
+		if data == "" {
+			return
+		}
 		if ttftLogged {
 			return
 		}
 		ttftLogged = true
+		if state != nil {
+			state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
+		}
 		guard.LogTTFT(time.Since(started))
 	}
 	chunks := relay.Chunks
@@ -2543,9 +2592,10 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 		select {
 		case chunk, ok := <-chunks:
 			if ok {
-				observeTTFT()
+				observeTTFT(chunk.Data)
 				if body.Len() > int(maxUpstreamResponseBodyBytes)-len(chunk.Data) {
 					relay.Cancel("response_body_too_large")
+					markProviderDone()
 					writeError(w, http.StatusBadGateway, "provider_response_too_large", "Provider response exceeded coordinator limit")
 					return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider response exceeded coordinator limit"}
 				}
@@ -2561,9 +2611,10 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 						chunks = nil
 						continue
 					}
-					observeTTFT()
+					observeTTFT(chunk.Data)
 					if body.Len() > int(maxUpstreamResponseBodyBytes)-len(chunk.Data) {
 						relay.Cancel("response_body_too_large")
+						markProviderDone()
 						writeError(w, http.StatusBadGateway, "provider_response_too_large", "Provider response exceeded coordinator limit")
 						return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider response exceeded coordinator limit"}
 					}
@@ -2575,8 +2626,10 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			if end.Status != "complete" {
 				status := wsEndHTTPStatus(end.Status)
 				if end.Status == "error_queue_full" {
+					markProviderDone()
 					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: end.Status}
 				}
+				markProviderDone()
 				writeWSEndError(w, end)
 				attempt := requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
 				if isSpec019ProviderDetailCode(attempt.ErrorCode) {
@@ -2584,6 +2637,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				}
 				return wsForwardFailed, attempt
 			}
+			markProviderDone()
 			if s.zeroTokenFault(end, finishReasonFromChatResponse(body.Bytes())) {
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
 				faultFlag = billing.FaultBreakerQualifying
@@ -2641,10 +2695,12 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 			setReceiptHeaderForProvider(w.Header(), receiptValue, provider)
+			markProviderDone()
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(checkedBody)
 			return wsForwardComplete, attempt
 		case err := <-relay.Errors:
+			markProviderDone()
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws relay failed")
 			if errors.Is(err, providerws.ErrRelayTimeout) {
 				s.recordBreakerFault(provider, breakerFaultRelayTimeout, requestID)
@@ -2656,12 +2712,15 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
 				return wsForwardProviderDisconnected, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider disconnected; buyer should retry", EstimatedCompTokens: estimatedCompletion(), FaultFlag: billing.FaultBreakerQualifying}
 			} else if errors.Is(err, providerws.ErrRelayAEADFailed) {
+				markProviderDone()
 				writeError(w, http.StatusBadGateway, "tier2_aead_decrypt_failed", "Provider encrypted response failed authentication")
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider encrypted response failed authentication"}
 			} else if errors.Is(err, providerws.ErrRelayNAKFallback) {
+				markProviderDone()
 				writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is not reachable"}
 			} else {
+				markProviderDone()
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider failed; buyer should retry"}
 			}
@@ -2691,6 +2750,17 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	}
 	streamFailureAttempt := requestLogAttempt{}
 	hasStreamFailureAttempt := false
+	markProviderDone := func() {
+		if state != nil {
+			now := phaseTimingNow(s)
+			state.phaseTiming.markProviderDone(now)
+			if committed {
+				writePhaseTimingTrailers(w.Header(), state, now)
+			} else {
+				writePhaseTimingHeaders(w.Header(), state, now)
+			}
+		}
+	}
 	setStreamFailureAttempt := func(status int, message string, code string) {
 		streamFailureAttempt = requestLogAttempt{Status: status, Error: message, ErrorCode: code, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 		hasStreamFailureAttempt = true
@@ -2712,13 +2782,17 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		committed = true
 	}
 	writeChunk := func(data string) (bool, wsForwardResult) {
-		if !ttftLogged {
+		if data != "" && !ttftLogged {
 			ttftLogged = true
+			if state != nil {
+				state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
+			}
 			guard.LogTTFT(time.Since(started))
 		}
 		checked, stop, err := guard.CheckStreamingChunk(data)
 		if err != nil {
 			relay.Cancel("tier2_encoding_invalid")
+			markProviderDone()
 			if !committed {
 				setStreamFailureAttempt(http.StatusBadGateway, "Provider returned invalid Tier2 output encoding", "tier2_output_encoding_invalid")
 				writeError(w, http.StatusBadGateway, "tier2_output_encoding_invalid", "Provider returned invalid Tier2 output encoding")
@@ -2744,6 +2818,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 			}
 			commit()
+			markProviderDone()
 			setStreamFailureAttempt(http.StatusOK, "Provider emitted malformed settlement stream", "malformed_settlement_stream")
 			writeSSEError(w, "Provider emitted malformed settlement stream", "malformed_settlement_stream")
 			if flusher != nil {
@@ -2757,6 +2832,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 			}
 			commit()
+			markProviderDone()
 			setStreamFailureAttempt(http.StatusOK, "Provider emitted malformed tool-call stream", "malformed_tool_call")
 			writeSSEError(w, "Provider emitted malformed tool-call stream", "malformed_tool_call")
 			if flusher != nil {
@@ -2768,6 +2844,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		if _, err := w.Write([]byte(checked)); err != nil {
 			relay.Cancel("buyer_disconnected")
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
+			markProviderDone()
 			return true, wsForwardCancelled
 		}
 		bytesEmitted += len(checked)
@@ -2776,6 +2853,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		}
 		if stop {
 			relay.Cancel("tier2_output_truncated")
+			markProviderDone()
 			return true, wsForwardComplete
 		}
 		return false, ""
@@ -2784,6 +2862,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		select {
 		case <-r.Context().Done():
 			relay.Cancel("buyer_disconnected")
+			markProviderDone()
 			return wsForwardCancelled, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 		case chunk, ok := <-chunks:
 			if !ok {
@@ -2826,10 +2905,13 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			if !committed && end.Status != "complete" && end.Status != "cancelled" {
 				status := wsEndHTTPStatus(end.Status)
 				if end.Status == "error_queue_full" {
+					markProviderDone()
 					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: end.Status}
 				}
+				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
 			}
+			markProviderDone()
 			commit()
 			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
@@ -2888,6 +2970,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			return wsForwardComplete, attempt
 		case err := <-relay.Errors:
+			markProviderDone()
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws streaming relay failed")
 			if errors.Is(err, providerws.ErrRelayClosed) {
 				if r.Context().Err() != nil {
@@ -2944,14 +3027,25 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 	var raw bytes.Buffer
 	var promptTok, cachedPromptTok, completionTok *int64
 	toolFinal := newStreamToolCallFinalValidator()
+	markProviderDone := func() {
+		if state != nil {
+			now := phaseTimingNow(s)
+			state.phaseTiming.markProviderDone(now)
+			writePhaseTimingTrailers(w.Header(), state, now)
+		}
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			relay.Cancel("buyer_disconnected")
+			markProviderDone()
 			return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone}
 		case chunk, ok := <-relay.Chunks:
 			if !ok {
 				continue
+			}
+			if chunk.Data != "" && state != nil {
+				state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
 			}
 			if _, p, cached, c := sseBlockWithCachedPromptTokens([]byte(chunk.Data), state, billingAttemptN); p != nil || cached != nil || c != nil {
 				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
@@ -2959,10 +3053,12 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			checked, stop, err := guard.CheckStreamingChunk(chunk.Data)
 			if err != nil {
 				relay.Cancel("tier2_encoding_invalid")
+				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid Tier2 output encoding", ErrorCode: "tier2_output_encoding_invalid", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
 			if raw.Len() > int(maxUpstreamResponseBodyBytes)-len(checked) {
 				relay.Cancel("buffered_stream_too_large")
+				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider buffered stream exceeded cap", ErrorCode: "provider_stream_too_large", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
 			if sanitized, p, cached, c := sseBlockWithCachedPromptTokens([]byte(checked), state, billingAttemptN); p != nil || cached != nil || c != nil {
@@ -2975,10 +3071,12 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
+				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
 			if stop {
 				relay.Cancel("tier2_output_truncated")
+				markProviderDone()
 				return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(raw.Len())}
 			}
 		case end := <-relay.Done:
@@ -2986,12 +3084,14 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				if toolFinal.toolOpened && s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
+				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: wsEndHTTPStatus(end.Status), Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
 			if !toolFinal.finalCloseOK() {
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
+				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider closed before tool-call stream completed", ErrorCode: "tool_call_final_close_failed", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
 			out, err := consolidatedToolCallSSE(raw.Bytes())
@@ -2999,6 +3099,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
+				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
 			settlementTracker := newSettlementStreamOutputTracker()
@@ -3006,8 +3107,10 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
+				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed settlement stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
+			markProviderDone()
 			receiptValue := normalizeReceiptHeaderValue(end.Receipt)
 			terminalTS := int64(0)
 			if providerTS, ok := trustedProviderTerminalStateTSInt(end.TerminalStateTSUnixMS, started, time.Now().UTC()); ok {
@@ -3040,6 +3143,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			}
 			return wsForwardComplete, attempt
 		case err := <-relay.Errors:
+			markProviderDone()
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws buffered streaming relay failed")
 			if toolFinal.toolOpened && s.streamingDowngrade != nil {
 				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -3065,8 +3169,25 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	upReq.Header.Set("Content-Type", "application/json")
 	upReq.Header.Set("X-Request-ID", requestID)
 	setSettlementMetadataHeader(upReq.Header, settlementMetadata)
+	markProviderDone := func() {
+		if state != nil {
+			now := phaseTimingNow(s)
+			state.phaseTiming.markProviderDone(now)
+			writePhaseTimingTrailers(w.Header(), state, now)
+		}
+	}
+	if state != nil {
+		state.phaseTiming.markProviderDispatchStart(phaseTimingNow(s))
+	}
 	resp, err := providerhttp.Client.Do(upReq)
+	dispatchDone := phaseTimingNow(s)
+	if state != nil {
+		state.phaseTiming.markProviderDispatchDone(dispatchDone)
+	}
 	if err != nil {
+		if state != nil {
+			state.phaseTiming.markProviderDone(dispatchDone)
+		}
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider request failed")
 		if r.Context().Err() != nil {
 			return wsForwardCancelled, 0, requestLogAttempt{}
@@ -3087,7 +3208,17 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	if resp.StatusCode != http.StatusOK {
 		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider returned non-200")
 		s.handleProviderFailure(provider, resp.StatusCode)
-		respBody, _ := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
+		body := io.Reader(resp.Body)
+		if state != nil {
+			body = &firstByteTimingReader{
+				r: resp.Body,
+				mark: func() {
+					state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
+				},
+			}
+		}
+		respBody, _ := readLimitedBody(body, maxUpstreamResponseBodyBytes)
+		markProviderDone()
 		attempt := requestLogAttempt{Status: resp.StatusCode, Error: http.StatusText(resp.StatusCode), ErrorCode: spec001StatusFromBody(respBody)}
 		if resp.StatusCode == http.StatusGatewayTimeout {
 			return wsForwardTimedOut, resp.StatusCode, attempt
@@ -3174,6 +3305,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if err != nil {
 				return err
 			}
+			if state != nil {
+				state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
+			}
 			if preCommit.Len()+lineBuf.Len() >= maxPreCommitStreamingBytes {
 				s.log.Warn().Int("bytes", preCommit.Len()+lineBuf.Len()).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider exceeded pre-commit buffer cap")
 				return errPreCommitCapExceeded
@@ -3227,6 +3361,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		}
 	}()
 	if preCommitErr != nil {
+		markProviderDone()
 		if errors.Is(preCommitErr, errPreCommitCapExceeded) {
 			s.handleProviderFailure(provider, http.StatusBadGateway)
 			return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider exceeded pre-commit buffer without commit-worthy event", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
@@ -3261,6 +3396,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	firstForwardedAt := s.now()
 	if _, writeErr := w.Write(preCommit.Bytes()); writeErr != nil {
 		s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer pre-commit write failed")
+		markProviderDone()
 		return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 	}
 	if s.streamingTiming != nil {
@@ -3297,6 +3433,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				if flusher != nil {
 					flusher.Flush()
 				}
+				markProviderDone()
 				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed tool-call stream", "malformed_tool_call", billing.FaultBreakerQualifying)
 			}
 			if err := settlementTracker.observeLine(line); err != nil {
@@ -3308,10 +3445,12 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				if flusher != nil {
 					flusher.Flush()
 				}
+				markProviderDone()
 				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed settlement stream", "malformed_settlement_stream", billing.FaultBreakerQualifying)
 			}
 			if _, writeErr := w.Write(line); writeErr != nil {
 				s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
+				markProviderDone()
 				return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 			}
 			bytesEmitted += len(line)
@@ -3323,6 +3462,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			continue
 		}
 		if err == io.EOF {
+			markProviderDone()
 			receiptValue := normalizeReceiptHeaderValue(resp.Trailer.Get("X-MacProvider-Receipt"))
 			if terminalSSEErrorCode != "" {
 				attempt := progressAttempt("Provider emitted terminal structured-output streaming error", billing.FaultBreakerQualifying)
@@ -3352,6 +3492,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CachedPromptTokens: cachedPromptTok, CompletionTokens: completionTok, EstimatedCompTokens: s.observedCompletionTokensFromBytes(bytesEmitted), SettlementOutput: settlementOutput, SettlementReceipt: receiptValue}
 		}
 		if r.Context().Err() != nil {
+			markProviderDone()
 			return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 		}
 		if isStreamingTimeoutErr(err, attemptCtx) {
@@ -3361,6 +3502,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if flusher != nil {
 				flusher.Flush()
 			}
+			markProviderDone()
 			return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttemptWithTerminal("Provider timed out during streaming", billing.FaultBreakerQualifying, billing.TerminalStateGatewayTimeout)
 		} else {
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider disconnected during streaming")
@@ -3370,18 +3512,37 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		if flusher != nil {
 			flusher.Flush()
 		}
+		markProviderDone()
 		return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttemptWithTerminal("Provider disconnected during streaming", billing.FaultBreakerQualifying, billing.TerminalStateUpstreamTransportDisconnect)
 	}
 }
 
 func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request, requestID string, resp *http.Response, provider pool.Provider, modelScope, streamingMode, streamingBuyer string, state *forwardState, billingAttemptN int) (wsForwardResult, int, requestLogAttempt) {
 	started := time.Now()
-	raw, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
+	markProviderDone := func() {
+		if state != nil {
+			now := phaseTimingNow(s)
+			state.phaseTiming.markProviderDone(now)
+			writePhaseTimingTrailers(w.Header(), state, now)
+		}
+	}
+	bodyReader := io.Reader(resp.Body)
+	if state != nil {
+		bodyReader = &firstByteTimingReader{
+			r: bodyReader,
+			mark: func() {
+				state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
+			},
+		}
+	}
+	raw, err := readLimitedBody(bodyReader, maxUpstreamResponseBodyBytes)
 	if err != nil {
+		markProviderDone()
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buffered streaming provider body read failed")
 		s.handleProviderFailure(provider, http.StatusBadGateway)
 		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider buffered stream failed", FaultFlag: billing.FaultBreakerQualifying}
 	}
+	markProviderDone()
 	receiptValue := normalizeReceiptHeaderValue(resp.Trailer.Get("X-MacProvider-Receipt"))
 	validator := newStreamToolCallFinalValidator()
 	if err := validator.observeBlock(string(raw)); err != nil || !validator.finalCloseOK() {
