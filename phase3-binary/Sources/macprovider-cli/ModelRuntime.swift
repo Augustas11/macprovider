@@ -1175,11 +1175,18 @@ actor ModelRuntime: ModelRuntimeServing {
                             finishReason = "stop"
                         }
 
+                        let cachedPromptTokens = lease?.cachedPromptTokens ?? 0
+                        let kvCacheBytesReused = Self.cachedPromptUTF8Bytes(
+                            promptTokenIds: promptTokenIds,
+                            cachedPromptTokens: cachedPromptTokens,
+                            decode: { context.tokenizer.decode(tokenIds: $0) }
+                        )
                         let completion = try Self.validateStructuredCompletion(CompletionResult(
                             content: parsed.content,
                             finishReason: finishReason,
                             promptTokens: promptTokenIds.count,
-                            cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
+                            cachedPromptTokens: cachedPromptTokens,
+                            kvCacheBytesReused: kvCacheBytesReused,
                             completionTokens: result.generationTokenCount,
                             ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt),
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
@@ -1627,11 +1634,18 @@ actor ModelRuntime: ModelRuntimeServing {
                             finishReason = "stop"
                         }
 
+                        let cachedPromptTokens = lease?.cachedPromptTokens ?? 0
+                        let kvCacheBytesReused = Self.cachedPromptUTF8Bytes(
+                            promptTokenIds: promptTokenIds,
+                            cachedPromptTokens: cachedPromptTokens,
+                            decode: { context.tokenizer.decode(tokenIds: $0) }
+                        )
                         let completion = CompletionResult(
                             content: parsed.content,
                             finishReason: finishReason,
                             promptTokens: promptTokenIds.count,
-                            cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
+                            cachedPromptTokens: cachedPromptTokens,
+                            kvCacheBytesReused: kvCacheBytesReused,
                             completionTokens: result.generationTokenCount,
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
@@ -2093,6 +2107,17 @@ actor ModelRuntime: ModelRuntimeServing {
         return (stripped, false)
     }
 
+    static func cachedPromptUTF8Bytes(
+        promptTokenIds: [Int32],
+        cachedPromptTokens: Int,
+        decode: ([Int]) -> String
+    ) -> Int {
+        let clamped = max(0, min(cachedPromptTokens, promptTokenIds.count))
+        guard clamped > 0 else { return 0 }
+        let prefixTokens = promptTokenIds.prefix(clamped).map(Int.init)
+        return decode(Array(prefixTokens)).utf8.count
+    }
+
     private static func streamingSafePrefix(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
@@ -2231,6 +2256,7 @@ actor ModelRuntime: ModelRuntimeServing {
             finishReason: completion.finishReason,
             promptTokens: completion.promptTokens,
             cachedPromptTokens: completion.cachedPromptTokens,
+            kvCacheBytesReused: completion.kvCacheBytesReused,
             completionTokens: completion.completionTokens,
             ttftMilliseconds: completion.ttftMilliseconds,
             toolCalls: completion.toolCalls,
@@ -2750,6 +2776,8 @@ struct CompletionResult: Sendable {
     let finishReason: String
     let promptTokens: Int
     let cachedPromptTokens: Int
+    let kvCacheReuseRatio: Double
+    let kvCacheBytesReused: Int
     let completionTokens: Int
     let ttftMilliseconds: Int64?
     let toolCalls: [ToolCall]?
@@ -2763,6 +2791,7 @@ struct CompletionResult: Sendable {
         finishReason: String,
         promptTokens: Int,
         cachedPromptTokens: Int = 0,
+        kvCacheBytesReused: Int = 0,
         completionTokens: Int,
         ttftMilliseconds: Int64? = nil,
         toolCalls: [ToolCall]? = nil,
@@ -2774,7 +2803,11 @@ struct CompletionResult: Sendable {
         self.content = content
         self.finishReason = finishReason
         self.promptTokens = promptTokens
-        self.cachedPromptTokens = max(0, min(cachedPromptTokens, promptTokens))
+        let clampedPromptTokens = max(0, promptTokens)
+        let clampedCachedTokens = max(0, min(cachedPromptTokens, clampedPromptTokens))
+        self.cachedPromptTokens = clampedCachedTokens
+        self.kvCacheReuseRatio = clampedPromptTokens == 0 ? 0 : Double(clampedCachedTokens) / Double(clampedPromptTokens)
+        self.kvCacheBytesReused = clampedCachedTokens == 0 ? 0 : max(0, kvCacheBytesReused)
         self.completionTokens = completionTokens
         self.ttftMilliseconds = ttftMilliseconds
         self.toolCalls = toolCalls
@@ -2791,6 +2824,7 @@ struct CompletionResult: Sendable {
             finishReason: finishReason,
             promptTokens: promptTokens,
             cachedPromptTokens: cachedPromptTokens,
+            kvCacheBytesReused: kvCacheBytesReused,
             completionTokens: completionTokens,
             ttftMilliseconds: ttftMilliseconds,
             toolCalls: toolCalls,

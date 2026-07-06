@@ -6,6 +6,7 @@ import MacProviderCore
 
 final class InferenceRelayTests: XCTestCase {
     func testCancelActiveStreamingRequestReportsUsage() async throws {
+        let telemetry = KVCacheTelemetryCapture()
         let runtime = FakeStreamingRuntime()
         let status = ProviderStatus(
             modelID: "mlx-community/Test-Model",
@@ -25,32 +26,35 @@ final class InferenceRelayTests: XCTestCase {
         )
 
         let body = #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":true}"#
-        try await relay.handleInferenceRequest([
-            "type": "inference_request",
-            "request_id": "req-cancel-usage",
-            "stream": true,
-            "body": body,
-        ])
+        let frames = try await KVCacheTelemetry.withSink({ telemetry.append($0) }) {
+            try await relay.handleInferenceRequest([
+                "type": "inference_request",
+                "request_id": "req-cancel-usage",
+                "stream": true,
+                "body": body,
+            ])
 
-        try await waitUntil {
-            let chunks = await recorder.frames.filter { $0["type"] as? String == "inference_response_chunk" }
-            return chunks.count == 2
-        }
-
-        try await relay.handleCancelRequest([
-            "type": "cancel_request",
-            "request_id": "req-cancel-usage",
-            "reason": "buyer_disconnected",
-        ])
-
-        let frames = try await waitForFrames { frames in
-            frames.contains {
-                $0["type"] as? String == "inference_response_end" &&
-                    $0["status"] as? String == "cancelled"
+            try await waitUntil {
+                let chunks = await recorder.frames.filter { $0["type"] as? String == "inference_response_chunk" }
+                return chunks.count == 2
             }
-        } from: {
-            await recorder.frames
+
+            try await relay.handleCancelRequest([
+                "type": "cancel_request",
+                "request_id": "req-cancel-usage",
+                "reason": "buyer_disconnected",
+            ])
+
+            return try await waitForFrames { frames in
+                frames.contains {
+                    $0["type"] as? String == "inference_response_end" &&
+                        $0["status"] as? String == "cancelled"
+                }
+            } from: {
+                await recorder.frames
+            }
         }
+
         let end = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
         XCTAssertEqual(end["request_id"] as? String, "req-cancel-usage")
         XCTAssertEqual(end["status"] as? String, "cancelled")
@@ -68,6 +72,7 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(usage["total_tokens"] as? Int, 9)
         XCTAssertTrue(usage.keys.contains("macprovider_model_hash_observed"))
         XCTAssertTrue(usage["macprovider_model_hash_observed"] is NSNull)
+        XCTAssertTrue(telemetry.records.isEmpty)
     }
 
     func testUnknownCancelIsIdempotent() async throws {
@@ -394,6 +399,7 @@ final class InferenceRelayTests: XCTestCase {
     }
 
     func testRelayNonStreamingCancelledAfterCompletionCarriesBuyerCancelSettlementReceipt() async throws {
+        let telemetry = KVCacheTelemetryCapture()
         let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
         let runtime = FakeCancelAfterCompletionReceiptRuntime(servedSnapshot: RuntimeSnapshot(
             state: .ready,
@@ -422,22 +428,24 @@ final class InferenceRelayTests: XCTestCase {
             }
         )
 
-        async let requestTask: Void = relay.handleInferenceRequest([
-            "type": "inference_request",
-            "request_id": "req-relay-v04",
-            "stream": false,
-            "body": #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}]}"#,
-            "settlement": settlementMetadataWire(
-                keyID: receiptKeyID(key.publicKey.rawRepresentation),
-                modelHash: hash
-            ),
-        ])
-        try await Task.sleep(nanoseconds: 20_000_000)
-        try await relay.handleCancelRequest([
-            "type": "cancel_request",
-            "request_id": "req-relay-v04",
-        ])
-        try await requestTask
+        try await KVCacheTelemetry.withSink({ telemetry.append($0) }) {
+            async let requestTask: Void = relay.handleInferenceRequest([
+                "type": "inference_request",
+                "request_id": "req-relay-v04",
+                "stream": false,
+                "body": #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}]}"#,
+                "settlement": settlementMetadataWire(
+                    keyID: receiptKeyID(key.publicKey.rawRepresentation),
+                    modelHash: hash
+                ),
+            ])
+            try await Task.sleep(nanoseconds: 20_000_000)
+            try await relay.handleCancelRequest([
+                "type": "cancel_request",
+                "request_id": "req-relay-v04",
+            ])
+            try await requestTask
+        }
 
         let frames = try await waitForFrames { frames in
             frames.contains { $0["type"] as? String == "inference_response_end" }
@@ -458,9 +466,11 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual((tuple["terminal_state_ts_unix_ms"] as? NSNumber)?.int64Value, terminalTS)
         let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: key.publicKey.rawRepresentation)
         XCTAssertTrue(publicKey.isValidSignature(signature, for: tupleBytes))
+        XCTAssertTrue(telemetry.records.isEmpty)
     }
 
     func testRelayStreamingCancelledAfterCompletionCarriesBuyerCancelSettlementReceipt() async throws {
+        let telemetry = KVCacheTelemetryCapture()
         let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
         let runtime = FakeCancelAfterCompletionReceiptRuntime(servedSnapshot: RuntimeSnapshot(
             state: .ready,
@@ -489,22 +499,24 @@ final class InferenceRelayTests: XCTestCase {
             }
         )
 
-        async let requestTask: Void = relay.handleInferenceRequest([
-            "type": "inference_request",
-            "request_id": "req-relay-v04",
-            "stream": true,
-            "body": #"{"model":"mlx-community/Test-Model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
-            "settlement": settlementMetadataWire(
-                keyID: receiptKeyID(key.publicKey.rawRepresentation),
-                modelHash: hash
-            ),
-        ])
-        try await Task.sleep(nanoseconds: 20_000_000)
-        try await relay.handleCancelRequest([
-            "type": "cancel_request",
-            "request_id": "req-relay-v04",
-        ])
-        try await requestTask
+        try await KVCacheTelemetry.withSink({ telemetry.append($0) }) {
+            async let requestTask: Void = relay.handleInferenceRequest([
+                "type": "inference_request",
+                "request_id": "req-relay-v04",
+                "stream": true,
+                "body": #"{"model":"mlx-community/Test-Model","stream":true,"messages":[{"role":"user","content":"hello"}]}"#,
+                "settlement": settlementMetadataWire(
+                    keyID: receiptKeyID(key.publicKey.rawRepresentation),
+                    modelHash: hash
+                ),
+            ])
+            try await Task.sleep(nanoseconds: 20_000_000)
+            try await relay.handleCancelRequest([
+                "type": "cancel_request",
+                "request_id": "req-relay-v04",
+            ])
+            try await requestTask
+        }
 
         let frames = try await waitForFrames { frames in
             frames.contains { $0["type"] as? String == "inference_response_end" }
@@ -525,6 +537,7 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual((tuple["terminal_state_ts_unix_ms"] as? NSNumber)?.int64Value, terminalTS)
         let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: key.publicKey.rawRepresentation)
         XCTAssertTrue(publicKey.isValidSignature(signature, for: tupleBytes))
+        XCTAssertTrue(telemetry.records.isEmpty)
     }
 
     func testRelayRejectsSettlementMetadataForDifferentRequest() async throws {
@@ -746,6 +759,23 @@ private actor FrameRecorder {
 
     func append(_ frame: [String: Any]) {
         frames.append(frame)
+    }
+}
+
+private final class KVCacheTelemetryCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var captured: [Data] = []
+
+    var records: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return captured
+    }
+
+    func append(_ record: Data) {
+        lock.lock()
+        captured.append(record)
+        lock.unlock()
     }
 }
 

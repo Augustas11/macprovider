@@ -88,9 +88,38 @@ final class ConversationCacheTests: XCTestCase {
             finishReason: "stop",
             promptTokens: 10,
             cachedPromptTokens: 11,
+            kvCacheBytesReused: 123,
             completionTokens: 1
         )
         XCTAssertEqual(completion.cachedPromptTokens, 10)
+        XCTAssertEqual(completion.kvCacheReuseRatio, 1.0)
+        XCTAssertEqual(completion.kvCacheBytesReused, 123)
+    }
+
+    func testCompletionResultZerosReuseTelemetryWithoutCachedTokens() {
+        let completion = CompletionResult(
+            content: "ok",
+            finishReason: "stop",
+            promptTokens: 0,
+            cachedPromptTokens: 4,
+            kvCacheBytesReused: 123,
+            completionTokens: 1
+        )
+        XCTAssertEqual(completion.cachedPromptTokens, 0)
+        XCTAssertEqual(completion.kvCacheReuseRatio, 0)
+        XCTAssertEqual(completion.kvCacheBytesReused, 0)
+    }
+
+    func testCachedPromptUTF8BytesUsesDecodedCachedPrefix() {
+        let bytes = ModelRuntime.cachedPromptUTF8Bytes(
+            promptTokenIds: [1, 2, 3, 4],
+            cachedPromptTokens: 3,
+            decode: { tokens in
+                XCTAssertEqual(tokens, [1, 2, 3])
+                return "hi µ"
+            }
+        )
+        XCTAssertEqual(bytes, "hi µ".utf8.count)
     }
 
     private func int32Range(_ range: Range<Int>) -> [Int32] {

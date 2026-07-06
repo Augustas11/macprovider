@@ -99,6 +99,25 @@ final class ModelRuntimeStructuredOutputTests: XCTestCase {
         XCTAssertEqual(visible.value, #"{"name":"Ada","age":"old"}"#)
     }
 
+    func testStreamingJsonSchemaPreservesKVCacheReuseTelemetry() async throws {
+        let runtime = Self.runtimeReturning(CompletionResult(
+            content: #"{"name":"Ada","age":37}"#,
+            finishReason: "stop",
+            promptTokens: 10,
+            cachedPromptTokens: 4,
+            kvCacheBytesReused: 128,
+            completionTokens: 2
+        ))
+        let request = try Self.request(responseFormat: Self.jsonSchemaResponseFormat(), stream: true)
+        let handle = try await runtime.acquireRequestHandle(request)
+
+        let result = try await runtime.stream(request, with: handle) { _ in }
+
+        XCTAssertEqual(result.cachedPromptTokens, 4)
+        XCTAssertEqual(result.kvCacheReuseRatio, 0.4, accuracy: 0.000_001)
+        XCTAssertEqual(result.kvCacheBytesReused, 128)
+    }
+
     func testStreamingJsonObjectWhitespaceOnlyIsTerminalMalformedJSON() async throws {
         let runtime = Self.runtimeReturning(CompletionResult(content: " \n\t", finishReason: "stop", promptTokens: 1, completionTokens: 1))
         let request = try Self.request(responseFormat: ["type": "json_object"], stream: true)

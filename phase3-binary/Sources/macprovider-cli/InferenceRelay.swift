@@ -235,10 +235,12 @@ actor InferenceRelay {
         let startedAt = await providerStatus.beginRequest(requestID: requestID)
         var completionResult: CompletionResult?
         var failed = false
+        var telemetryModelID = loadedModelID ?? ""
 
         do {
             let requestData = Data(body.utf8)
             let request = try ChatCompletionRequest.parse(data: requestData).withConversationKey(conversationKey)
+            telemetryModelID = request.model
             let validationModelID = warmSwapEnabled
                 ? await modelRuntime.currentSnapshot().modelID
                 : loadedModelID
@@ -311,6 +313,15 @@ actor InferenceRelay {
             failed: failed,
             requestID: requestID
         )
+        if !failed, !state.isCancelled, let completionResult {
+            KVCacheTelemetry.emitRequestCompleted(
+                providerID: receiptProviderID,
+                requestID: requestID,
+                modelID: telemetryModelID,
+                stream: stream,
+                completion: completionResult
+            )
+        }
     }
 
     private static func processNonStreaming(
