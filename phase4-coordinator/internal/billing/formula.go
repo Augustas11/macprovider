@@ -79,6 +79,8 @@ func NormalizeModelKey(model string) string {
 		return "meta-llama/" + key
 	case strings.HasPrefix(key, "meta-llama-"):
 		return "meta-llama/" + strings.TrimPrefix(key, "meta-")
+	case strings.HasPrefix(key, "nvidia-nemotron-"):
+		return strings.TrimPrefix(key, "nvidia-")
 	case strings.HasPrefix(key, "gpt-oss-"):
 		return "openai/" + key
 	default:

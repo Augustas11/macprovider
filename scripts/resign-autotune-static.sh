@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Re-sign the SPEC-023 static feeds (autotune-candidates.json,
-# demand-rank.json) with the v3 Curve25519 (Ed25519) private key.
+# demand-rank.json) with the v4 Curve25519 (Ed25519) private key.
 #
 # Usage:
 #   scripts/resign-autotune-static.sh                    # reads default key path
-#   AUTOTUNE_STATIC_V3_PRIVATE_KEY_PATH=<path> scripts/resign-autotune-static.sh
+#   AUTOTUNE_STATIC_V4_PRIVATE_KEY_PATH=<path> scripts/resign-autotune-static.sh
 #
 # The **private** key is intentionally NOT in the repository. This
 # script expects to find it at, in order of preference:
 #
-#   1. $AUTOTUNE_STATIC_V3_PRIVATE_KEY_PATH — explicit env override
-#   2. $HOME/.config/macprovider/keys/autotune-static-v3.private.base64
+#   1. $AUTOTUNE_STATIC_V4_PRIVATE_KEY_PATH — explicit env override
+#   2. $HOME/.config/macprovider/keys/autotune-static-v4.private.base64
 #      — the operator's local secure default
 #
 # The file must contain the base64-encoded 32-byte raw Curve25519
@@ -18,16 +18,16 @@
 # permissions: `chmod 0600`.
 #
 # The **public** key IS committed to the repo, at
-# `phase3-binary/dist/static/keys/autotune-static-v3.public.base64`,
+# `phase3-binary/dist/static/keys/autotune-static-v4.public.base64`,
 # and is also baked into `AutotuneRecommend.swift` as
-# `autotune_static_json_ed25519_v3`. The signature verifier only
+# `autotune_static_json_ed25519_v4`. The signature verifier only
 # needs the public key.
 #
 # The script signs each JSON file byte-for-byte as it lives on disk
 # (no re-serialization; the signature covers the exact bytes served
 # to clients), and writes a matching `.sig` sidecar next to it with:
 #
-#   {"key_id":"streamvc-autotune-static-v3","alg":"ed25519","signature":"<b64>"}
+#   {"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"<b64>"}
 #
 # See `phase3-binary/dist/static/keys/README.md` for the security
 # posture, the rotation path, and how to generate a fresh key.
@@ -36,10 +36,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEFAULT_KEY_PATH="$HOME/.config/macprovider/keys/autotune-static-v3.private.base64"
-KEY_PATH="${AUTOTUNE_STATIC_V3_PRIVATE_KEY_PATH:-$DEFAULT_KEY_PATH}"
+DEFAULT_KEY_PATH="$HOME/.config/macprovider/keys/autotune-static-v4.private.base64"
+KEY_PATH="${AUTOTUNE_STATIC_V4_PRIVATE_KEY_PATH:-$DEFAULT_KEY_PATH}"
 STATIC_DIR="$REPO_ROOT/phase3-binary/dist/static"
-KEY_ID="streamvc-autotune-static-v3"
+KEY_ID="streamvc-autotune-static-v4"
 
 fatal() {
   printf '[resign-autotune-static] ERROR: %s\n' "$*" >&2
@@ -50,11 +50,11 @@ if [ ! -f "$KEY_PATH" ]; then
   cat >&2 <<EOF
 [resign-autotune-static] ERROR: private key not found at $KEY_PATH.
 
-The v3 signing private key is not committed to the repo. Place it at:
+The v4 signing private key is not committed to the repo. Place it at:
 
   $DEFAULT_KEY_PATH   (chmod 0600 recommended)
 
-or set AUTOTUNE_STATIC_V3_PRIVATE_KEY_PATH to an alternate absolute path.
+or set AUTOTUNE_STATIC_V4_PRIVATE_KEY_PATH to an alternate absolute path.
 
 See phase3-binary/dist/static/keys/README.md for the security posture
 and how to rotate.

@@ -604,6 +604,18 @@ struct RateCardProjection: Decodable, Equatable {
         }
         return nil
     }
+
+    func servedModelKey(modelKey: String, rateCardKey: String) -> String {
+        if rateCardKey == "default", modelKey != "default" {
+            return modelKey
+        }
+        if rateCardKey == AutotuneModelKeyNormalizer.normalize(modelKey),
+           modelKey.contains("/"),
+           !modelKey.lowercased().hasPrefix("mlx-community/") {
+            return modelKey
+        }
+        return rateCardKey
+    }
 }
 
 enum AutotuneModelKeyNormalizer {
@@ -625,6 +637,9 @@ enum AutotuneModelKeyNormalizer {
         if key.hasPrefix("meta-llama-") {
             return "meta-llama/\(key.dropFirst("meta-".count))"
         }
+        if key.hasPrefix("nvidia-nemotron-") {
+            return String(key.dropFirst("nvidia-".count))
+        }
         if key.hasPrefix("gpt-oss-") {
             return "openai/\(key)"
         }
@@ -644,18 +659,18 @@ struct AutotuneStaticSelection<T> {
 }
 
 struct AutotuneStaticInputs {
-    // v3 keypair rotated 2026-07-03. Only the PUBLIC key is committed —
-    // at phase3-binary/dist/static/keys/autotune-static-v3.public.base64
+    // v4 keypair rotated 2026-07-06. Only the PUBLIC key is committed —
+    // at phase3-binary/dist/static/keys/autotune-static-v4.public.base64
     // and baked below. The private key is held off-repo by the operator
     // (default path ~/.config/macprovider/keys/, chmod 0600); see the
     // README in the keys directory for the full trust model. Older
-    // v1.7.9- clients that still bake the v2 pubkey `sidecarIsValid`
-    // fail on the v3 sig, fall back to their baked catalog, and stay
+    // v1.7.10- clients that still bake the v3 pubkey `sidecarIsValid`
+    // fail on the v4 sig, fall back to their baked catalog, and stay
     // online thanks to the SPEC-023 v0.2 soft-signal gates.
-    static let keyID = "streamvc-autotune-static-v3"
-    static let publicKeyName = "autotune_static_json_ed25519_v3"
-    static let autotune_static_json_ed25519_v3 = "1qzXegR2OEu0TaQNWjUkN4PamQAHdpvBcYW/pJ4h6oE="
-    static let publicKeyBase64 = autotune_static_json_ed25519_v3
+    static let keyID = "streamvc-autotune-static-v4"
+    static let publicKeyName = "autotune_static_json_ed25519_v4"
+    static let autotune_static_json_ed25519_v4 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
+    static let publicKeyBase64 = autotune_static_json_ed25519_v4
 
     var fetch: (URL) async throws -> Data
     var verifySignature: (Data, Data) -> Bool
@@ -923,19 +938,12 @@ struct AutotuneRecommendEngine {
             let raw = tps * 3600.0 * usdPerMillionCompletion * providerShare * demandWeight
             let headroom = Double(request.hardware.memoryGB - Self.safetyMarginGB - candidate.minRAMGB)
             let confidence = confidence(warnings: warnings, benchmark: benchmark)
-            // v1.7.6 Track A1 correction: when the rate-card lookup resolves
-            // via the "default" fallthrough (rate key == "default" but the
-            // catalog model isn't literally "default"), the served-model
-            // identity must remain the catalog model. Otherwise `--apply`
-            // writes `config.model = "default"` at ConfigApplier — which is
-            // the pricing key, not a real model runtime identity — and the
-            // HTTP server would reject buyer requests for the real model.
-            let servedModel: String
-            if let match = rateMatch, match.key == "default", modelKey != "default" {
-                servedModel = modelKey
-            } else {
-                servedModel = rateMatch?.key ?? modelKey
-            }
+            // Rate-card keys are pricing identities; catalog keys are runtime
+            // identities. Keep them split when a normalized/default rate row
+            // prices a public catalog model such as nvidia/nemotron.
+            let servedModel = rateMatch.map {
+                request.rateCard.servedModelKey(modelKey: modelKey, rateCardKey: $0.key)
+            } ?? modelKey
             return AutotuneCandidateScore(
                 rank: 0,
                 catalogKey: modelKey,
@@ -1937,7 +1945,7 @@ extension AutotuneStaticInputs {
     // baked-2026-07-03: v3 keypair rotation + M-Base-realistic
     // `min_sustained_tps` gates. Live signed feed at
     // coordinator.streamvc.live/static/autotune-candidates.json is
-    // signed with the v3 private key (held off-repo by the operator;
+    // signed with the v4 private key (held off-repo by the operator;
     // only the PUBLIC key ships here and above). When runtime signature
     // verification fails (older signing infra, network partition, etc.)
     // the client falls back to this baked catalog.
@@ -1946,7 +1954,7 @@ extension AutotuneStaticInputs {
     // deliberate drifts:
     //   1. Baked keeps `runtime_status="listed"` rows (qwen3-32b,
     //      qwen2.5-coder-32b) and `runtime_status="blocked"` rows
-    //      (google-gemma, nvidia-nemotron) that the live feed omits.
+    //      (google-gemma) that the live feed omits.
     //      Baked serves as an offline / cold-start fallback superset;
     //      recommendable-only-in-live catalogs need the extra rows for
     //      correct "listed but not currently sold" and "blocked at
@@ -1957,15 +1965,17 @@ extension AutotuneStaticInputs {
     // The 4 rows we lowered for M-Base UX (qwen3-coder-30b-a3b,
     // openai/gpt-oss-20b, meta-llama/llama-3.1-8b, qwen2.5-coder-32b)
     // ARE mirrored in baked so fallback still unblocks M-Base.
+    // Nemotron is also mirrored in baked/live static now that issue 411
+    // adds coordinator pricing and v4-signed static feeds.
     static let bakedDemandRankJSON = """
-    {"version":"baked-2026-07-03","generated_at":"2026-07-03T00:00:00Z","source":"openrouter_completion_token_rank_operator_curated","cold_start_floor":0.15,"diversification_band":0.85,"rows":{"meta-llama/llama-3.1-8b-instruct":{"demand_weight":0.45,"rank":3,"recommendable":true,"min_provider_target":20},"openai/gpt-oss-20b":{"demand_weight":0.60,"rank":2,"recommendable":true,"min_provider_target":20},"qwen3-32b":{"demand_weight":0.35,"rank":8,"recommendable":false,"min_provider_target":10},"qwen3-coder-30b-a3b-instruct":{"demand_weight":0.80,"rank":1,"recommendable":true,"min_provider_target":20},"qwen2.5-coder-32b-instruct":{"demand_weight":0.40,"rank":7,"recommendable":false,"min_provider_target":10},"google-gemma-4-26b-a4b-it":{"demand_weight":0.20,"rank":null,"recommendable":false,"min_provider_target":0},"nvidia/nemotron-3-nano-30b-a3b":{"demand_weight":0.20,"rank":null,"recommendable":false,"min_provider_target":0}}}
+    {"version":"baked-2026-07-03","generated_at":"2026-07-03T00:00:00Z","source":"openrouter_completion_token_rank_operator_curated","cold_start_floor":0.15,"diversification_band":0.85,"rows":{"meta-llama/llama-3.1-8b-instruct":{"demand_weight":0.45,"rank":3,"recommendable":true,"min_provider_target":20},"openai/gpt-oss-20b":{"demand_weight":0.60,"rank":2,"recommendable":true,"min_provider_target":20},"qwen3-32b":{"demand_weight":0.35,"rank":8,"recommendable":false,"min_provider_target":10},"qwen3-coder-30b-a3b-instruct":{"demand_weight":0.80,"rank":1,"recommendable":true,"min_provider_target":20},"qwen2.5-coder-32b-instruct":{"demand_weight":0.40,"rank":7,"recommendable":false,"min_provider_target":10},"google-gemma-4-26b-a4b-it":{"demand_weight":0.20,"rank":null,"recommendable":false,"min_provider_target":0},"nvidia/nemotron-3-nano-30b-a3b":{"demand_weight":0.30,"rank":68,"recommendable":true,"min_provider_target":20}}}
     """
 
     static let bakedCandidateCatalogJSON = """
-    {"version":"baked-2026-07-03","generated_at":"2026-07-03T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"meta-llama/llama-3.1-8b-instruct":{"model_id":"mlx-community/Meta-Llama-3.1-8B-Instruct-4bit","model_revision":"241a666dad6cb93c8ff213d39a7f34a36bf26db4","model_sha256":"67b26d6b1c50dc8836ab3705b06276a43c74c8f66247f9b112e232b58abbd99f","min_ram_gb":16,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 20->15 for M-Base-lite eligibility."},"openai/gpt-oss-20b":{"model_id":"mlx-community/gpt-oss-20b-MXFP4-Q8","model_revision":"773a7da77e569019bb0fd17a554b263738d669a3","model_sha256":"f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1","min_ram_gb":24,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 30->15 to reflect M-Base cold-start (~16.7 tok/s measured on M5)."},"qwen3-32b":{"model_id":"mlx-community/Qwen3-32B-4bit","model_revision":"bcaaf7f538adf166c1080a2befdb4f6019f66639","model_sha256":"69169cceb643f108755f96dba26d8647862e38a7f82cb1b5b25aff8f204967aa","min_ram_gb":32,"min_bandwidth_tier":"A","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"listed","notes":"baked"},"qwen3-coder-30b-a3b-instruct":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","model_revision":"6e302ea604ad9ab206367e2c501d1571023e7b6d","model_sha256":"10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0","min_ram_gb":28,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3000},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 25->20 for M5 cold-start (~23.4 tok/s measured) headroom."},"qwen2.5-coder-32b-instruct":{"model_id":"mlx-community/Qwen2.5-Coder-32B-Instruct-4bit","model_revision":"d1e3b690c8e225d7795bccddf971ca6be68b2012","model_sha256":"b7749cc57f37f7e9239d0f9b091bcffe6d7629e48af75e8cb84c1cdca1780973","min_ram_gb":64,"min_bandwidth_tier":"A","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500},"runtime_status":"listed","notes":"baked-2026-07-03: min_sustained_tps 30->20 to broaden eligibility."},"google-gemma-4-26b-a4b-it":{"model_id":"mlx-community/gemma-4-26b-a4b-it-4bit","min_ram_gb":32,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"blocked","notes":"baked-2026-07-03: blocked pending mlx-swift-lm migration validation and rate-card rollout."},"nvidia/nemotron-3-nano-30b-a3b":{"model_id":"mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit","min_ram_gb":32,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"blocked","notes":"baked-2026-07-03: blocked pending mlx-swift-lm migration validation and rate-card rollout."}}}
+    {"version":"baked-2026-07-03","generated_at":"2026-07-03T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"meta-llama/llama-3.1-8b-instruct":{"model_id":"mlx-community/Meta-Llama-3.1-8B-Instruct-4bit","model_revision":"241a666dad6cb93c8ff213d39a7f34a36bf26db4","model_sha256":"67b26d6b1c50dc8836ab3705b06276a43c74c8f66247f9b112e232b58abbd99f","min_ram_gb":16,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 20->15 for M-Base-lite eligibility."},"openai/gpt-oss-20b":{"model_id":"mlx-community/gpt-oss-20b-MXFP4-Q8","model_revision":"773a7da77e569019bb0fd17a554b263738d669a3","model_sha256":"f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1","min_ram_gb":24,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 30->15 to reflect M-Base cold-start (~16.7 tok/s measured on M5)."},"qwen3-32b":{"model_id":"mlx-community/Qwen3-32B-4bit","model_revision":"bcaaf7f538adf166c1080a2befdb4f6019f66639","model_sha256":"69169cceb643f108755f96dba26d8647862e38a7f82cb1b5b25aff8f204967aa","min_ram_gb":32,"min_bandwidth_tier":"A","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"listed","notes":"baked"},"qwen3-coder-30b-a3b-instruct":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","model_revision":"6e302ea604ad9ab206367e2c501d1571023e7b6d","model_sha256":"10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0","min_ram_gb":28,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3000},"runtime_status":"recommendable","notes":"baked-2026-07-03: min_sustained_tps 25->20 for M5 cold-start (~23.4 tok/s measured) headroom."},"qwen2.5-coder-32b-instruct":{"model_id":"mlx-community/Qwen2.5-Coder-32B-Instruct-4bit","model_revision":"d1e3b690c8e225d7795bccddf971ca6be68b2012","model_sha256":"b7749cc57f37f7e9239d0f9b091bcffe6d7629e48af75e8cb84c1cdca1780973","min_ram_gb":64,"min_bandwidth_tier":"A","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500},"runtime_status":"listed","notes":"baked-2026-07-03: min_sustained_tps 30->20 to broaden eligibility."},"google-gemma-4-26b-a4b-it":{"model_id":"mlx-community/gemma-4-26b-a4b-it-4bit","min_ram_gb":32,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"blocked","notes":"baked-2026-07-03: blocked pending mlx-swift-lm migration validation and rate-card rollout."},"nvidia/nemotron-3-nano-30b-a3b":{"model_id":"mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit","model_revision":"832f602eba5d22436c258c1462bdedc5afddb42b","model_sha256":"1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f","min_ram_gb":32,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"recommendable","notes":"baked-2026-07-06: runtime validated; coordinator-side rollout active."}}}
     """
 
     static let bakedRateCardJSON = """
-    {"version":"baked-2026-07-03","generated_at":"2026-07-03T00:00:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":500000,"completion_rate_per_mtok":1000000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-32b":{"prompt_rate_per_mtok":110000,"completion_rate_per_mtok":220000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"openai/gpt-oss-20b":{"prompt_rate_per_mtok":50000,"completion_rate_per_mtok":100000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-coder-30b-a3b-instruct":{"prompt_rate_per_mtok":117500,"completion_rate_per_mtok":235000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"meta-llama/llama-3.1-8b-instruct":{"prompt_rate_per_mtok":13500,"completion_rate_per_mtok":27000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen2.5-coder-32b-instruct":{"prompt_rate_per_mtok":425000,"completion_rate_per_mtok":850000,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
+    {"version":"baked-2026-07-03","generated_at":"2026-07-03T00:00:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":500000,"completion_rate_per_mtok":1000000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-32b":{"prompt_rate_per_mtok":110000,"completion_rate_per_mtok":220000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"openai/gpt-oss-20b":{"prompt_rate_per_mtok":50000,"completion_rate_per_mtok":100000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-coder-30b-a3b-instruct":{"prompt_rate_per_mtok":117500,"completion_rate_per_mtok":235000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"nemotron-3-nano-30b-a3b":{"prompt_rate_per_mtok":117500,"completion_rate_per_mtok":235000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"meta-llama/llama-3.1-8b-instruct":{"prompt_rate_per_mtok":13500,"completion_rate_per_mtok":27000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen2.5-coder-32b-instruct":{"prompt_rate_per_mtok":425000,"completion_rate_per_mtok":850000,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
     """
 }

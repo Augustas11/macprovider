@@ -292,7 +292,7 @@ final class ServeCommandTests: XCTestCase {
                     return rateCardBytes
                 }
                 if url.path.hasSuffix(".sig") {
-                    return Data(#"{"key_id":"streamvc-autotune-static-v3","alg":"ed25519","signature":"AA=="}"#.utf8)
+                    return Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA=="}"#.utf8)
                 }
                 return catalogBytes
             },

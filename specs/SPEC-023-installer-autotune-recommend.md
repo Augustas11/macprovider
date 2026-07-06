@@ -1,10 +1,23 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.2
+version: v0.3
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-07-03
+last-locked: 2026-07-06
 
 ## Change log
+
+- **v0.3 (2026-07-06)** — Issue 411 promotes
+  `nvidia/nemotron-3-nano-30b-a3b` from a baked diagnostic row to a
+  signed-static, paid-yield candidate. The live demand rank records
+  `rank=68`, `demand_weight=0.30`, `recommendable=true`, and
+  `min_provider_target=20`; the live candidate catalog pins
+  `mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit` at revision
+  `832f602eba5d22436c258c1462bdedc5afddb42b` with artifact-set SHA-256
+  `1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f`.
+  Because the local v3 signing private key was unavailable during this
+  update, the static-feed keypair rotates v3 -> v4. New keyID:
+  `streamvc-autotune-static-v4`; new base64 pubkey:
+  `zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU=`.
 
 - **v0.2 (2026-07-03)** — Two-part amendment ratifying the 5 client-side
   fixes shipped between v1.7.5 and v1.7.9 and the accompanying
@@ -63,10 +76,12 @@ last-locked: 2026-07-03
      fallback semantics match the intended M-Base UX. Baked and live
      intentionally drift on two other axes: (i) baked keeps
      `runtime_status="listed"` (qwen3-32b, qwen2.5-coder-32b) and
-     `runtime_status="blocked"` (google-gemma, nvidia-nemotron) rows that
+     `runtime_status="blocked"` (google-gemma) rows that
      the live feed omits — baked serves as an offline superset for
      correct "listed but not currently sold" and "blocked pending
-     migration validation/rate-card rollout" semantics; (ii) baked keeps
+     migration validation/rate-card rollout" semantics. Nemotron moved to
+     the live signed feed in v0.3 after runtime validation and rate-card
+     rollout; (ii) baked keeps
      qwen3-32b at `min_sustained_tps=30`
      (M-Max floor) while live sets it to `15` (recommendable to
      M-Pro 48GB) — offline recommendation on a compiled-in fallback
@@ -150,7 +165,7 @@ Candidate metadata is a separate signed control-plane input. Demand rank may sco
 Primary source:
 
 ```text
-https://get.streamvc.live/autotune-candidates.json
+https://coordinator.streamvc.live/static/autotune-candidates.json
 ```
 
 Fallback source:
@@ -208,9 +223,9 @@ The v0.1 baked catalog MUST contain at least these rows:
 | `qwen3-coder-30b-a3b-instruct` | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | 32 | `C` | 25 | 3000 | `recommendable` |
 | `qwen2.5-coder-32b-instruct` | `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit` | 64 | `A` | 30 | 3500 | `listed` |
 | `google-gemma-4-26b-a4b-it` | `mlx-community/gemma-4-26b-a4b-it-4bit` | 32 | `C` | 30 | 3000 | `blocked` |
-| `nvidia/nemotron-3-nano-30b-a3b` | `mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit` | 32 | `C` | 30 | 3000 | `blocked` |
+| `nvidia/nemotron-3-nano-30b-a3b` | `mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit` | 32 | `C` | 30 | 3000 | `recommendable` |
 
-`blocked` rows may be shown only as diagnostics when useful; they are never downloaded, benchmarked, or recommended by default in v0.1. The Gemma/Nemotron blocked status means pending `mlx-swift-lm` migration validation and rate-card rollout, not an upstream architecture absence.
+`blocked` rows may be shown only as diagnostics when useful; they are never downloaded, benchmarked, or recommended by default in v0.1. The Gemma blocked status means pending `mlx-swift-lm` migration validation and rate-card rollout, not an upstream architecture absence. Nemotron moved to `recommendable` after its `mlx-swift-lm` runtime validation and coordinator rate-card rollout.
 
 ### 3.3 Rate card
 
@@ -253,7 +268,7 @@ The v0.1 rate-card JSON schema is:
 
 ### 3.4 Demand signal
 
-The recommendation engine fetches `https://get.streamvc.live/demand-rank.json` and falls back to a baked snapshot when the static fetch fails, times out, fails Ed25519 detached-signature verification, or fails schema validation. The demand signal is operator-curated OpenRouter-prior metadata, not a coordinator demand endpoint.
+The recommendation engine fetches `https://coordinator.streamvc.live/static/demand-rank.json` and falls back to a baked snapshot when the static fetch fails, times out, fails Ed25519 detached-signature verification, or fails schema validation. The demand signal is operator-curated OpenRouter-prior metadata, not a coordinator demand endpoint.
 
 The v0.1 demand-rank JSON schema is locked as:
 
@@ -291,19 +306,19 @@ Field rules:
 
 Fetched `demand-rank.json` and `autotune-candidates.json` MUST be verified before parsing into the recommendation engine:
 
-1. Fetch `{name}.json` and detached `{name}.json.sig` from `https://get.streamvc.live/`.
+1. Fetch `{name}.json` and detached `{name}.json.sig` from `https://coordinator.streamvc.live/static/`.
 2. Parse `{name}.json.sig` as UTF-8 JSON exactly in this shape:
 
 ```json
 {
-  "key_id": "streamvc-autotune-static-v1",
+  "key_id": "streamvc-autotune-static-v4",
   "alg": "ed25519",
   "signature": "<base64>"
 }
 ```
 
 3. Verify `signature` as base64-encoded Ed25519 over the exact UTF-8 bytes of `{name}.json`.
-4. Use the release-embedded public key `autotune_static_json_ed25519_v1` and release-embedded key ID `streamvc-autotune-static-v1`.
+4. Use the release-embedded public key `autotune_static_json_ed25519_v4` and release-embedded key ID `streamvc-autotune-static-v4`.
 5. Parse `{name}.json` only after signature verification succeeds.
 6. Reject the fetched file and fall back to the baked snapshot when the signature sidecar is missing, malformed, uses the wrong `key_id`, uses any `alg` other than `ed25519`, or fails verification.
 7. Reject the fetched file and fall back to the baked snapshot when `generated_at` is older than the baked snapshot's `generated_at`.
@@ -311,7 +326,7 @@ Fetched `demand-rank.json` and `autotune-candidates.json` MUST be verified befor
 9. Reject the fetched file and fall back to the baked snapshot when `generated_at` is more than 10 minutes in the future relative to the local clock.
 10. Reject the fetched file and fall back to the baked snapshot when `generated_at` is more than 30 days old.
 
-Key rotation is deferred to v0.2, but v0.1 clients MUST keep the public key and key ID release-pinned. A new key requires a new binary release.
+Clients MUST keep the public key and key ID release-pinned. Key rotations require a new binary release that embeds the new verifier key and rejects older sidecar key IDs for the active feed generation.
 
 ## 4. Formula (locked v0.1)
 
@@ -593,7 +608,7 @@ Run: macprovider-cli autotune --recommend
 | M12 | Hard eligibility gates | §5 requires RAM, benchmark, no-swap, no-thermal, and rate-card gates before scoring. |
 | M16 | Deployability gate | §3.2 and §3.4 define deployability via `runtime_status` + `recommendable`; §5 enforces both. |
 | M18 | Full-utilization wording | §4 separates ranking from displayed capacity; §7 says "estimate, not a guarantee." |
-| M20 | Static JSON demand control plane | §3.4 requires `get.streamvc.live/demand-rank.json` with baked fallback and version metadata. |
+| M20 | Static JSON demand control plane | §3.4 requires `coordinator.streamvc.live/static/demand-rank.json` with baked fallback and version metadata. |
 
 ## 11. Acceptance criteria
 
@@ -603,11 +618,11 @@ AC-2: JSON field order is deterministic and matches §6 exactly for stable diffs
 
 AC-3: When all rows fail eligibility, JSON emits `recommended_model = null`, warnings include `no_eligible_paid_model`, and human output uses the §7.2 donor-tier transcript.
 
-AC-4: When `https://get.streamvc.live/demand-rank.json` returns 404, times out, fails schema validation, fails Ed25519 detached-signature validation, is older than the baked snapshot, is more than 10 minutes in the future, or is more than 30 days old, the CLI falls back to the baked demand-rank snapshot and emits `demand_rank_fallback_used`.
+AC-4: When `https://coordinator.streamvc.live/static/demand-rank.json` returns 404, times out, fails schema validation, fails Ed25519 detached-signature validation, is older than the baked snapshot, is more than 10 minutes in the future, or is more than 30 days old, the CLI falls back to the baked demand-rank snapshot and emits `demand_rank_fallback_used`.
 
 AC-5: When `/v1/rate-card` cannot be fetched, the CLI falls back to the baked rate-card snapshot and emits `rate_card_fallback_used`.
 
-AC-6: When `https://get.streamvc.live/autotune-candidates.json` returns 404, times out, fails schema validation, fails Ed25519 detached-signature validation, is older than the baked snapshot, is more than 10 minutes in the future, or is more than 30 days old, the CLI falls back to the baked candidate catalog and emits `candidate_catalog_fallback_used`.
+AC-6: When `https://coordinator.streamvc.live/static/autotune-candidates.json` returns 404, times out, fails schema validation, fails Ed25519 detached-signature validation, is older than the baked snapshot, is more than 10 minutes in the future, or is more than 30 days old, the CLI falls back to the baked candidate catalog and emits `candidate_catalog_fallback_used`.
 
 AC-7: `stable_hash(diversification_id) % len(pool)` produces the same recommendation for the same stable input and same pool across repeated runs.
 

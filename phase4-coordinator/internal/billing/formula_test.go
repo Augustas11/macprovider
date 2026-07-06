@@ -52,6 +52,24 @@ func TestRateFor_NormalizesMXFP4Suffix(t *testing.T) {
 	}
 }
 
+func TestRateFor_NormalizesNemotronAliases(t *testing.T) {
+	rateNemotron := RateCardEntry{PromptCreditsPerMtok: 117500, PromptCacheHitCreditsPerMtok: 29375, CompletionCreditsPerMtok: 235000}
+	card := map[string]RateCardEntry{
+		"nemotron-3-nano-30b-a3b": rateNemotron,
+		"default":                 {PromptCreditsPerMtok: 500000, CompletionCreditsPerMtok: 1000000},
+	}
+	for _, model := range []string{
+		"nemotron-3-nano-30b-a3b",
+		"nvidia/nemotron-3-nano-30b-a3b",
+		"mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
+	} {
+		got := RateFor(card, model)
+		if got != rateNemotron {
+			t.Fatalf("RateFor(%q) = %+v, want %+v", model, got, rateNemotron)
+		}
+	}
+}
+
 func TestRateFor_FallsBackToDefault(t *testing.T) {
 	rateD := RateCardEntry{PromptCreditsPerMtok: 100, CompletionCreditsPerMtok: 200}
 	got := RateFor(map[string]RateCardEntry{"default": rateD}, "something-not-in-card")
