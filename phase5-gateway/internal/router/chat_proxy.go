@@ -403,10 +403,13 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 		if err != nil {
 			return nil, err
 		}
-		if !s.cfg.Retry503.Enabled || maxAttempts == 1 || resp.StatusCode != http.StatusServiceUnavailable {
+		if !s.cfg.Retry503.Enabled || maxAttempts == 1 {
+			return resp, nil
+		}
+		if resp.StatusCode != http.StatusServiceUnavailable && resp.StatusCode != http.StatusBadGateway {
 			if attempt > 1 && resp.StatusCode == http.StatusOK {
 				s.retry503Metrics.recordRecovered(requestIDClass(r), totalBackoffMS)
-				slog.Info("gateway coord 503 retry recovered",
+				slog.Info("gateway coord retry recovered",
 					"request_id", requestID(r),
 					"attempt", attempt,
 					"total_backoff_ms", totalBackoffMS,
@@ -428,15 +431,16 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		resp.ContentLength = int64(len(body))
-		if readErr != nil || !isCoordNoProviderAvailable503(resp.StatusCode, body) {
+		if readErr != nil || !isCoordinatorChatRetryEligible(resp.StatusCode, body) {
 			return resp, nil
 		}
 		if attempt == maxAttempts {
 			s.retry503Metrics.recordExhausted(totalBackoffMS)
-			slog.Warn("gateway coord 503 retry exhausted",
+			slog.Warn("gateway coord retry exhausted",
 				"request_id", requestID(r),
 				"attempts", maxAttempts,
 				"total_backoff_ms", totalBackoffMS,
+				"status", resp.StatusCode,
 			)
 			return resp, nil
 		}
@@ -444,10 +448,11 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 			return resp, nil
 		}
 		backoff := coord503RetryBackoff(attempt, s.cfg.Retry503)
-		slog.Info("gateway coord 503 retry",
+		slog.Info("gateway coord retry",
 			"request_id", requestID(r),
 			"attempt", attempt+1,
 			"backoff_ms", backoff.Milliseconds(),
+			"status", resp.StatusCode,
 			"body_code", openAIErrorCode(body),
 		)
 		select {
@@ -1135,6 +1140,41 @@ func coordinatorTier2PolicyError(status int, body []byte) bool {
 		return status == http.StatusServiceUnavailable
 	case "tier2_hard_pin_predicate_failed":
 		return status == http.StatusBadRequest
+	default:
+		return false
+	}
+}
+
+// isCoordinatorChatRetryEligible returns true when the coordinator response
+// indicates the request MAY succeed on a retry — momentarily unavailable pool
+// (503) or transient provider transport failure (502). It intentionally does
+// NOT retry null-usage provider errors, tier2 policy errors, or post-inference
+// structured-output failures that already ran billing.
+func isCoordinatorChatRetryEligible(status int, body []byte) bool {
+	if isCoordNoProviderAvailable503(status, body) {
+		return true
+	}
+	return isCoordTransientProvider502(status, body)
+}
+
+// isCoordTransientProvider502 returns true for coordinator 502 responses that
+// signal provider disconnect / relay failure rather than billable inference
+// faults. Mirrors the buyer-visible codes written on ErrRelayClosed and
+// wsForwardProviderDisconnected paths in phase4-coordinator buyer/server.go.
+func isCoordTransientProvider502(status int, body []byte) bool {
+	if status != http.StatusBadGateway {
+		return false
+	}
+	if isNullUsageProviderError(body) {
+		return false
+	}
+	if coordinatorTier2PolicyError(status, body) {
+		return false
+	}
+	code := openAIErrorCode(body)
+	switch code {
+	case "provider_error", "provider_failed", "provider_disconnected", "":
+		return true
 	default:
 		return false
 	}

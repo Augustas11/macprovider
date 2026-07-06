@@ -102,9 +102,10 @@ timeouts:
   streaming_cancel_ms: 500
 
 retry_503:
-  # Retries only coordinator 503 no_provider_available responses (including
-  # empty-body fast refusals). Tier-2 policy and null-usage provider errors
-  # pass through unchanged.
+  # Retries coordinator 503 no_provider_available AND transient 502 provider
+  # transport failures (provider_disconnected / provider_error / provider_failed).
+  # Does NOT retry null-usage provider errors, tier-2 policy rejects, or
+  # post-inference structured-output 502s (malformed_json_response, etc.).
   enabled: true
   max_attempts: 3
   backoff_base_ms: 100

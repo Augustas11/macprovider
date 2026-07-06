@@ -493,7 +493,7 @@ actor CoordinatorClient {
         }
         await cleanupConnection()
 
-        let socket = openWebSocket()
+        let socket = try await openWebSocket()
         do {
             try await authenticateRotatedSocket(socket, newKey: newKey, commitKey: commitKey)
         } catch let error as CoordinatorReceiptRotationCommittedRecoveryFailed {
@@ -722,7 +722,7 @@ actor CoordinatorClient {
 
     private func restoreReceiptRotationSessionWithTimeout() async throws {
         let timeoutNanoseconds = receiptKeyRotationTimeoutNanoseconds
-        let socket = openWebSocket()
+        let socket = try await openWebSocket()
         let completion = ReceiptRotationVoidCompletion()
         let restoreTask = Task {
             do {
@@ -851,14 +851,15 @@ actor CoordinatorClient {
     }
 
     private func connectAndRun() async throws {
+        let socket = try await openWebSocket()
         if wsTunneledMode {
-            try await connectAndRunTier2(socket: openWebSocket())
+            try await connectAndRunTier2(socket: socket)
         } else {
-            try await connectAndRunLegacy(socket: openWebSocket())
+            try await connectAndRunLegacy(socket: socket)
         }
     }
 
-    private func openWebSocket() -> ProviderWebSocketTask {
+    private func openWebSocket() async throws -> ProviderWebSocketTask {
         var request = URLRequest(url: coordinatorURL)
         // M1-1 / XSEC-1: attach Authorization: Bearer when the operator has
         // issued this provider a token. Coordinator validates the header in
@@ -873,7 +874,36 @@ actor CoordinatorClient {
         webSocket = socket
         socket.resume()
         Self.keepaliveDebug("ws_resume url=\(Self.redactedURL(coordinatorURL)) token=\(providerToken == nil ? "absent" : "present")")
+        try await Self.waitForWebSocketReady(socket)
         return socket
+    }
+
+    /// URLSessionWebSocketTask.send() fails with NSPOSIXErrorDomain Code=57
+    /// ("Socket is not connected") when called immediately after resume(), before
+    /// the TCP/TLS/WS handshake completes. Reconnect loops then spam WARN lines
+    /// and leave the provider absent from the pool during the backoff window.
+    private static func waitForWebSocketReady(_ socket: ProviderWebSocketTask, timeoutSeconds: Double = 15) async throws {
+        guard let urlTask = socket as? URLSessionWebSocketTask else { return }
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        var lastError: Error?
+        while Date() < deadline {
+            if Task.isCancelled { throw CancellationError() }
+            switch urlTask.state {
+            case .completed, .canceling:
+                throw lastError ?? CoordinatorAuthError.invalidMessage("WebSocket closed before ready")
+            case .running:
+                do {
+                    try await urlTask.sendPing()
+                    return
+                } catch {
+                    lastError = error
+                }
+            default:
+                break
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        throw lastError ?? CoordinatorAuthError.invalidMessage("WebSocket timed out waiting for ready")
     }
 
     private func connectAndRunTier2(socket: ProviderWebSocketTask) async throws {
