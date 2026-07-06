@@ -215,8 +215,15 @@ enum AutotuneRecommendationError: Error {
     case timedOut
 }
 
+struct ModelDownloadPlan: Equatable {
+    let modelName: String
+    let earningsEstimate: EarningsEstimateRange?
+
+    static let recommended = ModelDownloadPlan(modelName: "recommended", earningsEstimate: nil)
+}
+
 struct AutotuneRecommendationResult: Equatable {
-    let plan: LaunchProviderController.ModelDownloadPlan
+    let plan: ModelDownloadPlan
     let serveConfig: ProviderConfig.AutotuneServeConfig
 
     static func fromAutotuneJSON(_ data: Data) throws -> Self {
@@ -225,7 +232,7 @@ struct AutotuneRecommendationResult: Equatable {
             throw AutotuneRecommendationError.invalidJSON
         }
         return AutotuneRecommendationResult(
-            plan: try LaunchProviderController.ModelDownloadPlan.fromAutotuneRoot(root),
+            plan: try ModelDownloadPlan.fromAutotuneRoot(root),
             serveConfig: try AutotuneServeConfigEnvelope.decode(from: data)
         )
     }
@@ -312,7 +319,7 @@ private struct AutotuneServeConfigPayload: Decodable {
     }
 }
 
-extension LaunchProviderController.ModelDownloadPlan {
+extension ModelDownloadPlan {
     static func fromAutotuneJSON(_ data: Data) throws -> Self {
         let rootObject = try JSONSerialization.jsonObject(with: data)
         guard let root = rootObject as? [String: Any] else {
@@ -324,7 +331,7 @@ extension LaunchProviderController.ModelDownloadPlan {
     static func fromAutotuneRoot(_ root: [String: Any]) throws -> Self {
         let modelName = recommendedModel(in: root) ?? Self.recommended.modelName
         let range = earningsEstimate(modelName: modelName, root: root)
-        return Self(modelName: modelName, state: nil, earningsEstimate: range)
+        return Self(modelName: modelName, earningsEstimate: range)
     }
 
     private static func recommendedModel(in root: [String: Any]) -> String? {

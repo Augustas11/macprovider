@@ -35,7 +35,7 @@ final class EarningsEstimateFormatterTests: XCTestCase {
         }
         """.utf8)
 
-        let plan = try LaunchProviderController.ModelDownloadPlan.fromAutotuneJSON(data)
+        let plan = try ModelDownloadPlan.fromAutotuneJSON(data)
 
         XCTAssertEqual(plan.modelName, "meta-llama/llama-3.1-8b-instruct")
         XCTAssertEqual(plan.earningsEstimate, EarningsEstimateRange(lowDailyUSD: 6, highDailyUSD: 6))
@@ -50,7 +50,7 @@ final class EarningsEstimateFormatterTests: XCTestCase {
         }
         """.utf8)
 
-        let plan = try LaunchProviderController.ModelDownloadPlan.fromAutotuneJSON(data)
+        let plan = try ModelDownloadPlan.fromAutotuneJSON(data)
 
         XCTAssertEqual(plan.modelName, "meta-llama/llama-3.1-8b-instruct")
         XCTAssertNil(plan.earningsEstimate)
