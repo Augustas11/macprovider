@@ -41,6 +41,9 @@ final class MalibuAgent: ObservableObject {
     private var healthPollTask: Task<Void, Never>?
     private var monitorsLaunchdProvider = false
     private var lastRequestsRateSample: (total: Int, date: Date)?
+    private var latestReleaseFetchedAt: Date?
+    private var cliUpdateTask: Task<Void, Never>?
+    private let latestReleaseTTL: TimeInterval = 3600
 
     init() {
         thermalMonitor.$state
@@ -106,6 +109,34 @@ final class MalibuAgent: ObservableObject {
         try? await control?.send(.resumeRequest)
     }
 
+    func updateCLINow() async {
+        guard !snapshot.cliUpdateInProgress else { return }
+        guard AgentSnapshotPresenter.updateAvailable(snapshot) else { return }
+        cliUpdateTask?.cancel()
+        snapshot.cliUpdateInProgress = true
+        snapshot.cliUpdateLastError = nil
+        cliUpdateTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await CLIUpdateRunner.run { line in
+                    self.logLines.append(line)
+                    if self.logLines.count > 400 {
+                        self.logLines.removeFirst(self.logLines.count - 400)
+                    }
+                }
+                self.snapshot.cliUpdateLastError = nil
+                if let port = ProviderConfig.readHTTPPort() {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    await self.applyProviderSnapshot(port: port)
+                }
+            } catch {
+                self.snapshot.cliUpdateLastError = error.localizedDescription
+            }
+            self.snapshot.cliUpdateInProgress = false
+        }
+        await cliUpdateTask?.value
+    }
+
     // AUDIT R2 CODE H2/H3: shutdown is the single termination path. Called from
     // both Quit-and-Uninstall and applicationShouldTerminate for plain Quit.
     // Cancels reconnect BEFORE marking child as stopping so nothing sneaks a
@@ -114,6 +145,7 @@ final class MalibuAgent: ObservableObject {
         isShuttingDown = true
         reconnectTask?.cancel(); reconnectTask = nil
         healthPollTask?.cancel(); healthPollTask = nil
+        cliUpdateTask?.cancel(); cliUpdateTask = nil
         monitorsLaunchdProvider = false
         lastRequestsRateSample = nil
         child?.markStopping()
@@ -150,7 +182,7 @@ final class MalibuAgent: ObservableObject {
             return false
         }
         monitorsLaunchdProvider = true
-        await applyHealthSnapshot(port: port)
+        await applyProviderSnapshot(port: port)
         snapshot.state = .serving
         snapshot.lastError = nil
         startHealthPolling(port: port)
@@ -179,6 +211,31 @@ final class MalibuAgent: ObservableObject {
         await control?.close()
         child = nil
         control = nil
+    }
+
+    private func applyProviderSnapshot(port: Int) async {
+        await applyHealthSnapshot(port: port)
+        if let status = await InstalledProviderMonitor.fetchStatus(port: port) {
+            if let version = status.binaryVersion {
+                snapshot.cliVersion = ProviderCLIVersion.normalize(version)
+            }
+            if let recommended = status.recommendedVersion {
+                snapshot.coordinatorRecommendedVersion = ProviderCLIVersion.normalize(recommended)
+            }
+        }
+        await refreshLatestReleaseIfNeeded()
+    }
+
+    private func refreshLatestReleaseIfNeeded() async {
+        if let fetchedAt = latestReleaseFetchedAt,
+           Date().timeIntervalSince(fetchedAt) < latestReleaseTTL,
+           snapshot.latestReleaseVersion != nil {
+            return
+        }
+        if let tag = await GitHubLatestReleaseClient.fetchTag() {
+            latestReleaseFetchedAt = Date()
+            snapshot.latestReleaseVersion = tag
+        }
     }
 
     private func applyHealthSnapshot(port: Int) async {
@@ -236,7 +293,7 @@ final class MalibuAgent: ObservableObject {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 guard let self else { return }
                 if await InstalledProviderMonitor.isHealthy(port: port) {
-                    await self.applyHealthSnapshot(port: port)
+                    await self.applyProviderSnapshot(port: port)
                     await MainActor.run {
                         if self.snapshot.state != .serving && self.snapshot.state != .paused {
                             self.snapshot.state = .serving

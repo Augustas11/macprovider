@@ -85,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .openOnboarding: presentOnboarding()
         case .pause: Task { await agent.pause() }
         case .resume: Task { await agent.resume() }
+        case .updateCLI: Task { await agent.updateCLINow() }
         case .quitAndUninstall:
             guard uninstallTask == nil else { return }
             uninstallTask = Task { @MainActor [weak self] in

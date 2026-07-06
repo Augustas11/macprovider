@@ -59,6 +59,12 @@ struct AgentSnapshot: Equatable {
     var thermalState: MalibuThermalState?
     var lastError: String?
 
+    var cliVersion: String?
+    var coordinatorRecommendedVersion: String?
+    var latestReleaseVersion: String?
+    var cliUpdateInProgress: Bool
+    var cliUpdateLastError: String?
+
     // Whether the CLI has explicitly acknowledged a pause; distinct from
     // "we optimistically flipped the UI" — pauseAck accepted:false must NOT
     // leave the UI showing Paused.
@@ -98,6 +104,11 @@ struct AgentSnapshot: Equatable {
         trustCriteriaRequired: nil,
         thermalState: nil,
         lastError: nil,
+        cliVersion: nil,
+        coordinatorRecommendedVersion: nil,
+        latestReleaseVersion: nil,
+        cliUpdateInProgress: false,
+        cliUpdateLastError: nil,
         pauseAcknowledged: false
     )
 }
@@ -303,6 +314,58 @@ enum AgentSnapshotPresenter {
         guard s.walletBound == false else { return nil }
         let total = (s.unpaidLedgerBacklogUSDC ?? 0) + (s.unpaidLedgerBacklogMALIBU ?? 0)
         return total > 0 ? total : nil
+    }
+
+    static func updateTargetVersion(_ s: AgentSnapshot) -> String? {
+        ProviderCLIVersion.updateTarget(
+            current: s.cliVersion,
+            recommended: s.coordinatorRecommendedVersion,
+            latestRelease: s.latestReleaseVersion
+        )
+    }
+
+    static func updateAvailable(_ s: AgentSnapshot) -> Bool {
+        updateTargetVersion(s) != nil
+    }
+
+    static func updateBadge(_ s: AgentSnapshot) -> String? {
+        guard updateAvailable(s), !s.cliUpdateInProgress else { return nil }
+        return "↑"
+    }
+
+    static func cliVersionLine(_ s: AgentSnapshot) -> String {
+        guard let current = s.cliVersion else {
+            return isActive(s) ? "Version unknown" : "Not running"
+        }
+        var parts = ["v\(current)"]
+        if let target = updateTargetVersion(s) {
+            parts.append("→ v\(target) available")
+        } else if let latest = s.latestReleaseVersion {
+            parts.append("latest v\(latest)")
+        } else if let recommended = s.coordinatorRecommendedVersion {
+            parts.append("coordinator v\(recommended)")
+        } else {
+            parts.append("up to date")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    static func cliUpdateStatusLine(_ s: AgentSnapshot) -> String? {
+        if s.cliUpdateInProgress {
+            return "Updating provider CLI…"
+        }
+        if let error = s.cliUpdateLastError {
+            return error
+        }
+        return nil
+    }
+
+    static func cliVersionMenuLine(_ s: AgentSnapshot) -> String? {
+        guard let current = s.cliVersion else { return nil }
+        if let target = updateTargetVersion(s) {
+            return "CLI v\(current) · v\(target) available"
+        }
+        return "CLI v\(current) · up to date"
     }
 
     private static func malibuDisplay(_ amount: Double, tier: AgentSnapshot.TrustTier, compact: Bool = false) -> String {

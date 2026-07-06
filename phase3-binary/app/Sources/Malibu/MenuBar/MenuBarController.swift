@@ -8,6 +8,7 @@ final class MenuBarController {
         case openOnboarding
         case pause
         case resume
+        case updateCLI
         case quitAndUninstall
     }
 
@@ -78,6 +79,17 @@ final class MenuBarController {
         earningsItem.isEnabled = false
         menu.addItem(earningsItem)
 
+        let cliVersionItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        cliVersionItem.identifier = .cliVersionRow
+        cliVersionItem.isEnabled = false
+        cliVersionItem.isHidden = true
+        menu.addItem(cliVersionItem)
+
+        let updateCLIItem = action("Update CLI…", key: "") { self.onAction(.updateCLI) }
+        updateCLIItem.identifier = .updateCLIAction
+        updateCLIItem.isHidden = true
+        menu.addItem(updateCLIItem)
+
         let backlogItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         backlogItem.identifier = .backlogRow
         backlogItem.isEnabled = false
@@ -125,9 +137,10 @@ final class MenuBarController {
         // snapshot data type. This lets locale/currency work touch one place.
         latestSnapshot = snapshot
         let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissedUnclaimedThreshold)
+        let updateBadge = AgentSnapshotPresenter.updateBadge(snapshot)
         let queueDot = (snapshot.queueDepth ?? 0) > 0 ? "•" : nil
         if let button = statusItem.button {
-            button.title = [AgentSnapshotPresenter.short(snapshot), badge, queueDot].compactMap { $0 }.joined(separator: " ")
+            button.title = [AgentSnapshotPresenter.short(snapshot), badge, updateBadge, queueDot].compactMap { $0 }.joined(separator: " ")
             button.imagePosition = .imageLeading
         }
         statusItem.button?.toolTip = menuTooltip(snapshot)
@@ -140,6 +153,22 @@ final class MenuBarController {
         let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissedUnclaimedThreshold)
         menu.item(withIdentifier: .statusRow)?.title = AgentSnapshotPresenter.stateLine(snapshot)
         menu.item(withIdentifier: .earningsRow)?.title = AgentSnapshotPresenter.earningsLine(snapshot)
+        if let cliLine = AgentSnapshotPresenter.cliVersionMenuLine(snapshot),
+           let item = menu.item(withIdentifier: .cliVersionRow) {
+            item.title = cliLine
+            item.isHidden = false
+        } else {
+            menu.item(withIdentifier: .cliVersionRow)?.isHidden = true
+        }
+        if let updateItem = menu.item(withIdentifier: .updateCLIAction) {
+            let showUpdate = AgentSnapshotPresenter.updateAvailable(snapshot) && !snapshot.cliUpdateInProgress
+            updateItem.isHidden = !showUpdate
+            if let target = AgentSnapshotPresenter.updateTargetVersion(snapshot) {
+                updateItem.title = "Update CLI to v\(target)…"
+            } else {
+                updateItem.title = "Update CLI…"
+            }
+        }
         if let backlog = AgentSnapshotPresenter.backlogLine(snapshot),
            let item = menu.item(withIdentifier: .backlogRow) {
             item.title = backlog
@@ -161,17 +190,23 @@ final class MenuBarController {
     }
 
     private func menuTooltip(_ snapshot: AgentSnapshot) -> String {
-        [
+        var lines = [
             AgentSnapshotPresenter.stateLine(snapshot),
             AgentSnapshotPresenter.earningsLine(snapshot),
-            "Click to open dashboard · Right-click for menu"
-        ].joined(separator: "\n")
+        ]
+        if let cliLine = AgentSnapshotPresenter.cliVersionMenuLine(snapshot) {
+            lines.append(cliLine)
+        }
+        lines.append("Click to open dashboard · Right-click for menu")
+        return lines.joined(separator: "\n")
     }
 }
 
 private extension NSUserInterfaceItemIdentifier {
     static let statusRow = NSUserInterfaceItemIdentifier("malibu.menubar.status")
     static let earningsRow = NSUserInterfaceItemIdentifier("malibu.menubar.earnings")
+    static let cliVersionRow = NSUserInterfaceItemIdentifier("malibu.menubar.cliVersion")
+    static let updateCLIAction = NSUserInterfaceItemIdentifier("malibu.menubar.updateCLI")
     static let backlogRow = NSUserInterfaceItemIdentifier("malibu.menubar.backlog")
     static let dismissBacklogBadge = NSUserInterfaceItemIdentifier("malibu.menubar.dismissBacklogBadge")
 }
