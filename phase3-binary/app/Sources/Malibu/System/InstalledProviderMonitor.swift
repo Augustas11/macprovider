@@ -6,11 +6,13 @@ enum InstalledProviderMonitor {
         let ready: Bool
         let model: String?
         let requestsTotal: Int?
+        let requestsToday: Int?
         let inputTokensToday: Int64?
         let outputTokensToday: Int64?
         let inputTokensAllTime: Int64?
         let outputTokensAllTime: Int64?
         let uptimeSeconds: Int?
+        let restartCount: Int?
     }
 
     static func readHTTPPort(paths: ProviderPaths = .current) -> Int? {
@@ -38,20 +40,24 @@ enum InstalledProviderMonitor {
             let status = object["status"] as? String
             let model = object["model"] as? String
             let requestsTotal = object["requests_total"] as? Int
+            let requestsToday = object["requests_today"] as? Int
             let inputTokensToday = int64Value(object["input_tokens_today"])
             let outputTokensToday = int64Value(object["output_tokens_today"])
             let inputTokensAllTime = int64Value(object["input_tokens_all_time"])
             let outputTokensAllTime = int64Value(object["output_tokens_all_time"])
             let uptimeSeconds = object["uptime_s"] as? Int
+            let restartCount = object["restart_count"] as? Int
             return HealthSnapshot(
                 ready: status == "ready",
                 model: model,
                 requestsTotal: requestsTotal,
+                requestsToday: requestsToday,
                 inputTokensToday: inputTokensToday,
                 outputTokensToday: outputTokensToday,
                 inputTokensAllTime: inputTokensAllTime,
                 outputTokensAllTime: outputTokensAllTime,
-                uptimeSeconds: uptimeSeconds
+                uptimeSeconds: uptimeSeconds,
+                restartCount: restartCount
             )
         } catch {
             return nil
