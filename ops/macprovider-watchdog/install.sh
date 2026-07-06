@@ -10,7 +10,7 @@ set -euo pipefail
 
 WATCHDOG_DIR_DEFAULT="$HOME/.local/share/macprovider-watchdog"
 WATCHDOG_DIR="${MACPROVIDER_WATCHDOG_DIR:-$WATCHDOG_DIR_DEFAULT}"
-WATCHDOG_PATH="$WATCHDOG_DIR/watchdog.sh"
+WATCHDOG_PATH="$WATCHDOG_DIR/macprovider-health-monitor"
 PLIST_TEMPLATE_PATH="${MACPROVIDER_WATCHDOG_TEMPLATE:-$(cd "$(dirname "$0")" && pwd)/live.streamvc.macprovider-watchdog.template.plist}"
 SOURCE_WATCHDOG="$(cd "$(dirname "$0")" && pwd)/watchdog.sh"
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
@@ -65,6 +65,10 @@ log "Installing watchdog to $WATCHDOG_DIR"
 run mkdir -p "$WATCHDOG_DIR" "$LOG_DIR" "$(dirname "$PLIST_PATH")"
 
 if [ "$DRY_RUN" -eq 0 ]; then
+  legacy_watchdog="$WATCHDOG_DIR/watchdog.sh"
+  if [ -f "$legacy_watchdog" ] && [ "$legacy_watchdog" != "$WATCHDOG_PATH" ]; then
+    rm -f "$legacy_watchdog"
+  fi
   install -m 0755 "$SOURCE_WATCHDOG" "$WATCHDOG_PATH"
 else
   log "[dry-run] install -m 0755 $SOURCE_WATCHDOG $WATCHDOG_PATH"

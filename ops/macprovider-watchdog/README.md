@@ -23,7 +23,7 @@ operator without any hardcoded provider id.
 
 | File | Purpose |
 |---|---|
-| `watchdog.sh` | The poll script. Idempotent; safe to invoke repeatedly. |
+| `watchdog.sh` | The poll script source (installed as `macprovider-health-monitor`). Idempotent; safe to invoke repeatedly. |
 | `live.streamvc.macprovider-watchdog.template.plist` | LaunchAgent template; substituted by `install.sh`. |
 | `install.sh` | Idempotent installer. Invoked by both the main `get.streamvc.live/install.sh` flow and by an operator running this directory by hand. |
 | `uninstall.sh` | Removes the LaunchAgent and the `~/.local/share/macprovider-watchdog` directory. |
