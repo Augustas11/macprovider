@@ -41,6 +41,18 @@ type forwardState struct {
 	// the billing ledger keys routing_ms off the last selection).
 	routingDone time.Time
 
+	// queueWait records coordinator-side slot-queue wait time for the
+	// active provider attempt. Queue delay is buyer-visible routing
+	// latency, not provider billable work; request_log writes it
+	// separately from token settlement so expired queued requests
+	// remain non-billable.
+	queueWait time.Duration
+
+	// queuedSlotProviderID is set when the slot queue reserves a
+	// recovered provider slot for this request. It is released when
+	// the request leaves that active route.
+	queuedSlotProviderID string
+
 	// explicitRetries is the retry counter the request_log.retried
 	// column and the shouldRetry caps key off. Incremented by
 	// advanceToNextProvider exactly once per advance; failover

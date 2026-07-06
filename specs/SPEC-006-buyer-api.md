@@ -1,7 +1,18 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.5 (2026-07-02, § 17.7.1 clause 1 strict-presence tightening — #295)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.0, SPEC-003 v0.7, SPEC-004 v0.2
+**Version:** 0.9.6 (2026-07-06, bounded coordinator slot queue — issue #374)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.3, SPEC-003 v0.7, SPEC-004 v0.2
+
+**Change log v0.9.6 (2026-07-06, issue #374 — bounded coordinator slot queue):**
+- Non-pinned no-slot routing may use SPEC-002 v1.5.3's bounded
+  coordinator-side pre-dispatch slot queue before returning 503. The
+  queue is not unbounded gateway queueing; it is capped per
+  `provider_id`, FIFO, and deadline-bound.
+- Pinned provider/session requests retain immediate 503 behavior when
+  the pinned target has no free slot.
+- `queue_wait_ms` is a latency diagnostic and refund/billing-neutral:
+  queue dwell does not create token usage, buyer debit, or provider
+  payout by itself; expired queued 503s remain failed/refunded requests.
 
 **Change log v0.9.5 (2026-07-02, issue #295):**
 - § 17.7.1 clause 1 tightened: the standalone envelope now literally forbids the `choices` and `usage` KEYS (regardless of value shape), plus duplicate top-level keys and duplicate immediate `error.*` fields (including `error.code`, `error.type`), plus trailing garbage. Duplicate keys DEEPER inside `error.*` sub-objects (e.g. `error.details.foo.k` twice) are outside the corroboration trust gate and NOT required to reject — no smuggling risk. Earlier "no usage field with non-zero token counts" wording drifted from the gateway's producer-side enforcement and from the #232 harness-side corroboration, opening JSON smuggling shapes (`usage:null`, `usage:{}`, duplicate `choices`/`usage`/`error.code`, non-enumerated usage subfields like `total_tokens`, invalid trailing bytes). Aligned to what the token-level parser and buyer's OpenAI SDK actually see.
@@ -259,7 +270,7 @@ SPEC-006 MAY add stricter public gateway limits before forwarding, including `ma
 
 SPEC-002 defines the Phase 4 coordinator.
 
-SPEC-006 layers on top of SPEC-002. The base relationship was established in SPEC-002 v1.1.5; the current SPEC-006 v0.9.1 depends on SPEC-002 v1.5.0 (account-scoped reconciliation key — see header `Depends on` line and §6 forward-header rule).
+SPEC-006 layers on top of SPEC-002. The base relationship was established in SPEC-002 v1.1.5; the current SPEC-006 v0.9.6 depends on SPEC-002 v1.5.3 (bounded slot queue plus the account-scoped reconciliation key lineage — see header `Depends on` line and §6 forward-header rule).
 
 SPEC-006 MUST preserve SPEC-002's router-only charter.
 
@@ -325,7 +336,7 @@ SPEC-006 MUST NOT create buyer-visible payout, earning, donation, or payment pro
 
 SPEC-001 and SPEC-002 are locked and unchanged during SPEC-006-only implementation and fix passes.
 
-SPEC-006 layers on top of the SPEC-002 coordinator. (Current dependency: SPEC-002 v1.5.0; base relationship established in v1.1.5 — see §1.5 and the document header `Depends on` line.)
+SPEC-006 layers on top of the SPEC-002 coordinator. (Current dependency: SPEC-002 v1.5.3; base relationship established in v1.1.5 — see §1.5 and the document header `Depends on` line.)
 
 Cross-spec dependencies are read-only references.
 
@@ -525,9 +536,11 @@ The metric MUST be reportable as a 7-day rolling distribution with median (p50) 
   - `X-RateLimit-Remaining`
   - `X-RateLimit-Reset`
 
-No long queueing.
+No unbounded queueing.
 
-If no slot is immediately available, return 503.
+For non-pinned requests, the coordinator MAY wait in the bounded
+pre-dispatch slot queue described in section 7.7. If no slot becomes
+available before that deadline, return 503.
 
 Streaming cancellation: when client disconnects mid-SSE, gateway MUST cancel the upstream request to coordinator within 500ms.
 
@@ -1193,9 +1206,13 @@ The documented response-pass-through allowlist is:
 - `X-MacProvider-Receipt`, emitted by SPEC-015 v0.1.3 non-streaming
   receipt-capable providers and forwarded unchanged by the gateway.
 
-The gateway MUST reject immediately with 503 when no provider slot is immediately available.
+The gateway MUST return 503 when no provider slot is available after
+any allowed bounded pre-dispatch slot queue expires.
 
-The gateway MUST NOT queue buyer requests waiting for future capacity.
+The gateway MUST NOT queue buyer requests indefinitely waiting for
+future capacity. Pinned provider or session requests MUST NOT enter the
+bounded slot queue and MUST return 503 when the pinned target has no
+immediately available slot.
 
 Non-streaming success response:
 
@@ -1728,6 +1745,8 @@ Quota decisions MAY use preflight estimates before forwarding.
 
 Final usage events MUST record whether token counts were provider-reported or gateway-estimated.
 
+Coordinator-side slot queue wait is routing latency, not token usage or provider billable work. If a coordinator waits for an otherwise eligible provider's `slots_free` to recover before dispatch, the wait MAY be recorded for latency diagnostics, but it MUST NOT create buyer debit, provider payout, prompt tokens, completion tokens, or non-zero usage settlement by itself. Expired queued requests that return 503 remain failed requests under the refund policy below.
+
 Quota enforcement MUST use a reservation ledger to prevent concurrent over-spend.
 
 For each admitted request, the gateway:
@@ -1846,11 +1865,15 @@ quota_exhausted
 
 The response MUST include `X-RateLimit-Reset`.
 
-### 7.7 No long queueing
+### 7.7 Bounded slot queueing
 
-The gateway MUST NOT queue requests waiting for provider slots.
+The gateway MUST NOT queue requests indefinitely waiting for provider slots.
 
-If model is known but no slot is immediately available, return 503.
+For non-pinned requests, the coordinator MAY hold a request in a bounded pre-dispatch slot queue when at least one otherwise eligible `ready` provider for the model reports `slots_free=0`. The queue MUST be FIFO per `provider_id`, MUST cap pending waiters at 4 per `provider_id`, and MUST use a total deadline no longer than 750 ms.
+
+If no slot becomes available before the bounded queue deadline, or if the candidate provider leaves `ready` state, return 503.
+
+Pinned provider or session requests MUST NOT enter this queue. If the pinned target has no immediately available slot, return 503.
 
 If the account concurrency cap is reached, return 429.
 
@@ -2703,7 +2726,7 @@ model_not_found
 
 ### 17.3 Model unavailable
 
-If a model is known but no provider slot is immediately available, return 503.
+If a model is known but no provider slot is available after any allowed bounded pre-dispatch slot queue expires, return 503.
 
 Code:
 

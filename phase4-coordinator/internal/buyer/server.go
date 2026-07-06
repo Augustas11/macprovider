@@ -155,6 +155,9 @@ type Server struct {
 	receiptKeysTTL        time.Duration
 	streamingDowngrade    *streamingDowngradeStore
 	streamingTiming       *streamingTimingCollector
+	slotQueue             *slotQueue
+	slotQueueDeadline     time.Duration
+	slotQueuePollInterval time.Duration
 	// trustedProxies is the parsed CIDR set whose X-Forwarded-For /
 	// X-Real-IP headers the rate-limit keying honors. Pre-parsed at
 	// construction (config.go TrustedProxyPrefixes) so the hot path
@@ -211,6 +214,9 @@ const (
 	maxRequestLogUsageTokens     = int64(10000000)
 	maxUpstreamResponseBodyBytes = int64(16 << 20)
 	requestLogWriteTimeout       = 6 * time.Second
+	slotQueueDefaultMaxPending   = 4
+	slotQueueDefaultDeadline     = 750 * time.Millisecond
+	slotQueueDefaultPollInterval = 25 * time.Millisecond
 )
 
 const (
@@ -462,6 +468,20 @@ func WithPoolCheckLimiter(maxEntries int, ttl time.Duration) Option {
 	}
 }
 
+func WithSlotQueueConfig(maxPendingPerProvider int, deadline, pollInterval time.Duration) Option {
+	return func(s *Server) {
+		if maxPendingPerProvider > 0 {
+			s.slotQueue = newSlotQueue(maxPendingPerProvider)
+		}
+		if deadline > 0 {
+			s.slotQueueDeadline = deadline
+		}
+		if pollInterval > 0 {
+			s.slotQueuePollInterval = pollInterval
+		}
+	}
+}
+
 func (s *Server) SetBillingConfig(cfg config.RewardsConfig, snapshotID int64, usdPerMillionCredits float64) {
 	s.billingMu.Lock()
 	defer s.billingMu.Unlock()
@@ -513,6 +533,9 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		receiptKeysTTL:         5 * time.Minute,
 		streamingDowngrade:     newStreamingDowngradeStore(),
 		streamingTiming:        newStreamingTimingCollector(),
+		slotQueue:              newSlotQueue(slotQueueDefaultMaxPending),
+		slotQueueDeadline:      slotQueueDefaultDeadline,
+		slotQueuePollInterval:  slotQueueDefaultPollInterval,
 		// Default trusted-proxy set mirrors config.Default()'s
 		// loopback-only posture so callers that construct via NewServer
 		// without WithTrustedProxies keep the production nginx-on-
@@ -1605,7 +1628,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// MEDIUM fix.
 	state.estimatedTokens = estimateTokens(req.raw)
 	rec.setPromptTokenUpperBound(int64(state.estimatedTokens))
-	provider, routeErr := s.selectProvider(routingRequestID, req, r.Header, state.dailyKey, state)
+	provider, routeErr := s.selectProvider(r.Context(), routingRequestID, req, r.Header, state.dailyKey, state)
 	if routeErr != nil {
 		state.routingDone = s.now()
 		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", 0)
@@ -1614,6 +1637,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	state.routingDone = s.now()
 	state.provider = provider
+	defer s.releaseQueuedSlotReservation(state)
 	// M2-1c: the three transport loops (streaming, WS-non-streaming, HTTP)
 	// previously duplicated the retry/failover/busy-marking decision tree.
 	// They now share three thin helpers (forwardStreamSequence,
@@ -2392,7 +2416,9 @@ func (s *Server) advanceToNextProvider(
 	rec *billingRecorder,
 ) (nextRouteID string, ok bool) {
 	nextRouteID = uuid.NewString()
-	picked, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded, state.dailyKey, state)
+	s.releaseQueuedSlotReservation(state)
+	state.queueWait = 0
+	picked, routeErr := s.selectProviderExcluding(r.Context(), nextRouteID, req, r.Header, excluded, state.dailyKey, state)
 	if routeErr != nil {
 		state.routingDone = s.now()
 		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", state.explicitRetries)
@@ -4682,11 +4708,11 @@ type routeError struct {
 	typ     string
 }
 
-func (s *Server) selectProvider(requestID string, req chatRequest, headers http.Header, dailyKey string, state *forwardState) (pool.Provider, *routeError) {
-	return s.selectProviderExcluding(requestID, req, headers, nil, dailyKey, state)
+func (s *Server) selectProvider(ctx context.Context, requestID string, req chatRequest, headers http.Header, dailyKey string, state *forwardState) (pool.Provider, *routeError) {
+	return s.selectProviderExcluding(ctx, requestID, req, headers, nil, dailyKey, state)
 }
 
-func (s *Server) failoverCandidate(requestID string, req chatRequest, headers http.Header, failed pool.Provider, excluded map[string]struct{}, dailyKey string, state *forwardState) (pool.Provider, bool) {
+func (s *Server) failoverCandidate(ctx context.Context, requestID string, req chatRequest, headers http.Header, failed pool.Provider, excluded map[string]struct{}, dailyKey string, state *forwardState) (pool.Provider, bool) {
 	if !s.failoverEnabled || hasPinnedRoute(headers) {
 		return pool.Provider{}, false
 	}
@@ -4697,7 +4723,7 @@ func (s *Server) failoverCandidate(requestID string, req chatRequest, headers ht
 	failoverHeaders := headers.Clone()
 	failoverHeaders.Del("X-MacProvider-Provider")
 	failoverHeaders.Del("X-MacProvider-Session")
-	next, routeErr := s.selectProviderExcluding(requestID, req, failoverHeaders, excluded, dailyKey, state)
+	next, routeErr := s.selectProviderExcluding(ctx, requestID, req, failoverHeaders, excluded, dailyKey, state)
 	if routeErr != nil {
 		return pool.Provider{}, false
 	}
@@ -4742,7 +4768,7 @@ func (s *Server) recordBreakerFault(provider pool.Provider, fault breakerFault, 
 	}
 }
 
-func (s *Server) selectProviderExcluding(requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}, dailyKey string, state *forwardState) (pool.Provider, *routeError) {
+func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}, dailyKey string, state *forwardState) (pool.Provider, *routeError) {
 	providers := s.pool.Snapshot()
 	estimatedTokens := estimateTokens(req.raw)
 	class := s.classForRequest(req.Model, providers)
@@ -4794,7 +4820,23 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 	}
 	result := routing.EligibleCandidates(providers, exSet, pool.Provider.SortKey, checker)
 	candidates := result.Eligible
+	queuedCandidates := []pool.Provider(nil)
+	queueEligible := !hasPinnedRoute(headers)
+	if queueEligible && len(candidates) > 0 {
+		var normalCandidates []pool.Provider
+		normalCandidates, queuedCandidates = s.splitQueuedCandidates(candidates)
+		candidates = normalCandidates
+	}
 	if len(candidates) == 0 {
+		if queueEligible {
+			queuedCandidates = append(queuedCandidates, s.slotQueueCandidates(providers, exSet, checker)...)
+		}
+		if len(queuedCandidates) > 0 {
+			provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, req.Model, queuedCandidates, headers, class, dailyKey, estimatedTokens, state)
+			if queued {
+				return provider, routeErr
+			}
+		}
 		// PreQuotaCount distinguishes "first loop dropped everything"
 		// from "every first-loop survivor was quota-blocked". Quota
 		// is checked first because SPEC-002 reserves 429 for the
@@ -5516,6 +5558,9 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
 	if !p.RoutingEligible() {
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
+	if s.slotQueue != nil && s.slotQueue.blocksProvider(p.ProviderID, p.SlotsFree) {
+		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
+	}
 	if s.tier2ProviderExcluded(p) {
 		return pool.Provider{}, &routeError{
 			status:  http.StatusBadRequest,
@@ -5543,6 +5588,181 @@ func (s *Server) preflightCandidate(provider pool.Provider, requestID string, es
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "preflight_rejected", message: msg}
 	}
 	return provider, nil
+}
+
+func (s *Server) selectQueuedProvider(ctx context.Context, requestID, model string, candidates []pool.Provider, headers http.Header, class *config.ModelClassConfig, dailyKey string, estimatedTokens int, state *forwardState) (pool.Provider, *routeError) {
+	provider, routeErr, queued := s.trySelectQueuedProvider(ctx, requestID, model, candidates, headers, class, dailyKey, estimatedTokens, state)
+	if queued {
+		return provider, routeErr
+	}
+	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}
+}
+
+func (s *Server) trySelectQueuedProvider(ctx context.Context, requestID, model string, candidates []pool.Provider, headers http.Header, class *config.ModelClassConfig, dailyKey string, estimatedTokens int, state *forwardState) (pool.Provider, *routeError, bool) {
+	if s.slotQueue == nil || state == nil || len(candidates) == 0 {
+		return pool.Provider{}, nil, false
+	}
+	ordered := append([]pool.Provider(nil), candidates...)
+	objective := s.objectiveForRequest(headers, class)
+	balancedCache := s.sortCandidates(ordered, objective)
+	ordered, stickyResult, stickyMissReason := s.applySticky(requestID, headers, model, class, ordered, balancedCache)
+	seed, draw, reason := int64(0), float64(0), "sticky_hit"
+	if stickyResult != "hit" {
+		ordered, seed, draw, reason = s.applyRandomTiebreak(requestID, ordered, objective, dailyKey, balancedCache)
+	}
+	deadline := s.slotQueueDeadline
+	if deadline <= 0 {
+		deadline = slotQueueDefaultDeadline
+	}
+	pollInterval := s.slotQueuePollInterval
+	if pollInterval <= 0 {
+		pollInterval = slotQueueDefaultPollInterval
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	lastPreflightErr := (*routeError)(nil)
+	queueWait := time.Duration(0)
+	tried := map[string]struct{}{}
+	queueCandidates := make([]poolQueueCandidate, 0, len(ordered))
+	for _, candidate := range ordered {
+		queueCandidates = append(queueCandidates, poolQueueCandidate{providerID: candidate.ProviderID})
+	}
+	for len(tried) < len(queueCandidates) {
+		waiter, ok := s.slotQueue.enterBest(queueCandidates, tried)
+		if !ok {
+			if len(tried) == 0 {
+				return pool.Provider{}, nil, false
+			}
+			break
+		}
+		queueSegmentStart := time.Now()
+		for {
+			provider, status := s.pollQueuedProvider(waiter, model, class, estimatedTokens)
+			switch status {
+			case queuedProviderAvailable:
+				s.slotQueue.leave(waiter)
+				queueWait += time.Since(queueSegmentStart)
+				state.queueWait = queueWait
+				selected, routeErr := s.preflightCandidate(provider, requestID, estimatedTokens)
+				if routeErr != nil {
+					s.slotQueue.releaseReservation(provider.ProviderID)
+					lastPreflightErr = routeErr
+					tried[provider.ProviderID] = struct{}{}
+					goto nextQueueCandidate
+				}
+				state.queuedSlotProviderID = provider.ProviderID
+				state.stickyResult = stickyResult
+				state.stickyMissReason = stickyMissReason
+				s.logRoutingDecisionFullWithCache(requestID, len(candidates), map[string]int{"busy": len(candidates)}, []pool.Provider{provider}, objective, seed, draw, "slot_queue_"+reason, provider.ProviderID, nil)
+				return selected, nil, true
+			case queuedProviderTerminal:
+				s.slotQueue.leave(waiter)
+				queueWait += time.Since(queueSegmentStart)
+				tried[waiter.providerID] = struct{}{}
+				goto nextQueueCandidate
+			default:
+			}
+			select {
+			case <-waitCtx.Done():
+				s.slotQueue.leave(waiter)
+				queueWait += time.Since(queueSegmentStart)
+				state.queueWait = queueWait
+				return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}, true
+			case <-ticker.C:
+			}
+		}
+	nextQueueCandidate:
+	}
+	if lastPreflightErr != nil {
+		state.queueWait = queueWait
+		return pool.Provider{}, lastPreflightErr, true
+	}
+	state.queueWait = queueWait
+	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + model}, true
+}
+
+type queuedProviderStatus int
+
+const (
+	queuedProviderWait queuedProviderStatus = iota
+	queuedProviderAvailable
+	queuedProviderTerminal
+)
+
+func (s *Server) pollQueuedProvider(waiter *slotWaiter, model string, class *config.ModelClassConfig, estimatedTokens int) (pool.Provider, queuedProviderStatus) {
+	if !s.slotQueue.head(waiter) {
+		return pool.Provider{}, queuedProviderWait
+	}
+	for _, provider := range s.pool.Snapshot() {
+		if provider.ProviderID != waiter.providerID {
+			continue
+		}
+		if !s.providerMatchesRequest(provider, model, class) || provider.MaxContextTokens < estimatedTokens {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if !provider.CapacityEligible() || provider.State != pool.StateReady || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if provider.SlotsFree <= 0 {
+			return pool.Provider{}, queuedProviderWait
+		}
+		if !provider.RoutingEligible() {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		if !s.slotQueue.reserveHead(waiter, provider.SlotsFree) {
+			return pool.Provider{}, queuedProviderWait
+		}
+		return provider, queuedProviderAvailable
+	}
+	return pool.Provider{}, queuedProviderTerminal
+}
+
+func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing.Excluded, checker *eligibilityCtx) []pool.Provider {
+	out := make([]pool.Provider, 0, len(providers))
+	for _, provider := range providers {
+		if excluded.Has(provider.SortKey()) || !s.providerSlotQueueEligible(provider) {
+			continue
+		}
+		if !s.providerMatchesRequest(provider, checker.model, checker.class) || !checker.ProviderContextSufficient(provider) {
+			continue
+		}
+		reason, _ := checker.Tier2Decision(provider)
+		if reason != 0 || !checker.QuotaPermits(provider) {
+			continue
+		}
+		out = append(out, provider)
+	}
+	return out
+}
+
+func (s *Server) splitQueuedCandidates(candidates []pool.Provider) ([]pool.Provider, []pool.Provider) {
+	if s.slotQueue == nil {
+		return candidates, nil
+	}
+	normal := make([]pool.Provider, 0, len(candidates))
+	queued := make([]pool.Provider, 0, len(candidates))
+	for _, provider := range candidates {
+		if s.slotQueue.blocksProvider(provider.ProviderID, provider.SlotsFree) {
+			queued = append(queued, provider)
+			continue
+		}
+		normal = append(normal, provider)
+	}
+	return normal, queued
+}
+
+func (s *Server) providerSlotQueueEligible(provider pool.Provider) bool {
+	return provider.CapacityEligible() && provider.State == pool.StateReady && provider.SlotsTotal > 0 && provider.SlotsFree == 0
+}
+
+func (s *Server) releaseQueuedSlotReservation(state *forwardState) {
+	if state == nil || state.queuedSlotProviderID == "" || s.slotQueue == nil {
+		return
+	}
+	s.slotQueue.releaseReservation(state.queuedSlotProviderID)
+	state.queuedSlotProviderID = ""
 }
 
 func validatePinnedProvider(p pool.Provider, model string, estimatedTokens int, unavailableMessage string) (pool.Provider, *routeError) {

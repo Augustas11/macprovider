@@ -11,11 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -5612,6 +5614,12 @@ type requestLogTestRow struct {
 	Retried            int
 }
 
+type requestLogQueueWaitRow struct {
+	RequestID   string
+	QueueWaitMs float64
+	Status      int
+}
+
 func openBuyerRequestLog(t *testing.T) (*requestlog.Store, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
@@ -5718,6 +5726,35 @@ ORDER BY id ASC`)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("request log rows: %v", err)
+	}
+	return got
+}
+
+func queryAllRequestLogRowsWithQueueWait(t *testing.T, dbPath string) []requestLogQueueWaitRow {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open request log db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`
+SELECT request_id, queue_wait_ms, status
+FROM request_log
+ORDER BY id ASC`)
+	if err != nil {
+		t.Fatalf("query request log queue wait: %v", err)
+	}
+	defer rows.Close()
+	var got []requestLogQueueWaitRow
+	for rows.Next() {
+		var row requestLogQueueWaitRow
+		if err := rows.Scan(&row.RequestID, &row.QueueWaitMs, &row.Status); err != nil {
+			t.Fatalf("scan request log queue wait: %v", err)
+		}
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("request log queue wait rows: %v", err)
 	}
 	return got
 }
@@ -6348,6 +6385,669 @@ func TestSPEC004DefaultConfigRegression_AllReadyButCapacityZero(t *testing.T) {
 		t.Fatalf("all-capacity-zero: expected 503; got %d body=%s", rr.Code, rr.Body.String())
 	}
 	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+}
+
+func TestSlotQueueWaitsForReadyProviderCapacity(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "queued", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "queued", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	zero := 0
+	registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithSlotQueueConfig(4, 100*time.Millisecond, time.Millisecond),
+	)
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		one := 1
+		registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
+	}()
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-Request-ID": []string{"queue-success"}})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("queued request status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryAllRequestLogRowsWithQueueWait(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
+	}
+	if rows[0].QueueWaitMs <= 0 {
+		t.Fatalf("queue_wait_ms = %v, want > 0", rows[0].QueueWaitMs)
+	}
+}
+
+func TestSlotQueueExpiresToNoProviderAvailable(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("upstream should not receive expired queued request")
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "queued", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "queued", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	zero := 0
+	registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithSlotQueueConfig(4, 20*time.Millisecond, time.Millisecond),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expired queued request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+}
+
+func TestSlotQueueCapRejectsFifthPendingPerProvider(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("upstream should not receive capped queued request")
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "queued", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "queued", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	zero := 0
+	registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithSlotQueueConfig(4, 100*time.Millisecond, time.Millisecond),
+	)
+
+	errs := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		go func() {
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
+			if rr.Code != http.StatusServiceUnavailable {
+				errs <- fmt.Errorf("background status = %d, want 503", rr.Code)
+				return
+			}
+			errs <- nil
+		}()
+	}
+	time.Sleep(10 * time.Millisecond)
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("fifth queued request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	for i := 0; i < 4; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestSlotQueueDoesNotWaitForDrainingProvider(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("upstream should not receive draining request")
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "draining", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "draining", "s1", "model-a", pool.StateDraining, 20000, 1, upstream.URL, 10)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithSlotQueueConfig(4, 100*time.Millisecond, time.Millisecond),
+	)
+
+	start := time.Now()
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("draining request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("draining request waited %v; should reject without queue deadline", elapsed)
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+}
+
+func TestSlotQueueDoesNotApplyToHardPinnedProvider(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("upstream should not receive pinned busy request")
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "pinned", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "pinned", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	zero := 0
+	registry.ApplyStateUpdate("pinned", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithSlotQueueConfig(4, 100*time.Millisecond, time.Millisecond),
+	)
+
+	start := time.Now()
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-MacProvider-Provider": []string{"pinned"}})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("pinned busy request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("pinned busy request waited %v; hard pins should not enter slot queue", elapsed)
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+}
+
+func TestSlotQueueExitsWhenQueuedProviderStartsDraining(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("upstream should not receive queued draining request")
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "queued", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "queued", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	zero := 0
+	registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithSlotQueueConfig(4, 150*time.Millisecond, time.Millisecond),
+	)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateDraining, At: time.Now().UTC()})
+	}()
+
+	start := time.Now()
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("queued draining request status = %d, want 503 body=%s", rr.Code, rr.Body.String())
+	}
+	if elapsed := time.Since(start); elapsed > 75*time.Millisecond {
+		t.Fatalf("queued draining request waited %v; should exit before queue deadline", elapsed)
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+}
+
+func TestSlotQueueFallsThroughAfterQueuedPreflightReject(t *testing.T) {
+	p1Upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("preflight-rejected provider should not receive request")
+	}))
+	defer p1Upstream.Close()
+	p2Upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer p2Upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "p1", EndpointURL: p1Upstream.URL},
+		{ProviderID: "p2", EndpointURL: p2Upstream.URL},
+	})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, p1Upstream.URL, 10)
+	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, p2Upstream.URL, 20)
+	zero := 0
+	registry.ApplyStateUpdate("p1", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	registry.ApplyStateUpdate("p2", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithSlotQueueConfig(4, 300*time.Millisecond, time.Millisecond),
+		buyer.WithPreflightConfig(1, 300*time.Millisecond),
+		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
+			if provider.ProviderID == "p1" {
+				time.Sleep(120 * time.Millisecond)
+				return buyer.PreflightResult{Accepted: false, Reason: "queue_full"}, true, nil
+			}
+			return buyer.PreflightResult{Accepted: true}, true, nil
+		}),
+	)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		one := 1
+		registry.ApplyStateUpdate("p1", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
+		registry.ApplyStateUpdate("p2", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
+	}()
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("queued preflight fallback status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
+		t.Fatalf("provider header = %q, want p2", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	rows := queryAllRequestLogRowsWithQueueWait(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
+	}
+	if rows[0].QueueWaitMs <= 0 {
+		t.Fatalf("queue_wait_ms = %v, want > 0", rows[0].QueueWaitMs)
+	}
+	if rows[0].QueueWaitMs >= 80 {
+		t.Fatalf("queue_wait_ms = %v, want queue wait excluding rejected provider preflight latency", rows[0].QueueWaitMs)
+	}
+}
+
+func TestSlotQueueWaitExcludesPreflightLatency(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "queued", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "queued", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	zero := 0
+	registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithSlotQueueConfig(4, 300*time.Millisecond, time.Millisecond),
+		buyer.WithPreflightConfig(1, 250*time.Millisecond),
+		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
+			time.Sleep(120 * time.Millisecond)
+			return buyer.PreflightResult{Accepted: true}, true, nil
+		}),
+	)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		one := 1
+		registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
+	}()
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-Request-ID": []string{"queue-preflight"}})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("queued request status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryAllRequestLogRowsWithQueueWait(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
+	}
+	if rows[0].QueueWaitMs <= 0 {
+		t.Fatalf("queue_wait_ms = %v, want > 0", rows[0].QueueWaitMs)
+	}
+	if rows[0].QueueWaitMs >= 80 {
+		t.Fatalf("queue_wait_ms = %v, want slot wait without 120ms preflight latency", rows[0].QueueWaitMs)
+	}
+}
+
+func TestSlotQueueReservationPreventsSingleSlotOverDispatch(t *testing.T) {
+	hits := make(chan struct{}, 4)
+	release := make(chan struct{}, 4)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits <- struct{}{}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "queued", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "queued", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	zero := 0
+	registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithSlotQueueConfig(4, 250*time.Millisecond, time.Millisecond),
+	)
+
+	errs := make(chan error, 3)
+	startRequest := func() {
+		go func() {
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
+			if rr.Code != http.StatusOK && rr.Code != http.StatusServiceUnavailable {
+				errs <- fmt.Errorf("status = %d body=%s", rr.Code, rr.Body.String())
+				return
+			}
+			errs <- nil
+		}()
+	}
+	startRequest()
+	startRequest()
+	time.Sleep(10 * time.Millisecond)
+	one := 1
+	registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
+	select {
+	case <-hits:
+	case <-time.After(75 * time.Millisecond):
+		t.Fatal("first queued request did not dispatch after slot recovery")
+	}
+	startRequest()
+	select {
+	case <-hits:
+		t.Fatal("another request dispatched while the single recovered slot was reserved")
+	case <-time.After(25 * time.Millisecond):
+	}
+	release <- struct{}{}
+	release <- struct{}{}
+	release <- struct{}{}
+	for i := 0; i < 3; i++ {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("request did not complete")
+		}
+	}
+}
+
+func TestSlotQueueReservationBlocksPinnedOverDispatch(t *testing.T) {
+	hits := make(chan struct{}, 2)
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits <- struct{}{}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "queued", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "queued", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	zero := 0
+	registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithSlotQueueConfig(4, 250*time.Millisecond, time.Millisecond),
+	)
+
+	queuedDone := make(chan int, 1)
+	go func() {
+		rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{})
+		queuedDone <- rr.Code
+	}()
+	time.Sleep(10 * time.Millisecond)
+	one := 1
+	registry.ApplyStateUpdate("queued", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
+	select {
+	case <-hits:
+	case <-time.After(75 * time.Millisecond):
+		t.Fatal("queued request did not dispatch after slot recovery")
+	}
+
+	pinned := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-MacProvider-Provider": []string{"queued"}})
+	if pinned.Code != http.StatusServiceUnavailable {
+		t.Fatalf("pinned status = %d, want 503 while queued reservation owns only free slot; body=%s", pinned.Code, pinned.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, pinned, "no_provider_available", "service_unavailable")
+	select {
+	case <-hits:
+		t.Fatal("pinned request dispatched while queued reservation owned the only free slot")
+	default:
+	}
+
+	release <- struct{}{}
+	select {
+	case status := <-queuedDone:
+		if status != http.StatusOK {
+			t.Fatalf("queued status = %d, want 200", status)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("queued request did not finish")
+	}
+}
+
+func TestSlotQueueBurstSweepAvoidsBuyerVisible503(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	providers := make([]config.ProviderConfig, 0, 8)
+	for i := 0; i < 8; i++ {
+		providers = append(providers, config.ProviderConfig{ProviderID: fmt.Sprintf("p%d", i), EndpointURL: upstream.URL})
+	}
+	registry := pool.NewRegistry(providers)
+	zero := 0
+	for i := 0; i < 8; i++ {
+		providerID := fmt.Sprintf("p%d", i)
+		assignedID := fmt.Sprintf("s%d", i)
+		registerWithEndpoint(registry, providerID, assignedID, "model-a", pool.StateReady, 20000, 1, upstream.URL, float64(10+i))
+		registry.ApplyStateUpdate(providerID, assignedID, pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	}
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithSlotQueueConfig(4, 750*time.Millisecond, time.Millisecond),
+	)
+
+	const requests = 30
+	results := make(chan int, requests)
+	started := make(chan struct{}, requests)
+	for i := 0; i < requests; i++ {
+		i := i
+		go func() {
+			started <- struct{}{}
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-Request-ID": []string{fmt.Sprintf("queue-burst-%02d", i)}})
+			results <- rr.Code
+		}()
+	}
+	for i := 0; i < requests; i++ {
+		<-started
+	}
+	time.Sleep(10 * time.Millisecond)
+	one := 1
+	for i := 0; i < 8; i++ {
+		registry.ApplyStateUpdate(fmt.Sprintf("p%d", i), fmt.Sprintf("s%d", i), pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
+	}
+	for i := 0; i < requests; i++ {
+		select {
+		case status := <-results:
+			if status != http.StatusOK {
+				t.Fatalf("burst request %d status = %d, want 200", i, status)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for burst request")
+		}
+	}
+	rows := queryAllRequestLogRowsWithQueueWait(t, dbPath)
+	if len(rows) != requests {
+		t.Fatalf("request_log rows = %d, want %d", len(rows), requests)
+	}
+	waits := make([]float64, 0, len(rows))
+	for _, row := range rows {
+		if row.Status != http.StatusOK {
+			t.Fatalf("request_log status = %d, want 200 for row %#v", row.Status, row)
+		}
+		waits = append(waits, row.QueueWaitMs)
+	}
+	sort.Float64s(waits)
+	p95 := waits[int(math.Ceil(float64(len(waits))*0.95))-1]
+	if p95 >= 400 {
+		t.Fatalf("queue_wait_ms p95 = %.1f, want < 400; waits=%v", p95, waits)
+	}
+}
+
+func TestSlotQueueAppliesToHTTPRetryReplacementProvider(t *testing.T) {
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer failUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "fail", EndpointURL: failUpstream.URL},
+		{ProviderID: "queued", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "fail", "s1", "model-a", pool.StateReady, 20000, 1, failUpstream.URL, 30)
+	registerWithEndpoint(registry, "queued", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	zero := 0
+	registry.ApplyStateUpdate("queued", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{MaxRetries: 1, RetryPerAttemptTimeoutS: 1}),
+		buyer.WithSlotQueueConfig(4, 100*time.Millisecond, time.Millisecond),
+	)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		one := 1
+		registry.ApplyStateUpdate("queued", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
+	}()
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("retry queued request status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "queued" {
+		t.Fatalf("provider header = %q, want queued", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	rows := queryAllRequestLogRowsWithQueueWait(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want 2: %#v", len(rows), rows)
+	}
+	if rows[0].QueueWaitMs != 0 {
+		t.Fatalf("failed attempt queue_wait_ms = %v, want 0", rows[0].QueueWaitMs)
+	}
+	if rows[1].QueueWaitMs <= 0 || rows[1].Status != http.StatusOK {
+		t.Fatalf("replacement row = %#v, want success with queue_wait_ms > 0", rows[1])
+	}
+}
+
+func TestSlotQueueWaitDoesNotCarryIntoImmediateRetryAttempt(t *testing.T) {
+	var registry *pool.Registry
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		one := 1
+		registry.ApplyStateUpdate("ok", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer failUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry = pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "queued-fail", EndpointURL: failUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "queued-fail", "s1", "model-a", pool.StateReady, 20000, 1, failUpstream.URL, 30)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateDraining, 20000, 1, okUpstream.URL, 20)
+	zero := 0
+	registry.ApplyStateUpdate("queued-fail", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{MaxRetries: 1, RetryPerAttemptTimeoutS: 1}),
+		buyer.WithSlotQueueConfig(4, 120*time.Millisecond, time.Millisecond),
+	)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		one := 1
+		registry.ApplyStateUpdate("queued-fail", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
+	}()
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("retry request status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryAllRequestLogRowsWithQueueWait(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want 2: %#v", len(rows), rows)
+	}
+	if rows[0].QueueWaitMs <= 0 {
+		t.Fatalf("queued failing row queue_wait_ms = %v, want > 0", rows[0].QueueWaitMs)
+	}
+	if rows[1].QueueWaitMs != 0 || rows[1].Status != http.StatusOK {
+		t.Fatalf("immediate retry row = %#v, want success with queue_wait_ms 0", rows[1])
+	}
+}
+
+func TestSlotQueueAppliesToWSFailoverReplacementProvider(t *testing.T) {
+	const requestID = "33333333-3333-4333-8333-333333333333"
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 30, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithPath(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	zero := 0
+	registry.ApplyStateUpdate("p2", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &zero, At: time.Now().UTC()})
+	var calls []string
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithFailoverConfig(true, 50*time.Millisecond),
+		buyer.WithSlotQueueConfig(4, 120*time.Millisecond, time.Millisecond),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			calls = append(calls, provider.ProviderID)
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			if provider.ProviderID == "p1" {
+				errs <- providerws.ErrRelayClosed
+				return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+			}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"failover","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		one := 1
+		registry.ApplyStateUpdate("p2", "s2", pool.StateUpdate{State: pool.StateReady, SlotsFree: &one, At: time.Now().UTC()})
+	}()
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), http.Header{"X-Request-ID": []string{requestID}})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("failover queued request status = %d, want 200 body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Join(calls, ",") != "p1,p2" {
+		t.Fatalf("relay calls = %v, want p1,p2", calls)
+	}
+	rows := queryAllRequestLogRowsWithQueueWait(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want 2: %#v", len(rows), rows)
+	}
+	if rows[0].QueueWaitMs != 0 {
+		t.Fatalf("failed failover source row queue_wait_ms = %v, want 0", rows[0].QueueWaitMs)
+	}
+	if rows[1].QueueWaitMs <= 0 || rows[1].Status != http.StatusOK {
+		t.Fatalf("failover target row = %#v, want success with queue_wait_ms > 0", rows[1])
+	}
 }
 
 // TestSPEC004DefaultConfigRegression_ContextTooSmall — AC-SR-1

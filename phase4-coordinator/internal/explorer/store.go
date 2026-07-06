@@ -307,7 +307,7 @@ func (Store) Activity(ctx context.Context, q ReadDB, from, to time.Time, cursor,
 		}
 		items, err := queryMaps(ctx, q, `
 			SELECT id AS request_log_id, ts_utc AS event_time_utc, 'request_completed' AS event_type, 'coordinator' AS source, request_id AS source_id,
-			       request_id, provider_assigned_id, model, status, error_code, total_tokens
+			       request_id, provider_assigned_id, model, status, error_code, total_tokens, queue_wait_ms
 			FROM request_log
 			WHERE ts_utc >= ? AND ts_utc < ?
 			  AND (? = '' OR 'request_completed' = ?)
@@ -329,7 +329,7 @@ func (Store) Activity(ctx context.Context, q ReadDB, from, to time.Time, cursor,
 	}
 	items, err := queryMaps(ctx, q, `
 			SELECT id AS request_log_id, ts_utc AS event_time_utc, 'request_completed' AS event_type, 'coordinator' AS source, request_id AS source_id,
-			       request_id, provider_assigned_id, model, status, error_code, total_tokens
+			       request_id, provider_assigned_id, model, status, error_code, total_tokens, queue_wait_ms
 			FROM request_log
 			WHERE ts_utc >= ? AND ts_utc < ?
 			  AND (? = '' OR 'request_completed' = ?)

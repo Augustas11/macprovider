@@ -74,6 +74,7 @@ type Row struct {
 	EstimatedCompTokens   *int64
 	LatencyMs             float64
 	RoutingMs             float64
+	QueueWaitMs           float64
 	Status                int
 	Stream                bool
 	BuyerIP               string
@@ -193,6 +194,7 @@ CREATE TABLE IF NOT EXISTS request_log (
     total_tokens         INTEGER NULL,
     latency_ms           REAL    NOT NULL,
     routing_ms           REAL    NOT NULL,
+    queue_wait_ms        REAL    NOT NULL DEFAULT 0,
     status               INTEGER NOT NULL,
     stream               INTEGER NOT NULL,
     buyer_ip             TEXT    NOT NULL DEFAULT '',
@@ -473,6 +475,7 @@ INSERT INTO request_log (
     total_tokens,
     latency_ms,
     routing_ms,
+    queue_wait_ms,
     status,
     stream,
     buyer_ip,
@@ -483,7 +486,7 @@ INSERT INTO request_log (
     provider_header,
     retried,
     attempt_n
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sqliteTimeText(row.TSUtc),
 		row.RequestID,
 		nullString(row.ExternalRequestID),
@@ -497,6 +500,7 @@ INSERT INTO request_log (
 		totalTokens,
 		row.LatencyMs,
 		row.RoutingMs,
+		row.QueueWaitMs,
 		row.Status,
 		boolInt(row.Stream),
 		row.BuyerIP,
@@ -532,6 +536,7 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		{name: "total_tokens", sql: `ALTER TABLE request_log ADD COLUMN total_tokens INTEGER NULL`},
 		{name: "latency_ms", sql: `ALTER TABLE request_log ADD COLUMN latency_ms REAL NOT NULL DEFAULT 0`},
 		{name: "routing_ms", sql: `ALTER TABLE request_log ADD COLUMN routing_ms REAL NOT NULL DEFAULT 0`},
+		{name: "queue_wait_ms", sql: `ALTER TABLE request_log ADD COLUMN queue_wait_ms REAL NOT NULL DEFAULT 0`},
 		{name: "status", sql: `ALTER TABLE request_log ADD COLUMN status INTEGER NOT NULL DEFAULT 0`},
 		{name: "stream", sql: `ALTER TABLE request_log ADD COLUMN stream INTEGER NOT NULL DEFAULT 0`},
 		{name: "buyer_ip", sql: `ALTER TABLE request_log ADD COLUMN buyer_ip TEXT NOT NULL DEFAULT ''`},
