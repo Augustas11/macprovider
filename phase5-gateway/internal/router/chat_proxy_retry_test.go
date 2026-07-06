@@ -146,6 +146,55 @@ func TestGatewayCoord503RetrySkipsTier2PolicyError(t *testing.T) {
 	assertRetryLogCounts(t, logs.String(), 0, 0, 0)
 }
 
+func TestGatewayCoord502RetryRecoversAfterTransientProviderError(t *testing.T) {
+	logs := captureRetryLogs(t)
+	var calls int
+	body := `{"error":{"code":"provider_disconnected","message":"Selected provider disconnected; buyer should retry","param":null,"type":"api_error"}}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls <= 2 {
+			return responseWithBody(http.StatusBadGateway, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, retryChatSuccessBody), nil
+	})}
+	h, store, _, cfg := newRetryHarness(t, client, nil)
+	fullKey := createAccountAndKey(t, store, cfg, "acct_retry_502_recovered")
+
+	resp := postChat(t, h, fullKey, chatBody(false), map[string]string{
+		"X-Request-ID": "22222222-2222-4222-8222-222222222222",
+	})
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if calls != 3 {
+		t.Fatalf("coordinator calls=%d want 3", calls)
+	}
+	assertRetryLogCounts(t, logs.String(), 2, 1, 0)
+}
+
+func TestGatewayCoord502RetrySkipsStructuredOutputProviderError(t *testing.T) {
+	logs := captureRetryLogs(t)
+	var calls int
+	body := `{"error":{"code":"malformed_json_response","message":"bad json","param":null,"type":"upstream_provider_error","inference_ran":true,"settlement_ran":true}}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return responseWithBody(http.StatusBadGateway, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+	})}
+	h, store, _, cfg := newRetryHarness(t, client, nil)
+	fullKey := createAccountAndKey(t, store, cfg, "acct_retry_502_structured")
+
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("coordinator calls=%d want 1", calls)
+	}
+	assertRetryLogCounts(t, logs.String(), 0, 0, 0)
+}
+
 func TestGatewayCoord503RetrySkipsNullUsageProviderError(t *testing.T) {
 	logs := captureRetryLogs(t)
 	var calls int
@@ -400,13 +449,13 @@ func captureRetryLogs(t *testing.T) *bytes.Buffer {
 
 func assertRetryLogCounts(t *testing.T, logs string, retry, recovered, exhausted int) {
 	t.Helper()
-	if got := strings.Count(logs, `msg="gateway coord 503 retry"`); got != retry {
+	if got := strings.Count(logs, `msg="gateway coord retry"`); got != retry {
 		t.Fatalf("retry log count=%d want %d logs:\n%s", got, retry, logs)
 	}
-	if got := strings.Count(logs, `msg="gateway coord 503 retry recovered"`); got != recovered {
+	if got := strings.Count(logs, `msg="gateway coord retry recovered"`); got != recovered {
 		t.Fatalf("recovered log count=%d want %d logs:\n%s", got, recovered, logs)
 	}
-	if got := strings.Count(logs, `msg="gateway coord 503 retry exhausted"`); got != exhausted {
+	if got := strings.Count(logs, `msg="gateway coord retry exhausted"`); got != exhausted {
 		t.Fatalf("exhausted log count=%d want %d logs:\n%s", got, exhausted, logs)
 	}
 }
