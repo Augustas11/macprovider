@@ -408,7 +408,7 @@ A row is eligible only if every gate passes:
 - `thermal_throttle_detected == false` **[unchanged from v0.1: hard block; the ONLY runtime hard eligibility gate in v0.2]**.
 - The candidate benchmark must be from the current `benchmark_id` or from a cached run whose candidate catalog hash, binary version, model ID, and HMAC-derived hardware identity hash match and whose `generated_at` is no older than 7 days.
 
-The real financial gate in v0.2 is `expected_net_usd_per_hour >= $0.0050/hr` (§7). If no rows clear that threshold, or if `thermal_throttle_detected == true` on all rows, `autotune --recommend` must emit no paid recommendation, JSON `recommended_model = null`, and the donor-tier transcript in §7.2.
+The real paid financial gate in v0.2 is `expected_net_usd_per_hour >= $0.0050/hr` (§7). If no rows clear that threshold but at least one eligible row has `expected_net_usd_per_hour > 0`, `autotune --recommend` must emit a starter recommendation per §7.3. If every eligible row is non-positive, or if no row passes all §5 gates, it must emit no paid/starter recommendation and use the donor-tier transcript in §7.2.
 
 ## 6. Output JSON contract (`autotune --recommend`)
 
@@ -436,6 +436,8 @@ The real financial gate in v0.2 is `expected_net_usd_per_hour >= $0.0050/hr` (§
     "availability_hours_per_day": 24
   },
   "recommended_model": "<model_key-or-null>",
+  "recommendation_tier": "paid|starter|donor|none",
+  "serve_config": null,
   "candidates": [
     {
       "rank": 1,
@@ -469,7 +471,9 @@ Schema rules:
 - `inputs.electricity_usd_per_kwh` is `null` unless the operator supplied it or the CLI has an explicit configured default. When `null`, candidate `electricity_usd_per_hour` is also `null`, electricity is omitted from net calculation, and `warnings[]` includes `electricity_not_included`.
 - `inputs.assumed_utilization` defaults to `1.0` and is in `[0.0, 1.0]`.
 - `inputs.availability_hours_per_day` defaults to `24` and is in `[0, 24]`.
-- `recommended_model` is a model key string only when a paid recommendation clears all §5 gates and `expected_net_usd_per_hour >= 0.0050`; otherwise it is `null`.
+- `recommended_model` is a model key string when a paid or starter recommendation clears all §5 gates. Paid recommendations require `expected_net_usd_per_hour >= 0.0050`; starter recommendations require `0 < expected_net_usd_per_hour < 0.0050`. Donor and none outcomes emit `recommended_model = null`.
+- `recommendation_tier` is one of `paid`, `starter`, `donor`, or `none`. `paid` means the selected model clears the minimum paid-yield threshold. `starter` means the selected model is eligible and positive-net but below the paid-yield threshold. `donor` means no positive-net eligible row exists but a donor-compatible catalog row exists for local donor-mode testing. `none` means no paid, starter, or donor-compatible row is available.
+- `serve_config` is `null` in recommendation-only output when no apply-ready serving configuration has been attached. When present, it is the exact model/knob payload the installer can apply for the selected paid or starter recommendation; donor outcomes keep `donor_mode = true`.
 - `candidates[]` default length is at most 5. It is sorted by eligibility first, then `raw_score` descending, then `model` lexicographically for deterministic ties.
 - `expected_*_usd_per_hour`, `platform_fee_usd_per_hour`, `tokens_per_second`, and `memory_headroom_gb` are rounded to 6 decimal places in JSON.
 - `confidence` is:
@@ -477,7 +481,7 @@ Schema rules:
   - `medium` when rate card, demand rank, or candidate catalog used a valid baked fallback, or the benchmark used a valid cache.
   - `low` when both market inputs used baked fallback, hardware tier is unknown, or any non-fatal diagnostic warning affects the recommended row.
 - `why` is a single line under 140 characters, contains no newline, and must not promise realized buyer demand.
-- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.1 warning vocabulary is: `candidate_catalog_fallback_used`, `candidate_catalog_stale`, `demand_rank_fallback_used`, `demand_rank_stale`, `electricity_not_included`, `hardware_tier_unknown`, `rate_card_fallback_used`, `recommendation_below_threshold`, `no_eligible_paid_model`.
+- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.1 warning vocabulary is: `candidate_catalog_fallback_used`, `candidate_catalog_stale`, `demand_rank_fallback_used`, `demand_rank_stale`, `electricity_not_included`, `hardware_tier_unknown`, `rate_card_fallback_used`, `recommendation_below_threshold`, `recommendation_starter_tier`, `no_eligible_paid_model`.
 
 ## 7. Install transcript copy (locked text)
 
@@ -518,7 +522,27 @@ You can keep this Mac configured for donor-mode testing, but it is not expected 
 Enable donor mode? [y/N]
 ```
 
-Donor-tier path applies when no recommendable model has `expected_net_usd_per_hour >= 0.0050` or no row passes all §5 gates.
+Donor-tier path applies when every otherwise eligible row has `expected_net_usd_per_hour <= 0`, when no row passes all §5 gates, or when only a donor-compatible non-default row remains available for explicit local donor-mode testing. It MUST NOT consume the positive-net starter case in §7.3.
+
+### 7.3 Starter-tier path
+
+Use this text verbatim, replacing braces with computed values:
+
+```text
+Detected {machine_or_chip}, {memory_gb} GB unified memory, Tier {bandwidth_tier}.
+Benchmarked {benchmarked_count} compatible models against rate card {rate_card_version} and demand rank {demand_rank_version}.
+
+Recommended starter model: {recommended_model}
+Expected net capacity: {expected_net_usd_per_hour}/hr at {assumed_utilization_percent}% utilization
+This is below the $0.0050/hr paid tier, but still positive starter earnings.
+Why: {recommended_delta_usd_per_hour}/hr vs default {default_model}; {memory_headroom_gb} GB memory headroom
+
+This is an estimate, not a guarantee. Actual earnings depend on buyer demand, uptime, thermal state, electricity, and rate-card changes.
+
+Start provider with {recommended_model}? [Y/n]
+```
+
+Starter-tier path applies only when no eligible row clears `expected_net_usd_per_hour >= 0.0050`, at least one eligible row has `expected_net_usd_per_hour > 0`, and all §5 integrity, fit, benchmark-cache, and thermal gates still pass. The selected starter row is the highest-net eligible row. The CLI emits `recommendation_tier = "starter"` and `recommendation_starter_tier`; it does not emit `recommendation_below_threshold` for this positive-net recommendation.
 
 ## 8. Donor-mode UX
 
@@ -577,7 +601,8 @@ Stored state MUST include at least:
   "benchmark_generated_at": "<RFC3339-or-null>",
   "binary_version": "<string>",
   "hardware_identity_hash": "<hex>",
-  "recommended_model": "<model_key-or-null>"
+  "recommended_model": "<model_key-or-null>",
+  "recommendation_tier": "paid|starter|donor|none"
 }
 ```
 
@@ -616,7 +641,7 @@ AC-1: `macprovider-cli autotune --recommend --json` output validates against `au
 
 AC-2: JSON field order is deterministic and matches §6 exactly for stable diffs and snapshot tests.
 
-AC-3: When all rows fail eligibility, JSON emits `recommended_model = null`, warnings include `no_eligible_paid_model`, and human output uses the §7.2 donor-tier transcript.
+AC-3: When all rows fail eligibility, JSON emits `recommended_model = null`, `recommendation_tier = "none"` or `"donor"` depending on donor-compatible fallback availability, warnings include `no_eligible_paid_model`, and human output uses the §7.2 donor-tier transcript.
 
 AC-4: When `https://coordinator.streamvc.live/static/demand-rank.json` returns 404, times out, fails schema validation, fails Ed25519 detached-signature validation, is older than the baked snapshot, is more than 10 minutes in the future, or is more than 30 days old, the CLI falls back to the baked demand-rank snapshot and emits `demand_rank_fallback_used`.
 
@@ -648,11 +673,13 @@ AC-17: Missing electricity input leaves `electricity_usd_per_kwh = null`, `elect
 
 AC-18: Supplied electricity input subtracts estimated electricity cost from `expected_net_usd_per_hour` and removes `electricity_not_included`.
 
-AC-19: A selected row with `expected_net_usd_per_hour < 0.0050` emits `recommended_model = null`, `recommendation_below_threshold`, and the §7.2 donor-tier transcript.
+AC-19: When no eligible row clears `expected_net_usd_per_hour >= 0.0050` but at least one eligible row has `expected_net_usd_per_hour > 0`, JSON emits that model as `recommended_model`, emits `recommendation_tier = "starter"` and `recommendation_starter_tier`, omits `recommendation_below_threshold`, and human output uses the §7.3 starter-tier transcript with prompt default Yes.
+
+AC-19a: When no eligible row has `expected_net_usd_per_hour > 0`, JSON emits `recommended_model = null`, `recommendation_tier = "donor"` or `"none"`, includes `recommendation_below_threshold` when an eligible non-positive row existed, and human output uses the §7.2 donor-tier transcript.
 
 AC-20: The happy-path transcript exactly matches §7.1 with `$%.4f/hr` formatting.
 
-AC-21: The donor-tier transcript exactly matches §7.2 with threshold `$0.0050/hr` and prompt default No.
+AC-21: The donor-tier transcript exactly matches §7.2 with threshold `$0.0050/hr` and prompt default No. The starter-tier transcript exactly matches §7.3 with threshold `$0.0050/hr` and prompt default Yes.
 
 AC-22 **[amended v0.2]**: `--donor-mode` allows a non-recommendable or below-threshold model to be locally committed only after printing the §8 warning, writing `donor_mode: true`, and verifying signed catalog metadata, immutable model revision, canonical artifact-set digest, `runtime_status != "blocked"`, model allowlist, RAM headroom, no-thermal-throttle, and runtime support. Swap and TPS/TTFT gates are advisory per AC-12/AC-13 amendments; observing them emits warnings but does not block donor-mode commit.
 

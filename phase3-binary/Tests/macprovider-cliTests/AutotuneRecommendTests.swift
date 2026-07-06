@@ -11,6 +11,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let result = AutotuneRecommendEngine().recommend(request)
 
         XCTAssertEqual(result.recommendedModel, "qwen3-coder-30b-a3b-instruct")
+        XCTAssertEqual(result.recommendationTier, .paid)
         XCTAssertFalse(result.warnings.contains(.noEligiblePaidModel))
         XCTAssertGreaterThan(try XCTUnwrap(result.candidates.first?.expectedNetUSDPerHour), 0.0050)
     }
@@ -120,6 +121,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(serveConfig["max_concurrency_override"] as? Int, 1)
         XCTAssertEqual(serveConfig["donor_mode"] as? Bool, false)
         XCTAssertEqual(root["recommended_model"] as? String, result.recommendedModel)
+        XCTAssertEqual(root["recommendation_tier"] as? String, "paid")
     }
 
     func testRecommendationJSONUsesNullServeConfigWhenNotProvided() throws {
@@ -162,19 +164,37 @@ final class AutotuneRecommendTests: XCTestCase {
         let result = AutotuneRecommendEngine().recommend(request)
 
         XCTAssertNil(result.recommendedModel)
+        XCTAssertEqual(result.recommendationTier, .none)
         XCTAssertTrue(result.warnings.contains(.noEligiblePaidModel))
         XCTAssertTrue(result.humanTranscript().contains("Recommendation: donor mode only"))
         XCTAssertTrue(result.humanTranscript().contains("Best compatible option: none"))
     }
 
-    func testBelowThresholdEmitsRecommendationBelowThreshold() throws {
+    func testBelowThresholdPositiveNetRecommendsStarterTier() throws {
         var request = try makeRequest()
         request.rateCard.rows["qwen3-coder-30b-a3b-instruct"]?.completionRatePerMtok = 1_000
 
         let result = AutotuneRecommendEngine().recommend(request)
 
+        XCTAssertEqual(result.recommendedModel, "qwen3-coder-30b-a3b-instruct")
+        XCTAssertEqual(result.recommendationTier, .starter)
+        XCTAssertTrue(result.warnings.contains(.recommendationStarterTier))
+        XCTAssertFalse(result.warnings.contains(.recommendationBelowThreshold))
+        XCTAssertTrue(result.humanTranscript().contains("Recommended starter model: qwen3-coder-30b-a3b-instruct"))
+        XCTAssertTrue(result.humanTranscript().contains("below the $0.0050/hr paid tier"))
+        XCTAssertTrue(result.humanTranscript().contains("Start provider with qwen3-coder-30b-a3b-instruct? [Y/n]"))
+    }
+
+    func testZeroNetDoesNotRecommendStarterTier() throws {
+        var request = try makeRequest()
+        request.rateCard.rows["qwen3-coder-30b-a3b-instruct"]?.completionRatePerMtok = 0
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
         XCTAssertNil(result.recommendedModel)
+        XCTAssertEqual(result.recommendationTier, .donor)
         XCTAssertTrue(result.warnings.contains(.recommendationBelowThreshold))
+        XCTAssertFalse(result.warnings.contains(.recommendationStarterTier))
     }
 
     func testDonorModeDoesNotTurnListedRowsIntoPaidDefaults() throws {
@@ -599,7 +619,8 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(json.hasPrefix(#"{"schema_version":"autotune_recommend.v1","generated_at":"#), json)
         XCTAssertLessThan(try XCTUnwrap(json.range(of: #""hardware":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""inputs":"#)?.lowerBound))
         XCTAssertLessThan(try XCTUnwrap(json.range(of: #""inputs":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""recommended_model":"#)?.lowerBound))
-        XCTAssertLessThan(try XCTUnwrap(json.range(of: #""recommended_model":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""candidates":"#)?.lowerBound))
+        XCTAssertLessThan(try XCTUnwrap(json.range(of: #""recommended_model":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""recommendation_tier":"#)?.lowerBound))
+        XCTAssertLessThan(try XCTUnwrap(json.range(of: #""recommendation_tier":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""candidates":"#)?.lowerBound))
         XCTAssertLessThan(try XCTUnwrap(json.range(of: #""candidates":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""comparison":"#)?.lowerBound))
         XCTAssertLessThan(try XCTUnwrap(json.range(of: #""comparison":"#)?.lowerBound), try XCTUnwrap(json.range(of: #""warnings":"#)?.lowerBound))
     }
