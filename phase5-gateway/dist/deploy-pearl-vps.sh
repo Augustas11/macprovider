@@ -13,8 +13,6 @@
 #
 # Prerequisites:
 #   - gateway-linux-amd64 cross-compiled into dist/ (see build-linux.sh)
-#   - dist/gateway-config-or-mock.yaml available locally for the C2 check, or
-#     pass via GATEWAY_CONFIG env (see GATEWAY_CONFIG below).
 #   - /etc/macprovider/gateway.env on Pearl already contains:
 #       COORDINATOR_OPERATOR_KEY, MACPROVIDER_KEY_HASH_SECRET,
 #       MACPROVIDER_DEMO_SIGNING_SECRET,
@@ -33,12 +31,12 @@
 #   VPS_USER         default: root
 #   DOMAIN           default: api.streamvc.live
 #   EMAIL            default: augstar@gmail.com
-#   GATEWAY_CONFIG   path to a real gateway.yaml to use for the pre-deploy
-#                    C2 cross-check (must contain timeouts.coordinator_request_seconds).
-#                    Defaults to ./gateway.yaml under dist/. Missing config aborts
-#                    the deploy unless SKIP_C2_CHECK=1 is also set; the deploy
-#                    intentionally REFUSES gateway.yaml.example as input — sample
-#                    config is documentation, not a production safety input.
+#   --dry-run-local  developer-only: run the old local-config C2 check using
+#                    GATEWAY_CONFIG and exit before any SSH mutation.
+#   GATEWAY_CONFIG   used only with --dry-run-local. Production deploys validate
+#                    the gateway config installed on Pearl.
+#   GATEWAY_REMOTE_CONFIG  installed gateway config path on Pearl.
+#                    Default: /opt/macprovider/gateway.yaml.
 #   COORD_CONFIG     path to the coordinator.yaml that's expected to be live
 #                    on Pearl. Defaults to ../../phase4-coordinator/dist/coordinator.yaml
 #                    if present. Used for the C2 timer cross-check.
@@ -47,6 +45,18 @@
 #   STRICT_PROVENANCE=1  abort if /healthz returns no "version" field.
 
 set -euo pipefail
+
+DRY_RUN_LOCAL=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run-local) DRY_RUN_LOCAL=1 ;;
+    *)
+      echo "unknown argument: $arg" >&2
+      echo "usage: bash deploy-pearl-vps.sh [--dry-run-local]" >&2
+      exit 2
+      ;;
+  esac
+done
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
 VPS_HOST="${VPS_HOST:-159.223.165.194}"
@@ -117,6 +127,7 @@ NGINX_SITE="$DIST_DIR/nginx-api.streamvc.live.conf"
 # fail-closed gate.
 GATEWAY_CONFIG_DEFAULT="$DIST_DIR/gateway.yaml"
 GATEWAY_CONFIG="${GATEWAY_CONFIG:-$GATEWAY_CONFIG_DEFAULT}"
+GATEWAY_REMOTE_CONFIG="${GATEWAY_REMOTE_CONFIG:-/opt/macprovider/gateway.yaml}"
 
 COORD_CONFIG_DEFAULT="$DIST_DIR/../../phase4-coordinator/dist/coordinator.yaml"
 COORD_CONFIG="${COORD_CONFIG:-$COORD_CONFIG_DEFAULT}"
@@ -145,41 +156,123 @@ SCP="scp -i $SSH_KEY -P 22"
 
 log() { printf "\n[deploy-gateway] %s\n" "$*"; }
 
+case "$GATEWAY_REMOTE_CONFIG" in
+  /*) ;;
+  *) echo "aborting deploy: GATEWAY_REMOTE_CONFIG must be an absolute path" >&2; exit 5 ;;
+esac
+case "$GATEWAY_REMOTE_CONFIG" in
+  *[!A-Za-z0-9._/-]*)
+    echo "aborting deploy: GATEWAY_REMOTE_CONFIG contains unsupported characters: $GATEWAY_REMOTE_CONFIG" >&2
+    exit 5
+    ;;
+esac
+
 # #290 (mirrors #244 R6 CODE+SEC+ARCH convergent MED) — register the
 # EXIT cleanup trap UNCONDITIONALLY, before any temp resource is
 # created. Same threat model as the coordinator: if the deploy fails
 # mid-flight, the remote staging dir must not persist. $DEPLOY_TMP is
 # guarded with `:-` so the trap is a no-op when it is unset.
 trap '
+  rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
   if [ -n "${DEPLOY_TMP:-}" ]; then
     $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
   fi
 ' EXIT
+
+read_gateway_db_path_from_file() {
+  awk '
+    BEGIN { in_storage=0 }
+    {
+      line=$0
+      sub(/[[:space:]]+#.*$/, "", line)
+    }
+    line ~ /^[[:space:]]*storage:[[:space:]]*$/ { in_storage=1; next }
+    in_storage && line ~ /^[^[:space:]#][^:]*:/ { exit }
+    in_storage && line ~ /^[[:space:]]*db_path:[[:space:]]*/ {
+      sub(/^[[:space:]]*db_path:[[:space:]]*/, "", line)
+      gsub(/^"|"$/, "", line)
+      gsub(/^'\''|'\''$/, "", line)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      print line
+      exit
+    }
+  ' "$1"
+}
 
 log "step 0/8: pre-deploy C2 cross-component config check"
 # M1-6 follow-up (codex audits 2026-06-11): require real configs for C2,
 # or an explicit SKIP_C2_CHECK=1 override. The previous "best-effort"
 # path treated missing inputs as a warning, which weakened a deploy gate
 # the audit called out as mandatory.
-if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
+if [ "$DRY_RUN_LOCAL" = "1" ]; then
+  echo "  --dry-run-local set — validating local GATEWAY_CONFIG and exiting before deploy" >&2
+  if [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ] && [ -f "$GATEWAY_CONFIG" ]; then
+    bash "$CHECK_SCRIPT" "$COORD_CONFIG" "$GATEWAY_CONFIG" || {
+      echo "aborting gateway deploy dry-run: local config-drift check failed" >&2; exit 5;
+    }
+    echo "  local dry-run C2 check passed"
+    exit 0
+  fi
+  echo "aborting gateway deploy dry-run: cannot run local C2 cross-check." >&2
+  echo "  check-deploy-config.sh: $CHECK_SCRIPT $( [ -x "$CHECK_SCRIPT" ] || echo '(missing or not executable)')" >&2
+  echo "  coordinator config:    $COORD_CONFIG $( [ -f "$COORD_CONFIG" ] || echo '(missing)')" >&2
+  echo "  gateway config:        $GATEWAY_CONFIG $( [ -f "$GATEWAY_CONFIG" ] || echo '(missing — provide GATEWAY_CONFIG=<path>)')" >&2
+  exit 5
+elif [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
   echo "  SKIP_C2_CHECK=1 set — C2 cross-check skipped by operator opt-out" >&2
-elif [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ] && [ -f "$GATEWAY_CONFIG" ]; then
-  bash "$CHECK_SCRIPT" "$COORD_CONFIG" "$GATEWAY_CONFIG" || {
+elif [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ]; then
+  GATEWAY_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-gateway-installed-config.XXXXXXXX)" || {
+    echo "aborting gateway deploy: mktemp failed for installed config copy" >&2; exit 5;
+  }
+  $SSH "test -f '$GATEWAY_REMOTE_CONFIG' || { echo 'missing installed gateway config: $GATEWAY_REMOTE_CONFIG' >&2; exit 1; }; cat '$GATEWAY_REMOTE_CONFIG'" > "$GATEWAY_REMOTE_CONFIG_TMP" || {
+    echo "aborting gateway deploy: could not read installed gateway config from Pearl: $GATEWAY_REMOTE_CONFIG" >&2
+    exit 5
+  }
+  GATEWAY_REMOTE_CONFIG_SHA=$(shasum -a 256 "$GATEWAY_REMOTE_CONFIG_TMP" | awk '{print $1}')
+  echo "  validating installed Pearl config: $GATEWAY_REMOTE_CONFIG sha256=$GATEWAY_REMOTE_CONFIG_SHA"
+  bash "$CHECK_SCRIPT" "$COORD_CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP" || {
     echo "aborting gateway deploy: config-drift check failed" >&2; exit 5;
   }
 else
   echo "aborting gateway deploy: cannot run C2 cross-check." >&2
   echo "  check-deploy-config.sh: $CHECK_SCRIPT $( [ -x "$CHECK_SCRIPT" ] || echo '(missing or not executable)')" >&2
   echo "  coordinator config:    $COORD_CONFIG $( [ -f "$COORD_CONFIG" ] || echo '(missing)')" >&2
-  echo "  gateway config:        $GATEWAY_CONFIG $( [ -f "$GATEWAY_CONFIG" ] || echo '(missing — provide GATEWAY_CONFIG=<path>)')" >&2
+  echo "  installed gateway config on Pearl: $GATEWAY_REMOTE_CONFIG" >&2
   echo "  To deploy without the cross-check, set SKIP_C2_CHECK=1 explicitly." >&2
-  echo "  gateway.yaml.example is sample documentation and intentionally NOT accepted here." >&2
+  echo "  Local gateway.yaml files are intentionally NOT accepted in production deploy mode." >&2
   exit 5
 fi
-# Defensive: even with C2 skipped, the gateway config (if provided) must at
-# least carry the coordinator_request_seconds key the C2 check looks at.
-if [ -f "$GATEWAY_CONFIG" ] && ! grep -qE '^[[:space:]]*coordinator_request_seconds:' "$GATEWAY_CONFIG"; then
-  echo "  FAIL: gateway config $GATEWAY_CONFIG missing timeouts.coordinator_request_seconds" >&2
+if [ -z "${GATEWAY_REMOTE_CONFIG_TMP:-}" ]; then
+  GATEWAY_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-gateway-installed-config.XXXXXXXX)" || {
+    echo "aborting gateway deploy: mktemp failed for installed config copy" >&2; exit 5;
+  }
+  $SSH "test -f '$GATEWAY_REMOTE_CONFIG' || { echo 'missing installed gateway config: $GATEWAY_REMOTE_CONFIG' >&2; exit 1; }; cat '$GATEWAY_REMOTE_CONFIG'" > "$GATEWAY_REMOTE_CONFIG_TMP" || {
+    echo "aborting gateway deploy: could not read installed gateway config from Pearl: $GATEWAY_REMOTE_CONFIG" >&2
+    exit 5
+  }
+  GATEWAY_REMOTE_CONFIG_SHA=$(shasum -a 256 "$GATEWAY_REMOTE_CONFIG_TMP" | awk '{print $1}')
+  echo "  installed Pearl config sha256=$GATEWAY_REMOTE_CONFIG_SHA"
+fi
+REMOTE_GATEWAY_DB_PATH="$(read_gateway_db_path_from_file "$GATEWAY_REMOTE_CONFIG_TMP")"
+if [ -z "$REMOTE_GATEWAY_DB_PATH" ]; then
+  echo "aborting gateway deploy: installed Pearl config missing storage.db_path ($GATEWAY_REMOTE_CONFIG sha256=$GATEWAY_REMOTE_CONFIG_SHA)" >&2
+  exit 5
+fi
+case "$REMOTE_GATEWAY_DB_PATH" in
+  /*) ;;
+  *) echo "aborting gateway deploy: storage.db_path must be absolute in installed Pearl config: $REMOTE_GATEWAY_DB_PATH" >&2; exit 5 ;;
+esac
+case "$REMOTE_GATEWAY_DB_PATH" in
+  *[!A-Za-z0-9._/-]*)
+    echo "aborting gateway deploy: storage.db_path contains unsupported characters: $REMOTE_GATEWAY_DB_PATH" >&2
+    exit 5
+    ;;
+esac
+echo "  installed Pearl DB path: $REMOTE_GATEWAY_DB_PATH"
+REMOTE_GATEWAY_DB_DIR="$(dirname "$REMOTE_GATEWAY_DB_PATH")"
+REMOTE_GATEWAY_DB_BASE="$(basename "$REMOTE_GATEWAY_DB_PATH")"
+if ! grep -qE '^[[:space:]]*coordinator_request_seconds:' "$GATEWAY_REMOTE_CONFIG_TMP"; then
+  echo "  FAIL: installed gateway config $GATEWAY_REMOTE_CONFIG missing timeouts.coordinator_request_seconds" >&2
   exit 5
 fi
 log "step 1/8: confirm SSH + DNS"
@@ -329,7 +422,7 @@ log "step 2d/8: pre-restart snapshot of gateway.db (BEFORE binary swap — #290 
 # expansion, no xargs, filename-injection closed.
 $SSH 'set -e
   TS=$(date -u +%Y%m%dT%H%M%SZ)
-  DB=/var/lib/macprovider/gateway.db
+  DB='"$REMOTE_GATEWAY_DB_PATH"'
   if [ -f "$DB" ]; then
     SNAP="${DB}.pre-deploy.${TS}"
     # #290 R1 (SEC+ARCH convergent CRITICAL) — run ENTIRE snapshot as
@@ -352,8 +445,9 @@ $SSH 'set -e
     # cannot smuggle an unlink of arbitrary paths.
     sudo -u macprovider python3 - <<PYEOF
 import os, re, sys
-d = "/var/lib/macprovider"
-pat = re.compile(r"^gateway\.db\.pre-deploy\.[0-9]{8}T[0-9]{6}Z$")
+d = "'"$REMOTE_GATEWAY_DB_DIR"'"
+base = "'"$REMOTE_GATEWAY_DB_BASE"'"
+pat = re.compile("^" + re.escape(base) + r"\.pre-deploy\.[0-9]{8}T[0-9]{6}Z$")
 try:
     entries = os.listdir(d)
 except OSError:
@@ -516,7 +610,9 @@ echo "      # #290 R7 CODE MED plus R8 CODE+ARCH MED: glob must expand"
 echo "      # INSIDE the sudo-macprovider shell (caller may not traverse"
 echo "      # the 0750 daemon dir), AND the sh -c body must use DOUBLE"
 echo "      # quotes so it does not close the outer ssh single-quote."
-echo "      LATEST=\$(sudo -u macprovider sh -c \"ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* 2>/dev/null | head -1\") &&"
+ROLLBACK_DB_DIR="$(dirname "$REMOTE_GATEWAY_DB_PATH")"
+ROLLBACK_DB_BASE="$(basename "$REMOTE_GATEWAY_DB_PATH")"
+echo "      LATEST=\$(sudo -u macprovider sh -c \"ls -1t $ROLLBACK_DB_DIR/$ROLLBACK_DB_BASE.pre-deploy.* 2>/dev/null | head -1\") &&"
 echo "      [ -n \"\$LATEST\" ] && sudo -u macprovider test -f \"\$LATEST\" && sudo -u macprovider test -r \"\$LATEST\" &&"
 echo "      sudo -u macprovider sqlite3 \"\$LATEST\" \"PRAGMA integrity_check;\" | head -1 | grep -q \"^ok\$\" &&"
 echo "      # Validate .prev binary is present + executable BEFORE stopping"
@@ -529,9 +625,9 @@ echo "      sudo install -o root -g macprovider -m 0750 /opt/macprovider/gateway
 echo "      # #290 R3 CODE HIGH — remove stale WAL/SHM sidecars before"
 echo "      # restoring the snapshot; SQLite would otherwise replay the WAL"
 echo "      # and reintroduce post-deploy state, silently defeating rollback."
-echo "      sudo rm -f /var/lib/macprovider/gateway.db-wal /var/lib/macprovider/gateway.db-shm &&"
-echo "      sudo install -o macprovider -g macprovider -m 0600 \"\$LATEST\" /var/lib/macprovider/gateway.db &&"
-echo "      sudo -u macprovider sqlite3 /var/lib/macprovider/gateway.db \"PRAGMA integrity_check;\" &&"
+echo "      sudo rm -f $REMOTE_GATEWAY_DB_PATH-wal $REMOTE_GATEWAY_DB_PATH-shm &&"
+echo "      sudo install -o macprovider -g macprovider -m 0600 \"\$LATEST\" $REMOTE_GATEWAY_DB_PATH &&"
+echo "      sudo -u macprovider sqlite3 $REMOTE_GATEWAY_DB_PATH \"PRAGMA integrity_check;\" &&"
 echo "      sudo systemctl start macprovider-gateway &&"
 echo "      curl -s http://127.0.0.1:9443/healthz   # confirm OK + version reflects .prev"
 echo "    '"
