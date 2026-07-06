@@ -84,6 +84,81 @@ func TestGatewayCoord503RetryExhaustsNoProviderResponses(t *testing.T) {
 	)
 }
 
+func TestCapacityRejection503EchoesRequestIDAndSettlesAfterRetryExhaustion(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return responseWithBody(http.StatusServiceUnavailable, http.Header{
+			"Content-Type": []string{"application/json"},
+			"X-Request-ID": []string{"99999999-9999-4999-8999-999999999999"},
+		}, noProviderBody()), nil
+	})}
+	h, store, dbPath, cfg := newRetryHarness(t, client, nil)
+	accountID := "acct_retry_exhausted_settled"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	requestID := "33333333-3333-4333-8333-333333333333"
+	resp := postChat(t, h, fullKey, chatBody(false), map[string]string{"X-Request-ID": requestID})
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if calls != 3 {
+		t.Fatalf("coordinator calls=%d want 3", calls)
+	}
+	values := resp.Header().Values("X-Request-ID")
+	if len(values) != 1 || values[0] != requestID {
+		t.Fatalf("response X-Request-ID values=%q, want only gateway request id %q", values, requestID)
+	}
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
+	if outcome != "no_provider_available" || source != "gateway_estimated" || completion != 0 || prompt <= 0 {
+		t.Fatalf("usage row outcome/source/completion/prompt = %s/%s/%d/%d, want no_provider_available/gateway_estimated/0/>0", outcome, source, completion, prompt)
+	}
+}
+
+func TestCoordinatorSuppliedRetryExhaustedHeaderDoesNotSettle(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusServiceUnavailable, http.Header{
+			"Content-Type":                          []string{"application/json"},
+			"X-MacProvider-Gateway-Retry-Exhausted": []string{"true"},
+		}, noProviderBody()), nil
+	})}
+	h, store, dbPath, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
+		cfg.Retry503.Enabled = false
+	})
+	accountID := "acct_retry_exhausted_header_spoof"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertNoUsageEventsForAccount(t, dbPath, accountID)
+}
+
+func TestGatewayCoord503RetryExhaustedEmptyBodyRefunds(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return responseWithBody(http.StatusServiceUnavailable, nil, ""), nil
+	})}
+	h, store, dbPath, cfg := newRetryHarness(t, client, nil)
+	accountID := "acct_retry_exhausted_empty_body"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if calls != 3 {
+		t.Fatalf("coordinator calls=%d want 3", calls)
+	}
+	assertErrorCode(t, resp.Body.String(), "no_provider_available")
+	assertNoUsageEventsForAccount(t, dbPath, accountID)
+}
+
 func TestGatewayCoord503RetryMetricsUsesGatewayGeneratedRequestIDClass(t *testing.T) {
 	var calls int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

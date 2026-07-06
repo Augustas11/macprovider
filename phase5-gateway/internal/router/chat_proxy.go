@@ -377,7 +377,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	structuredStreaming := chat.Stream && chat.hasStructuredOutput()
 	timing.markCoordinatorStart(s.now())
-	resp, err := s.doCoordinatorChatWithRetry(upCtx, r, subject.AccountID, buildUpReq)
+	resp, retryExhausted, err := s.doCoordinatorChatWithRetry(upCtx, r, subject.AccountID, buildUpReq)
 	if err != nil {
 		if structuredStreaming && errors.Is(upCtx.Err(), context.DeadlineExceeded) {
 			if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout") {
@@ -399,13 +399,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 17.7 fallback usage_events insert in settleAfterCommit
 		// uses the SAME window_date as the original reservation
 		// (avoids drift for streams that cross UTC midnight).
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, cancelUpstream, upCtx, structuredStreaming, window, timing)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, cancelUpstream, upCtx, structuredStreaming, window, timing)
 		return
 	}
-	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens)
+	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted)
 }
 
-func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Request, accountID string, buildUpReq func() (*http.Request, error)) (*http.Response, error) {
+func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Request, accountID string, buildUpReq func() (*http.Request, error)) (*http.Response, bool, error) {
 	maxAttempts := 1
 	if s.cfg.Retry503.Enabled {
 		maxAttempts = s.cfg.Retry503.MaxAttempts
@@ -416,18 +416,18 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 	totalBackoffMS := int64(0)
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := upCtx.Err(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		upReq, err := buildUpReq()
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		resp, err := s.client.Do(upReq)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if !s.cfg.Retry503.Enabled || maxAttempts == 1 {
-			return resp, nil
+			return resp, false, nil
 		}
 		if resp.StatusCode != http.StatusServiceUnavailable && resp.StatusCode != http.StatusBadGateway {
 			if attempt > 1 && resp.StatusCode == http.StatusOK {
@@ -438,7 +438,7 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 					"total_backoff_ms", totalBackoffMS,
 				)
 			}
-			return resp, nil
+			return resp, false, nil
 		}
 		body, readErr := readCoordRetryBody(resp.Body)
 		_ = resp.Body.Close()
@@ -455,7 +455,7 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 		}
 		resp.ContentLength = int64(len(body))
 		if readErr != nil || !isCoordinatorChatRetryEligible(resp.StatusCode, body) {
-			return resp, nil
+			return resp, false, nil
 		}
 		if attempt == maxAttempts {
 			s.retry503Metrics.recordExhausted(totalBackoffMS)
@@ -465,17 +465,17 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 				"total_backoff_ms", totalBackoffMS,
 				"status", resp.StatusCode,
 			)
-			return resp, nil
+			return resp, true, nil
 		}
 		if err := upCtx.Err(); err != nil {
-			return resp, nil
+			return resp, false, nil
 		}
 		backoff := coord503RetryBackoff(attempt, s.cfg.Retry503)
 		select {
 		case <-time.After(backoff):
 			totalBackoffMS += backoff.Milliseconds()
 			if err := upCtx.Err(); err != nil {
-				return resp, nil
+				return resp, false, nil
 			}
 			retryRate := s.chatStartLimits.allow(accountID, s.cfg.Quotas.AccountRequestRatePerSecond, s.now())
 			if !retryRate.Admitted {
@@ -485,7 +485,7 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 					"limit_rps", retryRate.Limit,
 					"retry_after_s", retryRate.RetryAfterSeconds,
 				)
-				return resp, nil
+				return resp, false, nil
 			}
 			slog.Info("gateway coord retry",
 				"request_id", requestID(r),
@@ -496,10 +496,10 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 			)
 			_ = resp.Body.Close()
 		case <-upCtx.Done():
-			return resp, nil
+			return resp, false, nil
 		}
 	}
-	return nil, upCtx.Err()
+	return nil, false, upCtx.Err()
 }
 
 func coord503RetryBackoff(attempt int, cfg config.Retry503Config) time.Duration {
@@ -563,7 +563,7 @@ func (b *coord503PrefixErrBody) Read(p []byte) (int, error) {
 
 func (b *coord503PrefixErrBody) Close() error { return nil }
 
-func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64) {
+func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted bool) {
 	body, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 	if err != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
@@ -576,10 +576,10 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 			return
 		}
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 		return
 	}
 	if resp.StatusCode == http.StatusGatewayTimeout {
@@ -595,20 +595,20 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	// reservation and pass the OpenAI-shaped error body through verbatim so
 	// the buyer sees an actionable 404 instead of an opaque 502.
 	if resp.StatusCode == http.StatusNotFound {
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 		return
 	}
 	if coordinatorTier2PolicyError(resp.StatusCode, body) {
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 		return
 	}
 	if coordinatorIdempotencyError(resp.StatusCode, body) {
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
 		if coordinatorValidationError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 			return
 		}
 		if isNullUsageProviderError(body) {
@@ -672,14 +672,14 @@ func emitProviderAttribution(dst, src http.Header) {
 	}
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, cancelUpstream func(), upstreamCtx context.Context, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted bool, cancelUpstream func(), upstreamCtx context.Context, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 			return
 		}
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -696,20 +696,20 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		// See forwardNonStreamingChat for the matching non-stream branch.
 		if resp.StatusCode == http.StatusNotFound {
 			body, _ := io.ReadAll(resp.Body)
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 			return
 		}
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorValidationError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 			return
 		}
 		if coordinatorIdempotencyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 			return
 		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
 			return
 		}
 		if !s.settleBeforeStreamingResponseWithCoordinatorFinality(w, r, subject, promptEstimate, completionFromHeaderCapped(resp.Header, maxTokens), maxUsageTokens, "gateway_estimated", "upstream_error", resp.Header) {
@@ -1064,8 +1064,16 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
 }
 
-func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
-	_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens int64, retryExhausted bool) {
+	if retryExhausted &&
+		len(bytes.TrimSpace(body)) > 0 &&
+		isCoordNoProviderAvailable503(resp.StatusCode, body) {
+		if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "no_provider_available") {
+			return
+		}
+	} else {
+		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+	}
 	if len(bytes.TrimSpace(body)) == 0 && resp.StatusCode == http.StatusServiceUnavailable {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "no_provider_available", "No provider available")
 		return
