@@ -1259,6 +1259,8 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 	}
 	session := newProviderSession(entry.ProviderID, entry.AssignedID, conn, s.cfg.WS.WriteBufferSize, s.cfg.ProviderWSWriteTimeout())
 	session.useTier2Session(entry.Tier2Session)
+	session.probeWrites = true
+	session.onWriteFailure = s.handleProviderWriteFailure
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
 	go session.runWriter()
 	go s.monitorHeartbeat(entry.ProviderID, entry.AssignedID, conn)
@@ -1680,7 +1682,10 @@ func (s *Server) Preflight(provider pool.Provider, requestID string, estimatedTo
 	if err != nil {
 		return PreflightAck{}, false, err
 	}
-	if err := session.send(payload); err != nil {
+	if err := session.sendProbe(payload, providerDispatchWriteProbeTimeout); err != nil {
+		if errors.Is(err, ErrRelayClosed) {
+			s.handleProviderWriteFailure(session, err)
+		}
 		return PreflightAck{}, false, err
 	}
 	timer := time.NewTimer(timeout)
@@ -2538,6 +2543,23 @@ func (s *Server) handleDisconnect(providerID, assignedID string) {
 	})
 }
 
+func (s *Server) handleProviderWriteFailure(session *providerSession, err error) {
+	if session == nil {
+		return
+	}
+	s.clearWarmupGate(session.providerID, session.assignedID)
+	_ = session.conn.Close()
+	session.close()
+	s.sessions.Delete(sessionKey(session.providerID, session.assignedID))
+	if s.pool.MarkState(session.providerID, session.assignedID, pool.StateUnavailable) {
+		s.log.Warn().
+			Err(err).
+			Str("provider_id", session.providerID).
+			Str("assigned_id", session.assignedID).
+			Msg("provider websocket write failed; marked unavailable")
+	}
+}
+
 func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) {
 	tick := s.cfg.FailoverTimeout() / 2
 	if tick <= 0 {
@@ -2548,7 +2570,6 @@ func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) 
 	}
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
-	threshold := s.cfg.HeartbeatMissThreshold()
 	for range ticker.C {
 		provider, ok := s.pool.Resolve(providerID, assignedID)
 		if !ok {
@@ -2563,6 +2584,7 @@ func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) 
 		if last.IsZero() {
 			last = provider.LastHeartbeatAt
 		}
+		threshold := s.providerLivenessThreshold(provider)
 		if s.now().Sub(last) <= threshold {
 			continue
 		}
@@ -2574,6 +2596,21 @@ func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) 
 		_ = conn.Close()
 		return
 	}
+}
+
+func (s *Server) providerLivenessThreshold(provider pool.Provider) time.Duration {
+	threshold := s.cfg.HeartbeatMissThreshold()
+	if providerSupportsInternalActivityLiveness(provider.BinaryVersion) {
+		if internalActivityThreshold := 60 * time.Second; threshold > internalActivityThreshold {
+			threshold = internalActivityThreshold
+		}
+	}
+	return threshold
+}
+
+func providerSupportsInternalActivityLiveness(binaryVersion string) bool {
+	cmp, ok := compareSemver(binaryVersion, "1.8.1")
+	return ok && cmp >= 0
 }
 
 func validState(state pool.State) bool {

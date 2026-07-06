@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,98 @@ import (
 	"github.com/gobwas/ws/wsutil"
 	"github.com/rs/zerolog"
 )
+
+type blockingWriteConn struct {
+	mu            sync.Mutex
+	writeDeadline time.Time
+	closed        chan struct{}
+	closeOnce     sync.Once
+}
+
+func newBlockingWriteConn() *blockingWriteConn {
+	return &blockingWriteConn{closed: make(chan struct{})}
+}
+
+func (c *blockingWriteConn) Read(_ []byte) (int, error) {
+	<-c.closed
+	return 0, net.ErrClosed
+}
+
+func (c *blockingWriteConn) Write(_ []byte) (int, error) {
+	for {
+		c.mu.Lock()
+		deadline := c.writeDeadline
+		c.mu.Unlock()
+		if deadline.IsZero() {
+			select {
+			case <-c.closed:
+				return 0, net.ErrClosed
+			case <-time.After(10 * time.Millisecond):
+				continue
+			}
+		}
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			return 0, os.ErrDeadlineExceeded
+		}
+		select {
+		case <-c.closed:
+			return 0, net.ErrClosed
+		case <-time.After(wait):
+			return 0, os.ErrDeadlineExceeded
+		}
+	}
+}
+
+func (c *blockingWriteConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (c *blockingWriteConn) LocalAddr() net.Addr  { return testAddr("local") }
+func (c *blockingWriteConn) RemoteAddr() net.Addr { return testAddr("remote") }
+
+func (c *blockingWriteConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.writeDeadline = t
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *blockingWriteConn) SetReadDeadline(time.Time) error { return nil }
+
+func (c *blockingWriteConn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.writeDeadline = t
+	c.mu.Unlock()
+	return nil
+}
+
+type testAddr string
+
+func (a testAddr) Network() string { return "test" }
+func (a testAddr) String() string  { return string(a) }
+
+type firstWriteSucceedsConn struct {
+	*blockingWriteConn
+	mu     sync.Mutex
+	writes int
+}
+
+func newFirstWriteSucceedsConn() *firstWriteSucceedsConn {
+	return &firstWriteSucceedsConn{blockingWriteConn: newBlockingWriteConn()}
+}
+
+func (c *firstWriteSucceedsConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	if c.writes == 0 {
+		c.writes++
+		c.mu.Unlock()
+		return len(p), nil
+	}
+	c.mu.Unlock()
+	return c.blockingWriteConn.Write(p)
+}
 
 func TestRelayDispatchRoutesChunkAndEndByRequestID(t *testing.T) {
 	serverConn, providerConn := net.Pipe()
@@ -121,6 +215,299 @@ func TestRelayDispatchCarriesConversationKeyFromContext(t *testing.T) {
 	}
 	if req.ConversationKey != "conv:relay-cache" {
 		t.Fatalf("conversation_key=%q want conv:relay-cache", req.ConversationKey)
+	}
+}
+
+func TestRelayWriteFailureMarksProviderUnavailable(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer serverConn.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "p1",
+		AssignedID:     "s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, serverConn)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", serverConn, 4)
+	session.onWriteFailure = s.handleProviderWriteFailure
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+
+	if err := providerConn.Close(); err != nil {
+		t.Fatalf("close provider side: %v", err)
+	}
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-dead", []byte(`{"model":"model-a"}`), false)
+	if err != nil && !errors.Is(err, ErrRelayClosed) {
+		t.Fatalf("dispatch = %v, want nil or ErrRelayClosed", err)
+	}
+	if relay != nil {
+		select {
+		case relayErr := <-relay.Errors:
+			if !errors.Is(relayErr, ErrRelayClosed) {
+				t.Fatalf("relay error = %v, want ErrRelayClosed", relayErr)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("timed out waiting for relay close after write failure")
+		}
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		got, ok := s.pool.Resolve("p1", "s1")
+		if ok && got.State == pool.StateUnavailable {
+			break
+		}
+		if time.Now().After(deadline) {
+			if !ok {
+				t.Fatal("timed out waiting for provider to remain registered as unavailable")
+			}
+			t.Fatalf("timed out waiting for unavailable state; state=%s", got.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("session still routable after websocket write failure")
+	}
+}
+
+func TestRelayWriteProbeTimesOutBlockingProviderWrite(t *testing.T) {
+	conn := newBlockingWriteConn()
+	defer conn.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "p1",
+		AssignedID:     "s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, conn)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", conn, 4, 10*time.Second)
+	session.probeWrites = true
+	session.onWriteFailure = s.handleProviderWriteFailure
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+
+	start := time.Now()
+	_, err := s.DispatchInference(context.Background(), *provider, "req-blocked", []byte(`{"model":"model-a"}`), false)
+	elapsed := time.Since(start)
+	if !errors.Is(err, ErrRelayClosed) {
+		t.Fatalf("dispatch = %v, want ErrRelayClosed", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("dispatch took %v, want below 1s probe bound", elapsed)
+	}
+	got, ok := s.pool.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing")
+	}
+	if got.State != pool.StateUnavailable {
+		t.Fatalf("state = %s, want unavailable", got.State)
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("session still routable after blocked write probe failure")
+	}
+}
+
+func TestPreflightWriteProbeTimesOutBlockingProviderWrite(t *testing.T) {
+	conn := newBlockingWriteConn()
+	defer conn.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "p1",
+		AssignedID:     "s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, conn)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", conn, 4, 10*time.Second)
+	session.probeWrites = true
+	session.onWriteFailure = s.handleProviderWriteFailure
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+
+	start := time.Now()
+	_, _, err := s.Preflight(*provider, "req-preflight-blocked", 1024, 5*time.Second)
+	elapsed := time.Since(start)
+	if !errors.Is(err, ErrRelayClosed) {
+		t.Fatalf("preflight = %v, want ErrRelayClosed", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("preflight took %v, want below 1s probe bound", elapsed)
+	}
+	got, ok := s.pool.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing")
+	}
+	if got.State != pool.StateUnavailable {
+		t.Fatalf("state = %s, want unavailable", got.State)
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("session still routable after blocked preflight write probe failure")
+	}
+}
+
+func TestRelayWriteProbeDoesNotEvictSlowRequestPayloadWrite(t *testing.T) {
+	conn := newFirstWriteSucceedsConn()
+	defer conn.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "p1",
+		AssignedID:     "s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, conn)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", conn, 4, 10*time.Second)
+	session.probeWrites = true
+	session.onWriteFailure = s.handleProviderWriteFailure
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+
+	start := time.Now()
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-slow-payload", []byte(`{"model":"model-a"}`), false)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("dispatch = %v, want probe success before slow payload write", err)
+	}
+	if relay == nil {
+		t.Fatal("relay is nil after successful probe")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("dispatch took %v, want below 1s after probe success", elapsed)
+	}
+	got, ok := s.pool.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing")
+	}
+	if got.State == pool.StateUnavailable {
+		t.Fatal("provider marked unavailable even though small write probe succeeded")
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
+		t.Fatal("session removed even though small write probe succeeded")
+	}
+	relay.Cancel("test_cleanup")
+}
+
+func TestRegisteredProviderSessionEnablesWriteProbes(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+
+	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop())
+	session, refusal := s.registerProviderSession(serverConn, &pool.Provider{
+		ProviderID:     "p1",
+		AssignedID:     "s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	})
+	if refusal != pool.RegisterRefusalNone || session == nil {
+		t.Fatalf("registerProviderSession refusal=%q session=%v", refusal, session)
+	}
+	if !session.probeWrites {
+		t.Fatal("production-registered provider session did not enable write probes")
+	}
+	session.close()
+}
+
+func TestRelayClosedSendMarksProviderUnavailable(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "p1",
+		AssignedID:     "s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathWSTunneled,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, serverConn)
+	s := NewServer(config.Default(), registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", serverConn, 4)
+	session.onWriteFailure = s.handleProviderWriteFailure
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	session.close()
+
+	if _, err := s.DispatchInference(context.Background(), *provider, "req-closed", []byte(`{"model":"model-a"}`), false); !errors.Is(err, ErrRelayClosed) {
+		t.Fatalf("dispatch = %v, want ErrRelayClosed", err)
+	}
+	got, ok := s.pool.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing")
+	}
+	if got.State != pool.StateUnavailable {
+		t.Fatalf("state = %s, want unavailable", got.State)
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("session still routable after closed send")
+	}
+}
+
+func TestProviderLivenessThresholdCapsB1ProvidersAtSixtySeconds(t *testing.T) {
+	cfg := config.Default()
+	cfg.Pool.HeartbeatMissThresholdS = 90
+	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop())
+
+	legacy := s.providerLivenessThreshold(pool.Provider{BinaryVersion: "1.8.0"})
+	if legacy != 90*time.Second {
+		t.Fatalf("legacy threshold = %v, want 90s", legacy)
+	}
+	b1 := s.providerLivenessThreshold(pool.Provider{BinaryVersion: "1.8.1"})
+	if b1 != 60*time.Second {
+		t.Fatalf("b1 threshold = %v, want 60s", b1)
+	}
+	next := s.providerLivenessThreshold(pool.Provider{BinaryVersion: "1.8.2"})
+	if next != 60*time.Second {
+		t.Fatalf("next release threshold = %v, want 60s", next)
+	}
+	malformed := s.providerLivenessThreshold(pool.Provider{BinaryVersion: "1.8.2-dev"})
+	if malformed != 90*time.Second {
+		t.Fatalf("malformed threshold = %v, want 90s", malformed)
+	}
+
+	cfg.Pool.HeartbeatMissThresholdS = 10
+	s = NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop())
+	tight := s.providerLivenessThreshold(pool.Provider{BinaryVersion: "1.8.1"})
+	if tight != 10*time.Second {
+		t.Fatalf("tight configured threshold = %v, want 10s", tight)
 	}
 }
 
