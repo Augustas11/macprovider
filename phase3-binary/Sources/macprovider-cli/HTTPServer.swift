@@ -321,6 +321,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     )
                     let unixTsSeconds = Int64(Date().timeIntervalSince1970)
                     await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
+                    KVCacheTelemetry.emitRequestCompleted(
+                        providerID: providerID,
+                        requestID: auditRequestID,
+                        modelID: request.model,
+                        stream: false,
+                        completion: completion
+                    )
                     let response = Self.chatCompletionResponse(request: request, completion: completion)
                     let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
                     let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
@@ -649,6 +656,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                 }
                 await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
+                KVCacheTelemetry.emitRequestCompleted(
+                    providerID: providerID,
+                    requestID: requestID,
+                    modelID: request.model,
+                    stream: true,
+                    completion: completion
+                )
 
                 // Fallback for non-streaming-incremental path: if tool calls landed only
                 // in the final CompletionResult (e.g. buffered/downgrade/test paths) and
