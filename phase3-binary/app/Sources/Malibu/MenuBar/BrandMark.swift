@@ -51,7 +51,10 @@ enum MalibuMenuBarIcon {
         let size = NSSize(width: pointSize, height: pointSize * 13/18)
         let image = NSImage(size: size, flipped: false) { rect in
             let inset = rect.insetBy(dx: rect.width * 0.045, dy: 0)
-            let horizonY = inset.midY + inset.height * 0.12
+            // Vertically center the composition (horizon line + half-sun above it).
+            // Composition extent = horizonY..(horizonY + sunR); center it on midY.
+            let sunR = inset.width * 0.30
+            let horizonY = inset.midY - sunR / 2
             let path = NSBezierPath()
 
             // Horizon line
@@ -63,7 +66,6 @@ enum MalibuMenuBarIcon {
             path.stroke()
 
             // Half-sun (filled semicircle sitting on the horizon)
-            let sunR = inset.width * 0.30
             let center = NSPoint(x: inset.midX, y: horizonY)
             let sun = NSBezierPath()
             sun.appendArc(withCenter: center, radius: sunR, startAngle: 0, endAngle: 180)

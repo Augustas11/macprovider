@@ -37,6 +37,8 @@ targets:
           - "**/*.md"
     resources:
       - Sources/Malibu/Resources
+      - path: ../dist/install.sh
+        buildPhase: resources
     entitlements:
       path: Malibu.entitlements
     info:

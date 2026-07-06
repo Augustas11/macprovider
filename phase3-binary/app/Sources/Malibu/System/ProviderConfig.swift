@@ -37,6 +37,21 @@ enum ProviderConfig {
         return parseTopLevelValue(named: "provider_id", from: contents)
     }
 
+    static func readModel(paths: ProviderPaths = .current) -> String? {
+        guard let contents = try? String(contentsOf: paths.configFile) else { return nil }
+        return parseTopLevelValue(named: "model", from: contents)
+    }
+
+    static func readHTTPPort(paths: ProviderPaths = .current) -> Int? {
+        guard let contents = try? String(contentsOf: paths.configFile),
+              let value = parseTopLevelValue(named: "port", from: contents),
+              let port = Int(value),
+              (1024...65535).contains(port) else {
+            return nil
+        }
+        return port
+    }
+
     static func readLinkState(paths: ProviderPaths = .current) -> LinkState? {
         guard let contents = try? String(contentsOf: paths.configFile),
               let value = parseTopLevelValue(named: "link_state", from: contents)

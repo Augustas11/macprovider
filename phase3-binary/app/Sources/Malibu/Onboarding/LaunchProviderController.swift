@@ -18,6 +18,7 @@ final class LaunchProviderController: ObservableObject {
 
     enum Stage: Equatable {
         case idle
+        case runningCLIInstall
         case identityReady
         case registering
         case autotuning
@@ -33,6 +34,14 @@ final class LaunchProviderController: ObservableObject {
 
     @Published private(set) var stage: Stage = .idle
     @Published private(set) var currentEarningsEstimate: EarningsEstimateRange?
+    @Published private(set) var installLogLines: [String] = []
+
+    /// When true (default), fresh onboarding runs `install.sh` instead of the
+    /// in-app SPEC-026 register/autotune path. Tests set this to false.
+    static var prefersCLIInstallTrack: Bool {
+        get { MalibuOnboardingPolicy.prefersCLIInstallTrack }
+        set { MalibuOnboardingPolicy.prefersCLIInstallTrack = newValue }
+    }
 
     // MARK: - Config
 
@@ -77,6 +86,10 @@ final class LaunchProviderController: ObservableObject {
         var startAgent: @MainActor () async -> Void
         var waitForFirstServing: @MainActor () async throws -> Date
         var readProviderID: () -> String?
+        var runCLIInstall: (@escaping @MainActor (String) -> Void) async throws -> Void
+        var importCLIConfigAfterInstall: () async throws -> Void
+        var monitorInstalledProvider: @MainActor () async -> Void
+        var readConfigModel: () -> String?
 
         static func live(registerClient: RegisterClient, bundledCLIPath: URL, agent: MalibuAgent?) -> Dependencies {
             Dependencies(
@@ -147,7 +160,21 @@ final class LaunchProviderController: ObservableObject {
                         userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for the first serving frame."]
                     )
                 },
-                readProviderID: { ProviderConfig.readProviderID() }
+                readProviderID: { ProviderConfig.readProviderID() },
+                runCLIInstall: { onLogLine in
+                    try await CLIInstallRunner.run(onLogLine: onLogLine)
+                },
+                importCLIConfigAfterInstall: {
+                    try await ProviderConfig.importExistingCLIConfig()
+                },
+                monitorInstalledProvider: {
+                    if let agent {
+                        _ = await agent.monitorInstalledProviderIfPresent(
+                            timeout: MalibuOnboardingTimeouts.firstServingFrameSec
+                        )
+                    }
+                },
+                readConfigModel: { ProviderConfig.readModel() }
             )
         }
     }
@@ -212,6 +239,10 @@ final class LaunchProviderController: ObservableObject {
     func launch() async {
         let existingState = try? dependencies.loadState()
         if await dependencies.isConfigured() {
+            if Self.prefersCLIInstallTrack {
+                await startConfiguredViaCLIInstall()
+                return
+            }
             if let existing = existingState,
                existing.onboardingSchemaVersion == 2,
                existing.firstServingAt == nil {
@@ -219,6 +250,11 @@ final class LaunchProviderController: ObservableObject {
             } else {
                 await startConfiguredAgent(model: "configured")
             }
+            return
+        }
+
+        if Self.prefersCLIInstallTrack {
+            await launchViaCLIInstall()
             return
         }
 
@@ -277,6 +313,39 @@ final class LaunchProviderController: ObservableObject {
     func setPayoutWallet(_ address: String) async throws {
         throw NSError(domain: "SPEC-026", code: 0,
                       userInfo: [NSLocalizedDescriptionKey: "Wallet binding is a guarded SPEC-016/SPEC-027 follow-up route."])
+    }
+
+    private func startConfiguredViaCLIInstall() async {
+        do {
+            try await dependencies.registerLoginItem()
+            await dependencies.monitorInstalledProvider()
+            let model = dependencies.readConfigModel() ?? "configured"
+            stage = .live(model: model, tier: .provisional)
+        } catch {
+            stage = .failed(stage: "configured", retryable: true, message: error.localizedDescription)
+        }
+    }
+
+    private func launchViaCLIInstall() async {
+        do {
+            stage = .runningCLIInstall
+            installLogLines = []
+            try await dependencies.runCLIInstall { [weak self] line in
+                guard let self else { return }
+                self.installLogLines.append(line)
+                if self.installLogLines.count > 200 {
+                    self.installLogLines.removeFirst(self.installLogLines.count - 200)
+                }
+            }
+            try await dependencies.importCLIConfigAfterInstall()
+            try await dependencies.registerLoginItem()
+            stage = .startingAgent
+            await dependencies.monitorInstalledProvider()
+            let model = dependencies.readConfigModel() ?? "installed"
+            stage = .live(model: model, tier: .provisional)
+        } catch {
+            stage = .failed(stage: "cliInstall", retryable: true, message: error.localizedDescription)
+        }
     }
 
     private func startConfiguredAgent(model: String) async {
@@ -461,6 +530,7 @@ final class LaunchProviderController: ObservableObject {
     private func stageName(_ stage: Stage) -> String {
         switch stage {
         case .idle: return "idle"
+        case .runningCLIInstall: return "cliInstall"
         case .identityReady: return "identityReady"
         case .registering: return "registering"
         case .autotuning: return "autotuning"
@@ -672,6 +742,9 @@ struct StartupState: Equatable {
         if identityExists && onboardingV2Enabled {
             return .resumeOnboarding
         }
+        if !configExists && !appMarkerExists {
+            return .showOnboarding
+        }
         return onboardingV2Enabled ? .showOnboarding : .setupPaused
     }
 
@@ -706,7 +779,10 @@ struct StartupState: Equatable {
                 firstServingAtExists: false,
                 onboardingV2Enabled: effectiveOnboardingV2Enabled
             )
-            return MigrationResult(route: fresh.route(), backupPath: backup?.path)
+            let route: StartupRoute = MalibuOnboardingPolicy.prefersCLIInstallTrack
+                ? .showOnboarding
+                : fresh.route()
+            return MigrationResult(route: route, backupPath: backup?.path)
         case .cancel:
             return MigrationResult(route: .quit, backupPath: nil)
         }

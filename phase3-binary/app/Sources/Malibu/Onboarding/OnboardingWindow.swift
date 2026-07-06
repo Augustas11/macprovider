@@ -50,8 +50,8 @@ private struct OnboardingRootView: View {
                         .font(.system(size: 28, weight: .semibold))
                 }
             }
-            Text("Three quick steps to launch a provider.")
-            Text("Create a provider identity, register this Mac, and start serving from the bundled provider.")
+            Text("Launch Provider installs and configures the macprovider CLI on this Mac.")
+            Text("Malibu monitors the background provider and shows earnings here — setup runs via the same installer as the terminal path.")
                 .foregroundStyle(.secondary)
 
             Divider()
@@ -67,12 +67,27 @@ private struct OnboardingRootView: View {
     private var content: some View {
         switch controller.stage {
         case .idle:
-            stageRow(title: "Ready", detail: "The app will create a local identity key and register this provider.") {
+            stageRow(title: "Ready", detail: "Installs the provider CLI, picks a model, and registers a background service.") {
                 VStack(alignment: .leading, spacing: 8) {
                     launchButton(title: "Launch Provider")
                     Text("No wallet needed to start — add one anytime after.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                }
+            }
+        case .runningCLIInstall:
+            stageRow(title: "Installing provider", detail: "Running the macprovider installer. This can take several minutes on first model download.") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    if !controller.installLogLines.isEmpty {
+                        ScrollView {
+                            Text(controller.installLogLines.suffix(12).joined(separator: "\n"))
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .frame(maxHeight: 140)
+                    }
                 }
             }
         case .identityReady:
@@ -104,7 +119,7 @@ private struct OnboardingRootView: View {
                 }
             }
         case .startingAgent:
-            stageRow(title: "Starting", detail: "Registering the login item and starting the provider.") {
+            stageRow(title: "Starting", detail: "Waiting for the background provider to become healthy.") {
                 ProgressView().controlSize(.small)
             }
         case .authenticating:

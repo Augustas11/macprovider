@@ -74,7 +74,6 @@ final class MenuBarController {
         menu.addItem(action("Pause", key: "") { self.onAction(.pause) })
         menu.addItem(action("Resume", key: "") { self.onAction(.resume) })
         menu.addItem(.separator())
-        menu.addItem(action("Quit and Uninstall…", key: "") { self.onAction(.quitAndUninstall) })
         menu.addItem(action("Quit", key: "q") { NSApp.terminate(nil) })
         return menu
     }
