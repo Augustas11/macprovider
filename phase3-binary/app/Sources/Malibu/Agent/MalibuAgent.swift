@@ -184,19 +184,37 @@ final class MalibuAgent: ObservableObject {
     /// Returns true when local /v1/health is reachable on the configured port.
     @discardableResult
     func monitorInstalledProviderIfPresent(timeout: TimeInterval = 120) async -> Bool {
-        guard await ProviderConfig.isConfigured else { return false }
-        guard let port = ProviderConfig.readHTTPPort() else { return false }
+        guard let port = ProviderConfig.readHTTPPort(),
+              ProviderConfig.readProviderID() != nil else {
+            return false
+        }
         let deadline = Date().addingTimeInterval(max(1, timeout))
         guard await InstalledProviderMonitor.waitForHealthy(port: port, deadline: deadline) else {
             return false
         }
         monitorsLaunchdProvider = true
+        await applyHealthSnapshot(port: port)
         snapshot.state = .serving
-        snapshot.currentModelID = ProviderConfig.readModel()
         snapshot.lastError = nil
         startHealthPolling(port: port)
         await refreshEarnings()
         return true
+    }
+
+    private func applyHealthSnapshot(port: Int) async {
+        guard let health = await InstalledProviderMonitor.fetchHealth(port: port) else { return }
+        if let model = health.model, !model.isEmpty {
+            snapshot.currentModelID = model
+        }
+        if let total = health.requestsTotal {
+            snapshot.requestsServedAllTime = total
+        }
+        if let uptime = health.uptimeSeconds {
+            snapshot.uptimeSec = uptime
+        }
+        if health.ready {
+            snapshot.state = .serving
+        }
     }
 
     private func startHealthPolling(port: Int) {
@@ -206,6 +224,7 @@ final class MalibuAgent: ObservableObject {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 guard let self else { return }
                 if await InstalledProviderMonitor.isHealthy(port: port) {
+                    await self.applyHealthSnapshot(port: port)
                     await MainActor.run {
                         if self.snapshot.state != .serving && self.snapshot.state != .paused {
                             self.snapshot.state = .serving

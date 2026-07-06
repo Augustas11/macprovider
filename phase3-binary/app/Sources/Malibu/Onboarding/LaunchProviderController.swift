@@ -35,6 +35,10 @@ final class LaunchProviderController: ObservableObject {
     @Published private(set) var stage: Stage = .idle
     @Published private(set) var currentEarningsEstimate: EarningsEstimateRange?
     @Published private(set) var installLogLines: [String] = []
+    @Published private(set) var installProgressHint: String?
+    @Published private(set) var installStartedAt: Date?
+
+    private var installProgressTask: Task<Void, Never>?
 
     /// When true (default), fresh onboarding runs `install.sh` instead of the
     /// in-app SPEC-026 register/autotune path. Tests set this to false.
@@ -237,6 +241,11 @@ final class LaunchProviderController: ObservableObject {
     ///   j. Show success card (owned by the SwiftUI view; controller
     ///      transitions to .live)
     func launch() async {
+        if Self.prefersCLIInstallTrack, await CLIInstallRunner.localInstallSucceeded() {
+            await launchViaCLIInstall()
+            return
+        }
+
         let existingState = try? dependencies.loadState()
         if await dependencies.isConfigured() {
             if Self.prefersCLIInstallTrack {
@@ -327,7 +336,16 @@ final class LaunchProviderController: ObservableObject {
     }
 
     private func launchViaCLIInstall() async {
+        beginInstallProgressWatch()
+        defer { endInstallProgressWatch() }
         do {
+            if await CLIInstallRunner.localInstallSucceeded() {
+                installLogLines.append(
+                    "Background provider is already running locally. Connecting Malibu to it."
+                )
+                await finalizeCLIInstallTrack()
+                return
+            }
             stage = .runningCLIInstall
             installLogLines = []
             try await dependencies.runCLIInstall { [weak self] line in
@@ -337,7 +355,26 @@ final class LaunchProviderController: ObservableObject {
                     self.installLogLines.removeFirst(self.installLogLines.count - 200)
                 }
             }
-            try await dependencies.importCLIConfigAfterInstall()
+            do {
+                try await dependencies.importCLIConfigAfterInstall()
+            } catch {
+                // CLI track may not have provider_token in yaml yet (coordinator assigns over WS).
+                if await CLIInstallRunner.localInstallSucceeded() {
+                    installLogLines.append(
+                        "Provider token not in config yet; Malibu will monitor the background provider without Keychain import."
+                    )
+                } else {
+                    throw error
+                }
+            }
+            await finalizeCLIInstallTrack()
+        } catch {
+            stage = .failed(stage: "cliInstall", retryable: true, message: error.localizedDescription)
+        }
+    }
+
+    private func finalizeCLIInstallTrack() async {
+        do {
             try await dependencies.registerLoginItem()
             stage = .startingAgent
             await dependencies.monitorInstalledProvider()
@@ -346,6 +383,41 @@ final class LaunchProviderController: ObservableObject {
         } catch {
             stage = .failed(stage: "cliInstall", retryable: true, message: error.localizedDescription)
         }
+    }
+
+    private func beginInstallProgressWatch() {
+        installStartedAt = Date()
+        installProgressHint = "Starting installer…"
+        installProgressTask?.cancel()
+        installProgressTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.installProgressHint = CLIInstallRunner.ActivityMonitor.snapshot()
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    private func endInstallProgressWatch() {
+        installProgressTask?.cancel()
+        installProgressTask = nil
+        installStartedAt = nil
+        installProgressHint = nil
+    }
+
+    /// When setup reopens after CLI install finished, jump straight to live/monitor.
+    func refreshFromExistingInstall() async {
+        switch stage {
+        case .idle:
+            break
+        case let .failed(stageName, _, _) where stageName == "cliInstall":
+            break
+        default:
+            return
+        }
+        guard await CLIInstallRunner.localInstallSucceeded() else { return }
+        installLogLines = ["Background provider is already running locally."]
+        await finalizeCLIInstallTrack()
     }
 
     private func startConfiguredAgent(model: String) async {
@@ -674,6 +746,7 @@ struct StartupState: Equatable {
     let onboardingStateExists: Bool
     let firstServingAtExists: Bool
     let onboardingV2Enabled: Bool
+    let backgroundProviderHealthy: Bool
 
     init(
         configExists: Bool,
@@ -684,7 +757,8 @@ struct StartupState: Equatable {
         identityExists: Bool,
         onboardingStateExists: Bool,
         firstServingAtExists: Bool,
-        onboardingV2Enabled: Bool
+        onboardingV2Enabled: Bool,
+        backgroundProviderHealthy: Bool = false
     ) {
         self.configExists = configExists
         self.appMarkerExists = appMarkerExists
@@ -695,6 +769,7 @@ struct StartupState: Equatable {
         self.onboardingStateExists = onboardingStateExists
         self.firstServingAtExists = firstServingAtExists
         self.onboardingV2Enabled = onboardingV2Enabled
+        self.backgroundProviderHealthy = backgroundProviderHealthy
     }
 
     @MainActor
@@ -713,6 +788,17 @@ struct StartupState: Equatable {
         let serveConfigShapeValid = (try? ProviderConfig.validateServeConfigShape(paths: paths)) != nil
         let identityExists = await ProviderIdentity.isReady()
         let onboarding = try? OnboardingStateStore.load(paths: paths)
+        var backgroundProviderHealthy = false
+        if MalibuOnboardingPolicy.prefersCLIInstallTrack,
+           ProviderConfig.readProviderID(paths: paths) != nil,
+           let port = ProviderConfig.readHTTPPort(paths: paths) {
+            let home = fm.homeDirectoryForCurrentUser
+            let manifest = home.appendingPathComponent("Library/Application Support/macprovider/install_manifest.json")
+            let launchd = home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+            if fm.isReadableFile(atPath: manifest.path) || fm.isReadableFile(atPath: launchd.path) {
+                backgroundProviderHealthy = await InstalledProviderMonitor.isHealthy(port: port)
+            }
+        }
         return StartupState(
             configExists: configExists,
             appMarkerExists: markerExists,
@@ -722,11 +808,15 @@ struct StartupState: Equatable {
             identityExists: identityExists,
             onboardingStateExists: onboarding != nil,
             firstServingAtExists: onboarding?.firstServingAt != nil,
-            onboardingV2Enabled: LaunchProviderController.isOnboardingV2Enabled
+            onboardingV2Enabled: LaunchProviderController.isOnboardingV2Enabled,
+            backgroundProviderHealthy: backgroundProviderHealthy
         )
     }
 
     func route() -> StartupRoute {
+        if backgroundProviderHealthy && MalibuOnboardingPolicy.prefersCLIInstallTrack {
+            return .startAgent
+        }
         if onboardingStateExists && !firstServingAtExists {
             return .resumeOnboarding
         }

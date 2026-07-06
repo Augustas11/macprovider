@@ -35,11 +35,33 @@ final class MenuBarController {
 
     private func configureButton() {
         guard let button = statusItem.button else { return }
-        button.image = MalibuMenuBarIcon.makeTemplate(pointSize: 18)
+        let icon = MalibuMenuBarIcon.makeTemplate(pointSize: 18)
+        button.image = icon
+        button.image?.size = icon.size
         button.image?.accessibilityDescription = "Malibu"
-        button.imagePosition = .imageLeft
+        button.imagePosition = .imageLeading
+        button.imageScaling = .scaleNone
         button.title = ""
-        statusItem.menu = buildMenu()
+        button.target = self
+        button.action = #selector(statusBarButtonClicked(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    }
+
+    @objc private func statusBarButtonClicked(_ sender: NSStatusBarButton?) {
+        guard let button = sender ?? statusItem.button else { return }
+        guard let event = NSApp.currentEvent else {
+            onAction(.openDashboard)
+            return
+        }
+        let isMenuClick = event.type == .rightMouseUp
+            || (event.type == .leftMouseUp && event.modifierFlags.contains(.control))
+        if isMenuClick {
+            let menu = buildMenu()
+            updateMenu(menu, snapshot: latestSnapshot)
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 2), in: button)
+        } else {
+            onAction(.openDashboard)
+        }
     }
 
     private func buildMenu() -> NSMenu {
@@ -104,12 +126,18 @@ final class MenuBarController {
         latestSnapshot = snapshot
         let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissedUnclaimedThreshold)
         let queueDot = (snapshot.queueDepth ?? 0) > 0 ? "•" : nil
-        statusItem.button?.title = [AgentSnapshotPresenter.short(snapshot), badge, queueDot].compactMap { $0 }.joined(separator: " ")
+        if let button = statusItem.button {
+            button.title = [AgentSnapshotPresenter.short(snapshot), badge, queueDot].compactMap { $0 }.joined(separator: " ")
+            button.imagePosition = .imageLeading
+        }
         statusItem.button?.toolTip = menuTooltip(snapshot)
         statusItem.button?.contentTintColor = snapshot.thermalState?.isMenuBarAttention == true
             ? NSColor.systemOrange
             : nil
-        guard let menu = statusItem.menu else { return }
+    }
+
+    private func updateMenu(_ menu: NSMenu, snapshot: AgentSnapshot) {
+        let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissedUnclaimedThreshold)
         menu.item(withIdentifier: .statusRow)?.title = AgentSnapshotPresenter.stateLine(snapshot)
         menu.item(withIdentifier: .earningsRow)?.title = AgentSnapshotPresenter.earningsLine(snapshot)
         if let backlog = AgentSnapshotPresenter.backlogLine(snapshot),
@@ -136,8 +164,7 @@ final class MenuBarController {
         [
             AgentSnapshotPresenter.stateLine(snapshot),
             AgentSnapshotPresenter.earningsLine(snapshot),
-            AgentSnapshotPresenter.queueChip(snapshot),
-            AgentSnapshotPresenter.thermalChip(snapshot)
+            "Click to open dashboard · Right-click for menu"
         ].joined(separator: "\n")
     }
 }

@@ -61,6 +61,9 @@ private struct OnboardingRootView: View {
         }
         .padding(28)
         .frame(minWidth: 460, minHeight: 560)
+        .task {
+            await controller.refreshFromExistingInstall()
+        }
     }
 
     @ViewBuilder
@@ -76,17 +79,29 @@ private struct OnboardingRootView: View {
                 }
             }
         case .runningCLIInstall:
-            stageRow(title: "Installing provider", detail: "Running the macprovider installer. This can take several minutes on first model download.") {
+            stageRow(
+                title: "Installing provider",
+                detail: controller.installProgressHint
+                    ?? "Running the macprovider installer. Autotune and first model download can take 10–30 minutes with little log output."
+            ) {
                 VStack(alignment: .leading, spacing: 8) {
-                    ProgressView().controlSize(.small)
+                    HStack(spacing: 12) {
+                        ProgressView().controlSize(.small)
+                        if let started = controller.installStartedAt {
+                            Text("Elapsed \(formattedElapsed(since: started))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
                     if !controller.installLogLines.isEmpty {
                         ScrollView {
-                            Text(controller.installLogLines.suffix(12).joined(separator: "\n"))
+                            Text(controller.installLogLines.suffix(20).joined(separator: "\n"))
                                 .font(.system(.caption, design: .monospaced))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .textSelection(.enabled)
                         }
-                        .frame(maxHeight: 140)
+                        .frame(maxHeight: 160)
                     }
                 }
             }
@@ -189,5 +204,17 @@ private struct OnboardingRootView: View {
         }
         .buttonStyle(.borderedProminent)
         .tint(MalibuBrand.coral)
+    }
+
+    private func formattedElapsed(since start: Date) -> String {
+        let seconds = max(0, Int(Date().timeIntervalSince(start)))
+        let minutes = seconds / 60
+        let remainder = seconds % 60
+        if minutes >= 60 {
+            let hours = minutes / 60
+            let mins = minutes % 60
+            return String(format: "%d:%02d:%02d", hours, mins, remainder)
+        }
+        return String(format: "%d:%02d", minutes, remainder)
     }
 }
