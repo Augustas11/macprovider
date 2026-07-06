@@ -353,7 +353,8 @@ final class AutoUpdateTests: XCTestCase {
                     tokenValidated: true,
                     bearerlessDuplicate: false,
                     connected: true,
-                    stableReason: "tier_demoted"
+                    stableReason: "tier_demoted",
+                    acceptProvisional: false
                 )
             },
             drain: { _ in true },
@@ -416,7 +417,8 @@ final class AutoUpdateTests: XCTestCase {
                     tokenValidated: true,
                     bearerlessDuplicate: false,
                     connected: true,
-                    stableReason: "tier_demoted"
+                    stableReason: "tier_demoted",
+                    acceptProvisional: false
                 )
             },
             drain: { _ in true },
