@@ -905,7 +905,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 							flusher.Flush()
 						}
 						cancelCoordinator()
-						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow, resp)
+						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow, resp)
 						return false
 					}
 					if projectedSerializedBytes-projectedContentBytes > maxStreamingFallbackMetadataBytes {
@@ -915,7 +915,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 							flusher.Flush()
 						}
 						cancelCoordinator()
-						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow, resp)
+						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow, resp)
 						return false
 					}
 					emitted = projectedContentBytes
@@ -1050,6 +1050,7 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 		return
 	}
 	copyCleanHeaders(w.Header(), resp.Header)
+	w.Header().Set("X-Request-ID", requestID(r))
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)

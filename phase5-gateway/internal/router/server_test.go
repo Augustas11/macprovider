@@ -3138,6 +3138,57 @@ func TestChatForwardsMiddlewareMintedRequestIDWhenBuyerOmits(t *testing.T) {
 	}
 }
 
+func TestNoProvider503EchoesOnlyGatewayRequestID(t *testing.T) {
+	cases := []struct {
+		name      string
+		coordBody string
+	}{
+		{
+			name:      "coordinator_body",
+			coordBody: `{"error":{"code":"no_provider_available","message":"No provider available","param":null,"type":"service_unavailable"}}`,
+		},
+		{
+			name:      "empty_body",
+			coordBody: "",
+		},
+	}
+	for _, tc := range cases {
+		for _, stream := range []bool{false, true} {
+			name := tc.name + "_non_stream"
+			if stream {
+				name = tc.name + "_stream"
+			}
+			t.Run(name, func(t *testing.T) {
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return responseWithBody(http.StatusServiceUnavailable, http.Header{
+						"Content-Type": []string{"application/json"},
+						"X-Request-ID": []string{"99999999-9999-4999-8999-999999999999"},
+					}, tc.coordBody), nil
+				})}
+				h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+					cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				}, WithHTTPClient(client))
+				fullKey := createAccountAndKey(t, store, cfg, "acct_no_provider_request_id_"+name)
+
+				requestID := "88888888-8888-4888-8888-888888888888"
+				body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+				if stream {
+					body = `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+				}
+				resp := postChat(t, h, fullKey, body, map[string]string{"X-Request-ID": requestID})
+
+				if resp.Code != http.StatusServiceUnavailable {
+					t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+				}
+				values := resp.Header().Values("X-Request-ID")
+				if len(values) != 1 || values[0] != requestID {
+					t.Fatalf("response X-Request-ID values=%q, want only gateway request id %q", values, requestID)
+				}
+			})
+		}
+	}
+}
+
 func TestStickyConversationDerivesInternalHeaderAndStripsInjection(t *testing.T) {
 	var captured http.Header
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -4467,7 +4518,7 @@ func TestStreamingGatewayEstimateStopsOverMaxOutput(t *testing.T) {
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
-	wantUsed := float64(estimatePromptTokens([]byte(body)) + 1)
+	wantUsed := float64(estimatePromptTokens([]byte(body)))
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
 	}
@@ -4509,7 +4560,7 @@ func TestStreamingGatewayEstimateCountsDataWithoutSpace(t *testing.T) {
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
-	wantUsed := float64(estimatePromptTokens([]byte(body)) + 1)
+	wantUsed := float64(estimatePromptTokens([]byte(body)))
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
 	}
@@ -4573,7 +4624,7 @@ func TestStreamingGatewayEstimateCountsGeneratedDeltaStrings(t *testing.T) {
 			}
 			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 			quota := readQuota(t, usageResp)
-			wantUsed := float64(estimatePromptTokens([]byte(body)) + 1)
+			wantUsed := float64(estimatePromptTokens([]byte(body)))
 			if quota["daily_tokens_used"].(float64) != wantUsed {
 				t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
 			}
@@ -4698,7 +4749,7 @@ func TestStreamingGatewayEstimateStopsOverMaxToolCallArguments(t *testing.T) {
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
-	wantUsed := float64(estimatePromptTokens([]byte(body)) + 1)
+	wantUsed := float64(estimatePromptTokens([]byte(body)))
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
 	}
@@ -5206,7 +5257,7 @@ func TestSettleFromUsage_TruncatedOverMaxWithoutObservedOutput_FallsBackToByteCa
 	})
 }
 
-func TestSettleFromUsage_RunawayByteStream_HardCap(t *testing.T) {
+func TestSettleFromUsage_RunawayByteStream_HardCapChargesOnlyForwardedPrefix(t *testing.T) {
 	runStreamingUsageSettlementCase(t, streamingUsageSettlementCase{
 		accountID:      "acct_usage_runaway_hard_cap",
 		model:          "llama",
@@ -5215,7 +5266,7 @@ func TestSettleFromUsage_RunawayByteStream_HardCap(t *testing.T) {
 		maxTokens:      128,
 		wantOutcome:    "stream_output_exceeded",
 		wantSource:     "gateway_estimated",
-		wantCompletion: 128,
+		wantCompletion: 0,
 	})
 }
 
