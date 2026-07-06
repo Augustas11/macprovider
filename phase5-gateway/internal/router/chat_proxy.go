@@ -541,8 +541,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 			return
 		}
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
-		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "no_provider_available", "No provider available")
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 		return
 	}
 	if resp.StatusCode == http.StatusGatewayTimeout {
@@ -642,8 +641,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 			return
 		}
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
-		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "no_provider_available", "No provider available")
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -1006,6 +1004,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 
 func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
 	_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+	if len(bytes.TrimSpace(body)) == 0 && resp.StatusCode == http.StatusServiceUnavailable {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "no_provider_available", "No provider available")
+		return
+	}
 	copyCleanHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	w.WriteHeader(resp.StatusCode)

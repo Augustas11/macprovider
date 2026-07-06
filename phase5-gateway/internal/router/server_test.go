@@ -1114,27 +1114,27 @@ func TestAggregateStatusExcludesBearerlessDuplicatesFromCapacity(t *testing.T) {
 		"summary":{"total_providers":4,"ready":3,"total_slots":5,"free_slots":5}
 	}`), 1, fixedNow())
 
-	if out.Pool.TotalProviders != 3 {
-		t.Fatalf("TotalProviders=%d, want 3 (bearerless duplicate excluded)", out.Pool.TotalProviders)
+	if out.Pool.TotalProviders != 2 {
+		t.Fatalf("TotalProviders=%d, want 2 (bearerless duplicate and self_minted excluded)", out.Pool.TotalProviders)
 	}
-	if out.Pool.Ready != 3 {
-		t.Fatalf("Pool.Ready=%d, want 3 (bearerless duplicate excluded)", out.Pool.Ready)
+	if out.Pool.Ready != 2 {
+		t.Fatalf("Pool.Ready=%d, want 2 (bearerless duplicate and self_minted excluded)", out.Pool.Ready)
 	}
 	if len(out.Models) != 1 {
 		t.Fatalf("models=%+v, want one model entry", out.Models)
 	}
 	m := out.Models[0]
-	if m.ProviderCount != 3 {
-		t.Fatalf("model.ProviderCount=%d, want 3 (bearerless duplicate excluded)", m.ProviderCount)
+	if m.ProviderCount != 2 {
+		t.Fatalf("model.ProviderCount=%d, want 2 (bearerless duplicate and self_minted excluded)", m.ProviderCount)
 	}
-	if m.ReadyProviderCount != 3 {
-		t.Fatalf("model.ReadyProviderCount=%d, want 3 (bearerless duplicate excluded)", m.ReadyProviderCount)
+	if m.ReadyProviderCount != 2 {
+		t.Fatalf("model.ReadyProviderCount=%d, want 2 (bearerless duplicate and self_minted excluded)", m.ReadyProviderCount)
 	}
-	if m.TotalSlots != 4 {
-		t.Fatalf("model.TotalSlots=%d, want 4 (1 from bearerless duplicate excluded)", m.TotalSlots)
+	if m.TotalSlots != 3 {
+		t.Fatalf("model.TotalSlots=%d, want 3 (2 excluded slots omitted)", m.TotalSlots)
 	}
-	if m.SlotsFree != 4 {
-		t.Fatalf("model.SlotsFree=%d, want 4 (1 from bearerless duplicate excluded)", m.SlotsFree)
+	if m.SlotsFree != 3 {
+		t.Fatalf("model.SlotsFree=%d, want 3 (2 excluded slots omitted)", m.SlotsFree)
 	}
 	if !m.Available || m.Availability != "available" {
 		t.Fatalf("model availability=%+v, want available", m)
@@ -1211,11 +1211,9 @@ func TestAggregateStatusSummaryFallbackFiresOnlyWhenPoolIsEmpty(t *testing.T) {
 }
 
 // SPEC-003 v0.8.3 enum coverage — pins per-value routability so future
-// changes (issue #82 item 2 will flip `mint_failed` semantics) MUST update
-// this test and SPEC-002 v1.4.1's aggregation rule together. Only
-// `bearerless_duplicate` is excluded today; everything else — including
-// empty (pre-v0.8.3 coordinator), `bearer_validated`, `self_minted`,
-// `mint_failed`, and unknown future values — aggregates normally.
+// changes MUST update this test and SPEC-002 v1.4.1's aggregation rule together.
+// Non-routable auth_state values (bearerless_duplicate, self_minted, mint_failed)
+// are excluded from buyer-facing /v1/status capacity.
 func TestAggregateStatusAuthStateRoutabilityCoverage(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -1224,10 +1222,10 @@ func TestAggregateStatusAuthStateRoutabilityCoverage(t *testing.T) {
 	}{
 		{name: "empty (pre-v0.8.3 coordinator)", authState: "", wantReady: 1},
 		{name: "bearer_validated", authState: "bearer_validated", wantReady: 1},
-		{name: "self_minted", authState: "self_minted", wantReady: 1},
-		{name: "mint_failed (currently routable; flips in #82 item 2)", authState: "mint_failed", wantReady: 1},
+		{name: "self_minted", authState: "self_minted", wantReady: 0},
+		{name: "mint_failed", authState: "mint_failed", wantReady: 0},
 		{name: "unknown future value (defensive default = aggregate)", authState: "future_value_xyz", wantReady: 1},
-		{name: "bearerless_duplicate (the only excluded value)", authState: "bearerless_duplicate", wantReady: 0},
+		{name: "bearerless_duplicate", authState: "bearerless_duplicate", wantReady: 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1253,6 +1251,48 @@ func TestAuthStateBearerlessDuplicateConstantMatchesSpec(t *testing.T) {
 	const want = "bearerless_duplicate"
 	if authStateBearerlessDuplicate != want {
 		t.Fatalf("authStateBearerlessDuplicate = %q, want %q (SPEC-002 v1.4.1 FR-O2 aggregation rule)", authStateBearerlessDuplicate, want)
+	}
+}
+
+func TestPoolzProviderCountsTowardBuyerCapacity(t *testing.T) {
+	falseVal := false
+	trueVal := true
+	cases := []struct {
+		name string
+		row  poolzProviderRow
+		want bool
+	}{
+		{name: "routing_eligible true", row: poolzProviderRow{RoutingEligible: &trueVal}, want: true},
+		{name: "routing_eligible false", row: poolzProviderRow{RoutingEligible: &falseVal, AuthState: "bearer_validated"}, want: false},
+		{name: "legacy bearer_validated", row: poolzProviderRow{AuthState: "bearer_validated"}, want: true},
+		{name: "legacy self_minted", row: poolzProviderRow{AuthState: "self_minted"}, want: false},
+		{name: "legacy bearerless_duplicate", row: poolzProviderRow{AuthState: "bearerless_duplicate"}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := poolzProviderCountsTowardBuyerCapacity(tc.row); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAggregateStatusAllSelfMintedPoolReportsNoCapacity(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"auth_state":"self_minted","routing_eligible":false}
+		],
+		"summary":{"total_providers":1,"ready":0,"total_slots":1,"free_slots":0}
+	}`), 1, fixedNow())
+
+	if out.Pool.Ready != 0 {
+		t.Fatalf("Pool.Ready=%d, want 0", out.Pool.Ready)
+	}
+	if out.Status != "idle" {
+		t.Fatalf("status=%q, want idle", out.Status)
+	}
+	if len(out.Models) != 0 {
+		t.Fatalf("models=%+v, want no model entries", out.Models)
 	}
 }
 

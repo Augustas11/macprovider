@@ -431,6 +431,15 @@ actor CoordinatorClient {
                 try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
                 backoffSeconds = 1
                 failedAttempts = 0
+            } catch is CoordinatorAuthUpgradeReconnect {
+                // FR-C9.3: tokenless bootstrap minted a bearer; reconnect immediately
+                // so the coordinator registers auth_state=bearer_validated and the
+                // session becomes buyer-routable.
+                await cleanupConnection()
+                print("coordinator reconnect scheduled after provisional token adoption")
+                try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
+                backoffSeconds = 1
+                failedAttempts = 0
             } catch {
                 await cleanupConnection()
                 failedAttempts += 1
@@ -825,6 +834,12 @@ actor CoordinatorClient {
             await cleanupConnection()
             runTask = nil
             print("coordinator reconnect attempt 1 scheduled after drain")
+            try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
+            startReconnectTask()
+        } catch is CoordinatorAuthUpgradeReconnect {
+            await cleanupConnection()
+            runTask = nil
+            print("coordinator reconnect scheduled after provisional token adoption")
             try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
             startReconnectTask()
         } catch {
@@ -1371,6 +1386,11 @@ actor CoordinatorClient {
         // Awaited so that persist-before-adopt holds: see
         // adoptAssignedProviderTokenIfPresent doc-comment.
         let assignedProviderTokenAdopted = await adoptAssignedProviderTokenIfPresent(payload)
+        if assignedProviderTokenAdopted {
+            // The current tokenless WS session stays auth_state=self_minted and is
+            // not buyer-routable until we reconnect with Authorization: Bearer.
+            throw CoordinatorAuthUpgradeReconnect()
+        }
         do {
             try pairingController.handlePairingMaterial(
                 pairOT: payload["pair_ot"] as? String,
@@ -2437,6 +2457,10 @@ extension CoordinatorClient: ReceiptKeyRotatingCoordinatorClient {}
 /// Signals "coordinator asked us to drain, handle complete, reconnect later
 /// after a grace period." Caught by runReconnectLoop.
 struct CoordinatorDrainComplete: Error {}
+
+/// FR-C9.3 — coordinator minted a provisional bearer on a tokenless connect;
+/// reconnect with Authorization so auth_state becomes bearer_validated.
+struct CoordinatorAuthUpgradeReconnect: Error {}
 
 enum CoordinatorAuthError: Error, Equatable, CustomStringConvertible {
     case invalidMessage(String)

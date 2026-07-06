@@ -2788,6 +2788,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	}
 	type poolzProvider struct {
 		pool.Provider
+		RoutingEligible   bool                    `json:"routing_eligible"`
 		CanaryFailCount   int                     `json:"canary_fail_count"`
 		ReceiptPubkey     *string                 `json:"receipt_pubkey"`
 		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
@@ -2810,6 +2811,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		}
 		poolz = append(poolz, poolzProvider{
 			Provider:          provider,
+			RoutingEligible:   provider.RoutingEligible(),
 			CanaryFailCount:   provider.CanaryFailCount,
 			ReceiptPubkey:     receiptPubkey,
 			ReceiptPubkeyPrev: receiptPubkeyPrev,
