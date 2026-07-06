@@ -95,14 +95,15 @@ type DemoConfig struct {
 }
 
 type QuotasConfig struct {
-	AccountDailyTokens        int64 `yaml:"account_daily_tokens"`
-	DemoDailyTokensPerIP      int64 `yaml:"demo_daily_tokens_per_ip"`
-	DemoSessionsPerIPPerHour  int   `yaml:"demo_sessions_per_ip_per_hour"`
-	AccountConcurrency        int   `yaml:"account_concurrency"`
-	DemoConcurrency           int   `yaml:"demo_concurrency"`
-	SignupAccountsPerIPPerDay int   `yaml:"signup_accounts_per_ip_per_day"`
-	ReaperIntervalHours       uint  `yaml:"reaper_interval_hours"`
-	ReservationMaxAgeHours    uint  `yaml:"reservation_max_age_hours"`
+	AccountDailyTokens          int64 `yaml:"account_daily_tokens"`
+	DemoDailyTokensPerIP        int64 `yaml:"demo_daily_tokens_per_ip"`
+	DemoSessionsPerIPPerHour    int   `yaml:"demo_sessions_per_ip_per_hour"`
+	AccountConcurrency          int   `yaml:"account_concurrency"`
+	AccountRequestRatePerSecond int   `yaml:"account_request_rate_per_second"`
+	DemoConcurrency             int   `yaml:"demo_concurrency"`
+	SignupAccountsPerIPPerDay   int   `yaml:"signup_accounts_per_ip_per_day"`
+	ReaperIntervalHours         uint  `yaml:"reaper_interval_hours"`
+	ReservationMaxAgeHours      uint  `yaml:"reservation_max_age_hours"`
 }
 
 type LimitsConfig struct {
@@ -185,23 +186,26 @@ func Default() Config {
 			AccountDailyTokens:       100000,
 			DemoDailyTokensPerIP:     1000,
 			DemoSessionsPerIPPerHour: 10,
-			// Issue #190: AccountConcurrency=3 matches phase-A
-			// network capacity (3 providers × 1 slot each) and the
-			// "user types follow-up while previous reply still
-			// streaming" UX pattern for paying buyers.
+			// Issue #375: AccountConcurrency=4 gives one runaway
+			// buyer enough headroom for normal multi-agent fan-out
+			// without letting a large local burst monopolize the
+			// provider pool. AccountRequestRatePerSecond is the
+			// gateway-edge steady request-start bucket for the same
+			// account_id.
 			// DemoConcurrency stays at 2 because M1-8 / PERF-6
 			// documented that 3+ parallel demo requests from one
 			// IP saturate the MLX-serialized provider pool for up
 			// to CoordinatorTimeout — an accidental DoS against
 			// paying buyers. Bumping the demo default to 3 would
 			// re-introduce that regression. Operators can override
-			// either via account_concurrency / demo_concurrency
-			// in gateway.yaml.
-			AccountConcurrency:        3,
-			DemoConcurrency:           2,
-			SignupAccountsPerIPPerDay: 3,
-			ReaperIntervalHours:       1,
-			ReservationMaxAgeHours:    24,
+			// account_concurrency, account_request_rate_per_second,
+			// or demo_concurrency in gateway.yaml.
+			AccountConcurrency:          4,
+			AccountRequestRatePerSecond: 30,
+			DemoConcurrency:             2,
+			SignupAccountsPerIPPerDay:   3,
+			ReaperIntervalHours:         1,
+			ReservationMaxAgeHours:      24,
 		},
 		Limits: LimitsConfig{
 			MaxTokensPerRequest:          4096,
@@ -388,6 +392,9 @@ func (c Config) Validate() error {
 	}
 	if c.Quotas.DemoSessionsPerIPPerHour <= 0 || c.Quotas.AccountConcurrency <= 0 || c.Quotas.SignupAccountsPerIPPerDay <= 0 {
 		return fmt.Errorf("quota counters must be positive")
+	}
+	if c.Quotas.AccountRequestRatePerSecond <= 0 {
+		return fmt.Errorf("quotas.account_request_rate_per_second must be positive")
 	}
 	if c.Quotas.DemoConcurrency <= 0 {
 		return fmt.Errorf("quotas.demo_concurrency must be positive")

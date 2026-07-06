@@ -262,6 +262,28 @@ func TestGatewayCoord503RetryDisabledKeepsSingleDispatch(t *testing.T) {
 	assertRetryLogCounts(t, logs.String(), 0, 0, 0)
 }
 
+func TestGatewayCoord503RetryAttemptsRespectRequestRateLimit(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+	})}
+	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
+		cfg.Quotas.AccountRequestRatePerSecond = 1
+	})
+	fullKey := createAccountAndKey(t, store, cfg, "acct_retry_rate_limited")
+
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "no_provider_available")
+	if calls != 1 {
+		t.Fatalf("coordinator calls=%d want 1; retry attempts must not multiply request-start rate", calls)
+	}
+}
+
 func TestGatewayCoord503RetryReplaysIdenticalRequestBodies(t *testing.T) {
 	var calls int
 	var seen [][]byte
@@ -401,6 +423,53 @@ func TestGatewayCoord503RetrySleepStopsOnBuyerCancel(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("coordinator calls=%d want 1; retry sleep should be cancellable before second attempt", got)
+	}
+}
+
+func TestGatewayCoord503RetryCancelDoesNotConsumeRetryRateToken(t *testing.T) {
+	var calls atomic.Int32
+	firstAttemptReturned := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			close(firstAttemptReturned)
+			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, retryChatSuccessBody), nil
+	})}
+	h, store, _, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
+		cfg.Quotas.AccountRequestRatePerSecond = 2
+		cfg.Retry503.BackoffBaseMs = 5000
+		cfg.Retry503.BackoffMaxMs = 5000
+	})
+	fullKey := createAccountAndKey(t, store, cfg, "acct_retry_cancel_rate")
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chatBody(false))).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(resp, req)
+		close(done)
+	}()
+	select {
+	case <-firstAttemptReturned:
+	case <-time.After(time.Second):
+		t.Fatal("first coordinator attempt was not reached")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not return promptly after buyer cancel during retry sleep")
+	}
+
+	second := postChat(t, h, fullKey, chatBody(false), nil)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second request status=%d body=%s; canceled retry sleep must not consume request-rate token", second.Code, second.Body.String())
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("coordinator calls=%d want 2; second request should reach upstream", got)
 	}
 }
 
