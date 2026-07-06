@@ -78,12 +78,6 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "Allow local donor-mode configuration for non-paid-yield rows.")
     var donorMode = false
 
-    @Option(help: "Electricity price in USD/kWh for net capacity estimate.")
-    var electricityUSDPerKWH: Double?
-
-    @Option(help: "Assumed utilization in [0.0, 1.0] for net capacity estimate.")
-    var assumedUtilization = 1.0
-
     @Flag(help: "Write the final recommendation to config.yaml.")
     var apply = false
 
@@ -673,14 +667,8 @@ struct AutotuneCommand: AsyncParsableCommand {
         guard tpsTieEpsilon >= 0 else {
             throw ValidationError("--tps-tie-epsilon must be >= 0")
         }
-        if let electricityUSDPerKWH, electricityUSDPerKWH < 0 {
-            throw ValidationError("--electricity-usd-per-kwh must be >= 0")
-        }
         if freshnessCheck && !recommend {
             throw ValidationError("--freshness-check requires --recommend")
-        }
-        guard (0.0...1.0).contains(assumedUtilization) else {
-            throw ValidationError("--assumed-utilization must be in 0.0...1.0")
         }
         guard maxDuration > 0 else {
             throw ValidationError("--max-duration must be > 0")
@@ -736,9 +724,6 @@ struct AutotuneCommand: AsyncParsableCommand {
             benchmarks: [:],
             warnings: warnings,
             generatedAt: now,
-            electricityUSDPerKWH: electricityUSDPerKWH,
-            assumedUtilization: assumedUtilization,
-            availabilityHoursPerDay: 24,
             donorMode: donorMode
         )
         let outcomes = try await AutotuneRecommendationBenchmarker().benchmarks(

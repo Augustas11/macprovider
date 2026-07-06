@@ -108,9 +108,6 @@ struct AutotuneRecommendSimulateEnvelope: Decodable {
     var benchmarks: [String: CandidateBenchmark]
     var warnings: [AutotuneRecommendWarning]
     var generatedAt: Date
-    var electricityUSDPerKWH: Double?
-    var assumedUtilization: Double
-    var availabilityHoursPerDay: Int
     var donorMode: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -122,10 +119,10 @@ struct AutotuneRecommendSimulateEnvelope: Decodable {
         case benchmarks
         case warnings
         case generatedAt
+        case donorMode
         case electricityUSDPerKWH
         case assumedUtilization
         case availabilityHoursPerDay
-        case donorMode
     }
 
     init(from decoder: Decoder) throws {
@@ -142,9 +139,6 @@ struct AutotuneRecommendSimulateEnvelope: Decodable {
             throw DecodingError.dataCorruptedError(forKey: .generatedAt, in: c, debugDescription: "generatedAt must be RFC3339")
         }
         generatedAt = parsedGeneratedAt
-        electricityUSDPerKWH = try c.decodeIfPresent(Double.self, forKey: .electricityUSDPerKWH)
-        assumedUtilization = try c.decode(Double.self, forKey: .assumedUtilization)
-        availabilityHoursPerDay = try c.decode(Int.self, forKey: .availabilityHoursPerDay)
         donorMode = try c.decode(Bool.self, forKey: .donorMode)
     }
 
@@ -171,9 +165,6 @@ struct AutotuneRecommendSimulateEnvelope: Decodable {
             benchmarks: patchedBenchmarks,
             warnings: Set(warnings),
             generatedAt: generatedAt,
-            electricityUSDPerKWH: electricityUSDPerKWH,
-            assumedUtilization: assumedUtilization,
-            availabilityHoursPerDay: availabilityHoursPerDay,
             donorMode: donorMode
         )
     }
