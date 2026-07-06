@@ -86,7 +86,7 @@ final class ProviderConfigParserTests: XCTestCase {
 
         let state = await StartupState.detect(paths: paths)
 
-        XCTAssertEqual(state.route(), .resumeOnboarding)
+        XCTAssertEqual(state.route(), .startAgent)
         XCTAssertFalse(FileManager.default.fileExists(atPath: ProviderConfig.importPendingMarker(paths: paths).path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))

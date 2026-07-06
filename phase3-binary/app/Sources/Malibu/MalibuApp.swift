@@ -118,10 +118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch route {
         case .startAgent:
             await agent.start()
-        case .showOnboarding, .resumeOnboarding:
+        case .showOnboarding:
             presentOnboarding()
-        case .setupPaused:
-            presentSetupPaused()
         case .quit:
             NSApp.terminate(nil)
         case .showImportDialog:
@@ -153,14 +151,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .alertSecondButtonReturn: return .startFresh
         default: return .cancel
         }
-    }
-
-    private func presentSetupPaused() {
-        let alert = NSAlert()
-        alert.messageText = "Setup paused"
-        alert.informativeText = "App-track onboarding is disabled for this build. Existing configured providers still start normally."
-        alert.alertStyle = .informational
-        alert.runModal()
     }
 
     private func presentStartFreshBackup(path: String) {

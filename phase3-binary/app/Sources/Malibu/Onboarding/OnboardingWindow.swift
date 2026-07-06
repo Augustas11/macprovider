@@ -27,13 +27,7 @@ private struct OnboardingRootView: View {
     init(agent: MalibuAgent, onDone: @escaping () -> Void) {
         self.agent = agent
         self.onDone = onDone
-        let bundled = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/MacOS/macprovider-cli")
-        _controller = StateObject(wrappedValue: LaunchProviderController(
-            coordinatorBaseURL: URL(string: "https://coordinator.streamvc.live")!,
-            bundledCLIPath: bundled,
-            agent: agent
-        ))
+        _controller = StateObject(wrappedValue: LaunchProviderController(agent: agent))
     }
 
     var body: some View {
@@ -105,40 +99,8 @@ private struct OnboardingRootView: View {
                     }
                 }
             }
-        case .identityReady:
-            stageRow(title: "Identity ready", detail: "Local provider identity created in Keychain.") {
-                ProgressView().controlSize(.small)
-            }
-        case .registering:
-            stageRow(title: "Registering", detail: "Requesting a provider token from the coordinator.") {
-                ProgressView().controlSize(.small)
-            }
-        case .autotuning:
-            stageRow(title: "Autotuning", detail: "Selecting the recommended local model.") {
-                ProgressView().controlSize(.small)
-            }
-        case let .downloadingCLI(progress):
-            stageRow(title: "Provider binary", detail: "Bundled provider binary is ready.") {
-                ProgressView(value: progress)
-            }
-        case let .downloadingModel(name, progress):
-            stageRow(title: "Model", detail: "Preparing \(name).") {
-                ProgressView(value: progress)
-                if let line = EarningsEstimateFormatter.line(
-                    modelName: name,
-                    range: controller.currentEarningsEstimate
-                ) {
-                    Text(line)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            }
         case .startingAgent:
             stageRow(title: "Starting", detail: "Waiting for the background provider to become healthy.") {
-                ProgressView().controlSize(.small)
-            }
-        case .authenticating:
-            stageRow(title: "Authenticating", detail: "Completing provider authentication.") {
                 ProgressView().controlSize(.small)
             }
         case let .live(model, tier):
@@ -158,7 +120,7 @@ private struct OnboardingRootView: View {
                     .tint(MalibuBrand.coral)
             }
         case let .failed(_, retryable, message):
-            stageRow(title: retryable ? "Needs retry" : "Setup paused", detail: message) {
+            stageRow(title: retryable ? "Needs retry" : "Setup failed", detail: message) {
                 if retryable {
                     launchButton(title: "Retry")
                 }

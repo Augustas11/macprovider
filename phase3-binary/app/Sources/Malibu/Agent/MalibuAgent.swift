@@ -53,105 +53,45 @@ final class MalibuAgent: ObservableObject {
     // MARK: - Lifecycle
 
     func start() async {
-        // AUDIT R2 CODE H3 fix.
         guard !isShuttingDown else { return }
 
-        // Option A: when install.sh owns the provider via launchd, monitor it
-        // instead of spawning a second macprovider-cli child. Run this before
-        // the spawned-child guard so a stale Malibu-owned CLI is released first.
+        // Release any Malibu-spawned CLI from older builds before attaching to launchd.
+        await releaseSpawnedChildForLaunchdMonitor()
+
+        snapshot.state = .starting
         if await monitorInstalledProviderIfPresent() {
             return
         }
 
-        guard child == nil else { return }
-
-        // AUDIT R2 CODE H4 fix: refuse to spawn the CLI without a validated
-        // app-owned config + keychain token. Onboarding must complete the
-        // deep-link callback first.
-        guard await ProviderConfig.isConfigured else {
+        guard ProviderConfig.readProviderID() != nil else {
             snapshot.state = .error
             snapshot.lastError = "Not set up yet. Click Launch Provider to activate."
             return
         }
-        // Re-check after the await, since we suspended.
         guard !isShuttingDown else { return }
 
-        snapshot.state = .starting
-
-        let paths = ProviderPaths.current
-        let cliURL: URL
-        do { cliURL = try Self.resolveCLIExecutable() } catch {
-            snapshot.state = .error; snapshot.lastError = "CLI binary not found"; return
-        }
-
-        var extraEnv: [String: String] = [:]
-        if let providerID = ProviderConfig.readProviderID(),
-           let token = await KeychainStore.readProviderToken(providerID: providerID) {
-            extraEnv["MACPROVIDER_PROVIDER_TOKEN"] = token
-        }
-        guard !isShuttingDown else { return }
-
-        // FreePortProbe: ask the kernel for a free 127.0.0.1 TCP port so the
-        // CLI's local HTTP inference endpoint doesn't collide with whatever
-        // else may be on port 8080 (Node dev server, Rails, jaeger). Falling
-        // back to nil lets the CLI use its default 8080; the CLI's own bind
-        // error surfaces the failure with the same context as before, so
-        // this cannot regress.
-        let probedPort = try? FreePortProbe.probe()
-
-        let launch = CLIChildProcess.Launch(
-            executable: cliURL,
-            configPath: paths.configFile,
-            controlSocketPath: paths.controlSocket,
-            httpPort: probedPort,
-            logFileURL: paths.cliLogFile,
-            extraEnvironment: extraEnv
-        )
-        let child = CLIChildProcess(launch: launch)
-        let startInstant = Date()
-        child.onUnexpectedExit = { [weak self] code in
-            Task { @MainActor in
-                guard let self else { return }
-                // AUDIT R1 CODE H1: nil the wrapper BEFORE scheduling reconnect
-                // so start()'s `guard child == nil` doesn't short-circuit.
-                self.child = nil
-                // AUDIT R1 ARCHITECT A7: fast-fail on flag/compat rejection.
-                let elapsed = Date().timeIntervalSince(startInstant)
-                if elapsed < 3 && code != 0 {
-                    self.snapshot.state = .error
-                    self.snapshot.lastError = "The bundled macprovider-cli is incompatible with this Malibu.app version (exit \(code) in \(String(format: "%.1f", elapsed))s). Please reinstall Malibu.app or file a bug."
-                    return
-                }
-                // AUDIT R2 CODE H3: do not schedule a reconnect during shutdown.
-                guard !self.isShuttingDown else { return }
-                self.snapshot.state = .reconnecting
-                self.snapshot.lastError = "CLI exited (\(code))"
-                await self.scheduleReconnect()
-            }
-        }
-        self.child = child
-
-        do {
-            try child.start()
-            startLogTail(fileURL: paths.cliLogFile)
-        } catch {
-            snapshot.state = .error; snapshot.lastError = "Failed to launch: \(error)"
-            self.child = nil
-            return
-        }
-
-        await connectControl(socketPath: paths.controlSocket.path)
+        snapshot.state = .reconnecting
+        snapshot.lastError = "Background provider is not responding. Open onboarding to reinstall or check ~/Library/Logs/macprovider/."
+        await scheduleReconnect()
     }
 
     // AUDIT R1 ARCHITECT A1: don't flip state until the CLI acks. If the CLI
     // returns accepted:false (current stub does), leave state where it was
     // and surface the reason in snapshot.lastError.
     func pause() async {
+        if monitorsLaunchdProvider {
+            snapshot.lastError = "Pause is not available while Malibu monitors the background provider."
+            return
+        }
         snapshot.pauseAcknowledged = false
         try? await control?.send(.pauseRequest)
     }
 
     func resume() async {
+        if monitorsLaunchdProvider {
+            snapshot.lastError = "Resume is not available while Malibu monitors the background provider."
+            return
+        }
         try? await control?.send(.resumeRequest)
     }
 

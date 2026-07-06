@@ -1,16 +1,19 @@
 # Provider Onboarding Audit — 2026-07-06
 
+> **Update 2026-07-06:** `feat/malibu-cli-wrapper-only` removes App-track V2 onboarding.
+> Malibu is now CLI-wrapper-only: `install.sh` for setup, launchd monitor for runtime.
+> Items marked **V2-removed** below are no longer production paths.
+
 Read-only audit of CLI-track vs App-track onboarding in current tree. Code is source of truth; memory items verified where noted.
 
 ---
 
 ## 1. Executive summary
 
-- **Two parallel tracks** share `~/.config/macprovider/config.yaml` but diverge on identity (CLI: hostname `provider_id` + YAML token; App: Ed25519 `provider_identity_v1` + Keychain token + `.installed-by-app` marker). SPEC-026 v0.13 is authoritative for App onboarding; SPEC-025 v0.1 for wrapper/CLI-child model.
-- **App-track V2 onboarding ships off by default** (`onboardingFlow=v2` or `MALIBU_ONBOARD_V2=1` required). Fresh installs see "Setup paused" unless the flag is set (`LaunchProviderController.swift:232-238`, `MalibuApp.swift:158-163`).
-- **M5 32GB Tier C cannot complete Malibu autotune today** when CLI emits `"serve_config": null` — Malibu's decoder requires a non-null object and fails before donor-mode handling (`AutotuneRecommendationRunner.swift:251-247`, `AutotuneRecommend.swift:1150`).
+- **Malibu is a CLI wrapper** (post-refactor): onboarding runs bundled `install.sh`; runtime monitors launchd-managed `macprovider-cli` via `/v1/health`. No in-app register/autotune/spawn-child path.
+- **CLI-track** remains the authoritative install path (`install.sh` → LaunchAgent → watchdog).
+- **V2 App-track removed** — former defects #1–3, #6, #10 are **V2-removed** (not production). See branch `feat/malibu-cli-wrapper-only`.
 - **CLI `install.sh` targets `$HOME/macprovider/macprovider-cli`**, not `/tmp`. Operator plist at `/tmp/macprovider-v1.8.10-run/...` is not produced by current installer (`install.sh:18-20`, `1456-1458`).
-- **Malibu always spawns its own CLI child**; no adopt-mode, no launchd conflict detection in App code. Coexistence with launchd-managed CLI is accidental (different ports possible, same `provider_id`).
 
 ---
 
@@ -37,33 +40,38 @@ Fresh Mac, `curl https://get.streamvc.live/install.sh | bash`:
 
 ---
 
-## 3. Onboarding path B — App-track
+## 3. Onboarding path B — Malibu wrapper (post-refactor)
 
 Fresh Mac, launch `Malibu.app`:
 
-| Step | Code | Artifacts | Coordinator | Failure UX |
-|------|------|-----------|-------------|------------|
-| 1. Startup route | `MalibuApp.handleStartup:112-114`, `StartupState.route:659-676` | Reads config, marker, Keychain, `onboarding.json` | — | `.setupPaused` alert if V2 off (`MalibuApp.swift:158-163`) |
-| 2. Migration (if CLI config, no marker) | `showImportDialog` / `importExistingCLIConfig:276-344` | Token → Keychain `tech.malibu.provider/{provider_id}`; strips YAML token; writes `.installed-by-app` | — | Alert on import error |
-| 3. V2 gate | `LaunchProviderController.launch:232-238` | — | — | `.failed(featureFlag)`: "App-track onboarding is not enabled" |
-| 4. Identity | `loadOrGenerateIdentity:242`, `ProviderIdentity.swift:64-66` | Keychain `tech.malibu.app` / `provider_identity_v1` | — | Keychain errors → `.failed` |
-| 5. Persist state | `saveState:245-252` | `~/Library/Application Support/Malibu/onboarding.json` (0600) | — | — |
-| 6. Register | `registerProvider:256`, `RegisterClient.postRegister:158-181` | Config YAML (no token on disk), Keychain token | **`POST /v1/providers/register`** | HTTP error → `.failed(retryable)` |
-| 7. Autotune | `finishLaunch` → `runAutotune:403`, `AutotuneRecommendationRunner.run:82-90` | Recommendation fields in config | Catalog via bundled CLI | JSON/decode/timeout → `.failed`; UI shows `error.localizedDescription` (`OnboardingWindow.swift:130-134`) |
-| 8. Model download | `downloadModel:418` | **Stub:** returns `plan.state` (always nil in live deps `LaunchProviderController.swift:123`) | — | Cosmetic progress only |
-| 9. Login item | `registerLoginItem:427`, `AppLoginItem.swift:10-11` | `SMAppService.mainApp` | — | Throws → `.failed` |
-| 10. Start agent | `startAgent:429`, `MalibuAgent.start:53-134` | Spawns bundled CLI with `--ctl-socket-path …/agent.sock`, `--managed-by malibu-app`, token via env | WS auth + identity signature | "Not set up yet" / control socket timeout / CLI exit |
-| 11. Live | `waitForFirstServing:432`, `updateState:433` | Sets `first_serving_at` in onboarding.json | — | Timeout: "Timed out waiting for the first serving frame." |
+| Step | Code | Artifacts | Notes |
+|------|------|-----------|-------|
+| 1. Startup route | `StartupState.route()` | config, marker, launchd manifest/plist | Healthy launchd → `.startAgent`; CLI config without marker → import dialog; else onboarding |
+| 2. Migration (if CLI config, no marker) | `importExistingCLIConfig` | Token → Keychain; `.installed-by-app` marker | Same as before |
+| 3. Onboarding | `LaunchProviderController.launchViaCLIInstall` | Runs bundled `install.sh` (`MACPROVIDER_NO_PROMPT=1`) | No V2 register/autotune UI |
+| 4. Finalize | `finalizeInstall` | Login item + `monitorInstalledProviderIfPresent` | Waits for `/v1/health` |
+| 5. Runtime | `MalibuAgent.start()` | Health poll only | **Does not spawn CLI child** |
 
-**State machine:** `Stage` enum `LaunchProviderController.swift:19-30`. **Resume:** `ResumePoint` + `lastStage` in onboarding.json (`307-340`). Crash mid-stage: resume from persisted `lastStage`; identity re-used via `loadOrGenerateIdentity` / `loadExistingIdentity` (`342-370`). **Not recovered:** missing Keychain identity when `isConfigured` still true (see §5).
-
-**V2 flag checks:** `LaunchProviderController.isOnboardingV2Enabled` (`157-173`); `StartupState.detect` (`655`); `StartupState.route` (`675`); `applyMigrationDecision` (`696`). Default **off** unless env or `UserDefaults onboardingFlow=v2`. SPEC-026 v0.12: fresh flag-off shows setup-paused, not browser OAuth.
-
-**Reboot:** `SMAppService` re-launches app → `.startAgent` if configured → `MalibuAgent.start()` spawns new CLI child. No launchd plist in App track.
+**Removed (V2-removed):** identity generation, `POST /v1/providers/register`, in-app autotune, model download stage, control-socket child spawn, `resumeOnboarding` / `setupPaused` routes.
 
 ---
 
-## 4. Overlap + priority map
+## 3b. Onboarding path B — App-track V2 (historical, removed)
+
+<details>
+<summary>Pre-refactor V2 path (reference only)</summary>
+
+| Step | Code | Status |
+|------|------|--------|
+| V2 gate / setup paused | `isOnboardingV2Enabled`, `setupPaused` | **V2-removed** |
+| Register / autotune / model download | `finishLaunch`, `resumePartialOnboarding` | **V2-removed** |
+| Spawn CLI child | `MalibuAgent.start()` spawn path | **V2-removed** |
+
+</details>
+
+---
+
+## 4. Overlap + priority map (post-refactor)
 
 | Artifact | CLI-track | App-track | Source of truth |
 |----------|-----------|-----------|-----------------|
@@ -85,18 +93,18 @@ Fresh Mac, launch `Malibu.app`:
 
 ## 5. UX defect list (code-evidence only)
 
-| # | Defect | Symptom | Evidence | Sev | Fix |
-|---|--------|---------|----------|-----|-----|
-| 1 | `serve_config: null` crashes Malibu JSON decode | Autotune spinner → "Needs retry" with opaque error; M5 32GB Tier C donor-only | `AutotuneRecommend.swift:1150`; `AutotuneServeConfigPayload` non-optional `AutotuneRecommendationRunner.swift:251-247`; no donor branch in `finishLaunch` | **Blocker** | M — nullable decode + donor UX like `install.sh:1274-1295` |
-| 2 | V2 onboarding default-off | Fresh Malibu install: "Setup paused", no earn path | `LaunchProviderController.swift:172`; `StartupState.route:675` | **Blocker** (product) | S — default `v2` in release build |
-| 3 | No identity recovery | Keychain identity missing but config OK: app shows "live"/serving; coordinator identity auth fails silently | `startConfiguredAgent:282-297`; `handleIdentitySignatureRequest:415-421`; no regen UI | **High** | M — detect `!ProviderIdentity.isReady()` + re-register flow |
-| 4 | No launchd coexistence handling | launchd CLI running + Malibu open → second CLI, duplicate provider, RAM waste | No `ProviderConflictDetector` in app; `MalibuAgent.start:56`; SPEC-025 §12 unimplemented | **High** | L — adopt-mode or conflict dialog |
-| 5 | `/tmp` plist not from installer | Reboot kills provider if plist manually points at `/tmp` | `install.sh:1458` uses `$INSTALL_DIR`; operator plist is out-of-tree | **High** (ops) | S — reinstall via install.sh |
-| 6 | Model download stage is no-op | "Preparing recommended" with fake progress | `Dependencies.downloadModel:123` returns `plan.state` | **Medium** | M — wire HF download or skip stage |
-| 7 | CLI uninstall leaves caches + Malibu state | HF cache, `~/.config/macprovider/`, Malibu App Support untouched | `uninstall.sh:112-113`, `185-188`; no Malibu paths | **Medium** | M — cross-track cleanup docs/UI |
-| 8 | Malibu uninstall misses CLI launchd | CLI LaunchAgent keeps running after "Quit and Uninstall" | `wipeAppOwnedState:466-488` — App Support only | **Medium** | M |
-| 9 | Adhoc CLI + launchd on macOS 26+ | `launchctl bootstrap` fails | `install_plist:1445`; pkg path validates Gatekeeper (`1112`) | **High** on unsigned | S — require signed pkg path |
-| 10 | Autotune errors opaque | `.failed` shows `localizedDescription`; `AutotuneRecommendationError` has no messages | `LaunchProviderController.swift:262`; `AutotuneRecommendationError:212-216` | **Low** | S |
+| # | Defect | Status |
+|---|--------|--------|
+| 1 | `serve_config: null` crashes Malibu JSON decode | **V2-removed** |
+| 2 | V2 onboarding default-off / setup paused | **Fixed** — CLI install is only path |
+| 3 | No identity recovery | **V2-removed** (identity path deferred to SPEC-026 P4) |
+| 4 | No launchd coexistence / dual CLI | **Fixed** — monitor-only, no spawn |
+| 5 | `/tmp` plist not from installer | Open (ops) |
+| 6 | Model download stage is no-op | **V2-removed** |
+| 7 | CLI uninstall leaves caches + Malibu state | Open |
+| 8 | Malibu uninstall misses CLI launchd | Open |
+| 9 | Adhoc CLI + launchd on macOS 26+ | Open |
+| 10 | Autotune errors opaque | **V2-removed** |
 
 **Verified:** Backup `Malibu.app.bak-*` is Developer ID + notarized (Superposition YF7XNRJUG4), stapled — enrollment blocker memory superseded.
 
