@@ -36,20 +36,15 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
             benchmarkID: nil,
             benchmarkGeneratedAt: nil,
             recommendedModel: "model-a",
-            recommendationTier: .paid,
-	            selectedCandidate: nil,
-	            candidates: [],
-	            allCandidates: [],
-	            defaultModel: nil,
+            promptRatePerMillionTokens: nil,
+            completionRatePerMillionTokens: nil,
+            selectedCandidate: nil,
+            candidates: [],
+            allCandidates: [],
+            defaultModel: nil,
             donorFallbackModel: nil,
             donorFallbackCandidate: nil,
-            donorFallbackNetUSDPerHour: nil,
-            recommendedDeltaUSDPerHour: 0,
-            recommendedDeltaPercent: 0,
-            warnings: [],
-            assumedUtilization: 1,
-            availabilityHoursPerDay: 24,
-            electricityUSDPerKWH: nil
+            warnings: []
         )
         let benchmark = CandidateBenchmark(
             modelKey: "model-a",

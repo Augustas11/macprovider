@@ -16,8 +16,6 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
         XCTAssertEqual(request.hardware.chip, "Apple M4")
         XCTAssertEqual(request.hardware.memoryGB, 32)
         XCTAssertEqual(request.hardware.bandwidthTier, .c)
-        XCTAssertEqual(request.assumedUtilization, 0.25)
-        XCTAssertEqual(request.availabilityHoursPerDay, 8)
         XCTAssertEqual(request.donorMode, false)
         XCTAssertEqual(request.benchmarks["qwen3-coder-30b-a3b-instruct"]?.modelKey, "qwen3-coder-30b-a3b-instruct")
         XCTAssertEqual(request.rateCard.version, "baked-2026-07-03")
@@ -128,9 +126,6 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
           },
           "warnings": [],
           "generatedAt": "2026-07-06T00:00:00Z",
-          "electricityUSDPerKWH": 0.15,
-          "assumedUtilization": 0.25,
-          "availabilityHoursPerDay": 8,
           "donorMode": false
         }
         """

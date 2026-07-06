@@ -1,10 +1,17 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.3
+version: v0.4
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-07-06
 
 ## Change log
+
+- **v0.4 (2026-07-06)** — Rate-card v4 pivot: SPEC-023 moves from hourly net capacity estimates to per-token transcript semantics.
+  1. **Drop hourly-net projection.** `expected_net_usd_per_hour`, `assumed_utilization`, and `electricityUSDPerKWH` inputs are removed. Recommendations now use only real measured tokens from provider transcripts.
+  2. **Remove paid threshold and starter tier.** The `$0.0050/hr` financial gate, paid vs. starter recommendation tiers, and two-path install transcript logic are superseded. v0.4 scoring uses a single pass: `score = demand_weight × completion_rate_per_mtok × measured_sustained_tps`.
+  3. **Per-token payout semantics.** Provider earnings are deterministic real income: `sum(tokens × rate)` where rate is the per-token rate from the current rate card. Install transcript shows one outcome: recommended model or donor-mode fallback.
+  4. **New scoring formula.** §4 replaces utility/hourly/utilization terms with token throughput: `score = demand_weight × completion_rate_per_mtok × measured_sustained_tps`. `raw_score` now uses `completion_rate_per_mtok` credits, not USD, for ranking independence from rate-card USD volatility.
+  5. **Two outcomes only: recommended / donor.** When at least one row passes §5, the CLI recommends it with per-token rates. When none pass, the donor transcript applies. No starter tier and no `recommendation_tier` JSON field.
 
 - **v0.3 (2026-07-06)** — Issue 411 promotes
   `nvidia/nemotron-3-nano-30b-a3b` from a baked diagnostic row to a
@@ -28,7 +35,7 @@ last-locked: 2026-07-06
      emits `.tps_below_gate` / `.ttft_above_gate` warnings but does not
      veto the recommendation. `thermalThrottleDetected` remains a hard
      block; the real financial gate stays `expected_net_usd_per_hour ≥
-     paidThreshold ($0.005/hr)`. `swapDetected` similarly went soft in
+     paidThreshold ($0.005/hr)` **[superseded v0.4: removed per per-token payout pivot]**. `swapDetected` similarly went soft in
      v1.7.6 (`.swap_observed_under_load`). Motivation: on M-Base 32GB
      Tier C hardware (M5), every candidate had positive net income but
      was hard-blocked by TPS gates calibrated for M-Pro/M-Max. The
@@ -91,7 +98,7 @@ last-locked: 2026-07-06
 
 ## 1. Mission
 
-`autotune --recommend` scores rate-card-eligible models against the operator's detected Mac hardware, local benchmark results, the current rate card, and an operator-curated static demand signal, then recommends the model with the best demand-weighted expected provider net `$/hr` among eligible rows. It serves every new provider installer and every operator who runs `macprovider-cli autotune --recommend` after install. Wave 0c lands now because beta launch readiness depends on the 120-provider acquisition cohort reaching a low-friction install path and a correct first-model choice instead of the current donor-default behavior that often selects the largest RAM-fitting dense model rather than the best paid-yield row.
+`autotune --recommend` scores rate-card-eligible models against the operator's detected Mac hardware, local benchmark results, the current rate card, and an operator-curated static demand signal, then recommends the model with the best demand-weighted token throughput among eligible rows. It serves every new provider installer and every operator who runs `macprovider-cli autotune --recommend` after install. Wave 0c lands now because beta launch readiness depends on the 120-provider acquisition cohort reaching a low-friction install path and a correct first-model choice instead of the current donor-default behavior that often selects the largest RAM-fitting dense model rather than the best paid-yield row.
 
 ## 2. Non-goals
 
@@ -113,18 +120,18 @@ Hardware fields come from `MachineFingerprinter.sample()` plus local autotune be
 
 Required hardware fields:
 
-| Field | Type | Source | Rule |
-|---|---|---|---|
-| `ram_gb` | integer | `MachineFingerprinter.sample().ramGB` | Rounded unified memory in GiB. Must be at least `1`; unknown hardware is not represented as `0`. |
-| `chip` | string | `MachineFingerprinter.sample().chip` | Apple chip family or `"unknown"`. |
-| `os_version` | string | `MachineFingerprinter.sample().osVersion` | Used only for support/debug output. |
-| `binary_version` | string | `MachineFingerprinter.sample().binaryVersion` | Used for reproducibility and support/debug output. |
-| `bandwidth_tier` | string enum: `S`, `A`, `B`, `C`, `unknown` | derived from chip family / benchmark table | Unknown hardware maps to `C` for eligibility conservatism unless a benchmark-derived tier is available. |
-| `diversification_id` | string | HMAC-SHA256-derived provider ID if configured, otherwise HMAC-SHA256-derived stable machine identity | Input to deterministic diversification. Raw machine fingerprints MUST NOT be persisted, logged, emitted in JSON, included in support bundles, or sent to coordinator/gateway as part of v0.1 recommendation. |
-| `candidate_benchmarks[model_key].sustained_tps` | float | local autotune benchmark | Warm steady-state decode tokens/sec for each candidate. |
-| `candidate_benchmarks[model_key].ttft_ms` | integer | local autotune benchmark | Time to first token under the v0.1 benchmark prompt shape. |
-| `candidate_benchmarks[model_key].swap_detected` | boolean | local probe | **[amended v0.2]** Observed swap emits `swap_observed_under_load` warning; does not fail eligibility. |
-| `candidate_benchmarks[model_key].thermal_throttle_detected` | boolean | local probe | Thermal throttle during probe fails eligibility. **[unchanged v0.2: hard block]** |
+|| Field | Type | Source | Rule |
+||---|---|---|---|
+|| `ram_gb` | integer | `MachineFingerprinter.sample().ramGB` | Rounded unified memory in GiB. Must be at least `1`; unknown hardware is not represented as `0`. |
+|| `chip` | string | `MachineFingerprinter.sample().chip` | Apple chip family or `"unknown"`. |
+|| `os_version` | string | `MachineFingerprinter.sample().osVersion` | Used only for support/debug output. |
+|| `binary_version` | string | `MachineFingerprinter.sample().binaryVersion` | Used for reproducibility and support/debug output. |
+|| `bandwidth_tier` | string enum: `S`, `A`, `B`, `C`, `unknown` | derived from chip family / benchmark table | Unknown hardware maps to `C` for eligibility conservatism unless a benchmark-derived tier is available. |
+|| `diversification_id` | string | HMAC-SHA256-derived provider ID if configured, otherwise HMAC-SHA256-derived stable machine identity | Input to deterministic diversification. Raw machine fingerprints MUST NOT be persisted, logged, emitted in JSON, included in support bundles, or sent to coordinator/gateway as part of v0.1 recommendation. |
+|| `candidate_benchmarks[model_key].sustained_tps` | float | local autotune benchmark | Warm steady-state decode tokens/sec for each candidate. |
+|| `candidate_benchmarks[model_key].ttft_ms` | integer | local autotune benchmark | Time to first token under the v0.1 benchmark prompt shape. |
+|| `candidate_benchmarks[model_key].swap_detected` | boolean | local probe | **[amended v0.2]** Observed swap emits `swap_observed_under_load` warning; does not fail eligibility. |
+|| `candidate_benchmarks[model_key].thermal_throttle_detected` | boolean | local probe | Thermal throttle during probe fails eligibility. **[unchanged v0.2: hard block]** |
 
 HMAC identity rules:
 
@@ -139,24 +146,24 @@ Bandwidth tier rules:
 - Tier order is `S >= A >= B >= C`; `unknown` is treated as `C` for eligibility.
 - v0.1 derives `bandwidth_tier` from the normalized `chip` string before benchmark overrides:
 
-| Chip family match | bandwidth_tier |
-|---|---|
-| `M3 Ultra`, `M4 Ultra`, or later `Ultra` | `S` |
-| `M1 Ultra`, `M2 Ultra`, `M3 Max`, `M4 Max`, or later `Max` | `A` |
-| `M1 Max`, `M2 Max`, any `Pro` | `B` |
-| `M1`, `M2`, `M3`, `M4`, `unknown`, or unrecognized chip string | `C` |
+|| Chip family match | bandwidth_tier |
+||---|---|
+|| `M3 Ultra`, `M4 Ultra`, or later `Ultra` | `S` |
+|| `M1 Ultra`, `M2 Ultra`, `M3 Max`, `M4 Max`, or later `Max` | `A` |
+|| `M1 Max`, `M2 Max`, any `Pro` | `B` |
+|| `M1`, `M2`, `M3`, `M4`, `unknown`, or unrecognized chip string | `C` |
 
 - A benchmark-derived tier override MAY raise the chip-derived tier only when the benchmark table is compiled into the same binary release and the table row names the benchmark ID, threshold, and resulting tier. It MUST NOT lower a known chip-derived tier in v0.1.
 - `min_bandwidth_tier` passes when `mac.bandwidth_tier >= model.min_bandwidth_tier` under the order above.
 
 Optional hardware fields:
 
-| Field | Type | Rule |
-|---|---|---|
-| `machine` | string | Human-readable Mac product name if available. |
-| `power_watts` | float | Used only when an electricity estimate is available. Absence must not fail recommendation. |
-| `measured_memory_pressure` | string enum | May be used for confidence. **[amended v0.2: the only runtime hard failure is `thermal_throttle_detected == true`; swap is advisory per change log v0.2 point 1]**. |
-| `benchmark_id` | string | Stable ID of the local benchmark run, included when available. |
+|| Field | Type | Rule |
+||---|---|---|
+|| `machine` | string | Human-readable Mac product name if available. |
+|| `power_watts` | float | Used only when an electricity estimate is available. Absence must not fail recommendation. |
+|| `measured_memory_pressure` | string enum | May be used for confidence. **[amended v0.2: the only runtime hard failure is `thermal_throttle_detected == true`; swap is advisory per change log v0.2 point 1]**. |
+|| `benchmark_id` | string | Stable ID of the local benchmark run, included when available. |
 
 ### 3.2 Candidate/admission catalog
 
@@ -215,15 +222,15 @@ The table below lists the minimum v0.1 rows and gate values. The baked JSON rele
 
 The v0.1 baked catalog MUST contain at least these rows:
 
-| model_key | model_id | min_ram_gb | min_bandwidth_tier | min_sustained_tps | max_4k_ttft_ms | runtime_status |
-|---|---|---:|---|---:|---:|---|
-| `meta-llama/llama-3.1-8b-instruct` | `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` | 16 | `C` | 20 | 2500 | `recommendable` |
-| `openai/gpt-oss-20b` | `mlx-community/gpt-oss-20b-MXFP4-Q8` | 24 | `C` | 30 | 2500 | `recommendable` |
-| `qwen3-32b` | `mlx-community/Qwen3-32B-4bit` | 32 | `A` | 30 | 3000 | `listed` |
-| `qwen3-coder-30b-a3b-instruct` | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | 32 | `C` | 25 | 3000 | `recommendable` |
-| `qwen2.5-coder-32b-instruct` | `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit` | 64 | `A` | 30 | 3500 | `listed` |
-| `google-gemma-4-26b-a4b-it` | `mlx-community/gemma-4-26b-a4b-it-4bit` | 32 | `C` | 30 | 3000 | `blocked` |
-| `nvidia/nemotron-3-nano-30b-a3b` | `mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit` | 32 | `C` | 30 | 3000 | `recommendable` |
+|| model_key | model_id | min_ram_gb | min_bandwidth_tier | min_sustained_tps | max_4k_ttft_ms | runtime_status |
+||---|---|---:|---|---:|---:|---|
+|| `meta-llama/llama-3.1-8b-instruct` | `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit` | 16 | `C` | 20 | 2500 | `recommendable` |
+|| `openai/gpt-oss-20b` | `mlx-community/gpt-oss-20b-MXFP4-Q8` | 24 | `C` | 30 | 2500 | `recommendable` |
+|| `qwen3-32b` | `mlx-community/Qwen3-32B-4bit` | 32 | `A` | 30 | 3000 | `listed` |
+|| `qwen3-coder-30b-a3b-instruct` | `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` | 32 | `C` | 25 | 3000 | `recommendable` |
+|| `qwen2.5-coder-32b-instruct` | `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit` | 64 | `A` | 30 | 3500 | `listed` |
+|| `google-gemma-4-26b-a4b-it` | `mlx-community/gemma-4-26b-a4b-it-4bit` | 32 | `C` | 30 | 3000 | `blocked` |
+|| `nvidia/nemotron-3-nano-30b-a3b` | `mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit` | 32 | `C` | 30 | 3000 | `recommendable` |
 
 `blocked` rows may be shown only as diagnostics when useful; they are never downloaded, benchmarked, or recommended by default in v0.1. The Gemma blocked status means pending `mlx-swift-lm` migration validation and rate-card rollout, not an upstream architecture absence. Nemotron moved to `recommendable` after its `mlx-swift-lm` runtime validation and coordinator rate-card rollout.
 
@@ -328,9 +335,9 @@ Fetched `demand-rank.json` and `autotune-candidates.json` MUST be verified befor
 
 Clients MUST keep the public key and key ID release-pinned. Key rotations require a new binary release that embeds the new verifier key and rejects older sidecar key IDs for the active feed generation.
 
-## 4. Formula (locked v0.1)
+## 4. Formula (updated v0.4)
 
-The recommendation engine MUST use this v0.1 formula shape:
+The v0.4 recommendation engine uses per-token throughput scoring independent of rate-card USD volatility:
 
 ```text
 eligible_rows = rows where:
@@ -340,12 +347,9 @@ eligible_rows = rows where:
   local_autotune_passes(model, mac)
 
 raw_score(row | mac) =
-  measured_tps(row, mac)
-  × 3600
-  × usd_per_million_completion_tok(row)
-  × provider_share(row)
-  × max(demand_weight(row), cold_start_floor)
-  × tier_weight(row, mac.tier)
+  demand_weight(row)
+  × completion_rate_per_mtok(row)
+  × measured_sustained_tps(row, mac)
 
 recommendation_pool =
   all eligible rows where raw_score >= 0.85 × max(raw_score)
@@ -354,33 +358,30 @@ default_model =
   pool[ stable_hash(diversification_id) % len(pool) ]
 ```
 
-Constants locked in v0.1:
+**Raw score uses `completion_rate_per_mtok` credits** (not USD) to rank candidates independent of rate-card price fluctuations. A model with higher token throughput and demand weight ranks higher. Tiebreaking and diversification logic are unchanged from v0.1.
+
+Constants locked in v0.4:
 
 | Constant | Value | Rule |
 |---|---:|---|
 | `cold_start_floor` | `0.15` | From demand-rank JSON; schema validation fails if the fetched value differs. |
 | `diversification_band` | `0.85` | All eligible rows within 85% of the best raw score join the diversification pool. |
-| `provider_share` | `0.90` | Represented by rate-card row `provider_share_bps = 9000`; the row value is authoritative, but v0.1 rows are expected to use 0.90. |
-| `tier_weight` | `1.0` | Applies to all rows and tiers in v0.1. Tier-specific calibration is deferred to v0.2. |
+| `provider_share` | `0.90` | Represented by rate-card row `provider_share_bps = 9000`; the row value is authoritative, but v0.4 rows are expected to use 0.90. |
+| `tier_weight` | `1.0` | Applies to all rows and tiers in v0.4. Tier-specific calibration is deferred to v0.2 follow-up. |
 | ranked output length | `5` | The JSON `candidates[]` array defaults to the top 5 rows after ranking, including eligible rows first and then selected ineligible diagnostic rows only when no eligible row exists. |
 | `stable_hash` | SHA-256 over UTF-8 `diversification_id` | Interpret the first 8 bytes as unsigned big-endian integer for modulo. |
 
-`usd_per_million_completion_tok(row)` is:
+**Real provider earnings** are recorded after tokens are served:
 
 ```text
-completion_rate_per_mtok
-× (global_multiplier_ppm / 1_000_000)
-× (usd_per_million_credits / 1_000_000)
+real_earnings = sum over transcript entries of (token_count × rate_per_token)
 ```
 
-Example: `completion_rate_per_mtok = 100000`, `global_multiplier_ppm = 1000000`, and `usd_per_million_credits = 1.0` yields `$0.100000/M` completion tokens. `provider_share(row)` is `provider_share_bps / 10_000.0`.
+Displayed candidate capacity is a per-token throughput estimate:
 
-Displayed earning fields are not allowed to overstate demand certainty:
-
-- `expected_gross_usd_per_hour` is full-utilization buyer gross capacity: `measured_tps × 3600 × usd_per_million_completion_tok / 1_000_000`.
-- `platform_fee_usd_per_hour` is `expected_gross_usd_per_hour × (1 - provider_share)`.
-- `expected_net_usd_per_hour` is provider-side capacity at `inputs.assumed_utilization`, minus electricity only when electricity is supplied: `(expected_gross_usd_per_hour - platform_fee_usd_per_hour) × assumed_utilization - electricity_usd_per_hour`.
-- `raw_score` is for ranking only and includes `demand_weight`; the transcript must still say the result is an estimate, not guaranteed realized earnings.
+- `tokens_per_second` is the measured `sustained_tps` from local autotune benchmark.
+- `platform_fee` is derived from the `provider_share` split at recommendation time.
+- `raw_score` is for ranking only; the transcript must say the result is an estimate.
 
 ## 5. Eligibility gates (mandatory pre-filter)
 
@@ -408,11 +409,11 @@ A row is eligible only if every gate passes:
 - `thermal_throttle_detected == false` **[unchanged from v0.1: hard block; the ONLY runtime hard eligibility gate in v0.2]**.
 - The candidate benchmark must be from the current `benchmark_id` or from a cached run whose candidate catalog hash, binary version, model ID, and HMAC-derived hardware identity hash match and whose `generated_at` is no older than 7 days.
 
-The real paid financial gate in v0.2 is `expected_net_usd_per_hour >= $0.0050/hr` (§7). If no rows clear that threshold but at least one eligible row has `expected_net_usd_per_hour > 0`, `autotune --recommend` must emit a starter recommendation per §7.3. If every eligible row is non-positive, or if no row passes all §5 gates, it must emit no paid/starter recommendation and use the donor-tier transcript in §7.2.
+In v0.4, there is no paid financial gate. All eligible rows proceed to recommendation regardless of earnings projections. Real earnings are recorded only after tokens are served.
 
 ## 6. Output JSON contract (`autotune --recommend`)
 
-`autotune --recommend --json` MUST emit deterministic field order exactly as shown below. Unknown optional data uses `null`; fields are not reordered, renamed, or omitted in v0.1.
+`autotune --recommend --json` MUST emit deterministic field order exactly as shown below. Unknown optional data uses `null`; fields are not reordered, renamed, or omitted in v0.4.
 
 ```json
 {
@@ -430,34 +431,26 @@ The real paid financial gate in v0.2 is `expected_net_usd_per_hour >= $0.0050/hr
   "inputs": {
     "rate_card_version": "<string>",
     "demand_rank_version": "<string>",
-    "candidate_catalog_version": "<string>",
-    "electricity_usd_per_kwh": null,
-    "assumed_utilization": 1.0,
-    "availability_hours_per_day": 24
+    "candidate_catalog_version": "<string>"
   },
   "recommended_model": "<model_key-or-null>",
-  "recommendation_tier": "paid|starter|donor|none",
+  "prompt_rate_usd_per_million_tokens": null,
+  "completion_rate_usd_per_million_tokens": null,
   "serve_config": null,
   "candidates": [
     {
       "rank": 1,
       "model": "<model_key>",
       "eligible": true,
-      "expected_gross_usd_per_hour": 0.0,
-      "expected_net_usd_per_hour": 0.0,
-      "electricity_usd_per_hour": null,
-      "platform_fee_usd_per_hour": 0.0,
+      "prompt_rate_usd_per_million_tokens": 0.0,
+      "completion_rate_usd_per_million_tokens": 0.0,
       "tokens_per_second": 0.0,
       "memory_headroom_gb": 0.0,
       "confidence": "low",
-      "why": "<one-line reason>"
+      "why": "<one-line reason>",
+      "raw_score": 0.0
     }
   ],
-  "comparison": {
-    "default_model": "<model_key-or-null>",
-    "recommended_delta_usd_per_hour": 0.0,
-    "recommended_delta_percent": 0.0
-  },
   "warnings": []
 }
 ```
@@ -468,26 +461,30 @@ Schema rules:
 - `generated_at` is RFC3339 UTC.
 - `hardware.memory_gb` is an integer greater than or equal to `1`.
 - `hardware.bandwidth_tier` is one of `S`, `A`, `B`, `C`, or `unknown`.
-- `inputs.electricity_usd_per_kwh` is `null` unless the operator supplied it or the CLI has an explicit configured default. When `null`, candidate `electricity_usd_per_hour` is also `null`, electricity is omitted from net calculation, and `warnings[]` includes `electricity_not_included`.
-- `inputs.assumed_utilization` defaults to `1.0` and is in `[0.0, 1.0]`.
-- `inputs.availability_hours_per_day` defaults to `24` and is in `[0, 24]`.
-- `recommended_model` is a model key string when a paid or starter recommendation clears all §5 gates. Paid recommendations require `expected_net_usd_per_hour >= 0.0050`; starter recommendations require `0 < expected_net_usd_per_hour < 0.0050`. Donor and none outcomes emit `recommended_model = null`.
-- `recommendation_tier` is one of `paid`, `starter`, `donor`, or `none`. `paid` means the selected model clears the minimum paid-yield threshold. `starter` means the selected model is eligible and positive-net but below the paid-yield threshold. `donor` means no positive-net eligible row exists but a donor-compatible catalog row exists for local donor-mode testing. `none` means no paid, starter, or donor-compatible row is available.
-- `serve_config` is `null` in recommendation-only output when no apply-ready serving configuration has been attached. When present, it is the exact model/knob payload the installer can apply for the selected paid or starter recommendation; donor outcomes keep `donor_mode = true`.
+- `recommended_model` is a model key string when at least one eligible row exists; otherwise `null`.
+- `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD/M rates for the selected recommendation, derived from rate-card credits and `usd_per_million_credits`. Both are `null` when `recommended_model` is `null`.
+- `serve_config` is `null` in recommendation-only output when no apply-ready serving configuration has been attached. When present, it is the exact model/knob payload the installer can apply for the selected recommendation; donor outcomes keep `donor_mode = true`.
 - `candidates[]` default length is at most 5. It is sorted by eligibility first, then `raw_score` descending, then `model` lexicographically for deterministic ties.
-- `expected_*_usd_per_hour`, `platform_fee_usd_per_hour`, `tokens_per_second`, and `memory_headroom_gb` are rounded to 6 decimal places in JSON.
+- Candidate `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD display rates from the rate-card row used for that candidate.
+- `raw_score` is rounded to 6 decimal places in JSON.
 - `confidence` is:
-  - `high` when rate-card fetch, signed demand-rank fetch, signed candidate-catalog fetch, current local benchmark, no-swap, and no-thermal checks all used live/current data.
+  - `high` when rate-card fetch, signed demand-rank fetch, signed candidate-catalog fetch, and current local benchmark all used live/current data.
   - `medium` when rate card, demand rank, or candidate catalog used a valid baked fallback, or the benchmark used a valid cache.
   - `low` when both market inputs used baked fallback, hardware tier is unknown, or any non-fatal diagnostic warning affects the recommended row.
 - `why` is a single line under 140 characters, contains no newline, and must not promise realized buyer demand.
-- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.1 warning vocabulary is: `candidate_catalog_fallback_used`, `candidate_catalog_stale`, `demand_rank_fallback_used`, `demand_rank_stale`, `electricity_not_included`, `hardware_tier_unknown`, `rate_card_fallback_used`, `recommendation_below_threshold`, `recommendation_starter_tier`, `no_eligible_paid_model`.
+- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.4 warning vocabulary is: `candidate_catalog_fallback_used`, `candidate_catalog_stale`, `demand_rank_fallback_used`, `demand_rank_stale`, `hardware_tier_unknown`, `rate_card_fallback_used`, `no_eligible_model`, `rate_card_default_tier_used`, `tps_below_gate`, `ttft_above_gate`, `swap_observed_under_load`.
 
-## 7. Install transcript copy (locked text)
+## 7. Per-token payout semantics
 
-All `$/hr` human transcript values MUST render as `$%.4f/hr`. The minimum paid-yield threshold is `$0.0050/hr` after provider share, assumed utilization, and available electricity adjustment.
+In v0.4, provider earnings are fully determined by real delivered tokens and the per-token rate from the rate card:
 
-### 7.1 Happy path
+```text
+real_earnings = sum(tokens_served × rate_per_token_from_rate_card)
+```
+
+The install transcript shows a per-token rate at recommendation time and instructs the operator that the provider will earn `sum(tokens × rate)` deterministically.
+
+### 7.1 Happy path (recommended model)
 
 Use this text verbatim, replacing braces with computed values:
 
@@ -496,15 +493,14 @@ Detected {machine_or_chip}, {memory_gb} GB unified memory, Tier {bandwidth_tier}
 Benchmarked {benchmarked_count} compatible models against rate card {rate_card_version} and demand rank {demand_rank_version}.
 
 Recommended: {recommended_model}
-Expected net capacity: {expected_net_usd_per_hour}/hr at {assumed_utilization_percent}% utilization
-Why: {recommended_delta_usd_per_hour}/hr vs default {default_model}; {memory_headroom_gb} GB memory headroom
-
-This is an estimate, not a guarantee. Actual earnings depend on buyer demand, uptime, thermal state, electricity, and rate-card changes.
+Rate: ${prompt_rate_usd_per_million_tokens} per million prompt tokens
+      ${completion_rate_usd_per_million_tokens} per million completion tokens
+Real earnings scale with buyer demand and your uptime.
 
 Start provider with {recommended_model}? [Y/n]
 ```
 
-Happy path applies only when at least one recommendable model is eligible and the selected recommendation has `expected_net_usd_per_hour >= 0.0050`.
+Happy path applies only when at least one recommendable model is eligible and clears all §5 gates.
 
 ### 7.2 Donor-tier path
 
@@ -512,37 +508,16 @@ Use this text verbatim, replacing braces with computed values:
 
 ```text
 Detected {machine_or_chip}, {memory_gb} GB unified memory, Tier {bandwidth_tier}.
-No paid model currently clears the minimum net-yield threshold of $0.0050/hr.
+No catalog model currently fits this Mac for network serving.
 
 Best compatible option: {best_compatible_model}
-Expected net capacity: {expected_net_range_or_value}/hr before demand risk
 Recommendation: donor mode only
 
 You can keep this Mac configured for donor-mode testing, but it is not expected to earn meaningful revenue on the current rate card.
 Enable donor mode? [y/N]
 ```
 
-Donor-tier path applies when every otherwise eligible row has `expected_net_usd_per_hour <= 0`, when no row passes all §5 gates, or when only a donor-compatible non-default row remains available for explicit local donor-mode testing. It MUST NOT consume the positive-net starter case in §7.3.
-
-### 7.3 Starter-tier path
-
-Use this text verbatim, replacing braces with computed values:
-
-```text
-Detected {machine_or_chip}, {memory_gb} GB unified memory, Tier {bandwidth_tier}.
-Benchmarked {benchmarked_count} compatible models against rate card {rate_card_version} and demand rank {demand_rank_version}.
-
-Recommended starter model: {recommended_model}
-Expected net capacity: {expected_net_usd_per_hour}/hr at {assumed_utilization_percent}% utilization
-This is below the $0.0050/hr paid tier, but still positive starter earnings.
-Why: {recommended_delta_usd_per_hour}/hr vs default {default_model}; {memory_headroom_gb} GB memory headroom
-
-This is an estimate, not a guarantee. Actual earnings depend on buyer demand, uptime, thermal state, electricity, and rate-card changes.
-
-Start provider with {recommended_model}? [Y/n]
-```
-
-Starter-tier path applies only when no eligible row clears `expected_net_usd_per_hour >= 0.0050`, at least one eligible row has `expected_net_usd_per_hour > 0`, and all §5 integrity, fit, benchmark-cache, and thermal gates still pass. The selected starter row is the highest-net eligible row. The CLI emits `recommendation_tier = "starter"` and `recommendation_starter_tier`; it does not emit `recommendation_below_threshold` for this positive-net recommendation.
+Donor-tier path applies when no row passes all §5 gates and only a donor-compatible non-default row remains available for explicit local donor-mode testing.
 
 ## 8. Donor-mode UX
 
@@ -554,33 +529,27 @@ v0.1 locks an explicit local donor-mode override:
 
 When `donor_mode == true`:
 
-- The CLI may skip only the paid-yield threshold and demand-rank `recommendable == true` default-selection gate.
+- The CLI may skip only the recommendability and demand-rank `recommendable == true` default-selection gate.
 - The CLI MUST NOT bypass signed candidate-catalog presence, immutable model revision, canonical artifact-set digest check, `runtime_status != "blocked"`, model ID allowlist, RAM headroom, no-swap, no-thermal, or runtime-support gates.
 - A donor-mode row must have signed candidate metadata with `runtime_status` equal to `candidate`, `listed`, or `recommendable`; `blocked` rows remain forbidden.
 - SPEC-023 does not add coordinator/gateway donor-routing or settlement behavior. Applying donor mode may write local config and status only; it MUST NOT auto-start or auto-register a network-connected paid provider for a non-recommendable donor row. Network-connected donor serving requires a separate donor-routing/settlement spec or build prerequisite.
 - The CLI must print an explicit warning before commit:
 
 ```text
-DONOR MODE: {selected_model} is estimated to earn {delta_usd_per_hour}/hr less than the recommended model on this Mac.
-```
-
-- When no paid recommendation exists, use:
-
-```text
-DONOR MODE: no paid model clears $0.0050/hr on this Mac; {selected_model} is for network support only.
+DONOR MODE: {selected_model} does not meet rate-card or hardware requirements on this Mac.
 ```
 
 - `macprovider-cli status` must show a `DONOR MODE` badge alongside the configured model while `donor_mode: true`.
 
 ## 9. Re-tune cadence + UX
 
-`autotune --recommend` re-runs or prompts the operator in exactly these v0.1 cases:
+`autotune --recommend` re-runs or prompts the operator in exactly these v0.4 cases:
 
 1. Manual invocation: `macprovider-cli autotune --recommend`.
 2. `macprovider-cli update` or installer rerun after install, when the live rate-card version, live demand-rank version, signed candidate-catalog version/hash, binary version, stable hardware identity hash, or benchmark age differs from stored recommendation state.
 3. Installer rerun when no stored recommendation exists.
 
-v0.1 explicitly does not re-run automatically on coordinator SIGHUP or rate-card hot reload. Coordinator broadcast of recommendation changes is deferred to v0.2.
+v0.4 explicitly does not re-run automatically on coordinator SIGHUP or rate-card hot reload. Coordinator broadcast of recommendation changes is deferred to v0.2 follow-up.
 
 The CLI stores the last recommendation result at:
 
@@ -601,8 +570,7 @@ Stored state MUST include at least:
   "benchmark_generated_at": "<RFC3339-or-null>",
   "binary_version": "<string>",
   "hardware_identity_hash": "<hex>",
-  "recommended_model": "<model_key-or-null>",
-  "recommendation_tier": "paid|starter|donor|none"
+  "recommended_model": "<model_key-or-null>"
 }
 ```
 
@@ -612,7 +580,7 @@ Stored hash/version derivation:
 
 - `candidate_catalog_sha256` is the lowercase hex SHA-256 over the exact selected catalog JSON bytes after fetched/baked selection and before parsing normalization.
 - `rate_card_version` is the `/v1/rate-card.version` recommendation-projection hash from §3.3. It MUST NOT reuse broader coordinator config or billing snapshot hashes that include unrelated ledger, quarantine, request-log, operator, or settlement state.
-- `demand_rank_version` is the selected demand-rank JSON `version`; v0.1 does not require an additional stored demand-rank hash.
+- `demand_rank_version` is the selected demand-rank JSON `version`; v0.4 does not require an additional stored demand-rank hash.
 
 `macprovider-cli status` MUST emit a stale-recommendation warning when the live rate-card version, demand-rank version, candidate-catalog version/hash, binary version, stable hardware identity hash, or benchmark freshness differs from this stored state:
 
@@ -632,7 +600,7 @@ Run: macprovider-cli autotune --recommend
 | M8 | Retune hint | §9 defines upgrade/manual triggers and stale status text. |
 | M12 | Hard eligibility gates | §5 requires RAM, benchmark, no-swap, no-thermal, and rate-card gates before scoring. |
 | M16 | Deployability gate | §3.2 and §3.4 define deployability via `runtime_status` + `recommendable`; §5 enforces both. |
-| M18 | Full-utilization wording | §4 separates ranking from displayed capacity; §7 says "estimate, not a guarantee." |
+| M18 | Full-utilization wording | §4 separates ranking from displayed capacity; §7 uses per-token rates only. |
 | M20 | Static JSON demand control plane | §3.4 requires `coordinator.streamvc.live/static/demand-rank.json` with baked fallback and version metadata. |
 
 ## 11. Acceptance criteria
@@ -641,7 +609,7 @@ AC-1: `macprovider-cli autotune --recommend --json` output validates against `au
 
 AC-2: JSON field order is deterministic and matches §6 exactly for stable diffs and snapshot tests.
 
-AC-3: When all rows fail eligibility, JSON emits `recommended_model = null`, `recommendation_tier = "none"` or `"donor"` depending on donor-compatible fallback availability, warnings include `no_eligible_paid_model`, and human output uses the §7.2 donor-tier transcript.
+AC-3: When all rows fail eligibility, JSON emits `recommended_model = null`, warnings include `no_eligible_model`, and human output uses the §7.2 donor-tier transcript.
 
 AC-4: When `https://coordinator.streamvc.live/static/demand-rank.json` returns 404, times out, fails schema validation, fails Ed25519 detached-signature validation, is older than the baked snapshot, is more than 10 minutes in the future, or is more than 30 days old, the CLI falls back to the baked demand-rank snapshot and emits `demand_rank_fallback_used`.
 
@@ -655,13 +623,13 @@ AC-8: For a pool length of at least 3, a deterministic-hash distribution test ov
 
 AC-9: Rows outside the 85% diversification band are not chosen as `recommended_model` unless all higher rows become ineligible.
 
-AC-10: A row with demand `recommendable: false` or candidate `runtime_status != "recommendable"` is never selected as the paid default recommendation.
+AC-10: A row with demand `recommendable: false` or candidate `runtime_status != "recommendable"` is never selected as the default recommendation.
 
-AC-11: A row whose `model.min_ram_gb > mac.ram_gb - 4` fails `hardware_fits` and is not benchmarked. v0.1 has no arbitrary local-model or custom donor-mode path override; any donor-mode selection must still select a row from the signed selected candidate catalog and pass §3.2, §5, §8, and AC-22 controls.
+AC-11: A row whose `model.min_ram_gb > mac.ram_gb - 4` fails `hardware_fits` and is not benchmarked. v0.4 has no arbitrary local-model or custom donor-mode path override; any donor-mode selection must still select a row from the signed selected candidate catalog and pass §3.2, §5, §8, and AC-22 controls.
 
-AC-12 **[amended v0.2]**: A row whose local benchmark records `thermal_throttle_detected == true` fails eligibility (hard block). A row whose local benchmark records `swap_detected == true` emits `swap_observed_under_load` warning but does NOT fail eligibility on that basis alone; the `expected_net_usd_per_hour >= $0.0050/hr` financial gate remains the paid-vs-donor arbiter.
+AC-12 **[amended v0.2]**: A row whose local benchmark records `thermal_throttle_detected == true` fails eligibility (hard block). A row whose local benchmark records `swap_detected == true` emits `swap_observed_under_load` warning but does NOT fail eligibility on that basis alone.
 
-AC-13 **[amended v0.2]**: A row whose benchmark misses `min_sustained_tps` or `max_4k_ttft_ms` emits `tps_below_gate` / `ttft_above_gate` warnings but does NOT fail eligibility on that basis alone. See change log v0.2 point 1 for the rationale (M-Base hardware had every candidate net-positive but hard-blocked by M-Pro/M-Max-calibrated gates).
+AC-13 **[amended v0.2]**: A row whose benchmark misses `min_sustained_tps` or `max_4k_ttft_ms` emits `tps_below_gate` / `ttft_above_gate` warnings but does NOT fail eligibility on that basis alone.
 
 AC-14: A buyer/model string that matches the rate-card only after `normalizeModelKey` is treated as rate-card-enabled and records the normalized key in the candidate model field.
 
@@ -669,19 +637,11 @@ AC-15: A candidate that would match only the coordinator `default` rate-card row
 
 AC-16: Missing candidate metadata, missing immutable `model_revision`, or missing canonical `model_sha256` for a demand/rate-card row makes the row ineligible before model download or benchmark.
 
-AC-17: Missing electricity input leaves `electricity_usd_per_kwh = null`, `electricity_usd_per_hour = null`, omits electricity from `expected_net_usd_per_hour`, and emits `electricity_not_included`.
+AC-20: The happy-path transcript exactly matches §7.1 with per-token rate display.
 
-AC-18: Supplied electricity input subtracts estimated electricity cost from `expected_net_usd_per_hour` and removes `electricity_not_included`.
+AC-21: The donor-tier transcript exactly matches §7.2.
 
-AC-19: When no eligible row clears `expected_net_usd_per_hour >= 0.0050` but at least one eligible row has `expected_net_usd_per_hour > 0`, JSON emits that model as `recommended_model`, emits `recommendation_tier = "starter"` and `recommendation_starter_tier`, omits `recommendation_below_threshold`, and human output uses the §7.3 starter-tier transcript with prompt default Yes.
-
-AC-19a: When no eligible row has `expected_net_usd_per_hour > 0`, JSON emits `recommended_model = null`, `recommendation_tier = "donor"` or `"none"`, includes `recommendation_below_threshold` when an eligible non-positive row existed, and human output uses the §7.2 donor-tier transcript.
-
-AC-20: The happy-path transcript exactly matches §7.1 with `$%.4f/hr` formatting.
-
-AC-21: The donor-tier transcript exactly matches §7.2 with threshold `$0.0050/hr` and prompt default No. The starter-tier transcript exactly matches §7.3 with threshold `$0.0050/hr` and prompt default Yes.
-
-AC-22 **[amended v0.2]**: `--donor-mode` allows a non-recommendable or below-threshold model to be locally committed only after printing the §8 warning, writing `donor_mode: true`, and verifying signed catalog metadata, immutable model revision, canonical artifact-set digest, `runtime_status != "blocked"`, model allowlist, RAM headroom, no-thermal-throttle, and runtime support. Swap and TPS/TTFT gates are advisory per AC-12/AC-13 amendments; observing them emits warnings but does not block donor-mode commit.
+AC-22 **[amended v0.4]**: `--donor-mode` allows a non-recommendable model to be locally committed only after printing the §8 warning, writing `donor_mode: true`, and verifying signed catalog metadata, immutable model revision, canonical artifact-set digest, `runtime_status != "blocked"`, model allowlist, RAM headroom, no-thermal-throttle, and runtime support. Swap and TPS/TTFT gates are advisory; observing them emits warnings but does not block donor-mode commit.
 
 AC-23: Applying donor mode for a non-recommendable row does not auto-start or auto-register a network-connected paid provider. Any network-connected donor serving is blocked until a separate donor-routing/settlement prerequisite exists.
 
@@ -695,9 +655,9 @@ AC-27: The recommendation cache at `~/.config/macprovider/last-recommendation.js
 
 AC-28: Raw hardware fingerprints, serial numbers, MAC addresses, device UUIDs, and the local HMAC secret do not appear in JSON output, logs, warnings, support bundles, or `last-recommendation.json`; only domain-separated HMAC-derived identifiers are persisted.
 
-AC-29: Human output never states or implies guaranteed earnings; it uses "Expected net capacity" and the exact estimate disclaimer from §7.
+AC-29 **[amended v0.4]**: Human output uses per-token rate display only; no hourly projections are promised or implied.
 
-AC-30: v0.1 implementation does not add or require a coordinator `/v1/demand-signal` endpoint, provider quota policy, or automatic model switch.
+AC-30: v0.4 implementation does not add or require a coordinator `/v1/demand-signal` endpoint, provider quota policy, or automatic model switch.
 
 AC-31: Static JSON whose `generated_at` is more than 10 minutes in the future relative to the local clock falls back to the baked snapshot and emits the matching fallback warning.
 
@@ -721,7 +681,7 @@ AC-39: `candidate_catalog_sha256` is computed over the exact selected catalog JS
 
 Q1: Live coordinator `/v1/demand-signal` endpoint and switch trigger. v0.2 may use local attempted-demand stats only after at least 60 days history, 50M paid or auth-valid requested completion-token equivalent, 5 buyer accounts or partner keys with non-test traffic, and no single buyer contributing more than 50% of model demand.
 
-Q2: Tier-specific `tier_weight` calibration. v0.1 locks all tier weights to `1.0`.
+Q2: Tier-specific `tier_weight` calibration. v0.4 locks all tier weights to `1.0`.
 
 Q3: Provider TPS reputation downweighting from production traffic.
 
@@ -737,7 +697,7 @@ Q8: Cross-Mac transfer of recommendation, such as an operator cloning config to 
 
 Q9: Donor-mode time-limited grant of token rewards and any `TOKEN_NAME` ledger interaction.
 
-Q10: Static JSON key rotation policy after the release-pinned Ed25519 v0.1 key ages out.
+Q10: Static JSON key rotation policy after the release-pinned Ed25519 v0.4 key ages out.
 
 Q11: How to represent model quality and buyer-acceptance scores without creating a new Goodhart target.
 
@@ -751,11 +711,11 @@ The closest competitive exception is Darkbloom. Its public pages show an Apple-S
 
 The right UX lineage is not generic cloud hosting. It is staking calculators and mining profitability calculators: ranked yield options, transparent assumptions, power/rate inputs, confidence, and stale-data warnings. macprovider has the same shape: detected hardware plus measured tokens/sec plus a per-model rate card plus demand assumptions yields a ranked recommendation.
 
-This will not create demand where none exists. SPEC-023 answers "which model should this provider run, given known rates and measured local performance?" It does not answer "will buyers show up?" The UX must say that clearly: expected `$/hr` is an estimate conditioned on demand, utilization, uptime, electricity, and the current rate card.
+This will not create demand where none exists. SPEC-023 answers "which model should this provider run, given known rates and measured local performance?" It does not answer "will buyers show up?" The UX must say that clearly: per-token rates are set by the rate card, and real earnings = tokens served × rate.
 
 ## 14. Threat model
 
-| Threat | Capability | v0.1 defense | Deferred |
+| Threat | Capability | v0.4 defense | Deferred |
 |---|---|---|---|
 | Static JSON tampering | DNS, CDN, or static-host compromise attempts to alter demand weights, `recommendable`, or candidate gates | §3.5 Ed25519 detached signatures, release-pinned public key, fallback to baked snapshot on invalid/missing/stale signed data | Key rotation automation in v0.2 |
 | Static JSON replay | Attacker serves an old but once-valid static file | §3.5 rejects files older than baked snapshot and files older than 30 days; 14-30 days emits `demand_rank_stale` or `candidate_catalog_stale` | Transparency log or monotonic operator epoch in v0.2 |
@@ -763,5 +723,5 @@ This will not create demand where none exists. SPEC-023 answers "which model sho
 | Provider benchmark gaming | Provider optimizes or tampers with local benchmark | §5 requires CLI-owned benchmark, sustained TPS, TTFT, no-swap, no-thermal checks; production TPS reputation deferred | Coordinator production feedback in v0.2 |
 | Donor-mode abuse | Operator commits non-recommendable row and receives paid buyer traffic | §8 keeps donor mode local-only for non-recommendable rows and blocks network-connected paid registration until a separate donor-routing/settlement prerequisite exists | Explicit donor traffic class or rewards policy in v0.2 |
 | Fingerprint leakage | Stable hardware identity links provider across runs or support bundles | §3.1 and §9 require per-install-secret, domain-separated HMAC-derived identities only; AC-28 and AC-33 ban raw fingerprints and HMAC secrets in persisted/output paths | Formal privacy review if identities become network-visible |
-| Misleading earnings claims | Provider interprets capacity as guaranteed realized income | §4 separates ranking score from displayed capacity; §7 locks estimate disclaimer; AC-29 enforces wording | Utilization-adjusted realized projection in v0.2 |
+| Misleading earnings claims | Provider interprets displayed tokens/sec as guaranteed realized income | §6 and §7 show per-token rate and per-token formula only; AC-29 enforces transparency | Utilization-adjusted realized projection in v0.2 |
 | Clean-room violation | Competitive framing accidentally depends on Darkbloom source | §2 and §13 restrict Darkbloom references to public surfaces only | None; source inspection remains prohibited |

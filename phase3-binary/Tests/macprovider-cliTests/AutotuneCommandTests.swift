@@ -153,15 +153,11 @@ final class AutotuneCommandTests: XCTestCase {
             "--recommend",
             "--freshness-check",
             "--donor-mode",
-            "--electricity-usd-per-kwh", "0.21",
-            "--assumed-utilization", "0.75",
         ])
 
         XCTAssertTrue(command.recommend)
         XCTAssertTrue(command.freshnessCheck)
         XCTAssertTrue(command.donorMode)
-        XCTAssertEqual(command.electricityUSDPerKWH, 0.21)
-        XCTAssertEqual(command.assumedUtilization, 0.75)
     }
 
     func testRecommendUsesSpec023FourKProbeContext() throws {
@@ -177,17 +173,4 @@ final class AutotuneCommandTests: XCTestCase {
         ]))
     }
 
-    func testRecommendRejectsNegativeElectricityPrice() {
-        XCTAssertThrowsError(try AutotuneCommand.parse([
-            "--recommend",
-            "--electricity-usd-per-kwh", "-0.01",
-        ]))
-    }
-
-    func testRecommendRejectsUtilizationOutsideUnitRange() {
-        XCTAssertThrowsError(try AutotuneCommand.parse([
-            "--recommend",
-            "--assumed-utilization", "1.01",
-        ]))
-    }
 }

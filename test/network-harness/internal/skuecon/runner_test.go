@@ -12,109 +12,114 @@ import (
 	"github.com/augstar/macprovider-network-harness/internal/scenario"
 )
 
-func TestAggregateViabilityCountsEligiblePaidRows(t *testing.T) {
+func TestAggregateViabilityCountsEligibleWithRateCardEntry(t *testing.T) {
 	got := AggregateViability([]simulateCandidate{
-		{Model: "donor", Eligible: true, ExpectedNetUSDPerHour: 0.0049},
-		{Model: "paid", Eligible: true, ExpectedNetUSDPerHour: 0.0050},
-		{Model: "ineligible", Eligible: false, ExpectedNetUSDPerHour: 1.0},
-	}, "at_least_one_paid_row")
+		{Model: "ineligible", Eligible: false, CompletionRateUSDPerMillionTokens: 1.0, RawScore: 100},
+		{Model: "eligible-a", Eligible: true, CompletionRateUSDPerMillionTokens: 0.235, RawScore: 50},
+		{Model: "eligible-b", Eligible: true, CompletionRateUSDPerMillionTokens: 0.160, RawScore: 80},
+	}, "at_least_one_eligible_row")
 
-	if got.EligibleRowCount != 1 {
-		t.Fatalf("eligible count=%d, want 1", got.EligibleRowCount)
+	if got.EligibleRowCount != 2 {
+		t.Fatalf("eligible count=%d, want 2", got.EligibleRowCount)
 	}
-	if got.EligibleEarningRowCount != 2 {
-		t.Fatalf("eligible earning count=%d, want 2", got.EligibleEarningRowCount)
+	if got.BestRow == nil || got.BestRow.Model != "eligible-b" {
+		t.Fatalf("best row=%+v, want highest raw_score eligible row", got.BestRow)
 	}
-	if got.BestRow == nil || got.BestRow.Model != "paid" {
-		t.Fatalf("best row=%+v, want highest-earning ELIGIBLE row", got.BestRow)
-	}
-	if got.BestByEarnings == nil || got.BestByEarnings.Model != "ineligible" {
-		t.Fatalf("best_by_earnings=%+v, want highest-net ineligible row to surface for phase-B triage", got.BestByEarnings)
+	if got.BestByScore == nil || got.BestByScore.Model != "ineligible" {
+		t.Fatalf("best_by_score=%+v, want highest-scoring ineligible row", got.BestByScore)
 	}
 	if got.DeltaVsExpected != "meets_expected" {
 		t.Fatalf("delta=%q, want meets_expected", got.DeltaVsExpected)
 	}
 }
 
-func TestAggregateViabilityCountsStarterRowsForEarningExpectation(t *testing.T) {
+func TestAggregateViabilityOmitsBestByScoreWhenSameAsBestRow(t *testing.T) {
 	got := AggregateViability([]simulateCandidate{
-		{Model: "starter", Eligible: true, ExpectedNetUSDPerHour: 0.0049},
-		{Model: "zero", Eligible: true, ExpectedNetUSDPerHour: 0},
-	}, "at_least_one_earning_row")
+		{Model: "eligible-a", Eligible: true, CompletionRateUSDPerMillionTokens: 0.235, RawScore: 80},
+		{Model: "eligible-b", Eligible: true, CompletionRateUSDPerMillionTokens: 0.160, RawScore: 50},
+	}, "at_least_one_eligible_row")
 
-	if got.EligibleRowCount != 0 {
-		t.Fatalf("eligible paid count=%d, want 0", got.EligibleRowCount)
+	if got.BestRow == nil || got.BestRow.Model != "eligible-a" {
+		t.Fatalf("best row=%+v, want highest raw_score eligible", got.BestRow)
 	}
-	if got.EligibleEarningRowCount != 1 {
-		t.Fatalf("eligible earning count=%d, want 1", got.EligibleEarningRowCount)
-	}
-	if got.DeltaVsExpected != "meets_expected_starter" {
-		t.Fatalf("delta=%q, want meets_expected_starter", got.DeltaVsExpected)
-	}
-}
-
-func TestAggregateViabilityOmitsBestByEarningsWhenSameAsBestRow(t *testing.T) {
-	// When the highest-net candidate is also eligible, BestByEarnings is
-	// redundant with BestRow and must be omitted (json:omitempty). Keeps
-	// the artifact tight for the common case.
-	got := AggregateViability([]simulateCandidate{
-		{Model: "paid-a", Eligible: true, ExpectedNetUSDPerHour: 0.0100},
-		{Model: "paid-b", Eligible: true, ExpectedNetUSDPerHour: 0.0060},
-	}, "at_least_one_paid_row")
-
-	if got.BestRow == nil || got.BestRow.Model != "paid-a" {
-		t.Fatalf("best row=%+v, want highest-net eligible (paid-a)", got.BestRow)
-	}
-	if got.BestByEarnings != nil {
-		t.Fatalf("best_by_earnings=%+v, want nil when same model as best_row", got.BestByEarnings)
+	if got.BestByScore != nil {
+		t.Fatalf("best_by_score=%+v, want nil when top scorer is eligible", got.BestByScore)
 	}
 }
 
 func TestAggregateViabilityBestRowNilWhenNoneEligible(t *testing.T) {
-	// If every candidate is ineligible (all runtime_status=blocked, or all
-	// benchmark-gated), best_row must be nil — never falsely present a
-	// non-recommendable row as the "best" one. best_by_earnings still
-	// surfaces the highest-net ineligible candidate for phase-B triage.
 	got := AggregateViability([]simulateCandidate{
-		{Model: "blocked-a", Eligible: false, ExpectedNetUSDPerHour: 0.10},
-		{Model: "blocked-b", Eligible: false, ExpectedNetUSDPerHour: 0.05},
-	}, "at_least_one_paid_row")
+		{Model: "blocked-a", Eligible: false, CompletionRateUSDPerMillionTokens: 0.10, RawScore: 10},
+		{Model: "blocked-b", Eligible: false, CompletionRateUSDPerMillionTokens: 0.05, RawScore: 5},
+	}, "at_least_one_eligible_row")
 
 	if got.BestRow != nil {
 		t.Fatalf("best_row=%+v, want nil when no eligible candidate exists", got.BestRow)
 	}
-	if got.BestByEarnings == nil || got.BestByEarnings.Model != "blocked-a" {
-		t.Fatalf("best_by_earnings=%+v, want highest-net ineligible surfaced", got.BestByEarnings)
+	if got.BestByScore == nil || got.BestByScore.Model != "blocked-a" {
+		t.Fatalf("best_by_score=%+v, want highest-scoring ineligible surfaced", got.BestByScore)
 	}
 	if got.DeltaVsExpected != "record_would_fail_phase_c" {
 		t.Fatalf("delta=%q, want record_would_fail_phase_c", got.DeltaVsExpected)
 	}
 }
 
-func TestI5OutcomeClassifier(t *testing.T) {
+func TestClassifyI5PassesEligibleAndDonor(t *testing.T) {
 	tests := []struct {
-		name               string
-		expected           string
-		paid               int
-		earning            int
-		want               string
-		recommendedModel   string
-		recommendationTier string
+		name             string
+		expected         string
+		eligible         int
+		recommendedModel string
+		want             string
 	}{
-		{name: "paid expected zero fails", expected: "at_least_one_paid_row", paid: 0, earning: 1, want: "fail", recommendedModel: "starter", recommendationTier: "starter"},
-		{name: "paid expected one passes with paid recommendation", expected: "at_least_one_paid_row", paid: 1, earning: 1, want: "pass", recommendedModel: "paid", recommendationTier: "paid"},
-		{name: "paid expected many fails without paid recommendation", expected: "at_least_one_paid_row", paid: 3, earning: 3, want: "fail", recommendedModel: "starter", recommendationTier: "starter"},
-		{name: "earning expected zero fails", expected: "at_least_one_earning_row", paid: 0, earning: 0, want: "fail", recommendedModel: "", recommendationTier: "donor"},
-		{name: "earning expected starter passes", expected: "at_least_one_earning_row", paid: 0, earning: 1, want: "pass", recommendedModel: "starter", recommendationTier: "starter"},
-		{name: "earning expected paid also passes", expected: "at_least_one_earning_row", paid: 1, earning: 1, want: "pass", recommendedModel: "paid", recommendationTier: "paid"},
-		{name: "donor exemption passes", expected: "donor_only_by_design", paid: 0, earning: 0, want: "pass", recommendedModel: "", recommendationTier: "donor"},
+		{name: "eligible expected passes", expected: "at_least_one_eligible_row", eligible: 1, recommendedModel: "qwen3-coder", want: "pass"},
+		{name: "eligible expected zero records", expected: "at_least_one_eligible_row", eligible: 0, recommendedModel: "", want: "record"},
+		{name: "eligible expected fails without recommendation", expected: "at_least_one_eligible_row", eligible: 2, recommendedModel: "", want: "fail"},
+		{name: "donor ram expected passes with zero eligible", expected: "donor_only_by_ram", eligible: 0, recommendedModel: "", want: "pass"},
+		{name: "donor ram expected records when misclassified", expected: "donor_only_by_ram", eligible: 1, recommendedModel: "qwen3-coder", want: "record"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ClassifyI5(tt.expected, tt.paid, tt.earning, tt.recommendedModel, tt.recommendationTier); got != tt.want {
-				t.Fatalf("ClassifyI5(%q,%d,%d,%q,%q)=%q, want %q", tt.expected, tt.paid, tt.earning, tt.recommendedModel, tt.recommendationTier, got, tt.want)
+			if got := ClassifyI5(tt.expected, tt.eligible, tt.recommendedModel); got != tt.want {
+				t.Fatalf("ClassifyI5(%q,%d,%q)=%q, want %q", tt.expected, tt.eligible, tt.recommendedModel, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestClassifyI5RecordsMisclassifiedRows(t *testing.T) {
+	if got := ClassifyI5("donor_only_by_ram", 2, "qwen3-coder-30b-a3b-instruct"); got != "record" {
+		t.Fatalf("misclassified donor row=%q, want record", got)
+	}
+}
+
+func TestSummaryLineFormatsPerTokenRate(t *testing.T) {
+	eligible := SummaryLine(scenario.HardwareMatrixRow{
+		Label:         "m4-64gb",
+		BandwidthTier: "C",
+		Expected:      "at_least_one_eligible_row",
+	}, []simulateCandidate{
+		{Model: "qwen3-coder-30b-a3b-instruct", Eligible: true, CompletionRateUSDPerMillionTokens: 0.235, RawScore: 100},
+	}, "pass")
+	if !strings.Contains(eligible, "eligible=1/1") {
+		t.Fatalf("summary=%q, want eligible count", eligible)
+	}
+	if !strings.Contains(eligible, "best_completion_rate=$0.235/M") {
+		t.Fatalf("summary=%q, want per-token completion rate", eligible)
+	}
+
+	donor := SummaryLine(scenario.HardwareMatrixRow{
+		Label:         "m1-8gb",
+		BandwidthTier: "C",
+		Expected:      "donor_only_by_ram",
+	}, []simulateCandidate{
+		{Model: "blocked", Eligible: false, CompletionRateUSDPerMillionTokens: 0.235, RawScore: 100},
+	}, "pass")
+	if !strings.Contains(donor, "eligible=0/1") {
+		t.Fatalf("summary=%q, want zero eligible", donor)
+	}
+	if !strings.Contains(donor, "no catalog fit") {
+		t.Fatalf("summary=%q, want donor-only wording", donor)
 	}
 }
 
@@ -165,10 +170,6 @@ func TestSanitizedEnvOmitsUnsetKeys(t *testing.T) {
 }
 
 func TestRateCardClientRefusesRedirects(t *testing.T) {
-	// SEC-H-1 (r3 security audit): a 3xx from the pinned coordinator must
-	// NOT cause a follow-up fetch to an attacker-controlled host. Replicate
-	// the runner's default client construction verbatim and confirm the
-	// redirect surfaces as a 3xx status the caller then rejects.
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -210,9 +211,9 @@ func TestI5FailFailsHardInvariantResult(t *testing.T) {
 	row := scenario.HardwareMatrixRow{
 		Label:         "m4-32gb",
 		BandwidthTier: "C",
-		Expected:      "at_least_one_paid_row",
+		Expected:      "at_least_one_eligible_row",
 	}
-	check := I5Check(row, 0, 0, "fail")
+	check := I5Check(row, 0, "fail")
 
 	if check.Passed {
 		t.Fatal("failed I5 must fail the hard-invariant result")
@@ -222,8 +223,5 @@ func TestI5FailFailsHardInvariantResult(t *testing.T) {
 	}
 	if !strings.Contains(check.Detail, "eligible_row_count=0") {
 		t.Fatalf("detail=%q, want eligible count evidence", check.Detail)
-	}
-	if !strings.Contains(check.Detail, "eligible_earning_row_count=0") {
-		t.Fatalf("detail=%q, want eligible earning count evidence", check.Detail)
 	}
 }

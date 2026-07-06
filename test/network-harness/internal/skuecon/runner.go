@@ -19,7 +19,6 @@ import (
 	"github.com/augstar/macprovider-network-harness/internal/scenario"
 )
 
-const paidThresholdUSDPerHour = 0.005
 const skuEconCLIBinEnv = "HARNESS_SKU_ECON_CLI_BIN"
 const allowScenarioCLIBinEnv = "HARNESS_SKU_ECON_ALLOW_SCENARIO_CLI_BIN"
 
@@ -47,27 +46,25 @@ type TierResult struct {
 }
 
 type ViabilityRow struct {
-	EligibleRowCount        int `json:"eligible_row_count"`
-	EligibleEarningRowCount int `json:"eligible_earning_row_count"`
-	TotalCandidates         int `json:"total_candidates"`
-	// BestRow is the highest-earning eligible candidate. nil when no
-	// candidate passes eligibility. Mirrors the engine's recommendation
-	// semantic: recommended_model is null iff no eligible row exists.
+	EligibleRowCount int `json:"eligible_row_count"`
+	TotalCandidates  int `json:"total_candidates"`
+	// BestRow is the highest-scoring eligible candidate. nil when no
+	// candidate passes eligibility.
 	BestRow *BestRow `json:"best_row"`
-	// BestByEarnings is included only when there's a higher-earning
-	// candidate that is NOT eligible (blocked/gated). Surfaces the
-	// "blocked Gemma outranks the paid row" phenomenon so phase-B can
-	// see when unblocking a runtime_status=blocked model would change
-	// the viability picture.
-	BestByEarnings  *BestRow `json:"best_by_earnings,omitempty"`
+	// BestByScore is included only when a higher-scoring candidate is NOT
+	// eligible (blocked/gated). Surfaces when unblocking a runtime_status=blocked
+	// model would change the viability picture.
+	BestByScore     *BestRow `json:"best_by_score,omitempty"`
 	Exempt          bool     `json:"exempt"`
 	DeltaVsExpected string   `json:"delta_vs_expected"`
 }
 
 type BestRow struct {
-	Model                 string  `json:"model"`
-	ExpectedNetUSDPerHour float64 `json:"expected_net_usd_per_hour"`
-	Eligible              bool    `json:"eligible"`
+	Model                         string  `json:"model"`
+	PromptRateUSDPerMtok          float64 `json:"best_prompt_rate_usd_per_mtok"`
+	CompletionRateUSDPerMtok      float64 `json:"best_completion_rate_usd_per_mtok"`
+	Eligible                      bool    `json:"eligible"`
+	RawScore                      float64 `json:"raw_score,omitempty"`
 }
 
 type catalogSnapshot struct {
@@ -89,16 +86,17 @@ type benchGate struct {
 }
 
 type simulateResult struct {
-	RecommendedModel   string              `json:"recommended_model"`
-	RecommendationTier string              `json:"recommendation_tier"`
-	Candidates         []simulateCandidate `json:"candidates"`
-	AllCandidates      []simulateCandidate `json:"all_candidates"`
+	RecommendedModel string              `json:"recommended_model"`
+	Candidates       []simulateCandidate `json:"candidates"`
+	AllCandidates    []simulateCandidate `json:"all_candidates"`
 }
 
 type simulateCandidate struct {
-	Model                 string  `json:"model"`
-	Eligible              bool    `json:"eligible"`
-	ExpectedNetUSDPerHour float64 `json:"expected_net_usd_per_hour"`
+	Model                             string  `json:"model"`
+	Eligible                          bool    `json:"eligible"`
+	PromptRateUSDPerMillionTokens     float64 `json:"prompt_rate_usd_per_million_tokens"`
+	CompletionRateUSDPerMillionTokens float64 `json:"completion_rate_usd_per_million_tokens"`
+	RawScore                          float64 `json:"raw_score"`
 }
 
 func (r Runner) Run(ctx context.Context, sc *scenario.Scenario, scenarioPath, outDir string) (*Result, error) {
@@ -197,7 +195,7 @@ func (r Runner) Run(ctx context.Context, sc *scenario.Scenario, scenarioPath, ou
 			viabilityCandidates = decoded.AllCandidates
 		}
 		v := AggregateViability(viabilityCandidates, hw.Expected)
-		outcome := ClassifyI5(hw.Expected, v.EligibleRowCount, v.EligibleEarningRowCount, decoded.RecommendedModel, decoded.RecommendationTier)
+		outcome := ClassifyI5(hw.Expected, v.EligibleRowCount, decoded.RecommendedModel)
 		line := map[string]any{
 			"label":     hw.Label,
 			"tier":      hw.BandwidthTier,
@@ -226,7 +224,7 @@ func (r Runner) Run(ctx context.Context, sc *scenario.Scenario, scenarioPath, ou
 			Summary:    summary,
 			ResultFile: i + 1,
 		})
-		checks = append(checks, I5Check(hw, v.EligibleRowCount, v.EligibleEarningRowCount, outcome))
+		checks = append(checks, I5Check(hw, v.EligibleRowCount, outcome))
 	}
 	if err := writeJSON(filepath.Join(outDir, "earn_viability.json"), viability); err != nil {
 		return nil, err
@@ -241,46 +239,30 @@ func (r Runner) Run(ctx context.Context, sc *scenario.Scenario, scenarioPath, ou
 func AggregateViability(candidates []simulateCandidate, expected string) ViabilityRow {
 	row := ViabilityRow{
 		TotalCandidates: len(candidates),
-		Exempt:          expected == "donor_only_by_design",
+		Exempt:          expected == "donor_only_by_ram",
 	}
-	var bestByEarnings *BestRow // highest net regardless of eligibility
-	var bestEligible *BestRow   // highest net among eligible
+	var bestByScore *BestRow
+	var bestEligible *BestRow
 	for _, c := range candidates {
-		snap := &BestRow{
-			Model:                 c.Model,
-			ExpectedNetUSDPerHour: c.ExpectedNetUSDPerHour,
-			Eligible:              c.Eligible,
-		}
-		if bestByEarnings == nil || c.ExpectedNetUSDPerHour > bestByEarnings.ExpectedNetUSDPerHour {
-			bestByEarnings = snap
+		snap := candidateSnapshot(c)
+		if bestByScore == nil || c.RawScore > bestByScore.RawScore {
+			bestByScore = snap
 		}
 		if c.Eligible {
-			if bestEligible == nil || c.ExpectedNetUSDPerHour > bestEligible.ExpectedNetUSDPerHour {
+			row.EligibleRowCount++
+			if bestEligible == nil || c.RawScore > bestEligible.RawScore {
 				bestEligible = snap
-			}
-			if c.ExpectedNetUSDPerHour >= paidThresholdUSDPerHour {
-				row.EligibleRowCount++
-			}
-			if c.ExpectedNetUSDPerHour > 0 {
-				row.EligibleEarningRowCount++
 			}
 		}
 	}
 	row.BestRow = bestEligible
-	// Only surface best_by_earnings when it differs from best_row —
-	// i.e., when a blocked/ineligible model would out-earn the recommended
-	// one. Same-model case is omitted to keep the JSON tight.
-	if bestByEarnings != nil && (bestEligible == nil || bestByEarnings.Model != bestEligible.Model) {
-		row.BestByEarnings = bestByEarnings
+	if bestByScore != nil && (bestEligible == nil || bestByScore.Model != bestEligible.Model) {
+		row.BestByScore = bestByScore
 	}
 	switch {
-	case expected == "donor_only_by_design":
+	case expected == "donor_only_by_ram":
 		row.DeltaVsExpected = "exempt"
-	case expected == "at_least_one_earning_row" && row.EligibleEarningRowCount > 0 && row.EligibleRowCount == 0:
-		row.DeltaVsExpected = "meets_expected_starter"
-	case expected == "at_least_one_earning_row" && row.EligibleEarningRowCount > 0:
-		row.DeltaVsExpected = "meets_expected"
-	case row.EligibleRowCount > 0:
+	case expected == "at_least_one_eligible_row" && row.EligibleRowCount > 0:
 		row.DeltaVsExpected = "meets_expected"
 	default:
 		row.DeltaVsExpected = "record_would_fail_phase_c"
@@ -288,54 +270,61 @@ func AggregateViability(candidates []simulateCandidate, expected string) Viabili
 	return row
 }
 
-func ClassifyI5(expected string, eligibleRowCount, eligibleEarningRowCount int, recommendedModel, recommendationTier string) string {
-	if expected == "donor_only_by_design" {
-		return "pass"
+func candidateSnapshot(c simulateCandidate) *BestRow {
+	return &BestRow{
+		Model:                    c.Model,
+		PromptRateUSDPerMtok:     c.PromptRateUSDPerMillionTokens,
+		CompletionRateUSDPerMtok: c.CompletionRateUSDPerMillionTokens,
+		Eligible:                 c.Eligible,
+		RawScore:                 c.RawScore,
 	}
-	if expected == "at_least_one_earning_row" && eligibleEarningRowCount >= 1 && recommendedModel != "" && (recommendationTier == "starter" || recommendationTier == "paid") {
-		return "pass"
-	}
-	if expected == "at_least_one_earning_row" {
-		return "fail"
-	}
-	if expected == "at_least_one_paid_row" && eligibleRowCount >= 1 && recommendedModel != "" && recommendationTier == "paid" {
-		return "pass"
-	}
-	if expected == "at_least_one_paid_row" {
-		return "fail"
-	}
-	return "record"
 }
 
-func I5Check(row scenario.HardwareMatrixRow, eligibleRowCount, eligibleEarningRowCount int, outcome string) invariants.Check {
+func ClassifyI5(expected string, eligibleRowCount int, recommendedModel string) string {
+	switch expected {
+	case "donor_only_by_ram":
+		if eligibleRowCount == 0 {
+			return "pass"
+		}
+		return "record"
+	case "at_least_one_eligible_row":
+		if eligibleRowCount >= 1 && recommendedModel != "" {
+			return "pass"
+		}
+		if eligibleRowCount == 0 {
+			return "record"
+		}
+		return "fail"
+	default:
+		return "fail"
+	}
+}
+
+func I5Check(row scenario.HardwareMatrixRow, eligibleRowCount int, outcome string) invariants.Check {
 	passed := outcome != "fail"
 	return invariants.Check{
 		ID:            "I5",
 		Title:         "SKU earn viability gate",
 		Passed:        passed,
 		Status:        outcome,
-		Detail:        fmt.Sprintf("%s Tier-%s expected=%s eligible_row_count=%d eligible_earning_row_count=%d", row.Label, row.BandwidthTier, row.Expected, eligibleRowCount, eligibleEarningRowCount),
-		EvidenceCount: eligibleEarningRowCount,
+		Detail:        fmt.Sprintf("%s Tier-%s expected=%s eligible_row_count=%d", row.Label, row.BandwidthTier, row.Expected, eligibleRowCount),
+		EvidenceCount: eligibleRowCount,
 	}
 }
 
 func SummaryLine(row scenario.HardwareMatrixRow, candidates []simulateCandidate, outcome string) string {
 	v := AggregateViability(candidates, row.Expected)
 	suffix := strings.ToUpper(outcome)
-	// best_eligible_usd_per_hour is the "would we recommend and would it
-	// clear the threshold" number. If no eligible candidate exists, print
-	// the sentinel string "-" so the summary never lies with 0.0000.
-	bestEligible := "-"
+	if row.Expected == "donor_only_by_ram" && v.EligibleRowCount == 0 {
+		return fmt.Sprintf("[sku-econ] %s Tier-%s  eligible=0/%d  no catalog fit                 <- %s",
+			row.Label, row.BandwidthTier, v.TotalCandidates, suffix)
+	}
+	rate := "-"
 	if v.BestRow != nil {
-		bestEligible = fmt.Sprintf("%.4f", v.BestRow.ExpectedNetUSDPerHour)
+		rate = fmt.Sprintf("$%.3f/M", v.BestRow.CompletionRateUSDPerMtok)
 	}
-	extra := ""
-	if v.BestByEarnings != nil {
-		extra = fmt.Sprintf("  (higher-earn ineligible=%s@%.4f)",
-			v.BestByEarnings.Model, v.BestByEarnings.ExpectedNetUSDPerHour)
-	}
-	return fmt.Sprintf("[sku-econ] %s Tier-%s  paid=%d earning=%d/%d  best_eligible_usd_per_hour=%s%s  <- %s",
-		row.Label, row.BandwidthTier, v.EligibleRowCount, v.EligibleEarningRowCount, len(candidates), bestEligible, extra, suffix)
+	return fmt.Sprintf("[sku-econ] %s Tier-%s  eligible=%d/%d  best_completion_rate=%s  <- %s",
+		row.Label, row.BandwidthTier, v.EligibleRowCount, v.TotalCandidates, rate, suffix)
 }
 
 func synthesizeEnvelope(
@@ -390,12 +379,9 @@ func synthesizeEnvelope(
 		"candidateCatalogSHA256":  catalogSHA,
 		"demandRank":              json.RawMessage(demandBytes),
 		"benchmarks":              benchmarks,
-		"warnings":                []string{},
-		"generatedAt":             generatedAt,
-		"electricityUSDPerKWH":    0.15,
-		"assumedUtilization":      0.25,
-		"availabilityHoursPerDay": 8,
-		"donorMode":               false,
+		"warnings":               []string{},
+		"generatedAt":            generatedAt,
+		"donorMode":              false,
 	}
 	return json.Marshal(envelope)
 }
