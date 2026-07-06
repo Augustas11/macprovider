@@ -172,11 +172,12 @@ to bring the provider back up.
 ## Cost discipline
 
 Scenarios target the live network and consume real provider time. The
-committed scenarios use conservative `max_tokens` (16–32) and small
-buyer fleets — a full pass of all 4 scenarios costs cents, not dollars.
-Before scaling a scenario up (e.g., 100 buyers, longer outputs), think
-about the bill. Pearl logs every settled request; don't run 10× the
-same scenario without reading the artifact bundle first.
+committed smoke and routing-discovery scenarios use conservative
+`max_tokens` (16-32) and small buyer fleets, while benchmark and
+settlement-regression scenarios intentionally use longer outputs. Before
+scaling a scenario up (e.g., 100 buyers, longer outputs), think about the
+bill. Pearl logs every settled request; don't run 10x the same scenario
+without reading the artifact bundle first.
 
 ## Artifact bundle
 
@@ -261,6 +262,14 @@ triage reads them as a set.
 | [`scenarios/04_wrong_model.yaml`](scenarios/04_wrong_model.yaml) | 3 buyers, nonexistent model | Negative-path error code + no-charge guarantee | BUYER_TOKEN, `pearl` SSH alias |
 | [`scenarios/05_mid_stream_drop.yaml`](scenarios/05_mid_stream_drop.yaml) | 1 streaming buyer + local launchd chaos at t=5s | Gateway behavior on mid-stream provider loss; billing of partial tokens | BUYER_TOKEN, `pearl` SSH alias, local launchd label |
 | [`scenarios/06_cold_start_race.yaml`](scenarios/06_cold_start_race.yaml) | Restart provider, buyer waits 2s, then fires before model loads | Cold-start window: queue / error / reroute / hang | BUYER_TOKEN, `pearl` SSH alias, local launchd label |
+| [`scenarios/07_sustained_throughput.yaml`](scenarios/07_sustained_throughput.yaml) | 2 buyers, paced streaming load | Benchmark TTFT, TPS, tail ratio, error rate, and slot utilization | BUYER_TOKEN, `pearl` SSH alias |
+| [`scenarios/08_cold_warm_compare.yaml`](scenarios/08_cold_warm_compare.yaml) | 10 cold/warm request pairs | Benchmark cold-start TTFT penalty | BUYER_TOKEN, `pearl` SSH alias |
+| [`scenarios/09_streaming_ttft_distribution.yaml`](scenarios/09_streaming_ttft_distribution.yaml) | 100 paced short streams | Benchmark TTFT histogram and tail ratio | BUYER_TOKEN, `pearl` SSH alias |
+| [`scenarios/10_provider_session_economics.yaml`](scenarios/10_provider_session_economics.yaml) | 10-minute low-load session | Benchmark provider slot utilization and earnings/hr | BUYER_TOKEN, `pearl` SSH alias |
+| [`scenarios/11_sku_earn_viability.yaml`](scenarios/11_sku_earn_viability.yaml) | Hardware matrix simulation | SKU-economics gate against live rate card | Packaged CLI, public coordinator |
+| [`scenarios/12_moe_mid_stream_projection.yaml`](scenarios/12_moe_mid_stream_projection.yaml) | MoE streaming regression | #303 Path A: premature `stream_output_exceeded` before provider usage | BUYER_TOKEN, `pearl` SSH alias, required MoE model rows |
+| [`scenarios/13_dense_token_count_regression.yaml`](scenarios/13_dense_token_count_regression.yaml) | Dense coding streams | #303 Path B: dense-content token downclamp drift | BUYER_TOKEN, `pearl` SSH alias, Qwen2.5-Coder-32B row |
+| [`scenarios/14_sparse_provider_reported_tokens.yaml`](scenarios/14_sparse_provider_reported_tokens.yaml) | Sparse English streams | #303 Path C: provider-reported tokens must beat byte estimates | BUYER_TOKEN, `pearl` SSH alias, Llama 3.1 8B row |
 
 See [`internal/scenario/schema.go`](internal/scenario/schema.go) for the
 authoritative field reference.

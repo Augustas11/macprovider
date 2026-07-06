@@ -1293,6 +1293,59 @@ func insertGwRow(t *testing.T, path, requestID, accountID string, completionToke
 	}
 }
 
+func TestQueryGatewayCarriesTokenSourceWhenPresent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open gateway db: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE usage_events (
+		request_id        TEXT NOT NULL,
+		account_id        TEXT NOT NULL DEFAULT '',
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		token_source      TEXT NOT NULL,
+		outcome           TEXT NOT NULL,
+		created_at        TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create usage_events: %v", err)
+	}
+	at := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(
+		`INSERT INTO usage_events(request_id, account_id, completion_tokens, token_source, outcome, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"req_token_source", "acct", 12, "provider_reported", "ok", at.Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatalf("insert gw row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	rows, hasAccountID, err := queryGateway(path, at.Add(-time.Second), at.Add(time.Second))
+	if err != nil {
+		t.Fatalf("queryGateway err: %v", err)
+	}
+	if !hasAccountID {
+		t.Fatal("hasAccountID=false, want true")
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1", len(rows))
+	}
+	if rows[0].TokenSource != "provider_reported" {
+		t.Fatalf("TokenSource=%q want provider_reported", rows[0].TokenSource)
+	}
+
+	byIDRows, err := queryGatewayByIDs(path, []string{"req_token_source"})
+	if err != nil {
+		t.Fatalf("queryGatewayByIDs err: %v", err)
+	}
+	if len(byIDRows) != 1 {
+		t.Fatalf("byIDRows=%d want 1", len(byIDRows))
+	}
+	if byIDRows[0].TokenSource != "provider_reported" {
+		t.Fatalf("byIDRows[0].TokenSource=%q want provider_reported", byIDRows[0].TokenSource)
+	}
+}
+
 // newTestCoordDB creates an empty request_log table in a fresh temp
 // SQLite file and returns its path. Same read-side projection rule
 // as newTestGatewayDB.

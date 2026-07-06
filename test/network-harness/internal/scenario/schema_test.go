@@ -3,6 +3,7 @@ package scenario
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,24 @@ func TestValidateChargedDeliveredToleranceBounds(t *testing.T) {
 	sc.ChargedDeliveredToleranceTokens = maxChargedDeliveredToleranceTokens + 1
 	if err := sc.Validate(); err == nil || !strings.Contains(err.Error(), "must be <=") {
 		t.Fatalf("oversized tolerance err=%v, want max validation", err)
+	}
+}
+
+func TestValidateMaxCompletionTokenDeltaBounds(t *testing.T) {
+	sc := validTestScenario()
+	sc.MaxCompletionTokenDelta = maxCompletionTokenDelta
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("max completion-token delta should validate: %v", err)
+	}
+
+	sc.MaxCompletionTokenDelta = -1
+	if err := sc.Validate(); err == nil || !strings.Contains(err.Error(), "must be >= 0") {
+		t.Fatalf("negative max completion-token delta err=%v, want >= 0 validation", err)
+	}
+
+	sc.MaxCompletionTokenDelta = maxCompletionTokenDelta + 1
+	if err := sc.Validate(); err == nil || !strings.Contains(err.Error(), "must be <=") {
+		t.Fatalf("oversized max completion-token delta err=%v, want max validation", err)
 	}
 }
 
@@ -183,6 +202,9 @@ func TestValidateRejectsNegativeNumericFields(t *testing.T) {
 		{"buyers.inter_pair_idle_seconds", func(s *Scenario) { s.Buyers.InterPairIdleSeconds = -1 }, "buyers.inter_pair_idle_seconds must be >= 0"},
 		{"prompts.max_tokens", func(s *Scenario) { s.Prompts[0].MaxTokens = -1 }, "prompts[0].max_tokens must be >= 0"},
 		{"charged_delivered_tolerance_tokens", func(s *Scenario) { s.ChargedDeliveredToleranceTokens = -1 }, "charged_delivered_tolerance_tokens must be >= 0"},
+		{"max_completion_token_delta", func(s *Scenario) { s.MaxCompletionTokenDelta = -1 }, "max_completion_token_delta must be >= 0"},
+		{"required_gateway_outcome whitespace", func(s *Scenario) { s.RequiredGatewayOutcome = " ok" }, "required_gateway_outcome must not have leading or trailing whitespace"},
+		{"required_gateway_token_source whitespace", func(s *Scenario) { s.RequiredGatewayTokenSource = "provider_reported " }, "required_gateway_token_source must not have leading or trailing whitespace"},
 		{"benchmark.provider_slots", func(s *Scenario) {
 			s.Benchmark.Enabled = true
 			s.Benchmark.Invariants = []string{"B1"}
@@ -385,6 +407,40 @@ duration: 1s
 	}
 	if sc.Target.BuyerToken != "expanded-token" {
 		t.Fatalf("buyer token=%q, want expanded-token", sc.Target.BuyerToken)
+	}
+}
+
+func TestCommittedScenariosValidate(t *testing.T) {
+	t.Setenv("BUYER_TOKEN", "test-buyer-token")
+
+	paths, err := filepath.Glob(filepath.Join("..", "..", "scenarios", "*.yaml"))
+	if err != nil {
+		t.Fatalf("glob scenarios: %v", err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no committed scenario files found")
+	}
+	sort.Strings(paths)
+
+	for _, path := range paths {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			mode, err := ProbeMode(path)
+			if err != nil {
+				t.Fatalf("ProbeMode err=%v", err)
+			}
+			var sc *Scenario
+			if mode == "sku-econ" {
+				sc, err = LoadNoEnv(path)
+			} else {
+				sc, err = Load(path)
+			}
+			if err != nil {
+				t.Fatalf("Load err=%v", err)
+			}
+			if err := sc.Validate(); err != nil {
+				t.Fatalf("Validate err=%v", err)
+			}
+		})
 	}
 }
 

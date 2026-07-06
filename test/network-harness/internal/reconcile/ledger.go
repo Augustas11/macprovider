@@ -240,6 +240,7 @@ type MatchedPair struct {
 	HarnessTotalTokens          int64  `json:"harness_total_tokens"`
 	GatewayTotalTokens          int64  `json:"gateway_total_tokens"`
 	GatewayCompletionTokens     int64  `json:"gateway_completion_tokens"`
+	GatewayTokenSource          string `json:"gateway_token_source,omitempty"`
 	GatewayOutcome              string `json:"gateway_outcome"`                // "ok" or SPEC-006 §17.7 fallback name; distinguishes coord-missing severity
 	GatewayMatchMethod          string `json:"gateway_match_method,omitempty"` // "exact_id" | "fuzzy_token_ts"
 	CoordinatorRequestID        string `json:"coordinator_request_id,omitempty"`
@@ -829,6 +830,7 @@ func matchExactPass(r *Result, ordered []buyer.Result, gwPool *[]gwRow, coordPoo
 			GatewayAccountID:        g.AccountID,
 			GatewayCompletionTokens: g.CompletionTokens,
 			GatewayTotalTokens:      gatewayTotalTokens(g),
+			GatewayTokenSource:      g.TokenSource,
 			GatewayOutcome:          g.Outcome,
 			GatewayLagMs:            g.CreatedAt.Sub(h.StartUTC).Milliseconds(),
 		}
@@ -871,6 +873,7 @@ func matchFuzzyPass(r *Result, deferred []buyer.Result, gwPool *[]gwRow, coordPo
 			GatewayAccountID:        g.AccountID,
 			GatewayCompletionTokens: g.CompletionTokens,
 			GatewayTotalTokens:      gatewayTotalTokens(g),
+			GatewayTokenSource:      g.TokenSource,
 			GatewayOutcome:          g.Outcome,
 			GatewayLagMs:            g.CreatedAt.Sub(h.StartUTC).Milliseconds(),
 		}
@@ -1193,6 +1196,7 @@ type gwRow struct {
 	PromptTokens     int64
 	CompletionTokens int64
 	TotalTokens      int64
+	TokenSource      string
 	Outcome          string
 	CreatedAt        time.Time
 }
@@ -1466,14 +1470,22 @@ func queryGateway(path string, start, end time.Time) ([]gwRow, bool, error) {
 	if hasAcct {
 		acctExpr = "COALESCE(account_id, '')"
 	}
+	hasTokenSource, err := columnExists(db, "usage_events", "token_source")
+	if err != nil {
+		return nil, false, fmt.Errorf("probe usage_events.token_source: %w", err)
+	}
+	tokenSourceExpr := "''"
+	if hasTokenSource {
+		tokenSourceExpr = "COALESCE(token_source, '')"
+	}
 	promptExpr, completionExpr, totalExpr, err := gatewayTokenExprs(db)
 	if err != nil {
 		return nil, false, err
 	}
 	rows, err := db.Query(fmt.Sprintf(`
-				SELECT request_id, %s, %s, %s, %s, outcome, created_at
+				SELECT request_id, %s, %s, %s, %s, %s, outcome, created_at
 				FROM usage_events
-			`, acctExpr, promptExpr, completionExpr, totalExpr))
+			`, acctExpr, promptExpr, completionExpr, totalExpr, tokenSourceExpr))
 	if err != nil {
 		return nil, false, err
 	}
@@ -1482,7 +1494,7 @@ func queryGateway(path string, start, end time.Time) ([]gwRow, bool, error) {
 	for rows.Next() {
 		var g gwRow
 		var ts string
-		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.PromptTokens, &g.CompletionTokens, &g.TotalTokens, &g.Outcome, &ts); err != nil {
+		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.PromptTokens, &g.CompletionTokens, &g.TotalTokens, &g.TokenSource, &g.Outcome, &ts); err != nil {
 			return nil, false, err
 		}
 		g.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
@@ -1534,16 +1546,24 @@ func queryGatewayByIDs(path string, ids []string) ([]gwRow, error) {
 	if hasAcct {
 		acctExpr = "COALESCE(account_id, '')"
 	}
+	hasTokenSource, err := columnExists(db, "usage_events", "token_source")
+	if err != nil {
+		return nil, fmt.Errorf("probe usage_events.token_source: %w", err)
+	}
+	tokenSourceExpr := "''"
+	if hasTokenSource {
+		tokenSourceExpr = "COALESCE(token_source, '')"
+	}
 	promptExpr, completionExpr, totalExpr, err := gatewayTokenExprs(db)
 	if err != nil {
 		return nil, err
 	}
 	placeholders, args := inClause(ids)
 	rows, err := db.Query(fmt.Sprintf(`
-				SELECT request_id, %s, %s, %s, %s, outcome, created_at
+				SELECT request_id, %s, %s, %s, %s, %s, outcome, created_at
 				FROM usage_events
 			WHERE request_id IN (%s)
-		`, acctExpr, promptExpr, completionExpr, totalExpr, placeholders), args...)
+		`, acctExpr, promptExpr, completionExpr, totalExpr, tokenSourceExpr, placeholders), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1552,7 +1572,7 @@ func queryGatewayByIDs(path string, ids []string) ([]gwRow, error) {
 	for rows.Next() {
 		var g gwRow
 		var ts string
-		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.PromptTokens, &g.CompletionTokens, &g.TotalTokens, &g.Outcome, &ts); err != nil {
+		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.PromptTokens, &g.CompletionTokens, &g.TotalTokens, &g.TokenSource, &g.Outcome, &ts); err != nil {
 			return nil, err
 		}
 		g.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
