@@ -55,13 +55,15 @@ final class MalibuAgent: ObservableObject {
     func start() async {
         // AUDIT R2 CODE H3 fix.
         guard !isShuttingDown else { return }
-        guard child == nil else { return }
 
         // Option A: when install.sh owns the provider via launchd, monitor it
-        // instead of spawning a second macprovider-cli child.
+        // instead of spawning a second macprovider-cli child. Run this before
+        // the spawned-child guard so a stale Malibu-owned CLI is released first.
         if await monitorInstalledProviderIfPresent() {
             return
         }
+
+        guard child == nil else { return }
 
         // AUDIT R2 CODE H4 fix: refuse to spawn the CLI without a validated
         // app-owned config + keychain token. Onboarding must complete the
@@ -183,11 +185,14 @@ final class MalibuAgent: ObservableObject {
     /// Attach to an existing launchd-managed provider (CLI install track).
     /// Returns true when local /v1/health is reachable on the configured port.
     @discardableResult
-    func monitorInstalledProviderIfPresent(timeout: TimeInterval = 120) async -> Bool {
+    func monitorInstalledProviderIfPresent(
+        timeout: TimeInterval = MalibuOnboardingTimeouts.firstServingFrameSec
+    ) async -> Bool {
         guard let port = ProviderConfig.readHTTPPort(),
               ProviderConfig.readProviderID() != nil else {
             return false
         }
+        await releaseSpawnedChildForLaunchdMonitor()
         let deadline = Date().addingTimeInterval(max(1, timeout))
         guard await InstalledProviderMonitor.waitForHealthy(port: port, deadline: deadline) else {
             return false
@@ -199,6 +204,29 @@ final class MalibuAgent: ObservableObject {
         startHealthPolling(port: port)
         await refreshEarnings()
         return true
+    }
+
+    /// Stop a Malibu-spawned CLI child before attaching to launchd. Without
+    /// this, onboarding can leave two macprovider-cli processes (different
+    /// ports, same provider_id) running concurrently.
+    private func releaseSpawnedChildForLaunchdMonitor() async {
+        guard child != nil else { return }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        child?.markStopping()
+        try? await control?.send(.shutdownRequest(graceSeconds: 5))
+        await child?.stop(gracePeriod: 5)
+        metricsPoller?.cancel()
+        metricsPoller = nil
+        eventStreamTask?.cancel()
+        eventStreamTask = nil
+        logTailCancellable?.cancel()
+        logTailCancellable = nil
+        logTailReader?.stop()
+        logTailReader = nil
+        await control?.close()
+        child = nil
+        control = nil
     }
 
     private func applyHealthSnapshot(port: Int) async {

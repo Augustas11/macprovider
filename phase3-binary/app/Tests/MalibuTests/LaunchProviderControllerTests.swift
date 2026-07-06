@@ -403,6 +403,7 @@ final class LaunchProviderControllerTests: XCTestCase {
                 },
                 monitorInstalledProvider: {
                     self.monitorRuns += 1
+                    return true
                 },
                 readConfigModel: { self.configModel }
             )

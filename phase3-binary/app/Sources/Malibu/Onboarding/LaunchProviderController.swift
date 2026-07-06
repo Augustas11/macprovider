@@ -92,7 +92,7 @@ final class LaunchProviderController: ObservableObject {
         var readProviderID: () -> String?
         var runCLIInstall: (@escaping @MainActor (String) -> Void) async throws -> Void
         var importCLIConfigAfterInstall: () async throws -> Void
-        var monitorInstalledProvider: @MainActor () async -> Void
+        var monitorInstalledProvider: @MainActor () async -> Bool
         var readConfigModel: () -> String?
 
         static func live(registerClient: RegisterClient, bundledCLIPath: URL, agent: MalibuAgent?) -> Dependencies {
@@ -172,11 +172,10 @@ final class LaunchProviderController: ObservableObject {
                     try await ProviderConfig.importExistingCLIConfig()
                 },
                 monitorInstalledProvider: {
-                    if let agent {
-                        _ = await agent.monitorInstalledProviderIfPresent(
-                            timeout: MalibuOnboardingTimeouts.firstServingFrameSec
-                        )
-                    }
+                    guard let agent else { return false }
+                    return await agent.monitorInstalledProviderIfPresent(
+                        timeout: MalibuOnboardingTimeouts.firstServingFrameSec
+                    )
                 },
                 readConfigModel: { ProviderConfig.readModel() }
             )
@@ -327,7 +326,9 @@ final class LaunchProviderController: ObservableObject {
     private func startConfiguredViaCLIInstall() async {
         do {
             try await dependencies.registerLoginItem()
-            await dependencies.monitorInstalledProvider()
+            guard await dependencies.monitorInstalledProvider() else {
+                throw launchdMonitorUnavailableError()
+            }
             let model = dependencies.readConfigModel() ?? "configured"
             stage = .live(model: model, tier: .provisional)
         } catch {
@@ -377,12 +378,25 @@ final class LaunchProviderController: ObservableObject {
         do {
             try await dependencies.registerLoginItem()
             stage = .startingAgent
-            await dependencies.monitorInstalledProvider()
+            guard await dependencies.monitorInstalledProvider() else {
+                throw launchdMonitorUnavailableError()
+            }
             let model = dependencies.readConfigModel() ?? "installed"
             stage = .live(model: model, tier: .provisional)
         } catch {
             stage = .failed(stage: "cliInstall", retryable: true, message: error.localizedDescription)
         }
+    }
+
+    private func launchdMonitorUnavailableError() -> NSError {
+        NSError(
+            domain: "Malibu.LaunchProviderController",
+            code: 3,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "Background provider did not become healthy in time. Check ~/Library/Logs/macprovider/ and try again."
+            ]
+        )
     }
 
     private func beginInstallProgressWatch() {
