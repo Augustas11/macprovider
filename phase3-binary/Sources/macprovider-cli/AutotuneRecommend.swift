@@ -164,6 +164,25 @@ struct AutotuneRecommendHardware: Equatable {
     }
 }
 
+extension AutotuneRecommendHardware {
+    var recommendedMaxBatch: Int {
+        let normalizedChip = chip.lowercased()
+        if normalizedChip.contains("ultra") {
+            if memoryGB >= 128 {
+                return 4
+            }
+            if memoryGB >= 96 {
+                return 3
+            }
+            return 1
+        }
+        if normalizedChip.contains("max"), memoryGB >= 48 {
+            return 2
+        }
+        return 1
+    }
+}
+
 struct HMACIdentity: Equatable {
     static let diversificationDomain = "macprovider-autotune-diversification-v1"
     static let cacheIdentityDomain = "macprovider-autotune-cache-identity-v1"

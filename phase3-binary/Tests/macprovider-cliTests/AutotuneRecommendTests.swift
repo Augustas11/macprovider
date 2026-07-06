@@ -67,6 +67,29 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(root["serve_config"] is NSNull)
     }
 
+    func testRecommendApplyServeConfigUsesHardwareDerivedMaxBatch() throws {
+        var request = try makeRequest()
+        request.hardware = Self.hardware(chip: "Apple M4 Max", memoryGB: 64, bandwidthTier: .a)
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        let benchmark = try XCTUnwrap(request.benchmarks[selected.catalogKey])
+        let row = try XCTUnwrap(request.candidateCatalog.rows[selected.catalogKey])
+
+        let core = AutotuneCommand.recommendationCoreForConfig(
+            selected: selected,
+            selectedBenchmark: benchmark,
+            selectedRow: row,
+            catalogVersion: request.candidateCatalog.version,
+            catalogHash: request.candidateCatalogSHA256,
+            hardware: request.hardware
+        )
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString(serveConfig: core).utf8)) as? [String: Any])
+        let serveConfig = try XCTUnwrap(root["serve_config"] as? [String: Any])
+
+        XCTAssertEqual(core.knobs.maxBatch, 2)
+        XCTAssertEqual(serveConfig["max_concurrency_override"] as? Int, 2)
+    }
+
     func testAllRowsFailingEligibilityEmitsNoEligibleWarning() throws {
         var request = try makeRequest()
         request.benchmarks = [:]
@@ -406,6 +429,23 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(BandwidthTier.derive(chip: "Apple M5 Max"), .a)
         XCTAssertEqual(BandwidthTier.derive(chip: "Apple M2 Max"), .b)
         XCTAssertEqual(BandwidthTier.derive(chip: "Apple M2 Pro"), .b)
+    }
+
+    func testRecommendedMaxBatchKeepsBaseAndProSingleSlot() {
+        XCTAssertEqual(Self.hardware(chip: "Apple M5", memoryGB: 32, bandwidthTier: .c).recommendedMaxBatch, 1)
+        XCTAssertEqual(Self.hardware(chip: "Apple M4 Pro", memoryGB: 64, bandwidthTier: .b).recommendedMaxBatch, 1)
+    }
+
+    func testRecommendedMaxBatchBumpsMaxAndUltraTiers() {
+        XCTAssertEqual(Self.hardware(chip: "Apple M4 Max", memoryGB: 48, bandwidthTier: .a).recommendedMaxBatch, 2)
+        XCTAssertEqual(Self.hardware(chip: "Apple M4 Ultra", memoryGB: 96, bandwidthTier: .s).recommendedMaxBatch, 3)
+        XCTAssertEqual(Self.hardware(chip: "Apple M4 Ultra", memoryGB: 128, bandwidthTier: .s).recommendedMaxBatch, 4)
+        XCTAssertEqual(Self.hardware(chip: "Apple M4 Ultra", memoryGB: 192, bandwidthTier: .s).recommendedMaxBatch, 4)
+    }
+
+    func testRecommendedMaxBatchDoesNotBumpLowRamMaxOrUltra() {
+        XCTAssertEqual(Self.hardware(chip: "Apple M3 Max", memoryGB: 36, bandwidthTier: .a).recommendedMaxBatch, 1)
+        XCTAssertEqual(Self.hardware(chip: "Apple M2 Ultra", memoryGB: 64, bandwidthTier: .a).recommendedMaxBatch, 1)
     }
 
     func testMinProviderTargetDoesNotAffectScoringOrEligibility() throws {
@@ -1634,6 +1674,23 @@ final class AutotuneRecommendTests: XCTestCase {
             assumedUtilization: 1.0,
             availabilityHoursPerDay: 24,
             donorMode: false
+        )
+    }
+
+    private static func hardware(
+        chip: String,
+        memoryGB: Int,
+        bandwidthTier: BandwidthTier
+    ) -> AutotuneRecommendHardware {
+        AutotuneRecommendHardware(
+            machine: "Mac-test",
+            chip: chip,
+            memoryGB: memoryGB,
+            bandwidthTier: bandwidthTier,
+            osVersion: "macOS 15",
+            binaryVersion: "test-bin",
+            diversificationID: "diversification",
+            hardwareIdentityHash: "hardware"
         )
     }
 
