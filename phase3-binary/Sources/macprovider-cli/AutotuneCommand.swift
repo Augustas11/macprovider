@@ -790,21 +790,13 @@ struct AutotuneCommand: AsyncParsableCommand {
         if let selected = selectedForConfig,
            let selectedBenchmark = request.benchmarks[selected.catalogKey],
            let selectedRow = catalog.value.rows[selected.catalogKey] {
-            serveConfig = RecommendationCore(
-                model: selected.model,
-                targetContext: Self.spec023RecommendationProbeContext,
-                knobs: WinningKnobs(kvBits: nil, maxBatch: 1, maxContext: Self.spec023RecommendationProbeContext),
-                tpsMedian: selected.tokensPerSecond,
-                ttftP95MS: 0,
-                replicates: 0,
-                modelArtifactPath: selectedBenchmark.modelArtifactPath,
-                modelArtifactSHA256: selectedBenchmark.artifactSHA256,
-                modelCatalogKey: selected.catalogKey,
-                modelCatalogModelID: selectedRow.modelID,
-                modelCatalogRevision: selectedRow.modelRevision,
-                modelCatalogSHA256: selectedRow.modelSHA256,
-                modelCatalogVersion: catalog.value.version,
-                modelCatalogHash: catalogSHA
+            serveConfig = Self.recommendationCoreForConfig(
+                selected: selected,
+                selectedBenchmark: selectedBenchmark,
+                selectedRow: selectedRow,
+                catalogVersion: catalog.value.version,
+                catalogHash: catalogSHA,
+                hardware: hardware
             )
         } else {
             serveConfig = nil
@@ -843,6 +835,36 @@ struct AutotuneCommand: AsyncParsableCommand {
         for warning in result.warnings {
             FileHandle.standardError.write(Data("\(warning.rawValue)\n".utf8))
         }
+    }
+
+    static func recommendationCoreForConfig(
+        selected: AutotuneCandidateScore,
+        selectedBenchmark: CandidateBenchmark,
+        selectedRow: CandidateCatalog.Row,
+        catalogVersion: String,
+        catalogHash: String,
+        hardware: AutotuneRecommendHardware
+    ) -> RecommendationCore {
+        RecommendationCore(
+            model: selected.model,
+            targetContext: Self.spec023RecommendationProbeContext,
+            knobs: WinningKnobs(
+                kvBits: nil,
+                maxBatch: hardware.recommendedMaxBatch,
+                maxContext: Self.spec023RecommendationProbeContext
+            ),
+            tpsMedian: selected.tokensPerSecond,
+            ttftP95MS: 0,
+            replicates: 0,
+            modelArtifactPath: selectedBenchmark.modelArtifactPath,
+            modelArtifactSHA256: selectedBenchmark.artifactSHA256,
+            modelCatalogKey: selected.catalogKey,
+            modelCatalogModelID: selectedRow.modelID,
+            modelCatalogRevision: selectedRow.modelRevision,
+            modelCatalogSHA256: selectedRow.modelSHA256,
+            modelCatalogVersion: catalogVersion,
+            modelCatalogHash: catalogHash
+        )
     }
 
     private func runRecommendationFreshnessCheck() async throws {
