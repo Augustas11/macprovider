@@ -55,7 +55,7 @@ func operatorBearerAuthorized(headers http.Header, expected string) bool {
 }
 
 func (s *Server) publicPaused(path string) bool {
-	if strings.HasPrefix(path, "/admin/") || path == "/v1/status" || path == "/healthz" {
+	if strings.HasPrefix(path, "/admin/") || path == "/v1/status" || path == "/healthz" || path == "/metrics" {
 		return false
 	}
 	s.mu.RLock()

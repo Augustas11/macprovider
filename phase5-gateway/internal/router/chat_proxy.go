@@ -405,6 +405,7 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 		}
 		if !s.cfg.Retry503.Enabled || maxAttempts == 1 || resp.StatusCode != http.StatusServiceUnavailable {
 			if attempt > 1 && resp.StatusCode == http.StatusOK {
+				s.retry503Metrics.recordRecovered(requestIDClass(r), totalBackoffMS)
 				slog.Info("gateway coord 503 retry recovered",
 					"request_id", requestID(r),
 					"attempt", attempt,
@@ -431,6 +432,7 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 			return resp, nil
 		}
 		if attempt == maxAttempts {
+			s.retry503Metrics.recordExhausted(totalBackoffMS)
 			slog.Warn("gateway coord 503 retry exhausted",
 				"request_id", requestID(r),
 				"attempts", maxAttempts,

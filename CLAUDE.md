@@ -63,6 +63,26 @@ it returns empty rather than the matching account's token). So pinning
 must explicitly call `gh auth token -u Augustas11` to bypass gh's
 active-account state.
 
+## Worktree isolation: don't edit the canonical checkout
+
+For any implementation, audit, release, or other write-heavy task in this
+repo, do not work directly in `/Users/augstar/macprovider-poc`. Start from a
+fresh sibling worktree off the intended base, usually `origin/main`, unless the
+user explicitly says to use the current checkout:
+
+```bash
+git status -sb
+git worktree list
+git fetch origin
+git worktree add ../macprovider-<topic> -b fix/<topic> origin/main
+cd ../macprovider-<topic>
+```
+
+Do all edits, tests, commits, pushes, PR work, and merge follow-up inside that
+task worktree. Do not reuse or mutate another active session's branch/worktree
+silently. For audits, start from `origin/main` and audit merged code unless the
+user names a different base.
+
 ## PR workflow: don't develop on local `main`
 
 Money-path and security-sensitive changes (billing, payouts, gateway,

@@ -35,7 +35,9 @@ func TestGatewayCoord503RetryRecoversAfterTwoNoProviderResponses(t *testing.T) {
 	h, store, _, cfg := newRetryHarness(t, client, nil)
 	fullKey := createAccountAndKey(t, store, cfg, "acct_retry_recovered")
 
-	resp := postChat(t, h, fullKey, chatBody(false), nil)
+	resp := postChat(t, h, fullKey, chatBody(false), map[string]string{
+		"X-Request-ID": "11111111-1111-4111-8111-111111111111",
+	})
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
@@ -44,6 +46,13 @@ func TestGatewayCoord503RetryRecoversAfterTwoNoProviderResponses(t *testing.T) {
 		t.Fatalf("coordinator calls=%d want 3", calls)
 	}
 	assertRetryLogCounts(t, logs.String(), 2, 1, 0)
+	assertRetryMetricsContain(t, h,
+		`gateway_coord_503_retry_recovered_total{request_id_class="client_supplied"} 1`,
+		`gateway_coord_503_retry_recovered_total{request_id_class="gateway_generated"} 0`,
+		`gateway_coord_503_retry_exhausted_total 0`,
+		`gateway_coord_503_retry_backoff_ms_bucket{le="100"} 1`,
+		`gateway_coord_503_retry_backoff_ms_bucket{le="+Inf"} 1`,
+	)
 }
 
 func TestGatewayCoord503RetryExhaustsNoProviderResponses(t *testing.T) {
@@ -66,6 +75,50 @@ func TestGatewayCoord503RetryExhaustsNoProviderResponses(t *testing.T) {
 		t.Fatalf("coordinator calls=%d want 3", calls)
 	}
 	assertRetryLogCounts(t, logs.String(), 2, 0, 1)
+	assertRetryMetricsContain(t, h,
+		`gateway_coord_503_retry_recovered_total{request_id_class="client_supplied"} 0`,
+		`gateway_coord_503_retry_recovered_total{request_id_class="gateway_generated"} 0`,
+		`gateway_coord_503_retry_exhausted_total 1`,
+		`gateway_coord_503_retry_backoff_ms_bucket{le="100"} 1`,
+		`gateway_coord_503_retry_backoff_ms_bucket{le="+Inf"} 1`,
+	)
+}
+
+func TestGatewayCoord503RetryMetricsUsesGatewayGeneratedRequestIDClass(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, retryChatSuccessBody), nil
+	})}
+	h, store, _, cfg := newRetryHarness(t, client, nil)
+	fullKey := createAccountAndKey(t, store, cfg, "acct_retry_generated_id")
+
+	resp := postChat(t, h, fullKey, chatBody(false), nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertRetryMetricsContain(t, h,
+		`gateway_coord_503_retry_recovered_total{request_id_class="client_supplied"} 0`,
+		`gateway_coord_503_retry_recovered_total{request_id_class="gateway_generated"} 1`,
+		`gateway_coord_503_retry_backoff_ms_bucket{le="+Inf"} 1`,
+	)
+}
+
+func TestGatewayRetryMetricsBypassAllPublicKillSwitch(t *testing.T) {
+	h, _, _, _ := newRetryHarness(t, nil, func(cfg *config.Config) {
+		cfg.KillSwitch.AllPublicAPI = true
+	})
+
+	assertRetryMetricsContain(t, h,
+		`gateway_coord_503_retry_recovered_total{request_id_class="client_supplied"} 0`,
+		`gateway_coord_503_retry_recovered_total{request_id_class="gateway_generated"} 0`,
+		`gateway_coord_503_retry_exhausted_total 0`,
+		`gateway_coord_503_retry_backoff_ms_bucket{le="+Inf"} 0`,
+	)
 }
 
 func TestGatewayCoord503RetrySkipsTier2PolicyError(t *testing.T) {
@@ -355,6 +408,25 @@ func assertRetryLogCounts(t *testing.T, logs string, retry, recovered, exhausted
 	}
 	if got := strings.Count(logs, `msg="gateway coord 503 retry exhausted"`); got != exhausted {
 		t.Fatalf("exhausted log count=%d want %d logs:\n%s", got, exhausted, logs)
+	}
+}
+
+func assertRetryMetricsContain(t *testing.T, h http.Handler, wants ...string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("metrics status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/plain; version=0.0.4") {
+		t.Fatalf("metrics content-type=%q", got)
+	}
+	body := resp.Body.String()
+	for _, want := range wants {
+		if !strings.Contains(body, "\n"+want+"\n") {
+			t.Fatalf("metrics missing %q in:\n%s", want, body)
+		}
 	}
 }
 
