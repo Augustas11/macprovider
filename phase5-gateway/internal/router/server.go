@@ -58,7 +58,8 @@ type Server struct {
 	// fires a coordinator roundtrip (the SPEC-004 audit's HIGH perf finding).
 	// 5s TTL — coordinator config only changes on reload, so staleness is
 	// harmless; cap on bursts.
-	routingMeta routingMetaCache
+	routingMeta     routingMetaCache
+	retry503Metrics *retry503Metrics
 }
 
 // readStore returns the read-only view of the database. M2-4: this
@@ -161,6 +162,7 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 		client:           http.DefaultClient,
 		trustedProxyNets: trustedProxyNets,
 		version:          "dev",
+		retry503Metrics:  newRetry503Metrics(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -201,6 +203,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/status", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleStatus)))
 	mux.HandleFunc("/v1/feedback", s.handleFeedback)
 	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/admin/feedback-summary", s.handleFeedbackSummary)
 	mux.HandleFunc("/admin/kill-switch", s.handleKillSwitch)
 	mux.HandleFunc("/admin/capacity-signal", s.handleCapacitySignal)
@@ -218,11 +221,22 @@ func (s *Server) Handler() http.Handler {
 	return s.middleware(mux)
 }
 
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = w.Write([]byte(s.retry503Metrics.prometheus()))
+}
+
 func (s *Server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := r.Header.Get("X-Request-ID")
+		requestIDClass := retry503RequestIDClassClientSupplied
 		if !isUUIDLike(requestID) {
 			requestID = newUUID()
+			requestIDClass = retry503RequestIDClassGatewayGenerated
 		}
 		if stripped := stripInternalMacProviderHeaders(r.Header); len(stripped) > 0 {
 			slog.Warn("internal header injection stripped", "request_id", requestID, "headers", stripped)
@@ -241,6 +255,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), requestIDKey{}, requestID)
+		ctx = context.WithValue(ctx, requestIDClassKey{}, requestIDClass)
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				slog.Error("panic recovered", "panic", recovered, "request_id", requestID, "path", r.URL.Path, "stack", string(debug.Stack()))
