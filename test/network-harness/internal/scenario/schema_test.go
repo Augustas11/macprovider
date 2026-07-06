@@ -35,7 +35,7 @@ func TestValidateSKUEconPinsCoordinatorURL(t *testing.T) {
 			CLIBin:         "/path/to/cli",
 		},
 		HardwareMatrix: []HardwareMatrixRow{
-			{Label: "m4", Chip: "Apple M4", MemoryGB: 32, BandwidthTier: "C", Expected: "at_least_one_paid_row"},
+			{Label: "m4", Chip: "Apple M4", MemoryGB: 32, BandwidthTier: "C", Expected: "at_least_one_eligible_row"},
 		},
 		BenchmarkSynthesis: BenchmarkSynthesis{
 			Mode:                  "warm_cache_synthetic",
@@ -46,6 +46,12 @@ func TestValidateSKUEconPinsCoordinatorURL(t *testing.T) {
 
 	if err := tpl.Validate(); err != nil {
 		t.Fatalf("baseline sku-econ scenario should validate: %v", err)
+	}
+
+	deprecated := tpl
+	deprecated.HardwareMatrix[0].Expected = "at_least_one_paid_row"
+	if err := deprecated.Validate(); err == nil || !strings.Contains(err.Error(), "deprecated sku-econ vocabulary") {
+		t.Fatalf("deprecated expected err=%v, want vocabulary rejection", err)
 	}
 
 	cases := []struct {
@@ -161,7 +167,7 @@ target:
   coordinator_url: https://coordinator.streamvc.live
   cli_bin: /tmp/macprovider-cli
 hardware_matrix:
-  - {label: m4, chip: "Apple M4", memoryGB: 32, bandwidthTier: C, expected: at_least_one_earning_row}
+  - {label: m4, chip: "Apple M4", memoryGB: 32, bandwidthTier: C, expected: at_least_one_eligible_row}
 benchmark_synthesis:
   mode: warm_cache_synthetic
   tps_multiplier_of_gate: 1.10

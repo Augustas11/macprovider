@@ -493,9 +493,11 @@ func (s *Scenario) validateSKUEcon() error {
 			return fmt.Errorf("hardware_matrix[%d].bandwidthTier must be one of S|A|B|C|unknown", i)
 		}
 		switch row.Expected {
+		case "at_least_one_eligible_row", "donor_only_by_ram":
 		case "at_least_one_paid_row", "at_least_one_earning_row", "donor_only_by_design":
+			return fmt.Errorf("hardware_matrix[%d].expected uses deprecated sku-econ vocabulary %q; use at_least_one_eligible_row or donor_only_by_ram (rate-card v4 pivot)", i, row.Expected)
 		default:
-			return fmt.Errorf("hardware_matrix[%d].expected must be at_least_one_paid_row, at_least_one_earning_row, or donor_only_by_design", i)
+			return fmt.Errorf("hardware_matrix[%d].expected must be at_least_one_eligible_row or donor_only_by_ram", i)
 		}
 	}
 	if s.BenchmarkSynthesis.Mode != "warm_cache_synthetic" {
