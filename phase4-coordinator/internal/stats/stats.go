@@ -302,32 +302,44 @@ func smoke(ctx context.Context, p *Pools) error {
 	defer cancel()
 
 	type check struct {
-		role        string
-		db          *sql.DB
-		positiveSQL string // MUST succeed under this role
-		denySQL     string // MUST fail with "permission denied"
+		role         string
+		db           *sql.DB
+		positiveSQLs []string // MUST succeed under this role
+		boolSQLs     []string // MUST return TRUE under this role
+		denySQL      string   // MUST fail with "permission denied"
 	}
 	checks := []check{
 		{
-			role:        "stats_reader",
-			db:          p.Reader,
-			positiveSQL: `SELECT 1 FROM stats_components_health LIMIT 1`,
+			role: "stats_reader",
+			db:   p.Reader,
+			positiveSQLs: []string{
+				`SELECT 1 FROM stats_components_health LIMIT 1`,
+				`SELECT idle_prewarm_pool_pct_with_b1_active, idle_prewarm_skips_by_reason_last_1h FROM stats_overview_current LIMIT 1`,
+				`SELECT 1 FROM stats_idle_prewarm_events LIMIT 1`,
+			},
 			// stats_late_events is on the §7.2.1 deny list.
 			denySQL: `SELECT 1 FROM stats_late_events LIMIT 1`,
 		},
 		{
-			role:        "stats_rollup",
-			db:          p.Rollup,
-			positiveSQL: `SELECT 1 FROM stats_components_health LIMIT 1`,
+			role: "stats_rollup",
+			db:   p.Rollup,
+			positiveSQLs: []string{
+				`SELECT 1 FROM stats_components_health LIMIT 1`,
+				`SELECT 1 FROM stats_idle_prewarm_events LIMIT 1`,
+			},
+			boolSQLs: []string{
+				`SELECT has_table_privilege(current_user, 'stats_idle_prewarm_events', 'INSERT') AND has_table_privilege(current_user, 'stats_idle_prewarm_events', 'DELETE')`,
+				`SELECT has_sequence_privilege(current_user, 'stats_idle_prewarm_events_id_seq', 'USAGE')`,
+			},
 			// partner_keys is on the §7.2.2 deny list.
 			denySQL: `SELECT 1 FROM partner_keys LIMIT 1`,
 		},
 	}
 	if p.PartnerKeysWriter != nil {
 		checks = append(checks, check{
-			role:        "partner_keys_writer",
-			db:          p.PartnerKeysWriter,
-			positiveSQL: `SELECT 1`,
+			role:         "partner_keys_writer",
+			db:           p.PartnerKeysWriter,
+			positiveSQLs: []string{`SELECT 1`},
 			// Column-scoped UPDATE only — SELECT on any column
 			// must fail.
 			denySQL: `SELECT 1 FROM partner_keys LIMIT 1`,
@@ -350,8 +362,19 @@ func smoke(ctx context.Context, p *Pools) error {
 		seenUser[current] = c.role
 
 		// 2. positive probe.
-		if _, err := c.db.ExecContext(timeout, c.positiveSQL); err != nil {
-			return fmt.Errorf("smoke %s: positive probe failed (migrations may not have run): %w", c.role, err)
+		for _, q := range c.positiveSQLs {
+			if _, err := c.db.ExecContext(timeout, q); err != nil {
+				return fmt.Errorf("smoke %s: positive probe failed (migrations may not have run): %w", c.role, err)
+			}
+		}
+		for _, q := range c.boolSQLs {
+			var ok bool
+			if err := c.db.QueryRowContext(timeout, q).Scan(&ok); err != nil {
+				return fmt.Errorf("smoke %s: privilege probe failed (migrations may not have run): %w", c.role, err)
+			}
+			if !ok {
+				return fmt.Errorf("smoke %s: privilege probe returned false (role missing required migration grant)", c.role)
+			}
 		}
 
 		// 3. deny probe.

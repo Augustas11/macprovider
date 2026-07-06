@@ -31,6 +31,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{8, "hardware_verification_jobs"},
 		{9, "provider_auth_policy_approve_fix"},
 		{10, "partner_keys_provider_id"},
+		{11, "idle_prewarm_events"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -67,7 +68,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix string
+	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm string
 	for _, m := range all {
 		switch m.Name {
 		case "stats_tables":
@@ -82,6 +83,8 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 			hardwareJobs = m.SQL
 		case "provider_auth_policy_approve_fix":
 			authPolicyApproveFix = m.SQL
+		case "idle_prewarm_events":
+			idlePrewarm = m.SQL
 		}
 	}
 	if schema == "" {
@@ -189,6 +192,25 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 		"SPEC-026 approval upsert must avoid PL/pgSQL output-column ambiguity")
 	if authPolicyApproveFix == "" {
 		t.Fatal("provider_auth_policy_approve_fix migration body is empty")
+	}
+	if idlePrewarm == "" {
+		t.Fatal("idle_prewarm_events migration body is empty")
+	}
+	idlePrewarmCode := stripSQLComments(idlePrewarm)
+	for _, s := range []string{
+		"CREATE TABLE IF NOT EXISTS stats_idle_prewarm_events",
+		"idle_prewarm_fired",
+		"idle_prewarm_completed",
+		"idle_prewarm_skipped",
+		"idle_prewarm_cancelled_by_real_request",
+		"idle_prewarm_failed",
+		"(event = 'idle_prewarm_skipped' AND reason IS NOT NULL)",
+		"(event <> 'idle_prewarm_skipped' AND reason IS NULL)",
+		"GRANT SELECT, INSERT, DELETE ON stats_idle_prewarm_events TO stats_rollup",
+		"GRANT SELECT ON stats_idle_prewarm_events TO stats_reader",
+		"REVOKE ALL ON stats_idle_prewarm_events FROM provider_portal",
+	} {
+		mustContain(t, idlePrewarmCode, s, "issue #381 idle-prewarm migration contract")
 	}
 	mustContain(t, authPolicyApproveFix, "CREATE OR REPLACE FUNCTION approve_provider_auth_policy_exemption",
 		"forward migration must replace the approval function on existing deployments")

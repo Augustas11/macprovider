@@ -88,6 +88,10 @@ type Server struct {
 	catalog            *tier2.Catalog
 	identitySignatures IdentitySignatureStore
 	authPolicyAdmin    ProviderAuthPolicyAdminStore
+	idlePrewarm        IdlePrewarmRecorder
+	idlePrewarmMetrics IdlePrewarmMetrics
+	idlePrewarmLimits  sync.Map
+	idlePrewarmQueue   chan idlePrewarmRecord
 }
 
 // TokenValidator handles inspection of a Bearer header on the WS connect.
@@ -149,6 +153,33 @@ type ProviderAuthPolicyAdminStore interface {
 	SeedProviderAuthPolicyCutover(ctx context.Context, cutover time.Time, cliProviderIDs []string) (int64, error)
 }
 
+type IdlePrewarmRecorder interface {
+	RecordIdlePrewarmEvent(ctx context.Context, providerID, event, reason string) error
+}
+
+type IdlePrewarmMetrics interface {
+	IncIdlePrewarmEvent(event, reason string)
+}
+
+const (
+	idlePrewarmEventBurst           = 10
+	idlePrewarmEventRefillPerSecond = 1
+	idlePrewarmEventQueueSize       = 1024
+	idlePrewarmLimiterTTL           = 15 * time.Minute
+)
+
+type idlePrewarmLimiter struct {
+	mu     sync.Mutex
+	tokens int
+	last   time.Time
+}
+
+type idlePrewarmRecord struct {
+	providerID string
+	event      string
+	reason     string
+}
+
 type Option func(*Server)
 
 // WithCatalog injects a specific tier2.Catalog instance for this server.
@@ -193,6 +224,18 @@ func WithIdentitySignatureStore(store IdentitySignatureStore) Option {
 func WithProviderAuthPolicyAdminStore(store ProviderAuthPolicyAdminStore) Option {
 	return func(s *Server) {
 		s.authPolicyAdmin = store
+	}
+}
+
+func WithIdlePrewarmRecorder(recorder IdlePrewarmRecorder) Option {
+	return func(s *Server) {
+		s.idlePrewarm = recorder
+	}
+}
+
+func WithIdlePrewarmMetrics(metrics IdlePrewarmMetrics) Option {
+	return func(s *Server) {
+		s.idlePrewarmMetrics = metrics
 	}
 }
 
@@ -311,6 +354,10 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.idlePrewarm != nil {
+		s.idlePrewarmQueue = make(chan idlePrewarmRecord, idlePrewarmEventQueueSize)
+		go s.runIdlePrewarmRecorder()
 	}
 	if registry != nil {
 		// M3-8d: route the heartbeat verifier through s.catalogRef() so a
@@ -1620,6 +1667,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 	switch envelope.Type {
 	case "heartbeat":
 		s.handleHeartbeat(conn, providerID, assignedID, payload)
+	case "idle_prewarm_event":
+		s.handleIdlePrewarmEvent(providerID, payload)
 	case "state_update":
 		s.handleStateUpdate(providerID, assignedID, payload)
 	case "preflight_ack":
@@ -1643,6 +1692,86 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		}
 		s.log.Warn().Str("provider_id", providerID).Str("type", safeType).Msg("unknown provider message type")
 	}
+}
+
+func (s *Server) handleIdlePrewarmEvent(providerID string, payload []byte) {
+	if s.idlePrewarm == nil {
+		return
+	}
+	ev, field, err := ParseIdlePrewarmEvent(payload)
+	if err != nil {
+		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid idle_prewarm_event")
+		return
+	}
+	if !s.allowIdlePrewarmEvent(providerID) {
+		s.log.Warn().Str("provider_id", providerID).Str("event", ev.Event).Msg("idle prewarm event rate limited")
+		return
+	}
+	if s.idlePrewarmMetrics != nil {
+		s.idlePrewarmMetrics.IncIdlePrewarmEvent(ev.Event, ev.Reason)
+	}
+	record := idlePrewarmRecord{providerID: providerID, event: ev.Event, reason: ev.Reason}
+	select {
+	case s.idlePrewarmQueue <- record:
+	default:
+		s.log.Warn().Str("provider_id", providerID).Str("event", ev.Event).Msg("idle prewarm event queue full; dropped")
+	}
+}
+
+func (s *Server) runIdlePrewarmRecorder() {
+	for record := range s.idlePrewarmQueue {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := s.idlePrewarm.RecordIdlePrewarmEvent(ctx, record.providerID, record.event, record.reason)
+		cancel()
+		if err != nil {
+			s.log.Warn().Err(err).Str("provider_id", record.providerID).Str("event", record.event).Msg("idle prewarm event record failed")
+		}
+	}
+}
+
+func (s *Server) allowIdlePrewarmEvent(providerID string) bool {
+	now := s.now()
+	s.pruneIdlePrewarmLimits(now)
+	v, _ := s.idlePrewarmLimits.LoadOrStore(providerID, &idlePrewarmLimiter{
+		tokens: idlePrewarmEventBurst,
+		last:   now,
+	})
+	limiter := v.(*idlePrewarmLimiter)
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if now.Before(limiter.last) {
+		limiter.last = now
+	}
+	elapsed := int(now.Sub(limiter.last).Seconds())
+	if elapsed > 0 {
+		limiter.tokens += elapsed * idlePrewarmEventRefillPerSecond
+		if limiter.tokens > idlePrewarmEventBurst {
+			limiter.tokens = idlePrewarmEventBurst
+		}
+		limiter.last = limiter.last.Add(time.Duration(elapsed) * time.Second)
+	}
+	if limiter.tokens <= 0 {
+		return false
+	}
+	limiter.tokens--
+	return true
+}
+
+func (s *Server) pruneIdlePrewarmLimits(now time.Time) {
+	s.idlePrewarmLimits.Range(func(key, value any) bool {
+		limiter, ok := value.(*idlePrewarmLimiter)
+		if !ok {
+			s.idlePrewarmLimits.Delete(key)
+			return true
+		}
+		limiter.mu.Lock()
+		expired := now.Sub(limiter.last) > idlePrewarmLimiterTTL
+		limiter.mu.Unlock()
+		if expired {
+			s.idlePrewarmLimits.Delete(key)
+		}
+		return true
+	})
 }
 
 func (s *Server) handleDrainStatus(conn net.Conn, providerID, assignedID string, payload []byte) {
@@ -2523,6 +2652,7 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
 	s.clearWarmupGate(providerID, assignedID)
+	s.pruneIdlePrewarmLimits(s.now())
 	if session, ok := s.storedSessionFor(providerID, assignedID); ok {
 		session.close()
 		s.sessions.Delete(sessionKey(providerID, assignedID))

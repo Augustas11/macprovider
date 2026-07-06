@@ -145,9 +145,18 @@ func TestAC1_OverviewJSONShape(t *testing.T) {
 	}
 	var body map[string]any
 	mustDecode(t, resp, &body)
-	for _, k := range []string{"generated_at", "stale_after", "network", "timeseries"} {
+	for _, k := range []string{"generated_at", "stale_after", "network", "timeseries", "idle_prewarm"} {
 		if _, ok := body[k]; !ok {
 			t.Errorf("top-level %q missing", k)
+		}
+	}
+	idle, ok := body["idle_prewarm"].(map[string]any)
+	if !ok {
+		t.Fatalf("idle_prewarm missing or not object")
+	}
+	for _, k := range []string{"pool_pct_with_b1_active", "skips_by_reason_last_1h"} {
+		if _, ok := idle[k]; !ok {
+			t.Errorf("idle_prewarm.%s missing", k)
 		}
 	}
 	net, ok := body["network"].(map[string]any)

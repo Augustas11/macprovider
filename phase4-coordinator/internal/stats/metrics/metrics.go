@@ -7,6 +7,7 @@
 //	stats_rollup_lag_seconds{component}                        — Gauge
 //	stats_rollup_errors_total{component}                       — Counter
 //	stats_rate_limit_exceeded_total{tier,endpoint}             — Counter
+//	stats_idle_prewarm_event_total{event,reason}                — Counter
 //
 // Label hygiene (SECURITY M5 — Step 4.C SECURITY lane category A):
 //
@@ -38,6 +39,10 @@
 //
 //   - `provider_register_hardware_profile_errors_total` has no labels.
 //
+//   - `stats_idle_prewarm_event_total{event,reason}` uses the
+//     idle-prewarm protocol allowlist. Non-skip events use
+//     reason="none" so the label set stays closed and low-cardinality.
+//
 // No label takes an operator- or attacker-controllable string directly.
 // A `Reset` method exists for test isolation.
 package metrics
@@ -61,6 +66,7 @@ type Metrics struct {
 	RegisterRateLimitHits  *prometheus.CounterVec
 	RegisterSource         *prometheus.CounterVec
 	RegisterHardwareErrors prometheus.Counter
+	IdlePrewarmEventTotal  *prometheus.CounterVec
 }
 
 // New registers all five metrics against reg and returns the
@@ -134,6 +140,13 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Count of accepted provider register requests whose best-effort hardware profile persistence failed.",
 			},
 		),
+		IdlePrewarmEventTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "stats_idle_prewarm_event_total",
+				Help: "Count of accepted provider idle-prewarm telemetry events by protocol event and closed-set reason.",
+			},
+			[]string{"event", "reason"},
+		),
 	}
 }
 
@@ -166,4 +179,29 @@ func (m *Metrics) IncRegisterHardwareProfileError() {
 		return
 	}
 	m.RegisterHardwareErrors.Inc()
+}
+
+func (m *Metrics) IncIdlePrewarmEvent(event, reason string) {
+	if m == nil || m.IdlePrewarmEventTotal == nil {
+		return
+	}
+	switch event {
+	case "idle_prewarm_fired",
+		"idle_prewarm_completed",
+		"idle_prewarm_cancelled_by_real_request",
+		"idle_prewarm_failed":
+		if reason != "" {
+			return
+		}
+		reason = "none"
+	case "idle_prewarm_skipped":
+		switch reason {
+		case "disabled", "busy", "not_idle_yet", "thermal_pressure", "on_battery", "model_not_loaded":
+		default:
+			return
+		}
+	default:
+		return
+	}
+	m.IdlePrewarmEventTotal.WithLabelValues(event, reason).Inc()
 }

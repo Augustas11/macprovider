@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	statsprewarm "github.com/augstar/macprovider-coordinator/internal/stats/prewarm"
 	"github.com/rs/zerolog"
 )
 
@@ -22,6 +23,10 @@ type tokenValidator interface {
 
 type tokenUseMarker interface {
 	ValidateAndMarkTokenUsed(ctx context.Context, raw string) (providerID string, ok bool, err error)
+}
+
+type idlePrewarmReader interface {
+	ProviderIdlePrewarm(ctx context.Context, providerID string) (statsprewarm.Summary, error)
 }
 
 func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int) http.Handler {
@@ -44,7 +49,11 @@ func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireP
 // below) so it shares atomicity with the ledger_config_snapshots
 // row §13.2 already requires.
 func (s *Store) HandlersWithQuarantineGate(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool) http.Handler {
-	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled)
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, nil)
+}
+
+func (s *Store) HandlersWithQuarantineGateAndIdlePrewarm(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, idlePrewarm)
 }
 
 // HandlersWithBridge mounts the admin/provider handlers. The
@@ -57,10 +66,10 @@ func (s *Store) HandlersWithQuarantineGate(operatorKey string, tokenStore tokenV
 // accepted. Handlers (the legacy single-arg signature) is kept as a
 // thin shim so test fixtures and direct callers don't churn.
 func (s *Store) HandlersWithBridge(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int) http.Handler {
-	return s.handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly, tokenStore, requireProviderTokens, earningsRateLimitPerMin, false)
+	return s.handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly, tokenStore, requireProviderTokens, earningsRateLimitPerMin, false, nil)
 }
 
-func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool) http.Handler {
+func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
 	// SPEC-005 v0.4 (issue #169) — handler CONSTRUCTION must not be
 	// able to silently flip the live route-layer flag. R8 fix
 	// (ARCH-M1) replaces the unconditional SetForceVoidEnabled call
@@ -88,6 +97,7 @@ func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOn
 		earningsRateLimitPerMin: earningsRateLimitPerMin,
 		lastEarnings:            map[string][]time.Time{},
 		adminBucket:             newAdminRateLimiter(),
+		idlePrewarm:             idlePrewarm,
 		log:                     zerolog.New(os.Stdout).With().Timestamp().Logger(),
 	}
 	return http.HandlerFunc(h.serveHTTP)
@@ -102,12 +112,14 @@ type handler struct {
 	mu                      sync.Mutex
 	lastEarnings            map[string][]time.Time
 	adminBucket             *adminRateLimiter
+	idlePrewarm             idlePrewarmReader
 	log                     zerolog.Logger
 }
 
 const settlementReceiptDiagnosticsDisclosure = "Settlement receipt diagnostics expose reason codes plus digest/fingerprint identifiers only. Raw receipt envelopes, raw receipt public keys, raw signatures, raw prompts, raw outputs, bearer tokens, receipt private keys, and provider-private state are not exposed."
 
 const settlementReceiptDiagnosticsDefaultWindow = 31 * 24 * time.Hour
+const idlePrewarmEarningsReadTimeout = 250 * time.Millisecond
 
 type settlementReceiptSummary struct {
 	ReceiptProfile        string                        `json:"receipt_profile"`
@@ -738,6 +750,23 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		"rate_card_excerpt":      h.rateCardExcerpt(r.Context(), models),
 		"fault_count":            h.sum(r.Context(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, faultArgs...),
 	}
+	idlePrewarm := statsprewarm.Summary{
+		EventsLast1h:        map[string]int64{},
+		SkipsByReasonLast1h: map[string]int64{},
+	}
+	if h.idlePrewarm != nil {
+		idleCtx, cancel := context.WithTimeout(r.Context(), idlePrewarmEarningsReadTimeout)
+		idlePrewarm, err = h.idlePrewarm.ProviderIdlePrewarm(idleCtx, providerID)
+		cancel()
+		if err != nil {
+			h.log.Warn().Err(err).Str("provider_id", providerID).Msg("provider idle prewarm summary unavailable")
+			idlePrewarm = statsprewarm.Summary{
+				EventsLast1h:        map[string]int64{},
+				SkipsByReasonLast1h: map[string]int64{},
+			}
+		}
+	}
+	resp["idle_prewarm"] = idlePrewarm
 	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(time.Now().UTC(), rangeFrom, rangeTo, hasRange)
 	summaries, err := h.settlementReceiptSummariesForProviders(r.Context(), []string{providerID}, diagnosticsFrom, diagnosticsTo, true, 5)
 	if err != nil {

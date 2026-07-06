@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/stats/store"
+	"github.com/rs/zerolog"
 )
 
 // Handler is the SPEC-017 §5 handler bundle. Owned by the
@@ -21,7 +22,12 @@ type Handler struct {
 	BackfillMode string
 	PartialSince string // RFC 3339 timestamp; empty = Path B
 	Now          func() time.Time
+	Logger       zerolog.Logger
+
+	idlePrewarmRead func(context.Context, string) (store.ProviderIdlePrewarmSummary, error)
 }
+
+const providerIdlePrewarmReadTimeout = 250 * time.Millisecond
 
 // nowFn returns the handler's time source, defaulting to
 // time.Now if the embedding caller did not inject a test fake.
@@ -58,10 +64,11 @@ func (h *Handler) overviewStaleProbe(ctx context.Context, now time.Time) (bool, 
 //	  timeseries{rpm_30m{bucket_seconds, points[]},
 //	             tpm_30m{bucket_seconds, points[]}} }
 type overviewResponse struct {
-	GeneratedAt string             `json:"generated_at"`
-	StaleAfter  string             `json:"stale_after"`
-	Network     overviewNetwork    `json:"network"`
-	Timeseries  overviewTimeseries `json:"timeseries"`
+	GeneratedAt string                     `json:"generated_at"`
+	StaleAfter  string                     `json:"stale_after"`
+	Network     overviewNetwork            `json:"network"`
+	Timeseries  overviewTimeseries         `json:"timeseries"`
+	IdlePrewarm overviewIdlePrewarmSummary `json:"idle_prewarm"`
 }
 
 // overviewNetwork is the §5.1.1 14-field schema (12 distinct
@@ -87,6 +94,16 @@ type overviewNetwork struct {
 type overviewTimeseries struct {
 	Rpm30m timeseriesRpm `json:"rpm_30m"`
 	Tpm30m timeseriesTpm `json:"tpm_30m"`
+}
+
+type overviewIdlePrewarmSummary struct {
+	PoolPctWithB1Active int              `json:"pool_pct_with_b1_active"`
+	SkipsByReasonLast1h map[string]int64 `json:"skips_by_reason_last_1h"`
+}
+
+type providerIdlePrewarmResponse struct {
+	EventsLast1h        map[string]int64 `json:"events_last_1h"`
+	SkipsByReasonLast1h map[string]int64 `json:"skips_by_reason_last_1h"`
 }
 
 type timeseriesRpm struct {
@@ -188,6 +205,10 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request, ar auth
 				Points:        alignTpmPoints(tpm, ov.GeneratedAt),
 			},
 		},
+		IdlePrewarm: overviewIdlePrewarmSummary{
+			PoolPctWithB1Active: ov.IdlePrewarm.PoolPctWithB1Active,
+			SkipsByReasonLast1h: decodeReasonCounts(ov.IdlePrewarm.SkipsByReasonLast1hJSON),
+		},
 	}
 
 	writeJSON(w, r, http.StatusOK, resp, ov.GeneratedAt,
@@ -263,11 +284,12 @@ type leaderboardResponse struct {
 }
 
 type providerStatsResponse struct {
-	GeneratedAt string             `json:"generated_at"`
-	StaleAfter  string             `json:"stale_after"`
-	Window      string             `json:"window"`
-	ProviderID  string             `json:"provider_id"`
-	Row         leaderboardRespRow `json:"row"`
+	GeneratedAt string                      `json:"generated_at"`
+	StaleAfter  string                      `json:"stale_after"`
+	Window      string                      `json:"window"`
+	ProviderID  string                      `json:"provider_id"`
+	Row         leaderboardRespRow          `json:"row"`
+	IdlePrewarm providerIdlePrewarmResponse `json:"idle_prewarm"`
 }
 
 type leaderboardMeta struct {
@@ -572,6 +594,7 @@ func (h *Handler) handleProvider(w http.ResponseWriter, r *http.Request, ar auth
 			writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "provider stats are stale", now, &retry)
 			return
 		}
+		idle := h.providerIdlePrewarm(ctx, providerID)
 		resp := providerStatsResponse{
 			GeneratedAt: gen.UTC().Format(time.RFC3339),
 			StaleAfter:  gen.Add(30 * time.Second).UTC().Format(time.RFC3339),
@@ -584,6 +607,7 @@ func (h *Handler) handleProvider(w http.ResponseWriter, r *http.Request, ar auth
 				Tokens:         0,
 				Jobs:           0,
 			},
+			IdlePrewarm: providerIdlePrewarmSummary(idle),
 		}
 		writeJSON(w, r, http.StatusOK, resp, gen, "private, max-age=30, s-maxage=30", varyForPartner(), ar)
 		return
@@ -596,6 +620,7 @@ func (h *Handler) handleProvider(w http.ResponseWriter, r *http.Request, ar auth
 	if obs := requestObsFromContext(r.Context()); obs != nil {
 		obs.GeneratedAtAgeMs = time.Since(row.GeneratedAt).Milliseconds()
 	}
+	idle := h.providerIdlePrewarm(ctx, providerID)
 
 	earn := parseUSD(row.EarningsTotalUSD)
 	work := parseUSD(row.EarningsWorkUSD)
@@ -625,8 +650,43 @@ func (h *Handler) handleProvider(w http.ResponseWriter, r *http.Request, ar auth
 		Window:      window,
 		ProviderID:  providerID,
 		Row:         respRow,
+		IdlePrewarm: providerIdlePrewarmSummary(idle),
 	}
 	writeJSON(w, r, http.StatusOK, resp, row.GeneratedAt, "private, max-age=30, s-maxage=30", varyForPartner(), ar)
+}
+
+func (h *Handler) providerIdlePrewarm(ctx context.Context, providerID string) store.ProviderIdlePrewarmSummary {
+	read := h.Store.ProviderIdlePrewarm
+	if h.idlePrewarmRead != nil {
+		read = h.idlePrewarmRead
+	}
+	idleCtx, cancel := context.WithTimeout(ctx, providerIdlePrewarmReadTimeout)
+	defer cancel()
+	idle, err := read(idleCtx, providerID)
+	if err != nil {
+		h.Logger.Warn().Err(err).Str("provider_id", providerID).Msg("provider idle prewarm read failed; returning empty optional block")
+		return store.ProviderIdlePrewarmSummary{
+			EventsLast1h:        map[string]int64{},
+			SkipsByReasonLast1h: map[string]int64{},
+		}
+	}
+	return idle
+}
+
+func providerIdlePrewarmSummary(in store.ProviderIdlePrewarmSummary) providerIdlePrewarmResponse {
+	return providerIdlePrewarmResponse{
+		EventsLast1h:        in.EventsLast1h,
+		SkipsByReasonLast1h: in.SkipsByReasonLast1h,
+	}
+}
+
+func decodeReasonCounts(raw []byte) map[string]int64 {
+	out := map[string]int64{}
+	if len(raw) == 0 {
+		return out
+	}
+	_ = json.Unmarshal(raw, &out)
+	return out
 }
 
 // leaderboardStaleFor503 returns true iff the leaderboard

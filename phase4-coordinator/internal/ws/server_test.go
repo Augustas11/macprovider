@@ -24,10 +24,12 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 )
 
@@ -48,6 +50,36 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
+type recordedIdlePrewarmEvent struct {
+	providerID string
+	event      string
+	reason     string
+}
+
+type recordingIdlePrewarm struct {
+	mu      sync.Mutex
+	records []recordedIdlePrewarmEvent
+}
+
+func (r *recordingIdlePrewarm) RecordIdlePrewarmEvent(_ context.Context, providerID, event, reason string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = append(r.records, recordedIdlePrewarmEvent{
+		providerID: providerID,
+		event:      event,
+		reason:     reason,
+	})
+	return nil
+}
+
+func (r *recordingIdlePrewarm) snapshot() []recordedIdlePrewarmEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]recordedIdlePrewarmEvent, len(r.records))
+	copy(out, r.records)
+	return out
+}
+
 func TestProviderHelloReceivesAck(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()
@@ -59,6 +91,149 @@ func TestProviderHelloReceivesAck(t *testing.T) {
 	defer conn.Close()
 
 	assertHelloAck(t, conn)
+}
+
+func TestIdlePrewarmEventRecordsProviderBoundTelemetry(t *testing.T) {
+	recorder := &recordingIdlePrewarm{}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithIdlePrewarmRecorder(recorder),
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+	if err := wsutil.WriteClientText(conn, []byte(`{"type":"idle_prewarm_event","event":"idle_prewarm_skipped","reason":"not_idle_yet"}`)); err != nil {
+		t.Fatalf("write idle prewarm event: %v", err)
+	}
+
+	eventually(t, func() bool {
+		records := recorder.snapshot()
+		return len(records) == 1 &&
+			records[0].providerID == "m4-anon" &&
+			records[0].event == "idle_prewarm_skipped" &&
+			records[0].reason == "not_idle_yet"
+	})
+}
+
+func TestIdlePrewarmEventIncrementsAcceptedEventMetric(t *testing.T) {
+	recorder := &recordingIdlePrewarm{}
+	reg := prometheus.NewRegistry()
+	metrics := statsmetrics.New(reg)
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithIdlePrewarmRecorder(recorder),
+		providerws.WithIdlePrewarmMetrics(metrics),
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+	if err := wsutil.WriteClientText(conn, []byte(`{"type":"idle_prewarm_event","event":"idle_prewarm_skipped","reason":"not_idle_yet"}`)); err != nil {
+		t.Fatalf("write idle prewarm event: %v", err)
+	}
+
+	eventually(t, func() bool {
+		return idlePrewarmMetricValue(t, reg, "idle_prewarm_skipped", "not_idle_yet") == 1
+	})
+}
+
+func TestIdlePrewarmEventWritesAreRateLimited(t *testing.T) {
+	recorder := &recordingIdlePrewarm{}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithIdlePrewarmRecorder(recorder),
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+	for i := 0; i < 12; i++ {
+		if err := wsutil.WriteClientText(conn, []byte(`{"type":"idle_prewarm_event","event":"idle_prewarm_fired"}`)); err != nil {
+			t.Fatalf("write idle prewarm event %d: %v", i, err)
+		}
+	}
+	eventually(t, func() bool {
+		return len(recorder.snapshot()) == 10
+	})
+	time.Sleep(100 * time.Millisecond)
+	if got := len(recorder.snapshot()); got != 10 {
+		t.Fatalf("recorded idle prewarm events = %d, want burst cap 10", got)
+	}
+}
+
+func TestIdlePrewarmRateLimitSurvivesImmediateReconnect(t *testing.T) {
+	recorder := &recordingIdlePrewarm{}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithIdlePrewarmRecorder(recorder),
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial first connection: %v", err)
+	}
+	assertHelloAck(t, conn)
+	for i := 0; i < 10; i++ {
+		if err := wsutil.WriteClientText(conn, []byte(`{"type":"idle_prewarm_event","event":"idle_prewarm_fired"}`)); err != nil {
+			t.Fatalf("write idle prewarm event %d: %v", i, err)
+		}
+	}
+	eventually(t, func() bool {
+		return len(recorder.snapshot()) == 10
+	})
+	_ = conn.Close()
+
+	conn2, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial second connection: %v", err)
+	}
+	defer conn2.Close()
+	assertHelloAck(t, conn2)
+	if err := wsutil.WriteClientText(conn2, []byte(`{"type":"idle_prewarm_event","event":"idle_prewarm_fired"}`)); err != nil {
+		t.Fatalf("write idle prewarm event after reconnect: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := len(recorder.snapshot()); got != 10 {
+		t.Fatalf("recorded idle prewarm events after reconnect = %d, want original burst cap 10", got)
+	}
+}
+
+func idlePrewarmMetricValue(t *testing.T, reg *prometheus.Registry, event, reason string) float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() != "stats_idle_prewarm_event_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			var gotEvent, gotReason string
+			for _, label := range metric.GetLabel() {
+				switch label.GetName() {
+				case "event":
+					gotEvent = label.GetValue()
+				case "reason":
+					gotReason = label.GetValue()
+				}
+			}
+			if gotEvent == event && gotReason == reason {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
 }
 
 func TestProviderAuthV2RegistersEncryptedSession(t *testing.T) {

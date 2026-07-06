@@ -73,6 +73,7 @@ func (p *Provider) OverviewSnapshot() statsrollup.OverviewSnapshot {
 			continue
 		}
 		snap.NodesOnline++
+		snap.CapacityEligibleProviderIDs = append(snap.CapacityEligibleProviderIDs, prov.ProviderID)
 		if prov.AttestationStatus == pool.AttestationStatusAttested {
 			snap.NodesHardwareAttested++
 		}

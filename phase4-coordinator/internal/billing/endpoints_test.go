@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	statsprewarm "github.com/augstar/macprovider-coordinator/internal/stats/prewarm"
 )
 
 type fakeTokens map[string]string
@@ -44,6 +46,28 @@ type validateOnlyTokens map[string]string
 func (v validateOnlyTokens) ValidateToken(_ context.Context, raw string) (string, bool, error) {
 	providerID, ok := v[raw]
 	return providerID, ok, nil
+}
+
+type fakeIdlePrewarmReader struct {
+	summary statsprewarm.Summary
+	err     error
+}
+
+func (f fakeIdlePrewarmReader) ProviderIdlePrewarm(context.Context, string) (statsprewarm.Summary, error) {
+	if f.err != nil {
+		return statsprewarm.Summary{}, f.err
+	}
+	return f.summary, nil
+}
+
+type blockingIdlePrewarmReader struct {
+	started chan struct{}
+}
+
+func (b blockingIdlePrewarmReader) ProviderIdlePrewarm(ctx context.Context, _ string) (statsprewarm.Summary, error) {
+	close(b.started)
+	<-ctx.Done()
+	return statsprewarm.Summary{}, ctx.Err()
 }
 
 func TestSummaryEndpoint(t *testing.T) {
@@ -684,6 +708,103 @@ func TestEarningsEndpointMarksProviderTokenUsed(t *testing.T) {
 	}
 	if tokens.marked != 1 {
 		t.Fatalf("token mark count=%d want 1", tokens.marked)
+	}
+}
+
+func TestEarningsEndpointIncludesIdlePrewarmSummary(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	insertCredit(t, store.db, "provider-a", time.Now().UTC(), 500)
+	reader := fakeIdlePrewarmReader{summary: statsprewarm.Summary{
+		EventsLast1h: map[string]int64{
+			"idle_prewarm_fired": 2,
+		},
+		SkipsByReasonLast1h: map[string]int64{
+			"not_idle_yet": 1,
+		},
+	}}
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	w := httptest.NewRecorder()
+	store.HandlersWithQuarantineGateAndIdlePrewarm("operator", fakeTokens{"good": "provider-a"}, true, 60, false, reader).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		IdlePrewarm statsprewarm.Summary `json:"idle_prewarm"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.IdlePrewarm.EventsLast1h["idle_prewarm_fired"] != 2 ||
+		resp.IdlePrewarm.SkipsByReasonLast1h["not_idle_yet"] != 1 {
+		t.Fatalf("idle_prewarm=%+v, want reader summary", resp.IdlePrewarm)
+	}
+}
+
+func TestEarningsEndpointKeepsServingWhenIdlePrewarmUnavailable(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	insertCredit(t, store.db, "provider-a", time.Now().UTC(), 500)
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	w := httptest.NewRecorder()
+	store.HandlersWithQuarantineGateAndIdlePrewarm(
+		"operator",
+		fakeTokens{"good": "provider-a"},
+		true,
+		60,
+		false,
+		fakeIdlePrewarmReader{err: errors.New("stats unavailable")},
+	).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		IdlePrewarm statsprewarm.Summary `json:"idle_prewarm"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.IdlePrewarm.EventsLast1h) != 0 || len(resp.IdlePrewarm.SkipsByReasonLast1h) != 0 {
+		t.Fatalf("idle_prewarm=%+v, want empty fail-open summary", resp.IdlePrewarm)
+	}
+}
+
+func TestEarningsEndpointBoundsBlockingIdlePrewarmRead(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	insertCredit(t, store.db, "provider-a", time.Now().UTC(), 500)
+	reader := blockingIdlePrewarmReader{started: make(chan struct{})}
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings", nil)
+	req.Header.Set("Authorization", "Bearer good")
+	w := httptest.NewRecorder()
+	start := time.Now()
+	store.HandlersWithQuarantineGateAndIdlePrewarm(
+		"operator",
+		fakeTokens{"good": "provider-a"},
+		true,
+		60,
+		false,
+		reader,
+	).ServeHTTP(w, req)
+	elapsed := time.Since(start)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if elapsed > time.Second {
+		t.Fatalf("blocking idle prewarm read held earnings endpoint for %s", elapsed)
+	}
+	select {
+	case <-reader.started:
+	default:
+		t.Fatal("idle prewarm reader was not called")
+	}
+	var resp struct {
+		IdlePrewarm statsprewarm.Summary `json:"idle_prewarm"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.IdlePrewarm.EventsLast1h) != 0 || len(resp.IdlePrewarm.SkipsByReasonLast1h) != 0 {
+		t.Fatalf("idle_prewarm=%+v, want empty timeout fail-open summary", resp.IdlePrewarm)
 	}
 }
 

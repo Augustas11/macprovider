@@ -49,6 +49,14 @@ import (
 	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
 )
 
+type fixedOverviewSnapshot struct {
+	snap statsrollup.OverviewSnapshot
+}
+
+func (f fixedOverviewSnapshot) OverviewSnapshot() statsrollup.OverviewSnapshot {
+	return f.snap
+}
+
 // rollupOLTPStubDDL creates the Postgres-shape SPEC-005 +
 // SPEC-002 source tables the rollup queries. Production
 // mirrors SQLite billing → Postgres via operator-side tooling
@@ -219,8 +227,21 @@ func TestRollupOverviewTick(t *testing.T) {
 	now := time.Now().UTC()
 	seedLedgerRow(t, adminDB, "p1", now.Add(-2*time.Hour), 100, 50, 1000)
 	seedLedgerRow(t, adminDB, "p2", now.Add(-1*time.Hour), 200, 75, 2000)
+	if _, err := adminDB.ExecContext(context.Background(), `
+        INSERT INTO stats_idle_prewarm_events (recorded_at, provider_id, event, reason) VALUES
+            ($1, 'p1', 'idle_prewarm_fired', NULL),
+            ($1, 'p2', 'idle_prewarm_fired', NULL),
+            ($1, 'p1', 'idle_prewarm_skipped', 'not_idle_yet'),
+            ($1, 'p2', 'idle_prewarm_skipped', 'model_not_loaded')
+    `, now); err != nil {
+		t.Fatalf("seed idle prewarm events: %v", err)
+	}
 
-	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), fixedOverviewSnapshot{snap: statsrollup.OverviewSnapshot{
+		NodesOnline:                 1,
+		CapacityEligibleProviderIDs: []string{"p1"},
+		At:                          now,
+	}}, logger)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -248,6 +269,20 @@ func TestRollupOverviewTick(t *testing.T) {
 	if requests != 2 {
 		t.Errorf("requests = %d, want 2", requests)
 	}
+	var idlePct int
+	var idleSkipsRaw []byte
+	if err := adminDB.QueryRowContext(context.Background(), `
+        SELECT idle_prewarm_pool_pct_with_b1_active, idle_prewarm_skips_by_reason_last_1h
+          FROM stats_overview_current
+    `).Scan(&idlePct, &idleSkipsRaw); err != nil {
+		t.Fatalf("scan idle overview: %v", err)
+	}
+	if idlePct != 100 {
+		t.Fatalf("idle_prewarm_pool_pct_with_b1_active=%d want 100 from capacity-eligible p1 only", idlePct)
+	}
+	if got := string(idleSkipsRaw); !strings.Contains(got, `"not_idle_yet"`) || strings.Contains(got, `"model_not_loaded"`) {
+		t.Fatalf("idle_prewarm_skips_by_reason_last_1h=%s want only capacity-eligible provider reasons", got)
+	}
 
 	var genAt time.Time
 	if err := adminDB.QueryRowContext(context.Background(),
@@ -257,6 +292,56 @@ func TestRollupOverviewTick(t *testing.T) {
 	}
 	if time.Since(genAt) > 5*time.Second {
 		t.Errorf("stats_components_health.overview.generated_at not fresh: %v", genAt)
+	}
+}
+
+func TestRollupOverviewIdlePrewarmFailureLogsAndKeepsPrimaryOverview(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	var logs bytes.Buffer
+	logger := zerolog.New(&logs)
+
+	seedProviderTokens(t, adminDB, "p1")
+	now := time.Now().UTC()
+	seedLedgerRow(t, adminDB, "p1", now.Add(-1*time.Hour), 100, 50, 1000)
+	if _, err := adminDB.ExecContext(context.Background(), `DROP TABLE stats_idle_prewarm_events`); err != nil {
+		t.Fatalf("drop optional idle prewarm table: %v", err)
+	}
+
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), fixedOverviewSnapshot{snap: statsrollup.OverviewSnapshot{
+		NodesOnline:                 1,
+		CapacityEligibleProviderIDs: []string{"p1"},
+		At:                          now,
+	}}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	var tokensIn, tokensOut, requests int64
+	var idlePct int
+	var idleSkipsRaw []byte
+	if err := adminDB.QueryRowContext(context.Background(), `
+        SELECT tokens_in, tokens_out, requests,
+               idle_prewarm_pool_pct_with_b1_active,
+               idle_prewarm_skips_by_reason_last_1h
+          FROM stats_overview_current
+    `).Scan(&tokensIn, &tokensOut, &requests, &idlePct, &idleSkipsRaw); err != nil {
+		t.Fatalf("scan overview: %v", err)
+	}
+	if tokensIn != 100 || tokensOut != 50 || requests != 1 {
+		t.Fatalf("primary overview counters = (%d, %d, %d), want (100, 50, 1)", tokensIn, tokensOut, requests)
+	}
+	if idlePct != 0 || string(idleSkipsRaw) != "{}" {
+		t.Fatalf("idle overview on optional failure = pct %d skips %s, want empty block", idlePct, idleSkipsRaw)
+	}
+	if got := logs.String(); !strings.Contains(got, "idle prewarm overview prune failed") ||
+		!strings.Contains(got, "idle prewarm overview query failed") {
+		t.Fatalf("logs=%s want idle prewarm optional failure warnings", got)
 	}
 }
 
