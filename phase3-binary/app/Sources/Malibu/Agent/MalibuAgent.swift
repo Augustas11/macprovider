@@ -68,6 +68,16 @@ final class MalibuAgent: ObservableObject {
             snapshot.lastError = "Not set up yet. Click Launch Provider to activate."
             return
         }
+        guard StartupState.launchdInstallEvidenceExists() else {
+            snapshot.state = .error
+            snapshot.lastError = "Not set up yet. Click Launch Provider to run the installer."
+            return
+        }
+        guard await ProviderConfig.isConfigured || ProviderConfig.readHTTPPort() != nil else {
+            snapshot.state = .error
+            snapshot.lastError = "Not set up yet. Click Launch Provider to activate."
+            return
+        }
         guard !isShuttingDown else { return }
 
         snapshot.state = .reconnecting

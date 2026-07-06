@@ -200,11 +200,7 @@ struct StartupState: Equatable {
         try? await ProviderConfig.recoverPendingImportIfNeeded(paths: paths)
         let configExists = fm.fileExists(atPath: paths.configFile.path)
         let markerExists = fm.fileExists(atPath: paths.appMarkerFile.path)
-        let home = fm.homeDirectoryForCurrentUser
-        let manifest = home.appendingPathComponent("Library/Application Support/macprovider/install_manifest.json")
-        let launchd = home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
-        let launchdInstallEvidenceExists =
-            fm.isReadableFile(atPath: manifest.path) || fm.isReadableFile(atPath: launchd.path)
+        let launchdInstallEvidenceExists = Self.launchdInstallEvidenceExists(paths: paths)
 
         var backgroundProviderHealthy = false
         if ProviderConfig.readProviderID(paths: paths) != nil,
@@ -228,10 +224,24 @@ struct StartupState: Equatable {
         if configExists && !appMarkerExists {
             return .showImportDialog
         }
-        if configExists || launchdInstallEvidenceExists {
+        // Launchd + config but provider still starting: attach and poll health.
+        if launchdInstallEvidenceExists && configExists {
             return .startAgent
         }
+        // Legacy app-track config without launchd, or launchd plist without config:
+        // run install.sh via onboarding instead of a reconnect loop.
+        if configExists || launchdInstallEvidenceExists {
+            return .showOnboarding
+        }
         return .showOnboarding
+    }
+
+    static func launchdInstallEvidenceExists(paths: ProviderPaths = .current) -> Bool {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let manifest = home.appendingPathComponent("Library/Application Support/macprovider/install_manifest.json")
+        let launchd = home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+        return fm.isReadableFile(atPath: manifest.path) || fm.isReadableFile(atPath: launchd.path)
     }
 
     static func applyMigrationDecision(

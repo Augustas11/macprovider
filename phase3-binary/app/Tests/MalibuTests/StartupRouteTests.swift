@@ -6,9 +6,10 @@ final class StartupRouteTests: XCTestCase {
     func testStartupRouteInstallStates() {
         let cases: [(String, StartupState, StartupRoute)] = [
             ("healthy-launchd", state(config: true, marker: true, launchd: true, healthy: true), .startAgent),
-            ("configured-app", state(config: true, marker: true, launchd: false, healthy: false), .startAgent),
+            ("launchd-config-starting", state(config: true, marker: true, launchd: true, healthy: false), .startAgent),
+            ("legacy-app-config", state(config: true, marker: true, launchd: false, healthy: false), .showOnboarding),
             ("cli-owned", state(config: true, marker: false, launchd: false, healthy: false), .showImportDialog),
-            ("launchd-only", state(config: false, marker: false, launchd: true, healthy: false), .startAgent),
+            ("launchd-only", state(config: false, marker: false, launchd: true, healthy: false), .showOnboarding),
             ("fresh", state(config: false, marker: false, launchd: false, healthy: false), .showOnboarding)
         ]
 
@@ -17,7 +18,7 @@ final class StartupRouteTests: XCTestCase {
         }
     }
 
-    func testMigrationImportMovesTokenToKeychainAndRemovesBearerFromConfig() async throws {
+    func testMigrationImportWithoutLaunchdRoutesToOnboarding() async throws {
         let paths = try makeTempPaths()
         try paths.ensureDirectories()
         try "provider_id: p_import\nprovider_token: secret-token\nmodel: test\n".write(to: paths.configFile, atomically: true, encoding: .utf8)
@@ -26,7 +27,9 @@ final class StartupRouteTests: XCTestCase {
         defer { Task { try? await KeychainStore.deleteProviderToken(providerID: "p_import") } }
 
         let result = try await StartupState.applyMigrationDecision(.importExisting, paths: paths)
-        XCTAssertEqual(result.route, .startAgent)
+        let state = await StartupState.detect(paths: paths)
+        let expectedRoute: StartupRoute = state.launchdInstallEvidenceExists ? .startAgent : .showOnboarding
+        XCTAssertEqual(result.route, expectedRoute)
         XCTAssertNil(result.backupPath)
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.appMarkerFile.path))
         let rewritten = try String(contentsOf: paths.configFile)
