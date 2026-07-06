@@ -115,6 +115,71 @@ Other targets supported by editing `target.gateway_url` / `target.coordinator_ur
   + `gateway_db_path` instead of `_ssh` variants for local files.
 - **Local stack (synthetic provider)** — via `test/integration` helpers.
   Best for harness self-validation, but won't catch real-model quirks.
+- **Embedded local rig** — see next section. For load/fairness scenarios
+  (17+) the harness spawns its own coord + gateway + N fake providers
+  on 127.0.0.1. No Pearl traffic, no real hardware needed.
+
+## Embedded local rig (load/fairness scenarios)
+
+Load-lane scenarios (`17_sustained_load_baseline.yaml` and follow-ons)
+drive 20+ concurrent buyers — too much for Pearl. The harness ships an
+embedded rig that starts real `coordinator` + `gateway` binaries on
+127.0.0.1 ephemeral ports, plus N in-process fake providers with
+configurable ttft / tokens-per-sec / capacity. The rig also seeds a
+buyer API key in the gateway and reports the local SQLite paths so
+I1 reconciliation runs end-to-end. Everything is 127.0.0.1-bound; the
+rig never listens on 0.0.0.0.
+
+Bring it up with the standard runner — the rig auto-spawns when a
+scenario declares `target.rig: local`:
+
+```
+./run-scenario.sh 17_sustained_load_baseline.yaml
+```
+
+First run takes ~15s longer (builds `phase4-coordinator/cmd/coordinator`,
+`phase4-coordinator/cmd/coordinator-cli`, `phase5-gateway/cmd/gateway`);
+subsequent runs in the same session reuse the cached binaries under the
+rig tempdir. On SIGINT or scenario completion the rig kills all child
+processes and cleans its tempdir.
+
+Scenario YAML shape:
+
+```yaml
+target:
+  rig: local
+  providers:
+    - id: fake-fast
+      model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+      ttft_ms: 50
+      tokens_per_sec: 120
+      capacity_slots: 4
+    - id: fake-baseline
+      model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+      ttft_ms: 200
+      tokens_per_sec: 80
+      capacity_slots: 4
+```
+
+When `rig: local` is set, `gateway_url`, `coordinator_url`,
+`buyer_token`, `demo_identity`, and the DB path fields are all forbidden
+— the rig supplies them at start time. See `internal/scenario/schema.go`
+`validateRigTarget` for the exact rules.
+
+The rig writes an additional artifact alongside the standard bundle:
+
+- `load_summary.json` — route distribution + fairness metrics (Gini,
+  stddev, max/min ratio) + latency by prompt class + starvation floor.
+  Load-lane scenarios record these; hard-invariant gating (I6+) waits
+  for ≥5 clean runs per phase-A discipline.
+
+### DoS guard (`ALLOW_PROD_LOAD`)
+
+A safety guard rejects `buyers.count > 10` against `*.streamvc.live`
+hosts. Load scenarios must target a rig; the guard catches the authoring
+mistake of leaving `gateway_url: https://api.streamvc.live` in a
+high-concurrency scenario. Override with `ALLOW_PROD_LOAD=1` for a
+one-off soak against production — expect to justify it.
 
 ## DB snapshot mechanics (live runs)
 
@@ -251,6 +316,7 @@ triage reads them as a set.
 | [`scenarios/04_wrong_model.yaml`](scenarios/04_wrong_model.yaml) | 3 buyers, nonexistent model | Negative-path error code + no-charge guarantee | BUYER_TOKEN, PEARL_SSH |
 | [`scenarios/05_mid_stream_drop.yaml`](scenarios/05_mid_stream_drop.yaml) | 1 streaming buyer + chaos kill at t=5s | Gateway behavior on mid-stream provider loss; billing of partial tokens | BUYER_TOKEN, PEARL_SSH, PROVIDER_SSH |
 | [`scenarios/06_cold_start_race.yaml`](scenarios/06_cold_start_race.yaml) | Restart provider, buyer fires before model loads | Cold-start window: queue / error / reroute / hang | BUYER_TOKEN, PEARL_SSH, PROVIDER_SSH |
+| [`scenarios/17_sustained_load_baseline.yaml`](scenarios/17_sustained_load_baseline.yaml) | 20 buyers × 30 requests over 15min against embedded rig | Route distribution + fairness + tail latency + starvation floor at load-lane scale | none (rig is embedded) |
 
 See [`internal/scenario/schema.go`](internal/scenario/schema.go) for the
 authoritative field reference.

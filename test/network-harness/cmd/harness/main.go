@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -22,12 +23,21 @@ import (
 	"github.com/augstar/macprovider-network-harness/internal/buyer"
 	"github.com/augstar/macprovider-network-harness/internal/chaos"
 	"github.com/augstar/macprovider-network-harness/internal/invariants"
+	"github.com/augstar/macprovider-network-harness/internal/loadmetrics"
+	"github.com/augstar/macprovider-network-harness/internal/localrig"
 	"github.com/augstar/macprovider-network-harness/internal/metrics"
 	"github.com/augstar/macprovider-network-harness/internal/reconcile"
 	"github.com/augstar/macprovider-network-harness/internal/runmeta"
 	"github.com/augstar/macprovider-network-harness/internal/scenario"
 	"github.com/augstar/macprovider-network-harness/internal/skuecon"
 )
+
+// errHardInvariantFail is the sentinel cmdRun returns when the scenario
+// finished cleanly but I1-I4 saw at least one failure. main() maps it to
+// exit code 10 — but AFTER cmdRun's defers (including rig.Shutdown()) run,
+// unlike a direct os.Exit(10) which would leak the rig's child processes
+// and tempdir.
+var errHardInvariantFail = errors.New("hard invariant failed")
 
 func main() {
 	if len(os.Args) < 2 {
@@ -37,6 +47,9 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		if err := cmdRun(os.Args[2:]); err != nil {
+			if errors.Is(err, errHardInvariantFail) {
+				os.Exit(10)
+			}
 			log.Printf("harness: %v", err)
 			os.Exit(1)
 		}
@@ -172,9 +185,47 @@ func cmdRun(args []string) error {
 		log.Printf("artifact bundle written to %s", filepath.Clean(*outDir))
 		logInvariantSummary(result.Invariants)
 		if result.Invariants.AnyFailed() {
-			os.Exit(10)
+			return errHardInvariantFail
 		}
 		return nil
+	}
+
+	var rig *localrig.Rig
+	if sc.Target.Rig == "local" {
+		rigCfg := localrig.Config{
+			Providers: make([]localrig.Provider, 0, len(sc.Target.Providers)),
+			Logger:    func(line string) { log.Print(line) },
+		}
+		for _, p := range sc.Target.Providers {
+			rigCfg.Providers = append(rigCfg.Providers, localrig.Provider{
+				ID:            p.ID,
+				Model:         p.Model,
+				TTFTMs:        p.TTFTMs,
+				TokensPerSec:  p.TokensPerSec,
+				CapacitySlots: p.CapacitySlots,
+			})
+		}
+		log.Printf("scenario %q: bringing up embedded rig with %d providers", sc.Name, len(rigCfg.Providers))
+		r, err := localrig.Start(ctx, rigCfg)
+		if err != nil {
+			return fmt.Errorf("localrig start: %w", err)
+		}
+		rig = r
+		// Any panic or subsequent error must still tear the rig down;
+		// defer covers the happy path too.
+		defer func() {
+			if err := rig.Shutdown(); err != nil {
+				log.Printf("localrig shutdown: %v", err)
+			}
+		}()
+		// Patch the scenario so downstream code (buyer.Run, reconcile,
+		// invariants) sees rig-supplied endpoints. Validate() has already
+		// rejected the case where any of these were pre-set.
+		sc.Target.GatewayURL = rig.GatewayURL
+		sc.Target.CoordinatorURL = rig.CoordinatorBuyerURL
+		sc.Target.BuyerToken = rig.BuyerToken
+		sc.Target.CoordinatorDBPath = rig.CoordinatorDBPath
+		sc.Target.GatewayDBPath = rig.GatewayDBPath
 	}
 
 	log.Printf("scenario %q: starting %d buyers, target %s for %s (chaos events: %d)",
@@ -186,9 +237,35 @@ func cmdRun(args []string) error {
 		chaosRunner.Start(ctx)
 	}
 
-	results, err := buyer.Run(ctx, sc)
+	// If a rig is running, race its crash channel against buyer.Run so
+	// a coord/gateway death aborts the scenario immediately rather than
+	// letting buyers fire timeouts against a dead endpoint for the full
+	// scenario duration.
+	buyerCtx := ctx
+	if rig != nil {
+		var cancelBuyer context.CancelFunc
+		buyerCtx, cancelBuyer = context.WithCancel(ctx)
+		defer cancelBuyer()
+		go func() {
+			select {
+			case <-rig.Done():
+				log.Printf("localrig: subprocess died mid-run: %v", rig.Err())
+				cancelBuyer()
+			case <-buyerCtx.Done():
+			}
+		}()
+	}
+
+	results, err := buyer.Run(buyerCtx, sc)
 	if err != nil {
 		return fmt.Errorf("buyer run: %w", err)
+	}
+	if rig != nil {
+		select {
+		case <-rig.Done():
+			return fmt.Errorf("localrig: %w", rig.Err())
+		default:
+		}
 	}
 	log.Printf("scenario %q: completed %d requests", sc.Name, len(results))
 	if chaosRunner != nil {
@@ -295,6 +372,20 @@ func cmdRun(args []string) error {
 		return fmt.Errorf("write artifact bundle: %w", err)
 	}
 
+	// load_summary.json — additive fairness + tail-latency + starvation
+	// diagnostics for load-lane scenarios (17+). Written unconditionally
+	// so run-to-run diffs stay schema-stable; non-load scenarios see
+	// empty buckets and a single-entry route distribution.
+	var readyProviders []string
+	for _, p := range sc.Target.Providers {
+		readyProviders = append(readyProviders, p.ID)
+	}
+	loadSum := loadmetrics.Compute(sc, results, readyProviders, nil)
+	if err := writeJSON(filepath.Join(*outDir, "load_summary.json"), loadSum); err != nil {
+		return fmt.Errorf("write load_summary.json: %w", err)
+	}
+	logLoadSummary(loadSum)
+
 	log.Printf("artifact bundle written to %s", filepath.Clean(*outDir))
 	logInvariantSummary(inv)
 	if bench != nil {
@@ -302,7 +393,7 @@ func cmdRun(args []string) error {
 	}
 
 	if inv.AnyFailed() {
-		os.Exit(10)
+		return errHardInvariantFail
 	}
 	return nil
 }
@@ -361,6 +452,37 @@ func logInvariantSummary(inv *invariants.Result) {
 		return
 	}
 	log.Printf("HARD INVARIANT FAILURE — triage %s", time.Now().UTC().Format(time.RFC3339))
+}
+
+// logLoadSummary prints a one-line-per-section snapshot of the load
+// diagnostics so operators can eyeball fairness + tail + starvation
+// without opening the JSON. Phase-A discipline: printed, not asserted.
+func logLoadSummary(s *loadmetrics.Summary) {
+	if s == nil {
+		return
+	}
+	if len(s.RouteDistribution) > 0 {
+		parts := make([]string, 0, len(s.RouteDistribution))
+		for _, e := range s.RouteDistribution {
+			parts = append(parts, fmt.Sprintf("%s=%.1f%%(%d)", e.ProviderID, e.Share*100, e.Requests))
+		}
+		log.Printf("[load] route distribution: %s", strings.Join(parts, " "))
+	}
+	if s.Fairness.ProviderCount > 0 {
+		log.Printf("[load] fairness: gini=%.3f stddev=%.2f max/min=%.2f over %d providers",
+			s.Fairness.Gini, s.Fairness.Stddev, s.Fairness.MaxMinRatio, s.Fairness.ProviderCount)
+	}
+	for label, b := range s.LatencyByPromptClass {
+		if b.Count == 0 {
+			continue
+		}
+		log.Printf("[load] latency %s (count=%d): p50=%.0fms p95=%.0fms p99=%.0fms", label, b.Count, b.P50, b.P95, b.P99)
+	}
+	if s.Starvation.ReadyProviderCount > 0 {
+		log.Printf("[load] starvation floor: min=%d on %s (window=%.0fs; zero-success=%v)",
+			s.Starvation.MinRequestsPerReadyProvider, s.Starvation.MinRequestsProviderID,
+			s.Starvation.WindowSeconds, s.Starvation.ProvidersWithZeroSuccess)
+	}
 }
 
 // logBenchmarkSummary mirrors logInvariantSummary for the B-invariants.

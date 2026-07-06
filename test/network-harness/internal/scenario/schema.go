@@ -34,6 +34,25 @@ var envVarPattern = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
 
 const maxChargedDeliveredToleranceTokens int64 = 16
 
+// ProdLoadGuardEnv is the operator override that suppresses the
+// "no >10 buyers against Pearl" scenario-validation guard. Load-lane
+// scenarios (17+) target 127.0.0.1 rigs, not Pearl; the guard exists
+// so an authoring mistake that leaves gateway_url pointed at
+// api.streamvc.live cannot silently DoS production during a beta window.
+// Set to "1" only for an explicit, one-off soak run.
+const ProdLoadGuardEnv = "ALLOW_PROD_LOAD"
+
+// ProdLoadGuardBuyerLimit is the largest buyers.count value the guard
+// permits against a *.streamvc.live host without ALLOW_PROD_LOAD=1.
+// Chosen to match the existing scenario 01/07 shape (2-5 buyers) with
+// modest headroom; anything larger requires the rig OR the override.
+const ProdLoadGuardBuyerLimit = 10
+
+// prodHostSuffix identifies Pearl-hosted stacks for ProdLoadGuardEnv.
+// Matched as a suffix on the gateway URL host (case-insensitive), so
+// api.streamvc.live and coordinator.streamvc.live both trip.
+const prodHostSuffix = ".streamvc.live"
+
 func expandEnv(input []byte) []byte {
 	return envVarPattern.ReplaceAllFunc(input, func(match []byte) []byte {
 		name := envVarPattern.FindSubmatch(match)[1]
@@ -116,10 +135,67 @@ type ChaosEvent struct {
 	Description string        `yaml:"description"`
 }
 
-// Target identifies the running stack the harness fires against. The
-// harness does NOT spawn coordinator/gateway — that's the caller's job
-// (test/integration/ helpers, deploy scripts, or a live Pearl stack).
+// RigProvider configures one synthetic provider inside the embedded
+// local rig (Target.Rig == "local"). Each rig provider is an in-process
+// HTTP endpoint that connects to the local coordinator via WebSocket
+// and serves canned OpenAI-shaped chat completions with configurable
+// latency and throughput. Used by load/fairness scenarios to drive
+// deterministic routing measurements without touching real inference.
+type RigProvider struct {
+	// ID is the stable provider_id the fake reports in its hello frame
+	// and echoes back in `X-Provider-Id`. Must be non-empty and unique
+	// within the scenario. Cited in load_summary.json route_distribution.
+	ID string `yaml:"id"`
+
+	// Model is the model_id the fake advertises. Every prompt whose
+	// `model:` matches a rig provider's Model can route to it. If
+	// multiple rig providers advertise the same Model, the coordinator
+	// picks among them per its routing policy — the point the load
+	// scenarios exist to measure.
+	Model string `yaml:"model"`
+
+	// TTFTMs is the artificial time-to-first-byte the fake sleeps
+	// before writing the response headers. 0 means "reply immediately".
+	// Non-negative.
+	TTFTMs int `yaml:"ttft_ms"`
+
+	// TokensPerSec caps the fake's output pacing for the fixed 12-token
+	// canned completion body. > 0 injects synthetic pacing; 0 replies
+	// as fast as HTTP can flush. Non-negative.
+	TokensPerSec float64 `yaml:"tokens_per_sec"`
+
+	// CapacitySlots caps concurrent /v1/chat/completions handlers at
+	// the fake. Requests over the cap return 429; the coord's degraded/
+	// breaker signalling is what routing scenarios exercise. Must be
+	// >= 1.
+	CapacitySlots int `yaml:"capacity_slots"`
+}
+
+// Target identifies the running stack the harness fires against. Two modes:
+//
+//   - Remote (default, Rig=""): scenario supplies gateway_url +
+//     coordinator_url + buyer_token and the harness fires against an
+//     already-running stack (Pearl or a caller-managed local rig).
+//
+//   - Embedded local rig (Rig="local"): the harness spawns its own
+//     coordinator + gateway + N fake providers on 127.0.0.1 ephemeral
+//     ports and points the buyer fleet at them. Used by load/fairness
+//     scenarios that would DoS Pearl at production scale. GatewayURL,
+//     CoordinatorURL, BuyerToken, CoordinatorDBPath, and GatewayDBPath
+//     are populated at rig-start time from the rig; they MUST be unset
+//     in the YAML.
 type Target struct {
+	// Rig selects an embedded local stack. Only value: "local". Empty
+	// (default) uses gateway_url / coordinator_url verbatim. When set,
+	// Providers must be non-empty and GatewayURL / CoordinatorURL /
+	// BuyerToken / CoordinatorDB* / GatewayDB* must be unset.
+	Rig string `yaml:"rig"`
+
+	// Providers configures the embedded rig's synthetic providers.
+	// Only consulted when Rig == "local". Empty in rig mode is a
+	// validation error — a rig with no providers can't serve requests.
+	Providers []RigProvider `yaml:"providers"`
+
 	GatewayURL     string `yaml:"gateway_url"`
 	CoordinatorURL string `yaml:"coordinator_url"`
 
@@ -355,14 +431,22 @@ func (s *Scenario) Validate() error {
 }
 
 func (s *Scenario) validateBuyerFleet() error {
-	if s.Target.GatewayURL == "" {
-		return fmt.Errorf("target.gateway_url is required")
+	if err := s.validateRigTarget(); err != nil {
+		return err
 	}
-	if s.Target.BuyerToken == "" && s.Target.DemoIdentity == "" {
-		return fmt.Errorf("target requires either buyer_token or demo_identity")
-	}
-	if s.Target.BuyerToken != "" && s.Target.DemoIdentity != "" {
-		return fmt.Errorf("target.buyer_token and target.demo_identity are mutually exclusive")
+	if s.Target.Rig == "" {
+		if s.Target.GatewayURL == "" {
+			return fmt.Errorf("target.gateway_url is required")
+		}
+		if s.Target.BuyerToken == "" && s.Target.DemoIdentity == "" {
+			return fmt.Errorf("target requires either buyer_token or demo_identity")
+		}
+		if s.Target.BuyerToken != "" && s.Target.DemoIdentity != "" {
+			return fmt.Errorf("target.buyer_token and target.demo_identity are mutually exclusive")
+		}
+		if err := s.validateProdLoadGuard(); err != nil {
+			return err
+		}
 	}
 	if (s.Target.CoordinatorDBSSH != "") != (s.Target.GatewayDBSSH != "") {
 		return fmt.Errorf("target.coordinator_db_ssh and target.gateway_db_ssh must be set together")
@@ -510,6 +594,115 @@ func (s *Scenario) validateSKUEcon() error {
 		return fmt.Errorf("benchmark_synthesis.ttft_fraction_of_ceiling must be > 0")
 	}
 	return nil
+}
+
+// validateRigTarget enforces the mutual-exclusion + shape rules for
+// Target.Rig. Rig-mode scenarios (Rig="local") must not carry
+// remote-target fields — the rig fills them at start-time — and their
+// Providers list must be non-empty with each entry structurally sound.
+func (s *Scenario) validateRigTarget() error {
+	if s.Target.Rig == "" {
+		if len(s.Target.Providers) > 0 {
+			return fmt.Errorf("target.providers must not be set unless target.rig is set")
+		}
+		return nil
+	}
+	if s.Target.Rig != "local" {
+		return fmt.Errorf("target.rig must be one of \"\"|local (got %q)", s.Target.Rig)
+	}
+	if s.Target.GatewayURL != "" {
+		return fmt.Errorf("target.gateway_url must not be set when target.rig=local (the rig supplies it)")
+	}
+	if s.Target.CoordinatorURL != "" {
+		return fmt.Errorf("target.coordinator_url must not be set when target.rig=local (the rig supplies it)")
+	}
+	if s.Target.BuyerToken != "" {
+		return fmt.Errorf("target.buyer_token must not be set when target.rig=local (the rig mints it)")
+	}
+	if s.Target.DemoIdentity != "" {
+		return fmt.Errorf("target.demo_identity is unsupported when target.rig=local")
+	}
+	if s.Target.CoordinatorDBPath != "" || s.Target.GatewayDBPath != "" {
+		return fmt.Errorf("target.coordinator_db_path / target.gateway_db_path must not be set when target.rig=local (the rig supplies them)")
+	}
+	if s.Target.CoordinatorDBSSH != "" || s.Target.GatewayDBSSH != "" {
+		return fmt.Errorf("target.coordinator_db_ssh / target.gateway_db_ssh are unsupported when target.rig=local")
+	}
+	if len(s.Target.Providers) == 0 {
+		return fmt.Errorf("target.providers must list at least one entry when target.rig=local")
+	}
+	seenIDs := make(map[string]int, len(s.Target.Providers))
+	for i, p := range s.Target.Providers {
+		if strings.TrimSpace(p.ID) == "" {
+			return fmt.Errorf("target.providers[%d].id is required", i)
+		}
+		if prior, dup := seenIDs[p.ID]; dup {
+			return fmt.Errorf("target.providers[%d].id %q duplicates target.providers[%d].id", i, p.ID, prior)
+		}
+		seenIDs[p.ID] = i
+		if strings.TrimSpace(p.Model) == "" {
+			return fmt.Errorf("target.providers[%d].model is required", i)
+		}
+		if p.TTFTMs < 0 {
+			return fmt.Errorf("target.providers[%d].ttft_ms must be >= 0", i)
+		}
+		if p.TokensPerSec < 0 {
+			return fmt.Errorf("target.providers[%d].tokens_per_sec must be >= 0", i)
+		}
+		if p.CapacitySlots < 1 {
+			return fmt.Errorf("target.providers[%d].capacity_slots must be >= 1", i)
+		}
+	}
+	// Every model referenced by prompts must be advertised by at least
+	// one rig provider; otherwise the coordinator has no eligible
+	// candidate and every request 502s.
+	advertised := make(map[string]bool, len(s.Target.Providers))
+	for _, p := range s.Target.Providers {
+		advertised[p.Model] = true
+	}
+	for i, p := range s.Prompts {
+		if p.Model != "" && !advertised[p.Model] {
+			return fmt.Errorf("prompts[%d].model %q is not advertised by any target.providers entry", i, p.Model)
+		}
+	}
+	return nil
+}
+
+// validateProdLoadGuard rejects high-concurrency buyer fleets aimed at
+// a *.streamvc.live host unless the operator explicitly sets
+// ALLOW_PROD_LOAD=1 in the environment. The load-lane charter (BUILD_SPEC
+// LOAD/FAIRNESS §6 anti-scope) forbids >10 buyers against production;
+// the guard catches the authoring mistake of leaving gateway_url pointed
+// at api.streamvc.live in a load scenario.
+//
+// Only evaluated for buyer-fleet mode; sku-econ scenarios do their own
+// host pinning in validateSKUEcon.
+func (s *Scenario) validateProdLoadGuard() error {
+	if s.Buyers.Count <= ProdLoadGuardBuyerLimit {
+		return nil
+	}
+	u, err := url.Parse(s.Target.GatewayURL)
+	if err != nil {
+		// If the URL doesn't parse we defer to whatever downstream code
+		// tries to dial it; no host we can inspect means no guard trip.
+		return nil
+	}
+	// Normalize the trailing DNS root dot before the suffix check —
+	// `api.streamvc.live.` and `api.streamvc.live` are equivalent under
+	// DNS, but the raw string suffix comparison would miss the dotted
+	// form and let the guard be bypassed via an authoring trick.
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return nil
+	}
+	if !strings.HasSuffix(host, prodHostSuffix) && host != strings.TrimPrefix(prodHostSuffix, ".") {
+		return nil
+	}
+	if os.Getenv(ProdLoadGuardEnv) == "1" {
+		return nil
+	}
+	return fmt.Errorf("buyers.count=%d against production host %q requires %s=1 (load scenarios should target a local rig; see target.rig=local)",
+		s.Buyers.Count, host, ProdLoadGuardEnv)
 }
 
 // PromptFor picks the prompt for a given (buyer_index, request_index).

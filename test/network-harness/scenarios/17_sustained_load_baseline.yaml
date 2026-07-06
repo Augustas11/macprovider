@@ -1,0 +1,120 @@
+# 17_sustained_load_baseline.yaml — phase-A load/fairness baseline.
+#
+# Scale target: 20 concurrent buyers × 30 requests each = 600 requests
+# over a 900s window at aggregate ~40 req/min (~0.67 req/sec). This is
+# where scenarios 01-11 stop and the load/fairness lane begins. Existing
+# scenarios cap at 5 buyers (01) or 2 buyers (07); we scale to 20 to
+# start surfacing routing distribution + tail latency + starvation floor.
+#
+# What we want to learn (phase A, RECORDED not asserted):
+#  - Route distribution: does coord spread ~evenly across 3 rig providers
+#    (fast/baseline/slow), or does one provider dominate?
+#  - Fairness metrics: Gini, stddev, and max/min ratio each summarize
+#    the distribution differently — reporting all three lets phase-B
+#    triage pick the one worth invariant-gating after ≥5 clean runs.
+#  - Tail latency by prompt class: short (16 tok) vs medium (200 tok).
+#    p95/p99 shape is where beta providers' capacity questions land.
+#  - Starvation floor: does any Ready provider serve zero requests over
+#    the 15-minute window? Winner-takes-all routing would show here.
+#
+# What gets asserted: the 4 hard invariants (I1-I4) only. Load-lane
+# soft benchmarks (fairness thresholds, tail budgets, starvation
+# minimums) stay descriptive for at least 5 successful runs before
+# any consideration of hard invariants I6+. See BUILD_SPEC LOAD
+# FAIRNESS §4.
+#
+# Why a local rig, not Pearl:
+#  - Anti-scope forbids >10 concurrent buyers against api.streamvc.live.
+#    Sustained 20-buyer soak against production would (a) trip rate
+#    limits and skew the measurements, (b) risk DoS'ing ourselves
+#    during the beta acquisition window, (c) interfere with real
+#    providers connected to production.
+#  - The load-lane charter is measurement, not source-code change; the
+#    coord + gateway binaries running under the rig are the same ones
+#    Pearl runs, and the rig's routing decisions are the ones we care
+#    about — the providers we replace with fakes are the OTHER side of
+#    the boundary, standing in for real Mac hardware.
+#
+# Rig fleet (fast/baseline/slow shapes are asymmetric-on-purpose so
+# the fairness metrics have signal from the very first run):
+#  - fake-fast:     TTFT 50ms, 120 tok/s, 128 concurrent slots
+#  - fake-baseline: TTFT 200ms, 80 tok/s, 128 concurrent slots
+#  - fake-slow:     TTFT 800ms, 40 tok/s, 128 concurrent slots
+#
+# capacity_slots is set high so the baseline measures ROUTING FAIRNESS,
+# not CAPACITY CONTENTION. First-run empirical: at capacity_slots=4 per
+# provider, aggregate 40 rps against the coord's preferred provider
+# exhausted its slots, the 429 retry path produced 161/600 5xx and I1
+# failed because gateway logged 161 usage_events rows as OK while
+# harness observed 5xx. That's a legitimate accounting question but
+# it's scenario 20's job (burst_load_recovery), not the baseline's.
+# High slots decouples the two dimensions so PR 1's fairness numbers
+# are clean.
+#
+# Cost: local rig only — zero Pearl cost, zero provider cost.
+#
+# Follow-up scenarios (PR 2+): 18_sticky_session_honoring,
+# 19_asymmetric_fleet_starvation, 20_burst_load_recovery,
+# 21_ramp_load, 22_streaming_load.
+name: sustained_load_baseline
+description: |
+  20 concurrent buyers × 30 non-streaming requests over 15 minutes
+  against an embedded local rig with 3 synthetic providers of
+  differing speed/capacity. Records fairness (Gini + stddev + max/min
+  ratio), tail latency by prompt class (short/medium), and starvation
+  floor. Hard-invariant gate: I1-I4.
+
+expected_shape: |
+  Phase A load-lane baseline (descriptive; RECORDED not asserted):
+   - Total ~600 requests over 900s at ~40 req/min aggregate.
+   - Route distribution across the 3 rig providers RECORDED into
+     load_summary.json → route_distribution.
+   - Fairness metrics: Gini/stddev/max_min_ratio RECORDED, no target
+     until ≥5 baseline runs establish the noise floor.
+   - Latency p95/p99 by prompt class: short_16tok, medium_200tok.
+     A short-prompt p99 above ~5s or medium-prompt p99 above ~15s is
+     worth triage attention, but neither is asserted this PR.
+   - starvation_floor.min_requests_per_ready_provider > 0 across all
+     3 rig providers. Any zero-success Ready provider is a signal that
+     the routing policy is winner-takes-all; do not treat as PASS/FAIL
+     yet, capture for phase-B triage.
+   - I1-I4 all PASS. Any failure is a real routing/settlement bug
+     surfaced by scale, not a load-lane accounting artifact.
+
+target:
+  rig: local
+  providers:
+    - id: fake-fast
+      model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+      ttft_ms: 50
+      tokens_per_sec: 120
+      capacity_slots: 128
+    - id: fake-baseline
+      model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+      ttft_ms: 200
+      tokens_per_sec: 80
+      capacity_slots: 128
+    - id: fake-slow
+      model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+      ttft_ms: 800
+      tokens_per_sec: 40
+      capacity_slots: 128
+
+buyers:
+  count: 20
+  stream: false
+  pattern: interval
+  interval_ms: 500
+  requests_per_buyer: 30
+
+duration: 900s
+request_timeout: 60s
+silent_hang_threshold: 30s
+
+prompts:
+  - model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+    user: "Reply with exactly the word: alpha."
+    max_tokens: 16
+  - model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+    user: "Write a single concise paragraph about a yellow finch."
+    max_tokens: 200
