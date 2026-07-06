@@ -794,6 +794,27 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	gatewaySerializedEstimatedCompletion := func() int64 {
 		return estimateStreamingCompletionTokens(maxInt64(emitted, serializedEmitted), maxTokens)
 	}
+	settleGatewayTerminalOutputExceeded := func() {
+		// This is a gateway-authored terminal SSE error. The gateway cancels
+		// the coordinator stream before EOF, so declared settlement trailers
+		// may be unavailable and must not rewrite the buyer-visible outcome.
+		if hasSettlementFinalityTrailerDeclaration(resp) {
+			holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if !s.boundStreamingSettlementHold(holdCtx, r, subject, coordinatorSettlementFinality{
+				Action:  settlementFinalityHold,
+				Outcome: "stream_output_exceeded",
+				Reason:  "gateway_stream_output_exceeded",
+			}) {
+				slog.Error("gateway failed to persist output-exceeded streaming settlement hold",
+					"request_id", requestID(r),
+					"account_id", subject.AccountID,
+				)
+			}
+			return
+		}
+		s.settleAfterCommit(r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow)
+	}
 	settleTruncated := func() {
 		if reported != nil {
 			settleReported("stream_truncated")
@@ -905,7 +926,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 							flusher.Flush()
 						}
 						cancelCoordinator()
-						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow, resp)
+						settleGatewayTerminalOutputExceeded()
 						return false
 					}
 					if projectedSerializedBytes-projectedContentBytes > maxStreamingFallbackMetadataBytes {
@@ -915,7 +936,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 							flusher.Flush()
 						}
 						cancelCoordinator()
-						s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow, resp)
+						settleGatewayTerminalOutputExceeded()
 						return false
 					}
 					emitted = projectedContentBytes

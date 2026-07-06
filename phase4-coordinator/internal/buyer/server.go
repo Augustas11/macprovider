@@ -3295,7 +3295,20 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	flusher, _ := w.(http.Flusher)
 	var promptTok, cachedPromptTok, completionTok *int64
 	bytesEmitted := 0
+	contentEmittedBytes := int64(0)
+	outputByteCeiling := streamingRequestOutputHardByteCeiling(body)
 	terminalSSEErrorCode := ""
+	outputExceededAttempt := func() requestLogAttempt {
+		zero := int64(0)
+		return requestLogAttempt{
+			Status:              http.StatusOK,
+			EstimatedCompTokens: &zero,
+			Error:               "Provider stream exceeded requested max_tokens",
+			ErrorCode:           "stream_output_exceeded",
+			FaultFlag:           billing.FaultBreakerQualifying,
+			SettlementOutput:    settlementTracker.output(billing.TerminalStateProviderError),
+		}
+	}
 	progressAttemptWithTerminal := func(message string, faultFlag string, terminalState string) requestLogAttempt {
 		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CachedPromptTokens: cachedPromptTok, CompletionTokens: completionTok, Error: message, FaultFlag: faultFlag}
 		if completionTok == nil {
@@ -3372,6 +3385,16 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				terminalSSEErrorCode = code
 				sawCommitWorthyDataLine = true
 			}
+			if outputByteCeiling > 0 {
+				if deltaBytes, ok := streamingOutputDeltaBytesFromSSELine(line); ok && deltaBytes > 0 {
+					projected := contentEmittedBytes + deltaBytes
+					if projected > outputByteCeiling {
+						s.log.Warn().Int64("projected_content_bytes", projected).Int64("hard_byte_ceiling", outputByteCeiling).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider exceeded requested max_tokens before commit")
+						return errPreCommitOutputCapExceeded
+					}
+					contentEmittedBytes = projected
+				}
+			}
 			status := inspectCommitWorthyDataLine(line)
 			if status == commitLineMalformedToolCalls {
 				s.log.Warn().Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed pre-commit tool_calls delta")
@@ -3407,6 +3430,10 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		if errors.Is(preCommitErr, errPreCommitMalformedToolCalls) {
 			s.handleProviderFailure(provider, http.StatusBadGateway)
 			return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed pre-commit tool_calls delta", ErrorCode: "malformed_tool_call", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+		}
+		if errors.Is(preCommitErr, errPreCommitOutputCapExceeded) {
+			s.handleProviderFailure(provider, http.StatusBadGateway)
+			return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider exceeded requested max_tokens before stream commit", ErrorCode: "stream_output_exceeded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 		}
 		if r.Context().Err() != nil {
 			return wsForwardCancelled, 0, requestLogAttempt{}
@@ -3473,6 +3500,22 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				}
 				markProviderDone()
 				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed tool-call stream", "malformed_tool_call", billing.FaultBreakerQualifying)
+			}
+			if outputByteCeiling > 0 {
+				if deltaBytes, ok := streamingOutputDeltaBytesFromSSELine(line); ok && deltaBytes > 0 {
+					projected := contentEmittedBytes + deltaBytes
+					if projected > outputByteCeiling {
+						s.log.Warn().Int64("projected_content_bytes", projected).Int64("hard_byte_ceiling", outputByteCeiling).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider exceeded requested max_tokens after commit")
+						writeSSEError(w, "Provider stream exceeded requested max_tokens", "stream_output_exceeded", requestID)
+						if flusher != nil {
+							flusher.Flush()
+						}
+						markProviderDone()
+						cancelAttempt()
+						return wsForwardProviderDisconnectedCommitted, http.StatusOK, outputExceededAttempt()
+					}
+					contentEmittedBytes = projected
+				}
 			}
 			if err := settlementTracker.observeLine(line); err != nil {
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed settlement data")
@@ -3776,6 +3819,8 @@ func collectStreamingToolCalls(raw []byte) ([]bufferedToolCall, error) {
 // before a commit-worthy event arrives. Distinguished from io.EOF /
 // timeout / network errors so the caller can log a specific reason.
 var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
+
+var errPreCommitOutputCapExceeded = errors.New("pre-commit output cap exceeded")
 
 // errPreCommitMalformedToolCalls is returned when a provider emits a
 // malformed tool_calls delta before the stream commits. Commit-worthy gates
@@ -6237,6 +6282,101 @@ func tokenPointersFromSSE(line []byte) (*int64, *int64, *int64) {
 		return nil, nil, nil
 	}
 	return tokenPointersFromChatResponse([]byte(payload))
+}
+
+func streamingRequestOutputHardByteCeiling(body []byte) int64 {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var req struct {
+		MaxTokens *json.Number `json:"max_tokens"`
+	}
+	if err := dec.Decode(&req); err != nil {
+		return 0
+	}
+	maxTokens, ok := validatedTokenCount(req.MaxTokens)
+	if !ok {
+		return 0
+	}
+	ceiling := maxTokens * 8
+	if ceiling < 1 {
+		return 1
+	}
+	return ceiling
+}
+
+func streamingOutputDeltaBytesFromSSELine(line []byte) (int64, bool) {
+	data, ok := settlementSSEDataValue(strings.TrimRight(string(line), "\r\n"))
+	if !ok || data == "" || data == "[DONE]" {
+		return 0, true
+	}
+	return streamingCompletionDeltaBytes(data)
+}
+
+func streamingCompletionDeltaBytes(data string) (int64, bool) {
+	var envelope struct {
+		Choices []struct {
+			Delta json.RawMessage `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(data), &envelope); err != nil {
+		return 0, false
+	}
+	var n int64
+	for _, choice := range envelope.Choices {
+		if len(choice.Delta) == 0 || bytes.Equal(choice.Delta, []byte("null")) {
+			continue
+		}
+		deltaBytes, ok := generatedDeltaStringBytes(choice.Delta)
+		if !ok {
+			return 0, false
+		}
+		n += deltaBytes
+	}
+	return n, true
+}
+
+func generatedDeltaStringBytes(raw json.RawMessage) (int64, bool) {
+	var delta any
+	if err := json.Unmarshal(raw, &delta); err != nil {
+		return 0, false
+	}
+	if _, ok := delta.(map[string]any); !ok {
+		return 0, false
+	}
+	return countGeneratedDeltaStrings("", delta), true
+}
+
+func countGeneratedDeltaStrings(key string, value any) int64 {
+	switch v := value.(type) {
+	case map[string]any:
+		var n int64
+		for childKey, childValue := range v {
+			n += countGeneratedDeltaStrings(childKey, childValue)
+		}
+		return n
+	case []any:
+		var n int64
+		for _, childValue := range v {
+			n += countGeneratedDeltaStrings(key, childValue)
+		}
+		return n
+	case string:
+		if !countDeltaStringKey(key) {
+			return 0
+		}
+		return int64(len(v))
+	default:
+		return 0
+	}
+}
+
+func countDeltaStringKey(key string) bool {
+	switch strings.ToLower(key) {
+	case "", "role", "id", "type", "name":
+		return false
+	default:
+		return true
+	}
 }
 
 func effectiveCachedPromptTokensForBuyer(cachedPromptTokens, promptTokens *int64, state *forwardState, attemptN int) int64 {

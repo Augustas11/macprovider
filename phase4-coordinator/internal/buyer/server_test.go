@@ -1978,6 +1978,86 @@ func TestStreamingBillingMergesLaterPartialUsageWithPriorPrompt(t *testing.T) {
 	}
 }
 
+func TestStreamingOutputExceededAfterObservedUsagePaysZeroProviderCredits(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk\",\"usage\":{\"prompt_tokens\":3,\"cached_prompt_tokens\":0,\"completion_tokens\":100,\"total_tokens\":103},\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk\",\"choices\":[{\"delta\":{\"content\":\"" + strings.Repeat("x", 31) + "\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+		buyer.WithTier2Config(config.Tier2Config{OutputBytesPerTokenCeiling: 16}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true,"max_tokens":4}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"content":"ok"`) || !strings.Contains(rr.Body.String(), "stream_output_exceeded") {
+		t.Fatalf("stream body missing forwarded prefix or terminal error: %s", rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), strings.Repeat("x", 31)) {
+		t.Fatalf("stream body forwarded over-cap content: %s", rr.Body.String())
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open billing db: %v", err)
+	}
+	defer db.Close()
+	var usageSource, faultFlag string
+	var grossCredits, providerCredits int64
+	var promptTokens, completionTokens, estimatedCompletionTokens sql.NullInt64
+	if err := db.QueryRow(`
+SELECT usage_source, gross_credits, provider_credits, prompt_tokens, completion_tokens,
+       estimated_completion_tokens, fault_flag
+FROM ledger_request_credits
+ORDER BY id DESC LIMIT 1`).Scan(
+		&usageSource,
+		&grossCredits,
+		&providerCredits,
+		&promptTokens,
+		&completionTokens,
+		&estimatedCompletionTokens,
+		&faultFlag,
+	); err != nil {
+		t.Fatalf("query billing row: %v", err)
+	}
+	if usageSource != billing.UsageByteEstimated || grossCredits != 0 || providerCredits != 0 || promptTokens.Valid || completionTokens.Valid || !estimatedCompletionTokens.Valid || estimatedCompletionTokens.Int64 != 0 || faultFlag != billing.FaultBreakerQualifying {
+		t.Fatalf("billing row usage/gross/provider/prompt/completion/estimated/fault = %s/%d/%d/%#v/%#v/%#v/%s, want byte_estimated/0/0/NULL/NULL/0/%s",
+			usageSource, grossCredits, providerCredits, promptTokens, completionTokens, estimatedCompletionTokens, faultFlag, billing.FaultBreakerQualifying)
+	}
+
+	outputRows := querySettlementAttemptOutputs(t, dbPath)
+	if len(outputRows) != 1 {
+		t.Fatalf("settlement output rows=%d want 1: %#v", len(outputRows), outputRows)
+	}
+	row := outputRows[0]
+	if row.TerminalState != billing.TerminalStateProviderError || row.UsageSource != billing.UsageSourceByteEstimated || row.Start != 0 || row.End != 2 || row.OutputAvailable != 1 {
+		t.Fatalf("settlement output row=%#v, want provider_error byte_estimated delivered prefix [0,2)", row)
+	}
+}
+
 func TestStreamingBillingLatchesInvalidCachedPromptTokensAfterLaterValidUsage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")

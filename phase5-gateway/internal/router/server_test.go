@@ -4563,6 +4563,90 @@ func TestStreamingGatewayEstimateStopsOverMaxOutput(t *testing.T) {
 	}
 }
 
+func TestStreamingGatewayOutputExceededAfterForwardedPrefixChargesNoCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		header             http.Header
+		wantUsageRows      int64
+		wantSettledRows    int64
+		wantActiveRows     int64
+		wantActiveReserved int64
+		wantHeldRows       int64
+	}{
+		{
+			name:            "legacy-without-finality-trailers",
+			header:          http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}},
+			wantUsageRows:   1,
+			wantSettledRows: 1,
+		},
+		{
+			name: "declared-finality-trailers-unavailable-after-gateway-cancel",
+			header: http.Header{
+				"Content-Type": []string{"text/event-stream; charset=utf-8"},
+				"Trailer":      []string{strings.Join(settlementFinalityHeaderNamesForTest(), ", ")},
+			},
+			wantActiveRows:     1,
+			wantActiveReserved: promptCapTokens([]byte(`{"model":"llama","stream":true,"max_tokens":4,"messages":[{"role":"user","content":"ok"}]}`)) + 4,
+			wantHeldRows:       1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"llama","stream":true,"max_tokens":4,"messages":[{"role":"user","content":"ok"}]}`
+			accountID := "acct_stream_output_exceeded_after_prefix_" + strings.ReplaceAll(tc.name, "-", "_")
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				payload := strings.Join([]string{
+					`data: {"id":"chatcmpl","choices":[{"delta":{"content":"` + strings.Repeat("x", 32) + `"}}]}`,
+					`data: {"id":"chatcmpl","choices":[{"delta":{"content":"y"}}]}`,
+					`data: {"id":"chatcmpl","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+					`data: [DONE]`,
+					``,
+				}, "\n\n")
+				return responseWithBody(http.StatusOK, tc.header.Clone(), payload), nil
+			})}
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+			resp := postChat(t, h, fullKey, body, nil)
+
+			if resp.Code != http.StatusOK {
+				t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+			}
+			if !strings.Contains(resp.Body.String(), "stream_output_exceeded") {
+				t.Fatalf("stream body missing stream_output_exceeded: %s", resp.Body.String())
+			}
+			wantPrompt := estimatePromptTokens([]byte(body))
+			got := gatewaySettlementSnapshot(t, dbPath, accountID)
+			if got.usageRows != tc.wantUsageRows || got.settledRows != tc.wantSettledRows || got.activeRows != tc.wantActiveRows || got.activeReserved != tc.wantActiveReserved || got.heldRows != tc.wantHeldRows {
+				t.Fatalf("settlement snapshot = %+v, want usage=%d settled=%d active=%d active_reserved=%d held=%d",
+					got, tc.wantUsageRows, tc.wantSettledRows, tc.wantActiveRows, tc.wantActiveReserved, tc.wantHeldRows)
+			}
+			if tc.wantUsageRows > 0 {
+				outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
+				if outcome != "stream_output_exceeded" || source != "gateway_estimated" || completion != 0 {
+					t.Fatalf("usage row outcome/source/completion = %s/%s/%d, want stream_output_exceeded/gateway_estimated/0", outcome, source, completion)
+				}
+				if prompt != wantPrompt {
+					t.Fatalf("usage row prompt_tokens=%d want %d", prompt, wantPrompt)
+				}
+			}
+			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+			quota := readQuota(t, usageResp)
+			wantUsed := float64(0)
+			if tc.wantUsageRows > 0 {
+				wantUsed = float64(wantPrompt)
+			}
+			if quota["daily_tokens_used"].(float64) != wantUsed {
+				t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
+			}
+			if quota["daily_tokens_reserved"].(float64) != float64(tc.wantActiveReserved) {
+				t.Fatalf("daily_tokens_reserved=%v want %v", quota["daily_tokens_reserved"], tc.wantActiveReserved)
+			}
+		})
+	}
+}
+
 func TestStreamingGatewayEstimateCountsDataWithoutSpace(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":1,"messages":[{"role":"user","content":"ok"}]}`
 	accountID := "acct_stream_no_space"
@@ -5655,6 +5739,7 @@ type gatewaySettlementState struct {
 	staleHeldRows  int64
 	activeRows     int64
 	activeReserved int64
+	heldRows       int64
 }
 
 func gatewaySettlementSnapshot(t *testing.T, dbPath, accountID string) gatewaySettlementState {
@@ -5682,6 +5767,9 @@ func gatewaySettlementSnapshot(t *testing.T, dbPath, accountID string) gatewaySe
 	}
 	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(reserved_tokens), 0) FROM quota_reservations WHERE account_id = ? AND status = 'active'`, accountID).Scan(&state.activeRows, &state.activeReserved); err != nil {
 		t.Fatalf("query active reservations: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'active' AND settlement_hold = 1`, accountID).Scan(&state.heldRows); err != nil {
+		t.Fatalf("query held reservations count: %v", err)
 	}
 	return state
 }
