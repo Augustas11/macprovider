@@ -48,6 +48,11 @@ type forwardState struct {
 	// remain non-billable.
 	queueWait time.Duration
 
+	// phaseTiming carries per-request spans that the gateway copies into
+	// its completion log. It is kept with forwardState because retries and
+	// failover already mutate the active route through this struct.
+	phaseTiming requestPhaseTiming
+
 	// queuedSlotProviderID is set when the slot queue reserves a
 	// recovered provider slot for this request. It is released when
 	// the request leaves that active route.

@@ -40,6 +40,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -50,10 +51,45 @@ import (
 	"github.com/rs/zerolog"
 )
 
+func assertTimingHeaderPresent(t *testing.T, h http.Header, name string) int64 {
+	t.Helper()
+	raw := h.Get(name)
+	if raw == "" {
+		t.Fatalf("%s missing", name)
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		t.Fatalf("%s = %q, want integer milliseconds", name, raw)
+	}
+	if value < 0 {
+		t.Fatalf("%s = %d, want non-negative milliseconds", name, value)
+	}
+	return value
+}
+
+func assertTimingHeaderBelow(t *testing.T, h http.Header, name string, maxExclusive int64) {
+	t.Helper()
+	if value := assertTimingHeaderPresent(t, h, name); value >= maxExclusive {
+		t.Fatalf("%s = %d, want below %d to prove final-attempt timing did not include the failed first attempt", name, value, maxExclusive)
+	}
+}
+
+func assertTimingHeaderAtLeast(t *testing.T, h http.Header, name string, minInclusive int64) {
+	t.Helper()
+	if value := assertTimingHeaderPresent(t, h, name); value < minInclusive {
+		t.Fatalf("%s = %d, want at least %d", name, value, minInclusive)
+	}
+}
+
 // Scenario 1: HTTP success on first attempt. One row, retried=0.
 func TestM2_1C_RowSequence_HTTPSuccessFirstAttempt(t *testing.T) {
 	const requestID = "aaaaaaaa-1111-4111-8111-111111111111"
 	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(120 * time.Millisecond)
 		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
 	}))
 	defer okUpstream.Close()
@@ -79,6 +115,7 @@ func TestM2_1C_RowSequence_HTTPSuccessFirstAttempt(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	assertTimingHeaderAtLeast(t, rr.Header(), "X-MacProvider-Timing-Provider-Prefill-Ms", 80)
 	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 1 {
 		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
@@ -100,10 +137,12 @@ func TestM2_1C_RowSequence_HTTPSuccessFirstAttempt(t *testing.T) {
 func TestM2_1C_RowSequence_HTTPRetryToSuccess(t *testing.T) {
 	const requestID = "bbbbbbbb-2222-4222-8222-222222222222"
 	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}))
 	defer failUpstream.Close()
 	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(10 * time.Millisecond)
 		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
 	}))
 	defer okUpstream.Close()
@@ -133,6 +172,7 @@ func TestM2_1C_RowSequence_HTTPRetryToSuccess(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	assertTimingHeaderBelow(t, rr.Header(), "X-MacProvider-Timing-Provider-Dispatch-Ms", 150)
 	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 2 {
 		t.Fatalf("request_log rows = %d, want 2: %#v", len(rows), rows)
@@ -257,16 +297,20 @@ func TestM2_1C_RowSequence_WSNonStreamingFailoverDoesNotBumpRetried(t *testing.T
 			StickyMaxEntries: 10000,
 		}),
 		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, reqID string, body []byte, stream bool) (*providerws.RelayStream, error) {
-			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			chunks := make(chan providerws.InferenceResponseChunk, 2)
 			done := make(chan providerws.InferenceResponseEnd, 1)
 			errs := make(chan error, 1)
 			if provider.ProviderID == "p1" {
 				// Drive into wsForwardProviderDisconnected — pre-commit.
-				errs <- providerws.ErrRelayClosed
-				return &providerws.RelayStream{RequestID: reqID, Chunks: chunks, Done: done, Errors: errs}, nil
+				time.Sleep(200 * time.Millisecond)
+				return nil, providerws.ErrRelayClosed
 			}
-			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: reqID, Seq: 0, Data: `{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`}
-			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: reqID, Status: "complete", ChunksSent: 1}
+			go func() {
+				chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: reqID, Seq: 0, Data: ""}
+				time.Sleep(120 * time.Millisecond)
+				chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: reqID, Seq: 1, Data: `{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`}
+				done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: reqID, Status: "complete", ChunksSent: 2}
+			}()
 			return &providerws.RelayStream{RequestID: reqID, Chunks: chunks, Done: done, Errors: errs}, nil
 		}, time.Second),
 	)
@@ -280,6 +324,9 @@ func TestM2_1C_RowSequence_WSNonStreamingFailoverDoesNotBumpRetried(t *testing.T
 	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
 		t.Fatalf("provider = %q, want p2 (after failover)", rr.Header().Get("X-MacProvider-Provider"))
 	}
+	assertTimingHeaderBelow(t, rr.Header(), "X-MacProvider-Timing-Provider-Dispatch-Ms", 150)
+	assertTimingHeaderAtLeast(t, rr.Header(), "X-MacProvider-Timing-Provider-Prefill-Ms", 80)
+	assertTimingHeaderBelow(t, rr.Header(), "X-MacProvider-Timing-Provider-Decode-Ms", 150)
 	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 2 {
 		t.Fatalf("request_log rows = %d, want 2 (failover-disconnect then success): %#v", len(rows), rows)

@@ -95,6 +95,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// outcome, so the flaky-provider failure mode can be diagnosed without
 	// re-instrumenting the binary.
 	start := s.now()
+	timing := newGatewayPhaseTiming(start)
 	// AC-V2-9: gateway-side first-byte-of-request is the SPEC-019 v0.2
 	// wall-clock zero-point. The 300s budget (`coordinator_request_seconds`
 	// by convention) measures from this point to provider terminal SSE frame
@@ -118,14 +119,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var accountID, model string
 	var streamMode bool
 	defer func() {
-		slog.Info("chat completion",
+		attrs := []any{
 			"request_id", requestID(r),
 			"account_id", accountID,
 			"model", model,
 			"stream", streamMode,
 			"wall_ms", s.now().Sub(start).Milliseconds(),
 			"status", sw.statusCode,
-		)
+		}
+		attrs = append(attrs, timing.attrs(s.now())...)
+		slog.Info("chat completion", attrs...)
 	}()
 
 	if r.Method != http.MethodPost {
@@ -355,6 +358,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return upReq, nil
 	}
 	structuredStreaming := chat.Stream && chat.hasStructuredOutput()
+	timing.markCoordinatorStart(s.now())
 	resp, err := s.doCoordinatorChatWithRetry(upCtx, r, buildUpReq)
 	if err != nil {
 		if structuredStreaming && errors.Is(upCtx.Err(), context.DeadlineExceeded) {
@@ -369,6 +373,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	timing.observeCoordinatorResponse(resp.Header, s.now())
 
 	if chat.Stream {
 		// ISS-187 R1 architect/code MAJOR: thread the reservation
@@ -376,7 +381,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 17.7 fallback usage_events insert in settleAfterCommit
 		// uses the SAME window_date as the original reservation
 		// (avoids drift for streams that cross UTC midnight).
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, cancelUpstream, upCtx, structuredStreaming, window)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, cancelUpstream, upCtx, structuredStreaming, window, timing)
 		return
 	}
 	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens)
@@ -639,7 +644,7 @@ func emitProviderAttribution(dst, src http.Header) {
 	}
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, cancelUpstream func(), upstreamCtx context.Context, structuredStreaming bool, reservationWindow string) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, cancelUpstream func(), upstreamCtx context.Context, structuredStreaming bool, reservationWindow string, timing *gatewayPhaseTiming) {
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
@@ -684,6 +689,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
+	}
+	if timing != nil {
+		defer timing.observeCoordinatorTrailers(resp.Trailer)
 	}
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyCleanHeaders(w.Header(), resp.Header)
