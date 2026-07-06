@@ -15,6 +15,16 @@ func TestQuotaReaperDefaults(t *testing.T) {
 	}
 }
 
+func TestAccountAdmissionDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.Quotas.AccountConcurrency != 4 {
+		t.Fatalf("AccountConcurrency=%d want 4", cfg.Quotas.AccountConcurrency)
+	}
+	if cfg.Quotas.AccountRequestRatePerSecond != 30 {
+		t.Fatalf("AccountRequestRatePerSecond=%d want 30", cfg.Quotas.AccountRequestRatePerSecond)
+	}
+}
+
 // Post-#92 (PR #167): header timeout must be >= the request budget so a
 // slow-but-valid streaming first-event (or non-streaming completion)
 // doesn't false-fail before the coordinator's own request_timeout_s
@@ -130,6 +140,15 @@ func TestQuotaReaperConfigValidation(t *testing.T) {
 				t.Fatalf("Validate error=%v want containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestAccountRequestRateConfigValidation(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Quotas.AccountRequestRatePerSecond = 0
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "quotas.account_request_rate_per_second must be positive") {
+		t.Fatalf("Validate error=%v", err)
 	}
 }
 

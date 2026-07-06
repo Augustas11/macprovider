@@ -1,7 +1,24 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.6 (2026-07-06, bounded coordinator slot queue — issue #374)
+**Version:** 0.9.7 (2026-07-06, gateway per-account admission guard — issue #375)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.3, SPEC-003 v0.7, SPEC-004 v0.2
+
+**Change log v0.9.7 (2026-07-06, issue #375 — gateway per-account admission guard):**
+- Gateway enforces a per-account request-start token bucket before
+  forwarding `/v1/chat/completions` to the coordinator. Default steady
+  rate is `quotas.account_request_rate_per_second: 30` per gateway
+  instance; default
+  authenticated account concurrency is now `quotas.account_concurrency:
+  4`. Both remain operator-configurable in `gateway.yaml`.
+- The request-start token bucket is a non-authoritative abuse-shedding
+  guard. Persistent daily token quota and in-flight concurrency
+  reservations remain storage-backed and authoritative for money-path
+  accounting. Process restart may reset the request-start bucket; it
+  MUST NOT mint quota, bypass auth, or affect settlement.
+- Fast request-start rejection returns `429` with `Retry-After` and
+  OpenAI-compatible `X-RateLimit-*-Requests` headers; the gateway emits a
+  structured log line with `request_id`, `account_id`, `limit_rps`, and
+  `retry_after_s` for operator triage.
 
 **Change log v0.9.6 (2026-07-06, issue #374 — bounded coordinator slot queue):**
 - Non-pinned no-slot routing may use SPEC-002 v1.5.3's bounded
@@ -356,7 +373,7 @@ Buyer-facing responses MUST NOT include provider hostnames, internal coordinator
 
 The gateway MUST be horizontally scalable from day 1.
 
-The gateway MUST forbid in-process state for rate-limiting, quota, or session data.
+The gateway MUST forbid in-process authoritative quota, concurrency, billing, or session state. Non-authoritative process-local request-start buckets are allowed only for preflight abuse shedding as described in §4.6 and §7.3.
 
 The gateway MUST require data layer abstraction.
 
@@ -539,7 +556,7 @@ The metric MUST be reportable as a 7-day rolling distribution with median (p50) 
 No unbounded queueing.
 
 For non-pinned requests, the coordinator MAY wait in the bounded
-pre-dispatch slot queue described in section 7.7. If no slot becomes
+pre-dispatch slot queue described in section 7.8. If no slot becomes
 available before that deadline, return 503.
 
 Streaming cancellation: when client disconnects mid-SSE, gateway MUST cancel the upstream request to coordinator within 500ms.
@@ -778,7 +795,18 @@ Demo traffic MUST NOT bypass account signup issuance limits.
 
 Gateway request handlers MUST be stateless.
 
-The gateway MUST NOT keep in-process rate-limit counters.
+The gateway MUST NOT keep authoritative quota, concurrency, billing, or
+session state in-process.
+
+The gateway MAY keep a best-effort process-local request-start token
+bucket for abuse shedding before coordinator forwarding. That bucket is
+scoped to one gateway instance; multi-replica deployments multiply the
+effective aggregate request-start rate unless they add a shared
+admission layer. The bucket
+MUST be keyed by authenticated `account_id` or demo subject identity,
+MUST NOT be used for billing or settlement, and MUST NOT be the only
+guard for daily quota or in-flight concurrency. Daily quota and
+concurrency remain storage-backed authoritative controls.
 
 The gateway MUST NOT keep in-process quota state.
 
@@ -919,7 +947,7 @@ All authenticated API requests MUST accept:
 Authorization: Bearer mp_...
 ```
 
-All applicable responses MUST include:
+All applicable quota responses MUST include:
 
 ```text
 X-RateLimit-Limit
@@ -930,6 +958,14 @@ X-RateLimit-Reset
 When the request is authenticated, rate-limit headers describe the account daily token quota unless a more specific quota blocked the request.
 
 When the request is demo traffic, rate-limit headers describe the demo daily token quota.
+
+When request-start or concurrency admission blocks the request, the gateway MUST return `429`, SHOULD include `Retry-After`, and SHOULD include the OpenAI-compatible request-count headers:
+
+```text
+X-RateLimit-Limit-Requests
+X-RateLimit-Remaining-Requests
+X-RateLimit-Reset-Requests
+```
 
 The gateway MUST include:
 
@@ -1726,7 +1762,8 @@ Default quotas:
 
 - Account daily total tokens: 100,000.
 - Demo daily total tokens per IP: 1,000.
-- Per-account concurrent requests: 2.
+- Per-account concurrent requests: 4.
+- Per-account request-start rate: 30 requests per second per gateway instance.
 - Per-IP signup issuance per day: 3 accounts.
 - Authenticated max tokens per request: 4,096.
 - Demo max tokens per request: 512 unless configured otherwise.
@@ -1828,6 +1865,8 @@ The docs MUST explain reset behavior.
 
 Rate-limit headers MUST reflect post-decision quota state. For admitted requests this means after reservation; for rejected requests this means after the failed admission decision without subtracting rejected work.
 
+Request-start token buckets are preflight abuse-shedding controls, not quota ledgers. A request rejected by the request-start bucket MUST NOT create a quota reservation, usage event, coordinator request, buyer debit, or provider payout. In v1 the bucket is process-local, so the limit applies per gateway instance rather than globally across all replicas.
+
 ### 7.4 Quota enforcement order
 
 The gateway SHOULD enforce in this order:
@@ -1837,11 +1876,12 @@ The gateway SHOULD enforce in this order:
 3. request body size limit.
 4. auth or demo classification.
 5. account/key status.
-6. signup closed state for signup paths.
-7. per-request caps.
-8. quota availability.
-9. concurrency reservation.
-10. coordinator availability.
+6. request-start rate bucket for chat completions.
+7. signup closed state for signup paths.
+8. per-request caps.
+9. quota availability.
+10. concurrency reservation.
+11. coordinator availability.
 
 ### 7.5 Concurrency
 
@@ -1851,9 +1891,23 @@ The v1 implementation MAY use SQLite transactional reservations.
 
 A reservation MUST expire or be released on request completion, timeout, or cancellation.
 
-If the account has 2 active requests and the cap is 2, the third request MUST return 429.
+If the account has 4 active requests and the cap is 4, the fifth request MUST return 429 by default. Operators MAY tune the cap in `gateway.yaml`.
 
-### 7.6 Quota exhausted response
+### 7.6 Request-start rate exceeded response
+
+When the per-account request-start token bucket is exhausted before the first coordinator attempt, the gateway MUST return 429 before forwarding to the coordinator. If an already-admitted request exhausts the bucket while deciding whether to retry a transient coordinator response, the gateway MUST NOT make the extra retry attempt and MAY relay the current coordinator response.
+
+The error code SHOULD be:
+
+```text
+account_request_rate_exceeded
+```
+
+The response MUST include `Retry-After`.
+
+The gateway SHOULD emit a structured log line with at least `request_id`, `account_id`, `limit_rps`, and `retry_after_s`.
+
+### 7.7 Quota exhausted response
 
 When quota is exhausted, the gateway MUST return 429.
 
@@ -1865,7 +1919,7 @@ quota_exhausted
 
 The response MUST include `X-RateLimit-Reset`.
 
-### 7.7 Bounded slot queueing
+### 7.8 Bounded slot queueing
 
 The gateway MUST NOT queue requests indefinitely waiting for provider slots.
 
@@ -2563,7 +2617,8 @@ quotas:
   account_daily_tokens: 100000
   demo_daily_tokens_per_ip: 1000
   demo_sessions_per_ip_per_hour: 10
-  account_concurrency: 2
+  account_concurrency: 4
+  account_request_rate_per_second: 30
   signup_accounts_per_ip_per_day: 3
 
 limits:

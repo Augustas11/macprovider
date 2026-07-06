@@ -276,6 +276,102 @@ func TestAccountConcurrencyCap(t *testing.T) {
 	}
 }
 
+func TestAccountRequestRateLimitRejectsBurstBeforeUpstream(t *testing.T) {
+	now := fixedNow()
+	upstreamHits := make(chan struct{}, 4)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits <- struct{}{}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_request_rate",
+			"object":"chat.completion",
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Quotas.AccountConcurrency = 10
+		cfg.Quotas.AccountRequestRatePerSecond = 2
+	}, WithNow(func() time.Time { return now }), WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_request_rate_burst")
+	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+
+	for i := 0; i < 2; i++ {
+		resp := postChat(t, h, key, body, nil)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("admitted request %d status=%d body=%s", i, resp.Code, resp.Body.String())
+		}
+	}
+	beforeReject := gatewaySettlementSnapshot(t, dbPath, "acct_request_rate_burst")
+	third := postChat(t, h, key, body, nil)
+	if third.Code != http.StatusTooManyRequests {
+		t.Fatalf("third request status=%d body=%s, want 429", third.Code, third.Body.String())
+	}
+	assertErrorCode(t, third.Body.String(), "account_request_rate_exceeded")
+	assertConcurrencyRejectHeaders(t, third, 2)
+	if got := len(upstreamHits); got != 2 {
+		t.Fatalf("upstream hits after rate rejection=%d want 2", got)
+	}
+	afterReject := gatewaySettlementSnapshot(t, dbPath, "acct_request_rate_burst")
+	if afterReject != beforeReject {
+		t.Fatalf("rate rejection changed settlement state: before=%+v after=%+v", beforeReject, afterReject)
+	}
+
+	now = now.Add(time.Second)
+	fourth := postChat(t, h, key, body, nil)
+	if fourth.Code != http.StatusOK {
+		t.Fatalf("request after refill status=%d body=%s", fourth.Code, fourth.Body.String())
+	}
+	if got := len(upstreamHits); got != 3 {
+		t.Fatalf("upstream hits after refill=%d want 3", got)
+	}
+}
+
+func TestRunawayBuyerBurstGetsQuick429sAtGateway(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		entered <- struct{}{}
+		<-release
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_runaway",
+			"object":"chat.completion",
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Quotas.AccountConcurrency = 1
+		cfg.Quotas.AccountRequestRatePerSecond = 100
+	}, WithHTTPClient(client))
+	key := createAccountAndKey(t, store, cfg, "acct_runaway_burst")
+	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- postChat(t, h, key, body, nil) }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first upstream request")
+	}
+
+	for i := 0; i < 19; i++ {
+		resp := postChat(t, h, key, body, nil)
+		if resp.Code != http.StatusTooManyRequests {
+			t.Fatalf("burst request %d status=%d body=%s, want 429", i+2, resp.Code, resp.Body.String())
+		}
+		assertErrorCode(t, resp.Body.String(), "account_concurrency_exceeded")
+		assertConcurrencyRejectHeaders(t, resp, 1)
+	}
+
+	close(release)
+	first := <-done
+	if first.Code != http.StatusOK {
+		t.Fatalf("first in-flight response status=%d body=%s", first.Code, first.Body.String())
+	}
+}
+
 // Issue #190 R1 security HIGH helper: confirm chat responses are
 // non-cacheable so per-tenant headers cannot leak via a shared
 // CDN/proxy cache.
