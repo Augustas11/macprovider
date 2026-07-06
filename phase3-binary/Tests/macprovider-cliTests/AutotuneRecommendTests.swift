@@ -15,6 +15,71 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(result.candidates.first?.expectedNetUSDPerHour), 0.0050)
     }
 
+    func testBakedNemotronInputsArePaidRecommendable() throws {
+        let modelKey = "nvidia/nemotron-3-nano-30b-a3b"
+        let demand = try AutotuneStaticInputs.decodeDemandRank(Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8))
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
+        let rateCard = try AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8))
+
+        let demandRow = try XCTUnwrap(demand.rows[modelKey])
+        XCTAssertTrue(demandRow.recommendable)
+        XCTAssertEqual(demandRow.rank, 68)
+        XCTAssertEqual(demandRow.demandWeight, 0.30)
+        XCTAssertEqual(demandRow.minProviderTarget, 20)
+
+        let catalogRow = try XCTUnwrap(catalog.rows[modelKey])
+        XCTAssertEqual(catalogRow.modelID, "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit")
+        XCTAssertEqual(catalogRow.modelRevision, "832f602eba5d22436c258c1462bdedc5afddb42b")
+        XCTAssertEqual(catalogRow.modelSHA256, "1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f")
+        XCTAssertEqual(catalogRow.runtimeStatus, "recommendable")
+        XCTAssertEqual(catalogRow.minRAMGB, 32)
+        XCTAssertEqual(catalogRow.minBandwidthTier, .c)
+
+        let rateMatch = try XCTUnwrap(rateCard.rowForRecommendation(modelKey: modelKey))
+        XCTAssertEqual(rateMatch.key, "nemotron-3-nano-30b-a3b")
+        let rateRow = rateMatch.row
+        XCTAssertEqual(rateRow.promptRatePerMtok, 117_500)
+        XCTAssertEqual(rateRow.completionRatePerMtok, 235_000)
+        XCTAssertEqual(rateRow.providerShareBPS, 9_000)
+    }
+
+    func testPublishedStaticNemotronInputsArePaidRecommendableAndSigned() throws {
+        let modelKey = "nvidia/nemotron-3-nano-30b-a3b"
+        let staticDir = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("dist/static")
+        let demandBytes = try Data(contentsOf: staticDir.appendingPathComponent("demand-rank.json"))
+        let demandSigBytes = try Data(contentsOf: staticDir.appendingPathComponent("demand-rank.json.sig"))
+        let catalogBytes = try Data(contentsOf: staticDir.appendingPathComponent("autotune-candidates.json"))
+        let catalogSigBytes = try Data(contentsOf: staticDir.appendingPathComponent("autotune-candidates.json.sig"))
+        let publicKeyBytes = try Data(contentsOf: staticDir.appendingPathComponent("keys/autotune-static-v4.public.base64"))
+
+        XCTAssertEqual(String(decoding: publicKeyBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines), AutotuneStaticInputs.publicKeyBase64)
+        XCTAssertTrue(Self.sidecar(demandSigBytes, hasKeyID: AutotuneStaticInputs.keyID))
+        XCTAssertTrue(Self.sidecar(catalogSigBytes, hasKeyID: AutotuneStaticInputs.keyID))
+        XCTAssertTrue(AutotuneStaticInputs.defaultSignatureVerifier(jsonBytes: demandBytes, sidecarBytes: demandSigBytes))
+        XCTAssertTrue(AutotuneStaticInputs.defaultSignatureVerifier(jsonBytes: catalogBytes, sidecarBytes: catalogSigBytes))
+
+        let demand = try AutotuneStaticInputs.decodeDemandRank(demandBytes)
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(catalogBytes)
+
+        let demandRow = try XCTUnwrap(demand.rows[modelKey])
+        XCTAssertTrue(demandRow.recommendable)
+        XCTAssertEqual(demandRow.rank, 68)
+        XCTAssertEqual(demandRow.demandWeight, 0.30)
+        XCTAssertEqual(demandRow.minProviderTarget, 20)
+
+        let catalogRow = try XCTUnwrap(catalog.rows[modelKey])
+        XCTAssertEqual(catalogRow.modelID, "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit")
+        XCTAssertEqual(catalogRow.modelRevision, "832f602eba5d22436c258c1462bdedc5afddb42b")
+        XCTAssertEqual(catalogRow.modelSHA256, "1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f")
+        XCTAssertEqual(catalogRow.runtimeStatus, "recommendable")
+        XCTAssertEqual(catalogRow.minRAMGB, 32)
+        XCTAssertEqual(catalogRow.minBandwidthTier, .c)
+    }
+
     func testRecommendationJSONIncludesApplyReadyServeConfigWhenProvided() throws {
         let request = try makeRequest()
         let result = AutotuneRecommendEngine().recommend(request)
@@ -322,6 +387,65 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(row?.key, "openai/gpt-oss-20b")
     }
 
+    func testNemotronRateCardLookupUsesNormalizedCoordinatorKey() throws {
+        let rateCard = try AutotuneStaticInputs.decodeRateCard(Data("""
+        {"version":"test","generated_at":"2026-07-06T00:00:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":500000,"completion_rate_per_mtok":1000000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"nemotron-3-nano-30b-a3b":{"prompt_rate_per_mtok":117500,"completion_rate_per_mtok":235000,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
+        """.utf8))
+
+        for modelKey in [
+            "nvidia/nemotron-3-nano-30b-a3b",
+            "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
+        ] {
+            let row = rateCard.rowForRecommendation(modelKey: modelKey)
+            XCTAssertEqual(row?.key, "nemotron-3-nano-30b-a3b")
+            XCTAssertEqual(row?.row.promptRatePerMtok, 117_500)
+            XCTAssertEqual(row?.row.completionRatePerMtok, 235_000)
+        }
+    }
+
+    func testNemotronRecommendationKeepsPublicServedModelWithNormalizedRateCard() throws {
+        let modelKey = "nvidia/nemotron-3-nano-30b-a3b"
+        var request = try makeRequest(modelKey: modelKey)
+        request.rateCard.rows = [
+            "nemotron-3-nano-30b-a3b": RateCardProjection.Row(
+                promptRatePerMtok: 117_500,
+                completionRatePerMtok: 235_000,
+                providerShareBPS: 9_000,
+                globalMultiplierPPM: 1_000_000
+            ),
+        ]
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        let benchmark = try XCTUnwrap(request.benchmarks[selected.catalogKey])
+        let row = try XCTUnwrap(request.candidateCatalog.rows[selected.catalogKey])
+        let core = RecommendationCore(
+            model: selected.model,
+            targetContext: 4000,
+            knobs: WinningKnobs(kvBits: nil, maxBatch: 1, maxContext: 4000),
+            tpsMedian: selected.tokensPerSecond,
+            ttftP95MS: 0,
+            replicates: 0,
+            modelArtifactPath: benchmark.modelArtifactPath,
+            modelArtifactSHA256: benchmark.artifactSHA256,
+            modelCatalogKey: selected.catalogKey,
+            modelCatalogModelID: row.modelID,
+            modelCatalogRevision: row.modelRevision,
+            modelCatalogSHA256: row.modelSHA256,
+            modelCatalogVersion: request.candidateCatalog.version,
+            modelCatalogHash: request.candidateCatalogSHA256
+        )
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString(serveConfig: core).utf8)) as? [String: Any])
+        let serveConfig = try XCTUnwrap(root["serve_config"] as? [String: Any])
+
+        XCTAssertEqual(result.recommendedModel, modelKey)
+        XCTAssertEqual(selected.model, modelKey)
+        XCTAssertEqual(selected.catalogKey, modelKey)
+        XCTAssertEqual(serveConfig["model"] as? String, modelKey)
+        XCTAssertEqual(serveConfig["model_catalog_key"] as? String, modelKey)
+        XCTAssertEqual(request.rateCard.rowForRecommendation(modelKey: modelKey)?.key, "nemotron-3-nano-30b-a3b")
+    }
+
     func testNormalizedRecommendationKeepsCatalogKeyForBenchmarkLookup() throws {
         let alias = "mlx-community/gpt-oss-20b-MXFP4-Q8"
         let normalized = "openai/gpt-oss-20b"
@@ -485,7 +609,7 @@ final class AutotuneRecommendTests: XCTestCase {
             .replacingOccurrences(of: "baked-2026-07-03", with: "fetched-2026-07-10")
             .replacingOccurrences(of: "2026-07-01T00:00:00Z", with: "2026-07-10T00:00:00Z")
             .utf8)
-        let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v3","alg":"ed25519","signature":"AA=="}"#.utf8)
+        let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA=="}"#.utf8)
         let staleInputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : validFetched },
             verifySignature: { _, _ in true },
@@ -513,7 +637,7 @@ final class AutotuneRecommendTests: XCTestCase {
             .replacingOccurrences(of: "baked-2026-07-03", with: "fetched-2026-07-10")
             .replacingOccurrences(of: "2026-07-01T00:00:00Z", with: "2026-07-10T00:00:00Z")
             .utf8)
-        let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v3","alg":"ed25519","signature":"AA==","extra":true}"#.utf8)
+        let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA==","extra":true}"#.utf8)
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : fetched },
             verifySignature: { _, _ in true },
@@ -527,7 +651,7 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     func testPinnedPublicKeyIsValidCurve25519SigningKey() {
-        let keyData = Data(base64Encoded: AutotuneStaticInputs.autotune_static_json_ed25519_v3)
+        let keyData = Data(base64Encoded: AutotuneStaticInputs.autotune_static_json_ed25519_v4)
 
         XCTAssertEqual(keyData?.count, 32)
         XCTAssertNotNil(try? Curve25519.Signing.PublicKey(rawRepresentation: try XCTUnwrap(keyData)))
@@ -1620,9 +1744,10 @@ final class AutotuneRecommendTests: XCTestCase {
         var demand = try AutotuneStaticInputs.decodeDemandRank(Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8))
         var catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
         var rateCard = try AutotuneStaticInputs.decodeRateCard(Data(AutotuneStaticInputs.bakedRateCardJSON.utf8))
+        let normalizedModelKey = AutotuneModelKeyNormalizer.normalize(modelKey)
         demand.rows = demand.rows.filter { $0.key == modelKey }
         catalog.rows = catalog.rows.filter { $0.key == modelKey }
-        rateCard.rows = rateCard.rows.filter { $0.key == modelKey }
+        rateCard.rows = rateCard.rows.filter { $0.key == modelKey || $0.key == normalizedModelKey }
 
         if modelKey == "google-gemma-4-26b-a4b-it" {
             rateCard.rows[modelKey] = RateCardProjection.Row(
@@ -1696,6 +1821,17 @@ final class AutotuneRecommendTests: XCTestCase {
 
     private static func date(_ raw: String) -> Date {
         ISO8601DateFormatter.autotuneInternet.date(from: raw)!
+    }
+
+    private static func sidecar(_ data: Data, hasKeyID keyID: String) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(object.keys) == Set(["key_id", "alg", "signature"])
+        else {
+            return false
+        }
+        return object["key_id"] as? String == keyID &&
+            object["alg"] as? String == "ed25519" &&
+            Data(base64Encoded: object["signature"] as? String ?? "") != nil
     }
 
     private func tempDir() throws -> URL {

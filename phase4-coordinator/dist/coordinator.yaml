@@ -172,6 +172,10 @@ rewards:
       prompt_credits_per_mtok: 117500        # $0.1175/M
       prompt_cache_hit_credits_per_mtok: 29375 # $0.029375/M prefix-cache hit
       completion_credits_per_mtok: 235000    # $0.235/M (RESEARCH_227 developer-coding target, MoE-small-active)
+    nemotron-3-nano-30b-a3b:                 # issue 411 — normalized Nemotron key; matches billing.NormalizeModelKey
+      prompt_credits_per_mtok: 117500        # $0.1175/M (match qwen3-coder initial rollout)
+      prompt_cache_hit_credits_per_mtok: 29375 # $0.029375/M prefix-cache hit
+      completion_credits_per_mtok: 235000    # $0.235/M (initial parity with qwen3-coder)
     meta-llama/llama-3.1-8b-instruct:        # v3 expansion — low-tier / broad-compatibility row
       prompt_credits_per_mtok: 13500         # $0.0135/M
       prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit

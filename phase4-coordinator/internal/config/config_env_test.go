@@ -152,6 +152,15 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 	if got, want := cfg.Stats.PartnerKeys.ProductionSignoffPath, "/opt/macprovider/spec017-signoff.txt"; got != want {
 		t.Fatalf("ProductionSignoffPath=%q want %q", got, want)
 	}
+	nemotron, ok := cfg.Rewards.RateCard["nemotron-3-nano-30b-a3b"]
+	if !ok {
+		t.Fatal("nemotron rate-card row missing")
+	}
+	if nemotron.PromptCreditsPerMtok != 117500 ||
+		nemotron.EffectivePromptCacheHitCreditsPerMtok() != 29375 ||
+		nemotron.CompletionCreditsPerMtok != 235000 {
+		t.Fatalf("unexpected nemotron rate-card row: %+v", nemotron)
+	}
 }
 
 // writeMinimalConfig writes a YAML fragment that already satisfies
