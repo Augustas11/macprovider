@@ -178,10 +178,10 @@ logging:
 #       prompt_credits_per_mtok: 117500       # $0.1175/M
 #       prompt_cache_hit_credits_per_mtok: 29375 # $0.029375/M prefix-cache hit
 #       completion_credits_per_mtok: 235000   # $0.235/M — RESEARCH_227 developer-coding target
-#     nemotron-3-nano-30b-a3b:                # Issue 411 — normalized billing key for validated Nemotron rollout
-#       prompt_credits_per_mtok: 117500       # $0.1175/M — match qwen3-coder initial rollout
-#       prompt_cache_hit_credits_per_mtok: 29375 # $0.029375/M prefix-cache hit
-#       completion_credits_per_mtok: 235000   # $0.235/M — initial parity with qwen3-coder
+#     nemotron-3-nano-30b-a3b:                # v4 pivot — RESEARCH_227 broad-fleet lane, 20% undercut vs $0.200/M OpenRouter cheapest
+#       prompt_credits_per_mtok: 80000        # $0.080/M
+#       prompt_cache_hit_credits_per_mtok: 20000 # $0.020/M prefix-cache hit
+#       completion_credits_per_mtok: 160000   # $0.160/M
 #     meta-llama/llama-3.1-8b-instruct:       # Wave 1 v0.2 — broad-compatibility 8B
 #       prompt_credits_per_mtok: 13500        # $0.0135/M
 #       prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
