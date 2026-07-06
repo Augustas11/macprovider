@@ -1,7 +1,26 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.5.2 (2026-06-29, monotonic `attempt_n` column — issue #168)
+**Version:** 1.5.3 (2026-07-06, bounded coordinator slot queue — issue #374)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.5.3 (2026-07-06, issue #374 — bounded coordinator slot queue):**
+- **Bounded zero-slot queue.** Non-pinned requests MAY enter a
+  coordinator-side pre-dispatch queue when at least one otherwise
+  eligible `ready` provider for the requested model reports
+  `slots_free == 0`. Queue admission is still quota-filtered before
+  waiting. The queue is FIFO per `provider_id`, caps pending waiters at
+  4 per provider, and uses a total deadline no longer than 750 ms.
+  Pinned provider/session requests do not enter this queue and retain
+  immediate 503 behavior when the pinned target has no free slot.
+- **Queue wait observability.** `request_log` gains
+  `queue_wait_ms REAL NOT NULL DEFAULT 0`, populated per active
+  provider attempt. The value measures coordinator slot-queue dwell
+  before preflight/provider dispatch; it does not include provider
+  execution time or preflight latency.
+- **Provider-queue boundary.** The coordinator remains responsible only
+  for bounded pre-dispatch slot smoothing. Provider-side tokenization,
+  execution queueing, and model-specific inference work remain provider
+  responsibilities.
 
 **Change log v1.5.2 (2026-06-29, issue #168 — monotonic `attempt_n` column on `request_log`):**
 - **New column.** `request_log` gains `attempt_n INTEGER NULL` (zero-based
@@ -1644,6 +1663,7 @@ Every buyer request is logged to the `request_log` table in SQLite:
 | `total_tokens` | INTEGER | prompt + completion |
 | `latency_ms` | REAL | Total wall time including routing |
 | `routing_ms` | REAL | Time spent in routing + preflight |
+| `queue_wait_ms` | REAL | Coordinator-side bounded slot queue wait for this attempt; 0 when no slot queue wait occurred |
 | `status` | INTEGER | HTTP status returned to buyer |
 | `stream` | INTEGER | 1 if streaming, 0 if not |
 | `buyer_ip` | TEXT | Buyer's IP (for rate limiting in future) |
@@ -1675,7 +1695,7 @@ CREATE INDEX idx_request_log_account_external_request_id ON request_log(account_
 
 The `idx_request_log_ts_utc` index supports SPEC-005 v0.3 reconciliation scans (24h startup, 7d nightly, ad-hoc admin ranges) at 10K-provider scale. The composite `(request_id, id)` index supports the SPEC-005 § 8.2 attempt-ordinal fallback and SPEC-004 multi-attempt log queries. The partial-NULL `external_request_id` and `(account_id, external_request_id)` indexes support closing-the-books reconciliation joins to gateway `usage_events` and `audit_events` (whether run as out-of-process harnesses or via a future coordinator-hosted reconciliation endpoint).
 
-Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`, `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL` (v1.4.2 R-2), `ALTER TABLE request_log ADD COLUMN account_id TEXT NULL` (v1.5.0), and `ALTER TABLE request_log ADD COLUMN attempt_n INTEGER NULL` (v1.5.2), and create the four indexes above. The two partial-NULL reconciliation indexes are built via `coordinator migrate-indexes`, NOT from daemon startup. The `attempt_n` column requires no index (it is a per-row ordinal, not a join key); the operator backfill subcommand `coordinator backfill-attempt-n` populates legacy NULL rows once per deployment.
+Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`, `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL` (v1.4.2 R-2), `ALTER TABLE request_log ADD COLUMN account_id TEXT NULL` (v1.5.0), `ALTER TABLE request_log ADD COLUMN attempt_n INTEGER NULL` (v1.5.2), and `ALTER TABLE request_log ADD COLUMN queue_wait_ms REAL NOT NULL DEFAULT 0` (v1.5.3), and create the four indexes above. The two partial-NULL reconciliation indexes are built via `coordinator migrate-indexes`, NOT from daemon startup. The `attempt_n` column requires no index (it is a per-row ordinal, not a join key); the operator backfill subcommand `coordinator backfill-attempt-n` populates legacy NULL rows once per deployment.
 
 **Per-key migration-state machine (v1.5.1).** Because ALTER TABLE migrations run at daemon startup but the partial-NULL composite indexes are built only by the operator subcommand `coordinator migrate-indexes`, each composite reconciliation key on `request_log` has its OWN three-state migration:
 
@@ -2002,19 +2022,19 @@ function route(request, pool, headers) -> provider | error:
 
     # Step 2: Filter candidates
     candidates = []
+    queue_candidates = []
     for p in pool:
         if not model_id_equal(p.model_id, model):
             continue
         if p.state != "ready":
             continue
         if p.slots_free <= 0:
+            if p.slots_total > 0 and p.max_context_tokens >= estimated_tokens:
+                queue_candidates.append(p)
             continue
         if p.max_context_tokens < estimated_tokens:
             continue
         candidates.append(p)
-
-    if len(candidates) == 0:
-        return error(503, "No provider available for model " + model)
 
     # Step 2.3: Provisional request quota check (v1.1.1)
     function check_provisional_quota(provider) -> bool:
@@ -2029,6 +2049,15 @@ function route(request, pool, headers) -> provider | error:
                                 if not check_provisional_quota(c)]
     candidates = [c for c in pre_quota_candidates
                   if check_provisional_quota(c)]
+    queue_candidates = [c for c in queue_candidates
+                        if check_provisional_quota(c)]
+
+    if len(candidates) == 0 and len(queue_candidates) > 0:
+        provider = wait_in_bounded_slot_queue(queue_candidates,
+                                             max_pending_per_provider=4,
+                                             deadline_ms=750)
+        if provider is not nil:
+            return provider
 
     if len(candidates) == 0:
         if len(quota_blocked_candidates) > 0 and len(pre_quota_candidates) == len(quota_blocked_candidates):
@@ -2087,7 +2116,10 @@ function route(request, pool, headers) -> provider | error:
 
 3. **State + capacity filter** removes any provider that cannot serve
    the request right now. Only `ready` providers with `slots_free > 0`
-   and sufficient `max_context_tokens` are candidates.
+   and sufficient `max_context_tokens` are immediate candidates. For
+   non-pinned requests, a `ready` provider with `slots_free == 0`,
+   `slots_total > 0`, and sufficient `max_context_tokens` MAY enter the
+   bounded coordinator-side slot queue described below.
 
 4. **Buyer preference** changes the sort order but not the filter.
    All three sort strategies produce a total order — no random
@@ -2726,8 +2758,10 @@ Validation order:
 | 8 | Preflight (if applicable) | 503 `preflight_rejected` |
 
 Note: steps 7-8 replace SPEC-001's steps 7-9 (Stage 1/2 pre-flight
-and queue admission). The coordinator does not tokenize or queue —
-the provider handles those.
+and provider queue admission). The coordinator does not tokenize. It
+MAY perform the bounded pre-dispatch slot queue described in this spec;
+provider-side tokenization and execution queueing remain provider
+responsibilities.
 
 **Non-streaming response (200):** Forwarded from provider. Same shape
 as SPEC-001 section 6.2 non-streaming response. The coordinator adds:

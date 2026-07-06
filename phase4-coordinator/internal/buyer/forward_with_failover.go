@@ -136,10 +136,18 @@ func (s *Server) forwardWithFailover(
 		// failover callbacks nil.
 		if tr.failoverEligible && tx.onFailoverHit != nil && tx.onFailoverMiss != nil {
 			if !failoverAttempted && !hasPinnedRoute(r.Header) {
-				next, hit := s.failoverCandidate(uuid.NewString(), req, r.Header, state.provider, excluded, state.dailyKey, state)
+				priorQueueWait := state.queueWait
+				s.releaseQueuedSlotReservation(state)
+				next, hit := s.failoverCandidate(r.Context(), uuid.NewString(), req, r.Header, state.provider, excluded, state.dailyKey, state)
 				if hit {
+					nextQueueWait := state.queueWait
+					nextQueuedSlotProviderID := state.queuedSlotProviderID
+					state.queueWait = priorQueueWait
+					state.queuedSlotProviderID = ""
 					tx.onFailoverHit(originalRequestID, requestID, dispatched, state, next)
 					failoverAttempted = true
+					state.queueWait = nextQueueWait
+					state.queuedSlotProviderID = nextQueuedSlotProviderID
 					state.provider = next
 					if tx.afterFailoverHit != nil {
 						if fallThrough := tx.afterFailoverHit(state); fallThrough {
@@ -148,6 +156,8 @@ func (s *Server) forwardWithFailover(
 					}
 					continue
 				}
+				state.queueWait = priorQueueWait
+				s.releaseQueuedSlotReservation(state)
 			}
 			if handled := tx.onFailoverMiss(w, r, dispatched, state); handled {
 				return false

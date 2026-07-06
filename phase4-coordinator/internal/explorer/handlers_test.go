@@ -538,7 +538,7 @@ func TestAC14_HealthExposesReconciliationDelta(t *testing.T) {
 
 func TestAC15_ActivityCursorMonotonic(t *testing.T) {
 	h, db := newTestExplorer(t, nil)
-	seedRequestLog(t, db, fixedExplorerTime().Add(-time.Minute), "req_activity_next")
+	seedRequestLogWithQueueWait(t, db, fixedExplorerTime().Add(time.Minute), "req_activity_next", 17)
 	from := fixedExplorerTime().Add(-time.Hour).Format(time.RFC3339)
 	to := fixedExplorerTime().Add(time.Hour).Format(time.RFC3339)
 	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?limit=1&from="+from+"&to="+to, "operator-key")
@@ -553,6 +553,9 @@ func TestAC15_ActivityCursorMonotonic(t *testing.T) {
 	items := body["events"].([]any)
 	if len(items) == 0 || items[0].(map[string]any)["cursor"] == "" {
 		t.Fatalf("activity row cursor missing: %s", resp.Body.String())
+	}
+	if got := items[0].(map[string]any)["queue_wait_ms"]; got != float64(17) {
+		t.Fatalf("queue_wait_ms = %#v, want 17 in activity row: %s", got, resp.Body.String())
 	}
 	page2 := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?limit=1&from="+from+"&to="+to+"&cursor="+next, "operator-key")
 	if page2.Code != http.StatusOK {
@@ -624,7 +627,8 @@ func TestAC17_ActivitySinceCursorReturnsOnlyNewEvents(t *testing.T) {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
 	body := decodeObject(t, resp)
-	ids := requestIDs(body["events"].([]any))
+	events := body["events"].([]any)
+	ids := requestIDs(events)
 	if len(ids) != 2 || !ids["req_live_activity"] || !ids["req_live_activity_2"] {
 		t.Fatalf("new activity missing: %s", resp.Body.String())
 	}
@@ -633,6 +637,12 @@ func TestAC17_ActivitySinceCursorReturnsOnlyNewEvents(t *testing.T) {
 	}
 	if body["latest_cursor"] == latest {
 		t.Fatalf("latest cursor did not advance: %s", resp.Body.String())
+	}
+	for _, event := range events {
+		row := event.(map[string]any)
+		if row["queue_wait_ms"] == nil {
+			t.Fatalf("queue_wait_ms missing from since-cursor activity row: %s", resp.Body.String())
+		}
 	}
 }
 
@@ -1066,13 +1076,18 @@ func requestExplorer(t *testing.T, h *Handler, method, path, bearer string) *htt
 
 func seedRequestLog(t *testing.T, db *sql.DB, ts time.Time, requestID string) {
 	t.Helper()
+	seedRequestLogWithQueueWait(t, db, ts, requestID, 0)
+}
+
+func seedRequestLogWithQueueWait(t *testing.T, db *sql.DB, ts time.Time, requestID string, queueWaitMs float64) {
+	t.Helper()
 	if _, err := db.ExecContext(context.Background(), `
 insert into request_log (
 	ts_utc, request_id, model, provider_assigned_id, prompt_tokens, completion_tokens,
-	total_tokens, latency_ms, routing_ms, status, stream, buyer_ip, error, error_code,
+	total_tokens, latency_ms, routing_ms, queue_wait_ms, status, stream, buyer_ip, error, error_code,
 	pref_header, provider_header, retried
-) values (?, ?, 'llama', 'assigned_seed', 1, 1, 2, 10, 2, 200, 0, '', NULL, NULL, NULL, NULL, 0)`,
-		ts.UTC().Format(time.RFC3339Nano), requestID); err != nil {
+) values (?, ?, 'llama', 'assigned_seed', 1, 1, 2, 10, 2, ?, 200, 0, '', NULL, NULL, NULL, NULL, 0)`,
+		ts.UTC().Format(time.RFC3339Nano), requestID, queueWaitMs); err != nil {
 		t.Fatalf("seed request_log: %v", err)
 	}
 }

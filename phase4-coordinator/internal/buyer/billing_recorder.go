@@ -209,6 +209,7 @@ func (b *billingRecorder) recordRow(
 		EstimatedCompTokens:   estimatedCompTokens,
 		LatencyMs:             float64(time.Since(b.startedAt).Milliseconds()),
 		RoutingMs:             float64(b.state.routingDone.Sub(b.startedAt).Milliseconds()),
+		QueueWaitMs:           float64(b.state.queueWait.Milliseconds()),
 		Status:                status,
 		Stream:                b.stream,
 		BuyerIP:               buyerIP(b.req.RemoteAddr),
