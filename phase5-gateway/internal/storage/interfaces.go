@@ -76,19 +76,22 @@ type UsageStore interface {
 	ListSettlementHeldReservations(ctx context.Context, limit int) ([]ActiveReservation, error)
 	InsertUsageEvent(ctx context.Context, event UsageEvent) error
 	// EnsureUsageEvent inserts a usage_events row idempotently. The
-	// behavior on a request_id PK conflict is the SPEC-006 § 17.7
-	// money-path contract for the failure-mode fallback in
-	// chat_proxy.settleAfterCommit (issue #187):
+	// idempotency key is the composite (account_id, request_id), matching
+	// the usage_events primary key. That is the SPEC-006 § 17.7 money-path
+	// contract for the failure-mode fallback in chat_proxy.settleAfterCommit
+	// (issue #187):
 	//
 	//   - Returns nil on a fresh insert.
-	//   - Returns nil when an existing row at the same request_id
-	//     matches the incoming event in EVERY billing-relevant field
-	//     (account_id, demo_identity, window_date, prompt_tokens,
+	//   - Returns nil when an existing row at the same account_id and
+	//     request_id matches the incoming event in EVERY billing-relevant
+	//     field (demo_identity, window_date, prompt_tokens,
 	//     completion_tokens, total_tokens, token_source, outcome).
-	//   - Returns ErrUsageEventConflict when an existing row at the
-	//     same request_id DIFFERS from the incoming event in any of
-	//     those fields — covers cross-account collisions (#196
-	//     pre-existing) and any same-account payload drift.
+	//   - Returns ErrUsageEventConflict when an existing row at the same
+	//     account_id and request_id DIFFERS from the incoming event in any
+	//     of those fields.
+	//   - Allows the same request_id under a different account_id to be
+	//     stored independently; cross-account ambiguity is handled by
+	//     lookup callers that accept request_id without account_id.
 	//
 	// The caller must treat ErrUsageEventConflict as a failure to
 	// settle (i.e., the audit trail is unrecoverable for THIS event)

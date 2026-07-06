@@ -26,6 +26,182 @@ func TestValidateChargedDeliveredToleranceBounds(t *testing.T) {
 	}
 }
 
+func TestValidateRequestsPerBuyerBounds(t *testing.T) {
+	for _, value := range []int{-1, 0} {
+		sc := validTestScenario()
+		sc.Buyers.RequestsPerBuyer = value
+		err := sc.Validate()
+		if err == nil || !strings.Contains(err.Error(), "scenario test: requests_per_buyer must be >= 1, got") {
+			t.Fatalf("requests_per_buyer=%d err=%v, want >= 1 validation", value, err)
+		}
+	}
+
+	sc := validTestScenario()
+	sc.Buyers.RequestsPerBuyer = 1
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("requests_per_buyer=1 should validate: %v", err)
+	}
+}
+
+func TestLoadRejectsExplicitZeroRequestsPerBuyer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero.yaml")
+	yaml := `
+name: buyer
+target:
+  gateway_url: http://gateway.test
+  buyer_token: token
+buyers:
+  count: 1
+  requests_per_buyer: 0
+prompts:
+  - {model: m, user: hi}
+duration: 1s
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write yaml: %v", err)
+	}
+
+	sc, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load err=%v", err)
+	}
+	if err := sc.Validate(); err == nil || !strings.Contains(err.Error(), "requests_per_buyer must be >= 1") {
+		t.Fatalf("Validate err=%v, want requests_per_buyer rejection", err)
+	}
+}
+
+func TestLoadDefaultsOmittedRequestsPerBuyer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "omitted.yaml")
+	yaml := `
+name: buyer
+target:
+  gateway_url: http://gateway.test
+  buyer_token: token
+buyers:
+  count: 1
+prompts:
+  - {model: m, user: hi}
+duration: 1s
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write yaml: %v", err)
+	}
+
+	sc, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load err=%v", err)
+	}
+	if sc.Buyers.RequestsPerBuyer != 1 {
+		t.Fatalf("requests_per_buyer=%d want default 1", sc.Buyers.RequestsPerBuyer)
+	}
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("Validate err=%v", err)
+	}
+}
+
+func TestValidateBuyerFleetUpperBounds(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Scenario)
+		wantIn string
+	}{
+		{"buyers.count", func(s *Scenario) { s.Buyers.Count = MaxBuyerCount + 1 }, "buyers.count must be <="},
+		{"buyers.requests_per_buyer", func(s *Scenario) { s.Buyers.RequestsPerBuyer = MaxRequestsPerBuyer + 1 }, "buyers.requests_per_buyer must be <="},
+		{"total requests", func(s *Scenario) {
+			s.Buyers.Count = MaxBuyerCount
+			s.Buyers.RequestsPerBuyer = MaxRequestsPerBuyer
+		}, "buyers.count * buyers.requests_per_buyer must be <="},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := validTestScenario()
+			tc.mutate(&sc)
+			err := sc.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantIn) {
+				t.Fatalf("err=%v want substring %q", err, tc.wantIn)
+			}
+		})
+	}
+
+	sc := validTestScenario()
+	sc.Buyers.Count = MaxBuyerCount
+	sc.Buyers.RequestsPerBuyer = MaxTotalBuyerRequests / MaxBuyerCount
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("max bounded scenario should validate: %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidTimingFields(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Scenario)
+		wantIn string
+	}{
+		{"request_timeout negative", func(s *Scenario) { s.RequestTimeout = -time.Second }, "request_timeout must be >= 0"},
+		{"silent_hang_threshold negative", func(s *Scenario) { s.SilentHangThreshold = -time.Second }, "silent_hang_threshold must be >= 0"},
+		{"duration negative", func(s *Scenario) { s.Duration = -time.Second }, "duration must be >= 0"},
+		{"burst duration negative", func(s *Scenario) {
+			s.Buyers.Pattern = "burst"
+			s.Duration = -time.Second
+		}, "duration must be >= 0"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := validTestScenario()
+			tc.mutate(&sc)
+			err := sc.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantIn) {
+				t.Fatalf("err=%v want substring %q", err, tc.wantIn)
+			}
+		})
+	}
+}
+
+func TestValidateAllowsDefaultTimingFields(t *testing.T) {
+	sc := validTestScenario()
+	sc.RequestTimeout = 0
+	sc.SilentHangThreshold = 0
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("zero timing fields should validate as defaults: %v", err)
+	}
+}
+
+func TestValidateRejectsNegativeNumericFields(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Scenario)
+		wantIn string
+	}{
+		{"buyers.count", func(s *Scenario) { s.Buyers.Count = -1 }, "buyers.count must be >= 1"},
+		{"buyers.requests_per_buyer", func(s *Scenario) { s.Buyers.RequestsPerBuyer = -1 }, "requests_per_buyer must be >= 1"},
+		{"buyers.initial_delay", func(s *Scenario) { s.Buyers.InitialDelay = -time.Second }, "buyers.initial_delay must be >= 0"},
+		{"buyers.interval_ms", func(s *Scenario) { s.Buyers.IntervalMs = -1 }, "buyers.interval_ms must be >= 0"},
+		{"buyers.inter_pair_idle_seconds", func(s *Scenario) { s.Buyers.InterPairIdleSeconds = -1 }, "buyers.inter_pair_idle_seconds must be >= 0"},
+		{"prompts.max_tokens", func(s *Scenario) { s.Prompts[0].MaxTokens = -1 }, "prompts[0].max_tokens must be >= 0"},
+		{"charged_delivered_tolerance_tokens", func(s *Scenario) { s.ChargedDeliveredToleranceTokens = -1 }, "charged_delivered_tolerance_tokens must be >= 0"},
+		{"benchmark.provider_slots", func(s *Scenario) {
+			s.Benchmark.Enabled = true
+			s.Benchmark.Invariants = []string{"B1"}
+			s.Benchmark.ProviderSlots = -1
+		}, "benchmark.provider_slots must be >= 1"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := validTestScenario()
+			tc.mutate(&sc)
+			err := sc.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantIn) {
+				t.Fatalf("err=%v want substring %q", err, tc.wantIn)
+			}
+		})
+	}
+}
+
 func TestValidateSKUEconPinsCoordinatorURL(t *testing.T) {
 	tpl := Scenario{
 		Name: "sku",
@@ -214,8 +390,10 @@ duration: 1s
 
 func validTestScenario() Scenario {
 	return Scenario{
-		Name:     "test",
-		Duration: time.Second,
+		Name:                "test",
+		Duration:            time.Second,
+		RequestTimeout:      time.Second,
+		SilentHangThreshold: time.Second,
 		Target: Target{
 			GatewayURL:     "http://gateway.test",
 			BuyerToken:     "token",
