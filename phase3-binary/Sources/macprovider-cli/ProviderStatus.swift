@@ -104,6 +104,7 @@ struct ProviderSnapshot: Sendable {
     let modelLoaded: Bool
     let uptimeSeconds: Int
     let requestsTotal: Int
+    let requestsToday: Int
     let inputTokensToday: Int64
     let outputTokensToday: Int64
     let inputTokensAllTime: Int64
@@ -111,6 +112,7 @@ struct ProviderSnapshot: Sendable {
     let requestsInFlight: Int
     let requestsQueued: Int
     let errorsTotal: Int
+    let restartCount: Int
     let memoryRSSMB: Int
     let capacity: ProviderCapacity
     let requestsServedSinceLast: Int
@@ -150,7 +152,10 @@ actor ProviderStatus {
     private var capacity: ProviderCapacity
     private var status: ProviderHealthState
     private var requestsTotal = 0
+    private var requestsToday = 0
     private var tokensTodayDayStart = Calendar.current.startOfDay(for: Date())
+    private let statsStore: ProviderStatsStore?
+    private let persistedProviderID: String?
     private var inputTokensToday: Int64 = 0
     private var outputTokensToday: Int64 = 0
     private var inputTokensAllTime: Int64 = 0
@@ -158,6 +163,7 @@ actor ProviderStatus {
     private var requestsInFlight = 0
     private var requestsQueued = 0
     private var errorsTotal = 0
+    private var restartCount = 0
     private var windowRequests = 0
     private var windowLatencyMS = 0.0
     private var windowCompletionTokens = 0
@@ -185,7 +191,9 @@ actor ProviderStatus {
         modelHash: String? = nil,
         thermalGate: ThermalGate? = nil,
         specDecodeDraftModelID: String? = nil,
-        specDecodeNumDraftTokens: Int? = nil
+        specDecodeNumDraftTokens: Int? = nil,
+        providerID: String? = nil,
+        statsStore: ProviderStatsStore? = nil
     ) {
         self.modelID = modelID
         self.modelHash = modelHash
@@ -196,6 +204,15 @@ actor ProviderStatus {
         self.specDecodeEnabled = modelLoaded && specDecodeDraftModelID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         self.specDecodeDraftModelID = Self.publicSpecDecodeDraftModelID(specDecodeDraftModelID)
         self.specDecodeNumDraftTokens = self.specDecodeEnabled ? specDecodeNumDraftTokens : nil
+        let trimmedProviderID = providerID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedProviderID, !trimmedProviderID.isEmpty {
+            persistedProviderID = trimmedProviderID
+            self.statsStore = statsStore ?? ProviderStatsStore(providerID: trimmedProviderID)
+            bootstrapPersistedStats()
+        } else {
+            persistedProviderID = nil
+            self.statsStore = nil
+        }
     }
 
     func beginRequest(requestID: String? = nil) -> Date {
@@ -214,7 +231,9 @@ actor ProviderStatus {
         if let requestID {
             activeRequestIDs.remove(requestID)
         }
+        rolloverDayCountersIfNeeded()
         requestsTotal += 1
+        requestsToday += 1
         if failed {
             errorsTotal += 1
         }
@@ -235,6 +254,7 @@ actor ProviderStatus {
             )
         }
         refreshAvailabilityState()
+        persistStats()
     }
 
     func currentSpecDecodeGeneration() -> Int {
@@ -273,6 +293,7 @@ actor ProviderStatus {
 
     func recordError() {
         errorsTotal += 1
+        persistStats()
     }
 
     func noteRealRequestStart() {
@@ -317,7 +338,7 @@ actor ProviderStatus {
     }
 
     func snapshot(resetWindow: Bool = false) async -> ProviderSnapshot {
-        rolloverTokensTodayIfNeeded()
+        rolloverDayCountersIfNeeded()
         // Resolve thermal state BEFORE reading any actor-isolated mutable
         // state. Actors are reentrant across `await`, so a `finishRequest`
         // running during the suspension could mutate `windowRequests` and
@@ -336,6 +357,7 @@ actor ProviderStatus {
             modelLoaded: modelLoaded,
             uptimeSeconds: Int(Date().timeIntervalSince(startedAt)),
             requestsTotal: requestsTotal,
+            requestsToday: requestsToday,
             inputTokensToday: inputTokensToday,
             outputTokensToday: outputTokensToday,
             inputTokensAllTime: inputTokensAllTime,
@@ -343,6 +365,7 @@ actor ProviderStatus {
             requestsInFlight: requestsInFlight,
             requestsQueued: requestsQueued,
             errorsTotal: errorsTotal,
+            restartCount: restartCount,
             memoryRSSMB: Self.memoryRSSMB(),
             capacity: capacity,
             requestsServedSinceLast: windowRequests,
@@ -393,16 +416,17 @@ actor ProviderStatus {
         status = requestsInFlight >= capacity.maxConcurrency ? .busy : .ready
     }
 
-    private func rolloverTokensTodayIfNeeded(now: Date = Date()) {
+    private func rolloverDayCountersIfNeeded(now: Date = Date()) {
         let dayStart = Calendar.current.startOfDay(for: now)
         guard dayStart > tokensTodayDayStart else { return }
         tokensTodayDayStart = dayStart
+        requestsToday = 0
         inputTokensToday = 0
         outputTokensToday = 0
     }
 
     private func recordTokenUsage(promptTokens: Int, completionTokens: Int) {
-        rolloverTokensTodayIfNeeded()
+        rolloverDayCountersIfNeeded()
         let input = Int64(max(0, promptTokens))
         let output = Int64(max(0, completionTokens))
         inputTokensToday += input
@@ -432,6 +456,50 @@ actor ProviderStatus {
         let digest = SHA256.hash(data: Data(canonical.utf8))
         let prefix = digest.map { String(format: "%02x", $0) }.joined().prefix(32)
         return "local:\(prefix)"
+    }
+
+    private func bootstrapPersistedStats() {
+        guard let statsStore, let persistedProviderID else { return }
+        if let record = statsStore.load(), record.providerID == persistedProviderID {
+            applyLoadedStats(record)
+            restartCount = record.restartCount + 1
+        } else {
+            restartCount = 0
+        }
+        persistStats()
+    }
+
+    private func applyLoadedStats(_ record: ProviderStatsRecord) {
+        requestsTotal = max(0, record.requestsTotal)
+        requestsToday = max(0, record.requestsToday)
+        tokensTodayDayStart = record.requestsTodayDayStart
+        inputTokensToday = max(0, record.inputTokensToday)
+        outputTokensToday = max(0, record.outputTokensToday)
+        inputTokensAllTime = max(0, record.inputTokensAllTime)
+        outputTokensAllTime = max(0, record.outputTokensAllTime)
+        errorsTotal = max(0, record.errorsTotal)
+        rolloverDayCountersIfNeeded()
+    }
+
+    private func persistStats(now: Date = Date()) {
+        guard let statsStore, let persistedProviderID else { return }
+        rolloverDayCountersIfNeeded(now: now)
+        statsStore.save(
+            ProviderStatsRecord(
+                version: ProviderStatsRecord.currentVersion,
+                providerID: persistedProviderID,
+                requestsTotal: requestsTotal,
+                requestsToday: requestsToday,
+                requestsTodayDayStart: tokensTodayDayStart,
+                inputTokensToday: inputTokensToday,
+                outputTokensToday: outputTokensToday,
+                inputTokensAllTime: inputTokensAllTime,
+                outputTokensAllTime: outputTokensAllTime,
+                errorsTotal: errorsTotal,
+                restartCount: restartCount,
+                updatedAt: now
+            )
+        )
     }
 
     private static func isPublicHuggingFaceModelID(_ value: String) -> Bool {

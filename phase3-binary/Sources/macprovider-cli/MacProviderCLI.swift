@@ -490,7 +490,8 @@ struct ServeCommand: AsyncParsableCommand {
             modelHash: await modelRuntime.loadedModelHash,
             thermalGate: thermalGate,
             specDecodeDraftModelID: resolved.draftModel,
-            specDecodeNumDraftTokens: resolved.numDraftTokens
+            specDecodeNumDraftTokens: resolved.numDraftTokens,
+            providerID: resolved.providerID
         )
         await modelRuntime.setProviderStatus(providerStatus)
         let idlePrewarmer = IdlePrewarmer(

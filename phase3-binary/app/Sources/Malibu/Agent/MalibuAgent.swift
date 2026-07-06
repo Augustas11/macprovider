@@ -40,6 +40,7 @@ final class MalibuAgent: ObservableObject {
     private var isShuttingDown: Bool = false
     private var healthPollTask: Task<Void, Never>?
     private var monitorsLaunchdProvider = false
+    private var lastRequestsRateSample: (total: Int, date: Date)?
 
     init() {
         thermalMonitor.$state
@@ -114,6 +115,7 @@ final class MalibuAgent: ObservableObject {
         reconnectTask?.cancel(); reconnectTask = nil
         healthPollTask?.cancel(); healthPollTask = nil
         monitorsLaunchdProvider = false
+        lastRequestsRateSample = nil
         child?.markStopping()
 
         try? await control?.send(.shutdownRequest(graceSeconds: gracefulSeconds))
@@ -186,6 +188,10 @@ final class MalibuAgent: ObservableObject {
         }
         if let total = health.requestsTotal {
             snapshot.requestsServedAllTime = total
+            updateRequestsPerMinute(from: total)
+        }
+        if let today = health.requestsToday {
+            snapshot.requestsServedToday = today
         }
         if let inputToday = health.inputTokensToday {
             snapshot.inputTokensToday = inputToday
@@ -202,12 +208,28 @@ final class MalibuAgent: ObservableObject {
         if let uptime = health.uptimeSeconds {
             snapshot.uptimeSec = uptime
         }
+        if let restarts = health.restartCount {
+            snapshot.restartCount = restarts
+        }
         if health.ready {
             snapshot.state = .serving
         }
     }
 
+    private func updateRequestsPerMinute(from total: Int) {
+        let now = Date()
+        if let last = lastRequestsRateSample {
+            let elapsedMinutes = now.timeIntervalSince(last.date) / 60.0
+            if elapsedMinutes > 0 {
+                let delta = max(0, total - last.total)
+                snapshot.requestsPerMinute = Double(delta) / elapsedMinutes
+            }
+        }
+        lastRequestsRateSample = (total, now)
+    }
+
     private func startHealthPolling(port: Int) {
+        lastRequestsRateSample = nil
         healthPollTask?.cancel()
         healthPollTask = Task { [weak self] in
             while !Task.isCancelled {

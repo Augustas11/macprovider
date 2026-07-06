@@ -1082,6 +1082,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "model_loaded": snapshot.modelLoaded,
             "uptime_s": snapshot.uptimeSeconds,
             "requests_total": snapshot.requestsTotal,
+            "requests_today": snapshot.requestsToday,
             "input_tokens_today": snapshot.inputTokensToday,
             "output_tokens_today": snapshot.outputTokensToday,
             "input_tokens_all_time": snapshot.inputTokensAllTime,
@@ -1089,6 +1090,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "requests_in_flight": snapshot.requestsInFlight,
             "requests_queued": snapshot.requestsQueued,
             "errors_total": snapshot.errorsTotal,
+            "restart_count": snapshot.restartCount,
             "memory_rss_mb": snapshot.memoryRSSMB,
             "capacity": [
                 "ram_gb": snapshot.capacity.ramGB,
@@ -1173,6 +1175,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "model_loaded": effectiveModelLoaded,
             "uptime_s": snapshot.uptimeSeconds,
             "requests_total": snapshot.requestsTotal,
+            "requests_today": snapshot.requestsToday,
             "input_tokens_today": snapshot.inputTokensToday,
             "output_tokens_today": snapshot.outputTokensToday,
             "input_tokens_all_time": snapshot.inputTokensAllTime,
@@ -1180,6 +1183,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "requests_in_flight": snapshot.requestsInFlight,
             "active_request_id_count": snapshot.activeRequestIDCount,
             "errors_total": snapshot.errorsTotal,
+            "restart_count": snapshot.restartCount,
             "memory_rss_mb": snapshot.memoryRSSMB,
             "capacity": [
                 "ram_gb": snapshot.capacity.ramGB,
