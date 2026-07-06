@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 )
 
@@ -26,6 +28,7 @@ var (
 )
 
 const retiredRelayRequestTTL = 5 * time.Minute
+const providerDispatchWriteProbeTimeout = 500 * time.Millisecond
 
 var relayEndFrameAADMismatchTotal atomic.Uint64
 var relayBufferExceededTotal atomic.Uint64
@@ -136,20 +139,22 @@ type retiredRelayRequest struct {
 }
 
 type providerSession struct {
-	providerID string
-	assignedID string
-	conn       net.Conn
-	writeCh    chan providerFrame
-	writeLimit time.Duration
-	closeOnce  sync.Once
-	writeMu    sync.Mutex
-	closed     bool
-	activeMu   sync.Mutex
-	active     map[string]*relayActive
-	retired    map[string]retiredRelayRequest
-	httpOnly   bool
-	tier2Mu    sync.Mutex
-	tier2      *pool.Tier2Session
+	providerID     string
+	assignedID     string
+	conn           net.Conn
+	writeCh        chan providerFrame
+	writeLimit     time.Duration
+	probeWrites    bool
+	onWriteFailure func(*providerSession, error)
+	closeOnce      sync.Once
+	writeMu        sync.Mutex
+	closed         bool
+	activeMu       sync.Mutex
+	active         map[string]*relayActive
+	retired        map[string]retiredRelayRequest
+	httpOnly       bool
+	tier2Mu        sync.Mutex
+	tier2          *pool.Tier2Session
 }
 
 // providerFrame is the unit of work consumed by runWriter. Two kinds exist:
@@ -166,8 +171,10 @@ type providerSession struct {
 // The single runWriter goroutine has exclusive ownership of all post-handshake
 // conn writes; every other caller MUST go through send / enqueueRaw.
 type providerFrame struct {
-	raw     bool
-	payload []byte
+	raw        bool
+	payload    []byte
+	writeLimit time.Duration
+	result     chan error
 }
 
 type encryptedInferenceRequest struct {
@@ -220,7 +227,11 @@ func newProviderSession(providerID, assignedID string, conn net.Conn, bufferSize
 
 func (ps *providerSession) runWriter() {
 	for f := range ps.writeCh {
-		_ = ps.conn.SetWriteDeadline(time.Now().Add(ps.writeLimit))
+		writeLimit := ps.writeLimit
+		if f.writeLimit > 0 && (writeLimit <= 0 || f.writeLimit < writeLimit) {
+			writeLimit = f.writeLimit
+		}
+		_ = ps.conn.SetWriteDeadline(time.Now().Add(writeLimit))
 		var err error
 		if f.raw {
 			// Single Write of an already-framed control reply. The header and
@@ -230,11 +241,26 @@ func (ps *providerSession) runWriter() {
 		} else {
 			err = wsutil.WriteServerText(ps.conn, f.payload)
 		}
+		ps.completeFrame(f, err)
 		if err != nil {
 			ps.failAll(ErrRelayClosed)
 			_ = ps.conn.Close()
+			ps.close()
+			if ps.onWriteFailure != nil {
+				ps.onWriteFailure(ps, err)
+			}
 			return
 		}
+	}
+}
+
+func (ps *providerSession) completeFrame(f providerFrame, err error) {
+	if f.result == nil {
+		return
+	}
+	select {
+	case f.result <- err:
+	default:
 	}
 }
 
@@ -250,6 +276,48 @@ func (ps *providerSession) close() {
 
 func (ps *providerSession) send(payload []byte) error {
 	return ps.enqueueFrame(providerFrame{payload: payload})
+}
+
+func (ps *providerSession) sendProbe(payload []byte, timeout time.Duration) error {
+	if timeout <= 0 || !ps.probeWrites {
+		return ps.send(payload)
+	}
+	frame, err := providerWriteProbeFrame()
+	if err != nil {
+		return err
+	}
+	if err := ps.writeProbe(frame, timeout); err != nil {
+		return err
+	}
+	return ps.send(payload)
+}
+
+func (ps *providerSession) writeProbe(rawFrame []byte, timeout time.Duration) error {
+	result := make(chan error, 1)
+	if err := ps.enqueueFrame(providerFrame{raw: true, payload: rawFrame, writeLimit: timeout, result: result}); err != nil {
+		return err
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-result:
+		if err != nil {
+			return ErrRelayClosed
+		}
+		return nil
+	case <-timer.C:
+		_ = ps.conn.Close()
+		ps.close()
+		return ErrRelayClosed
+	}
+}
+
+func providerWriteProbeFrame() ([]byte, error) {
+	var buf bytes.Buffer
+	if err := gobwas.WriteFrame(&buf, gobwas.NewPingFrame([]byte("probe"))); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // enqueueRaw queues a pre-baked WS frame (header + body, already assembled by
@@ -658,8 +726,11 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 		session.removeActive(requestID)
 		return nil, err
 	}
-	if err := session.send(payload); err != nil {
+	if err := session.sendProbe(payload, providerDispatchWriteProbeTimeout); err != nil {
 		session.removeActive(requestID)
+		if errors.Is(err, ErrRelayClosed) {
+			s.handleProviderWriteFailure(session, err)
+		}
 		return nil, err
 	}
 	if provider.EncryptedLeg {
