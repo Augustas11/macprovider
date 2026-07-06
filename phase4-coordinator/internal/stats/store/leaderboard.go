@@ -89,6 +89,41 @@ func (s *Store) Leaderboard(ctx context.Context, window, sort string, limit int)
 	return out, rows.Err()
 }
 
+func (s *Store) LeaderboardProvider(ctx context.Context, window, providerID string) (*LeaderboardRow, error) {
+	table, ok := leaderboardTable(window)
+	if !ok {
+		return nil, fmt.Errorf("leaderboard provider: unknown window %q", window)
+	}
+	q := fmt.Sprintf(`
+        SELECT lb.provider_id, lb.pseudonym, lb.generated_at,
+               lb.rank_earnings, lb.rank_tokens, lb.rank_jobs,
+               lb.earnings_usd, lb.earnings_work_usd, lb.earnings_rewards_usd,
+               lb.earnings_bucket, lb.tokens, lb.jobs,
+               lb.first_seen_at, lb.last_seen_at,
+               COALESCE(pv.mode, 'bucketed') AS visibility_mode,
+               COALESCE(pv.blocked_from_partner_projection, FALSE) AS visibility_blocked
+          FROM %s lb
+          LEFT JOIN provider_visibility pv ON pv.provider_id = lb.provider_id
+         WHERE lb.provider_id = $1
+         LIMIT 1
+    `, table)
+	var r LeaderboardRow
+	if err := s.db.QueryRowContext(ctx, q, providerID).Scan(
+		&r.ProviderID, &r.Pseudonym, &r.GeneratedAt,
+		&r.RankEarnings, &r.RankTokens, &r.RankJobs,
+		&r.EarningsTotalUSD, &r.EarningsWorkUSD, &r.EarningsRewardsUSD,
+		&r.Bucket, &r.Tokens, &r.Jobs,
+		&r.FirstSeenAt, &r.LastSeenAt,
+		&r.VisibilityMode, &r.VisibilityBlocked,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("leaderboard provider select: %w", err)
+	}
+	return &r, nil
+}
+
 // LeaderboardTotals returns the per-window aggregate counters.
 // `active_accounts` = number of rows in the leaderboard table
 // (one row per authenticated provider with activity in the

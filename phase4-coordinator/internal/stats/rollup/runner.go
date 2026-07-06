@@ -3,6 +3,7 @@ package rollup
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"regexp"
 	"sync"
@@ -134,6 +135,8 @@ func RunNightlyRebuild(ctx context.Context, db *sql.DB, cfg Config, logger zerol
 	return runNightlyRebuild(ctx, db, cfg, logger)
 }
 
+var runNightlyRebuildForRunner = runNightlyRebuild
+
 // RunLateEventsRetention runs the §9.3 90-day (or
 // operator-configured) DELETE pass on stats_late_events once,
 // synchronously. The Runner calls this after the nightly
@@ -247,6 +250,7 @@ func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(c
 			}
 			if r.metrics != nil && c != "" {
 				r.metrics.RollupErrorsTotal.WithLabelValues(string(c)).Inc()
+				r.metrics.RollupPanicTotal.WithLabelValues(string(c)).Inc()
 			}
 		}
 	}()
@@ -369,23 +373,6 @@ func (r *Runner) spawnNightlyRebuild(ctx context.Context) {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		defer func() {
-			if rec := recover(); rec != nil {
-				r.logger.Error().
-					Str("event", "stats_rollup_panic").
-					Str("job", "nightly_rebuild").
-					Str("recovered_class", classifyPanic(rec)).
-					Msg("nightly rebuild panic recovered; will retry tomorrow")
-				// Round-1 CODE H2 fix: per SPEC §9.4 the
-				// nightly rebuild is a rollup path; its
-				// panic MUST increment stats_rollup_errors_total
-				// for the affected leaderboard components.
-				if r.metrics != nil {
-					r.metrics.RollupErrorsTotal.WithLabelValues("leaderboard_30d").Inc()
-					r.metrics.RollupErrorsTotal.WithLabelValues("leaderboard_all").Inc()
-				}
-			}
-		}()
 		heartbeat := time.NewTicker(1 * time.Minute)
 		defer heartbeat.Stop()
 		lastFiredOn := -1 // day-of-year of the most recent fire
@@ -403,12 +390,13 @@ func (r *Runner) spawnNightlyRebuild(ctx context.Context) {
 					continue
 				}
 				lastFiredOn = doy
-				if err := runNightlyRebuild(ctx, r.db, r.cfg, r.logger); err != nil {
+				if err := r.runNightlyRebuildOnce(ctx); err != nil {
 					r.logger.Warn().Err(err).Msg("nightly rebuild error; will retry tomorrow")
 					// Round-1 CODE H2 fix: nightly rebuild
 					// error path mirrors the panic path's metric
 					// emit (SPEC §9.6).
-					if r.metrics != nil {
+					var panicErr *nightlyPanicError
+					if r.metrics != nil && !errors.As(err, &panicErr) {
 						r.metrics.RollupErrorsTotal.WithLabelValues("leaderboard_30d").Inc()
 						r.metrics.RollupErrorsTotal.WithLabelValues("leaderboard_all").Inc()
 					}
@@ -416,4 +404,37 @@ func (r *Runner) spawnNightlyRebuild(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+func (r *Runner) runNightlyRebuildOnce(ctx context.Context) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			class := classifyPanic(rec)
+			r.logger.Error().
+				Str("event", "stats_rollup_panic").
+				Str("job", "nightly_rebuild").
+				Str("recovered_class", class).
+				Msg("nightly rebuild panic recovered; scheduler will continue after backoff")
+			if r.metrics != nil {
+				for _, comp := range []string{"leaderboard_30d", "leaderboard_all"} {
+					r.metrics.RollupErrorsTotal.WithLabelValues(comp).Inc()
+					r.metrics.RollupPanicTotal.WithLabelValues(comp).Inc()
+				}
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(r.cfg.PanicBackoff):
+			}
+			err = &nightlyPanicError{class: class}
+		}
+	}()
+	return runNightlyRebuildForRunner(ctx, r.db, r.cfg, r.logger)
+}
+
+type nightlyPanicError struct {
+	class string
+}
+
+func (e *nightlyPanicError) Error() string {
+	return "nightly rebuild panic: " + e.class
 }

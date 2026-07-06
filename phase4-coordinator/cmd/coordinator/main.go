@@ -564,6 +564,7 @@ func main() {
 		buyer.WithBilling(billingStore, cfg.Rewards),
 		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithRateCardUSDPerMillionCredits(cfg.Stats.Rollup.UsdPerMillionCredits),
+		buyer.WithStreamingMetricsMaxSamples(cfg.Stats.StreamingMetrics.MaxSamples),
 		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
 			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)
 			return buyer.PreflightResult{Accepted: ack.Accepted, Reason: ack.Reason}, ok, err
@@ -611,7 +612,7 @@ func main() {
 		// DefaultRegisterer) so concurrent test runs don't
 		// double-register. SPEC-026 adds /admin/metrics below;
 		// /metrics remains as a loopback-compatible alias only.
-		statsHandler := stats.NewMuxWithMetrics(
+		statsHandler := stats.NewMuxWithMetricsAndRateLimit(
 			statsstore.New(statsPools.Reader),
 			stats.CORSConfig{
 				AccessControlMaxAgeSeconds: cfg.Stats.CORS.AccessControlMaxAgeSeconds,
@@ -622,6 +623,11 @@ func main() {
 			cfg.Stats.TrustedProxies,
 			logger.With().Str("subsystem", "stats_handlers").Logger(),
 			metricsHandle,
+			stats.RateLimitConfig{
+				MaxBuckets:   cfg.Stats.RateLimit.MaxBuckets,
+				IdleTTL:      time.Duration(cfg.Stats.RateLimit.IdleTTLSeconds) * time.Second,
+				PreflightRPM: cfg.Stats.RateLimit.PreflightRPM,
+			},
 		).Handler()
 		providerMux.Handle("/v1/stats/", statsHandler)
 		providerMux.Handle("/metrics", promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{}))

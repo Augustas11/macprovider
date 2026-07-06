@@ -59,6 +59,7 @@ type PartnerKey struct {
 	ID             int64
 	Label          string
 	Prefix         string
+	ProviderID     sql.NullString
 	AllowedOrigins []string
 	RateLimitRPM   int
 	RevokedAt      sql.NullTime
@@ -117,14 +118,14 @@ func (s *Store) ActivePartnerOrigins(ctx context.Context) ([]string, error) {
 func (s *Store) LookupPartnerKeyByHash(ctx context.Context, tokenHash []byte) (*PartnerKey, error) {
 	s.lookupHashCount.Add(1)
 	const q = `
-        SELECT id, label, prefix, allowed_origins, rate_limit_rpm, revoked_at
+        SELECT id, label, prefix, provider_id, allowed_origins, rate_limit_rpm, revoked_at
           FROM partner_keys
          WHERE token_hash = $1
          LIMIT 1
     `
 	var pk PartnerKey
 	if err := s.db.QueryRowContext(ctx, q, tokenHash).Scan(
-		&pk.ID, &pk.Label, &pk.Prefix, pqArray(&pk.AllowedOrigins), &pk.RateLimitRPM, &pk.RevokedAt,
+		&pk.ID, &pk.Label, &pk.Prefix, &pk.ProviderID, pqArray(&pk.AllowedOrigins), &pk.RateLimitRPM, &pk.RevokedAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil

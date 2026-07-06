@@ -116,14 +116,28 @@ type StatsConfig struct {
 	// open a pool for it (BUILD §D.6 / SECURITY §B.1).
 	PartnerKeysAdminDSN string `yaml:"partner_keys_admin_dsn"`
 
-	Rollup StatsRollupConfig `yaml:"rollup"`
-	CORS   StatsCORSConfig   `yaml:"cors"`
+	Rollup           StatsRollupConfig           `yaml:"rollup"`
+	CORS             StatsCORSConfig             `yaml:"cors"`
+	RateLimit        StatsRateLimitConfig        `yaml:"rate_limit"`
+	StreamingMetrics StatsStreamingMetricsConfig `yaml:"streaming_metrics"`
 
 	// TrustedProxies — operator-allowlisted X-Forwarded-For
 	// trusted hops, consumed by Step 3's auth-failure tier
 	// limiter for client-IP derivation (SPEC §5.6 v0.1.8 +
 	// SECURITY r5 H1). Step 1 declares; Step 3 consumes.
-	TrustedProxies []string `yaml:"trusted_proxies"`
+	TrustedProxies  []string `yaml:"trusted_proxies"`
+	TrustDirectPeer bool     `yaml:"trust_direct_peer"`
+}
+
+type StatsRateLimitConfig struct {
+	MaxBuckets              int `yaml:"max_buckets"`
+	IdleTTLSeconds          int `yaml:"idle_ttl_seconds"`
+	EvictionIntervalSeconds int `yaml:"eviction_interval_seconds"`
+	PreflightRPM            int `yaml:"preflight_rpm"`
+}
+
+type StatsStreamingMetricsConfig struct {
+	MaxSamples int `yaml:"max_samples"`
 }
 
 type StatsPartnerKeysConfig struct {
@@ -726,6 +740,16 @@ func Default() Config {
 			CORS: StatsCORSConfig{
 				AccessControlMaxAgeSeconds: 60,
 			},
+			RateLimit: StatsRateLimitConfig{
+				MaxBuckets:              100000,
+				IdleTTLSeconds:          15 * 60,
+				EvictionIntervalSeconds: 60,
+				PreflightRPM:            10,
+			},
+			StreamingMetrics: StatsStreamingMetricsConfig{
+				MaxSamples: 10000,
+			},
+			TrustedProxies: []string{"127.0.0.0/8", "::1/128"},
 		},
 		Onboarding: OnboardingConfig{
 			AppTrackRegisterEnabled: false,
@@ -1056,6 +1080,32 @@ func (c Config) TrustedProxyPrefixes() ([]netip.Prefix, error) {
 		// security-lane L2.
 		if p.Bits() == 0 {
 			return nil, fmt.Errorf("proxy.trusted_proxies[%q]: default-route prefix is not a valid trusted proxy (every caller would be header-trusted)", raw)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func (c Config) StatsTrustedProxyPrefixes() ([]netip.Prefix, error) {
+	return parseTrustedProxyCIDRs("stats.trusted_proxies", c.Stats.TrustedProxies)
+}
+
+func parseTrustedProxyCIDRs(name string, cidrs []string) ([]netip.Prefix, error) {
+	if len(cidrs) == 0 {
+		return nil, nil
+	}
+	out := make([]netip.Prefix, 0, len(cidrs))
+	for _, raw := range cidrs {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("%s[%q]: %w", name, raw, err)
+		}
+		if p.Bits() == 0 {
+			return nil, fmt.Errorf("%s[%q]: default-route prefix is not a valid trusted proxy (every caller would be header-trusted)", name, raw)
 		}
 		out = append(out, p)
 	}
@@ -1540,6 +1590,28 @@ func (c Config) validateStats() error {
 	}
 	if s.CORS.AccessControlMaxAgeSeconds < 0 || s.CORS.AccessControlMaxAgeSeconds > 300 {
 		return fmt.Errorf("stats.cors.access_control_max_age_seconds must be between 0 and 300 (SPEC §5.7)")
+	}
+	prefixes, err := c.StatsTrustedProxyPrefixes()
+	if err != nil {
+		return err
+	}
+	if len(prefixes) == 0 && !s.TrustDirectPeer {
+		return fmt.Errorf("stats.trusted_proxies must be set when stats.enabled is true; set stats.trust_direct_peer=true only for direct-client deployments")
+	}
+	if s.RateLimit.MaxBuckets < 0 {
+		return fmt.Errorf("stats.rate_limit.max_buckets must be >= 0")
+	}
+	if s.RateLimit.IdleTTLSeconds < 0 {
+		return fmt.Errorf("stats.rate_limit.idle_ttl_seconds must be >= 0")
+	}
+	if s.RateLimit.EvictionIntervalSeconds < 0 {
+		return fmt.Errorf("stats.rate_limit.eviction_interval_seconds must be >= 0")
+	}
+	if s.RateLimit.PreflightRPM < 0 {
+		return fmt.Errorf("stats.rate_limit.preflight_rpm must be >= 0")
+	}
+	if s.StreamingMetrics.MaxSamples < 0 {
+		return fmt.Errorf("stats.streaming_metrics.max_samples must be >= 0")
 	}
 	return nil
 }

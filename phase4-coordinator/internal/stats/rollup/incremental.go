@@ -72,6 +72,8 @@ func runLeaderboardIncrementalTick(ctx context.Context, db *sql.DB, cfg Config, 
 	if lastOK.Equal(epoch) || lastOK.Before(epoch.Add(1*time.Second)) {
 		// Bootstrap path: full recompute. The full-tick code
 		// also runs detectLateEvents internally for 30d/all.
+		leaderboardWriteMu.Lock()
+		defer leaderboardWriteMu.Unlock()
 		return runLeaderboardTick(ctx, db, cfg, window)
 	}
 
@@ -93,6 +95,9 @@ func runLeaderboardIncrementalTick(ctx context.Context, db *sql.DB, cfg Config, 
 }
 
 func runIncrementalLeaderboardUpdate(ctx context.Context, db *sql.DB, cfg Config, window string, now, lastOK time.Time) error {
+	leaderboardWriteMu.Lock()
+	defer leaderboardWriteMu.Unlock()
+
 	lookbackStart := lastOK.Add(-time.Duration(cfg.LateEventsLookbackHours) * time.Hour).Unix()
 	endUnix := now.Unix()
 	winStart := windowStart(window, now, cfg.PartialHistorySinceUnix)
@@ -117,8 +122,7 @@ func runIncrementalLeaderboardUpdate(ctx context.Context, db *sql.DB, cfg Config
 	// `all` window has no aging-out (partial_history_since is
 	// fixed); skip for that case.
 	if window == "30d" {
-		tickInterval := cfg.Leaderboard30dInterval
-		agingStart := winStart - int64(tickInterval.Seconds()) - int64(cfg.LateEventsLookbackHours)*3600 // generous: include up to lastOK's age too
+		agingStart := windowStart(window, lastOK, cfg.PartialHistorySinceUnix)
 		agingEnd := winStart
 		if agingStart < 0 {
 			agingStart = 0

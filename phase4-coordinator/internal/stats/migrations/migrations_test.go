@@ -30,6 +30,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{7, "hardware_profiles"},
 		{8, "hardware_verification_jobs"},
 		{9, "provider_auth_policy_approve_fix"},
+		{10, "partner_keys_provider_id"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))

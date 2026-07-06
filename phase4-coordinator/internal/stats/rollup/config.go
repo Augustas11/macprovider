@@ -57,6 +57,7 @@ type Config struct {
 	Leaderboard7dInterval  time.Duration
 	Leaderboard30dInterval time.Duration
 	LeaderboardAllInterval time.Duration
+	PanicBackoff           time.Duration
 }
 
 // DefaultsApplied returns a copy of c with any zero-value field
@@ -109,6 +110,9 @@ func (c Config) DefaultsApplied() Config {
 	}
 	if c.LeaderboardAllInterval == 0 {
 		c.LeaderboardAllInterval = 6 * time.Hour
+	}
+	if c.PanicBackoff == 0 {
+		c.PanicBackoff = 60 * time.Second
 	}
 	return c
 }

@@ -230,6 +230,7 @@ CREATE TABLE IF NOT EXISTS partner_keys (
     token_hash        BYTEA NOT NULL,
     token_hash_alg    TEXT NOT NULL DEFAULT 'sha256',
     prefix            TEXT NOT NULL,
+    provider_id       TEXT,
     allowed_origins   TEXT[] NOT NULL DEFAULT '{}',
     rate_limit_rpm    INT NOT NULL DEFAULT 600,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),

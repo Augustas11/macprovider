@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -170,6 +171,41 @@ func TestAutoDowngradeIsScopedPerBuyerProvider(t *testing.T) {
 	store.recordClean("buyer-a", "provider-x", now.Add(13*time.Minute))
 	if store.isDowngraded("buyer-a", "provider-x", now.Add(13*time.Minute)) {
 		t.Fatal("clean recovery window should lift the tuple downgrade")
+	}
+}
+
+func TestStreamingDowngradeStoreBoundsEntries(t *testing.T) {
+	store := newStreamingDowngradeStoreWithLimit(3)
+	now := time.Unix(1716768000, 0)
+	for i := 0; i < 5; i++ {
+		store.recordMalformed("buyer-"+strconv.Itoa(i), "provider-x", now)
+	}
+	if got := store.sizeForTest(); got != 3 {
+		t.Fatalf("downgrade entries=%d want 3", got)
+	}
+	if got := store.evictionsForTest(); got != 2 {
+		t.Fatalf("downgrade evictions=%d want 2", got)
+	}
+	if store.isDowngraded("buyer-0", "provider-x", now) {
+		t.Fatal("oldest buyer should have been evicted")
+	}
+}
+
+func TestStreamingDowngradeStoreRemovesExpiredKeysFromOrder(t *testing.T) {
+	store := newStreamingDowngradeStoreWithLimit(100)
+	now := time.Unix(1716768000, 0)
+	for i := 0; i < 5; i++ {
+		buyerID := "buyer-expire-" + strconv.Itoa(i)
+		store.recordMalformed(buyerID, "provider-x", now)
+		if store.isDowngraded(buyerID, "provider-x", now.Add(6*time.Minute)) {
+			t.Fatalf("%s should not be downgraded after one malformed stream", buyerID)
+		}
+	}
+	if got := store.sizeForTest(); got != 0 {
+		t.Fatalf("downgrade entries=%d want 0 after expiry pruning", got)
+	}
+	if got := store.orderSizeForTest(); got != 0 {
+		t.Fatalf("downgrade order entries=%d want 0 after expiry pruning", got)
 	}
 }
 

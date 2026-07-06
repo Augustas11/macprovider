@@ -169,6 +169,7 @@ func runPartnerKeysIssue(args []string, stdout, stderr io.Writer) int {
 	configPath := fs.String("config", "coordinator.yaml", "path to coordinator YAML config (read for stats.partner_keys_admin_dsn)")
 	adminDSNFlag := fs.String("admin-dsn", "", "operator admin DSN (overrides --config and "+adminDSNEnv+")")
 	label := fs.String("label", "", "human-readable label (required)")
+	providerID := fs.String("provider-id", "", "optional provider_id this key may access via /v1/stats/provider/<provider_id>")
 	rpm := fs.Int("rpm", 600, "rate_limit_rpm")
 	createdBy := fs.String("created-by", "", "operator principal (defaults to $USER@hostname)")
 	rotateFrom := fs.Int64("rotate-from", 0, "predecessor partner_keys.id (rotation flow)")
@@ -186,6 +187,12 @@ func runPartnerKeysIssue(args []string, stdout, stderr io.Writer) int {
 	if *rpm <= 0 {
 		fmt.Fprintln(stderr, "partner-keys issue: --rpm must be positive")
 		return 2
+	}
+	if strings.TrimSpace(*providerID) != "" {
+		if err := config.ValidateProviderID(strings.TrimSpace(*providerID)); err != nil {
+			fmt.Fprintf(stderr, "partner-keys issue: --provider-id %v\n", err)
+			return 2
+		}
 	}
 	// Final adversarial audit (ARCH r3 + CODE r3 CRITICAL closure):
 	// config-driven §6.6.2 sign-off gate. The previous opt-in
@@ -316,9 +323,9 @@ func runPartnerKeysIssue(args []string, stdout, stderr io.Writer) int {
 
 	const insertQ = `
 INSERT INTO partner_keys (
-    label, token_hash, token_hash_alg, prefix,
+    label, provider_id, token_hash, token_hash_alg, prefix,
     allowed_origins, rate_limit_rpm, created_by, rotated_from_id
-) VALUES ($1, $2, 'sha256', $3, $4, $5, $6, $7)
+) VALUES ($1, NULLIF($2, ''), $3, 'sha256', $4, $5, $6, $7, $8)
 RETURNING id, created_at`
 
 	prefix := rawToken[:8]
@@ -326,6 +333,7 @@ RETURNING id, created_at`
 	var createdAt time.Time
 	err = db.QueryRowContext(ctx, insertQ,
 		*label,
+		strings.TrimSpace(*providerID),
 		tokenHash[:],
 		prefix,
 		pqStringArrayLiteral(canonicalOrigins),

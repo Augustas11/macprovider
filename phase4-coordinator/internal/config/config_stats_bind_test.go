@@ -24,6 +24,7 @@ func TestStatsRequiresLoopbackBind(t *testing.T) {
 		c.Stats.Enabled = true
 		c.Stats.ReaderDSN = "postgres://r@/x"
 		c.Stats.RollupDSN = "postgres://w@/x"
+		c.Stats.TrustedProxies = []string{"127.0.0.0/8", "::1/128"}
 		return c
 	}
 
