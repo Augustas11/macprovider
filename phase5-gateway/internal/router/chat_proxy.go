@@ -1108,6 +1108,7 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 	// no provider was selected on its callers' paths.
 	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
+	w.Header().Set("X-Request-ID", requestID(r))
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)

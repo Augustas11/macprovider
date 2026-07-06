@@ -3189,6 +3189,42 @@ func TestNoProvider503EchoesOnlyGatewayRequestID(t *testing.T) {
 	}
 }
 
+func TestReceiptEligible5xxEchoesOnlyGatewayRequestID(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{name: "capacity_503", status: http.StatusServiceUnavailable},
+		{name: "upstream_502", status: http.StatusBadGateway},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"error":{"code":"error_model_not_loaded","message":"model not loaded","param":null,"type":"api_error"}}`
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return responseWithBody(tc.status, http.Header{
+					"Content-Type": []string{"application/json"},
+					"X-Request-ID": []string{"99999999-9999-4999-8999-999999999999"},
+				}, body), nil
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			fullKey := createAccountAndKey(t, store, cfg, "acct_receipt_eligible_request_id_"+tc.name)
+
+			requestID := "77777777-7777-4777-8777-777777777777"
+			resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, map[string]string{"X-Request-ID": requestID})
+
+			if resp.Code != tc.status {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			values := resp.Header().Values("X-Request-ID")
+			if len(values) != 1 || values[0] != requestID {
+				t.Fatalf("response X-Request-ID values=%q, want only gateway request id %q", values, requestID)
+			}
+		})
+	}
+}
+
 func TestStickyConversationDerivesInternalHeaderAndStripsInjection(t *testing.T) {
 	var captured http.Header
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

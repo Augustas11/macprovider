@@ -910,6 +910,9 @@ func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
 		if isGatewayOwnedRateLimitHeader(key) {
 			continue
 		}
+		if isGatewayOwnedCorrelationHeader(key) {
+			continue
+		}
 		for _, value := range values {
 			dst.Add(key, value)
 		}
@@ -933,6 +936,10 @@ func isGatewayOwnedRateLimitHeader(key string) bool {
 		return true
 	}
 	return false
+}
+
+func isGatewayOwnedCorrelationHeader(key string) bool {
+	return strings.EqualFold(key, "X-Request-ID")
 }
 
 func isReceiptResponseHeader(key string) bool {
