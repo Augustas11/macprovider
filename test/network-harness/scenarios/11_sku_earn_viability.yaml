@@ -1,0 +1,44 @@
+name: sku_earn_viability
+mode: sku-econ
+description: |
+  Simulates autotune --recommend across the full supported hardware matrix
+  against the live coordinator rate card. Locks the fresh-install ->
+  donor-only regression class into a hard SKU-economics gate.
+
+expected_shape: |
+  SKU-economics gate:
+   - Every tier row in hardware_matrix runs autotune recommend-simulate
+     against the live /v1/rate-card.
+   - earn_viability.json must show >=1 paid-eligible recommendation for
+     paid-gated tiers and >=1 starter-or-paid earning recommendation for
+     starter-gated tiers.
+   - No tier is expected to carry donor_only_by_design permanently -- the
+     label is a temporary escape hatch. If a tier lands here, file a
+     paired SPEC-023-rN addendum documenting WHY and by when.
+
+target:
+  coordinator_url: https://coordinator.streamvc.live
+  cli_bin: ../../phase3-binary/.build/release/macprovider-cli
+
+hardware_matrix:
+  - {label: m1-8gb,   chip: "Apple M1",       memoryGB: 8,  bandwidthTier: C, expected: donor_only_by_design}
+  - {label: m1-16gb,  chip: "Apple M1",       memoryGB: 16, bandwidthTier: C, expected: donor_only_by_design}
+  - {label: m2-16gb,  chip: "Apple M2",       memoryGB: 16, bandwidthTier: C, expected: donor_only_by_design}
+  - {label: m4-16gb,  chip: "Apple M4",       memoryGB: 16, bandwidthTier: C, expected: donor_only_by_design}
+  - {label: m4-32gb,  chip: "Apple M4",       memoryGB: 32, bandwidthTier: C, expected: at_least_one_earning_row}
+  - {label: m4-64gb,  chip: "Apple M4",       memoryGB: 64, bandwidthTier: C, expected: at_least_one_paid_row}
+  - {label: m1-pro-16gb, chip: "Apple M1 Pro", memoryGB: 16, bandwidthTier: B, expected: donor_only_by_design}
+  - {label: m3-max-36gb, chip: "Apple M3 Max", memoryGB: 36, bandwidthTier: A, expected: at_least_one_paid_row}
+  - {label: m3-ultra-96gb, chip: "Apple M3 Ultra", memoryGB: 96, bandwidthTier: S, expected: at_least_one_paid_row}
+
+invariants: [I5]
+
+benchmark_synthesis:
+  mode: warm_cache_synthetic
+  tps_multiplier_of_gate: 1.10
+  ttft_fraction_of_ceiling: 0.85
+
+artifacts:
+  - recommend_per_tier.jsonl
+  - rate_card_snapshot.json
+  - earn_viability.json

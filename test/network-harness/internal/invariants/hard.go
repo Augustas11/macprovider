@@ -32,6 +32,7 @@ type Check struct {
 	Title         string   `json:"title"`
 	Passed        bool     `json:"passed"`
 	Skipped       bool     `json:"skipped"`
+	Status        string   `json:"status,omitempty"`
 	Detail        string   `json:"detail"`
 	OffendingIDs  []string `json:"offending_request_ids,omitempty"`
 	EvidenceCount int      `json:"evidence_count,omitempty"`

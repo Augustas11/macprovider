@@ -8,7 +8,8 @@ struct AutotuneCommand: AsyncParsableCommand {
 
     static let configuration = CommandConfiguration(
         commandName: "autotune",
-        abstract: "Find the biggest feasible model for this Mac and recommend serve knobs."
+        abstract: "Find the biggest feasible model for this Mac and recommend serve knobs.",
+        subcommands: [AutotuneRecommendSimulateCommand.self, AutotuneDumpBakedSnapshotCommand.self]
     )
 
     @Option(help: "Target context in tokens.")

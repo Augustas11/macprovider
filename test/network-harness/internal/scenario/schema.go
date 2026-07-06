@@ -7,6 +7,7 @@ package scenario
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -14,6 +15,16 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// SKUEconCoordinatorHost is the only host sku-econ mode may fetch from.
+// SEC-M-1 (r1 security audit) — the runner's rate-card fetch trusts
+// target.coordinator_url; without a validator, a scenario YAML could
+// point at an attacker-controlled host. The Swift @LIVE path already
+// pins this host; validateSKUEcon enforces the same pin on the Go side.
+// Exported so the sku-econ runner can build fetch URLs from the same
+// constant rather than concatenating the scenario-supplied field, per
+// SEC-H-1 (r2 security audit) defense-in-depth.
+const SKUEconCoordinatorHost = "coordinator.streamvc.live"
 
 // envVarPattern matches `${VAR}` references for safe expansion at load
 // time. Lets scenarios reference secrets like ${BUYER_TOKEN} without
@@ -33,6 +44,7 @@ func expandEnv(input []byte) []byte {
 // Scenario is the top-level YAML root.
 type Scenario struct {
 	Name        string `yaml:"name"`
+	Mode        string `yaml:"mode"`
 	Description string `yaml:"description"`
 
 	// ExpectedShape is human-readable "what we're looking to learn" text.
@@ -68,6 +80,11 @@ type Scenario struct {
 	// Benchmark, when Enabled, runs the phase-B benchmark suite (B1-B6)
 	// against this scenario's results. See specs/SPEC-NETWORK-BENCHMARK-v0.1.md.
 	Benchmark Benchmark `yaml:"benchmark"`
+
+	HardwareMatrix     []HardwareMatrixRow `yaml:"hardware_matrix"`
+	Invariants         []string            `yaml:"invariants"`
+	BenchmarkSynthesis BenchmarkSynthesis  `yaml:"benchmark_synthesis"`
+	Artifacts          []string            `yaml:"artifacts"`
 }
 
 // Benchmark declares which B-invariants this scenario should evaluate
@@ -106,6 +123,8 @@ type Target struct {
 	GatewayURL     string `yaml:"gateway_url"`
 	CoordinatorURL string `yaml:"coordinator_url"`
 
+	CLIBin string `yaml:"cli_bin"`
+
 	// CoordinatorDBPath + GatewayDBPath are filesystem paths to the
 	// SQLite files holding request_log + usage_events. Required for
 	// I1 (billing reconciliation). When unset, reconciliation is
@@ -139,6 +158,20 @@ type Target struct {
 	// OperatorToken authenticates against /admin/explorer/* introspection
 	// endpoints when the harness pre-flights provider visibility.
 	OperatorToken string `yaml:"operator_token"`
+}
+
+type HardwareMatrixRow struct {
+	Label         string `yaml:"label"`
+	Chip          string `yaml:"chip"`
+	MemoryGB      int    `yaml:"memoryGB"`
+	BandwidthTier string `yaml:"bandwidthTier"`
+	Expected      string `yaml:"expected"`
+}
+
+type BenchmarkSynthesis struct {
+	Mode                  string  `yaml:"mode"`
+	TPSMultiplierOfGate   float64 `yaml:"tps_multiplier_of_gate"`
+	TTFTFractionOfCeiling float64 `yaml:"ttft_fraction_of_ceiling"`
 }
 
 // Buyers describes the concurrent buyer fleet.
@@ -200,22 +233,78 @@ type Prompt struct {
 	MaxTokens int    `yaml:"max_tokens"`
 }
 
+// ProbeMode reads path and returns the resolved scenario mode WITHOUT
+// performing environment-variable expansion. Used by cmd/harness/mode
+// to gate secret handling in run-scenario.sh; expanding ${VAR} at probe
+// time would let a raced or attacker-supplied scenario interpolate
+// parent-shell secrets into any accepted field (and into validation
+// error output), which SEC-M-1 (r3 security audit) flagged as a leak
+// vector separate from the CLI-child env sanitizer. This function is
+// intentionally minimal — it decodes only the top-level `mode` scalar
+// and NEVER calls expandEnv.
+func ProbeMode(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if envVarPattern.Match(b) {
+		var rawMode struct {
+			Mode string `yaml:"mode"`
+		}
+		if err := yaml.Unmarshal(b, &rawMode); err != nil {
+			return "", fmt.Errorf("yaml: %w", err)
+		}
+		if envVarPattern.MatchString(rawMode.Mode) {
+			return "", fmt.Errorf("mode must not contain ${VAR} placeholders")
+		}
+	}
+	var probe struct {
+		Mode string `yaml:"mode"`
+	}
+	if err := yaml.Unmarshal(b, &probe); err != nil {
+		return "", fmt.Errorf("yaml: %w", err)
+	}
+	if probe.Mode == "" {
+		return "buyer-fleet", nil
+	}
+	return probe.Mode, nil
+}
+
 // Load reads and unmarshals a scenario YAML file.
 func Load(path string) (*Scenario, error) {
+	return load(path, true)
+}
+
+// LoadNoEnv reads a scenario without expanding ${VAR} placeholders. sku-econ
+// scenarios do not need secrets; leaving expansion disabled prevents a scenario
+// from copying parent-shell credentials into artifact fields.
+func LoadNoEnv(path string) (*Scenario, error) {
+	return load(path, false)
+}
+
+func load(path string, expand bool) (*Scenario, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	b = expandEnv(b)
+	if expand {
+		b = expandEnv(b)
+	}
 	var sc Scenario
 	if err := yaml.Unmarshal(b, &sc); err != nil {
 		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	if !expand && sc.Mode == "sku-econ" && envVarPattern.Match(b) {
+		return nil, fmt.Errorf("sku-econ scenarios must not contain ${VAR} placeholders")
 	}
 	sc.applyDefaults()
 	return &sc, nil
 }
 
 func (s *Scenario) applyDefaults() {
+	if s.Mode == "" {
+		s.Mode = "buyer-fleet"
+	}
 	if s.RequestTimeout == 0 {
 		s.RequestTimeout = 120 * time.Second
 	}
@@ -231,6 +320,17 @@ func (s *Scenario) applyDefaults() {
 	if s.Benchmark.Enabled && s.Benchmark.ProviderSlots == 0 {
 		s.Benchmark.ProviderSlots = 3
 	}
+	if s.Mode == "sku-econ" {
+		if s.BenchmarkSynthesis.Mode == "" {
+			s.BenchmarkSynthesis.Mode = "warm_cache_synthetic"
+		}
+		if s.BenchmarkSynthesis.TPSMultiplierOfGate == 0 {
+			s.BenchmarkSynthesis.TPSMultiplierOfGate = 1.10
+		}
+		if s.BenchmarkSynthesis.TTFTFractionOfCeiling == 0 {
+			s.BenchmarkSynthesis.TTFTFractionOfCeiling = 0.85
+		}
+	}
 }
 
 // Validate returns a non-nil error if the scenario is missing required
@@ -240,6 +340,21 @@ func (s *Scenario) Validate() error {
 	if strings.TrimSpace(s.Name) == "" {
 		return fmt.Errorf("name is required")
 	}
+	mode := s.Mode
+	if mode == "" {
+		mode = "buyer-fleet"
+	}
+	switch mode {
+	case "buyer-fleet":
+		return s.validateBuyerFleet()
+	case "sku-econ":
+		return s.validateSKUEcon()
+	default:
+		return fmt.Errorf("mode must be one of buyer-fleet|sku-econ (got %q)", s.Mode)
+	}
+}
+
+func (s *Scenario) validateBuyerFleet() error {
 	if s.Target.GatewayURL == "" {
 		return fmt.Errorf("target.gateway_url is required")
 	}
@@ -321,6 +436,76 @@ func (s *Scenario) Validate() error {
 		if s.Benchmark.ProviderSlots < 1 {
 			return fmt.Errorf("benchmark.provider_slots must be >= 1")
 		}
+	}
+	return nil
+}
+
+func (s *Scenario) validateSKUEcon() error {
+	if s.Target.CoordinatorURL == "" {
+		return fmt.Errorf("target.coordinator_url is required")
+	}
+	u, err := url.Parse(s.Target.CoordinatorURL)
+	if err != nil {
+		return fmt.Errorf("target.coordinator_url is not a valid URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("target.coordinator_url must use https scheme (got %q)", u.Scheme)
+	}
+	if u.Host != SKUEconCoordinatorHost {
+		return fmt.Errorf("target.coordinator_url host must be %s (got %q)", SKUEconCoordinatorHost, u.Host)
+	}
+	if u.User != nil {
+		// SEC-H-1 (r2 security audit): userinfo in the URL causes Go's
+		// http client to emit `Authorization: Basic <base64>` on every
+		// request. That would send credentials to the public-read
+		// /v1/rate-card endpoint, violating the "no auth on rate-card"
+		// invariant.
+		return fmt.Errorf("target.coordinator_url must not carry userinfo (would add Authorization header)")
+	}
+	if u.Path != "" && u.Path != "/" {
+		// SEC-H-1 / CODE-M-1 (r2 audit): a scenario-supplied path would
+		// be concatenated with `/v1/rate-card`, so `https://coordinator.streamvc.live/admin`
+		// would fetch `/admin/v1/rate-card`. Path must be empty or root.
+		return fmt.Errorf("target.coordinator_url must have empty or / path (got %q)", u.Path)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("target.coordinator_url must not carry query or fragment")
+	}
+	if s.Target.CLIBin == "" {
+		return fmt.Errorf("target.cli_bin is required")
+	}
+	if len(s.HardwareMatrix) == 0 {
+		return fmt.Errorf("hardware_matrix must list at least one row")
+	}
+	for i, row := range s.HardwareMatrix {
+		if row.Label == "" {
+			return fmt.Errorf("hardware_matrix[%d].label is required", i)
+		}
+		if row.Chip == "" {
+			return fmt.Errorf("hardware_matrix[%d].chip is required", i)
+		}
+		if row.MemoryGB <= 0 {
+			return fmt.Errorf("hardware_matrix[%d].memoryGB must be > 0", i)
+		}
+		switch row.BandwidthTier {
+		case "S", "A", "B", "C", "unknown":
+		default:
+			return fmt.Errorf("hardware_matrix[%d].bandwidthTier must be one of S|A|B|C|unknown", i)
+		}
+		switch row.Expected {
+		case "at_least_one_paid_row", "at_least_one_earning_row", "donor_only_by_design":
+		default:
+			return fmt.Errorf("hardware_matrix[%d].expected must be at_least_one_paid_row, at_least_one_earning_row, or donor_only_by_design", i)
+		}
+	}
+	if s.BenchmarkSynthesis.Mode != "warm_cache_synthetic" {
+		return fmt.Errorf("benchmark_synthesis.mode must be warm_cache_synthetic")
+	}
+	if s.BenchmarkSynthesis.TPSMultiplierOfGate <= 0 {
+		return fmt.Errorf("benchmark_synthesis.tps_multiplier_of_gate must be > 0")
+	}
+	if s.BenchmarkSynthesis.TTFTFractionOfCeiling <= 0 {
+		return fmt.Errorf("benchmark_synthesis.ttft_fraction_of_ceiling must be > 0")
 	}
 	return nil
 }

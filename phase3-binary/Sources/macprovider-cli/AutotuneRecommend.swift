@@ -33,6 +33,7 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     case hardwareTierUnknown = "hardware_tier_unknown"
     case rateCardFallbackUsed = "rate_card_fallback_used"
     case recommendationBelowThreshold = "recommendation_below_threshold"
+    case recommendationStarterTier = "recommendation_starter_tier"
     case noEligiblePaidModel = "no_eligible_paid_model"
     /// v1.7.6 Track A1: at least one recommended candidate had no
     /// specific rate-card row and is being priced against the coord's
@@ -858,6 +859,13 @@ struct AutotuneCandidateScore: Equatable {
     var rawScore: Double
 }
 
+enum AutotuneRecommendationTier: String, Codable, Equatable {
+    case paid
+    case starter
+    case donor
+    case none
+}
+
 struct AutotuneRecommendResult: Equatable {
     var generatedAt: Date
     var hardware: AutotuneRecommendHardware
@@ -868,8 +876,10 @@ struct AutotuneRecommendResult: Equatable {
     var benchmarkID: String?
     var benchmarkGeneratedAt: Date?
     var recommendedModel: String?
+    var recommendationTier: AutotuneRecommendationTier
     var selectedCandidate: AutotuneCandidateScore?
     var candidates: [AutotuneCandidateScore]
+    var allCandidates: [AutotuneCandidateScore]
     var defaultModel: String?
     var donorFallbackModel: String?
     var donorFallbackCandidate: AutotuneCandidateScore?
@@ -973,13 +983,45 @@ struct AutotuneRecommendEngine {
         }
 
         let eligible = scored.filter(\.eligible)
-        let bestRaw = eligible.map(\.rawScore).max() ?? 0
-        let pool = eligible.filter { $0.rawScore >= request.demandRank.diversificationBand * bestRaw }
-        let selected = pool.isEmpty ? nil : pool[stableHashIndex(request.hardware.diversificationID, count: pool.count)]
-        var recommended = selected
-        if let selected, selected.expectedNetUSDPerHour < Self.paidThreshold {
-            recommended = nil
-            warnings.insert(.recommendationBelowThreshold)
+        let paidEligible = eligible.filter { $0.expectedNetUSDPerHour >= Self.paidThreshold }
+        let bestPaidRaw = paidEligible.map(\.rawScore).max() ?? 0
+        let paidPool = paidEligible.filter { $0.rawScore >= request.demandRank.diversificationBand * bestPaidRaw }
+        let recommendedPaid = paidPool.isEmpty ? nil : paidPool[stableHashIndex(request.hardware.diversificationID, count: paidPool.count)]
+        let recommendedStarter = recommendedPaid ?? eligible
+            .filter { $0.expectedNetUSDPerHour > 0 }
+            .max {
+                if $0.expectedNetUSDPerHour != $1.expectedNetUSDPerHour {
+                    return $0.expectedNetUSDPerHour < $1.expectedNetUSDPerHour
+                }
+                if $0.rawScore != $1.rawScore {
+                    return $0.rawScore < $1.rawScore
+                }
+                return $0.model > $1.model
+            }
+        let recommended = recommendedStarter
+        let donorFallback = recommended == nil ? scored.first { score in
+            Self.donorModeCompatible(
+                modelKey: score.catalogKey,
+                candidate: request.candidateCatalog.rows[score.catalogKey],
+                request: request
+            )
+        } : nil
+        let recommendationTier: AutotuneRecommendationTier
+        if recommendedPaid != nil {
+            recommendationTier = .paid
+        } else if recommendedStarter != nil {
+            recommendationTier = .starter
+            warnings.insert(.recommendationStarterTier)
+        } else if donorFallback != nil {
+            recommendationTier = .donor
+            if !eligible.isEmpty {
+                warnings.insert(.recommendationBelowThreshold)
+            }
+        } else {
+            recommendationTier = .none
+            if !eligible.isEmpty {
+                warnings.insert(.recommendationBelowThreshold)
+            }
         }
         if eligible.isEmpty {
             warnings.insert(.noEligiblePaidModel)
@@ -990,13 +1032,6 @@ struct AutotuneRecommendEngine {
         let denominator = abs(scored.first(where: { $0.model == defaultModel })?.expectedNetUSDPerHour ?? 0)
         let percent = denominator > 0 ? delta / denominator * 100.0 : 0.0
         let selectedBenchmark = recommended.flatMap { request.benchmarks[$0.catalogKey] } ?? eligible.compactMap { request.benchmarks[$0.catalogKey] }.first
-        let donorFallback = scored.first { score in
-            Self.donorModeCompatible(
-                modelKey: score.catalogKey,
-                candidate: request.candidateCatalog.rows[score.catalogKey],
-                request: request
-            )
-        }
         // v1.7.6 Track A1/A2a: only surface default-tier and swap warnings when
         // they apply to the ACTUALLY-recommended candidate (or donor fallback
         // when no paid recommendation lands). Prior placement inside the score
@@ -1040,8 +1075,10 @@ struct AutotuneRecommendEngine {
             benchmarkID: selectedBenchmark?.benchmarkID,
             benchmarkGeneratedAt: selectedBenchmark?.generatedAt,
             recommendedModel: recommended?.model,
+            recommendationTier: recommendationTier,
             selectedCandidate: recommended,
             candidates: resultCandidates,
+            allCandidates: scored,
             defaultModel: defaultModel,
             donorFallbackModel: donorFallback?.model,
             donorFallbackCandidate: donorFallback,
@@ -1162,21 +1199,29 @@ struct AutotuneRecommendEngine {
         if eligible {
             return "\(modelKey) has the strongest demand-weighted expected net capacity for this Mac.".prefixString(140)
         }
-        return "\(modelKey) did not clear one or more paid recommendation gates.".prefixString(140)
+        return "\(modelKey) did not clear one or more recommendation gates.".prefixString(140)
     }
 }
 
 extension AutotuneRecommendResult {
     func jsonString(serveConfig: RecommendationCore? = nil, donorMode: Bool = false) -> String {
         let warningsJSON = warnings.map { "\"\($0.rawValue)\"" }.joined(separator: ",")
-        let candidatesJSON = candidates.map { candidate in
-            """
-            {"rank":\(candidate.rank),"model":\(candidate.model.jsonEscaped),"eligible":\(candidate.eligible),"expected_gross_usd_per_hour":\(candidate.expectedGrossUSDPerHour.jsonNumber),"expected_net_usd_per_hour":\(candidate.expectedNetUSDPerHour.jsonNumber),"electricity_usd_per_hour":\(candidate.electricityUSDPerHour?.jsonNumber ?? "null"),"platform_fee_usd_per_hour":\(candidate.platformFeeUSDPerHour.jsonNumber),"tokens_per_second":\(candidate.tokensPerSecond.jsonNumber),"memory_headroom_gb":\(candidate.memoryHeadroomGB.jsonNumber),"confidence":\(candidate.confidence.jsonEscaped),"why":\(candidate.why.jsonEscaped)}
-            """
-        }.joined(separator: ",")
+        let candidatesJSON = candidates.map(Self.candidateJSON).joined(separator: ",")
         let serveConfigJSON = serveConfig.map { Self.serveConfigJSON($0, donorMode: donorMode) } ?? "null"
         return """
-        {"schema_version":"autotune_recommend.v1","generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"hardware":{"machine":\(hardware.machine?.jsonEscaped ?? "null"),"chip":\(hardware.chip.jsonEscaped),"memory_gb":\(hardware.memoryGB),"bandwidth_tier":\(hardware.bandwidthTier.rawValue.jsonEscaped),"detected":\(hardware.detected),"os_version":\(hardware.osVersion.jsonEscaped),"binary_version":\(hardware.binaryVersion.jsonEscaped)},"inputs":{"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"electricity_usd_per_kwh":\(electricityUSDPerKWH?.jsonNumber ?? "null"),"assumed_utilization":\(assumedUtilization.jsonNumber),"availability_hours_per_day":\(availabilityHoursPerDay)},"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"serve_config":\(serveConfigJSON),"candidates":[\(candidatesJSON)],"comparison":{"default_model":\(defaultModel?.jsonEscaped ?? "null"),"recommended_delta_usd_per_hour":\(recommendedDeltaUSDPerHour.jsonNumber),"recommended_delta_percent":\(recommendedDeltaPercent.jsonNumber)},"warnings":[\(warningsJSON)]}
+        {"schema_version":"autotune_recommend.v1","generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"hardware":{"machine":\(hardware.machine?.jsonEscaped ?? "null"),"chip":\(hardware.chip.jsonEscaped),"memory_gb":\(hardware.memoryGB),"bandwidth_tier":\(hardware.bandwidthTier.rawValue.jsonEscaped),"detected":\(hardware.detected),"os_version":\(hardware.osVersion.jsonEscaped),"binary_version":\(hardware.binaryVersion.jsonEscaped)},"inputs":{"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"electricity_usd_per_kwh":\(electricityUSDPerKWH?.jsonNumber ?? "null"),"assumed_utilization":\(assumedUtilization.jsonNumber),"availability_hours_per_day":\(availabilityHoursPerDay)},"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"recommendation_tier":\(recommendationTier.rawValue.jsonEscaped),"serve_config":\(serveConfigJSON),"candidates":[\(candidatesJSON)],"comparison":{"default_model":\(defaultModel?.jsonEscaped ?? "null"),"recommended_delta_usd_per_hour":\(recommendedDeltaUSDPerHour.jsonNumber),"recommended_delta_percent":\(recommendedDeltaPercent.jsonNumber)},"warnings":[\(warningsJSON)]}
+        """
+    }
+
+    func simulatorJSON() -> String {
+        let base = jsonString()
+        let allCandidatesJSON = allCandidates.map(Self.candidateJSON).joined(separator: ",")
+        return String(base.dropLast()) + ",\"all_candidates\":[\(allCandidatesJSON)]}"
+    }
+
+    private static func candidateJSON(_ candidate: AutotuneCandidateScore) -> String {
+        """
+        {"rank":\(candidate.rank),"model":\(candidate.model.jsonEscaped),"eligible":\(candidate.eligible),"expected_gross_usd_per_hour":\(candidate.expectedGrossUSDPerHour.jsonNumber),"expected_net_usd_per_hour":\(candidate.expectedNetUSDPerHour.jsonNumber),"electricity_usd_per_hour":\(candidate.electricityUSDPerHour?.jsonNumber ?? "null"),"platform_fee_usd_per_hour":\(candidate.platformFeeUSDPerHour.jsonNumber),"tokens_per_second":\(candidate.tokensPerSecond.jsonNumber),"memory_headroom_gb":\(candidate.memoryHeadroomGB.jsonNumber),"confidence":\(candidate.confidence.jsonEscaped),"why":\(candidate.why.jsonEscaped)}
         """
     }
 
@@ -1192,7 +1237,7 @@ extension AutotuneRecommendResult {
             "\(key.jsonEscaped):\(probeDiagnostics[key]!.jsonEscaped)"
         }.joined(separator: ",")
         return """
-        {"generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"candidate_catalog_sha256":\(candidateCatalogSHA256.jsonEscaped),"benchmark_id":\(benchmarkID?.jsonEscaped ?? "null"),"benchmark_generated_at":\(benchmarkGeneratedAt.map { ISO8601DateFormatter.autotuneInternet.string(from: $0).jsonEscaped } ?? "null"),"binary_version":\(hardware.binaryVersion.jsonEscaped),"hardware_identity_hash":\(hardware.hardwareIdentityHash.jsonEscaped),"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"probe_diagnostics":{\(diagnosticsJSON)}}
+        {"generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"candidate_catalog_sha256":\(candidateCatalogSHA256.jsonEscaped),"benchmark_id":\(benchmarkID?.jsonEscaped ?? "null"),"benchmark_generated_at":\(benchmarkGeneratedAt.map { ISO8601DateFormatter.autotuneInternet.string(from: $0).jsonEscaped } ?? "null"),"binary_version":\(hardware.binaryVersion.jsonEscaped),"hardware_identity_hash":\(hardware.hardwareIdentityHash.jsonEscaped),"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"recommendation_tier":\(recommendationTier.rawValue.jsonEscaped),"probe_diagnostics":{\(diagnosticsJSON)}}
         """
     }
 
@@ -1200,6 +1245,21 @@ extension AutotuneRecommendResult {
         let machineOrChip = hardware.machine ?? hardware.chip
         if let recommendedModel,
            let candidate = selectedCandidate ?? candidates.first(where: { $0.model == recommendedModel }) {
+            if recommendationTier == .starter {
+                return """
+                Detected \(machineOrChip), \(hardware.memoryGB) GB unified memory, Tier \(hardware.bandwidthTier.rawValue).
+                Benchmarked \(candidates.filter(\.eligible).count) compatible models against rate card \(rateCardVersion) and demand rank \(demandRankVersion).
+
+                Recommended starter model: \(recommendedModel)
+                Expected net capacity: \(formatUSD(candidate.expectedNetUSDPerHour))/hr at \(Int(assumedUtilization * 100))% utilization
+                This is below the $0.0050/hr paid tier, but still positive starter earnings.
+                Why: \(formatUSD(recommendedDeltaUSDPerHour))/hr vs default \(defaultModel ?? "none"); \(String(format: "%.1f", candidate.memoryHeadroomGB)) GB memory headroom
+
+                This is an estimate, not a guarantee. Actual earnings depend on buyer demand, uptime, thermal state, electricity, and rate-card changes.
+
+                Start provider with \(recommendedModel)? [Y/n]
+                """
+            }
             return """
             Detected \(machineOrChip), \(hardware.memoryGB) GB unified memory, Tier \(hardware.bandwidthTier.rawValue).
             Benchmarked \(candidates.filter(\.eligible).count) compatible models against rate card \(rateCardVersion) and demand rank \(demandRankVersion).
@@ -1244,6 +1304,7 @@ struct LastRecommendationState: Decodable, Equatable {
     var binaryVersion: String
     var hardwareIdentityHash: String
     var recommendedModel: String?
+    var recommendationTier: AutotuneRecommendationTier
     var probeDiagnostics: [String: String]
 
     enum CodingKeys: String, CodingKey {
@@ -1257,6 +1318,7 @@ struct LastRecommendationState: Decodable, Equatable {
         case binaryVersion = "binary_version"
         case hardwareIdentityHash = "hardware_identity_hash"
         case recommendedModel = "recommended_model"
+        case recommendationTier = "recommendation_tier"
         case probeDiagnostics = "probe_diagnostics"
     }
 
@@ -1271,6 +1333,7 @@ struct LastRecommendationState: Decodable, Equatable {
         binaryVersion: String,
         hardwareIdentityHash: String,
         recommendedModel: String?,
+        recommendationTier: AutotuneRecommendationTier = .paid,
         probeDiagnostics: [String: String] = [:]
     ) {
         self.generatedAt = generatedAt
@@ -1283,6 +1346,7 @@ struct LastRecommendationState: Decodable, Equatable {
         self.binaryVersion = binaryVersion
         self.hardwareIdentityHash = hardwareIdentityHash
         self.recommendedModel = recommendedModel
+        self.recommendationTier = recommendationTier
         self.probeDiagnostics = probeDiagnostics
     }
 
@@ -1303,6 +1367,8 @@ struct LastRecommendationState: Decodable, Equatable {
         binaryVersion = try c.decode(String.self, forKey: .binaryVersion)
         hardwareIdentityHash = try c.decode(String.self, forKey: .hardwareIdentityHash)
         recommendedModel = try c.decodeIfPresent(String.self, forKey: .recommendedModel)
+        recommendationTier = try c.decodeIfPresent(AutotuneRecommendationTier.self, forKey: .recommendationTier)
+            ?? (recommendedModel == nil ? .donor : .paid)
         probeDiagnostics = try c.decodeIfPresent([String: String].self, forKey: .probeDiagnostics) ?? [:]
     }
 }

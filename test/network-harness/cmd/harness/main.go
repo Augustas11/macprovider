@@ -5,8 +5,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -24,6 +26,7 @@ import (
 	"github.com/augstar/macprovider-network-harness/internal/reconcile"
 	"github.com/augstar/macprovider-network-harness/internal/runmeta"
 	"github.com/augstar/macprovider-network-harness/internal/scenario"
+	"github.com/augstar/macprovider-network-harness/internal/skuecon"
 )
 
 func main() {
@@ -37,6 +40,11 @@ func main() {
 			log.Printf("harness: %v", err)
 			os.Exit(1)
 		}
+	case "mode":
+		if err := cmdMode(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "harness mode: %v\n", err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -45,15 +53,43 @@ func main() {
 	}
 }
 
+// cmdMode prints the resolved scenario mode ("buyer-fleet" or "sku-econ")
+// to stdout so run-scenario.sh can gate secret handling with the same
+// YAML parser the harness itself uses. SEC-M-1 (r2 security audit): grep/sed
+// mode detection missed valid YAML forms (quoted scalars, anchors), which
+// leaked buyer-token env into sku-econ runs.
+//
+// Uses scenario.ProbeMode rather than scenario.Load so environment
+// variable expansion is skipped — SEC-M-1 (r3 security audit) noted
+// that ${VAR} expansion during the mode probe would let a scenario
+// interpolate parent-shell secrets into accepted fields.
+func cmdMode(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: harness mode <scenario.yaml>")
+	}
+	mode, err := scenario.ProbeMode(args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Println(mode)
+	return nil
+}
+
 func usage() {
 	fmt.Fprintf(os.Stderr, `network-harness — internal e2e scenario runner
 
 usage:
   harness run <scenario.yaml> --out <dir>
+  harness mode <scenario.yaml>
 
 flags (for "run"):
   --out string     output directory for artifact bundle (required)
   --dry-run        validate scenario YAML and exit without firing requests
+
+The "mode" subcommand loads and parses the scenario YAML and prints its
+resolved mode ("buyer-fleet" or "sku-econ") to stdout. Used by
+run-scenario.sh to gate secret handling with the same parser as the
+harness itself, avoiding grep/sed YAML fragility.
 
 exit codes:
   0   scenario completed, all hard invariants passed
@@ -85,11 +121,21 @@ func cmdRun(args []string) error {
 		return fmt.Errorf("expected exactly one scenario file argument; got %d", len(positionals))
 	}
 	scenarioPath := positionals[0]
+	scenarioOriginPath := originalScenarioPath(scenarioPath)
 	if *outDir == "" {
 		return fmt.Errorf("--out is required")
 	}
 
-	sc, err := scenario.Load(scenarioPath)
+	mode, err := scenario.ProbeMode(scenarioPath)
+	if err != nil {
+		return fmt.Errorf("probe scenario mode %s: %w", scenarioPath, err)
+	}
+	var sc *scenario.Scenario
+	if mode == "sku-econ" {
+		sc, err = scenario.LoadNoEnv(scenarioPath)
+	} else {
+		sc, err = scenario.Load(scenarioPath)
+	}
 	if err != nil {
 		return fmt.Errorf("load scenario %s: %w", scenarioPath, err)
 	}
@@ -108,7 +154,28 @@ func cmdRun(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	meta := runmeta.New(sc.Name, scenarioPath)
+	meta := runmeta.New(sc.Name, scenarioOriginPath)
+
+	if sc.Mode == "sku-econ" {
+		log.Printf("scenario %q: starting sku-econ matrix with %d hardware rows", sc.Name, len(sc.HardwareMatrix))
+		result, err := (skuecon.Runner{}).Run(ctx, sc, scenarioOriginPath, *outDir)
+		if err != nil {
+			return fmt.Errorf("sku-econ run: %w", err)
+		}
+		meta.Finish()
+		if err := copyFile(scenarioPath, filepath.Join(*outDir, "scenario.yaml")); err != nil {
+			return fmt.Errorf("copy scenario.yaml: %w", err)
+		}
+		if err := writeJSON(filepath.Join(*outDir, "run_meta.json"), meta); err != nil {
+			return fmt.Errorf("write run_meta.json: %w", err)
+		}
+		log.Printf("artifact bundle written to %s", filepath.Clean(*outDir))
+		logInvariantSummary(result.Invariants)
+		if result.Invariants.AnyFailed() {
+			os.Exit(10)
+		}
+		return nil
+	}
 
 	log.Printf("scenario %q: starting %d buyers, target %s for %s (chaos events: %d)",
 		sc.Name, sc.Buyers.Count, sc.Target.GatewayURL, sc.Duration, len(sc.ChaosEvents))
@@ -188,11 +255,11 @@ func cmdRun(args []string) error {
 	if sc.Benchmark.Enabled {
 		var pricing *benchmark.Pricing
 		if sc.Benchmark.PricingSource != "" {
-			// Resolve local pricing paths relative to the scenario YAML
+			// Resolve local pricing paths relative to the original scenario
 			// dir, so `pricing_source: specs/PRICING.json` works regardless
-			// of harness invocation CWD. SSH specs ("host:/path") and
-			// absolute paths pass through unchanged.
-			pricingPath := resolvePricingPath(sc.Benchmark.PricingSource, scenarioPath)
+			// of wrapper snapshot location or invocation CWD. SSH specs
+			// ("host:/path") and absolute paths pass through unchanged.
+			pricingPath := resolvePricingPath(sc.Benchmark.PricingSource, scenarioOriginPath)
 			p, perr := benchmark.LoadPricing(pricingPath)
 			if perr != nil {
 				log.Printf("benchmark: pricing load failed (%v) — B6 will SKIP", perr)
@@ -321,4 +388,37 @@ func resolvePricingPath(source, scenarioPath string) string {
 		return source
 	}
 	return filepath.Join(filepath.Dir(scenarioPath), source)
+}
+
+func originalScenarioPath(snapshotPath string) string {
+	if original := os.Getenv("HARNESS_SCENARIO_ORIGINAL_PATH"); original != "" {
+		return original
+	}
+	return snapshotPath
+}
+
+func writeJSON(path string, v any) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
