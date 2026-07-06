@@ -383,6 +383,22 @@ func TestDemoConcurrencyCap(t *testing.T) {
 	}
 }
 
+func TestCoordinator503PassthroughPreservesPreflightRejected(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"error":{"code":"preflight_rejected","message":"Provider rejected preflight","param":null,"type":"service_unavailable"}}`
+		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_preflight_passthrough")
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":80,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "preflight_rejected")
+}
+
 func TestProviderUnavailableReturns503AndRefunds(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return responseWithBody(http.StatusServiceUnavailable, nil, ""), nil

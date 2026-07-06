@@ -353,6 +353,47 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertFalse(authJSON.contains("request_pair_ot"), authJSON)
     }
 
+    func testHelloAckAssignedProviderTokenTriggersAuthUpgradeReconnect() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let dir = try Self.makeTemporaryDirectory(prefix: "coordinator-token-reconnect-")
+        let configPath = dir.appendingPathComponent("config.yaml").path
+        try "provider_id: provider-test\nmodel: model-a\n".write(
+            toFile: configPath,
+            atomically: true,
+            encoding: .utf8
+        )
+        var config = AppConfig.defaults(configPath: configPath)
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = false
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            webSocketFactory: { _ in FakeProviderWebSocketTask(receiveResults: []) },
+            sleepAssertionFactory: { nil }
+        ))
+
+        do {
+            try await client.handleCoordinatorPayloadForTest([
+                "type": "hello_ack",
+                "assigned_id": "assigned-a",
+                "heartbeat_interval_s": 30,
+                "assigned_provider_token": "minted-provisional-token",
+            ])
+            XCTFail("expected CoordinatorAuthUpgradeReconnect")
+        } catch is CoordinatorAuthUpgradeReconnect {
+            // FR-C9.3: tokenless bootstrap must reconnect with Bearer before serving buyers.
+        }
+    }
+
     func testHelloAckPairingMaterial_WritesClaimURLBeforeFailedOpen() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
