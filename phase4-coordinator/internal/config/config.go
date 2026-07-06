@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/netip"
 	"net/url"
 	"os"
@@ -778,6 +779,14 @@ func Load(path string) (Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
+	if err := validateOperatorSecretStrength("auth.operator_key", cfg.Auth.OperatorKey); err != nil {
+		return Config{}, err
+	}
+	for name, key := range cfg.Auth.OperatorKeys {
+		if err := validateOperatorSecretStrength("auth.operator_keys."+name, key); err != nil {
+			return Config{}, err
+		}
+	}
 	return cfg, nil
 }
 
@@ -888,6 +897,58 @@ func resolveEnvValue(field, v string) (string, error) {
 		return "", fmt.Errorf("%s references env:%s but the environment variable is unset or empty", field, name)
 	}
 	return resolved, nil
+}
+
+var weakOperatorKeyDenylist = map[string]struct{}{
+	"":            {},
+	"changeme":    {},
+	"placeholder": {},
+	"test":        {},
+	"secret":      {},
+	"password":    {},
+	"admin":       {},
+}
+
+func validateOperatorSecretStrength(field, key string) error {
+	trimmed := strings.TrimSpace(key)
+	if _, denied := weakOperatorKeyDenylist[strings.ToLower(trimmed)]; denied {
+		return fmt.Errorf("%s strength check failed: placeholder_denied", field)
+	}
+	if len([]byte(trimmed)) < 32 {
+		return fmt.Errorf("%s strength check failed: too_short (minimum 32 bytes)", field)
+	}
+	allZero := true
+	for _, b := range []byte(trimmed) {
+		if b != 0 && b != '0' {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return fmt.Errorf("%s strength check failed: repeated_zero", field)
+	}
+	if entropyBitsPerByte(trimmed) < 3.5 {
+		return fmt.Errorf("%s strength check failed: low_entropy", field)
+	}
+	return nil
+}
+
+func entropyBitsPerByte(s string) float64 {
+	data := []byte(s)
+	if len(data) == 0 {
+		return 0
+	}
+	counts := make(map[byte]int, len(data))
+	for _, b := range data {
+		counts[b]++
+	}
+	var entropy float64
+	n := float64(len(data))
+	for _, count := range counts {
+		p := float64(count) / n
+		entropy -= p * math.Log2(p)
+	}
+	return entropy
 }
 
 func (c Config) HeartbeatInterval() time.Duration {

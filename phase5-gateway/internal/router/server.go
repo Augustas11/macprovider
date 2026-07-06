@@ -60,6 +60,7 @@ type Server struct {
 	// harmless; cap on bursts.
 	routingMeta     routingMetaCache
 	retry503Metrics *retry503Metrics
+	adminMetrics    *adminStateWriteMetrics
 }
 
 // readStore returns the read-only view of the database. M2-4: this
@@ -163,6 +164,7 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 		trustedProxyNets: trustedProxyNets,
 		version:          "dev",
 		retry503Metrics:  newRetry503Metrics(),
+		adminMetrics:     newAdminStateWriteMetrics(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -228,6 +230,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(s.retry503Metrics.prometheus()))
+	_, _ = w.Write([]byte(s.adminMetrics.prometheus()))
 }
 
 func (s *Server) middleware(next http.Handler) http.Handler {
@@ -588,7 +591,7 @@ type poolzProviderRow struct {
 	PublishesSupportedModels bool     `json:"publishes_supported_models,omitempty"`
 	// routing_eligible is coordinator-computed from pool.Provider.RoutingEligible().
 	// Omitted on legacy coordinators — gateway falls back to auth_state exclusion.
-	RoutingEligible *bool `json:"routing_eligible,omitempty"`
+	RoutingEligible *bool  `json:"routing_eligible,omitempty"`
 	AuthState       string `json:"auth_state,omitempty"`
 }
 

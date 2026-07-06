@@ -26,6 +26,12 @@
 #                                 primary deploy — issue #244 root cause).
 #   FORCE_RESTART    default: 0   bypass connected-provider guard at step 1c/6c
 #   STRICT_PROVENANCE default: 0  fail if /healthz lacks `version` field
+#   --dry-run-local  developer-only: run the old local-config C2 check using
+#                    GATEWAY_CONFIG and exit before any SSH mutation.
+#   GATEWAY_CONFIG   used only with --dry-run-local. Production deploys validate
+#                    the gateway config installed on Pearl.
+#   GATEWAY_REMOTE_CONFIG  installed gateway config path on Pearl.
+#                    Default: /opt/macprovider/gateway.yaml.
 #   SKIP_C2_CHECK    default: 0   skip C2 cross-check (development only)
 #   ALLOW_CONFIG_DRIFT default: 0 push local coordinator.yaml over live one
 #   SKIP_TCP_TUNING default: 0    skip Pearl TCP sysctl install/apply step
@@ -38,6 +44,18 @@
 # for another. Refused fail-closed.
 
 set -euo pipefail
+
+DRY_RUN_LOCAL=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run-local) DRY_RUN_LOCAL=1 ;;
+    *)
+      echo "unknown argument: $arg" >&2
+      echo "usage: bash deploy-pearl-vps.sh [--dry-run-local]" >&2
+      exit 2
+      ;;
+  esac
+done
 
 # TLS state machine (classify/plan/message) lives in a sourced helper
 # (lib/pearl_tls.sh) so it can be exercised by fixture tests without a
@@ -220,6 +238,18 @@ SCP="scp -i $SSH_KEY -P 22"
 
 log() { printf "\n[deploy] %s\n" "$*"; }
 
+GATEWAY_REMOTE_CONFIG="${GATEWAY_REMOTE_CONFIG:-/opt/macprovider/gateway.yaml}"
+case "$GATEWAY_REMOTE_CONFIG" in
+  /*) ;;
+  *) echo "aborting deploy: GATEWAY_REMOTE_CONFIG must be an absolute path" >&2; exit 5 ;;
+esac
+case "$GATEWAY_REMOTE_CONFIG" in
+  *[!A-Za-z0-9._/-]*)
+    echo "aborting deploy: GATEWAY_REMOTE_CONFIG contains unsupported characters: $GATEWAY_REMOTE_CONFIG" >&2
+    exit 5
+    ;;
+esac
+
 yaml_tier2_value() {
   yaml_block_value tier2 "$1"
 }
@@ -263,6 +293,23 @@ if [ "${STATS_REQUIRED:-0}" = "1" ]; then
   fi
 fi
 
+# Issue #244 R6 (CODE+SEC+ARCH convergent MED) — register the EXIT
+# cleanup trap UNCONDITIONALLY, before any temp resource is created.
+# Earlier the trap was inside the `if [ -n "$CATALOG_REMOTE_PATH" ]`
+# branch, so a deploy with catalog disabled that failed mid-flight
+# could leave the remote $DEPLOY_TMP and local TMP_CATALOG_PUBKEY
+# behind. Both variables are guarded with `:-` so the trap is a
+# no-op when they are unset.
+trap '
+  rm -f "${TMP_CATALOG_PUBKEY:-}"
+  rm -f "${CATALOG_SMOKE_TMP:-}"
+  rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
+  rm -rf "${STATIC_SMOKE_DIR:-}"
+  if [ -n "${DEPLOY_TMP:-}" ]; then
+    $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
+  fi
+' EXIT
+
 log "step 0/9: pre-deploy config-drift + C2 cross-check"
 # Fail closed before touching the VPS if the config to be deployed has a
 # placeholder operator_key, an unsafe threshold, etc. (see check-deploy-config.sh).
@@ -272,27 +319,44 @@ log "step 0/9: pre-deploy config-drift + C2 cross-check"
 # Previously only $CONFIG was passed, so check-deploy-config.sh silently
 # skipped C2 on every standard coordinator deploy — the past-incident
 # guard was effectively disabled.
-# M1-6 follow-up (codex audits 2026-06-11): the previous .example fallback
-# was a false fail-closed gate — production deploy could pass C2 using
-# SAMPLE timeout values while the real VPS gateway.yaml had drifted.
-# Sample config is documentation, not an operational input. Require a real
-# gateway.yaml or an explicit SKIP_C2_CHECK=1 override.
-GATEWAY_CONFIG_DEFAULT="$DIST_DIR/../../phase5-gateway/dist/gateway.yaml"
-GATEWAY_CONFIG="${GATEWAY_CONFIG:-$GATEWAY_CONFIG_DEFAULT}"
-if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
+# M1-6 follow-up: production deploy reads the gateway config installed on
+# Pearl, not a local sample or developer config. Local validation is available
+# only through --dry-run-local and exits before any SSH mutation.
+CHECK_SCRIPT="$DIST_DIR/check-deploy-config.sh"
+if [ ! -x "$CHECK_SCRIPT" ]; then
+  echo "aborting deploy: check-deploy-config.sh missing or not executable: $CHECK_SCRIPT" >&2
+  exit 5
+fi
+if [ "$DRY_RUN_LOCAL" = "1" ]; then
+  echo "  --dry-run-local set — validating local GATEWAY_CONFIG and exiting before deploy" >&2
+  GATEWAY_CONFIG_DEFAULT="$DIST_DIR/../../phase5-gateway/dist/gateway.yaml"
+  GATEWAY_CONFIG="${GATEWAY_CONFIG:-$GATEWAY_CONFIG_DEFAULT}"
+  if [ ! -f "$GATEWAY_CONFIG" ]; then
+    echo "aborting deploy dry-run: local gateway config not found for C2 cross-check ($GATEWAY_CONFIG)." >&2
+    echo "  Provide GATEWAY_CONFIG=<path-to-real-gateway.yaml>." >&2
+    exit 5
+  fi
+  bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_CONFIG" || {
+    echo "aborting deploy dry-run: config-drift check failed" >&2; exit 5;
+  }
+  echo "  local dry-run C2 check passed"
+  exit 0
+elif [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
   echo "  SKIP_C2_CHECK=1 set — running coordinator-only check (C2 gate intentionally skipped)" >&2
-  SKIP_C2_CHECK=1 bash "$DIST_DIR/check-deploy-config.sh" "$CONFIG" || {
+  SKIP_C2_CHECK=1 bash "$CHECK_SCRIPT" "$CONFIG" || {
     echo "aborting deploy: config-drift check failed" >&2; exit 5;
   }
 else
-  if [ ! -f "$GATEWAY_CONFIG" ]; then
-    echo "aborting deploy: real gateway.yaml not found for C2 cross-check ($GATEWAY_CONFIG)." >&2
-    echo "  Provide GATEWAY_CONFIG=<path-to-real-gateway.yaml> or set SKIP_C2_CHECK=1" >&2
-    echo "  to deploy without the cross-check. gateway.yaml.example is sample" >&2
-    echo "  documentation and intentionally NOT accepted here." >&2
+  GATEWAY_REMOTE_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-gateway-installed-config.XXXXXXXX)" || {
+    echo "aborting deploy: mktemp failed for installed gateway config copy" >&2; exit 5;
+  }
+  $SSH "test -f '$GATEWAY_REMOTE_CONFIG' || { echo 'missing installed gateway config: $GATEWAY_REMOTE_CONFIG' >&2; exit 1; }; cat '$GATEWAY_REMOTE_CONFIG'" > "$GATEWAY_REMOTE_CONFIG_TMP" || {
+    echo "aborting deploy: could not read installed gateway config from Pearl: $GATEWAY_REMOTE_CONFIG" >&2
     exit 5
-  fi
-  bash "$DIST_DIR/check-deploy-config.sh" "$CONFIG" "$GATEWAY_CONFIG" || {
+  }
+  GATEWAY_REMOTE_CONFIG_SHA=$(shasum -a 256 "$GATEWAY_REMOTE_CONFIG_TMP" | awk '{print $1}')
+  echo "  validating installed Pearl gateway config: $GATEWAY_REMOTE_CONFIG sha256=$GATEWAY_REMOTE_CONFIG_SHA"
+  bash "$CHECK_SCRIPT" "$CONFIG" "$GATEWAY_REMOTE_CONFIG_TMP" || {
     echo "aborting deploy: config-drift check failed" >&2; exit 5;
   }
 fi
@@ -306,21 +370,6 @@ fi
 bash "$DIST_DIR/test/check_nginx_catalog_routes_test.sh" || {
   echo "aborting deploy: nginx /catalog/ routes missing or misconfigured" >&2; exit 5;
 }
-
-# Issue #244 R6 (CODE+SEC+ARCH convergent MED) — register the EXIT
-# cleanup trap UNCONDITIONALLY, before any temp resource is created.
-# Earlier the trap was inside the `if [ -n "$CATALOG_REMOTE_PATH" ]`
-# branch, so a deploy with catalog disabled that failed mid-flight
-# could leave the remote $DEPLOY_TMP and local TMP_CATALOG_PUBKEY
-# behind. Both variables are guarded with `:-` so the trap is a
-# no-op when they are unset.
-trap '
-  rm -f "${TMP_CATALOG_PUBKEY:-}"
-  rm -f "${CATALOG_SMOKE_TMP:-}"
-  if [ -n "${DEPLOY_TMP:-}" ]; then
-    $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
-  fi
-' EXIT
 
 CATALOG_REMOTE_PATH="$(yaml_tier2_value catalog_path)"
 CATALOG_PUBLIC_KEY="$(yaml_tier2_value catalog_public_key)"
@@ -405,6 +454,12 @@ normalize_yaml() {
     | sed -E 's/[[:space:]]+#.*$//' \
     | grep -vE '^[[:space:]]*(#|$)'
 }
+redact_dsn() {
+  sed -E 's#(postgres(ql)?://[^:/@[:space:]]+:)[^@[:space:]]+@#\1***@#g'
+}
+print_config_drift_diff() {
+  redact_dsn | sed 's/^/    /' >&2
+}
 LIVE_NORM=$($SSH 'cat /opt/macprovider/coordinator.yaml' 2>/dev/null | normalize_yaml) || {
   echo "could not pull live coordinator.yaml from Pearl for drift check" >&2; exit 6;
 }
@@ -412,7 +467,7 @@ LOCAL_NORM=$(normalize_yaml < "$CONFIG")
 if ! DRIFT_DIFF=$(diff <(printf '%s\n' "$LOCAL_NORM") <(printf '%s\n' "$LIVE_NORM")); then
   echo "" >&2
   echo "  CONFIG DRIFT detected (secrets masked; '<' = local, '>' = live):" >&2
-  printf '%s\n' "$DRIFT_DIFF" | sed 's/^/    /' >&2
+  printf '%s\n' "$DRIFT_DIFF" | print_config_drift_diff
   echo "" >&2
   if [ "${ALLOW_CONFIG_DRIFT:-0}" != "1" ]; then
     echo "  Aborting. The local config will overwrite the live one on deploy." >&2
@@ -1493,15 +1548,21 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
 fi
 
 # SPEC-023 v1.7.3 signed static feeds smoke.
+STATIC_SMOKE_DIR=$(umask 077 && mktemp -d -t macprovider-static-probe.XXXXXXXX) || {
+  echo "aborting smoke: mktemp -d failed for static feed probe" >&2
+  exit 1
+}
+STATIC_SMOKE_BODY="$STATIC_SMOKE_DIR/body"
 for STATIC_PATH in \
     /static/demand-rank.json \
     /static/demand-rank.json.sig \
     /static/autotune-candidates.json \
     /static/autotune-candidates.json.sig; do
   echo "  GET https://$DOMAIN$STATIC_PATH -> expect 200"
-  STATUS=$(curl -sS -o /tmp/macprovider-static-probe -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN$STATIC_PATH")
+  : > "$STATIC_SMOKE_BODY"
+  STATUS=$(curl -sS -o "$STATIC_SMOKE_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN$STATIC_PATH")
   if [ "$STATUS" != "200" ]; then
-    echo "SPEC-023 static feed smoke failed: $STATIC_PATH status=$STATUS body=$(head -c 200 /tmp/macprovider-static-probe)" >&2
+    echo "SPEC-023 static feed smoke failed: $STATIC_PATH status=$STATUS body=$(head -c 200 "$STATIC_SMOKE_BODY")" >&2
     exit 1
   fi
 done

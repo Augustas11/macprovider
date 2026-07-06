@@ -33,6 +33,70 @@ func TestProviderTokensRequiredByDefault(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsWeakOperatorKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{name: "placeholder", key: "changeme", want: "placeholder_denied"},
+		{name: "too_short", key: "short-but-not-placeholder", want: "too_short"},
+		{name: "low_entropy", key: strings.Repeat("a", 32), want: "low_entropy"},
+		{name: "repeated_zero", key: strings.Repeat("0", 32), want: "repeated_zero"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadConfigFromYAML(t, "auth:\n  operator_key: "+tc.key+"\n")
+			if err == nil {
+				t.Fatal("Load accepted weak operator key")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsStrongOperatorKey(t *testing.T) {
+	cfg := writeMinimalConfig(t, `
+auth:
+  operator_key: 0123456789abcdefABCDEFghijklmnop
+`)
+	if cfg.Auth.OperatorKey != "0123456789abcdefABCDEFghijklmnop" {
+		t.Fatalf("OperatorKey=%q", cfg.Auth.OperatorKey)
+	}
+}
+
+func TestLoadRejectsWeakNamedOperatorKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{name: "placeholder", key: "changeme", want: "placeholder_denied"},
+		{name: "too_short", key: "short-but-not-placeholder", want: "too_short"},
+		{name: "low_entropy", key: strings.Repeat("a", 32), want: "low_entropy"},
+		{name: "repeated_zero", key: strings.Repeat("0", 32), want: "repeated_zero"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadConfigFromYAML(t, `
+auth:
+  operator_key: 0123456789abcdefABCDEFghijklmnop
+  operator_keys:
+    alice: `+tc.key+`
+    bob: fedcba9876543210PONMLKJIHGFEDCBA
+`)
+			if err == nil {
+				t.Fatal("Load accepted weak named operator key")
+			}
+			if !strings.Contains(err.Error(), "auth.operator_keys.alice") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v want field auth.operator_keys.alice and %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestCanaryValidationRequiresPrivateChallengeBankWhenEnabled(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"
