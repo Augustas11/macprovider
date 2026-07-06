@@ -18,7 +18,10 @@
 #
 #   interval ≥ B × wall_p95 / N_eff = 1 × 3000 / 2.5 = 1200ms (theory)
 #   Set 2000ms for belt + suspenders, mean_active at p95 = 1.5 (under N_eff).
-#   100 × 2s = 200s firing window, fits 240s duration.
+#   Harness interval_ms is a floor after each request completes, so the
+#   expected sample cost is roughly observed wall time + interval. With
+#   ~2.5s wall p50 plus 2s floor pacing, 100 samples need about 450s;
+#   duration=540s gives 20% headroom.
 #
 # Cost estimate (100 × 8 max_tokens): negligible.
 name: streaming_ttft_distribution
@@ -50,7 +53,7 @@ buyers:
   interval_ms: 2000
   requests_per_buyer: 100
 
-duration: 240s
+duration: 540s
 request_timeout: 30s
 silent_hang_threshold: 15s
 

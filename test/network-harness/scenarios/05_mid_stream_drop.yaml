@@ -8,8 +8,9 @@
 #
 # What we want to learn (phase A, descriptive — recorded only):
 #  - Per chat_proxy.go:495, gateway DOES NOT failover mid-stream.
-#    Expectation: buyer sees `stream_truncated` SSE error event, billing
-#    settles for tokens already delivered, no reroute.
+#    Expectation: buyer sees a terminal SSE error envelope
+#    (stream_truncated) before the final [DONE] frame, billing settles
+#    for tokens already delivered, no reroute.
 #  - Does I4 (silent hang) fire? It SHOULD NOT — there should be a
 #    terminating error.
 #  - Does I1 reconcile show partial token count consistently across
@@ -33,8 +34,8 @@ expected_shape: |
   Phase A note (descriptive, not asserted):
    - Buyer should see Outcome != "ok" with SHORT completion_tokens_received > 0.
    - SawTerminator may be true (stream_truncated marker) or false.
-   - I4 (silent hang) should NOT fire — gateway should write an error event
-     before connection close.
+   - I4 (silent hang) should NOT fire — gateway should write a terminal
+     SSE error envelope before the final [DONE] frame.
    - I1 should show partial token agreement: coord.completion ==
      gw.completion == bytes-derived count.
    - PHASE B TRIAGE: confirm or refute "no mid-stream reroute" as contract.
