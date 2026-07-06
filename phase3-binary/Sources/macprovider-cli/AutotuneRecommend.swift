@@ -924,9 +924,8 @@ struct AutotuneRecommendEngine {
             let rateRow = rateMatch?.row
             let promptUSD = rateRow?.usdPerMillionPromptTokens(creditsPerMillion: request.rateCard.usdPerMillionCredits) ?? 0
             let completionUSD = rateRow?.usdPerMillionCompletionTokens(creditsPerMillion: request.rateCard.usdPerMillionCredits) ?? 0
-            let demandWeight = max(demand.demandWeight, request.demandRank.coldStartFloor)
-            let completionCredits = Double(rateRow?.completionRatePerMtok ?? 0)
-            let raw = demandWeight * completionCredits * tps
+            let providerShare = Double(rateRow?.providerShareBPS ?? 0) / 10_000.0
+            let payoutScore = Double(rateRow?.completionRatePerMtok ?? 0) * providerShare
             let headroom = Double(request.hardware.memoryGB - Self.safetyMarginGB - candidate.minRAMGB)
             let confidence = confidence(warnings: warnings, benchmark: benchmark)
             let servedModel = rateMatch.map {
@@ -943,13 +942,17 @@ struct AutotuneRecommendEngine {
                 memoryHeadroomGB: headroom.rounded6,
                 confidence: confidence,
                 why: why(modelKey: modelKey, eligible: eligible),
-                rawScore: raw.rounded6
+                rawScore: payoutScore.rounded6
             )
         }
-        .sorted {
-            if $0.eligible != $1.eligible { return $0.eligible && !$1.eligible }
-            if $0.rawScore != $1.rawScore { return $0.rawScore > $1.rawScore }
-            return $0.model < $1.model
+        .sorted { a, b in
+            if a.eligible != b.eligible { return a.eligible && !b.eligible }
+            if a.rawScore != b.rawScore { return a.rawScore > b.rawScore }
+            if a.tokensPerSecond != b.tokensPerSecond { return a.tokensPerSecond > b.tokensPerSecond }
+            let demandA = max(request.demandRank.rows[a.catalogKey]?.demandWeight ?? 0, request.demandRank.coldStartFloor)
+            let demandB = max(request.demandRank.rows[b.catalogKey]?.demandWeight ?? 0, request.demandRank.coldStartFloor)
+            if demandA != demandB { return demandA > demandB }
+            return a.model < b.model
         }
         .enumerated()
         .map { offset, value in
@@ -959,9 +962,7 @@ struct AutotuneRecommendEngine {
         }
 
         let eligible = scored.filter(\.eligible)
-        let bestRaw = eligible.map(\.rawScore).max() ?? 0
-        let pool = eligible.filter { $0.rawScore >= request.demandRank.diversificationBand * bestRaw }
-        let recommended = pool.isEmpty ? nil : pool[stableHashIndex(request.hardware.diversificationID, count: pool.count)]
+        let recommended = eligible.first
         let donorFallback = recommended == nil ? scored.first { score in
             Self.donorModeCompatible(
                 modelKey: score.catalogKey,
@@ -1095,12 +1096,6 @@ struct AutotuneRecommendEngine {
         return request.generatedAt.timeIntervalSince(benchmark.generatedAt) <= maxBenchmarkAge
     }
 
-    private func stableHashIndex(_ input: String, count: Int) -> Int {
-        let digest = SHA256.hash(data: Data(input.utf8))
-        let first8 = digest.prefix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
-        return Int(first8 % UInt64(count))
-    }
-
     private func confidence(warnings: Set<AutotuneRecommendWarning>, benchmark: CandidateBenchmark?) -> String {
         if (warnings.contains(.rateCardFallbackUsed) && warnings.contains(.demandRankFallbackUsed))
             || warnings.contains(.hardwareTierUnknown)
@@ -1116,7 +1111,7 @@ struct AutotuneRecommendEngine {
 
     private func why(modelKey: String, eligible: Bool) -> String {
         if eligible {
-            return "\(modelKey) has the strongest demand-weighted per-token score for this Mac.".prefixString(140)
+            return "\(modelKey) has the highest provider payout per completion token among eligible models for this Mac.".prefixString(140)
         }
         return "\(modelKey) did not clear one or more recommendation gates.".prefixString(140)
     }

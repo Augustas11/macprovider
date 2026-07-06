@@ -457,7 +457,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(result.jsonString().contains("catalog_key"))
     }
 
-    func testRecommendedCandidateOutsideTopFiveIsStillCarriedForApplyLookup() throws {
+    func testRecommendedModelIsAlwaysTopRankedEligibleRow() throws {
         var request = try makeRequest()
         let candidateTemplate = try XCTUnwrap(request.candidateCatalog.rows.values.first)
         let demandTemplate = try XCTUnwrap(request.demandRank.rows.values.first)
@@ -494,26 +494,93 @@ final class AutotuneRecommendTests: XCTestCase {
             )
         }
 
-        var foundDiversifiedSelectionOutsideTopFive = false
-        for seed in 0..<500 {
-            request.hardware.diversificationID = "seed-\(seed)"
-            let result = AutotuneRecommendEngine().recommend(request)
-            guard let recommendedModel = result.recommendedModel,
-                  let selected = result.selectedCandidate,
-                  selected.model == recommendedModel
-            else {
-                continue
-            }
-            if selected.rank > 5 {
-                foundDiversifiedSelectionOutsideTopFive = true
-                XCTAssertFalse(result.candidates.contains { $0.model == recommendedModel })
-                XCTAssertEqual(result.candidates.map(\.rank), [1, 2, 3, 4, 5])
-                XCTAssertFalse(result.jsonString().contains("selectedCandidate"))
-                XCTAssertFalse(result.jsonString().contains("selected_candidate"))
-                break
-            }
-        }
-        XCTAssertTrue(foundDiversifiedSelectionOutsideTopFive)
+        let result = AutotuneRecommendEngine().recommend(request)
+        let recommended = try XCTUnwrap(result.recommendedModel)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        XCTAssertEqual(selected.model, recommended)
+        XCTAssertEqual(selected.rank, 1)
+        XCTAssertTrue(result.candidates.contains { $0.model == recommended })
+        XCTAssertEqual(result.candidates.first?.model, recommended)
+        XCTAssertFalse(result.jsonString().contains("selectedCandidate"))
+        XCTAssertFalse(result.jsonString().contains("selected_candidate"))
+    }
+
+    func testPayoutScoreRanksAboveThroughputAndDemand() throws {
+        var request = try makeRequest()
+        let candidateTemplate = try XCTUnwrap(request.candidateCatalog.rows.values.first)
+        let demandTemplate = try XCTUnwrap(request.demandRank.rows.values.first)
+        request.candidateCatalog.rows = [:]
+        request.demandRank.rows = [:]
+        request.rateCard.rows = [:]
+        request.benchmarks = [:]
+
+        let highPayoutKey = "high-payout-low-throughput"
+        var highPayoutCandidate = candidateTemplate
+        highPayoutCandidate.modelID = "test/high-payout"
+        highPayoutCandidate.modelRevision = String(repeating: "1", count: 40)
+        highPayoutCandidate.modelSHA256 = String(repeating: "b", count: 64)
+        request.candidateCatalog.rows[highPayoutKey] = highPayoutCandidate
+        request.demandRank.rows[highPayoutKey] = demandTemplate
+        request.rateCard.rows[highPayoutKey] = RateCardProjection.Row(
+            promptRatePerMtok: 450_000,
+            completionRatePerMtok: 900_000,
+            providerShareBPS: 9_000,
+            globalMultiplierPPM: 1_000_000
+        )
+        request.benchmarks[highPayoutKey] = CandidateBenchmark(
+            modelKey: highPayoutKey,
+            sustainedTPS: 1,
+            ttftMS: 1,
+            swapDetected: false,
+            thermalThrottleDetected: false,
+            artifactSHA256: highPayoutCandidate.modelSHA256!,
+            modelArtifactPath: "/tmp/high-payout",
+            benchmarkID: "bench-high-payout",
+            generatedAt: request.generatedAt,
+            candidateCatalogSHA256: request.candidateCatalogSHA256,
+            binaryVersion: request.hardware.binaryVersion,
+            modelID: highPayoutCandidate.modelID,
+            hardwareIdentityHash: request.hardware.hardwareIdentityHash
+        )
+
+        let highThroughputKey = "low-payout-high-throughput"
+        var highThroughputCandidate = candidateTemplate
+        highThroughputCandidate.modelID = "test/high-throughput"
+        highThroughputCandidate.modelRevision = String(repeating: "2", count: 40)
+        highThroughputCandidate.modelSHA256 = String(repeating: "c", count: 64)
+        request.candidateCatalog.rows[highThroughputKey] = highThroughputCandidate
+        var highDemand = demandTemplate
+        highDemand.demandWeight = 10
+        request.demandRank.rows[highThroughputKey] = highDemand
+        request.rateCard.rows[highThroughputKey] = RateCardProjection.Row(
+            promptRatePerMtok: 13_500,
+            completionRatePerMtok: 27_000,
+            providerShareBPS: 9_000,
+            globalMultiplierPPM: 1_000_000
+        )
+        request.benchmarks[highThroughputKey] = CandidateBenchmark(
+            modelKey: highThroughputKey,
+            sustainedTPS: 1_000,
+            ttftMS: 1,
+            swapDetected: false,
+            thermalThrottleDetected: false,
+            artifactSHA256: highThroughputCandidate.modelSHA256!,
+            modelArtifactPath: "/tmp/high-throughput",
+            benchmarkID: "bench-high-throughput",
+            generatedAt: request.generatedAt,
+            candidateCatalogSHA256: request.candidateCatalogSHA256,
+            binaryVersion: request.hardware.binaryVersion,
+            modelID: highThroughputCandidate.modelID,
+            hardwareIdentityHash: request.hardware.hardwareIdentityHash
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.recommendedModel, highPayoutKey)
+        XCTAssertGreaterThan(
+            try XCTUnwrap(result.candidates.first?.rawScore),
+            try XCTUnwrap(result.candidates.first { $0.model == highThroughputKey }?.rawScore)
+        )
     }
 
     func testJSONCandidatesExcludeIneligibleDiagnosticsWhenEligibleRowsExist() throws {
@@ -1727,6 +1794,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let top = try XCTUnwrap(result.candidates.first)
         XCTAssertTrue(top.eligible)
         XCTAssertGreaterThan(top.rawScore, 0)
+        XCTAssertEqual(top.model, result.recommendedModel)
         for other in result.candidates.dropFirst() where other.eligible {
             XCTAssertGreaterThanOrEqual(top.rawScore, other.rawScore)
         }
