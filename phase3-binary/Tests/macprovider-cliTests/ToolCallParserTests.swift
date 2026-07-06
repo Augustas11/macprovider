@@ -402,6 +402,112 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertTrue(parsed.toolCalls.isEmpty)
     }
 
+    func testQwen3CoderNemotronXMLToolCall() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"""
+<tool_call>
+<function=json_validate>
+<parameter=text>
+{"valid":true}
+</parameter>
+</function>
+</tool_call>
+"""#,
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            allowedFunctionNames: ["json_validate"]
+        )
+
+        XCTAssertNil(parsed.cleanedContent)
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(call.functionName, "json_validate")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "text") as? String, "{\"valid\":true}")
+    }
+
+    func testQwen3CoderNemotronXMLInlineToolCall() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<tool_call><function=json_validate><parameter=text>{"valid":true}</parameter></function></tool_call>"#,
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            allowedFunctionNames: ["json_validate"]
+        )
+
+        XCTAssertNil(parsed.cleanedContent)
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(call.functionName, "json_validate")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "text") as? String, "{\"valid\":true}")
+    }
+
+    func testQwen3CoderNemotronXMLMultilineParameter() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"""
+<tool_call>
+<function=execute_bash>
+<parameter=command>
+pwd && ls
+</parameter>
+</function>
+</tool_call>
+"""#,
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            allowedFunctionNames: ["execute_bash"]
+        )
+
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(call.functionName, "execute_bash")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "command") as? String, "pwd && ls")
+    }
+
+    func testQwen3CoderNemotronXMLMultipleParameters() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"""
+<tool_call>
+<function=search_products>
+<parameter=query>
+waterproof running shoes
+</parameter>
+<parameter=sort_by>
+price_low_to_high
+</parameter>
+</function>
+</tool_call>
+"""#,
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            allowedFunctionNames: ["search_products"]
+        )
+
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(call.functionName, "search_products")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "query") as? String, "waterproof running shoes")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "sort_by") as? String, "price_low_to_high")
+    }
+
+    func testQwen3CoderNemotronXMLUndeclaredFunctionFailsClosed() {
+        let raw = #"<tool_call><function=delete_symbol><parameter=symbol>x</parameter></function></tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            allowedFunctionNames: ["json_validate"]
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testQwen3CoderNemotronXMLBareFunctionWithoutToolCallWrapper() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: """
+I'll validate that.
+
+<function=json_validate><parameter=text>{"valid":true}</parameter></function>
+""",
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            allowedFunctionNames: ["json_validate"]
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, "I'll validate that.")
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(call.functionName, "json_validate")
+    }
+
     func testTemplateToolsStripFieldsOutsideReceiptCanonicalSubset() {
         let tools: JSONValue = .array([
             .object([

@@ -2547,12 +2547,26 @@ private struct NativeToolCallStreamEmitter {
     }
 
     mutating func observe(_ text: String) -> [StreamChunk] {
-        guard !closed, let start = text.range(of: startDelimiter) else {
+        guard !closed else {
             return []
         }
-        let afterStart = start.upperBound
-        let bodyEnd = text.range(of: endDelimiter, range: afterStart..<text.endIndex)?.lowerBound ?? text.endIndex
-        let body = String(text[afterStart..<bodyEnd])
+        if let start = text.range(of: startDelimiter) {
+            let afterStart = start.upperBound
+            let bodyEnd = text.range(of: endDelimiter, range: afterStart..<text.endIndex)?.lowerBound ?? text.endIndex
+            let body = String(text[afterStart..<bodyEnd])
+            let isClosed = text.range(of: endDelimiter, range: afterStart..<text.endIndex) != nil
+            if body.contains("<function=") {
+                return observeNemotronXML(body: body, isClosed: isClosed)
+            }
+            return observeJSONToolCall(body: body, isClosed: isClosed)
+        }
+        if text.contains("<function=") {
+            return observeNemotronXML(body: text, isClosed: false)
+        }
+        return []
+    }
+
+    private mutating func observeJSONToolCall(body: String, isClosed: Bool) -> [StreamChunk] {
         guard let name = stringField("name", in: body),
               let arguments = argumentPrefix(in: body)
         else {
@@ -2569,7 +2583,30 @@ private struct NativeToolCallStreamEmitter {
             emittedArguments = arguments
             events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: nil, type: nil, functionName: nil, arguments: fragment)))
         }
-        if text.range(of: endDelimiter, range: afterStart..<text.endIndex) != nil {
+        if isClosed {
+            closed = true
+        }
+        return events
+    }
+
+    private mutating func observeNemotronXML(body: String, isClosed: Bool) -> [StreamChunk] {
+        guard let name = ToolCallParser.nemotronFunctionName(in: body),
+              let arguments = ToolCallParser.nemotronArgumentsJSON(in: body, includeIncomplete: isClosed)
+        else {
+            return []
+        }
+
+        var events: [StreamChunk] = []
+        if !opened {
+            opened = true
+            events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: callID, type: "function", functionName: name, arguments: "")))
+        }
+        let fragment = Self.delta(from: emittedArguments, to: arguments)
+        if !fragment.isEmpty {
+            emittedArguments = arguments
+            events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: nil, type: nil, functionName: nil, arguments: fragment)))
+        }
+        if isClosed {
             closed = true
         }
         return events
