@@ -579,7 +579,8 @@ type chunkPayload struct {
 //   - code: the non-empty `error.code` value if the dispatched event
 //     is a STANDALONE error envelope; "" otherwise.
 //   - isStandaloneError: true ONLY if the event has a non-empty
-//     `error.code` AND no `choices` AND no `usage` tokens.
+//     `error.code`, no `choices` key, no `usage` key, no duplicate
+//     top-level keys, and no duplicate immediate `error.*` keys.
 //
 // The caller in consumeSSE tracks whether the LAST DISPATCHED event
 // before `[DONE]`/EOF was a standalone error envelope; only that
@@ -593,23 +594,134 @@ func parseChunkTokens(payload []byte, res *Result) (code string, isStandaloneErr
 	if err := json.Unmarshal(payload, &c); err != nil {
 		return "", false
 	}
+	// Error-bearing frames are either strict standalone terminal envelopes or
+	// untrusted for both corroboration and token extraction. Otherwise a
+	// malformed `error` + `usage` frame could fail the envelope gate but still
+	// donate prompt tokens to the harness side and erase the overbill drift
+	// the gate is meant to preserve.
+	if topLevelJSONKeyPresent(payload, "error") {
+		if code, ok := standaloneSSEErrorCode(payload); ok {
+			return code, true
+		}
+		return "", false
+	}
 	if c.Usage.CompletionTokens > 0 {
 		res.CompletionTokensReceived = c.Usage.CompletionTokens
 	}
 	if c.Usage.PromptTokens > 0 {
 		res.PromptTokensReported = c.Usage.PromptTokens
 	}
-	// Standalone terminal-envelope shape: error.code present AND no
-	// choices AND no usage tokens. Both writeSSEError and
-	// writeStructuredOutputTimeoutSSE emit chunks of this exact shape
-	// — see phase5-gateway/internal/router/chat_proxy.go:1239 / :1256.
-	if c.Error != nil && c.Error.Code != "" &&
-		len(c.Choices) == 0 &&
-		c.Usage.CompletionTokens == 0 &&
-		c.Usage.PromptTokens == 0 {
-		return c.Error.Code, true
-	}
 	return "", false
+}
+
+func topLevelJSONKeyPresent(payload []byte, want string) bool {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.UseNumber()
+
+	tok, err := dec.Token()
+	if err != nil {
+		return false
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return false
+	}
+
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return false
+		}
+		if key == want {
+			return true
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return false
+		}
+	}
+	return false
+}
+
+func standaloneSSEErrorCode(payload []byte) (string, bool) {
+	top, ok := strictJSONRawObject(payload)
+	if !ok {
+		return "", false
+	}
+	if _, hasChoices := top["choices"]; hasChoices {
+		return "", false
+	}
+	if _, hasUsage := top["usage"]; hasUsage {
+		return "", false
+	}
+	errorRaw, ok := top["error"]
+	if !ok {
+		return "", false
+	}
+	errorFields, ok := strictJSONRawObject(errorRaw)
+	if !ok {
+		return "", false
+	}
+	codeRaw, ok := errorFields["code"]
+	if !ok {
+		return "", false
+	}
+	var code string
+	if err := json.Unmarshal(codeRaw, &code); err != nil || code == "" {
+		return "", false
+	}
+	return code, true
+}
+
+func strictJSONRawObject(payload []byte) (map[string]json.RawMessage, bool) {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.UseNumber()
+
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, false
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return nil, false
+	}
+
+	fields := make(map[string]json.RawMessage)
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return nil, false
+		}
+		if _, exists := fields[key]; exists {
+			return nil, false
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, false
+		}
+		fields[key] = raw
+	}
+
+	tok, err = dec.Token()
+	if err != nil {
+		return nil, false
+	}
+	delim, ok = tok.(json.Delim)
+	if !ok || delim != '}' {
+		return nil, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, false
+	}
+	return fields, true
 }
 
 // isDefaultEventName returns true when the SSE event name is empty or

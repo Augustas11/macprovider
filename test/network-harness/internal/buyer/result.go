@@ -62,7 +62,7 @@ type Result struct {
 	// SawSSEErrorEvent is true when the SSE stream's last DISPATCHED SSE
 	// event before `[DONE]` (or EOF) was a STANDALONE terminal error
 	// envelope — `{"error": {"code": "...", ...}}` with no `choices`
-	// and no `usage` tokens. This shape matches the gateway's
+	// key and no `usage` key. This shape matches the gateway's
 	// writeSSEError and writeStructuredOutputTimeoutSSE helpers in
 	// chat_proxy.go.
 	//

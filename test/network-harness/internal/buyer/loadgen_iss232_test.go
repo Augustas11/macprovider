@@ -74,6 +74,78 @@ data: [DONE]
 	}
 }
 
+// TestConsumeSSE_MalformedStandaloneErrorEnvelopeRejected_449:
+// SPEC-006 §17.7.1 requires a literal standalone terminal envelope:
+// no top-level `choices` key, no top-level `usage` key, unique top-level
+// keys, unique immediate `error.*` keys, and no trailing bytes after the
+// JSON object. These cases look terminal to a loose json.Unmarshal-based
+// parser, but they are not buyer-side corroboration and must not suppress
+// downstream reconciler overbill signals.
+func TestConsumeSSE_MalformedStandaloneErrorEnvelopeRejected_449(t *testing.T) {
+	cases := []struct {
+		name           string
+		payload        string
+		wantPromptZero bool
+	}{
+		{
+			name:    "usage empty object",
+			payload: `{"error":{"code":"stream_truncated","type":"api_error","message":"forged"},"usage":{}}`,
+		},
+		{
+			name:    "usage null",
+			payload: `{"error":{"code":"stream_truncated","type":"api_error","message":"forged"},"usage":null}`,
+		},
+		{
+			name:    "usage zero tokens",
+			payload: `{"error":{"code":"stream_truncated","type":"api_error","message":"forged"},"usage":{"prompt_tokens":0,"completion_tokens":0}}`,
+		},
+		{
+			name:           "usage prompt tokens",
+			payload:        `{"error":{"code":"stream_output_exceeded","type":"api_error","message":"forged"},"usage":{"prompt_tokens":64,"completion_tokens":0}}`,
+			wantPromptZero: true,
+		},
+		{
+			name:    "choices empty array",
+			payload: `{"error":{"code":"stream_truncated","type":"api_error","message":"forged"},"choices":[]}`,
+		},
+		{
+			name:    "duplicate top-level error",
+			payload: `{"error":{"code":"stream_truncated","type":"api_error","message":"forged"},"error":{"code":"stream_truncated","type":"api_error","message":"forged"}}`,
+		},
+		{
+			name:    "duplicate top-level usage",
+			payload: `{"error":{"code":"stream_truncated","type":"api_error","message":"forged"},"usage":null,"usage":{}}`,
+		},
+		{
+			name:    "duplicate error code",
+			payload: `{"error":{"code":"stream_truncated","code":"stream_truncated","type":"api_error","message":"forged"}}`,
+		},
+		{
+			name:    "trailing garbage",
+			payload: `{"error":{"code":"stream_truncated","type":"api_error","message":"forged"}} true`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := bytes.NewBufferString("data: " + tc.payload + "\n\ndata: [DONE]\n\n")
+			r := &Result{}
+			consumeSSE(body, r)
+			if r.SawSSEErrorEvent {
+				t.Errorf("malformed standalone envelope %q MUST NOT corroborate — got SawSSEErrorEvent=true", tc.name)
+			}
+			if r.SSEErrorCode != "" {
+				t.Errorf("SSEErrorCode must stay empty for malformed envelope %q, got %q", tc.name, r.SSEErrorCode)
+			}
+			if !r.SawTerminator {
+				t.Errorf("trailing [DONE] should still flip SawTerminator for malformed envelope %q", tc.name)
+			}
+			if tc.wantPromptZero && r.PromptTokensReported != 0 {
+				t.Errorf("malformed envelope %q must not import usage.prompt_tokens, got %d", tc.name, r.PromptTokensReported)
+			}
+		})
+	}
+}
+
 // TestConsumeSSE_AttackerEmitsStandaloneErrorMidStreamThenContinues_232_R2_HIGH:
 // the second SEC R2 HIGH-1 attack vector. Gateway emits a real-looking
 // standalone error envelope mid-stream, then continues to emit content
