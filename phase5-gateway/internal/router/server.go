@@ -61,6 +61,7 @@ type Server struct {
 	routingMeta     routingMetaCache
 	retry503Metrics *retry503Metrics
 	adminMetrics    *adminStateWriteMetrics
+	chatStartLimits *requestRateLimiter
 }
 
 // readStore returns the read-only view of the database. M2-4: this
@@ -165,6 +166,7 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 		version:          "dev",
 		retry503Metrics:  newRetry503Metrics(),
 		adminMetrics:     newAdminStateWriteMetrics(),
+		chatStartLimits:  newRequestRateLimiter(),
 	}
 	for _, opt := range opts {
 		opt(s)

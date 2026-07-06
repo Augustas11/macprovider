@@ -154,6 +154,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		subject = usageSubject{AccountID: authn.Bearer.AccountID}
 	}
 	accountID = subject.AccountID
+	requestRate := s.chatStartLimits.allow(subject.AccountID, s.cfg.Quotas.AccountRequestRatePerSecond, s.now())
+	if !requestRate.Admitted {
+		slog.Warn("chat completion request rate limited",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"limit_rps", requestRate.Limit,
+			"retry_after_s", requestRate.RetryAfterSeconds,
+		)
+		setConcurrencyRateLimitHeaders(w, requestRate.Limit, requestRate.Remaining, requestRate.RetryAfterSeconds, s.now())
+		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "account_request_rate_exceeded", "Account request rate limit exceeded")
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, s.cfg.Limits.RequestBodyBytes+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request_body", "Could not read request body")
@@ -264,6 +276,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	})
 	if errors.Is(concurrencyErr, storage.ErrQuotaExceeded) {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		slog.Warn("chat completion concurrency limited",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"limit", concurrencyLimit,
+			"retry_after_s", concurrencyRetryAfterSeconds,
+		)
 		// Issue #190: surface OpenAI-compatible concurrency
 		// rate-limit headers so client SDKs can self-pace
 		// instead of retrying blindly until 429.
@@ -359,7 +377,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	structuredStreaming := chat.Stream && chat.hasStructuredOutput()
 	timing.markCoordinatorStart(s.now())
-	resp, err := s.doCoordinatorChatWithRetry(upCtx, r, buildUpReq)
+	resp, err := s.doCoordinatorChatWithRetry(upCtx, r, subject.AccountID, buildUpReq)
 	if err != nil {
 		if structuredStreaming && errors.Is(upCtx.Err(), context.DeadlineExceeded) {
 			if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout") {
@@ -387,7 +405,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens)
 }
 
-func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Request, buildUpReq func() (*http.Request, error)) (*http.Response, error) {
+func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Request, accountID string, buildUpReq func() (*http.Request, error)) (*http.Response, error) {
 	maxAttempts := 1
 	if s.cfg.Retry503.Enabled {
 		maxAttempts = s.cfg.Retry503.MaxAttempts
@@ -453,19 +471,29 @@ func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Reque
 			return resp, nil
 		}
 		backoff := coord503RetryBackoff(attempt, s.cfg.Retry503)
-		slog.Info("gateway coord retry",
-			"request_id", requestID(r),
-			"attempt", attempt+1,
-			"backoff_ms", backoff.Milliseconds(),
-			"status", resp.StatusCode,
-			"body_code", openAIErrorCode(body),
-		)
 		select {
 		case <-time.After(backoff):
 			totalBackoffMS += backoff.Milliseconds()
 			if err := upCtx.Err(); err != nil {
 				return resp, nil
 			}
+			retryRate := s.chatStartLimits.allow(accountID, s.cfg.Quotas.AccountRequestRatePerSecond, s.now())
+			if !retryRate.Admitted {
+				slog.Warn("gateway coord retry request rate limited",
+					"request_id", requestID(r),
+					"account_id", accountID,
+					"limit_rps", retryRate.Limit,
+					"retry_after_s", retryRate.RetryAfterSeconds,
+				)
+				return resp, nil
+			}
+			slog.Info("gateway coord retry",
+				"request_id", requestID(r),
+				"attempt", attempt+1,
+				"backoff_ms", backoff.Milliseconds(),
+				"status", resp.StatusCode,
+				"body_code", openAIErrorCode(body),
+			)
 			_ = resp.Body.Close()
 		case <-upCtx.Done():
 			return resp, nil
