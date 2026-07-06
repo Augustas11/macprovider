@@ -17,13 +17,13 @@ target:
   cli_bin: ../../phase3-binary/.build/release/macprovider-cli
 
 hardware_matrix:
-  - {label: m1-8gb,   chip: "Apple M1",       memoryGB: 8,  bandwidthTier: C, expected: donor_only_by_ram}
-  - {label: m1-16gb,  chip: "Apple M1",       memoryGB: 16, bandwidthTier: C, expected: donor_only_by_ram}
-  - {label: m2-16gb,  chip: "Apple M2",       memoryGB: 16, bandwidthTier: C, expected: donor_only_by_ram}
-  - {label: m4-16gb,  chip: "Apple M4",       memoryGB: 16, bandwidthTier: C, expected: donor_only_by_ram}
+  - {label: m1-8gb,   chip: "Apple M1",       memoryGB: 8,  bandwidthTier: C, expected: at_least_one_eligible_row}
+  - {label: m1-16gb,  chip: "Apple M1",       memoryGB: 16, bandwidthTier: C, expected: at_least_one_eligible_row}
+  - {label: m2-16gb,  chip: "Apple M2",       memoryGB: 16, bandwidthTier: C, expected: at_least_one_eligible_row}
+  - {label: m4-16gb,  chip: "Apple M4",       memoryGB: 16, bandwidthTier: C, expected: at_least_one_eligible_row}
   - {label: m4-32gb,  chip: "Apple M4",       memoryGB: 32, bandwidthTier: C, expected: at_least_one_eligible_row}
   - {label: m4-64gb,  chip: "Apple M4",       memoryGB: 64, bandwidthTier: C, expected: at_least_one_eligible_row}
-  - {label: m1-pro-16gb, chip: "Apple M1 Pro", memoryGB: 16, bandwidthTier: B, expected: donor_only_by_ram}
+  - {label: m1-pro-16gb, chip: "Apple M1 Pro", memoryGB: 16, bandwidthTier: B, expected: at_least_one_eligible_row}
   - {label: m3-max-36gb, chip: "Apple M3 Max", memoryGB: 36, bandwidthTier: A, expected: at_least_one_eligible_row}
   - {label: m3-ultra-96gb, chip: "Apple M3 Ultra", memoryGB: 96, bandwidthTier: S, expected: at_least_one_eligible_row}
 

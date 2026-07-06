@@ -186,6 +186,10 @@ logging:
 #       prompt_credits_per_mtok: 13500        # $0.0135/M
 #       prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
 #       completion_credits_per_mtok: 27000    # $0.027/M — cheapest publicly-served 8B
+#     meta-llama/llama-3.2-3b-instruct:       # Entry 116 — 8 GB M-Base onboarding row
+#       prompt_credits_per_mtok: 13500        # $0.0135/M
+#       prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
+#       completion_credits_per_mtok: 27000    # $0.027/M
 #     qwen2.5-coder-32b-instruct:             # Wave 1 v0.2 — M-Max/Ultra only per admission
 #       prompt_credits_per_mtok: 425000       # $0.425/M
 #       prompt_cache_hit_credits_per_mtok: 106250 # $0.10625/M prefix-cache hit
