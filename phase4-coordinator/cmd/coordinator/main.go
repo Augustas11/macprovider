@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -570,8 +572,8 @@ func main() {
 			return buyer.PreflightResult{Accepted: ack.Accepted, Reason: ack.Reason}, ok, err
 		}),
 	)
-	providerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
-	buyerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
+	providerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
+	buyerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
@@ -946,6 +948,10 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 		ReadTimeout:       310 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+}
+
+func listenAddress(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Handler {

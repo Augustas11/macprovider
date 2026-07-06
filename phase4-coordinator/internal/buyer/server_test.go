@@ -1375,6 +1375,40 @@ func TestHTTPForwardingPassesReceiptFromProviderWithPublishedReceiptKey(t *testi
 	}
 }
 
+func TestHTTPForwardingStripsReceiptWhenPillarDTruncatesBody(t *testing.T) {
+	const receipt = "originalbytes.http.signed.receipt"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-MacProvider-Receipt", receipt)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"this content is longer than the cap and will get truncated"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":20,"total_tokens":24}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpointReceiptPubkey(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, bytes.Repeat([]byte{0x61}, 32))
+	tier2Cfg := config.Default().Tier2
+	tier2Cfg.BehavioralSafetyEnabled = true
+	tier2Cfg.OutputSizeCapBytes = 8
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(tier2Cfg),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte("truncated")) {
+		t.Fatalf("body was not truncated by PillarD: %s", rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("receipt header = %q, want stripped because PillarD mutated the body the provider signed", got)
+	}
+}
+
 func TestHTTPForwardingStripsV04SettlementReceiptFromBuyerResponse(t *testing.T) {
 	receipt := base64.StdEncoding.EncodeToString([]byte(`{"receipt_version":"4","terminal_state_ts_unix_ms":1782864001789}`)) + "." + base64.StdEncoding.EncodeToString([]byte("signature"))
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3663,11 +3697,17 @@ func TestChatCompletionsWSTunneledTier2RejectsInvalidNonStreamingOutput(t *testi
 	tier2Cfg := config.Default().Tier2
 	tier2Cfg.BehavioralSafetyEnabled = true
 	tier2Cfg.EncodingValidationEnabled = true
+	recoveryIDs := make(chan string, 1)
 	server := buyer.NewServer(
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
 		buyer.WithTier2Config(tier2Cfg),
+		buyer.WithRecoveryConfig(10*time.Millisecond, 1, true),
+		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
+			recoveryIDs <- requestID
+			return buyer.PreflightResult{Accepted: true}, true, nil
+		}),
 		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
 			chunks := make(chan providerws.InferenceResponseChunk, 1)
 			done := make(chan providerws.InferenceResponseEnd, 1)
@@ -3685,6 +3725,82 @@ func TestChatCompletionsWSTunneledTier2RejectsInvalidNonStreamingOutput(t *testi
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_output_encoding_invalid"`)) {
 		t.Fatalf("body missing tier2 output error: %s", rr.Body.String())
+	}
+	select {
+	case requestID := <-recoveryIDs:
+		if !strings.HasPrefix(requestID, "recovery-probe-") {
+			t.Fatalf("requestID = %q", requestID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovery preflight did not run")
+	}
+}
+
+func TestChatCompletionsHTTPNonStreamingAppliesTier2OutputGuard(t *testing.T) {
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	var upstreamCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"http","choices":[{"message":{"content":"bad\u0000"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	recoveryIDs := make(chan string, 1)
+	tier2Cfg := config.Default().Tier2
+	tier2Cfg.BehavioralSafetyEnabled = true
+	tier2Cfg.EncodingValidationEnabled = true
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithTier2Config(tier2Cfg),
+		buyer.WithRecoveryConfig(10*time.Millisecond, 1, true),
+		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
+			recoveryIDs <- requestID
+			return buyer.PreflightResult{Accepted: true}, true, nil
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_output_encoding_invalid"`)) {
+		t.Fatalf("body missing tier2 output error: %s", rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte(`bad`)) {
+		t.Fatalf("blocked provider output leaked to buyer: %s", rr.Body.String())
+	}
+	if upstreamCalls != 1 {
+		t.Fatalf("upstreamCalls=%d want 1", upstreamCalls)
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("request_log rows=%d want 1: %#v", len(rows), rows)
+	}
+	if rows[0].Status != http.StatusBadGateway {
+		t.Fatalf("logged status=%d want 502", rows[0].Status)
+	}
+	if !rows[0].ErrorCode.Valid || rows[0].ErrorCode.String != "tier2_output_encoding_invalid" {
+		t.Fatalf("logged error_code=%v want tier2_output_encoding_invalid", rows[0].ErrorCode)
+	}
+	if rows[0].PromptTokens.Valid || rows[0].CompletionTokens.Valid {
+		t.Fatalf("blocked response logged billable tokens: prompt=%v completion=%v", rows[0].PromptTokens, rows[0].CompletionTokens)
+	}
+	select {
+	case requestID := <-recoveryIDs:
+		if !strings.HasPrefix(requestID, "recovery-probe-") {
+			t.Fatalf("requestID = %q", requestID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovery preflight did not run")
 	}
 }
 

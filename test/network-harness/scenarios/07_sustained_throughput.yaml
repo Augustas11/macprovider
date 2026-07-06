@@ -11,15 +11,20 @@
 #   The 2026-06-28 retune used wall_p50 → interval=5000ms → mean_active
 #   at p95 spiked to 4.7 → 42% non-2xx (issue #227 production trip).
 #
-# Use wall_p95 as the input so tail-spike concurrency stays under N_eff:
-#   interval ≥ B × wall_p95 / N_eff = 2 × 11791 / 2.5 = 9433ms
-#   Round up to 10000ms.
-#   mean_active at p95: 2 × 11.8 / 10 = 2.36 < N_eff ✓
-#   mean_active at p50: 2 × 5.6 / 10 = 1.12 (lots of headroom)
+# Harness interval semantics: each buyer sleeps interval_ms after a
+# request finishes. The interval is a floor between completions and the
+# next dispatch, not a fixed start-to-start cadence. Use wall_p95 as
+# the input so tail-spike concurrency stays under N_eff even before the
+# floor sleep applies:
+#   start-to-start floor ≈ wall_time + interval_ms
+#   p95 floor = 11.8s + 10s = 21.8s
+#   mean_active at p95 floor: 2 × 11.8 / 21.8 = 1.08 < N_eff ✓
+#   p50 floor = 5.6s + 10s = 15.6s
+#   mean_active at p50 floor: 2 × 5.6 / 15.6 = 0.72
 #
-# requests_per_buyer = 30 gives 30 × 10s = 300s firing window per buyer.
-# Bumping duration to 360s leaves a 60s tail buffer for last-request
-# completion under p95 wall.
+# requests_per_buyer = 30 gives roughly 30 × (wall_time + 10s) per
+# buyer; duration=360s is intentionally a cap, so the run records as
+# many floor-paced samples as fit instead of enforcing a fixed count.
 #
 # Not a chaos test — providers should stay up the whole window. Any
 # 5xx in the error_taxonomy is real signal worth investigating.

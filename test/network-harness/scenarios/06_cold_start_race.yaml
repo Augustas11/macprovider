@@ -44,6 +44,7 @@ buyers:
   count: 1
   stream: false
   pattern: constant
+  initial_delay: 2s
   requests_per_buyer: 1
 
 duration: 120s
@@ -59,6 +60,6 @@ chaos_events:
   - at: 0s
     description: "Kill local provider to force a cold start"
     command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
-  # Buyer fleet fires at t=0 (constant pattern, no ramp). The single
-  # buyer request happens before the 32B model has reloaded. The 90s
-  # request_timeout / 120s duration give the cold start ~110s of room.
+  # Buyer fleet waits initial_delay=2s, then fires while the 32B model
+  # is still expected to be reloading. The 90s request_timeout / 120s
+  # duration give the cold start ~110s of room.

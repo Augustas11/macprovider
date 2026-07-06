@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,6 +41,21 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 	}
 	if server.IdleTimeout == 0 {
 		t.Fatal("IdleTimeout must be set")
+	}
+}
+
+func TestListenAddressParsesIPv4AndIPv6(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "::1", "::"} {
+		t.Run(host, func(t *testing.T) {
+			addr := listenAddress(host, 8080)
+			tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+			if err != nil {
+				t.Fatalf("ResolveTCPAddr(%q): %v", addr, err)
+			}
+			if tcpAddr.Port != 8080 {
+				t.Fatalf("port=%d want 8080 for %q", tcpAddr.Port, addr)
+			}
+		})
 	}
 }
 

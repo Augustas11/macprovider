@@ -27,6 +27,18 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 	if sc.Buyers.Count < 1 {
 		return nil, fmt.Errorf("buyers.count must be >= 1")
 	}
+	if sc.Buyers.Count > scenario.MaxBuyerCount {
+		return nil, fmt.Errorf("buyers.count must be <= %d", scenario.MaxBuyerCount)
+	}
+	if sc.Buyers.RequestsPerBuyer < 1 {
+		return nil, fmt.Errorf("buyers.requests_per_buyer must be >= 1")
+	}
+	if sc.Buyers.RequestsPerBuyer > scenario.MaxRequestsPerBuyer {
+		return nil, fmt.Errorf("buyers.requests_per_buyer must be <= %d", scenario.MaxRequestsPerBuyer)
+	}
+	if sc.Buyers.Count > scenario.MaxTotalBuyerRequests/sc.Buyers.RequestsPerBuyer {
+		return nil, fmt.Errorf("buyers.count * buyers.requests_per_buyer must be <= %d", scenario.MaxTotalBuyerRequests)
+	}
 
 	deadline := time.Time{}
 	if sc.Duration > 0 {
@@ -53,9 +65,9 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 		buyerIdx := i
 
 		// Ramp pattern: stagger goroutine starts across RampDuration.
-		startAfter := time.Duration(0)
+		startAfter := sc.Buyers.InitialDelay
 		if sc.Buyers.Pattern == "ramp" && sc.Buyers.Count > 1 {
-			startAfter = sc.Buyers.RampDuration * time.Duration(buyerIdx) / time.Duration(sc.Buyers.Count-1)
+			startAfter += sc.Buyers.RampDuration * time.Duration(buyerIdx) / time.Duration(sc.Buyers.Count-1)
 		}
 
 		wg.Add(1)
@@ -63,9 +75,8 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 			defer wg.Done()
 
 			if startAfter > 0 {
-				select {
-				case <-time.After(startAfter):
-				case <-ctx.Done():
+				ok, interrupted := waitForDispatchDelay(ctx, startAfter, deadline)
+				if interrupted || !ok {
 					return
 				}
 			}
@@ -89,9 +100,8 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 				// cold (reqIdx=0) fires without a leading idle since the
 				// provider is in its natural state when the scenario starts.
 				if sc.Buyers.Pattern == "cold_warm_pairs" && reqIdx > 0 && reqIdx%2 == 0 {
-					select {
-					case <-time.After(time.Duration(sc.Buyers.InterPairIdleSeconds) * time.Second):
-					case <-ctx.Done():
+					ok, interrupted := waitForDispatchDelay(ctx, time.Duration(sc.Buyers.InterPairIdleSeconds)*time.Second, deadline)
+					if interrupted || !ok {
 						return
 					}
 				}
@@ -114,9 +124,8 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 					return
 				}
 				if sc.Buyers.Pattern == "interval" && sc.Buyers.IntervalMs > 0 {
-					select {
-					case <-time.After(time.Duration(sc.Buyers.IntervalMs) * time.Millisecond):
-					case <-ctx.Done():
+					ok, interrupted := waitForDispatchDelay(ctx, time.Duration(sc.Buyers.IntervalMs)*time.Millisecond, deadline)
+					if interrupted || !ok {
 						return
 					}
 				}
@@ -126,6 +135,32 @@ func Run(ctx context.Context, sc *scenario.Scenario) ([]Result, error) {
 
 	wg.Wait()
 	return results, nil
+}
+
+func waitForDispatchDelay(ctx context.Context, delay time.Duration, deadline time.Time) (ok bool, interrupted bool) {
+	if delay <= 0 {
+		return true, false
+	}
+	waitUntil := time.Now().Add(delay)
+	if !deadline.IsZero() && waitUntil.After(deadline) {
+		waitUntil = deadline
+	}
+	wait := time.Until(waitUntil)
+	if wait <= 0 {
+		return !deadlineExpired(deadline), false
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return deadlineExpired(deadline) == false, false
+	case <-ctx.Done():
+		return false, true
+	}
+}
+
+func deadlineExpired(deadline time.Time) bool {
+	return !deadline.IsZero() && !time.Now().Before(deadline)
 }
 
 func fireOnce(ctx context.Context, client *http.Client, sc *scenario.Scenario, p scenario.Prompt, buyerIdx, reqIdx int) Result {
@@ -602,14 +637,147 @@ func consumeJSON(body io.Reader, res *Result) {
 		res.ErrorMsg = err.Error()
 		return
 	}
-	var c chunkPayload
-	if err := json.Unmarshal(b, &c); err == nil {
+	c, err := parseNonStreamingChatCompletion(b)
+	if err != nil {
+		if res.HTTPStatus >= 200 && res.HTTPStatus < 300 {
+			res.Outcome = "invalid_response"
+			res.ErrorCode = "invalid_response"
+			res.ErrorMsg = err.Error()
+		}
+		return
+	}
+	if c.Usage != nil {
 		if c.Usage.CompletionTokens > 0 {
 			res.CompletionTokensReceived = c.Usage.CompletionTokens
 		}
 		if c.Usage.PromptTokens > 0 {
 			res.PromptTokensReported = c.Usage.PromptTokens
 		}
-		res.SawTerminator = true
 	}
+	res.SawTerminator = true
+}
+
+type nonStreamingChatCompletion struct {
+	Choices []struct {
+		Text    *string `json:"text"`
+		Message *struct {
+			Content      *string         `json:"content"`
+			Role         *string         `json:"role"`
+			Refusal      *string         `json:"refusal"`
+			Reasoning    *string         `json:"reasoning"`
+			ToolCalls    json.RawMessage `json:"tool_calls"`
+			FunctionCall json.RawMessage `json:"function_call"`
+		} `json:"message"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
+func parseNonStreamingChatCompletion(body []byte) (nonStreamingChatCompletion, error) {
+	var c nonStreamingChatCompletion
+	if err := json.Unmarshal(body, &c); err != nil {
+		return c, fmt.Errorf("invalid JSON response: %w", err)
+	}
+	if len(c.Choices) == 0 {
+		return c, fmt.Errorf("missing choices")
+	}
+	for i, choice := range c.Choices {
+		if nonEmptyString(choice.Text) {
+			continue
+		}
+		if choice.Message == nil {
+			return c, fmt.Errorf("choices[%d].message is required", i)
+		}
+		if len(choice.Message.ToolCalls) > 0 {
+			if ok, err := validToolCalls(choice.Message.ToolCalls); err != nil {
+				return c, fmt.Errorf("choices[%d].message.tool_calls: %w", i, err)
+			} else if ok {
+				continue
+			}
+		}
+		if len(choice.Message.FunctionCall) > 0 {
+			if ok, err := validFunctionCall(choice.Message.FunctionCall); err != nil {
+				return c, fmt.Errorf("choices[%d].message.function_call: %w", i, err)
+			} else if ok {
+				continue
+			}
+		}
+		if nonEmptyString(choice.Message.Content) ||
+			nonEmptyString(choice.Message.Refusal) ||
+			nonEmptyString(choice.Message.Reasoning) {
+			continue
+		}
+		return c, fmt.Errorf("choices[%d].message has no OpenAI-compatible signal", i)
+	}
+	return c, nil
+}
+
+func nonEmptyString(v *string) bool {
+	return v != nil && *v != ""
+}
+
+func validToolCalls(raw json.RawMessage) (bool, error) {
+	if len(raw) == 0 {
+		return false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false, fmt.Errorf("must not be null")
+	}
+	var calls []struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function *struct {
+			Name      string  `json:"name"`
+			Arguments *string `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(raw, &calls); err != nil {
+		return false, fmt.Errorf("must be an array: %w", err)
+	}
+	if len(calls) == 0 {
+		return false, fmt.Errorf("must not be empty")
+	}
+	for i, call := range calls {
+		if call.ID == "" {
+			return false, fmt.Errorf("[%d].id is required", i)
+		}
+		if call.Type != "function" {
+			return false, fmt.Errorf("[%d].type must be function", i)
+		}
+		if call.Function == nil {
+			return false, fmt.Errorf("[%d].function is required", i)
+		}
+		if call.Function.Name == "" {
+			return false, fmt.Errorf("[%d].function.name is required", i)
+		}
+		if call.Function.Arguments == nil {
+			return false, fmt.Errorf("[%d].function.arguments is required", i)
+		}
+	}
+	return true, nil
+}
+
+func validFunctionCall(raw json.RawMessage) (bool, error) {
+	if len(raw) == 0 {
+		return false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false, fmt.Errorf("must not be null")
+	}
+	var call struct {
+		Name      string  `json:"name"`
+		Arguments *string `json:"arguments"`
+	}
+	if err := json.Unmarshal(raw, &call); err != nil {
+		return false, fmt.Errorf("must be an object: %w", err)
+	}
+	if call.Name == "" {
+		return false, fmt.Errorf("name is required")
+	}
+	if call.Arguments == nil {
+		return false, fmt.Errorf("arguments is required")
+	}
+	return true, nil
 }

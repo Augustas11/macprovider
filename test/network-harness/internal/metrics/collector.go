@@ -20,11 +20,12 @@ type Summary struct {
 	TransportErrs int `json:"transport_errors"`
 	ClientAborts  int `json:"client_aborts"`
 	SilentHangs   int `json:"silent_hangs"`
+	Invalid2xx    int `json:"harness_invalid_2xx_total"`
 
 	SuccessRate float64 `json:"success_rate"`
 
-	TTFTMillis  Histogram `json:"ttft_ms"`
-	TotalMillis Histogram `json:"total_ms"`
+	TTFTMillis   Histogram `json:"ttft_ms"`
+	TotalMillis  Histogram `json:"total_ms"`
 	TokensPerSec Histogram `json:"tokens_per_sec"`
 
 	// RouteDistribution: provider_id -> request count. Empty when the
@@ -74,6 +75,8 @@ func Aggregate(results []buyer.Result) *Summary {
 			s.ClientAborts++
 		case "silent_hang":
 			s.SilentHangs++
+		case "invalid_response":
+			s.Invalid2xx++
 		}
 		if r.HTTPStatus > 0 {
 			s.HTTPStatusCounts[r.HTTPStatus]++

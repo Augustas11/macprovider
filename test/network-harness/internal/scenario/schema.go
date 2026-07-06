@@ -32,7 +32,12 @@ const SKUEconCoordinatorHost = "coordinator.streamvc.live"
 // any required field that's empty.
 var envVarPattern = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
 
-const maxChargedDeliveredToleranceTokens int64 = 16
+const (
+	maxChargedDeliveredToleranceTokens int64 = 16
+	MaxBuyerCount                            = 1000
+	MaxRequestsPerBuyer                      = 10000
+	MaxTotalBuyerRequests                    = 100000
+)
 
 func expandEnv(input []byte) []byte {
 	return envVarPattern.ReplaceAllFunc(input, func(match []byte) []byte {
@@ -85,6 +90,8 @@ type Scenario struct {
 	Invariants         []string            `yaml:"invariants"`
 	BenchmarkSynthesis BenchmarkSynthesis  `yaml:"benchmark_synthesis"`
 	Artifacts          []string            `yaml:"artifacts"`
+
+	buyersRequestsPerBuyerSet bool
 }
 
 // Benchmark declares which B-invariants this scenario should evaluate
@@ -189,6 +196,7 @@ type Buyers struct {
 	//                         "cold" request, then immediately fires one "warm"
 	//                         request. RequestsPerBuyer MUST be even (= 2 × pairs).
 	Pattern          string        `yaml:"pattern"`
+	InitialDelay     time.Duration `yaml:"initial_delay"`
 	IntervalMs       int           `yaml:"interval_ms"`
 	RampDuration     time.Duration `yaml:"ramp_duration"`
 	RequestsPerBuyer int           `yaml:"requests_per_buyer"`
@@ -294,6 +302,7 @@ func load(path string, expand bool) (*Scenario, error) {
 	if err := yaml.Unmarshal(b, &sc); err != nil {
 		return nil, fmt.Errorf("yaml: %w", err)
 	}
+	sc.buyersRequestsPerBuyerSet = yamlMapPathHasKey(b, "buyers", "requests_per_buyer")
 	if !expand && sc.Mode == "sku-econ" && envVarPattern.Match(b) {
 		return nil, fmt.Errorf("sku-econ scenarios must not contain ${VAR} placeholders")
 	}
@@ -314,7 +323,7 @@ func (s *Scenario) applyDefaults() {
 	if s.Buyers.Pattern == "" {
 		s.Buyers.Pattern = "constant"
 	}
-	if s.Buyers.RequestsPerBuyer == 0 {
+	if s.Buyers.RequestsPerBuyer == 0 && !s.buyersRequestsPerBuyerSet {
 		s.Buyers.RequestsPerBuyer = 1
 	}
 	if s.Benchmark.Enabled && s.Benchmark.ProviderSlots == 0 {
@@ -331,6 +340,31 @@ func (s *Scenario) applyDefaults() {
 			s.BenchmarkSynthesis.TTFTFractionOfCeiling = 0.85
 		}
 	}
+}
+
+func yamlMapPathHasKey(b []byte, path ...string) bool {
+	var root yaml.Node
+	if err := yaml.Unmarshal(b, &root); err != nil || len(root.Content) == 0 {
+		return false
+	}
+	node := root.Content[0]
+	for _, key := range path {
+		if node.Kind != yaml.MappingNode {
+			return false
+		}
+		var next *yaml.Node
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == key {
+				next = node.Content[i+1]
+				break
+			}
+		}
+		if next == nil {
+			return false
+		}
+		node = next
+	}
+	return true
 }
 
 // Validate returns a non-nil error if the scenario is missing required
@@ -379,6 +413,15 @@ func (s *Scenario) validateBuyerFleet() error {
 	if s.Target.GatewayDBSSH != "" && s.Target.GatewayDBPath != "" {
 		return fmt.Errorf("target.gateway_db_ssh and target.gateway_db_path are mutually exclusive")
 	}
+	if s.RequestTimeout < 0 {
+		return fmt.Errorf("request_timeout must be >= 0")
+	}
+	if s.SilentHangThreshold < 0 {
+		return fmt.Errorf("silent_hang_threshold must be >= 0")
+	}
+	if s.Duration < 0 {
+		return fmt.Errorf("duration must be >= 0")
+	}
 	for i, c := range s.ChaosEvents {
 		if c.Command == "" {
 			return fmt.Errorf("chaos_events[%d].command is required", i)
@@ -390,6 +433,27 @@ func (s *Scenario) validateBuyerFleet() error {
 	if s.Buyers.Count < 1 {
 		return fmt.Errorf("buyers.count must be >= 1")
 	}
+	if s.Buyers.Count > MaxBuyerCount {
+		return fmt.Errorf("buyers.count must be <= %d", MaxBuyerCount)
+	}
+	if s.Buyers.RequestsPerBuyer < 1 {
+		return fmt.Errorf("scenario %s: requests_per_buyer must be >= 1, got %d", s.Name, s.Buyers.RequestsPerBuyer)
+	}
+	if s.Buyers.RequestsPerBuyer > MaxRequestsPerBuyer {
+		return fmt.Errorf("buyers.requests_per_buyer must be <= %d", MaxRequestsPerBuyer)
+	}
+	if s.Buyers.Count > MaxTotalBuyerRequests/s.Buyers.RequestsPerBuyer {
+		return fmt.Errorf("buyers.count * buyers.requests_per_buyer must be <= %d", MaxTotalBuyerRequests)
+	}
+	if s.Buyers.InitialDelay < 0 {
+		return fmt.Errorf("buyers.initial_delay must be >= 0")
+	}
+	if s.Buyers.IntervalMs < 0 {
+		return fmt.Errorf("buyers.interval_ms must be >= 0")
+	}
+	if s.Buyers.InterPairIdleSeconds < 0 {
+		return fmt.Errorf("buyers.inter_pair_idle_seconds must be >= 0")
+	}
 	if len(s.Prompts) == 0 {
 		return fmt.Errorf("at least one prompt is required")
 	}
@@ -399,6 +463,9 @@ func (s *Scenario) validateBuyerFleet() error {
 		}
 		if p.User == "" {
 			return fmt.Errorf("prompts[%d].user is required", i)
+		}
+		if p.MaxTokens < 0 {
+			return fmt.Errorf("prompts[%d].max_tokens must be >= 0", i)
 		}
 	}
 	switch s.Buyers.Pattern {
@@ -420,7 +487,7 @@ func (s *Scenario) validateBuyerFleet() error {
 			return fmt.Errorf("buyers.requests_per_buyer must be an even number ≥ 2 when pattern=cold_warm_pairs (got %d)", s.Buyers.RequestsPerBuyer)
 		}
 	}
-	if s.Duration <= 0 && s.Buyers.Pattern != "burst" {
+	if s.Duration == 0 && s.Buyers.Pattern != "burst" {
 		return fmt.Errorf("duration must be > 0 unless pattern=burst")
 	}
 	if s.Benchmark.Enabled {

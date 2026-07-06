@@ -189,6 +189,14 @@ type SettlementRelayFunc func(ctx context.Context, provider pool.Provider, reque
 
 type Option func(*Server)
 
+func applyTier2OutputGuard(guard *tier2.PillarDGuard, output []byte) ([]byte, string, error) {
+	filtered, err := guard.CheckNonStreamingBody(output)
+	if err != nil {
+		return nil, "tier2_output_encoding_invalid", err
+	}
+	return filtered, "", nil
+}
+
 type requestLogInserter interface {
 	Insert(context.Context, requestlog.Row) error
 	InsertForAccount(context.Context, requestlog.AuthenticatedAccount, requestlog.Row) error
@@ -2183,6 +2191,21 @@ func (s *Server) forwardHTTPSequence(
 					writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 					return dispatchedAttempt{}, false
 				}
+				guard := tier2.NewPillarDGuard(s.tier2Config(), requestID, state.provider, s.log)
+				checkedBody, blockReason, guardErr := applyTier2OutputGuard(guard, respBody)
+				if guardErr != nil {
+					cancelAttempt()
+					s.handleProviderFailure(state.provider, http.StatusBadGateway)
+					output := settlementOutputUnavailableFor(billing.TerminalStateProviderError)
+					if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, http.StatusBadGateway, nil, nil, nil, "Provider returned invalid Tier2 output encoding", blockReason, state.explicitRetries, nil, billing.FaultBreakerQualifying, output); err != nil {
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+						return dispatchedAttempt{}, false
+					}
+					writeError(w, http.StatusBadGateway, blockReason, "Provider returned invalid Tier2 output encoding")
+					return dispatchedAttempt{}, false
+				}
+				bodyMutatedByGuard := !bytes.Equal(checkedBody, respBody)
+				respBody = checkedBody
 				estimatedCompletion := s.observedCompletionTokensFromBytes(len(respBody))
 				promptTok, cachedPromptTok, completionTok := tokenPointersFromChatResponse(respBody)
 				effectiveCached := effectiveCachedPromptTokensForBuyer(cachedPromptTok, promptTok, state, rec.attemptN)
@@ -2197,6 +2220,9 @@ func (s *Server) forwardHTTPSequence(
 					respBody = chatResponseWithCachedPromptTokens(respBody, effectiveCached)
 				}
 				receiptValue := normalizeReceiptHeaderValue(resp.Header.Get("X-MacProvider-Receipt"))
+				if bodyMutatedByGuard {
+					receiptValue = ""
+				}
 				terminalTS := time.Now().UTC().UnixMilli()
 				if providerTS, ok := trustedProviderTerminalStateTS(resp.Header.Get(receiptTerminalStateTSHeaderName), startedAt, time.Now().UTC()); ok {
 					terminalTS = providerTS
@@ -2219,7 +2245,7 @@ func (s *Server) forwardHTTPSequence(
 				if hasReceiptState {
 					setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 				}
-				copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
+				setReceiptHeaderForProvider(w.Header(), receiptValue, state.provider)
 				w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 				if w.Header().Get("Content-Type") == "" {
 					w.Header().Set("Content-Type", "application/json")
@@ -2654,10 +2680,11 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				faultFlag = billing.FaultBreakerQualifying
 			}
 			originalBody := body.Bytes()
-			checkedBody, err := guard.CheckNonStreamingBody(originalBody)
+			checkedBody, blockReason, err := applyTier2OutputGuard(guard, originalBody)
 			if err != nil {
-				writeError(w, http.StatusBadGateway, "tier2_output_encoding_invalid", "Provider returned invalid Tier2 output encoding")
-				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid Tier2 output encoding"}
+				s.handleProviderFailure(provider, http.StatusBadGateway)
+				writeError(w, http.StatusBadGateway, blockReason, "Provider returned invalid Tier2 output encoding")
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid Tier2 output encoding", ErrorCode: blockReason, FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
 			// Round-2 audit HIGH: PillarD enforceOutputCap may truncate the
 			// completion. The provider signed end.Receipt over the original

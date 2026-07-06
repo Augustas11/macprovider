@@ -75,19 +75,22 @@ in phase B.
 ```
 go build -o harness ./cmd/harness
 
-# Required for all scenarios:
-export BUYER_TOKEN="..."         # live buyer bearer (committed YAML uses ${BUYER_TOKEN})
-export PEARL_SSH="root@..."      # ssh target for Pearl VPS (coordinator + gateway SQLite)
-
-# Required for chaos scenarios (05, 06):
-export PROVIDER_SSH="ops@..."    # ssh target of the Mac to chaos-kill
+# Required for buyer-fleet scenarios:
+export BUYER_TOKEN="..."         # committed YAML uses ${BUYER_TOKEN}
 
 ./harness run scenarios/smoke.yaml --out artifacts/smoke-run-1
+
+# Convenience wrapper: builds the binary, resolves scenario mode safely,
+# reads BUYER_TOKEN from .env.harness or ~/.config/macprovider/buyer-api-key,
+# and writes a timestamped artifacts/<scenario>-<utc>/ bundle.
+./run-scenario.sh smoke.yaml
 ```
 
 Scenario YAML supports `${VAR}` expansion at load time. Unset vars expand to empty
 and `Validate()` rejects empty required fields. SSH targets are passed through
-verbatim to `ssh` and `scp` — your `~/.ssh/config` and agent forwarding apply.
+verbatim to `ssh` and `scp` when remote DB reconciliation is configured.
+Committed live scenarios use the `pearl:` SSH alias; configure that in
+`~/.ssh/config` rather than exporting a separate SSH target variable.
 
 Exit codes:
 
@@ -100,13 +103,16 @@ Exit codes:
 
 ## Pointing at different stacks
 
-The harness does **not** spawn coordinator/gateway. Caller is responsible.
+The harness does **not** deploy production services. The buyer fleet runs
+in-process inside the harness binary against the configured
+`target.gateway_url`. Caller is responsible for pointing that URL at a
+live stack or at test binaries booted by `test/integration` helpers.
 
 **Default for phase A is the live network** at `https://api.streamvc.live`
-with the user's own M-series providers attached. All committed scenarios
-target this. **I1 runs against live** by SCP'ing a WAL-consistent SQLite
-snapshot (via `sqlite3 'VACUUM INTO'` over SSH) before reconciliation —
-`target.coordinator_db_ssh` and `target.gateway_db_ssh` configure where.
+with the user's own M-series providers attached. All committed buyer-fleet
+scenarios target this. **I1 runs only when DB sources are configured**:
+local file paths use `target.coordinator_db_path` / `target.gateway_db_path`;
+live runs use `target.coordinator_db_ssh` / `target.gateway_db_ssh`.
 
 Other targets supported by editing `target.gateway_url` / `target.coordinator_url`:
 
@@ -116,7 +122,7 @@ Other targets supported by editing `target.gateway_url` / `target.coordinator_ur
 - **Local stack (synthetic provider)** — via `test/integration` helpers.
   Best for harness self-validation, but won't catch real-model quirks.
 
-## DB snapshot mechanics (live runs)
+## DB snapshot mechanics
 
 When `target.coordinator_db_ssh` / `target.gateway_db_ssh` are set, the
 reconciler runs three SSH operations per DB:
@@ -132,6 +138,10 @@ live writers. The local temp file is deleted after reconciliation. If
 the SSH target requires a non-default key, set it in your `~/.ssh/config`
 under the matching host alias; the harness inherits.
 
+When `target.coordinator_db_path` / `target.gateway_db_path` are set,
+the reconciler opens those local SQLite files directly. This is the
+preferred path for in-process local stacks booted by integration helpers.
+
 ## Chaos events
 
 A scenario can include a `chaos_events` timeline:
@@ -140,10 +150,10 @@ A scenario can include a `chaos_events` timeline:
 chaos_events:
   - at: 5s
     description: "Kill provider mid-stream"
-    command: ssh ${PROVIDER_SSH} pkill -SIGKILL macprovider-cli || true
+    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
   - at: 30s
     description: "Restart provider"
-    command: ssh ${PROVIDER_SSH} 'launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider'
+    command: launchctl kickstart gui/$(id -u)/live.streamvc.macprovider
 ```
 
 Each entry runs via `/bin/sh -c` at the specified offset from scenario
@@ -156,8 +166,8 @@ with what buyers observed.
 Edit the launchd label / pkill pattern in scenarios 05 and 06 to match
 your provider's actual start mechanism before running them. The
 trailing restart events in those scenarios are best-effort — if they
-fail, you may need to SSH into the affected Mac afterward to bring the
-provider back up.
+fail, run the same launchd recovery command locally on the affected Mac
+to bring the provider back up.
 
 ## Cost discipline
 
@@ -176,7 +186,7 @@ After a run, `--out` contains:
 scenario.yaml             # verbatim copy of the input
 run_meta.json             # scenario name, UTC window, git sha
 per_request.jsonl         # one row per request — the raw evidence
-metrics_summary.json      # aggregated histograms + route distribution
+metrics_summary.json      # aggregated histograms, route distribution, invalid-2xx count
 ledger_reconcile.json     # three-way drift report (omitted when skipped)
 invariants.json           # the 4 hard verdicts
 benchmark_summary.json    # B-invariants source data (only when benchmark.enabled)
@@ -244,13 +254,13 @@ triage reads them as a set.
 
 | File | Shape | What it surfaces | Env needed |
 |---|---|---|---|
-| [`scenarios/smoke.yaml`](scenarios/smoke.yaml) | 1 buyer × 3 prompts | Harness pipeline + basic reachability | BUYER_TOKEN, PEARL_SSH |
-| [`scenarios/01_happy_path_concurrent.yaml`](scenarios/01_happy_path_concurrent.yaml) | 5 buyers × 2 requests | Routing distribution under modest concurrency, two-model parity | BUYER_TOKEN, PEARL_SSH |
-| [`scenarios/02_capacity_contention.yaml`](scenarios/02_capacity_contention.yaml) | 10 buyers, burst at t=0 | Capacity-exhaustion behavior (queue / fail-fast / preflight reject) | BUYER_TOKEN, PEARL_SSH |
-| [`scenarios/03_sticky_multi_turn.yaml`](scenarios/03_sticky_multi_turn.yaml) | 3 buyers × 5 sequential | Whether sticky affinity is active in production | BUYER_TOKEN, PEARL_SSH |
-| [`scenarios/04_wrong_model.yaml`](scenarios/04_wrong_model.yaml) | 3 buyers, nonexistent model | Negative-path error code + no-charge guarantee | BUYER_TOKEN, PEARL_SSH |
-| [`scenarios/05_mid_stream_drop.yaml`](scenarios/05_mid_stream_drop.yaml) | 1 streaming buyer + chaos kill at t=5s | Gateway behavior on mid-stream provider loss; billing of partial tokens | BUYER_TOKEN, PEARL_SSH, PROVIDER_SSH |
-| [`scenarios/06_cold_start_race.yaml`](scenarios/06_cold_start_race.yaml) | Restart provider, buyer fires before model loads | Cold-start window: queue / error / reroute / hang | BUYER_TOKEN, PEARL_SSH, PROVIDER_SSH |
+| [`scenarios/smoke.yaml`](scenarios/smoke.yaml) | 1 buyer × 3 prompts | Harness pipeline + basic reachability | BUYER_TOKEN, `pearl` SSH alias |
+| [`scenarios/01_happy_path_concurrent.yaml`](scenarios/01_happy_path_concurrent.yaml) | 5 buyers × 2 requests | Routing distribution under modest concurrency, two-model parity | BUYER_TOKEN, `pearl` SSH alias |
+| [`scenarios/02_capacity_contention.yaml`](scenarios/02_capacity_contention.yaml) | 10 buyers, burst at t=0 | Capacity-exhaustion behavior (queue / fail-fast / preflight reject) | BUYER_TOKEN, `pearl` SSH alias |
+| [`scenarios/03_sticky_multi_turn.yaml`](scenarios/03_sticky_multi_turn.yaml) | 3 buyers × 5 sequential | Whether sticky affinity is active in production | BUYER_TOKEN, `pearl` SSH alias |
+| [`scenarios/04_wrong_model.yaml`](scenarios/04_wrong_model.yaml) | 3 buyers, nonexistent model | Negative-path error code + no-charge guarantee | BUYER_TOKEN, `pearl` SSH alias |
+| [`scenarios/05_mid_stream_drop.yaml`](scenarios/05_mid_stream_drop.yaml) | 1 streaming buyer + local launchd chaos at t=5s | Gateway behavior on mid-stream provider loss; billing of partial tokens | BUYER_TOKEN, `pearl` SSH alias, local launchd label |
+| [`scenarios/06_cold_start_race.yaml`](scenarios/06_cold_start_race.yaml) | Restart provider, buyer waits 2s, then fires before model loads | Cold-start window: queue / error / reroute / hang | BUYER_TOKEN, `pearl` SSH alias, local launchd label |
 
 See [`internal/scenario/schema.go`](internal/scenario/schema.go) for the
 authoritative field reference.
@@ -260,7 +270,9 @@ Key fields:
 - `target.gateway_url` — required
 - `target.buyer_token` OR `target.demo_identity` — required
 - `target.coordinator_db_path` + `target.gateway_db_path` — required for I1
-- `buyers.count`, `buyers.pattern` (`constant` | `interval` | `ramp` | `burst`)
+- `target.coordinator_db_ssh` + `target.gateway_db_ssh` — remote snapshot alternative for I1
+- `buyers.count`, `buyers.pattern` (`constant` | `interval` | `ramp` | `burst` | `cold_warm_pairs`)
+- `buyers.initial_delay` — optional fleet-wide delay before first request
 - `prompts[]` — rotated round-robin across the buyer fleet
 - `expected_shape` — free-text "what we're looking to learn" (phase A: recorded only)
 

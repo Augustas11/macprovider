@@ -32,7 +32,7 @@ type Result struct {
 
 	// HTTP outcome.
 	HTTPStatus int    `json:"http_status"`
-	Outcome    string `json:"outcome"` // ok | http_error | transport_error | timeout | silent_hang | client_abort
+	Outcome    string `json:"outcome"` // ok | http_error | transport_error | timeout | silent_hang | client_abort | invalid_response
 
 	// Error detail (empty on Outcome=ok).
 	ErrorCode string `json:"error_code,omitempty"`
