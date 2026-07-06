@@ -104,6 +104,10 @@ struct ProviderSnapshot: Sendable {
     let modelLoaded: Bool
     let uptimeSeconds: Int
     let requestsTotal: Int
+    let inputTokensToday: Int64
+    let outputTokensToday: Int64
+    let inputTokensAllTime: Int64
+    let outputTokensAllTime: Int64
     let requestsInFlight: Int
     let requestsQueued: Int
     let errorsTotal: Int
@@ -146,6 +150,11 @@ actor ProviderStatus {
     private var capacity: ProviderCapacity
     private var status: ProviderHealthState
     private var requestsTotal = 0
+    private var tokensTodayDayStart = Calendar.current.startOfDay(for: Date())
+    private var inputTokensToday: Int64 = 0
+    private var outputTokensToday: Int64 = 0
+    private var inputTokensAllTime: Int64 = 0
+    private var outputTokensAllTime: Int64 = 0
     private var requestsInFlight = 0
     private var requestsQueued = 0
     private var errorsTotal = 0
@@ -220,6 +229,10 @@ actor ProviderStatus {
                 specDecodeWindowDraftedTokens += completion.specDecodeDraftedTokens
                 specDecodeWindowAcceptedTokens += completion.specDecodeAcceptedTokens
             }
+            recordTokenUsage(
+                promptTokens: completion.promptTokens,
+                completionTokens: completion.completionTokens
+            )
         }
         refreshAvailabilityState()
     }
@@ -304,6 +317,7 @@ actor ProviderStatus {
     }
 
     func snapshot(resetWindow: Bool = false) async -> ProviderSnapshot {
+        rolloverTokensTodayIfNeeded()
         // Resolve thermal state BEFORE reading any actor-isolated mutable
         // state. Actors are reentrant across `await`, so a `finishRequest`
         // running during the suspension could mutate `windowRequests` and
@@ -322,6 +336,10 @@ actor ProviderStatus {
             modelLoaded: modelLoaded,
             uptimeSeconds: Int(Date().timeIntervalSince(startedAt)),
             requestsTotal: requestsTotal,
+            inputTokensToday: inputTokensToday,
+            outputTokensToday: outputTokensToday,
+            inputTokensAllTime: inputTokensAllTime,
+            outputTokensAllTime: outputTokensAllTime,
             requestsInFlight: requestsInFlight,
             requestsQueued: requestsQueued,
             errorsTotal: errorsTotal,
@@ -373,6 +391,24 @@ actor ProviderStatus {
             return
         }
         status = requestsInFlight >= capacity.maxConcurrency ? .busy : .ready
+    }
+
+    private func rolloverTokensTodayIfNeeded(now: Date = Date()) {
+        let dayStart = Calendar.current.startOfDay(for: now)
+        guard dayStart > tokensTodayDayStart else { return }
+        tokensTodayDayStart = dayStart
+        inputTokensToday = 0
+        outputTokensToday = 0
+    }
+
+    private func recordTokenUsage(promptTokens: Int, completionTokens: Int) {
+        rolloverTokensTodayIfNeeded()
+        let input = Int64(max(0, promptTokens))
+        let output = Int64(max(0, completionTokens))
+        inputTokensToday += input
+        outputTokensToday += output
+        inputTokensAllTime += input
+        outputTokensAllTime += output
     }
 
     private static func memoryRSSMB() -> Int {

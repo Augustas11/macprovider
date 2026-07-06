@@ -229,6 +229,80 @@ final class ProviderStatusTests: XCTestCase {
         )
     }
 
+    func testTokenCountersAccumulateAcrossRequests() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+
+        let firstStarted = await status.beginRequest(requestID: "r-1")
+        await status.finishRequest(
+            startedAt: firstStarted,
+            completion: CompletionResult(
+                content: "ok",
+                finishReason: "stop",
+                promptTokens: 625,
+                completionTokens: 14,
+            ),
+            failed: false,
+            requestID: "r-1"
+        )
+
+        let secondStarted = await status.beginRequest(requestID: "r-2")
+        await status.finishRequest(
+            startedAt: secondStarted,
+            completion: CompletionResult(
+                content: "again",
+                finishReason: "stop",
+                promptTokens: 141,
+                completionTokens: 545,
+            ),
+            failed: false,
+            requestID: "r-2"
+        )
+
+        let snap = await status.snapshot()
+        XCTAssertEqual(snap.requestsTotal, 2)
+        XCTAssertEqual(snap.inputTokensToday, 766)
+        XCTAssertEqual(snap.outputTokensToday, 559)
+        XCTAssertEqual(snap.inputTokensAllTime, 766)
+        XCTAssertEqual(snap.outputTokensAllTime, 559)
+    }
+
+    func testTokenCountersIgnoreFailedRequestsWithoutCompletion() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let started = await status.beginRequest(requestID: "r-1")
+        await status.finishRequest(startedAt: started, completion: nil, failed: true, requestID: "r-1")
+
+        let snap = await status.snapshot()
+        XCTAssertEqual(snap.requestsTotal, 1)
+        XCTAssertEqual(snap.inputTokensToday, 0)
+        XCTAssertEqual(snap.outputTokensToday, 0)
+        XCTAssertEqual(snap.inputTokensAllTime, 0)
+        XCTAssertEqual(snap.outputTokensAllTime, 0)
+    }
+
+    func testStatusResponseExposesTokenCounters() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        let started = await status.beginRequest(requestID: "r-1")
+        await status.finishRequest(
+            startedAt: started,
+            completion: CompletionResult(
+                content: "ok",
+                finishReason: "stop",
+                promptTokens: 100,
+                completionTokens: 25,
+            ),
+            failed: false,
+            requestID: "r-1"
+        )
+
+        let snap = await status.snapshot()
+        let body = RouterHandler.statusResponse(snap, providerID: "provider-a", coordinatorURL: nil)
+
+        XCTAssertEqual(body["input_tokens_today"] as? Int64, 100)
+        XCTAssertEqual(body["output_tokens_today"] as? Int64, 25)
+        XCTAssertEqual(body["input_tokens_all_time"] as? Int64, 100)
+        XCTAssertEqual(body["output_tokens_all_time"] as? Int64, 25)
+    }
+
     func testSlotsFreeReportsZeroWhenThermallyThrottled() async {
         for state: ProcessInfo.ThermalState in [.serious, .critical] {
             let gate = ThermalGate(stateProvider: FixedThermalProvider(state: state))

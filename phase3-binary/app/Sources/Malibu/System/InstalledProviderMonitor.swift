@@ -6,6 +6,10 @@ enum InstalledProviderMonitor {
         let ready: Bool
         let model: String?
         let requestsTotal: Int?
+        let inputTokensToday: Int64?
+        let outputTokensToday: Int64?
+        let inputTokensAllTime: Int64?
+        let outputTokensAllTime: Int64?
         let uptimeSeconds: Int?
     }
 
@@ -34,11 +38,19 @@ enum InstalledProviderMonitor {
             let status = object["status"] as? String
             let model = object["model"] as? String
             let requestsTotal = object["requests_total"] as? Int
+            let inputTokensToday = int64Value(object["input_tokens_today"])
+            let outputTokensToday = int64Value(object["output_tokens_today"])
+            let inputTokensAllTime = int64Value(object["input_tokens_all_time"])
+            let outputTokensAllTime = int64Value(object["output_tokens_all_time"])
             let uptimeSeconds = object["uptime_s"] as? Int
             return HealthSnapshot(
                 ready: status == "ready",
                 model: model,
                 requestsTotal: requestsTotal,
+                inputTokensToday: inputTokensToday,
+                outputTokensToday: outputTokensToday,
+                inputTokensAllTime: inputTokensAllTime,
+                outputTokensAllTime: outputTokensAllTime,
                 uptimeSeconds: uptimeSeconds
             )
         } catch {
@@ -60,5 +72,12 @@ enum InstalledProviderMonitor {
             try? await Task.sleep(nanoseconds: UInt64(sleep * 1_000_000_000))
         }
         return false
+    }
+
+    private static func int64Value(_ value: Any?) -> Int64? {
+        if let value = value as? Int64 { return value }
+        if let value = value as? Int { return Int64(value) }
+        if let value = value as? NSNumber { return value.int64Value }
+        return nil
     }
 }
