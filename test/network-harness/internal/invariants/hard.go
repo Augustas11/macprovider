@@ -364,13 +364,10 @@ func checkI2(results []buyer.Result, ledger *reconcile.Result) Check {
 	return c
 }
 
-// I3 — no charged-tokens > delivered-tokens. The harness's own SSE
-// parser produced CompletionTokensReceived; the gateway's usage block
-// produced PromptTokensReported / CompletionTokensReceived (when the
-// usage field was inlined). For successful requests we compare:
-// reported_completion <= harness_observed_completion. Strict greater-
-// than is a fail; equal or less is fine (provider may report fewer if
-// usage is gateway-estimated).
+// I3 — no charged-tokens > delivered-tokens. This consumes the
+// reconciler's actionable GatewayOverbillVsHarnessTokens field rather
+// than raw net drift, so corroborated SPEC-006 fallback prompt-token
+// drift remains diagnostic while uncorroborated overbill still fails.
 //
 // Phase A limitation: when the usage block is provider-reported and
 // differs from the SSE-content count, we may flag false positives.

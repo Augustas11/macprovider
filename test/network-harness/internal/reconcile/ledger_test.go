@@ -221,7 +221,7 @@ func TestCollectUnmatchedGatewayOK_NoLeftovers(t *testing.T) {
 	}
 }
 
-func TestComputePerPairDrift_FallbackPairsCountBuyerVisibleOverbill(t *testing.T) {
+func TestComputePerPairDrift_FallbackPairsWithSSEErrorSuppressHarnessOverbill(t *testing.T) {
 	r := &Result{
 		MatchedSuccesses: []MatchedPair{
 			{HarnessRequestID: "fallback_undercount", HarnessCompletionTokens: 8, GatewayCompletionTokens: 64,
@@ -231,11 +231,79 @@ func TestComputePerPairDrift_FallbackPairsCountBuyerVisibleOverbill(t *testing.T
 		},
 	}
 	computePerPairDrift(r)
-	if r.GatewayOverbillVsHarnessTokens != 56 {
-		t.Errorf("fallback pair must count buyer-visible overbill 56, got %d", r.GatewayOverbillVsHarnessTokens)
+	if r.GatewayOverbillVsHarnessTokens != 0 {
+		t.Errorf("corroborated fallback pair must suppress harness-axis overbill, got %d", r.GatewayOverbillVsHarnessTokens)
 	}
-	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "fallback_undercount" {
-		t.Errorf("fallback pair must appear in OverbilledPairs: %v", r.OverbilledPairs)
+	if len(r.OverbilledPairs) != 0 {
+		t.Errorf("corroborated fallback pair must not appear in OverbilledPairs: %v", r.OverbilledPairs)
+	}
+}
+
+func TestComputePerPairDrift_StreamOutputExceededSSEErrorPromptOnlySuppressesHarnessOverbill_449(t *testing.T) {
+	r := &Result{
+		MatchedSuccesses: []MatchedPair{
+			{
+				HarnessRequestID:            "scenario15_prompt_only",
+				HarnessTotalTokens:          0,
+				HarnessCompletionTokens:     0,
+				GatewayTotalTokens:          64,
+				GatewayCompletionTokens:     0,
+				CoordinatorRequestID:        "coord_scenario15_prompt_only",
+				CoordinatorTotalTokens:      63,
+				CoordinatorCompletionTokens: 0,
+				GatewayOutcome:              "stream_output_exceeded",
+				HarnessSawSSEErrorEvent:     true,
+				HarnessSSEErrorCode:         "stream_output_exceeded",
+			},
+		},
+	}
+
+	computePerPairDrift(r)
+
+	if r.NetGatewayMinusHarnessTokens != 64 {
+		t.Errorf("raw net harness drift should remain visible for triage: want 64, got %d", r.NetGatewayMinusHarnessTokens)
+	}
+	if r.GatewayOverbillVsHarnessTokens != 0 {
+		t.Errorf("corroborated stream_output_exceeded fallback must suppress harness-axis prompt-token overbill, got %d", r.GatewayOverbillVsHarnessTokens)
+	}
+	if len(r.OverbilledPairs) != 0 {
+		t.Errorf("corroborated stream_output_exceeded fallback must not appear in OverbilledPairs: %v", r.OverbilledPairs)
+	}
+	if r.NetGatewayMinusCoordinatorTokens != 1 || r.GatewayOverbillVsCoordinatorTokens != 1 {
+		t.Errorf("raw gw-coord tokenizer drift should remain diagnostic, got net=%d overbill=%d",
+			r.NetGatewayMinusCoordinatorTokens, r.GatewayOverbillVsCoordinatorTokens)
+	}
+	if r.AbsGatewayCoordinatorMismatchTokens != 0 || len(r.GatewayCoordMismatchedPairs) != 0 {
+		t.Errorf("corroborated fallback must suppress gw-coord mismatch signal, got abs=%d pairs=%v",
+			r.AbsGatewayCoordinatorMismatchTokens, r.GatewayCoordMismatchedPairs)
+	}
+}
+
+func TestComputePerPairDrift_StreamOutputExceededMalformedEnvelopeDoesNotSuppressOverbill_449(t *testing.T) {
+	r := &Result{
+		MatchedSuccesses: []MatchedPair{
+			{
+				HarnessRequestID:        "scenario15_malformed_envelope",
+				HarnessTotalTokens:      0,
+				HarnessCompletionTokens: 0,
+				GatewayTotalTokens:      64,
+				GatewayCompletionTokens: 0,
+				GatewayOutcome:          "stream_output_exceeded",
+				// The buyer parser leaves this false for malformed terminal
+				// envelopes that contain choices/usage keys or duplicate keys.
+				HarnessSawSSEErrorEvent: false,
+				HarnessSSEErrorCode:     "",
+			},
+		},
+	}
+
+	computePerPairDrift(r)
+
+	if r.GatewayOverbillVsHarnessTokens != 64 {
+		t.Errorf("malformed-envelope fallback must not suppress harness-axis prompt-token overbill, got %d", r.GatewayOverbillVsHarnessTokens)
+	}
+	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "scenario15_malformed_envelope" {
+		t.Errorf("malformed-envelope fallback must surface in OverbilledPairs, got %v", r.OverbilledPairs)
 	}
 }
 
@@ -308,8 +376,8 @@ func TestComputePerPairDrift_FallbackUnlistedCodeMismatch_232_R6_HIGH(t *testing
 // the SPEC-006 §17.7.1 named-mapping exception path. Buyer-visible
 // `error.code=provider_disconnected` while gateway outcome is
 // `stream_truncated` is an EXPLICITLY allowed divergence (matches
-// gateway writeProviderDisconnectedSSE behavior). The mapping may suppress
-// coord-mismatch noise, but it must not suppress buyer-visible overbill.
+// gateway writeProviderDisconnectedSSE behavior). The mapping suppresses both
+// coord-mismatch noise and harness-axis overbill noise.
 func TestComputePerPairDrift_FallbackNamedMappingException_232_R6(t *testing.T) {
 	r := &Result{
 		MatchedSuccesses: []MatchedPair{
@@ -320,11 +388,11 @@ func TestComputePerPairDrift_FallbackNamedMappingException_232_R6(t *testing.T) 
 		},
 	}
 	computePerPairDrift(r)
-	if r.GatewayOverbillVsHarnessTokens != 56 {
-		t.Errorf("provider_disconnected↔stream_truncated named mapping must still count overbill 56, got %d", r.GatewayOverbillVsHarnessTokens)
+	if r.GatewayOverbillVsHarnessTokens != 0 {
+		t.Errorf("provider_disconnected↔stream_truncated named mapping must suppress harness-axis overbill, got %d", r.GatewayOverbillVsHarnessTokens)
 	}
-	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "named_exception" {
-		t.Errorf("named-mapping exception must surface buyer-visible overbill, got %v", r.OverbilledPairs)
+	if len(r.OverbilledPairs) != 0 {
+		t.Errorf("named-mapping exception must not surface harness-axis overbill, got %v", r.OverbilledPairs)
 	}
 }
 
@@ -358,9 +426,9 @@ func TestSseErrorCorroboratesOutcome_232_R6(t *testing.T) {
 
 // TestComputePerPairDrift_FallbackPairSuppressedWithSSEErrorEvent_232:
 // the legitimate fallback case: gateway labeled the pair as a fallback AND
-// the buyer received the matching terminal SSE error envelope. This can
-// suppress coord mismatch noise, but not buyer-visible overbill.
-func TestComputePerPairDrift_FallbackPairCountsHarnessOverbillWithSSEErrorEvent_232(t *testing.T) {
+// the buyer received the matching terminal SSE error envelope. This suppresses
+// both coord mismatch noise and harness-axis overbill noise.
+func TestComputePerPairDrift_FallbackPairSuppressesHarnessOverbillWithSSEErrorEvent_232(t *testing.T) {
 	r := &Result{
 		MatchedSuccesses: []MatchedPair{
 			{HarnessRequestID: "legit_truncation", HarnessCompletionTokens: 8, GatewayCompletionTokens: 64,
@@ -370,17 +438,17 @@ func TestComputePerPairDrift_FallbackPairCountsHarnessOverbillWithSSEErrorEvent_
 	}
 	computePerPairDrift(r)
 
-	if r.GatewayOverbillVsHarnessTokens != 56 {
-		t.Errorf("legit truncation must count harness-axis overbill 56, got %d", r.GatewayOverbillVsHarnessTokens)
+	if r.GatewayOverbillVsHarnessTokens != 0 {
+		t.Errorf("legit truncation must suppress harness-axis overbill, got %d", r.GatewayOverbillVsHarnessTokens)
 	}
 	if r.GatewayOverbillVsCoordinatorTokens != 0 {
-		t.Errorf("legit truncation must keep coord-axis suppression, got %d", r.GatewayOverbillVsCoordinatorTokens)
+		t.Errorf("legit truncation fixture has gateway under coord, so positive coord-axis overbill must stay 0, got %d", r.GatewayOverbillVsCoordinatorTokens)
 	}
 	if r.AbsGatewayCoordinatorMismatchTokens != 0 {
 		t.Errorf("legit truncation must keep coord-mismatch suppression, got %d", r.AbsGatewayCoordinatorMismatchTokens)
 	}
-	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "legit_truncation" || len(r.GatewayCoordMismatchedPairs) != 0 {
-		t.Errorf("legit truncation must surface overbill only, got %v / %v",
+	if len(r.OverbilledPairs) != 0 || len(r.GatewayCoordMismatchedPairs) != 0 {
+		t.Errorf("legit truncation must suppress overbill and coord mismatch, got %v / %v",
 			r.OverbilledPairs, r.GatewayCoordMismatchedPairs)
 	}
 }
@@ -998,7 +1066,7 @@ func TestMatchPairs_MixedExactAndFuzzyPool(t *testing.T) {
 
 // TestMatchPairs_FallbackExactMatchEndToEnd is the R1 code-lane LOW:
 // a harness OK whose exact gateway match is a fallback outcome must
-// (a) match by exact id, (b) count buyer-visible gateway overbill,
+// (a) match by exact id, (b) suppress corroborated fallback overbill,
 // (c) NOT trigger MatchedCoordMissing, (d) NOT leak into
 // UnmatchedGatewayOKRows.
 func TestMatchPairs_FallbackExactMatchEndToEnd(t *testing.T) {
@@ -1025,11 +1093,11 @@ func TestMatchPairs_FallbackExactMatchEndToEnd(t *testing.T) {
 	if r.MatchedSuccesses[0].GatewayMatchMethod != "exact_id" {
 		t.Errorf("want exact_id match on fallback row, got %q", r.MatchedSuccesses[0].GatewayMatchMethod)
 	}
-	if r.GatewayOverbillVsHarnessTokens != 56 {
-		t.Errorf("fallback exact-match must count buyer-visible overbill 56, got %d", r.GatewayOverbillVsHarnessTokens)
+	if r.GatewayOverbillVsHarnessTokens != 0 {
+		t.Errorf("fallback exact-match must suppress corroborated harness-axis overbill, got %d", r.GatewayOverbillVsHarnessTokens)
 	}
-	if len(r.OverbilledPairs) != 1 || r.OverbilledPairs[0] != "h1" {
-		t.Errorf("fallback exact-match must surface in OverbilledPairs, got %v", r.OverbilledPairs)
+	if len(r.OverbilledPairs) != 0 {
+		t.Errorf("fallback exact-match must not surface in OverbilledPairs, got %v", r.OverbilledPairs)
 	}
 	if len(r.MatchedCoordMissing) != 0 {
 		t.Errorf("fallback pair must not trigger coord-missing, got %v", r.MatchedCoordMissing)

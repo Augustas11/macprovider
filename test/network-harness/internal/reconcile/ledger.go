@@ -27,7 +27,8 @@
 //     bypass or settlement gap
 //   - "row count or token-sum mismatch between gateway and coord in
 //     the window" — money-path drift
-//   - "harness saw N tokens but gateway billed M (M > N)" — overcharge
+//   - "gateway has actionable positive drift vs harness after fallback
+//     corroboration suppression" — overcharge
 package reconcile
 
 import (
@@ -158,14 +159,16 @@ type Result struct {
 	NetGatewayMinusCoordinatorTokens int64 `json:"net_gateway_minus_coordinator_tokens"`
 	NetGatewayMinusHarnessTokens     int64 `json:"net_gateway_minus_harness_tokens"`
 
-	// Gateway-vs-Harness positive overbill: I1 headline signal for this
-	// axis. Sums per-pair (gateway − harness) where gateway > harness.
-	// Underbill alone is allowed because gateway-side streaming rounding
-	// can legitimately undercount vs the harness's SSE byte timeline.
-	// Positive-only means a +N overbill is not hidden behind a −N
-	// underbill (#229 R1 CRITICAL).
+	// Gateway-vs-Harness actionable overbill: I1/I3 headline signal for
+	// this axis. Sums per-pair (gateway − harness) where gateway > harness,
+	// excluding SPEC-006 fallback outcomes corroborated by the buyer's
+	// terminal SSE error envelope. Raw signed drift remains visible in
+	// NetGatewayMinusHarnessTokens. Underbill alone is allowed because
+	// gateway-side streaming rounding can legitimately undercount vs the
+	// harness's SSE byte timeline. Positive-only means a +N overbill is not
+	// hidden behind a −N underbill (#229 R1 CRITICAL).
 	GatewayOverbillVsHarnessTokens int64    `json:"gateway_overbill_vs_harness_tokens"`
-	OverbilledPairs                []string `json:"overbilled_pairs,omitempty"` // harness request_ids of overbilled pairs
+	OverbilledPairs                []string `json:"overbilled_pairs,omitempty"` // harness request_ids of actionable overbill pairs
 
 	// Gateway-vs-Coordinator positive overbill: REFERENCE ONLY for triage.
 	// Both gateway and coord are settlement systems and MUST agree on
@@ -253,7 +256,7 @@ type MatchedPair struct {
 	// HarnessSawSSEErrorEvent carries through buyer.Result.SawSSEErrorEvent:
 	// true when the last DISPATCHED SSE event in the buyer's stream before
 	// `[DONE]` or EOF was a STANDALONE OpenAI-style terminal `error`
-	// envelope (no `choices`, no `usage` tokens) — the shape SPEC-006
+	// envelope (no `choices` key, no `usage` key) — the shape SPEC-006
 	// §17.7.1 pins for every in-scope fallback path. "Dispatched" is
 	// precise per the HTML5/SSE model: only a blank-line-terminated
 	// event counts (#232 R8 SEC HIGH — closes the leading-`[DONE]`
@@ -285,10 +288,10 @@ type MatchedPair struct {
 	// HarnessSSEErrorCode carries the `error.code` value from the
 	// terminal SSE error envelope, when one was observed. Empty when
 	// HarnessSawSSEErrorEvent is false. Triage uses this to cross-check
-	// the buyer-visible code against the gateway's `outcome` column —
-	// a mismatch (e.g. buyer saw `provider_disconnected` but gateway
-	// settled `stream_truncated`) is not currently an I1 signal but is
-	// useful evidence in `ledger_reconcile.json`. (#232 R2 ARCH LOW.)
+	// the buyer-visible code against the gateway's `outcome` column. A
+	// mismatch without a named SPEC-006 mapping exception prevents fallback
+	// overbill suppression, so positive drift remains actionable in I1/I3.
+	// (#232 R2 ARCH LOW.)
 	HarnessSSEErrorCode string `json:"harness_sse_error_code,omitempty"`
 }
 
@@ -457,14 +460,16 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 //	             field is for triage reference, NOT the I1 pass/fail
 //	             input (3-lane codex audit CRITICAL on PR #229 R1).
 //
-//	GatewayOverbill*-: sum of POSITIVE-only per-pair deltas; an overbilled
-//	                  pair contributes its overbill amount, an underbilled
-//	                  pair contributes 0. This is the headline overbill
-//	                  signal — does NOT cancel against other pairs.
+//	GatewayOverbill*-: positive-only per-pair deltas retained for triage.
+//	                  On the harness axis, corroborated fallback pairs are
+//	                  suppressed before contributing to the I1/I3 headline
+//	                  signal; on the coord axis, I1 gates on
+//	                  AbsGatewayCoordinatorMismatchTokens instead. This
+//	                  positive-only view does NOT cancel against underbills.
 //
-// Also populates OverbilledPairs with harness request IDs of any pair
-// where the gateway billed more than the harness observed, so triage
-// can drill into the offending requests.
+// Also populates OverbilledPairs with harness request IDs of actionable
+// gateway-vs-harness overbill pairs after fallback corroboration suppression,
+// so triage can drill into the offending requests.
 //
 // MatchedCoordMissing is populated for pairs whose gateway outcome is
 // "ok" but no coord row matched — fallback outcomes legitimately lack
@@ -476,12 +481,14 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 func computePerPairDrift(r *Result) {
 	for _, p := range r.MatchedSuccesses {
 		// Gateway vs Harness — fold every positive buyer-visible delta into
-		// the headline overbill signal. Fallback/SSE-error corroboration can
-		// explain why a stream ended, but it must not hide a gateway row that
-		// charged more completion tokens than the harness observed.
+		// the headline overbill signal unless a SPEC-006 fallback outcome is
+		// corroborated by the buyer-visible terminal SSE error envelope. Raw
+		// signed drift still lands in NetGatewayMinusHarnessTokens for triage,
+		// but I1/I3 should not fail on prompt tokens consumed before a
+		// corroborated error-terminated stream.
 		dh := pairGatewayTokens(p) - pairHarnessTokens(p)
 		r.NetGatewayMinusHarnessTokens += dh
-		if dh > 0 {
+		if dh > 0 && !fallbackOverbillSuppressed(p) {
 			r.GatewayOverbillVsHarnessTokens += dh
 			r.OverbilledPairs = append(r.OverbilledPairs, p.HarnessRequestID)
 		}
@@ -493,12 +500,13 @@ func computePerPairDrift(r *Result) {
 		// surface. AbsGatewayCoordinatorMismatchTokens uses |delta| to
 		// avoid signed-cancel across pairs (#229 R2 HIGH).
 		//
-		// Fallback pairs keep contributing to the signed net for triage,
-		// but are excluded from overbill/mismatch signals for the same
-		// fallback-unit asymmetry described on the gateway-vs-harness axis
-		// above: gateway counts emitted bytes before truncation, while coord
-		// can record the provider's full reported usage. Counting that as
-		// drift false-fails I1 in the #285 reproduction.
+		// Fallback pairs keep contributing to the signed net and positive
+		// gw-coord overbill fields for triage, but are excluded from I1's
+		// absolute mismatch signal for the same fallback-unit asymmetry
+		// described on the gateway-vs-harness axis above: gateway counts
+		// emitted bytes before truncation, while coord can record the
+		// provider's full reported usage. Counting that as drift false-fails
+		// I1 in the #285 reproduction.
 		//
 		// #232: same buyer-corroboration check applies here. The coord
 		// axis uses the buyer's view as the trust anchor — if the buyer
