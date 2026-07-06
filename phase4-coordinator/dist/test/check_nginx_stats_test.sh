@@ -80,6 +80,7 @@ mkdir -p "$TMP/conf.d" "$TMP/sites-enabled" "$TMP/cache" "$TMP/log"
 chmod 0777 "$TMP/cache" "$TMP/log"
 cp "$DIST_DIR/nginx-snippets/stats-shared.conf"           "$TMP/conf.d/stats-shared.conf"
 cp "$DIST_DIR/nginx-snippets/stats-security-headers.conf" "$TMP/conf.d/stats-security-headers.conf"
+cp "$DIST_DIR/nginx-snippets/cors-429.conf"               "$TMP/conf.d/cors-429.conf"
 
 # Build a test-only stats vhost: strip TLS, rewrite proxy_pass to
 # the host-side upstream mock. Issue #244: dist confs now ship with
@@ -229,8 +230,11 @@ if [ "$PASS" -ne 60 ]; then fail "AC-8: 60 anonymous /overview passes = $PASS, w
 RESP=$(curl -s -i "${BASE}/v1/stats/overview")
 if ! grep -q '^HTTP/1.1 429' <<<"$RESP"; then fail "AC-8: 61st request did not return 429: $(head -1 <<<"$RESP")"; fi
 if ! grep -qi '^Retry-After: 60' <<<"$RESP"; then fail "AC-8: 61st response missing Retry-After: 60"; fi
+if ! grep -qi '^Access-Control-Allow-Origin: \*' <<<"$RESP"; then fail "AC-8: 61st response missing public ACAO:*"; fi
+if grep -qi '^Access-Control-Allow-Credentials:' <<<"$RESP"; then fail "AC-8: 61st public 429 must not emit Allow-Credentials"; fi
+if ! grep -qi '^X-Stats-Rate-Limit: exceeded' <<<"$RESP"; then fail "AC-8: 61st response missing X-Stats-Rate-Limit"; fi
 if ! grep -q '"code":"rate_limited"' <<<"$RESP"; then fail "AC-8: 61st response missing rate_limited envelope"; fi
-[ "$FAIL" -eq 0 ] && ok "AC-8: 60 anonymous /overview pass, 61st returns 429 + Retry-After + §5.9 envelope"
+[ "$FAIL" -eq 0 ] && ok "AC-8: 60 anonymous /overview pass, 61st returns 429 + public CORS + Retry-After + §5.9 envelope"
 
 # Step 5 — Keyed-bypass: 100 valid-keyed /leaderboard from one IP
 # must NOT trip the public limiter. Use a fixed `mpk_*` token that

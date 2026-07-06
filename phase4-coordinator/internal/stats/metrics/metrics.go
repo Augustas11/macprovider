@@ -22,7 +22,7 @@
 //     never reached a partner-key match).
 //
 //   - `endpoint` is a closed set: "overview" / "leaderboard" /
-//     "health" (mirrors the Step 3 mux verbs).
+//     "provider" / "health" (mirrors the Step 3 mux verbs).
 //
 //   - `component` is a closed set from §9.5: "overview",
 //     "timeseries_rpm", "timeseries_tpm", "leaderboard_24h",
@@ -56,6 +56,7 @@ type Metrics struct {
 	PartnerKeyRequestTotal *prometheus.CounterVec
 	RollupLagSeconds       *prometheus.GaugeVec
 	RollupErrorsTotal      *prometheus.CounterVec
+	RollupPanicTotal       *prometheus.CounterVec
 	RateLimitExceededTotal *prometheus.CounterVec
 	RegisterRateLimitHits  *prometheus.CounterVec
 	RegisterSource         *prometheus.CounterVec
@@ -96,6 +97,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			prometheus.CounterOpts{
 				Name: "stats_rollup_errors_total",
 				Help: "Count of rollup-tick errors per component (panics + returned errors).",
+			},
+			[]string{"component"},
+		),
+		RollupPanicTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "stats_rollup_panic_total",
+				Help: "Count of recovered rollup panics per component.",
 			},
 			[]string{"component"},
 		),

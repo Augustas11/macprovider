@@ -347,6 +347,13 @@ func WithTrustedProxies(prefixes []netip.Prefix) Option {
 	}
 }
 
+func WithStreamingMetricsMaxSamples(maxSamples int) Option {
+	return func(s *Server) {
+		s.streamingDowngrade = newStreamingDowngradeStoreWithLimit(maxSamples)
+		s.streamingTiming = newStreamingTimingCollectorWithLimit(maxSamples)
+	}
+}
+
 func (s *Server) SetTier2Config(cfg config.Tier2Config) {
 	s.tier2Mu.Lock()
 	defer s.tier2Mu.Unlock()
@@ -618,7 +625,11 @@ func authenticatedAccountFromContext(ctx context.Context) (requestlog.Authentica
 
 func (s *Server) handleStreamingMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	_, _ = w.Write([]byte(s.streamingTiming.prometheusText()))
+	var downgradeEvictions int64
+	if s.streamingDowngrade != nil {
+		downgradeEvictions = s.streamingDowngrade.evictionsForTest()
+	}
+	_, _ = w.Write([]byte(s.streamingTiming.prometheusText(downgradeEvictions)))
 }
 
 func (s *Server) InternalHandler() http.Handler {

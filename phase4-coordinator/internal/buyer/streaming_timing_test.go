@@ -18,7 +18,7 @@ func TestStreamingTimingCollectorSkipsLargeSkewAndExportsP95(t *testing.T) {
 	headers.Set(streamingTimingGatewayByteHeader, strconvMillis(base.Add(1300*time.Millisecond)))
 
 	collector.observeFromHeaders("req-1", "provider-a", streamingModeIncremental, headers, base.Add(1200*time.Millisecond))
-	text := collector.prometheusText()
+	text := collector.prometheusText(0)
 	if !strings.Contains(text, "macprovider_streaming_timing_samples_total 1") {
 		t.Fatalf("metrics missing sample count: %s", text)
 	}
@@ -29,10 +29,39 @@ func TestStreamingTimingCollectorSkipsLargeSkewAndExportsP95(t *testing.T) {
 	skewed := headers.Clone()
 	skewed.Set(streamingTimingGatewayNowHeader, strconvMillis(base.Add(800*time.Millisecond)))
 	collector.observeFromHeaders("req-2", "provider-a", streamingModeIncremental, skewed, base.Add(1200*time.Millisecond))
-	text = collector.prometheusText()
+	text = collector.prometheusText(0)
 	if !strings.Contains(text, "macprovider_streaming_timing_samples_total 1") ||
 		!strings.Contains(text, "macprovider_streaming_timing_skew_skipped_total 1") {
 		t.Fatalf("large-skew sample should be skipped: %s", text)
+	}
+}
+
+func TestStreamingTimingCollectorBoundsSamples(t *testing.T) {
+	collector := newStreamingTimingCollectorWithLimit(3)
+	base := time.Unix(1000, 0).UTC()
+	headers := http.Header{}
+	headers.Set(streamingTimingProviderOpenHeader, strconvMillis(base))
+	for i := 0; i < 5; i++ {
+		collector.observeFromHeaders(
+			"req-"+strconv.Itoa(i),
+			"provider-a",
+			streamingModeIncremental,
+			headers,
+			base.Add(time.Duration(i+1)*time.Millisecond),
+		)
+	}
+	records, _ := collector.snapshot()
+	if len(records) != 3 {
+		t.Fatalf("records len=%d want 3", len(records))
+	}
+	if records[0].RequestID != "req-2" {
+		t.Fatalf("oldest retained request=%q want req-2", records[0].RequestID)
+	}
+	if got := collector.evictionsCount(); got != 2 {
+		t.Fatalf("evictions=%d want 2", got)
+	}
+	if text := collector.prometheusText(7); !strings.Contains(text, "stats_streaming_metrics_evictions_total 9") {
+		t.Fatalf("metrics missing combined eviction count: %s", text)
 	}
 }
 

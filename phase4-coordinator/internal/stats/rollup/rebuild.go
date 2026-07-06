@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
 )
+
+var leaderboardWriteMu sync.Mutex
 
 // runNightlyRebuild performs the §9.4 v0.1.8 Shape C full
 // rebuild of `stats_leaderboard_30d` AND `stats_leaderboard_all`
@@ -29,6 +32,9 @@ import (
 // idempotent step that can be retried independently of the
 // rebuild atomicity.
 func runNightlyRebuild(ctx context.Context, db *sql.DB, cfg Config, logger zerolog.Logger) error {
+	leaderboardWriteMu.Lock()
+	defer leaderboardWriteMu.Unlock()
+
 	now := time.Now().UTC()
 	windows := []string{"30d", "all"}
 

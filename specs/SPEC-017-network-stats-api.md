@@ -238,6 +238,10 @@ special case.
   `requests/minute` + `tokens/minute` timeseries.
 - `GET /v1/stats/leaderboard` — rolling-window pseudonymized provider
   rankings by `earnings` | `tokens` | `jobs` over `24h | 7d | 30d | all`.
+- `GET /v1/stats/provider/<provider_id>` — bearer-gated per-provider
+  drill-down. The bearer MUST be bound server-side to the same
+  `provider_id`; provider keys are never exposed to browser clients for
+  client-side filtering.
 - `GET /v1/stats/health` — generated-at timestamp + rollup-pipeline
   liveness signal.
 - A rollup pipeline writing into narrow `stats_*` Postgres tables
@@ -257,8 +261,9 @@ back into v0.1.
   v0.2+ work item.
 - **WebSocket/SSE live push.** v0.1 is HTTP poll + edge cache only.
 - **GraphQL surface.** REST + JSON only.
-- **Per-provider drill-down** (`/v1/stats/provider/<id>`). Distinct
-  surface; gated on earnings-visibility policy being battle-tested.
+- Provider-owned mutation of the public visibility mode remains out of
+  scope; the provider drill-down read surface is server-filtered and
+  bearer-bound.
 - **Authenticated partner dashboards / per-key analytics UI.**
 - **Cross-region replicas.** Pearl VPS is the single backend.
 - **Webhook events** (e.g. "provider X passed threshold Y").
@@ -535,6 +540,7 @@ explorer. Both reach Postgres but via distinct DB roles; see §7.2.
 |---|---|---|---|
 | `GET /v1/stats/overview` | None | yes, public | no |
 | `GET /v1/stats/leaderboard` | Optional `Bearer <partner_key>` | yes; key MAY unlock a separate cache projection | yes, behind key |
+| `GET /v1/stats/provider/<provider_id>` | Required `Bearer <partner_key>` bound to `provider_id` | no; private only | yes, for that provider only |
 | `GET /v1/stats/health` | None | short cache (10s) | no |
 
 `HEAD` MUST be supported on every `GET`. `OPTIONS` MUST return CORS
@@ -800,6 +806,14 @@ the legal posture this requires AND the launch-sequencing
 precondition (§6.6.2: partner-key issuance MUST NOT begin in
 production until SPEC-014 v0.9 disclosure UI ships).
 
+**Deprecation note.** The broad partner-key leaderboard projection is
+kept for one release cycle for existing dashboards. New browser
+clients MUST use `/v1/stats/provider/<provider_id>` for exact
+per-provider earnings. That route performs server-side filtering from
+the bearer's `partner_keys.provider_id` binding and returns `403` when
+the path provider does not match the bearer. No partner key or provider
+filter secret may be shipped to browser code for client-side filtering.
+
 **Response headers (public projection).**
 
 - `Content-Type: application/json; charset=utf-8`
@@ -845,6 +859,21 @@ production until SPEC-014 v0.9 disclosure UI ships).
 - `401` invalid or revoked `Authorization`
 - `429` rate limit exceeded (§5.6)
 - `503` rollup stale beyond §5.8 budget
+
+### 5.2a `GET /v1/stats/provider/<provider_id>`
+
+Returns exact windowed stats for one provider. The request MUST carry
+`Authorization: Bearer <partner_key>`, and the matched `partner_keys`
+row MUST have `provider_id = <provider_id>`. Missing bearer returns
+`401`; a valid bearer bound to a different provider returns `403` with
+the `unauthorized` error code from §5.9. Successful responses are
+`Cache-Control: private, max-age=30, s-maxage=30` and `Vary:
+Accept-Encoding, Origin, Authorization`.
+
+The route exists so browser clients do not receive a partner key and
+then filter an all-provider exact leaderboard client-side. The server
+performs the provider binding and returns only the requested provider's
+row.
 
 ### 5.3 `GET /v1/stats/health`
 
@@ -916,6 +945,7 @@ CREATE TABLE partner_keys (
   token_hash        BYTEA NOT NULL,
   token_hash_alg    TEXT NOT NULL DEFAULT 'sha256',
   prefix            TEXT NOT NULL,
+  provider_id       TEXT,
   allowed_origins   TEXT[] NOT NULL DEFAULT '{}',
   rate_limit_rpm    INT  NOT NULL DEFAULT 600,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -927,6 +957,7 @@ CREATE TABLE partner_keys (
   UNIQUE (token_hash)
 );
 CREATE INDEX ON partner_keys (prefix);
+CREATE INDEX ON partner_keys (provider_id) WHERE provider_id IS NOT NULL;
 ```
 
 The `partner_keys.id BIGSERIAL` backing sequence
@@ -946,6 +977,10 @@ Field rules:
 - `prefix` — the first 8 characters of the raw token (including the
   `mpk_` namespace). Stored for log-correlation and last-4 display
   in operator tooling, NOT for auth.
+- `provider_id` — optional server-side binding for
+  `/v1/stats/provider/<provider_id>`. A key without this binding cannot
+  access provider drill-down, even if it remains temporarily accepted
+  for the deprecated broad partner leaderboard projection.
 - `allowed_origins` — an array of exact-match origin strings (e.g.
   `https://partner.example.com`). Empty array means "no Origin
   restriction" — public partner usage from any origin. See §5.7 CORS
@@ -1160,6 +1195,10 @@ Both tiers MUST return `429 Too Many Requests` on exhaustion, with
 primary enforcement layer for the public tier so a misbehaving
 partner cannot starve the coordinator process; the in-process bucket
 exists as a defense-in-depth fallback.
+When nginx generates the 429 before the Go handler resolves the
+request projection, it MUST use the public CORS branch from §5.7:
+`Access-Control-Allow-Origin: *` and no
+`Access-Control-Allow-Credentials`.
 
 **Auth-failure tier (v0.1.8 binding).** Because the public nginx
 limiter is keyed empty for Authorization-bearing requests (per the
@@ -1318,7 +1357,7 @@ Code vocabulary (closed set for v0.1):
 | `code` | HTTP | When |
 |---|---|---|
 | `bad_request` | 400 | malformed `window`/`sort`/`limit` |
-| `unauthorized` | 401 | invalid or revoked `Authorization` |
+| `unauthorized` | 401 or 403 | invalid or revoked `Authorization`; valid bearer not authorized for the requested provider returns 403 |
 | `method_not_allowed` | 405 | request verb not in `Allow: GET, HEAD, OPTIONS` (§4.3); response MUST also carry `Allow: GET, HEAD, OPTIONS` |
 | `rate_limited` | 429 | per-IP or per-key bucket exhausted |
 | `stats_stale` | 503 | rollup older than §5.8 budget |

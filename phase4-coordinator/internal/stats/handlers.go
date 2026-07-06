@@ -262,6 +262,14 @@ type leaderboardResponse struct {
 	Rows                []leaderboardRespRow  `json:"rows"`
 }
 
+type providerStatsResponse struct {
+	GeneratedAt string             `json:"generated_at"`
+	StaleAfter  string             `json:"stale_after"`
+	Window      string             `json:"window"`
+	ProviderID  string             `json:"provider_id"`
+	Row         leaderboardRespRow `json:"row"`
+}
+
 type leaderboardMeta struct {
 	RewardsPopulated bool `json:"rewards_populated"`
 }
@@ -364,6 +372,12 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 		limit = n
 	}
 
+	partnerProj := ar.projection == "partner"
+	if partnerProj && ar.matchedKey != nil && ar.matchedKey.ProviderID.Valid {
+		writeError(w, r, http.StatusForbidden, codeUnauthorized, "unauthorized", now, nil)
+		return
+	}
+
 	rows, err := h.Store.Leaderboard(ctx, window, sort, limit)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "leaderboard read failed", now, nil)
@@ -411,8 +425,6 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "rewards_populated read failed", now, nil)
 		return
 	}
-
-	partnerProj := ar.projection == "partner"
 
 	respRows := make([]leaderboardRespRow, 0, len(rows))
 	// Page-scoped sums for totals (round-1 ARCH H2 fix: totals
@@ -490,6 +502,9 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 	if partnerProj {
 		cacheControl = "private, max-age=30, s-maxage=30"
 		vary = varyForPartner()
+		w.Header().Set("Deprecation", "@1783296000")
+		w.Header().Add("Link", `</v1/stats/provider/{provider_id}>; rel="deprecation"`)
+		w.Header().Set("Warning", `299 - "Deprecated partner leaderboard projection; use /v1/stats/provider/{provider_id}"`)
 	}
 
 	smax := leaderboardSMaxAgeSeconds(partnerProj)
@@ -511,6 +526,107 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 	}
 
 	writeJSON(w, r, http.StatusOK, resp, snapshotTime, cacheControl, vary, ar)
+}
+
+func (h *Handler) handleProvider(w http.ResponseWriter, r *http.Request, ar authResult) {
+	ctx := r.Context()
+	now := h.nowFn()
+	providerID := providerIDFromPath(r.URL.Path)
+	if providerID == "" {
+		writeError(w, r, http.StatusNotFound, codeBadRequest, "unknown endpoint", now, nil)
+		return
+	}
+	if ar.projection != "partner" || ar.matchedKey == nil {
+		writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
+		return
+	}
+	if !ar.matchedKey.ProviderID.Valid || ar.matchedKey.ProviderID.String != providerID {
+		writeError(w, r, http.StatusForbidden, codeUnauthorized, "unauthorized", now, nil)
+		return
+	}
+
+	window := r.URL.Query().Get("window")
+	if window == "" {
+		window = "30d"
+	}
+	switch window {
+	case "24h", "7d", "30d", "all":
+	default:
+		writeError(w, r, http.StatusBadRequest, codeBadRequest, "invalid window", now, nil)
+		return
+	}
+
+	row, err := h.Store.LeaderboardProvider(ctx, window, providerID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "provider stats read failed", now, nil)
+		return
+	}
+	if row == nil {
+		gen, gerr := h.Store.ComponentGeneratedAt(ctx, "leaderboard_"+window)
+		if gerr != nil {
+			writeError(w, r, http.StatusInternalServerError, codeInternal, "components_health read failed", now, nil)
+			return
+		}
+		if gen.IsZero() || h.leaderboardStaleFor503(gen, now, window) {
+			retry := 30
+			writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "provider stats are stale", now, &retry)
+			return
+		}
+		resp := providerStatsResponse{
+			GeneratedAt: gen.UTC().Format(time.RFC3339),
+			StaleAfter:  gen.Add(30 * time.Second).UTC().Format(time.RFC3339),
+			Window:      window,
+			ProviderID:  providerID,
+			Row: leaderboardRespRow{
+				Rank:           0,
+				Pseudonym:      "",
+				EarningsBucket: "-",
+				Tokens:         0,
+				Jobs:           0,
+			},
+		}
+		writeJSON(w, r, http.StatusOK, resp, gen, "private, max-age=30, s-maxage=30", varyForPartner(), ar)
+		return
+	}
+	if h.leaderboardStaleFor503(row.GeneratedAt, now, window) {
+		retry := 30
+		writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "provider stats are stale", now, &retry)
+		return
+	}
+	if obs := requestObsFromContext(r.Context()); obs != nil {
+		obs.GeneratedAtAgeMs = time.Since(row.GeneratedAt).Milliseconds()
+	}
+
+	earn := parseUSD(row.EarningsTotalUSD)
+	work := parseUSD(row.EarningsWorkUSD)
+	reward := parseUSD(row.EarningsRewardsUSD)
+	earnCopy := earn
+	workCopy := work
+	rewardCopy := reward
+	respRow := leaderboardRespRow{
+		Rank:               row.RankEarnings,
+		Pseudonym:          row.Pseudonym,
+		EarningsBucket:     row.Bucket,
+		Tokens:             row.Tokens,
+		Jobs:               row.Jobs,
+		EarningsUSD:        &earnCopy,
+		EarningsWorkUSD:    &workCopy,
+		EarningsRewardsUSD: &rewardCopy,
+	}
+	if row.FirstSeenAt.Valid {
+		respRow.FirstSeenAt = row.FirstSeenAt.Time.UTC().Format(time.RFC3339)
+	}
+	if row.LastSeenAt.Valid {
+		respRow.LastSeenAt = row.LastSeenAt.Time.UTC().Format(time.RFC3339)
+	}
+	resp := providerStatsResponse{
+		GeneratedAt: row.GeneratedAt.UTC().Format(time.RFC3339),
+		StaleAfter:  row.GeneratedAt.Add(30 * time.Second).UTC().Format(time.RFC3339),
+		Window:      window,
+		ProviderID:  providerID,
+		Row:         respRow,
+	}
+	writeJSON(w, r, http.StatusOK, resp, row.GeneratedAt, "private, max-age=30, s-maxage=30", varyForPartner(), ar)
 }
 
 // leaderboardStaleFor503 returns true iff the leaderboard
@@ -757,5 +873,20 @@ func trimEndpointFromPath(p string) string {
 	case "overview", "leaderboard", "health":
 		return rest
 	}
+	if providerIDFromPath(p) != "" {
+		return "provider"
+	}
 	return ""
+}
+
+func providerIDFromPath(p string) string {
+	const prefix = "/v1/stats/provider/"
+	if !strings.HasPrefix(p, prefix) {
+		return ""
+	}
+	rest := strings.TrimPrefix(p, prefix)
+	if rest == "" || strings.Contains(rest, "/") {
+		return ""
+	}
+	return rest
 }

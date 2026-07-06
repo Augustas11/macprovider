@@ -426,6 +426,53 @@ func TestTrustedProxyPrefixesEmptyAllowed(t *testing.T) {
 	}
 }
 
+func TestDefaultStatsConfigTrustsLoopbackOnly(t *testing.T) {
+	cfg := Default()
+	if got, want := len(cfg.Stats.TrustedProxies), 2; got != want {
+		t.Fatalf("default stats.trusted_proxies len=%d want %d", got, want)
+	}
+	prefixes, err := cfg.StatsTrustedProxyPrefixes()
+	if err != nil {
+		t.Fatalf("StatsTrustedProxyPrefixes default parse: %v", err)
+	}
+	if len(prefixes) != 2 {
+		t.Fatalf("default stats prefixes len=%d want 2", len(prefixes))
+	}
+	if prefixes[0].String() != "127.0.0.0/8" {
+		t.Fatalf("default stats[0] = %q want 127.0.0.0/8", prefixes[0].String())
+	}
+	if prefixes[1].String() != "::1/128" {
+		t.Fatalf("default stats[1] = %q want ::1/128", prefixes[1].String())
+	}
+}
+
+func TestStatsTrustedProxyValidation(t *testing.T) {
+	mkCfg := func(trusted []string, trustDirect bool) Config {
+		cfg := Default()
+		cfg.Auth.OperatorKey = "operator-key"
+		cfg.Listen.BindAddress = "127.0.0.1"
+		cfg.Stats.Enabled = true
+		cfg.Stats.ReaderDSN = "postgres://r@/x"
+		cfg.Stats.RollupDSN = "postgres://w@/x"
+		cfg.Stats.TrustedProxies = trusted
+		cfg.Stats.TrustDirectPeer = trustDirect
+		return cfg
+	}
+
+	if err := mkCfg([]string{"not-a-cidr"}, false).Validate(); err == nil || !strings.Contains(err.Error(), "stats.trusted_proxies") {
+		t.Fatalf("malformed stats trusted proxy err=%v, want stats.trusted_proxies parse error", err)
+	}
+	if err := mkCfg([]string{"0.0.0.0/0"}, false).Validate(); err == nil || !strings.Contains(err.Error(), "default-route prefix") {
+		t.Fatalf("default-route stats trusted proxy err=%v, want rejection", err)
+	}
+	if err := mkCfg(nil, false).Validate(); err == nil || !strings.Contains(err.Error(), "trust_direct_peer") {
+		t.Fatalf("empty stats trusted proxies err=%v, want direct-peer opt-in rejection", err)
+	}
+	if err := mkCfg(nil, true).Validate(); err != nil {
+		t.Fatalf("empty stats trusted proxies with direct-peer opt-in err=%v, want nil", err)
+	}
+}
+
 func TestOnboardingDefaultsProductionDisabled(t *testing.T) {
 	cfg := Default()
 	if cfg.Onboarding.AppTrackRegisterEnabled {

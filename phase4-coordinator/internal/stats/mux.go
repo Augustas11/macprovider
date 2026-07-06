@@ -1,8 +1,8 @@
 package stats
 
 import (
-	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"time"
 
@@ -27,16 +27,24 @@ import (
 // + Vary regardless of what the request Authorization header
 // looks like.
 type Mux struct {
-	h             *Handler
-	logger        zerolog.Logger
-	authFailLimit *limiter
-	publicLimit   *limiter
-	partnerLimit  *limiter
-	trustedCIDRs  []*net.IPNet
-	metrics       *metrics.Metrics // optional; nil → no metric emit
+	h              *Handler
+	logger         zerolog.Logger
+	authFailLimit  *limiter
+	publicLimit    *limiter
+	partnerLimit   *limiter
+	preflightLimit *limiter
+	trustedCIDRs   []netip.Prefix
+	metrics        *metrics.Metrics // optional; nil → no metric emit
+	preflightRPM   int
 }
 
 const authFailureMinLatency = 5 * time.Millisecond
+
+type RateLimitConfig struct {
+	MaxBuckets   int
+	IdleTTL      time.Duration
+	PreflightRPM int
+}
 
 func NewMux(reader *store.Store, cors CORSConfig, backfillMode, partialSince string, trustedProxies []string, logger zerolog.Logger) *Mux {
 	return NewMuxWithMetrics(reader, cors, backfillMode, partialSince, trustedProxies, logger, nil)
@@ -47,6 +55,23 @@ func NewMux(reader *store.Store, cors CORSConfig, backfillMode, partialSince str
 // can call NewMux for the nil-metrics behavior; production wires
 // the coordinator-owned Metrics from main.go.
 func NewMuxWithMetrics(reader *store.Store, cors CORSConfig, backfillMode, partialSince string, trustedProxies []string, logger zerolog.Logger, m *metrics.Metrics) *Mux {
+	return NewMuxWithMetricsAndRateLimit(reader, cors, backfillMode, partialSince, trustedProxies, logger, m, RateLimitConfig{})
+}
+
+func NewMuxWithMetricsAndRateLimit(reader *store.Store, cors CORSConfig, backfillMode, partialSince string, trustedProxies []string, logger zerolog.Logger, m *metrics.Metrics, rl RateLimitConfig) *Mux {
+	if rl.MaxBuckets <= 0 {
+		rl.MaxBuckets = 100000
+	}
+	if rl.IdleTTL <= 0 {
+		rl.IdleTTL = 15 * time.Minute
+	}
+	if rl.PreflightRPM <= 0 {
+		rl.PreflightRPM = 10
+	}
+	prefixes, err := parseTrustedProxies(trustedProxies)
+	if err != nil {
+		logger.Error().Err(err).Msg("invalid stats trusted_proxies; no proxy headers will be trusted")
+	}
 	return &Mux{
 		h: &Handler{
 			Store:        reader,
@@ -54,12 +79,14 @@ func NewMuxWithMetrics(reader *store.Store, cors CORSConfig, backfillMode, parti
 			BackfillMode: backfillMode,
 			PartialSince: partialSince,
 		},
-		logger:        logger,
-		authFailLimit: newLimiter(),
-		publicLimit:   newLimiter(),
-		partnerLimit:  newLimiter(),
-		trustedCIDRs:  parseTrustedProxies(trustedProxies),
-		metrics:       m,
+		logger:         logger,
+		authFailLimit:  newLimiterWithBounds(rl.MaxBuckets, rl.IdleTTL),
+		publicLimit:    newLimiterWithBounds(rl.MaxBuckets, rl.IdleTTL),
+		partnerLimit:   newLimiterWithBounds(rl.MaxBuckets, rl.IdleTTL),
+		preflightLimit: newLimiterWithBounds(rl.MaxBuckets, rl.IdleTTL),
+		trustedCIDRs:   prefixes,
+		metrics:        m,
+		preflightRPM:   rl.PreflightRPM,
 	}
 }
 
@@ -76,6 +103,16 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 
 	if r.Method == http.MethodOptions {
+		ip := clientIP(r, m.trustedCIDRs)
+		endpoint := trimEndpointFromPath(r.URL.Path)
+		if endpoint == "" {
+			endpoint = "unknown"
+		}
+		if !m.preflightLimit.allow("preflight|"+ip+"|"+endpoint, now, m.preflightRPM) {
+			retry := 60
+			writeError(w, r, http.StatusTooManyRequests, codeRateLimited, "rate limited", now, &retry)
+			return
+		}
 		servePreflight(w, r, m.h.Store, m.h.CORS)
 		return
 	}
@@ -100,7 +137,7 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	// auth-failure tier + §5.4.3 dispatcher. /overview and
 	// /health are §4.3 `Auth: None`; Authorization is ignored.
 	var ar authResult
-	if endpoint == "leaderboard" {
+	if endpoint == "leaderboard" || endpoint == "provider" {
 		authStarted := time.Now()
 		// Layer 4 — auth-failure tier (Authorization-present
 		// only). Round-3 CODE H1: only schedule the refund
@@ -250,6 +287,8 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		m.h.handleOverview(rec, r, ar)
 	case "leaderboard":
 		m.h.handleLeaderboard(rec, r, ar)
+	case "provider":
+		m.h.handleProvider(rec, r, ar)
 	case "health":
 		m.h.handleHealth(rec, r, ar)
 	}

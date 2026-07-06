@@ -169,6 +169,7 @@ TCP_BBR_MODULES_LOAD="$DIST_DIR/modules-load.d/tcp_bbr.conf"
 # installed below alongside the coordinator vhost.
 NGINX_STATS_SHARED="$DIST_DIR/nginx-snippets/stats-shared.conf"
 NGINX_STATS_SECHEADERS="$DIST_DIR/nginx-snippets/stats-security-headers.conf"
+NGINX_STATS_CORS_429="$DIST_DIR/nginx-snippets/cors-429.conf"
 NGINX_STATS_SITE="$DIST_DIR/nginx-stats.streamvc.live.conf"
 CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}"
 
@@ -1060,6 +1061,7 @@ $SCP "$NGINX_SITE"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-coordinator-full.conf
 # trip on missing zone names.).
 $SCP "$NGINX_STATS_SHARED"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats-shared.conf"
 $SCP "$NGINX_STATS_SECHEADERS" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats-security-headers.conf"
+$SCP "$NGINX_STATS_CORS_429"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats-cors-429.conf"
 $SCP "$NGINX_STATS_SITE"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/nginx-stats.streamvc.live.conf"
 # SPEC-023 v1.7.3 signed static feeds
 $SCP "$STATIC_DEMAND_JSON"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/demand-rank.json"
@@ -1322,6 +1324,7 @@ log "step 6b/9: install nginx artifacts + full TLS vhost for [${DOMAINS_FULL_TLS
 $SSH "set -e
   install -o root -g root -m 0644 $DEPLOY_TMP/nginx-stats-shared.conf /etc/nginx/conf.d/stats-shared.conf
   install -o root -g root -m 0644 $DEPLOY_TMP/nginx-stats-security-headers.conf /etc/nginx/conf.d/stats-security-headers.conf
+  install -o root -g root -m 0644 $DEPLOY_TMP/nginx-stats-cors-429.conf /etc/nginx/conf.d/cors-429.conf
 "
 
 # Install the full TLS vhost ONLY for domains with a valid cert. Domains

@@ -11,7 +11,7 @@ package metrics
 //   - the partner_key_id label only takes positive-integer
 //     decimal strings (no prefix, no label-text)
 //   - tier ∈ {public, partner}
-//   - endpoint ∈ {overview, leaderboard, health}
+//   - endpoint ∈ {overview, leaderboard, provider, health}
 //   - component ∈ the locked §9.5 component set
 
 import (
@@ -25,7 +25,7 @@ import (
 var (
 	bodyShape = regexp.MustCompile(`[A-Za-z0-9_-]{43}`)
 	allowTier = map[string]bool{"public": true, "partner": true}
-	allowEP   = map[string]bool{"overview": true, "leaderboard": true, "health": true}
+	allowEP   = map[string]bool{"overview": true, "leaderboard": true, "provider": true, "health": true}
 	allowComp = map[string]bool{
 		"overview": true, "timeseries_rpm": true, "timeseries_tpm": true,
 		"leaderboard_24h": true, "leaderboard_7d": true,
@@ -44,6 +44,7 @@ func TestLabelHygiene(t *testing.T) {
 	// Drive a representative cross-section of label combinations.
 	m.RequestTotal.WithLabelValues("overview", "200", "public").Inc()
 	m.RequestTotal.WithLabelValues("leaderboard", "200", "partner").Inc()
+	m.RequestTotal.WithLabelValues("provider", "200", "partner").Inc()
 	m.RequestTotal.WithLabelValues("leaderboard", "429", "public").Inc()
 	m.RequestTotal.WithLabelValues("health", "503", "public").Inc()
 	m.PartnerKeyRequestTotal.WithLabelValues("17").Inc()
@@ -51,6 +52,7 @@ func TestLabelHygiene(t *testing.T) {
 	m.RollupLagSeconds.WithLabelValues("overview").Set(1.5)
 	m.RollupLagSeconds.WithLabelValues("leaderboard_24h").Set(0)
 	m.RollupErrorsTotal.WithLabelValues("timeseries_rpm").Inc()
+	m.RollupPanicTotal.WithLabelValues("leaderboard_30d").Inc()
 	m.RateLimitExceededTotal.WithLabelValues("public", "overview").Inc()
 	m.RateLimitExceededTotal.WithLabelValues("partner", "leaderboard").Inc()
 	m.IncRegisterRateLimitHit("ip")

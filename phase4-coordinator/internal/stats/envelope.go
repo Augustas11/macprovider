@@ -109,6 +109,9 @@ func errorHeadersForRequest(r *http.Request, status int) (string, string) {
 		}
 		return "public, max-age=60, s-maxage=60, stale-while-revalidate=120",
 			"Accept-Encoding, Origin"
+	case "provider":
+		return "private, max-age=30, s-maxage=30",
+			"Accept-Encoding, Origin, Authorization"
 	case "health":
 		return "public, max-age=10, s-maxage=10",
 			"Accept-Encoding, Origin"

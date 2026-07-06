@@ -17,8 +17,11 @@ const (
 )
 
 type streamingDowngradeStore struct {
-	mu      sync.Mutex
-	entries map[string]streamingDowngradeEntry
+	mu         sync.Mutex
+	entries    map[string]streamingDowngradeEntry
+	order      []string
+	maxEntries int
+	evictions  int64
 }
 
 type streamingDowngradeEntry struct {
@@ -27,7 +30,17 @@ type streamingDowngradeEntry struct {
 }
 
 func newStreamingDowngradeStore() *streamingDowngradeStore {
-	return &streamingDowngradeStore{entries: map[string]streamingDowngradeEntry{}}
+	return newStreamingDowngradeStoreWithLimit(defaultStreamingMetricMaxSamples)
+}
+
+func newStreamingDowngradeStoreWithLimit(maxEntries int) *streamingDowngradeStore {
+	if maxEntries <= 0 {
+		maxEntries = defaultStreamingMetricMaxSamples
+	}
+	return &streamingDowngradeStore{
+		entries:    map[string]streamingDowngradeEntry{},
+		maxEntries: maxEntries,
+	}
 }
 
 func (s *streamingDowngradeStore) isDowngraded(buyerID, providerID string, now time.Time) bool {
@@ -42,7 +55,7 @@ func (s *streamingDowngradeStore) isDowngraded(buyerID, providerID string, now t
 		entry.downgradeUntil = time.Time{}
 		entry.malformed = pruneMalformed(entry.malformed, now)
 		if len(entry.malformed) == 0 {
-			delete(s.entries, key)
+			s.deleteLocked(key)
 		} else {
 			s.entries[key] = entry
 		}
@@ -60,6 +73,7 @@ func (s *streamingDowngradeStore) recordMalformed(buyerID, providerID string, no
 		entry.downgradeUntil = now.Add(10 * time.Minute)
 	}
 	s.entries[key] = entry
+	s.rememberLocked(key)
 }
 
 func (s *streamingDowngradeStore) recordClean(buyerID, providerID string, now time.Time) {
@@ -71,8 +85,57 @@ func (s *streamingDowngradeStore) recordClean(buyerID, providerID string, now ti
 		return
 	}
 	if now.Sub(entry.downgradeUntil.Add(-10*time.Minute)) >= 10*time.Minute {
-		delete(s.entries, key)
+		s.deleteLocked(key)
 	}
+}
+
+func (s *streamingDowngradeStore) rememberLocked(key string) {
+	if _, ok := s.entries[key]; !ok {
+		return
+	}
+	for _, existing := range s.order {
+		if existing == key {
+			return
+		}
+	}
+	s.order = append(s.order, key)
+	for len(s.entries) > s.maxEntries && len(s.order) > 0 {
+		victim := s.order[0]
+		s.order = s.order[1:]
+		if _, ok := s.entries[victim]; ok {
+			delete(s.entries, victim)
+			s.evictions++
+		}
+	}
+}
+
+func (s *streamingDowngradeStore) deleteLocked(key string) {
+	delete(s.entries, key)
+	for i, existing := range s.order {
+		if existing == key {
+			copy(s.order[i:], s.order[i+1:])
+			s.order = s.order[:len(s.order)-1]
+			return
+		}
+	}
+}
+
+func (s *streamingDowngradeStore) sizeForTest() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.entries)
+}
+
+func (s *streamingDowngradeStore) orderSizeForTest() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.order)
+}
+
+func (s *streamingDowngradeStore) evictionsForTest() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.evictions
 }
 
 func pruneMalformed(values []time.Time, now time.Time) []time.Time {

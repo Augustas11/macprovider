@@ -19,6 +19,7 @@ const (
 	streamingTimingProviderNowHeader  = "X-MacProvider-Provider-Unix-Ms"
 	streamingTimingGatewayNowHeader   = "X-MacProvider-Gateway-Unix-Ms"
 	streamingTimingSkewBound          = 100 * time.Millisecond
+	defaultStreamingMetricMaxSamples  = 10000
 )
 
 // Streaming timing samples are triggered by the provider's
@@ -26,9 +27,11 @@ const (
 // ModelRuntime.stream .toolCallDelta. The legacy response header remains a
 // fallback for older providers.
 type streamingTimingCollector struct {
-	mu          sync.Mutex
+	mu          sync.RWMutex
 	records     []streamingTimingRecord
 	skippedSkew int
+	maxSamples  int
+	evictions   int64
 }
 
 type streamingTimingRecord struct {
@@ -44,7 +47,14 @@ type streamingTimingRecord struct {
 }
 
 func newStreamingTimingCollector() *streamingTimingCollector {
-	return &streamingTimingCollector{}
+	return newStreamingTimingCollectorWithLimit(defaultStreamingMetricMaxSamples)
+}
+
+func newStreamingTimingCollectorWithLimit(maxSamples int) *streamingTimingCollector {
+	if maxSamples <= 0 {
+		maxSamples = defaultStreamingMetricMaxSamples
+	}
+	return &streamingTimingCollector{maxSamples: maxSamples}
 }
 
 func (c *streamingTimingCollector) observeFromHeaders(requestID, providerID, mode string, headers http.Header, firstForwarded time.Time) {
@@ -102,6 +112,12 @@ func (c *streamingTimingCollector) observeFromHeadersAndProviderOpen(requestID, 
 	}
 	c.mu.Lock()
 	c.records = append(c.records, record)
+	if len(c.records) > c.maxSamples {
+		drop := len(c.records) - c.maxSamples
+		copy(c.records, c.records[drop:])
+		c.records = c.records[:c.maxSamples]
+		c.evictions += int64(drop)
+	}
 	c.mu.Unlock()
 }
 
@@ -122,13 +138,22 @@ func (c *streamingTimingCollector) snapshot() ([]streamingTimingRecord, int) {
 	if c == nil {
 		return nil, 0
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	out := append([]streamingTimingRecord(nil), c.records...)
 	return out, c.skippedSkew
 }
 
-func (c *streamingTimingCollector) prometheusText() string {
+func (c *streamingTimingCollector) evictionsCount() int64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.evictions
+}
+
+func (c *streamingTimingCollector) prometheusText(extraEvictions int64) string {
 	records, skipped := c.snapshot()
 	var forward []float64
 	var gateway []float64
@@ -139,6 +164,7 @@ func (c *streamingTimingCollector) prometheusText() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "macprovider_streaming_timing_samples_total %d\n", len(records))
 	fmt.Fprintf(&b, "macprovider_streaming_timing_skew_skipped_total %d\n", skipped)
+	fmt.Fprintf(&b, "stats_streaming_metrics_evictions_total %d\n", c.evictionsCount()+extraEvictions)
 	fmt.Fprintf(&b, "macprovider_streaming_forward_lag_p95_ms %.0f\n", percentile(forward, 0.95))
 	fmt.Fprintf(&b, "macprovider_streaming_gateway_lag_p95_ms %.0f\n", percentile(gateway, 0.95))
 	for _, bucket := range []float64{1, 5, 10, 25, 50, 100} {
