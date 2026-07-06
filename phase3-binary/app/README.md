@@ -71,4 +71,26 @@ open build/Release/Malibu.app
 2. **CLI-side handler semantics.** Frames + wire format are wired end-to-end (`feat(control-socket): add metrics/pause/resume/shutdown frames`), but the server-side handlers are stubs — `pause_ack`/`resume_ack` return `accepted:false, reason:"not_implemented"` and `metrics_response` returns zeros. Real earnings / uptime source + pause gating land in P1.
 3. **CLI-track config migration dialog.** If `~/.config/macprovider/config.yaml` exists without the App-track marker, the App routes to the SPEC-026 migration surface instead of overwriting it silently.
 5. **Sparkle** not wired up yet — separate P3 pass.
-6. **Signed release pipeline** — `release.yml` ships stapled `Malibu-{tag}.dmg` (primary) and optional `Malibu-{tag}.pkg`. Validate downloads with `scripts/verify-malibu-release-artifacts.sh`.
+6. **Signed release pipeline** — `release.yml` ships stapled `Malibu-{tag}.dmg` (primary) and optional `Malibu-{tag}.pkg`. Validate downloads with `scripts/verify-malibu-release-artifacts.sh`. Publish `latest.dmg` with `scripts/publish-malibu-latest-dmg.sh` after tagging.
+
+## Uninstall (Malibu + CLI)
+
+Malibu **Quit and Uninstall** runs, in order:
+
+1. `macprovider-cli uninstall --yes` (stops launchd, removes CLI binary/plists/manifest)
+2. Malibu login item unregister
+3. App Keychain slots + App Support wipe
+
+CLI-only uninstall remains:
+
+```bash
+bash <(curl -fsSL https://get.streamvc.live/uninstall.sh)
+# or
+macprovider-cli uninstall --yes
+```
+
+CLI uninstall does **not** remove `~/Library/Application Support/Malibu` or Malibu Keychain tokens — use Malibu uninstall or delete App Support manually.
+
+Malibu uninstall does **not** remove Hugging Face model caches (`~/.cache/huggingface/`) — same as CLI uninstall.
+
+Fresh-Mac validation checklist: `scratchpad/fresh-mac-smoke-v1.8.13.md`.

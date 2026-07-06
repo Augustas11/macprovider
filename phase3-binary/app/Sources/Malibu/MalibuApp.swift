@@ -184,11 +184,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // request termination ourselves.
     private func performUninstall() async {
         await agent.shutdown(gracefulSeconds: 30)
+        let cliTeardown = await CLIInstallTeardown.uninstallBackgroundProvider()
         let unregisterFailure = await AppLoginItem.unregisterReturningError()
         // SPEC-026 §6.5: also wipe the Ed25519 identity Keychain slot.
         do { try await ProviderIdentity.deleteFromKeychain() }
         catch { NSLog("[malibu] provider identity delete failed: %@", error.localizedDescription) }
-        let residue = await ProviderConfig.wipeAppOwnedState()
+        var residue = await ProviderConfig.wipeAppOwnedState()
+        residue.cliUninstallWarnings = cliTeardown.warnings
 
         if !residue.clean || unregisterFailure != nil {
             self.presentUninstallResidue(residue, loginItem: unregisterFailure)
@@ -210,6 +212,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let e = residue.appSupportRemoveFailed { bullets.append("App Support: \(e.localizedDescription)") }
         if let e = residue.keychainDeleteFailed { bullets.append("Keychain: \(e.localizedDescription)") }
         if let e = loginItem { bullets.append("Login item: \(e.localizedDescription)") }
+        for warning in residue.cliUninstallWarnings {
+            bullets.append("Background provider: \(warning)")
+        }
         let alert = NSAlert()
         alert.messageText = "Uninstall finished with residue"
         alert.informativeText = bullets.isEmpty

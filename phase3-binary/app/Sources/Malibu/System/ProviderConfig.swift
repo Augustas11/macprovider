@@ -473,8 +473,12 @@ enum ProviderConfig {
         var configRemoveFailed: Error?
         var appSupportRemoveFailed: Error?
         var keychainDeleteFailed: Error?
+        var cliUninstallWarnings: [String] = []
         var clean: Bool {
-            configRemoveFailed == nil && appSupportRemoveFailed == nil && keychainDeleteFailed == nil
+            configRemoveFailed == nil
+                && appSupportRemoveFailed == nil
+                && keychainDeleteFailed == nil
+                && cliUninstallWarnings.isEmpty
         }
     }
 

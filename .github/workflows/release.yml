@@ -678,10 +678,11 @@ jobs:
           if [ -f "phase3-binary/app/dist/Malibu-${tag}.dmg" ]; then
             cat >> release-notes.md <<EOF
 
-          **Malibu.app (App-track provider onboarding)** — this release ships a
-          Developer ID-signed, notarized, and stapled \`Malibu-${tag}.dmg\`.
-          Open the disk image, drag Malibu.app to Applications, and launch.
-          First run drives install.sh onboarding with no terminal setup.
+          **Malibu.app (CLI wrapper)** — this release ships a Developer ID-signed,
+          notarized, and stapled \`Malibu-${tag}.dmg\`. Open the disk image, drag
+          Malibu.app to Applications, and launch. First run drives install.sh
+          onboarding with no terminal setup; Malibu monitors the launchd provider.
+          Publish \`latest.dmg\` with \`scripts/publish-malibu-latest-dmg.sh ${tag}\`.
           EOF
           elif [ -f "phase3-binary/app/dist/Malibu-${tag}.pkg" ]; then
             cat >> release-notes.md <<EOF
@@ -718,6 +719,18 @@ jobs:
             --title "macprovider-cli $tag" \
             --notes-file release-notes.md \
             "${release_flags[@]}"
+
+      - name: Publish Malibu latest.dmg
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MALIBU_DOWNLOAD_BUCKET: ${{ secrets.MALIBU_DOWNLOAD_BUCKET }}
+          MALIBU_DOWNLOAD_ENDPOINT: ${{ secrets.MALIBU_DOWNLOAD_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.MALIBU_DOWNLOAD_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MALIBU_DOWNLOAD_AWS_SECRET_ACCESS_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/publish-malibu-latest-dmg.sh "${{ steps.version.outputs.tag }}"
 
       - name: Verify published Tier-2 Release assets
         shell: bash
