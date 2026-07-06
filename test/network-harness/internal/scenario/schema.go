@@ -34,6 +34,7 @@ var envVarPattern = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
 
 const (
 	maxChargedDeliveredToleranceTokens int64 = 16
+	maxCompletionTokenDelta            int64 = 16
 	MaxBuyerCount                            = 1000
 	MaxRequestsPerBuyer                      = 10000
 	MaxTotalBuyerRequests                    = 100000
@@ -72,6 +73,23 @@ type Scenario struct {
 	// ChargedDeliveredToleranceTokens allows scenarios with known tokenizer
 	// drift to permit a small charged-vs-delivered delta. Default 0.
 	ChargedDeliveredToleranceTokens int64 `yaml:"charged_delivered_tolerance_tokens"`
+
+	// MaxCompletionTokenDelta, when >0, makes I1 fail if any matched
+	// buyer/gateway success pair differs by more than this many completion
+	// tokens in either direction. Default 0 preserves existing scenarios,
+	// where gateway underbilling alone is treated as triage evidence.
+	MaxCompletionTokenDelta int64 `yaml:"max_completion_token_delta"`
+
+	// RequiredGatewayOutcome, when non-empty, makes I1 fail if any matched
+	// buyer/gateway success pair has a different gateway outcome. Default
+	// empty preserves existing scenarios where outcome details are triage
+	// evidence only.
+	RequiredGatewayOutcome string `yaml:"required_gateway_outcome"`
+
+	// RequiredGatewayTokenSource, when non-empty, makes I1 fail if any
+	// matched buyer/gateway success pair has a different gateway token
+	// source. Default empty preserves old snapshots and legacy scenarios.
+	RequiredGatewayTokenSource string `yaml:"required_gateway_token_source"`
 
 	// RequestTimeout is a per-request hard cap. Default 120s if unset.
 	RequestTimeout time.Duration `yaml:"request_timeout"`
@@ -406,6 +424,18 @@ func (s *Scenario) validateBuyerFleet() error {
 	}
 	if s.ChargedDeliveredToleranceTokens > maxChargedDeliveredToleranceTokens {
 		return fmt.Errorf("charged_delivered_tolerance_tokens must be <= %d", maxChargedDeliveredToleranceTokens)
+	}
+	if s.MaxCompletionTokenDelta < 0 {
+		return fmt.Errorf("max_completion_token_delta must be >= 0")
+	}
+	if s.MaxCompletionTokenDelta > maxCompletionTokenDelta {
+		return fmt.Errorf("max_completion_token_delta must be <= %d", maxCompletionTokenDelta)
+	}
+	if s.RequiredGatewayOutcome != strings.TrimSpace(s.RequiredGatewayOutcome) {
+		return fmt.Errorf("required_gateway_outcome must not have leading or trailing whitespace")
+	}
+	if s.RequiredGatewayTokenSource != strings.TrimSpace(s.RequiredGatewayTokenSource) {
+		return fmt.Errorf("required_gateway_token_source must not have leading or trailing whitespace")
 	}
 	if s.Target.CoordinatorDBSSH != "" && s.Target.CoordinatorDBPath != "" {
 		return fmt.Errorf("target.coordinator_db_ssh and target.coordinator_db_path are mutually exclusive")

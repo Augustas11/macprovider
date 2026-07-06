@@ -1,0 +1,65 @@
+# 12_moe_mid_stream_projection.yaml — issue #303 Path A regression.
+#
+# PR #288 closed a MoE streaming settlement failure where gateway byte
+# projection could trip stream_output_exceeded before the provider's final
+# usage chunk arrived. This live scenario keeps that path covered with the
+# two MoE model rows documented in #303.
+#
+# What gets asserted by hard invariants:
+#   - I1 fails if gateway/coord token ledgers drift or if a gateway
+#     stream_output_exceeded fallback overbills a clean-looking buyer stream.
+#   - I2 fails if any 5xx response lacks a request id / settlement row.
+#   - I3 fails if charged tokens exceed buyer-delivered tokens.
+#   - I4 fails on silent stream hangs.
+#
+# Expected live shape when the required models are present:
+#   - All successful streams settle outcome=ok.
+#   - ledger_reconcile.matched_successes should show no
+#     gateway_outcome=stream_output_exceeded rows.
+#   - ledger_reconcile.matched_successes should show
+#     gateway_token_source=provider_reported for successful streams.
+name: moe_mid_stream_projection_regression
+description: |
+  Issue #303 Path A regression coverage. Two streaming buyer requests
+  exercise the MoE rows that previously triggered premature gateway byte
+  projection before provider usage arrived.
+
+expected_shape: |
+  Issue #303 Path A:
+   - 2 total streaming requests, one per MoE model row when both are
+     available in the live fleet.
+   - Successful requests should reconcile with gateway_outcome=ok.
+   - Any stream_output_exceeded row on a request where the buyer did not
+     observe the gateway terminal SSE error envelope is a regression signal.
+   - ledger_reconcile.json should show gateway_token_source=provider_reported
+     for successful streams; inspect DB rows only when triaging a mismatch.
+   - If a required model is absent, the scenario is not a valid #303
+     acceptance run; treat no_provider_available as fleet setup missing.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 1
+  stream: true
+  pattern: constant
+  requests_per_buyer: 2
+
+duration: 300s
+request_timeout: 120s
+silent_hang_threshold: 45s
+required_gateway_outcome: ok
+required_gateway_token_source: provider_reported
+
+prompts:
+  - model: mlx-community/gpt-oss-20b-MXFP4-Q8
+    user: "Write a compact but complete implementation plan for a tiny append-only log, including record format, crash recovery, and three invariants."
+    max_tokens: 192
+  - model: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit
+    user: "Write a Python implementation of a red-black tree insert operation with rotations, type hints, and a short explanation after the code."
+    max_tokens: 192

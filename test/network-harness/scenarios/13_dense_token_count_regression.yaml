@@ -1,0 +1,55 @@
+# 13_dense_token_count_regression.yaml — issue #303 Path B regression.
+#
+# PR #288 closed an old downclamp path that under-settled dense coding
+# output from Qwen2.5-Coder-32B by roughly 12 tokens. This scenario keeps a
+# live dense-code generation shape in the harness.
+#
+# What gets asserted by hard invariants:
+#   - I1 fails on gateway/coord mismatch or positive gateway overbill vs
+#     the buyer. This scenario also opts into a 2-token absolute completion
+#     delta gate so the historical 12-token under-settlement fails I1.
+#   - I2/I3/I4 retain the standard orphan-5xx, overcharge, and silent-hang
+#     protections.
+name: dense_token_count_regression
+description: |
+  Issue #303 Path B regression coverage. Two streaming code-generation
+  requests against Qwen2.5-Coder-32B exercise the dense-content token
+  accounting path that PR #288 fixed.
+
+expected_shape: |
+  Issue #303 Path B:
+   - 2 total streaming requests against Qwen2.5-Coder-32B.
+   - Completion token counts in buyer, gateway, and coordinator artifacts
+     should agree within the configured 2-token tolerance.
+   - A 12-token gateway/coord or gateway/buyer delta reproduces the
+     historical downclamp class and should fail I1/I3.
+   - If the model is absent, the scenario is not a valid #303 acceptance
+     run; treat no_provider_available as fleet setup missing.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 1
+  stream: true
+  pattern: constant
+  requests_per_buyer: 2
+
+duration: 360s
+request_timeout: 150s
+silent_hang_threshold: 60s
+charged_delivered_tolerance_tokens: 2
+max_completion_token_delta: 2
+
+prompts:
+  - model: mlx-community/Qwen2.5-Coder-32B-Instruct-4bit
+    user: "Write a Python function that parses a CSV stream into typed records, including error handling and one unit test."
+    max_tokens: 192
+  - model: mlx-community/Qwen2.5-Coder-32B-Instruct-4bit
+    user: "Write a SQL migration plus rollback for adding an idempotency key to a payments table, with comments explaining the constraints."
+    max_tokens: 192

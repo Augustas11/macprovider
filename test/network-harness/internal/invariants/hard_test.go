@@ -158,6 +158,70 @@ func TestCheckI1_HarnessUnderbillAlone_Passes(t *testing.T) {
 	}
 }
 
+func TestCheckI1_MaxCompletionTokenDeltaFailsEitherDirection(t *testing.T) {
+	sc := &scenario.Scenario{MaxCompletionTokenDelta: 2}
+	ledger := &reconcile.Result{
+		MatchedSuccesses: []reconcile.MatchedPair{
+			{HarnessRequestID: "under", HarnessCompletionTokens: 20, GatewayCompletionTokens: 17},
+			{HarnessRequestID: "over", HarnessCompletionTokens: 20, GatewayCompletionTokens: 23},
+			{HarnessRequestID: "inside", HarnessCompletionTokens: 20, GatewayCompletionTokens: 18},
+		},
+	}
+	c := checkI1(sc, ledger)
+	if c.Passed {
+		t.Fatal("I1 should fail when configured completion-token delta is exceeded")
+	}
+	if !contains(c.OffendingIDs, "under") || !contains(c.OffendingIDs, "over") {
+		t.Fatalf("offending ids should include both over-limit deltas, got %v", c.OffendingIDs)
+	}
+	if contains(c.OffendingIDs, "inside") {
+		t.Fatalf("delta at tolerance should not be offending, got %v", c.OffendingIDs)
+	}
+	if !strings.Contains(c.Detail, "completion-token") {
+		t.Fatalf("detail should call out completion-token delta: %s", c.Detail)
+	}
+}
+
+func TestCheckI1_RequiredGatewayOutcomeFailsMismatches(t *testing.T) {
+	sc := &scenario.Scenario{RequiredGatewayOutcome: "ok"}
+	ledger := &reconcile.Result{
+		MatchedSuccesses: []reconcile.MatchedPair{
+			{HarnessRequestID: "ok", GatewayOutcome: "ok"},
+			{HarnessRequestID: "fallback", GatewayOutcome: "stream_output_exceeded"},
+		},
+	}
+	c := checkI1(sc, ledger)
+	if c.Passed {
+		t.Fatal("I1 should fail when a matched pair has the wrong gateway outcome")
+	}
+	if !contains(c.OffendingIDs, "fallback") || contains(c.OffendingIDs, "ok") {
+		t.Fatalf("offending ids should contain only the mismatched outcome pair, got %v", c.OffendingIDs)
+	}
+	if !strings.Contains(c.Detail, "required gateway outcome") {
+		t.Fatalf("detail should call out required gateway outcome: %s", c.Detail)
+	}
+}
+
+func TestCheckI1_RequiredGatewayTokenSourceFailsMismatches(t *testing.T) {
+	sc := &scenario.Scenario{RequiredGatewayTokenSource: "provider_reported"}
+	ledger := &reconcile.Result{
+		MatchedSuccesses: []reconcile.MatchedPair{
+			{HarnessRequestID: "reported", GatewayTokenSource: "provider_reported"},
+			{HarnessRequestID: "estimated", GatewayTokenSource: "gateway_estimated"},
+		},
+	}
+	c := checkI1(sc, ledger)
+	if c.Passed {
+		t.Fatal("I1 should fail when a matched pair has the wrong gateway token source")
+	}
+	if !contains(c.OffendingIDs, "estimated") || contains(c.OffendingIDs, "reported") {
+		t.Fatalf("offending ids should contain only the mismatched token-source pair, got %v", c.OffendingIDs)
+	}
+	if !strings.Contains(c.Detail, "required gateway token source") {
+		t.Fatalf("detail should call out required gateway token source: %s", c.Detail)
+	}
+}
+
 // Net-zero with hidden overbill: +10 in one pair, -10 in another → Net
 // = 0 but positive-overbill = 10. Must fail. This is the CRITICAL the
 // R1 audit caught.

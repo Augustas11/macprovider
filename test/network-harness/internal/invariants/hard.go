@@ -118,9 +118,18 @@ func checkI1(sc *scenario.Scenario, ledger *reconcile.Result) Check {
 	gwOverbillVsHarness := ledger.GatewayOverbillVsHarnessTokens
 	absGwCoordMismatch := ledger.AbsGatewayCoordinatorMismatchTokens
 	tolerance := int64(0)
+	maxCompletionDelta := int64(0)
+	requiredGatewayOutcome := ""
+	requiredGatewayTokenSource := ""
 	if sc != nil {
 		tolerance = sc.ChargedDeliveredToleranceTokens
+		maxCompletionDelta = sc.MaxCompletionTokenDelta
+		requiredGatewayOutcome = sc.RequiredGatewayOutcome
+		requiredGatewayTokenSource = sc.RequiredGatewayTokenSource
 	}
+	completionDeltaPairs := completionTokenDeltaViolations(ledger, maxCompletionDelta)
+	gatewayOutcomePairs := gatewayOutcomeViolations(ledger, requiredGatewayOutcome)
+	gatewayTokenSourcePairs := gatewayTokenSourceViolations(ledger, requiredGatewayTokenSource)
 	unmatched := len(ledger.UnmatchedSuccesses)
 	unmatchedGwOK := len(ledger.UnmatchedGatewayOKRows)
 	unmatchedCoord2xx := len(ledger.UnmatchedCoordinator2xxRows)
@@ -145,6 +154,15 @@ func checkI1(sc *scenario.Scenario, ledger *reconcile.Result) Check {
 		driftSignals++
 	}
 	if gwOverbillVsHarness > tolerance {
+		driftSignals++
+	}
+	if len(completionDeltaPairs) > 0 {
+		driftSignals++
+	}
+	if len(gatewayOutcomePairs) > 0 {
+		driftSignals++
+	}
+	if len(gatewayTokenSourcePairs) > 0 {
 		driftSignals++
 	}
 	if absGwCoordMismatch > 0 {
@@ -182,6 +200,15 @@ func checkI1(sc *scenario.Scenario, ledger *reconcile.Result) Check {
 	if gwOverbillVsHarness > tolerance {
 		parts = append(parts, fmt.Sprintf("gateway over-billed by %d vs harness above tolerance %d across %d pair(s)", gwOverbillVsHarness, tolerance, len(ledger.OverbilledPairs)))
 	}
+	if len(completionDeltaPairs) > 0 {
+		parts = append(parts, fmt.Sprintf("%d buyer/gateway completion-token pair(s) exceeded max delta %d", len(completionDeltaPairs), maxCompletionDelta))
+	}
+	if len(gatewayOutcomePairs) > 0 {
+		parts = append(parts, fmt.Sprintf("%d matched pair(s) did not have required gateway outcome %q", len(gatewayOutcomePairs), requiredGatewayOutcome))
+	}
+	if len(gatewayTokenSourcePairs) > 0 {
+		parts = append(parts, fmt.Sprintf("%d matched pair(s) did not have required gateway token source %q", len(gatewayTokenSourcePairs), requiredGatewayTokenSource))
+	}
 	if absGwCoordMismatch > 0 {
 		parts = append(parts, fmt.Sprintf("gateway-coord ledger mismatch %d tokens across %d pair(s)", absGwCoordMismatch, len(ledger.GatewayCoordMismatchedPairs)))
 	}
@@ -196,11 +223,57 @@ func checkI1(sc *scenario.Scenario, ledger *reconcile.Result) Check {
 	c.OffendingIDs = append(c.OffendingIDs, ledger.UnmatchedGatewayOKRows...)
 	c.OffendingIDs = append(c.OffendingIDs, ledger.UnmatchedCoordinator2xxRows...)
 	c.OffendingIDs = append(c.OffendingIDs, ledger.OverbilledPairs...)
+	c.OffendingIDs = append(c.OffendingIDs, completionDeltaPairs...)
+	c.OffendingIDs = append(c.OffendingIDs, gatewayOutcomePairs...)
+	c.OffendingIDs = append(c.OffendingIDs, gatewayTokenSourcePairs...)
 	c.OffendingIDs = append(c.OffendingIDs, ledger.MatchedCoordMissing...)
 	c.OffendingIDs = append(c.OffendingIDs, ledger.GatewayCoordMismatchedPairs...)
 	c.OffendingIDs = append(c.OffendingIDs, ledger.AmbiguousExactGatewayIDs...)
 	c.OffendingIDs = append(c.OffendingIDs, ledger.AmbiguousExactCoordIDs...)
 	return c
+}
+
+func completionTokenDeltaViolations(ledger *reconcile.Result, maxDelta int64) []string {
+	if ledger == nil || maxDelta <= 0 {
+		return nil
+	}
+	var out []string
+	for _, p := range ledger.MatchedSuccesses {
+		delta := p.GatewayCompletionTokens - p.HarnessCompletionTokens
+		if delta < 0 {
+			delta = -delta
+		}
+		if delta > maxDelta {
+			out = append(out, p.HarnessRequestID)
+		}
+	}
+	return out
+}
+
+func gatewayOutcomeViolations(ledger *reconcile.Result, required string) []string {
+	if ledger == nil || required == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range ledger.MatchedSuccesses {
+		if p.GatewayOutcome != required {
+			out = append(out, p.HarnessRequestID)
+		}
+	}
+	return out
+}
+
+func gatewayTokenSourceViolations(ledger *reconcile.Result, required string) []string {
+	if ledger == nil || required == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range ledger.MatchedSuccesses {
+		if p.GatewayTokenSource != required {
+			out = append(out, p.HarnessRequestID)
+		}
+	}
+	return out
 }
 
 // I2 — no 5xx response without a billing settlement entry on the
