@@ -169,6 +169,67 @@ trailing restart events in those scenarios are best-effort — if they
 fail, run the same launchd recovery command locally on the affected Mac
 to bring the provider back up.
 
+## Chaos lane (money-path resilience)
+
+The chaos scenarios test money-path invariants I1–I4 under adversarial
+network / process conditions. Scenarios 05, 06, and 15 are the
+lane's current members; scenarios 16–19 are on the roadmap below.
+
+### Hybrid rig, not local rig
+
+The chaos lane uses the same rig as every other scenario in this
+harness: Pearl (`api.streamvc.live` + `coordinator.streamvc.live`) is
+the SUT, and this Mac is the provider under test. **All chaos is
+scoped to the local provider process** — `launchctl kickstart -k` on
+this Mac, never `systemctl restart` on Pearl. That means:
+
+- Each chaos scenario's `prompts[].model` must be served ONLY by
+  this Mac at the time of the run (today: `Qwen3-Coder-30B-A3B` for
+  scenario 15; `Qwen3-32B-4bit` for scenarios 05, 06 — verify against
+  the current `--model` flag in `~/Library/LaunchAgents/live.streamvc.macprovider.plist`).
+  Killing the local provider then blocks buyer traffic for that model,
+  isolating the fault surface. If another Mac joins the pool for the
+  same model, chaos scenarios will produce noisier reconcile because
+  buyers reroute mid-run.
+- No `PROVIDER_SSH` needed for scenarios 05, 06, 15 — chaos is local.
+- The billing reconcile still runs against Pearl's SQLite via the
+  existing `_ssh` snapshot path.
+
+### Chaos-lane anti-scope
+
+- **Do not inject faults into Pearl coord or gateway** — they are the
+  SUT. Chaos targets the local provider only.
+- **Do not touch coord / gateway / provider source code** from this
+  lane — chaos is scenarios + observation, not source changes. Bugs
+  surfaced here go through the usual PR workflow.
+- **Do not soften I1–I4** to accommodate chaos. If a chaos scenario
+  reveals a genuine spec gap (e.g. SPEC-022 tolerates drift under a
+  specific fault mode), file that as a SPEC amendment, not a scenario-
+  local tolerance bump.
+
+### A local coord+gateway rig is deferred
+
+Some planned scenarios (see roadmap) will need to fault-inject at the
+gateway or coord layer (`16_gateway_restart_midstream.yaml`,
+`17_packet_loss_5pct.yaml`, `19_coordinator_restart_midstream.yaml`).
+Those cannot target Pearl safely. The rig decision — reuse
+`test/integration` bring-up vs a minimal new `rig/` directory — is
+deferred to the PR that first needs it, so that the shape follows the
+scenario's actual requirements rather than a speculative design.
+
+### Follow-up roadmap
+
+| PR | Scenario | Fault | Rig gap |
+|---|---|---|---|
+| — | `15_provider_reconnect_storm.yaml` | 4× local `launchctl kickstart -k` at 5/35/65/95s, buyer fleet interval-paced to span the full 100s window | none (this PR) |
+| PR 2 | `16_gateway_restart_midstream.yaml` | `systemctl restart macprovider-gateway` mid-stream | first PR that needs coord/gateway chaos — decides on local rig |
+| PR 3 | `17_packet_loss_5pct.yaml` | 5% packet loss via `tc netem` (root required) | needs local rig or booked Pearl window |
+| PR 4 | `18_slow_provider_streaming.yaml` | Throttle provider output to 5 tok/s | needs provider-side throttle knob (new) |
+| PR 5 | `19_coordinator_restart_midstream.yaml` | `systemctl restart macprovider-coordinator` mid-stream | same as PR 2 |
+
+Each subsequent PR follows the same rhythm: discovery → design →
+implement → three-lane codex audit at 0 C/H/M → merge → verify.
+
 ## Cost discipline
 
 Scenarios target the live network and consume real provider time. The
@@ -270,6 +331,7 @@ triage reads them as a set.
 | [`scenarios/12_moe_mid_stream_projection.yaml`](scenarios/12_moe_mid_stream_projection.yaml) | MoE streaming regression | #303 Path A: premature `stream_output_exceeded` before provider usage | BUYER_TOKEN, `pearl` SSH alias, required MoE model rows |
 | [`scenarios/13_dense_token_count_regression.yaml`](scenarios/13_dense_token_count_regression.yaml) | Dense coding streams | #303 Path B: dense-content token downclamp drift | BUYER_TOKEN, `pearl` SSH alias, Qwen2.5-Coder-32B row |
 | [`scenarios/14_sparse_provider_reported_tokens.yaml`](scenarios/14_sparse_provider_reported_tokens.yaml) | Sparse English streams | #303 Path C: provider-reported tokens must beat byte estimates | BUYER_TOKEN, `pearl` SSH alias, Llama 3.1 8B row |
+| [`scenarios/15_provider_reconnect_storm.yaml`](scenarios/15_provider_reconnect_storm.yaml) | 3 buyers × 5 streaming (interval 15s) + 4 kicks at 5/35/65/95s | I1-I4 under repeated mid-stream reconnect churn | BUYER_TOKEN, `pearl` SSH alias, local launchd label |
 
 See [`internal/scenario/schema.go`](internal/scenario/schema.go) for the
 authoritative field reference.

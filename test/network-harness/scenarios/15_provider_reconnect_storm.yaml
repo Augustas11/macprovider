@@ -1,0 +1,164 @@
+# 15_provider_reconnect_storm.yaml — repeatedly kill THIS Mac's provider
+# process while multiple buyers stream, exercising the reconnect + pool
+# re-election path under sustained mid-stream churn.
+#
+# This Mac is provider augustass-macbook-air, serving
+# qwen3-coder-30b-a3b-instruct, managed by launchd label
+# `live.streamvc.macprovider`. Chaos events use local launchctl —
+# no SSH required, no fault injected into Pearl coord/gateway
+# themselves (they are the SUT).
+#
+# Delta vs 05_mid_stream_drop.yaml:
+#   05 fires ONE kill during ONE buyer's ONE stream. This scenario
+#   fires FOUR kills across THREE buyers × FIVE requests each (15
+#   attempts total), interval-paced so the buyer window spans the
+#   full chaos timeline. Kicks are 30s apart — chosen so launchd
+#   KeepAlive can bring the provider back (~10s) and one stream
+#   at max_tokens=512 (~15-17s) can complete cleanly before the
+#   next kick. Result is a mix of outcomes across the run: some
+#   streams complete without incident, some get killed mid-stream.
+#   Reconnect + settlement paths run repeatedly under load. The
+#   subtle billing bugs live here — double-settlement on
+#   reconnect, orphaned settlement rows on the killed attempt,
+#   pool re-election races that route a mid-stream buyer to a
+#   still-connecting provider, overbill on the HTTP-200-with-SSE-
+#   error path (see issue #444).
+#
+# What we want to learn (phase A, descriptive — recorded only):
+#  - I1 (billing reconciliation drift == 0) holds across multiple
+#    kicks. Every settled request — completed or truncated — must
+#    reconcile exactly gateway == coord == observed tokens.
+#  - I2 (no orphan 5xx): every 5xx-shape response event has a
+#    settlement row.
+#  - I3 (no overcharge): no charged > delivered on any request,
+#    including the truncated ones.
+#  - I4 (no silent hang): every stream terminates cleanly (data,
+#    error, or documented close) within silent_hang_threshold.
+#  - Descriptively: how many of the ~15 attempts complete vs how
+#    many see stream_truncated or capacity-503? What is the p95
+#    reconnect-to-first-token time for the request AFTER a kick?
+#    These become phase-B triage inputs, not phase-A assertions.
+#  - PHASE B TRIAGE: is repeated mid-stream churn tolerable behavior
+#    or does it warrant gateway-side retry with exclude-list?
+#
+# What gets asserted (the 4 hard invariants): all 4 run.
+#
+# IMPORTANT: this scenario stops the local provider four times.
+# `launchctl kickstart -k` sends SIGKILL and lets launchd's KeepAlive
+# bring the daemon back. A final belt-and-suspenders `kickstart` (no
+# -k) at 115s ensures a clean provider is running before the
+# settlement snapshot window opens.
+#
+# Chaos targets the local provider only; no faults are injected into
+# Pearl coord or gateway. See test/network-harness/README.md
+# "Chaos lane" for the hybrid-rig rationale.
+name: provider_reconnect_storm
+description: |
+  Three buyers each fire five streaming chat completions to
+  Qwen3-Coder-30B-A3B (served only by this Mac) with a 15s
+  interval between each buyer's own requests. At
+  t=5s / 35s / 65s / 95s a chaos event kills the local provider
+  process, letting launchd KeepAlive reconnect it between kicks.
+  Interval pacing keeps a request in-flight across the full
+  100s window; the 30s kick cadence gives the provider a
+  recovery window big enough for one stream to complete cleanly
+  before the next kick, producing a mix of clean-completion and
+  killed-mid-stream outcomes.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - Empirically ~1 attempt establishes an HTTP 200 stream (usually
+     the first, before kick #1); the remaining ~14 attempts capacity-
+     reject with HTTP 503 as they retry across the buyer window.
+     The reason isn't a scenario defect — Qwen3-Coder-30B-A3B takes
+     ~30-60s to reload its MLX weights after a `launchctl kickstart
+     -k`, which is longer than the 30s inter-kick spacing. Under
+     this fault density the provider spends most of the run in a
+     "restarting / weight loading" state, coord marks it unavailable,
+     and buyers get admission-control 503s (see issue #443). That is
+     the real "reconnect storm" shape on a big-model 1-slot provider.
+   - The 1 established stream reliably overlaps kick #1 and terminates
+     with an SSE error (`stream_output_exceeded` or `stream_malformed`)
+     while the buyer parser records `completion_tokens_received == 0`.
+     Gateway currently overbills on that path (issue #444) and coord
+     sometimes records the request as 2xx, sometimes 5xx, depending on
+     when in the stream the kick lands.
+   - I4 must not fire — every stream terminates (data, error, or
+     documented close) within silent_hang_threshold. This is the one
+     invariant that should stay green regardless of what else goes
+     wrong.
+   - PHASE B TRIAGE: When #443 and #444 land, expected shape becomes
+     ~1 stream + ~14 clean-error 5xx (each with X-Request-Id echoed
+     and 0-token settlement rows), gateway_overbill_vs_harness == 0,
+     I1-I4 all pass. That's the smoke-check the scenario should
+     produce before it graduates from phase-A record-only to a
+     phase-C CI-gated regression.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+# Fleet shape: 3 buyers × 5 requests with a 15s interval between each
+# buyer's own requests, running against a 1-slot local provider
+# (`max_concurrency_override: 1`). Rationale for these numbers vs the
+# original 3×2 constant shape:
+#   - Constant + 3×2 finishes buyer traffic in ~10-15s because 5/6
+#     requests fail-fast with capacity-503 and the surviving stream is
+#     the only long-lived request. Kicks #2–#5 then fire against an
+#     empty buyer window and only kick #1 exercises the storm.
+#   - Interval-15s + 3×5 keeps a request in-flight essentially the
+#     whole 100s window: the slot cycles ~one stream per 15-18s
+#     (max_tokens 512 at ~30 tok/s ≈ 17s per stream), so at each kick
+#     at t=5/25/45/65/85s the slot is either mid-stream or being
+#     re-established. That's the reconnect-storm condition the
+#     scenario is named for.
+#   - Non-slot buyers still fail-fast with capacity-503 in the mean
+#     time, which is the shape that surfaces the I2 orphan-5xx path
+#     (see issue #443). Both bugs get exercised in one run.
+buyers:
+  count: 3
+  stream: true
+  pattern: interval
+  interval_ms: 15000
+  requests_per_buyer: 5
+
+duration: 100s
+request_timeout: 90s
+silent_hang_threshold: 25s
+
+prompts:
+  - model: qwen3-coder-30b-a3b-instruct
+    # Long generation so streams span multiple kick windows and
+    # reliably exercise mid-stream chaos across successive requests,
+    # not just pre-first-token chaos on one buyer.
+    user: "Write a Python implementation of a red-black tree with insert, delete, and rebalancing. Include docstrings, type hints, and one usage example."
+    max_tokens: 512
+
+chaos_events:
+  # Kick cadence: 30s apart. Rationale — launchd KeepAlive brings the
+  # provider back in ~10s and a completion at max_tokens=512 streams
+  # for ~15-17s, so a 30s gap gives ONE stream a chance to complete
+  # cleanly before the next kick. That produces a mix of outcomes
+  # across the run — some streams complete without incident, some
+  # get killed mid-stream — instead of the "provider is basically
+  # down the whole time" degenerate shape that a tighter 20s cadence
+  # produces (only the very first stream ever establishes).
+  - at: 5s
+    description: "Kick #1: kill local provider mid-stream"
+    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
+  - at: 35s
+    description: "Kick #2: kill again after ~1 stream completed cleanly"
+    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
+  - at: 65s
+    description: "Kick #3: third mid-stream kick"
+    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
+  - at: 95s
+    description: "Kick #4: last chaos kick (late buyer window)"
+    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
+  - at: 115s
+    description: "Sanity restart (belt-and-suspenders before snapshot pad opens)"
+    command: launchctl kickstart gui/$(id -u)/live.streamvc.macprovider
