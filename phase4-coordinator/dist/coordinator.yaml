@@ -180,6 +180,10 @@ rewards:
       prompt_credits_per_mtok: 13500         # $0.0135/M
       prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
       completion_credits_per_mtok: 27000     # $0.027/M (RESEARCH_227 target, cheapest publicly-served 8B)
+    meta-llama/llama-3.2-3b-instruct:        # Entry 116 — 8 GB M-Base onboarding row (SPEC-003 parity)
+      prompt_credits_per_mtok: 13500         # $0.0135/M (same small-dense lane as Llama 3.1 8B)
+      prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
+      completion_credits_per_mtok: 27000     # $0.027/M
     qwen2.5-coder-32b-instruct:              # v3 expansion — M-Max/Ultra only per Entry 92 admission gate
       prompt_credits_per_mtok: 425000        # $0.425/M
       prompt_cache_hit_credits_per_mtok: 106250 # $0.10625/M prefix-cache hit

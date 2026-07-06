@@ -76,7 +76,7 @@ curl -fsSL https://get.streamvc.live/install.sh | bash
 
 The installer:
 
-- Picks a recommended MLX model by running the SPEC-023 `autotune-recommend` flow against a signed static feed of demand rank + candidate models, filtered by your Mac's RAM tier, sustained TPS, and 4K-prompt TTFT (you can override)
+- Picks a recommended MLX model by running the SPEC-023 `autotune-recommend` flow against a signed static feed of demand rank + candidate models. Eligibility is gated by RAM headroom (catalog `min_ram_gb` vs Mac RAM minus a 4 GB safety margin), bandwidth tier, and a local benchmark probe; scoring ranks eligible rows by `demand_weight × completion_rate_per_mtok × sustained_tps` using live `/v1/rate-card` per-token rates (you can override)
 - Asks for a stable provider handle used as your pool identity
 - Downloads and verifies the latest `macprovider-cli` release against a signed checksum manifest
 - Installs under `~/macprovider` and sets up a user-level launchd service
@@ -143,7 +143,7 @@ Latest release and signed binaries: [github.com/augustas11/macprovider/releases]
 - **Structured output (SPEC-019, LOCKED).** `response_format: json_schema` with OpenAI strict-mode subset; post-hoc validate-and-fault.
 - **Prefix-cache reuse + billing (SPEC-024).** Sticky `conversation_id` routing, `cached_prompt_tokens` in `usage`, prefix-cache metering.
 - **Provider autoupdate (SPEC-020).** Coordinator advertises `recommended_binary_version`; providers auto-drain, verify the signed release, and swap in place.
-- **Installer-integrated autotune-recommend (SPEC-023 v0.2 LOCKED).** Signed static demand-rank + candidate-catalog feeds off Pearl nginx; RAM/TPS/TTFT eligibility gates picked at install time.
+- **Installer-integrated autotune-recommend (SPEC-023 v0.4 LOCKED).** Signed static demand-rank + candidate-catalog feeds off Pearl nginx; RAM/benchmark eligibility gates at install time; per-token payout transcript (recommended model or donor-only fallback — no hourly projection or starter tier).
 - **Provider payout pipeline (SPEC-016).** USDC payout design on Base, gated on the operator hot-wallet prerequisites in §9; converged after 20 codex audit rounds.
 
 ## In flight
