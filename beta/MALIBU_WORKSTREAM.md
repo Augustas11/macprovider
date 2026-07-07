@@ -21,7 +21,6 @@ repo.
 
 | ID | Scope | Exit criterion | Notes |
 |---|---|---|---|
-| **P2b** | **Consolidate static feeds into buyer API** | Live autotune catalog + demand-rank served from coordinator buyer mux (`/v1/demand-rank`, `/v1/autotune-candidates` + `.sig`); Pearl deploy installs `/opt/macprovider/autotune/`; CLI fetches `/v1/*`; drop nginx `/static/` | PR in progress |
 
 ---
 
@@ -37,6 +36,7 @@ repo.
 
 | ID | Shipped | PR / release | Notes |
 |---|---|---|---|
+| **P2b** | 2026-07-07 | v1.8.19 (#459 + release) | Autotune feeds on buyer mux `/v1/*`; Pearl deploy + Sparkle release |
 | **P2a** | 2026-07-07 | #458 | Autotune `--recommend`/`--apply` hardening |
 | **R1** | 2026-07-07 | v1.8.18 (#457) | Sparkle live + dashboard stats clipping fix |
 | Pearl static feeds | 2026-07-07 | #454 | Baked catalog sync + nginx EACCES hardening (superseded by P2b buyer mux) |
@@ -48,7 +48,7 @@ repo.
 
 ## FAQ
 
-### Update paths (post v1.8.18)
+### Update paths (post v1.8.19)
 
 | Path | What it updates |
 |---|---|
@@ -60,6 +60,6 @@ repo.
 | SPEC-025 §11 | Status |
 |---|---|
 | P2 signing / `.dmg` | Done |
-| P3 Sparkle | Live (v1.8.18) |
+| P3 Sparkle | Live (v1.8.19) |
 | P4 landing page | Not started |
 | P5+ WalletConnect, Homebrew | Backlog |
