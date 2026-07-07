@@ -1,0 +1,76 @@
+{
+  "bf16WeightsEnvFlag" : false,
+  "compiledDecodeEnvFlag" : false,
+  "decodeTokensTarget" : 64,
+  "label" : "t0-02-refresh-gpt-oss",
+  "mlxSwiftLMPin" : "mlxlm-3.31.4",
+  "modelID" : "mlx-community\/gpt-oss-20b-MXFP4-Q8",
+  "modelTag" : "gpt-oss-20b-MXFP4-Q8",
+  "prefillStepSize" : 512,
+  "prefillTokensTarget" : 512,
+  "runs" : 5,
+  "samples" : [
+    {
+      "decodeSeconds" : 2.7514710426330566,
+      "decodeTPS" : 22.896842824742695,
+      "decodeTokensActual" : 64,
+      "isWarmup" : false,
+      "prefillSeconds" : 2.383787989616394,
+      "prefillTPS" : 244.14922909887514,
+      "promptTokensActual" : 582,
+      "ttftSeconds" : 2.383787989616394
+    },
+    {
+      "decodeSeconds" : 2.7487049102783203,
+      "decodeTPS" : 22.91988483900985,
+      "decodeTokensActual" : 64,
+      "isWarmup" : false,
+      "prefillSeconds" : 2.194643020629883,
+      "prefillTPS" : 265.1911926127105,
+      "promptTokensActual" : 582,
+      "ttftSeconds" : 2.194643020629883
+    },
+    {
+      "decodeSeconds" : 2.764886975288391,
+      "decodeTPS" : 22.785741537745423,
+      "decodeTokensActual" : 64,
+      "isWarmup" : false,
+      "prefillSeconds" : 2.220661997795105,
+      "prefillTPS" : 262.08400944307044,
+      "promptTokensActual" : 582,
+      "ttftSeconds" : 2.220661997795105
+    },
+    {
+      "decodeSeconds" : 2.7214319705963135,
+      "decodeTPS" : 23.149577384510405,
+      "decodeTokensActual" : 64,
+      "isWarmup" : false,
+      "prefillSeconds" : 2.2274019718170166,
+      "prefillTPS" : 261.2909602146172,
+      "promptTokensActual" : 582,
+      "ttftSeconds" : 2.2274019718170166
+    },
+    {
+      "decodeSeconds" : 2.773224949836731,
+      "decodeTPS" : 22.71723395670049,
+      "decodeTokensActual" : 64,
+      "isWarmup" : false,
+      "prefillSeconds" : 2.248033046722412,
+      "prefillTPS" : 258.8929912967892,
+      "promptTokensActual" : 582,
+      "ttftSeconds" : 2.248033046722412
+    }
+  ],
+  "schemaVersion" : 1,
+  "timestamp" : "2026-07-07T17:14:17Z",
+  "warmup" : {
+    "decodeSeconds" : 3.2272039651870728,
+    "decodeTPS" : 19.52154269751836,
+    "decodeTokensActual" : 64,
+    "isWarmup" : true,
+    "prefillSeconds" : 42.18389105796814,
+    "prefillTPS" : 13.796735801356705,
+    "promptTokensActual" : 582,
+    "ttftSeconds" : 42.18389105796814
+  }
+}

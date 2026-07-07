@@ -110,9 +110,9 @@ In practice:
 that index arithmetic is a node in the computation graph rather than a constant.
 This requires a change to mlx-swift-lm; it cannot be fixed in macprovider-cli.
 
-**Tracking:** File an issue against mlx-swift-lm requesting MLXArray-based offset in
-`KVCacheSimple`. Until resolved, `MACPROVIDER_COMPILED_DECODE=1` must not be used
-for production inference.
+**Tracking:** [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406)
+(MLXArray-based `KVCacheSimple.offset` for `MLX.compile()` compatibility).
+Until resolved, `MACPROVIDER_COMPILED_DECODE=1` must not be used for production inference.
 
 ---
 
@@ -185,8 +185,7 @@ on the upstream fix.
 
 ## Next Steps
 
-1. File issue on mlx-swift-lm: "MLXArray-based `KVCacheSimple.offset` for
-   `MLX.compile()` compatibility"
+1. ~~File issue on mlx-swift-lm~~ → **Done:** [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406)
 2. Once upstream fix is available: bump mlx-swift-lm pin, re-run T2-01 correctness
    check, then proceed to perf benchmarks
 3. Full production `stream()` wire-in (currently log-only) in follow-up PR after

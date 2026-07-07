@@ -1,0 +1,56 @@
+{
+  "bf16WeightsEnvFlag" : false,
+  "compiledDecodeEnvFlag" : false,
+  "decodeTokensTarget" : 32,
+  "label" : "prefill-1024",
+  "mlxSwiftLMPin" : "mlxlm-3.31.4",
+  "modelID" : "mlx-community\/Qwen2.5-7B-Instruct-4bit",
+  "modelTag" : "Qwen2.5-7B-Instruct-4bit",
+  "prefillStepSize" : 1024,
+  "prefillTokensTarget" : 4096,
+  "runs" : 3,
+  "samples" : [
+    {
+      "decodeSeconds" : 1.4729970693588257,
+      "decodeTPS" : 21.045527275552455,
+      "decodeTokensActual" : 32,
+      "isWarmup" : false,
+      "prefillSeconds" : 9.306547999382019,
+      "prefillTPS" : 443.34376186250563,
+      "promptTokensActual" : 4126,
+      "ttftSeconds" : 9.306547999382019
+    },
+    {
+      "decodeSeconds" : 1.4268280267715454,
+      "decodeTPS" : 21.726514631299377,
+      "decodeTokensActual" : 32,
+      "isWarmup" : false,
+      "prefillSeconds" : 9.26556396484375,
+      "prefillTPS" : 445.3047883167443,
+      "promptTokensActual" : 4126,
+      "ttftSeconds" : 9.26556396484375
+    },
+    {
+      "decodeSeconds" : 1.6791490316390991,
+      "decodeTPS" : 18.461732351260917,
+      "decodeTokensActual" : 32,
+      "isWarmup" : false,
+      "prefillSeconds" : 9.237982034683228,
+      "prefillTPS" : 446.63433902656226,
+      "promptTokensActual" : 4126,
+      "ttftSeconds" : 9.237982034683228
+    }
+  ],
+  "schemaVersion" : 1,
+  "timestamp" : "2026-07-07T17:10:56Z",
+  "warmup" : {
+    "decodeSeconds" : 1.4460139274597168,
+    "decodeTPS" : 21.438244411974104,
+    "decodeTokensActual" : 32,
+    "isWarmup" : true,
+    "prefillSeconds" : 9.307653069496155,
+    "prefillTPS" : 443.2911249692024,
+    "promptTokensActual" : 4126,
+    "ttftSeconds" : 9.307653069496155
+  }
+}
