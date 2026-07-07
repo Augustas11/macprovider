@@ -38,8 +38,8 @@ final class AutotuneRecommendTests: XCTestCase {
         let rateMatch = try XCTUnwrap(rateCard.rowForRecommendation(modelKey: modelKey))
         XCTAssertEqual(rateMatch.key, "nemotron-3-nano-30b-a3b")
         let rateRow = rateMatch.row
-        XCTAssertEqual(rateRow.promptRatePerMtok, 117_500)
-        XCTAssertEqual(rateRow.completionRatePerMtok, 235_000)
+        XCTAssertEqual(rateRow.promptRatePerMtok, 80_000)
+        XCTAssertEqual(rateRow.completionRatePerMtok, 160_000)
         XCTAssertEqual(rateRow.providerShareBPS, 9_000)
     }
 
@@ -1501,7 +1501,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: "provider-a")
         try Data("""
-        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-03","demand_rank_version":"published-2026-07-07-p1-gemma","candidate_catalog_version":"published-2026-07-07-p1-gemma","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-07-p2-drift","demand_rank_version":"published-2026-07-07-p1-gemma","candidate_catalog_version":"published-2026-07-07-p1-gemma","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
 
         let staleSince = await StatusCommand.staleRecommendationSince(
