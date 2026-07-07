@@ -99,6 +99,12 @@ public struct AppConfig: Equatable, Sendable {
     // `stream_interval`, env `MACPROVIDER_STREAM_INTERVAL`, CLI `--stream-interval`.
     public var streamInterval: Int
 
+    // T3-02 adaptive prefill: mlx-swift chunked prefill window (GenerateParameters.prefillStepSize).
+    // Default 512 matches mlx-swift-lm. Larger values reduce TTFT on long cold prefills.
+    // Triple-exposed: yaml key `prefill_step_size`, env `MACPROVIDER_PREFILL_STEP_SIZE`,
+    // CLI `--prefill-step-size`.
+    public var prefillStepSize: Int
+
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
     public static func defaults(configPath: String = defaultConfigPath) -> AppConfig {
@@ -151,7 +157,8 @@ public struct AppConfig: Equatable, Sendable {
             idlePrewarmRunOnBattery: false,
             providerToken: nil,
             managedBy: nil,
-            streamInterval: 1
+            streamInterval: 1,
+            prefillStepSize: 512
         )
     }
 }
@@ -191,6 +198,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var idlePrewarmPrompt: String?
     public var idlePrewarmRunOnBattery: Bool?
     public var streamInterval: Int?
+    public var prefillStepSize: Int?
 
     public init(
         port: Int? = nil,
@@ -223,7 +231,8 @@ public struct CLIOverrides: Equatable, Sendable {
         idlePrewarmMaxTokens: Int? = nil,
         idlePrewarmPrompt: String? = nil,
         idlePrewarmRunOnBattery: Bool? = nil,
-        streamInterval: Int? = nil
+        streamInterval: Int? = nil,
+        prefillStepSize: Int? = nil
     ) {
         self.port = port
         self.model = model
@@ -256,6 +265,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.idlePrewarmPrompt = idlePrewarmPrompt
         self.idlePrewarmRunOnBattery = idlePrewarmRunOnBattery
         self.streamInterval = streamInterval
+        self.prefillStepSize = prefillStepSize
     }
 }
 
@@ -389,6 +399,7 @@ public enum ConfigLoader {
         try assign(&config.providerToken, from: dict, key: "provider_token", expected: "string")
         try assign(&config.managedBy, from: dict, key: "managed_by", expected: "string")
         try assign(&config.streamInterval, from: dict, key: "stream_interval", expected: "integer >= 1")
+        try assign(&config.prefillStepSize, from: dict, key: "prefill_step_size", expected: "integer >= 1")
         return config
     }
 
@@ -438,6 +449,7 @@ public enum ConfigLoader {
         try assign(&config.providerToken, from: environment, env: "MACPROVIDER_PROVIDER_TOKEN", expected: "string")
         try assign(&config.managedBy, from: environment, env: "MACPROVIDER_MANAGED_BY", expected: "string")
         try assign(&config.streamInterval, from: environment, env: "MACPROVIDER_STREAM_INTERVAL", expected: "integer >= 1")
+        try assign(&config.prefillStepSize, from: environment, env: "MACPROVIDER_PREFILL_STEP_SIZE", expected: "integer >= 1")
         return config
     }
 
@@ -539,6 +551,9 @@ public enum ConfigLoader {
         }
         if let streamInterval = cli.streamInterval {
             config.streamInterval = streamInterval
+        }
+        if let prefillStepSize = cli.prefillStepSize {
+            config.prefillStepSize = prefillStepSize
         }
         return config
     }

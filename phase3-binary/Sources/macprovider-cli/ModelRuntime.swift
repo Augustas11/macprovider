@@ -335,6 +335,7 @@ actor ModelRuntime: ModelRuntimeServing {
     // quantization (mlx-swift default). maxBatch defaults to 1, the
     // pre-knob behavior; lifting above 1 widens the autotune search.
     private let kvBitsOverride: Int?
+    private let prefillStepSize: Int
     private let conversationCache: ConversationCache
     private let inferenceGate: AsyncSemaphore
     private let maxBatch: Int
@@ -362,6 +363,24 @@ actor ModelRuntime: ModelRuntimeServing {
         currentContainer != nil || (testCompletion != nil && currentModelID != nil)
     }
 
+    private nonisolated static func makeServeGenerateParameters(
+        maxTokens: Int?,
+        maxContextTokens: Int,
+        kvBitsOverride: Int?,
+        prefillStepSize: Int,
+        temperature: Float,
+        topP: Float
+    ) -> GenerateParameters {
+        GenerateParameters(
+            maxTokens: maxTokens,
+            maxKVSize: maxContextTokens,
+            kvBits: kvBitsOverride,
+            temperature: temperature,
+            topP: topP,
+            prefillStepSize: prefillStepSize
+        )
+    }
+
     init(
         modelID: String?,
         modelLoadPath: String? = nil,
@@ -370,6 +389,7 @@ actor ModelRuntime: ModelRuntimeServing {
         numDraftTokens: Int = 3,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
+        prefillStepSize: Int = 512,
         maxBatch: Int = 1,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30
@@ -385,6 +405,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.numDraftTokens = numDraftTokens
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
+        self.prefillStepSize = max(1, prefillStepSize)
         self.conversationCache = ConversationCache()
         self.maxBatch = max(1, maxBatch)
         self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
@@ -434,7 +455,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 draft: draftContainer,
                 numDraftTokens: 1,
                 maxContextTokens: self.maxContextTokens,
-                kvBitsOverride: self.kvBitsOverride
+                kvBitsOverride: self.kvBitsOverride,
+                prefillStepSize: self.prefillStepSize
             )
             try await Self.runSpeculativeEquivalenceCanary(
                 target: container,
@@ -442,7 +464,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 targetModelID: modelID,
                 numDraftTokens: numDraftTokens,
                 maxContextTokens: self.maxContextTokens,
-                kvBitsOverride: self.kvBitsOverride
+                kvBitsOverride: self.kvBitsOverride,
+                prefillStepSize: self.prefillStepSize
             )
             self.currentDraftModelID = draftModelID
             self.currentDraftTargetModelID = modelID
@@ -457,6 +480,7 @@ actor ModelRuntime: ModelRuntimeServing {
         numDraftTokens: Int = 3,
         maxContextTokensOverride: Int? = nil,
         kvBitsOverride: Int? = nil,
+        prefillStepSize: Int = 512,
         maxBatch: Int = 1,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
@@ -480,6 +504,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
+        self.prefillStepSize = max(1, prefillStepSize)
         self.conversationCache = ConversationCache()
         self.maxBatch = max(1, maxBatch)
         self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
@@ -559,7 +584,8 @@ actor ModelRuntime: ModelRuntimeServing {
         let numDraftTokens = numDraftTokens
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = kvBitsOverride
-        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride] in
+        let prefillStepSize = prefillStepSize
+        return Task.detached { [weak self, testLoader, drainTimeoutSeconds, providerStatus, configuredDraftModelID, configuredDraftModelLoadPath, numDraftTokens, maxContextTokens, kvBitsOverride, prefillStepSize] in
             guard let self else { return }
             do {
                 let container: ModelContainer?
@@ -608,7 +634,8 @@ actor ModelRuntime: ModelRuntimeServing {
                                 draft: draftLoaded.0,
                                 numDraftTokens: 1,
                                 maxContextTokens: maxContextTokens,
-                                kvBitsOverride: kvBitsOverride
+                                kvBitsOverride: kvBitsOverride,
+                                prefillStepSize: prefillStepSize
                             )
                             try await Self.runSpeculativeEquivalenceCanary(
                                 target: loaded.0,
@@ -616,7 +643,8 @@ actor ModelRuntime: ModelRuntimeServing {
                                 targetModelID: modelID,
                                 numDraftTokens: numDraftTokens,
                                 maxContextTokens: maxContextTokens,
-                                kvBitsOverride: kvBitsOverride
+                                kvBitsOverride: kvBitsOverride,
+                                prefillStepSize: prefillStepSize
                             )
                             draftModelID = configuredDraftModelID
                             draftContainer = draftLoaded.0
@@ -958,6 +986,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = kvBitsOverride
+        let prefillStepSize = prefillStepSize
         let inferenceGate = inferenceGate
         let firstToken = FirstTokenRecorder()
         let cancellation = WarmupCancellationRecorder()
@@ -972,10 +1001,11 @@ actor ModelRuntime: ModelRuntimeServing {
                 let input = UserInput(chat: [.user(prompt)])
                 let lmInput = try await context.processor.prepare(input: input)
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-                let parameters = GenerateParameters(
+                let parameters = Self.makeServeGenerateParameters(
                     maxTokens: boundedMaxTokens,
-                    maxKVSize: maxContextTokens,
-                    kvBits: kvBitsOverride,
+                    maxContextTokens: maxContextTokens,
+                    kvBitsOverride: kvBitsOverride,
+                    prefillStepSize: prefillStepSize,
                     temperature: 0.0,
                     topP: 1.0
                 )
@@ -1059,6 +1089,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = kvBitsOverride
+        let prefillStepSize = prefillStepSize
         let conversationCache = conversationCache
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
@@ -1072,10 +1103,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     let input = try Self.userInput(for: request)
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-                    let parameters = GenerateParameters(
+                    let parameters = Self.makeServeGenerateParameters(
                         maxTokens: request.maxTokens,
-                        maxKVSize: maxContextTokens,
-                        kvBits: kvBitsOverride,
+                        maxContextTokens: maxContextTokens,
+                        kvBitsOverride: kvBitsOverride,
+                        prefillStepSize: prefillStepSize,
                         temperature: Float(request.temperature),
                         topP: Float(request.topP)
                     )
@@ -1427,6 +1459,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = kvBitsOverride
+        let prefillStepSize = prefillStepSize
         let conversationCache = conversationCache
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
@@ -1450,10 +1483,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     let input = try Self.userInput(for: request)
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-                    let parameters = GenerateParameters(
+                    let parameters = Self.makeServeGenerateParameters(
                         maxTokens: request.maxTokens,
-                        maxKVSize: maxContextTokens,
-                        kvBits: kvBitsOverride,
+                        maxContextTokens: maxContextTokens,
+                        kvBitsOverride: kvBitsOverride,
+                        prefillStepSize: prefillStepSize,
                         temperature: Float(request.temperature),
                         topP: Float(request.topP)
                     )
@@ -1691,11 +1725,21 @@ actor ModelRuntime: ModelRuntimeServing {
 
         do {
             let start = Date()
+            let maxContextTokens = maxContextTokens
+            let kvBitsOverride = kvBitsOverride
+            let prefillStepSize = prefillStepSize
             let result: GenerateResult = try await inferenceGate.withPermit {
                 try await container.perform { context in
                     let input = UserInput(chat: [.user("Reply with a short greeting.")])
                     let lmInput = try await context.processor.prepare(input: input)
-                    let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0.0, topP: 1.0)
+                    let parameters = Self.makeServeGenerateParameters(
+                        maxTokens: maxTokens,
+                        maxContextTokens: maxContextTokens,
+                        kvBitsOverride: kvBitsOverride,
+                        prefillStepSize: prefillStepSize,
+                        temperature: 0.0,
+                        topP: 1.0
+                    )
                     return try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
                         GenerateDisposition.more
                     }
@@ -1758,7 +1802,8 @@ actor ModelRuntime: ModelRuntimeServing {
         draft: ModelContainer,
         numDraftTokens: Int,
         maxContextTokens: Int,
-        kvBitsOverride: Int?
+        kvBitsOverride: Int?,
+        prefillStepSize: Int
     ) async throws {
         do {
             _ = try await target.perform { targetContext in
@@ -1770,7 +1815,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     maxKVSize: maxContextTokens,
                     kvBits: kvBitsOverride,
                     temperature: 0.0,
-                    topP: 1.0
+                    topP: 1.0,
+                    prefillStepSize: prefillStepSize
                 )
                 return try await speculativeTokenIDs(
                     input: lmInput,
@@ -1793,7 +1839,8 @@ actor ModelRuntime: ModelRuntimeServing {
         targetModelID: String,
         numDraftTokens: Int,
         maxContextTokens: Int,
-        kvBitsOverride: Int?
+        kvBitsOverride: Int?,
+        prefillStepSize: Int
     ) async throws {
         let request = try spec028EquivalenceRequest(targetModelID: targetModelID)
         let tokenPair = try await target.perform { targetContext in
@@ -1805,7 +1852,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 maxKVSize: maxContextTokens,
                 kvBits: kvBitsOverride,
                 temperature: 0.0,
-                topP: 1.0
+                topP: 1.0,
+                prefillStepSize: prefillStepSize
             )
             let plain = try plainTokenIDs(input: lmInput, parameters: parameters, context: targetContext)
             let speculative = try await speculativeTokenIDs(

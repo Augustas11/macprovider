@@ -313,7 +313,7 @@ running, both of which are T0-01 scope (already GREEN on `main`).
 
 ## 8. Recommendation
 
-**Verdict: GO**
+**Verdict: GO** — implementation landed in PR (Phase A+B: `decode-bench --prefill-step-size`, config/env/CLI `prefill_step_size` wired through `ModelRuntime`).
 
 Raise a BUILD spec `BUILD_SPEC_T3-02_ADAPTIVE_PREFILL` covering:
 
