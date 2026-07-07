@@ -21,6 +21,9 @@ actor InferenceRelay {
     private let receiptBuilder: ReceiptBuilder?
     private let receiptProviderID: String?
     private let demoteAutoupdateTrust: TrustDemotion?
+    // T3-01: number of content-token deltas to accumulate per WS frame.
+    // 1 = one frame per token (default, current behaviour).
+    nonisolated let streamInterval: Int
     private var active: [String: ActiveRequest] = [:]
 
     init(
@@ -33,6 +36,7 @@ actor InferenceRelay {
         tier2Session: Tier2ProviderSession? = nil,
         receiptBuilder: ReceiptBuilder? = nil,
         receiptProviderID: String? = nil,
+        streamInterval: Int = 1,
         demoteAutoupdateTrust: TrustDemotion? = nil,
         sendFrame: @escaping SendFrame
     ) {
@@ -45,6 +49,7 @@ actor InferenceRelay {
         self.tier2Session = tier2Session
         self.receiptBuilder = receiptBuilder
         self.receiptProviderID = receiptProviderID
+        self.streamInterval = max(1, streamInterval)
         self.demoteAutoupdateTrust = demoteAutoupdateTrust
         self.sendFrame = sendFrame
     }
@@ -133,7 +138,7 @@ actor InferenceRelay {
         let state = RelayRequestState()
         let receiptBuilder = receiptBuilder
         let receiptProviderID = receiptProviderID
-        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, warmSwapEnabled, sendFrame, tier2Session, state, settlementMetadata] in
+        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, warmSwapEnabled, sendFrame, tier2Session, state, settlementMetadata, streamInterval] in
             await Self.process(
                 requestID: requestID,
                 body: body,
@@ -148,6 +153,7 @@ actor InferenceRelay {
                 receiptProviderID: receiptProviderID,
                 settlementMetadata: settlementMetadata,
                 conversationKey: conversationKey?.isEmpty == false ? conversationKey : nil,
+                streamInterval: streamInterval,
                 sendFrame: sendFrame
             )
             await self?.removeActive(requestID)
@@ -230,6 +236,7 @@ actor InferenceRelay {
         receiptProviderID: String?,
         settlementMetadata: SettlementReceiptMetadata?,
         conversationKey: String?,
+        streamInterval: Int = 1,
         sendFrame: @escaping SendFrame
     ) async {
         let startedAt = await providerStatus.beginRequest(requestID: requestID)
@@ -258,6 +265,7 @@ actor InferenceRelay {
                     receiptBuilder: receiptBuilder,
                     receiptProviderID: receiptProviderID,
                     settlementMetadata: settlementMetadata,
+                    streamInterval: streamInterval,
                     sendFrame: sendFrame
                 )
             }
@@ -532,6 +540,7 @@ actor InferenceRelay {
         receiptBuilder: ReceiptBuilder?,
         receiptProviderID: String?,
         settlementMetadata: SettlementReceiptMetadata?,
+        streamInterval: Int = 1,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
         let created = Int(Date().timeIntervalSince1970)
@@ -565,17 +574,40 @@ actor InferenceRelay {
             )))
 
             let streamedAnyToolCallDelta = StreamedFlag()
+            // T3-01: accumulate content-token deltas until streamInterval tokens,
+            // then emit one combined SSE frame. Tool-call deltas flush any pending
+            // content immediately and are never batched.
+            var pendingContent = ""
+            var pendingCount = 0
+
             let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { state.isCancelled }) { chunk in
                 switch chunk {
                 case .content(let text):
-                    _ = buffer.enqueue(sseEvent(chatCompletionChunk(
-                        id: id,
-                        created: created,
-                        model: request.model,
-                        delta: ["content": text],
-                        finishReason: NSNull()
-                    )))
+                    pendingContent += text
+                    pendingCount += 1
+                    if pendingCount >= streamInterval {
+                        _ = buffer.enqueue(sseEvent(chatCompletionChunk(
+                            id: id,
+                            created: created,
+                            model: request.model,
+                            delta: ["content": pendingContent],
+                            finishReason: NSNull()
+                        )))
+                        pendingContent = ""
+                        pendingCount = 0
+                    }
                 case .toolCallDelta(let toolDelta):
+                    if !pendingContent.isEmpty {
+                        _ = buffer.enqueue(sseEvent(chatCompletionChunk(
+                            id: id,
+                            created: created,
+                            model: request.model,
+                            delta: ["content": pendingContent],
+                            finishReason: NSNull()
+                        )))
+                        pendingContent = ""
+                        pendingCount = 0
+                    }
                     streamedAnyToolCallDelta.set()
                     _ = buffer.enqueue(sseEvent(chatCompletionChunk(
                         id: id,
@@ -585,6 +617,17 @@ actor InferenceRelay {
                         finishReason: NSNull()
                     )))
                 }
+            }
+
+            // Flush any remaining batched content before the finish frame.
+            if !pendingContent.isEmpty {
+                _ = buffer.enqueue(sseEvent(chatCompletionChunk(
+                    id: id,
+                    created: created,
+                    model: request.model,
+                    delta: ["content": pendingContent],
+                    finishReason: NSNull()
+                )))
             }
 
             state.setUsage(completion)
