@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import MLX
 import MLXLLM
 import MLXLMCommon
 import MacProviderCore
@@ -103,11 +104,11 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
 
-        // T0-01 harness: compiled decode and bf16 cast are NOT wired.
-        // These flags are always false here; T2-01 will introduce the
-        // compiled path and flip them when the env vars are set.
+        let env = ProcessInfo.processInfo.environment
+        // bf16 cast is NOT in T2-01 scope — WeightCast lands separately.
         let bf16Enabled = false
-        let compiledEnabled = false
+        // T2-01: honor MACPROVIDER_COMPILED_DECODE; default OFF.
+        let compiledEnabled = CompiledDecode.isEnabledByEnvironment(env)
 
         // Reuse the serve runtime's model load path so the bench sees the
         // same dtype histogram and same KVCache wiring it would in prod.
@@ -139,12 +140,22 @@ struct DecodeBenchCommand: AsyncParsableCommand {
         var samples: [BenchSampleResult] = []
         for runIndex in 0..<(runs + 1) {
             let isWarmup = runIndex == 0
-            let sample = try await runOnce(
-                container: container,
-                prompt: prompt,
-                maxTokens: decodeTokens,
-                isWarmup: isWarmup
-            )
+            let sample: BenchSampleResult
+            if compiledEnabled {
+                sample = try await runCompiledOnce(
+                    container: container,
+                    prompt: prompt,
+                    maxTokens: decodeTokens,
+                    isWarmup: isWarmup
+                )
+            } else {
+                sample = try await runOnce(
+                    container: container,
+                    prompt: prompt,
+                    maxTokens: decodeTokens,
+                    isWarmup: isWarmup
+                )
+            }
             if isWarmup {
                 warmupSample = sample
             } else {
@@ -224,6 +235,122 @@ struct DecodeBenchCommand: AsyncParsableCommand {
     }
 
     // MARK: - One sample
+
+    /// Compiled decode loop using `CompiledDecodeStep`.
+    ///
+    /// Runs prefill via the standard `model.prepare()` path (handles chunked
+    /// prefill correctly), then transitions to `MLX.compile()`-wrapped
+    /// per-token forwards for the decode phase.
+    ///
+    /// Token sampling is greedy (temperature=0, argMax) to match the
+    /// correctness gate — compiled and uncompiled should produce identical
+    /// token IDs for the same prompt.
+    private func runCompiledOnce(
+        container: ModelContainer,
+        prompt: String,
+        maxTokens: Int,
+        isWarmup: Bool
+    ) async throws -> BenchSampleResult {
+        let prefillStart = Date()
+        nonisolated(unsafe) var firstTokenAt: Date? = nil
+        var promptTokensCount = 0
+        var decodedTokenCount = 0
+
+        try await container.perform { context in
+            let input = UserInput(chat: [.user(prompt)])
+            let lmInput = try await context.processor.prepare(input: input)
+            promptTokensCount = lmInput.text.tokens.size
+
+            let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0.0, topP: 1.0)
+            // Create the cache separately so we hold a reference to the same
+            // KVCache instances the model will mutate during prefill. After
+            // prepare() returns, innerState() will be non-empty and we can
+            // safely construct CompiledDecodeStep.
+            let cache = context.model.newCache(parameters: parameters)
+
+            // Prefill: model.prepare() handles chunked prefill internally.
+            // `.tokens` → need one more model call for the remaining token chunk.
+            // `.logits` → first-token logits are already available.
+            let firstTokenArray: MLXArray
+            switch try context.model.prepare(lmInput, cache: cache, windowSize: parameters.prefillStepSize) {
+            case .tokens(let textInput):
+                // Process the remaining prefix tokens to get first-token logits.
+                // `withPreparedCache` is a no-op when sequenceLengths is nil
+                // (unbatched 1-D token array); still called for correctness parity
+                // with TokenIterator.step().
+                let output = withPreparedCache(cache, lengths: textInput.sequenceLengths) {
+                    context.model(textInput[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: nil)
+                }
+                eval(output.logits)
+                firstTokenArray = argMax(output.logits[0..., -1, 0...], axis: -1)
+
+            case .logits(let output):
+                eval(output.logits)
+                firstTokenArray = argMax(output.logits[0..., -1, 0...], axis: -1)
+            }
+
+            eval(firstTokenArray)
+            // Force cache synchronization: evaluating the logits covers most
+            // of the computation graph, but an explicit cache eval matches what
+            // LLMModel.prepare() does and satisfies ADV-1 (non-empty innerState
+            // precondition in CompiledDecodeStep).
+            eval(cache)
+            firstTokenAt = Date()
+
+            // Cache is now populated with the prefill + first decode forward.
+            // Constructing CompiledDecodeStep here satisfies ADV-1 (populated
+            // cache precondition from CompiledDecode.swift).
+            let step = CompiledDecodeStep(model: context.model, cache: cache, enabled: true)
+
+            // Build EOS set: mirrors buildStopTokenIds() from mlx-swift-lm Evaluate.swift.
+            // Must include extraEOSTokens (string→ID) so chat templates that use tokens
+            // like "<|im_end|>" (Qwen) are correctly recognised as stop tokens.
+            var eosIds: Set<Int> = context.configuration.eosTokenIds
+            if let tokEOS = context.tokenizer.eosTokenId { eosIds.insert(tokEOS) }
+            if let unkID = context.tokenizer.unknownTokenId { eosIds.insert(unkID) }
+            for token in context.configuration.extraEOSTokens {
+                if let id = context.tokenizer.convertTokenToId(token) { eosIds.insert(id) }
+            }
+
+            decodedTokenCount = 1  // count first token
+            var currentToken = firstTokenArray.reshaped(1, 1)
+
+            for _ in 1 ..< maxTokens {
+                // compiled step: model(currentToken [1,1], cache:) → logits [1,1,vocab]
+                let logits = step.step(currentToken)
+                eval(logits)
+                let nextToken = argMax(logits[0..., -1, 0...], axis: -1)
+                eval(nextToken)
+                let tokenId = nextToken.item(Int.self)
+                if eosIds.contains(tokenId) { break }
+                currentToken = nextToken.reshaped(1, 1)
+                decodedTokenCount += 1
+            }
+
+            // Synchronize stream before returning — mirrors TokenIterator's
+            // Stream().synchronize() call to avoid scheduler tear-down assertions.
+            Stream().synchronize()
+        }
+
+        let endAt = Date()
+        let prefillEnd = firstTokenAt ?? endAt
+        let prefillElapsed = max(prefillEnd.timeIntervalSince(prefillStart), 0.001)
+        let decodeElapsed = max(endAt.timeIntervalSince(prefillEnd), 0.001)
+        let prefillTPS = Double(promptTokensCount) / prefillElapsed
+        // -1: first token is the TTFT boundary token, not counted in decode TPS
+        let decodeTPS = Double(max(decodedTokenCount - 1, 0)) / decodeElapsed
+
+        return BenchSampleResult(
+            isWarmup: isWarmup,
+            promptTokensActual: promptTokensCount,
+            decodeTokensActual: decodedTokenCount,
+            prefillSeconds: prefillElapsed,
+            decodeSeconds: decodeElapsed,
+            ttftSeconds: prefillElapsed,
+            prefillTPS: prefillTPS,
+            decodeTPS: decodeTPS
+        )
+    }
 
     private func runOnce(
         container: ModelContainer,

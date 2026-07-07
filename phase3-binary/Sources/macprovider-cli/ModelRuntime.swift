@@ -1413,6 +1413,18 @@ actor ModelRuntime: ModelRuntimeServing {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
 
+        // T2-01: compiled decode env-flag wire-in. When enabled, the
+        // decode-bench path uses MLX.compile()-wrapped per-token forwards
+        // (see DecodeBenchCommand.runCompiledOnce). Full production stream()
+        // wire-in is deferred to a follow-up PR after bench correctness is
+        // confirmed via T2-01 artifact. The flag is read here so it appears
+        // in inference logs and the serve path is ready to branch on it.
+        let compiledDecodeEnabled = CompiledDecode.isEnabledByEnvironment()
+        if compiledDecodeEnabled {
+            let line = "event=compiled_decode_enabled status=stream_path_deferred flag=\(CompiledDecode.envFlag)\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+
         let maxContextTokens = maxContextTokens
         let kvBitsOverride = kvBitsOverride
         let conversationCache = conversationCache
