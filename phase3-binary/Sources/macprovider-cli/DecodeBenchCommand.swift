@@ -49,6 +49,12 @@ struct DecodeBenchCommand: AsyncParsableCommand {
     )
     var prefillTokens: Int = 512
 
+    @Option(
+        name: .customLong("prefill-step-size"),
+        help: "Prefill chunk size (GenerateParameters.prefillStepSize / model.prepare windowSize). Default 512."
+    )
+    var prefillStepSize: Int = 512
+
     @Option(help: "Number of timed runs (after a single warmup). Default 3.")
     var runs: Int = 3
 
@@ -97,9 +103,9 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             ))
             throw ExitCode(2)
         }
-        guard decodeTokens > 0, prefillTokens > 0, runs > 0 else {
+        guard decodeTokens > 0, prefillTokens > 0, prefillStepSize > 0, runs > 0 else {
             FileHandle.standardError.write(Data(
-                "decode-bench: --decode-tokens, --prefill-tokens, --runs must all be > 0\n".utf8
+                "decode-bench: --decode-tokens, --prefill-tokens, --prefill-step-size, --runs must all be > 0\n".utf8
             ))
             throw ExitCode(2)
         }
@@ -187,6 +193,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             modelTag: modelTag,
             mlxSwiftLMPin: pin,
             prefillTokensTarget: prefillTokens,
+            prefillStepSize: prefillStepSize,
             decodeTokensTarget: decodeTokens,
             runs: runs,
             warmup: warmupSample,
@@ -261,7 +268,12 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             let lmInput = try await context.processor.prepare(input: input)
             promptTokensCount = lmInput.text.tokens.size
 
-            let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0.0, topP: 1.0)
+            let parameters = GenerateParameters(
+                maxTokens: maxTokens,
+                temperature: 0.0,
+                topP: 1.0,
+                prefillStepSize: prefillStepSize
+            )
             // Create the cache separately so we hold a reference to the same
             // KVCache instances the model will mutate during prefill. After
             // prepare() returns, innerState() will be non-empty and we can
@@ -373,7 +385,8 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             let parameters = GenerateParameters(
                 maxTokens: maxTokens,
                 temperature: 0.0,
-                topP: 1.0
+                topP: 1.0,
+                prefillStepSize: prefillStepSize
             )
             let result: GenerateResult = try generate(
                 input: lmInput,
@@ -526,6 +539,7 @@ struct BenchReport: Codable, Sendable {
     let modelTag: String
     let mlxSwiftLMPin: String
     let prefillTokensTarget: Int
+    let prefillStepSize: Int
     let decodeTokensTarget: Int
     let runs: Int
     let warmup: BenchSampleResult?

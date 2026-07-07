@@ -123,6 +123,12 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Number of content-token deltas to accumulate before emitting one SSE/WS frame. Default 1 (one frame per token, current behaviour). Set to 4 to match upstream production batching — reduces WS send calls by ~75% with first-chunk latency ≤ N token periods. Overrides MACPROVIDER_STREAM_INTERVAL and config key stream_interval.")
     var streamInterval: Int?
 
+    @Option(
+        name: .customLong("prefill-step-size"),
+        help: "Chunked prefill window (mlx-swift GenerateParameters.prefillStepSize). Default 512. Larger values (e.g. 2048, 4096) reduce TTFT on long cold prefills. Overrides MACPROVIDER_PREFILL_STEP_SIZE and config key prefill_step_size."
+    )
+    var prefillStepSize: Int?
+
     @Flag(help: "Run only the local HTTP server; do not establish a coordinator WebSocket session.")
     var noJoin = false
 
@@ -181,6 +187,12 @@ struct ServeCommand: AsyncParsableCommand {
         if resolved.streamInterval < 1 {
             FileHandle.standardError.write(Data((
                 "--stream-interval \(resolved.streamInterval) must be >= 1\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+        if resolved.prefillStepSize < 1 {
+            FileHandle.standardError.write(Data((
+                "--prefill-step-size \(resolved.prefillStepSize) must be >= 1\n"
             ).utf8))
             throw ExitCode(2)
         }
@@ -443,7 +455,8 @@ struct ServeCommand: AsyncParsableCommand {
                 idlePrewarmMaxTokens: idlePrewarmMaxTokens,
                 idlePrewarmPrompt: idlePrewarmPrompt,
                 idlePrewarmRunOnBattery: idlePrewarmRunOnBattery,
-                streamInterval: streamInterval
+                streamInterval: streamInterval,
+                prefillStepSize: prefillStepSize
             )
         )
 
@@ -482,6 +495,7 @@ struct ServeCommand: AsyncParsableCommand {
             numDraftTokens: resolved.numDraftTokens,
             maxContextTokensOverride: resolved.maxContextOverride,
             kvBitsOverride: effectiveKVBits,
+            prefillStepSize: resolved.prefillStepSize,
             maxBatch: resolved.maxConcurrencyOverride ?? 1,
             warmSwapEnabled: resolved.enableWarmSwap,
             swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds
@@ -806,4 +820,5 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  idle_prewarm.prompt: \(config.idlePrewarmPrompt)")
     print("  idle_prewarm.run_on_battery: \(config.idlePrewarmRunOnBattery)")
     print("  stream_interval: \(config.streamInterval)")
+    print("  prefill_step_size: \(config.prefillStepSize)")
 }

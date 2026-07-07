@@ -541,33 +541,33 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 # Status tracker
 
 > **Maintained by:** executor agents + pinned planning session.  
-> Last updated: 2026-07-07 (initial plan)
+> Last updated: 2026-07-07 (T3 merged)
 
 | Task ID | Phase | Status | Gate | Artifact | Notes |
 |---------|-------|--------|------|----------|-------|
-| T0-01 | T0 | **`GREEN`** | TG0 | `beta/throughput-engineering/T0-01-decode-bench-harness.md` | Branch `perf/decode-bench-harness`; 946 tests; harness only |
-| T0-02 | T0 | **`YELLOW`** | TG0 | `T0-02-baseline-matrix.json` on branch | Qwen 27.1 / gpt-oss 26.3 TPS p50; Gemma blocked on pin 3.31.4 |
-| T0-03 | T0 | **`GREEN` (structural)** | TG0 | `T0-03-egress-profile.md` on branch | Egress ~1–2% est.; NWConnection DEFER |
-| T0 rollup | T0 | **`DONE`** | **TG0** | `beta/throughput-engineering/T0_SUMMARY.md` | **PROCEED to T1-01** |
-| T1-01 | T1 | `READY` | TG1 | — | Next spawn |
-| T1-02 | T1 | `BLOCKED` | TG1 | — | Needs T1-01 |
-| T1-03 | T1 | `BLOCKED` | TG1 | — | Needs T1-01 |
-| T2-01 | T2 | `BLOCKED` | TG2 | — | Needs TG1 |
-| T2-02 | T2 | `READY` | — | — | Can start after T0-02 |
-| T3-01 | T3 | `BLOCKED` | TG3 | — | Needs T0-03 |
-| T3-02 | T3 | `BLOCKED` | TG3 | — | Needs TG1 |
-| T3-03 | T3 | `BLOCKED` | TG3 | — | Needs TG1 |
-| T4-01 | T4 | `PENDING` | TG4 | — | Operator priority call |
+| T0-01 | T0 | **`GREEN`** | TG0 | `T0-01-decode-bench-harness.md` | Merged #467 |
+| T0-02 | T0 | **`YELLOW`** | TG0 | `T0-02-baseline-matrix.json` | Merged #467 |
+| T0-03 | T0 | **`GREEN` (structural)** | TG0 | `T0-03-egress-profile.md` | Merged #468 |
+| T0 rollup | T0 | **`DONE`** | **TG0** | `T0_SUMMARY.md` | CLOSED |
+| T1-01 | T1 | **`YELLOW`** | TG1 | `T1-01-mlx-pin-bump.md` | At ml-explore latest; Gemma → #364 |
+| T1-02 | T1 | `BLOCKED` | TG1 | — | Waits mlx-swift-lm#364 release |
+| T1-03 | T1 | **`GREEN`** | TG1 | `T1-03-metallib-rebuild.md` | Docs on `fix/t1-03-metallib-verify` |
+| T2-01 | T2 | **`YELLOW`** | TG2 | `T2-01-compiled-decode-wire-in.md` | Merged #471 — flag OFF; KV graph blocked |
+| T2-02 | T2 | **`GREEN`** | — | `T2-02-decode-bandwidth-model.md` | Merged #470 |
+| T3-01 | T3 | **`WAIVE`** | TG3 | `T3-01-stream-interval.md` | Merged #473 — default 1; egress not bottleneck |
+| T3-02 | T3 | **`GREEN` (wire-in)** | TG3 | `T3-02-adaptive-prefill-spike.md` | Spike GO; env/CLI/decode-bench wired; measure before prod default |
+| T3-03 | T3 | **`GREEN`** | TG3 | `T3-03-kv-quant-scheme.md` | Merged #472 — Gemma/gpt-oss → kvBits 8 |
+| T4-01 | T4 | `PENDING` | TG4 | — | Operator priority |
 | T4-02 | T4 | `BLOCKED` | — | — | Needs T4-01 GO |
 
 ### Gate summary
 
 | Gate | Status | Signed off |
 |------|--------|------------|
-| TG0 | **`CLOSED — PROCEED`** (YELLOW baseline; Gemma → T1-02) | 2026-07-07 |
-| TG1 | `OPEN` | — |
-| TG2 | `OPEN` | — |
-| TG3 | `OPEN` | — |
+| TG0 | **`CLOSED`** | 2026-07-07 (#467+#468) |
+| TG1 | **`OPEN`** | T1-01 YELLOW; #364 blocker |
+| TG2 | **`OPEN`** | T2-01 compile blocked on upstream KV offset |
+| TG3 | **`CLOSED`** | 2026-07-07 (#472+#473 + T3-02 wire-in) |
 | TG4 | `OPEN` | — |
 
 ---
@@ -579,3 +579,4 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 | 0.1.0 | 2026-07-07 | Initial runbook from throughput engineering exploration |
 | 0.1.1 | 2026-07-07 | T0-01 GREEN (decode-bench harness); T0-03 GREEN structural (egress trace); T0-02 spawned |
 | 0.1.2 | 2026-07-07 | T0 complete — TG0 PROCEED; T0_SUMMARY + DEFERRED; T1-01 READY |
+| 0.1.9 | 2026-07-07 | T3 complete — #472+#473 merged; T3-02 prefill_step_size wire-in |
