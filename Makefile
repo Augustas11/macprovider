@@ -64,6 +64,7 @@ test-dist:
 	bash scripts/test-install-provider-id-preserve.sh
 	bash scripts/test-install-launchd-enable.sh
 	bash scripts/test-watchdog-inline-drift.sh
+	bash scripts/test-malibu-download-publish.sh
 
 vet: vet-coordinator vet-gateway vet-integration
 

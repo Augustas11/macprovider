@@ -748,13 +748,18 @@ jobs:
       - name: Publish Malibu latest.dmg
         env:
           GH_TOKEN: ${{ github.token }}
-          MALIBU_DOWNLOAD_BUCKET: ${{ secrets.MALIBU_DOWNLOAD_BUCKET }}
-          MALIBU_DOWNLOAD_ENDPOINT: ${{ secrets.MALIBU_DOWNLOAD_ENDPOINT }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.MALIBU_DOWNLOAD_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.MALIBU_DOWNLOAD_AWS_SECRET_ACCESS_KEY }}
+          MALIBU_DOWNLOAD_VPS_HOST: ${{ secrets.MALIBU_DOWNLOAD_VPS_HOST }}
+          MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ -n "${MALIBU_DOWNLOAD_SSH_KEY:-}" ]; then
+            key_file="$(mktemp)"
+            trap 'rm -f "$key_file"' EXIT
+            printf '%s\n' "$MALIBU_DOWNLOAD_SSH_KEY" > "$key_file"
+            chmod 600 "$key_file"
+            export MALIBU_DOWNLOAD_SSH_KEY="$key_file"
+          fi
           bash scripts/publish-malibu-latest-dmg.sh "${{ steps.version.outputs.tag }}"
 
       - name: Verify published Tier-2 Release assets
