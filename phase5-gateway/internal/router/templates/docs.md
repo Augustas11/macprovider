@@ -93,10 +93,10 @@ Primary buyer endpoints:
 
 `POST /v1/chat/completions` accepts OpenAI-compatible chat completion requests. Set `stream:true` for server-sent events or omit it for a single JSON response.
 
-Text-only structured `messages[].content` arrays such as
-`[{"type":"text","text":"Say hello"}]` are accepted and normalized to plain
-text before provider dispatch. Multimodal parts such as `image_url` are not
-supported in v1 and return `unsupported_content_shape`.
+Text-only structured `messages[].content` arrays are accepted for `system` and
+`user` messages and normalized to plain text before provider dispatch.
+Multimodal parts such as `image_url` are not supported in v1 and return
+`unsupported_content_shape`.
 
 Covered paid settlement claims are limited to `POST /v1/chat/completions`. Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.
 
@@ -183,6 +183,6 @@ Common codes:
 | `missing_bearer_token` | Add `Authorization: Bearer mp_...` |
 | `invalid_demo_token` | Refresh the browser demo session |
 | `quota_exhausted` | Daily or request quota is exhausted |
-| `unsupported_content_shape` | Use string content or text-only structured content arrays; multimodal parts are not supported in v1 |
+| `unsupported_content_shape` | Use string content; `system` and `user` messages may also use text-only structured content arrays. Multimodal parts are not supported in v1 |
 | `coordinator_unavailable` | The provider pool is temporarily unavailable |
 | `not_found` | The requested route does not exist |

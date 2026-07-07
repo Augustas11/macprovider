@@ -917,9 +917,9 @@ Known v1 divergences include:
 - No tool execution.
 - Tool fields may be syntactically accepted but are not executed.
 - Strict schema-enforced structured outputs are not guaranteed.
-- Multimodal `messages[].content` parts are not supported in v1. Text-only
-  structured content arrays are accepted and normalized to a single string;
-  non-text parts such as `image_url` return
+- Multimodal `messages[].content` parts are not supported in v1. For `system`
+  and `user` messages, text-only structured content arrays are accepted and
+  normalized to a single string; non-text parts such as `image_url` return
   `unsupported_content_shape`.
 - Provider availability can yield 503 immediately.
 - Model lineup is live-pool dependent.
