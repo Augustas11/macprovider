@@ -1,0 +1,334 @@
+import ArgumentParser
+import Foundation
+import MLXLLM
+import MLXLMCommon
+import MacProviderCore
+
+/// `decode-bench` — pure decode-loop benchmark, no coordinator, no WS.
+///
+/// T0-01 of `specs/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md`. Loads the same
+/// `LLMModelFactory` / `MLXLMCommon` path the serve runtime uses, runs
+/// a fixed-length prefill + decode, and reports prefill TPS, decode TPS
+/// (p50 across N runs after one warmup), and decode wall time as JSON.
+///
+/// TPS semantics (generation-only): denominator is time from first generated
+/// token to last, excluding TTFT (prefill wall-clock). Matches
+/// `Stage1Iterator.swift` v1.7.8 Track A4 semantics — "generation-only
+/// throughput" where `generationElapsed = endedAt - firstTokenAt`.
+///
+/// Does NOT wire CompiledDecode or bf16 weight cast — harness only.
+/// Those are T2-01 scope. The JSON output records `compiledDecodeEnvFlag`
+/// and `bf16WeightsEnvFlag` as `false` so downstream tooling has a stable
+/// schema to diff against T2-01 results.
+struct DecodeBenchCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "decode-bench",
+        abstract: "Run a pure-decode benchmark for a target model (T0-01 of throughput runbook).",
+        discussion: """
+            Decoupled from the coordinator and WS paths. Measures prefill TPS
+            and steady-state decode TPS over a fixed prompt + token budget.
+
+            TPS semantics: generation-only (excludes TTFT), matching Stage1Iterator
+            v1.7.8 Track A4 semantics.
+            """
+    )
+
+    @Option(help: "HuggingFace model ID or local path. Falls back to MACPROVIDER_MODEL.")
+    var model: String?
+
+    @Option(
+        name: .customLong("decode-tokens"),
+        help: "Number of decode tokens to generate per run. Default 256."
+    )
+    var decodeTokens: Int = 256
+
+    @Option(
+        name: .customLong("prefill-tokens"),
+        help: "Approximate prefill token target. The fixture prompt is replicated until token count meets/exceeds this. Default 512."
+    )
+    var prefillTokens: Int = 512
+
+    @Option(help: "Number of timed runs (after a single warmup). Default 3.")
+    var runs: Int = 3
+
+    @Option(
+        help: "Optional label suffix for auto-generated output filenames (e.g. 'baseline'). Default 'baseline'."
+    )
+    var label: String = "baseline"
+
+    @Option(
+        help: "Full output path for JSON result file. When set, writes to this exact path instead of the auto-generated state/perf/ path."
+    )
+    var output: String?
+
+    @Option(
+        name: .customLong("output-dir"),
+        help: "Output directory for auto-generated JSON result files. Ignored when --output is set. Default 'state/perf/'."
+    )
+    var outputDir: String = "state/perf"
+
+    @Flag(help: "Skip writing the JSON file to disk; print to stdout only.")
+    var stdoutOnly: Bool = false
+
+    func run() async throws {
+        guard let modelID = model ?? ProcessInfo.processInfo.environment["MACPROVIDER_MODEL"],
+              !modelID.isEmpty else {
+            FileHandle.standardError.write(Data(
+                "decode-bench: --model is required (or set MACPROVIDER_MODEL)\n".utf8
+            ))
+            throw ExitCode(2)
+        }
+        guard decodeTokens > 0, prefillTokens > 0, runs > 0 else {
+            FileHandle.standardError.write(Data(
+                "decode-bench: --decode-tokens, --prefill-tokens, --runs must all be > 0\n".utf8
+            ))
+            throw ExitCode(2)
+        }
+
+        // T0-01 harness: compiled decode and bf16 cast are NOT wired.
+        // These flags are always false here; T2-01 will introduce the
+        // compiled path and flip them when the env vars are set.
+        let bf16Enabled = false
+        let compiledEnabled = false
+
+        // Reuse the serve runtime's model load path so the bench sees the
+        // same dtype histogram and same KVCache wiring it would in prod.
+        let runtime = try await ModelRuntime(modelID: modelID)
+        guard await runtime.isLoaded else {
+            FileHandle.standardError.write(Data(
+                "decode-bench: failed to load model \(modelID)\n".utf8
+            ))
+            throw ExitCode(1)
+        }
+
+        let snapshot = await runtime.currentSnapshot()
+        guard let container = snapshot.container else {
+            FileHandle.standardError.write(Data(
+                "decode-bench: runtime has no container post-load\n".utf8
+            ))
+            throw ExitCode(1)
+        }
+
+        // Build a prompt that prefills to roughly the requested token count.
+        // We don't try to hit the exact target — `prefillTokensActual` in
+        // the output records what we got, which is what the analyst needs.
+        let basePrompt = "Summarize the following technical document. "
+        let replications = max(1, prefillTokens / 8)
+        let prompt = String(repeating: basePrompt, count: replications)
+
+        // One warmup run, then `runs` timed runs.
+        var warmupSample: BenchSampleResult?
+        var samples: [BenchSampleResult] = []
+        for runIndex in 0..<(runs + 1) {
+            let isWarmup = runIndex == 0
+            let sample = try await runOnce(
+                container: container,
+                prompt: prompt,
+                maxTokens: decodeTokens,
+                isWarmup: isWarmup
+            )
+            if isWarmup {
+                warmupSample = sample
+            } else {
+                samples.append(sample)
+            }
+        }
+
+        let pin = decodeBenchMLXPinTag()
+        let modelTag = modelID
+            .split(separator: "/")
+            .last
+            .map(String.init) ?? "model"
+
+        var tsFormatter = ISO8601DateFormatter()
+        tsFormatter.formatOptions = [.withInternetDateTime, .withTimeZone]
+        let ts = tsFormatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
+
+        let report = BenchReport(
+            schemaVersion: 1,
+            label: label,
+            modelID: modelID,
+            modelTag: modelTag,
+            mlxSwiftLMPin: pin,
+            prefillTokensTarget: prefillTokens,
+            decodeTokensTarget: decodeTokens,
+            runs: runs,
+            warmup: warmupSample,
+            samples: samples,
+            bf16WeightsEnvFlag: bf16Enabled,
+            compiledDecodeEnvFlag: compiledEnabled,
+            timestamp: ISO8601DateFormatter().string(from: Date())
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let json = try encoder.encode(report)
+        FileHandle.standardOutput.write(json)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+
+        let p50Decode = decodeBenchPercentileTPS(samples.map(\.decodeTPS), p: 0.5)
+        let p50Prefill = decodeBenchPercentileTPS(samples.map(\.prefillTPS), p: 0.5)
+        FileHandle.standardError.write(Data((
+            "decode-bench: model=\(modelTag) pin=\(pin) " +
+            "prefill_tps_p50=\(decodeBenchFormatTPS(p50Prefill)) " +
+            "decode_tps_p50=\(decodeBenchFormatTPS(p50Decode)) " +
+            "bf16=\(bf16Enabled) compiled=\(compiledEnabled) runs=\(runs)\n"
+        ).utf8))
+
+        guard !stdoutOnly else { return }
+
+        let fileURL: URL
+        if let explicitPath = output {
+            fileURL = URL(fileURLWithPath: explicitPath)
+            if let parent = fileURL.deletingLastPathComponent() as URL?, parent.path != "/" {
+                try FileManager.default.createDirectory(
+                    at: parent, withIntermediateDirectories: true
+                )
+            }
+        } else {
+            let dir = URL(fileURLWithPath: outputDir, isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let safeLabel = decodeBenchSanitizeFilenameComponent(label)
+            let safeModelTag = decodeBenchSanitizeFilenameComponent(modelTag)
+            let filename = "\(safeLabel)-\(safeModelTag)-\(pin)-\(ts).json"
+            fileURL = dir.appendingPathComponent(filename)
+        }
+        try json.write(to: fileURL, options: [.atomic])
+        FileHandle.standardError.write(Data("decode-bench: wrote \(fileURL.path)\n".utf8))
+    }
+
+    // MARK: - One sample
+
+    private func runOnce(
+        container: ModelContainer,
+        prompt: String,
+        maxTokens: Int,
+        isWarmup: Bool
+    ) async throws -> BenchSampleResult {
+        let prefillStart = Date()
+        // Capture first-token timestamp from inside the generate callback.
+        // `nonisolated(unsafe)` is needed because the closure is @Sendable
+        // (container.perform isolates to the ModelContext actor) but we
+        // only write once (first token) and read after await returns.
+        nonisolated(unsafe) var firstTokenAt: Date? = nil
+        var promptTokens = 0
+        var generationTokens = 0
+        try await container.perform { context in
+            let input = UserInput(chat: [.user(prompt)])
+            let lmInput = try await context.processor.prepare(input: input)
+            promptTokens = lmInput.text.tokens.size
+            let parameters = GenerateParameters(
+                maxTokens: maxTokens,
+                temperature: 0.0,
+                topP: 1.0
+            )
+            let result: GenerateResult = try generate(
+                input: lmInput,
+                parameters: parameters,
+                context: context
+            ) { tokens in
+                if firstTokenAt == nil, !tokens.isEmpty {
+                    firstTokenAt = Date()
+                }
+                return GenerateDisposition.more
+            }
+            generationTokens = result.generationTokenCount
+        }
+        let endAt = Date()
+        let prefillEnd = firstTokenAt ?? endAt
+        let prefillElapsed = max(prefillEnd.timeIntervalSince(prefillStart), 0.001)
+        // Generation-only elapsed time: from first generated token to last.
+        // Matches Stage1Iterator.swift v1.7.8 Track A4 semantics —
+        // denominator excludes TTFT so catalog `min_sustained_tps` gates apply.
+        let decodeElapsed = max(endAt.timeIntervalSince(prefillEnd), 0.001)
+        let prefillTPS = Double(promptTokens) / prefillElapsed
+        // Subtract 1 because the first token is the TTFT boundary token,
+        // not a "generated beyond prefill" token.
+        let decodeTPS = Double(max(generationTokens - 1, 0)) / decodeElapsed
+
+        return BenchSampleResult(
+            isWarmup: isWarmup,
+            promptTokensActual: promptTokens,
+            decodeTokensActual: generationTokens,
+            prefillSeconds: prefillElapsed,
+            decodeSeconds: decodeElapsed,
+            ttftSeconds: prefillElapsed,
+            prefillTPS: prefillTPS,
+            decodeTPS: decodeTPS
+        )
+    }
+}
+
+// MARK: - Helpers (module-level, prefixed to avoid collision)
+
+/// The mlx-swift-lm pin tag used for benchmark output filenames so a
+/// future operator can disambiguate runs taken on different pins.
+/// Source of truth: `phase3-binary/Package.resolved` — update when pin bumps.
+func decodeBenchMLXPinTag() -> String {
+    return "mlxlm-3.31.4"
+}
+
+/// Nearest-rank percentile for small `runs` budgets (3–5).
+/// For `runs == 3`, p50 is the middle element after sort.
+func decodeBenchPercentileTPS(_ values: [Double], p: Double) -> Double {
+    guard !values.isEmpty else { return 0 }
+    let sorted = values.sorted()
+    let rank = max(0, min(sorted.count - 1, Int((p * Double(sorted.count - 1)).rounded())))
+    return sorted[rank]
+}
+
+func decodeBenchFormatTPS(_ v: Double) -> String {
+    String(format: "%.1f", v)
+}
+
+/// Reduce an operator-supplied string to a basename-safe slug.
+/// Prevents path-traversal sequences (`../`) from reaching the output path.
+func decodeBenchSanitizeFilenameComponent(_ input: String) -> String {
+    let allowed: Set<Character> = Set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+    )
+    var out = String()
+    out.reserveCapacity(input.count)
+    var lastWasUnderscore = false
+    for ch in input {
+        if allowed.contains(ch) {
+            out.append(ch)
+            lastWasUnderscore = (ch == "_")
+        } else if !lastWasUnderscore {
+            out.append("_")
+            lastWasUnderscore = true
+        }
+    }
+    let trimmed = out.trimmingCharacters(in: CharacterSet(charactersIn: "_."))
+    let capped = String(trimmed.prefix(80))
+    return capped.isEmpty ? "unlabeled" : capped
+}
+
+// MARK: - Wire schema
+
+struct BenchSampleResult: Codable, Sendable {
+    let isWarmup: Bool
+    let promptTokensActual: Int
+    let decodeTokensActual: Int
+    let prefillSeconds: TimeInterval
+    let decodeSeconds: TimeInterval
+    let ttftSeconds: TimeInterval
+    let prefillTPS: Double
+    let decodeTPS: Double
+}
+
+struct BenchReport: Codable, Sendable {
+    let schemaVersion: Int
+    let label: String
+    let modelID: String
+    let modelTag: String
+    let mlxSwiftLMPin: String
+    let prefillTokensTarget: Int
+    let decodeTokensTarget: Int
+    let runs: Int
+    let warmup: BenchSampleResult?
+    let samples: [BenchSampleResult]
+    let bf16WeightsEnvFlag: Bool
+    let compiledDecodeEnvFlag: Bool
+    let timestamp: String
+}
