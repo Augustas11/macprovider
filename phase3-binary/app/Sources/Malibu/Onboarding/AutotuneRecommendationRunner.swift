@@ -4,7 +4,10 @@ enum AutotuneRecommendationRunner {
     /// Wall-clock budget for `macprovider-cli autotune --recommend --json`.
     ///
     /// Autotune runs Stage-1 probes against every non-blocked, RAM-eligible
-    /// row in the catalog. Each probe spawns a subprocess of
+    /// row in the catalog. Rows that fail artifact verification (e.g. stale
+    /// HuggingFace cache hash mismatch on an unrelated model) are skipped with
+    /// a diagnostic instead of aborting the whole run. Optional
+    /// `--candidate-models` scopes probes to matching catalog `model_id`s. Each probe spawns a subprocess of
     /// `macprovider-cli serve`, waits for MLX to load the model, then does a
     /// prewarm HTTP call followed by measured TTFT + tokens/sec replicates.
     ///

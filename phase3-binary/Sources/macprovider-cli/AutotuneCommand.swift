@@ -510,6 +510,17 @@ struct AutotuneCommand: AsyncParsableCommand {
         return AutotunePlan(candidates: filtered.map(\.modelID), source: .defaultList, warning: nil)
     }
 
+    /// When `--candidate-models` is set, `--recommend` probes only catalog rows
+    /// whose HuggingFace `model_id` appears in the operator list.
+    private func recommendCandidateModelFilter() throws -> Set<String>? {
+        guard let candidateModels,
+              !candidateModels.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        return Set(try Self.parseCSVStrict(candidateModels, flag: "--candidate-models"))
+    }
+
     static let specVersion = "SPEC-013 v0.3"
 
     static func candidatesBySize(for plan: AutotunePlan) -> [String]? {
@@ -709,6 +720,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
         let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
         let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
+        let candidateModelFilter = try recommendCandidateModelFilter()
         let now = Date()
         var warnings = Set<AutotuneRecommendWarning>()
         warnings.formUnion(demand.warnings)
@@ -732,7 +744,8 @@ struct AutotuneCommand: AsyncParsableCommand {
             gateTTFTMS: gateTTFTMS,
             replicates: stage1Replicates,
             port: port,
-            interruptFlag: interruptFlag
+            interruptFlag: interruptFlag,
+            candidateModelIDs: candidateModelFilter
         )
         if interruptFlag.isSet() {
             FileHandle.standardError.write(Data("autotune --recommend interrupted; exiting after subtree cleanup\n".utf8))

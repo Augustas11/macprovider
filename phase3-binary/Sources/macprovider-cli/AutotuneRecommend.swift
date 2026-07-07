@@ -1705,7 +1705,8 @@ struct CachedModelArtifactResolver {
 ///
 /// `benchmarks` contains only feasible probes (rows admitted into eligibility);
 /// `diagnostics` contains a modelKey -> reason string for every candidate that
-/// returned .infeasible OR was skipped by runtime-status/RAM/tier gates. This is
+/// returned .infeasible OR was skipped by runtime-status/RAM/tier gates OR failed
+/// artifact verification before Stage 1. This is
 /// what the SPEC-023 caller emits to stderr + persists into
 /// last-recommendation.json so the user can see WHY no eligible paid model was
 /// found. Prior to v1.7.5 the .infeasible(reason:nErr:) string was silently
@@ -1731,7 +1732,8 @@ struct AutotuneRecommendationBenchmarker {
         gateTTFTMS: Int,
         replicates: Int,
         port: Int,
-        interruptFlag: AutotuneInterruptFlag? = nil
+        interruptFlag: AutotuneInterruptFlag? = nil,
+        candidateModelIDs: Set<String>? = nil
     ) async throws -> BenchmarkOutcomes {
         var results: [String: CandidateBenchmark] = [:]
         var diagnostics: [String: String] = [:]
@@ -1745,6 +1747,9 @@ struct AutotuneRecommendationBenchmarker {
                 break
             }
             guard let row = request.candidateCatalog.rows[modelKey] else {
+                continue
+            }
+            if let candidateModelIDs, !candidateModelIDs.contains(row.modelID) {
                 continue
             }
             if row.runtimeStatus == "blocked" {
@@ -1800,7 +1805,11 @@ struct AutotuneRecommendationBenchmarker {
                 case .infeasible(let reason, let nErr):
                     diagnostics[modelKey] = "\(reason) (n_err=\(nErr))"
                 }
-            } catch {
+            } catch let error as AutotuneRecommendError {
+                if case .invalidArtifact(let message) = error {
+                    diagnostics[modelKey] = message
+                    continue
+                }
                 throw error
             }
         }
