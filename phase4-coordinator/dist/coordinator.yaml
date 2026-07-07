@@ -185,6 +185,14 @@ rewards:
       prompt_credits_per_mtok: 80000         # $0.080/M
       prompt_cache_hit_credits_per_mtok: 20000 # $0.020/M prefix-cache hit
       completion_credits_per_mtok: 160000    # $0.160/M
+    google-gemma-4-26b-a4b-it:               # P1-02 — Gemma-4 MoE broad-fleet lane (RESEARCH_227 rank ~20)
+      prompt_credits_per_mtok: 60000         # $0.060/M
+      prompt_cache_hit_credits_per_mtok: 15000 # $0.015/M prefix-cache hit
+      completion_credits_per_mtok: 240000    # $0.240/M (20% undercut vs $0.300/M OpenRouter)
+    gemma-4-26b-a4b-it:                      # P1-02 alias — mlx-community/google/ buyer strings normalize here
+      prompt_credits_per_mtok: 60000         # $0.060/M
+      prompt_cache_hit_credits_per_mtok: 15000 # $0.015/M prefix-cache hit
+      completion_credits_per_mtok: 240000    # $0.240/M (same credits as google-gemma-4-26b-a4b-it)
     meta-llama/llama-3.1-8b-instruct:        # v3 expansion — low-tier / broad-compatibility row
       prompt_credits_per_mtok: 13500         # $0.0135/M
       prompt_cache_hit_credits_per_mtok: 3375 # $0.003375/M prefix-cache hit
