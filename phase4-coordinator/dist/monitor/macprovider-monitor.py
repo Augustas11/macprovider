@@ -32,6 +32,12 @@ STATE_FILE = "/var/lib/macprovider/monitor-state.json"
 HEALTHZ = "http://127.0.0.1:8444/healthz"
 POOLZ = "http://127.0.0.1:8444/poolz"
 GW_STATUS = "http://127.0.0.1:9443/v1/status"
+STATIC_FEEDS = (
+    "https://coordinator.streamvc.live/static/autotune-candidates.json",
+    "https://coordinator.streamvc.live/static/autotune-candidates.json.sig",
+    "https://coordinator.streamvc.live/static/demand-rank.json",
+    "https://coordinator.streamvc.live/static/demand-rank.json.sig",
+)
 TIMEOUT = 8
 HOST = socket.gethostname()
 
@@ -67,6 +73,14 @@ def get_json(url, bearer=None):
         req.add_header("Authorization", "Bearer " + bearer)
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.load(r)
+
+
+def probe_static_feed(url):
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        if r.status != 200:
+            raise RuntimeError(f"HTTP {r.status}")
+        return r.read(65536)
 
 
 def load_state():
@@ -121,12 +135,23 @@ def main():
         gw_up = False
         alerts.append(("CRITICAL", f"gateway /v1/status unreachable: {e}"))
 
+    # --- SPEC-023 signed static feeds (public nginx surface) ---
+    static_ok = True
+    static_failures = []
+    for url in STATIC_FEEDS:
+        try:
+            probe_static_feed(url)
+        except Exception as e:  # noqa: BLE001
+            static_ok = False
+            static_failures.append(f"{url}: {e}")
+
     # --- transition detection vs last poll ---
     prev = load_state()
     prev_pool = prev.get("pool", {})
     prev_ready = prev.get("ready")
     prev_coord_up = prev.get("coord_up", True)
     prev_gw_status = prev.get("gw_status")
+    prev_static_ok = prev.get("static_ok", True)
 
     # pool emptied (idle)
     if coord_up and ready == 0 and prev_ready != 0:
@@ -156,6 +181,10 @@ def main():
         alerts.append(("INFO", "coordinator recovered"))
     if gw_up and gw_status != prev_gw_status and gw_status in ("idle", "degraded", "down"):
         alerts.append(("WARN", f"gateway status -> {gw_status}"))
+    if not static_ok and prev_static_ok:
+        alerts.append(("CRITICAL", "SPEC-023 static feeds unreachable: " + "; ".join(static_failures)))
+    elif static_ok and not prev_static_ok:
+        alerts.append(("INFO", "SPEC-023 static feeds recovered"))
 
     # --- emit alerts ---
     for sev, msg in alerts:
@@ -176,6 +205,7 @@ def main():
         "ready": ready,
         "coord_up": coord_up,
         "gw_status": gw_status,
+        "static_ok": static_ok,
     }
     alerting = any(sev in ("CRITICAL", "WARN") for sev, _ in alerts)
     # `delivery is not False` keeps the strong "SMTP failed -> don't seal"
