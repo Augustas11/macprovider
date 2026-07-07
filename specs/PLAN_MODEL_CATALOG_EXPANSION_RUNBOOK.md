@@ -1,6 +1,6 @@
 # PLAN — Model Catalog Expansion Runbook
 
-**Version:** 0.1.10  
+**Version:** 0.1.11  
 **Date:** 2026-07-07  
 **Status:** ACTIVE — execution plan (not normative spec)  
 **Source analysis:** Model-catalog expansion exploration (2026-07-07 Cursor session)  
@@ -558,7 +558,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 # Status tracker
 
 > **Maintained by:** executor agents + pinned planning session.  
-> Last updated: 2026-07-07 (G3 WAIVED pre-beta; P2 unblocked — P2-03 first)
+> Last updated: 2026-07-07 (P2-02 PASS — qwen3-8b 9th model; P2-03 DONE #464)
 
 | Task ID | Phase | Status | Gate | Artifact | Notes |
 |---------|-------|--------|------|----------|-------|
@@ -575,8 +575,9 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 | P1-04 | P1 | `READY` | — | — | Optional QAT variant; after P1 soak |
 | P1 rollup | P1 | **`DONE`** | **G2** | `beta/catalog-expansion/P1-gemma4-catalog-rollout.md` | **G2 CLOSED** |
 | P2-01 | P2 | `DEFERRED` | G3 | — | Weak demand vs `qwen3-coder-30b` + Nemotron; RESEARCH_227 demote |
-| P2-02 | P2 | **`READY`** | G3 | — | Small-tier dense after P2-03; prefer Qwen3-8B |
-| P2-03 | P2 | **`READY`** | G3 | — | Baked/live drift — **start here** |
+| P2-02 | P2 | **`PASS`** | G3 | `beta/catalog-expansion/P2-small-tier-catalog.md` | `qwen3-8b` 9th model; `published-2026-07-07-p2-qwen3-8b`; prod deployed 2026-07-07 |
+| P2-03 | P2 | **`DONE`** | G3 | `beta/catalog-expansion/P2-baked-live-drift.md` | Nemotron baked rate-card drift; merged #464 |
+| P2 rollup | P2 | **`DONE`** | **G3** | `P2-small-tier-catalog.md` | P2-02 + P2-03 complete; P2-01 deferred |
 | P3-01 | P3 | `PENDING` | G4 | — | Operator decision |
 | P4-01 | P4 | `BLOCKED` | G5 | — | P0-03 GREEN; needs Tier-A HW bench |
 | P4-02 | P4 | `BLOCKED` | G5 | — | P0-03 GREEN; needs Tier-A HW bench |
@@ -610,3 +611,4 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 | 0.1.8 | 2026-07-07 | P1-01 PASS — Gemma 12.5 TPS / gates 10+28; gpt-oss sanity 18.3 |
 | 0.1.9 | 2026-07-07 | P1 DONE + G2 CLOSED — commit P0/P1 artifacts; #461 merged |
 | 0.1.10 | 2026-07-07 | G3 WAIVED pre-beta; P2 unblocked; P2-03 → P2-02 order; P2-01 deferred |
+| 0.1.11 | 2026-07-07 | P2-03 DONE (#464); P2-02 PASS — `qwen3-8b` small-tier live |
