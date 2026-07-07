@@ -460,6 +460,10 @@ struct ServeCommand: AsyncParsableCommand {
 
         printResolvedConfiguration(resolved)
 
+        // T3-03: apply family-based KV-quant default when the operator has
+        // not set an explicit override. Explicit config/env/CLI always wins.
+        let effectiveKVBits = resolved.kvBitsOverride
+            ?? KVQuantRecommendation.recommendedKVBits(for: resolved.model ?? "")
         let modelRuntime = try await ModelRuntime(
             modelID: resolved.model,
             modelLoadPath: resolved.modelArtifactPath,
@@ -467,7 +471,7 @@ struct ServeCommand: AsyncParsableCommand {
             draftModelLoadPath: verifiedDraftModelLoadPath,
             numDraftTokens: resolved.numDraftTokens,
             maxContextTokensOverride: resolved.maxContextOverride,
-            kvBitsOverride: resolved.kvBitsOverride,
+            kvBitsOverride: effectiveKVBits,
             maxBatch: resolved.maxConcurrencyOverride ?? 1,
             warmSwapEnabled: resolved.enableWarmSwap,
             swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds
