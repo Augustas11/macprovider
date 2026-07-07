@@ -36,7 +36,7 @@ repo.
 
 | ID | Shipped | PR / release | Notes |
 |---|---|---|---|
-| **P4** | 2026-07-07 | (infra PR pending) | `download.malibu.tech` on Pearl nginx + name.com DNS; Sparkle + `latest.dmg` live |
+| **P4** | 2026-07-07 | #465 | `download.malibu.tech` on Pearl nginx + name.com DNS; Sparkle + `latest.dmg` live |
 | **P2b** | 2026-07-07 | v1.8.19 (#459 + release) | Autotune feeds on buyer mux `/v1/*`; Pearl deploy + Sparkle release |
 | **P2a** | 2026-07-07 | #458 | Autotune `--recommend`/`--apply` hardening |
 | **R1** | 2026-07-07 | v1.8.18 (#457) | Sparkle live + dashboard stats clipping fix |
