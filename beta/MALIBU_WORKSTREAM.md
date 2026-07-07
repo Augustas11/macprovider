@@ -21,7 +21,7 @@ repo.
 
 | ID | Scope | Exit criterion | Notes |
 |---|---|---|---|
-| **P2a** | **Harden autotune `--apply`** | `recommend` does not fail entirely when an unrelated catalog row has a bad HF cache; `--candidate-models` scopes recommend probes | PR in progress |
+| **P2b** | **Consolidate static feeds into buyer API** | Live autotune catalog + demand-rank served from coordinator buyer mux (`/v1/demand-rank`, `/v1/autotune-candidates` + `.sig`); Pearl deploy installs `/opt/macprovider/autotune/`; CLI fetches `/v1/*`; drop nginx `/static/` | PR in progress |
 
 ---
 
@@ -29,7 +29,6 @@ repo.
 
 | ID | Scope | Exit criterion | Area |
 |---|---|---|---|
-| **P2b** | **Consolidate static feeds into buyer API** *(future)* | Live autotune catalog + demand-rank served from coordinator buyer mux (like `/v1/rate-card`); drop Pearl nginx `/opt/macprovider/static/` copy step; keep Ed25519 signatures + baked fallback | Coordinator / ops |
 | **P3** | Dashboard log tail wiring (SPEC-026 Step 3 Item 6) | `LogTailView` shows live provider stderr/out tail on dashboard when lines exist (hidden when empty as of v1.8.18) | Malibu UI |
 
 ---
@@ -38,8 +37,9 @@ repo.
 
 | ID | Shipped | PR / release | Notes |
 |---|---|---|---|
+| **P2a** | 2026-07-07 | #458 | Autotune `--recommend`/`--apply` hardening |
 | **R1** | 2026-07-07 | v1.8.18 (#457) | Sparkle live + dashboard stats clipping fix |
-| Pearl static feeds | 2026-07-07 | #454 | Baked catalog sync + nginx EACCES hardening |
+| Pearl static feeds | 2026-07-07 | #454 | Baked catalog sync + nginx EACCES hardening (superseded by P2b buyer mux) |
 | Malibu P1 diagnostics | 2026-07-07 | #455 | Provider log tail + stale-catalog UX on onboarding |
 | Sparkle in-app updates | 2026-07-07 | #456 | Sparkle in Malibu.app |
 | CLI update UI in dashboard | 2026-07-06 | v1.8.16 | Overflow fixed in v1.8.18 |

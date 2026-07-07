@@ -120,6 +120,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
 	}
+	autotuneFeeds, err := buyer.LoadAutotuneFeeds(cfg.AutotuneFeeds)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "autotune feeds: %v\n", err)
+		os.Exit(1)
+	}
 	providerhttp.Init(cfg.ProviderHTTP.TimeoutS)
 
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
@@ -571,6 +576,7 @@ func main() {
 		buyer.WithBilling(billingStore, cfg.Rewards),
 		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithRateCardUSDPerMillionCredits(cfg.Stats.Rollup.UsdPerMillionCredits),
+		buyer.WithAutotuneFeeds(autotuneFeeds),
 		buyer.WithStreamingMetricsMaxSamples(cfg.Stats.StreamingMetrics.MaxSamples),
 		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
 			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)

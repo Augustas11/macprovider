@@ -33,10 +33,10 @@ HEALTHZ = "http://127.0.0.1:8444/healthz"
 POOLZ = "http://127.0.0.1:8444/poolz"
 GW_STATUS = "http://127.0.0.1:9443/v1/status"
 STATIC_FEEDS = (
-    "https://coordinator.streamvc.live/static/autotune-candidates.json",
-    "https://coordinator.streamvc.live/static/autotune-candidates.json.sig",
-    "https://coordinator.streamvc.live/static/demand-rank.json",
-    "https://coordinator.streamvc.live/static/demand-rank.json.sig",
+    "https://coordinator.streamvc.live/v1/autotune-candidates",
+    "https://coordinator.streamvc.live/v1/autotune-candidates.sig",
+    "https://coordinator.streamvc.live/v1/demand-rank",
+    "https://coordinator.streamvc.live/v1/demand-rank.sig",
 )
 TIMEOUT = 8
 HOST = socket.gethostname()

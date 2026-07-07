@@ -144,6 +144,15 @@ logging:
   level: "info"
   format: "json"
 
+# SPEC-023 signed recommendation feeds — buyer mux /v1/demand-rank and
+# /v1/autotune-candidates (+ .sig sidecars). Deploy refreshes from
+# phase3-binary/dist/static/ on each Pearl run.
+autotune:
+  demand_rank_path: "/opt/macprovider/autotune/demand-rank.json"
+  demand_rank_sig_path: "/opt/macprovider/autotune/demand-rank.json.sig"
+  autotune_candidates_path: "/opt/macprovider/autotune/autotune-candidates.json"
+  autotune_candidates_sig_path: "/opt/macprovider/autotune/autotune-candidates.json.sig"
+
 # Wave 1 subset — Entry 92 v2 rate-card rows for canary rollout (2026-07-01).
 # Units: credits_per_mtok; stats_rollup.usd_per_million_credits=1.0 → 1M credits = $1.00.
 # Keys must match Wave 0b normalizeModelKey() output (phase4-coordinator/internal/billing/formula.go).

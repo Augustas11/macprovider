@@ -746,8 +746,8 @@ struct AutotuneStaticInputs {
         let bakedValue = (try? decode(bakedBytes))!
         let bakedGeneratedAt = generatedAt(in: bakedBytes) ?? .distantFuture
         do {
-            let jsonURL = URL(string: "https://coordinator.streamvc.live/static/\(name).json")!
-            let sigURL = URL(string: "https://coordinator.streamvc.live/static/\(name).json.sig")!
+            let jsonURL = URL(string: "https://coordinator.streamvc.live/v1/\(name)")!
+            let sigURL = URL(string: "https://coordinator.streamvc.live/v1/\(name).sig")!
             let jsonBytes = try await fetch(jsonURL)
             let sigBytes = try await fetch(sigURL)
             guard sidecarIsValid(sigBytes), verifySignature(jsonBytes, sigBytes) else {

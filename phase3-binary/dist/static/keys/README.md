@@ -35,7 +35,9 @@ The runtime verification model relies on:
 
 1. **Provider clients** ship the baked v4 public key in
    `AutotuneRecommend.swift`. They fetch the signed feed from
-   `https://coordinator.streamvc.live/static/*` (URL hardcoded in
+   `https://coordinator.streamvc.live/v1/demand-rank` and
+   `https://coordinator.streamvc.live/v1/autotune-candidates` (URL
+   hardcoded in
    [`AutotuneRecommend.swift`](../../../Sources/macprovider-cli/AutotuneRecommend.swift))
    and verify each `.sig` sidecar against the baked pubkey.
 2. **The private key** is held only by the operator running
@@ -43,8 +45,8 @@ The runtime verification model relies on:
    git, CI logs, or `coordinator.streamvc.live`.
 3. **Deployment** copies the freshly-signed `autotune-candidates.json`
    / `demand-rank.json` and their `.sig` sidecars to Pearl VPS via
-   `phase4-coordinator/dist/deploy-pearl-vps.sh`; nginx serves them
-   under `/static/`.
+   `phase4-coordinator/dist/deploy-pearl-vps.sh`; the coordinator buyer
+   mux serves them under `/v1/demand-rank` and `/v1/autotune-candidates`.
 
 Additional defenses in depth:
 
