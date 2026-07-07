@@ -1,6 +1,6 @@
 # PLAN — MacProvider Throughput Engineering Runbook
 
-**Version:** 0.1.9  
+**Version:** 0.1.10  
 **Date:** 2026-07-07  
 **Status:** ACTIVE — **T0–T3 merged** (TG0/TG3 closed); upstream watch (#364, #406) or operator T4-01  
 **Source analysis:** Throughput engineering exploration (2026-07-07 Cursor session)  
@@ -565,7 +565,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 | T0 rollup | T0 | **`DONE`** | **TG0** | `T0_SUMMARY.md` | CLOSED |
 | T1-01 | T1 | **`YELLOW`** | TG1 | `T1-01-mlx-pin-bump.md` | At ml-explore latest; Gemma → #364 |
 | T1-02 | T1 | `BLOCKED` | TG1 | — | Waits mlx-swift-lm#364 release |
-| T1-03 | T1 | **`GREEN`** | TG1 | `T1-03-metallib-rebuild.md` | Docs on `fix/t1-03-metallib-verify` |
+| T1-03 | T1 | **`GREEN`** | TG1 | `T1-03-metallib-rebuild.md` | Merged — metallib preflight GREEN |
 | T2-01 | T2 | **`YELLOW`** | TG2 | `T2-01-compiled-decode-wire-in.md` | Merged #471 — flag OFF; blocked on [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) |
 | T2-02 | T2 | **`GREEN`** | — | `T2-02-decode-bandwidth-model.md` | Merged #470 |
 | T3-01 | T3 | **`WAIVE`** | TG3 | `T3-01-stream-interval.md` | Merged #473 — default 1; egress not bottleneck |
@@ -595,3 +595,4 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 | 0.1.2 | 2026-07-07 | T0 complete — TG0 PROCEED; T0_SUMMARY + DEFERRED; T1-01 READY |
 | 0.1.3–0.1.8 | 2026-07-07 | T0–T2 merges (#467–#471); see git history |
 | 0.1.9 | 2026-07-07 | T3 complete (#472–#474); TG3 closed; T2-01 tracks mlx-swift-lm#406; T3-02 prefill sweep measured |
+| 0.1.10 | 2026-07-07 | Land T1-01 + T1-03 artifact markdown on main |
