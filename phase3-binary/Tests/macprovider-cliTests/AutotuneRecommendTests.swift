@@ -1175,7 +1175,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertThrowsError(try CachedModelArtifactResolver(hubRoot: hub).verifiedExistingArtifact(for: mismatch))
     }
 
-    func testBenchmarkingFailsClosedOnArtifactHashMismatch() async throws {
+    func testBenchmarksDiagnosesRowsSkippedByArtifactHashMismatch() async throws {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
@@ -1193,18 +1193,133 @@ final class AutotuneRecommendTests: XCTestCase {
             runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("runner should not start") }
         )
 
-        do {
-            _ = try await benchmarker.benchmarks(
-                request: request,
-                targetContext: 4_000,
-                gateTTFTMS: 3_000,
-                replicates: 1,
-                port: 18080
-            )
-            XCTFail("artifact mismatch must fail closed")
-        } catch AutotuneRecommendError.invalidArtifact {
-            // expected
-        }
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+
+        XCTAssertNil(outcomes.benchmarks[modelKey])
+        let diagnostic = try XCTUnwrap(outcomes.diagnostics[modelKey])
+        XCTAssertTrue(diagnostic.contains("hash mismatch"))
+    }
+
+    func testBenchmarkRecommendContinuesWhenUnrelatedRowHasArtifactMismatch() async throws {
+        let badKey = "meta-llama/llama-3.1-8b-instruct"
+        let goodKey = "qwen3-coder-30b-a3b-instruct"
+        var request = try makeRequest(modelKey: goodKey)
+        let badRow = try XCTUnwrap(
+            try AutotuneStaticInputs.decodeCandidateCatalog(
+                Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+            ).rows[badKey]
+        )
+        request.candidateCatalog.rows[badKey] = badRow
+        request.demandRank.rows[badKey] = try XCTUnwrap(
+            try AutotuneStaticInputs.decodeDemandRank(
+                Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
+            ).rows[badKey]
+        )
+        request.rateCard.rows[badKey] = try XCTUnwrap(
+            try AutotuneStaticInputs.decodeRateCard(
+                Data(AutotuneStaticInputs.bakedRateCardJSON.utf8)
+            ).rows[badKey]
+        )
+        request.benchmarks = [:]
+
+        let hub = try tempDir()
+        let badRevision = try XCTUnwrap(badRow.modelRevision)
+        let badSnapshot = hub
+            .appendingPathComponent("models--mlx-community--Meta-Llama-3.1-8B-Instruct-4bit", isDirectory: true)
+            .appendingPathComponent("snapshots", isDirectory: true)
+            .appendingPathComponent(badRevision, isDirectory: true)
+        try FileManager.default.createDirectory(at: badSnapshot, withIntermediateDirectories: true)
+        try Data("stale-llama".utf8).write(to: badSnapshot.appendingPathComponent("weights.bin"))
+
+        let goodRow = try XCTUnwrap(request.candidateCatalog.rows[goodKey])
+        let goodRevision = try XCTUnwrap(goodRow.modelRevision)
+        let goodSnapshot = hub
+            .appendingPathComponent("models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit", isDirectory: true)
+            .appendingPathComponent("snapshots", isDirectory: true)
+            .appendingPathComponent(goodRevision, isDirectory: true)
+        try FileManager.default.createDirectory(at: goodSnapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: goodSnapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[goodKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: goodSnapshot)
+        let goodArtifactPath = goodSnapshot.path
+
+        let prober = RecordingStage1Prober(results: [
+            goodArtifactPath: .feasible(medianTPS: 88, p95TTFTMS: 900)
+        ])
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: hub),
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: prober,
+            safetySampler: StaticProbeSafetySampler(),
+            clock: { Self.date("2026-07-02T00:00:00Z") }
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+
+        XCTAssertNil(outcomes.benchmarks[badKey])
+        XCTAssertTrue(try XCTUnwrap(outcomes.diagnostics[badKey]).contains("hash mismatch"))
+        XCTAssertNotNil(outcomes.benchmarks[goodKey])
+        XCTAssertEqual(prober.probedModels, [goodArtifactPath])
+    }
+
+    func testBenchmarksScopesToCandidateModelsWhenFilterProvided() async throws {
+        let goodKey = "qwen3-coder-30b-a3b-instruct"
+        let skippedKey = "meta-llama/llama-3.1-8b-instruct"
+        var request = try makeRequest(modelKey: goodKey)
+        let skippedRow = try XCTUnwrap(
+            try AutotuneStaticInputs.decodeCandidateCatalog(
+                Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+            ).rows[skippedKey]
+        )
+        request.candidateCatalog.rows[skippedKey] = skippedRow
+        request.benchmarks = [:]
+
+        let goodRow = try XCTUnwrap(request.candidateCatalog.rows[goodKey])
+        let revision = try XCTUnwrap(goodRow.modelRevision)
+        let hub = try tempDir()
+        let snapshot = hub
+            .appendingPathComponent("models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit", isDirectory: true)
+            .appendingPathComponent("snapshots", isDirectory: true)
+            .appendingPathComponent(revision, isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.candidateCatalog.rows[goodKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        let artifactPath = snapshot.path
+
+        let prober = RecordingStage1Prober(results: [
+            artifactPath: .feasible(medianTPS: 88, p95TTFTMS: 900)
+        ])
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: hub),
+            runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
+            prober: prober,
+            safetySampler: StaticProbeSafetySampler()
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080,
+            candidateModelIDs: Set([goodRow.modelID])
+        )
+
+        XCTAssertNotNil(outcomes.benchmarks[goodKey])
+        XCTAssertNil(outcomes.benchmarks[skippedKey])
+        XCTAssertNil(outcomes.diagnostics[skippedKey])
+        XCTAssertEqual(prober.probedModels, [artifactPath])
     }
 
     func testBenchmarkingRethrowsUnexpectedRunnerFailures() async throws {
