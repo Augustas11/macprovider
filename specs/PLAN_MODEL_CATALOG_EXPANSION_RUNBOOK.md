@@ -1,6 +1,6 @@
 # PLAN — Model Catalog Expansion Runbook
 
-**Version:** 0.1.9  
+**Version:** 0.1.10  
 **Date:** 2026-07-07  
 **Status:** ACTIVE — execution plan (not normative spec)  
 **Source analysis:** Model-catalog expansion exploration (2026-07-07 Cursor session)  
@@ -46,7 +46,7 @@ beta/catalog-expansion/
 | **G0** | All P0 tasks GREEN or WAIVED | P1 runtime bench |
 | **G1** | P1 bench PASS on ≥2 RAM tiers | Gemma-4 catalog publish |
 | **G2** | G1 + rate-card + tier-2 hash signed | Prod recommendable |
-| **G3** | P2 artifacts + G2 stable 48h | Small-tier publish |
+| **G3** | P2 artifacts + G2 stable 48h *(waivable in pre-beta — see tracker)* | Small-tier publish |
 | **G4** | P3 decision record (VLM yes/no) | Any VLM engine work |
 | **G5** | P4 bench on Tier-A hardware | Flagship catalog rows |
 
@@ -398,7 +398,8 @@ Separate catalog key or quant suffix — operator decision. Lower priority than 
 # P2 — Cheap catalog wins (parallel after G1)
 
 > **Goal:** Widen supply without engine changes.  
-> **Requires:** G2 for coordination deploy; can prep PRs during P1.
+> **Requires:** G2 for coordination deploy; can prep PRs during P1.  
+> **Execution order (2026-07-07):** P2-03 → P2-02 → P2-01 deferred (weak demand vs existing coder/Nemotron/Gemma rows).
 
 ---
 
@@ -443,9 +444,9 @@ Separate catalog key or quant suffix — operator decision. Lower priority than 
 | Field | Value |
 |-------|-------|
 | **ID** | `P2-03` |
-| **Issue** | Baked fallback diverges from live on `qwen3-32b` min_ram (32 vs 48), `qwen2.5-coder` (64 vs 48) per `AutotuneRecommend.swift:1913–1929` |
+| **Issue** | Baked fallback drift vs live/coordinator (post-P1): `bakedRateCardJSON` still `baked-2026-07-03` — Nemotron credits wrong (235k vs 160k live), Gemma rows present in baked catalog but verify byte parity; candidate/demand should mirror `published-2026-07-07-p1-gemma` |
 
-Align baked JSON with live after P1/P2 publishes to avoid offline autotune surprises.
+Align all three baked strings (`bakedCandidateCatalogJSON`, `bakedDemandRankJSON`, `bakedRateCardJSON`) with live static + `coordinator.yaml` rate card. **No new catalog version** unless drift fix requires re-sign (rate-card-only fix = Swift baked string only).
 
 ---
 
@@ -557,7 +558,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 # Status tracker
 
 > **Maintained by:** executor agents + pinned planning session.  
-> Last updated: 2026-07-07 (P1 DONE, G2 CLOSED — #461 merged)
+> Last updated: 2026-07-07 (G3 WAIVED pre-beta; P2 unblocked — P2-03 first)
 
 | Task ID | Phase | Status | Gate | Artifact | Notes |
 |---------|-------|--------|------|----------|-------|
@@ -573,9 +574,9 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 | P1-03 | P1 | **`PASS`** | G2 | `beta/catalog-expansion/P1-gemma4-catalog-rollout.md` | `published-2026-07-07-p1-gemma` live; 8 models; prod + #461 |
 | P1-04 | P1 | `READY` | — | — | Optional QAT variant; after P1 soak |
 | P1 rollup | P1 | **`DONE`** | **G2** | `beta/catalog-expansion/P1-gemma4-catalog-rollout.md` | **G2 CLOSED** |
-| P2-01 | P2 | `BLOCKED` | G3 | — | Needs G2 stable 48h |
-| P2-02 | P2 | `BLOCKED` | G3 | — | Needs G2 stable 48h |
-| P2-03 | P2 | `BLOCKED` | G3 | — | Baked/live drift |
+| P2-01 | P2 | `DEFERRED` | G3 | — | Weak demand vs `qwen3-coder-30b` + Nemotron; RESEARCH_227 demote |
+| P2-02 | P2 | **`READY`** | G3 | — | Small-tier dense after P2-03; prefer Qwen3-8B |
+| P2-03 | P2 | **`READY`** | G3 | — | Baked/live drift — **start here** |
 | P3-01 | P3 | `PENDING` | G4 | — | Operator decision |
 | P4-01 | P4 | `BLOCKED` | G5 | — | P0-03 GREEN; needs Tier-A HW bench |
 | P4-02 | P4 | `BLOCKED` | G5 | — | P0-03 GREEN; needs Tier-A HW bench |
@@ -588,7 +589,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 | G0 | **`CLOSED — PROCEED`** | 2026-07-07 |
 | G1 | **`PASS`** (32 GB only; 48 GB tier deferred) | 2026-07-07 |
 | G2 | **`CLOSED — PASS`** — Gemma-4 prod recommendable; #461 merged | 2026-07-07 |
-| G3 | `OPEN` — needs G2 stable 48h | — |
+| G3 | **`WAIVED — pre-beta`** (no external buyers; 48h soak non-informative) | 2026-07-07 |
 | G4 | `OPEN` | — |
 | G5 | `OPEN` | — |
 
@@ -608,3 +609,4 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 | 0.1.7 | 2026-07-07 | P1-01: P0-01 TPS contamination caveat + mandatory gpt-oss sanity check |
 | 0.1.8 | 2026-07-07 | P1-01 PASS — Gemma 12.5 TPS / gates 10+28; gpt-oss sanity 18.3 |
 | 0.1.9 | 2026-07-07 | P1 DONE + G2 CLOSED — commit P0/P1 artifacts; #461 merged |
+| 0.1.10 | 2026-07-07 | G3 WAIVED pre-beta; P2 unblocked; P2-03 → P2-02 order; P2-01 deferred |
