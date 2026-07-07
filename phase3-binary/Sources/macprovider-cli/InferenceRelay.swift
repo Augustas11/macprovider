@@ -245,8 +245,10 @@ actor InferenceRelay {
                 ? await modelRuntime.currentSnapshot().modelID
                 : loadedModelID
             try request.validateModelMatches(validationModelID)
-            if stream {
-                completionResult = try await processStreaming(
+        if stream {
+            let trace = EgressPerfTrace()
+            completionResult = try await EgressPerfTraceKey.$current.withValue(trace) {
+                try await processStreaming(
                     requestID: requestID,
                     request: request,
                     state: state,
@@ -258,7 +260,9 @@ actor InferenceRelay {
                     settlementMetadata: settlementMetadata,
                     sendFrame: sendFrame
                 )
-            } else {
+            }
+            trace.printSummary(requestID: requestID, completionTokens: completionResult?.completionTokens ?? 0)
+        } else {
                 completionResult = try await processNonStreaming(
                     requestID: requestID,
                     request: request,
@@ -762,7 +766,10 @@ actor InferenceRelay {
         sendFrame: @escaping SendFrame
     ) async throws {
         if let tier2Session {
-            try await sendFrame(tier2Session.sealResponseChunk(requestID: requestID, stream: stream, plaintext: data))
+            let sealStart = clockMonotonicMicros()
+            let sealed = try tier2Session.sealResponseChunk(requestID: requestID, stream: stream, plaintext: data)
+            EgressPerfTraceKey.current?.recordSeal(durationMicros: clockMonotonicMicros() &- sealStart)
+            try await sendFrame(sealed)
             return
         }
         try await sendFrame([
