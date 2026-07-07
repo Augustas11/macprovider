@@ -81,6 +81,8 @@ chmod 0777 "$TMP/cache" "$TMP/log"
 cp "$DIST_DIR/nginx-snippets/stats-shared.conf"           "$TMP/conf.d/stats-shared.conf"
 cp "$DIST_DIR/nginx-snippets/stats-security-headers.conf" "$TMP/conf.d/stats-security-headers.conf"
 cp "$DIST_DIR/nginx-snippets/cors-429.conf"               "$TMP/conf.d/cors-429.conf"
+cp "$DIST_DIR/nginx-snippets/stats-proxy-public.conf"     "$TMP/conf.d/stats-proxy-public.conf"
+cp "$DIST_DIR/nginx-snippets/stats-proxy-partner.conf"    "$TMP/conf.d/stats-proxy-partner.conf"
 
 # Build a test-only stats vhost: strip TLS, rewrite proxy_pass to
 # the host-side upstream mock. Issue #244: dist confs now ship with
@@ -162,6 +164,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "public, max-age=30, s-maxage=30")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(b'{"projection":"public"}')
     def log_message(self, fmt, *args): pass
@@ -235,6 +238,17 @@ if grep -qi '^Access-Control-Allow-Credentials:' <<<"$RESP"; then fail "AC-8: 61
 if ! grep -qi '^X-Stats-Rate-Limit: exceeded' <<<"$RESP"; then fail "AC-8: 61st response missing X-Stats-Rate-Limit"; fi
 if ! grep -q '"code":"rate_limited"' <<<"$RESP"; then fail "AC-8: 61st response missing rate_limited envelope"; fi
 [ "$FAIL" -eq 0 ] && ok "AC-8: 60 anonymous /overview pass, 61st returns 429 + public CORS + Retry-After + §5.9 envelope"
+
+# Step 4b — /overview 200 must carry exactly one ACAO (upstream + edge dedup).
+docker restart "$NGINX_CID" >/dev/null
+refresh_base
+sleep 2
+OVERVIEW_HDRS=$(curl -s -i "${BASE}/v1/stats/overview")
+if ! grep -q '^HTTP/1.1 200' <<<"$OVERVIEW_HDRS"; then fail "CORS dedup: /overview did not return 200: $(head -1 <<<"$OVERVIEW_HDRS")"; fi
+ACAO_COUNT=$(grep -ci '^Access-Control-Allow-Origin:' <<<"$OVERVIEW_HDRS")
+if [ "$ACAO_COUNT" -ne 1 ]; then fail "CORS dedup: /overview must carry exactly one ACAO; got $ACAO_COUNT"; fi
+if grep -qi '^X-Stats-Rate-Limit:' <<<"$OVERVIEW_HDRS"; then fail "CORS dedup: /overview 200 must not carry X-Stats-Rate-Limit"; fi
+[ "$FAIL" -eq 0 ] && ok "CORS dedup: /overview 200 carries exactly one Access-Control-Allow-Origin"
 
 # Step 5 — Keyed-bypass: 100 valid-keyed /leaderboard from one IP
 # must NOT trip the public limiter. Use a fixed `mpk_*` token that

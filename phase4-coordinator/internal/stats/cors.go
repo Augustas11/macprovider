@@ -61,6 +61,10 @@ func servePreflight(w http.ResponseWriter, r *http.Request, st *store.Store, cor
 	w.Header().Set("Access-Control-Max-Age", strconv.Itoa(maxAge))
 	w.Header().Set("Vary", "Origin")
 
+	h := w.Header()
+	h.Del("Access-Control-Allow-Origin")
+	h.Del("Access-Control-Allow-Credentials")
+
 	norm, ok := NormalizeOrigin(r.Header.Get("Origin"))
 	if ok && isOriginOnGlobalAllowlistUnion(r, norm, st, cors.PartnerOriginAllowlist) {
 		w.Header().Set("Access-Control-Allow-Origin", norm)
@@ -108,6 +112,9 @@ func isOriginOnGlobalAllowlistUnion(r *http.Request, normalized string, st *stor
 //   - Always ACAO: * — including for 401 auth-failed because
 //     the response is not key-derived.
 func writeCORSHeaders(w http.ResponseWriter, partner bool, originPresent bool, originValue string) {
+	h := w.Header()
+	h.Del("Access-Control-Allow-Origin")
+	h.Del("Access-Control-Allow-Credentials")
 	if partner {
 		if originPresent {
 			w.Header().Set("Access-Control-Allow-Origin", originValue)
