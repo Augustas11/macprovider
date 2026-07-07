@@ -131,6 +131,17 @@ logging:
   level: "info"
   format: "json"
 
+# SPEC-023 signed recommendation feeds served on the buyer mux at
+# /v1/demand-rank(+ .sig) and /v1/autotune-candidates(+ .sig).
+# Paths point at literal signed bytes on disk (not computed like
+# /v1/rate-card). Empty paths disable that feed (404). Deploy installs
+# fresh files from phase3-binary/dist/static/ into /opt/macprovider/autotune/.
+autotune:
+  demand_rank_path: "/opt/macprovider/autotune/demand-rank.json"
+  demand_rank_sig_path: "/opt/macprovider/autotune/demand-rank.json.sig"
+  autotune_candidates_path: "/opt/macprovider/autotune/autotune-candidates.json"
+  autotune_candidates_sig_path: "/opt/macprovider/autotune/autotune-candidates.json.sig"
+
 # Rewards / rate-card configuration (Entry 92 v2 pricing thesis; Wave 1 hot-reload surface).
 #
 # Sample below documents the Wave 1 2-row canary pattern that shipped 2026-07-01

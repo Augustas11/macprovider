@@ -11,20 +11,16 @@ fail() {
 
 bash -n "$DEPLOY_SH"
 
-grep -q 'chmod o+x /opt/macprovider' "$DEPLOY_SH" ||
-  fail "deploy must chmod o+x /opt/macprovider for nginx static feed traversal"
+grep -q 'install -d -o root -g macprovider -m 0750 /opt/macprovider/autotune' "$DEPLOY_SH" ||
+  fail "deploy must install autotune feed directory under /opt/macprovider/autotune"
 
-# Step 3 must re-apply o+x immediately after install -d resets mode to 0750.
-awk '
-  /install -d -o root -g macprovider -m 0750 \/opt\/macprovider/ {
-    if (!getline nxt || nxt !~ /chmod o\+x \/opt\/macprovider/) {
-      exit 1
-    }
-  }
-  END { exit 0 }
-' "$DEPLOY_SH" || fail "step 3 must chmod o+x immediately after install -d /opt/macprovider"
+grep -q 'sudo -u macprovider test -r /opt/macprovider/autotune/autotune-candidates.json' "$DEPLOY_SH" ||
+  fail "deploy smoke must verify macprovider can read autotune feeds"
 
-grep -q 'sudo -u www-data test -r /opt/macprovider/static/autotune-candidates.json' "$DEPLOY_SH" ||
-  fail "deploy smoke must verify www-data can read static feeds"
+grep -q '/v1/demand-rank' "$DEPLOY_SH" ||
+  fail "deploy smoke must probe /v1/demand-rank"
 
-echo "PASS: deploy static feed nginx access guards present"
+grep -q 'chmod o+x /opt/macprovider' "$DEPLOY_SH" &&
+  fail "deploy must not chmod o+x /opt/macprovider for legacy nginx static feeds"
+
+echo "PASS: deploy autotune feed access guards present"

@@ -175,10 +175,10 @@ NGINX_STATS_PROXY_PARTNER="$DIST_DIR/nginx-snippets/stats-proxy-partner.conf"
 NGINX_STATS_SITE="$DIST_DIR/nginx-stats.streamvc.live.conf"
 CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}"
 
-# SPEC-023 v1.7.3 — signed static feeds (demand-rank + autotune-candidates)
-# served by nginx from /opt/macprovider/static/ under the /static/ prefix.
+# SPEC-023 signed recommendation feeds served on the buyer mux at
+# /v1/demand-rank and /v1/autotune-candidates (+ .sig sidecars).
 # Files live in phase3-binary/dist/static/ in the repo. Deploy installs
-# them alongside the coordinator config.
+# them into /opt/macprovider/autotune/ for coordinator startup load.
 STATIC_FEEDS_DIR="$DIST_DIR/../../phase3-binary/dist/static"
 STATIC_DEMAND_JSON="$STATIC_FEEDS_DIR/demand-rank.json"
 STATIC_DEMAND_SIG="$STATIC_FEEDS_DIR/demand-rank.json.sig"
@@ -555,13 +555,6 @@ $SSH 'set -e
   # config, catalog) are still installed mode-set to macprovider so
   # the daemon can read them.
   install -d -o root -g macprovider -m 0750 /opt/macprovider
-  # SPEC-023: nginx (www-data) must traverse /opt/macprovider to reach
-  # /opt/macprovider/static/*. o+x on the parent is path-traversal only;
-  # sibling files keep 0750/0640. Re-applied immediately after install -d
-  # because install -d resets mode to exactly 0750 and wipes a prior o+x
-  # when step 6 is skipped or a partial rerun only refreshes dirs — caught
-  # 2026-07-07 P0 static-feed outage (nginx stat() EACCES → public 404).
-  chmod o+x /opt/macprovider
   install -d -o root -g macprovider-stats -m 0750 /opt/macprovider-stats
   install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider
   install -d -o macprovider -g macprovider -m 0750 /var/log/macprovider
@@ -1136,27 +1129,14 @@ $SSH "set -e
   elif [ -f /var/lib/macprovider/request-log.sqlite ]; then
     echo '  warning: setfacl not available; stats billing mirror will remain disabled until macprovider-stats can read request-log.sqlite'
   fi
-  # SPEC-023 v1.7.3 signed static feeds — served by nginx as
-  # coordinator.streamvc.live/static/*. Files are world-readable
-  # (mode 0644) because they are public signed content; nginx runs as
-  # www-data. Directory itself is world-executable so www-data can enter.
-  #
-  # /opt/macprovider/ is provisioned as root:macprovider 0750, which
-  # blocks www-data (not in the macprovider group) from traversing INTO
-  # any subdir including /static/. Add +x for others so nginx can walk
-  # the path; contents of siblings (coordinator, coordinator-cli,
-  # coordinator.yaml, coordinator.env) stay unreadable — their own modes
-  # 0750/0640 unchanged, +x on the parent only adds path-traversal, not
-  # listing or reading. Caught 2026-07-02 v1.7.3 first deploy: smoke
-  # returned 404 until the parent chmod was applied.
-  chmod o+x /opt/macprovider
-  mkdir -p /opt/macprovider/static
-  chown root:root /opt/macprovider/static
-  chmod 0755      /opt/macprovider/static
-  install -o root -g root -m 0644 $DEPLOY_TMP/demand-rank.json          /opt/macprovider/static/demand-rank.json
-  install -o root -g root -m 0644 $DEPLOY_TMP/demand-rank.json.sig      /opt/macprovider/static/demand-rank.json.sig
-  install -o root -g root -m 0644 $DEPLOY_TMP/autotune-candidates.json  /opt/macprovider/static/autotune-candidates.json
-  install -o root -g root -m 0644 $DEPLOY_TMP/autotune-candidates.json.sig /opt/macprovider/static/autotune-candidates.json.sig
+  # SPEC-023 signed recommendation feeds — loaded by coordinator at startup
+  # and served on the buyer mux (/v1/demand-rank, /v1/autotune-candidates).
+  # root:macprovider 0640 so the macprovider daemon can read them.
+  install -d -o root -g macprovider -m 0750 /opt/macprovider/autotune
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json            /opt/macprovider/autotune/demand-rank.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json.sig        /opt/macprovider/autotune/demand-rank.json.sig
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json   /opt/macprovider/autotune/autotune-candidates.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json.sig /opt/macprovider/autotune/autotune-candidates.json.sig
 "
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   # R4: no more `install -d` on a dynamic dirname. /opt/macprovider is
@@ -1563,35 +1543,34 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   echo "  catalog OK: $CATALOG_SUMMARY"
 fi
 
-# SPEC-023 v1.7.3 signed static feeds smoke.
-log "  verifying nginx can read static feeds as www-data"
+# SPEC-023 signed recommendation feeds smoke (buyer mux via nginx).
+log "  verifying coordinator can read autotune feeds as macprovider"
 $SSH "set -e
-  chmod o+x /opt/macprovider
-  sudo -u www-data test -r /opt/macprovider/static/autotune-candidates.json
-  sudo -u www-data test -r /opt/macprovider/static/demand-rank.json
+  sudo -u macprovider test -r /opt/macprovider/autotune/autotune-candidates.json
+  sudo -u macprovider test -r /opt/macprovider/autotune/demand-rank.json
 " || {
-  echo "aborting smoke: www-data cannot read /opt/macprovider/static/* (check chmod o+x /opt/macprovider)" >&2
+  echo "aborting smoke: macprovider cannot read /opt/macprovider/autotune/*" >&2
   exit 1
 }
-STATIC_SMOKE_DIR=$(umask 077 && mktemp -d -t macprovider-static-probe.XXXXXXXX) || {
-  echo "aborting smoke: mktemp -d failed for static feed probe" >&2
+STATIC_SMOKE_DIR=$(umask 077 && mktemp -d -t macprovider-autotune-probe.XXXXXXXX) || {
+  echo "aborting smoke: mktemp -d failed for autotune feed probe" >&2
   exit 1
 }
 STATIC_SMOKE_BODY="$STATIC_SMOKE_DIR/body"
 for STATIC_PATH in \
-    /static/demand-rank.json \
-    /static/demand-rank.json.sig \
-    /static/autotune-candidates.json \
-    /static/autotune-candidates.json.sig; do
+    /v1/demand-rank \
+    /v1/demand-rank.sig \
+    /v1/autotune-candidates \
+    /v1/autotune-candidates.sig; do
   echo "  GET https://$DOMAIN$STATIC_PATH -> expect 200"
   : > "$STATIC_SMOKE_BODY"
   STATUS=$(curl -sS -o "$STATIC_SMOKE_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN$STATIC_PATH")
   if [ "$STATUS" != "200" ]; then
-    echo "SPEC-023 static feed smoke failed: $STATIC_PATH status=$STATUS body=$(head -c 200 "$STATIC_SMOKE_BODY")" >&2
+    echo "SPEC-023 autotune feed smoke failed: $STATIC_PATH status=$STATUS body=$(head -c 200 "$STATIC_SMOKE_BODY")" >&2
     exit 1
   fi
 done
-echo "  SPEC-023 static feeds OK"
+echo "  SPEC-023 autotune feeds OK"
 
 # R3+R4+R5 stats smoke check on STATS_DOMAIN.
 #

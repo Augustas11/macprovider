@@ -37,7 +37,7 @@ runs journal-only.
 
 ## What it alerts on (transition-based)
 - pool `ready == 0` (idle / no buyer capacity) — CRITICAL
-- SPEC-023 static feeds (`/static/autotune-candidates.json`, `.sig`, `/static/demand-rank.json`, `.sig`) unreachable from Pearl — CRITICAL
+- SPEC-023 autotune feeds (`/v1/autotune-candidates`, `.sig`, `/v1/demand-rank`, `.sig`) unreachable from Pearl — CRITICAL
 - a provider → `unavailable` (breaker re-trip / `warmup_failed` / removed) — WARN
 - a provider → `degraded` (breaker trip / warm-up hold) — WARN
 - a provider dropped from the pool — WARN

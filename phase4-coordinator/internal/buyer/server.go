@@ -169,6 +169,8 @@ type Server struct {
 	billingCfg        config.RewardsConfig
 	billingSnapshotID int64
 	rateCardUSDPerM   float64
+	autotuneFeedsMu   sync.RWMutex
+	autotuneFeeds     AutotuneFeeds
 	now               func() time.Time
 	version           string
 }
@@ -588,6 +590,10 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/v1/models", s.handleModels)
 	r.Get("/v1/rate-card", s.handleRateCard)
+	r.Get("/v1/demand-rank", s.handleDemandRank)
+	r.Get("/v1/demand-rank.sig", s.handleDemandRankSig)
+	r.Get("/v1/autotune-candidates", s.handleAutotuneCandidates)
+	r.Get("/v1/autotune-candidates.sig", s.handleAutotuneCandidatesSig)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
 	r.Get("/v1/receipt-keys/{provider_id}", s.handleReceiptKeys)
 	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotations.

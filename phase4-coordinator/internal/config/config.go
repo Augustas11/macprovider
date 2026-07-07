@@ -58,6 +58,7 @@ type Config struct {
 	Explorer                     ExplorerConfig               `yaml:"explorer"`
 	Stats                        StatsConfig                  `yaml:"stats"`
 	Onboarding                   OnboardingConfig             `yaml:"onboarding"`
+	AutotuneFeeds                AutotuneFeedsConfig          `yaml:"autotune"`
 	Proxy                        ProxyConfig                  `yaml:"proxy"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
 }
@@ -79,6 +80,16 @@ type OnboardingConfig struct {
 	AppleTeamID             string            `yaml:"apple_team_id"`
 	CoordinatorDomain       string            `yaml:"coordinator_domain"`
 	ASNPrefixes             map[string]string `yaml:"asn_prefixes"`
+}
+
+// AutotuneFeedsConfig points at the signed SPEC-023 recommendation feeds
+// served on the buyer mux (/v1/demand-rank, /v1/autotune-candidates, and
+// their .sig sidecars). Empty paths disable that feed (404).
+type AutotuneFeedsConfig struct {
+	DemandRankPath            string `yaml:"demand_rank_path"`
+	DemandRankSigPath         string `yaml:"demand_rank_sig_path"`
+	AutotuneCandidatesPath    string `yaml:"autotune_candidates_path"`
+	AutotuneCandidatesSigPath string `yaml:"autotune_candidates_sig_path"`
 }
 
 // StatsConfig is the SPEC-017 Network Stats API config block.
@@ -1326,6 +1337,9 @@ func (c Config) Validate() error {
 	if err := c.validateOnboarding(); err != nil {
 		return err
 	}
+	if err := c.validateAutotuneFeeds(); err != nil {
+		return err
+	}
 	if _, ok := c.Rewards.RateCard["default"]; !ok {
 		return fmt.Errorf("rewards.rate_card must contain default")
 	}
@@ -1351,6 +1365,29 @@ func (c Config) Validate() error {
 			if err := ValidateEndpointURL(p.EndpointURL); err != nil {
 				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
 			}
+		}
+	}
+	return nil
+}
+
+func (c Config) validateAutotuneFeeds() error {
+	a := c.AutotuneFeeds
+	pairs := []struct {
+		label    string
+		jsonPath string
+		sigPath  string
+	}{
+		{"demand_rank", a.DemandRankPath, a.DemandRankSigPath},
+		{"autotune_candidates", a.AutotuneCandidatesPath, a.AutotuneCandidatesSigPath},
+	}
+	for _, p := range pairs {
+		jsonPath := strings.TrimSpace(p.jsonPath)
+		sigPath := strings.TrimSpace(p.sigPath)
+		if jsonPath == "" && sigPath == "" {
+			continue
+		}
+		if jsonPath == "" || sigPath == "" {
+			return fmt.Errorf("autotune.%s_path and autotune.%s_sig_path must both be set", p.label, p.label)
 		}
 	}
 	return nil
