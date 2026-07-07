@@ -527,6 +527,20 @@ Re-open only if T0-03 **RED** or TG4 concurrency mandate.
 
 ---
 
+# Upstream watch (automated)
+
+Pending throughput blockers are tracked in `beta/throughput-engineering/UPSTREAM_WATCH.json` and polled by `scripts/check-upstream-throughput-blockers.sh`.
+
+| Upstream | Kind | Runbook | Cursor Automation |
+|----------|------|---------|-------------------|
+| [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) | Issue | T2-01 / TG2 | Weekday blocker watch |
+| [mlx-swift-lm#364](https://github.com/ml-explore/mlx-swift-lm/pull/364) | PR | T1-02 / TG1 | Weekday blocker watch |
+| ml-explore release tags | Release | T1-01 pin bump | Weekly discovery watch |
+
+When the checker reports a **material change** (issue/PR closed or merged, new release above pin, KVCache compile-fix heuristic), the automation opens a macprovider tracking issue with unblock steps.
+
+---
+
 # Executor prompt template
 
 ```
