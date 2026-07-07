@@ -1552,6 +1552,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     let iterator = try TokenIterator(input: iteratorInput, model: context.model, cache: kvCache, parameters: parameters)
                     do {
                         let result: GenerateResult = generate(input: iteratorInput, context: context, iterator: iterator) { tokens in
+                            EgressPerfTraceKey.current?.recordDecodeCallbackEntry()
                             if Task.isCancelled || shouldCancel() || drainCancelled.isFired || idleCancellation.isFired {
                                 return .stop
                             }

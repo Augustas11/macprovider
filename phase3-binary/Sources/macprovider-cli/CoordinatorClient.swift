@@ -2439,7 +2439,9 @@ actor CoordinatorClient {
         if let type = payload["type"] as? String {
             keepaliveDebug("ws_send type=\(type) bytes=\(text.utf8.count)")
         }
+        let wsSendStart = clockMonotonicMicros()
         try await webSocket.send(.string(text))
+        EgressPerfTraceKey.current?.recordWSSend(durationMicros: clockMonotonicMicros() &- wsSendStart)
     }
 
     private static func receiveJSONObject(from webSocket: ProviderWebSocketTask) async throws -> [String: Any] {
