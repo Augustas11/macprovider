@@ -171,6 +171,7 @@ final class AutotuneRecommendTests: XCTestCase {
         var request = try makeRequest(modelKey: "qwen3-32b")
         request.donorMode = true
         request.hardware.bandwidthTier = .a
+        request.candidateCatalog.rows["qwen3-32b"]?.runtimeStatus = "listed"
 
         let result = AutotuneRecommendEngine().recommend(request)
 
@@ -663,7 +664,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticFallbackAndStaleWarnings() async throws {
         let validFetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "baked-2026-07-03", with: "fetched-2026-07-10")
+            .replacingOccurrences(of: "published-2026-07-06-mbase-lite", with: "fetched-2026-07-10")
             .replacingOccurrences(of: "2026-07-01T00:00:00Z", with: "2026-07-10T00:00:00Z")
             .utf8)
         let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA=="}"#.utf8)
@@ -691,7 +692,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticRejectsSidecarWithExtraFields() async throws {
         let fetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "baked-2026-07-03", with: "fetched-2026-07-10")
+            .replacingOccurrences(of: "published-2026-07-06-mbase-lite", with: "fetched-2026-07-10")
             .replacingOccurrences(of: "2026-07-01T00:00:00Z", with: "2026-07-10T00:00:00Z")
             .utf8)
         let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA==","extra":true}"#.utf8)
@@ -1325,7 +1326,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(chmod(secretURL.path, 0o600), 0)
         let stateURL = dir.appendingPathComponent("last-recommendation.json")
         try Data("""
-        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"old","demand_rank_version":"baked-2026-07-03","candidate_catalog_version":"baked-2026-07-03","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"old","demand_rank_version":"published-2026-07-06-mbase-lite","candidate_catalog_version":"published-2026-07-06-mbase-lite","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
         let staticInputs = AutotuneStaticInputs(
             fetch: { _ in throw AutotuneRecommendError.invalidStaticJSON("offline") },
@@ -1351,7 +1352,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(chmod(secretURL.path, 0o644), 0)
         let stateURL = dir.appendingPathComponent("last-recommendation.json")
         try Data("""
-        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"baked-2026-07-03","demand_rank_version":"baked-2026-07-03","candidate_catalog_version":"baked-2026-07-03","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"baked-2026-07-03","demand_rank_version":"published-2026-07-06-mbase-lite","candidate_catalog_version":"published-2026-07-06-mbase-lite","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
         let staticInputs = AutotuneStaticInputs(
             fetch: { _ in throw AutotuneRecommendError.invalidStaticJSON("offline") },
@@ -1385,7 +1386,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: "provider-a")
         try Data("""
-        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-03","demand_rank_version":"baked-2026-07-03","candidate_catalog_version":"baked-2026-07-03","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-03","demand_rank_version":"published-2026-07-06-mbase-lite","candidate_catalog_version":"published-2026-07-06-mbase-lite","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
 
         let staleSince = await StatusCommand.staleRecommendationSince(
@@ -1844,6 +1845,16 @@ final class AutotuneRecommendTests: XCTestCase {
         rateCard.rows = rateCard.rows.filter { $0.key == modelKey || $0.key == normalizedModelKey }
 
         if modelKey == "google-gemma-4-26b-a4b-it" {
+            catalog.rows[modelKey] = CandidateCatalog.Row(
+                modelID: "mlx-community/gemma-4-26b-a4b-it-4bit",
+                modelRevision: nil,
+                modelSHA256: nil,
+                minRAMGB: 32,
+                minBandwidthTier: .c,
+                benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 30, max4KTTFTMS: 3000),
+                runtimeStatus: "blocked",
+                notes: "test fixture"
+            )
             rateCard.rows[modelKey] = RateCardProjection.Row(
                 promptRatePerMtok: 60_000,
                 completionRatePerMtok: 120_000,

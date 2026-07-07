@@ -19,8 +19,8 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
         XCTAssertEqual(request.donorMode, false)
         XCTAssertEqual(request.benchmarks["qwen3-coder-30b-a3b-instruct"]?.modelKey, "qwen3-coder-30b-a3b-instruct")
         XCTAssertEqual(request.rateCard.version, "baked-2026-07-03")
-        XCTAssertEqual(request.candidateCatalog.version, "baked-2026-07-03")
-        XCTAssertEqual(request.demandRank.version, "baked-2026-07-03")
+        XCTAssertEqual(request.candidateCatalog.version, "published-2026-07-06-mbase-lite")
+        XCTAssertEqual(request.demandRank.version, "published-2026-07-06-mbase-lite")
     }
 
     func testSimulateRecommendationMatchesDirectEngineCall() async throws {
@@ -60,8 +60,8 @@ final class AutotuneRecommendSimulateTests: XCTestCase {
 
         XCTAssertEqual(fetchedURL, AutotuneRecommendSimulator.liveRateCardURL)
         XCTAssertEqual(result.rateCardVersion, "baked-2026-07-03")
-        XCTAssertEqual(result.candidateCatalogVersion, "baked-2026-07-03")
-        XCTAssertEqual(result.demandRankVersion, "baked-2026-07-03")
+        XCTAssertEqual(result.candidateCatalogVersion, "published-2026-07-06-mbase-lite")
+        XCTAssertEqual(result.demandRankVersion, "published-2026-07-06-mbase-lite")
     }
 
     func testSimulatorJSONIncludesFullCandidateUniverse() async throws {

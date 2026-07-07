@@ -555,6 +555,13 @@ $SSH 'set -e
   # config, catalog) are still installed mode-set to macprovider so
   # the daemon can read them.
   install -d -o root -g macprovider -m 0750 /opt/macprovider
+  # SPEC-023: nginx (www-data) must traverse /opt/macprovider to reach
+  # /opt/macprovider/static/*. o+x on the parent is path-traversal only;
+  # sibling files keep 0750/0640. Re-applied immediately after install -d
+  # because install -d resets mode to exactly 0750 and wipes a prior o+x
+  # when step 6 is skipped or a partial rerun only refreshes dirs — caught
+  # 2026-07-07 P0 static-feed outage (nginx stat() EACCES → public 404).
+  chmod o+x /opt/macprovider
   install -d -o root -g macprovider-stats -m 0750 /opt/macprovider-stats
   install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider
   install -d -o macprovider -g macprovider -m 0750 /var/log/macprovider
@@ -1557,6 +1564,15 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
 fi
 
 # SPEC-023 v1.7.3 signed static feeds smoke.
+log "  verifying nginx can read static feeds as www-data"
+$SSH "set -e
+  chmod o+x /opt/macprovider
+  sudo -u www-data test -r /opt/macprovider/static/autotune-candidates.json
+  sudo -u www-data test -r /opt/macprovider/static/demand-rank.json
+" || {
+  echo "aborting smoke: www-data cannot read /opt/macprovider/static/* (check chmod o+x /opt/macprovider)" >&2
+  exit 1
+}
 STATIC_SMOKE_DIR=$(umask 077 && mktemp -d -t macprovider-static-probe.XXXXXXXX) || {
   echo "aborting smoke: mktemp -d failed for static feed probe" >&2
   exit 1
