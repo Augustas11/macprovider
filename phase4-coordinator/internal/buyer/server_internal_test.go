@@ -313,6 +313,69 @@ func TestRequestSidePassThrough_ToolCalls_ByteEquivalent(t *testing.T) {
 	}
 }
 
+func TestStructuredTextContentArrayNormalizesForProvider(t *testing.T) {
+	body := []byte(`{
+		"model":"model-a",
+		"messages":[
+			{"role":"system","content":[{"type":"text","text":"Be "},{"type":"text","text":"brief."}]},
+			{"role":"user","content":[{"type":"text","text":"Hello"}]}
+		],
+		"user":"sdk-user"
+	}`)
+	req, status, code, msg := validateChatRequest(body)
+	if status != 0 {
+		t.Fatalf("validateChatRequest status=%d code=%s msg=%s", status, code, msg)
+	}
+	for _, providerModelID := range []string{"model-a", "provider-model-b"} {
+		t.Run(providerModelID, func(t *testing.T) {
+			outbound, err := dispatchBodyForProvider(req, pool.Provider{ModelID: providerModelID})
+			if err != nil {
+				t.Fatalf("dispatchBodyForProvider: %v", err)
+			}
+			if bytes.Contains(outbound, []byte(`"tool_calls"`)) || bytes.Contains(outbound, []byte(`"tool_call_id"`)) {
+				t.Fatalf("normalized simple messages gained tool fields: %s", string(outbound))
+			}
+
+			var got struct {
+				Model    string `json:"model"`
+				Messages []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal(outbound, &got); err != nil {
+				t.Fatalf("unmarshal outbound: %v; body=%s", err, string(outbound))
+			}
+			if got.Model != providerModelID {
+				t.Fatalf("model = %q, want %q; body=%s", got.Model, providerModelID, string(outbound))
+			}
+			if len(got.Messages) != 2 {
+				t.Fatalf("messages len = %d, want 2; body=%s", len(got.Messages), string(outbound))
+			}
+			if got.Messages[0].Content != "Be brief." || got.Messages[1].Content != "Hello" {
+				t.Fatalf("normalized content = %#v; body=%s", got.Messages, string(outbound))
+			}
+		})
+	}
+}
+
+func TestStructuredContentArrayRejectsMultimodalPart(t *testing.T) {
+	body := []byte(`{
+		"model":"model-a",
+		"messages":[{"role":"user","content":[
+			{"type":"text","text":"describe this"},
+			{"type":"image_url","image_url":{"url":"https://example.test/image.png"}}
+		]}]
+	}`)
+	_, status, code, msg := validateChatRequest(body)
+	if status != 400 || code != "unsupported_content_shape" {
+		t.Fatalf("validateChatRequest status=%d code=%s msg=%s, want 400 unsupported_content_shape", status, code, msg)
+	}
+	if !strings.Contains(msg, "multimodal content arrays are not supported") {
+		t.Fatalf("message not actionable: %q", msg)
+	}
+}
+
 func requestSideToolFields(t *testing.T, body []byte) (json.RawMessage, []json.RawMessage) {
 	t.Helper()
 	var parsed struct {

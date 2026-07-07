@@ -1477,6 +1477,11 @@ type chatMessage struct {
 	ToolCalls  json.RawMessage `json:"tool_calls"`
 }
 
+type chatContentPart struct {
+	Type string          `json:"type"`
+	Text json.RawMessage `json:"text"`
+}
+
 type requestToolCall struct {
 	ID        string
 	Name      string
@@ -4372,6 +4377,10 @@ func validateChatRequest(body []byte) (chatRequest, int, string, string) {
 	if err := json.Unmarshal(messagesRaw, &req.Messages); err != nil || len(req.Messages) == 0 {
 		return req, http.StatusBadRequest, "invalid_request", "Invalid messages"
 	}
+	var rawMessages []map[string]json.RawMessage
+	if err := json.Unmarshal(messagesRaw, &rawMessages); err != nil || len(rawMessages) != len(req.Messages) {
+		return req, http.StatusBadRequest, "invalid_request", "Invalid messages"
+	}
 	if v, ok := raw["stream"]; ok {
 		if err := json.Unmarshal(v, &req.Stream); err != nil {
 			return req, http.StatusBadRequest, "invalid_request", "Invalid stream"
@@ -4380,8 +4389,19 @@ func validateChatRequest(body []byte) (chatRequest, int, string, string) {
 	if status, code, msg := validateOptionalFields(raw, req.Stream); status != 0 {
 		return req, status, code, msg
 	}
-	if status, code, msg := validateMessages(req.Messages); status != 0 {
+	if normalized, status, code, msg := validateMessages(req.Messages, rawMessages); status != 0 {
 		return req, status, code, msg
+	} else if normalized {
+		normalizedMessages, err := json.Marshal(rawMessages)
+		if err != nil {
+			return req, http.StatusBadRequest, "invalid_request", "Invalid messages"
+		}
+		raw["messages"] = normalizedMessages
+		normalizedBody, err := json.Marshal(raw)
+		if err != nil {
+			return req, http.StatusBadRequest, "invalid_request", "Invalid request"
+		}
+		req.raw = normalizedBody
 	}
 	if status, code, msg := validateTools(raw, req.Messages); status != 0 {
 		return req, status, code, msg
@@ -4747,9 +4767,9 @@ func jsonSchemaNumberOperand(node map[string]json.RawMessage, keyword string) (f
 	return number, true, ""
 }
 
-func validateMessages(messages []chatMessage) (int, string, string) {
+func validateMessages(messages []chatMessage, rawMessages []map[string]json.RawMessage) (bool, int, string, string) {
 	if len(messages) > maxChatMessages {
-		return http.StatusBadRequest, "messages_too_long", "messages may contain at most 256 entries"
+		return false, http.StatusBadRequest, "messages_too_long", "messages may contain at most 256 entries"
 	}
 
 	allIDs := map[string]int{}
@@ -4757,34 +4777,41 @@ func validateMessages(messages []chatMessage) (int, string, string) {
 	totalToolCalls := 0
 	totalArgumentBytes := 0
 	duplicateAssistantID := false
+	normalizedContent := false
 
 	for i, m := range messages {
 		switch m.Role {
 		case "system", "user":
-			if !rawStringNonEmpty(m.Content) {
-				return http.StatusBadRequest, "invalid_request", "Invalid message content"
+			normalized, changed, status, code, msg := normalizeSystemUserContent(m.Content)
+			if status != 0 {
+				return false, status, code, msg
+			}
+			if changed {
+				messages[i].Content = normalized
+				rawMessages[i]["content"] = normalized
+				normalizedContent = true
 			}
 		case "assistant":
 			hasContent := string(m.Content) != "" && string(m.Content) != "null"
 			hasTools := len(m.ToolCalls) > 0 && string(m.ToolCalls) != "null"
 			if hasContent && !rawString(m.Content) {
-				return http.StatusBadRequest, "invalid_request", "Invalid assistant content"
+				return false, http.StatusBadRequest, "invalid_request", "Invalid assistant content"
 			}
 			if !hasContent && !hasTools {
-				return http.StatusBadRequest, "invalid_request", "Assistant message requires content or tool_calls"
+				return false, http.StatusBadRequest, "invalid_request", "Assistant message requires content or tool_calls"
 			}
 			if hasTools {
 				calls, status, code, msg := parseRequestToolCalls(m.ToolCalls, i)
 				if status != 0 {
-					return status, code, msg
+					return false, status, code, msg
 				}
 				totalToolCalls += len(calls)
 				if totalToolCalls > maxAssistantToolCalls {
-					return http.StatusBadRequest, "too_many_tool_calls", "assistant tool_calls may contain at most 128 entries"
+					return false, http.StatusBadRequest, "too_many_tool_calls", "assistant tool_calls may contain at most 128 entries"
 				}
 				for _, call := range calls {
 					if !validRequestToolCallID(call.ID) {
-						return http.StatusBadRequest, "invalid_tool_call_id", "Invalid tool_call id"
+						return false, http.StatusBadRequest, "invalid_tool_call_id", "Invalid tool_call id"
 					}
 					if _, exists := allIDs[call.ID]; exists {
 						duplicateAssistantID = true
@@ -4793,24 +4820,24 @@ func validateMessages(messages []chatMessage) (int, string, string) {
 					}
 					totalArgumentBytes += len([]byte(call.Arguments))
 					if totalArgumentBytes > maxToolCallArgumentsResponseBytes {
-						return http.StatusRequestEntityTooLarge, "tool_call_arguments_aggregate_too_large", "assistant-history tool_call arguments exceed aggregate cap"
+						return false, http.StatusRequestEntityTooLarge, "tool_call_arguments_aggregate_too_large", "assistant-history tool_call arguments exceed aggregate cap"
 					}
 				}
 				parsedByMessage[i] = calls
 			}
 		case "tool":
 			if m.ToolCallID == "" || !validRequestToolCallID(m.ToolCallID) {
-				return http.StatusBadRequest, "invalid_tool_call_id", "Invalid tool_call_id"
+				return false, http.StatusBadRequest, "invalid_tool_call_id", "Invalid tool_call_id"
 			}
 			if string(m.Content) == "null" || !rawString(m.Content) {
-				return http.StatusBadRequest, "invalid_request", "Invalid tool message content"
+				return false, http.StatusBadRequest, "invalid_request", "Invalid tool message content"
 			}
 		default:
-			return http.StatusBadRequest, "invalid_request", "Invalid message role"
+			return false, http.StatusBadRequest, "invalid_request", "Invalid message role"
 		}
 	}
 	if duplicateAssistantID {
-		return http.StatusBadRequest, "duplicate_tool_call_id", "Duplicate assistant tool_call id"
+		return false, http.StatusBadRequest, "duplicate_tool_call_id", "Duplicate assistant tool_call id"
 	}
 
 	seenAssistantIDs := map[string]struct{}{}
@@ -4824,27 +4851,69 @@ func validateMessages(messages []chatMessage) (int, string, string) {
 			continue
 		}
 		if _, ok := allIDs[m.ToolCallID]; !ok {
-			return http.StatusBadRequest, "tool_call_id_not_found", "tool_call_id does not reference an earlier assistant tool_call"
+			return false, http.StatusBadRequest, "tool_call_id_not_found", "tool_call_id does not reference an earlier assistant tool_call"
 		}
 		if _, ok := seenAssistantIDs[m.ToolCallID]; !ok {
-			return http.StatusBadRequest, "tool_call_result_out_of_order", "tool result appears before matching assistant tool_call"
+			return false, http.StatusBadRequest, "tool_call_result_out_of_order", "tool result appears before matching assistant tool_call"
 		}
 		if _, exists := fulfilledToolIDs[m.ToolCallID]; exists {
-			return http.StatusBadRequest, "duplicate_tool_call_id", "Duplicate tool result for tool_call_id"
+			return false, http.StatusBadRequest, "duplicate_tool_call_id", "Duplicate tool result for tool_call_id"
 		}
 		fulfilledToolIDs[m.ToolCallID] = struct{}{}
 		var content string
 		_ = json.Unmarshal(m.Content, &content)
 		contentBytes := len([]byte(content))
 		if contentBytes > maxToolResultBytes {
-			return http.StatusRequestEntityTooLarge, "tool_result_too_large", "tool message content exceeds 256 KiB"
+			return false, http.StatusRequestEntityTooLarge, "tool_result_too_large", "tool message content exceeds 256 KiB"
 		}
 		totalToolResultBytes += contentBytes
 		if totalToolResultBytes > maxToolResultsAggregateBytes {
-			return http.StatusRequestEntityTooLarge, "tool_results_aggregate_too_large", "tool message content exceeds aggregate cap"
+			return false, http.StatusRequestEntityTooLarge, "tool_results_aggregate_too_large", "tool message content exceeds aggregate cap"
 		}
 	}
-	return 0, "", ""
+	return normalizedContent, 0, "", ""
+}
+
+func normalizeSystemUserContent(raw json.RawMessage) (json.RawMessage, bool, int, string, string) {
+	if rawStringNonEmpty(raw) {
+		return raw, false, 0, "", ""
+	}
+
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, false, http.StatusBadRequest, "invalid_request", "content must be a non-empty string"
+	}
+	if trimmed[0] != '[' {
+		return nil, false, http.StatusBadRequest, "unsupported_content_shape", "content must be a non-empty string or a text-only structured content array in v1"
+	}
+
+	var parts []chatContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return nil, false, http.StatusBadRequest, "unsupported_content_shape", "structured content arrays must contain text parts in v1"
+	}
+	if len(parts) == 0 {
+		return nil, false, http.StatusBadRequest, "invalid_request", "content must contain non-empty text"
+	}
+
+	var b strings.Builder
+	for _, part := range parts {
+		if part.Type != "text" {
+			return nil, false, http.StatusBadRequest, "unsupported_content_shape", "multimodal content arrays are not supported in v1; use text parts only"
+		}
+		var text string
+		if err := json.Unmarshal(part.Text, &text); err != nil {
+			return nil, false, http.StatusBadRequest, "unsupported_content_shape", "structured content text parts must contain string text"
+		}
+		b.WriteString(text)
+	}
+	if b.Len() == 0 {
+		return nil, false, http.StatusBadRequest, "invalid_request", "content must contain non-empty text"
+	}
+	normalized, err := json.Marshal(b.String())
+	if err != nil {
+		return nil, false, http.StatusBadRequest, "invalid_request", "Invalid message content"
+	}
+	return json.RawMessage(normalized), true, 0, "", ""
 }
 
 func validateTools(raw map[string]json.RawMessage, messages []chatMessage) (int, string, string) {
