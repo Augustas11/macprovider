@@ -1,8 +1,8 @@
 # PLAN — Model Catalog Expansion Runbook
 
-**Version:** 0.1.11  
+**Version:** 0.1.12  
 **Date:** 2026-07-07  
-**Status:** ACTIVE — execution plan (not normative spec)  
+**Status:** PARKED — P0–P2 complete; P3/P4 deferred (not normative spec)  
 **Source analysis:** Model-catalog expansion exploration (2026-07-07 Cursor session)  
 **Pinned session role:** This document is the **single plan-of-record**. Executor agents update task status here; the pinned planning session verifies gates and revises sequencing.
 
@@ -558,7 +558,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 # Status tracker
 
 > **Maintained by:** executor agents + pinned planning session.  
-> Last updated: 2026-07-07 (P2-02 PASS — qwen3-8b 9th model; P2-03 DONE #464)
+> Last updated: 2026-07-07 (P2 CLOSED — prod feed-path fix verified; runbook PARKED)
 
 | Task ID | Phase | Status | Gate | Artifact | Notes |
 |---------|-------|--------|------|----------|-------|
@@ -575,9 +575,9 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 | P1-04 | P1 | `READY` | — | — | Optional QAT variant; after P1 soak |
 | P1 rollup | P1 | **`DONE`** | **G2** | `beta/catalog-expansion/P1-gemma4-catalog-rollout.md` | **G2 CLOSED** |
 | P2-01 | P2 | `DEFERRED` | G3 | — | Weak demand vs `qwen3-coder-30b` + Nemotron; RESEARCH_227 demote |
-| P2-02 | P2 | **`PASS`** | G3 | `beta/catalog-expansion/P2-small-tier-catalog.md` | `qwen3-8b` 9th model; `published-2026-07-07-p2-qwen3-8b`; prod deployed 2026-07-07 |
+| P2-02 | P2 | **`PASS`** | G3 | `beta/catalog-expansion/P2-small-tier-catalog.md` | `qwen3-8b` 9th model; `published-2026-07-07-p2-qwen3-8b`; #466 merged; prod verified 9 rows 2026-07-07 |
 | P2-03 | P2 | **`DONE`** | G3 | `beta/catalog-expansion/P2-baked-live-drift.md` | Nemotron baked rate-card drift; merged #464 |
-| P2 rollup | P2 | **`DONE`** | **G3** | `P2-small-tier-catalog.md` | P2-02 + P2-03 complete; P2-01 deferred |
+| P2 rollup | P2 | **`CLOSED`** | **G3** | `P2-small-tier-catalog.md` | P2-02 + P2-03 complete; P2-01 deferred; prod feed-path fix applied (see note) |
 | P3-01 | P3 | `PENDING` | G4 | — | Operator decision |
 | P4-01 | P4 | `BLOCKED` | G5 | — | P0-03 GREEN; needs Tier-A HW bench |
 | P4-02 | P4 | `BLOCKED` | G5 | — | P0-03 GREEN; needs Tier-A HW bench |
@@ -590,9 +590,17 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 | G0 | **`CLOSED — PROCEED`** | 2026-07-07 |
 | G1 | **`PASS`** (32 GB only; 48 GB tier deferred) | 2026-07-07 |
 | G2 | **`CLOSED — PASS`** — Gemma-4 prod recommendable; #461 merged | 2026-07-07 |
-| G3 | **`WAIVED — pre-beta`** (no external buyers; 48h soak non-informative) | 2026-07-07 |
+| G3 | **`CLOSED — WAIVED`** (pre-beta; 48h soak non-informative; prod verified 9-model feed 2026-07-07) | 2026-07-07 |
 | G4 | `OPEN` | — |
 | G5 | `OPEN` | — |
+
+### Prod deploy note (P2-02 feed-path remediation, 2026-07-07)
+
+P2-02 executor SCP'd signed static feeds to `/opt/macprovider/static/`, but the coordinator buyer mux reads **`/opt/macprovider/autotune/`** (`coordinator.yaml` `autotune.*_path`). Tier-2 at `/opt/macprovider/tier2-catalog.json` was already correct; only autotune feeds were stale (7-row `published-2026-07-06-mbase-lite` served publicly).
+
+**Fix:** copy `static/` → `autotune/` on Pearl, then **restart** coordinator (autotune paths are startup-only; SIGHUP reloads tier-2/rate-card but not feeds). Verified: `/v1/autotune-candidates` → `published-2026-07-07-p2-qwen3-8b`, 9 rows; `/catalog/current` → 9 models.
+
+**Future publishes:** use `deploy-pearl-vps.sh` (installs to `/opt/macprovider/autotune/`) or SCP directly to `autotune/`, not `static/`.
 
 ---
 
@@ -612,3 +620,4 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 | 0.1.9 | 2026-07-07 | P1 DONE + G2 CLOSED — commit P0/P1 artifacts; #461 merged |
 | 0.1.10 | 2026-07-07 | G3 WAIVED pre-beta; P2 unblocked; P2-03 → P2-02 order; P2-01 deferred |
 | 0.1.11 | 2026-07-07 | P2-03 DONE (#464); P2-02 PASS — `qwen3-8b` small-tier live |
+| 0.1.12 | 2026-07-07 | P2/G3 CLOSED — prod feed-path fix (`static/` → `autotune/` + restart); runbook PARKED |
