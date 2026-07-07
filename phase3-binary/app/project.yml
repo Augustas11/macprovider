@@ -17,6 +17,11 @@ options:
   developmentLanguage: en
   createIntermediateGroups: true
 
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.6.4
+
 settings:
   base:
     SWIFT_VERSION: "5.9"
@@ -52,6 +57,9 @@ targets:
         NSHumanReadableCopyright: "Copyright © 2026 Malibu AI, Inc."
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        SUFeedURL: https://download.malibu.tech/appcast.xml
+        SUPublicEDKey: JkTDWnRJfOI3YIlpfJKvasWkxb0O1j/7ObGYiIA7big=
+        SUEnableAutomaticChecks: true
     settings:
       base:
         PRODUCT_NAME: Malibu
@@ -64,7 +72,9 @@ targets:
         basedOnDependencyAnalysis: false
         script: |
           install -m 755 "${SRCROOT}/../dist/install.sh" "${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/Contents/Resources/install.sh"
-    dependencies: []
+    dependencies:
+      - package: Sparkle
+        product: Sparkle
 
   # AUDIT R1 ARCHITECT A8 fix: unit-test the audit-critical app-side surfaces
   # (codec parity vs CLI, URL-scheme nonce validation, snapshot presenter,

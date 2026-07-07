@@ -35,6 +35,8 @@ app/
         ├── KeychainStore.swift    # provider_token in Keychain, service tech.malibu.provider
         ├── ProviderIdentity.swift # App-track Ed25519 identity in Keychain
         └── AppLoginItem.swift     # SMAppService.mainApp wrapper
+        ├── MalibuUpdateConfiguration.swift  # Sparkle feed URL + Ed25519 public key
+        └── SparkleUpdaterController.swift     # SPUStandardUpdaterController wrapper
 ```
 
 ## Build
@@ -70,8 +72,8 @@ open build/Release/Malibu.app
 1. **`ControlFrame` is duplicated**, not shared. Extract the wire-format frames from `phase3-binary/Sources/macprovider-cli/ControlSocket.swift` into a new `MacProviderControl` library target so both CLI and app import one source of truth.
 2. **CLI-side handler semantics.** Frames + wire format are wired end-to-end (`feat(control-socket): add metrics/pause/resume/shutdown frames`), but the server-side handlers are stubs — `pause_ack`/`resume_ack` return `accepted:false, reason:"not_implemented"` and `metrics_response` returns zeros. Real earnings / uptime source + pause gating land in P1.
 3. **CLI-track config migration dialog.** If `~/.config/macprovider/config.yaml` exists without the App-track marker, the App routes to the SPEC-026 migration surface instead of overwriting it silently.
-5. **Sparkle** not wired up yet — separate P3 pass.
-6. **Signed release pipeline** — `release.yml` ships stapled `Malibu-{tag}.dmg` (primary) and optional `Malibu-{tag}.pkg`. Validate downloads with `scripts/verify-malibu-release-artifacts.sh`. Publish `latest.dmg` with `scripts/publish-malibu-latest-dmg.sh` after tagging.
+5. **Sparkle in-app updates** — wired via `SparkleUpdaterController` + `https://download.malibu.tech/appcast.xml`. Release CI signs appcast entries with `SPARKLE_EDDSA_PRIVATE_KEY`; publish with `scripts/publish-malibu-latest-dmg.sh` uploads `appcast.xml` beside `latest.dmg`. CLI self-update stays disabled under `--managed-by malibu-app`.
+6. **Signed release pipeline** — `release.yml` ships stapled `Malibu-{tag}.dmg` (primary) and optional `Malibu-{tag}.pkg`. Validate downloads with `scripts/verify-malibu-release-artifacts.sh`. Publish `latest.dmg` + `appcast.xml` with `scripts/publish-malibu-latest-dmg.sh` after tagging.
 
 ## Uninstall (Malibu + CLI)
 
