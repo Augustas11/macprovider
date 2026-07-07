@@ -9,6 +9,8 @@ struct ProviderPaths {
     let configFile: URL          // ~/.config/macprovider/config.yaml (shared with CLI track)
     let controlSocket: URL       // ~/Library/Application Support/Malibu/agent.sock
     let cliLogFile: URL          // ~/Library/Logs/malibu/malibu-cli.log
+    let launchdStdoutLog: URL    // ~/Library/Logs/macprovider/macprovider.out.log
+    let launchdStderrLog: URL    // ~/Library/Logs/macprovider/macprovider.err.log
     let appSupport: URL          // ~/Library/Application Support/Malibu
     let appMarkerFile: URL       // ~/Library/Application Support/Malibu/.installed-by-app
     let onboardingStateFile: URL // ~/Library/Application Support/Malibu/onboarding.json
@@ -22,6 +24,8 @@ struct ProviderPaths {
             configFile: home.appendingPathComponent(".config/macprovider/config.yaml"),
             controlSocket: appSupport.appendingPathComponent("agent.sock"),
             cliLogFile: home.appendingPathComponent("Library/Logs/malibu/malibu-cli.log"),
+            launchdStdoutLog: home.appendingPathComponent("Library/Logs/macprovider/macprovider.out.log"),
+            launchdStderrLog: home.appendingPathComponent("Library/Logs/macprovider/macprovider.err.log"),
             appSupport: appSupport,
             appMarkerFile: appSupport.appendingPathComponent(".installed-by-app"),
             onboardingStateFile: appSupport.appendingPathComponent("onboarding.json"),

@@ -34,6 +34,7 @@ final class LaunchProviderController: ObservableObject {
         var importCLIConfigAfterInstall: @MainActor () async throws -> Void
         var monitorInstalledProvider: @MainActor () async -> Bool
         var readConfigModel: () -> String?
+        var providerStartFailure: @MainActor () -> String?
 
         static func live(agent: MalibuAgent?) -> Dependencies {
             Dependencies(
@@ -51,7 +52,8 @@ final class LaunchProviderController: ObservableObject {
                         timeout: MalibuOnboardingTimeouts.firstServingFrameSec
                     )
                 },
-                readConfigModel: { ProviderConfig.readModel() }
+                readConfigModel: { ProviderConfig.readModel() },
+                providerStartFailure: { agent?.providerStartFailure }
             )
         }
     }
@@ -129,7 +131,9 @@ final class LaunchProviderController: ObservableObject {
             try await dependencies.registerLoginItem()
             stage = .startingAgent
             guard await dependencies.monitorInstalledProvider() else {
-                throw launchdMonitorUnavailableError()
+                let message = dependencies.providerStartFailure()
+                    ?? ProviderLogDiagnostics.timeoutMessage(logHint: ProviderLogDiagnostics.logHint())
+                throw launchdMonitorUnavailableError(message: message)
             }
             let model = dependencies.readConfigModel() ?? "installed"
             stage = .live(model: model, tier: .provisional)
@@ -138,14 +142,11 @@ final class LaunchProviderController: ObservableObject {
         }
     }
 
-    private func launchdMonitorUnavailableError() -> NSError {
+    private func launchdMonitorUnavailableError(message: String) -> NSError {
         NSError(
             domain: "Malibu.LaunchProviderController",
             code: 3,
-            userInfo: [
-                NSLocalizedDescriptionKey:
-                    "Background provider did not become healthy in time. Check ~/Library/Logs/macprovider/ and try again."
-            ]
+            userInfo: [NSLocalizedDescriptionKey: message]
         )
     }
 

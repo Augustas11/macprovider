@@ -22,18 +22,19 @@ import Foundation
 final class MalibuAgent: ObservableObject {
     @Published private(set) var snapshot: AgentSnapshot = .empty
     @Published private(set) var logLines: [String] = []
+    @Published private(set) var providerStartFailure: String?
 
     private var child: CLIChildProcess?
     private var control: ControlSocketClient?
     private var metricsPoller: Task<Void, Never>?
     private var eventStreamTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
-    private var logTailReader: LogTailReader?
+    private var providerLogTail: ProviderLogTail?
+    private var providerLogTailCancellable: AnyCancellable?
     private var reconnect = ReconnectPolicy()
     private let earningsClient = EarningsClient()
     private let thermalMonitor = ThermalMonitor()
     private var cancellables: Set<AnyCancellable> = []
-    private var logTailCancellable: AnyCancellable?
     // AUDIT R2 CODE H3 fix: once shutdown begins, refuse any subsequent start()
     // — including a reconnect Task that already slept past its cancellation
     // check but hadn't yet re-entered the MainActor.
@@ -63,7 +64,14 @@ final class MalibuAgent: ObservableObject {
         await releaseSpawnedChildForLaunchdMonitor()
 
         snapshot.state = .starting
+        startProviderLogTail()
         if await monitorInstalledProviderIfPresent() {
+            return
+        }
+
+        if let failure = providerStartFailure {
+            snapshot.state = .error
+            snapshot.lastError = failure
             return
         }
 
@@ -84,8 +92,17 @@ final class MalibuAgent: ObservableObject {
         }
         guard !isShuttingDown else { return }
 
+        if let failure = diagnosedProviderFailure() {
+            providerStartFailure = failure
+            snapshot.state = .error
+            snapshot.lastError = failure
+            return
+        }
+
         snapshot.state = .reconnecting
-        snapshot.lastError = "Background provider is not responding. Open onboarding to reinstall or check ~/Library/Logs/macprovider/."
+        snapshot.lastError = ProviderLogDiagnostics.timeoutMessage(
+            logHint: ProviderLogDiagnostics.logHint()
+        )
         await scheduleReconnect()
     }
 
@@ -155,8 +172,7 @@ final class MalibuAgent: ObservableObject {
         await control?.close()
         metricsPoller?.cancel(); metricsPoller = nil
         eventStreamTask?.cancel(); eventStreamTask = nil
-        logTailCancellable?.cancel(); logTailCancellable = nil
-        logTailReader?.stop(); logTailReader = nil
+        stopProviderLogTail()
         logLines = []
         child = nil
         control = nil
@@ -176,18 +192,39 @@ final class MalibuAgent: ObservableObject {
               ProviderConfig.readProviderID() != nil else {
             return false
         }
+        providerStartFailure = nil
         await releaseSpawnedChildForLaunchdMonitor()
+        startProviderLogTail()
         let deadline = Date().addingTimeInterval(max(1, timeout))
-        guard await InstalledProviderMonitor.waitForHealthy(port: port, deadline: deadline) else {
-            return false
+        let pollInterval: TimeInterval = 2
+        while Date() < deadline {
+            if await InstalledProviderMonitor.isHealthy(port: port) {
+                monitorsLaunchdProvider = true
+                providerStartFailure = nil
+                await applyProviderSnapshot(port: port)
+                snapshot.state = .serving
+                snapshot.lastError = nil
+                startHealthPolling(port: port)
+                await refreshEarnings()
+                return true
+            }
+            if let failure = diagnosedProviderFailure() {
+                providerStartFailure = failure
+                snapshot.state = .error
+                snapshot.lastError = failure
+                return false
+            }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            let sleep = min(pollInterval, remaining)
+            try? await Task.sleep(nanoseconds: UInt64(sleep * 1_000_000_000))
         }
-        monitorsLaunchdProvider = true
-        await applyProviderSnapshot(port: port)
-        snapshot.state = .serving
-        snapshot.lastError = nil
-        startHealthPolling(port: port)
-        await refreshEarnings()
-        return true
+        let failure = diagnosedProviderFailure()
+            ?? ProviderLogDiagnostics.timeoutMessage(logHint: ProviderLogDiagnostics.logHint())
+        providerStartFailure = failure
+        snapshot.state = .error
+        snapshot.lastError = failure
+        return false
     }
 
     /// Stop a Malibu-spawned CLI child before attaching to launchd. Without
@@ -204,10 +241,6 @@ final class MalibuAgent: ObservableObject {
         metricsPoller = nil
         eventStreamTask?.cancel()
         eventStreamTask = nil
-        logTailCancellable?.cancel()
-        logTailCancellable = nil
-        logTailReader?.stop()
-        logTailReader = nil
         await control?.close()
         child = nil
         control = nil
@@ -302,8 +335,16 @@ final class MalibuAgent: ObservableObject {
                     await self.refreshEarnings()
                 } else if self.monitorsLaunchdProvider {
                     await MainActor.run {
-                        self.snapshot.state = .reconnecting
-                        self.snapshot.lastError = "Background provider is not responding on port \(port)."
+                        if let failure = self.diagnosedProviderFailure() {
+                            self.providerStartFailure = failure
+                            self.snapshot.state = .error
+                            self.snapshot.lastError = failure
+                        } else {
+                            self.snapshot.state = .reconnecting
+                            self.snapshot.lastError = ProviderLogDiagnostics.timeoutMessage(
+                                logHint: ProviderLogDiagnostics.logHint()
+                            )
+                        }
                     }
                 }
             }
@@ -498,16 +539,27 @@ final class MalibuAgent: ObservableObject {
         }
     }
 
-    private func startLogTail(fileURL: URL) {
-        logTailCancellable?.cancel()
-        logTailReader?.stop()
-        let reader = LogTailReader(fileURL: fileURL)
-        logTailCancellable = reader.$lines
+    private func startProviderLogTail(paths: ProviderPaths = .current) {
+        providerLogTailCancellable?.cancel()
+        providerLogTail?.stop()
+        let tail = ProviderLogTail()
+        providerLogTailCancellable = tail.$lines
             .sink { [weak self] lines in
                 self?.logLines = lines
             }
-        logTailReader = reader
-        reader.start()
+        providerLogTail = tail
+        tail.start(paths: paths)
+    }
+
+    private func stopProviderLogTail() {
+        providerLogTailCancellable?.cancel()
+        providerLogTailCancellable = nil
+        providerLogTail?.stop()
+        providerLogTail = nil
+    }
+
+    private func diagnosedProviderFailure() -> String? {
+        ProviderLogDiagnostics.diagnose(lines: logLines)?.userMessage
     }
 
     private func handleIdentitySignatureRequest(

@@ -533,6 +533,8 @@ final class ProviderConfigParserTests: XCTestCase {
             configFile: configRoot.appendingPathComponent("config.yaml"),
             controlSocket: appSupport.appendingPathComponent("agent.sock"),
             cliLogFile: root.appendingPathComponent("logs/malibu-cli.log"),
+            launchdStdoutLog: root.appendingPathComponent("logs/macprovider.out.log"),
+            launchdStderrLog: root.appendingPathComponent("logs/macprovider.err.log"),
             appSupport: appSupport,
             appMarkerFile: appSupport.appendingPathComponent(".installed-by-app"),
             onboardingStateFile: appSupport.appendingPathComponent("onboarding.json"),
