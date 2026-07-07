@@ -17,10 +17,11 @@ enum ProviderLogDiagnostics {
     private static let rules: [Rule] = [
         Rule(
             id: "stale_model_catalog",
-            needle: "model catalog provenance is stale",
+            needle: "model catalog provenance envelope is stale",
             userMessage:
-                "Model catalog is out of date for this Mac. Update Malibu to the latest release, "
-                + "or run: macprovider-cli autotune --recommend --apply"
+                "Model catalog was republished since autotune last wrote config. "
+                + "Serving continues while your model row is still admitted; "
+                + "run: macprovider-cli autotune --recommend --apply to refresh provenance."
         ),
         Rule(
             id: "catalog_admission",

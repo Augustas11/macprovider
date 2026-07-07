@@ -5,7 +5,7 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
     func testDiagnoseStaleCatalogProvenance() {
         let finding = ProviderLogDiagnostics.diagnose(lines: [
             "loading config",
-            "model catalog provenance is stale; rerun autotune --recommend --apply",
+            "model catalog provenance envelope is stale (stored",
         ])
 
         XCTAssertEqual(finding?.id, "stale_model_catalog")
@@ -15,7 +15,7 @@ final class ProviderLogDiagnosticsTests: XCTestCase {
     func testDiagnosePrefersMostRecentMatchingLine() {
         let finding = ProviderLogDiagnostics.diagnose(lines: [
             "model artifact hash mismatch for /tmp/old",
-            "model catalog provenance is stale; rerun autotune --recommend --apply",
+            "model catalog provenance envelope is stale (stored",
         ])
 
         XCTAssertEqual(finding?.id, "stale_model_catalog")

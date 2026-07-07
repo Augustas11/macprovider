@@ -365,10 +365,10 @@ struct ServeCommand: AsyncParsableCommand {
 
         let catalog = await staticInputs.loadCandidateCatalog()
         let actualCatalogHash = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
-        guard catalog.value.version == version, actualCatalogHash == storedCatalogHash else {
-            FileHandle.standardError.write(Data("model catalog provenance is stale; rerun autotune --recommend --apply\n".utf8))
-            throw ExitCode(2)
-        }
+        // Row admission against the *current* signed catalog is the security gate.
+        // The stored model_catalog_version/hash envelope records which autotune --apply
+        // revision wrote config.yaml; a coordinator catalog publish that only adds or
+        // edits unrelated rows must not crash-loop providers whose model row is unchanged.
         guard let row = catalog.value.rows[key],
               (requireRecommendable ? row.runtimeStatus == "recommendable" : ["candidate", "listed", "recommendable"].contains(row.runtimeStatus)),
               row.modelID == modelID,
@@ -378,6 +378,16 @@ struct ServeCommand: AsyncParsableCommand {
         else {
             FileHandle.standardError.write(Data("model artifact is not admitted by the signed candidate catalog\n".utf8))
             throw ExitCode(2)
+        }
+        if catalog.value.version != version || actualCatalogHash != storedCatalogHash {
+            let storedPrefix = String(storedCatalogHash.prefix(8))
+            let currentPrefix = String(actualCatalogHash.prefix(8))
+            FileHandle.standardError.write(Data(
+                ("model catalog provenance envelope is stale (stored \(version)/\(storedPrefix)…, "
+                    + "current \(catalog.value.version)/\(currentPrefix)…); "
+                    + "row still admitted — run macprovider-cli autotune --recommend --apply to refresh config\n")
+                .utf8
+            ))
         }
     }
 
