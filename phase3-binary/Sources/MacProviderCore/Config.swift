@@ -93,6 +93,12 @@ public struct AppConfig: Equatable, Sendable {
     // values are reserved (e.g. future MDM wrappers can set their own tag).
     public var managedBy: String?
 
+    // T3-01 token/chunk batching: number of content-token deltas to accumulate
+    // before emitting one SSE frame. 1 = current behaviour (one frame per token).
+    // Production experiment at 4 (upstream default). Triple-exposed: yaml key
+    // `stream_interval`, env `MACPROVIDER_STREAM_INTERVAL`, CLI `--stream-interval`.
+    public var streamInterval: Int
+
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
     public static func defaults(configPath: String = defaultConfigPath) -> AppConfig {
@@ -144,7 +150,8 @@ public struct AppConfig: Equatable, Sendable {
             idlePrewarmPrompt: "warm",
             idlePrewarmRunOnBattery: false,
             providerToken: nil,
-            managedBy: nil
+            managedBy: nil,
+            streamInterval: 1
         )
     }
 }
@@ -183,6 +190,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var idlePrewarmMaxTokens: Int?
     public var idlePrewarmPrompt: String?
     public var idlePrewarmRunOnBattery: Bool?
+    public var streamInterval: Int?
 
     public init(
         port: Int? = nil,
@@ -214,7 +222,8 @@ public struct CLIOverrides: Equatable, Sendable {
         idlePrewarmTickSeconds: Double? = nil,
         idlePrewarmMaxTokens: Int? = nil,
         idlePrewarmPrompt: String? = nil,
-        idlePrewarmRunOnBattery: Bool? = nil
+        idlePrewarmRunOnBattery: Bool? = nil,
+        streamInterval: Int? = nil
     ) {
         self.port = port
         self.model = model
@@ -246,6 +255,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.idlePrewarmMaxTokens = idlePrewarmMaxTokens
         self.idlePrewarmPrompt = idlePrewarmPrompt
         self.idlePrewarmRunOnBattery = idlePrewarmRunOnBattery
+        self.streamInterval = streamInterval
     }
 }
 
@@ -378,6 +388,7 @@ public enum ConfigLoader {
         }
         try assign(&config.providerToken, from: dict, key: "provider_token", expected: "string")
         try assign(&config.managedBy, from: dict, key: "managed_by", expected: "string")
+        try assign(&config.streamInterval, from: dict, key: "stream_interval", expected: "integer >= 1")
         return config
     }
 
@@ -426,6 +437,7 @@ public enum ConfigLoader {
         try assign(&config.idlePrewarmRunOnBattery, from: environment, env: "MACPROVIDER_IDLE_PREWARM_ON_BATTERY", expected: "boolean")
         try assign(&config.providerToken, from: environment, env: "MACPROVIDER_PROVIDER_TOKEN", expected: "string")
         try assign(&config.managedBy, from: environment, env: "MACPROVIDER_MANAGED_BY", expected: "string")
+        try assign(&config.streamInterval, from: environment, env: "MACPROVIDER_STREAM_INTERVAL", expected: "integer >= 1")
         return config
     }
 
@@ -524,6 +536,9 @@ public enum ConfigLoader {
         }
         if let idlePrewarmRunOnBattery = cli.idlePrewarmRunOnBattery {
             config.idlePrewarmRunOnBattery = idlePrewarmRunOnBattery
+        }
+        if let streamInterval = cli.streamInterval {
+            config.streamInterval = streamInterval
         }
         return config
     }

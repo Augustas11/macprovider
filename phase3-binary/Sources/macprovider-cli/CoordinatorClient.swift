@@ -240,6 +240,7 @@ actor CoordinatorClient {
     private var swapHeartbeatTask: Task<Void, Never>?
     private var sleepAssertion: ProviderSleepAssertion?
     private let sendOverride: SendOverride?
+    private let streamInterval: Int
 
     // SPEC-026 §7: optional bridge for delegating identity signature to
     // Malibu.app via the control socket. `nil` when the CLI runs standalone
@@ -327,6 +328,7 @@ actor CoordinatorClient {
         self.identityBridge = identityBridge
         self.identitySignatureTimeoutSeconds = identitySignatureTimeoutSeconds
         self.watchdogExitHook = watchdogExitHook
+        self.streamInterval = max(1, config.streamInterval)
     }
 
     func start() async {
@@ -824,6 +826,7 @@ actor CoordinatorClient {
             tier2Session: session,
             receiptBuilder: receiptBuilder,
             receiptProviderID: providerID,
+            streamInterval: streamInterval,
             demoteAutoupdateTrust: { [weak self] reason in
                 await self?.markAutoupdateTrustDemoted(reason: reason)
             },
