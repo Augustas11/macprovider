@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Publish Malibu-{tag}.dmg to the download.malibu.tech bucket and refresh latest.dmg.
+# Publish Malibu-{tag}.dmg to download.malibu.tech (Pearl VPS nginx docroot).
 #
-# Requires operator credentials for the object store backing download.malibu.tech.
-# Example (Cloudflare R2 via awscli-compatible endpoint):
+# Downloads release assets from GitHub, copies to Pearl via SSH, and refreshes
+# latest.dmg + appcast.xml for Sparkle.
 #
-#   export MALIBU_DOWNLOAD_ENDPOINT="https://<account>.r2.cloudflarestorage.com"
-#   export MALIBU_DOWNLOAD_BUCKET="malibu-download"
-#   export AWS_ACCESS_KEY_ID=...
-#   export AWS_SECRET_ACCESS_KEY=...
-#   bash scripts/publish-malibu-latest-dmg.sh v1.8.13
+# Usage:
+#   bash scripts/publish-malibu-latest-dmg.sh v1.8.19
 #
-# Without object-store credentials this script prints the GitHub Release URL to
-# wire manually in Cloudflare (redirect latest.dmg → versioned asset).
+# Environment:
+#   MALIBU_DOWNLOAD_VPS_HOST  default 159.223.165.194
+#   MALIBU_DOWNLOAD_SSH_KEY   default ~/.ssh/pearl_operator_ed25519
+#   MALIBU_DOWNLOAD_VPS_USER  default root
+#   MALIBU_DOWNLOAD_WEBROOT   default /var/www/malibu-download
+#   VERIFY_MALIBU_DOWNLOAD=1   run verify-malibu-download.sh after upload
 
 set -euo pipefail
 
@@ -27,6 +28,11 @@ repo="${GITHUB_REPOSITORY:-Augustas11/macprovider}"
 dmg_name="Malibu-${tag}.dmg"
 versioned_key="Malibu-${tag}.dmg"
 latest_key="latest.dmg"
+
+VPS_HOST="${MALIBU_DOWNLOAD_VPS_HOST:-159.223.165.194}"
+SSH_KEY="${MALIBU_DOWNLOAD_SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
+VPS_USER="${MALIBU_DOWNLOAD_VPS_USER:-root}"
+WEBROOT="${MALIBU_DOWNLOAD_WEBROOT:-/var/www/malibu-download}"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/malibu-publish.XXXXXX")"
 cleanup() { rm -rf "$work"; }
@@ -45,38 +51,51 @@ asset="$work/$dmg_name"
 sha256="$(shasum -a 256 "$asset" | awk '{print $1}')"
 printf '%s  %s\n' "$sha256" "$dmg_name" > "$work/${dmg_name}.sha256"
 
-if [[ -z "${MALIBU_DOWNLOAD_BUCKET:-}" ]]; then
+if [[ ! -f "$SSH_KEY" ]]; then
   cat <<EOF
-[publish-malibu-latest-dmg] No MALIBU_DOWNLOAD_BUCKET set — manual step required.
+[publish-malibu-latest-dmg] No SSH key at $SSH_KEY — manual step required.
 
-1. Upload $dmg_name to download.malibu.tech as:
-     $versioned_key
+1. Run: bash scripts/setup-malibu-download-pearl.sh
+2. Upload $dmg_name to ${WEBROOT} on Pearl as:
+     ${versioned_key}
+     ${latest_key}
+     appcast.xml
      SHA-256: $sha256
-2. Point https://download.malibu.tech/latest.dmg at that object (redirect or copy).
-3. GitHub Release asset (fallback):
+3. name.com DNS: download.malibu.tech A -> ${VPS_HOST}
+4. GitHub Release fallback:
      https://github.com/$repo/releases/download/$tag/$dmg_name
 EOF
   exit 0
 fi
 
-command -v aws >/dev/null 2>&1 || die "aws CLI required when MALIBU_DOWNLOAD_BUCKET is set"
+SSH="ssh -i $SSH_KEY -o ConnectTimeout=15 -p 22 $VPS_USER@$VPS_HOST"
+SCP="scp -i $SSH_KEY -P 22"
 
-aws_args=()
-if [[ -n "${MALIBU_DOWNLOAD_ENDPOINT:-}" ]]; then
-  aws_args+=(--endpoint-url "$MALIBU_DOWNLOAD_ENDPOINT")
-fi
-
-aws s3 cp "$asset" "s3://${MALIBU_DOWNLOAD_BUCKET}/${versioned_key}" "${aws_args[@]}"
-aws s3 cp "$asset" "s3://${MALIBU_DOWNLOAD_BUCKET}/${latest_key}" "${aws_args[@]}"
-aws s3 cp "$work/${dmg_name}.sha256" "s3://${MALIBU_DOWNLOAD_BUCKET}/${dmg_name}.sha256" "${aws_args[@]}"
-
+$SSH "install -d -o www-data -g www-data -m 0755 $WEBROOT"
+$SCP "$asset" "$VPS_USER@$VPS_HOST:/tmp/malibu-${versioned_key}" >/dev/null
+$SCP "$work/${dmg_name}.sha256" "$VPS_USER@$VPS_HOST:/tmp/malibu-${dmg_name}.sha256" >/dev/null
 appcast="$work/appcast.xml"
 if [[ -f "$appcast" ]]; then
-  aws s3 cp "$appcast" "s3://${MALIBU_DOWNLOAD_BUCKET}/appcast.xml" "${aws_args[@]}"
-  printf '[publish-malibu-latest-dmg] ok: appcast.xml published\n'
+  $SCP "$appcast" "$VPS_USER@$VPS_HOST:/tmp/malibu-appcast.xml" >/dev/null
 else
-  printf '[publish-malibu-latest-dmg] WARN: appcast.xml missing from release %s — Sparkle feed unchanged\n' "$tag" >&2
+  printf '[publish-malibu-latest-dmg] WARN: appcast.xml missing from release %s\n' "$tag" >&2
 fi
 
-printf '[publish-malibu-latest-dmg] ok: s3://%s/%s and latest.dmg (sha256=%s)\n' \
-  "$MALIBU_DOWNLOAD_BUCKET" "$versioned_key" "$sha256"
+$SSH "set -e
+  install -o www-data -g www-data -m 0644 /tmp/malibu-${versioned_key} ${WEBROOT}/${versioned_key}
+  install -o www-data -g www-data -m 0644 /tmp/malibu-${versioned_key} ${WEBROOT}/${latest_key}
+  install -o www-data -g www-data -m 0644 /tmp/malibu-${dmg_name}.sha256 ${WEBROOT}/${dmg_name}.sha256
+  rm -f /tmp/malibu-${versioned_key} /tmp/malibu-${dmg_name}.sha256
+  if [ -f /tmp/malibu-appcast.xml ]; then
+    install -o www-data -g www-data -m 0644 /tmp/malibu-appcast.xml ${WEBROOT}/appcast.xml
+    rm -f /tmp/malibu-appcast.xml
+  fi
+"
+
+printf '[publish-malibu-latest-dmg] ok: %s/%s + latest.dmg on Pearl (sha256=%s)\n' \
+  "$WEBROOT" "$versioned_key" "$sha256"
+
+if [[ "${VERIFY_MALIBU_DOWNLOAD:-0}" == "1" ]]; then
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  bash "$script_dir/verify-malibu-download.sh"
+fi
