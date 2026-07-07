@@ -40,6 +40,11 @@ print(resp.choices[0].message.content)
 
 Any MLX chat model in the pool works. Available models: `client.models.list()` or `curl https://api.streamvc.live/v1/models`.
 
+Text-only structured content is accepted for `system` and `user` messages too.
+Frameworks that emit `content=[{"type":"text","text":"Hello"}]` for those roles
+are normalized to plain text before provider dispatch. Multimodal parts such as
+`image_url` are not supported in v1 and return `unsupported_content_shape`.
+
 ## Streaming
 
 ```python

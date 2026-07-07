@@ -917,6 +917,10 @@ Known v1 divergences include:
 - No tool execution.
 - Tool fields may be syntactically accepted but are not executed.
 - Strict schema-enforced structured outputs are not guaranteed.
+- Multimodal `messages[].content` parts are not supported in v1. For `system`
+  and `user` messages, text-only structured content arrays are accepted and
+  normalized to a single string; non-text parts such as `image_url` return
+  `unsupported_content_shape`.
 - Provider availability can yield 503 immediately.
 - Model lineup is live-pool dependent.
 - Usage accounting may be gateway-estimated when provider token fields are absent.
@@ -1201,6 +1205,13 @@ Supported request fields:
 `user` is accepted as opaque diagnostics, stored in usage events, and MUST NOT be exposed in buyer-visible responses.
 
 `logprobs` is accepted syntactically and forwarded to the provider as part of the request body. SPEC-001 v1.2.2 § 6.4 specifies unknown-field tolerance, so the provider MAY ignore unknown OpenAI-compatible fields including `logprobs`. Behavior is model-dependent; the gateway MUST NOT enforce `logprobs`-specific semantics.
+
+For `system` and `user` messages, `content` MAY be a non-empty JSON string
+or a text-only structured content array such as
+`[{"type":"text","text":"hello"}]`. The buyer boundary MUST normalize
+text-only arrays into a single string before provider dispatch. Multimodal or
+otherwise non-text content parts MUST be rejected with HTTP 400,
+`type: "invalid_request_error"`, and `code: "unsupported_content_shape"`.
 
 Gateway request caps:
 
