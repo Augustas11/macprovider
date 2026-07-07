@@ -100,8 +100,24 @@ private struct OnboardingRootView: View {
                 }
             }
         case .startingAgent:
-            stageRow(title: "Starting", detail: "Waiting for the background provider to become healthy.") {
-                ProgressView().controlSize(.small)
+            stageRow(
+                title: "Starting",
+                detail: agent.providerStartFailure
+                    ?? agent.snapshot.lastError
+                    ?? "Waiting for the background provider to become healthy."
+            ) {
+                VStack(alignment: .leading, spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    if !agent.logLines.isEmpty {
+                        ScrollView {
+                            Text(agent.logLines.suffix(20).joined(separator: "\n"))
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .frame(maxHeight: 160)
+                    }
+                }
             }
         case let .live(model, tier):
             VStack(alignment: .leading, spacing: 16) {

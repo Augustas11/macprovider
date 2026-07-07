@@ -149,6 +149,8 @@ enum AgentSnapshotPresenter {
             return s.currentModelID
         case .reconnecting:
             return s.lastError ?? "Checking background provider…"
+        case .starting:
+            return s.lastError ?? "Waiting for the background provider to respond…"
         case .error:
             return s.lastError
         default:

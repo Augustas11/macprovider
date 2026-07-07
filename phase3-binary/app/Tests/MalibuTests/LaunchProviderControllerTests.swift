@@ -103,6 +103,25 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
+    func testLaunchMonitorFailureSurfacesProviderStartFailure() async {
+        let harness = Harness()
+        harness.monitorHealthy = false
+        harness.providerStartFailureMessage =
+            "Model catalog is out of date for this Mac. Update Malibu to the latest release, "
+            + "or run: macprovider-cli autotune --recommend --apply"
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.launch()
+
+        if case let .failed(stage, retryable, message) = controller.stage {
+            XCTAssertEqual(stage, "cliInstall")
+            XCTAssertTrue(retryable)
+            XCTAssertEqual(message, harness.providerStartFailureMessage)
+        } else {
+            XCTFail("expected failed cliInstall stage with provider start failure")
+        }
+    }
+
     private final class Harness {
         var localInstallSucceeded = false
         var localInstallSucceededAfterInstall = false
@@ -111,6 +130,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         var monitorRuns = 0
         var loginItemRegistrations = 0
         var monitorHealthy = true
+        var providerStartFailureMessage: String?
         var cliInstallError: Error?
         var cliImportError: Error?
         var configModel = "mlx-community/Qwen2.5-7B-Instruct-4bit"
@@ -138,7 +158,8 @@ final class LaunchProviderControllerTests: XCTestCase {
                     self.monitorRuns += 1
                     return self.monitorHealthy
                 },
-                readConfigModel: { self.configModel }
+                readConfigModel: { self.configModel },
+                providerStartFailure: { self.providerStartFailureMessage }
             )
         }
     }
