@@ -70,6 +70,24 @@ struct DecodeBenchCommand: AsyncParsableCommand {
     @Flag(help: "Skip writing the JSON file to disk; print to stdout only.")
     var stdoutOnly: Bool = false
 
+    @Flag(
+        name: .customLong("report-sparsity"),
+        help: "Append implied_active_params_B and decode_regime to the JSON output using DecodeBandwidthModel (T2-02). Requires --total-params-b and --bandwidth-tier."
+    )
+    var reportSparsity: Bool = false
+
+    @Option(
+        name: .customLong("total-params-b"),
+        help: "Total model parameter count in billions (e.g. 20.0 for gpt-oss-20b). Required when --report-sparsity is set."
+    )
+    var totalParamsB: Double?
+
+    @Option(
+        name: .customLong("bandwidth-gbps"),
+        help: "Host memory bandwidth in GB/s for sparsity diagnostics (e.g. 120 for M4, 273 for M4 Pro). Required when --report-sparsity is set."
+    )
+    var bandwidthGBps: Double?
+
     func run() async throws {
         guard let modelID = model ?? ProcessInfo.processInfo.environment["MACPROVIDER_MODEL"],
               !modelID.isEmpty else {
@@ -144,6 +162,13 @@ struct DecodeBenchCommand: AsyncParsableCommand {
         tsFormatter.formatOptions = [.withInternetDateTime, .withTimeZone]
         let ts = tsFormatter.string(from: Date()).replacingOccurrences(of: ":", with: "-")
 
+        let sparsityReport = decodeBenchSparsityReport(
+            enabled: reportSparsity,
+            totalParamsB: totalParamsB,
+            bandwidthGBps: bandwidthGBps,
+            p50DecodeTPS: decodeBenchPercentileTPS(samples.map(\.decodeTPS), p: 0.5)
+        )
+
         let report = BenchReport(
             schemaVersion: 1,
             label: label,
@@ -157,7 +182,8 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             samples: samples,
             bf16WeightsEnvFlag: bf16Enabled,
             compiledDecodeEnvFlag: compiledEnabled,
-            timestamp: ISO8601DateFormatter().string(from: Date())
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            sparsity: sparsityReport
         )
 
         let encoder = JSONEncoder()
@@ -304,6 +330,55 @@ func decodeBenchSanitizeFilenameComponent(_ input: String) -> String {
     return capped.isEmpty ? "unlabeled" : capped
 }
 
+/// Build a `SparsityReport` using `DecodeBandwidthModel` if all inputs are present.
+/// Returns `nil` (and logs a warning) when the flag is set but required args are missing.
+func decodeBenchSparsityReport(
+    enabled: Bool,
+    totalParamsB: Double?,
+    bandwidthGBps bw: Double?,
+    p50DecodeTPS: Double
+) -> SparsityReport? {
+    guard enabled else { return nil }
+
+    guard let totalB = totalParamsB, totalB > 0 else {
+        FileHandle.standardError.write(Data(
+            "decode-bench: --report-sparsity requires --total-params-b > 0; skipping sparsity report\n".utf8
+        ))
+        return nil
+    }
+    guard let bandwidth = bw, bandwidth > 0 else {
+        FileHandle.standardError.write(Data(
+            "decode-bench: --report-sparsity requires --bandwidth-gbps > 0 (e.g. 120 for M4, 273 for M4 Pro); skipping sparsity report\n".utf8
+        ))
+        return nil
+    }
+    guard p50DecodeTPS > 0 else { return nil }
+
+    let impliedReadGB = DecodeBandwidthModel.impliedReadGBPerToken(
+        decodeTokensPerSecond: p50DecodeTPS,
+        bandwidthGBps: bandwidth
+    )
+    let impliedActiveB = DecodeBandwidthModel.impliedActiveParams(
+        decodeTokensPerSecond: p50DecodeTPS,
+        bandwidthGBps: bandwidth
+    ) / 1e9
+    let totalWeightGB = totalB * DecodeBandwidthModel.fourBitBytesPerParam
+    let regime = DecodeBandwidthModel.classifyRegime(
+        impliedReadGB: impliedReadGB,
+        totalWeightGB: totalWeightGB
+    )
+
+    return SparsityReport(
+        bandwidthGBps: bandwidth,
+        totalParamsB: totalB,
+        p50DecodeTPS: p50DecodeTPS,
+        impliedReadGBPerToken: impliedReadGB,
+        impliedActiveParamsB: impliedActiveB,
+        activeParamsFractionPct: (impliedActiveB / totalB) * 100.0,
+        decodeRegime: regime.rawValue
+    )
+}
+
 // MARK: - Wire schema
 
 struct BenchSampleResult: Codable, Sendable {
@@ -331,4 +406,19 @@ struct BenchReport: Codable, Sendable {
     let bf16WeightsEnvFlag: Bool
     let compiledDecodeEnvFlag: Bool
     let timestamp: String
+    /// T2-02: optional sparsity diagnostics from DecodeBandwidthModel.
+    /// Present when `--report-sparsity` is set; null otherwise.
+    let sparsity: SparsityReport?
+}
+
+/// Sparsity diagnostics emitted when `decode-bench --report-sparsity` is set.
+/// All fields derive from `DecodeBandwidthModel` (T2-02 runbook artifact).
+struct SparsityReport: Codable, Sendable {
+    let bandwidthGBps: Double
+    let totalParamsB: Double
+    let p50DecodeTPS: Double
+    let impliedReadGBPerToken: Double
+    let impliedActiveParamsB: Double
+    let activeParamsFractionPct: Double
+    let decodeRegime: String
 }
