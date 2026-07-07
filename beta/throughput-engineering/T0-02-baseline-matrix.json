@@ -94,5 +94,16 @@
     "proceed_to_t1": true,
     "proceed_condition": "T1-01 must include Gemma4 re-measure as T1-02 precondition"
   },
-  "metallib_fix_note": "First bench attempt used production binary's mlx-swift_Cmlx.bundle (compiled for a different MLX version). Correct metallib was built from mlx-swift 0.31.6 checkout using scripts/build-mlx-metallib.sh. Without this fix, Qwen showed 12.4 TPS (mismatched Metal shaders). With version-matched metallib: 27.1 TPS. Metallib mismatch produces wrong (not absent) shaders — Metal does not error out, just runs suboptimally."
+  "metallib_fix_note": "First bench attempt used production binary's mlx-swift_Cmlx.bundle (compiled for a different MLX version). Correct metallib was built from mlx-swift 0.31.6 checkout using scripts/build-mlx-metallib.sh. Without this fix, Qwen showed 12.4 TPS (mismatched Metal shaders). With version-matched metallib: 27.1 TPS. Metallib mismatch produces wrong (not absent) shaders — Metal does not error out, just runs suboptimally.",
+  "refresh_2026_07_07_pm": {
+    "note": "Post-T3 merge sanity rerun; decode TPS ~17% below morning session — likely thermal throttling after sustained afternoon bench load.",
+    "snapshots": {
+      "qwen2.5_7b": "audits/2026-07-07/bench-snapshots/t0-02-refresh-qwen2.5-7b.json",
+      "gpt_oss_20b": "audits/2026-07-07/bench-snapshots/t0-02-refresh-gpt-oss-20b.json"
+    },
+    "decode_tps_p50": {
+      "qwen2.5_7b": 22.4,
+      "gpt_oss_20b": 22.9
+    }
+  }
 }

@@ -1,8 +1,8 @@
 # PLAN — MacProvider Throughput Engineering Runbook
 
-**Version:** 0.1.2  
+**Version:** 0.1.9  
 **Date:** 2026-07-07  
-**Status:** ACTIVE — **T0 complete (TG0 PROCEED)**; ready for T1  
+**Status:** ACTIVE — **T0–T3 merged** (TG0/TG3 closed); upstream watch (#364, #406) or operator T4-01  
 **Source analysis:** Throughput engineering exploration (2026-07-07 Cursor session)  
 **Pinned session role:** Single plan-of-record for MLX/engine/egress throughput work. Executor agents update task status here; the pinned planning session verifies gates and revises sequencing.
 
@@ -527,6 +527,20 @@ Re-open only if T0-03 **RED** or TG4 concurrency mandate.
 
 ---
 
+# Upstream watch (automated)
+
+Pending throughput blockers are tracked in `beta/throughput-engineering/UPSTREAM_WATCH.json` and polled by `scripts/check-upstream-throughput-blockers.sh`.
+
+| Upstream | Kind | Runbook | Cursor Automation |
+|----------|------|---------|-------------------|
+| [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) | Issue | T2-01 / TG2 | Weekday blocker watch |
+| [mlx-swift-lm#364](https://github.com/ml-explore/mlx-swift-lm/pull/364) | PR | T1-02 / TG1 | Weekday blocker watch |
+| ml-explore release tags | Release | T1-01 pin bump | Weekly discovery watch |
+
+When the checker reports a **material change** (issue/PR closed or merged, new release above pin, KVCache compile-fix heuristic), the automation opens a macprovider tracking issue with unblock steps.
+
+---
+
 # Executor prompt template
 
 ```
@@ -552,10 +566,10 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 | T1-01 | T1 | **`YELLOW`** | TG1 | `T1-01-mlx-pin-bump.md` | At ml-explore latest; Gemma → #364 |
 | T1-02 | T1 | `BLOCKED` | TG1 | — | Waits mlx-swift-lm#364 release |
 | T1-03 | T1 | **`GREEN`** | TG1 | `T1-03-metallib-rebuild.md` | Docs on `fix/t1-03-metallib-verify` |
-| T2-01 | T2 | **`YELLOW`** | TG2 | `T2-01-compiled-decode-wire-in.md` | Merged #471 — flag OFF; KV graph blocked |
+| T2-01 | T2 | **`YELLOW`** | TG2 | `T2-01-compiled-decode-wire-in.md` | Merged #471 — flag OFF; blocked on [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) |
 | T2-02 | T2 | **`GREEN`** | — | `T2-02-decode-bandwidth-model.md` | Merged #470 |
 | T3-01 | T3 | **`WAIVE`** | TG3 | `T3-01-stream-interval.md` | Merged #473 — default 1; egress not bottleneck |
-| T3-02 | T3 | **`GREEN` (wire-in)** | TG3 | `T3-02-adaptive-prefill-spike.md` | Spike GO; env/CLI/decode-bench wired; measure before prod default |
+| T3-02 | T3 | **`GREEN` (wire-in) / WAIVE default** | TG3 | `T3-02-adaptive-prefill-spike.md`, `T3-02-prefill-step-sweep.json` | Wire-in #474; 4k sweep flat — keep default 512 |
 | T3-03 | T3 | **`GREEN`** | TG3 | `T3-03-kv-quant-scheme.md` | Merged #472 — Gemma/gpt-oss → kvBits 8 |
 | T4-01 | T4 | `PENDING` | TG4 | — | Operator priority |
 | T4-02 | T4 | `BLOCKED` | — | — | Needs T4-01 GO |
@@ -566,7 +580,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 |------|--------|------------|
 | TG0 | **`CLOSED`** | 2026-07-07 (#467+#468) |
 | TG1 | **`OPEN`** | T1-01 YELLOW; #364 blocker |
-| TG2 | **`OPEN`** | T2-01 compile blocked on upstream KV offset |
+| TG2 | **`OPEN`** | T2-01 blocked on [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) |
 | TG3 | **`CLOSED`** | 2026-07-07 (#472+#473 + T3-02 wire-in) |
 | TG4 | `OPEN` | — |
 
@@ -579,4 +593,5 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 | 0.1.0 | 2026-07-07 | Initial runbook from throughput engineering exploration |
 | 0.1.1 | 2026-07-07 | T0-01 GREEN (decode-bench harness); T0-03 GREEN structural (egress trace); T0-02 spawned |
 | 0.1.2 | 2026-07-07 | T0 complete — TG0 PROCEED; T0_SUMMARY + DEFERRED; T1-01 READY |
-| 0.1.9 | 2026-07-07 | T3 complete — #472+#473 merged; T3-02 prefill_step_size wire-in |
+| 0.1.3–0.1.8 | 2026-07-07 | T0–T2 merges (#467–#471); see git history |
+| 0.1.9 | 2026-07-07 | T3 complete (#472–#474); TG3 closed; T2-01 tracks mlx-swift-lm#406; T3-02 prefill sweep measured |

@@ -331,7 +331,19 @@ machine.
 
 ---
 
-## 9. Files examined
+## 10. Phase A measurement (2026-07-07)
+
+**Artifact:** `T3-02-prefill-step-sweep.json` + raw JSON under `audits/2026-07-07/bench-snapshots/`
+
+**Result: WAIVE for production default change.** On M5 32GB, Qwen2.5-7B-4bit,
+4126-token prefill (`--prefill-tokens 4096`), TTFT p50 was flat across step sizes
+512/1024/2048/4096 (~9.3–9.5s; best 1024 at −1% vs 512). Does not meet the ≥15%
+bar. **Keep default `prefill_step_size=512`.** Env/CLI override remains for
+per-model experimentation; Phase C static tier table is **DEFERRED**.
+
+---
+
+## 11. Files examined
 
 | File | What was checked |
 |------|-----------------|
