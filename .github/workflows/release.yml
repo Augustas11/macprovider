@@ -485,6 +485,24 @@ jobs:
             echo "  Malibu.app.pkg: phase3-binary/app/dist/Malibu-${tag}.pkg"
           fi
 
+      - name: Generate Sparkle appcast for Malibu.app
+        shell: bash
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          dmg="phase3-binary/app/dist/Malibu-${tag}.dmg"
+          if [ ! -f "$dmg" ]; then
+            echo "No Malibu dmg at $dmg; skipping appcast generation."
+            exit 0
+          fi
+          if [ -z "${SPARKLE_EDDSA_PRIVATE_KEY:-}" ]; then
+            echo "::warning::SPARKLE_EDDSA_PRIVATE_KEY not set; skipping Sparkle appcast generation."
+            exit 0
+          fi
+          bash scripts/generate-malibu-appcast.sh "$tag"
+
       - name: Clean signing material
         if: always()
         shell: bash
@@ -619,10 +637,12 @@ jobs:
           pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
           app_src="phase3-binary/app/dist/Malibu-${tag}.pkg"
           app_dmg_src="phase3-binary/app/dist/Malibu-${tag}.dmg"
+          appcast_src="phase3-binary/app/dist/appcast.xml"
           tar_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
           pkg_asset="macprovider-cli-${tag}-darwin-arm64.pkg"
           app_asset="Malibu-${tag}.pkg"
           app_dmg_asset="Malibu-${tag}.dmg"
+          appcast_asset="appcast.xml"
           test -f "$src"
           if [ -z "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" ]; then
             echo "MACPROVIDER_RELEASE_SIGNING_KEY_PEM secret is required" >&2
@@ -642,6 +662,10 @@ jobs:
           if [ -f "$app_dmg_src" ]; then
             cp "$app_dmg_src" "$app_dmg_asset"
             release_assets+=("$app_dmg_asset")
+          fi
+          if [ -f "$appcast_src" ]; then
+            cp "$appcast_src" "$appcast_asset"
+            release_assets+=("$appcast_asset")
           fi
           if [ -f "$app_src" ]; then
             cp "$app_src" "$app_asset"
@@ -682,7 +706,8 @@ jobs:
           notarized, and stapled \`Malibu-${tag}.dmg\`. Open the disk image, drag
           Malibu.app to Applications, and launch. First run drives install.sh
           onboarding with no terminal setup; Malibu monitors the launchd provider.
-          Publish \`latest.dmg\` with \`scripts/publish-malibu-latest-dmg.sh ${tag}\`.
+          Publish \`latest.dmg\` and \`appcast.xml\` with \`scripts/publish-malibu-latest-dmg.sh ${tag}\`.
+          Malibu checks \`https://download.malibu.tech/appcast.xml\` for in-app updates via Sparkle.
           EOF
           elif [ -f "phase3-binary/app/dist/Malibu-${tag}.pkg" ]; then
             cat >> release-notes.md <<EOF

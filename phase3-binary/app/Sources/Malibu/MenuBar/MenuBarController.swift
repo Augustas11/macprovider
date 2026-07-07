@@ -8,12 +8,14 @@ final class MenuBarController {
         case openOnboarding
         case pause
         case resume
+        case checkForUpdates
         case updateCLI
         case quitAndUninstall
     }
 
     private let statusItem: NSStatusItem
     private let agent: MalibuAgent
+    private let sparkleUpdater: SparkleUpdaterController
     private let onAction: (Action) -> Void
     private var dismissalStore: UnclaimedBadgeDismissalStore
     private var cancellables: Set<AnyCancellable> = []
@@ -22,16 +24,19 @@ final class MenuBarController {
 
     init(
         agent: MalibuAgent,
+        sparkleUpdater: SparkleUpdaterController,
         dismissalStore: UnclaimedBadgeDismissalStore = UnclaimedBadgeDismissalStore(),
         onAction: @escaping (Action) -> Void
     ) {
         self.agent = agent
+        self.sparkleUpdater = sparkleUpdater
         self.dismissalStore = dismissalStore
         self.dismissedUnclaimedThreshold = dismissalStore.dismissedThreshold
         self.onAction = onAction
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         configureButton()
         subscribeToState()
+        subscribeToSparkle()
     }
 
     private func configureButton() {
@@ -85,10 +90,9 @@ final class MenuBarController {
         cliVersionItem.isHidden = true
         menu.addItem(cliVersionItem)
 
-        let updateCLIItem = action("Update CLI…", key: "") { self.onAction(.updateCLI) }
-        updateCLIItem.identifier = .updateCLIAction
-        updateCLIItem.isHidden = true
-        menu.addItem(updateCLIItem)
+        let updateItem = action("Check for Updates…", key: "") { self.onAction(.checkForUpdates) }
+        updateItem.identifier = .updateAction
+        menu.addItem(updateItem)
 
         let backlogItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         backlogItem.identifier = .backlogRow
@@ -123,6 +127,16 @@ final class MenuBarController {
         (sender.representedObject as? () -> Void)?()
     }
 
+    private func subscribeToSparkle() {
+        sparkleUpdater.$updateAvailable
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.render(self.latestSnapshot)
+            }
+            .store(in: &cancellables)
+    }
+
     private func subscribeToState() {
         agent.$snapshot
             .receive(on: RunLoop.main)
@@ -137,7 +151,7 @@ final class MenuBarController {
         // snapshot data type. This lets locale/currency work touch one place.
         latestSnapshot = snapshot
         let badge = AgentSnapshotPresenter.unclaimedBadge(snapshot, dismissedThreshold: dismissedUnclaimedThreshold)
-        let updateBadge = AgentSnapshotPresenter.updateBadge(snapshot)
+        let updateBadge = sparkleUpdater.updateAvailable ? "↑" : nil
         let queueDot = (snapshot.queueDepth ?? 0) > 0 ? "•" : nil
         if let button = statusItem.button {
             button.title = [AgentSnapshotPresenter.short(snapshot), badge, updateBadge, queueDot].compactMap { $0 }.joined(separator: " ")
@@ -160,13 +174,13 @@ final class MenuBarController {
         } else {
             menu.item(withIdentifier: .cliVersionRow)?.isHidden = true
         }
-        if let updateItem = menu.item(withIdentifier: .updateCLIAction) {
-            let showUpdate = AgentSnapshotPresenter.updateAvailable(snapshot) && !snapshot.cliUpdateInProgress
-            updateItem.isHidden = !showUpdate
-            if let target = AgentSnapshotPresenter.updateTargetVersion(snapshot) {
-                updateItem.title = "Update CLI to v\(target)…"
+        if let updateItem = menu.item(withIdentifier: .updateAction) {
+            updateItem.isHidden = false
+            updateItem.isEnabled = sparkleUpdater.canCheckForUpdates
+            if sparkleUpdater.updateAvailable {
+                updateItem.title = "Check for Updates… (available)"
             } else {
-                updateItem.title = "Update CLI…"
+                updateItem.title = "Check for Updates…"
             }
         }
         if let backlog = AgentSnapshotPresenter.backlogLine(snapshot),
@@ -206,7 +220,7 @@ private extension NSUserInterfaceItemIdentifier {
     static let statusRow = NSUserInterfaceItemIdentifier("malibu.menubar.status")
     static let earningsRow = NSUserInterfaceItemIdentifier("malibu.menubar.earnings")
     static let cliVersionRow = NSUserInterfaceItemIdentifier("malibu.menubar.cliVersion")
-    static let updateCLIAction = NSUserInterfaceItemIdentifier("malibu.menubar.updateCLI")
+    static let updateAction = NSUserInterfaceItemIdentifier("malibu.menubar.update")
     static let backlogRow = NSUserInterfaceItemIdentifier("malibu.menubar.backlog")
     static let dismissBacklogBadge = NSUserInterfaceItemIdentifier("malibu.menubar.dismissBacklogBadge")
 }

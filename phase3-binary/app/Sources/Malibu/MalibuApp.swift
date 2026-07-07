@@ -13,6 +13,7 @@ struct MalibuApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let agent = MalibuAgent()
+    private lazy var sparkleUpdater = SparkleUpdaterController { [unowned self] in self.agent }
     private var menuBar: MenuBarController!
     private var onboardingWindow: NSWindow?
     private var dashboardWindow: NSWindow?
@@ -22,7 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // support can tell a Sparkle-only update from a get.streamvc.live-only one.
         logStartupProvenance()
 
-        menuBar = MenuBarController(agent: agent) { [weak self] action in
+        menuBar = MenuBarController(agent: agent, sparkleUpdater: sparkleUpdater) { [weak self] action in
             self?.handle(action)
         }
 
@@ -85,7 +86,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .openOnboarding: presentOnboarding()
         case .pause: Task { await agent.pause() }
         case .resume: Task { await agent.resume() }
-        case .updateCLI: Task { await agent.updateCLINow() }
+        case .checkForUpdates: sparkleUpdater.checkForUpdates(nil)
+        case .updateCLI: sparkleUpdater.checkForUpdates(nil)
         case .quitAndUninstall:
             guard uninstallTask == nil else { return }
             uninstallTask = Task { @MainActor [weak self] in
@@ -172,7 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func presentDashboard() {
         if dashboardWindow == nil {
-            dashboardWindow = DashboardWindow.make(agent: agent)
+            dashboardWindow = DashboardWindow.make(agent: agent, sparkleUpdater: sparkleUpdater)
         }
         dashboardWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

@@ -35,6 +35,7 @@ trap cleanup EXIT
 gh release download "$tag" \
   --repo "$repo" \
   --pattern "$dmg_name" \
+  --pattern "appcast.xml" \
   --dir "$work" \
   --clobber
 
@@ -68,6 +69,14 @@ fi
 aws s3 cp "$asset" "s3://${MALIBU_DOWNLOAD_BUCKET}/${versioned_key}" "${aws_args[@]}"
 aws s3 cp "$asset" "s3://${MALIBU_DOWNLOAD_BUCKET}/${latest_key}" "${aws_args[@]}"
 aws s3 cp "$work/${dmg_name}.sha256" "s3://${MALIBU_DOWNLOAD_BUCKET}/${dmg_name}.sha256" "${aws_args[@]}"
+
+appcast="$work/appcast.xml"
+if [[ -f "$appcast" ]]; then
+  aws s3 cp "$appcast" "s3://${MALIBU_DOWNLOAD_BUCKET}/appcast.xml" "${aws_args[@]}"
+  printf '[publish-malibu-latest-dmg] ok: appcast.xml published\n'
+else
+  printf '[publish-malibu-latest-dmg] WARN: appcast.xml missing from release %s — Sparkle feed unchanged\n' "$tag" >&2
+fi
 
 printf '[publish-malibu-latest-dmg] ok: s3://%s/%s and latest.dmg (sha256=%s)\n' \
   "$MALIBU_DOWNLOAD_BUCKET" "$versioned_key" "$sha256"

@@ -31,5 +31,11 @@
 	</dict>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Malibu AI, Inc.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://download.malibu.tech/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>JkTDWnRJfOI3YIlpfJKvasWkxb0O1j/7ObGYiIA7big=</string>
 </dict>
 </plist>

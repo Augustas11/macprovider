@@ -3,8 +3,8 @@ import SwiftUI
 
 @MainActor
 enum DashboardWindow {
-    static func make(agent: MalibuAgent) -> NSWindow {
-        let hosting = NSHostingController(rootView: DashboardView(agent: agent))
+    static func make(agent: MalibuAgent, sparkleUpdater: SparkleUpdaterController) -> NSWindow {
+        let hosting = NSHostingController(rootView: DashboardView(agent: agent, sparkleUpdater: sparkleUpdater))
         let window = NSWindow(contentViewController: hosting)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.title = "Malibu"
@@ -17,6 +17,7 @@ enum DashboardWindow {
 
 private struct DashboardView: View {
     @ObservedObject var agent: MalibuAgent
+    @ObservedObject var sparkleUpdater: SparkleUpdaterController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -77,12 +78,10 @@ private struct DashboardView: View {
                             .font(.caption)
                             .foregroundStyle(agent.snapshot.cliUpdateLastError == nil ? Color.secondary : Color.red)
                     }
-                    if AgentSnapshotPresenter.updateAvailable(agent.snapshot) {
-                        Button(agent.snapshot.cliUpdateInProgress ? "Updating…" : updateButtonTitle) {
-                            Task { await agent.updateCLINow() }
-                        }
-                        .disabled(agent.snapshot.cliUpdateInProgress)
+                    Button(sparkleUpdater.updateAvailable ? "Check for Updates… (available)" : "Check for Updates…") {
+                        sparkleUpdater.checkForUpdates(nil)
                     }
+                    .disabled(!sparkleUpdater.canCheckForUpdates)
                     MetricRow(title: "Requests", value: AgentSnapshotPresenter.requestsLine(agent.snapshot))
                     MetricRow(title: "Tokens", value: AgentSnapshotPresenter.tokenLine(agent.snapshot))
                     MetricRow(title: "Uptime", value: AgentSnapshotPresenter.uptimeLine(agent.snapshot))
@@ -121,13 +120,6 @@ private struct DashboardView: View {
 
     private var queueTone: MetricChip.Tone {
         (agent.snapshot.queueDepth ?? 0) > 0 ? .attention : .neutral
-    }
-
-    private var updateButtonTitle: String {
-        if let target = AgentSnapshotPresenter.updateTargetVersion(agent.snapshot) {
-            return "Update to v\(target)"
-        }
-        return "Update CLI"
     }
 
     private var thermalTone: MetricChip.Tone {
