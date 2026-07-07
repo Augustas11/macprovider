@@ -664,7 +664,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticFallbackAndStaleWarnings() async throws {
         let validFetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-07-06-mbase-lite", with: "fetched-2026-07-10")
+            .replacingOccurrences(of: "published-2026-07-07-p1-gemma", with: "fetched-2026-07-10")
             .replacingOccurrences(of: "2026-07-01T00:00:00Z", with: "2026-07-10T00:00:00Z")
             .utf8)
         let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA=="}"#.utf8)
@@ -692,7 +692,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticRejectsSidecarWithExtraFields() async throws {
         let fetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-07-06-mbase-lite", with: "fetched-2026-07-10")
+            .replacingOccurrences(of: "published-2026-07-07-p1-gemma", with: "fetched-2026-07-10")
             .replacingOccurrences(of: "2026-07-01T00:00:00Z", with: "2026-07-10T00:00:00Z")
             .utf8)
         let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA==","extra":true}"#.utf8)
@@ -1441,7 +1441,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(chmod(secretURL.path, 0o600), 0)
         let stateURL = dir.appendingPathComponent("last-recommendation.json")
         try Data("""
-        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"old","demand_rank_version":"published-2026-07-06-mbase-lite","candidate_catalog_version":"published-2026-07-06-mbase-lite","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"old","demand_rank_version":"published-2026-07-07-p1-gemma","candidate_catalog_version":"published-2026-07-07-p1-gemma","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
         let staticInputs = AutotuneStaticInputs(
             fetch: { _ in throw AutotuneRecommendError.invalidStaticJSON("offline") },
@@ -1467,7 +1467,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(chmod(secretURL.path, 0o644), 0)
         let stateURL = dir.appendingPathComponent("last-recommendation.json")
         try Data("""
-        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"baked-2026-07-03","demand_rank_version":"published-2026-07-06-mbase-lite","candidate_catalog_version":"published-2026-07-06-mbase-lite","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-01T00:00:00Z","rate_card_version":"baked-2026-07-03","demand_rank_version":"published-2026-07-07-p1-gemma","candidate_catalog_version":"published-2026-07-07-p1-gemma","candidate_catalog_sha256":"old","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-01T00:00:00Z","binary_version":"test","hardware_identity_hash":"old","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
         let staticInputs = AutotuneStaticInputs(
             fetch: { _ in throw AutotuneRecommendError.invalidStaticJSON("offline") },
@@ -1501,7 +1501,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: "provider-a")
         try Data("""
-        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-03","demand_rank_version":"published-2026-07-06-mbase-lite","candidate_catalog_version":"published-2026-07-06-mbase-lite","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-03","demand_rank_version":"published-2026-07-07-p1-gemma","candidate_catalog_version":"published-2026-07-07-p1-gemma","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
 
         let staleSince = await StatusCommand.staleRecommendationSince(
