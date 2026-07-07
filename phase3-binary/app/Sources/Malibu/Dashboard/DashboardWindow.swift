@@ -8,7 +8,7 @@ enum DashboardWindow {
         let window = NSWindow(contentViewController: hosting)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.title = "Malibu"
-        window.setContentSize(NSSize(width: 780, height: 520))
+        window.setContentSize(NSSize(width: 780, height: 560))
         window.center()
         window.isReleasedWhenClosed = false
         return window
@@ -60,7 +60,7 @@ private struct DashboardView: View {
                         .disabled(true)
                 }
 
-                panel {
+                statsPanel {
                     MetricRow(title: "Running model", value: AgentSnapshotPresenter.modelLine(agent.snapshot))
                     if let path = agent.snapshot.weightsPath {
                         DisclosureGroup("Weights path") {
@@ -94,10 +94,12 @@ private struct DashboardView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(minHeight: 260)
+            .frame(minHeight: 280)
 
-            LogTailView(lines: agent.logLines)
-                .frame(minHeight: 170)
+            if !agent.logLines.isEmpty {
+                LogTailView(lines: agent.logLines)
+                    .frame(minHeight: 120, maxHeight: 180)
+            }
             Spacer(minLength: 0)
         }
         .padding(20)
@@ -111,11 +113,29 @@ private struct DashboardView: View {
         }
         .frame(maxWidth: .infinity, minHeight: 250, alignment: .topLeading)
         .padding(16)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(MalibuBrand.coral.opacity(0.25), lineWidth: 1)
-        )
+        .background(panelBackground)
+    }
+
+    @ViewBuilder
+    private func statsPanel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, minHeight: 280, alignment: .topLeading)
+        .padding(16)
+        .background(panelBackground)
+    }
+
+    private var panelBackground: some View {
+        RoundedRectangle(cornerRadius: 8)
+            .fill(Color.gray.opacity(0.08))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(MalibuBrand.coral.opacity(0.25), lineWidth: 1)
+            )
     }
 
     private var queueTone: MetricChip.Tone {
