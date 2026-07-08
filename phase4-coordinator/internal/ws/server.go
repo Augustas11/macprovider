@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -2108,7 +2107,12 @@ const (
 )
 
 func (s *Server) runCanaryProbe(provider pool.Provider) bool {
-	outcome := s.runCanaryProbeAttempt(provider)
+	attempt := s.runCanaryProbeAttempt(provider)
+	outcome := attempt.outcome
+	if attempt.modelClassBank {
+		pass := outcome == canaryProbePass
+		s.pool.SetModelClassOPoIPass(provider.ProviderID, provider.AssignedID, &pass)
+	}
 	if outcome == canaryProbeSkip {
 		s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary skipped")
 		return false
@@ -2134,6 +2138,11 @@ func (s *Server) runCanaryProbe(provider pool.Provider) bool {
 		Int("canary_failure_threshold", result.Threshold)
 	if result.Tripped != pool.CanaryTripNone {
 		event = event.Str("canary_trip", string(result.Tripped))
+	}
+	if attempt.modelClassBank && attempt.metrics.LatencyGated {
+		event = event.
+			Int("canary_ttft_ms", attempt.metrics.TTFTMS).
+			Float64("canary_sustained_tps", attempt.metrics.SustainedTPS)
 	}
 	event.Msg("provider canary failed")
 	switch result.Tripped {
@@ -2178,30 +2187,46 @@ func (s *Server) deleteCanarySanction(providerID string) {
 	}
 }
 
-func (s *Server) runCanaryProbeAttempt(provider pool.Provider) canaryProbeOutcome {
-	body, expected, err := s.buildCanaryBody(provider.ModelID, s.canaryMaxTokens())
+func (s *Server) runCanaryProbeAttempt(provider pool.Provider) canaryAttemptResult {
+	challenges, modelClassBank := s.cfg.Pool.CanaryChallengesForModel(provider.ModelID)
+	probe, err := buildCanaryProbe(provider.ModelID, s.canaryMaxTokens(), challenges, modelClassBank)
 	if err != nil {
-		return canaryProbeSkip
+		return canaryAttemptResult{outcome: canaryProbeSkip}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.canaryTimeout())
 	defer cancel()
+	var outcome canaryProbeOutcome
+	var metrics canaryProbeMetrics
 	if !provider.IsWSTunneled() {
-		return s.runHTTPCanaryProbeAttempt(ctx, provider, body, expected)
+		outcome, metrics = s.runHTTPCanaryProbeAttempt(ctx, provider, probe)
+	} else {
+		outcome, metrics = s.runWSCanaryProbeAttempt(ctx, provider, probe)
 	}
-	return s.runWSCanaryProbeAttempt(ctx, provider, body, expected)
+	if challengeHasLatencyGates(probe.Challenge) {
+		metrics.LatencyGated = true
+	}
+	return canaryAttemptResult{
+		outcome:        outcome,
+		metrics:        metrics,
+		modelClassBank: probe.ModelClassBank,
+		challenge:      probe.Challenge,
+	}
 }
 
-func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Provider, body []byte, expected string) canaryProbeOutcome {
+func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Provider, probe canaryBuiltProbe) (canaryProbeOutcome, canaryProbeMetrics) {
 	if s.tier2WarmupExcluded(provider) {
-		return canaryProbeSkip
+		return canaryProbeSkip, canaryProbeMetrics{}
 	}
 	requestID := s.newUUID()
-	relay, err := s.DispatchInference(ctx, provider, requestID, body, false)
+	start := time.Now()
+	relay, err := s.DispatchInference(ctx, provider, requestID, probe.Body, false)
 	if err != nil {
-		return canaryProbeSkip
+		return canaryProbeSkip, canaryProbeMetrics{}
 	}
 	chunks := relay.Chunks
 	var output strings.Builder
+	var firstTokenAt time.Time
+	var rawResponse strings.Builder
 	for {
 		select {
 		case chunk, ok := <-chunks:
@@ -2209,95 +2234,89 @@ func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Prov
 				chunks = nil
 				continue
 			}
+			if firstTokenAt.IsZero() {
+				firstTokenAt = time.Now()
+			}
+			rawResponse.WriteString(chunk.Data)
 			output.WriteString(canaryChunkContent(chunk.Data))
 		case end := <-relay.Done:
+			completedAt := time.Now()
+			metrics := canaryProbeMetrics{}
+			if challengeHasLatencyGates(probe.Challenge) {
+				tokens := canaryCompletionTokens([]byte(rawResponse.String()))
+				if tokens == 0 {
+					tokens = len(strings.Fields(output.String()))
+					if tokens == 0 {
+						tokens = 1
+					}
+				}
+				metrics = canaryMetricsFromTiming(start, firstTokenAt, completedAt, tokens)
+			}
 			if end.Status != "complete" {
-				return canaryProbeFail
+				return canaryProbeFail, metrics
 			}
-			if canaryAnswerMatches(output.String(), expected) {
-				return canaryProbePass
-			}
-			return canaryProbeFail
+			return evaluateCanaryProbe(probe.Challenge, output.String(), probe.Expected, metrics), metrics
 		case <-relay.Errors:
-			return canaryProbeFail
+			return canaryProbeFail, canaryProbeMetrics{}
 		case <-ctx.Done():
-			return canaryProbeFail
+			return canaryProbeFail, canaryProbeMetrics{}
 		}
 	}
 }
 
-func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Provider, body []byte, expected string) canaryProbeOutcome {
+func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Provider, probe canaryBuiltProbe) (canaryProbeOutcome, canaryProbeMetrics) {
 	endpoint := strings.TrimRight(strings.TrimSpace(provider.EndpointURL), "/")
 	if endpoint == "" {
-		return canaryProbeSkip
+		return canaryProbeSkip, canaryProbeMetrics{}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/v1/chat/completions", bytes.NewReader(body))
+	start := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/v1/chat/completions", bytes.NewReader(probe.Body))
 	if err != nil {
-		return canaryProbeSkip
+		return canaryProbeSkip, canaryProbeMetrics{}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := providerhttp.Client.Do(req)
 	if err != nil {
-		return canaryProbeFail
+		return canaryProbeFail, canaryProbeMetrics{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return canaryProbeFail
+		return canaryProbeFail, canaryProbeMetrics{}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return canaryProbeFail
+		return canaryProbeFail, canaryProbeMetrics{}
 	}
-	if canaryAnswerMatches(strings.Join(canaryPayloadContents(raw), ""), expected) {
-		return canaryProbePass
+	completedAt := time.Now()
+	output := strings.Join(canaryPayloadContents(raw), "")
+	metrics := canaryProbeMetrics{}
+	if challengeHasLatencyGates(probe.Challenge) {
+		tokens := canaryCompletionTokens(raw)
+		if tokens == 0 {
+			tokens = len(strings.Fields(output))
+			if tokens == 0 {
+				tokens = 1
+			}
+		}
+		metrics = canaryMetricsFromTiming(start, time.Time{}, completedAt, tokens)
 	}
-	return canaryProbeFail
+	return evaluateCanaryProbe(probe.Challenge, output, probe.Expected, metrics), metrics
 }
 
 func (s *Server) buildCanaryBody(modelID string, maxTokens int) ([]byte, string, error) {
-	return buildCanaryBody(modelID, maxTokens, s.cfg.Pool.CanaryChallenges)
+	challenges, _ := s.cfg.Pool.CanaryChallengesForModel(modelID)
+	body, expected, _, err := buildCanaryBodyFromBank(modelID, maxTokens, challenges)
+	return body, expected, err
 }
 
 func buildCanaryBody(modelID string, maxTokens int, challenges []config.CanaryChallengeConfig) ([]byte, string, error) {
-	random, err := randomBytes(5)
-	if err != nil {
-		return nil, "", err
-	}
-	return buildCanaryBodyFromRandom(modelID, maxTokens, challenges, random)
+	body, expected, _, err := buildCanaryBodyFromBank(modelID, maxTokens, challenges)
+	return body, expected, err
 }
 
 func buildCanaryBodyFromRandom(modelID string, maxTokens int, challenges []config.CanaryChallengeConfig, random []byte) ([]byte, string, error) {
-	if len(challenges) == 0 {
-		return nil, "", errors.New("canary challenge bank is empty")
-	}
-	if len(random) < 5 {
-		return nil, "", errors.New("canary random seed too short")
-	}
-	challenge := challenges[int(random[4])%len(challenges)]
-	promptTemplate := strings.TrimSpace(challenge.Prompt)
-	expectedTemplate := strings.TrimSpace(challenge.Expected)
-	if promptTemplate == "" || expectedTemplate == "" {
-		return nil, "", errors.New("canary challenge prompt and expected must not be empty")
-	}
-	if !strings.Contains(promptTemplate, "{nonce}") || !strings.Contains(expectedTemplate, "{nonce}") {
-		return nil, "", errors.New("canary challenge prompt and expected must contain {nonce}")
-	}
-	nonce := strings.ToUpper(hex.EncodeToString(random[:4]))
-	content := strings.ReplaceAll(promptTemplate, "{nonce}", nonce)
-	expected := strings.ReplaceAll(expectedTemplate, "{nonce}", nonce)
-	body, err := json.Marshal(map[string]any{
-		"model": modelID,
-		"messages": []map[string]string{{
-			"role":    "user",
-			"content": content,
-		}},
-		"max_tokens": maxTokens,
-		"stream":     false,
-	})
-	if err != nil {
-		return nil, "", err
-	}
-	return body, expected, nil
+	body, expected, _, err := buildCanaryBodyFromRandomWithChallenge(modelID, maxTokens, challenges, random)
+	return body, expected, err
 }
 
 func canaryAnswerMatches(output, expected string) bool {

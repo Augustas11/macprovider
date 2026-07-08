@@ -310,13 +310,50 @@ type PoolConfig struct {
 	CanaryIntervalS         int                     `yaml:"canary_interval_s"`
 	CanaryTimeoutS          int                     `yaml:"canary_timeout_s"`
 	CanaryMaxTokens         int                     `yaml:"canary_max_tokens"`
-	CanaryFailureThreshold  int                     `yaml:"canary_failure_threshold"`
-	CanaryChallenges        []CanaryChallengeConfig `yaml:"canary_challenges"`
+	CanaryFailureThreshold  int                              `yaml:"canary_failure_threshold"`
+	CanaryChallenges        []CanaryChallengeConfig          `yaml:"canary_challenges"`
+	ModelClassChallenges    map[string][]CanaryChallengeConfig `yaml:"model_class_challenges"`
 }
 
 type CanaryChallengeConfig struct {
-	Prompt   string `yaml:"prompt"`
-	Expected string `yaml:"expected"`
+	Prompt          string  `yaml:"prompt"`
+	Expected        string  `yaml:"expected"`
+	MaxTTFTMS       int     `yaml:"max_ttft_ms,omitempty"`
+	MinSustainedTPS float64 `yaml:"min_sustained_tps,omitempty"`
+}
+
+func validateCanaryChallengeList(prefix string, challenges []CanaryChallengeConfig) error {
+	for i, challenge := range challenges {
+		if strings.TrimSpace(challenge.Prompt) == "" || strings.TrimSpace(challenge.Expected) == "" {
+			return fmt.Errorf("%s[%d] prompt and expected must not be empty", prefix, i)
+		}
+		if !strings.Contains(challenge.Prompt, "{nonce}") || !strings.Contains(challenge.Expected, "{nonce}") {
+			return fmt.Errorf("%s[%d] prompt and expected must contain {nonce}", prefix, i)
+		}
+		if challenge.MaxTTFTMS < 0 {
+			return fmt.Errorf("%s[%d] max_ttft_ms must be >= 0", prefix, i)
+		}
+		if math.IsNaN(challenge.MinSustainedTPS) || math.IsInf(challenge.MinSustainedTPS, 0) || challenge.MinSustainedTPS < 0 {
+			return fmt.Errorf("%s[%d] min_sustained_tps is invalid", prefix, i)
+		}
+	}
+	return nil
+}
+
+func (p PoolConfig) CanaryChallengesForModel(modelID string) ([]CanaryChallengeConfig, bool) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return p.CanaryChallenges, false
+	}
+	if bank, ok := p.ModelClassChallenges[modelID]; ok && len(bank) > 0 {
+		return bank, true
+	}
+	for key, bank := range p.ModelClassChallenges {
+		if strings.EqualFold(strings.TrimSpace(key), modelID) && len(bank) > 0 {
+			return bank, true
+		}
+	}
+	return p.CanaryChallenges, false
 }
 
 type RoutingConfig struct {
@@ -1283,15 +1320,18 @@ func (c Config) Validate() error {
 		return fmt.Errorf("pool canary settings must be > 0 when enabled")
 	}
 	if c.Pool.CanaryEnabled {
-		if len(c.Pool.CanaryChallenges) == 0 {
-			return fmt.Errorf("pool canary_challenges must not be empty when enabled")
+		if len(c.Pool.CanaryChallenges) == 0 && len(c.Pool.ModelClassChallenges) == 0 {
+			return fmt.Errorf("pool canary_challenges or model_class_challenges must not be empty when enabled")
 		}
-		for i, challenge := range c.Pool.CanaryChallenges {
-			if strings.TrimSpace(challenge.Prompt) == "" || strings.TrimSpace(challenge.Expected) == "" {
-				return fmt.Errorf("pool canary_challenges[%d] prompt and expected must not be empty", i)
+		if err := validateCanaryChallengeList("pool.canary_challenges", c.Pool.CanaryChallenges); err != nil {
+			return err
+		}
+		for modelID, challenges := range c.Pool.ModelClassChallenges {
+			if strings.TrimSpace(modelID) == "" {
+				return fmt.Errorf("pool.model_class_challenges model id must not be empty")
 			}
-			if !strings.Contains(challenge.Prompt, "{nonce}") || !strings.Contains(challenge.Expected, "{nonce}") {
-				return fmt.Errorf("pool canary_challenges[%d] prompt and expected must contain {nonce}", i)
+			if err := validateCanaryChallengeList("pool.model_class_challenges."+modelID, challenges); err != nil {
+				return err
 			}
 		}
 	}

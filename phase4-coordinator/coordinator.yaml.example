@@ -54,6 +54,14 @@ pool:
       expected: "CANARY-{nonce}"
     - prompt: "What is the code {nonce}? Reply with only the code."
       expected: "{nonce}"
+  # W3 optional — per-model challenge banks with latency gates. When a provider's
+  # active model_id matches a key, canaries use that bank instead of canary_challenges.
+  # model_class_challenges:
+  #   qwen3-coder-30b-a3b-instruct:
+  #     - prompt: "Reply with exactly: CANARY-{nonce}"
+  #       expected: "CANARY-{nonce}"
+  #       max_ttft_ms: 3500
+  #       min_sustained_tps: 20
 
 routing:
   preflight_threshold_tokens: 4096

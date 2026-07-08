@@ -31,3 +31,11 @@ pool:
       expected: "CANARY-{nonce}"
     - prompt: "What is the code {nonce}? Reply with only the code."
       expected: "{nonce}"
+  # W3 — per-model-class probes with latency gates (Session B).
+  # Keys match provider hello model_id / catalog row key.
+  model_class_challenges:
+    qwen3-coder-30b-a3b-instruct:
+      - prompt: "Reply with exactly: CANARY-{nonce}"
+        expected: "CANARY-{nonce}"
+        max_ttft_ms: 3500
+        min_sustained_tps: 20

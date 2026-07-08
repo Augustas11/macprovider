@@ -75,9 +75,23 @@ pool:
 - Expected answer must be **exact** after trim (`canaryAnswerMatches`).
 - Use **deterministic** short outputs (low `max_tokens`) to minimize MLX variance.
 
-### 2.3 Model-specific banks (recommended)
+### 2.3 Model-specific banks (Session B / W3)
 
-Maintain per-model challenge entries if templates differ (tokenizer quirks). Start with one bank for 3B/8B instruct models.
+Per-model challenge banks with optional latency gates live under `pool.model_class_challenges` (Proof of Weights W3). When a provider's active `model_id` matches a bank key, canaries use that bank instead of the global `canary_challenges` list. See `ops/runbooks/proof-of-weights-implementation.md` §5 (when committed) and `phase4-coordinator/internal/ws/canary_probe.go`.
+
+Example:
+
+```yaml
+pool:
+  model_class_challenges:
+    qwen3-coder-30b-a3b-instruct:
+      - prompt: "Reply with exactly: CANARY-{nonce}"
+        expected: "CANARY-{nonce}"
+        max_ttft_ms: 3500
+        min_sustained_tps: 20
+```
+
+Start with one bank per production model class before widening coverage.
 
 ### 2.4 Rollout
 

@@ -166,6 +166,10 @@ type Provider struct {
 	// or provider admitted before W2 rollout.
 	MaxAdmittedModelKey string `json:"max_admitted_model_class,omitempty"`
 	MaxAdmittedModelID  string `json:"max_admitted_model_id,omitempty"`
+	// Proof of Weights W3 — latest model-class OPoI probe outcome when a
+	// per-model challenge bank with optional latency gates was used.
+	// Omitted when only the global canary bank applies.
+	ModelClassOPoIPass *bool `json:"model_class_opoi_pass,omitempty"`
 
 	// SPEC-002 v1.3.5 §3.X.1 — populated from v2 auth_request initial-stage
 	// supported_models[] per SPEC-010 v1.5 R-3.3.1; nil for the L-1 baseline.
@@ -1055,6 +1059,16 @@ func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool
 	}
 	result.Tripped = CanaryTripDegraded
 	return result
+}
+
+func (r *Registry) SetModelClassOPoIPass(providerID, assignedID string, pass *bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return
+	}
+	p.ModelClassOPoIPass = pass
 }
 
 func (r *Registry) applyCanarySanctionLocked(p *Provider) {
