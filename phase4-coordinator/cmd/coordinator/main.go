@@ -365,7 +365,7 @@ func main() {
 	// SPEC-MALIBU-EMISSION-LEDGER — bootstrap accrual worker (default-off).
 	var rewardsRunner *rewards.Runner
 	var rewardsDB *sql.DB
-	if cfg.MalibuEmission.Enabled {
+	if strings.TrimSpace(cfg.MalibuEmission.WriterDSN) != "" {
 		var err error
 		rewardsDB, err = sql.Open("postgres", cfg.MalibuEmission.WriterDSN)
 		if err != nil {
@@ -375,29 +375,37 @@ func main() {
 		rewardsDB.SetMaxOpenConns(4)
 		rewardsDB.SetMaxIdleConns(2)
 		rewardsDB.SetConnMaxLifetime(5 * time.Minute)
+		defer rewardsDB.Close()
+	}
+	if cfg.MalibuEmission.Enabled {
+		if rewardsDB == nil {
+			fmt.Fprintf(os.Stderr, "malibu_emission: writer_dsn is required when enabled\n")
+			os.Exit(1)
+		}
 		sqlitePath := strings.TrimSpace(cfg.MalibuEmission.SQLitePayoutDBPath)
 		if sqlitePath == "" {
 			sqlitePath = cfg.Storage.DBPath
 		}
 		rewardsCfg := rewards.Config{
-			Enabled:                true,
-			WriterDSN:              cfg.MalibuEmission.WriterDSN,
-			TickInterval:           time.Duration(cfg.MalibuEmission.TickIntervalSeconds) * time.Second,
-			ProviderDailyCapMALIBU: cfg.MalibuEmission.ProviderDailyCapMALIBU,
-			WalletDailyCapMALIBU:   cfg.MalibuEmission.WalletDailyCapMALIBU,
-			SQLitePayoutDBPath:     sqlitePath,
-			WalletMirrorInterval:   time.Duration(cfg.MalibuEmission.WalletMirrorIntervalSeconds) * time.Second,
-			UnlockEvalInterval:     time.Duration(cfg.MalibuEmission.UnlockEvalIntervalSeconds) * time.Second,
-			MaxSerializableRetries: cfg.MalibuEmission.MaxSerializableRetries,
+			Enabled:                  true,
+			WriterDSN:                cfg.MalibuEmission.WriterDSN,
+			TickInterval:             time.Duration(cfg.MalibuEmission.TickIntervalSeconds) * time.Second,
+			ProviderDailyCapMALIBU:   cfg.MalibuEmission.ProviderDailyCapMALIBU,
+			WalletDailyCapMALIBU:     cfg.MalibuEmission.WalletDailyCapMALIBU,
+			SQLitePayoutDBPath:       sqlitePath,
+			WalletMirrorInterval:     time.Duration(cfg.MalibuEmission.WalletMirrorIntervalSeconds) * time.Second,
+			UnlockEvalInterval:       time.Duration(cfg.MalibuEmission.UnlockEvalIntervalSeconds) * time.Second,
+			MaxSerializableRetries:   cfg.MalibuEmission.MaxSerializableRetries,
+			BaseUSDCBalanceRPCURLs:   cfg.MalibuEmission.BaseUSDCBalanceRPCURLs,
 		}
-		rewardsRunner, err = rewards.New(rewardsDB, rewardsCfg, logger.With().Str("subsystem", "malibu_emission").Logger())
+		var err error
+		rewardsRunner, err = rewards.New(rewardsDB, rewardsCfg, logger.With().Str("subsystem", "malibu_emission").Logger(), rewards.RunnerDeps{})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "malibu_emission: %v\n", err)
 			os.Exit(1)
 		}
 		rewardsRunner.Start(shutdownCtx)
 		logger.Info().Msg("SPEC-MALIBU-EMISSION-LEDGER accrual runner started")
-		defer rewardsDB.Close()
 	} else {
 		logger.Info().Msg("malibu_emission DISABLED via config (default)")
 	}
@@ -622,6 +630,9 @@ func main() {
 		pool.WithReceiptRotationEmitter(receiptRotationEmitter),
 	))
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
+	if rewardsRunner != nil {
+		rewardsRunner.SetConnectivity(rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot))
+	}
 	buyerServer := buyer.NewServer(
 		registry,
 		logger,
@@ -682,6 +693,12 @@ func main() {
 		Str("event", "spec005_v0_4_route_layer_flag_init").
 		Msg("quarantine force-void route-layer flag initialized")
 	providerMux.Handle("/admin/ledger/", billingHandler)
+	if rewardsDB != nil {
+		providerMux.Handle("/admin/trust-promotion/", rewards.TrustPromotionMux(rewards.TrustAdminDeps{
+			DB:          rewardsDB,
+			OperatorKey: cfg.Auth.OperatorKey,
+		}))
+	}
 	if cfg.Auth.RequireProviderTokens {
 		providerMux.Handle("/providers/", billingHandler)
 	}
@@ -772,7 +789,7 @@ func main() {
 		cfg.Onboarding.AppTrackRegisterEnabled,
 		register,
 		hardwareEvidence,
-		malibuAccrualHandler(cfg, tokenStore, rewardsDB),
+		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
 	)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
@@ -1067,19 +1084,24 @@ func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, 
 	return mux
 }
 
-func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB) http.Handler {
+func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB, connectivity rewards.ProviderConnectivity) http.Handler {
 	if rewardsDB == nil || !cfg.MalibuEmission.Enabled {
 		return nil
 	}
 	rewardsCfg := rewards.Config{
 		ProviderDailyCapMALIBU: cfg.MalibuEmission.ProviderDailyCapMALIBU,
 		WalletDailyCapMALIBU:   cfg.MalibuEmission.WalletDailyCapMALIBU,
+		SQLitePayoutDBPath:     cfg.MalibuEmission.SQLitePayoutDBPath,
+	}
+	if rewardsCfg.SQLitePayoutDBPath == "" {
+		rewardsCfg.SQLitePayoutDBPath = cfg.Storage.DBPath
 	}
 	return rewards.NewAccrualHandler(rewards.AccrualHandlerDeps{
 		DB:                    rewardsDB,
 		TokenStore:            tokenStore,
 		RequireProviderTokens: cfg.Auth.RequireProviderTokens,
 		Config:                rewardsCfg,
+		Connectivity:          connectivity,
 	})
 }
 

@@ -111,7 +111,7 @@ func TestProvisionalAccrualSetsWithdrawalHold(t *testing.T) {
 		WalletDailyCapMALIBU:   100,
 		MaxSerializableRetries: 5,
 	}
-	runner, err := rewards.New(writerDB, cfg, zerolog.Nop())
+	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
 	if err != nil {
 		t.Fatalf("new runner: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestWalletDailyCapAcrossProviders(t *testing.T) {
 		WalletDailyCapMALIBU:   100,
 		MaxSerializableRetries: 5,
 	}
-	runner, err := rewards.New(writerDB, cfg, zerolog.Nop())
+	runner, err := rewards.New(writerDB, cfg, zerolog.Nop(), rewards.RunnerDeps{})
 	if err != nil {
 		t.Fatalf("new runner: %v", err)
 	}

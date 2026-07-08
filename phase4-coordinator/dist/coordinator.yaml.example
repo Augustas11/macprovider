@@ -291,6 +291,8 @@ malibu_emission:
   wallet_mirror_interval_seconds: 300
   unlock_eval_interval_seconds: 3600
   max_serializable_retries: 5
+  # Optional Base USDC dual-RPC URLs for E2 wallet-balance unlock checks (SPEC-026 §5.2).
+  # base_usdc_balance_rpc_urls: []
 
 # Auto-update recommendation surface. The coordinator forwards
 # `latest_binary_version` to every connected provider in its
