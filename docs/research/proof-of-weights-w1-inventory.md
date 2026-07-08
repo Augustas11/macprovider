@@ -31,7 +31,7 @@
 - `/poolz` tier2 eligibility uses the same predicate (`ws/server.go:3042`).
 - Tier2 audit log emits `decision=exclude` for mismatch (`catalog.go:705-706`).
 
-**Gap (LOW):** optional coordinator metric `model_hash_mismatch_total` from runbook §3.1 not yet present — routing exclusion works without it.
+**Gap (LOW):** optional coordinator metric `model_hash_mismatch_total` — increments on transition to `hash_mismatch` via WS server (`internal/ws/server.go` + `internal/stats/metrics`).
 
 ---
 
@@ -62,7 +62,7 @@
 |-----------|--------|
 | Mismatch provider never receives buyer traffic for pinned catalog row | ✅ Enforced via tier2 routing predicate |
 | Quarantined receipts visible in operator explorer | ✅ Settlement reason filters present |
-| Optional mismatch metric | ⬜ Not implemented (carry LOW) |
+| Optional mismatch metric | ✅ `model_hash_mismatch_total` on hash status transition to mismatch |
 
 ---
 

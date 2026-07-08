@@ -453,6 +453,7 @@ func main() {
 	if statsPools != nil {
 		wsOpts = append(wsOpts, providerws.WithIdlePrewarmRecorder(statsprewarm.NewRecorder(statsPools.Rollup)))
 		wsOpts = append(wsOpts, providerws.WithIdlePrewarmMetrics(metricsHandle))
+		wsOpts = append(wsOpts, providerws.WithModelHashMismatchMetrics(metricsHandle))
 	}
 	var onboardingStore *onboarding.PGStore
 	if cfg.Onboarding.AppTrackRegisterEnabled {

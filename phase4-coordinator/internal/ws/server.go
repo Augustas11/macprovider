@@ -94,6 +94,7 @@ type Server struct {
 	authPolicyAdmin    ProviderAuthPolicyAdminStore
 	idlePrewarm        IdlePrewarmRecorder
 	idlePrewarmMetrics IdlePrewarmMetrics
+	modelHashMismatchMetrics ModelHashMismatchMetrics
 	idlePrewarmLimits  sync.Map
 	idlePrewarmQueue   chan idlePrewarmRecord
 }
@@ -163,6 +164,10 @@ type IdlePrewarmRecorder interface {
 
 type IdlePrewarmMetrics interface {
 	IncIdlePrewarmEvent(event, reason string)
+}
+
+type ModelHashMismatchMetrics interface {
+	IncModelHashMismatch()
 }
 
 const (
@@ -257,6 +262,12 @@ func WithIdlePrewarmRecorder(recorder IdlePrewarmRecorder) Option {
 func WithIdlePrewarmMetrics(metrics IdlePrewarmMetrics) Option {
 	return func(s *Server) {
 		s.idlePrewarmMetrics = metrics
+	}
+}
+
+func WithModelHashMismatchMetrics(metrics ModelHashMismatchMetrics) Option {
+	return func(s *Server) {
+		s.modelHashMismatchMetrics = metrics
 	}
 }
 
@@ -433,14 +444,22 @@ func (s *Server) RefreshTier2HashStatuses() int {
 	}
 	return s.pool.UpdateHashStatuses(func(provider pool.Provider) pool.HashStatus {
 		next := s.catalogRef().VerifyProviderHash(provider.ModelID, provider.ModelHash)
-		if next != provider.HashStatus {
-			tier2.LogProviderHashStatus(s.log, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash, next)
-		}
+		s.observeHashStatusTransition(provider.HashStatus, next, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash)
 		if cfg.RequireHashVerified && (next == pool.HashStatusUncatalogued || next == pool.HashStatusCatalogUnavailable) {
 			tier2.LogHashRequiredProviderExcluded(s.log, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash, next)
 		}
 		return next
 	})
+}
+
+func (s *Server) observeHashStatusTransition(prev, next pool.HashStatus, providerID, assignedID, modelID, reportedHash string) {
+	if next == prev {
+		return
+	}
+	tier2.LogProviderHashStatus(s.log, providerID, assignedID, modelID, reportedHash, next)
+	if next == pool.HashStatusMismatch && s.modelHashMismatchMetrics != nil {
+		s.modelHashMismatchMetrics.IncModelHashMismatch()
+	}
 }
 
 func (s *Server) tier2Config() config.Tier2Config {
@@ -1202,7 +1221,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 	tier2Cfg := s.tier2Config()
 	if tier2.ModelHashActive(tier2Cfg) {
 		hashStatus = s.catalogRef().VerifyProviderHash(hello.ModelID, hello.ModelHash)
-		tier2.LogProviderHashStatus(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
+		s.observeHashStatusTransition("", hashStatus, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash)
 		if tier2Cfg.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
 			tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
 		}
