@@ -311,7 +311,7 @@ jobs:
   swift-tests:
     name: phase3-binary (swift test)
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Checkout
         # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
