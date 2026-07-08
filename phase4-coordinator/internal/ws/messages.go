@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -421,7 +422,7 @@ func ParseFirstAuthMessage(payload []byte) (string, int, error) {
 		return "", 0, err
 	}
 	var version int
-	if err := requireInt(raw, "version", &version); err != nil {
+	if err := requireAuthVersion(raw, &version); err != nil {
 		return "", 0, err
 	}
 	return typ, version, nil
@@ -439,7 +440,7 @@ func ParseAuthRequest(payload []byte) (AuthRequest, Spec010Presence, string, err
 	if req.Type != "auth_request" {
 		return AuthRequest{}, Spec010Presence{}, "type", fmt.Errorf("expected auth_request, got %q", req.Type)
 	}
-	if err := requireInt(raw, "version", &req.Version); err != nil {
+	if err := requireAuthVersion(raw, &req.Version); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if req.Version != 2 {
@@ -726,6 +727,26 @@ func requireInt(raw map[string]json.RawMessage, field string, out *int) *fieldEr
 	if err := json.Unmarshal(v, out); err != nil {
 		return &fieldError{Field: field}
 	}
+	return nil
+}
+
+func requireAuthVersion(raw map[string]json.RawMessage, out *int) *fieldError {
+	v, ok := raw["version"]
+	if !ok {
+		return &fieldError{Field: "missing version"}
+	}
+	if err := json.Unmarshal(v, out); err == nil {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil || s == "" {
+		return &fieldError{Field: "version"}
+	}
+	parsed, err := strconv.Atoi(s)
+	if err != nil {
+		return &fieldError{Field: "version"}
+	}
+	*out = parsed
 	return nil
 }
 
