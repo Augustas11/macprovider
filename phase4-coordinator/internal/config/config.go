@@ -69,8 +69,23 @@ type Config struct {
 // legacy self-declared hello model_id behavior until the operator enables
 // the autotune hello gate explicitly.
 type ProofOfWeightsConfig struct {
-	RequireAutotuneHelloGate bool `yaml:"require_autotune_hello_gate"`
-	AutotuneEvidenceTTLDays  int  `yaml:"autotune_evidence_ttl_days"`
+	RequireAutotuneHelloGate bool                     `yaml:"require_autotune_hello_gate"`
+	AutotuneEvidenceTTLDays  int                      `yaml:"autotune_evidence_ttl_days"`
+	TelemetryDrift           TelemetryDriftConfig     `yaml:"telemetry_drift"`
+}
+
+// TelemetryDriftConfig enables observe-only operator alerts when live
+// provider telemetry diverges from verified autotune evidence or W3 OPoI
+// pass-rate baselines. Default-off; does not change routing or sanctions.
+type TelemetryDriftConfig struct {
+	Enabled                  bool     `yaml:"enabled"`
+	TPSRatioThreshold        float64  `yaml:"tps_ratio_threshold"`
+	TPSMinAbsolute           float64  `yaml:"tps_min_absolute"`
+	HashAlertOnStatus        []string `yaml:"hash_alert_on_status"`
+	HashAlertOnArtifactDrift bool     `yaml:"hash_alert_on_artifact_drift"`
+	OPoIPassRateWindow       int      `yaml:"opoi_pass_rate_window"`
+	OPoIPassRateThreshold    float64  `yaml:"opoi_pass_rate_threshold"`
+	AlertCooldownSeconds     int      `yaml:"alert_cooldown_s"`
 }
 
 type CoordinatorConfig struct {
@@ -745,6 +760,16 @@ func Default() Config {
 		ProofOfWeights: ProofOfWeightsConfig{
 			RequireAutotuneHelloGate: false,
 			AutotuneEvidenceTTLDays:  30,
+			TelemetryDrift: TelemetryDriftConfig{
+				Enabled:                  false,
+				TPSRatioThreshold:        0.70,
+				TPSMinAbsolute:           5.0,
+				HashAlertOnStatus:        []string{"hash_mismatch", "hash_invalid"},
+				HashAlertOnArtifactDrift: true,
+				OPoIPassRateWindow:       10,
+				OPoIPassRateThreshold:    0.80,
+				AlertCooldownSeconds:     900,
+			},
 		},
 		Tier2: Tier2Config{
 			ObserveEnabled:                 false,
@@ -1483,18 +1508,59 @@ func (c Config) validateProofOfWeights() error {
 	if p.AutotuneEvidenceTTLDays < 0 {
 		return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be >= 0")
 	}
-	if !p.RequireAutotuneHelloGate {
+	if p.RequireAutotuneHelloGate {
+		if p.AutotuneEvidenceTTLDays <= 0 {
+			return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be > 0 when require_autotune_hello_gate is true")
+		}
+		if err := c.requireAutotuneEvidenceFeeds(); err != nil {
+			return err
+		}
+	}
+	if !p.TelemetryDrift.Enabled {
 		return nil
 	}
 	if p.AutotuneEvidenceTTLDays <= 0 {
-		return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be > 0 when require_autotune_hello_gate is true")
+		return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be > 0 when telemetry_drift.enabled is true")
 	}
+	if err := c.requireAutotuneEvidenceFeeds(); err != nil {
+		return err
+	}
+	d := p.TelemetryDrift
+	if d.TPSRatioThreshold <= 0 || d.TPSRatioThreshold > 1 || math.IsNaN(d.TPSRatioThreshold) || math.IsInf(d.TPSRatioThreshold, 0) {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.tps_ratio_threshold must be in (0,1]")
+	}
+	if d.TPSMinAbsolute < 0 || math.IsNaN(d.TPSMinAbsolute) || math.IsInf(d.TPSMinAbsolute, 0) {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.tps_min_absolute must be >= 0")
+	}
+	if d.OPoIPassRateWindow < 0 {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.opoi_pass_rate_window must be >= 0")
+	}
+	if d.OPoIPassRateThreshold < 0 || d.OPoIPassRateThreshold > 1 || math.IsNaN(d.OPoIPassRateThreshold) || math.IsInf(d.OPoIPassRateThreshold, 0) {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.opoi_pass_rate_threshold must be in [0,1]")
+	}
+	if d.AlertCooldownSeconds < 0 {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.alert_cooldown_s must be >= 0")
+	}
+	for _, status := range d.HashAlertOnStatus {
+		switch strings.TrimSpace(status) {
+		case "hash_mismatch", "hash_invalid", "hash_verified", "uncatalogued", "catalog_unavailable":
+		default:
+			return fmt.Errorf("proof_of_weights.telemetry_drift.hash_alert_on_status contains unsupported value %q", status)
+		}
+	}
+	if !c.Pool.CanaryEnabled && d.OPoIPassRateWindow > 0 {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.opoi_pass_rate_window requires pool.canary_enabled when > 0")
+	}
+	return nil
+}
+
+func (c Config) requireAutotuneEvidenceFeeds() error {
 	a := c.AutotuneFeeds
 	if strings.TrimSpace(a.AutotuneCandidatesPath) == "" || strings.TrimSpace(a.AutotuneCandidatesSigPath) == "" {
-		return fmt.Errorf("proof_of_weights.require_autotune_hello_gate requires autotune.autotune_candidates_path and autotune.autotune_candidates_sig_path")
+		return fmt.Errorf("proof_of_weights autotune evidence requires autotune.autotune_candidates_path and autotune.autotune_candidates_sig_path")
 	}
 	if !c.Onboarding.AppTrackRegisterEnabled || strings.TrimSpace(c.Onboarding.PostgresDSN) == "" {
-		return fmt.Errorf("proof_of_weights.require_autotune_hello_gate requires onboarding.app_track_register_enabled and onboarding.postgres_dsn")
+		return fmt.Errorf("proof_of_weights autotune evidence requires onboarding.app_track_register_enabled and onboarding.postgres_dsn")
 	}
 	return nil
 }
