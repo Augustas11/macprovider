@@ -109,7 +109,9 @@ if protocol != "h2":
 print("ok: TLS ALPN negotiated h2")
 PY
 
-if [ "${MACPROVIDER_HTTP2_RUN_CHAT_BENCH:-}" != "1" ] && [ "${MACPROVIDER_HTTP2_RUN_SSE:-}" != "1" ]; then
+run_transport_bench="${MACPROVIDER_HTTP2_RUN_TRANSPORT_BENCH:-${MACPROVIDER_HTTP2_RUN_BENCH:-}}"
+run_chat_bench="${MACPROVIDER_HTTP2_RUN_CHAT_BENCH:-}"
+if [ "$run_transport_bench" != "1" ] && [ "$run_chat_bench" != "1" ] && [ "${MACPROVIDER_HTTP2_RUN_SSE:-}" != "1" ]; then
   echo "skip: authenticated point/parallel bench and SSE compatibility checks not requested"
   exit 0
 fi
@@ -141,10 +143,10 @@ printf 'header = "Authorization: Bearer %s"\n' "$API_KEY" >"$auth_curl_config"
 chmod 600 "$api_key_file" "$auth_curl_config"
 
 model="${MACPROVIDER_HTTP2_MODEL:-}"
-if [ -z "$model" ]; then
-  models_json="$TMPDIR/models.json"
-  curl --config "$auth_curl_config" --http2 -fsS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MODELS_MAX_TIME" -o "$models_json" \
-    "$GATEWAY_ORIGIN/v1/models"
+models_json="$TMPDIR/models.json"
+curl --config "$auth_curl_config" --http2 -fsS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MODELS_MAX_TIME" -o "$models_json" \
+  "$GATEWAY_ORIGIN/v1/models"
+if [ -z "$model" ] && { [ "$run_chat_bench" = "1" ] || [ "${MACPROVIDER_HTTP2_RUN_SSE:-}" = "1" ]; }; then
   model="$(python3 - "$models_json" <<'PY'
 import json
 import sys
@@ -158,7 +160,40 @@ print(data[0]["id"])
 PY
 )"
 fi
-echo "ok: using model $model for authenticated #379 probes"
+if [ -n "$model" ]; then
+  echo "ok: using model $model for authenticated #379 probes"
+else
+  echo "ok: authenticated /v1/models available for #379 transport benchmark"
+fi
+
+assert_chat_bench_capacity() {
+  if [ "${MACPROVIDER_HTTP2_ALLOW_LOW_CAPACITY_CHAT_BENCH:-}" = "1" ]; then
+    return 0
+  fi
+  python3 - "$models_json" "$model" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    payload = json.load(fh)
+model = sys.argv[2]
+data = payload.get("data") or []
+for row in data:
+    if row.get("id") == model:
+        slots = int(row.get("total_slots") or 0)
+        if slots < 8:
+            raise SystemExit(
+                "FAIL: MACPROVIDER_HTTP2_RUN_CHAT_BENCH=1 requires the selected model "
+                f"to advertise total_slots >= 8 for the issue #379 8-request fan-out; "
+                f"{model} advertises total_slots={slots}. Bring enough providers/slots online "
+                "or set MACPROVIDER_HTTP2_ALLOW_LOW_CAPACITY_CHAT_BENCH=1 to run the "
+                "negative-capacity check anyway."
+            )
+        print(f"ok: selected model {model} advertises total_slots={slots} for #379 chat benchmark")
+        raise SystemExit(0)
+raise SystemExit(f"FAIL: selected model {model} was not present in /v1/models")
+PY
+}
 
 write_payload() {
   local stream="$1"
@@ -190,13 +225,16 @@ stream_payload="$TMPDIR/stream.json"
 write_payload false "$chat_payload"
 write_payload true "$stream_payload"
 
-run_chat_bench() {
+run_shared_connection_bench() {
+  local target="$1"
+  local label="$2"
+
   command -v go >/dev/null || {
-    echo "FAIL: go is required for #379 shared-connection chat benchmark" >&2
+    echo "FAIL: go is required for #379 shared-connection benchmark" >&2
     exit 1
   }
 
-  bench_go="$TMPDIR/http2_bench.go"
+  bench_go="$TMPDIR/http2_shared_connection_bench.go"
   cat >"$bench_go" <<'GO'
 package main
 
@@ -216,6 +254,13 @@ import (
 	"time"
 )
 
+type benchmark struct {
+	target  string
+	method  string
+	path    string
+	payload []byte
+}
+
 type result struct {
 	label    string
 	proto    string
@@ -225,6 +270,8 @@ type result struct {
 	body     string
 	err      error
 }
+
+const maxBenchmarkResponseBytes = 1 << 20
 
 type summary struct {
 	count  int
@@ -257,12 +304,17 @@ func newClient(forceH2 bool, timeout time.Duration) *http.Client {
 		ForceAttemptHTTP2:     forceH2,
 	}
 	if !forceH2 {
+		// #379 is about shared-connection head-of-line blocking. Constrain
+		// the forced HTTP/1.1 comparison to one connection so the benchmark
+		// does not hide that cost behind eight parallel TCP connections.
 		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		tr.MaxConnsPerHost = 1
+		tr.MaxIdleConnsPerHost = 1
 	}
 	return &http.Client{Transport: tr, Timeout: timeout}
 }
 
-func makePayload(model string) []byte {
+func makeChatPayload(model string) []byte {
 	payload := map[string]any{
 		"model":       model,
 		"max_tokens":  8,
@@ -279,7 +331,24 @@ func makePayload(model string) []byte {
 	return out
 }
 
-func postChat(ctx context.Context, client *http.Client, origin, apiKey string, payload []byte, label string) result {
+func benchmarkFromEnv() benchmark {
+	target := getenv("MACPROVIDER_HTTP2_BENCH_TARGET", "models")
+	switch target {
+	case "models":
+		return benchmark{target: target, method: http.MethodGet, path: "/v1/models"}
+	case "chat":
+		model := os.Getenv("MACPROVIDER_HTTP2_MODEL")
+		if model == "" {
+			fail("MACPROVIDER_HTTP2_MODEL is required for chat benchmark")
+		}
+		return benchmark{target: target, method: http.MethodPost, path: "/v1/chat/completions", payload: makeChatPayload(model)}
+	default:
+		fail("invalid MACPROVIDER_HTTP2_BENCH_TARGET %q", target)
+		return benchmark{}
+	}
+}
+
+func doBenchmarkRequest(ctx context.Context, client *http.Client, origin, apiKey string, bench benchmark, label string) result {
 	start := time.Now()
 	var conn string
 	trace := &httptrace.ClientTrace{
@@ -290,30 +359,36 @@ func postChat(ctx context.Context, client *http.Client, origin, apiKey string, p
 		},
 	}
 	ctx = httptrace.WithClientTrace(ctx, trace)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(origin, "/")+"/v1/chat/completions", bytes.NewReader(payload))
+	var body io.Reader
+	if bench.payload != nil {
+		body = bytes.NewReader(bench.payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, bench.method, strings.TrimRight(origin, "/")+bench.path, body)
 	if err != nil {
 		return result{label: label, err: err}
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	if bench.payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return result{label: label, duration: time.Since(start), err: err}
 	}
 	defer resp.Body.Close()
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return result{
-			label:    label,
-			proto:    resp.Proto,
-			status:   resp.StatusCode,
-			duration: time.Since(start),
-			conn:     conn,
-			body:     string(body),
-			err:      readErr,
-		}
+	bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBenchmarkResponseBytes))
+	return result{
+		label:    label,
+		proto:    resp.Proto,
+		status:   resp.StatusCode,
+		duration: time.Since(start),
+		conn:     conn,
+		body:     string(bodyBytes),
+		err:      readErr,
 	}
+}
 
-	func requireOK(res result, wantProto string) {
+func requireOK(res result, wantProto string, bench benchmark) {
 	if res.err != nil {
 		fail("%s request failed: %v", res.label, res.err)
 	}
@@ -323,18 +398,32 @@ func postChat(ctx context.Context, client *http.Client, origin, apiKey string, p
 	if res.proto != wantProto {
 		fail("%s request used %s, want %s", res.label, res.proto, wantProto)
 	}
-	var payload struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal([]byte(res.body), &payload); err != nil {
-		fail("%s response was not valid JSON: %v\n%s", res.label, err, res.body)
-	}
-	if len(payload.Choices) == 0 || payload.Choices[0].Message.Content == "" {
-		fail("%s response did not include non-empty choices[0].message.content\n%s", res.label, res.body)
+	switch bench.target {
+	case "models":
+		var payload struct {
+			Object string            `json:"object"`
+			Data   []json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(res.body), &payload); err != nil {
+			fail("%s response was not valid JSON: %v\n%s", res.label, err, res.body)
+		}
+		if payload.Object != "list" || payload.Data == nil {
+			fail("%s response did not include OpenAI-compatible models list\n%s", res.label, res.body)
+		}
+	case "chat":
+		var payload struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(res.body), &payload); err != nil {
+			fail("%s response was not valid JSON: %v\n%s", res.label, err, res.body)
+		}
+		if len(payload.Choices) == 0 || payload.Choices[0].Message.Content == "" {
+			fail("%s response did not include non-empty choices[0].message.content\n%s", res.label, res.body)
+		}
 	}
 }
 
@@ -368,31 +457,29 @@ func printSummary(label, proto string, s summary) {
 		label, proto, s.count, s.min.Seconds(), s.median.Seconds(), s.p95.Seconds(), s.max.Seconds())
 }
 
-func runParallel(ctx context.Context, client *http.Client, origin, apiKey string, payload []byte, label, wantProto string) []result {
+func runParallel(ctx context.Context, client *http.Client, origin, apiKey string, bench benchmark, label, wantProto string) []result {
 	results := make([]result, 8)
 	var wg sync.WaitGroup
 	for i := range results {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			results[i] = postChat(ctx, client, origin, apiKey, payload, fmt.Sprintf("%s-%d", label, i+1))
+			results[i] = doBenchmarkRequest(ctx, client, origin, apiKey, bench, fmt.Sprintf("%s-%d", label, i+1))
 		}(i)
 	}
 	wg.Wait()
 	for _, res := range results {
-		requireOK(res, wantProto)
+		requireOK(res, wantProto, bench)
 	}
-	if wantProto == "HTTP/2.0" {
-		conns := map[string]bool{}
-		for _, res := range results {
-			if res.conn == "" {
-				fail("%s did not record a client connection", res.label)
-			}
-			conns[res.conn] = true
+	conns := map[string]bool{}
+	for _, res := range results {
+		if res.conn == "" {
+			fail("%s did not record a client connection", res.label)
 		}
-		if len(conns) != 1 {
-			fail("%s used %d client connections, want 1 shared HTTP/2 connection", label, len(conns))
-		}
+		conns[res.conn] = true
+	}
+	if len(conns) != 1 {
+		fail("%s used %d client connections, want 1 shared connection", label, len(conns))
 	}
 	return results
 }
@@ -400,9 +487,8 @@ func runParallel(ctx context.Context, client *http.Client, origin, apiKey string
 func main() {
 	origin := os.Getenv("MACPROVIDER_HTTP2_GATEWAY_URL")
 	apiKeyFile := os.Getenv("MACPROVIDER_HTTP2_API_KEY_FILE")
-	model := os.Getenv("MACPROVIDER_HTTP2_MODEL")
-	if origin == "" || apiKeyFile == "" || model == "" {
-		fail("MACPROVIDER_HTTP2_GATEWAY_URL, MACPROVIDER_HTTP2_API_KEY_FILE, and MACPROVIDER_HTTP2_MODEL are required")
+	if origin == "" || apiKeyFile == "" {
+		fail("MACPROVIDER_HTTP2_GATEWAY_URL and MACPROVIDER_HTTP2_API_KEY_FILE are required")
 	}
 	rawAPIKey, err := os.ReadFile(apiKeyFile)
 	if err != nil {
@@ -423,49 +509,63 @@ func main() {
 		}
 	}
 
-	payload := makePayload(model)
 	ctx := context.Background()
 	h2Client := newClient(true, timeout)
 	h1Client := newClient(false, timeout)
+	bench := benchmarkFromEnv()
+	label := getenv("MACPROVIDER_HTTP2_BENCH_LABEL", bench.target)
 
-	h2Point := postChat(ctx, h2Client, origin, apiKey, payload, "h2-point")
-	requireOK(h2Point, "HTTP/2.0")
-	h1Point := postChat(ctx, h1Client, origin, apiKey, payload, "h1-point")
-	requireOK(h1Point, "HTTP/1.1")
-	printSummary("point request", "HTTP/2", summarize([]result{h2Point}))
-	printSummary("point request", "HTTP/1.1", summarize([]result{h1Point}))
+	h2Point := doBenchmarkRequest(ctx, h2Client, origin, apiKey, bench, "h2-point")
+	requireOK(h2Point, "HTTP/2.0", bench)
+	h1Point := doBenchmarkRequest(ctx, h1Client, origin, apiKey, bench, "h1-point")
+	requireOK(h1Point, "HTTP/1.1", bench)
+	printSummary(label+" point request", "HTTP/2", summarize([]result{h2Point}))
+	printSummary(label+" point request", "HTTP/1.1", summarize([]result{h1Point}))
 
-	h2Parallel := runParallel(ctx, h2Client, origin, apiKey, payload, "h2-parallel", "HTTP/2.0")
-	h1Parallel := runParallel(ctx, h1Client, origin, apiKey, payload, "h1-parallel", "HTTP/1.1")
+	h2Parallel := runParallel(ctx, h2Client, origin, apiKey, bench, "h2-parallel", "HTTP/2.0")
+	h1Parallel := runParallel(ctx, h1Client, origin, apiKey, bench, "h1-parallel", "HTTP/1.1")
 	h2Summary := summarize(h2Parallel)
 	h1Summary := summarize(h1Parallel)
-	printSummary("parallel 8-request", "HTTP/2", h2Summary)
-	printSummary("parallel 8-request", "HTTP/1.1", h1Summary)
+	printSummary(label+" parallel 8-request", "HTTP/2", h2Summary)
+	printSummary(label+" parallel 8-request", "HTTP/1.1", h1Summary)
 
 	if h2Summary.p95 >= h1Summary.p95 {
-		fail("parallel HTTP/2 p95 %.3fs is not lower than HTTP/1.1 p95 %.3fs", h2Summary.p95.Seconds(), h1Summary.p95.Seconds())
+		fail("%s parallel HTTP/2 p95 %.3fs is not lower than HTTP/1.1 p95 %.3fs", label, h2Summary.p95.Seconds(), h1Summary.p95.Seconds())
 	}
 	if h2Point.duration > time.Duration(float64(h1Point.duration)*pointFactor) {
-		fail("point HTTP/2 %.3fs regressed beyond %.2fx HTTP/1.1 %.3fs", h2Point.duration.Seconds(), pointFactor, h1Point.duration.Seconds())
+		fail("%s point HTTP/2 %.3fs regressed beyond %.2fx HTTP/1.1 %.3fs", label, h2Point.duration.Seconds(), pointFactor, h1Point.duration.Seconds())
 	}
 }
 GO
 
-  bench_bin="$TMPDIR/http2_bench"
+  bench_bin="$TMPDIR/http2_shared_connection_bench"
   go build -o "$bench_bin" "$bench_go"
 
   MACPROVIDER_HTTP2_GATEWAY_URL="$GATEWAY_ORIGIN" \
     MACPROVIDER_HTTP2_API_KEY_FILE="$api_key_file" \
     MACPROVIDER_HTTP2_MODEL="$model" \
+    MACPROVIDER_HTTP2_BENCH_TARGET="$target" \
+    MACPROVIDER_HTTP2_BENCH_LABEL="$label" \
     MACPROVIDER_HTTP2_CHAT_MAX_TIME="$CHAT_MAX_TIME" \
     MACPROVIDER_HTTP2_POINT_REGRESSION_FACTOR="${MACPROVIDER_HTTP2_POINT_REGRESSION_FACTOR:-1.20}" \
     "$bench_bin"
 }
 
-if [ "${MACPROVIDER_HTTP2_RUN_CHAT_BENCH:-}" = "1" ]; then
-  run_chat_bench
+if [ "$run_transport_bench" = "1" ]; then
+  run_shared_connection_bench models transport
 else
-  echo "skip: MACPROVIDER_HTTP2_RUN_CHAT_BENCH is not 1 - authenticated point/parallel bench not exercised"
+  echo "skip: MACPROVIDER_HTTP2_RUN_TRANSPORT_BENCH is not 1 - authenticated transport bench not exercised"
+fi
+
+if [ "$run_chat_bench" = "1" ]; then
+  if [ -z "$model" ]; then
+    echo "FAIL: MACPROVIDER_HTTP2_RUN_CHAT_BENCH=1 requires MACPROVIDER_HTTP2_MODEL or a non-empty /v1/models response" >&2
+    exit 1
+  fi
+  assert_chat_bench_capacity
+  run_shared_connection_bench chat chat
+else
+  echo "skip: MACPROVIDER_HTTP2_RUN_CHAT_BENCH is not 1 - authenticated chat point/parallel bench not exercised"
 fi
 
 if [ "${MACPROVIDER_HTTP2_RUN_SSE:-}" = "1" ]; then
