@@ -161,6 +161,11 @@ type Provider struct {
 	// AttestationStatus and from verified stats hardware inventory: it can make
 	// cores/bandwidth visible without claiming hardware attestation.
 	HardwareCapacity *ProviderHardwareCapacity `json:"hardware_capacity,omitempty"`
+	// Proof of Weights W2 — coordinator-side autotune hello gate cap derived
+	// from latest verified hardware-evidence benchmarks. Empty when gate off
+	// or provider admitted before W2 rollout.
+	MaxAdmittedModelKey string `json:"max_admitted_model_class,omitempty"`
+	MaxAdmittedModelID  string `json:"max_admitted_model_id,omitempty"`
 
 	// SPEC-002 v1.3.5 §3.X.1 — populated from v2 auth_request initial-stage
 	// supported_models[] per SPEC-010 v1.5 R-3.3.1; nil for the L-1 baseline.

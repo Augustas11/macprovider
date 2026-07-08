@@ -59,8 +59,17 @@ type Config struct {
 	Stats                        StatsConfig                  `yaml:"stats"`
 	Onboarding                   OnboardingConfig             `yaml:"onboarding"`
 	AutotuneFeeds                AutotuneFeedsConfig          `yaml:"autotune"`
+	ProofOfWeights               ProofOfWeightsConfig       `yaml:"proof_of_weights"`
 	Proxy                        ProxyConfig                  `yaml:"proxy"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
+}
+
+// ProofOfWeightsConfig gates Session B integrity controls. Defaults keep
+// legacy self-declared hello model_id behavior until the operator enables
+// the autotune hello gate explicitly.
+type ProofOfWeightsConfig struct {
+	RequireAutotuneHelloGate bool `yaml:"require_autotune_hello_gate"`
+	AutotuneEvidenceTTLDays  int  `yaml:"autotune_evidence_ttl_days"`
 }
 
 type CoordinatorConfig struct {
@@ -679,6 +688,10 @@ func Default() Config {
 			ProvisionalQuotaPerHour:         100,
 			ProvisionalTierWeight:           0.3,
 			ProvisionalRetentionDays:        30,
+		},
+		ProofOfWeights: ProofOfWeightsConfig{
+			RequireAutotuneHelloGate: false,
+			AutotuneEvidenceTTLDays:  30,
 		},
 		Tier2: Tier2Config{
 			ObserveEnabled:                 false,
@@ -1363,6 +1376,9 @@ func (c Config) Validate() error {
 	if err := c.validateAutotuneFeeds(); err != nil {
 		return err
 	}
+	if err := c.validateProofOfWeights(); err != nil {
+		return err
+	}
 	if _, ok := c.Rewards.RateCard["default"]; !ok {
 		return fmt.Errorf("rewards.rate_card must contain default")
 	}
@@ -1389,6 +1405,27 @@ func (c Config) Validate() error {
 				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
 			}
 		}
+	}
+	return nil
+}
+
+func (c Config) validateProofOfWeights() error {
+	p := c.ProofOfWeights
+	if p.AutotuneEvidenceTTLDays < 0 {
+		return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be >= 0")
+	}
+	if !p.RequireAutotuneHelloGate {
+		return nil
+	}
+	if p.AutotuneEvidenceTTLDays <= 0 {
+		return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be > 0 when require_autotune_hello_gate is true")
+	}
+	a := c.AutotuneFeeds
+	if strings.TrimSpace(a.AutotuneCandidatesPath) == "" || strings.TrimSpace(a.AutotuneCandidatesSigPath) == "" {
+		return fmt.Errorf("proof_of_weights.require_autotune_hello_gate requires autotune.autotune_candidates_path and autotune.autotune_candidates_sig_path")
+	}
+	if !c.Onboarding.AppTrackRegisterEnabled || strings.TrimSpace(c.Onboarding.PostgresDSN) == "" {
+		return fmt.Errorf("proof_of_weights.require_autotune_hello_gate requires onboarding.app_track_register_enabled and onboarding.postgres_dsn")
 	}
 	return nil
 }
