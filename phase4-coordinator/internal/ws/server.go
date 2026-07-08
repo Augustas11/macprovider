@@ -27,6 +27,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
+	"github.com/augstar/macprovider-coordinator/internal/pow"
 )
 
 const (
@@ -88,6 +89,7 @@ type Server struct {
 	catalog            *tier2.Catalog
 	autotuneCatalog    *autotune.Catalog
 	autotuneEvidence   autotune.EvidenceStore
+	telemetryDrift     *pow.Evaluator
 	identitySignatures IdentitySignatureStore
 	authPolicyAdmin    ProviderAuthPolicyAdminStore
 	idlePrewarm        IdlePrewarmRecorder
@@ -202,6 +204,12 @@ func WithAutotuneHelloGate(catalog *autotune.Catalog, store autotune.EvidenceSto
 	return func(s *Server) {
 		s.autotuneCatalog = catalog
 		s.autotuneEvidence = store
+	}
+}
+
+func WithTelemetryDriftEvaluator(evaluator *pow.Evaluator) Option {
+	return func(s *Server) {
+		s.telemetryDrift = evaluator
 	}
 }
 
@@ -2112,6 +2120,9 @@ func (s *Server) runCanaryProbe(provider pool.Provider) bool {
 	if attempt.modelClassBank {
 		pass := outcome == canaryProbePass
 		s.pool.SetModelClassOPoIPass(provider.ProviderID, provider.AssignedID, &pass)
+		if s.telemetryDrift != nil {
+			s.logTelemetryDriftAlerts(s.telemetryDrift.RecordModelClassCanary(provider, pass))
+		}
 	}
 	if outcome == canaryProbeSkip {
 		s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary skipped")
@@ -2664,6 +2675,53 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Int("slots_total", entry.SlotsTotal).
 			Msg("provider heartbeat")
 	}
+	if s.telemetryDrift != nil {
+		s.logTelemetryDriftAlerts(s.telemetryDrift.EvaluateHeartbeat(context.Background(), *entry))
+	}
+}
+
+func (s *Server) logTelemetryDriftAlerts(alerts []pow.Alert) {
+	for _, alert := range alerts {
+		event := s.log.Warn().
+			Str("event", pow.EventTelemetryDriftDetected).
+			Str("signal", alert.Signal).
+			Str("provider_id", alert.ProviderID).
+			Str("assigned_id", alert.AssignedID).
+			Str("model_id", alert.ModelID)
+		if alert.LiveTPS > 0 || alert.BaselineTPS > 0 {
+			event = event.
+				Float64("live_tps", alert.LiveTPS).
+				Float64("baseline_tps", alert.BaselineTPS).
+				Float64("tps_threshold", alert.TPSThreshold)
+		}
+		if alert.HashStatus != "" {
+			event = event.Str("hash_status", string(alert.HashStatus))
+		}
+		if alert.LiveModelHash != "" {
+			event = event.Str("live_model_hash_prefix", prefixHex(alert.LiveModelHash, 8))
+		}
+		if alert.ExpectedArtifactHash != "" {
+			event = event.Str("expected_artifact_hash_prefix", prefixHex(alert.ExpectedArtifactHash, 8))
+		}
+		if alert.OPoIPassRateWindow > 0 {
+			event = event.
+				Float64("opoi_pass_rate", alert.OPoIPassRate).
+				Int("opoi_pass_rate_window", alert.OPoIPassRateWindow).
+				Int("opoi_pass_count", alert.OPoIPassCount)
+		}
+		if alert.SwapDetected {
+			event = event.Bool("swap_detected", true)
+		}
+		event.Msg("proof-of-weights telemetry drift detected")
+	}
+}
+
+func prefixHex(value string, n int) string {
+	value = strings.TrimSpace(value)
+	if n <= 0 || len(value) <= n {
+		return value
+	}
+	return value[:n]
 }
 
 func poolHardwareCapacity(summary *HardwareSummary) *pool.ProviderHardwareCapacity {

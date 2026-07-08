@@ -25,6 +25,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/explorer"
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/pow"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/rewards"
@@ -478,6 +479,34 @@ func main() {
 			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
 			Str("autotune_catalog_version", autotuneCatalog.Version).
 			Msg("proof-of-weights autotune hello gate enabled")
+	}
+	if cfg.ProofOfWeights.TelemetryDrift.Enabled {
+		if autotuneCatalog == nil {
+			logger.Fatal().Msg("proof_of_weights.telemetry_drift.enabled requires autotune candidate catalog feeds")
+		}
+		if onboardingStore == nil || onboardingStore.DB() == nil {
+			logger.Fatal().Msg("proof_of_weights.telemetry_drift.enabled requires onboarding postgres store")
+		}
+		driftCfg, err := pow.TelemetryDriftConfigFrom(
+			true,
+			cfg.ProofOfWeights.TelemetryDrift.TPSRatioThreshold,
+			cfg.ProofOfWeights.TelemetryDrift.TPSMinAbsolute,
+			cfg.ProofOfWeights.TelemetryDrift.HashAlertOnStatus,
+			cfg.ProofOfWeights.TelemetryDrift.HashAlertOnArtifactDrift,
+			cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateWindow,
+			cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateThreshold,
+			cfg.ProofOfWeights.TelemetryDrift.AlertCooldownSeconds,
+		)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("proof_of_weights.telemetry_drift config invalid")
+		}
+		evidenceStore := autotune.NewPGEvidenceStore(onboardingStore.DB())
+		ttl := time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
+		wsOpts = append(wsOpts, providerws.WithTelemetryDriftEvaluator(pow.NewEvaluator(driftCfg, autotuneCatalog, evidenceStore, ttl)))
+		logger.Info().
+			Float64("tps_ratio_threshold", driftCfg.TPSRatioThreshold).
+			Int("opoi_pass_rate_window", driftCfg.OPoIPassRateWindow).
+			Msg("proof-of-weights telemetry drift alerts enabled")
 	}
 	if cfg.Auth.RequireProviderTokens {
 		logger.Info().
