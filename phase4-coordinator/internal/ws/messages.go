@@ -413,19 +413,24 @@ func ParseHello(payload []byte) (Hello, string, error) {
 }
 
 func ParseFirstAuthMessage(payload []byte) (string, int, error) {
+	typ, version, _, err := parseFirstAuthMessageWithField(payload)
+	return typ, version, err
+}
+
+func parseFirstAuthMessageWithField(payload []byte) (string, int, string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
-		return "", 0, err
+		return "", 0, "json", err
 	}
 	var typ string
 	if err := requireString(raw, "type", &typ); err != nil {
-		return "", 0, err
+		return "", 0, err.Field, err
 	}
 	var version int
 	if err := requireAuthVersion(raw, &version); err != nil {
-		return "", 0, err
+		return "", 0, err.Field, err
 	}
-	return typ, version, nil
+	return typ, version, "", nil
 }
 
 func ParseAuthRequest(payload []byte) (AuthRequest, Spec010Presence, string, error) {

@@ -612,12 +612,17 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 		return
 	}
 	if op != gobwas.OpText {
+		s.log.Warn().Str("bad_field", "opcode").Msg("provider first auth message rejected")
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return
 	}
 
-	typ, version, err := ParseFirstAuthMessage(payload)
+	typ, version, badField, err := parseFirstAuthMessageWithField(payload)
 	if err != nil {
+		if badField == "" {
+			badField = "unknown"
+		}
+		s.log.Warn().Str("bad_field", badField).Msg("provider first auth message rejected")
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return
 	}
@@ -627,6 +632,14 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 	case typ == "auth_request" && version == 2:
 		providerID, assignedID = s.handleV2Conn(conn, auth, payload, releaseUnauth)
 	default:
+		badField := "dispatch"
+		switch typ {
+		case "hello", "auth_request":
+			badField = "version"
+		default:
+			badField = "type"
+		}
+		s.log.Warn().Str("bad_field", badField).Msg("provider first auth message rejected")
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 	}
 }

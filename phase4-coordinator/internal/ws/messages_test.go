@@ -390,6 +390,19 @@ func TestParseAuthInitialAcceptsNumericStringVersion(t *testing.T) {
 	}
 }
 
+func TestParseFirstAuthMessageWithFieldReportsVersion(t *testing.T) {
+	payload := validAuthRequestInitial()
+	payload["version"] = "v2"
+
+	_, _, field, err := parseFirstAuthMessageWithField(mustAuthJSON(t, payload))
+	if err == nil {
+		t.Fatal("ParseFirstAuthMessageWithField err = nil, want error")
+	}
+	if field != "version" {
+		t.Fatalf("field = %q, want version", field)
+	}
+}
+
 func TestParseAuthInitialAcceptsProviderReceiptPublicKey(t *testing.T) {
 	payload := validAuthRequestInitial()
 	pubkey := bytesOf(0x42, 32)
