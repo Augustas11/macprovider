@@ -75,6 +75,55 @@ SPEC-015 receipt compatibility live checks are opt-in because they require a run
 SPEC015_NGINX_ECHO_URL='https://api.streamvc.live/operator-echo-url' make test-dist
 ```
 
+Issue #379 HTTP/2 live checks are also opt-in. The default `make test-dist`
+run records an explicit skip so CI does not depend on Pearl or spend buyer
+quota. Run the read-only ALPN and `/healthz` probe with:
+
+```sh
+MACPROVIDER_HTTP2_LIVE=1 \
+MACPROVIDER_HTTP2_GATEWAY_URL=https://api.streamvc.live \
+  bash phase4-coordinator/dist/test/check_nginx_http2_live_test.sh
+```
+
+Run the authenticated point-request, 8-way parallel benchmark, and curl SSE
+compatibility probe with a valid API key in
+`MACPROVIDER_HTTP2_API_KEY_FILE`, `MACPROVIDER_HTTP2_API_KEY`, `MP_API_KEY`,
+`BUYER_TOKEN`, or `~/.config/macprovider/buyer-api-key`. Prefer the file form
+so the token does not enter child-process environments:
+
+```sh
+MACPROVIDER_HTTP2_LIVE=1 \
+MACPROVIDER_HTTP2_RUN_CHAT_BENCH=1 \
+MACPROVIDER_HTTP2_RUN_SSE=1 \
+MACPROVIDER_HTTP2_MODEL='<live model id if /v1/models is empty>' \
+MACPROVIDER_HTTP2_API_KEY_FILE=~/.config/macprovider/buyer-api-key \
+MACPROVIDER_HTTP2_GATEWAY_URL=https://api.streamvc.live \
+  bash phase4-coordinator/dist/test/check_nginx_http2_live_test.sh
+```
+
+The benchmark fails unless HTTP/2 parallel p95 is lower than the forced
+HTTP/1.1 comparison and the HTTP/2 point request stays within
+`MACPROVIDER_HTTP2_POINT_REGRESSION_FACTOR` of HTTP/1.1, default `1.20`.
+For non-default `MACPROVIDER_HTTP2_GATEWAY_URL` values, pass the target token
+explicitly as `MACPROVIDER_HTTP2_API_KEY_FILE` or
+`MACPROVIDER_HTTP2_API_KEY`; generic key fallbacks are only used for
+`https://api.streamvc.live` unless
+`MACPROVIDER_HTTP2_ALLOW_GENERIC_KEY_FOR_CUSTOM_GATEWAY=1` is set.
+
+Pair that with the existing SDK streaming compatibility runner when a live
+provider is advertising a model:
+
+```sh
+(
+  cd test/integration && \
+  SPEC015_SDK_COMPAT_LIVE=1 \
+  MACPROVIDER_SPEC015_GATEWAY_URL=https://api.streamvc.live \
+  MACPROVIDER_SPEC015_MODEL="$MACPROVIDER_HTTP2_MODEL" \
+  MACPROVIDER_SPEC015_API_KEY=$MP_API_KEY \
+    go test . -run TestSpec015SDKCompatLiveRunner -count=1
+)
+```
+
 ## Deployment To Pearl
 
 Templates:
