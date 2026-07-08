@@ -560,3 +560,28 @@ func TestOnboardingCoordinatorDomainMustBeBareLowercaseHost(t *testing.T) {
 		t.Fatalf("domain validation err=%v", err)
 	}
 }
+
+// TestCanaryOPoIV0StagingOverlayParsesAndValidates verifies that the OPoI v0
+// staging overlay YAML unmarshals into a valid canary config block (both
+// challenges contain {nonce} in prompt and expected).
+func TestCanaryOPoIV0StagingOverlayParsesAndValidates(t *testing.T) {
+	b, err := os.ReadFile(filepath.Clean("../../coordinator.opoi-v0-staging.yaml"))
+	if err != nil {
+		t.Fatalf("read staging overlay: %v", err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		t.Fatalf("unmarshal staging overlay: %v", err)
+	}
+	if !cfg.Pool.CanaryEnabled {
+		t.Fatal("staging overlay must have canary_enabled: true")
+	}
+	if len(cfg.Pool.CanaryChallenges) == 0 {
+		t.Fatal("staging overlay must have at least one canary_challenge")
+	}
+	for i, ch := range cfg.Pool.CanaryChallenges {
+		if !strings.Contains(ch.Prompt, "{nonce}") || !strings.Contains(ch.Expected, "{nonce}") {
+			t.Fatalf("canary_challenges[%d] missing {nonce} in prompt or expected", i)
+		}
+	}
+}

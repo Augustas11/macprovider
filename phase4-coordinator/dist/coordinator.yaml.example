@@ -54,15 +54,21 @@ pool:
   degraded_probe_after_502: true
   breaker_failure_threshold: 2
   breaker_window_s: 120
+  # OPoI v0 canary liveness (disabled here — production template).
+  # For staging/lab rollout use coordinator.opoi-v0-staging.yaml overlay.
+  # See ops/runbooks/opoi-challenge-implementation.md §2 before enabling.
   canary_enabled: false
-  canary_interval_s: 300
-  canary_timeout_s: 30
-  canary_max_tokens: 8
-  canary_failure_threshold: 3
-  # Required when canary_enabled is true. Keep deployment-specific and rotate periodically.
+  canary_interval_s: 300        # 5 min staging; use 600 for initial production
+  canary_timeout_s: 120
+  canary_max_tokens: 16
+  canary_failure_threshold: 3   # provisional ban; pinned → degrade at 2
+  # OPoI v0 challenge bank reference (enable in staging overlay, not here).
+  # Every entry must contain {nonce} in both prompt and expected.
   # canary_challenges:
-  #   - prompt: "<private operator challenge prompt containing {nonce}>"
-  #     expected: "<private expected answer containing {nonce}>"
+  #   - prompt: "Reply with exactly: CANARY-{nonce}"
+  #     expected: "CANARY-{nonce}"
+  #   - prompt: "What is the code {nonce}? Reply with only the code."
+  #     expected: "{nonce}"
 
 routing:
   preflight_threshold_tokens: 4096
