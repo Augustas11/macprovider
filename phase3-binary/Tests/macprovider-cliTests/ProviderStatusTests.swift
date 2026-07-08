@@ -381,20 +381,21 @@ final class ProviderStatusTests: XCTestCase {
     func testSnapshotResetWindowSurvivesReentrancyDuringThermalGateAwait() async {
         // Regression for the round-1 finding: `snapshot(resetWindow:)` must
         // resolve the thermal-gate `await` BEFORE reading any window state.
-        // We force the race by giving the gate a 50ms artificial delay
-        // inside `isThrottled()`, then letting `finishRequest` enter the
-        // actor while snapshot is suspended. If the await were AFTER the
-        // window reads, the finish would be silently dropped on reset.
+        // We block `isThrottled()` until the test signals, then let
+        // `finishRequest` enter the actor while snapshot is suspended. If the
+        // await were AFTER the window reads, the finish would be silently
+        // dropped on reset.
         let gate = ThermalGate(
             stateProvider: FixedThermalProvider(state: .nominal),
-            isThrottledArtificialDelayNanos: 50_000_000
+            blockIsThrottledForTest: true
         )
         let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity(), thermalGate: gate)
 
         let begin = await status.beginRequest(requestID: "r-1")
         let snapshotTask = Task { await status.snapshot(resetWindow: true) }
-        try? await Task.sleep(nanoseconds: 10_000_000)
+        await gate.waitUntilIsThrottledBlockedForTest()
         await status.finishRequest(startedAt: begin, completion: nil, failed: false, requestID: "r-1")
+        await gate.resumeIsThrottledForTest()
 
         let snap = await snapshotTask.value
         XCTAssertEqual(snap.requestsServedSinceLast, 1,

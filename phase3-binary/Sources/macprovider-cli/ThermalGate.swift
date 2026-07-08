@@ -16,20 +16,22 @@ struct SystemThermalStateProvider: ThermalStateProviding {
 /// router naturally migrates new buyer traffic off a `slots_free=0` provider).
 actor ThermalGate {
     nonisolated private let stateProvider: ThermalStateProviding
-    nonisolated private let isThrottledArtificialDelayNanos: UInt64
+    nonisolated private let blockIsThrottledForTest: Bool
     private var current: ProcessInfo.ThermalState
     private var observer: NSObjectProtocol?
     private var drainTask: Task<Void, Never>?
     private var transitionLogger: (@Sendable (ProcessInfo.ThermalState, ProcessInfo.ThermalState) -> Void)?
+    private var isThrottledTestBlocker: CheckedContinuation<Void, Never>?
+    private var isThrottledBlockedWaiters: [CheckedContinuation<Void, Never>] = []
 
-    /// `isThrottledArtificialDelayNanos` is a test-only seam — pass a non-zero
-    /// value to make `isThrottled()` suspend long enough for a separate actor
-    /// caller to enter `ProviderStatus` during the await (used to validate
+    /// `blockIsThrottledForTest` is a test-only seam — when true, `isThrottled()`
+    /// suspends until `resumeIsThrottledForTest()` is called so a separate actor
+    /// caller can enter `ProviderStatus` during the await (used to validate
     /// snapshot reentrancy correctness).
     init(stateProvider: ThermalStateProviding = SystemThermalStateProvider(),
-         isThrottledArtificialDelayNanos: UInt64 = 0) {
+         blockIsThrottledForTest: Bool = false) {
         self.stateProvider = stateProvider
-        self.isThrottledArtificialDelayNanos = isThrottledArtificialDelayNanos
+        self.blockIsThrottledForTest = blockIsThrottledForTest
         self.current = stateProvider.currentThermalState()
     }
 
@@ -76,10 +78,41 @@ actor ThermalGate {
     func currentState() -> ProcessInfo.ThermalState { current }
 
     func isThrottled() async -> Bool {
-        if isThrottledArtificialDelayNanos > 0 {
-            try? await Task.sleep(nanoseconds: isThrottledArtificialDelayNanos)
+        if blockIsThrottledForTest {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                isThrottledTestBlocker = continuation
+                let waiters = isThrottledBlockedWaiters
+                isThrottledBlockedWaiters.removeAll()
+                for waiter in waiters {
+                    Task { waiter.resume() }
+                }
+            }
+            isThrottledTestBlocker = nil
         }
         return Self.shouldThrottle(current)
+    }
+
+    /// Test seam: await until `isThrottled()` has entered its blocking await.
+    func waitUntilIsThrottledBlockedForTest() async {
+        if isThrottledTestBlocker != nil {
+            return
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            if isThrottledTestBlocker != nil {
+                Task { continuation.resume() }
+            } else {
+                isThrottledBlockedWaiters.append(continuation)
+            }
+        }
+    }
+
+    /// Test seam: release a blocked `isThrottled()` call.
+    func resumeIsThrottledForTest() {
+        guard let continuation = isThrottledTestBlocker else { return }
+        isThrottledTestBlocker = nil
+        // Resume outside the actor executor — resuming from within the same
+        // actor would deadlock because `isThrottled()` must re-enter here.
+        Task { continuation.resume() }
     }
 
     /// Test seam: drive a transition without an NSNotification.
