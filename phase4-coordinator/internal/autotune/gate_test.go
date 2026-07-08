@@ -64,6 +64,35 @@ func TestEvaluateHelloGateUnderTierAllowedOverTierRejected(t *testing.T) {
 	}
 }
 
+func TestEvaluateHelloGateAcceptsCatalogRowKeyHelloModelID(t *testing.T) {
+	t.Parallel()
+	catalog := mustCatalog(t, `{
+		"version":"test",
+		"generated_at":"2026-07-08T00:00:00Z",
+		"source":"operator_curated_autotune_candidate_catalog",
+		"rows":{
+			"qwen3-coder-30b-a3b-instruct":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","model_revision":"6e302ea604ad9ab206367e2c501d1571023e7b6d","model_sha256":"10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0","min_ram_gb":28,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500},"runtime_status":"recommendable"}
+		}
+	}`)
+	evidence := autotune.VerifiedEvidence{
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{
+			{
+				ModelKey:               "qwen3-coder-30b-a3b-instruct",
+				ModelID:                "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+				SustainedTPS:           45.9,
+				TTFTMS:                 3064,
+				ArtifactSHA256:         "10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0",
+				CandidateCatalogSHA256: catalog.SHA256,
+			},
+		},
+	}
+	allowed := autotune.EvaluateHelloGate(catalog, evidence, "qwen3-coder-30b-a3b-instruct")
+	if !allowed.Allowed || allowed.ClaimedModelKey != "qwen3-coder-30b-a3b-instruct" {
+		t.Fatalf("catalog-key hello: %+v", allowed)
+	}
+}
+
 func TestEvaluateHelloGateRejectsThermalThrottle(t *testing.T) {
 	t.Parallel()
 	catalog := mustCatalog(t, `{

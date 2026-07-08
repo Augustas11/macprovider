@@ -98,7 +98,11 @@ func (c *Catalog) HighestClaimedTier(modelID string) (key string, row Row, ok bo
 	if c == nil {
 		return "", Row{}, false
 	}
-	keys := c.keysByModel[normalizeModelID(modelID)]
+	normalized := normalizeModelID(modelID)
+	if row, ok := c.rowsByKey[normalized]; ok {
+		return normalized, row, true
+	}
+	keys := c.keysByModel[normalized]
 	if len(keys) == 0 {
 		return "", Row{}, false
 	}
