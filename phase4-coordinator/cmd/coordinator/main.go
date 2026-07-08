@@ -698,8 +698,8 @@ func main() {
 	providerMux.Handle("/admin/ledger/", billingHandler)
 	if rewardsDB != nil {
 		providerMux.Handle("/admin/trust-promotion/", rewards.TrustPromotionMux(rewards.TrustAdminDeps{
-			DB:          rewardsDB,
-			OperatorKey: cfg.Auth.OperatorKey,
+			DB:           rewardsDB,
+			OperatorKeys: cfg.Auth.OperatorKeys,
 		}))
 	}
 	if cfg.Auth.RequireProviderTokens {
