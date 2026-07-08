@@ -588,13 +588,17 @@ struct ServeCommand: AsyncParsableCommand {
         }
         if resolved.enableWarmSwap || receiptRotator != nil {
             let socketURL = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
+            let malibuAccrualClient = try? MalibuAccrualClient(coordinatorURL: resolved.coordinatorURL)
             controlSocket = ControlSocketServer(
                 socketPath: socketURL,
                 modelRuntime: modelRuntime,
                 supportedModels: resolved.supportedModels,
                 receiptRotator: receiptRotator,
                 receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
-                identityBridge: identityBridge
+                identityBridge: identityBridge,
+                providerStatus: providerStatus,
+                malibuAccrualClient: malibuAccrualClient,
+                providerToken: resolved.providerToken
             )
             do {
                 try await controlSocket?.start()

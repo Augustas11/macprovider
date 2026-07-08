@@ -1085,7 +1085,7 @@ func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, 
 }
 
 func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB, connectivity rewards.ProviderConnectivity) http.Handler {
-	if rewardsDB == nil || !cfg.MalibuEmission.Enabled {
+	if rewardsDB == nil {
 		return nil
 	}
 	rewardsCfg := rewards.Config{

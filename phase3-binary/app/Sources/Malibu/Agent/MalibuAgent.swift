@@ -33,6 +33,7 @@ final class MalibuAgent: ObservableObject {
     private var providerLogTailCancellable: AnyCancellable?
     private var reconnect = ReconnectPolicy()
     private let earningsClient = EarningsClient()
+    private let malibuAccrualClient = MalibuAccrualClient()
     private let thermalMonitor = ThermalMonitor()
     private var cancellables: Set<AnyCancellable> = []
     // AUDIT R2 CODE H3 fix: once shutdown begins, refuse any subsequent start()
@@ -518,8 +519,7 @@ final class MalibuAgent: ObservableObject {
               let token = await KeychainStore.readProviderToken(providerID: providerID) else {
             return
         }
-        do {
-            let earnings = try await earningsClient.fetch(providerID: providerID, bearerToken: token)
+        if let earnings = try? await earningsClient.fetch(providerID: providerID, bearerToken: token) {
             snapshot.walletBound = earnings.walletBound
             snapshot.trustTier = earnings.trustTier
             snapshot.unpaidLedgerBacklogUSDC = earnings.unpaidLedgerBacklogUSDC
@@ -532,10 +532,15 @@ final class MalibuAgent: ObservableObject {
             snapshot.malibuAccruedAllTime = earnings.malibuAllTime
             snapshot.trustCriteriaMet = earnings.trustCriteriaMet
             snapshot.trustCriteriaRequired = earnings.trustCriteriaRequired
-        } catch {
-            // Earnings is not part of the daemon liveness path. Keep existing
-            // metrics visible and retry on the next poll without logging bearer
-            // material or the request payload.
+        }
+        if let accrual = try? await malibuAccrualClient.fetch(bearerToken: token) {
+            snapshot.malibuAccruedAllTime = accrual.accruedMALIBU
+            snapshot.trustTier = accrual.trustTier
+            snapshot.trustCriteriaMet = accrual.trustCriteriaMet
+            snapshot.trustCriteriaRequired = accrual.trustCriteriaRequired
+            if let walletBound = accrual.walletBound {
+                snapshot.walletBound = walletBound
+            }
         }
     }
 
