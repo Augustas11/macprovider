@@ -1,0 +1,14 @@
+# Proof of Weights W4 staging overlay — telemetry drift alerts (observe-only).
+# Merge with production coordinator.yaml + Pearl pearl-overlays.yaml.
+proof_of_weights:
+  telemetry_drift:
+    enabled: true
+    tps_ratio_threshold: 0.70
+    tps_min_absolute: 5.0
+    hash_alert_on_status:
+      - hash_mismatch
+      - hash_invalid
+    hash_alert_on_artifact_drift: true
+    opoi_pass_rate_window: 10
+    opoi_pass_rate_threshold: 0.80
+    alert_cooldown_s: 900
