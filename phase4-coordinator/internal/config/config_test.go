@@ -105,6 +105,17 @@ func TestCanaryValidationRequiresPrivateChallengeBankWhenEnabled(t *testing.T) {
 		t.Fatalf("enabled canary without challenges validation err=%v", err)
 	}
 
+	cfg.Pool.ModelClassChallenges = map[string][]CanaryChallengeConfig{
+		"model-a": {{
+			Prompt:   "Reply with exactly: CANARY-{nonce}",
+			Expected: "CANARY-{nonce}",
+		}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("enabled canary with model_class_challenges only should validate: %v", err)
+	}
+	cfg.Pool.ModelClassChallenges = nil
+
 	cfg.Pool.CanaryChallenges = []CanaryChallengeConfig{{
 		Prompt:   "Which US state uses postal abbreviation VT?",
 		Expected: "Vermont-{nonce}",
@@ -582,6 +593,16 @@ func TestCanaryOPoIV0StagingOverlayParsesAndValidates(t *testing.T) {
 	for i, ch := range cfg.Pool.CanaryChallenges {
 		if !strings.Contains(ch.Prompt, "{nonce}") || !strings.Contains(ch.Expected, "{nonce}") {
 			t.Fatalf("canary_challenges[%d] missing {nonce} in prompt or expected", i)
+		}
+	}
+	if len(cfg.Pool.ModelClassChallenges) == 0 {
+		t.Fatal("staging overlay must include model_class_challenges for W3 lab smoke")
+	}
+	for modelID, bank := range cfg.Pool.ModelClassChallenges {
+		for i, ch := range bank {
+			if !strings.Contains(ch.Prompt, "{nonce}") || !strings.Contains(ch.Expected, "{nonce}") {
+				t.Fatalf("model_class_challenges.%s[%d] missing {nonce}", modelID, i)
+			}
 		}
 	}
 }

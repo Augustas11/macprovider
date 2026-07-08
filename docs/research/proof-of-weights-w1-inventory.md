@@ -68,4 +68,4 @@
 
 ## Handoff to W2
 
-W1 seams are wired; W2 adds **capacity ceiling** via verified autotune hardware-evidence at WS hello (`internal/autotune` hello gate). OPoI model-class probes remain Session A / W3.
+W1 seams are wired; W2 adds **capacity ceiling** via verified autotune hardware-evidence at WS hello (`internal/autotune` hello gate). W3 adds **runtime model-class probes** via `pool.model_class_challenges` with optional `max_ttft_ms` / `min_sustained_tps` gates on the existing canary path (`internal/ws/canary_probe.go`), exporting `model_class_opoi_pass` on `/poolz`.
