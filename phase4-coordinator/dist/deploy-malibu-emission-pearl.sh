@@ -180,6 +180,14 @@ if [ "$DRY_RUN" != "1" ]; then
     install -d -o root -g root -m 0755 /etc/systemd/system/macprovider-coordinator.service.d
     install -o root -g root -m 0644 $DEPLOY_TMP/malibu-emission.conf \
       /etc/systemd/system/macprovider-coordinator.service.d/malibu-emission.conf
+    # OPS-1: remove the superseded OPoI drop-in. Its ExecStart points at
+    # coordinator.opoi-v0-staging.yaml and, because systemd applies .service.d
+    # drop-ins in lexicographic filename order, opoi-v0.conf sorts AFTER
+    # malibu-emission.conf and its ExecStart would WIN — the coordinator would
+    # then ignore the merged coordinator.pearl-overlays.yaml. The OPoI config is
+    # already folded into pearl-overlays.yaml by the step 3 merge, so removing
+    # this drop-in drops no configuration.
+    rm -f /etc/systemd/system/macprovider-coordinator.service.d/opoi-v0.conf
   "
 fi
 
@@ -216,6 +224,15 @@ if [ "$DRY_RUN" != "1" ]; then
       --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml \
       --validate-config
     systemctl daemon-reload
+    # OPS-1: assert the effective ExecStart uses the merged overlay we just
+    # validated. Guards against a lingering/again-added drop-in silently running
+    # the coordinator against a different --config-overlay than --validate-config
+    # checked (validate-vs-runtime divergence).
+    if ! systemctl show -p ExecStart macprovider-coordinator | grep -q "coordinator.pearl-overlays.yaml"; then
+      echo "ERROR: effective ExecStart does not reference coordinator.pearl-overlays.yaml" >&2
+      systemctl show -p ExecStart macprovider-coordinator >&2
+      exit 1
+    fi
     systemctl restart macprovider-coordinator
     sleep 3
     systemctl is-active macprovider-coordinator
@@ -234,5 +251,13 @@ log "DONE. C4 staging complete with malibu_emission.enabled=false."
 log "Verify read API from a provider token:"
 log "  curl -sS -H \"Authorization: Bearer \$PROVIDER_TOKEN\" https://$DOMAIN/v1/provider/malibu-accrual | jq"
 log "Promotion (accrual ticks): set malibu_emission.enabled: true in pearl overlay and restart."
-log "Rollback:"
-log "  ssh -i $SSH_KEY $VPS_USER@$VPS_HOST 'sudo rm /etc/systemd/system/macprovider-coordinator.service.d/malibu-emission.conf && sudo systemctl daemon-reload && sudo systemctl restart macprovider-coordinator'"
+log "Rollback (disable MALIBU emission, KEEP the OPoI overlay):"
+log "  1. Edit /etc/macprovider/coordinator.pearl-overlays.yaml and set the"
+log "     malibu_emission.enabled key to false (edit the YAML directly; do not"
+log "     sed it — a blind substitution can hit another 'enabled:' key or break"
+log "     indentation)."
+log "  2. Validate + restart (drop-in unchanged so the OPoI overlay is preserved):"
+log "     ssh -i $SSH_KEY $VPS_USER@$VPS_HOST 'sudo /opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml --validate-config && sudo systemctl restart macprovider-coordinator'"
+log "  Do NOT remove the malibu-emission.conf drop-in: it loads pearl-overlays.yaml,"
+log "  which now also carries the merged OPoI overlay, so removing it would leave the"
+log "  base unit with no --config-overlay and drop the OPoI canary config."
