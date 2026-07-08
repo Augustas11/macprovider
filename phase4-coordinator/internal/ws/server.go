@@ -988,6 +988,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		if badField == "" {
 			badField = "stage"
 		}
+		s.log.Warn().Str("bad_field", badField).Msg("provider auth_request proof rejected")
 		s.sendAuthRejection(conn, "invalid_auth_request", "invalid auth_request")
 		s.close(conn, CloseInvalidHello, "invalid_auth_request: "+badField)
 		return "", ""
