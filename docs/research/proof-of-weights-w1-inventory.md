@@ -66,6 +66,6 @@
 
 ---
 
-## Handoff to W2
+## Handoff to W2–W4
 
-W1 seams are wired; W2 adds **capacity ceiling** via verified autotune hardware-evidence at WS hello (`internal/autotune` hello gate). W3 adds **runtime model-class probes** via `pool.model_class_challenges` with optional `max_ttft_ms` / `min_sustained_tps` gates on the existing canary path (`internal/ws/canary_probe.go`), exporting `model_class_opoi_pass` on `/poolz`.
+W1 seams are wired; W2 adds **capacity ceiling** via verified autotune hardware-evidence at WS hello (`internal/autotune` hello gate). W3 adds **runtime model-class probes** via `pool.model_class_challenges` with optional `max_ttft_ms` / `min_sustained_tps` gates on the existing canary path (`internal/ws/canary_probe.go`), exporting `model_class_opoi_pass` on `/poolz`. W4 adds **observe-only telemetry drift alerts** (`internal/pow/drift.go`) comparing live heartbeat TPS/hash and rolling OPoI pass-rate against verified autotune evidence; emits `pow_telemetry_drift_detected` structured logs without changing routing or sanctions.
