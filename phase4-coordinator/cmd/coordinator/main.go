@@ -497,6 +497,7 @@ func main() {
 			true,
 			cfg.ProofOfWeights.TelemetryDrift.TPSRatioThreshold,
 			cfg.ProofOfWeights.TelemetryDrift.TPSMinAbsolute,
+			cfg.ProofOfWeights.TelemetryDrift.TPSMinRequestsWindow,
 			cfg.ProofOfWeights.TelemetryDrift.HashAlertOnStatus,
 			cfg.ProofOfWeights.TelemetryDrift.HashAlertOnArtifactDrift,
 			cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateWindow,
@@ -511,6 +512,7 @@ func main() {
 		wsOpts = append(wsOpts, providerws.WithTelemetryDriftEvaluator(pow.NewEvaluator(driftCfg, autotuneCatalog, evidenceStore, ttl)))
 		logger.Info().
 			Float64("tps_ratio_threshold", driftCfg.TPSRatioThreshold).
+			Int("tps_min_requests_window", driftCfg.TPSMinRequestsWindow).
 			Int("opoi_pass_rate_window", driftCfg.OPoIPassRateWindow).
 			Msg("proof-of-weights telemetry drift alerts enabled")
 	}

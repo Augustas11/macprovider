@@ -14,10 +14,13 @@ import (
 
 const EventTelemetryDriftDetected = "pow_telemetry_drift_detected"
 
+const defaultTPSMinRequestsWindow = 2
+
 type TelemetryDriftConfig struct {
 	Enabled                  bool
 	TPSRatioThreshold        float64
 	TPSMinAbsolute           float64
+	TPSMinRequestsWindow     int
 	HashAlertOnStatus        []pool.HashStatus
 	HashAlertOnArtifactDrift bool
 	OPoIPassRateWindow       int
@@ -62,6 +65,9 @@ func NewEvaluator(cfg TelemetryDriftConfig, catalog *autotune.Catalog, evidence 
 	}
 	if cfg.TPSRatioThreshold <= 0 {
 		cfg.TPSRatioThreshold = 0.70
+	}
+	if cfg.TPSMinRequestsWindow <= 0 {
+		cfg.TPSMinRequestsWindow = defaultTPSMinRequestsWindow
 	}
 	if cfg.AlertCooldown <= 0 {
 		cfg.AlertCooldown = 15 * time.Minute
@@ -150,7 +156,10 @@ func (e *Evaluator) evaluateTPS(provider pool.Provider, benchmark autotune.Verif
 	if baseline <= 0 || math.IsNaN(baseline) || math.IsInf(baseline, 0) {
 		return Alert{}, false
 	}
-	live := provider.ThroughputTPSEstimate
+	if provider.RequestsServedSinceLast < e.cfg.TPSMinRequestsWindow {
+		return Alert{}, false
+	}
+	live := provider.ThroughputTPSSinceLast
 	if live <= 0 || math.IsNaN(live) || math.IsInf(live, 0) {
 		return Alert{}, false
 	}
@@ -174,16 +183,19 @@ func (e *Evaluator) evaluateHash(provider pool.Provider, benchmark autotune.Veri
 	for _, status := range e.cfg.HashAlertOnStatus {
 		if provider.HashStatus == status {
 			return Alert{
-				Signal:     "hash_status",
-				ProviderID: provider.ProviderID,
-				AssignedID: provider.AssignedID,
-				ModelID:    provider.ModelID,
-				HashStatus: provider.HashStatus,
+				Signal:        "hash_status",
+				ProviderID:    provider.ProviderID,
+				AssignedID:    provider.AssignedID,
+				ModelID:       provider.ModelID,
+				HashStatus:    provider.HashStatus,
 				LiveModelHash: strings.TrimSpace(provider.ModelHash),
 			}, true
 		}
 	}
 	if !e.cfg.HashAlertOnArtifactDrift || !hasBenchmark {
+		return Alert{}, false
+	}
+	if provider.HashStatus == pool.HashStatusVerified {
 		return Alert{}, false
 	}
 	expected := strings.ToLower(strings.TrimSpace(benchmark.ArtifactSHA256))
@@ -278,7 +290,7 @@ func ParseHashAlertStatuses(values []string) ([]pool.HashStatus, error) {
 	return out, nil
 }
 
-func TelemetryDriftConfigFrom(enabled bool, tpsRatio, tpsMinAbsolute float64, hashStatuses []string, hashArtifactDrift bool, opoiWindow int, opoiThreshold float64, cooldownSeconds int) (TelemetryDriftConfig, error) {
+func TelemetryDriftConfigFrom(enabled bool, tpsRatio, tpsMinAbsolute float64, tpsMinRequestsWindow int, hashStatuses []string, hashArtifactDrift bool, opoiWindow int, opoiThreshold float64, cooldownSeconds int) (TelemetryDriftConfig, error) {
 	statuses, err := ParseHashAlertStatuses(hashStatuses)
 	if err != nil {
 		return TelemetryDriftConfig{}, err
@@ -288,6 +300,7 @@ func TelemetryDriftConfigFrom(enabled bool, tpsRatio, tpsMinAbsolute float64, ha
 		Enabled:                  enabled,
 		TPSRatioThreshold:        tpsRatio,
 		TPSMinAbsolute:           tpsMinAbsolute,
+		TPSMinRequestsWindow:     tpsMinRequestsWindow,
 		HashAlertOnStatus:        statuses,
 		HashAlertOnArtifactDrift: hashArtifactDrift,
 		OPoIPassRateWindow:       opoiWindow,

@@ -69,9 +69,9 @@ type Config struct {
 // legacy self-declared hello model_id behavior until the operator enables
 // the autotune hello gate explicitly.
 type ProofOfWeightsConfig struct {
-	RequireAutotuneHelloGate bool                     `yaml:"require_autotune_hello_gate"`
-	AutotuneEvidenceTTLDays  int                      `yaml:"autotune_evidence_ttl_days"`
-	TelemetryDrift           TelemetryDriftConfig     `yaml:"telemetry_drift"`
+	RequireAutotuneHelloGate bool                 `yaml:"require_autotune_hello_gate"`
+	AutotuneEvidenceTTLDays  int                  `yaml:"autotune_evidence_ttl_days"`
+	TelemetryDrift           TelemetryDriftConfig `yaml:"telemetry_drift"`
 }
 
 // TelemetryDriftConfig enables observe-only operator alerts when live
@@ -81,6 +81,7 @@ type TelemetryDriftConfig struct {
 	Enabled                  bool     `yaml:"enabled"`
 	TPSRatioThreshold        float64  `yaml:"tps_ratio_threshold"`
 	TPSMinAbsolute           float64  `yaml:"tps_min_absolute"`
+	TPSMinRequestsWindow     int      `yaml:"tps_min_requests_window"`
 	HashAlertOnStatus        []string `yaml:"hash_alert_on_status"`
 	HashAlertOnArtifactDrift bool     `yaml:"hash_alert_on_artifact_drift"`
 	OPoIPassRateWindow       int      `yaml:"opoi_pass_rate_window"`
@@ -768,6 +769,7 @@ func Default() Config {
 				Enabled:                  false,
 				TPSRatioThreshold:        0.70,
 				TPSMinAbsolute:           5.0,
+				TPSMinRequestsWindow:     2,
 				HashAlertOnStatus:        []string{"hash_mismatch", "hash_invalid"},
 				HashAlertOnArtifactDrift: true,
 				OPoIPassRateWindow:       10,
@@ -1535,6 +1537,9 @@ func (c Config) validateProofOfWeights() error {
 	}
 	if d.TPSMinAbsolute < 0 || math.IsNaN(d.TPSMinAbsolute) || math.IsInf(d.TPSMinAbsolute, 0) {
 		return fmt.Errorf("proof_of_weights.telemetry_drift.tps_min_absolute must be >= 0")
+	}
+	if d.TPSMinRequestsWindow < 0 {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.tps_min_requests_window must be >= 0")
 	}
 	if d.OPoIPassRateWindow < 0 {
 		return fmt.Errorf("proof_of_weights.telemetry_drift.opoi_pass_rate_window must be >= 0")

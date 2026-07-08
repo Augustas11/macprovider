@@ -820,6 +820,45 @@ func TestApplyHeartbeatStoresHardwareCapacity(t *testing.T) {
 	}
 }
 
+func TestApplyHeartbeatStoresRollingThroughput(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "current",
+		State:            StateReady,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		ConnectedAt:      start,
+		MaxConcurrency:   1,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		AuthState:        AuthBearerValidated,
+		ModelID:          "model-a",
+		MaxContextTokens: 8192,
+	}, nil)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status:                  StateReady,
+		ModelID:                 "model-a",
+		RAMGB:                   32,
+		MaxContextTokens:        8192,
+		MaxConcurrency:          1,
+		SlotsFree:               1,
+		SlotsTotal:              1,
+		ThroughputTPSEstimate:   0.2,
+		RequestsServedSinceLast: 1,
+		ThroughputTPSSinceLast:  42.5,
+		At:                      start.Add(time.Minute),
+	})
+	if !ok {
+		t.Fatal("ApplyHeartbeat ok = false")
+	}
+	if provider.RequestsServedSinceLast != 1 || provider.ThroughputTPSSinceLast != 42.5 {
+		t.Fatalf("rolling throughput = requests:%d tps:%v", provider.RequestsServedSinceLast, provider.ThroughputTPSSinceLast)
+	}
+}
+
 func TestApplyHeartbeatClampsHardwareCapacityBounds(t *testing.T) {
 	registry := NewRegistry(nil, WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
 		return HashStatusVerified
