@@ -403,6 +403,14 @@ func (s *Server) Admission() *AdmissionManager {
 	return s.admission
 }
 
+// PoolSnapshot returns connected providers for uptime/trust evaluation hooks.
+func (s *Server) PoolSnapshot() []pool.Provider {
+	if s == nil || s.pool == nil {
+		return nil
+	}
+	return s.pool.Snapshot()
+}
+
 func (s *Server) SetTier2Config(cfg config.Tier2Config) {
 	s.tier2Mu.Lock()
 	defer s.tier2Mu.Unlock()

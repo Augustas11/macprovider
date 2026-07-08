@@ -168,13 +168,17 @@ When `cap_replay_pending = TRUE`, under the same SERIALIZABLE lock as live emiss
 
 ### 4.4 Trusted unlock evaluator (Phase C2)
 
-Coordinator job evaluates SPEC-026 §5.2 criteria:
+Coordinator job evaluates SPEC-026 §5.2 criteria on `unlock_eval_interval`:
 
 - At least **one economic** (E1/E2/E3) **and one distinct additional** criterion
+- E1: ≥100 verified receipts from `settlement_receipt_verdicts` (SQLite billing DB)
+- E2/A3: wallet bound + ≥100 USDC for 72h when `base_usdc_balance_rpc_urls` + checker configured
+- E3: dual-control operator promotion via `/admin/trust-promotion/request` + `.../approve`
+- A1: 72h uptime with heartbeat gap &lt;5m (live pool snapshot)
+- A4: `provider_identities.attested = true`
 - On unlock: `trust_tier → trusted`; new accruals omit `trust_tier_provisional` hold
 - On demotion (§5.5): `trust_tier → provisional`, set `demotion_cooldown_until = now() + 72h`, new rows get `demotion_cooldown` hold until cooldown elapses
-
-v0.1 ships unlock evaluator skeleton with manual `trust_tier` override admin path; full E1/E2 automation is follow-up within C2.
+- Post-demotion requalification: pairing must co-hold continuously for 72h before reinstatement
 
 ### 4.5 Withdrawal runner filter
 

@@ -102,8 +102,9 @@ type MalibuEmissionConfig struct {
 	WalletDailyCapMALIBU       float64 `yaml:"wallet_daily_cap_malibu"`
 	SQLitePayoutDBPath         string  `yaml:"sqlite_payout_db_path"`
 	WalletMirrorIntervalSeconds int    `yaml:"wallet_mirror_interval_seconds"`
-	UnlockEvalIntervalSeconds  int     `yaml:"unlock_eval_interval_seconds"`
-	MaxSerializableRetries     int     `yaml:"max_serializable_retries"`
+	UnlockEvalIntervalSeconds  int      `yaml:"unlock_eval_interval_seconds"`
+	MaxSerializableRetries     int      `yaml:"max_serializable_retries"`
+	BaseUSDCBalanceRPCURLs     []string `yaml:"base_usdc_balance_rpc_urls"`
 }
 
 // AutotuneFeedsConfig points at the signed SPEC-023 recommendation feeds

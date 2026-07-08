@@ -37,6 +37,7 @@ type Config struct {
 	WalletMirrorInterval    time.Duration
 	UnlockEvalInterval      time.Duration
 	MaxSerializableRetries  int
+	BaseUSDCBalanceRPCURLs  []string
 }
 
 // DefaultsApplied fills zero values with spec defaults.
@@ -78,13 +79,21 @@ func (c Config) Validate() error {
 
 // Runner orchestrates emission tick, wallet mirror, and unlock evaluation.
 type Runner struct {
-	db     *sql.DB
-	cfg    Config
-	logger zerolog.Logger
+	db               *sql.DB
+	cfg              Config
+	logger           zerolog.Logger
+	connectivity     ProviderConnectivity
+	balanceChecker   WalletBalanceChecker
+}
+
+// RunnerDeps optional integrations for Phase C2 unlock evaluation.
+type RunnerDeps struct {
+	Connectivity   ProviderConnectivity
+	BalanceChecker WalletBalanceChecker
 }
 
 // New constructs a Runner. db MUST be authenticated as rewards_writer.
-func New(db *sql.DB, cfg Config, logger zerolog.Logger) (*Runner, error) {
+func New(db *sql.DB, cfg Config, logger zerolog.Logger, deps RunnerDeps) (*Runner, error) {
 	if db == nil {
 		return nil, errors.New("rewards: db is required")
 	}
@@ -92,7 +101,20 @@ func New(db *sql.DB, cfg Config, logger zerolog.Logger) (*Runner, error) {
 	if err := applied.Validate(); err != nil {
 		return nil, err
 	}
-	return &Runner{db: db, cfg: applied, logger: logger}, nil
+	return &Runner{
+		db:             db,
+		cfg:            applied,
+		logger:         logger,
+		connectivity:   deps.Connectivity,
+		balanceChecker: deps.BalanceChecker,
+	}, nil
+}
+
+// SetConnectivity wires live pool heartbeat state after the WS server starts.
+func (r *Runner) SetConnectivity(c ProviderConnectivity) {
+	if r != nil {
+		r.connectivity = c
+	}
 }
 
 // Start launches background goroutines until ctx is cancelled.

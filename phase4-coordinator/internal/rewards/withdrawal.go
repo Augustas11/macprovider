@@ -50,23 +50,18 @@ func SetTrustTier(ctx context.Context, db *sql.DB, providerID, tier string) erro
 	now := time.Now().UTC()
 	var cooldown interface{}
 	if tier == TierProvisional {
-		cooldown = now.Add(72 * time.Hour)
+		cooldown = now.Add(trustRequalifyWindow)
 	}
 	_, err := db.ExecContext(ctx, `
         INSERT INTO provider_emission_state (provider_id, trust_tier, demotion_cooldown_until, updated_at)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (provider_id) DO UPDATE SET
             trust_tier = EXCLUDED.trust_tier,
-            demotion_cooldown_until = EXCLUDED.demotion_cooldown_until,
+            demotion_cooldown_until = CASE
+                WHEN EXCLUDED.trust_tier = 'trusted' THEN NULL
+                ELSE EXCLUDED.demotion_cooldown_until
+            END,
             updated_at = EXCLUDED.updated_at
     `, providerID, tier, cooldown, now)
 	return err
-}
-
-// runUnlockEval is the Phase C2 skeleton — full E1/E2 automation deferred.
-func (r *Runner) runUnlockEval(ctx context.Context) error {
-	// v0.1: no-op evaluator; operators promote via admin SetTrustTier.
-	// Hook point for SPEC-026 §5.2 criteria evaluation.
-	_ = ctx
-	return nil
 }
