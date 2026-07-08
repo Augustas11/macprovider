@@ -58,6 +58,7 @@ type Config struct {
 	Explorer                     ExplorerConfig               `yaml:"explorer"`
 	Stats                        StatsConfig                  `yaml:"stats"`
 	Onboarding                   OnboardingConfig             `yaml:"onboarding"`
+	MalibuEmission               MalibuEmissionConfig         `yaml:"malibu_emission"`
 	AutotuneFeeds                AutotuneFeedsConfig          `yaml:"autotune"`
 	ProofOfWeights               ProofOfWeightsConfig       `yaml:"proof_of_weights"`
 	Proxy                        ProxyConfig                  `yaml:"proxy"`
@@ -89,6 +90,20 @@ type OnboardingConfig struct {
 	AppleTeamID             string            `yaml:"apple_team_id"`
 	CoordinatorDomain       string            `yaml:"coordinator_domain"`
 	ASNPrefixes             map[string]string `yaml:"asn_prefixes"`
+}
+
+// MalibuEmissionConfig gates SPEC-MALIBU-EMISSION-LEDGER bootstrap accrual.
+// Default-off; money-path changes require PR + audit.
+type MalibuEmissionConfig struct {
+	Enabled                    bool    `yaml:"enabled"`
+	WriterDSN                  string  `yaml:"writer_dsn"`
+	TickIntervalSeconds        int     `yaml:"tick_interval_seconds"`
+	ProviderDailyCapMALIBU     float64 `yaml:"provider_daily_cap_malibu"`
+	WalletDailyCapMALIBU       float64 `yaml:"wallet_daily_cap_malibu"`
+	SQLitePayoutDBPath         string  `yaml:"sqlite_payout_db_path"`
+	WalletMirrorIntervalSeconds int    `yaml:"wallet_mirror_interval_seconds"`
+	UnlockEvalIntervalSeconds  int     `yaml:"unlock_eval_interval_seconds"`
+	MaxSerializableRetries     int     `yaml:"max_serializable_retries"`
 }
 
 // AutotuneFeedsConfig points at the signed SPEC-023 recommendation feeds
@@ -780,6 +795,15 @@ func Default() Config {
 			BundleID:                "tech.malibu.app",
 			CoordinatorDomain:       "coordinator.streamvc.live",
 		},
+		MalibuEmission: MalibuEmissionConfig{
+			Enabled:                     false,
+			TickIntervalSeconds:         900,
+			ProviderDailyCapMALIBU:      25,
+			WalletDailyCapMALIBU:        100,
+			WalletMirrorIntervalSeconds: 300,
+			UnlockEvalIntervalSeconds:   3600,
+			MaxSerializableRetries:      5,
+		},
 		Explorer: ExplorerConfig{
 			Enabled:                       false,
 			BindPath:                      "/admin/explorer/",
@@ -903,6 +927,7 @@ func (c *Config) resolveEnv() error {
 		{"stats.provider_portal_dsn", &c.Stats.ProviderPortalDSN},
 		{"stats.partner_keys.writer_dsn", &c.Stats.PartnerKeys.WriterDSN},
 		{"stats.partner_keys_admin_dsn", &c.Stats.PartnerKeysAdminDSN},
+		{"malibu_emission.writer_dsn", &c.MalibuEmission.WriterDSN},
 	}
 	for _, f := range statsDSNs {
 		v, err := resolveEnvValue(f.field, *f.dst)
@@ -1373,6 +1398,9 @@ func (c Config) Validate() error {
 	if err := c.validateOnboarding(); err != nil {
 		return err
 	}
+	if err := c.validateMalibuEmission(); err != nil {
+		return err
+	}
 	if err := c.validateAutotuneFeeds(); err != nil {
 		return err
 	}
@@ -1501,6 +1529,35 @@ func (c Config) validateOnboarding() error {
 	}
 	if err := validateOperatorKeyMap(c.Auth.OperatorKeys); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (c Config) validateMalibuEmission() error {
+	m := c.MalibuEmission
+	if !m.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(m.WriterDSN) == "" {
+		return fmt.Errorf("malibu_emission.writer_dsn must be set when malibu_emission.enabled is true")
+	}
+	if m.TickIntervalSeconds <= 0 {
+		return fmt.Errorf("malibu_emission.tick_interval_seconds must be > 0")
+	}
+	if m.ProviderDailyCapMALIBU <= 0 {
+		return fmt.Errorf("malibu_emission.provider_daily_cap_malibu must be > 0")
+	}
+	if m.WalletDailyCapMALIBU <= 0 {
+		return fmt.Errorf("malibu_emission.wallet_daily_cap_malibu must be > 0")
+	}
+	if m.WalletMirrorIntervalSeconds <= 0 {
+		return fmt.Errorf("malibu_emission.wallet_mirror_interval_seconds must be > 0")
+	}
+	if m.UnlockEvalIntervalSeconds <= 0 {
+		return fmt.Errorf("malibu_emission.unlock_eval_interval_seconds must be > 0")
+	}
+	if m.MaxSerializableRetries <= 0 {
+		return fmt.Errorf("malibu_emission.max_serializable_retries must be > 0")
 	}
 	return nil
 }
