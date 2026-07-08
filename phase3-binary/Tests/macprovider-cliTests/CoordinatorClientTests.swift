@@ -4,6 +4,64 @@ import XCTest
 @testable import macprovider_cli
 
 final class CoordinatorClientTests: XCTestCase {
+    func testIdlePrewarmEventIsNotSentBeforeCoordinatorAcceptsSession() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+
+        await client.sendIdlePrewarmEvent(event: "idle_prewarm_skipped", reason: "idle_prewarmer_disabled")
+
+        let frames = await recorder.frames
+        XCTAssertTrue(frames.isEmpty, "pre-auth idle prewarm event must not race ahead of auth: \(frames)")
+    }
+
+    func testWarmSwapCompletionDoesNotSendHeartbeatBeforeCoordinatorAcceptsSession() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.enableWarmSwap = true
+        config.wsTunneledMode = true
+        let runtime = makeRuntime(modelID: "model-a", warmSwapEnabled: true)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let socket = FakeProviderWebSocketTask(
+            receiveResults: [],
+            receiveOverride: { _ in
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                throw CancellationError()
+            }
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [socket])
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            reconnectGraceNanoseconds: 1_000_000,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil }
+        ))
+
+        await client.start()
+        try await Task.sleep(nanoseconds: 10_000_000)
+        let swapTask = try await runtime.beginSwap(targetModelID: "model-b")
+        try await swapTask.value
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await client.stop()
+
+        let frames = socket.sentFrames()
+        XCTAssertFalse(frames.contains { $0["type"] as? String == "heartbeat" },
+                       "pre-auth warm-swap completion must not race a heartbeat ahead of auth: \(frames)")
+    }
+
     func testPreflightAckKeepsRequestIDCorrelation() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
@@ -811,6 +869,63 @@ final class CoordinatorClientTests: XCTestCase {
 
         XCTAssertEqual(heartbeat["model_id"] as? String, "model-a")
         XCTAssertNil(heartbeat["loading"])
+    }
+
+    func testCoordinatorFramesUseCatalogModelIDForConfiguredModelKey() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let catalogModelID = "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: String(repeating: "a", count: 64)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            enableWarmSwap: false,
+            modelCatalogModelID: catalogModelID
+        )
+
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+        let hello = await client.helloMessage()
+        try await client.sendHeartbeatForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.first)
+        let supportedModels = try XCTUnwrap(auth["supported_models"] as? [String])
+
+        XCTAssertEqual(auth["model_id"] as? String, catalogModelID)
+        XCTAssertEqual(hello["model_id"] as? String, catalogModelID)
+        XCTAssertEqual(heartbeat["model_id"] as? String, catalogModelID)
+        XCTAssertEqual(supportedModels, [catalogModelID])
+    }
+
+    func testCatalogModelIDDoesNotMaskCompletedWarmSwapRuntimeModelID() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let runtime = makeRuntime(modelID: "model-b", modelHash: "runtime-hash", warmSwapEnabled: true)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: "boot-hash"
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            enableWarmSwap: true,
+            modelRuntime: runtime,
+            modelCatalogModelID: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+        )
+
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+        let hello = await client.helloMessage()
+        try await client.sendHeartbeatForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.first)
+
+        XCTAssertEqual(auth["model_id"] as? String, "model-b")
+        XCTAssertEqual(hello["model_id"] as? String, "model-b")
+        XCTAssertEqual(heartbeat["model_id"] as? String, "model-b")
     }
 
     func testHelloDisabledModeKeepsProviderStatusModelIDWhenRuntimeDiffers() async throws {
@@ -2124,12 +2239,14 @@ final class CoordinatorClientTests: XCTestCase {
         providerReceiptPublicKey: String? = nil,
         sendOverride: CoordinatorClient.SendOverride? = nil,
         watchdogExitHook: (@Sendable (String) -> Void)? = nil,
-        publishesSpecDecodeTelemetry: Bool = false
+        publishesSpecDecodeTelemetry: Bool = false,
+        modelCatalogModelID: String? = nil
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = "model-a"
+        config.modelCatalogModelID = modelCatalogModelID
         config.drainTimeoutSeconds = drainTimeoutSeconds
         config.enableWarmSwap = enableWarmSwap
         config.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry

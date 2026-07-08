@@ -180,6 +180,7 @@ actor CoordinatorClient {
     private let maxBodyBytes: Int
     private let maxActiveRequests: Int
     private let supportedModels: [String]?
+    private let catalogModelIDForCoordinator: String?
     private let publishesSupportedModels: Bool
     private let warmSwapEnabled: Bool
     private let hardwareSummary: [String: Any]?
@@ -229,6 +230,7 @@ actor CoordinatorClient {
     private var autoupdateDrainExtensions = false
     private var autoupdateAttemptedTargets = Set<String>()
     private var webSocket: ProviderWebSocketTask?
+    private var coordinatorSessionAccepted = false
     private var runTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
     // Issue #189: separate watchdog task observing heartbeat liveness.
@@ -307,6 +309,10 @@ actor CoordinatorClient {
         self.maxBodyBytes = config.maxRequestBodyBytes
         self.maxActiveRequests = 1
         self.supportedModels = config.supportedModels
+        self.catalogModelIDForCoordinator = config.modelCatalogModelID.flatMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
         self.publishesSupportedModels = config.publishesSupportedModels
         self.warmSwapEnabled = config.enableWarmSwap
         self.hardwareSummary = ProviderHardwareSummary.liveWireObject()
@@ -352,6 +358,7 @@ actor CoordinatorClient {
         inferenceRelay = nil
         tier2Session = nil
         webSocket?.cancel(with: .goingAway, reason: nil)
+        coordinatorSessionAccepted = false
         autoupdateCoordinatorPayload = [:]
         autoupdateCoordinatorPayloadIsV2 = false
         autoupdateAssignedProviderTokenAdopted = false
@@ -377,6 +384,9 @@ actor CoordinatorClient {
     }
 
     func sendIdlePrewarmEvent(event rawEvent: String, reason: String?) async {
+        guard coordinatorSessionAccepted else {
+            return
+        }
         var payload: [String: Any] = [
             "type": "idle_prewarm_event",
             "event": rawEvent,
@@ -402,6 +412,9 @@ actor CoordinatorClient {
             case .loadFinished:
                 continue
             case .completed:
+                guard coordinatorSessionAccepted || webSocket == nil else {
+                    continue
+                }
                 // Issue #189 R1 architect MEDIUM: the warm-swap completion
                 // path is the second hot heartbeat callsite. A wedged
                 // URLSession.send() here would park swapHeartbeatTask
@@ -1034,6 +1047,7 @@ actor CoordinatorClient {
         tier2Session = nil
         webSocket?.cancel(with: .goingAway, reason: nil)
         webSocket = nil
+        coordinatorSessionAccepted = false
         autoupdateCoordinatorPayload = [:]
         autoupdateCoordinatorPayloadIsV2 = false
         autoupdateAssignedProviderTokenAdopted = false
@@ -1474,6 +1488,7 @@ actor CoordinatorClient {
             tier: payload["tier"] as? String,
             recommendedBinaryVersion: payload["recommended_binary_version"] as? String
         )
+        coordinatorSessionAccepted = true
         if let tier = payload["tier"] as? String {
             print("Coordinator tier: \(tier)")
         }
@@ -2210,13 +2225,28 @@ actor CoordinatorClient {
     // sub-interval tick to keep the connection alive) pass resetWindow=false so
     // the since-last window stays aligned to the full coordinator interval and
     // metrics are unchanged from the prior single-heartbeat-per-interval cadence.
+    private func coordinatorWireModelID(for servedModelID: String?) -> String {
+        guard let servedModelID, !servedModelID.isEmpty else {
+            return ""
+        }
+        guard let catalogModelIDForCoordinator,
+              let loadedModelID,
+              !loadedModelID.isEmpty,
+              servedModelID == loadedModelID
+        else {
+            return servedModelID
+        }
+        return catalogModelIDForCoordinator
+    }
+
     private func sendHeartbeat(resetWindow: Bool = true) async throws {
         let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
+        let snapshotWireModelID = coordinatorWireModelID(for: snapshot.modelID)
         var payload: [String: Any] = [
             "type": "heartbeat",
             "status": snapshot.status.rawValue,
-            "model_id": snapshot.modelID ?? "",
-            "model_params_b": snapshot.capacity.modelParamsB(modelID: snapshot.modelID),
+            "model_id": snapshotWireModelID,
+            "model_params_b": snapshot.capacity.modelParamsB(modelID: snapshotWireModelID),
             "ram_gb": snapshot.capacity.ramGB,
             "max_context_tokens": snapshot.capacity.maxContextTokens,
             "max_concurrency": snapshot.capacity.maxConcurrency,
@@ -2235,8 +2265,9 @@ actor CoordinatorClient {
         if warmSwapEnabled {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
             let runtimeModelID = runtimeSnapshot.modelID
-            payload["model_id"] = runtimeModelID ?? ""
-            payload["model_params_b"] = snapshot.capacity.modelParamsB(modelID: runtimeModelID)
+            let runtimeWireModelID = coordinatorWireModelID(for: runtimeModelID)
+            payload["model_id"] = runtimeWireModelID
+            payload["model_params_b"] = snapshot.capacity.modelParamsB(modelID: runtimeWireModelID)
             if let modelHash = runtimeSnapshot.modelHash {
                 payload["model_hash"] = modelHash
             }
@@ -2328,14 +2359,14 @@ actor CoordinatorClient {
         // routing decisions in that window used the wrong metadata.
         // Fix: source modelID + modelHash from the same place
         // helloMessage does.
-        let resolvedModelID: String
+        let wireModelID: String
         let resolvedModelHash: String?
         if warmSwapEnabled {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
-            resolvedModelID = runtimeSnapshot.modelID ?? ""
+            wireModelID = coordinatorWireModelID(for: runtimeSnapshot.modelID)
             resolvedModelHash = runtimeSnapshot.modelHash
         } else {
-            resolvedModelID = snapshot.modelID ?? ""
+            wireModelID = coordinatorWireModelID(for: snapshot.modelID)
             resolvedModelHash = snapshot.modelHash
         }
         var message: [String: Any] = [
@@ -2344,8 +2375,8 @@ actor CoordinatorClient {
             "stage": "initial",
             "provider_id": providerID,
             "hostname": Host.current().localizedName ?? "unknown",
-            "model_id": resolvedModelID,
-            "model_params_b": snapshot.capacity.modelParamsB(modelID: resolvedModelID),
+            "model_id": wireModelID,
+            "model_params_b": snapshot.capacity.modelParamsB(modelID: wireModelID),
             "ram_gb": snapshot.capacity.ramGB,
             "max_context_tokens": snapshot.capacity.maxContextTokens,
             "max_concurrency": snapshot.capacity.maxConcurrency,
@@ -2362,11 +2393,11 @@ actor CoordinatorClient {
         let resolvedCatalog: [String]
         do {
             resolvedCatalog = try SupportedModels.validate(
-                model: resolvedModelID,
+                model: wireModelID,
                 supportedModels: supportedModels
             )
         } catch {
-            resolvedCatalog = [resolvedModelID]
+            resolvedCatalog = [wireModelID]
         }
         message["supported_models"] = resolvedCatalog
         if publishesSupportedModels {
@@ -2405,17 +2436,18 @@ actor CoordinatorClient {
         if let endpointURL {
             message["endpoint_url"] = endpointURL
         }
-        let modelIDForHello: String
+        let wireModelIDForHello: String
         let hashForHello: String?
         if warmSwapEnabled {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
-            modelIDForHello = runtimeSnapshot.modelID ?? ""
+            wireModelIDForHello = coordinatorWireModelID(for: runtimeSnapshot.modelID)
             hashForHello = runtimeSnapshot.modelHash
         } else {
-            modelIDForHello = snapshot.modelID ?? ""
+            wireModelIDForHello = coordinatorWireModelID(for: snapshot.modelID)
             hashForHello = snapshot.modelHash
         }
-        message["model_id"] = modelIDForHello
+        message["model_id"] = wireModelIDForHello
+        message["model_params_b"] = snapshot.capacity.modelParamsB(modelID: wireModelIDForHello)
         if let hashForHello {
             message["model_hash"] = hashForHello
         }
