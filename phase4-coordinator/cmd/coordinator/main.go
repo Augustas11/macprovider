@@ -18,6 +18,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/audit"
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -124,6 +125,14 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "autotune feeds: %v\n", err)
 		os.Exit(1)
+	}
+	var autotuneCatalog *autotune.Catalog
+	if len(autotuneFeeds.AutotuneCandidatesJSON) > 0 {
+		autotuneCatalog, err = autotune.ParseCatalog(autotuneFeeds.AutotuneCandidatesJSON)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "autotune candidate catalog: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	providerhttp.Init(cfg.ProviderHTTP.TimeoutS)
 
@@ -398,6 +407,19 @@ func main() {
 		}
 		wsOpts = append(wsOpts, providerws.WithIdentitySignatureStore(onboardingStore))
 		wsOpts = append(wsOpts, providerws.WithProviderAuthPolicyAdminStore(onboardingStore))
+	}
+	if cfg.ProofOfWeights.RequireAutotuneHelloGate {
+		if autotuneCatalog == nil {
+			logger.Fatal().Msg("proof_of_weights.require_autotune_hello_gate requires autotune candidate catalog feeds")
+		}
+		if onboardingStore == nil || onboardingStore.DB() == nil {
+			logger.Fatal().Msg("proof_of_weights.require_autotune_hello_gate requires onboarding postgres store")
+		}
+		wsOpts = append(wsOpts, providerws.WithAutotuneHelloGate(autotuneCatalog, autotune.NewPGEvidenceStore(onboardingStore.DB())))
+		logger.Info().
+			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
+			Str("autotune_catalog_version", autotuneCatalog.Version).
+			Msg("proof-of-weights autotune hello gate enabled")
 	}
 	if cfg.Auth.RequireProviderTokens {
 		logger.Info().

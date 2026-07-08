@@ -27,6 +27,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 )
 
 const (
@@ -86,6 +87,8 @@ type Server struct {
 	// want isolation from the package-singleton; nil means "use
 	// tier2.Default()". M3-8d (audit TEST-4). See s.catalogRef().
 	catalog            *tier2.Catalog
+	autotuneCatalog    *autotune.Catalog
+	autotuneEvidence   autotune.EvidenceStore
 	identitySignatures IdentitySignatureStore
 	authPolicyAdmin    ProviderAuthPolicyAdminStore
 	idlePrewarm        IdlePrewarmRecorder
@@ -189,6 +192,17 @@ type Option func(*Server)
 func WithCatalog(c *tier2.Catalog) Option {
 	return func(s *Server) {
 		s.catalog = c
+	}
+}
+
+// WithAutotuneHelloGate wires Session B proof-of-weights capacity ceiling
+// inputs. When cfg.ProofOfWeights.RequireAutotuneHelloGate is true, hello
+// admission consults catalog + verified hardware-evidence before registering
+// the provider.
+func WithAutotuneHelloGate(catalog *autotune.Catalog, store autotune.EvidenceStore) Option {
+	return func(s *Server) {
+		s.autotuneCatalog = catalog
+		s.autotuneEvidence = store
 	}
 }
 
@@ -1178,6 +1192,48 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 			tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
 		}
 	}
+	maxAdmittedModelKey := ""
+	maxAdmittedModelID := ""
+	if s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
+		if s.autotuneCatalog == nil || s.autotuneEvidence == nil {
+			s.log.Error().Str("provider_id", hello.ProviderID).Msg("autotune hello gate enabled but dependencies are not wired")
+			s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
+			return nil, false
+		}
+		ttl := time.Duration(s.cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
+		evidence, ok, err := s.autotuneEvidence.LatestVerified(context.Background(), hello.ProviderID, ttl)
+		if err != nil {
+			s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("autotune hello gate evidence lookup failed")
+			s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
+			return nil, false
+		}
+		if !ok {
+			s.log.Info().
+				Str("provider_id", hello.ProviderID).
+				Str("event", "autotune_evidence_required").
+				Str("model_id", hello.ModelID).
+				Msg("autotune hello gate rejected connect without verified hardware evidence")
+			s.close(conn, CloseInvalidHello, "autotune_evidence_required")
+			return nil, false
+		}
+		decision := autotune.EvaluateHelloGate(s.autotuneCatalog, evidence, hello.ModelID)
+		if !decision.Allowed {
+			s.log.Info().
+				Str("provider_id", hello.ProviderID).
+				Str("event", decision.Reason).
+				Str("model_id", hello.ModelID).
+				Str("claimed_model_key", decision.ClaimedModelKey).
+				Str("max_admitted_model_class", decision.MaxAdmittedModelKey).
+				Str("max_admitted_model_id", decision.MaxAdmittedModelID).
+				Int("claimed_min_ram_gb", decision.ClaimedMinRAMGB).
+				Int("max_admitted_min_ram_gb", decision.MaxAdmittedMinRAMGB).
+				Msg("autotune hello gate rejected provider model claim")
+			s.close(conn, CloseInvalidHello, decision.Reason)
+			return nil, false
+		}
+		maxAdmittedModelKey = decision.MaxAdmittedModelKey
+		maxAdmittedModelID = decision.MaxAdmittedModelID
+	}
 	initialState := pool.StateReady
 	if s.cfg.Pool.WarmupGateEnabled {
 		initialState = pool.StateDegraded
@@ -1206,6 +1262,8 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		BinaryVersion:         hello.BinaryVersion,
 		ModelHash:             hello.ModelHash,
 		HashStatus:            hashStatus,
+		MaxAdmittedModelKey:   maxAdmittedModelKey,
+		MaxAdmittedModelID:    maxAdmittedModelID,
 	}, true
 }
 

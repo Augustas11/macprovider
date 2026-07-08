@@ -91,6 +91,15 @@ func (s *PGStore) Close() error {
 	return err
 }
 
+// DB exposes the primary onboarding postgres handle for read-only consumers
+// such as the proof-of-weights autotune hello gate.
+func (s *PGStore) DB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.db
+}
+
 func (s *PGStore) Smoke(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return errors.New("onboarding postgres store is nil")
