@@ -1,0 +1,19 @@
+# systemd drop-in — OPoI v0 canary overlay (Session A)
+#
+# Install on Pearl:
+#   sudo install -d -m 0755 /etc/systemd/system/macprovider-coordinator.service.d
+#   sudo install -m 0644 opoi-v0.conf.example \
+#     /etc/systemd/system/macprovider-coordinator.service.d/opoi-v0.conf
+#   sudo systemctl daemon-reload
+#   sudo systemctl restart macprovider-coordinator
+#
+# Requires coordinator binary built from main @ PR #478+ (--config-overlay support).
+# Rollback: sudo rm /etc/systemd/system/macprovider-coordinator.service.d/opoi-v0.conf
+#           && sudo systemctl daemon-reload && sudo systemctl restart macprovider-coordinator
+
+[Service]
+# Clear the base unit ExecStart, then set overlay-aware command.
+ExecStart=
+ExecStart=/opt/macprovider/coordinator \
+  --config /opt/macprovider/coordinator.yaml \
+  --config-overlay /etc/macprovider/coordinator.opoi-v0-staging.yaml
