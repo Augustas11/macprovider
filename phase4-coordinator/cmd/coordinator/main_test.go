@@ -216,6 +216,34 @@ func TestNginxWalletRouteBeforeV1CatchAll(t *testing.T) {
 	}
 }
 
+func TestNginxMalibuAccrualRouteBeforeV1CatchAll(t *testing.T) {
+	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	cfg := string(body)
+	route := strings.Index(cfg, "location = /v1/provider/malibu-accrual")
+	catchAll := strings.Index(cfg, "location /v1/ {\n        return 404;")
+	if route < 0 {
+		t.Fatal("missing exact /v1/provider/malibu-accrual route")
+	}
+	if catchAll < 0 {
+		t.Fatal("missing /v1/ catch-all route")
+	}
+	if route > catchAll {
+		t.Fatal("/v1/provider/malibu-accrual route must appear before /v1/ catch-all")
+	}
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8443/v1/provider/malibu-accrual;",
+		"proxy_set_header Authorization $http_authorization;",
+		"add_header Cache-Control \"no-store\" always;",
+	} {
+		if !strings.Contains(cfg[route:catchAll], needle) {
+			t.Fatalf("malibu-accrual route missing %q", needle)
+		}
+	}
+}
+
 func TestNginxV2ProviderAliasesExistingWSHandler(t *testing.T) {
 	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
 	if err != nil {

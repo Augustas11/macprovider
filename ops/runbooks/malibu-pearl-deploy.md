@@ -15,7 +15,7 @@
 | Applies Postgres migrations `012_malibu_emission_ledger` + `014_malibu_trust_unlock` | `malibu_emission.enabled` (stays `false`) |
 | Installs coordinator binary with `writer_dsn` wired | Withdrawable MALIBU flow |
 | Merges MALIBU overlay into Pearl `coordinator.pearl-overlays.yaml` | Base `/opt/macprovider/coordinator.yaml` |
-| Mounts `GET /v1/provider/malibu-accrual` read API | nginx / TLS / gateway |
+| Mounts `GET /v1/provider/malibu-accrual` read API | Base nginx vhost (add `location = /v1/provider/malibu-accrual` per §4.4) |
 
 **Operator stance (C4 staging):** accrual **read path** on, accrual **ticks** off until promotion.
 
@@ -143,6 +143,23 @@ Expect `200` with `accrued_malibu`, `trust_tier`, `trust_criteria_*`, `wallet_bo
 ssh pearl 'set -a && . /etc/macprovider/coordinator.env && set +a \
   && psql "$COORDINATOR_PARTNER_KEYS_ADMIN_DSN" -c \
   "SELECT version, name FROM schema_migrations_spec017 WHERE version IN (12, 14) ORDER BY version"'
+```
+
+### 4.4 Nginx allow-through (one-time)
+
+`GET /v1/provider/malibu-accrual` lives on buyer port **8443**. Without an exact-match nginx location, the public URL returns **404**.
+
+Install from repo template (or copy the `location = /v1/provider/malibu-accrual` block from `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`):
+
+```bash
+# On Pearl — merge block after /v1/provider/wallet, then:
+nginx -t && systemctl reload nginx
+```
+
+Unauthenticated probe should return **401** (not 404):
+
+```bash
+curl -sS -o /dev/null -w "%{http_code}\n" https://coordinator.streamvc.live/v1/provider/malibu-accrual
 ```
 
 ---
