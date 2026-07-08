@@ -860,6 +860,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		if badField == "" {
 			badField = "stage"
 		}
+		s.log.Warn().Str("bad_field", badField).Msg("provider auth_request initial rejected")
 		// SPEC-002 v1.3.5 §11 AC-K.15 / SPEC-010 v1.5 R-3.1.9 — when
 		// initial-stage parse fails on a SPEC-010 catalog validation
 		// rule, surface the LOCKED reason substring on the wire so
