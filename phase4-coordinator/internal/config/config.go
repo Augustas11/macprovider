@@ -382,6 +382,12 @@ type Tier2Config struct {
 	AttestationFormats   []string `yaml:"attestation_formats"`
 	AllowMockAttestation bool     `yaml:"allow_mock_attestation"`
 
+	// SE liveness challenge settings (Phase 1, Track P1-C).
+	// Only sent to providers whose SE pubkey is recorded (attestation_tier=self_signed).
+	SELivenessIntervalS   int `yaml:"se_liveness_interval_s"`
+	SELivenessTimeoutS    int `yaml:"se_liveness_timeout_s"`
+	SELivenessMaxFailures int `yaml:"se_liveness_max_failures"`
+
 	BehavioralSafetyEnabled    bool    `yaml:"behavioral_safety_enabled"`
 	OutputSizeCapBytes         int64   `yaml:"output_size_cap_bytes"`
 	OutputBytesPerTokenCeiling int     `yaml:"output_bytes_per_token_ceiling"`
@@ -681,6 +687,9 @@ func Default() Config {
 			ProvisionalRetentionDays:        30,
 		},
 		Tier2: Tier2Config{
+			SELivenessIntervalS:            300,
+			SELivenessTimeoutS:             30,
+			SELivenessMaxFailures:          3,
 			ObserveEnabled:                 false,
 			CatalogPath:                    "",
 			CatalogPublicKey:               "",
@@ -692,7 +701,7 @@ func Default() Config {
 			RequireAttestation:             false,
 			AttestationRoots:               []string{},
 			AttestationMaxAgeS:             600,
-			AttestationFormats:             []string{"apple-managed-device-attestation-acme-v1"},
+			AttestationFormats:             []string{"apple-managed-device-attestation-acme-v1", "macprovider-se-p256-v1"},
 			AllowMockAttestation:           false,
 			BehavioralSafetyEnabled:        false,
 			OutputSizeCapBytes:             0,

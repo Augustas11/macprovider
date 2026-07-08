@@ -80,86 +80,122 @@ type attestationBindingSignature struct {
 	Signature string `json:"signature"`
 }
 
+// AttestationVerifyResult wraps the attestation status together with any
+// format-specific side-channel data returned by format-specific verifiers.
+// Callers that only need the status use the thin VerifyAttestationToken wrapper.
+type AttestationVerifyResult struct {
+	Status   pool.AttestationStatus
+	SEResult *SEAttestationResult
+}
+
+// VerifyAttestationTokenExt is the full-result variant of VerifyAttestationToken.
+// It returns an AttestationVerifyResult so the caller can access SE-specific
+// output (e.g. the verified SE public key) without a second parse pass.
+func VerifyAttestationTokenExt(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) AttestationVerifyResult {
+	status, seResult := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger)
+	return AttestationVerifyResult{Status: status, SEResult: seResult}
+}
+
+// VerifyAttestationToken verifies an attestation token and returns the status.
+// Use VerifyAttestationTokenExt when the caller needs format-specific results.
 func VerifyAttestationToken(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) pool.AttestationStatus {
+	status, _ := verifyAttestationTokenInternal(raw, cfg, challenge, authAttemptID, providerID, providerECDHPublicKey, now, logger)
+	return status
+}
+
+func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) (pool.AttestationStatus, *SEAttestationResult) {
 	if !cfg.RequireAttestation && len(raw) == 0 {
-		return pool.AttestationStatusNotRequired
+		return pool.AttestationStatusNotRequired, nil
 	}
 	if len(raw) == 0 || string(raw) == "null" {
 		if cfg.RequireAttestation {
 			logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "missing_token", "tier2.require_attestation")
-			return pool.AttestationStatusFailed
+			return pool.AttestationStatusFailed, nil
 		}
-		return pool.AttestationStatusUnsupported
+		return pool.AttestationStatusUnsupported, nil
 	}
 	if len(raw) > MaxAttestationEnvelopeBytes {
 		logAttestationEvent(logger, "attestation_token_too_large", "WARN", providerID, "reject", "token_too_large", "tier2.attestation_max_age_s")
-		return pool.AttestationStatusFailed
+		return pool.AttestationStatusFailed, nil
 	}
 	var token AttestationToken
 	if err := json.Unmarshal(raw, &token); err != nil {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "invalid_json", "tier2.require_attestation")
-		return pool.AttestationStatusFailed
+		return pool.AttestationStatusFailed, nil
 	}
 	if !attestationFormatAllowed(token.Format, cfg.AttestationFormats) {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "unsupported_format", "tier2.attestation_formats")
-		return pool.AttestationStatusUnsupported
+		return pool.AttestationStatusUnsupported, nil
 	}
 	if len(token.Token) > MaxAttestationTokenBytes {
 		logAttestationEvent(logger, "attestation_token_too_large", "WARN", providerID, "reject", "token_too_large", "tier2.attestation_max_age_s")
-		return pool.AttestationStatusFailed
+		return pool.AttestationStatusFailed, nil
 	}
 	if !validAttestationTokenEncoding(token.Token) {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "invalid_token_encoding", "tier2.require_attestation")
-		return pool.AttestationStatusFailed
+		return pool.AttestationStatusFailed, nil
 	}
 	if token.ProviderID != providerID {
 		logAttestationEvent(logger, "provider_binding_mismatch", "WARN", providerID, "reject", "provider_binding_mismatch", "tier2.require_attestation")
-		return pool.AttestationStatusFailed
+		return pool.AttestationStatusFailed, nil
 	}
 	wantChallenge := base64.RawURLEncoding.EncodeToString(challenge)
 	if token.Challenge != wantChallenge {
 		logAttestationEvent(logger, "attestation_replay", "WARN", providerID, "reject", "challenge_mismatch", "tier2.require_attestation")
-		return pool.AttestationStatusStale
+		return pool.AttestationStatusStale, nil
 	}
 	if strings.TrimSpace(providerECDHPublicKey) != "" && token.KeyBinding.ProviderECDHPublicKey != providerECDHPublicKey {
 		logAttestationEvent(logger, "provider_binding_mismatch", "WARN", providerID, "reject", "ecdh_binding_mismatch", "tier2.require_attestation")
-		return pool.AttestationStatusFailed
+		return pool.AttestationStatusFailed, nil
 	}
 	if !attestationHardwareFamilyAllowed(token) {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "hardware_family_policy_mismatch", "tier2.attestation_formats")
-		return pool.AttestationStatusFailed
+		return pool.AttestationStatusFailed, nil
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	if token.IssuedAt.IsZero() || token.ExpiresAt.IsZero() || now.Before(token.IssuedAt.Add(-1*time.Minute)) || !now.Before(token.ExpiresAt) {
 		logAttestationEvent(logger, "attestation_stale", "WARN", providerID, "reject", "stale_or_expired", "tier2.attestation_max_age_s")
-		return pool.AttestationStatusStale
+		return pool.AttestationStatusStale, nil
 	}
 	if cfg.AttestationMaxAgeS > 0 && now.Sub(token.IssuedAt) > time.Duration(cfg.AttestationMaxAgeS)*time.Second {
 		logAttestationEvent(logger, "attestation_stale", "WARN", providerID, "reject", "max_age_exceeded", "tier2.attestation_max_age_s")
-		return pool.AttestationStatusStale
+		return pool.AttestationStatusStale, nil
+	}
+	// SE P-256 format: self-signed attestation, no MDA root required.
+	// Common checks above (challenge, providerID, ECDH, hardware family,
+	// time) have already passed. SE-specific cryptographic verification
+	// runs here before the MDA root / mock paths.
+	if token.Format == seAttestationFormat {
+		status, seResult := verifySEAttestationToken(token, challenge, authAttemptID)
+		if status == pool.AttestationStatusAttested {
+			logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "se_p256_attested", "tier2.attestation_formats")
+		} else {
+			logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "se_p256_verification_failed", "tier2.attestation_formats")
+		}
+		return status, seResult
 	}
 	if len(cfg.AttestationRoots) == 0 {
 		logAttestationEvent(logger, "attestation_root_missing", "WARN", providerID, "reject", "missing_attestation_roots", "tier2.attestation_roots")
 		if cfg.RequireAttestation {
-			return pool.AttestationStatusFailed
+			return pool.AttestationStatusFailed, nil
 		}
-		return pool.AttestationStatusUnsupported
+		return pool.AttestationStatusUnsupported, nil
 	}
 	if cfg.AllowMockAttestation && hasMockAttestationRoot(cfg.AttestationRoots) {
 		if validMockAttestationToken(token.Token) {
 			logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mock_attested", "tier2.attestation_roots")
-			return pool.AttestationStatusAttested
+			return pool.AttestationStatusAttested, nil
 		}
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "invalid_mock_attestation", "tier2.attestation_roots")
-		return pool.AttestationStatusFailed
+		return pool.AttestationStatusFailed, nil
 	}
 	// Production Apple MDA roots must not become a positive hardware signal
 	// until certificate-chain, freshness-code, public-key, device-property,
 	// and ACME CSR key-binding validation all pass.
 	if status, ok := verifyProductionMDAChainShape(token, cfg, now, authAttemptID, providerID, logger); ok {
-		return status
+		return status, nil
 	}
 	decision := "observe"
 	if cfg.RequireAttestation {
@@ -167,9 +203,9 @@ func VerifyAttestationToken(raw json.RawMessage, cfg config.Tier2Config, challen
 	}
 	logAttestationEvent(logger, "attestation_unsupported", "WARN", providerID, decision, "mda_certificate_chain_missing", "tier2.attestation_roots")
 	if cfg.RequireAttestation {
-		return pool.AttestationStatusFailed
+		return pool.AttestationStatusFailed, nil
 	}
-	return pool.AttestationStatusUnsupported
+	return pool.AttestationStatusUnsupported, nil
 }
 
 func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Config, now time.Time, authAttemptID, providerID string, logger zerolog.Logger) (pool.AttestationStatus, bool) {

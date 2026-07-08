@@ -92,6 +92,12 @@ type Server struct {
 	idlePrewarmMetrics IdlePrewarmMetrics
 	idlePrewarmLimits  sync.Map
 	idlePrewarmQueue   chan idlePrewarmRecord
+
+	// SE liveness (Phase 1, Track P1-C).
+	// seLivenessChans maps sessionKey → chan SELivenessResponse for in-flight probes.
+	// seLivenessInFlight guards against concurrent probes for the same session.
+	seLivenessChans    sync.Map
+	seLivenessInFlight sync.Map
 }
 
 // TokenValidator handles inspection of a Bearer header on the WS connect.
@@ -370,6 +376,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	}
 	if cfg.Pool.CanaryEnabled && registry != nil {
 		go s.runCanaryLoop()
+	}
+	if registry != nil {
+		go s.runSELivenessLoop()
 	}
 	return s
 }
@@ -984,7 +993,8 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 			}
 		}
 	}
-	attestationStatus := tier2.VerifyAttestationToken(proof.AttestationToken, tier2Cfg, challengeBytes, authAttemptID, initial.ProviderID, initial.ProviderECDHPublicKey, s.now(), s.log)
+	attestResult := tier2.VerifyAttestationTokenExt(proof.AttestationToken, tier2Cfg, challengeBytes, authAttemptID, initial.ProviderID, initial.ProviderECDHPublicKey, s.now(), s.log)
+	attestationStatus := attestResult.Status
 	if tier2Cfg.RequireAttestation && attestationStatus != pool.AttestationStatusAttested {
 		s.sendAuthRejection(conn, string(attestationStatus), string(attestationStatus))
 		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
@@ -1004,6 +1014,10 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 
 	entry.EncryptedLeg = true
 	entry.AttestationStatus = attestationStatus
+	if attestResult.SEResult != nil {
+		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)
+		entry.AttestationTier = "self_signed"
+	}
 	if len(initial.ProviderReceiptPubkey) > 0 {
 		entry.ReceiptPubkey = append([]byte(nil), initial.ProviderReceiptPubkey...)
 	} else {
@@ -1681,6 +1695,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleNAK(providerID, assignedID, payload)
 	case "drain_status":
 		s.handleDrainStatus(conn, providerID, assignedID, payload)
+	case "se_liveness_response":
+		s.handleSELivenessResponse(providerID, assignedID, payload)
 	default:
 		// SPEC-002 v1.5.1 R-2 / issue #197 R5 security: envelope.Type
 		// is provider-controlled and reaches structured logs only on
@@ -1692,6 +1708,15 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		}
 		s.log.Warn().Str("provider_id", providerID).Str("type", safeType).Msg("unknown provider message type")
 	}
+}
+
+func (s *Server) handleSELivenessResponse(providerID, assignedID string, payload []byte) {
+	var resp SELivenessResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("se_liveness: invalid response json")
+		return
+	}
+	s.deliverSELivenessResponse(providerID, assignedID, resp)
 }
 
 func (s *Server) handleIdlePrewarmEvent(providerID string, payload []byte) {

@@ -547,7 +547,14 @@ struct ServeCommand: AsyncParsableCommand {
                 config: resolved,
                 modelRuntime: modelRuntime,
                 providerStatus: providerStatus,
-                attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath),
+                attestationGenerator: {
+                    #if arch(arm64)
+                    if let seGen = SecureEnclaveAttestationGenerator.loadIfAvailable() {
+                        return seGen
+                    }
+                    #endif
+                    return ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
+                }(),
                 providerReceiptPublicKey: receiptRuntime.publicKeyBase64,
                 receiptBuilder: receiptRuntime.builder,
                 identityBridge: identityBridge

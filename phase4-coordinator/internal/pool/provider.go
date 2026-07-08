@@ -162,6 +162,20 @@ type Provider struct {
 	// cores/bandwidth visible without claiming hardware attestation.
 	HardwareCapacity *ProviderHardwareCapacity `json:"hardware_capacity,omitempty"`
 
+	// SE attestation fields (Phase 1).
+	// SEPublicKey holds the raw P-256 public key (64 bytes: 32 X || 32 Y) verified
+	// during macprovider-se-p256-v1 auth. Nil when no SE attestation was presented.
+	// Not exported in public JSON to avoid leaking key material; set by P1-B verifier.
+	SEPublicKey []byte `json:"-"`
+	// AttestationTier records the verified attestation strength.
+	// Values: "" (legacy/none), "self_signed" (SE P-256 verified), "hardware" (MDA, Phase 3+).
+	AttestationTier string `json:"attestation_tier,omitempty"`
+	// LastSELivenessAt is the coordinator clock of the most recent successful SE liveness response.
+	LastSELivenessAt *time.Time `json:"last_se_liveness_at,omitempty"`
+	// SELivenessFailCount is the current consecutive SE liveness failure count.
+	// Internal only — not serialised to JSON.
+	SELivenessFailCount int `json:"-"`
+
 	// SPEC-002 v1.3.5 §3.X.1 — populated from v2 auth_request initial-stage
 	// supported_models[] per SPEC-010 v1.5 R-3.3.1; nil for the L-1 baseline.
 	SupportedModels []string `json:"supported_models,omitempty"`
@@ -1050,6 +1064,65 @@ func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool
 	}
 	result.Tripped = CanaryTripDegraded
 	return result
+}
+
+// SELivenessResult is returned by RecordSELivenessResult.
+type SELivenessResult struct {
+	// Current is false when the provider session no longer exists in the registry.
+	Current bool
+	Passed  bool
+	// FailCount is the consecutive failure count after this result.
+	FailCount int
+	// Stale is true when FailCount reached maxFailures and AttestationStatus was set to stale.
+	Stale bool
+}
+
+// RecordSELivenessResult records a SE liveness challenge outcome and updates
+// the provider's SELivenessFailCount and AttestationStatus.
+// On pass: resets fail count, updates LastSELivenessAt.
+// On fail: increments fail count; at maxFailures sets AttestationStatusStale.
+func (r *Registry) RecordSELivenessResult(providerID, assignedID string, passed bool, at time.Time, maxFailures int) SELivenessResult {
+	if maxFailures <= 0 {
+		maxFailures = 3
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return SELivenessResult{}
+	}
+	result := SELivenessResult{Current: true, Passed: passed}
+	if passed {
+		p.SELivenessFailCount = 0
+		ts := at
+		p.LastSELivenessAt = &ts
+		return result
+	}
+	p.SELivenessFailCount++
+	result.FailCount = p.SELivenessFailCount
+	if p.SELivenessFailCount >= maxFailures {
+		p.AttestationStatus = AttestationStatusStale
+		result.Stale = true
+	}
+	return result
+}
+
+// SetSEPublicKey stores the SE public key and attestation tier on a live provider
+// session. Called by P1-B coordinator verifier after a successful
+// macprovider-se-p256-v1 attestation verification.
+func (r *Registry) SetSEPublicKey(providerID, assignedID string, pubkey []byte, tier string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	p.SEPublicKey = append([]byte(nil), pubkey...)
+	p.AttestationTier = tier
+	return true
 }
 
 func (r *Registry) applyCanarySanctionLocked(p *Provider) {
