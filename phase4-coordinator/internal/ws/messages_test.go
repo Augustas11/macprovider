@@ -394,12 +394,31 @@ func TestParseFirstAuthMessageWithFieldReportsVersion(t *testing.T) {
 	payload := validAuthRequestInitial()
 	payload["version"] = "v2"
 
-	_, _, field, err := parseFirstAuthMessageWithField(mustAuthJSON(t, payload))
+	typ, _, field, err := parseFirstAuthMessageWithField(mustAuthJSON(t, payload))
 	if err == nil {
 		t.Fatal("ParseFirstAuthMessageWithField err = nil, want error")
 	}
+	if typ != "auth_request" {
+		t.Fatalf("type = %q, want auth_request", typ)
+	}
 	if field != "version" {
 		t.Fatalf("field = %q, want version", field)
+	}
+}
+
+func TestParseFirstAuthMessageWithFieldReportsMissingVersionType(t *testing.T) {
+	payload := validAuthRequestInitial()
+	delete(payload, "version")
+
+	typ, _, field, err := parseFirstAuthMessageWithField(mustAuthJSON(t, payload))
+	if err == nil {
+		t.Fatal("ParseFirstAuthMessageWithField err = nil, want error")
+	}
+	if typ != "auth_request" {
+		t.Fatalf("type = %q, want auth_request", typ)
+	}
+	if field != "missing version" {
+		t.Fatalf("field = %q, want missing version", field)
 	}
 }
 
