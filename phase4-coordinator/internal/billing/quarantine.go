@@ -29,13 +29,16 @@ import (
 const (
 	quarantinePathPrefix   = "/admin/ledger/quarantine/"
 	forceVoidPathSuffix    = "/force-void"
+	forceCreditPathSuffix  = "/force-credit"
 	maxReasonLen           = 500
 	maxOperatorIDLen       = 64
 	maxBodyBytes           = 4 * 1024
 	operatorAttribution    = "operator_key_self_asserted"
 	eventForceVoid         = "ledger_quarantine_force_void"
+	eventForceCredit       = "ledger_quarantine_force_credit"
 	eventConfigFlagChanged = "billing_config_flag_changed"
 	resolutionKindVoid     = "force_void"
+	resolutionKindCredit   = "force_credit"
 )
 
 // quarantinePathMatch distinguishes three cases:
@@ -57,31 +60,48 @@ func matchQuarantinePath(path string) quarantinePathMatch {
 		return quarantinePathMatch{}
 	}
 	rest := path[len(quarantinePathPrefix):]
-	if !strings.HasSuffix(rest, forceVoidPathSuffix) {
+	suffix := ""
+	kind := ""
+	switch {
+	case strings.HasSuffix(rest, forceVoidPathSuffix):
+		suffix = forceVoidPathSuffix
+		kind = "force-void"
+	case strings.HasSuffix(rest, forceCreditPathSuffix):
+		suffix = forceCreditPathSuffix
+		kind = "force-credit"
+	default:
 		return quarantinePathMatch{}
 	}
-	idStr := rest[:len(rest)-len(forceVoidPathSuffix)]
+	idStr := rest[:len(rest)-len(suffix)]
 	// At this point the path SHAPE matches the force-void route.
 	// Anything wrong with the id field is now a §11.6.1.1 400, not a
 	// 404 fall-through.
 	if idStr == "" {
-		return quarantinePathMatch{matched: true, badID: true, kind: "force-void"}
+		return quarantinePathMatch{matched: true, badID: true, kind: kind}
 	}
 	for _, c := range idStr {
 		if c < '0' || c > '9' {
-			return quarantinePathMatch{matched: true, badID: true, kind: "force-void"}
+			return quarantinePathMatch{matched: true, badID: true, kind: kind}
 		}
 	}
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		return quarantinePathMatch{matched: true, badID: true, kind: "force-void"}
+		return quarantinePathMatch{matched: true, badID: true, kind: kind}
 	}
-	return quarantinePathMatch{matched: true, badID: false, id: id, kind: "force-void"}
+	return quarantinePathMatch{matched: true, badID: false, id: id, kind: kind}
 }
 
 // forceVoidHandler implements POST /admin/ledger/quarantine/{id}/force-void
 // per SPEC-005 v0.4 §11.6.1.
 func (h *handler) forceVoidHandler(w http.ResponseWriter, r *http.Request, requestCreditID int64) {
+	h.forceResolutionHandler(w, r, requestCreditID, resolutionKindVoid, eventForceVoid)
+}
+
+func (h *handler) forceCreditHandler(w http.ResponseWriter, r *http.Request, requestCreditID int64) {
+	h.forceResolutionHandler(w, r, requestCreditID, resolutionKindCredit, eventForceCredit)
+}
+
+func (h *handler) forceResolutionHandler(w http.ResponseWriter, r *http.Request, requestCreditID int64, resolutionKind, eventType string) {
 	// The dispatcher has already enforced the route launch gate,
 	// operator auth, admin rate limit, method, and id shape before
 	// entering this mutation handler.
@@ -172,13 +192,61 @@ SELECT 1, quarantined, request_id, attempt_n, provider_id, quarantine_reason
 		return
 	}
 
-	// Resolution INSERT. Race protection is the UNIQUE constraint
-	// (§11.6.6); we do NOT pre-check ledger_quarantine_resolutions.
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// Resolution INSERT. v0.5 relaxes UNIQUE(request_credit_id) so
+	// the handler owns the corrective-resolution rule: first
+	// resolution wins, then one opposite-kind correction is allowed
+	// while the hold window is still open.
+	nowTime := h.store.now().UTC()
+	now := sqliteTimeText(nowTime)
+	var existingCount int
+	if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM ledger_quarantine_resolutions WHERE request_credit_id = ?`,
+		requestCreditID).Scan(&existingCount); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "count resolutions: "+err.Error())
+		return
+	}
+	if existingCount > 0 {
+		var existingKind string
+		var existingCreated string
+		var existingMatures sql.NullString
+		var existingDeadline string
+		if err := conn.QueryRowContext(ctx, `
+SELECT resolution_kind, created_at_utc, force_credit_matures_at_utc, correction_deadline_at_utc
+  FROM ledger_quarantine_resolutions
+ WHERE request_credit_id = ?
+ ORDER BY created_at_utc DESC, id DESC
+ LIMIT 1`, requestCreditID).Scan(&existingKind, &existingCreated, &existingMatures, &existingDeadline); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "read latest resolution: "+err.Error())
+			return
+		}
+		if existingKind == resolutionKind || existingCount >= 2 {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+			committed = true
+			conn.Close()
+			h.respondAlreadyResolved(w, ctx, nil, requestCreditID)
+			return
+		}
+		correctionDeadline, ok := h.correctionDeadline(existingDeadline)
+		if !ok || !nowTime.Before(correctionDeadline) {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+			committed = true
+			conn.Close()
+			h.respondResolutionLocked(w, ctx, requestCreditID)
+			return
+		}
+	}
+	var maturesAt sql.NullString
+	if resolutionKind == resolutionKindCredit {
+		maturesAt = sql.NullString{
+			String: sqliteTimeText(nowTime.Add(time.Duration(h.store.ForceCreditSettlementHoldSeconds()) * time.Second)),
+			Valid:  true,
+		}
+	}
+	correctionDeadlineAt := sqliteTimeText(nowTime.Add(time.Duration(h.store.ForceCreditSettlementHoldSeconds()) * time.Second))
 	_, err = conn.ExecContext(ctx, `
 INSERT INTO ledger_quarantine_resolutions
-    (request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc)
-VALUES (?, ?, ?, ?, ?)`, requestCreditID, resolutionKindVoid, operatorID, reason, now)
+    (request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc, force_credit_matures_at_utc, correction_deadline_at_utc)
+VALUES (?, ?, ?, ?, ?, ?, ?)`, requestCreditID, resolutionKind, operatorID, reason, now, maturesAt, correctionDeadlineAt)
 	if err != nil {
 		if isSQLiteUniqueConstraint(err) {
 			// ROLLBACK + release conn (MaxOpenConns(1) on the shared
@@ -199,16 +267,21 @@ VALUES (?, ?, ?, ?, ?)`, requestCreditID, resolutionKindVoid, operatorID, reason
 	// insertion-path requirement). Must use json.Marshal — no
 	// hand-rolled JSON.
 	payload := map[string]any{
-		"severity":             "WARN",
-		"operator_attribution": operatorAttribution,
-		"operator_id":          operatorID,
-		"request_credit_id":    requestCreditID,
-		"request_id":           requestID,
-		"attempt_n":            attemptN,
-		"provider_id":          providerID,
-		"quarantine_reason":    nullStringOrNil(quarantineReason),
-		"resolution_reason":    reason,
-		"ts_utc":               now,
+		"severity":                   "WARN",
+		"operator_attribution":       operatorAttribution,
+		"operator_id":                operatorID,
+		"request_credit_id":          requestCreditID,
+		"resolution_kind":            resolutionKind,
+		"request_id":                 requestID,
+		"attempt_n":                  attemptN,
+		"provider_id":                providerID,
+		"quarantine_reason":          nullStringOrNil(quarantineReason),
+		"resolution_reason":          reason,
+		"ts_utc":                     now,
+		"correction_deadline_at_utc": correctionDeadlineAt,
+	}
+	if maturesAt.Valid {
+		payload["force_credit_matures_at_utc"] = maturesAt.String
 	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -217,7 +290,7 @@ VALUES (?, ?, ?, ?, ?)`, requestCreditID, resolutionKindVoid, operatorID, reason
 	}
 	if _, err := conn.ExecContext(ctx, `
 INSERT INTO audit_log (ts_utc, event_type, provider_id, payload_json)
-VALUES (?, ?, ?, ?)`, now, eventForceVoid, providerID, string(payloadJSON)); err != nil {
+VALUES (?, ?, ?, ?)`, now, eventType, providerID, string(payloadJSON)); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "insert audit: "+err.Error())
 		return
 	}
@@ -229,12 +302,22 @@ VALUES (?, ?, ?, ?)`, now, eventForceVoid, providerID, string(payloadJSON)); err
 	committed = true
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"request_credit_id": requestCreditID,
-		"resolution_kind":   resolutionKindVoid,
-		"operator_id":       operatorID,
-		"resolution_reason": reason,
-		"created_at_utc":    now,
+		"request_credit_id":           requestCreditID,
+		"resolution_kind":             resolutionKind,
+		"operator_id":                 operatorID,
+		"resolution_reason":           reason,
+		"created_at_utc":              now,
+		"force_credit_matures_at_utc": nullStringOrNil(maturesAt),
+		"correction_deadline_at_utc":  correctionDeadlineAt,
 	})
+}
+
+func (h *handler) correctionDeadline(deadlineAt string) (time.Time, bool) {
+	deadline, err := time.Parse(time.RFC3339Nano, deadlineAt)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return deadline, true
 }
 
 // respondAlreadyResolved reads the existing resolution row and emits
@@ -250,14 +333,20 @@ func (h *handler) respondAlreadyResolved(w http.ResponseWriter, ctx context.Cont
 		opID      string
 		reason    string
 		createdAt string
+		maturesAt sql.NullString
+		deadline  string
 	)
 	err := h.store.db.QueryRowContext(ctx, `
-SELECT resolution_kind, operator_id, resolution_reason, created_at_utc
-  FROM ledger_quarantine_resolutions WHERE request_credit_id = ?`,
-		requestCreditID).Scan(&kind, &opID, &reason, &createdAt)
+SELECT resolution_kind, operator_id, resolution_reason, created_at_utc, force_credit_matures_at_utc, correction_deadline_at_utc
+  FROM ledger_quarantine_resolutions
+ WHERE request_credit_id = ?
+ ORDER BY created_at_utc DESC, id DESC
+ LIMIT 1`,
+		requestCreditID).Scan(&kind, &opID, &reason, &createdAt, &maturesAt, &deadline)
 	if err != nil {
-		// UNIQUE fired but the row vanished? Treat as 500 — should
-		// never happen because the constraint precludes deletion.
+		// The caller observed an existing resolution but the re-read
+		// could not find it. Treat as 500; resolution rows are
+		// append-only and should not disappear.
 		writeError(w, http.StatusInternalServerError, "internal_error", "re-read existing resolution: "+err.Error())
 		return
 	}
@@ -266,15 +355,54 @@ SELECT resolution_kind, operator_id, resolution_reason, created_at_utc
 			"code":    "already_resolved",
 			"message": "row already resolved",
 			"existing_resolution": map[string]any{
-				"request_credit_id": requestCreditID,
-				"resolution_kind":   kind,
-				"operator_id":       opID,
-				"resolution_reason": reason,
-				"created_at_utc":    createdAt,
+				"request_credit_id":           requestCreditID,
+				"resolution_kind":             kind,
+				"operator_id":                 opID,
+				"resolution_reason":           reason,
+				"created_at_utc":              createdAt,
+				"force_credit_matures_at_utc": nullStringOrNil(maturesAt),
+				"correction_deadline_at_utc":  deadline,
 			},
 		},
 	}
 	writeJSON(w, http.StatusConflict, body)
+}
+
+func (h *handler) respondResolutionLocked(w http.ResponseWriter, ctx context.Context, requestCreditID int64) {
+	var (
+		kind      string
+		opID      string
+		reason    string
+		createdAt string
+		maturesAt sql.NullString
+		deadline  string
+	)
+	err := h.store.db.QueryRowContext(ctx, `
+SELECT resolution_kind, operator_id, resolution_reason, created_at_utc, force_credit_matures_at_utc, correction_deadline_at_utc
+  FROM ledger_quarantine_resolutions
+ WHERE request_credit_id = ?
+ ORDER BY created_at_utc DESC, id DESC
+ LIMIT 1`,
+		requestCreditID).Scan(&kind, &opID, &reason, &createdAt, &maturesAt, &deadline)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "re-read locked resolution: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error": map[string]any{
+			"code":    "resolution_locked",
+			"message": "resolution can no longer be corrected",
+			"existing_resolution": map[string]any{
+				"request_credit_id":           requestCreditID,
+				"resolution_kind":             kind,
+				"operator_id":                 opID,
+				"resolution_reason":           reason,
+				"created_at_utc":              createdAt,
+				"force_credit_matures_at_utc": nullStringOrNil(maturesAt),
+				"correction_deadline_at_utc":  deadline,
+			},
+		},
+	})
 }
 
 type forceVoidBody struct {

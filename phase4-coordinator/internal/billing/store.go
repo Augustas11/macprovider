@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -32,15 +33,20 @@ type Store struct {
 	// forceVoidReloadMu serializes writes so that the (audit, publish)
 	// pair is atomic and the published value is durable in audit_log
 	// before any handler can observe it (R2 fix for flag-flip race).
-	forceVoidReloadMu sync.Mutex
-	forceVoidEnabled  atomic.Bool
+	forceVoidReloadMu      sync.Mutex
+	forceVoidEnabled       atomic.Bool
+	forceCreditEnabled     atomic.Bool
+	forceCreditHoldSeconds atomic.Int64
 }
+
+const defaultForceCreditSettlementHoldSeconds int64 = 24 * 60 * 60
 
 func NewStore(db *sql.DB) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db is required")
 	}
 	s := &Store{db: db, now: time.Now}
+	s.forceCreditHoldSeconds.Store(defaultForceCreditSettlementHoldSeconds)
 	if err := s.migrate(context.Background()); err != nil {
 		return nil, err
 	}
@@ -303,25 +309,27 @@ CREATE INDEX IF NOT EXISTS idx_srv_provider_recent ON settlement_receipt_verdict
 CREATE INDEX IF NOT EXISTS idx_srv_provider_failed_recent ON settlement_receipt_verdicts(provider_id, received_at_unix_ms DESC, id DESC)
     WHERE closed=1 AND settlement_outcome='quarantined';
 
--- SPEC-005 v0.4 (issue #169) — MIG-005-010
--- ledger_quarantine_resolutions records the operator-issued force-void
--- decision for a quarantined ledger_request_credits row. v0.4 ships
--- force-void only; CHECK widens in v0.5 to include 'force_credit' once
--- the pre-payout hold primitive lands.
--- UNIQUE(request_credit_id) makes the resolution terminal; the implicit
--- sqlite_autoindex covers the LEFT JOIN read path (no separate
--- non-unique index is added).
+-- SPEC-005 v0.5 (issue #253) — MIG-005-011
+-- ledger_quarantine_resolutions records operator-issued quarantine
+-- decisions. v0.5 widens the enum to force-credit and keeps history:
+-- at most one corrective opposite-kind row may be appended by the
+-- handler during the hold window; readers project the latest row.
 CREATE TABLE IF NOT EXISTS ledger_quarantine_resolutions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     request_credit_id INTEGER NOT NULL REFERENCES ledger_request_credits(id),
-    resolution_kind TEXT NOT NULL CHECK(resolution_kind IN ('force_void')),
+    resolution_kind TEXT NOT NULL CHECK(resolution_kind IN ('force_void','force_credit')),
     operator_id TEXT NOT NULL CHECK(length(operator_id) BETWEEN 1 AND 64),
     resolution_reason TEXT NOT NULL CHECK(length(resolution_reason) BETWEEN 1 AND 500),
     created_at_utc TEXT NOT NULL,
-    UNIQUE(request_credit_id)
+    force_credit_matures_at_utc TEXT NULL,
+    correction_deadline_at_utc TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lqr_kind_created ON ledger_quarantine_resolutions(resolution_kind, created_at_utc);
+CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutions(request_credit_id, created_at_utc DESC, id DESC);
 `); err != nil {
+		return err
+	}
+	if err := s.ensureLedgerQuarantineResolutionsV05(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureCachedPromptTokensColumn(ctx); err != nil {
@@ -388,6 +396,210 @@ func (s *Store) ensureLedgerRequestCreditSettlementColumns(ctx context.Context) 
 		}
 	}
 	return nil
+}
+
+func (s *Store) ensureLedgerQuarantineResolutionsV05(ctx context.Context) error {
+	if err := s.recoverLedgerQuarantineResolutionsV05(ctx); err != nil {
+		return err
+	}
+	tableSQL := ""
+	if err := s.db.QueryRowContext(ctx, `
+SELECT sql FROM sqlite_master WHERE type='table' AND name='ledger_quarantine_resolutions'`).Scan(&tableSQL); err != nil {
+		return err
+	}
+	hasMaturesColumn, err := s.columnExists(ctx, "ledger_quarantine_resolutions", "force_credit_matures_at_utc")
+	if err != nil {
+		return err
+	}
+	hasDeadlineColumn, err := s.columnExists(ctx, "ledger_quarantine_resolutions", "correction_deadline_at_utc")
+	if err != nil {
+		return err
+	}
+	hasForceCreditEnum := strings.Contains(tableSQL, "'force_credit'")
+	hasUniqueRequestCredit, err := s.hasUniqueIndexOnColumns(ctx, "ledger_quarantine_resolutions", []string{"request_credit_id"})
+	if err != nil {
+		return err
+	}
+	if hasMaturesColumn && hasDeadlineColumn && hasForceCreditEnum && !hasUniqueRequestCredit {
+		_, err := s.db.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_lqr_kind_created ON ledger_quarantine_resolutions(resolution_kind, created_at_utc);
+CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutions(request_credit_id, created_at_utc DESC, id DESC);
+`)
+		return err
+	}
+	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var oldCount int64
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM ledger_quarantine_resolutions`).Scan(&oldCount); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `
+DROP VIEW IF EXISTS spec022_payable_request_credits;
+DROP INDEX IF EXISTS idx_lqr_kind_created;
+DROP INDEX IF EXISTS idx_lqr_request_latest;
+DROP TABLE IF EXISTS ledger_quarantine_resolutions_v05;
+CREATE TABLE ledger_quarantine_resolutions_v05 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_credit_id INTEGER NOT NULL REFERENCES ledger_request_credits(id),
+    resolution_kind TEXT NOT NULL CHECK(resolution_kind IN ('force_void','force_credit')),
+    operator_id TEXT NOT NULL CHECK(length(operator_id) BETWEEN 1 AND 64),
+    resolution_reason TEXT NOT NULL CHECK(length(resolution_reason) BETWEEN 1 AND 500),
+    created_at_utc TEXT NOT NULL,
+    force_credit_matures_at_utc TEXT NULL,
+    correction_deadline_at_utc TEXT NOT NULL
+);
+INSERT INTO ledger_quarantine_resolutions_v05 (
+    id, request_credit_id, resolution_kind, operator_id, resolution_reason,
+    created_at_utc, force_credit_matures_at_utc, correction_deadline_at_utc
+)
+SELECT id, request_credit_id, resolution_kind, operator_id, resolution_reason,
+       created_at_utc,
+       CASE WHEN resolution_kind = 'force_credit'
+            THEN strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc, '+86400 seconds')
+            ELSE NULL
+       END,
+       strftime('%Y-%m-%dT%H:%M:%fZ', created_at_utc, '+86400 seconds')
+  FROM ledger_quarantine_resolutions;
+`); err != nil {
+			return err
+		}
+		var newCount int64
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM ledger_quarantine_resolutions_v05`).Scan(&newCount); err != nil {
+			return err
+		}
+		if newCount != oldCount {
+			return fmt.Errorf("ledger_quarantine_resolutions v0.5 rebuild count mismatch: old=%d new=%d", oldCount, newCount)
+		}
+		_, err := conn.ExecContext(ctx, `
+DROP TABLE ledger_quarantine_resolutions;
+ALTER TABLE ledger_quarantine_resolutions_v05 RENAME TO ledger_quarantine_resolutions;
+CREATE INDEX IF NOT EXISTS idx_lqr_kind_created ON ledger_quarantine_resolutions(resolution_kind, created_at_utc);
+CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutions(request_credit_id, created_at_utc DESC, id DESC);
+`)
+		return err
+	})
+}
+
+func (s *Store) recoverLedgerQuarantineResolutionsV05(ctx context.Context) error {
+	leftover, err := s.tableExists(ctx, "ledger_quarantine_resolutions_v05")
+	if err != nil || !leftover {
+		return err
+	}
+	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var canonicalCount, leftoverCount int64
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM ledger_quarantine_resolutions`).Scan(&canonicalCount); err != nil {
+			return err
+		}
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM ledger_quarantine_resolutions_v05`).Scan(&leftoverCount); err != nil {
+			return err
+		}
+		switch {
+		case leftoverCount == 0:
+			_, err := conn.ExecContext(ctx, `DROP TABLE ledger_quarantine_resolutions_v05`)
+			return err
+		case canonicalCount == 0:
+			_, err := conn.ExecContext(ctx, `
+DROP VIEW IF EXISTS spec022_payable_request_credits;
+DROP TABLE ledger_quarantine_resolutions;
+ALTER TABLE ledger_quarantine_resolutions_v05 RENAME TO ledger_quarantine_resolutions;
+CREATE INDEX IF NOT EXISTS idx_lqr_kind_created ON ledger_quarantine_resolutions(resolution_kind, created_at_utc);
+CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutions(request_credit_id, created_at_utc DESC, id DESC);
+`)
+			return err
+		default:
+			return fmt.Errorf("ambiguous ledger_quarantine_resolutions_v05 recovery: canonical=%d leftover=%d", canonicalCount, leftoverCount)
+		}
+	})
+}
+
+func (s *Store) tableExists(ctx context.Context, table string) (bool, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (s *Store) hasUniqueIndexOnColumns(ctx context.Context, table string, want []string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA index_list("+table+")")
+	if err != nil {
+		return false, err
+	}
+	var indexes []string
+	for rows.Next() {
+		var seq int
+		var name string
+		var unique int
+		var origin string
+		var partial int
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		if unique == 1 {
+			indexes = append(indexes, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+	for _, indexName := range indexes {
+		cols, err := s.indexColumns(ctx, indexName)
+		if err != nil {
+			return false, err
+		}
+		if sameStringSlice(cols, want) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Store) indexColumns(ctx context.Context, indexName string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA index_info("+indexName+")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type indexColumn struct {
+		seq  int
+		name string
+	}
+	var cols []indexColumn
+	for rows.Next() {
+		var seqno, cid int
+		var name string
+		if err := rows.Scan(&seqno, &cid, &name); err != nil {
+			return nil, err
+		}
+		cols = append(cols, indexColumn{seq: seqno, name: name})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]string, len(cols))
+	for _, c := range cols {
+		if c.seq >= 0 && c.seq < len(out) {
+			out[c.seq] = c.name
+		}
+	}
+	return out, nil
+}
+
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) ensureCachedPromptTokensColumn(ctx context.Context) error {
@@ -713,7 +925,24 @@ DROP VIEW IF EXISTS spec022_payable_request_credits;
 CREATE VIEW spec022_payable_request_credits AS
 SELECT lrc.*
   FROM ledger_request_credits lrc
- WHERE lrc.quarantined = 0
+ WHERE (
+       lrc.quarantined = 0
+       OR EXISTS (
+           SELECT 1
+             FROM ledger_quarantine_resolutions lqr
+            WHERE lqr.request_credit_id = lrc.id
+              AND lqr.id = (
+                  SELECT latest.id
+                    FROM ledger_quarantine_resolutions latest
+                   WHERE latest.request_credit_id = lrc.id
+                   ORDER BY latest.created_at_utc DESC, latest.id DESC
+                   LIMIT 1
+              )
+              AND lqr.resolution_kind = 'force_credit'
+              AND lqr.force_credit_matures_at_utc IS NOT NULL
+              AND lqr.force_credit_matures_at_utc <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+       )
+   )
    AND (
        COALESCE(lrc.settlement_policy_mode, 'legacy') IN ('legacy', 'observe')
        OR (
@@ -929,6 +1158,25 @@ func (s *Store) ForceVoidEnabled() bool {
 	return s.forceVoidEnabled.Load()
 }
 
+func (s *Store) ForceCreditEnabled() bool {
+	return s.forceCreditEnabled.Load()
+}
+
+func (s *Store) ForceCreditSettlementHoldSeconds() int64 {
+	hold := s.forceCreditHoldSeconds.Load()
+	if hold <= 0 {
+		return defaultForceCreditSettlementHoldSeconds
+	}
+	return hold
+}
+
+func (s *Store) SetForceCreditSettlementHoldSeconds(seconds int64) {
+	if seconds <= 0 {
+		seconds = defaultForceCreditSettlementHoldSeconds
+	}
+	s.forceCreditHoldSeconds.Store(seconds)
+}
+
 // SetForceVoidEnabled atomically updates the route-layer flag and,
 // on actual flips (old != new), emits the SPEC-005 v0.4 §11.6.4
 // `billing_config_flag_changed` audit-log row inside the billing
@@ -940,6 +1188,14 @@ func (s *Store) ForceVoidEnabled() bool {
 // "startup" callers MUST pass a zero-value old (we infer first-time
 // init from changed == false on the swap).
 func (s *Store) SetForceVoidEnabled(ctx context.Context, newValue bool, reloadSource string) error {
+	return s.setQuarantineFlagEnabled(ctx, "quarantine_resolution_force_void_enabled", &s.forceVoidEnabled, newValue, reloadSource)
+}
+
+func (s *Store) SetForceCreditEnabled(ctx context.Context, newValue bool, reloadSource string) error {
+	return s.setQuarantineFlagEnabled(ctx, "quarantine_resolution_force_credit_enabled", &s.forceCreditEnabled, newValue, reloadSource)
+}
+
+func (s *Store) setQuarantineFlagEnabled(ctx context.Context, flagName string, flag *atomic.Bool, newValue bool, reloadSource string) error {
 	// R6 fix (CODE-M1): reloadSource enum is documented as restricted
 	// to "startup" | "sighup" | "http_reload". Validate before doing
 	// any state mutation or DB write — otherwise a typo in a caller
@@ -956,7 +1212,7 @@ func (s *Store) SetForceVoidEnabled(ctx context.Context, newValue bool, reloadSo
 	s.forceVoidReloadMu.Lock()
 	defer s.forceVoidReloadMu.Unlock()
 
-	oldValue := s.forceVoidEnabled.Load()
+	oldValue := flag.Load()
 	if oldValue == newValue {
 		return nil
 	}
@@ -966,11 +1222,11 @@ func (s *Store) SetForceVoidEnabled(ctx context.Context, newValue bool, reloadSo
 	// `ledger_config_snapshots` row already captures the initial
 	// state."
 	if reloadSource == "startup" {
-		s.forceVoidEnabled.Store(newValue)
+		flag.Store(newValue)
 		return nil
 	}
 	payload := map[string]any{
-		"flag":          "quarantine_resolution_force_void_enabled",
+		"flag":          flagName,
 		"old_value":     oldValue,
 		"new_value":     newValue,
 		"reload_source": reloadSource,
@@ -993,7 +1249,7 @@ VALUES (?, 'billing_config_flag_changed', NULL, ?)`, now, string(payloadJSON)); 
 	}
 	// Audit is durable: publish the new value. No handler could
 	// observe newValue before this point because the only reader is
-	// h.store.ForceVoidEnabled() which reads s.forceVoidEnabled.
-	s.forceVoidEnabled.Store(newValue)
+	// h.store.Force*Enabled() which reads the corresponding atomic.
+	flag.Store(newValue)
 	return nil
 }

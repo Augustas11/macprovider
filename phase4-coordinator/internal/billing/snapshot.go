@@ -23,15 +23,19 @@ type canonicalConfig struct {
 	// `quarantine_resolution_force_void_enabled` value. Including
 	// the boolean in the canonical hash makes the snapshot a
 	// forensic record of the flag state at that reload.
-	QuarantineResolutionForceVoidEnabled bool `json:"quarantine_resolution_force_void_enabled"`
+	QuarantineResolutionForceVoidEnabled   bool  `json:"quarantine_resolution_force_void_enabled"`
+	QuarantineResolutionForceCreditEnabled bool  `json:"quarantine_resolution_force_credit_enabled"`
+	ForceCreditSettlementHoldSeconds       int64 `json:"force_credit_settlement_hold_seconds"`
 }
 
 func (s *Store) InsertConfigSnapshot(ctx context.Context, cfg RewardsConfig, now time.Time) (int64, error) {
 	canon := canonicalConfig{
-		ProviderShareBps:                     ParseShareBps(cfg.ProviderShare),
-		GlobalMultiplierPPM:                  ParseMultiplierPPM(cfg.GlobalMultiplier),
-		RateCard:                             cfg.RateCard,
-		QuarantineResolutionForceVoidEnabled: s.forceVoidEnabled.Load(),
+		ProviderShareBps:                       ParseShareBps(cfg.ProviderShare),
+		GlobalMultiplierPPM:                    ParseMultiplierPPM(cfg.GlobalMultiplier),
+		RateCard:                               cfg.RateCard,
+		QuarantineResolutionForceVoidEnabled:   s.forceVoidEnabled.Load(),
+		QuarantineResolutionForceCreditEnabled: s.forceCreditEnabled.Load(),
+		ForceCreditSettlementHoldSeconds:       s.ForceCreditSettlementHoldSeconds(),
 	}
 	rateJSON, err := json.Marshal(canon.RateCard)
 	if err != nil {
@@ -82,8 +86,15 @@ INSERT INTO ledger_config_snapshots (
 // audit) and HandlersWithQuarantineGate (which uses
 // SetForceVoidEnabled with reloadSource="startup").
 func (s *Store) ReloadBillingConfig(ctx context.Context, cfg RewardsConfig, forceVoidEnabled bool, reloadSource string, now time.Time) (int64, error) {
+	return s.ReloadBillingConfigV05(ctx, cfg, forceVoidEnabled, s.forceCreditEnabled.Load(), s.ForceCreditSettlementHoldSeconds(), reloadSource, now)
+}
+
+func (s *Store) ReloadBillingConfigV05(ctx context.Context, cfg RewardsConfig, forceVoidEnabled bool, forceCreditEnabled bool, forceCreditHoldSeconds int64, reloadSource string, now time.Time) (int64, error) {
 	if reloadSource != "sighup" && reloadSource != "http_reload" {
 		return 0, errors.New("ReloadBillingConfig: reloadSource must be sighup or http_reload")
+	}
+	if forceCreditHoldSeconds <= 0 {
+		forceCreditHoldSeconds = defaultForceCreditSettlementHoldSeconds
 	}
 	s.forceVoidReloadMu.Lock()
 	defer s.forceVoidReloadMu.Unlock()
@@ -92,10 +103,12 @@ func (s *Store) ReloadBillingConfig(ctx context.Context, cfg RewardsConfig, forc
 	// value so the ledger_config_snapshots row reflects what the
 	// next handler-request observes (not the pre-reload value).
 	canon := canonicalConfig{
-		ProviderShareBps:                     ParseShareBps(cfg.ProviderShare),
-		GlobalMultiplierPPM:                  ParseMultiplierPPM(cfg.GlobalMultiplier),
-		RateCard:                             cfg.RateCard,
-		QuarantineResolutionForceVoidEnabled: forceVoidEnabled,
+		ProviderShareBps:                       ParseShareBps(cfg.ProviderShare),
+		GlobalMultiplierPPM:                    ParseMultiplierPPM(cfg.GlobalMultiplier),
+		RateCard:                               cfg.RateCard,
+		QuarantineResolutionForceVoidEnabled:   forceVoidEnabled,
+		QuarantineResolutionForceCreditEnabled: forceCreditEnabled,
+		ForceCreditSettlementHoldSeconds:       forceCreditHoldSeconds,
 	}
 	rateJSON, err := json.Marshal(canon.RateCard)
 	if err != nil {
@@ -111,6 +124,8 @@ func (s *Store) ReloadBillingConfig(ctx context.Context, cfg RewardsConfig, forc
 
 	oldFlag := s.forceVoidEnabled.Load()
 	flagChanged := oldFlag != forceVoidEnabled
+	oldCreditFlag := s.forceCreditEnabled.Load()
+	creditFlagChanged := oldCreditFlag != forceCreditEnabled
 
 	var flagPayloadJSON []byte
 	if flagChanged {
@@ -122,6 +137,20 @@ func (s *Store) ReloadBillingConfig(ctx context.Context, cfg RewardsConfig, forc
 			"ts_utc":        ts,
 		}
 		flagPayloadJSON, err = json.Marshal(flagPayload)
+		if err != nil {
+			return 0, err
+		}
+	}
+	var creditFlagPayloadJSON []byte
+	if creditFlagChanged {
+		flagPayload := map[string]any{
+			"flag":          "quarantine_resolution_force_credit_enabled",
+			"old_value":     oldCreditFlag,
+			"new_value":     forceCreditEnabled,
+			"reload_source": reloadSource,
+			"ts_utc":        ts,
+		}
+		creditFlagPayloadJSON, err = json.Marshal(flagPayload)
 		if err != nil {
 			return 0, err
 		}
@@ -150,6 +179,13 @@ VALUES (?, 'billing_config_flag_changed', NULL, ?)`, ts, string(flagPayloadJSON)
 				return err
 			}
 		}
+		if creditFlagChanged {
+			if _, err := conn.ExecContext(ctx, `
+INSERT INTO audit_log (ts_utc, event_type, provider_id, payload_json)
+VALUES (?, 'billing_config_flag_changed', NULL, ?)`, ts, string(creditFlagPayloadJSON)); err != nil {
+				return err
+			}
+		}
 		snapshotID = id
 		return nil
 	}); err != nil {
@@ -162,6 +198,10 @@ VALUES (?, 'billing_config_flag_changed', NULL, ?)`, ts, string(flagPayloadJSON)
 	if flagChanged {
 		s.forceVoidEnabled.Store(forceVoidEnabled)
 	}
+	if creditFlagChanged {
+		s.forceCreditEnabled.Store(forceCreditEnabled)
+	}
+	s.forceCreditHoldSeconds.Store(forceCreditHoldSeconds)
 	return snapshotID, nil
 }
 
