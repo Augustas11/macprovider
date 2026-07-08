@@ -118,10 +118,20 @@ fi
 
 log "step 4/6: validate merged config"
 if [ "$DRY_RUN" != "1" ]; then
-  "${SSH[@]}" '/opt/macprovider/coordinator \
-    --config /opt/macprovider/coordinator.yaml \
-    --config-overlay /etc/macprovider/coordinator.opoi-v0-staging.yaml \
-    --validate-config'
+  "${SSH[@]}" 'set -euo pipefail
+    env_file=/etc/macprovider/coordinator.env
+    if [ ! -f "$env_file" ]; then
+      echo "missing $env_file (required for --validate-config env expansion)" >&2
+      exit 1
+    fi
+    set -a
+    # shellcheck disable=SC1090
+    . "$env_file"
+    set +a
+    /opt/macprovider/coordinator \
+      --config /opt/macprovider/coordinator.yaml \
+      --config-overlay /etc/macprovider/coordinator.opoi-v0-staging.yaml \
+      --validate-config'
 fi
 
 log "step 5/6: restart coordinator"
