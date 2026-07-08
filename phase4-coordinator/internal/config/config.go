@@ -60,7 +60,7 @@ type Config struct {
 	Onboarding                   OnboardingConfig             `yaml:"onboarding"`
 	MalibuEmission               MalibuEmissionConfig         `yaml:"malibu_emission"`
 	AutotuneFeeds                AutotuneFeedsConfig          `yaml:"autotune"`
-	ProofOfWeights               ProofOfWeightsConfig       `yaml:"proof_of_weights"`
+	ProofOfWeights               ProofOfWeightsConfig         `yaml:"proof_of_weights"`
 	Proxy                        ProxyConfig                  `yaml:"proxy"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
 }
@@ -110,16 +110,16 @@ type OnboardingConfig struct {
 // MalibuEmissionConfig gates SPEC-MALIBU-EMISSION-LEDGER bootstrap accrual.
 // Default-off; money-path changes require PR + audit.
 type MalibuEmissionConfig struct {
-	Enabled                    bool    `yaml:"enabled"`
-	WriterDSN                  string  `yaml:"writer_dsn"`
-	TickIntervalSeconds        int     `yaml:"tick_interval_seconds"`
-	ProviderDailyCapMALIBU     float64 `yaml:"provider_daily_cap_malibu"`
-	WalletDailyCapMALIBU       float64 `yaml:"wallet_daily_cap_malibu"`
-	SQLitePayoutDBPath         string  `yaml:"sqlite_payout_db_path"`
-	WalletMirrorIntervalSeconds int    `yaml:"wallet_mirror_interval_seconds"`
-	UnlockEvalIntervalSeconds  int      `yaml:"unlock_eval_interval_seconds"`
-	MaxSerializableRetries     int      `yaml:"max_serializable_retries"`
-	BaseUSDCBalanceRPCURLs     []string `yaml:"base_usdc_balance_rpc_urls"`
+	Enabled                     bool     `yaml:"enabled"`
+	WriterDSN                   string   `yaml:"writer_dsn"`
+	TickIntervalSeconds         int      `yaml:"tick_interval_seconds"`
+	ProviderDailyCapMALIBU      float64  `yaml:"provider_daily_cap_malibu"`
+	WalletDailyCapMALIBU        float64  `yaml:"wallet_daily_cap_malibu"`
+	SQLitePayoutDBPath          string   `yaml:"sqlite_payout_db_path"`
+	WalletMirrorIntervalSeconds int      `yaml:"wallet_mirror_interval_seconds"`
+	UnlockEvalIntervalSeconds   int      `yaml:"unlock_eval_interval_seconds"`
+	MaxSerializableRetries      int      `yaml:"max_serializable_retries"`
+	BaseUSDCBalanceRPCURLs      []string `yaml:"base_usdc_balance_rpc_urls"`
 }
 
 // AutotuneFeedsConfig points at the signed SPEC-023 recommendation feeds
@@ -311,22 +311,22 @@ type PoolConfig struct {
 	WakeGapThresholdS       int `yaml:"wake_gap_threshold_s"`
 	// WakeGapThresholdMs, when > 0, overrides WakeGapThresholdS for
 	// millisecond-precision test scenarios. Not for production use.
-	WakeGapThresholdMs      int                     `yaml:"wake_gap_threshold_ms"`
-	WarmupFallbackS         int                     `yaml:"warmup_fallback_s"`
-	WarmupGateEnabled       bool                    `yaml:"warmup_gate_enabled"`
-	WarmupGateTimeoutS      int                     `yaml:"warmup_gate_timeout_s"`
-	WarmupGateMaxTokens     int                     `yaml:"warmup_gate_max_tokens"`
-	DegradedBackoffS        int                     `yaml:"degraded_backoff_s"`
-	DegradedMaxRetries      int                     `yaml:"degraded_max_retries"`
-	DegradedProbeAfter502   bool                    `yaml:"degraded_probe_after_502"`
-	BreakerFailureThreshold int                     `yaml:"breaker_failure_threshold"`
-	BreakerWindowS          int                     `yaml:"breaker_window_s"`
-	CanaryEnabled           bool                    `yaml:"canary_enabled"`
-	CanaryIntervalS         int                     `yaml:"canary_interval_s"`
-	CanaryTimeoutS          int                     `yaml:"canary_timeout_s"`
-	CanaryMaxTokens         int                     `yaml:"canary_max_tokens"`
-	CanaryFailureThreshold  int                              `yaml:"canary_failure_threshold"`
-	CanaryChallenges        []CanaryChallengeConfig          `yaml:"canary_challenges"`
+	WakeGapThresholdMs      int                                `yaml:"wake_gap_threshold_ms"`
+	WarmupFallbackS         int                                `yaml:"warmup_fallback_s"`
+	WarmupGateEnabled       bool                               `yaml:"warmup_gate_enabled"`
+	WarmupGateTimeoutS      int                                `yaml:"warmup_gate_timeout_s"`
+	WarmupGateMaxTokens     int                                `yaml:"warmup_gate_max_tokens"`
+	DegradedBackoffS        int                                `yaml:"degraded_backoff_s"`
+	DegradedMaxRetries      int                                `yaml:"degraded_max_retries"`
+	DegradedProbeAfter502   bool                               `yaml:"degraded_probe_after_502"`
+	BreakerFailureThreshold int                                `yaml:"breaker_failure_threshold"`
+	BreakerWindowS          int                                `yaml:"breaker_window_s"`
+	CanaryEnabled           bool                               `yaml:"canary_enabled"`
+	CanaryIntervalS         int                                `yaml:"canary_interval_s"`
+	CanaryTimeoutS          int                                `yaml:"canary_timeout_s"`
+	CanaryMaxTokens         int                                `yaml:"canary_max_tokens"`
+	CanaryFailureThreshold  int                                `yaml:"canary_failure_threshold"`
+	CanaryChallenges        []CanaryChallengeConfig            `yaml:"canary_challenges"`
 	ModelClassChallenges    map[string][]CanaryChallengeConfig `yaml:"model_class_challenges"`
 }
 
@@ -638,10 +638,7 @@ type SettlementConfig struct {
 	JobEnabled                  bool   `yaml:"job_enabled"`
 }
 
-// BillingConfig is the SPEC-005 v0.4 (issue #169) billing-side
-// operator-toggleable surface. v0.4 ships one flag gating the
-// quarantine-VOID admin endpoint at the route layer; v0.5 will
-// add a force-credit flag alongside the pre-payout hold.
+// BillingConfig is the SPEC-005 billing-side operator-toggleable surface.
 type BillingConfig struct {
 	// QuarantineResolutionForceVoidEnabled gates POST
 	// /admin/ledger/quarantine/{id}/force-void (SPEC-005 v0.4
@@ -650,6 +647,13 @@ type BillingConfig struct {
 	// 10) until the operator explicitly flips this to true via
 	// the existing config-reload primitive.
 	QuarantineResolutionForceVoidEnabled bool `yaml:"quarantine_resolution_force_void_enabled"`
+	// QuarantineResolutionForceCreditEnabled gates POST
+	// /admin/ledger/quarantine/{id}/force-credit. Default false.
+	QuarantineResolutionForceCreditEnabled bool `yaml:"quarantine_resolution_force_credit_enabled"`
+	// ForceCreditSettlementHoldSeconds is the pre-payout hold for
+	// force-credit resolutions. Zero means the SPEC-005 v0.5 default
+	// of 24 hours.
+	ForceCreditSettlementHoldSeconds int `yaml:"force_credit_settlement_hold_seconds"`
 }
 
 type EndpointsConfig struct {

@@ -208,6 +208,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing force-void flag init: %v\n", err)
 		os.Exit(1)
 	}
+	if err := billingStore.SetForceCreditEnabled(context.Background(), cfg.Billing.QuarantineResolutionForceCreditEnabled, "startup"); err != nil {
+		fmt.Fprintf(os.Stderr, "billing force-credit flag init: %v\n", err)
+		os.Exit(1)
+	}
+	billingStore.SetForceCreditSettlementHoldSeconds(int64(cfg.Billing.ForceCreditSettlementHoldSeconds))
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
@@ -391,16 +396,16 @@ func main() {
 			sqlitePath = cfg.Storage.DBPath
 		}
 		rewardsCfg := rewards.Config{
-			Enabled:                  true,
-			WriterDSN:                cfg.MalibuEmission.WriterDSN,
-			TickInterval:             time.Duration(cfg.MalibuEmission.TickIntervalSeconds) * time.Second,
-			ProviderDailyCapMALIBU:   cfg.MalibuEmission.ProviderDailyCapMALIBU,
-			WalletDailyCapMALIBU:     cfg.MalibuEmission.WalletDailyCapMALIBU,
-			SQLitePayoutDBPath:       sqlitePath,
-			WalletMirrorInterval:     time.Duration(cfg.MalibuEmission.WalletMirrorIntervalSeconds) * time.Second,
-			UnlockEvalInterval:       time.Duration(cfg.MalibuEmission.UnlockEvalIntervalSeconds) * time.Second,
-			MaxSerializableRetries:   cfg.MalibuEmission.MaxSerializableRetries,
-			BaseUSDCBalanceRPCURLs:   cfg.MalibuEmission.BaseUSDCBalanceRPCURLs,
+			Enabled:                true,
+			WriterDSN:              cfg.MalibuEmission.WriterDSN,
+			TickInterval:           time.Duration(cfg.MalibuEmission.TickIntervalSeconds) * time.Second,
+			ProviderDailyCapMALIBU: cfg.MalibuEmission.ProviderDailyCapMALIBU,
+			WalletDailyCapMALIBU:   cfg.MalibuEmission.WalletDailyCapMALIBU,
+			SQLitePayoutDBPath:     sqlitePath,
+			WalletMirrorInterval:   time.Duration(cfg.MalibuEmission.WalletMirrorIntervalSeconds) * time.Second,
+			UnlockEvalInterval:     time.Duration(cfg.MalibuEmission.UnlockEvalIntervalSeconds) * time.Second,
+			MaxSerializableRetries: cfg.MalibuEmission.MaxSerializableRetries,
+			BaseUSDCBalanceRPCURLs: cfg.MalibuEmission.BaseUSDCBalanceRPCURLs,
 		}
 		var err error
 		rewardsRunner, err = rewards.New(rewardsDB, rewardsCfg, logger.With().Str("subsystem", "malibu_emission").Logger(), rewards.RunnerDeps{})
@@ -711,17 +716,20 @@ func main() {
 	if statsPools != nil {
 		idlePrewarmReader = statsprewarm.NewReader(statsPools.Reader)
 	}
-	billingHandler := billingStore.HandlersWithQuarantineGateAndIdlePrewarm(
+	billingHandler := billingStore.HandlersWithQuarantineGatesAndIdlePrewarm(
 		cfg.Auth.OperatorKey,
 		tokenStore,
 		cfg.Auth.RequireProviderTokens,
 		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
 		cfg.Billing.QuarantineResolutionForceVoidEnabled,
+		cfg.Billing.QuarantineResolutionForceCreditEnabled,
 		idlePrewarmReader,
 	)
 	// §11.5 launch-gate item 10 — operator-visible startup state.
 	logger.Info().
 		Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
+		Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).
+		Int("billing.force_credit_settlement_hold_seconds", cfg.Billing.ForceCreditSettlementHoldSeconds).
 		Str("event", "spec005_v0_4_route_layer_flag_init").
 		Msg("quarantine force-void route-layer flag initialized")
 	providerMux.Handle("/admin/ledger/", billingHandler)
@@ -1188,7 +1196,15 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 		// written, and the force-void flag stays at its prior value.
 		// Only AFTER COMMIT do we publish the rewards / settlement
 		// in-memory configs that depend on the snapshot id.
-		snapshotID, err := billingStores[0].ReloadBillingConfig(context.Background(), cfg.Rewards, cfg.Billing.QuarantineResolutionForceVoidEnabled, "sighup", time.Now().UTC())
+		snapshotID, err := billingStores[0].ReloadBillingConfigV05(
+			context.Background(),
+			cfg.Rewards,
+			cfg.Billing.QuarantineResolutionForceVoidEnabled,
+			cfg.Billing.QuarantineResolutionForceCreditEnabled,
+			int64(cfg.Billing.ForceCreditSettlementHoldSeconds),
+			"sighup",
+			time.Now().UTC(),
+		)
 		if err != nil {
 			logger.Error().Err(err).Msg("billing config reload rejected (snapshot + flag audit atomic)")
 			return
@@ -1197,6 +1213,8 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
 		logger.Info().
 			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
+			Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).
+			Int("billing.force_credit_settlement_hold_seconds", cfg.Billing.ForceCreditSettlementHoldSeconds).
 			Str("event", "spec005_v0_4_route_layer_flag_reload").
 			Msg("quarantine force-void route-layer flag reloaded")
 	}
