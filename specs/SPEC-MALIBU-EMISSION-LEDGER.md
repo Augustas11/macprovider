@@ -173,7 +173,13 @@ Coordinator job evaluates SPEC-026 §5.2 criteria on `unlock_eval_interval`:
 - At least **one economic** (E1/E2/E3) **and one distinct additional** criterion
 - E1: ≥100 verified receipts from `settlement_receipt_verdicts` (SQLite billing DB)
 - E2/A3: wallet bound + ≥100 USDC for 72h when `base_usdc_balance_rpc_urls` + checker configured
-- E3: dual-control operator promotion via `/admin/trust-promotion/request` + `.../approve`
+- E3: dual-control operator promotion via `/admin/trust-promotion/request` + `.../approve`.
+  Two-person control is enforced by **distinct operator credentials**: both endpoints
+  authenticate against `auth.operator_keys` (per-actor map) with a constant-time
+  compare, and the acting operator identity is bound to the **matched key** — the
+  `X-Operator-Actor` header is never trusted. The route **fails closed**
+  (`503 dual_control_unavailable`) unless `auth.operator_keys` holds ≥2 entries with
+  distinct, non-empty secrets, so one credential cannot both request and approve.
 - A1: 72h uptime with heartbeat gap &lt;5m (live pool snapshot)
 - A4: `provider_identities.attested = true`
 - On unlock: `trust_tier → trusted`; new accruals omit `trust_tier_provisional` hold
