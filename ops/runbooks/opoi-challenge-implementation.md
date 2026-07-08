@@ -81,6 +81,8 @@ Maintain per-model challenge entries if templates differ (tokenizer quirks). Sta
 
 ### 2.4 Rollout
 
+**Full Pearl procedure:** [`opoi-pearl-deploy.md`](./opoi-pearl-deploy.md) (build, systemd drop-in, scripted deploy).
+
 1. Enable on **staging** coordinator with 1–2 lab providers.
 2. Watch logs: `provider canary passed` / `provider canary failed`.
 3. Confirm degraded provider drops out of `/poolz` routing (`RoutingEligible` false).
