@@ -785,8 +785,13 @@ PY
     }
     psql_preflight_service onboarding_preflight "$ONBOARDING_POSTGRES_DSN" <<SQL >/dev/null
 SELECT 1 FROM hardware_verification_jobs LIMIT 1;
+SELECT generated_at, evidence
+  FROM hardware_verification_jobs
+ WHERE provider_id = ''
+   AND status = 'verified'
+ LIMIT 0;
 SQL
-    echo "  ok: migration 008 hardware_verification_jobs is visible to provider_onboarding"
+    echo "  ok: migration 008+013 hardware_verification_jobs visible to provider_onboarding (hello gate read path)"
     psql_preflight_service auth_policy_request_preflight "$ONBOARDING_AUTH_POLICY_REQUEST_DSN" <<SQL >/dev/null
 DO \$\$
 BEGIN
