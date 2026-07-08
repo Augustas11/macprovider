@@ -1,0 +1,14 @@
+# systemd drop-in — MALIBU emission overlay (Session C4)
+#
+# Install on Pearl (after deploy-malibu-emission-pearl.sh merges overlays):
+#   /etc/systemd/system/macprovider-coordinator.service.d/malibu-emission.conf
+#
+# Rollback overlay only:
+#   sudo rm /etc/systemd/system/macprovider-coordinator.service.d/malibu-emission.conf
+#   sudo systemctl daemon-reload && sudo systemctl restart macprovider-coordinator
+
+[Service]
+ExecStart=
+ExecStart=/opt/macprovider/coordinator \
+  --config /opt/macprovider/coordinator.yaml \
+  --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml

@@ -614,3 +614,35 @@ pool:
 		t.Fatalf("canary challenges=%d want 1", len(cfg.Pool.CanaryChallenges))
 	}
 }
+
+func TestLoadWithOverlayMalibuEmissionBlock(t *testing.T) {
+	t.Setenv("MALIBU_EMISSION_WRITER_DSN", "postgres://rewards_writer:pw@127.0.0.1:5432/stats?sslmode=disable")
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.yaml")
+	overlayPath := filepath.Join(dir, "malibu.yaml")
+	if err := os.WriteFile(basePath, []byte("auth:\n  operator_key: test-operator-key-with-32-byte-minimum-length\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	overlay := strings.TrimSpace(`
+malibu_emission:
+  enabled: false
+  writer_dsn: env:MALIBU_EMISSION_WRITER_DSN
+  provider_daily_cap_malibu: 25
+`)
+	if err := os.WriteFile(overlayPath, []byte(overlay), 0o644); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	cfg, err := LoadWithOverlay(basePath, overlayPath)
+	if err != nil {
+		t.Fatalf("LoadWithOverlay: %v", err)
+	}
+	if cfg.MalibuEmission.Enabled {
+		t.Fatal("malibu overlay should keep enabled false for C4 staging")
+	}
+	if cfg.MalibuEmission.WriterDSN != "postgres://rewards_writer:pw@127.0.0.1:5432/stats?sslmode=disable" {
+		t.Fatalf("writer_dsn=%q", cfg.MalibuEmission.WriterDSN)
+	}
+	if cfg.MalibuEmission.ProviderDailyCapMALIBU != 25 {
+		t.Fatalf("provider cap=%v", cfg.MalibuEmission.ProviderDailyCapMALIBU)
+	}
+}

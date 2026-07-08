@@ -1,0 +1,18 @@
+# coordinator.malibu-emission-overlay.yaml — Session C4 Pearl overlay
+#
+# Mounts MALIBU accrual read API (writer_dsn) while keeping accrual ticks
+# disabled until operator promotion. Merge with any existing Pearl overlay
+# (e.g. OPoI canaries) before install — deploy script does this automatically.
+#
+# Promotion (after C4 verification): set enabled: true and restart coordinator.
+# Rollback: set enabled: false or remove this overlay block.
+
+malibu_emission:
+  enabled: false
+  writer_dsn: env:MALIBU_EMISSION_WRITER_DSN
+  tick_interval_seconds: 900
+  provider_daily_cap_malibu: 25
+  wallet_daily_cap_malibu: 100
+  wallet_mirror_interval_seconds: 300
+  unlock_eval_interval_seconds: 3600
+  max_serializable_retries: 5

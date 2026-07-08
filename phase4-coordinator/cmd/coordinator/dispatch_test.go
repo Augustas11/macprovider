@@ -167,6 +167,25 @@ func TestDispatchJournalStreamFlagAccepted(t *testing.T) {
 	}
 }
 
+// TestDispatchStatsMigrateMissingAdminDSN — stats-migrate rejects missing DSN.
+func TestDispatchStatsMigrateMissingAdminDSN(t *testing.T) {
+	bin := locateCoordinatorBinary(t)
+	cmd := exec.Command(bin, "stats-migrate")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	exitCode := exitCodeOf(err)
+	if exitCode != 2 {
+		t.Fatalf("stats-migrate without --admin-dsn exit=%d, want 2; stderr=%q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no admin DSN") {
+		t.Errorf("stderr should mention missing admin DSN; got %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "open coordinator.yaml") {
+		t.Errorf("stats-migrate fell through to daemon config load: %q", stderr.String())
+	}
+}
+
 func exitCodeOf(err error) int {
 	if err == nil {
 		return 0
