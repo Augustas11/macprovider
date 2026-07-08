@@ -272,6 +272,20 @@ stats:
     - "127.0.0.0/8"
     - "::1/128"
 
+# SPEC-MALIBU-EMISSION-LEDGER — bootstrap $MALIBU accrual (default-off).
+# Requires migration 012 on the stats/rewards Postgres DB before enable.
+malibu_emission:
+  enabled: false
+  # writer_dsn: env:MALIBU_EMISSION_WRITER_DSN
+  tick_interval_seconds: 900
+  provider_daily_cap_malibu: 25
+  wallet_daily_cap_malibu: 100
+  # Defaults to storage.db_path when unset (SPEC-016 payout address mirror source).
+  # sqlite_payout_db_path: "/var/lib/macprovider/coordinator.db"
+  wallet_mirror_interval_seconds: 300
+  unlock_eval_interval_seconds: 3600
+  max_serializable_retries: 5
+
 # Auto-update recommendation surface. The coordinator forwards
 # `latest_binary_version` to every connected provider in its
 # `auth_response` / `state_update` frame as `recommended_binary_version`.

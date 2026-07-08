@@ -26,6 +26,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/rewards"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
 	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
@@ -344,6 +345,46 @@ func main() {
 		}
 		statsRollup.Start(shutdownCtx)
 		logger.Info().Str("backfill_mode", mode).Int64("partial_history_since_unix", partialUnix).Msg("SPEC-017 stats rollup started (overview/timeseries/leaderboards/rewards_populated/nightly_rebuild)")
+	}
+
+	// SPEC-MALIBU-EMISSION-LEDGER — bootstrap accrual worker (default-off).
+	var rewardsRunner *rewards.Runner
+	var rewardsDB *sql.DB
+	if cfg.MalibuEmission.Enabled {
+		var err error
+		rewardsDB, err = sql.Open("postgres", cfg.MalibuEmission.WriterDSN)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "malibu_emission: open writer pool: %v\n", err)
+			os.Exit(1)
+		}
+		rewardsDB.SetMaxOpenConns(4)
+		rewardsDB.SetMaxIdleConns(2)
+		rewardsDB.SetConnMaxLifetime(5 * time.Minute)
+		sqlitePath := strings.TrimSpace(cfg.MalibuEmission.SQLitePayoutDBPath)
+		if sqlitePath == "" {
+			sqlitePath = cfg.Storage.DBPath
+		}
+		rewardsCfg := rewards.Config{
+			Enabled:                true,
+			WriterDSN:              cfg.MalibuEmission.WriterDSN,
+			TickInterval:           time.Duration(cfg.MalibuEmission.TickIntervalSeconds) * time.Second,
+			ProviderDailyCapMALIBU: cfg.MalibuEmission.ProviderDailyCapMALIBU,
+			WalletDailyCapMALIBU:   cfg.MalibuEmission.WalletDailyCapMALIBU,
+			SQLitePayoutDBPath:     sqlitePath,
+			WalletMirrorInterval:   time.Duration(cfg.MalibuEmission.WalletMirrorIntervalSeconds) * time.Second,
+			UnlockEvalInterval:     time.Duration(cfg.MalibuEmission.UnlockEvalIntervalSeconds) * time.Second,
+			MaxSerializableRetries: cfg.MalibuEmission.MaxSerializableRetries,
+		}
+		rewardsRunner, err = rewards.New(rewardsDB, rewardsCfg, logger.With().Str("subsystem", "malibu_emission").Logger())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "malibu_emission: %v\n", err)
+			os.Exit(1)
+		}
+		rewardsRunner.Start(shutdownCtx)
+		logger.Info().Msg("SPEC-MALIBU-EMISSION-LEDGER accrual runner started")
+		defer rewardsDB.Close()
+	} else {
+		logger.Info().Msg("malibu_emission DISABLED via config (default)")
 	}
 	// Round-3 ARCH r3 LOW 2 fix: defers run LIFO, so a non-signal
 	// return path would call `Wait()` BEFORE the
@@ -703,6 +744,7 @@ func main() {
 		cfg.Onboarding.AppTrackRegisterEnabled,
 		register,
 		hardwareEvidence,
+		malibuAccrualHandler(cfg, tokenStore, rewardsDB),
 	)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
@@ -983,15 +1025,34 @@ func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Ha
 	})
 }
 
-func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence http.HandlerFunc) http.Handler {
+func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence http.HandlerFunc, malibuAccrual http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	if enabled {
 		mux.HandleFunc("/v1/providers/register", register)
 		mux.HandleFunc("/v1/providers/hardware-evidence", hardwareEvidence)
 	}
 	mux.HandleFunc("/v1/provider/wallet", appTrackWalletNotImplementedHandler)
+	if malibuAccrual != nil {
+		mux.Handle("/v1/provider/malibu-accrual", malibuAccrual)
+	}
 	mux.Handle("/", base)
 	return mux
+}
+
+func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB) http.Handler {
+	if rewardsDB == nil || !cfg.MalibuEmission.Enabled {
+		return nil
+	}
+	rewardsCfg := rewards.Config{
+		ProviderDailyCapMALIBU: cfg.MalibuEmission.ProviderDailyCapMALIBU,
+		WalletDailyCapMALIBU:   cfg.MalibuEmission.WalletDailyCapMALIBU,
+	}
+	return rewards.NewAccrualHandler(rewards.AccrualHandlerDeps{
+		DB:                    rewardsDB,
+		TokenStore:            tokenStore,
+		RequireProviderTokens: cfg.Auth.RequireProviderTokens,
+		Config:                rewardsCfg,
+	})
 }
 
 func appTrackWalletNotImplementedHandler(w http.ResponseWriter, r *http.Request) {
