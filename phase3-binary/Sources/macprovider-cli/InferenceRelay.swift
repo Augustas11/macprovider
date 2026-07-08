@@ -810,7 +810,7 @@ actor InferenceRelay {
     ) async throws {
         if let tier2Session {
             let sealStart = clockMonotonicMicros()
-            let sealed = try tier2Session.sealResponseChunk(requestID: requestID, stream: stream, plaintext: data)
+            let sealed = try tier2Session.sealResponseChunk(requestID: requestID, stream: stream, seq: seq, plaintext: data)
             EgressPerfTraceKey.current?.recordSeal(durationMicros: clockMonotonicMicros() &- sealStart)
             try await sendFrame(sealed)
             return

@@ -31,6 +31,7 @@ final class Tier2ProviderSession: @unchecked Sendable {
     let p2cNonceBase: Data
 
     private let lock = NSLock()
+    private var responseChunkPlaintextEnvelope = false
     private var c2pCounter: UInt64 = 0
     private var p2cCounter: UInt64 = 0
 
@@ -100,6 +101,12 @@ final class Tier2ProviderSession: @unchecked Sendable {
         )
     }
 
+    func enableResponseChunkPlaintextEnvelope() {
+        lock.lock()
+        responseChunkPlaintextEnvelope = true
+        lock.unlock()
+    }
+
     var countersForTest: (c2p: UInt64, p2c: UInt64) {
         lock.lock()
         defer { lock.unlock() }
@@ -146,10 +153,21 @@ final class Tier2ProviderSession: @unchecked Sendable {
         )
     }
 
-    func sealResponseChunk(requestID: String, stream: Bool, plaintext: String) throws -> [String: Any] {
+    func sealResponseChunk(requestID: String, stream: Bool, seq: Int, plaintext: String) throws -> [String: Any] {
         lock.lock()
         defer { lock.unlock() }
-        let seq = p2cCounter
+        let plaintextData: Data
+        if responseChunkPlaintextEnvelope {
+            let plaintextEnvelope: [String: Any] = [
+                "type": "inference_response_chunk_plaintext",
+                "seq": seq,
+                "data": plaintext,
+            ]
+            plaintextData = try JSONSerialization.data(withJSONObject: plaintextEnvelope, options: [.sortedKeys])
+        } else {
+            plaintextData = Data(plaintext.utf8)
+        }
+        let aeadSeq = p2cCounter
         let aad = Tier2FrameAAD(
             type: "inference_response_chunk",
             direction: "p2c",
@@ -157,15 +175,15 @@ final class Tier2ProviderSession: @unchecked Sendable {
             stream: stream,
             providerID: providerID,
             assignedID: assignedID,
-            seq: seq
+            seq: aeadSeq
         )
         let enc = try Self.sealEnvelope(
-            Data(plaintext.utf8),
+            plaintextData,
             key: p2cKey,
             nonceBase: p2cNonceBase,
             keyID: keyID,
             aad: aad,
-            seq: seq
+            seq: aeadSeq
         )
         p2cCounter += 1
         return [
@@ -256,7 +274,9 @@ final class Tier2ProviderSession: @unchecked Sendable {
             seq: seq
         )
         let plaintext = try openEnvelope(enc, key: session.p2cKey, nonceBase: session.p2cNonceBase, keyID: session.keyID, expectedAAD: aad, expectedSeq: seq)
-        guard let data = String(data: plaintext, encoding: .utf8) else {
+        guard let object = try? JSONSerialization.jsonObject(with: plaintext) as? [String: Any],
+              object["type"] as? String == "inference_response_chunk_plaintext",
+              let data = object["data"] as? String else {
             throw Tier2ProviderError.invalidPlaintext
         }
         return data

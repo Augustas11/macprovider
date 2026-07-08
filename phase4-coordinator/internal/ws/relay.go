@@ -30,6 +30,10 @@ var (
 const retiredRelayRequestTTL = 5 * time.Minute
 const providerDispatchWriteProbeTimeout = 500 * time.Millisecond
 
+// Bound sparse p2c sequence gaps so multiplexed responses can arrive out of
+// order without giving an admitted provider an unbounded replay-cache sink.
+const tier2MaxOutOfOrderP2CFrames = 4096
+
 var relayEndFrameAADMismatchTotal atomic.Uint64
 var relayBufferExceededTotal atomic.Uint64
 
@@ -197,6 +201,18 @@ type encryptedInferenceResponseChunk struct {
 	RequestID string                 `json:"request_id,omitempty"`
 	Encrypted bool                   `json:"encrypted"`
 	Enc       tier2.AEADEnvelopeBody `json:"enc"`
+}
+
+type encryptedInferenceChunkPlaintext struct {
+	Type string `json:"type"`
+	Seq  int    `json:"seq"`
+	Data string `json:"data"`
+}
+
+type encryptedInferenceChunkPlaintextDecode struct {
+	Type string  `json:"type"`
+	Seq  *int    `json:"seq"`
+	Data *string `json:"data"`
 }
 
 type encryptedInferenceResponseEnd struct {
@@ -431,10 +447,10 @@ func (ps *providerSession) failActiveOrAll(requestID string, err error) {
 	ps.failActive(requestID, err)
 }
 
-func (ps *providerSession) cancelActive(requestID string, reason string, err error) {
+func (ps *providerSession) cancelActive(requestID string, reason string, err error) bool {
 	active, ok := ps.removeActive(requestID)
 	if !ok {
-		return
+		return false
 	}
 	b, _ := json.Marshal(CancelRequest{Type: "cancel_request", RequestID: requestID, Reason: reason})
 	_ = ps.send(b)
@@ -445,6 +461,7 @@ func (ps *providerSession) cancelActive(requestID string, reason string, err err
 		}
 	}
 	close(active.chunks)
+	return true
 }
 
 func (ps *providerSession) activeFor(requestID string) (*relayActive, bool) {
@@ -546,16 +563,16 @@ func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestI
 	})
 }
 
-func (ps *providerSession) openInferenceChunk(providerID, assignedID string, active *relayActive, envelope tier2.AEADEnvelope) (InferenceResponseChunk, error) {
+func (ps *providerSession) openInferenceChunk(providerID, assignedID string, active *relayActive, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) (InferenceResponseChunk, error) {
 	ps.tier2Mu.Lock()
 	defer ps.tier2Mu.Unlock()
 	if ps.tier2 == nil {
 		return InferenceResponseChunk{}, errors.New("encrypted chunk for provider without tier2 session")
 	}
-	if ps.tier2.P2CCounter == ^uint64(0) {
+	seq := aad.Seq
+	if seq == ^uint64(0) {
 		return InferenceResponseChunk{}, errors.New("tier2 p2c frame counter exhausted")
 	}
-	seq := ps.tier2.P2CCounter
 	expectedAAD := tier2.AEADFrameAAD{
 		Type:       "inference_response_chunk",
 		Direction:  "p2c",
@@ -565,29 +582,92 @@ func (ps *providerSession) openInferenceChunk(providerID, assignedID string, act
 		AssignedID: assignedID,
 		Seq:        seq,
 	}
+	if ps.tier2P2CSequenceOutsideWindow(seq) {
+		return InferenceResponseChunk{}, errors.New("tier2 p2c frame sequence outside receive window")
+	}
+	if ps.tier2P2CSequenceSeen(seq) {
+		return InferenceResponseChunk{}, errors.New("tier2 p2c frame replayed")
+	}
 	plaintext, err := tier2.OpenPillarBFrame(ps.tier2.P2CKey, ps.tier2.P2CNonceBase, ps.tier2.KeyID, seq, expectedAAD, envelope)
 	if err != nil {
 		return InferenceResponseChunk{}, err
 	}
-	ps.tier2.P2CCounter++
+	responseChunkPlaintextEnvelope := ps.tier2.ResponseChunkPlaintextEnvelope
+	ps.markTier2P2CSequenceSeen(seq)
+	chunk, err := decodeEncryptedInferenceChunkPlaintext(active.requestID, seq, responseChunkPlaintextEnvelope, plaintext)
+	if err != nil {
+		return InferenceResponseChunk{}, err
+	}
 	return InferenceResponseChunk{
 		Type:      "inference_response_chunk",
 		RequestID: active.requestID,
-		Seq:       int(seq),
+		Seq:       chunk.Seq,
+		Data:      chunk.Data,
+	}, nil
+}
+
+func decodeEncryptedInferenceChunkPlaintext(requestID string, legacySeq uint64, responseChunkPlaintextEnvelope bool, plaintext []byte) (InferenceResponseChunk, error) {
+	if !responseChunkPlaintextEnvelope {
+		return legacyEncryptedInferenceChunk(requestID, legacySeq, plaintext)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(plaintext, &fields); err != nil {
+		return InferenceResponseChunk{}, errors.New("encrypted chunk plaintext envelope must be valid JSON")
+	}
+	var plaintextType string
+	rawType, ok := fields["type"]
+	if !ok {
+		return InferenceResponseChunk{}, errors.New("encrypted chunk plaintext type is required")
+	}
+	if err := json.Unmarshal(rawType, &plaintextType); err != nil {
+		return InferenceResponseChunk{}, errors.New("encrypted chunk plaintext type must be a string")
+	}
+	if plaintextType != "inference_response_chunk_plaintext" {
+		return InferenceResponseChunk{}, errors.New("encrypted chunk plaintext type mismatch")
+	}
+	var envelope encryptedInferenceChunkPlaintextDecode
+	if err := json.Unmarshal(plaintext, &envelope); err != nil {
+		return InferenceResponseChunk{}, err
+	}
+	if envelope.Seq == nil {
+		return InferenceResponseChunk{}, errors.New("encrypted chunk plaintext seq is required")
+	}
+	if *envelope.Seq < 0 {
+		return InferenceResponseChunk{}, errors.New("encrypted chunk plaintext seq must be >= 0")
+	}
+	if envelope.Data == nil {
+		return InferenceResponseChunk{}, errors.New("encrypted chunk plaintext data is required")
+	}
+	return InferenceResponseChunk{
+		Type:      "inference_response_chunk",
+		RequestID: requestID,
+		Seq:       *envelope.Seq,
+		Data:      *envelope.Data,
+	}, nil
+}
+
+func legacyEncryptedInferenceChunk(requestID string, legacySeq uint64, plaintext []byte) (InferenceResponseChunk, error) {
+	if legacySeq > uint64(^uint(0)>>1) {
+		return InferenceResponseChunk{}, errors.New("legacy encrypted chunk seq overflows int")
+	}
+	return InferenceResponseChunk{
+		Type:      "inference_response_chunk",
+		RequestID: requestID,
+		Seq:       int(legacySeq),
 		Data:      string(plaintext),
 	}, nil
 }
 
-func (ps *providerSession) openInferenceEnd(providerID, assignedID string, active *relayActive, envelope tier2.AEADEnvelope) (InferenceResponseEnd, error) {
+func (ps *providerSession) openInferenceEnd(providerID, assignedID string, active *relayActive, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) (InferenceResponseEnd, error) {
 	ps.tier2Mu.Lock()
 	defer ps.tier2Mu.Unlock()
 	if ps.tier2 == nil {
 		return InferenceResponseEnd{}, errors.New("encrypted end for provider without tier2 session")
 	}
-	if ps.tier2.P2CCounter == ^uint64(0) {
+	seq := aad.Seq
+	if seq == ^uint64(0) {
 		return InferenceResponseEnd{}, errors.New("tier2 p2c frame counter exhausted")
 	}
-	seq := ps.tier2.P2CCounter
 	expectedAAD := tier2.AEADFrameAAD{
 		Type:       "inference_response_end",
 		Direction:  "p2c",
@@ -597,11 +677,17 @@ func (ps *providerSession) openInferenceEnd(providerID, assignedID string, activ
 		AssignedID: assignedID,
 		Seq:        seq,
 	}
+	if ps.tier2P2CSequenceOutsideWindow(seq) {
+		return InferenceResponseEnd{}, errors.New("tier2 p2c frame sequence outside receive window")
+	}
+	if ps.tier2P2CSequenceSeen(seq) {
+		return InferenceResponseEnd{}, errors.New("tier2 p2c frame replayed")
+	}
 	plaintext, err := tier2.OpenPillarBFrame(ps.tier2.P2CKey, ps.tier2.P2CNonceBase, ps.tier2.KeyID, seq, expectedAAD, envelope)
 	if err != nil {
 		return InferenceResponseEnd{}, err
 	}
-	ps.tier2.P2CCounter++
+	ps.markTier2P2CSequenceSeen(seq)
 	var end InferenceResponseEnd
 	if err := json.Unmarshal(plaintext, &end); err != nil {
 		return InferenceResponseEnd{}, err
@@ -615,7 +701,8 @@ func (ps *providerSession) consumeRetiredEncryptedFrame(providerID, assignedID s
 	if ps.tier2 == nil {
 		return errors.New("encrypted frame for provider without tier2 session")
 	}
-	if ps.tier2.P2CCounter == ^uint64(0) {
+	seq := aad.Seq
+	if seq == ^uint64(0) {
 		return errors.New("tier2 p2c frame counter exhausted")
 	}
 	if aad.Type != expectedType {
@@ -630,7 +717,6 @@ func (ps *providerSession) consumeRetiredEncryptedFrame(providerID, assignedID s
 	if aad.Stream != retired.stream {
 		return errors.New("tier2 retired frame stream mismatch")
 	}
-	seq := ps.tier2.P2CCounter
 	expectedAAD := tier2.AEADFrameAAD{
 		Type:       expectedType,
 		Direction:  "p2c",
@@ -640,11 +726,64 @@ func (ps *providerSession) consumeRetiredEncryptedFrame(providerID, assignedID s
 		AssignedID: assignedID,
 		Seq:        seq,
 	}
+	if ps.tier2P2CSequenceOutsideWindow(seq) {
+		return errors.New("tier2 p2c frame sequence outside receive window")
+	}
+	if ps.tier2P2CSequenceSeen(seq) {
+		return errors.New("tier2 p2c frame replayed")
+	}
 	if _, err := tier2.OpenPillarBFrame(ps.tier2.P2CKey, ps.tier2.P2CNonceBase, ps.tier2.KeyID, seq, expectedAAD, envelope); err != nil {
 		return err
 	}
-	ps.tier2.P2CCounter++
+	ps.markTier2P2CSequenceSeen(seq)
 	return nil
+}
+
+func (ps *providerSession) tier2P2CSequenceOutsideWindow(seq uint64) bool {
+	if ps.tier2 == nil || seq <= ps.tier2.P2CCounter {
+		return false
+	}
+	return seq-ps.tier2.P2CCounter > tier2MaxOutOfOrderP2CFrames
+}
+
+func (ps *providerSession) tier2P2CSequenceSeen(seq uint64) bool {
+	if ps.tier2 == nil {
+		return false
+	}
+	if seq < ps.tier2.P2CCounter {
+		return true
+	}
+	if ps.tier2.P2CSeen == nil {
+		return false
+	}
+	_, ok := ps.tier2.P2CSeen[seq]
+	return ok
+}
+
+func (ps *providerSession) markTier2P2CSequenceSeen(seq uint64) {
+	if ps.tier2 == nil {
+		return
+	}
+	if seq == ps.tier2.P2CCounter {
+		ps.tier2.P2CCounter++
+		for {
+			if ps.tier2.P2CSeen == nil {
+				return
+			}
+			if _, ok := ps.tier2.P2CSeen[ps.tier2.P2CCounter]; !ok {
+				return
+			}
+			delete(ps.tier2.P2CSeen, ps.tier2.P2CCounter)
+			ps.tier2.P2CCounter++
+		}
+	}
+	if seq < ps.tier2.P2CCounter {
+		return
+	}
+	if ps.tier2.P2CSeen == nil {
+		ps.tier2.P2CSeen = make(map[uint64]struct{})
+	}
+	ps.tier2.P2CSeen[seq] = struct{}{}
 }
 
 func (ps *providerSession) markTier2RequestDispatched() {
@@ -679,6 +818,15 @@ func (s *Server) closeProviderForTier2Rekey(session *providerSession, providerID
 	s.sessions.Delete(sessionKey(providerID, assignedID))
 	_ = session.conn.Close()
 	session.close()
+}
+
+func (s *Server) closeProviderForTier2RekeyIfDrained(session *providerSession, providerID, assignedID, requestID string) {
+	if session.hasActive() {
+		return
+	}
+	if reason, ok := session.tier2RekeyReason(s.now(), s.tier2Config()); ok {
+		s.closeProviderForTier2Rekey(session, providerID, assignedID, requestID, reason)
+	}
 }
 
 func (s *Server) closeProviderForTier2AEADFailure(session *providerSession, providerID, assignedID, requestID, reason string) {
@@ -740,15 +888,21 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 		if reason == "" {
 			reason = "buyer_disconnected"
 		}
-		session.cancelActive(requestID, reason, nil)
+		if session.cancelActive(requestID, reason, nil) {
+			s.closeProviderForTier2RekeyIfDrained(session, provider.ProviderID, provider.AssignedID, requestID)
+		}
 	}
 	go func() {
 		<-ctx.Done()
 		switch {
 		case errors.Is(ctx.Err(), context.DeadlineExceeded):
-			session.cancelActive(requestID, "timeout", ErrRelayTimeout)
+			if session.cancelActive(requestID, "timeout", ErrRelayTimeout) {
+				s.closeProviderForTier2RekeyIfDrained(session, provider.ProviderID, provider.AssignedID, requestID)
+			}
 		default:
-			session.cancelActive(requestID, "buyer_disconnected", ErrRelayClosed)
+			if session.cancelActive(requestID, "buyer_disconnected", ErrRelayClosed) {
+				s.closeProviderForTier2RekeyIfDrained(session, provider.ProviderID, provider.AssignedID, requestID)
+			}
 		}
 	}()
 	chunks, done := active.delivered(ctx)
@@ -812,7 +966,7 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "unknown encrypted inference_response_chunk request_id")
 			return
 		}
-		chunk, err = session.openInferenceChunk(providerID, assignedID, active, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
+		chunk, err = session.openInferenceChunk(providerID, assignedID, active, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
 		if err != nil {
 			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
 			return
@@ -846,7 +1000,9 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 	if s.relayChunkWouldExceed(active, len([]byte(chunk.Data))) {
 		relayBufferExceededTotal.Add(1)
 		s.log.Warn().Str("provider_id", providerID).Str("assigned_id", assignedID).Str("request_id", chunk.RequestID).Msg("relay buffer cap exceeded")
-		session.cancelActive(chunk.RequestID, "relay_buffer_exceeded", ErrRelayBufferExceeded)
+		if session.cancelActive(chunk.RequestID, "relay_buffer_exceeded", ErrRelayBufferExceeded) {
+			s.closeProviderForTier2RekeyIfDrained(session, providerID, assignedID, chunk.RequestID)
+		}
 		return
 	}
 	select {
@@ -858,6 +1014,7 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 			default:
 			}
 			close(active.chunks)
+			s.closeProviderForTier2RekeyIfDrained(session, providerID, assignedID, chunk.RequestID)
 		}
 	}
 }
@@ -912,7 +1069,7 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "unknown encrypted inference_response_end request_id")
 			return
 		}
-		opened, err := session.openInferenceEnd(providerID, assignedID, active, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
+		opened, err := session.openInferenceEnd(providerID, assignedID, active, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
 		if err != nil {
 			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
 			return
@@ -950,9 +1107,7 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 	}
 	active.done <- end
 	close(active.chunks)
-	if reason, ok := session.tier2RekeyReason(s.now(), s.tier2Config()); ok {
-		s.closeProviderForTier2Rekey(session, providerID, assignedID, end.RequestID, reason)
-	}
+	s.closeProviderForTier2RekeyIfDrained(session, providerID, assignedID, end.RequestID)
 }
 
 func (s *Server) handleNAK(providerID, assignedID string, payload []byte) {
@@ -983,6 +1138,7 @@ func (s *Server) handleNAK(providerID, assignedID string, payload []byte) {
 		if active, found := session.removeActive(nak.InReplyTo); found {
 			active.errs <- ErrRelayNAKFallback
 			close(active.chunks)
+			s.closeProviderForTier2RekeyIfDrained(session, providerID, assignedID, nak.InReplyTo)
 		}
 	}
 	s.log.Warn().Str("provider_id", providerID).Str("in_reply_to", nak.InReplyTo).Str("code", nak.Error.Code).Msg("provider nak processed")
