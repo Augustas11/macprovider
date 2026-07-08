@@ -33,6 +33,7 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{10, "partner_keys_provider_id"},
 		{11, "idle_prewarm_events"},
 		{12, "malibu_emission_ledger"},
+		{13, "pow_w2_hello_gate_grants"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
