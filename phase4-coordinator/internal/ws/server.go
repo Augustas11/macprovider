@@ -622,7 +622,10 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 		if badField == "" {
 			badField = "unknown"
 		}
-		s.log.Warn().Str("bad_field", badField).Msg("provider first auth message rejected")
+		s.log.Warn().
+			Str("bad_field", badField).
+			Str("message_type", firstAuthMessageTypeForLog(typ)).
+			Msg("provider first auth message rejected")
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return
 	}
@@ -639,8 +642,22 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 		default:
 			badField = "type"
 		}
-		s.log.Warn().Str("bad_field", badField).Msg("provider first auth message rejected")
+		s.log.Warn().
+			Str("bad_field", badField).
+			Str("message_type", firstAuthMessageTypeForLog(typ)).
+			Msg("provider first auth message rejected")
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
+	}
+}
+
+func firstAuthMessageTypeForLog(typ string) string {
+	switch typ {
+	case "hello", "auth_request":
+		return typ
+	case "":
+		return "missing"
+	default:
+		return "other"
 	}
 }
 

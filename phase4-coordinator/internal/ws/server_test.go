@@ -777,6 +777,31 @@ func TestProviderAuthV2InitialEmptyCatalogRejectedOnTheWire(t *testing.T) {
 	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "supported_models cannot be empty")
 }
 
+func TestProviderFirstAuthMissingVersionLogsBoundedMessageType(t *testing.T) {
+	var logBuffer lockedBuffer
+	h := newProviderHarnessWithServerOptionsAndLogger(t, nil, nil, zerolog.New(&logBuffer), func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	delete(initial, "version")
+
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, initial)
+	if code != providerws.CloseUnrecognizedAuthMessage {
+		t.Fatalf("close code = %d, want %d", code, providerws.CloseUnrecognizedAuthMessage)
+	}
+	if reason != "unrecognized auth message" {
+		t.Fatalf("close reason = %q, want %q", reason, "unrecognized auth message")
+	}
+
+	logText := logBuffer.String()
+	if !strings.Contains(logText, `"bad_field":"missing version"`) ||
+		!strings.Contains(logText, `"message_type":"auth_request"`) {
+		t.Fatalf("missing bounded first-auth rejection log fields: %s", logText)
+	}
+}
+
 // TestProviderAuthV2ProofStageFirstWithMalformedCatalogTakesEnvelopePath
 // regression-pins the [r2:1.1] R2V closure: a first-frame
 // auth_request with stage:"proof" whose supported_models field is a

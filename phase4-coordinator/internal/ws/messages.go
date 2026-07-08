@@ -428,7 +428,7 @@ func parseFirstAuthMessageWithField(payload []byte) (string, int, string, error)
 	}
 	var version int
 	if err := requireAuthVersion(raw, &version); err != nil {
-		return "", 0, err.Field, err
+		return typ, 0, err.Field, err
 	}
 	return typ, version, "", nil
 }
