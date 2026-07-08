@@ -35,7 +35,7 @@ public enum ControlSocketFrame: Equatable, Sendable {
     // The stub server acks with accepted:false + reason "not_implemented" when the semantic
     // is not yet wired end-to-end; the wire format is stable so the app can integrate now.
     case metricsRequest
-    case metricsResponse(earningsUsdc: Double, malibuAccrued: Double, gpuC: Double?, latencyP50Ms: Int?, uptimeSec: Int)
+    case metricsResponse(ControlMetricsSnapshot)
     case pauseRequest
     case pauseAck(accepted: Bool, reason: String?)
     case resumeRequest
@@ -127,15 +127,23 @@ public enum ControlSocketCodec {
             ]
         case .metricsRequest:
             object = ["type": "metrics_request"]
-        case let .metricsResponse(earningsUsdc, malibuAccrued, gpuC, latencyP50Ms, uptimeSec):
+        case let .metricsResponse(metrics):
             var frame: [String: Any] = [
                 "type": "metrics_response",
-                "earnings_usdc": earningsUsdc,
-                "malibu_accrued": malibuAccrued,
-                "uptime_sec": uptimeSec,
+                "earnings_usdc": metrics.earningsUsdc,
+                "malibu_accrued": metrics.malibuAccrued,
+                "uptime_sec": metrics.uptimeSec,
             ]
-            if let gpuC { frame["gpu_c"] = gpuC }
-            if let latencyP50Ms { frame["latency_p50_ms"] = latencyP50Ms }
+            if let gpuC = metrics.gpuC { frame["gpu_c"] = gpuC }
+            if let latencyP50Ms = metrics.latencyP50Ms { frame["latency_p50_ms"] = latencyP50Ms }
+            if let requestsServedToday = metrics.requestsServedToday { frame["requests_served_today"] = requestsServedToday }
+            if let requestsServedAllTime = metrics.requestsServedAllTime { frame["requests_served_all_time"] = requestsServedAllTime }
+            if let requestsPerMinute = metrics.requestsPerMinute { frame["requests_per_minute"] = requestsPerMinute }
+            if let inputTokensToday = metrics.inputTokensToday { frame["input_tokens_today"] = inputTokensToday }
+            if let outputTokensToday = metrics.outputTokensToday { frame["output_tokens_today"] = outputTokensToday }
+            if let inputTokensAllTime = metrics.inputTokensAllTime { frame["input_tokens_all_time"] = inputTokensAllTime }
+            if let outputTokensAllTime = metrics.outputTokensAllTime { frame["output_tokens_all_time"] = outputTokensAllTime }
+            if let queueDepth = metrics.queueDepth { frame["queue_depth"] = queueDepth }
             object = frame
         case .pauseRequest:
             object = ["type": "pause_request"]
@@ -246,13 +254,21 @@ public enum ControlSocketCodec {
         case "metrics_request":
             return .metricsRequest
         case "metrics_response":
-            return .metricsResponse(
+            return .metricsResponse(ControlMetricsSnapshot(
                 earningsUsdc: try doubleField("earnings_usdc", in: object),
                 malibuAccrued: try doubleField("malibu_accrued", in: object),
                 gpuC: optionalDoubleField("gpu_c", in: object),
                 latencyP50Ms: optionalIntField("latency_p50_ms", in: object),
-                uptimeSec: try intField("uptime_sec", in: object)
-            )
+                uptimeSec: try intField("uptime_sec", in: object),
+                requestsServedToday: optionalIntField("requests_served_today", in: object),
+                requestsServedAllTime: optionalIntField("requests_served_all_time", in: object),
+                requestsPerMinute: optionalDoubleField("requests_per_minute", in: object),
+                inputTokensToday: optionalInt64Field("input_tokens_today", in: object),
+                outputTokensToday: optionalInt64Field("output_tokens_today", in: object),
+                inputTokensAllTime: optionalInt64Field("input_tokens_all_time", in: object),
+                outputTokensAllTime: optionalInt64Field("output_tokens_all_time", in: object),
+                queueDepth: optionalIntField("queue_depth", in: object)
+            ))
         case "pause_request":
             return .pauseRequest
         case "pause_ack":
@@ -306,6 +322,13 @@ public enum ControlSocketCodec {
     private static func optionalIntField(_ field: String, in object: [String: Any]) -> Int? {
         if let value = object[field] as? Int { return value }
         if let value = object[field] as? NSNumber { return value.intValue }
+        return nil
+    }
+
+    private static func optionalInt64Field(_ field: String, in object: [String: Any]) -> Int64? {
+        if let value = object[field] as? Int64 { return value }
+        if let value = object[field] as? Int { return Int64(value) }
+        if let value = object[field] as? NSNumber { return value.int64Value }
         return nil
     }
 
@@ -414,6 +437,9 @@ actor ControlSocketServer {
     private let receiptRotationProviderID: String?
     private let idleTimeoutSeconds: TimeInterval
     private let identityBridge: IdentitySignatureBridge?
+    private let providerStatus: ProviderStatus?
+    private let malibuAccrualClient: MalibuAccrualClient?
+    private let providerToken: String?
     private let tracker = ControlSocketSwitchTracker()
     private var listenerFD: Int32?
     private var acceptTask: Task<Void, Never>?
@@ -427,7 +453,10 @@ actor ControlSocketServer {
         receiptRotator: (@Sendable () async throws -> Void)? = nil,
         receiptRotationProviderID: String? = nil,
         idleTimeoutSeconds: TimeInterval = 30.0,
-        identityBridge: IdentitySignatureBridge? = nil
+        identityBridge: IdentitySignatureBridge? = nil,
+        providerStatus: ProviderStatus? = nil,
+        malibuAccrualClient: MalibuAccrualClient? = nil,
+        providerToken: String? = nil
     ) {
         self.socketPath = socketPath
         self.modelRuntime = modelRuntime
@@ -436,6 +465,9 @@ actor ControlSocketServer {
         self.receiptRotationProviderID = receiptRotationProviderID
         self.idleTimeoutSeconds = idleTimeoutSeconds
         self.identityBridge = identityBridge
+        self.providerStatus = providerStatus
+        self.malibuAccrualClient = malibuAccrualClient
+        self.providerToken = providerToken
     }
 
     func start() async throws {
@@ -482,6 +514,9 @@ actor ControlSocketServer {
         let receiptRotationProviderID = receiptRotationProviderID
         let idleTimeoutSeconds = idleTimeoutSeconds
         let identityBridge = identityBridge
+        let providerStatus = providerStatus
+        let malibuAccrualClient = malibuAccrualClient
+        let providerToken = providerToken
         acceptTask = Task.detached(priority: .userInitiated) {
             await Self.acceptLoop(
                 listenerFD: fd,
@@ -492,6 +527,9 @@ actor ControlSocketServer {
                 receiptRotationProviderID: receiptRotationProviderID,
                 idleTimeoutSeconds: idleTimeoutSeconds,
                 identityBridge: identityBridge,
+                providerStatus: providerStatus,
+                malibuAccrualClient: malibuAccrualClient,
+                providerToken: providerToken,
                 server: self
             )
         }
@@ -545,6 +583,9 @@ actor ControlSocketServer {
         receiptRotationProviderID: String?,
         idleTimeoutSeconds: TimeInterval,
         identityBridge: IdentitySignatureBridge?,
+        providerStatus: ProviderStatus?,
+        malibuAccrualClient: MalibuAccrualClient?,
+        providerToken: String?,
         server: ControlSocketServer
     ) async {
         while !Task.isCancelled {
@@ -573,7 +614,10 @@ actor ControlSocketServer {
                     receiptRotator: receiptRotator,
                     receiptRotationProviderID: receiptRotationProviderID,
                     idleTimeoutSeconds: idleTimeoutSeconds,
-                    identityBridge: identityBridge
+                    identityBridge: identityBridge,
+                    providerStatus: providerStatus,
+                    malibuAccrualClient: malibuAccrualClient,
+                    providerToken: providerToken
                 )
                 await server.removeClientFD(clientFD)
             }
@@ -611,7 +655,10 @@ actor ControlSocketServer {
         receiptRotator: (@Sendable () async throws -> Void)?,
         receiptRotationProviderID: String?,
         idleTimeoutSeconds: TimeInterval,
-        identityBridge: IdentitySignatureBridge? = nil
+        identityBridge: IdentitySignatureBridge? = nil,
+        providerStatus: ProviderStatus? = nil,
+        malibuAccrualClient: MalibuAccrualClient? = nil,
+        providerToken: String? = nil
     ) async {
         let connection = ControlSocketConnection(fd: fd)
 
@@ -691,15 +738,12 @@ actor ControlSocketServer {
                     await connection.close()
                     return
                 case .metricsRequest:
-                    // SPEC-025 §5.2 — real earnings/uptime source will land with the App track
-                    // rollout (see SPEC-025 §11 P1). Wire format is stable; semantic is stub.
-                    try? await connection.send(.metricsResponse(
-                        earningsUsdc: 0,
-                        malibuAccrued: 0,
-                        gpuC: nil,
-                        latencyP50Ms: nil,
-                        uptimeSec: 0
-                    ))
+                    let snapshot = await ControlMetricsBuilder.build(
+                        providerStatus: providerStatus,
+                        malibuAccrualClient: malibuAccrualClient,
+                        providerToken: providerToken
+                    )
+                    try? await connection.send(.metricsResponse(snapshot))
                 case .pauseRequest:
                     try? await connection.send(.pauseAck(accepted: false, reason: "not_implemented"))
                 case .resumeRequest:
