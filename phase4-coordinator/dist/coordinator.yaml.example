@@ -122,6 +122,15 @@ auth:
   # so operator_key can be rotated independently. Leave unset to preserve
   # pre-bridge behavior.
   #   gateway_service_token: env:GATEWAY_SERVICE_TOKEN
+  # Per-actor operator keys for TWO-PERSON control (SPEC-026 provider-auth-policy
+  # AND MALIBU trust-promotion /admin/trust-promotion/{request,approve}). The
+  # acting operator identity is bound to the MATCHED key, so dual-control requires
+  # at least TWO entries with DISTINCT, non-empty secrets; the trust-promotion
+  # route fails closed (503 dual_control_unavailable) otherwise. Do NOT rename an
+  # operator id while it has a pending promotion (the actor identity would change).
+  #   operator_keys:
+  #     spec026_a: env:OPERATOR_AUTH_POLICY_A
+  #     spec026_b: env:OPERATOR_AUTH_POLICY_B
   require_provider_tokens: true # Production/provider WS public exposure must require provider tokens.
   # Public onboarding escape hatch: permit a first tokenless provisional
   # provider to receive and persist its own provider_token. Tokenless reconnects
