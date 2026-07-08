@@ -800,29 +800,52 @@ func Default() Config {
 }
 
 func Load(path string) (Config, error) {
+	return LoadWithOverlay(path, "")
+}
+
+// LoadWithOverlay reads basePath into defaults, then merges overlayPath when
+// non-empty (overlay keys override). Used for OPoI v0 staging overlays without
+// editing production coordinator.yaml.
+func LoadWithOverlay(basePath, overlayPath string) (Config, error) {
 	cfg := Default()
+	if err := unmarshalYAMLFile(basePath, &cfg); err != nil {
+		return Config{}, fmt.Errorf("base config %s: %w", basePath, err)
+	}
+	if strings.TrimSpace(overlayPath) != "" {
+		if err := unmarshalYAMLFile(overlayPath, &cfg); err != nil {
+			return Config{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
+		}
+	}
+	if err := finalizeLoadedConfig(&cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func unmarshalYAMLFile(path string, cfg *Config) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return Config{}, err
+		return err
 	}
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
-		return Config{}, err
-	}
+	return yaml.Unmarshal(b, cfg)
+}
+
+func finalizeLoadedConfig(cfg *Config) error {
 	if err := cfg.resolveEnv(); err != nil {
-		return Config{}, err
+		return err
 	}
 	if err := cfg.Validate(); err != nil {
-		return Config{}, err
+		return err
 	}
 	if err := validateOperatorSecretStrength("auth.operator_key", cfg.Auth.OperatorKey); err != nil {
-		return Config{}, err
+		return err
 	}
 	for name, key := range cfg.Auth.OperatorKeys {
 		if err := validateOperatorSecretStrength("auth.operator_keys."+name, key); err != nil {
-			return Config{}, err
+			return err
 		}
 	}
-	return cfg, nil
+	return nil
 }
 
 // resolveEnv expands "env:NAME" sentinels in secret-bearing fields by

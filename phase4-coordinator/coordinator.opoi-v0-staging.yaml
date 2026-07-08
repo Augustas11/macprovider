@@ -3,9 +3,12 @@
 # Purpose: Enable OPoI v0 liveness (pool canaries) on a lab/staging coordinator
 # with 1-2 provider machines before promoting to Pearl production.
 #
-# Usage:
-#   macprovider-coordinator --config coordinator.yaml --config coordinator.opoi-v0-staging.yaml
-# (Later flags override earlier; merge semantics apply per-key.)
+# Usage (coordinator supports --config-overlay since OPoI Phase A):
+#   macprovider-coordinator \
+#     --config /etc/macprovider/coordinator.yaml \
+#     --config-overlay /etc/macprovider/coordinator.opoi-v0-staging.yaml \
+#     --validate-config
+# Overlay keys override base; production base stays unchanged until promotion.
 #
 # DO NOT use on Pearl production without completing §2.4-2.6 validation steps
 # in ops/runbooks/opoi-challenge-implementation.md.

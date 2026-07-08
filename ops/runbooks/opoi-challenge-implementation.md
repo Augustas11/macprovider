@@ -89,31 +89,30 @@ Maintain per-model challenge entries if templates differ (tokenizer quirks). Sta
 **Pearl staging deploy commands** (operator — requires SSH access to Pearl VPS):
 
 ```bash
-# 1. Copy overlay to Pearl (from local macprovider-poc checkout)
+# 1. Copy overlay to Pearl (after PR merge + coordinator binary with --config-overlay)
 scp phase4-coordinator/coordinator.opoi-v0-staging.yaml pearl:/etc/macprovider/
 
-# 2. SSH to Pearl and dry-run config merge
+# 2. Validate merged config (no daemon start)
 ssh pearl
-cd /opt/macprovider
-./macprovider-coordinator \
+/opt/macprovider/macprovider-coordinator \
   --config /etc/macprovider/coordinator.yaml \
-  --config /etc/macprovider/coordinator.opoi-v0-staging.yaml \
+  --config-overlay /etc/macprovider/coordinator.opoi-v0-staging.yaml \
   --validate-config
 
-# 3. If valid, restart with overlay
-systemctl stop macprovider-coordinator
-./macprovider-coordinator \
-  --config /etc/macprovider/coordinator.yaml \
-  --config /etc/macprovider/coordinator.opoi-v0-staging.yaml &
+# 3. Update systemd unit to pass --config-overlay (or merge pool keys manually)
+# Example ExecStart addition:
+#   --config-overlay /etc/macprovider/coordinator.opoi-v0-staging.yaml
+sudo systemctl daemon-reload
+sudo systemctl restart macprovider-coordinator
 
 # 4. Tail logs for canary events
 journalctl -fu macprovider-coordinator | grep -E "canary (passed|failed|skipped)"
 
-# 5. Promote to Pearl production (update service unit to add --config overlay)
+# 5. Promote to production: keep overlay in unit with canary_interval_s: 600
 #    Only after staging validation per §2.5-2.6.
 ```
 
-**Note:** The above assumes the coordinator binary supports `--config` multi-file merge (check binary help; if not, merge YAML manually). Canary challenges are in the overlay, not the base `coordinator.yaml`, so Pearl production stays clean until explicit promotion.
+**Rollback:** remove `--config-overlay` from unit and restart (or set `canary_enabled: false` in overlay).
 
 ### 2.5 Operator verification
 

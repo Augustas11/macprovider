@@ -97,7 +97,7 @@ func main() {
 		if !strings.HasPrefix(arg1, "-") {
 			fmt.Fprintf(os.Stderr, "coordinator: unknown subcommand %q\n", arg1)
 			fmt.Fprintln(os.Stderr, "usage:")
-			fmt.Fprintln(os.Stderr, "  coordinator --config <path>     (daemon mode — default)")
+			fmt.Fprintln(os.Stderr, "  coordinator --config <path> [--config-overlay <path>] [--validate-config]")
 			fmt.Fprintln(os.Stderr, "  coordinator --version           (print build version)")
 			fmt.Fprintln(os.Stderr, "  coordinator partner-keys <issue|revoke|list> [flags]")
 			fmt.Fprintln(os.Stderr, "  coordinator visibility revert --id <pid> --reason TEXT")
@@ -108,6 +108,8 @@ func main() {
 	}
 
 	configPath := flag.String("config", "coordinator.yaml", "path to coordinator YAML config")
+	configOverlay := flag.String("config-overlay", "", "optional YAML overlay merged after --config (overlay keys override)")
+	validateConfig := flag.Bool("validate-config", false, "load config (with overlay if set), validate, and exit")
 	showVersion := flag.Bool("version", false, "print build version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -115,10 +117,14 @@ func main() {
 		return
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.LoadWithOverlay(*configPath, *configOverlay)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
+	}
+	if *validateConfig {
+		fmt.Println("config: ok")
+		return
 	}
 	autotuneFeeds, err := buyer.LoadAutotuneFeeds(cfg.AutotuneFeeds)
 	if err != nil {

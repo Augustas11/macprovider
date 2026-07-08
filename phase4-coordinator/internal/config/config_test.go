@@ -585,3 +585,32 @@ func TestCanaryOPoIV0StagingOverlayParsesAndValidates(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadWithOverlayMergesPoolCanaryBlock(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.yaml")
+	overlayPath := filepath.Join(dir, "overlay.yaml")
+	if err := os.WriteFile(basePath, []byte("auth:\n  operator_key: test-operator-key-with-32-byte-minimum-length\npool:\n  canary_enabled: false\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	overlay := strings.TrimSpace(`
+pool:
+  canary_enabled: true
+  canary_challenges:
+    - prompt: "Reply with exactly: CANARY-{nonce}"
+      expected: "CANARY-{nonce}"
+`)
+	if err := os.WriteFile(overlayPath, []byte(overlay), 0o644); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	cfg, err := LoadWithOverlay(basePath, overlayPath)
+	if err != nil {
+		t.Fatalf("LoadWithOverlay: %v", err)
+	}
+	if !cfg.Pool.CanaryEnabled {
+		t.Fatal("overlay should enable canaries")
+	}
+	if len(cfg.Pool.CanaryChallenges) != 1 {
+		t.Fatalf("canary challenges=%d want 1", len(cfg.Pool.CanaryChallenges))
+	}
+}
