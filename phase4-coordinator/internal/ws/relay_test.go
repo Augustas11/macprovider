@@ -722,6 +722,269 @@ func TestEncryptedRelayDecryptsResponseEnd(t *testing.T) {
 	}
 }
 
+func TestEncryptedRelayAcceptsOutOfOrderConcurrentP2CSequences(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	provider.MaxConcurrency = 2
+	provider.SlotsFree = 2
+	provider.SlotsTotal = 2
+
+	relayA, err := s.DispatchInference(context.Background(), *provider, "req-a", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch a: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request a: %v", err)
+	}
+	relayB, err := s.DispatchInference(context.Background(), *provider, "req-b", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch b: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request b: %v", err)
+	}
+
+	s.handleInferenceChunk("p1", "s1", encryptedResponseChunkWithAppSeq(t, provider, "req-b", false, 1, 0, []byte(`{"request":"b"}`)))
+	select {
+	case chunk := <-relayB.Chunks:
+		if chunk.RequestID != "req-b" || chunk.Seq != 0 || chunk.Data != `{"request":"b"}` {
+			t.Fatalf("decrypted out-of-order chunk b = %#v", chunk)
+		}
+	case err := <-relayB.Errors:
+		t.Fatalf("relay b unexpected error: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("decrypted out-of-order chunk b timeout")
+	}
+
+	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-a", false, 0, []byte(`{"request":"a"}`)))
+	select {
+	case chunk := <-relayA.Chunks:
+		if chunk.RequestID != "req-a" || chunk.Seq != 0 || chunk.Data != `{"request":"a"}` {
+			t.Fatalf("decrypted lower-sequence chunk a = %#v", chunk)
+		}
+	case err := <-relayA.Errors:
+		t.Fatalf("relay a unexpected error: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("decrypted lower-sequence chunk a timeout")
+	}
+	if provider.Tier2Session.P2CCounter != 2 {
+		t.Fatalf("p2c contiguous counter = %d, want 2", provider.Tier2Session.P2CCounter)
+	}
+	if len(provider.Tier2Session.P2CSeen) != 0 {
+		t.Fatalf("p2c out-of-order gap count = %d, want 0", len(provider.Tier2Session.P2CSeen))
+	}
+}
+
+func TestEncryptedRelayDecryptsLegacyRawDataChunksWithAEADSequence(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	provider.Tier2Session.ResponseChunkPlaintextEnvelope = false
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-legacy-raw-chunk", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+
+	s.handleInferenceChunk("p1", "s1", encryptedLegacyRawResponseChunk(t, provider, "req-legacy-raw-chunk", false, 0, []byte(`{"legacy":true}`)))
+	select {
+	case chunk := <-relay.Chunks:
+		if chunk.RequestID != "req-legacy-raw-chunk" || chunk.Seq != 0 || chunk.Data != `{"legacy":true}` {
+			t.Fatalf("legacy raw encrypted chunk = %#v", chunk)
+		}
+	case err := <-relay.Errors:
+		t.Fatalf("legacy raw encrypted chunk error: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("legacy raw encrypted chunk timeout")
+	}
+
+	s.handleInferenceChunk("p1", "s1", encryptedLegacyRawResponseChunk(t, provider, "req-legacy-raw-chunk", false, 1, []byte(`{"legacy":2}`)))
+	select {
+	case chunk := <-relay.Chunks:
+		if chunk.RequestID != "req-legacy-raw-chunk" || chunk.Seq != 1 || chunk.Data != `{"legacy":2}` {
+			t.Fatalf("second legacy raw encrypted chunk = %#v", chunk)
+		}
+	case err := <-relay.Errors:
+		t.Fatalf("second legacy raw encrypted chunk error: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("second legacy raw encrypted chunk timeout")
+	}
+}
+
+func TestEncryptedRelayLegacyRawDataPreservesWrapperShapedOutput(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	provider.Tier2Session.ResponseChunkPlaintextEnvelope = false
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-legacy-wrapper-shaped-chunk", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+
+	raw := []byte(`{"type":"inference_response_chunk_plaintext","seq":5,"data":"x"}`)
+	s.handleInferenceChunk("p1", "s1", encryptedLegacyRawResponseChunk(t, provider, "req-legacy-wrapper-shaped-chunk", false, 0, raw))
+	select {
+	case chunk := <-relay.Chunks:
+		if chunk.RequestID != "req-legacy-wrapper-shaped-chunk" || chunk.Seq != 0 || chunk.Data != string(raw) {
+			t.Fatalf("legacy wrapper-shaped raw chunk = %#v", chunk)
+		}
+	case err := <-relay.Errors:
+		t.Fatalf("legacy wrapper-shaped raw chunk error: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("legacy wrapper-shaped raw chunk timeout")
+	}
+}
+
+func TestEncryptedRelayRejectsMalformedTypedChunkPlaintext(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-malformed-typed-chunk", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+
+	s.handleInferenceChunk("p1", "s1", encryptedLegacyRawResponseChunk(t, provider, "req-malformed-typed-chunk", false, 0, []byte(`{"type":"inference_response_chunk_plaintext","data":"missing seq"}`)))
+	select {
+	case err := <-relay.Errors:
+		if err != ErrRelayAEADFailed {
+			t.Fatalf("err = %v, want ErrRelayAEADFailed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("malformed typed chunk error timeout")
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("session remained stored after malformed typed chunk plaintext")
+	}
+}
+
+func TestEncryptedRelayRejectsCapabilityTrueRawChunkPlaintext(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-cap-true-raw-chunk", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+
+	s.handleInferenceChunk("p1", "s1", encryptedLegacyRawResponseChunk(t, provider, "req-cap-true-raw-chunk", false, 0, []byte(`{"raw":true}`)))
+	select {
+	case err := <-relay.Errors:
+		if err != ErrRelayAEADFailed {
+			t.Fatalf("err = %v, want ErrRelayAEADFailed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("capability-true raw chunk error timeout")
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("session remained stored after capability-true raw chunk plaintext")
+	}
+}
+
+func TestDecodeEncryptedInferenceChunkPlaintextRejectsMalformedTypedEnvelope(t *testing.T) {
+	tests := []struct {
+		name      string
+		plaintext []byte
+	}{
+		{
+			name:      "missing_seq",
+			plaintext: []byte(`{"type":"inference_response_chunk_plaintext","data":"x"}`),
+		},
+		{
+			name:      "wrong_seq_type",
+			plaintext: []byte(`{"type":"inference_response_chunk_plaintext","seq":"0","data":"x"}`),
+		},
+		{
+			name:      "negative_seq",
+			plaintext: []byte(`{"type":"inference_response_chunk_plaintext","seq":-1,"data":"x"}`),
+		},
+		{
+			name:      "missing_data",
+			plaintext: []byte(`{"type":"inference_response_chunk_plaintext","seq":0}`),
+		},
+		{
+			name:      "wrong_data_type",
+			plaintext: []byte(`{"type":"inference_response_chunk_plaintext","seq":0,"data":{}}`),
+		},
+		{
+			name:      "raw_json",
+			plaintext: []byte(`{"raw":true}`),
+		},
+		{
+			name:      "non_json",
+			plaintext: []byte(`raw`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := decodeEncryptedInferenceChunkPlaintext("req-malformed", 9, true, tt.plaintext); err == nil {
+				t.Fatal("decode succeeded for malformed typed envelope")
+			}
+		})
+	}
+}
+
+func TestEncryptedRelayRejectsReplayedP2CSequence(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-replay", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+
+	first := encryptedResponseChunk(t, provider, "req-replay", false, 0, []byte(`{"ok":true}`))
+	s.handleInferenceChunk("p1", "s1", first)
+	select {
+	case <-relay.Chunks:
+	case err := <-relay.Errors:
+		t.Fatalf("unexpected first-frame error: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("first chunk timeout")
+	}
+
+	s.handleInferenceChunk("p1", "s1", first)
+	select {
+	case err := <-relay.Errors:
+		if err != ErrRelayAEADFailed {
+			t.Fatalf("err = %v, want ErrRelayAEADFailed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replay error timeout")
+	}
+}
+
+func TestEncryptedRelayRejectsSparseP2CSequenceGap(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-sparse-gap", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+
+	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-sparse-gap", false, tier2MaxOutOfOrderP2CFrames+1, []byte(`{"ok":true}`)))
+	select {
+	case err := <-relay.Errors:
+		if err != ErrRelayAEADFailed {
+			t.Fatalf("err = %v, want ErrRelayAEADFailed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sparse sequence gap error timeout")
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("session remained stored after sparse sequence gap")
+	}
+	if len(provider.Tier2Session.P2CSeen) != 0 {
+		t.Fatalf("p2c seen count = %d, want 0 after rejected sparse gap", len(provider.Tier2Session.P2CSeen))
+	}
+}
+
 func TestEncryptedRelayRoutesEndByAADWhenPlaintextRequestIDDiffers(t *testing.T) {
 	s, provider, providerConn := newEncryptedRelayHarness(t)
 	relay, err := s.DispatchInference(context.Background(), *provider, "req-aad", []byte(`{"model":"model-a"}`), false)
@@ -937,6 +1200,35 @@ func TestEncryptedRelayDropsLateEndForRetiredRequest(t *testing.T) {
 	}
 }
 
+func TestEncryptedRelayRejectsSparseLateRetiredP2CSequenceGap(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-late-sparse-gap", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+	relay.Cancel("buyer_disconnected")
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read cancel_request: %v", err)
+	}
+
+	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-late-sparse-gap", false, tier2MaxOutOfOrderP2CFrames+1, InferenceResponseEnd{
+		Type:       "inference_response_end",
+		RequestID:  "req-late-sparse-gap",
+		Status:     "complete",
+		ChunksSent: 0,
+	}))
+
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("session remained stored after sparse retired sequence gap")
+	}
+	if len(provider.Tier2Session.P2CSeen) != 0 {
+		t.Fatalf("p2c seen count = %d, want 0 after rejected retired sparse gap", len(provider.Tier2Session.P2CSeen))
+	}
+}
+
 func TestEncryptedRelayDropsLateChunkForRetiredRequest(t *testing.T) {
 	var logs bytes.Buffer
 	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, config.Default(), zerolog.New(&logs), time.Now())
@@ -1053,42 +1345,119 @@ func TestEncryptedRelayRekeysAfterRequestThreshold(t *testing.T) {
 func TestEncryptedRelayDefersRekeyCloseUntilActiveCompletes(t *testing.T) {
 	var logs bytes.Buffer
 	cfg := config.Default()
-	cfg.Tier2.EncryptedLegRekeyAfterRequests = 1
+	cfg.Tier2.EncryptedLegRekeyAfterRequests = 2
 	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.New(&logs), time.Now())
 	provider.MaxConcurrency = 2
 
-	relay, err := s.DispatchInference(context.Background(), *provider, "req-rekey-active", []byte(`{"model":"model-a"}`), false)
+	relayA, err := s.DispatchInference(context.Background(), *provider, "req-rekey-active-a", []byte(`{"model":"model-a"}`), false)
 	if err != nil {
 		t.Fatalf("first dispatch: %v", err)
 	}
 	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
-		t.Fatalf("read encrypted inference_request: %v", err)
+		t.Fatalf("read encrypted inference_request a: %v", err)
 	}
-	if _, err := s.DispatchInference(context.Background(), *provider, "req-rekey-second", []byte(`{"model":"model-a"}`), false); err != ErrRelayBackpressure {
-		t.Fatalf("second dispatch = %v, want ErrRelayBackpressure while first request drains", err)
+	relayB, err := s.DispatchInference(context.Background(), *provider, "req-rekey-active-b", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("second dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request b: %v", err)
+	}
+	if _, err := s.DispatchInference(context.Background(), *provider, "req-rekey-third", []byte(`{"model":"model-a"}`), false); err != ErrRelayBackpressure {
+		t.Fatalf("third dispatch = %v, want ErrRelayBackpressure while active requests drain", err)
 	}
 	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
-		t.Fatal("session closed before active request completed")
+		t.Fatal("session closed before active requests completed")
 	}
 
-	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-rekey-active", false, 0, []byte(`{"ok":true}`)))
+	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-rekey-active-a", false, 0, []byte(`{"a":true}`)))
 	select {
-	case <-relay.Chunks:
+	case <-relayA.Chunks:
 	case <-time.After(time.Second):
-		t.Fatal("chunk timeout")
+		t.Fatal("chunk a timeout")
 	}
-	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-rekey-active", false, 1, InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-rekey-active", Status: "complete", ChunksSent: 1}))
+	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-rekey-active-a", false, 1, InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-rekey-active-a", Status: "complete", ChunksSent: 1}))
 
 	select {
-	case end := <-relay.Done:
+	case end := <-relayA.Done:
 		if end.Status != "complete" {
 			t.Fatalf("end = %#v", end)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("end timeout")
+		t.Fatal("end a timeout")
 	}
+	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
+		t.Fatal("session closed before second active request completed")
+	}
+
+	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-rekey-active-b", false, 2, []byte(`{"b":true}`)))
+	select {
+	case <-relayB.Chunks:
+	case <-time.After(time.Second):
+		t.Fatal("chunk b timeout")
+	}
+	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-rekey-active-b", false, 3, InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-rekey-active-b", Status: "complete", ChunksSent: 1}))
+
+	select {
+	case end := <-relayB.Done:
+		if end.Status != "complete" {
+			t.Fatalf("end = %#v", end)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("end b timeout")
+	}
+
 	if _, ok := s.storedSessionFor("p1", "s1"); ok {
 		t.Fatal("session still stored after drained rekey")
+	}
+	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey"`)) || !bytes.Contains(logs.Bytes(), []byte(`"reason":"request_threshold"`)) {
+		t.Fatalf("missing request-threshold rekey log: %s", logs.String())
+	}
+}
+
+func TestEncryptedRelayClosesDrainedRekeyAfterActiveCancel(t *testing.T) {
+	var logs bytes.Buffer
+	cfg := config.Default()
+	cfg.Tier2.EncryptedLegRekeyAfterRequests = 2
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, cfg, zerolog.New(&logs), time.Now())
+	provider.MaxConcurrency = 2
+
+	relayA, err := s.DispatchInference(context.Background(), *provider, "req-rekey-cancel-a", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("first dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request a: %v", err)
+	}
+	relayB, err := s.DispatchInference(context.Background(), *provider, "req-rekey-cancel-b", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("second dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request b: %v", err)
+	}
+	if _, err := s.DispatchInference(context.Background(), *provider, "req-rekey-cancel-third", []byte(`{"model":"model-a"}`), false); err != ErrRelayBackpressure {
+		t.Fatalf("third dispatch = %v, want ErrRelayBackpressure while active requests drain", err)
+	}
+
+	relayA.Cancel("buyer_disconnected")
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read cancel_request a: %v", err)
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
+		t.Fatal("session closed before second active request canceled")
+	}
+
+	relayB.Cancel("buyer_disconnected")
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("session still stored after drained rekey cancel")
+	}
+	got, ok := s.pool.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider not found")
+	}
+	if got.State != pool.StateUnavailable {
+		t.Fatalf("state = %s, want unavailable", got.State)
 	}
 	if !bytes.Contains(logs.Bytes(), []byte(`"event":"aead_rekey"`)) || !bytes.Contains(logs.Bytes(), []byte(`"reason":"request_threshold"`)) {
 		t.Fatalf("missing request-threshold rekey log: %s", logs.String())
@@ -1565,13 +1934,14 @@ func newEncryptedRelayHarnessWithConfig(t *testing.T, cfg config.Config, logger 
 		_ = serverConn.Close()
 	})
 	tier2Session := &pool.Tier2Session{
-		AEADSuite:    tier2.PillarBAEADA256GCM,
-		C2PKey:       bytes.Repeat([]byte{0x11}, 32),
-		P2CKey:       bytes.Repeat([]byte{0x22}, 32),
-		C2PNonceBase: []byte{0x01, 0x02, 0x03, 0x04},
-		P2CNonceBase: []byte{0x05, 0x06, 0x07, 0x08},
-		KeyID:        "test-kid",
-		StartedAt:    startedAt,
+		AEADSuite:                      tier2.PillarBAEADA256GCM,
+		ResponseChunkPlaintextEnvelope: true,
+		C2PKey:                         bytes.Repeat([]byte{0x11}, 32),
+		P2CKey:                         bytes.Repeat([]byte{0x22}, 32),
+		C2PNonceBase:                   []byte{0x01, 0x02, 0x03, 0x04},
+		P2CNonceBase:                   []byte{0x05, 0x06, 0x07, 0x08},
+		KeyID:                          "test-kid",
+		StartedAt:                      startedAt,
 	}
 	provider := &pool.Provider{
 		ProviderID:     "p1",
@@ -1597,6 +1967,21 @@ func newEncryptedRelayHarnessWithConfig(t *testing.T, cfg config.Config, logger 
 }
 
 func encryptedResponseChunk(t *testing.T, provider *pool.Provider, requestID string, stream bool, seq uint64, plaintext []byte) []byte {
+	t.Helper()
+	return encryptedResponseChunkWithAppSeq(t, provider, requestID, stream, seq, int(seq), plaintext)
+}
+
+func encryptedResponseChunkWithAppSeq(t *testing.T, provider *pool.Provider, requestID string, stream bool, seq uint64, appSeq int, plaintext []byte) []byte {
+	t.Helper()
+	wrapped := mustJSON(encryptedInferenceChunkPlaintext{
+		Type: "inference_response_chunk_plaintext",
+		Seq:  appSeq,
+		Data: string(plaintext),
+	})
+	return encryptedLegacyRawResponseChunk(t, provider, requestID, stream, seq, wrapped)
+}
+
+func encryptedLegacyRawResponseChunk(t *testing.T, provider *pool.Provider, requestID string, stream bool, seq uint64, plaintext []byte) []byte {
 	t.Helper()
 	aad := tier2.AEADFrameAAD{
 		Type:       "inference_response_chunk",

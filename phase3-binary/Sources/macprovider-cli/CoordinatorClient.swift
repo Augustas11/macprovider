@@ -1328,6 +1328,9 @@ actor CoordinatorClient {
         else {
             throw CoordinatorAuthError.invalidMessage("auth_response missing matching encrypted_leg session")
         }
+        if encryptedLeg["response_chunk_plaintext_envelope"] as? Bool == true {
+            session.enableResponseChunkPlaintextEnvelope()
+        }
     }
 
     /// SPEC-003 v0.8.2 FR-C9.3 — extract `assigned_provider_token` from
@@ -2353,6 +2356,7 @@ actor CoordinatorClient {
                 "encrypted_leg": true,
                 "attestation": true,
                 "aead_suites": [Tier2ProviderSession.aeadSuite],
+                "response_chunk_plaintext_envelope": true,
             ],
         ]
         let resolvedCatalog: [String]

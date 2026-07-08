@@ -90,9 +90,10 @@ type Spec010Presence struct {
 }
 
 type Tier2Caps struct {
-	EncryptedLeg bool     `json:"encrypted_leg"`
-	Attestation  bool     `json:"attestation"`
-	AEADSuites   []string `json:"aead_suites"`
+	EncryptedLeg                   bool     `json:"encrypted_leg"`
+	Attestation                    bool     `json:"attestation"`
+	AEADSuites                     []string `json:"aead_suites"`
+	ResponseChunkPlaintextEnvelope bool     `json:"response_chunk_plaintext_envelope,omitempty"`
 }
 
 type AuthChallenge struct {
@@ -148,11 +149,12 @@ type AuthTier2Session struct {
 }
 
 type AuthEncryptedLegSession struct {
-	Enabled            bool   `json:"enabled"`
-	Alg                string `json:"alg"`
-	KID                string `json:"kid"`
-	RekeyAfterRequests int    `json:"rekey_after_requests"`
-	RekeyAfterSeconds  int    `json:"rekey_after_seconds"`
+	Enabled                        bool   `json:"enabled"`
+	Alg                            string `json:"alg"`
+	KID                            string `json:"kid"`
+	RekeyAfterRequests             int    `json:"rekey_after_requests"`
+	RekeyAfterSeconds              int    `json:"rekey_after_seconds"`
+	ResponseChunkPlaintextEnvelope bool   `json:"response_chunk_plaintext_envelope,omitempty"`
 }
 
 type AuthAttestationSession struct {

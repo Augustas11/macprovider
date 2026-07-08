@@ -86,17 +86,17 @@ type Server struct {
 	// catalog holds an explicitly-injected tier2.Catalog for tests that
 	// want isolation from the package-singleton; nil means "use
 	// tier2.Default()". M3-8d (audit TEST-4). See s.catalogRef().
-	catalog            *tier2.Catalog
-	autotuneCatalog    *autotune.Catalog
-	autotuneEvidence   autotune.EvidenceStore
-	telemetryDrift     *pow.Evaluator
-	identitySignatures IdentitySignatureStore
-	authPolicyAdmin    ProviderAuthPolicyAdminStore
-	idlePrewarm        IdlePrewarmRecorder
-	idlePrewarmMetrics IdlePrewarmMetrics
+	catalog                  *tier2.Catalog
+	autotuneCatalog          *autotune.Catalog
+	autotuneEvidence         autotune.EvidenceStore
+	telemetryDrift           *pow.Evaluator
+	identitySignatures       IdentitySignatureStore
+	authPolicyAdmin          ProviderAuthPolicyAdminStore
+	idlePrewarm              IdlePrewarmRecorder
+	idlePrewarmMetrics       IdlePrewarmMetrics
 	modelHashMismatchMetrics ModelHashMismatchMetrics
-	idlePrewarmLimits  sync.Map
-	idlePrewarmQueue   chan idlePrewarmRecord
+	idlePrewarmLimits        sync.Map
+	idlePrewarmQueue         chan idlePrewarmRecord
 }
 
 // TokenValidator handles inspection of a Bearer header on the WS connect.
@@ -1073,13 +1073,14 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	}
 	entry.PublishesSupportedModels = initial.PublishesSupportedModels
 	entry.Tier2Session = &pool.Tier2Session{
-		AEADSuite:    selectedAEAD,
-		C2PKey:       keys.C2PKey,
-		P2CKey:       keys.P2CKey,
-		C2PNonceBase: keys.C2PNonceBase,
-		P2CNonceBase: keys.P2CNonceBase,
-		KeyID:        keys.KeyID,
-		StartedAt:    s.now(),
+		AEADSuite:                      selectedAEAD,
+		ResponseChunkPlaintextEnvelope: initial.Tier2Capabilities.ResponseChunkPlaintextEnvelope,
+		C2PKey:                         keys.C2PKey,
+		P2CKey:                         keys.P2CKey,
+		C2PNonceBase:                   keys.C2PNonceBase,
+		P2CNonceBase:                   keys.P2CNonceBase,
+		KeyID:                          keys.KeyID,
+		StartedAt:                      s.now(),
 	}
 	if retainAuthAttempt {
 		// SPEC-002 v1.3.5 §7.9 — explicit early release so the
@@ -1130,11 +1131,12 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		ClaimURL:                  claimURL,
 		Tier2Session: &AuthTier2Session{
 			EncryptedLeg: AuthEncryptedLegSession{
-				Enabled:            true,
-				Alg:                selectedAEAD,
-				KID:                keys.KeyID,
-				RekeyAfterRequests: tier2Cfg.EncryptedLegRekeyAfterRequests,
-				RekeyAfterSeconds:  tier2Cfg.EncryptedLegRekeyAfterSeconds,
+				Enabled:                        true,
+				Alg:                            selectedAEAD,
+				KID:                            keys.KeyID,
+				RekeyAfterRequests:             tier2Cfg.EncryptedLegRekeyAfterRequests,
+				RekeyAfterSeconds:              tier2Cfg.EncryptedLegRekeyAfterSeconds,
+				ResponseChunkPlaintextEnvelope: initial.Tier2Capabilities.ResponseChunkPlaintextEnvelope,
 			},
 			Attestation: AuthAttestationSession{
 				Status:          string(attestationStatus),

@@ -470,6 +470,7 @@ final class CoordinatorClientTests: XCTestCase {
                     "enabled": true,
                     "alg": Tier2ProviderSession.aeadSuite,
                     "kid": "kid-test",
+                    "response_chunk_plaintext_envelope": true,
                 ],
             ],
         ], session: session)
@@ -477,6 +478,13 @@ final class CoordinatorClientTests: XCTestCase {
         let record = try XCTUnwrap(claimFile.read())
         XCTAssertEqual(record.pairOT, "PAIRV2")
         XCTAssertEqual(record.claimURL, "https://portal.example/claim?ot=PAIRV2")
+        let response = try session.sealResponseChunk(requestID: "req-ack", stream: false, seq: 0, plaintext: "ack-body")
+        XCTAssertEqual(try Tier2ProviderSession.openResponseChunkForTest(
+            session: session,
+            frame: response,
+            requestID: "req-ack",
+            stream: false
+        ), "ack-body")
     }
 
     func testOwnershipStatusNeedsClaim_WritesStubWithoutOpeningBrowser() async throws {
@@ -1587,6 +1595,7 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["encrypted_leg"] as? Bool, true)
         XCTAssertEqual(caps["attestation"] as? Bool, true)
         XCTAssertEqual(caps["aead_suites"] as? [String], [Tier2ProviderSession.aeadSuite])
+        XCTAssertEqual(caps["response_chunk_plaintext_envelope"] as? Bool, true)
     }
 
     func testAuthInitialIncludesReceiptPublicKeyWhenConfigured() async throws {

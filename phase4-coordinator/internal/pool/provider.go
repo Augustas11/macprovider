@@ -268,16 +268,18 @@ func truncateUTF8Bytes(s string, maxBytes int) string {
 }
 
 type Tier2Session struct {
-	AEADSuite          string
-	C2PKey             []byte
-	P2CKey             []byte
-	C2PNonceBase       []byte
-	P2CNonceBase       []byte
-	C2PCounter         uint64
-	P2CCounter         uint64
-	RequestsDispatched uint64
-	KeyID              string
-	StartedAt          time.Time
+	AEADSuite                      string
+	ResponseChunkPlaintextEnvelope bool
+	C2PKey                         []byte
+	P2CKey                         []byte
+	C2PNonceBase                   []byte
+	P2CNonceBase                   []byte
+	C2PCounter                     uint64
+	P2CCounter                     uint64
+	P2CSeen                        map[uint64]struct{}
+	RequestsDispatched             uint64
+	KeyID                          string
+	StartedAt                      time.Time
 }
 
 type ReceiptPubkeyPrevious struct {
