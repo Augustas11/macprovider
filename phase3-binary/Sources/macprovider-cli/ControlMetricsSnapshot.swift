@@ -80,7 +80,13 @@ enum ControlMetricsBuilder {
         guard let providerStatus else {
             return ControlMetricsSnapshot()
         }
-        let snapshot = await providerStatus.snapshot(resetWindow: true)
+        // CS-3: the control-socket metrics poll (Malibu.app UI cadence) must NOT
+        // reset the since-last window. That window is owned by the coordinator
+        // heartbeat (CoordinatorClient.sendHeartbeat), whose since-last deltas feed
+        // autotune demand ranking and SPEC-023 payout-first scoring. Draining it
+        // here — the two share one ProviderStatus instance — truncated the next
+        // heartbeat's window to the post-poll sliver. Read without resetting.
+        let snapshot = await providerStatus.snapshot(resetWindow: false)
         var malibu = 0.0
         if let malibuAccrualClient,
            let token = providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
