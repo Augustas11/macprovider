@@ -225,6 +225,7 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
   let usage = null;
   let requestId = '';
   let provider = '';
+  let streamError = null;
 
   try {
     const r = await fetch(`${CONFIG.base}/v1/chat/completions`, {
@@ -280,6 +281,9 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
             } catch {
               continue;
             }
+            // A terminal error frame means the completion failed even if content
+            // already streamed — don't count it as a healthy sample.
+            if (obj?.error) streamError = obj.error;
             const delta = obj?.choices?.[0]?.delta?.content;
             if (delta) {
               if (!firstTokenAt) firstTokenAt = now();
@@ -305,6 +309,17 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
   }
 
   const end = now();
+  if (streamError) {
+    return {
+      ok: false,
+      status: 200,
+      kind: 'stream_error',
+      error: redact(`stream error frame: ${JSON.stringify(streamError).slice(0, 200)}`),
+      requestId,
+      provider,
+      usage,
+    };
+  }
   if (!firstTokenAt) {
     // 2xx but no content token ever arrived (e.g. empty completion / mid-stream abort).
     return { ok: false, status: 200, error: 'no content token', requestId, provider, usage };
@@ -337,7 +352,7 @@ async function sampleModel(model) {
     model,
     ttftMs: [],
     decodeTps: [],
-    outcomes: {}, // "2xx" | "502" | "5xx" | "timeout" | "empty" | "other"
+    outcomes: {}, // 2xx | 502 | 5xx | timeout | network_error | stream_error | empty | other
     samples: 0,
     firstError: '',
     cachedRatio: null,
@@ -431,9 +446,11 @@ async function sampleModel(model) {
   return res;
 }
 
+// Buckets: 2xx | 502 | 5xx | timeout | network_error | stream_error | empty | other
 function outcomeBucket(r) {
   if (r.ok) return '2xx';
-  if (r.status === 0) return r.kind === 'timeout' ? 'timeout' : 'network_error';
+  if (r.kind) return r.kind; // timeout | network_error | stream_error
+  if (r.status === 0) return 'network_error';
   if (r.status === 502) return '502';
   if (r.status === 200) return 'empty';
   if (r.status >= 500) return '5xx';
@@ -527,7 +544,9 @@ function toProm(run) {
 
   h('macprovider_canary_model_serviceable', 'A chat completion actually produced a token (1) despite status. Catches status-vs-serviceable divergence.', 'gauge');
   h('macprovider_canary_ttft_ms', 'Time-to-first-token in ms by quantile.', 'gauge');
+  h('macprovider_canary_ttft_samples', 'Valid TTFT samples collected this run (0 while serviceable=1 means the signal went dark).', 'gauge');
   h('macprovider_canary_decode_tps', 'Sustained decode tokens/sec (excludes first token/prefill).', 'gauge');
+  h('macprovider_canary_decode_tps_samples', 'Valid decode-TPS samples this run (0 while serviceable=1 means usage stopped being reported).', 'gauge');
   h('macprovider_canary_cached_prompt_ratio', 'Sticky turn-2 cached_prompt_tokens / prompt_tokens (KV-cache reuse).', 'gauge');
   // Per-run gauges (reset each run), NOT cumulative counters — hence no _total
   // suffix, so consumers don't apply rate()/counter semantics to them.
@@ -544,6 +563,10 @@ function toProm(run) {
     for (const q of ['p50', 'p95', 'p99']) {
       if (m.ttft_ms[q] != null) L.push(`macprovider_canary_ttft_ms{${lbl({ ...base, quantile: q })}} ${m.ttft_ms[q]}`);
     }
+    // Explicit sample counts so alerts can catch "serviceable but signal dark"
+    // — Prometheus can't easily alert on an absent series.
+    L.push(`macprovider_canary_ttft_samples{${lbl(base)}} ${m.ttft_ms.n}`);
+    L.push(`macprovider_canary_decode_tps_samples{${lbl(base)}} ${m.decode_tps.n}`);
     // Only the p50 quantile is emitted to Prometheus; mean stays in the JSON
     // artifact (a mean under a quantile label misleads Prometheus consumers).
     if (m.decode_tps.p50 != null) L.push(`macprovider_canary_decode_tps{${lbl({ ...base, quantile: 'p50' })}} ${round(m.decode_tps.p50)}`);
@@ -632,19 +655,19 @@ async function main() {
 
   if (CONFIG.metricsOut) {
     await writeAtomic(CONFIG.metricsOut, prom);
-    console.error(`wrote metrics → ${CONFIG.metricsOut}`);
+    console.error(redact(`wrote metrics → ${CONFIG.metricsOut}`));
   }
   if (CONFIG.jsonOut) {
     const fname = `canary-${run.run_at.replace(/[:.]/g, '-')}.json`;
     const path = await joinPath(CONFIG.jsonOut, fname);
     await writeAtomic(path, runJson + '\n');
     await rotateArtifacts(CONFIG.jsonOut, 200);
-    console.error(`wrote artifact → ${path}`);
+    console.error(redact(`wrote artifact → ${path}`));
   }
   if (CONFIG.pushgateway) {
     try {
       await pushMetrics(prom);
-      console.error(`pushed metrics → ${CONFIG.pushgateway}`);
+      console.error(redact(`pushed metrics → ${CONFIG.pushgateway}`));
     } catch (e) {
       console.error(`WARN: pushgateway failed: ${redact(e.message)}`);
     }
@@ -675,7 +698,12 @@ async function writeAtomic(path, content) {
   const tmp = `${path}.tmp-${process.pid}-${randUUID()}`;
   await fs.mkdir(dirname(path), { recursive: true }).catch(() => {});
   await fs.writeFile(tmp, content, { flag: 'wx', mode: 0o600 });
-  await fs.rename(tmp, path);
+  try {
+    await fs.rename(tmp, path);
+  } catch (e) {
+    await fs.unlink(tmp).catch(() => {}); // don't leave a .tmp behind on failure
+    throw e;
+  }
 }
 async function joinPath(dir, file) {
   const fs = await import('node:fs/promises');

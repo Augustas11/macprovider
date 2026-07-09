@@ -31,9 +31,11 @@
     <key>CANARY_BASE</key>
     <string>https://api.streamvc.live</string>
     <!-- Uncomment to push to a Prometheus pushgateway instead of relying on the
-         node_exporter textfile collector:
+         node_exporter textfile collector. A localhost/http pushgateway also
+         requires CANARY_ALLOW_INSECURE=1 (URLs must be https + non-private by
+         default); prefer an https, non-private pushgateway address:
     <key>CANARY_PUSHGATEWAY</key>
-    <string>http://127.0.0.1:9091</string>
+    <string>https://pushgateway.internal.example:9091</string>
     -->
     <!-- Uncomment to pin an explicit model set instead of deriving from /v1/status:
     <key>CANARY_MODELS</key>

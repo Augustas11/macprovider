@@ -22,7 +22,8 @@ scheduled, dependency-free probe.
 | TTFT | `macprovider_canary_ttft_ms{model,quantile}` | p50/p95/p99 time-to-first-token. Feeds real numbers into the W3 `max_ttft_ms` canary gate instead of guesses. |
 | Decode TPS | `macprovider_canary_decode_tps{model,quantile}` | Sustained tokens/sec (first token excluded). Catches metallib/thermal silent regressions. |
 | KV-cache reuse | `macprovider_canary_cached_prompt_ratio{model}` | Turn-2 `cached_prompt_tokens / prompt_tokens`. Locks in the measured ~45% sticky-affinity win. |
-| Outcomes | `macprovider_canary_requests{model,outcome}` | 2xx / 502 / 5xx / timeout / empty counts (per-run gauge) → 502-rate signal. |
+| Outcomes | `macprovider_canary_requests{model,outcome}` | Per-run gauge over buckets `2xx / 502 / 5xx / timeout / network_error / stream_error / empty / other` → 502-rate and mid-stream-failure signal. |
+| Sample counts | `macprovider_canary_ttft_samples{model}`, `macprovider_canary_decode_tps_samples{model}` | Valid samples collected — alert on `== 0 while serviceable == 1` to catch a signal going dark (e.g. gateway stops returning usage). |
 | Pool view | `macprovider_canary_pool_providers{state}`, `macprovider_canary_up` | What `/v1/status` claims, for divergence comparison. |
 
 Also writes a per-run JSON artifact (same shape as the network-harness
@@ -105,6 +106,9 @@ tokens**. At 30-minute cadence and one model that is ~24k tokens/day.
 
 # Silent throughput regression (tune the floor per model/tier from observed p50).
 macprovider_canary_decode_tps{quantile="p50"} < 15
+
+# Serviceable but a signal went dark (e.g. gateway stopped returning usage).
+macprovider_canary_model_serviceable == 1 and on(model) macprovider_canary_decode_tps_samples == 0
 
 # TTFT SLO breach.
 macprovider_canary_ttft_ms{quantile="p95"} > 7000
