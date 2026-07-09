@@ -5,6 +5,7 @@ final class DashboardViewTests: XCTestCase {
     func testOptionalDashboardFieldsRenderFriendlyZerosWhenServing() {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
+        snapshot.coordinatorConnected = true
 
         XCTAssertEqual(AgentSnapshotPresenter.modelLine(snapshot), "Connected")
         XCTAssertTrue(AgentSnapshotPresenter.requestsLine(snapshot).contains("0 today"))
@@ -16,8 +17,27 @@ final class DashboardViewTests: XCTestCase {
         XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Serving")
         XCTAssertEqual(
             AgentSnapshotPresenter.dashboardSubtitle(snapshot),
-            "Provider connected · waiting for first paid job"
+            "Connected to coordinator · waiting for first paid job"
         )
+    }
+
+    func testLocalOnlyStateWhenCoordinatorDisconnected() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .reconnecting
+        snapshot.coordinatorConnected = false
+        snapshot.currentModelID = "qwen3-coder-30b-a3b-instruct"
+        snapshot.lastError = "Model loaded locally · not connected to coordinator"
+
+        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(snapshot), "Local only")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.dashboardSubtitle(snapshot),
+            "Model loaded locally · not connected to coordinator"
+        )
+        XCTAssertEqual(
+            AgentSnapshotPresenter.stateLine(snapshot),
+            "Local only · qwen3-coder-30b-a3b-instruct"
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.short(snapshot), "Sync")
     }
 
     func testPopulatedDashboardFieldsRenderValues() {

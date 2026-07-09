@@ -203,11 +203,9 @@ final class MalibuAgent: ObservableObject {
                 monitorsLaunchdProvider = true
                 providerStartFailure = nil
                 await applyProviderSnapshot(port: port)
-                snapshot.state = .serving
-                snapshot.lastError = nil
                 startHealthPolling(port: port)
                 await refreshEarnings()
-                return true
+                return snapshot.state == .serving
             }
             if let failure = diagnosedProviderFailure() {
                 providerStartFailure = failure
@@ -248,8 +246,9 @@ final class MalibuAgent: ObservableObject {
     }
 
     private func applyProviderSnapshot(port: Int) async {
-        await applyHealthSnapshot(port: port)
+        let localReady = await applyHealthSnapshot(port: port)
         if let status = await InstalledProviderMonitor.fetchStatus(port: port) {
+            snapshot.coordinatorConnected = status.coordinatorConnected
             if let version = status.binaryVersion {
                 snapshot.cliVersion = ProviderCLIVersion.normalize(version)
             }
@@ -257,23 +256,14 @@ final class MalibuAgent: ObservableObject {
                 snapshot.coordinatorRecommendedVersion = ProviderCLIVersion.normalize(recommended)
             }
         }
+        reconcileNetworkState(localReady: localReady)
         await refreshLatestReleaseIfNeeded()
     }
 
-    private func refreshLatestReleaseIfNeeded() async {
-        if let fetchedAt = latestReleaseFetchedAt,
-           Date().timeIntervalSince(fetchedAt) < latestReleaseTTL,
-           snapshot.latestReleaseVersion != nil {
-            return
-        }
-        if let tag = await GitHubLatestReleaseClient.fetchTag() {
-            latestReleaseFetchedAt = Date()
-            snapshot.latestReleaseVersion = tag
-        }
-    }
-
-    private func applyHealthSnapshot(port: Int) async {
-        guard let health = await InstalledProviderMonitor.fetchHealth(port: port) else { return }
+    /// Local /v1/health readiness only — coordinator session is reconciled separately.
+    @discardableResult
+    private func applyHealthSnapshot(port: Int) async -> Bool {
+        guard let health = await InstalledProviderMonitor.fetchHealth(port: port) else { return false }
         if let model = health.model, !model.isEmpty {
             snapshot.currentModelID = model
         }
@@ -302,8 +292,44 @@ final class MalibuAgent: ObservableObject {
         if let restarts = health.restartCount {
             snapshot.restartCount = restarts
         }
-        if health.ready {
+        return health.ready
+    }
+
+    /// Serving requires both local model readiness and an active coordinator session.
+    private func reconcileNetworkState(localReady: Bool) {
+        guard snapshot.state != .paused else { return }
+        if localReady && snapshot.coordinatorConnected == true {
             snapshot.state = .serving
+            snapshot.lastError = nil
+            return
+        }
+        if localReady {
+            snapshot.state = .reconnecting
+            snapshot.lastError = coordinatorDisconnectMessage()
+            return
+        }
+    }
+
+    private func coordinatorDisconnectMessage() -> String {
+        switch snapshot.coordinatorConnected {
+        case false:
+            return "Model loaded locally · not connected to coordinator"
+        case nil:
+            return "Model loaded locally · checking coordinator connection…"
+        case true:
+            return "Checking background provider…"
+        }
+    }
+
+    private func refreshLatestReleaseIfNeeded() async {
+        if let fetchedAt = latestReleaseFetchedAt,
+           Date().timeIntervalSince(fetchedAt) < latestReleaseTTL,
+           snapshot.latestReleaseVersion != nil {
+            return
+        }
+        if let tag = await GitHubLatestReleaseClient.fetchTag() {
+            latestReleaseFetchedAt = Date()
+            snapshot.latestReleaseVersion = tag
         }
     }
 
@@ -328,11 +354,6 @@ final class MalibuAgent: ObservableObject {
                 guard let self else { return }
                 if await InstalledProviderMonitor.isHealthy(port: port) {
                     await self.applyProviderSnapshot(port: port)
-                    await MainActor.run {
-                        if self.snapshot.state != .serving && self.snapshot.state != .paused {
-                            self.snapshot.state = .serving
-                        }
-                    }
                     await self.refreshEarnings()
                 } else if self.monitorsLaunchdProvider {
                     await MainActor.run {
@@ -396,6 +417,9 @@ final class MalibuAgent: ObservableObject {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 try? await client.send(.metricsRequest)
                 try? await client.send(.statusRequest)
+                if let port = ProviderConfig.readHTTPPort() {
+                    await self?.applyProviderSnapshot(port: port)
+                }
                 await self?.refreshEarnings()
             }
         }
@@ -416,7 +440,9 @@ final class MalibuAgent: ObservableObject {
             // (`state:"ready"`) call the "serving" transition. Accept
             // either spelling so the state contract survives a rename on
             // either side.
-            if state == "ready" || state == "serving" { snapshot.state = .serving }
+            if state == "ready" || state == "serving" {
+                reconcileNetworkState(localReady: true)
+            }
         case let .metricsResponse(
             usdc,
             malibu,
@@ -476,7 +502,7 @@ final class MalibuAgent: ObservableObject {
             }
         case let .resumeAck(accepted, reason):
             if accepted {
-                snapshot.state = .serving
+                reconcileNetworkState(localReady: true)
                 snapshot.pauseAcknowledged = false
             } else {
                 snapshot.lastError = reason ?? "Resume was refused"
