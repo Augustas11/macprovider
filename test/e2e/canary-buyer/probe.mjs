@@ -38,6 +38,12 @@
 
 import net from 'node:net';
 import dns from 'node:dns/promises';
+import { webcrypto } from 'node:crypto';
+
+// `crypto` is a global on Node 20+ / browsers, but NOT on Node 18 (where it's
+// gated behind a flag). Fall back to node:crypto's webcrypto so the probe runs
+// on the systemd host's Node 18 as well as newer runtimes.
+const crypto = globalThis.crypto ?? webcrypto;
 
 const args = parseArgs(process.argv.slice(2));
 
