@@ -24,6 +24,12 @@ pool:
   canary_timeout_s: 120
   canary_max_tokens: 16
   canary_failure_threshold: 3   # 3 consecutive fails → provisional ban
+  # Relax ONLY the max_ttft_ms gate for the first 300s after a provider
+  # connects: a cold large-model load (observed ~8s TTFT for a cold 30B)
+  # must not false-fail the latency gate on reconnect. Correctness +
+  # min_sustained_tps still enforced. The real fix for the 3500→7000
+  # cold-30B false-fail (see proof-of-weights-implementation.md §5).
+  canary_cold_start_grace_s: 300
   # Challenge bank — both entries embed {nonce} (hex, 4 bytes, upper-case).
   # Rotate periodically; keep this file deployment-specific.
   canary_challenges:

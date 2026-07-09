@@ -47,6 +47,8 @@ pool:
   canary_timeout_s: 120
   canary_max_tokens: 16
   canary_failure_threshold: 3   # provisional ban; pinned → degrade at 2
+  canary_cold_start_grace_s: 300 # waive ONLY max_ttft_ms for 300s after connect
+                                 # (cold large-model load); correctness + TPS enforced
   # OPoI v0 challenge bank — every entry must contain {nonce} in both prompt and expected.
   # Rotate or extend periodically; keep deployment-specific for model security.
   canary_challenges:

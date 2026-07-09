@@ -2213,6 +2213,14 @@ func (s *Server) runCanaryProbe(provider pool.Provider) bool {
 		s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary skipped")
 		return false
 	}
+	if attempt.metrics.LatencyGraced {
+		s.log.Info().
+			Str("provider_id", provider.ProviderID).
+			Int("canary_ttft_ms", attempt.metrics.TTFTMS).
+			Int("max_ttft_ms", attempt.challenge.MaxTTFTMS).
+			Dur("connected_age", s.now().Sub(provider.ConnectedAt)).
+			Msg("provider canary TTFT gate waived during cold-start grace window")
+	}
 	passed := outcome == canaryProbePass
 	checkedAt := s.now()
 	result := s.pool.RecordCanaryResult(provider.ProviderID, provider.AssignedID, passed, checkedAt, s.canaryFailureThreshold())
@@ -2352,7 +2360,11 @@ func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Prov
 			if end.Status != "complete" {
 				return canaryProbeFail, metrics
 			}
-			return evaluateCanaryProbe(probe.Challenge, output.String(), probe.Expected, metrics), metrics
+			grace := s.canaryColdStartActive(provider)
+			if grace && probe.Challenge.MaxTTFTMS > 0 && metrics.TTFTMS > probe.Challenge.MaxTTFTMS {
+				metrics.LatencyGraced = true
+			}
+			return evaluateCanaryProbe(probe.Challenge, output.String(), probe.Expected, metrics, grace), metrics
 		case <-relay.Errors:
 			return canaryProbeFail, canaryProbeMetrics{}
 		case <-ctx.Done():
@@ -2397,7 +2409,23 @@ func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Pr
 		}
 		metrics = canaryMetricsFromTiming(start, time.Time{}, completedAt, tokens)
 	}
-	return evaluateCanaryProbe(probe.Challenge, output, probe.Expected, metrics), metrics
+	grace := s.canaryColdStartActive(provider)
+	if grace && probe.Challenge.MaxTTFTMS > 0 && metrics.TTFTMS > probe.Challenge.MaxTTFTMS {
+		metrics.LatencyGraced = true
+	}
+	return evaluateCanaryProbe(probe.Challenge, output, probe.Expected, metrics, grace), metrics
+}
+
+// canaryColdStartActive reports whether the provider is within its cold-start
+// grace window since connecting, during which the max_ttft_ms latency gate is
+// relaxed (see PoolConfig.CanaryColdStartGraceS). The nonce-correctness and
+// min_sustained_tps gates are never relaxed.
+func (s *Server) canaryColdStartActive(provider pool.Provider) bool {
+	grace := s.cfg.Pool.CanaryColdStartGraceS
+	if grace <= 0 || provider.ConnectedAt.IsZero() {
+		return false
+	}
+	return s.now().Sub(provider.ConnectedAt) < time.Duration(grace)*time.Second
 }
 
 func (s *Server) buildCanaryBody(modelID string, maxTokens int) ([]byte, string, error) {

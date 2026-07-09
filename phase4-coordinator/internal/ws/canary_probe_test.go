@@ -14,18 +14,29 @@ func TestEvaluateCanaryProbeLatencyGates(t *testing.T) {
 		MaxTTFTMS:       800,
 		MinSustainedTPS: 12,
 	}
-	pass := evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 15})
+	pass := evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 15}, false)
 	if pass != canaryProbePass {
 		t.Fatalf("latency pass = %q", pass)
 	}
-	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 900, SustainedTPS: 15}) != canaryProbeFail {
+	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 900, SustainedTPS: 15}, false) != canaryProbeFail {
 		t.Fatal("expected ttft fail")
 	}
-	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 8}) != canaryProbeFail {
+	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 8}, false) != canaryProbeFail {
 		t.Fatal("expected tps fail")
 	}
-	if evaluateCanaryProbe(challenge, "wrong", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 15}) != canaryProbeFail {
+	if evaluateCanaryProbe(challenge, "wrong", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 15}, false) != canaryProbeFail {
 		t.Fatal("expected answer fail")
+	}
+	// Cold-start grace waives ONLY the TTFT gate: a slow-but-correct answer
+	// passes, while a wrong answer or low sustained TPS still fails.
+	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 15}, true) != canaryProbePass {
+		t.Fatal("expected cold-start grace to waive the ttft gate")
+	}
+	if evaluateCanaryProbe(challenge, "wrong", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 15}, true) != canaryProbeFail {
+		t.Fatal("cold-start grace must NOT waive the answer-correctness gate")
+	}
+	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 8}, true) != canaryProbeFail {
+		t.Fatal("cold-start grace must NOT waive the sustained-tps gate")
 	}
 }
 

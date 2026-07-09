@@ -29,6 +29,10 @@ type canaryProbeMetrics struct {
 	TTFTMS       int
 	SustainedTPS float64
 	LatencyGated bool
+	// LatencyGraced is set when the TTFT gate WOULD have failed but was waived
+	// because the provider was inside its cold-start grace window. Surfaced in
+	// logs so a genuinely-slow provider hiding behind grace stays visible.
+	LatencyGraced bool
 }
 
 type canaryAttemptResult struct {
@@ -97,14 +101,18 @@ func challengeHasLatencyGates(challenge config.CanaryChallengeConfig) bool {
 	return challenge.MaxTTFTMS > 0 || challenge.MinSustainedTPS > 0
 }
 
-func evaluateCanaryProbe(challenge config.CanaryChallengeConfig, output string, expected string, metrics canaryProbeMetrics) canaryProbeOutcome {
+// evaluateCanaryProbe returns the probe outcome. When coldStartGrace is true the
+// max_ttft_ms latency gate is waived (the provider may still be cold-loading a
+// large model after connecting) — but the nonce-correctness and min_sustained_tps
+// gates are ALWAYS enforced, so this never weakens the anti-cheat guarantee.
+func evaluateCanaryProbe(challenge config.CanaryChallengeConfig, output string, expected string, metrics canaryProbeMetrics, coldStartGrace bool) canaryProbeOutcome {
 	if !canaryAnswerMatches(output, expected) {
 		return canaryProbeFail
 	}
 	if !challengeHasLatencyGates(challenge) {
 		return canaryProbePass
 	}
-	if challenge.MaxTTFTMS > 0 && metrics.TTFTMS > challenge.MaxTTFTMS {
+	if !coldStartGrace && challenge.MaxTTFTMS > 0 && metrics.TTFTMS > challenge.MaxTTFTMS {
 		return canaryProbeFail
 	}
 	if challenge.MinSustainedTPS > 0 && (math.IsNaN(metrics.SustainedTPS) || math.IsInf(metrics.SustainedTPS, 0) || metrics.SustainedTPS < challenge.MinSustainedTPS) {

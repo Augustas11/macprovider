@@ -327,6 +327,14 @@ type PoolConfig struct {
 	CanaryTimeoutS          int                                `yaml:"canary_timeout_s"`
 	CanaryMaxTokens         int                                `yaml:"canary_max_tokens"`
 	CanaryFailureThreshold  int                                `yaml:"canary_failure_threshold"`
+	// CanaryColdStartGraceS relaxes ONLY the max_ttft_ms latency gate for the
+	// first grace-window seconds after a provider connects. A freshly
+	// (re)connected provider may still be cold-loading a large model, so a
+	// correct-but-slow answer must not trip a latency sanction. 0 (default)
+	// disables it; the nonce-correctness and min_sustained_tps gates are never
+	// relaxed. Size it to cover a cold large-model TTFT (observed ~8s for a
+	// cold 30B; a full model load can take tens of seconds).
+	CanaryColdStartGraceS   int                                `yaml:"canary_cold_start_grace_s"`
 	CanaryChallenges        []CanaryChallengeConfig            `yaml:"canary_challenges"`
 	ModelClassChallenges    map[string][]CanaryChallengeConfig `yaml:"model_class_challenges"`
 }
@@ -1396,6 +1404,9 @@ func (c Config) Validate() error {
 	}
 	if c.Pool.CanaryEnabled && (c.Pool.CanaryIntervalS <= 0 || c.Pool.CanaryTimeoutS <= 0 || c.Pool.CanaryMaxTokens <= 0 || c.Pool.CanaryFailureThreshold <= 0) {
 		return fmt.Errorf("pool canary settings must be > 0 when enabled")
+	}
+	if c.Pool.CanaryColdStartGraceS < 0 {
+		return fmt.Errorf("pool canary_cold_start_grace_s must be >= 0")
 	}
 	if c.Pool.CanaryEnabled {
 		if len(c.Pool.CanaryChallenges) == 0 && len(c.Pool.ModelClassChallenges) == 0 {

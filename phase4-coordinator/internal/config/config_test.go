@@ -133,6 +133,23 @@ func TestCanaryValidationRequiresPrivateChallengeBankWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestCanaryColdStartGraceValidation(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Pool.CanaryColdStartGraceS = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "canary_cold_start_grace_s") {
+		t.Fatalf("negative cold-start grace validation err=%v", err)
+	}
+	cfg.Pool.CanaryColdStartGraceS = 300
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid cold-start grace should validate: %v", err)
+	}
+	cfg.Pool.CanaryColdStartGraceS = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("zero cold-start grace (disabled) should validate: %v", err)
+	}
+}
+
 func TestProviderWebSocketBoundsDefaultAndValidate(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"
