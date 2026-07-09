@@ -29,27 +29,18 @@ func TestEvaluateCanaryProbeLatencyGates(t *testing.T) {
 	if evaluateCanaryProbe(challenge, "wrong", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 15}, false) != canaryProbeFail {
 		t.Fatal("expected answer fail")
 	}
-	// Cold-start grace waives the TTFT gate: a slow-but-correct answer passes.
-	// DecodeWindowReliable=true models a streaming WS probe.
-	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 15, DecodeWindowReliable: true}, true) != canaryProbePass {
-		t.Fatal("expected cold-start grace to waive the ttft gate")
+	// Cold-start grace waives BOTH wall-time latency gates (canary probes are
+	// non-streaming, so max_ttft_ms and min_sustained_tps are both cold-
+	// contaminated): a slow-but-correct answer passes.
+	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 8}, true) != canaryProbePass {
+		t.Fatal("expected cold-start grace to waive both latency gates for a correct answer")
 	}
 	// Grace never waives the answer-correctness gate.
-	if evaluateCanaryProbe(challenge, "wrong", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 15, DecodeWindowReliable: true}, true) != canaryProbeFail {
+	if evaluateCanaryProbe(challenge, "wrong", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 15}, true) != canaryProbeFail {
 		t.Fatal("cold-start grace must NOT waive the answer-correctness gate")
 	}
-	// For a WS probe with a real decode window, sustained-TPS is STILL enforced
-	// under grace (cold load does not depress decode rate).
-	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 8, DecodeWindowReliable: true}, true) != canaryProbeFail {
-		t.Fatal("cold-start grace must NOT waive sustained-tps for a WS decode-window probe")
-	}
-	// For an HTTP probe with NO decode window, SustainedTPS is over full wall
-	// time and is cold-contaminated, so it is waived under grace.
-	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 8, DecodeWindowReliable: false}, true) != canaryProbePass {
-		t.Fatal("cold-start grace should waive sustained-tps for an HTTP no-decode-window probe")
-	}
-	// Without grace, TPS is enforced regardless of decode window.
-	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 8, DecodeWindowReliable: false}, false) != canaryProbeFail {
+	// Without grace, both latency gates are still enforced.
+	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 8}, false) != canaryProbeFail {
 		t.Fatal("without grace the sustained-tps gate must still fail")
 	}
 }

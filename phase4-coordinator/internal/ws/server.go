@@ -2225,6 +2225,15 @@ func (s *Server) runCanaryProbe(provider pool.Provider) bool {
 			Int("max_ttft_ms", attempt.challenge.MaxTTFTMS).
 			Dur("connected_age", s.now().Sub(provider.ConnectedAt)).
 			Msg("provider canary TTFT gate waived during cold-start grace window")
+		// A graced (correct-but-TTFT-slow) probe is NEUTRAL for the canary
+		// sanction counter: it is not recorded, so it neither counts as a
+		// failure nor CLEARS failures accrued during enforced (non-grace)
+		// windows. Recording it as a pass would let a chronically-slow provider
+		// cycling at the grace/cooldown boundary reset the counter before it
+		// reaches the failure threshold and evade the TTFT sanction indefinitely
+		// (R2 SECURITY HIGH). Correctness + model-class OPoI identity were
+		// already recorded above; only the latency sanction is neutralized.
+		return true
 	}
 	passed := outcome == canaryProbePass
 	checkedAt := s.now()
@@ -2366,7 +2375,7 @@ func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Prov
 				return canaryProbeFail, metrics
 			}
 			grace := s.canaryColdStartActive(provider)
-			if grace && probe.Challenge.MaxTTFTMS > 0 && metrics.TTFTMS > probe.Challenge.MaxTTFTMS {
+			if grace && challengeLatencyBreach(probe.Challenge, metrics) {
 				metrics.LatencyGraced = true
 			}
 			return evaluateCanaryProbe(probe.Challenge, output.String(), probe.Expected, metrics, grace), metrics
@@ -2415,7 +2424,7 @@ func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Pr
 		metrics = canaryMetricsFromTiming(start, time.Time{}, completedAt, tokens)
 	}
 	grace := s.canaryColdStartActive(provider)
-	if grace && probe.Challenge.MaxTTFTMS > 0 && metrics.TTFTMS > probe.Challenge.MaxTTFTMS {
+	if grace && challengeLatencyBreach(probe.Challenge, metrics) {
 		metrics.LatencyGraced = true
 	}
 	return evaluateCanaryProbe(probe.Challenge, output, probe.Expected, metrics, grace), metrics

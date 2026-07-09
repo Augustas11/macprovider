@@ -29,16 +29,11 @@ type canaryProbeMetrics struct {
 	TTFTMS       int
 	SustainedTPS float64
 	LatencyGated bool
-	// LatencyGraced is set when the TTFT gate WOULD have failed but was waived
-	// because the provider was inside its cold-start grace window. Surfaced in
-	// logs so a genuinely-slow provider hiding behind grace stays visible.
+	// LatencyGraced is set when a latency gate (max_ttft_ms or min_sustained_tps)
+	// WOULD have failed but was waived because the provider was inside its
+	// cold-start grace window. Surfaced in logs so a genuinely-slow provider
+	// hiding behind grace stays visible.
 	LatencyGraced bool
-	// DecodeWindowReliable is true when a real first-token timestamp was
-	// observed (streaming WS probes), so SustainedTPS reflects decode rate and
-	// is NOT contaminated by cold prefill. HTTP/non-stream probes have no
-	// first-token split, so their SustainedTPS is over full wall time and the
-	// TPS gate must be waived under cold-start grace (see evaluateCanaryProbe).
-	DecodeWindowReliable bool
 }
 
 type canaryAttemptResult struct {
@@ -107,25 +102,34 @@ func challengeHasLatencyGates(challenge config.CanaryChallengeConfig) bool {
 	return challenge.MaxTTFTMS > 0 || challenge.MinSustainedTPS > 0
 }
 
-// evaluateCanaryProbe returns the probe outcome. When coldStartGrace is true the
-// max_ttft_ms latency gate is waived (the provider may still be cold-loading a
-// large model after connecting). The nonce-correctness gate is ALWAYS enforced.
-// min_sustained_tps is also always enforced when the probe has a real decode
-// window (streaming WS probes, DecodeWindowReliable); it is waived under grace
-// only for HTTP/non-stream probes whose SustainedTPS is measured over full wall
-// time and would therefore be contaminated by cold prefill.
+// challengeLatencyBreach reports whether the probe metrics violate a configured
+// latency gate (max_ttft_ms or min_sustained_tps).
+func challengeLatencyBreach(challenge config.CanaryChallengeConfig, metrics canaryProbeMetrics) bool {
+	if challenge.MaxTTFTMS > 0 && metrics.TTFTMS > challenge.MaxTTFTMS {
+		return true
+	}
+	if challenge.MinSustainedTPS > 0 && (math.IsNaN(metrics.SustainedTPS) || math.IsInf(metrics.SustainedTPS, 0) || metrics.SustainedTPS < challenge.MinSustainedTPS) {
+		return true
+	}
+	return false
+}
+
+// evaluateCanaryProbe returns the probe outcome. The nonce-correctness gate
+// (model identity / anti-downgrade) is ALWAYS enforced. When coldStartGrace is
+// true, BOTH latency gates are waived: canary probes are non-streaming
+// (stream:false), so max_ttft_ms and min_sustained_tps are both measured over
+// wall time (no reliable first-token/decode split) and are dominated by a cold
+// model load. A graced probe is additionally NEUTRAL for the sanction counter
+// (see runCanaryProbe), so waiving the latency gates here cannot be abused to
+// clear enforced-window failures.
 func evaluateCanaryProbe(challenge config.CanaryChallengeConfig, output string, expected string, metrics canaryProbeMetrics, coldStartGrace bool) canaryProbeOutcome {
 	if !canaryAnswerMatches(output, expected) {
 		return canaryProbeFail
 	}
-	if !challengeHasLatencyGates(challenge) {
+	if coldStartGrace {
 		return canaryProbePass
 	}
-	if !coldStartGrace && challenge.MaxTTFTMS > 0 && metrics.TTFTMS > challenge.MaxTTFTMS {
-		return canaryProbeFail
-	}
-	tpsWaived := coldStartGrace && !metrics.DecodeWindowReliable
-	if !tpsWaived && challenge.MinSustainedTPS > 0 && (math.IsNaN(metrics.SustainedTPS) || math.IsInf(metrics.SustainedTPS, 0) || metrics.SustainedTPS < challenge.MinSustainedTPS) {
+	if challengeLatencyBreach(challenge, metrics) {
 		return canaryProbeFail
 	}
 	return canaryProbePass
@@ -148,10 +152,9 @@ func canaryMetricsFromTiming(start time.Time, firstTokenAt time.Time, completedA
 	}
 	tps := float64(completionTokens) / decode.Seconds()
 	return canaryProbeMetrics{
-		TTFTMS:               int(ttft.Round(time.Millisecond) / time.Millisecond),
-		SustainedTPS:         tps,
-		LatencyGated:         true,
-		DecodeWindowReliable: !firstTokenAt.IsZero(),
+		TTFTMS:       int(ttft.Round(time.Millisecond) / time.Millisecond),
+		SustainedTPS: tps,
+		LatencyGated: true,
 	}
 }
 
