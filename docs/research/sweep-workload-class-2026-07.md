@@ -8,7 +8,7 @@
 
 MacProvider already measures buyer-harness behavior by workload name, but the autotune and static-candidate surfaces are still class-blind. The right v0.1 shape is to keep the existing context/concurrency/kv sweep shape and run it as parallel workload-class partitions, producing per-class winners as data. Runtime request classification and class-routed serving should stay out of scope until a later SPEC defines the trust, latency, and API boundary.
 
-The current beta workload library exposes six workload names and maps them to five corpus classes: `short_chat -> short`, `medium_with_system -> medium`, `long_context -> long`, `code_completion -> code`, `agent_style -> agent`, and `streaming_check -> short` (`beta/workloads.py:26`). The report path already groups rows by workload and publishes per-workload medians (`beta/report.py:59`, `beta/report.py:118`). Decision criteria also ask for per-workload median throughput, streaming TTFT, and stop-token leak checks (`beta/DECISION_CRITERIA.md:54`, `beta/DECISION_CRITERIA.md:85`).
+The current beta workload library exposes six workload names and maps them to five corpus classes: `short_chat -> short`, `medium_with_system -> medium`, `long_context -> long`, `code_completion -> code`, `agent_style -> agent`, and `streaming_check -> short` (`beta/workloads.py:26`). The report path already groups rows by workload and publishes per-workload medians (`beta/report.py:59`, `beta/report.py:118`). Decision criteria also ask for per-workload median throughput, streaming TTFT, and stop-token leak checks (`beta/DECISION_CRITERIA.md:57`, `beta/DECISION_CRITERIA.md:89`).
 
 Two prompt references were unavailable in the current repository state: `.omc/logs/context-throughput-sweep-impl-notes.md` does not exist, and `origin/spike/context-throughput-sweep` is not a valid ref. Those absences should be treated as research constraints, not inferred evidence.
 
@@ -43,7 +43,7 @@ With speculative decoding, a winner is no longer only a serve-capacity tuple. Th
 (kv_bits, max_context, max_batch, draft_model, num_draft_tokens)
 ```
 
-`num_draft_tokens` should be per workload class for a given target/draft pair. SPEC-028 makes `num_draft_tokens` a provider serve knob (`specs/SPEC-028-mlx-speculative-decoding.md:63`) and explicitly identifies autotune/candidate-catalog extension points (`specs/SPEC-028-mlx-speculative-decoding.md:31`). It also warns that autotune must not blindly multiply every context/concurrency/kv cell by every draft candidate and shows `draft_candidates[]` with `workload_bias` as an additive static-row extension (`specs/SPEC-028-mlx-speculative-decoding.md:202`). That points to a staged shape: choose eligible target/draft candidates first, then tune per class.
+`num_draft_tokens` should be per workload class for a given target/draft pair. SPEC-028 makes `num_draft_tokens` a provider serve knob (`specs/SPEC-028-mlx-speculative-decoding.md:63`) and explicitly identifies autotune/candidate-catalog extension points (`specs/SPEC-028-mlx-speculative-decoding.md:31`). It also warns that autotune must not blindly multiply every context/concurrency/kv cell by every draft candidate and shows `draft_candidates[]` with `workload_bias` as an additive static-row extension (`specs/SPEC-028-mlx-speculative-decoding.md:202`, `specs/SPEC-028-mlx-speculative-decoding.md:206`). That points to a staged shape: choose eligible target/draft candidates first, then tune per class.
 
 Acceptance rate is expected to vary by content shape. A shared `num_draft_tokens` would reintroduce the compromise this SPEC is trying to avoid. The safer v0.1 policy is:
 
@@ -71,12 +71,20 @@ Recommended additive shape:
         "max_context_override": 20000,
         "max_concurrency_override": 1,
         "draft_model": "example/draft",
+        "draft_model_artifact_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "num_draft_tokens": 4
       },
-      "bench_gate": {
-        "min_sustained_tps": 8.5,
-        "max_ttft_ms": 8000,
-        "max_stop_token_leak_rate": 0
+      "gate_policy": {
+        "max_p95_ttft_ms": 12000,
+        "max_stop_token_leak_rate": 0,
+        "min_sustained_tps": null
+      },
+      "profile_metrics": {
+        "median_tps": 8.5,
+        "p95_ttft_ms": 2400,
+        "stop_token_leak_rate": 0,
+        "spec_decode_acceptance_rate": 0.42,
+        "sample_count": 5
       },
       "source": "sweep-workload-class-2026-07"
     }
@@ -84,7 +92,7 @@ Recommended additive shape:
 }
 ```
 
-Use `workload_profiles` rather than `per_class` in the normative SPEC because the keys are harness workload names in v0.1, not a general traffic taxonomy. `per_class` can remain an acceptable alias only if maintainers prefer that spelling.
+Use `workload_profiles` rather than `per_class` in the normative SPEC because the keys are harness workload names in v0.1, not a general traffic taxonomy. The nested object should avoid the existing top-level `bench_gate` key so SPEC-023's advisory catalog gates are not confused with workload-specific gate policy and measured profile metrics.
 
 The same static feed trust domain should sign the additive catalog. The current public key is baked into the installer recommendation code with key ID `streamvc-autotune-static-v4` (`phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:684`), and the static-key README describes the single feed trust model and re-signing process (`phase3-binary/dist/static/keys/README.md:32`). A new key would imply a new trust domain; class profiles are still operator-curated candidate recommendations, so reusing the current static key is correct.
 
@@ -113,10 +121,10 @@ Gates should become class-parameterized where the metric is shape-sensitive:
 - `long_context` should have explicit prefill/TTFT tolerance, because long prompt length changes the expected latency envelope.
 - `streaming_check` should own streaming TTFT gates and should not choose a separate non-stream serve config in v0.1.
 - `code_completion` and `agent_style` should track speculative acceptance rate and output correctness/leak checks more closely, because draft-token benefit depends on structured continuation shape.
-- Stop-token leak gates should remain per workload because decision criteria already ask for stop-token leak rate per workload (`beta/DECISION_CRITERIA.md:85`).
+- Stop-token leak gates should remain per workload because decision criteria already ask for stop-token leak rate per workload (`beta/DECISION_CRITERIA.md:89`).
 
-SPEC-023 made static-catalog TPS and TTFT fields advisory rather than hard eligibility gates (`specs/SPEC-023-installer-autotune-recommend.md:35`). The class profile should preserve that posture: record class-specific measured gates and let recommendation logic consume them explicitly after an implementation SPEC updates the consumer.
+SPEC-023 made static-catalog TPS and TTFT fields advisory rather than hard eligibility gates (`specs/SPEC-023-installer-autotune-recommend.md:35`). The class profile should preserve that posture for measured throughput and SPEC-023 top-level `bench_gate` fields, while SPEC-029 should separately serialize the workload-specific hard TTFT/leak gate policy used to choose a sweep winner.
 
 ## Recommended Next Step
 
-Adopt SPEC-029 v0.1-draft as a research/specification artifact. Do not implement code until maintainers answer the routing/default-profile open questions and confirm whether the static row field should be named `workload_profiles` or `per_class`.
+Adopt SPEC-029 v0.1-draft as a research/specification artifact. Do not implement runtime class-routed serving until maintainers answer the routing/default-profile open questions.
