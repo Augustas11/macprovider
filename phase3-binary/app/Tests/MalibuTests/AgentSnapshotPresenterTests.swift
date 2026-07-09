@@ -15,7 +15,16 @@ final class AgentSnapshotPresenterTests: XCTestCase {
     func testShortShowsServingWhenNoEarningsYet() {
         var s = AgentSnapshot.empty
         s.state = .serving
+        s.coordinatorConnected = true
         XCTAssertEqual(AgentSnapshotPresenter.short(s), "Serving")
+    }
+
+    func testShortShowsSyncWhenLocalOnly() {
+        var s = AgentSnapshot.empty
+        s.state = .reconnecting
+        s.coordinatorConnected = false
+        s.currentModelID = "model-a"
+        XCTAssertEqual(AgentSnapshotPresenter.short(s), "Sync")
     }
 
     func testShortShowsSyncWhenReconnecting() {
