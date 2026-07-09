@@ -53,6 +53,7 @@ const CONFIG = {
   tpsMaxTokens: intEnv('CANARY_TPS_MAX_TOKENS', 128),
   intervalMs: intEnv('CANARY_INTERVAL_MS', 1500),
   reqTimeoutMs: intEnv('CANARY_REQ_TIMEOUT_MS', 45000),
+  stickyPrefixLines: intEnv('CANARY_STICKY_PREFIX_LINES', 80),
   metricsOut: args['metrics-out'] || env('CANARY_METRICS_OUT') || '',
   jsonOut: args['json-out'] || env('CANARY_JSON_OUT') || '',
   pushgateway: args['pushgateway'] || env('CANARY_PUSHGATEWAY') || '',
@@ -405,13 +406,18 @@ async function sampleModel(model) {
     record(r, { tps: true });
   }
 
-  // 3. Sticky KV-cache reuse — two turns, same conversation tag.
+  // 3. Sticky KV-cache reuse — two turns, same conversation tag, sharing a
+  // large prefix. The prefix MUST be large enough to exceed the provider's
+  // prefix-cache granularity, otherwise turn-2 cached_prompt_tokens is always 0
+  // and the metric can't distinguish "working" from "reuse collapsed". A live
+  // measurement (2026-07-09, ~3.9k-token prefix) saw ~64% turn-2 reuse.
   await sleep(CONFIG.intervalMs);
   const conv = randUUID();
+  const prefix = stickyPrefix(CONFIG.stickyPrefixLines);
   const t1 = await streamOne({
     model,
     conversationId: conv,
-    messages: [{ role: 'user', content: 'Reply with exactly: pong' }],
+    messages: [{ role: 'user', content: `${prefix}\n\nReply with exactly: pong` }],
     maxTokens: 16,
   });
   record(t1);
@@ -421,7 +427,7 @@ async function sampleModel(model) {
       model,
       conversationId: conv,
       messages: [
-        { role: 'user', content: 'Reply with exactly: pong' },
+        { role: 'user', content: `${prefix}\n\nReply with exactly: pong` },
         { role: 'assistant', content: t1.content },
         { role: 'user', content: 'Reply with exactly: ping' },
       ],
@@ -459,6 +465,16 @@ function outcomeBucket(r) {
 
 function numOrNull(v) {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+// Deterministic shared prefix (~10 tokens/line) for the sticky KV-cache test.
+// Large enough to exceed the provider's prefix-cache granularity so turn-2
+// cached_prompt_tokens is a real reuse signal.
+function stickyPrefix(lines) {
+  const out = ['Reference facts to retain for this conversation:'];
+  for (let i = 0; i < lines; i++) {
+    out.push(`- item ${i}: key K${i} maps to value V${i * 7} under namespace N${i % 9}; invariant s${i} > ${i}.`);
+  }
+  return out.join('\n');
 }
 function randUUID() {
   return crypto.randomUUID();

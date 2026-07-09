@@ -21,7 +21,7 @@ scheduled, dependency-free probe.
 | Serviceability | `macprovider_canary_model_serviceable{model}` | 1 iff a chat actually produced a token. Catches the status-vs-serviceable divergence (status says ready, completions 502). |
 | TTFT | `macprovider_canary_ttft_ms{model,quantile}` | p50/p95/p99 time-to-first-token. Feeds real numbers into the W3 `max_ttft_ms` canary gate instead of guesses. |
 | Decode TPS | `macprovider_canary_decode_tps{model,quantile}` | Sustained tokens/sec (first token excluded). Catches metallib/thermal silent regressions. |
-| KV-cache reuse | `macprovider_canary_cached_prompt_ratio{model}` | Turn-2 `cached_prompt_tokens / prompt_tokens`. Locks in the measured ~45% sticky-affinity win. |
+| KV-cache reuse | `macprovider_canary_cached_prompt_ratio{model}` | Turn-2 `cached_prompt_tokens / prompt_tokens` over a large shared prefix. Locks in the sticky-affinity win (measured ~64% live 2026-07-09). Requires the usage frame to survive large prompts (gateway PR #511). |
 | Outcomes | `macprovider_canary_requests{model,outcome}` | Per-run gauge over buckets `2xx / 502 / 5xx / timeout / network_error / stream_error / empty / other` → 502-rate and mid-stream-failure signal. |
 | Sample counts | `macprovider_canary_ttft_samples{model}`, `macprovider_canary_decode_tps_samples{model}` | Valid samples collected — alert on `== 0 while serviceable == 1` to catch a signal going dark (e.g. gateway stops returning usage). |
 | Pool view | `macprovider_canary_pool_providers{state}`, `macprovider_canary_up` | What `/v1/status` claims, for divergence comparison. |
@@ -81,6 +81,7 @@ All env, all optional except the token:
 | `CANARY_TPS_MAX_TOKENS` | `128` | decode window for TPS samples |
 | `CANARY_INTERVAL_MS` | `1500` | floor gap between samples (avoids self-induced queueing; see scenario 09 pacing math) |
 | `CANARY_REQ_TIMEOUT_MS` | `45000` | per-request timeout |
+| `CANARY_STICKY_PREFIX_LINES` | `80` | shared-prefix size (~10 tok/line) for the sticky KV-cache test; must exceed the provider's prefix-cache granularity or turn-2 `cached_prompt_tokens` is always 0 |
 | `CANARY_ALLOW_INSECURE` | *(unset)* | set `1` to permit `http`/localhost/private-host targets (local mock testing only). By default `CANARY_BASE`/`CANARY_PUSHGATEWAY` must be `https` and non-private, so the buyer token can't be sent to an arbitrary origin. |
 
 The buyer token is redacted from all logs, stdout, and artifacts even if a
