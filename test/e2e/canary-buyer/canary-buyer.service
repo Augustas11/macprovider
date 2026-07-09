@@ -1,0 +1,50 @@
+# macprovider canary buyer probe — systemd oneshot (Linux/always-on host).
+#
+# Companion to com.streamvc.canary-buyer.plist (the lab-Mac launchd variant).
+# Prefer this on an always-on host (VPS) so a sleeping Mac can't create blind
+# spots. Triggered by canary-buyer.timer.
+#
+# Install (Pearl):
+#   apt-get install -y nodejs            # >= 18 (ships probe-compatible ESM)
+#   install -d -o macprovider -g macprovider -m 0755 /opt/macprovider/canary-buyer
+#   cp probe.mjs run-canary.sh /opt/macprovider/canary-buyer/
+#   install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider/canary-buyer
+#   # buyer token via 0640 env file (NEVER inline in this unit):
+#   #   printf 'MACPROVIDER_BUYER_TOKEN=%s\n' "$TOKEN" > /etc/macprovider/canary-buyer.env
+#   #   chown root:macprovider /etc/macprovider/canary-buyer.env && chmod 0640 ...
+#   cp canary-buyer.service canary-buyer.timer /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now canary-buyer.timer
+[Unit]
+Description=macprovider canary buyer probe (e2e serving/perf harness)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=macprovider
+Group=macprovider
+# Buyer token (MACPROVIDER_BUYER_TOKEN) and optional CANARY_HEARTBEAT_URL live
+# here, mode 0640 root:macprovider. The "-" tolerates a missing file so the unit
+# fails loud (no token) rather than refusing to load.
+EnvironmentFile=-/etc/macprovider/canary-buyer.env
+Environment=CANARY_BASE=https://api.streamvc.live
+Environment=CANARY_NODE_BIN=/usr/bin/node
+Environment=CANARY_METRICS_OUT=/var/lib/macprovider/canary-buyer/canary_buyer.prom
+Environment=CANARY_JSON_OUT=/var/lib/macprovider/canary-buyer/artifacts
+# --fail-on-degraded: exit non-zero when the gateway is down or any model is
+# unserviceable, so the run FAILS (visible in journald) and the heartbeat is not
+# pinged (dead-man switch fires upstream).
+ExecStart=/bin/bash /opt/macprovider/canary-buyer/run-canary.sh --fail-on-degraded
+TimeoutStartSec=180
+# Hardening — the probe only needs outbound https + its own state dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/macprovider/canary-buyer
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=canary-buyer

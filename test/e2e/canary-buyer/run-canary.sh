@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Wrapper for the canary buyer probe. Resolves the buyer token, runs the probe,
+# and writes a Prometheus textfile + a rotated JSON artifact. Intended to be
+# invoked by launchd (com.streamvc.canary-buyer.plist) on a lab Mac, or by hand.
+#
+# Token resolution order:
+#   1. $MACPROVIDER_BUYER_TOKEN (if already exported)
+#   2. ~/.config/macprovider/buyer-api-key  (the documented harness location)
+#
+# The token is never echoed. Diagnostics go to stderr / the launchd log.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+: "${CANARY_BASE:=https://api.streamvc.live}"
+: "${CANARY_TOKEN_FILE:=$HOME/.config/macprovider/buyer-api-key}"
+: "${CANARY_METRICS_OUT:=$HOME/.local/state/canary-buyer/canary_buyer.prom}"
+: "${CANARY_JSON_OUT:=$HOME/.local/state/canary-buyer/artifacts}"
+# Optional: export CANARY_PUSHGATEWAY=http://host:9091 to push instead of/along
+# with the textfile.
+
+if [[ -z "${MACPROVIDER_BUYER_TOKEN:-}" ]]; then
+  if [[ -r "$CANARY_TOKEN_FILE" ]]; then
+    MACPROVIDER_BUYER_TOKEN="$(tr -d '[:space:]' < "$CANARY_TOKEN_FILE")"
+    export MACPROVIDER_BUYER_TOKEN
+  else
+    echo "canary: no token in \$MACPROVIDER_BUYER_TOKEN and $CANARY_TOKEN_FILE not readable" >&2
+    exit 2
+  fi
+fi
+
+export CANARY_BASE CANARY_METRICS_OUT CANARY_JSON_OUT
+
+# launchd runs with a minimal PATH that usually lacks Homebrew, so a bare `node`
+# would fail every scheduled run. Resolve it explicitly.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+NODE_BIN="${CANARY_NODE_BIN:-$(command -v node || true)}"
+if [[ -z "$NODE_BIN" ]]; then
+  echo "canary: node not found on PATH; set \$CANARY_NODE_BIN to the node binary" >&2
+  exit 2
+fi
+
+# Artifact rotation (keep newest 200) is handled inside probe.mjs in Node, so no
+# filename can be misparsed by the shell into an unintended delete.
+
+# Optional dead-man's-switch heartbeat. When CANARY_HEARTBEAT_URL is set (an
+# https BetterStack / healthchecks-style ping URL), the wrapper pings it ONLY
+# when the probe exits 0 (healthy). A degraded run (with --fail-on-degraded) or a
+# probe that never runs leaves the heartbeat stale, so the upstream monitor
+# alerts. The heartbeat URL carries no buyer token, but we still require https so
+# a mispointed URL can't be reached over cleartext (CANARY_ALLOW_INSECURE=1
+# bypasses, for local testing only).
+if [[ -n "${CANARY_HEARTBEAT_URL:-}" ]]; then
+  if [[ "$CANARY_HEARTBEAT_URL" != https://* && "${CANARY_ALLOW_INSECURE:-}" != "1" ]]; then
+    echo "canary: CANARY_HEARTBEAT_URL must be https (set CANARY_ALLOW_INSECURE=1 to allow http)" >&2
+    exit 2
+  fi
+  if "$NODE_BIN" "$HERE/probe.mjs" \
+      --metrics-out "$CANARY_METRICS_OUT" \
+      --json-out "$CANARY_JSON_OUT" \
+      "$@"; then
+    curl -fsS -m 10 "$CANARY_HEARTBEAT_URL" >/dev/null 2>&1 \
+      || echo "canary: heartbeat ping failed (probe was healthy)" >&2
+    exit 0
+  else
+    rc=$?
+    echo "canary: probe exited $rc; heartbeat NOT pinged (dead-man switch will fire)" >&2
+    exit "$rc"
+  fi
+fi
+
+exec "$NODE_BIN" "$HERE/probe.mjs" \
+  --metrics-out "$CANARY_METRICS_OUT" \
+  --json-out "$CANARY_JSON_OUT" \
+  "$@"

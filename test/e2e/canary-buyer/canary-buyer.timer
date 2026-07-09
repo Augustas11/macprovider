@@ -1,0 +1,14 @@
+# Runs the canary buyer probe every 30 minutes. See canary-buyer.service.
+[Unit]
+Description=Run macprovider canary buyer probe every 30 min
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=30min
+# Jitter so the probe never lands on the same instant as other periodic jobs.
+RandomizedDelaySec=60
+# Catch up one missed run after downtime instead of waiting a full interval.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
