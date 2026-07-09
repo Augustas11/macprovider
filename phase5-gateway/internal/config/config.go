@@ -131,6 +131,7 @@ type TimeoutsConfig struct {
 	CoordinatorRequestSeconds       int `yaml:"coordinator_request_seconds"`
 	CoordinatorHeaderTimeoutSeconds int `yaml:"coordinator_header_timeout_seconds"`
 	StreamingCancelMS               int `yaml:"streaming_cancel_ms"`
+	StreamingIdleMS                 int `yaml:"streaming_idle_ms"`
 }
 
 type SettlementConfig struct {
@@ -218,7 +219,7 @@ func Default() Config {
 		Capacity: CapacityConfig{
 			MonthlyBudgetUSD: 500, ReadyProviderDegradedThreshold: 1, ProjectedCostTier1Percent: 80, TierCooldownSeconds: 3600,
 		},
-		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, CoordinatorHeaderTimeoutSeconds: 300, StreamingCancelMS: 500},
+		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, CoordinatorHeaderTimeoutSeconds: 300, StreamingCancelMS: 500, StreamingIdleMS: 10000},
 		Settlement: SettlementConfig{
 			ReconcileEnabled:               true,
 			ReconcileIntervalSeconds:       30,
@@ -417,7 +418,7 @@ func (c Config) Validate() error {
 	if c.Capacity.MonthlyBudgetUSD <= 0 || c.Capacity.ReadyProviderDegradedThreshold <= 0 || c.Capacity.ProjectedCostTier1Percent <= 0 || c.Capacity.TierCooldownSeconds <= 0 {
 		return fmt.Errorf("capacity thresholds must be positive")
 	}
-	if c.Timeouts.CoordinatorRequestSeconds <= 0 || c.Timeouts.CoordinatorHeaderTimeoutSeconds <= 0 || c.Timeouts.StreamingCancelMS <= 0 {
+	if c.Timeouts.CoordinatorRequestSeconds <= 0 || c.Timeouts.CoordinatorHeaderTimeoutSeconds <= 0 || c.Timeouts.StreamingCancelMS <= 0 || c.Timeouts.StreamingIdleMS <= 0 {
 		return fmt.Errorf("timeouts must be positive")
 	}
 	// Post-#92 / PR #167: header timeout must be >= request budget so a
@@ -573,4 +574,8 @@ func (c Config) CoordinatorTimeout() time.Duration {
 // guard at phase4-coordinator/dist/check-deploy-config.sh C2b enforces this.
 func (c Config) CoordinatorHeaderTimeout() time.Duration {
 	return time.Duration(c.Timeouts.CoordinatorHeaderTimeoutSeconds) * time.Second
+}
+
+func (c Config) StreamingIdleTimeout() time.Duration {
+	return time.Duration(c.Timeouts.StreamingIdleMS) * time.Millisecond
 }

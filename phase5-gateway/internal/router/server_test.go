@@ -4063,7 +4063,7 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
-	wantCompletion := estimateStreamingCompletionTokens(boundedStreamingFallbackFrameBytes([]byte(fmt.Sprintf("data: {\"id\":\"chatcmpl\",\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\n", strings.Repeat("x", 120)))), 200)
+	wantCompletion := estimateStreamingCompletionTokens(int64(len(strings.Repeat("x", 120))), 200)
 	wantUsed := float64(estimatePromptTokens([]byte(body)) + wantCompletion)
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
@@ -5509,10 +5509,183 @@ func TestSettleFromUsage_ClientDisconnect_WithUsage(t *testing.T) {
 		maxTokens:      128,
 		failWriteAt:    3,
 		wantOutcome:    "client_disconnect",
-		wantSource:     "provider_reported",
-		wantCompletion: 42,
-		wantPrompt:     12,
+		wantSource:     "gateway_estimated",
+		wantCompletion: 30,
 	})
+}
+
+func TestStreamingIdleTimeoutTerminatesAndIgnoresUsageOnlyFrame(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"stall"}]}`
+	accountID := "acct_stream_idle_usage_only"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = pw.Write([]byte(`data: {"id":"chatcmpl","usage":{"prompt_tokens":0,"completion_tokens":102,"total_tokens":102},"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+			<-r.Context().Done()
+			_ = pw.CloseWithError(r.Context().Err())
+		}()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"text/event-stream; charset=utf-8"},
+				"Trailer":      []string{settlementOutcomeHeader},
+			},
+			Body: pr,
+		}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.StreamingIdleMS = 25
+		cfg.Timeouts.CoordinatorRequestSeconds = 5
+		cfg.Timeouts.CoordinatorHeaderTimeoutSeconds = 5
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"code":"provider_timeout"`) || !strings.Contains(resp.Body.String(), "data: [DONE]") {
+		t.Fatalf("stream body missing terminal provider_timeout + DONE: %s", resp.Body.String())
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 0 || got.settledRows != 0 || got.activeRows != 1 || got.heldRows != 1 {
+		t.Fatalf("settlement snapshot=%+v, want declared idle timeout held without local usage row", got)
+	}
+}
+
+func TestStreamingBuyerCancelBeforeIdleIgnoresUsageOnlyFrame(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"cancel"}]}`
+	accountID := "acct_stream_cancel_usage_only"
+	firstFrame := make(chan struct{})
+	cancelSeen := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = pw.Write([]byte(`data: {"id":"chatcmpl","usage":{"prompt_tokens":0,"completion_tokens":102,"total_tokens":102},"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+			close(firstFrame)
+			<-r.Context().Done()
+			close(cancelSeen)
+			_ = pw.CloseWithError(r.Context().Err())
+		}()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"text/event-stream; charset=utf-8"},
+				"Trailer":      []string{settlementOutcomeHeader},
+			},
+			Body: pr,
+		}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.StreamingIdleMS = 5000
+		cfg.Timeouts.CoordinatorRequestSeconds = 10
+		cfg.Timeouts.CoordinatorHeaderTimeoutSeconds = 10
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(resp, req)
+		close(done)
+	}()
+	select {
+	case <-firstFrame:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for usage-only frame")
+	}
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	select {
+	case <-cancelSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not observe buyer cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("gateway did not finish after buyer cancellation")
+	}
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 0 || got.settledRows != 0 || got.activeRows != 1 || got.heldRows != 1 {
+		t.Fatalf("settlement snapshot=%+v, want declared client disconnect held without local usage row", got)
+	}
+}
+
+func TestStreamingBuyerDeadlineBeforeIdleIgnoresUsageOnlyFrame(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":128,"messages":[{"role":"user","content":"deadline"}]}`
+	accountID := "acct_stream_deadline_usage_only"
+	firstFrame := make(chan struct{})
+	cancelSeen := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = pw.Write([]byte(`data: {"id":"chatcmpl","usage":{"prompt_tokens":0,"completion_tokens":102,"total_tokens":102},"choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+			close(firstFrame)
+			<-r.Context().Done()
+			close(cancelSeen)
+			_ = pw.CloseWithError(r.Context().Err())
+		}()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"text/event-stream; charset=utf-8"},
+				"Trailer":      []string{settlementOutcomeHeader},
+			},
+			Body: pr,
+		}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.StreamingIdleMS = 5000
+		cfg.Timeouts.CoordinatorRequestSeconds = 10
+		cfg.Timeouts.CoordinatorHeaderTimeoutSeconds = 10
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(resp, req)
+		close(done)
+	}()
+	select {
+	case <-firstFrame:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for usage-only frame")
+	}
+	select {
+	case <-cancelSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not observe buyer deadline")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("gateway did not finish after buyer deadline")
+	}
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 0 || got.settledRows != 0 || got.activeRows != 1 || got.heldRows != 1 {
+		t.Fatalf("settlement snapshot=%+v, want declared client deadline held without local usage row", got)
+	}
 }
 
 func TestSettleFromUsage_MalformedSSEChunk(t *testing.T) {

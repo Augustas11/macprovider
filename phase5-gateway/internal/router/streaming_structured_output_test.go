@@ -119,6 +119,61 @@ func TestStreamingStructuredOutputGatewayTimeoutEmitsProviderTimeout(t *testing.
 	}
 }
 
+func TestStreamingStructuredOutputPostFirstByteTimeoutPreservesProviderTimeoutSettlement(t *testing.T) {
+	firstFrame := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = pw.Write([]byte(`data: {"id":"chatcmpl","choices":[{"delta":{},"finish_reason":null}]}` + "\n\n"))
+			close(firstFrame)
+			<-r.Context().Done()
+			_ = pw.CloseWithError(r.Context().Err())
+		}()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"text/event-stream; charset=utf-8"},
+				"Trailer":      []string{settlementOutcomeHeader},
+			},
+			Body: pr,
+		}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.CoordinatorRequestSeconds = 1
+		cfg.Timeouts.CoordinatorHeaderTimeoutSeconds = 1
+		cfg.Timeouts.StreamingIdleMS = 5000
+	}, WithHTTPClient(client))
+	accountID := "acct_stream_structured_mid_timeout"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- postChat(t, h, fullKey, structuredStreamingRequestBody(), nil)
+	}()
+	select {
+	case <-firstFrame:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first structured frame")
+	}
+	var resp *httptest.ResponseRecorder
+	select {
+	case resp = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("gateway did not finish after structured upstream timeout")
+	}
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"code":"provider_timeout"`) || strings.Contains(resp.Body.String(), "unverified_streaming") {
+		t.Fatalf("unexpected timeout SSE body: %s", resp.Body.String())
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 0 || got.settledRows != 0 || got.activeRows != 1 || got.heldRows != 1 {
+		t.Fatalf("settlement snapshot=%+v, want declared structured timeout held without local usage row", got)
+	}
+}
+
 func TestStreamingStructuredOutputUpstreamContextStartsAtRequestEntry(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		select {
