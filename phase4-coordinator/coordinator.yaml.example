@@ -128,6 +128,14 @@ admission:
 #   attestation_max_age_s: 600
 #   attestation_formats:
 #     - "apple-managed-device-attestation-acme-v1"
+#     # Phase 1 (P1-B): SE P-256 self-signed attestation. No MDA root required.
+#     # Coordinator verifies the SE blob signature and binding; sets
+#     # attestation_tier=self_signed on the pool entry. Observe-only until Phase 4.
+#     - "macprovider-se-p256-v1"
+#   # Phase 1 liveness config keys (P1-C, not yet implemented):
+#   # se_liveness_interval_s: 300
+#   # se_liveness_timeout_s: 30
+#   # se_liveness_max_failures: 3
 #
 #   # SPEC-008 §11.1 — Pillar D relay controls; disabled by default to preserve Tier-1 behavior.
 #   behavioral_safety_enabled: false
