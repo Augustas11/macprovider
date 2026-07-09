@@ -287,6 +287,29 @@ Script auto-restores config backup on verification failure. Manual: set `require
 |------|-------|
 | 2026-07-08 | Runbook created; Phase 1 agents spawned (P1-A, P1-B, P1-C) |
 | 2026-07-08 | All three tracks landed in worktree; focused tests pass (Go SE+Liveness, Swift SEAttestation 12/12). Swift liveness unit tests still TODO. Entitlements blocker documented. |
+| 2026-07-09 | **Phase 1 merged** — PR #477 squash-merged to main (`001fb405`). Augustas11 approved (PR author was antfleet-ops). |
+| 2026-07-09 | **Phase 2 started** — worktree `/Users/augstar/macprovider-attest-phase2`, branch `fix/attestation-phase2`. Operator registering Apple MDM push cert in parallel. |
+
+## Phase 2 — IN PROGRESS
+
+**Goal:** macprovider-run MDM enrollment path (`POST /v1/enroll` + provider `enroll` CLI). APNs cert ops parallel (operator).
+
+### Phase 2 tracks
+
+| Track | Scope | Deliverables |
+|-------|-------|--------------|
+| **P2-A** | Coordinator enroll API | `POST /v1/enroll`, SCEP+MDM `.mobileconfig` generator, AccessRights=1041, config keys |
+| **P2-B** | Routing + nginx + config | `coordinator.yaml` MDM block, nginx exact route, tests |
+| **P2-C** | Provider CLI | `macprovider enroll`, `mdm-status`, serial via ioreg, open System Settings |
+
+### Phase 2 exit criteria
+
+- [ ] `POST /v1/enroll` returns valid `.mobileconfig` for a serial
+- [ ] Provider `enroll` command downloads and opens profile
+- [ ] `mdm-status` reports enrolled / not enrolled / foreign MDM
+- [ ] Config documented in `coordinator.yaml.example`
+- [ ] Tests (Go handler + Swift enroll parser)
+- [ ] **Ops (parallel):** APNs push cert at identity.apple.com/pushcert
 
 ### Phase 1 exit criteria status
 
