@@ -59,6 +59,63 @@ func TestBillingMigration(t *testing.T) {
 	}
 }
 
+func TestBillingMigrationUpgradesQuarantineResolutionsV04ToV05(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	insertCreditWithRequest(t, store.db, "legacy-resolution-row", "provider-a", time.Now().UTC(), 100)
+	id := scalar(t, store.db, `SELECT id FROM ledger_request_credits WHERE request_id='legacy-resolution-row'`)
+	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET quarantined=1, quarantine_reason='legacy' WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+DROP VIEW IF EXISTS spec022_payable_request_credits;
+DROP TABLE ledger_quarantine_resolutions;
+CREATE TABLE ledger_quarantine_resolutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_credit_id INTEGER NOT NULL REFERENCES ledger_request_credits(id),
+    resolution_kind TEXT NOT NULL CHECK(resolution_kind IN ('force_void')),
+    operator_id TEXT NOT NULL CHECK(length(operator_id) BETWEEN 1 AND 64),
+    resolution_reason TEXT NOT NULL CHECK(length(resolution_reason) BETWEEN 1 AND 500),
+    created_at_utc TEXT NOT NULL,
+    UNIQUE(request_credit_id)
+);
+CREATE INDEX IF NOT EXISTS idx_lqr_kind_created ON ledger_quarantine_resolutions(resolution_kind, created_at_utc);
+INSERT INTO ledger_quarantine_resolutions (
+    request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc
+) VALUES (?, 'force_void', 'alice', 'legacy void', '2026-07-01T00:00:00.000000000Z')`, id); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := NewStore(store.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !columnExists(t, store.db, "ledger_quarantine_resolutions", "force_credit_matures_at_utc") {
+		t.Fatal("missing force_credit_matures_at_utc after v0.5 migration")
+	}
+	if !columnExists(t, store.db, "ledger_quarantine_resolutions", "correction_deadline_at_utc") {
+		t.Fatal("missing correction_deadline_at_utc after v0.5 migration")
+	}
+	hasUnique, err := upgraded.hasUniqueIndexOnColumns(context.Background(), "ledger_quarantine_resolutions", []string{"request_credit_id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasUnique {
+		t.Fatal("UNIQUE(request_credit_id) survived v0.5 migration")
+	}
+	if !indexExists(t, store.db, "ledger_quarantine_resolutions", "idx_lqr_request_latest") {
+		t.Fatal("missing idx_lqr_request_latest after v0.5 migration")
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_quarantine_resolutions WHERE request_credit_id=? AND resolution_kind='force_void'`, id); got != 1 {
+		t.Fatalf("preserved legacy rows=%d want 1", got)
+	}
+	if _, err := store.db.Exec(`
+INSERT INTO ledger_quarantine_resolutions (
+    request_credit_id, resolution_kind, operator_id, resolution_reason,
+    created_at_utc, force_credit_matures_at_utc, correction_deadline_at_utc
+) VALUES (?, 'force_credit', 'bob', 'corrected', '2026-07-01T00:00:01.000000000Z', '2026-07-02T00:00:01.000000000Z', '2026-07-02T00:00:01.000000000Z')`, id); err != nil {
+		t.Fatalf("append force_credit after migration: %v", err)
+	}
+}
+
 func TestBillingMigration_ReplacesSettledMoneyTrigger(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	if _, err := store.db.Exec(`

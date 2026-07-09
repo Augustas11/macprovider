@@ -1,0 +1,41 @@
+# coordinator.opoi-v0-staging.yaml — OPoI v0 canary staging overlay
+#
+# Purpose: Enable OPoI v0 liveness (pool canaries) on a lab/staging coordinator
+# with 1-2 provider machines before promoting to Pearl production.
+#
+# Usage (coordinator supports --config-overlay since OPoI Phase A):
+#   macprovider-coordinator \
+#     --config /etc/macprovider/coordinator.yaml \
+#     --config-overlay /etc/macprovider/coordinator.opoi-v0-staging.yaml \
+#     --validate-config
+# Overlay keys override base; production base stays unchanged until promotion.
+#
+# DO NOT use on Pearl production without completing §2.4-2.6 validation steps
+# in ops/runbooks/opoi-challenge-implementation.md.
+#
+# Rollback: set canary_enabled: false and restart coordinator.
+
+pool:
+  # OPoI v0 liveness — canary challenges prove the provider is running the
+  # declared model by embedding a random nonce in prompt and expected reply.
+  # See ops/runbooks/opoi-challenge-implementation.md §2.
+  canary_enabled: true
+  canary_interval_s: 300        # 5 min for staging observation
+  canary_timeout_s: 120
+  canary_max_tokens: 16
+  canary_failure_threshold: 3   # 3 consecutive fails → provisional ban
+  # Challenge bank — both entries embed {nonce} (hex, 4 bytes, upper-case).
+  # Rotate periodically; keep this file deployment-specific.
+  canary_challenges:
+    - prompt: "Reply with exactly: CANARY-{nonce}"
+      expected: "CANARY-{nonce}"
+    - prompt: "What is the code {nonce}? Reply with only the code."
+      expected: "{nonce}"
+  # W3 — per-model-class probes with latency gates (Session B).
+  # Keys match provider hello model_id / catalog row key.
+  model_class_challenges:
+    qwen3-coder-30b-a3b-instruct:
+      - prompt: "Reply with exactly: CANARY-{nonce}"
+        expected: "CANARY-{nonce}"
+        max_ttft_ms: 3500
+        min_sustained_tps: 20

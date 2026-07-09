@@ -67,6 +67,7 @@ type Metrics struct {
 	RegisterSource         *prometheus.CounterVec
 	RegisterHardwareErrors prometheus.Counter
 	IdlePrewarmEventTotal  *prometheus.CounterVec
+	ModelHashMismatchTotal prometheus.Counter
 }
 
 // New registers all five metrics against reg and returns the
@@ -147,6 +148,12 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"event", "reason"},
 		),
+		ModelHashMismatchTotal: f.NewCounter(
+			prometheus.CounterOpts{
+				Name: "model_hash_mismatch_total",
+				Help: "Count of provider hash status transitions to hash_mismatch (Proof of Weights W1 observability).",
+			},
+		),
 	}
 }
 
@@ -204,4 +211,11 @@ func (m *Metrics) IncIdlePrewarmEvent(event, reason string) {
 		return
 	}
 	m.IdlePrewarmEventTotal.WithLabelValues(event, reason).Inc()
+}
+
+func (m *Metrics) IncModelHashMismatch() {
+	if m == nil || m.ModelHashMismatchTotal == nil {
+		return
+	}
+	m.ModelHashMismatchTotal.Inc()
 }

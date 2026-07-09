@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -90,9 +91,10 @@ type Spec010Presence struct {
 }
 
 type Tier2Caps struct {
-	EncryptedLeg bool     `json:"encrypted_leg"`
-	Attestation  bool     `json:"attestation"`
-	AEADSuites   []string `json:"aead_suites"`
+	EncryptedLeg                   bool     `json:"encrypted_leg"`
+	Attestation                    bool     `json:"attestation"`
+	AEADSuites                     []string `json:"aead_suites"`
+	ResponseChunkPlaintextEnvelope bool     `json:"response_chunk_plaintext_envelope,omitempty"`
 }
 
 type AuthChallenge struct {
@@ -148,11 +150,12 @@ type AuthTier2Session struct {
 }
 
 type AuthEncryptedLegSession struct {
-	Enabled            bool   `json:"enabled"`
-	Alg                string `json:"alg"`
-	KID                string `json:"kid"`
-	RekeyAfterRequests int    `json:"rekey_after_requests"`
-	RekeyAfterSeconds  int    `json:"rekey_after_seconds"`
+	Enabled                        bool   `json:"enabled"`
+	Alg                            string `json:"alg"`
+	KID                            string `json:"kid"`
+	RekeyAfterRequests             int    `json:"rekey_after_requests"`
+	RekeyAfterSeconds              int    `json:"rekey_after_seconds"`
+	ResponseChunkPlaintextEnvelope bool   `json:"response_chunk_plaintext_envelope,omitempty"`
 }
 
 type AuthAttestationSession struct {
@@ -433,19 +436,24 @@ func ParseHello(payload []byte) (Hello, string, error) {
 }
 
 func ParseFirstAuthMessage(payload []byte) (string, int, error) {
+	typ, version, _, err := parseFirstAuthMessageWithField(payload)
+	return typ, version, err
+}
+
+func parseFirstAuthMessageWithField(payload []byte) (string, int, string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
-		return "", 0, err
+		return "", 0, "json", err
 	}
 	var typ string
 	if err := requireString(raw, "type", &typ); err != nil {
-		return "", 0, err
+		return "", 0, err.Field, err
 	}
 	var version int
-	if err := requireInt(raw, "version", &version); err != nil {
-		return "", 0, err
+	if err := requireAuthVersion(raw, &version); err != nil {
+		return typ, 0, err.Field, err
 	}
-	return typ, version, nil
+	return typ, version, "", nil
 }
 
 func ParseAuthRequest(payload []byte) (AuthRequest, Spec010Presence, string, error) {
@@ -460,7 +468,7 @@ func ParseAuthRequest(payload []byte) (AuthRequest, Spec010Presence, string, err
 	if req.Type != "auth_request" {
 		return AuthRequest{}, Spec010Presence{}, "type", fmt.Errorf("expected auth_request, got %q", req.Type)
 	}
-	if err := requireInt(raw, "version", &req.Version); err != nil {
+	if err := requireAuthVersion(raw, &req.Version); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if req.Version != 2 {
@@ -747,6 +755,26 @@ func requireInt(raw map[string]json.RawMessage, field string, out *int) *fieldEr
 	if err := json.Unmarshal(v, out); err != nil {
 		return &fieldError{Field: field}
 	}
+	return nil
+}
+
+func requireAuthVersion(raw map[string]json.RawMessage, out *int) *fieldError {
+	v, ok := raw["version"]
+	if !ok {
+		return &fieldError{Field: "missing version"}
+	}
+	if err := json.Unmarshal(v, out); err == nil {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil || s == "" {
+		return &fieldError{Field: "version"}
+	}
+	parsed, err := strconv.Atoi(s)
+	if err != nil {
+		return &fieldError{Field: "version"}
+	}
+	*out = parsed
 	return nil
 }
 

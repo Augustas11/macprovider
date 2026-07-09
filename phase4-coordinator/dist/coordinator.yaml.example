@@ -54,15 +54,21 @@ pool:
   degraded_probe_after_502: true
   breaker_failure_threshold: 2
   breaker_window_s: 120
+  # OPoI v0 canary liveness (disabled here — production template).
+  # For staging/lab rollout use coordinator.opoi-v0-staging.yaml overlay.
+  # See ops/runbooks/opoi-challenge-implementation.md §2 before enabling.
   canary_enabled: false
-  canary_interval_s: 300
-  canary_timeout_s: 30
-  canary_max_tokens: 8
-  canary_failure_threshold: 3
-  # Required when canary_enabled is true. Keep deployment-specific and rotate periodically.
+  canary_interval_s: 300        # 5 min staging; use 600 for initial production
+  canary_timeout_s: 120
+  canary_max_tokens: 16
+  canary_failure_threshold: 3   # provisional ban; pinned → degrade at 2
+  # OPoI v0 challenge bank reference (enable in staging overlay, not here).
+  # Every entry must contain {nonce} in both prompt and expected.
   # canary_challenges:
-  #   - prompt: "<private operator challenge prompt containing {nonce}>"
-  #     expected: "<private expected answer containing {nonce}>"
+  #   - prompt: "Reply with exactly: CANARY-{nonce}"
+  #     expected: "CANARY-{nonce}"
+  #   - prompt: "What is the code {nonce}? Reply with only the code."
+  #     expected: "{nonce}"
 
 routing:
   preflight_threshold_tokens: 4096
@@ -116,6 +122,15 @@ auth:
   # so operator_key can be rotated independently. Leave unset to preserve
   # pre-bridge behavior.
   #   gateway_service_token: env:GATEWAY_SERVICE_TOKEN
+  # Per-actor operator keys for TWO-PERSON control (SPEC-026 provider-auth-policy
+  # AND MALIBU trust-promotion /admin/trust-promotion/{request,approve}). The
+  # acting operator identity is bound to the MATCHED key, so dual-control requires
+  # at least TWO entries with DISTINCT, non-empty secrets; the trust-promotion
+  # route fails closed (503 dual_control_unavailable) otherwise. Do NOT rename an
+  # operator id while it has a pending promotion (the actor identity would change).
+  #   operator_keys:
+  #     spec026_a: env:OPERATOR_AUTH_POLICY_A
+  #     spec026_b: env:OPERATOR_AUTH_POLICY_B
   require_provider_tokens: true # Production/provider WS public exposure must require provider tokens.
   # Public onboarding escape hatch: permit a first tokenless provisional
   # provider to receive and persist its own provider_token. Tokenless reconnects
@@ -271,6 +286,22 @@ stats:
   trusted_proxies:
     - "127.0.0.0/8"
     - "::1/128"
+
+# SPEC-MALIBU-EMISSION-LEDGER — bootstrap $MALIBU accrual (default-off).
+# Requires migration 012 on the stats/rewards Postgres DB before enable.
+malibu_emission:
+  enabled: false
+  # writer_dsn: env:MALIBU_EMISSION_WRITER_DSN
+  tick_interval_seconds: 900
+  provider_daily_cap_malibu: 25
+  wallet_daily_cap_malibu: 100
+  # Defaults to storage.db_path when unset (SPEC-016 payout address mirror source).
+  # sqlite_payout_db_path: "/var/lib/macprovider/coordinator.db"
+  wallet_mirror_interval_seconds: 300
+  unlock_eval_interval_seconds: 3600
+  max_serializable_retries: 5
+  # Optional Base USDC dual-RPC URLs for E2 wallet-balance unlock checks (SPEC-026 §5.2).
+  # base_usdc_balance_rpc_urls: []
 
 # Auto-update recommendation surface. The coordinator forwards
 # `latest_binary_version` to every connected provider in its

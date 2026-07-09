@@ -105,6 +105,17 @@ func TestCanaryValidationRequiresPrivateChallengeBankWhenEnabled(t *testing.T) {
 		t.Fatalf("enabled canary without challenges validation err=%v", err)
 	}
 
+	cfg.Pool.ModelClassChallenges = map[string][]CanaryChallengeConfig{
+		"model-a": {{
+			Prompt:   "Reply with exactly: CANARY-{nonce}",
+			Expected: "CANARY-{nonce}",
+		}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("enabled canary with model_class_challenges only should validate: %v", err)
+	}
+	cfg.Pool.ModelClassChallenges = nil
+
 	cfg.Pool.CanaryChallenges = []CanaryChallengeConfig{{
 		Prompt:   "Which US state uses postal abbreviation VT?",
 		Expected: "Vermont-{nonce}",
@@ -558,5 +569,101 @@ func TestOnboardingCoordinatorDomainMustBeBareLowercaseHost(t *testing.T) {
 	cfg.Onboarding.CoordinatorDomain = "https://Coordinator.streamvc.live/"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "bare lowercase host") {
 		t.Fatalf("domain validation err=%v", err)
+	}
+}
+
+// TestCanaryOPoIV0StagingOverlayParsesAndValidates verifies that the OPoI v0
+// staging overlay YAML unmarshals into a valid canary config block (both
+// challenges contain {nonce} in prompt and expected).
+func TestCanaryOPoIV0StagingOverlayParsesAndValidates(t *testing.T) {
+	b, err := os.ReadFile(filepath.Clean("../../coordinator.opoi-v0-staging.yaml"))
+	if err != nil {
+		t.Fatalf("read staging overlay: %v", err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		t.Fatalf("unmarshal staging overlay: %v", err)
+	}
+	if !cfg.Pool.CanaryEnabled {
+		t.Fatal("staging overlay must have canary_enabled: true")
+	}
+	if len(cfg.Pool.CanaryChallenges) == 0 {
+		t.Fatal("staging overlay must have at least one canary_challenge")
+	}
+	for i, ch := range cfg.Pool.CanaryChallenges {
+		if !strings.Contains(ch.Prompt, "{nonce}") || !strings.Contains(ch.Expected, "{nonce}") {
+			t.Fatalf("canary_challenges[%d] missing {nonce} in prompt or expected", i)
+		}
+	}
+	if len(cfg.Pool.ModelClassChallenges) == 0 {
+		t.Fatal("staging overlay must include model_class_challenges for W3 lab smoke")
+	}
+	for modelID, bank := range cfg.Pool.ModelClassChallenges {
+		for i, ch := range bank {
+			if !strings.Contains(ch.Prompt, "{nonce}") || !strings.Contains(ch.Expected, "{nonce}") {
+				t.Fatalf("model_class_challenges.%s[%d] missing {nonce}", modelID, i)
+			}
+		}
+	}
+}
+
+func TestLoadWithOverlayMergesPoolCanaryBlock(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.yaml")
+	overlayPath := filepath.Join(dir, "overlay.yaml")
+	if err := os.WriteFile(basePath, []byte("auth:\n  operator_key: test-operator-key-with-32-byte-minimum-length\npool:\n  canary_enabled: false\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	overlay := strings.TrimSpace(`
+pool:
+  canary_enabled: true
+  canary_challenges:
+    - prompt: "Reply with exactly: CANARY-{nonce}"
+      expected: "CANARY-{nonce}"
+`)
+	if err := os.WriteFile(overlayPath, []byte(overlay), 0o644); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	cfg, err := LoadWithOverlay(basePath, overlayPath)
+	if err != nil {
+		t.Fatalf("LoadWithOverlay: %v", err)
+	}
+	if !cfg.Pool.CanaryEnabled {
+		t.Fatal("overlay should enable canaries")
+	}
+	if len(cfg.Pool.CanaryChallenges) != 1 {
+		t.Fatalf("canary challenges=%d want 1", len(cfg.Pool.CanaryChallenges))
+	}
+}
+
+func TestLoadWithOverlayMalibuEmissionBlock(t *testing.T) {
+	t.Setenv("MALIBU_EMISSION_WRITER_DSN", "postgres://rewards_writer:pw@127.0.0.1:5432/stats?sslmode=disable")
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.yaml")
+	overlayPath := filepath.Join(dir, "malibu.yaml")
+	if err := os.WriteFile(basePath, []byte("auth:\n  operator_key: test-operator-key-with-32-byte-minimum-length\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	overlay := strings.TrimSpace(`
+malibu_emission:
+  enabled: false
+  writer_dsn: env:MALIBU_EMISSION_WRITER_DSN
+  provider_daily_cap_malibu: 25
+`)
+	if err := os.WriteFile(overlayPath, []byte(overlay), 0o644); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	cfg, err := LoadWithOverlay(basePath, overlayPath)
+	if err != nil {
+		t.Fatalf("LoadWithOverlay: %v", err)
+	}
+	if cfg.MalibuEmission.Enabled {
+		t.Fatal("malibu overlay should keep enabled false for C4 staging")
+	}
+	if cfg.MalibuEmission.WriterDSN != "postgres://rewards_writer:pw@127.0.0.1:5432/stats?sslmode=disable" {
+		t.Fatalf("writer_dsn=%q", cfg.MalibuEmission.WriterDSN)
+	}
+	if cfg.MalibuEmission.ProviderDailyCapMALIBU != 25 {
+		t.Fatalf("provider cap=%v", cfg.MalibuEmission.ProviderDailyCapMALIBU)
 	}
 }

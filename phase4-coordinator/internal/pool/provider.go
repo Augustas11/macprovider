@@ -94,20 +94,22 @@ const (
 )
 
 type Provider struct {
-	ProviderID            string  `json:"provider_id"`
-	AssignedID            string  `json:"assigned_id"`
-	Hostname              string  `json:"hostname"`
-	ModelID               string  `json:"model_id"`
-	ModelParamsB          float64 `json:"model_params_b"`
-	RAMGB                 int     `json:"ram_gb"`
-	MaxContextTokens      int     `json:"max_context_tokens"`
-	MaxConcurrency        int     `json:"max_concurrency"`
-	SlotsFree             int     `json:"slots_free"`
-	SlotsTotal            int     `json:"slots_total"`
-	ThroughputTPSEstimate float64 `json:"throughput_tps_estimate"`
-	ModelLoadTimeMs       int64   `json:"model_load_time_ms,omitempty"`
-	EndpointURL           string  `json:"endpoint_url"`
-	Tier                  Tier    `json:"tier"`
+	ProviderID              string  `json:"provider_id"`
+	AssignedID              string  `json:"assigned_id"`
+	Hostname                string  `json:"hostname"`
+	ModelID                 string  `json:"model_id"`
+	ModelParamsB            float64 `json:"model_params_b"`
+	RAMGB                   int     `json:"ram_gb"`
+	MaxContextTokens        int     `json:"max_context_tokens"`
+	MaxConcurrency          int     `json:"max_concurrency"`
+	SlotsFree               int     `json:"slots_free"`
+	SlotsTotal              int     `json:"slots_total"`
+	ThroughputTPSEstimate   float64 `json:"throughput_tps_estimate"`
+	RequestsServedSinceLast int     `json:"-"`
+	ThroughputTPSSinceLast  float64 `json:"-"`
+	ModelLoadTimeMs         int64   `json:"model_load_time_ms,omitempty"`
+	EndpointURL             string  `json:"endpoint_url"`
+	Tier                    Tier    `json:"tier"`
 	// AuthState records how the connect was admitted. Empty string
 	// preserves pre-v0.8.3 behavior (routable, billable). Set to
 	// AuthBearerlessDuplicate by the duplicate-tokenless admit path
@@ -161,6 +163,15 @@ type Provider struct {
 	// AttestationStatus and from verified stats hardware inventory: it can make
 	// cores/bandwidth visible without claiming hardware attestation.
 	HardwareCapacity *ProviderHardwareCapacity `json:"hardware_capacity,omitempty"`
+	// Proof of Weights W2 — coordinator-side autotune hello gate cap derived
+	// from latest verified hardware-evidence benchmarks. Empty when gate off
+	// or provider admitted before W2 rollout.
+	MaxAdmittedModelKey string `json:"max_admitted_model_class,omitempty"`
+	MaxAdmittedModelID  string `json:"max_admitted_model_id,omitempty"`
+	// Proof of Weights W3 — latest model-class OPoI probe outcome when a
+	// per-model challenge bank with optional latency gates was used.
+	// Omitted when only the global canary bank applies.
+	ModelClassOPoIPass *bool `json:"model_class_opoi_pass,omitempty"`
 
 	// SE attestation fields (Phase 1).
 	// SEPublicKey holds the raw P-256 public key (64 bytes: 32 X || 32 Y) verified
@@ -273,16 +284,18 @@ func truncateUTF8Bytes(s string, maxBytes int) string {
 }
 
 type Tier2Session struct {
-	AEADSuite          string
-	C2PKey             []byte
-	P2CKey             []byte
-	C2PNonceBase       []byte
-	P2CNonceBase       []byte
-	C2PCounter         uint64
-	P2CCounter         uint64
-	RequestsDispatched uint64
-	KeyID              string
-	StartedAt          time.Time
+	AEADSuite                      string
+	ResponseChunkPlaintextEnvelope bool
+	C2PKey                         []byte
+	P2CKey                         []byte
+	C2PNonceBase                   []byte
+	P2CNonceBase                   []byte
+	C2PCounter                     uint64
+	P2CCounter                     uint64
+	P2CSeen                        map[uint64]struct{}
+	RequestsDispatched             uint64
+	KeyID                          string
+	StartedAt                      time.Time
 }
 
 type ReceiptPubkeyPrevious struct {
@@ -1125,6 +1138,16 @@ func (r *Registry) SetSEPublicKey(providerID, assignedID string, pubkey []byte, 
 	return true
 }
 
+func (r *Registry) SetModelClassOPoIPass(providerID, assignedID string, pass *bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return
+	}
+	p.ModelClassOPoIPass = pass
+}
+
 func (r *Registry) applyCanarySanctionLocked(p *Provider) {
 	sanction, ok := r.canarySanctions[p.ProviderID]
 	if !ok || p.Tier != TierPinned {
@@ -1318,15 +1341,17 @@ type ReceiptRotationEvent struct {
 type ReceiptRotationEventEmitter func(event ReceiptRotationEvent)
 
 type HeartbeatUpdate struct {
-	Status                State
-	ModelID               string
-	ModelParamsB          float64
-	RAMGB                 int
-	MaxContextTokens      int
-	MaxConcurrency        int
-	SlotsFree             int
-	SlotsTotal            int
-	ThroughputTPSEstimate float64
+	Status                  State
+	ModelID                 string
+	ModelParamsB            float64
+	RAMGB                   int
+	MaxContextTokens        int
+	MaxConcurrency          int
+	SlotsFree               int
+	SlotsTotal              int
+	ThroughputTPSEstimate   float64
+	RequestsServedSinceLast int
+	ThroughputTPSSinceLast  float64
 	// ModelHash is the raw lowercase hex hash from the heartbeat when
 	// ModelHashPresent is true; ignored otherwise. Populated from the SPEC-011
 	// v0.5 optional heartbeat field per SPEC-002 v1.3.5 §7.1 R-7.1.4.
@@ -1392,6 +1417,8 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.SlotsFree = hb.SlotsFree
 	p.SlotsTotal = hb.SlotsTotal
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
+	p.RequestsServedSinceLast = hb.RequestsServedSinceLast
+	p.ThroughputTPSSinceLast = hb.ThroughputTPSSinceLast
 	if len(hb.LastAutoupdateEvent) > 0 {
 		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], hb.LastAutoupdateEvent...)
 	}

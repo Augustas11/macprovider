@@ -369,6 +369,59 @@ func TestParseAuthInitialAcceptsLegacyAbsentSpec010(t *testing.T) {
 	}
 }
 
+func TestParseAuthInitialAcceptsNumericStringVersion(t *testing.T) {
+	payload := validAuthRequestInitial()
+	payload["version"] = "2"
+
+	typ, version, err := ParseFirstAuthMessage(mustAuthJSON(t, payload))
+	if err != nil {
+		t.Fatalf("ParseFirstAuthMessage err=%v", err)
+	}
+	if typ != "auth_request" || version != 2 {
+		t.Fatalf("first auth = (%q, %d), want auth_request 2", typ, version)
+	}
+
+	req, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+	if err != nil {
+		t.Fatalf("ParseAuthRequest field=%q err=%v", field, err)
+	}
+	if req.Version != 2 {
+		t.Fatalf("Version = %d, want 2", req.Version)
+	}
+}
+
+func TestParseFirstAuthMessageWithFieldReportsVersion(t *testing.T) {
+	payload := validAuthRequestInitial()
+	payload["version"] = "v2"
+
+	typ, _, field, err := parseFirstAuthMessageWithField(mustAuthJSON(t, payload))
+	if err == nil {
+		t.Fatal("ParseFirstAuthMessageWithField err = nil, want error")
+	}
+	if typ != "auth_request" {
+		t.Fatalf("type = %q, want auth_request", typ)
+	}
+	if field != "version" {
+		t.Fatalf("field = %q, want version", field)
+	}
+}
+
+func TestParseFirstAuthMessageWithFieldReportsMissingVersionType(t *testing.T) {
+	payload := validAuthRequestInitial()
+	delete(payload, "version")
+
+	typ, _, field, err := parseFirstAuthMessageWithField(mustAuthJSON(t, payload))
+	if err == nil {
+		t.Fatal("ParseFirstAuthMessageWithField err = nil, want error")
+	}
+	if typ != "auth_request" {
+		t.Fatalf("type = %q, want auth_request", typ)
+	}
+	if field != "missing version" {
+		t.Fatalf("field = %q, want missing version", field)
+	}
+}
+
 func TestParseAuthInitialAcceptsProviderReceiptPublicKey(t *testing.T) {
 	payload := validAuthRequestInitial()
 	pubkey := bytesOf(0x42, 32)

@@ -58,9 +58,35 @@ type Config struct {
 	Explorer                     ExplorerConfig               `yaml:"explorer"`
 	Stats                        StatsConfig                  `yaml:"stats"`
 	Onboarding                   OnboardingConfig             `yaml:"onboarding"`
+	MalibuEmission               MalibuEmissionConfig         `yaml:"malibu_emission"`
 	AutotuneFeeds                AutotuneFeedsConfig          `yaml:"autotune"`
+	ProofOfWeights               ProofOfWeightsConfig         `yaml:"proof_of_weights"`
 	Proxy                        ProxyConfig                  `yaml:"proxy"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
+}
+
+// ProofOfWeightsConfig gates Session B integrity controls. Defaults keep
+// legacy self-declared hello model_id behavior until the operator enables
+// the autotune hello gate explicitly.
+type ProofOfWeightsConfig struct {
+	RequireAutotuneHelloGate bool                 `yaml:"require_autotune_hello_gate"`
+	AutotuneEvidenceTTLDays  int                  `yaml:"autotune_evidence_ttl_days"`
+	TelemetryDrift           TelemetryDriftConfig `yaml:"telemetry_drift"`
+}
+
+// TelemetryDriftConfig enables observe-only operator alerts when live
+// provider telemetry diverges from verified autotune evidence or W3 OPoI
+// pass-rate baselines. Default-off; does not change routing or sanctions.
+type TelemetryDriftConfig struct {
+	Enabled                  bool     `yaml:"enabled"`
+	TPSRatioThreshold        float64  `yaml:"tps_ratio_threshold"`
+	TPSMinAbsolute           float64  `yaml:"tps_min_absolute"`
+	TPSMinRequestsWindow     int      `yaml:"tps_min_requests_window"`
+	HashAlertOnStatus        []string `yaml:"hash_alert_on_status"`
+	HashAlertOnArtifactDrift bool     `yaml:"hash_alert_on_artifact_drift"`
+	OPoIPassRateWindow       int      `yaml:"opoi_pass_rate_window"`
+	OPoIPassRateThreshold    float64  `yaml:"opoi_pass_rate_threshold"`
+	AlertCooldownSeconds     int      `yaml:"alert_cooldown_s"`
 }
 
 type CoordinatorConfig struct {
@@ -80,6 +106,21 @@ type OnboardingConfig struct {
 	AppleTeamID             string            `yaml:"apple_team_id"`
 	CoordinatorDomain       string            `yaml:"coordinator_domain"`
 	ASNPrefixes             map[string]string `yaml:"asn_prefixes"`
+}
+
+// MalibuEmissionConfig gates SPEC-MALIBU-EMISSION-LEDGER bootstrap accrual.
+// Default-off; money-path changes require PR + audit.
+type MalibuEmissionConfig struct {
+	Enabled                     bool     `yaml:"enabled"`
+	WriterDSN                   string   `yaml:"writer_dsn"`
+	TickIntervalSeconds         int      `yaml:"tick_interval_seconds"`
+	ProviderDailyCapMALIBU      float64  `yaml:"provider_daily_cap_malibu"`
+	WalletDailyCapMALIBU        float64  `yaml:"wallet_daily_cap_malibu"`
+	SQLitePayoutDBPath          string   `yaml:"sqlite_payout_db_path"`
+	WalletMirrorIntervalSeconds int      `yaml:"wallet_mirror_interval_seconds"`
+	UnlockEvalIntervalSeconds   int      `yaml:"unlock_eval_interval_seconds"`
+	MaxSerializableRetries      int      `yaml:"max_serializable_retries"`
+	BaseUSDCBalanceRPCURLs      []string `yaml:"base_usdc_balance_rpc_urls"`
 }
 
 // AutotuneFeedsConfig points at the signed SPEC-023 recommendation feeds
@@ -271,27 +312,64 @@ type PoolConfig struct {
 	WakeGapThresholdS       int `yaml:"wake_gap_threshold_s"`
 	// WakeGapThresholdMs, when > 0, overrides WakeGapThresholdS for
 	// millisecond-precision test scenarios. Not for production use.
-	WakeGapThresholdMs      int                     `yaml:"wake_gap_threshold_ms"`
-	WarmupFallbackS         int                     `yaml:"warmup_fallback_s"`
-	WarmupGateEnabled       bool                    `yaml:"warmup_gate_enabled"`
-	WarmupGateTimeoutS      int                     `yaml:"warmup_gate_timeout_s"`
-	WarmupGateMaxTokens     int                     `yaml:"warmup_gate_max_tokens"`
-	DegradedBackoffS        int                     `yaml:"degraded_backoff_s"`
-	DegradedMaxRetries      int                     `yaml:"degraded_max_retries"`
-	DegradedProbeAfter502   bool                    `yaml:"degraded_probe_after_502"`
-	BreakerFailureThreshold int                     `yaml:"breaker_failure_threshold"`
-	BreakerWindowS          int                     `yaml:"breaker_window_s"`
-	CanaryEnabled           bool                    `yaml:"canary_enabled"`
-	CanaryIntervalS         int                     `yaml:"canary_interval_s"`
-	CanaryTimeoutS          int                     `yaml:"canary_timeout_s"`
-	CanaryMaxTokens         int                     `yaml:"canary_max_tokens"`
-	CanaryFailureThreshold  int                     `yaml:"canary_failure_threshold"`
-	CanaryChallenges        []CanaryChallengeConfig `yaml:"canary_challenges"`
+	WakeGapThresholdMs      int                                `yaml:"wake_gap_threshold_ms"`
+	WarmupFallbackS         int                                `yaml:"warmup_fallback_s"`
+	WarmupGateEnabled       bool                               `yaml:"warmup_gate_enabled"`
+	WarmupGateTimeoutS      int                                `yaml:"warmup_gate_timeout_s"`
+	WarmupGateMaxTokens     int                                `yaml:"warmup_gate_max_tokens"`
+	DegradedBackoffS        int                                `yaml:"degraded_backoff_s"`
+	DegradedMaxRetries      int                                `yaml:"degraded_max_retries"`
+	DegradedProbeAfter502   bool                               `yaml:"degraded_probe_after_502"`
+	BreakerFailureThreshold int                                `yaml:"breaker_failure_threshold"`
+	BreakerWindowS          int                                `yaml:"breaker_window_s"`
+	CanaryEnabled           bool                               `yaml:"canary_enabled"`
+	CanaryIntervalS         int                                `yaml:"canary_interval_s"`
+	CanaryTimeoutS          int                                `yaml:"canary_timeout_s"`
+	CanaryMaxTokens         int                                `yaml:"canary_max_tokens"`
+	CanaryFailureThreshold  int                                `yaml:"canary_failure_threshold"`
+	CanaryChallenges        []CanaryChallengeConfig            `yaml:"canary_challenges"`
+	ModelClassChallenges    map[string][]CanaryChallengeConfig `yaml:"model_class_challenges"`
 }
 
 type CanaryChallengeConfig struct {
-	Prompt   string `yaml:"prompt"`
-	Expected string `yaml:"expected"`
+	Prompt          string  `yaml:"prompt"`
+	Expected        string  `yaml:"expected"`
+	MaxTTFTMS       int     `yaml:"max_ttft_ms,omitempty"`
+	MinSustainedTPS float64 `yaml:"min_sustained_tps,omitempty"`
+}
+
+func validateCanaryChallengeList(prefix string, challenges []CanaryChallengeConfig) error {
+	for i, challenge := range challenges {
+		if strings.TrimSpace(challenge.Prompt) == "" || strings.TrimSpace(challenge.Expected) == "" {
+			return fmt.Errorf("%s[%d] prompt and expected must not be empty", prefix, i)
+		}
+		if !strings.Contains(challenge.Prompt, "{nonce}") || !strings.Contains(challenge.Expected, "{nonce}") {
+			return fmt.Errorf("%s[%d] prompt and expected must contain {nonce}", prefix, i)
+		}
+		if challenge.MaxTTFTMS < 0 {
+			return fmt.Errorf("%s[%d] max_ttft_ms must be >= 0", prefix, i)
+		}
+		if math.IsNaN(challenge.MinSustainedTPS) || math.IsInf(challenge.MinSustainedTPS, 0) || challenge.MinSustainedTPS < 0 {
+			return fmt.Errorf("%s[%d] min_sustained_tps is invalid", prefix, i)
+		}
+	}
+	return nil
+}
+
+func (p PoolConfig) CanaryChallengesForModel(modelID string) ([]CanaryChallengeConfig, bool) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return p.CanaryChallenges, false
+	}
+	if bank, ok := p.ModelClassChallenges[modelID]; ok && len(bank) > 0 {
+		return bank, true
+	}
+	for key, bank := range p.ModelClassChallenges {
+		if strings.EqualFold(strings.TrimSpace(key), modelID) && len(bank) > 0 {
+			return bank, true
+		}
+	}
+	return p.CanaryChallenges, false
 }
 
 type RoutingConfig struct {
@@ -567,10 +645,7 @@ type SettlementConfig struct {
 	JobEnabled                  bool   `yaml:"job_enabled"`
 }
 
-// BillingConfig is the SPEC-005 v0.4 (issue #169) billing-side
-// operator-toggleable surface. v0.4 ships one flag gating the
-// quarantine-VOID admin endpoint at the route layer; v0.5 will
-// add a force-credit flag alongside the pre-payout hold.
+// BillingConfig is the SPEC-005 billing-side operator-toggleable surface.
 type BillingConfig struct {
 	// QuarantineResolutionForceVoidEnabled gates POST
 	// /admin/ledger/quarantine/{id}/force-void (SPEC-005 v0.4
@@ -579,6 +654,13 @@ type BillingConfig struct {
 	// 10) until the operator explicitly flips this to true via
 	// the existing config-reload primitive.
 	QuarantineResolutionForceVoidEnabled bool `yaml:"quarantine_resolution_force_void_enabled"`
+	// QuarantineResolutionForceCreditEnabled gates POST
+	// /admin/ledger/quarantine/{id}/force-credit. Default false.
+	QuarantineResolutionForceCreditEnabled bool `yaml:"quarantine_resolution_force_credit_enabled"`
+	// ForceCreditSettlementHoldSeconds is the pre-payout hold for
+	// force-credit resolutions. Zero means the SPEC-005 v0.5 default
+	// of 24 hours.
+	ForceCreditSettlementHoldSeconds int `yaml:"force_credit_settlement_hold_seconds"`
 }
 
 type EndpointsConfig struct {
@@ -686,6 +768,21 @@ func Default() Config {
 			ProvisionalTierWeight:           0.3,
 			ProvisionalRetentionDays:        30,
 		},
+		ProofOfWeights: ProofOfWeightsConfig{
+			RequireAutotuneHelloGate: false,
+			AutotuneEvidenceTTLDays:  30,
+			TelemetryDrift: TelemetryDriftConfig{
+				Enabled:                  false,
+				TPSRatioThreshold:        0.70,
+				TPSMinAbsolute:           5.0,
+				TPSMinRequestsWindow:     2,
+				HashAlertOnStatus:        []string{"hash_mismatch", "hash_invalid"},
+				HashAlertOnArtifactDrift: true,
+				OPoIPassRateWindow:       10,
+				OPoIPassRateThreshold:    0.80,
+				AlertCooldownSeconds:     900,
+			},
+		},
 		Tier2: Tier2Config{
 			SELivenessIntervalS:            300,
 			SELivenessTimeoutS:             30,
@@ -776,6 +873,15 @@ func Default() Config {
 			BundleID:                "tech.malibu.app",
 			CoordinatorDomain:       "coordinator.streamvc.live",
 		},
+		MalibuEmission: MalibuEmissionConfig{
+			Enabled:                     false,
+			TickIntervalSeconds:         900,
+			ProviderDailyCapMALIBU:      25,
+			WalletDailyCapMALIBU:        100,
+			WalletMirrorIntervalSeconds: 300,
+			UnlockEvalIntervalSeconds:   3600,
+			MaxSerializableRetries:      5,
+		},
 		Explorer: ExplorerConfig{
 			Enabled:                       false,
 			BindPath:                      "/admin/explorer/",
@@ -809,29 +915,52 @@ func Default() Config {
 }
 
 func Load(path string) (Config, error) {
+	return LoadWithOverlay(path, "")
+}
+
+// LoadWithOverlay reads basePath into defaults, then merges overlayPath when
+// non-empty (overlay keys override). Used for OPoI v0 staging overlays without
+// editing production coordinator.yaml.
+func LoadWithOverlay(basePath, overlayPath string) (Config, error) {
 	cfg := Default()
+	if err := unmarshalYAMLFile(basePath, &cfg); err != nil {
+		return Config{}, fmt.Errorf("base config %s: %w", basePath, err)
+	}
+	if strings.TrimSpace(overlayPath) != "" {
+		if err := unmarshalYAMLFile(overlayPath, &cfg); err != nil {
+			return Config{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
+		}
+	}
+	if err := finalizeLoadedConfig(&cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func unmarshalYAMLFile(path string, cfg *Config) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return Config{}, err
+		return err
 	}
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
-		return Config{}, err
-	}
+	return yaml.Unmarshal(b, cfg)
+}
+
+func finalizeLoadedConfig(cfg *Config) error {
 	if err := cfg.resolveEnv(); err != nil {
-		return Config{}, err
+		return err
 	}
 	if err := cfg.Validate(); err != nil {
-		return Config{}, err
+		return err
 	}
 	if err := validateOperatorSecretStrength("auth.operator_key", cfg.Auth.OperatorKey); err != nil {
-		return Config{}, err
+		return err
 	}
 	for name, key := range cfg.Auth.OperatorKeys {
 		if err := validateOperatorSecretStrength("auth.operator_keys."+name, key); err != nil {
-			return Config{}, err
+			return err
 		}
 	}
-	return cfg, nil
+	return nil
 }
 
 // resolveEnv expands "env:NAME" sentinels in secret-bearing fields by
@@ -876,6 +1005,7 @@ func (c *Config) resolveEnv() error {
 		{"stats.provider_portal_dsn", &c.Stats.ProviderPortalDSN},
 		{"stats.partner_keys.writer_dsn", &c.Stats.PartnerKeys.WriterDSN},
 		{"stats.partner_keys_admin_dsn", &c.Stats.PartnerKeysAdminDSN},
+		{"malibu_emission.writer_dsn", &c.MalibuEmission.WriterDSN},
 	}
 	for _, f := range statsDSNs {
 		v, err := resolveEnvValue(f.field, *f.dst)
@@ -1230,15 +1360,18 @@ func (c Config) Validate() error {
 		return fmt.Errorf("pool canary settings must be > 0 when enabled")
 	}
 	if c.Pool.CanaryEnabled {
-		if len(c.Pool.CanaryChallenges) == 0 {
-			return fmt.Errorf("pool canary_challenges must not be empty when enabled")
+		if len(c.Pool.CanaryChallenges) == 0 && len(c.Pool.ModelClassChallenges) == 0 {
+			return fmt.Errorf("pool canary_challenges or model_class_challenges must not be empty when enabled")
 		}
-		for i, challenge := range c.Pool.CanaryChallenges {
-			if strings.TrimSpace(challenge.Prompt) == "" || strings.TrimSpace(challenge.Expected) == "" {
-				return fmt.Errorf("pool canary_challenges[%d] prompt and expected must not be empty", i)
+		if err := validateCanaryChallengeList("pool.canary_challenges", c.Pool.CanaryChallenges); err != nil {
+			return err
+		}
+		for modelID, challenges := range c.Pool.ModelClassChallenges {
+			if strings.TrimSpace(modelID) == "" {
+				return fmt.Errorf("pool.model_class_challenges model id must not be empty")
 			}
-			if !strings.Contains(challenge.Prompt, "{nonce}") || !strings.Contains(challenge.Expected, "{nonce}") {
-				return fmt.Errorf("pool canary_challenges[%d] prompt and expected must contain {nonce}", i)
+			if err := validateCanaryChallengeList("pool.model_class_challenges."+modelID, challenges); err != nil {
+				return err
 			}
 		}
 	}
@@ -1346,7 +1479,13 @@ func (c Config) Validate() error {
 	if err := c.validateOnboarding(); err != nil {
 		return err
 	}
+	if err := c.validateMalibuEmission(); err != nil {
+		return err
+	}
 	if err := c.validateAutotuneFeeds(); err != nil {
+		return err
+	}
+	if err := c.validateProofOfWeights(); err != nil {
 		return err
 	}
 	if _, ok := c.Rewards.RateCard["default"]; !ok {
@@ -1375,6 +1514,71 @@ func (c Config) Validate() error {
 				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
 			}
 		}
+	}
+	return nil
+}
+
+func (c Config) validateProofOfWeights() error {
+	p := c.ProofOfWeights
+	if p.AutotuneEvidenceTTLDays < 0 {
+		return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be >= 0")
+	}
+	if p.RequireAutotuneHelloGate {
+		if p.AutotuneEvidenceTTLDays <= 0 {
+			return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be > 0 when require_autotune_hello_gate is true")
+		}
+		if err := c.requireAutotuneEvidenceFeeds(); err != nil {
+			return err
+		}
+	}
+	if !p.TelemetryDrift.Enabled {
+		return nil
+	}
+	if p.AutotuneEvidenceTTLDays <= 0 {
+		return fmt.Errorf("proof_of_weights.autotune_evidence_ttl_days must be > 0 when telemetry_drift.enabled is true")
+	}
+	if err := c.requireAutotuneEvidenceFeeds(); err != nil {
+		return err
+	}
+	d := p.TelemetryDrift
+	if d.TPSRatioThreshold <= 0 || d.TPSRatioThreshold > 1 || math.IsNaN(d.TPSRatioThreshold) || math.IsInf(d.TPSRatioThreshold, 0) {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.tps_ratio_threshold must be in (0,1]")
+	}
+	if d.TPSMinAbsolute < 0 || math.IsNaN(d.TPSMinAbsolute) || math.IsInf(d.TPSMinAbsolute, 0) {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.tps_min_absolute must be >= 0")
+	}
+	if d.TPSMinRequestsWindow < 0 {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.tps_min_requests_window must be >= 0")
+	}
+	if d.OPoIPassRateWindow < 0 {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.opoi_pass_rate_window must be >= 0")
+	}
+	if d.OPoIPassRateThreshold < 0 || d.OPoIPassRateThreshold > 1 || math.IsNaN(d.OPoIPassRateThreshold) || math.IsInf(d.OPoIPassRateThreshold, 0) {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.opoi_pass_rate_threshold must be in [0,1]")
+	}
+	if d.AlertCooldownSeconds < 0 {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.alert_cooldown_s must be >= 0")
+	}
+	for _, status := range d.HashAlertOnStatus {
+		switch strings.TrimSpace(status) {
+		case "hash_mismatch", "hash_invalid", "hash_verified", "uncatalogued", "catalog_unavailable":
+		default:
+			return fmt.Errorf("proof_of_weights.telemetry_drift.hash_alert_on_status contains unsupported value %q", status)
+		}
+	}
+	if !c.Pool.CanaryEnabled && d.OPoIPassRateWindow > 0 {
+		return fmt.Errorf("proof_of_weights.telemetry_drift.opoi_pass_rate_window requires pool.canary_enabled when > 0")
+	}
+	return nil
+}
+
+func (c Config) requireAutotuneEvidenceFeeds() error {
+	a := c.AutotuneFeeds
+	if strings.TrimSpace(a.AutotuneCandidatesPath) == "" || strings.TrimSpace(a.AutotuneCandidatesSigPath) == "" {
+		return fmt.Errorf("proof_of_weights autotune evidence requires autotune.autotune_candidates_path and autotune.autotune_candidates_sig_path")
+	}
+	if !c.Onboarding.AppTrackRegisterEnabled || strings.TrimSpace(c.Onboarding.PostgresDSN) == "" {
+		return fmt.Errorf("proof_of_weights autotune evidence requires onboarding.app_track_register_enabled and onboarding.postgres_dsn")
 	}
 	return nil
 }
@@ -1450,6 +1654,35 @@ func (c Config) validateOnboarding() error {
 	}
 	if err := validateOperatorKeyMap(c.Auth.OperatorKeys); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (c Config) validateMalibuEmission() error {
+	m := c.MalibuEmission
+	if !m.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(m.WriterDSN) == "" {
+		return fmt.Errorf("malibu_emission.writer_dsn must be set when malibu_emission.enabled is true")
+	}
+	if m.TickIntervalSeconds <= 0 {
+		return fmt.Errorf("malibu_emission.tick_interval_seconds must be > 0")
+	}
+	if m.ProviderDailyCapMALIBU <= 0 {
+		return fmt.Errorf("malibu_emission.provider_daily_cap_malibu must be > 0")
+	}
+	if m.WalletDailyCapMALIBU <= 0 {
+		return fmt.Errorf("malibu_emission.wallet_daily_cap_malibu must be > 0")
+	}
+	if m.WalletMirrorIntervalSeconds <= 0 {
+		return fmt.Errorf("malibu_emission.wallet_mirror_interval_seconds must be > 0")
+	}
+	if m.UnlockEvalIntervalSeconds <= 0 {
+		return fmt.Errorf("malibu_emission.unlock_eval_interval_seconds must be > 0")
+	}
+	if m.MaxSerializableRetries <= 0 {
+		return fmt.Errorf("malibu_emission.max_serializable_retries must be > 0")
 	}
 	return nil
 }

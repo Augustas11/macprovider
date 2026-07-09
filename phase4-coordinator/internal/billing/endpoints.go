@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -49,11 +50,19 @@ func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireP
 // below) so it shares atomicity with the ledger_config_snapshots
 // row §13.2 already requires.
 func (s *Store) HandlersWithQuarantineGate(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool) http.Handler {
-	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, nil)
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, false, nil)
 }
 
 func (s *Store) HandlersWithQuarantineGateAndIdlePrewarm(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
-	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, idlePrewarm)
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, false, idlePrewarm)
+}
+
+func (s *Store) HandlersWithQuarantineGates(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool) http.Handler {
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, nil)
+}
+
+func (s *Store) HandlersWithQuarantineGatesAndIdlePrewarm(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
+	return s.handlersInternal(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin, forceVoidEnabled, forceCreditEnabled, idlePrewarm)
 }
 
 // HandlersWithBridge mounts the admin/provider handlers. The
@@ -66,10 +75,10 @@ func (s *Store) HandlersWithQuarantineGateAndIdlePrewarm(operatorKey string, tok
 // accepted. Handlers (the legacy single-arg signature) is kept as a
 // thin shim so test fixtures and direct callers don't churn.
 func (s *Store) HandlersWithBridge(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int) http.Handler {
-	return s.handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly, tokenStore, requireProviderTokens, earningsRateLimitPerMin, false, nil)
+	return s.handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly, tokenStore, requireProviderTokens, earningsRateLimitPerMin, false, false, nil)
 }
 
-func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
+func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool, forceCreditEnabled bool, idlePrewarm idlePrewarmReader) http.Handler {
 	// SPEC-005 v0.4 (issue #169) — handler CONSTRUCTION must not be
 	// able to silently flip the live route-layer flag. R8 fix
 	// (ARCH-M1) replaces the unconditional SetForceVoidEnabled call
@@ -88,6 +97,9 @@ func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOn
 	// the first-construction init case.
 	if forceVoidEnabled {
 		s.forceVoidEnabled.CompareAndSwap(false, true)
+	}
+	if forceCreditEnabled {
+		s.forceCreditEnabled.CompareAndSwap(false, true)
 	}
 	h := &handler{
 		store:                   s,
@@ -175,6 +187,10 @@ type settlementVerdictCounter struct {
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/admin/ledger/quarantine" {
+		h.quarantineListHandler(w, r)
+		return
+	}
 	// SPEC-005 v0.4 §11.6 quarantine surface (issue #169).
 	// matchQuarantinePath distinguishes "not this route" from
 	// "matched route + bad id" so we can emit 400 (not 404) per
@@ -186,7 +202,11 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		// checks. Otherwise GET / PUT / bad-id requests leak route
 		// existence via 405 / 400 even when the operator has not
 		// turned the surface on.
-		if !h.store.ForceVoidEnabled() {
+		enabled := h.store.ForceVoidEnabled()
+		if m.kind == "force-credit" {
+			enabled = h.store.ForceCreditEnabled()
+		}
+		if !enabled {
 			if auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
 				if !h.allowAdminRequest(w) {
 					return
@@ -214,6 +234,9 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		case "force-void":
 			h.forceVoidHandler(w, r, m.id)
 			return
+		case "force-credit":
+			h.forceCreditHandler(w, r, m.id)
+			return
 		}
 	}
 	switch {
@@ -230,6 +253,138 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 	}
+}
+
+func (h *handler) quarantineListHandler(w http.ResponseWriter, r *http.Request) {
+	if !auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
+		writeError(w, http.StatusForbidden, "forbidden", "operator key required")
+		return
+	}
+	if !h.allowAdminRequest(w) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	status := r.URL.Query().Get("status")
+	if status == "" {
+		status = "open"
+	}
+	if status != "open" {
+		writeError(w, http.StatusBadRequest, "bad_request", "status must be open")
+		return
+	}
+	limit := 500
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 || parsed > 500 {
+			writeError(w, http.StatusBadRequest, "bad_request", "limit must be between 1 and 500")
+			return
+		}
+		limit = parsed
+	}
+	cursorTS := ""
+	cursorID := int64(0)
+	if rawCursor := r.URL.Query().Get("cursor"); rawCursor != "" {
+		cursor, err := decodeQuarantineListCursor(rawCursor)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "bad cursor")
+			return
+		}
+		cursorTS = cursor.TS
+		cursorID = cursor.ID
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	rows, err := h.store.db.QueryContext(ctx, `
+SELECT id, request_id, attempt_n, provider_id, ts_utc, quarantine_reason
+  FROM ledger_request_credits lrc
+ WHERE lrc.quarantined = 1
+   AND NOT EXISTS (
+       SELECT 1 FROM ledger_quarantine_resolutions lqr
+        WHERE lqr.request_credit_id = lrc.id
+   )
+   AND (? = '' OR lrc.ts_utc < ? OR (lrc.ts_utc = ? AND lrc.id < ?))
+ ORDER BY ts_utc DESC, id DESC
+ LIMIT ?`, cursorTS, cursorTS, cursorTS, cursorID, limit+1)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "query quarantine list: "+err.Error())
+		return
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	for rows.Next() {
+		var id int64
+		var requestID string
+		var attemptN int64
+		var providerID string
+		var tsUTC string
+		var quarantineReason sql.NullString
+		if err := rows.Scan(&id, &requestID, &attemptN, &providerID, &tsUTC, &quarantineReason); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "scan quarantine list: "+err.Error())
+			return
+		}
+		items = append(items, map[string]any{
+			"request_credit_id": id,
+			"request_id":        requestID,
+			"attempt_n":         attemptN,
+			"provider_id":       providerID,
+			"ts_utc":            tsUTC,
+			"quarantine_reason": nullStringOrNil(quarantineReason),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "read quarantine list: "+err.Error())
+		return
+	}
+	var nextCursor any
+	if len(items) > limit {
+		last := items[limit-1]
+		if ts, _ := last["ts_utc"].(string); ts != "" {
+			if id, ok := last["request_credit_id"].(int64); ok {
+				nextCursor = encodeQuarantineListCursor(quarantineListCursor{TS: ts, ID: id})
+			}
+		}
+		items = items[:limit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":      status,
+		"count":       len(items),
+		"items":       items,
+		"next_cursor": nextCursor,
+	})
+}
+
+type quarantineListCursor struct {
+	TS string `json:"ts"`
+	ID int64  `json:"id"`
+}
+
+func decodeQuarantineListCursor(raw string) (quarantineListCursor, error) {
+	b, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return quarantineListCursor{}, err
+	}
+	var cursor quarantineListCursor
+	if err := json.Unmarshal(b, &cursor); err != nil {
+		return quarantineListCursor{}, err
+	}
+	if cursor.TS == "" || cursor.ID <= 0 {
+		return quarantineListCursor{}, errors.New("invalid cursor")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, cursor.TS); err != nil {
+		return quarantineListCursor{}, err
+	}
+	return cursor, nil
+}
+
+func encodeQuarantineListCursor(cursor quarantineListCursor) string {
+	b, err := json.Marshal(cursor)
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func (h *handler) admin(w http.ResponseWriter, r *http.Request, fn func(http.ResponseWriter, *http.Request)) {

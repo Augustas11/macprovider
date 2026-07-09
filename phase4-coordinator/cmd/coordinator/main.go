@@ -18,14 +18,17 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/audit"
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/explorer"
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/pow"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/rewards"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
 	statshardware "github.com/augstar/macprovider-coordinator/internal/stats/hardware"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
@@ -86,6 +89,8 @@ func main() {
 			os.Exit(runMigrateIndexes(os.Args[2:]))
 		case "backfill-attempt-n":
 			os.Exit(runBackfillAttemptN(os.Args[2:]))
+		case "stats-migrate":
+			os.Exit(runStatsMigrate(os.Args[2:]))
 		}
 		// Round-1 CODE H1 fix: a non-flag first positional that
 		// is NEITHER a known daemon flag NOR a known CLI verb is
@@ -97,17 +102,20 @@ func main() {
 		if !strings.HasPrefix(arg1, "-") {
 			fmt.Fprintf(os.Stderr, "coordinator: unknown subcommand %q\n", arg1)
 			fmt.Fprintln(os.Stderr, "usage:")
-			fmt.Fprintln(os.Stderr, "  coordinator --config <path>     (daemon mode — default)")
+			fmt.Fprintln(os.Stderr, "  coordinator --config <path> [--config-overlay <path>] [--validate-config]")
 			fmt.Fprintln(os.Stderr, "  coordinator --version           (print build version)")
 			fmt.Fprintln(os.Stderr, "  coordinator partner-keys <issue|revoke|list> [flags]")
 			fmt.Fprintln(os.Stderr, "  coordinator visibility revert --id <pid> --reason TEXT")
 			fmt.Fprintln(os.Stderr, "  coordinator migrate-indexes --config <path>  (one-shot operator migration)")
 			fmt.Fprintln(os.Stderr, "  coordinator backfill-attempt-n --config <path>  (one-shot attempt_n backfill)")
+			fmt.Fprintln(os.Stderr, "  coordinator stats-migrate [--admin-dsn DSN] [--check]  (SPEC-017 stats/rewards migrations)")
 			os.Exit(2)
 		}
 	}
 
 	configPath := flag.String("config", "coordinator.yaml", "path to coordinator YAML config")
+	configOverlay := flag.String("config-overlay", "", "optional YAML overlay merged after --config (overlay keys override)")
+	validateConfig := flag.Bool("validate-config", false, "load config (with overlay if set), validate, and exit")
 	showVersion := flag.Bool("version", false, "print build version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -115,15 +123,27 @@ func main() {
 		return
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.LoadWithOverlay(*configPath, *configOverlay)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
+	}
+	if *validateConfig {
+		fmt.Println("config: ok")
+		return
 	}
 	autotuneFeeds, err := buyer.LoadAutotuneFeeds(cfg.AutotuneFeeds)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "autotune feeds: %v\n", err)
 		os.Exit(1)
+	}
+	var autotuneCatalog *autotune.Catalog
+	if len(autotuneFeeds.AutotuneCandidatesJSON) > 0 {
+		autotuneCatalog, err = autotune.ParseCatalog(autotuneFeeds.AutotuneCandidatesJSON)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "autotune candidate catalog: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	providerhttp.Init(cfg.ProviderHTTP.TimeoutS)
 
@@ -188,6 +208,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing force-void flag init: %v\n", err)
 		os.Exit(1)
 	}
+	if err := billingStore.SetForceCreditEnabled(context.Background(), cfg.Billing.QuarantineResolutionForceCreditEnabled, "startup"); err != nil {
+		fmt.Fprintf(os.Stderr, "billing force-credit flag init: %v\n", err)
+		os.Exit(1)
+	}
+	billingStore.SetForceCreditSettlementHoldSeconds(int64(cfg.Billing.ForceCreditSettlementHoldSeconds))
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
@@ -345,6 +370,54 @@ func main() {
 		statsRollup.Start(shutdownCtx)
 		logger.Info().Str("backfill_mode", mode).Int64("partial_history_since_unix", partialUnix).Msg("SPEC-017 stats rollup started (overview/timeseries/leaderboards/rewards_populated/nightly_rebuild)")
 	}
+
+	// SPEC-MALIBU-EMISSION-LEDGER — bootstrap accrual worker (default-off).
+	var rewardsRunner *rewards.Runner
+	var rewardsDB *sql.DB
+	if strings.TrimSpace(cfg.MalibuEmission.WriterDSN) != "" {
+		var err error
+		rewardsDB, err = sql.Open("postgres", cfg.MalibuEmission.WriterDSN)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "malibu_emission: open writer pool: %v\n", err)
+			os.Exit(1)
+		}
+		rewardsDB.SetMaxOpenConns(4)
+		rewardsDB.SetMaxIdleConns(2)
+		rewardsDB.SetConnMaxLifetime(5 * time.Minute)
+		defer rewardsDB.Close()
+	}
+	if cfg.MalibuEmission.Enabled {
+		if rewardsDB == nil {
+			fmt.Fprintf(os.Stderr, "malibu_emission: writer_dsn is required when enabled\n")
+			os.Exit(1)
+		}
+		sqlitePath := strings.TrimSpace(cfg.MalibuEmission.SQLitePayoutDBPath)
+		if sqlitePath == "" {
+			sqlitePath = cfg.Storage.DBPath
+		}
+		rewardsCfg := rewards.Config{
+			Enabled:                true,
+			WriterDSN:              cfg.MalibuEmission.WriterDSN,
+			TickInterval:           time.Duration(cfg.MalibuEmission.TickIntervalSeconds) * time.Second,
+			ProviderDailyCapMALIBU: cfg.MalibuEmission.ProviderDailyCapMALIBU,
+			WalletDailyCapMALIBU:   cfg.MalibuEmission.WalletDailyCapMALIBU,
+			SQLitePayoutDBPath:     sqlitePath,
+			WalletMirrorInterval:   time.Duration(cfg.MalibuEmission.WalletMirrorIntervalSeconds) * time.Second,
+			UnlockEvalInterval:     time.Duration(cfg.MalibuEmission.UnlockEvalIntervalSeconds) * time.Second,
+			MaxSerializableRetries: cfg.MalibuEmission.MaxSerializableRetries,
+			BaseUSDCBalanceRPCURLs: cfg.MalibuEmission.BaseUSDCBalanceRPCURLs,
+		}
+		var err error
+		rewardsRunner, err = rewards.New(rewardsDB, rewardsCfg, logger.With().Str("subsystem", "malibu_emission").Logger(), rewards.RunnerDeps{})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "malibu_emission: %v\n", err)
+			os.Exit(1)
+		}
+		rewardsRunner.Start(shutdownCtx)
+		logger.Info().Msg("SPEC-MALIBU-EMISSION-LEDGER accrual runner started")
+	} else {
+		logger.Info().Msg("malibu_emission DISABLED via config (default)")
+	}
 	// Round-3 ARCH r3 LOW 2 fix: defers run LIFO, so a non-signal
 	// return path would call `Wait()` BEFORE the
 	// `stopBackground()` registered earlier — blocking forever on
@@ -380,6 +453,7 @@ func main() {
 	if statsPools != nil {
 		wsOpts = append(wsOpts, providerws.WithIdlePrewarmRecorder(statsprewarm.NewRecorder(statsPools.Rollup)))
 		wsOpts = append(wsOpts, providerws.WithIdlePrewarmMetrics(metricsHandle))
+		wsOpts = append(wsOpts, providerws.WithModelHashMismatchMetrics(metricsHandle))
 	}
 	var onboardingStore *onboarding.PGStore
 	if cfg.Onboarding.AppTrackRegisterEnabled {
@@ -398,6 +472,49 @@ func main() {
 		}
 		wsOpts = append(wsOpts, providerws.WithIdentitySignatureStore(onboardingStore))
 		wsOpts = append(wsOpts, providerws.WithProviderAuthPolicyAdminStore(onboardingStore))
+	}
+	if cfg.ProofOfWeights.RequireAutotuneHelloGate {
+		if autotuneCatalog == nil {
+			logger.Fatal().Msg("proof_of_weights.require_autotune_hello_gate requires autotune candidate catalog feeds")
+		}
+		if onboardingStore == nil || onboardingStore.DB() == nil {
+			logger.Fatal().Msg("proof_of_weights.require_autotune_hello_gate requires onboarding postgres store")
+		}
+		wsOpts = append(wsOpts, providerws.WithAutotuneHelloGate(autotuneCatalog, autotune.NewPGEvidenceStore(onboardingStore.DB())))
+		logger.Info().
+			Int("autotune_evidence_ttl_days", cfg.ProofOfWeights.AutotuneEvidenceTTLDays).
+			Str("autotune_catalog_version", autotuneCatalog.Version).
+			Msg("proof-of-weights autotune hello gate enabled")
+	}
+	if cfg.ProofOfWeights.TelemetryDrift.Enabled {
+		if autotuneCatalog == nil {
+			logger.Fatal().Msg("proof_of_weights.telemetry_drift.enabled requires autotune candidate catalog feeds")
+		}
+		if onboardingStore == nil || onboardingStore.DB() == nil {
+			logger.Fatal().Msg("proof_of_weights.telemetry_drift.enabled requires onboarding postgres store")
+		}
+		driftCfg, err := pow.TelemetryDriftConfigFrom(
+			true,
+			cfg.ProofOfWeights.TelemetryDrift.TPSRatioThreshold,
+			cfg.ProofOfWeights.TelemetryDrift.TPSMinAbsolute,
+			cfg.ProofOfWeights.TelemetryDrift.TPSMinRequestsWindow,
+			cfg.ProofOfWeights.TelemetryDrift.HashAlertOnStatus,
+			cfg.ProofOfWeights.TelemetryDrift.HashAlertOnArtifactDrift,
+			cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateWindow,
+			cfg.ProofOfWeights.TelemetryDrift.OPoIPassRateThreshold,
+			cfg.ProofOfWeights.TelemetryDrift.AlertCooldownSeconds,
+		)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("proof_of_weights.telemetry_drift config invalid")
+		}
+		evidenceStore := autotune.NewPGEvidenceStore(onboardingStore.DB())
+		ttl := time.Duration(cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
+		wsOpts = append(wsOpts, providerws.WithTelemetryDriftEvaluator(pow.NewEvaluator(driftCfg, autotuneCatalog, evidenceStore, ttl)))
+		logger.Info().
+			Float64("tps_ratio_threshold", driftCfg.TPSRatioThreshold).
+			Int("tps_min_requests_window", driftCfg.TPSMinRequestsWindow).
+			Int("opoi_pass_rate_window", driftCfg.OPoIPassRateWindow).
+			Msg("proof-of-weights telemetry drift alerts enabled")
 	}
 	if cfg.Auth.RequireProviderTokens {
 		logger.Info().
@@ -553,6 +670,9 @@ func main() {
 		pool.WithReceiptRotationEmitter(receiptRotationEmitter),
 	))
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
+	if rewardsRunner != nil {
+		rewardsRunner.SetConnectivity(rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot))
+	}
 	buyerServer := buyer.NewServer(
 		registry,
 		logger,
@@ -599,20 +719,29 @@ func main() {
 	if statsPools != nil {
 		idlePrewarmReader = statsprewarm.NewReader(statsPools.Reader)
 	}
-	billingHandler := billingStore.HandlersWithQuarantineGateAndIdlePrewarm(
+	billingHandler := billingStore.HandlersWithQuarantineGatesAndIdlePrewarm(
 		cfg.Auth.OperatorKey,
 		tokenStore,
 		cfg.Auth.RequireProviderTokens,
 		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
 		cfg.Billing.QuarantineResolutionForceVoidEnabled,
+		cfg.Billing.QuarantineResolutionForceCreditEnabled,
 		idlePrewarmReader,
 	)
 	// §11.5 launch-gate item 10 — operator-visible startup state.
 	logger.Info().
 		Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
+		Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).
+		Int("billing.force_credit_settlement_hold_seconds", cfg.Billing.ForceCreditSettlementHoldSeconds).
 		Str("event", "spec005_v0_4_route_layer_flag_init").
 		Msg("quarantine force-void route-layer flag initialized")
 	providerMux.Handle("/admin/ledger/", billingHandler)
+	if rewardsDB != nil {
+		providerMux.Handle("/admin/trust-promotion/", rewards.TrustPromotionMux(rewards.TrustAdminDeps{
+			DB:           rewardsDB,
+			OperatorKeys: cfg.Auth.OperatorKeys,
+		}))
+	}
 	if cfg.Auth.RequireProviderTokens {
 		providerMux.Handle("/providers/", billingHandler)
 	}
@@ -703,6 +832,7 @@ func main() {
 		cfg.Onboarding.AppTrackRegisterEnabled,
 		register,
 		hardwareEvidence,
+		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
 	)
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
@@ -983,15 +1113,39 @@ func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Ha
 	})
 }
 
-func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence http.HandlerFunc) http.Handler {
+func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence http.HandlerFunc, malibuAccrual http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	if enabled {
 		mux.HandleFunc("/v1/providers/register", register)
 		mux.HandleFunc("/v1/providers/hardware-evidence", hardwareEvidence)
 	}
 	mux.HandleFunc("/v1/provider/wallet", appTrackWalletNotImplementedHandler)
+	if malibuAccrual != nil {
+		mux.Handle("/v1/provider/malibu-accrual", malibuAccrual)
+	}
 	mux.Handle("/", base)
 	return mux
+}
+
+func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB, connectivity rewards.ProviderConnectivity) http.Handler {
+	if rewardsDB == nil {
+		return nil
+	}
+	rewardsCfg := rewards.Config{
+		ProviderDailyCapMALIBU: cfg.MalibuEmission.ProviderDailyCapMALIBU,
+		WalletDailyCapMALIBU:   cfg.MalibuEmission.WalletDailyCapMALIBU,
+		SQLitePayoutDBPath:     cfg.MalibuEmission.SQLitePayoutDBPath,
+	}
+	if rewardsCfg.SQLitePayoutDBPath == "" {
+		rewardsCfg.SQLitePayoutDBPath = cfg.Storage.DBPath
+	}
+	return rewards.NewAccrualHandler(rewards.AccrualHandlerDeps{
+		DB:                    rewardsDB,
+		TokenStore:            tokenStore,
+		RequireProviderTokens: cfg.Auth.RequireProviderTokens,
+		Config:                rewardsCfg,
+		Connectivity:          connectivity,
+	})
 }
 
 func appTrackWalletNotImplementedHandler(w http.ResponseWriter, r *http.Request) {
@@ -1045,7 +1199,15 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 		// written, and the force-void flag stays at its prior value.
 		// Only AFTER COMMIT do we publish the rewards / settlement
 		// in-memory configs that depend on the snapshot id.
-		snapshotID, err := billingStores[0].ReloadBillingConfig(context.Background(), cfg.Rewards, cfg.Billing.QuarantineResolutionForceVoidEnabled, "sighup", time.Now().UTC())
+		snapshotID, err := billingStores[0].ReloadBillingConfigV05(
+			context.Background(),
+			cfg.Rewards,
+			cfg.Billing.QuarantineResolutionForceVoidEnabled,
+			cfg.Billing.QuarantineResolutionForceCreditEnabled,
+			int64(cfg.Billing.ForceCreditSettlementHoldSeconds),
+			"sighup",
+			time.Now().UTC(),
+		)
 		if err != nil {
 			logger.Error().Err(err).Msg("billing config reload rejected (snapshot + flag audit atomic)")
 			return
@@ -1054,6 +1216,8 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
 		logger.Info().
 			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
+			Bool("billing.quarantine_resolution_force_credit_enabled", cfg.Billing.QuarantineResolutionForceCreditEnabled).
+			Int("billing.force_credit_settlement_hold_seconds", cfg.Billing.ForceCreditSettlementHoldSeconds).
 			Str("event", "spec005_v0_4_route_layer_flag_reload").
 			Msg("quarantine force-void route-layer flag reloaded")
 	}

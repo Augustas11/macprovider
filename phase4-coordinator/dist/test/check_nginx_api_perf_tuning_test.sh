@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# check_nginx_api_perf_tuning_test.sh — assert #378 buyer-facing nginx
-# latency/connection tuning stays active in the gateway deploy surface.
+# check_nginx_api_perf_tuning_test.sh — assert #378/#379 buyer-facing nginx
+# latency/connection tuning and HTTP/2 stay active in the gateway deploy surface.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -29,10 +29,41 @@ require_conf_directive() {
   fi
 }
 
+API_TLS_BLOCK="$(awk '
+  /^[[:space:]]*server[[:space:]]*\{/ {
+    in_server = 1
+    depth = 1
+    block = $0 ORS
+    next
+  }
+  in_server {
+    block = block $0 ORS
+    opens = gsub(/\{/, "{")
+    closes = gsub(/\}/, "}")
+    depth += opens - closes
+    if (depth == 0) {
+      if (block ~ /server_name[[:space:]]+api\.streamvc\.live;/ &&
+          block ~ /listen[[:space:]]+443[[:space:]]+ssl/) {
+        printf "%s", block
+      }
+      in_server = 0
+      block = ""
+    }
+  }
+' <<<"$ACTIVE_CONF")"
+require_api_tls_directive() {
+  local directive="$1"
+  if ! grep -qF "$directive" <<<"$API_TLS_BLOCK"; then
+    fail "$NGINX_CONF api.streamvc.live TLS server missing active directive: $directive"
+  fi
+}
+
 require_conf_directive "keepalive_timeout 300s;"
 require_conf_directive "keepalive_requests 1000;"
 require_conf_directive "client_body_timeout 300s;"
 require_conf_directive "send_timeout 300s;"
+require_api_tls_directive "listen 443 ssl http2;"
+require_api_tls_directive "listen [::]:443 ssl http2;"
 
 # `worker_connections` is an nginx events-context directive, so the gateway
 # deploy script owns the idempotent global nginx.conf tuning before `nginx -t`.
@@ -59,6 +90,6 @@ if ! grep -qF "nginx worker tuning rollback" "$GATEWAY_DEPLOY"; then
 fi
 
 if [ "$FAIL" -eq 0 ]; then
-  echo "ok: nginx API buyer-path performance tuning configured"
+  echo "ok: nginx API buyer-path performance tuning and HTTP/2 configured"
 fi
 exit "$FAIL"

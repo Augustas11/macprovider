@@ -32,6 +32,9 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{9, "provider_auth_policy_approve_fix"},
 		{10, "partner_keys_provider_id"},
 		{11, "idle_prewarm_events"},
+		{12, "malibu_emission_ledger"},
+		{13, "pow_w2_hello_gate_grants"},
+		{14, "malibu_trust_unlock"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -68,7 +71,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm string
+	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm, powW2HelloGateGrants string
 	for _, m := range all {
 		switch m.Name {
 		case "stats_tables":
@@ -85,6 +88,8 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 			authPolicyApproveFix = m.SQL
 		case "idle_prewarm_events":
 			idlePrewarm = m.SQL
+		case "pow_w2_hello_gate_grants":
+			powW2HelloGateGrants = m.SQL
 		}
 	}
 	if schema == "" {
@@ -420,6 +425,12 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	} {
 		mustContain(t, hardwareJobsDownSQL, needle, "hardware verification rollback artifact")
 	}
+	if powW2HelloGateGrants == "" {
+		t.Fatal("pow_w2_hello_gate_grants migration body is empty")
+	}
+	mustContain(t, powW2HelloGateGrants,
+		"GRANT SELECT (\n    generated_at,\n    evidence\n) ON hardware_verification_jobs TO provider_onboarding",
+		"provider_onboarding hello gate read grants")
 }
 
 func mustContain(t *testing.T, body, needle, why string) {

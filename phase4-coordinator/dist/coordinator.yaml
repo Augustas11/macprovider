@@ -30,6 +30,8 @@ pool:
   warmup_gate_max_tokens: 2
   breaker_failure_threshold: 2
   breaker_window_s: 120
+  # OPoI v0 canaries: NOT enabled on Pearl yet. Validate on staging first.
+  # Use coordinator.opoi-v0-staging.yaml overlay; see ops/runbooks/opoi-challenge-implementation.md §2.4.
 
 routing:
   preflight_threshold_tokens: 4096

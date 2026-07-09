@@ -855,7 +855,7 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
 }
 
 private func testTier2Session() throws -> Tier2ProviderSession {
-    try Tier2ProviderSession(
+    let session = try Tier2ProviderSession(
         providerID: "provider-test",
         assignedID: "assigned-test",
         selectedAEAD: Tier2ProviderSession.aeadSuite,
@@ -865,6 +865,8 @@ private func testTier2Session() throws -> Tier2ProviderSession {
         c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
         p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
     )
+    session.enableResponseChunkPlaintextEnvelope()
+    return session
 }
 
 private func waitUntil(

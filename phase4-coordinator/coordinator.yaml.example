@@ -39,15 +39,29 @@ pool:
   degraded_probe_after_502: true
   breaker_failure_threshold: 2
   breaker_window_s: 120
-  canary_enabled: false
-  canary_interval_s: 300
-  canary_timeout_s: 30
-  canary_max_tokens: 8
-  canary_failure_threshold: 3
-  # Required when canary_enabled is true. Keep deployment-specific and rotate periodically.
-  # canary_challenges:
-  #   - prompt: "<private operator challenge prompt containing {nonce}>"
-  #     expected: "<private expected answer containing {nonce}>"
+  # OPoI v0 canary liveness — see ops/runbooks/opoi-challenge-implementation.md §2.
+  # Production deploy uses coordinator.opoi-v0-staging.yaml overlay for lab validation
+  # before enabling on Pearl. Keep canary_enabled: true in dev/staging; false in dist/coordinator.yaml.
+  canary_enabled: true
+  canary_interval_s: 300        # 5 min; use 600 on production initially
+  canary_timeout_s: 120
+  canary_max_tokens: 16
+  canary_failure_threshold: 3   # provisional ban; pinned → degrade at 2
+  # OPoI v0 challenge bank — every entry must contain {nonce} in both prompt and expected.
+  # Rotate or extend periodically; keep deployment-specific for model security.
+  canary_challenges:
+    - prompt: "Reply with exactly: CANARY-{nonce}"
+      expected: "CANARY-{nonce}"
+    - prompt: "What is the code {nonce}? Reply with only the code."
+      expected: "{nonce}"
+  # W3 optional — per-model challenge banks with latency gates. When a provider's
+  # active model_id matches a key, canaries use that bank instead of canary_challenges.
+  # model_class_challenges:
+  #   qwen3-coder-30b-a3b-instruct:
+  #     - prompt: "Reply with exactly: CANARY-{nonce}"
+  #       expected: "CANARY-{nonce}"
+  #       max_ttft_ms: 3500
+  #       min_sustained_tps: 20
 
 routing:
   preflight_threshold_tokens: 4096

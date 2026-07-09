@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -27,6 +26,8 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
+	"github.com/augstar/macprovider-coordinator/internal/pow"
 )
 
 const (
@@ -85,13 +86,17 @@ type Server struct {
 	// catalog holds an explicitly-injected tier2.Catalog for tests that
 	// want isolation from the package-singleton; nil means "use
 	// tier2.Default()". M3-8d (audit TEST-4). See s.catalogRef().
-	catalog            *tier2.Catalog
-	identitySignatures IdentitySignatureStore
-	authPolicyAdmin    ProviderAuthPolicyAdminStore
-	idlePrewarm        IdlePrewarmRecorder
-	idlePrewarmMetrics IdlePrewarmMetrics
-	idlePrewarmLimits  sync.Map
-	idlePrewarmQueue   chan idlePrewarmRecord
+	catalog                  *tier2.Catalog
+	autotuneCatalog          *autotune.Catalog
+	autotuneEvidence         autotune.EvidenceStore
+	telemetryDrift           *pow.Evaluator
+	identitySignatures       IdentitySignatureStore
+	authPolicyAdmin          ProviderAuthPolicyAdminStore
+	idlePrewarm              IdlePrewarmRecorder
+	idlePrewarmMetrics       IdlePrewarmMetrics
+	modelHashMismatchMetrics ModelHashMismatchMetrics
+	idlePrewarmLimits        sync.Map
+	idlePrewarmQueue         chan idlePrewarmRecord
 
 	// SE liveness (Phase 1, Track P1-C).
 	// seLivenessChans maps sessionKey → chan SELivenessResponse for in-flight probes.
@@ -167,6 +172,10 @@ type IdlePrewarmMetrics interface {
 	IncIdlePrewarmEvent(event, reason string)
 }
 
+type ModelHashMismatchMetrics interface {
+	IncModelHashMismatch()
+}
+
 const (
 	idlePrewarmEventBurst           = 10
 	idlePrewarmEventRefillPerSecond = 1
@@ -195,6 +204,23 @@ type Option func(*Server)
 func WithCatalog(c *tier2.Catalog) Option {
 	return func(s *Server) {
 		s.catalog = c
+	}
+}
+
+// WithAutotuneHelloGate wires Session B proof-of-weights capacity ceiling
+// inputs. When cfg.ProofOfWeights.RequireAutotuneHelloGate is true, hello
+// admission consults catalog + verified hardware-evidence before registering
+// the provider.
+func WithAutotuneHelloGate(catalog *autotune.Catalog, store autotune.EvidenceStore) Option {
+	return func(s *Server) {
+		s.autotuneCatalog = catalog
+		s.autotuneEvidence = store
+	}
+}
+
+func WithTelemetryDriftEvaluator(evaluator *pow.Evaluator) Option {
+	return func(s *Server) {
+		s.telemetryDrift = evaluator
 	}
 }
 
@@ -242,6 +268,12 @@ func WithIdlePrewarmRecorder(recorder IdlePrewarmRecorder) Option {
 func WithIdlePrewarmMetrics(metrics IdlePrewarmMetrics) Option {
 	return func(s *Server) {
 		s.idlePrewarmMetrics = metrics
+	}
+}
+
+func WithModelHashMismatchMetrics(metrics ModelHashMismatchMetrics) Option {
+	return func(s *Server) {
+		s.modelHashMismatchMetrics = metrics
 	}
 }
 
@@ -398,6 +430,14 @@ func (s *Server) Admission() *AdmissionManager {
 	return s.admission
 }
 
+// PoolSnapshot returns connected providers for uptime/trust evaluation hooks.
+func (s *Server) PoolSnapshot() []pool.Provider {
+	if s == nil || s.pool == nil {
+		return nil
+	}
+	return s.pool.Snapshot()
+}
+
 func (s *Server) SetTier2Config(cfg config.Tier2Config) {
 	s.tier2Mu.Lock()
 	defer s.tier2Mu.Unlock()
@@ -413,14 +453,22 @@ func (s *Server) RefreshTier2HashStatuses() int {
 	}
 	return s.pool.UpdateHashStatuses(func(provider pool.Provider) pool.HashStatus {
 		next := s.catalogRef().VerifyProviderHash(provider.ModelID, provider.ModelHash)
-		if next != provider.HashStatus {
-			tier2.LogProviderHashStatus(s.log, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash, next)
-		}
+		s.observeHashStatusTransition(provider.HashStatus, next, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash)
 		if cfg.RequireHashVerified && (next == pool.HashStatusUncatalogued || next == pool.HashStatusCatalogUnavailable) {
 			tier2.LogHashRequiredProviderExcluded(s.log, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash, next)
 		}
 		return next
 	})
+}
+
+func (s *Server) observeHashStatusTransition(prev, next pool.HashStatus, providerID, assignedID, modelID, reportedHash string) {
+	if next == prev {
+		return
+	}
+	tier2.LogProviderHashStatus(s.log, providerID, assignedID, modelID, reportedHash, next)
+	if next == pool.HashStatusMismatch && s.modelHashMismatchMetrics != nil {
+		s.modelHashMismatchMetrics.IncModelHashMismatch()
+	}
 }
 
 func (s *Server) tier2Config() config.Tier2Config {
@@ -573,12 +621,20 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 		return
 	}
 	if op != gobwas.OpText {
+		s.log.Warn().Str("bad_field", "opcode").Msg("provider first auth message rejected")
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return
 	}
 
-	typ, version, err := ParseFirstAuthMessage(payload)
+	typ, version, badField, err := parseFirstAuthMessageWithField(payload)
 	if err != nil {
+		if badField == "" {
+			badField = "unknown"
+		}
+		s.log.Warn().
+			Str("bad_field", badField).
+			Str("message_type", firstAuthMessageTypeForLog(typ)).
+			Msg("provider first auth message rejected")
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return
 	}
@@ -588,7 +644,29 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 	case typ == "auth_request" && version == 2:
 		providerID, assignedID = s.handleV2Conn(conn, auth, payload, releaseUnauth)
 	default:
+		badField := "dispatch"
+		switch typ {
+		case "hello", "auth_request":
+			badField = "version"
+		default:
+			badField = "type"
+		}
+		s.log.Warn().
+			Str("bad_field", badField).
+			Str("message_type", firstAuthMessageTypeForLog(typ)).
+			Msg("provider first auth message rejected")
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
+	}
+}
+
+func firstAuthMessageTypeForLog(typ string) string {
+	switch typ {
+	case "hello", "auth_request":
+		return typ
+	case "":
+		return "missing"
+	default:
+		return "other"
 	}
 }
 
@@ -821,6 +899,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		if badField == "" {
 			badField = "stage"
 		}
+		s.log.Warn().Str("bad_field", badField).Msg("provider auth_request initial rejected")
 		// SPEC-002 v1.3.5 §11 AC-K.15 / SPEC-010 v1.5 R-3.1.9 — when
 		// initial-stage parse fails on a SPEC-010 catalog validation
 		// rule, surface the LOCKED reason substring on the wire so
@@ -948,6 +1027,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		if badField == "" {
 			badField = "stage"
 		}
+		s.log.Warn().Str("bad_field", badField).Msg("provider auth_request proof rejected")
 		s.sendAuthRejection(conn, "invalid_auth_request", "invalid auth_request")
 		s.close(conn, CloseInvalidHello, "invalid_auth_request: "+badField)
 		return "", ""
@@ -1039,13 +1119,14 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	}
 	entry.PublishesSupportedModels = initial.PublishesSupportedModels
 	entry.Tier2Session = &pool.Tier2Session{
-		AEADSuite:    selectedAEAD,
-		C2PKey:       keys.C2PKey,
-		P2CKey:       keys.P2CKey,
-		C2PNonceBase: keys.C2PNonceBase,
-		P2CNonceBase: keys.P2CNonceBase,
-		KeyID:        keys.KeyID,
-		StartedAt:    s.now(),
+		AEADSuite:                      selectedAEAD,
+		ResponseChunkPlaintextEnvelope: initial.Tier2Capabilities.ResponseChunkPlaintextEnvelope,
+		C2PKey:                         keys.C2PKey,
+		P2CKey:                         keys.P2CKey,
+		C2PNonceBase:                   keys.C2PNonceBase,
+		P2CNonceBase:                   keys.P2CNonceBase,
+		KeyID:                          keys.KeyID,
+		StartedAt:                      s.now(),
 	}
 	if retainAuthAttempt {
 		// SPEC-002 v1.3.5 §7.9 — explicit early release so the
@@ -1096,11 +1177,12 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		ClaimURL:                  claimURL,
 		Tier2Session: &AuthTier2Session{
 			EncryptedLeg: AuthEncryptedLegSession{
-				Enabled:            true,
-				Alg:                selectedAEAD,
-				KID:                keys.KeyID,
-				RekeyAfterRequests: tier2Cfg.EncryptedLegRekeyAfterRequests,
-				RekeyAfterSeconds:  tier2Cfg.EncryptedLegRekeyAfterSeconds,
+				Enabled:                        true,
+				Alg:                            selectedAEAD,
+				KID:                            keys.KeyID,
+				RekeyAfterRequests:             tier2Cfg.EncryptedLegRekeyAfterRequests,
+				RekeyAfterSeconds:              tier2Cfg.EncryptedLegRekeyAfterSeconds,
+				ResponseChunkPlaintextEnvelope: initial.Tier2Capabilities.ResponseChunkPlaintextEnvelope,
 			},
 			Attestation: AuthAttestationSession{
 				Status:          string(attestationStatus),
@@ -1187,10 +1269,52 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 	tier2Cfg := s.tier2Config()
 	if tier2.ModelHashActive(tier2Cfg) {
 		hashStatus = s.catalogRef().VerifyProviderHash(hello.ModelID, hello.ModelHash)
-		tier2.LogProviderHashStatus(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
+		s.observeHashStatusTransition("", hashStatus, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash)
 		if tier2Cfg.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
 			tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
 		}
+	}
+	maxAdmittedModelKey := ""
+	maxAdmittedModelID := ""
+	if s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
+		if s.autotuneCatalog == nil || s.autotuneEvidence == nil {
+			s.log.Error().Str("provider_id", hello.ProviderID).Msg("autotune hello gate enabled but dependencies are not wired")
+			s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
+			return nil, false
+		}
+		ttl := time.Duration(s.cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
+		evidence, ok, err := s.autotuneEvidence.LatestVerified(context.Background(), hello.ProviderID, ttl)
+		if err != nil {
+			s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("autotune hello gate evidence lookup failed")
+			s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
+			return nil, false
+		}
+		if !ok {
+			s.log.Info().
+				Str("provider_id", hello.ProviderID).
+				Str("event", "autotune_evidence_required").
+				Str("model_id", hello.ModelID).
+				Msg("autotune hello gate rejected connect without verified hardware evidence")
+			s.close(conn, CloseInvalidHello, "autotune_evidence_required")
+			return nil, false
+		}
+		decision := autotune.EvaluateHelloGate(s.autotuneCatalog, evidence, hello.ModelID)
+		if !decision.Allowed {
+			s.log.Info().
+				Str("provider_id", hello.ProviderID).
+				Str("event", decision.Reason).
+				Str("model_id", hello.ModelID).
+				Str("claimed_model_key", decision.ClaimedModelKey).
+				Str("max_admitted_model_class", decision.MaxAdmittedModelKey).
+				Str("max_admitted_model_id", decision.MaxAdmittedModelID).
+				Int("claimed_min_ram_gb", decision.ClaimedMinRAMGB).
+				Int("max_admitted_min_ram_gb", decision.MaxAdmittedMinRAMGB).
+				Msg("autotune hello gate rejected provider model claim")
+			s.close(conn, CloseInvalidHello, decision.Reason)
+			return nil, false
+		}
+		maxAdmittedModelKey = decision.MaxAdmittedModelKey
+		maxAdmittedModelID = decision.MaxAdmittedModelID
 	}
 	initialState := pool.StateReady
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -1220,6 +1344,8 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		BinaryVersion:         hello.BinaryVersion,
 		ModelHash:             hello.ModelHash,
 		HashStatus:            hashStatus,
+		MaxAdmittedModelKey:   maxAdmittedModelKey,
+		MaxAdmittedModelID:    maxAdmittedModelID,
 	}, true
 }
 
@@ -1888,7 +2014,7 @@ func (s *Server) runWarmupGate(provider pool.Provider) {
 
 func (s *Server) runWarmupGateAttempt(provider pool.Provider, attempt int) bool {
 	body, err := json.Marshal(map[string]any{
-		"model": provider.ModelID,
+		"model": providerProbeModelID(provider),
 		"messages": []map[string]string{{
 			"role":    "user",
 			"content": "Reply with ok.",
@@ -1905,6 +2031,13 @@ func (s *Server) runWarmupGateAttempt(provider pool.Provider, attempt int) bool 
 		return s.runHTTPWarmupGateAttempt(ctx, provider, body)
 	}
 	return s.runWSWarmupGateAttempt(ctx, provider, attempt, body)
+}
+
+func providerProbeModelID(provider pool.Provider) string {
+	if modelKey := strings.TrimSpace(provider.MaxAdmittedModelKey); modelKey != "" {
+		return modelKey
+	}
+	return provider.ModelID
 }
 
 func (s *Server) runWSWarmupGateAttempt(ctx context.Context, provider pool.Provider, attempt int, body []byte) bool {
@@ -2067,7 +2200,15 @@ const (
 )
 
 func (s *Server) runCanaryProbe(provider pool.Provider) bool {
-	outcome := s.runCanaryProbeAttempt(provider)
+	attempt := s.runCanaryProbeAttempt(provider)
+	outcome := attempt.outcome
+	if attempt.modelClassBank {
+		pass := outcome == canaryProbePass
+		s.pool.SetModelClassOPoIPass(provider.ProviderID, provider.AssignedID, &pass)
+		if s.telemetryDrift != nil {
+			s.logTelemetryDriftAlerts(s.telemetryDrift.RecordModelClassCanary(provider, pass))
+		}
+	}
 	if outcome == canaryProbeSkip {
 		s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary skipped")
 		return false
@@ -2093,6 +2234,11 @@ func (s *Server) runCanaryProbe(provider pool.Provider) bool {
 		Int("canary_failure_threshold", result.Threshold)
 	if result.Tripped != pool.CanaryTripNone {
 		event = event.Str("canary_trip", string(result.Tripped))
+	}
+	if attempt.modelClassBank && attempt.metrics.LatencyGated {
+		event = event.
+			Int("canary_ttft_ms", attempt.metrics.TTFTMS).
+			Float64("canary_sustained_tps", attempt.metrics.SustainedTPS)
 	}
 	event.Msg("provider canary failed")
 	switch result.Tripped {
@@ -2137,30 +2283,47 @@ func (s *Server) deleteCanarySanction(providerID string) {
 	}
 }
 
-func (s *Server) runCanaryProbeAttempt(provider pool.Provider) canaryProbeOutcome {
-	body, expected, err := s.buildCanaryBody(provider.ModelID, s.canaryMaxTokens())
+func (s *Server) runCanaryProbeAttempt(provider pool.Provider) canaryAttemptResult {
+	probeModelID := providerProbeModelID(provider)
+	challenges, modelClassBank := s.cfg.Pool.CanaryChallengesForModel(probeModelID)
+	probe, err := buildCanaryProbe(probeModelID, s.canaryMaxTokens(), challenges, modelClassBank)
 	if err != nil {
-		return canaryProbeSkip
+		return canaryAttemptResult{outcome: canaryProbeSkip}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.canaryTimeout())
 	defer cancel()
+	var outcome canaryProbeOutcome
+	var metrics canaryProbeMetrics
 	if !provider.IsWSTunneled() {
-		return s.runHTTPCanaryProbeAttempt(ctx, provider, body, expected)
+		outcome, metrics = s.runHTTPCanaryProbeAttempt(ctx, provider, probe)
+	} else {
+		outcome, metrics = s.runWSCanaryProbeAttempt(ctx, provider, probe)
 	}
-	return s.runWSCanaryProbeAttempt(ctx, provider, body, expected)
+	if challengeHasLatencyGates(probe.Challenge) {
+		metrics.LatencyGated = true
+	}
+	return canaryAttemptResult{
+		outcome:        outcome,
+		metrics:        metrics,
+		modelClassBank: probe.ModelClassBank,
+		challenge:      probe.Challenge,
+	}
 }
 
-func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Provider, body []byte, expected string) canaryProbeOutcome {
+func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Provider, probe canaryBuiltProbe) (canaryProbeOutcome, canaryProbeMetrics) {
 	if s.tier2WarmupExcluded(provider) {
-		return canaryProbeSkip
+		return canaryProbeSkip, canaryProbeMetrics{}
 	}
 	requestID := s.newUUID()
-	relay, err := s.DispatchInference(ctx, provider, requestID, body, false)
+	start := time.Now()
+	relay, err := s.DispatchInference(ctx, provider, requestID, probe.Body, false)
 	if err != nil {
-		return canaryProbeSkip
+		return canaryProbeSkip, canaryProbeMetrics{}
 	}
 	chunks := relay.Chunks
 	var output strings.Builder
+	var firstTokenAt time.Time
+	var rawResponse strings.Builder
 	for {
 		select {
 		case chunk, ok := <-chunks:
@@ -2168,95 +2331,89 @@ func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Prov
 				chunks = nil
 				continue
 			}
+			if firstTokenAt.IsZero() {
+				firstTokenAt = time.Now()
+			}
+			rawResponse.WriteString(chunk.Data)
 			output.WriteString(canaryChunkContent(chunk.Data))
 		case end := <-relay.Done:
+			completedAt := time.Now()
+			metrics := canaryProbeMetrics{}
+			if challengeHasLatencyGates(probe.Challenge) {
+				tokens := canaryCompletionTokens([]byte(rawResponse.String()))
+				if tokens == 0 {
+					tokens = len(strings.Fields(output.String()))
+					if tokens == 0 {
+						tokens = 1
+					}
+				}
+				metrics = canaryMetricsFromTiming(start, firstTokenAt, completedAt, tokens)
+			}
 			if end.Status != "complete" {
-				return canaryProbeFail
+				return canaryProbeFail, metrics
 			}
-			if canaryAnswerMatches(output.String(), expected) {
-				return canaryProbePass
-			}
-			return canaryProbeFail
+			return evaluateCanaryProbe(probe.Challenge, output.String(), probe.Expected, metrics), metrics
 		case <-relay.Errors:
-			return canaryProbeFail
+			return canaryProbeFail, canaryProbeMetrics{}
 		case <-ctx.Done():
-			return canaryProbeFail
+			return canaryProbeFail, canaryProbeMetrics{}
 		}
 	}
 }
 
-func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Provider, body []byte, expected string) canaryProbeOutcome {
+func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Provider, probe canaryBuiltProbe) (canaryProbeOutcome, canaryProbeMetrics) {
 	endpoint := strings.TrimRight(strings.TrimSpace(provider.EndpointURL), "/")
 	if endpoint == "" {
-		return canaryProbeSkip
+		return canaryProbeSkip, canaryProbeMetrics{}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/v1/chat/completions", bytes.NewReader(body))
+	start := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/v1/chat/completions", bytes.NewReader(probe.Body))
 	if err != nil {
-		return canaryProbeSkip
+		return canaryProbeSkip, canaryProbeMetrics{}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := providerhttp.Client.Do(req)
 	if err != nil {
-		return canaryProbeFail
+		return canaryProbeFail, canaryProbeMetrics{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return canaryProbeFail
+		return canaryProbeFail, canaryProbeMetrics{}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return canaryProbeFail
+		return canaryProbeFail, canaryProbeMetrics{}
 	}
-	if canaryAnswerMatches(strings.Join(canaryPayloadContents(raw), ""), expected) {
-		return canaryProbePass
+	completedAt := time.Now()
+	output := strings.Join(canaryPayloadContents(raw), "")
+	metrics := canaryProbeMetrics{}
+	if challengeHasLatencyGates(probe.Challenge) {
+		tokens := canaryCompletionTokens(raw)
+		if tokens == 0 {
+			tokens = len(strings.Fields(output))
+			if tokens == 0 {
+				tokens = 1
+			}
+		}
+		metrics = canaryMetricsFromTiming(start, time.Time{}, completedAt, tokens)
 	}
-	return canaryProbeFail
+	return evaluateCanaryProbe(probe.Challenge, output, probe.Expected, metrics), metrics
 }
 
 func (s *Server) buildCanaryBody(modelID string, maxTokens int) ([]byte, string, error) {
-	return buildCanaryBody(modelID, maxTokens, s.cfg.Pool.CanaryChallenges)
+	challenges, _ := s.cfg.Pool.CanaryChallengesForModel(modelID)
+	body, expected, _, err := buildCanaryBodyFromBank(modelID, maxTokens, challenges)
+	return body, expected, err
 }
 
 func buildCanaryBody(modelID string, maxTokens int, challenges []config.CanaryChallengeConfig) ([]byte, string, error) {
-	random, err := randomBytes(5)
-	if err != nil {
-		return nil, "", err
-	}
-	return buildCanaryBodyFromRandom(modelID, maxTokens, challenges, random)
+	body, expected, _, err := buildCanaryBodyFromBank(modelID, maxTokens, challenges)
+	return body, expected, err
 }
 
 func buildCanaryBodyFromRandom(modelID string, maxTokens int, challenges []config.CanaryChallengeConfig, random []byte) ([]byte, string, error) {
-	if len(challenges) == 0 {
-		return nil, "", errors.New("canary challenge bank is empty")
-	}
-	if len(random) < 5 {
-		return nil, "", errors.New("canary random seed too short")
-	}
-	challenge := challenges[int(random[4])%len(challenges)]
-	promptTemplate := strings.TrimSpace(challenge.Prompt)
-	expectedTemplate := strings.TrimSpace(challenge.Expected)
-	if promptTemplate == "" || expectedTemplate == "" {
-		return nil, "", errors.New("canary challenge prompt and expected must not be empty")
-	}
-	if !strings.Contains(promptTemplate, "{nonce}") || !strings.Contains(expectedTemplate, "{nonce}") {
-		return nil, "", errors.New("canary challenge prompt and expected must contain {nonce}")
-	}
-	nonce := strings.ToUpper(hex.EncodeToString(random[:4]))
-	content := strings.ReplaceAll(promptTemplate, "{nonce}", nonce)
-	expected := strings.ReplaceAll(expectedTemplate, "{nonce}", nonce)
-	body, err := json.Marshal(map[string]any{
-		"model": modelID,
-		"messages": []map[string]string{{
-			"role":    "user",
-			"content": content,
-		}},
-		"max_tokens": maxTokens,
-		"stream":     false,
-	})
-	if err != nil {
-		return nil, "", err
-	}
-	return body, expected, nil
+	body, expected, _, err := buildCanaryBodyFromRandomWithChallenge(modelID, maxTokens, challenges, random)
+	return body, expected, err
 }
 
 func canaryAnswerMatches(output, expected string) bool {
@@ -2561,22 +2718,24 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		state = pool.StateDegraded
 	}
 	entry, gap, ok := s.pool.ApplyHeartbeat(providerID, assignedID, pool.HeartbeatUpdate{
-		Status:                state,
-		ModelID:               hb.ModelID,
-		ModelParamsB:          hb.ModelParamsB,
-		RAMGB:                 hb.RAMGB,
-		MaxContextTokens:      hb.MaxContextTokens,
-		MaxConcurrency:        hb.MaxConcurrency,
-		SlotsFree:             hb.SlotsFree,
-		SlotsTotal:            hb.SlotsTotal,
-		ThroughputTPSEstimate: hb.ThroughputTPSEstimate,
-		ModelHash:             hb.ModelHash,
-		ModelHashPresent:      presence.ModelHash,
-		Loading:               hb.Loading,
-		LoadingPresent:        presence.Loading,
-		LastAutoupdateEvent:   hb.LastAutoupdateEvent,
-		HardwareCapacity:      poolHardwareCapacity(hb.HardwareSummary),
-		At:                    s.now(),
+		Status:                  state,
+		ModelID:                 hb.ModelID,
+		ModelParamsB:            hb.ModelParamsB,
+		RAMGB:                   hb.RAMGB,
+		MaxContextTokens:        hb.MaxContextTokens,
+		MaxConcurrency:          hb.MaxConcurrency,
+		SlotsFree:               hb.SlotsFree,
+		SlotsTotal:              hb.SlotsTotal,
+		ThroughputTPSEstimate:   hb.ThroughputTPSEstimate,
+		RequestsServedSinceLast: hb.RequestsServedSinceLast,
+		ThroughputTPSSinceLast:  hb.ThroughputTPSSinceLast,
+		ModelHash:               hb.ModelHash,
+		ModelHashPresent:        presence.ModelHash,
+		Loading:                 hb.Loading,
+		LoadingPresent:          presence.Loading,
+		LastAutoupdateEvent:     hb.LastAutoupdateEvent,
+		HardwareCapacity:        poolHardwareCapacity(hb.HardwareSummary),
+		At:                      s.now(),
 	})
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat for unknown provider")
@@ -2604,6 +2763,53 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 			Int("slots_total", entry.SlotsTotal).
 			Msg("provider heartbeat")
 	}
+	if s.telemetryDrift != nil {
+		s.logTelemetryDriftAlerts(s.telemetryDrift.EvaluateHeartbeat(context.Background(), *entry))
+	}
+}
+
+func (s *Server) logTelemetryDriftAlerts(alerts []pow.Alert) {
+	for _, alert := range alerts {
+		event := s.log.Warn().
+			Str("event", pow.EventTelemetryDriftDetected).
+			Str("signal", alert.Signal).
+			Str("provider_id", alert.ProviderID).
+			Str("assigned_id", alert.AssignedID).
+			Str("model_id", alert.ModelID)
+		if alert.LiveTPS > 0 || alert.BaselineTPS > 0 {
+			event = event.
+				Float64("live_tps", alert.LiveTPS).
+				Float64("baseline_tps", alert.BaselineTPS).
+				Float64("tps_threshold", alert.TPSThreshold)
+		}
+		if alert.HashStatus != "" {
+			event = event.Str("hash_status", string(alert.HashStatus))
+		}
+		if alert.LiveModelHash != "" {
+			event = event.Str("live_model_hash_prefix", prefixHex(alert.LiveModelHash, 8))
+		}
+		if alert.ExpectedArtifactHash != "" {
+			event = event.Str("expected_artifact_hash_prefix", prefixHex(alert.ExpectedArtifactHash, 8))
+		}
+		if alert.OPoIPassRateWindow > 0 {
+			event = event.
+				Float64("opoi_pass_rate", alert.OPoIPassRate).
+				Int("opoi_pass_rate_window", alert.OPoIPassRateWindow).
+				Int("opoi_pass_count", alert.OPoIPassCount)
+		}
+		if alert.SwapDetected {
+			event = event.Bool("swap_detected", true)
+		}
+		event.Msg("proof-of-weights telemetry drift detected")
+	}
+}
+
+func prefixHex(value string, n int) string {
+	value = strings.TrimSpace(value)
+	if n <= 0 || len(value) <= n {
+		return value
+	}
+	return value[:n]
 }
 
 func poolHardwareCapacity(summary *HardwareSummary) *pool.ProviderHardwareCapacity {

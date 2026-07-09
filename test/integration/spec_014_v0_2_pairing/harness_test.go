@@ -461,7 +461,10 @@ func postBind(t *testing.T, c *http.Client, baseURL, body string) (int, []byte) 
 
 func waitForHTTP(t *testing.T, rawURL string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	// 30s: the cross-service integration job runs this package in parallel
+	// with the root harness (each builds coordinator binaries). Under CI
+	// load 10s was too tight for /healthz to come up reliably.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(rawURL)
 		if err == nil {

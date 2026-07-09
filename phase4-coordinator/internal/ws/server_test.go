@@ -283,6 +283,9 @@ func TestProviderAuthV2RegistersEncryptedSession(t *testing.T) {
 	if response.Tier2Session == nil || !response.Tier2Session.EncryptedLeg.Enabled || response.Tier2Session.EncryptedLeg.KID != challenge.KeyID || response.Tier2Session.Attestation.Status != string(pool.AttestationStatusUnsupported) {
 		t.Fatalf("tier2 auth_response session = %+v", response.Tier2Session)
 	}
+	if !response.Tier2Session.EncryptedLeg.ResponseChunkPlaintextEnvelope {
+		t.Fatal("auth_response did not select response_chunk_plaintext_envelope")
+	}
 	eventually(t, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
 		return ok &&
@@ -290,6 +293,7 @@ func TestProviderAuthV2RegistersEncryptedSession(t *testing.T) {
 			provider.AttestationStatus == pool.AttestationStatusUnsupported &&
 			provider.ModelLoadTimeMs == 1234 &&
 			provider.Tier2Session != nil &&
+			provider.Tier2Session.ResponseChunkPlaintextEnvelope &&
 			provider.Tier2Session.KeyID == challenge.KeyID &&
 			len(provider.Tier2Session.C2PKey) == 32 &&
 			provider.InferencePath == pool.InferencePathWSTunneled
@@ -771,6 +775,31 @@ func TestProviderAuthV2InitialEmptyCatalogRejectedOnTheWire(t *testing.T) {
 	initial["supported_models"] = []string{}
 
 	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "supported_models cannot be empty")
+}
+
+func TestProviderFirstAuthMissingVersionLogsBoundedMessageType(t *testing.T) {
+	var logBuffer lockedBuffer
+	h := newProviderHarnessWithServerOptionsAndLogger(t, nil, nil, zerolog.New(&logBuffer), func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	delete(initial, "version")
+
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, initial)
+	if code != providerws.CloseUnrecognizedAuthMessage {
+		t.Fatalf("close code = %d, want %d", code, providerws.CloseUnrecognizedAuthMessage)
+	}
+	if reason != "unrecognized auth message" {
+		t.Fatalf("close reason = %q, want %q", reason, "unrecognized auth message")
+	}
+
+	logText := logBuffer.String()
+	if !strings.Contains(logText, `"bad_field":"missing version"`) ||
+		!strings.Contains(logText, `"message_type":"auth_request"`) {
+		t.Fatalf("missing bounded first-auth rejection log fields: %s", logText)
+	}
 }
 
 // TestProviderAuthV2ProofStageFirstWithMalformedCatalogTakesEnvelopePath
@@ -3606,9 +3635,10 @@ func validAuthInitial(providerID, providerPublic string) map[string]any {
 	delete(h, "attestation")
 	h["provider_ecdh_public_key"] = providerPublic
 	h["tier2_capabilities"] = map[string]any{
-		"encrypted_leg": true,
-		"attestation":   true,
-		"aead_suites":   []string{tier2.PillarBAEADA256GCM},
+		"encrypted_leg":                     true,
+		"attestation":                       true,
+		"aead_suites":                       []string{tier2.PillarBAEADA256GCM},
+		"response_chunk_plaintext_envelope": true,
 	}
 	return h
 }

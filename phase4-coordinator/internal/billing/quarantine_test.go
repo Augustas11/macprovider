@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,18 @@ func doForceVoid(t *testing.T, store *Store, gateEnabled bool, id int64, body st
 	return w
 }
 
+func doForceCredit(t *testing.T, store *Store, gateEnabled bool, id int64, body string, ct string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/"+itoa(id)+"/force-credit", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer operator")
+	if ct != "" {
+		req.Header.Set("Content-Type", ct)
+	}
+	w := httptest.NewRecorder()
+	store.HandlersWithQuarantineGates("operator", fakeTokens{}, true, 60, true, gateEnabled).ServeHTTP(w, req)
+	return w
+}
+
 func itoa(i int64) string {
 	if i == 0 {
 		return "0"
@@ -94,9 +107,10 @@ func itoa(i int64) string {
 	return string(buf[n:])
 }
 
-// AC-Q040: schema shape — UNIQUE(request_credit_id),
-// CHECK(resolution_kind IN ('force_void')), idx_lqr_kind_created
-// present, no separate idx_lqr_request_credit index.
+// AC-Q040: schema shape — history-capable resolution table,
+// CHECK(resolution_kind IN ('force_void','force_credit')),
+// idx_lqr_kind_created and latest-projection index present, and no
+// UNIQUE(request_credit_id).
 func TestACQ040_SchemaShape(t *testing.T) {
 	store := quarantineFixture(t)
 	// Columns present?
@@ -116,30 +130,37 @@ func TestACQ040_SchemaShape(t *testing.T) {
 		}
 		cols[name] = typ
 	}
-	want := []string{"id", "request_credit_id", "resolution_kind", "operator_id", "resolution_reason", "created_at_utc"}
+	want := []string{"id", "request_credit_id", "resolution_kind", "operator_id", "resolution_reason", "created_at_utc", "force_credit_matures_at_utc", "correction_deadline_at_utc"}
 	for _, c := range want {
 		if _, ok := cols[c]; !ok {
 			t.Fatalf("missing column %q", c)
 		}
 	}
-	// UNIQUE auto-index present, idx_lqr_kind_created present.
 	if !indexExists(t, store.db, "ledger_quarantine_resolutions", "idx_lqr_kind_created") {
 		t.Fatal("idx_lqr_kind_created missing")
 	}
-	// No non-unique idx_lqr_request_credit (the UNIQUE auto-index
-	// covers the read path).
-	if indexExists(t, store.db, "ledger_quarantine_resolutions", "idx_lqr_request_credit") {
-		t.Fatal("idx_lqr_request_credit must not exist in v0.4")
+	if !indexExists(t, store.db, "ledger_quarantine_resolutions", "idx_lqr_request_latest") {
+		t.Fatal("idx_lqr_request_latest missing")
 	}
-	// UNIQUE constraint: try INSERT twice with same request_credit_id.
-	id := insertQuarantinedCredit(t, store, "p-q040")
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := store.db.Exec(`INSERT INTO ledger_quarantine_resolutions(request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc) VALUES (?, 'force_void', 'alice', 'reason', ?)`, id, now); err != nil {
+	hasUnique, err := store.hasUniqueIndexOnColumns(context.Background(), "ledger_quarantine_resolutions", []string{"request_credit_id"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.db.Exec(`INSERT INTO ledger_quarantine_resolutions(request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc) VALUES (?, 'force_void', 'alice', 'reason', ?)`, id, now)
-	if err == nil {
-		t.Fatal("second INSERT must hit UNIQUE constraint")
+	if hasUnique {
+		t.Fatal("UNIQUE(request_credit_id) must be relaxed in v0.5")
+	}
+	// History shape: direct INSERT may keep a prior decision and append
+	// a corrective opposite-kind row; API owns the one-correction rule.
+	id := insertQuarantinedCredit(t, store, "p-q040")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO ledger_quarantine_resolutions(request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc, correction_deadline_at_utc) VALUES (?, 'force_void', 'alice', 'reason', ?, ?)`, id, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO ledger_quarantine_resolutions(request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc, force_credit_matures_at_utc, correction_deadline_at_utc) VALUES (?, 'force_credit', 'alice', 'correction', ?, ?, ?)`, id, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_quarantine_resolutions WHERE request_credit_id=?`, id); got != 2 {
+		t.Fatalf("history rows=%d want 2", got)
 	}
 	// R6 fix (CODE-M2): pin the §4.10 length CHECK constraints on
 	// operator_id and resolution_reason. Empty values and over-cap
@@ -155,7 +176,7 @@ func TestACQ040_SchemaShape(t *testing.T) {
 	}
 	for _, c := range checkCases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := store.db.Exec(`INSERT INTO ledger_quarantine_resolutions(request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc) VALUES (?, 'force_void', ?, ?, ?)`, id2, c.opID, c.reason, now)
+			_, err := store.db.Exec(`INSERT INTO ledger_quarantine_resolutions(request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc, correction_deadline_at_utc) VALUES (?, 'force_void', ?, ?, ?, ?)`, id2, c.opID, c.reason, now, now)
 			if err == nil {
 				t.Fatalf("INSERT (%s) must hit length CHECK", c.name)
 			}
@@ -504,18 +525,246 @@ func TestACQ053_RouteLayerConfigFlagGate(t *testing.T) {
 	}
 }
 
-// AC-Q055: v0.4 force-credit schema rejection — direct INSERT with
-// resolution_kind='force_credit' must fail the CHECK constraint.
-func TestACQ055_ForceCreditSchemaRejection(t *testing.T) {
+// AC-Q055: v0.5 force-credit endpoint is held out of payable rows
+// until force_credit_matures_at_utc, then appears in the payable
+// projection without clearing the base quarantined flag.
+func TestACQ055_ForceCreditHoldThenPayable(t *testing.T) {
 	store := quarantineFixture(t)
+	now := time.Now().UTC().Add(time.Hour)
+	store.now = func() time.Time { return now }
 	id := insertQuarantinedCredit(t, store, "p-q055")
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := store.db.Exec(`INSERT INTO ledger_quarantine_resolutions(request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc) VALUES (?, 'force_credit', 'alice', 'x', ?)`, id, now)
-	if err == nil {
-		t.Fatal("INSERT with resolution_kind=force_credit must hit CHECK constraint in v0.4")
+	w := doForceCredit(t, store, true, id, `{"operator_id":"alice","reason":"receipt verified manually"}`, "application/json")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s want 200", w.Code, w.Body.String())
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "check") {
-		t.Fatalf("error must mention CHECK constraint, got: %v", err)
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["resolution_kind"] != "force_credit" {
+		t.Fatalf("resolution_kind=%v want force_credit", resp["resolution_kind"])
+	}
+	wantMatures := sqliteTimeText(now.Add(24 * time.Hour))
+	if resp["force_credit_matures_at_utc"] != wantMatures {
+		t.Fatalf("force_credit_matures_at_utc=%v want %s", resp["force_credit_matures_at_utc"], wantMatures)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE id=?`, id); got != 0 {
+		t.Fatalf("held force-credit payable rows=%d want 0", got)
+	}
+	if _, err := store.db.Exec(`UPDATE ledger_quarantine_resolutions SET force_credit_matures_at_utc='2000-01-01T00:00:00.000000000Z' WHERE request_credit_id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE id=?`, id); got != 1 {
+		t.Fatalf("matured force-credit payable rows=%d want 1", got)
+	}
+}
+
+func TestForceCreditCorrectiveVoidWithinHoldLatestWins(t *testing.T) {
+	store := quarantineFixture(t)
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	id := insertQuarantinedCredit(t, store, "p-correct")
+	if w := doForceCredit(t, store, true, id, `{"operator_id":"alice","reason":"manual credit"}`, "application/json"); w.Code != http.StatusOK {
+		t.Fatalf("force-credit status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := doForceVoid(t, store, true, id, `{"operator_id":"bob","reason":"mistake caught before hold"}`, "application/json"); w.Code != http.StatusOK {
+		t.Fatalf("force-void correction status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_quarantine_resolutions WHERE request_credit_id=?`, id); got != 2 {
+		t.Fatalf("resolution history rows=%d want 2", got)
+	}
+	var latest string
+	if err := store.db.QueryRow(`SELECT resolution_kind FROM ledger_quarantine_resolutions WHERE request_credit_id=? ORDER BY created_at_utc DESC, id DESC LIMIT 1`, id).Scan(&latest); err != nil {
+		t.Fatal(err)
+	}
+	if latest != "force_void" {
+		t.Fatalf("latest resolution=%q want force_void", latest)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM spec022_payable_request_credits WHERE id=?`, id); got != 0 {
+		t.Fatalf("corrected-to-void payable rows=%d want 0", got)
+	}
+	if w := doForceCredit(t, store, true, id, `{"operator_id":"carol","reason":"third try"}`, "application/json"); w.Code != http.StatusConflict {
+		t.Fatalf("third resolution status=%d body=%s want 409", w.Code, w.Body.String())
+	}
+}
+
+func TestForceCreditCorrectionAfterHoldLocked(t *testing.T) {
+	store := quarantineFixture(t)
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	id := insertQuarantinedCredit(t, store, "p-lock")
+	if w := doForceCredit(t, store, true, id, `{"operator_id":"alice","reason":"manual credit"}`, "application/json"); w.Code != http.StatusOK {
+		t.Fatalf("force-credit status=%d body=%s", w.Code, w.Body.String())
+	}
+	store.now = func() time.Time { return now.Add(25 * time.Hour) }
+	w := doForceVoid(t, store, true, id, `{"operator_id":"bob","reason":"too late"}`, "application/json")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("late correction status=%d body=%s want 409", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "resolution_locked") {
+		t.Fatalf("body=%s missing resolution_locked", w.Body.String())
+	}
+}
+
+func TestForceVoidCorrectionDeadlinePersistsAcrossHoldReload(t *testing.T) {
+	store := quarantineFixture(t)
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	store.SetForceCreditSettlementHoldSeconds(24 * 60 * 60)
+	id := insertQuarantinedCredit(t, store, "p-deadline")
+	if w := doForceVoid(t, store, true, id, `{"operator_id":"alice","reason":"initial void"}`, "application/json"); w.Code != http.StatusOK {
+		t.Fatalf("force-void status=%d body=%s", w.Code, w.Body.String())
+	}
+	// A later config reload shortens the current hold to one second,
+	// but the existing row's correction deadline remains the
+	// resolution-time 24h deadline.
+	store.SetForceCreditSettlementHoldSeconds(1)
+	store.now = func() time.Time { return now.Add(time.Hour) }
+	w := doForceCredit(t, store, true, id, `{"operator_id":"bob","reason":"correct within original deadline"}`, "application/json")
+	if w.Code != http.StatusOK {
+		t.Fatalf("force-credit correction status=%d body=%s want 200", w.Code, w.Body.String())
+	}
+}
+
+func TestSettlementForceCreditMaturedAfterExistingPayoutRollsForward(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	windowStart := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	windowEnd := windowStart.AddDate(0, 0, 7)
+	cfg := SettlementConfig{CadenceDays: 7, MinPayoutCredits: 1}
+	insertCreditWithOperator(t, store.db, "existing-window-credit", "provider-a", windowStart.Add(time.Hour), 600)
+	if err := store.RunSettlement(context.Background(), cfg, windowStart, windowEnd); err != nil {
+		t.Fatal(err)
+	}
+	var payoutID int64
+	var payoutCreatedRaw string
+	if err := store.db.QueryRow(`SELECT id, created_at_utc FROM ledger_payout_ready WHERE provider_id='provider-a' AND window_start_utc=? AND window_end_utc=?`, sqliteTimeText(windowStart), sqliteTimeText(windowEnd)).Scan(&payoutID, &payoutCreatedRaw); err != nil {
+		t.Fatal(err)
+	}
+	payoutCreated, err := time.Parse(time.RFC3339Nano, payoutCreatedRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertCreditWithRequest(t, store.db, "force-credit-after-payout", "provider-a", windowStart.Add(2*time.Hour), 500)
+	id := scalar(t, store.db, `SELECT id FROM ledger_request_credits WHERE request_id='force-credit-after-payout'`)
+	if _, err := store.db.Exec(`UPDATE ledger_request_credits SET quarantined=1, quarantine_reason='manual review' WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	createdAt := sqliteTimeText(payoutCreated)
+	maturesAt := sqliteTimeText(payoutCreated.Add(time.Nanosecond))
+	if _, err := store.db.Exec(`
+INSERT INTO ledger_quarantine_resolutions (
+    request_credit_id, resolution_kind, operator_id, resolution_reason,
+    created_at_utc, force_credit_matures_at_utc, correction_deadline_at_utc
+) VALUES (?, 'force_credit', 'alice', 'late credit', ?, ?, ?)`,
+		id, createdAt, maturesAt, maturesAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RunSettlement(context.Background(), cfg, windowStart, windowEnd); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE id=?`, payoutID); got != 600 {
+		t.Fatalf("old payout provider_credits=%d want 600", got)
+	}
+	if got := scalar(t, store.db, `SELECT source_credit_count FROM ledger_payout_ready WHERE id=?`, payoutID); got != 1 {
+		t.Fatalf("old payout source count=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT settled FROM ledger_request_credits WHERE id=?`, id); got != 0 {
+		t.Fatalf("force-credit row settled after old-window rerun=%d want 0", got)
+	}
+	nextEnd := windowEnd.AddDate(0, 0, 7)
+	if err := store.RunSettlement(context.Background(), cfg, windowEnd, nextEnd); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id='provider-a' AND window_start_utc=? AND window_end_utc=?`, sqliteTimeText(windowEnd), sqliteTimeText(nextEnd)); got != 500 {
+		t.Fatalf("rolled-forward payout provider_credits=%d want 500", got)
+	}
+	if got := scalar(t, store.db, `SELECT settlement_id FROM ledger_request_credits WHERE id=?`, id); got == payoutID {
+		t.Fatalf("force-credit row linked to old payout id %d", payoutID)
+	}
+}
+
+func TestQuarantineListOpenEndpoint(t *testing.T) {
+	store := quarantineFixture(t)
+	openID := insertQuarantinedCredit(t, store, "p-list-open")
+	resolvedID := insertQuarantinedCredit(t, store, "p-list-resolved")
+	if w := doForceVoid(t, store, true, resolvedID, `{"operator_id":"alice","reason":"x"}`, "application/json"); w.Code != http.StatusOK {
+		t.Fatalf("force-void status=%d body=%s", w.Code, w.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/quarantine?status=open", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s want 200", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Count int `json:"count"`
+		Items []struct {
+			RequestCreditID int64 `json:"request_credit_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Count != 1 || len(resp.Items) != 1 || resp.Items[0].RequestCreditID != openID {
+		t.Fatalf("open list=%+v want only id %d", resp, openID)
+	}
+}
+
+func TestQuarantineListOpenEndpointPaginates(t *testing.T) {
+	store := quarantineFixture(t)
+	base := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	ids := make([]int64, 0, 3)
+	for i := 0; i < 3; i++ {
+		id := insertQuarantinedCredit(t, store, fmt.Sprintf("p-list-page-%d", i))
+		ts := sqliteTimeText(base.Add(time.Duration(i) * time.Minute))
+		if _, err := store.db.Exec(`UPDATE ledger_request_credits SET ts_utc=? WHERE id=?`, ts, id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/quarantine?status=open&limit=2", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first page status=%d body=%s want 200", w.Code, w.Body.String())
+	}
+	var first struct {
+		Count      int     `json:"count"`
+		NextCursor *string `json:"next_cursor"`
+		Items      []struct {
+			RequestCreditID int64 `json:"request_credit_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Count != 2 || len(first.Items) != 2 || first.NextCursor == nil || *first.NextCursor == "" {
+		t.Fatalf("first page=%+v want 2 items and next cursor", first)
+	}
+	if first.Items[0].RequestCreditID != ids[2] || first.Items[1].RequestCreditID != ids[1] {
+		t.Fatalf("first page ids=%+v want [%d %d]", first.Items, ids[2], ids[1])
+	}
+	req = httptest.NewRequest(http.MethodGet, "/admin/ledger/quarantine?status=open&limit=2&cursor="+url.QueryEscape(*first.NextCursor), nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w = httptest.NewRecorder()
+	store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("second page status=%d body=%s want 200", w.Code, w.Body.String())
+	}
+	var second struct {
+		Count      int     `json:"count"`
+		NextCursor *string `json:"next_cursor"`
+		Items      []struct {
+			RequestCreditID int64 `json:"request_credit_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Count != 1 || len(second.Items) != 1 || second.Items[0].RequestCreditID != ids[0] || second.NextCursor != nil {
+		t.Fatalf("second page=%+v want only id %d and no cursor", second, ids[0])
 	}
 }
 
@@ -740,28 +989,37 @@ func TestACQ053_ReloadEmitsFlagChangedAuditAndFlipTakesEffect(t *testing.T) {
 	}
 }
 
-// AC-Q050: SPEC-007 explorer detail surface — LEFT JOIN to
-// ledger_quarantine_resolutions exposes resolution_kind /
-// resolution_operator_id / resolution_reason / resolution_at_utc as
-// aliased columns on the ledger row when a resolution exists.
+// AC-Q050: SPEC-007 explorer detail surface — after v0.5 UNIQUE
+// relaxation, explorer-style queries must separate latest current
+// projection from ordered resolution history.
 func TestACQ050_ExplorerAliasColumns(t *testing.T) {
 	store := quarantineFixture(t)
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
 	id := insertQuarantinedCredit(t, store, "p-q050")
-	// Force-void via the handler to land both the resolution + audit.
-	w := doForceVoid(t, store, true, id, `{"operator_id":"alice","reason":"audited"}`, "application/json")
-	if w.Code != http.StatusOK {
-		t.Fatalf("prep force-void status=%d body=%s", w.Code, w.Body.String())
+	if w := doForceCredit(t, store, true, id, `{"operator_id":"alice","reason":"audited credit"}`, "application/json"); w.Code != http.StatusOK {
+		t.Fatalf("prep force-credit status=%d body=%s", w.Code, w.Body.String())
 	}
-	// Read the request_id we used to seed the row.
+	store.now = func() time.Time { return now.Add(time.Hour) }
+	if w := doForceVoid(t, store, true, id, `{"operator_id":"bob","reason":"corrected to void"}`, "application/json"); w.Code != http.StatusOK {
+		t.Fatalf("prep force-void correction status=%d body=%s", w.Code, w.Body.String())
+	}
 	var requestID string
 	if err := store.db.QueryRow(`SELECT request_id FROM ledger_request_credits WHERE id = ?`, id).Scan(&requestID); err != nil {
 		t.Fatal(err)
 	}
-	// Mirror the explorer query against the same DB.
 	row := store.db.QueryRow(`
-SELECT lqr.resolution_kind, lqr.operator_id, lqr.resolution_reason, lqr.created_at_utc
+SELECT current.resolution_kind, current.operator_id, current.resolution_reason, current.created_at_utc
   FROM ledger_request_credits lrc
-  LEFT JOIN ledger_quarantine_resolutions lqr ON lqr.request_credit_id = lrc.id
+  LEFT JOIN ledger_quarantine_resolutions current
+    ON current.request_credit_id = lrc.id
+   AND current.id = (
+       SELECT latest.id
+         FROM ledger_quarantine_resolutions latest
+        WHERE latest.request_credit_id = lrc.id
+        ORDER BY latest.created_at_utc DESC, latest.id DESC
+        LIMIT 1
+   )
  WHERE lrc.request_id = ?`, requestID)
 	var kind, opID, reason, createdAt sql.NullString
 	if err := row.Scan(&kind, &opID, &reason, &createdAt); err != nil {
@@ -770,14 +1028,37 @@ SELECT lqr.resolution_kind, lqr.operator_id, lqr.resolution_reason, lqr.created_
 	if !kind.Valid || kind.String != "force_void" {
 		t.Fatalf("resolution_kind=%v want force_void", kind)
 	}
-	if !opID.Valid || opID.String != "alice" {
-		t.Fatalf("resolution_operator_id=%v want alice", opID)
+	if !opID.Valid || opID.String != "bob" {
+		t.Fatalf("resolution_operator_id=%v want bob", opID)
 	}
-	if !reason.Valid || reason.String != "audited" {
-		t.Fatalf("resolution_reason=%v want audited", reason)
+	if !reason.Valid || reason.String != "corrected to void" {
+		t.Fatalf("resolution_reason=%v want corrected to void", reason)
 	}
 	if !createdAt.Valid || createdAt.String == "" {
 		t.Fatal("resolution_at_utc unset")
+	}
+	rows, err := store.db.Query(`
+SELECT resolution_kind
+  FROM ledger_quarantine_resolutions
+ WHERE request_credit_id = ?
+ ORDER BY created_at_utc ASC, id ASC`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var history []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			t.Fatal(err)
+		}
+		history = append(history, k)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 2 || history[0] != "force_credit" || history[1] != "force_void" {
+		t.Fatalf("history=%v want [force_credit force_void]", history)
 	}
 }
 

@@ -609,6 +609,76 @@ func decodeCanaryBody(t *testing.T, body []byte) decodedCanaryBody {
 	return req
 }
 
+func TestRunCanaryProbeUsesAutotuneAdmissionKeyForModelClassProbe(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:          "p1",
+		AssignedID:          "s1",
+		ModelID:             "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+		MaxAdmittedModelKey: "qwen3-coder-30b-a3b-instruct",
+		Tier:                pool.TierPinned,
+		InferencePath:       pool.InferencePathWSTunneled,
+		State:               pool.StateReady,
+		SlotsFree:           1,
+		SlotsTotal:          1,
+		MaxConcurrency:      1,
+	}
+	registry.Register(provider, serverConn)
+	cfg := config.Default()
+	cfg.Pool.CanaryTimeoutS = 1
+	cfg.Pool.CanaryMaxTokens = 8
+	cfg.Pool.CanaryChallenges = []config.CanaryChallengeConfig{{
+		Prompt:   "global {nonce}",
+		Expected: "{nonce}",
+	}}
+	cfg.Pool.ModelClassChallenges = map[string][]config.CanaryChallengeConfig{
+		"qwen3-coder-30b-a3b-instruct": {testCanaryChallenge()},
+	}
+	s := NewServer(cfg, registry, zerolog.Nop())
+	session := newProviderSession("p1", "s1", serverConn, 1)
+	s.sessions.Store(sessionKey("p1", "s1"), session)
+	go session.runWriter()
+
+	done := make(chan struct{})
+	go func() {
+		s.runCanaryProbe(*provider)
+		close(done)
+	}()
+	req := readCanaryInferenceRequest(t, providerConn)
+	body := decodeCanaryBody(t, []byte(req.Body))
+	if body.Model != "qwen3-coder-30b-a3b-instruct" {
+		t.Fatalf("canary body model = %q, want admitted key", body.Model)
+	}
+	if len(body.Messages) != 1 || !strings.Contains(body.Messages[0].Content, "Which US state") {
+		t.Fatalf("canary prompt = %+v, want model-class challenge", body.Messages)
+	}
+	expected := expectedAnswerFromCanaryRequest(t, req)
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{
+		Type:      "inference_response_chunk",
+		RequestID: req.RequestID,
+		Seq:       0,
+		Data:      `{"choices":[{"message":{"content":"` + expected + `"}}]}`,
+	}))
+	s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{
+		Type:       "inference_response_end",
+		RequestID:  req.RequestID,
+		Status:     "complete",
+		ChunksSent: 1,
+	}))
+	waitForCanary(t, done)
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider not found after canary")
+	}
+	if got.ModelClassOPoIPass == nil || !*got.ModelClassOPoIPass {
+		t.Fatalf("ModelClassOPoIPass = %v, want true", got.ModelClassOPoIPass)
+	}
+}
+
 func readCanaryInferenceRequest(t *testing.T, conn net.Conn) InferenceRequest {
 	t.Helper()
 	return readInferenceRequestFrame(t, conn)

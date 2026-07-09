@@ -91,6 +91,15 @@ func (s *PGStore) Close() error {
 	return err
 }
 
+// DB exposes the primary onboarding postgres handle for read-only consumers
+// such as the proof-of-weights autotune hello gate.
+func (s *PGStore) DB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.db
+}
+
 func (s *PGStore) Smoke(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return errors.New("onboarding postgres store is nil")
@@ -112,6 +121,14 @@ func (s *PGStore) Smoke(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(timeout, `SELECT id, evidence_sha256 FROM hardware_verification_jobs LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke hardware_verification_jobs read: %w", err)
+	}
+	if _, err := s.db.ExecContext(timeout, `
+SELECT generated_at, evidence
+  FROM hardware_verification_jobs
+ WHERE provider_id = ''
+   AND status = 'verified'
+ LIMIT 0`); err != nil {
+		return fmt.Errorf("provider_onboarding smoke autotune hello gate evidence read: %w", err)
 	}
 	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_register_nonces LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_register_nonces read: %w", err)
