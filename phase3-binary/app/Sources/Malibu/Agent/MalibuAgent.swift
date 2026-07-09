@@ -312,11 +312,11 @@ final class MalibuAgent: ObservableObject {
 
     private func coordinatorDisconnectMessage() -> String {
         switch snapshot.coordinatorConnected {
-        case false:
+        case .some(false):
             return "Model loaded locally · not connected to coordinator"
-        case nil:
+        case .none:
             return "Model loaded locally · checking coordinator connection…"
-        case true:
+        case .some(true):
             return "Checking background provider…"
         }
     }
