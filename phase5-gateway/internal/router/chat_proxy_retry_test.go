@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -84,7 +85,7 @@ func TestGatewayCoord503RetryExhaustsNoProviderResponses(t *testing.T) {
 	)
 }
 
-func TestCapacityRejection503EchoesRequestIDAndSettlesAfterRetryExhaustion(t *testing.T) {
+func TestCapacityRejection503EchoesRequestIDAndRefundsAfterRetryExhaustion(t *testing.T) {
 	var calls int
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
@@ -94,7 +95,7 @@ func TestCapacityRejection503EchoesRequestIDAndSettlesAfterRetryExhaustion(t *te
 		}, noProviderBody()), nil
 	})}
 	h, store, dbPath, cfg := newRetryHarness(t, client, nil)
-	accountID := "acct_retry_exhausted_settled"
+	accountID := "acct_retry_exhausted_refunded"
 	fullKey := createAccountAndKey(t, store, cfg, accountID)
 
 	requestID := "33333333-3333-4333-8333-333333333333"
@@ -110,13 +111,10 @@ func TestCapacityRejection503EchoesRequestIDAndSettlesAfterRetryExhaustion(t *te
 	if len(values) != 1 || values[0] != requestID {
 		t.Fatalf("response X-Request-ID values=%q, want only gateway request id %q", values, requestID)
 	}
-	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
-	if outcome != "no_provider_available" || source != "gateway_estimated" || completion != 0 || prompt <= 0 {
-		t.Fatalf("usage row outcome/source/completion/prompt = %s/%s/%d/%d, want no_provider_available/gateway_estimated/0/>0", outcome, source, completion, prompt)
-	}
+	assertRefundedNoProviderAudit(t, dbPath, accountID)
 }
 
-func TestCoordinatorSuppliedRetryExhaustedHeaderDoesNotSettle(t *testing.T) {
+func TestCoordinatorSuppliedRetryExhaustedHeaderDoesNotCharge(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return responseWithBody(http.StatusServiceUnavailable, http.Header{
 			"Content-Type":                          []string{"application/json"},
@@ -134,7 +132,7 @@ func TestCoordinatorSuppliedRetryExhaustedHeaderDoesNotSettle(t *testing.T) {
 	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	assertNoUsageEventsForAccount(t, dbPath, accountID)
+	assertRefundedNoProviderAudit(t, dbPath, accountID)
 }
 
 func TestGatewayCoord503RetryExhaustedEmptyBodyRefunds(t *testing.T) {
@@ -156,7 +154,60 @@ func TestGatewayCoord503RetryExhaustedEmptyBodyRefunds(t *testing.T) {
 		t.Fatalf("coordinator calls=%d want 3", calls)
 	}
 	assertErrorCode(t, resp.Body.String(), "no_provider_available")
-	assertNoUsageEventsForAccount(t, dbPath, accountID)
+	assertRefundedNoProviderAudit(t, dbPath, accountID)
+}
+
+func TestGatewayCoord503RetryExhaustedStreamingRefunds(t *testing.T) {
+	var calls int
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+	})}
+	h, store, dbPath, cfg := newRetryHarness(t, client, nil)
+	accountID := "acct_retry_exhausted_stream_refunded"
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, chatBody(true), nil)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if calls != 3 {
+		t.Fatalf("coordinator calls=%d want 3", calls)
+	}
+	assertErrorCode(t, resp.Body.String(), "no_provider_available")
+	assertRefundedNoProviderAudit(t, dbPath, accountID)
+}
+
+func TestNoProviderAuditRefundFailureReturnsSettlementFailed(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream_%v", stream), func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, noProviderBody()), nil
+			})}
+			_, store, dbPath, cfg := newRetryHarness(t, client, func(cfg *config.Config) {
+				cfg.Retry503.Enabled = false
+			})
+			accountID := fmt.Sprintf("acct_no_provider_refund_failure_%v", stream)
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+			spy := &retryReservationSpyStore{Store: store, refundErr: errors.New("refund write failed")}
+			h := New(cfg, spy, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(client)).Handler()
+
+			resp := postChat(t, h, fullKey, chatBody(stream), nil)
+
+			if resp.Code != http.StatusInternalServerError {
+				t.Fatalf("status=%d body=%s, want settlement_failed 500", resp.Code, resp.Body.String())
+			}
+			assertErrorCode(t, resp.Body.String(), "settlement_failed")
+			if spy.refundCalls != 1 {
+				t.Fatalf("RefundReservation calls=%d, want 1", spy.refundCalls)
+			}
+			outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
+			if outcome != "no_provider_available" || source != "gateway_estimated" || completion != 0 || prompt != 0 {
+				t.Fatalf("usage row outcome/source/completion/prompt = %s/%s/%d/%d, want no_provider_available/gateway_estimated/0/0", outcome, source, completion, prompt)
+			}
+		})
+	}
 }
 
 func TestGatewayCoord503RetryMetricsUsesGatewayGeneratedRequestIDClass(t *testing.T) {
@@ -198,27 +249,72 @@ func TestGatewayRetryMetricsBypassAllPublicKillSwitch(t *testing.T) {
 
 func TestGatewayCoord503RetrySkipsTier2PolicyError(t *testing.T) {
 	logs := captureRetryLogs(t)
-	var calls int
-	body := `{"error":{"code":"tier2_hash_verified_required","message":"tier2 policy rejected request","param":null,"type":"service_unavailable"}}`
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		calls++
-		return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, body), nil
-	})}
-	h, store, _, cfg := newRetryHarness(t, client, nil)
-	fullKey := createAccountAndKey(t, store, cfg, "acct_retry_tier2")
-
-	resp := postChat(t, h, fullKey, chatBody(false), nil)
-
-	if resp.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	codes := []string{
+		"tier2_hash_verified_required",
+		"tier2_hash_mismatch",
+		"tier2_encrypted_leg_required",
+		"tier2_attestation_required",
 	}
-	if calls != 1 {
-		t.Fatalf("coordinator calls=%d want 1", calls)
-	}
-	if !strings.Contains(resp.Body.String(), `"code":"tier2_hash_verified_required"`) {
-		t.Fatalf("coordinator tier2 body not preserved: %s", resp.Body.String())
+	for _, code := range codes {
+		t.Run(code, func(t *testing.T) {
+			body := fmt.Sprintf(`{"error":{"code":%q,"message":"tier2 policy rejected request","param":null,"type":"service_unavailable"}}`, code)
+			for _, stream := range []bool{false, true} {
+				t.Run(fmt.Sprintf("stream_%v", stream), func(t *testing.T) {
+					var calls int
+					client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+						calls++
+						return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+					})}
+					h, store, dbPath, cfg := newRetryHarness(t, client, nil)
+					accountID := fmt.Sprintf("acct_retry_%s_%v", code, stream)
+					fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+					resp := postChat(t, h, fullKey, chatBody(stream), nil)
+
+					if resp.Code != http.StatusServiceUnavailable {
+						t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+					}
+					if calls != 1 {
+						t.Fatalf("coordinator calls=%d want 1", calls)
+					}
+					if !strings.Contains(resp.Body.String(), fmt.Sprintf(`"code":%q`, code)) {
+						t.Fatalf("coordinator tier2 body not preserved: %s", resp.Body.String())
+					}
+					assertRefundedAuditOutcome(t, dbPath, accountID, code)
+				})
+			}
+		})
 	}
 	assertRetryLogCounts(t, logs.String(), 0, 0, 0)
+}
+
+func TestGatewayTier2HardPin400WritesRefundedAudit(t *testing.T) {
+	body := `{"error":{"code":"tier2_hard_pin_predicate_failed","message":"tier2 hard pin predicate failed","param":null,"type":"invalid_request_error"}}`
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream_%v", stream), func(t *testing.T) {
+			var calls int
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				return responseWithBody(http.StatusBadRequest, http.Header{"Content-Type": []string{"application/json"}}, body), nil
+			})}
+			h, store, dbPath, cfg := newRetryHarness(t, client, nil)
+			accountID := fmt.Sprintf("acct_retry_tier2_hard_pin_%v", stream)
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+			resp := postChat(t, h, fullKey, chatBody(stream), nil)
+
+			if resp.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			if calls != 1 {
+				t.Fatalf("coordinator calls=%d want 1", calls)
+			}
+			if !strings.Contains(resp.Body.String(), `"code":"tier2_hard_pin_predicate_failed"`) {
+				t.Fatalf("coordinator tier2 body not preserved: %s", resp.Body.String())
+			}
+			assertRefundedAuditOutcome(t, dbPath, accountID, "tier2_hard_pin_predicate_failed")
+		})
+	}
 }
 
 func TestGatewayCoord502RetryRecoversAfterTransientProviderError(t *testing.T) {
@@ -627,6 +723,23 @@ func noProviderBody() string {
 	return `{"error":{"code":"no_provider_available","message":"No provider available","param":null,"type":"service_unavailable"}}`
 }
 
+func assertRefundedNoProviderAudit(t *testing.T, dbPath, accountID string) {
+	t.Helper()
+	assertRefundedAuditOutcome(t, dbPath, accountID, "no_provider_available")
+}
+
+func assertRefundedAuditOutcome(t *testing.T, dbPath, accountID, wantOutcome string) {
+	t.Helper()
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
+	if outcome != wantOutcome || source != "gateway_estimated" || completion != 0 || prompt != 0 {
+		t.Fatalf("usage row outcome/source/completion/prompt = %s/%s/%d/%d, want %s/gateway_estimated/0/0", outcome, source, completion, prompt, wantOutcome)
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.usageRows != 1 || got.settledRows != 0 || got.refundedRows != 1 || got.activeRows != 0 || got.activeReserved != 0 {
+		t.Fatalf("settlement snapshot = %+v, want one zero-token usage audit row plus refunded reservation", got)
+	}
+}
+
 func chatBody(stream bool) string {
 	if stream {
 		return `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
@@ -640,6 +753,7 @@ type retryReservationSpyStore struct {
 	acquireCalls int
 	refundCalls  int
 	releaseCalls int
+	refundErr    error
 }
 
 func (s *retryReservationSpyStore) ReserveQuota(ctx context.Context, req storage.ReservationRequest) (storage.QuotaDecision, error) {
@@ -654,6 +768,9 @@ func (s *retryReservationSpyStore) AcquireConcurrency(ctx context.Context, req s
 
 func (s *retryReservationSpyStore) RefundReservation(ctx context.Context, accountID, requestID string, refundedAt int64) error {
 	s.refundCalls++
+	if s.refundErr != nil {
+		return s.refundErr
+	}
 	return s.Store.RefundReservation(ctx, accountID, requestID, refundedAt)
 }
 
