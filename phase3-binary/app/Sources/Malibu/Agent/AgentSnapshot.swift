@@ -60,6 +60,9 @@ struct AgentSnapshot: Equatable {
     var lastError: String?
 
     var cliVersion: String?
+    /// Whether macprovider-cli reports an active coordinator WebSocket session.
+    /// Distinct from local model readiness (`state == .serving` requires both).
+    var coordinatorConnected: Bool?
     var coordinatorRecommendedVersion: String?
     var latestReleaseVersion: String?
     var cliUpdateInProgress: Bool
@@ -105,6 +108,7 @@ struct AgentSnapshot: Equatable {
         thermalState: nil,
         lastError: nil,
         cliVersion: nil,
+        coordinatorConnected: nil,
         coordinatorRecommendedVersion: nil,
         latestReleaseVersion: nil,
         cliUpdateInProgress: false,
@@ -115,7 +119,15 @@ struct AgentSnapshot: Equatable {
 
 enum AgentSnapshotPresenter {
     private static func isActive(_ s: AgentSnapshot) -> Bool {
-        s.state == .serving || s.state == .paused
+        s.state == .serving || s.state == .paused || isLocalOnly(s)
+    }
+
+    private static func isNetworkReady(_ s: AgentSnapshot) -> Bool {
+        s.state == .serving && s.coordinatorConnected == true
+    }
+
+    private static func isLocalOnly(_ s: AgentSnapshot) -> Bool {
+        s.state == .reconnecting && s.currentModelID != nil
     }
 
     static func short(_ s: AgentSnapshot) -> String {
@@ -136,7 +148,8 @@ enum AgentSnapshotPresenter {
         case .starting:     return "Starting…"
         case .serving:      return "Serving"
         case .paused:       return "Paused"
-        case .reconnecting: return "Reconnecting…"
+        case .reconnecting:
+            return isLocalOnly(s) ? "Local only" : "Reconnecting…"
         case .error:        return "Error"
         }
     }
@@ -144,9 +157,11 @@ enum AgentSnapshotPresenter {
     static func dashboardSubtitle(_ s: AgentSnapshot) -> String? {
         switch s.state {
         case .serving where s.earningsUsdcToday == nil:
-            return "Provider connected · waiting for first paid job"
+            return "Connected to coordinator · waiting for first paid job"
         case .serving:
             return s.currentModelID
+        case .reconnecting where isLocalOnly(s):
+            return s.lastError ?? "Model loaded locally · reconnecting to coordinator"
         case .reconnecting:
             return s.lastError ?? "Checking background provider…"
         case .starting:
@@ -164,7 +179,11 @@ enum AgentSnapshotPresenter {
         case .starting:     return "Starting…"
         case .serving:      return "Serving " + (s.currentModelID ?? "model")
         case .paused:       return "Paused"
-        case .reconnecting: return "Reconnecting…"
+        case .reconnecting:
+            if isLocalOnly(s) {
+                return "Local only · " + (s.currentModelID ?? "model loaded")
+            }
+            return "Reconnecting…"
         case .error:        return s.lastError ?? "Error"
         }
     }
@@ -197,6 +216,8 @@ enum AgentSnapshotPresenter {
 
     static func modelLine(_ s: AgentSnapshot) -> String {
         if let model = s.currentModelID { return model }
+        if isNetworkReady(s) { return "Connected" }
+        if isLocalOnly(s) { return "Local only" }
         return isActive(s) ? "Connected" : "Not running"
     }
 
