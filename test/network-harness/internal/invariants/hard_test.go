@@ -272,6 +272,265 @@ func TestCheckI2_FailsWhen5xxSettlementBelongsToForeignAccount(t *testing.T) {
 	}
 }
 
+func TestCheckI2_PassesNoProviderOnlyWhenZeroTokenRefunded(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 503, RequestID: "req-5xx"}}
+	ledger := &reconcile.Result{
+		GatewayHasAccountID: true,
+		HarnessAccountID:    "acct-harness",
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			AccountID:         "acct-harness",
+			RequestID:         "req-5xx",
+			Outcome:           "no_provider_available",
+			TotalTokens:       0,
+			ReservationStatus: "refunded",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if !c.Passed || c.Skipped {
+		t.Fatalf("I2 should pass zero-token refunded no-provider evidence: %+v", c)
+	}
+}
+
+func TestCheckI2_FailsNoProviderEvidenceWhenNotRefunded(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 503, RequestID: "req-5xx"}}
+	ledger := &reconcile.Result{
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			RequestID:         "req-5xx",
+			Outcome:           "no_provider_available",
+			TotalTokens:       0,
+			ReservationStatus: "active",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if c.Passed || c.Skipped {
+		t.Fatalf("I2 should fail active no-provider reservation evidence: %+v", c)
+	}
+	if !contains(c.OffendingIDs, "req-5xx") {
+		t.Fatalf("offending IDs=%v want req-5xx", c.OffendingIDs)
+	}
+}
+
+func TestCheckI2_PassesTier2OnlyWhenZeroTokenRefunded(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 503, RequestID: "req-tier2"}}
+	ledger := &reconcile.Result{
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			RequestID:         "req-tier2",
+			Outcome:           "tier2_hash_verified_required",
+			TotalTokens:       0,
+			ReservationStatus: "refunded",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if !c.Passed || c.Skipped {
+		t.Fatalf("I2 should pass zero-token refunded tier2 evidence: %+v", c)
+	}
+}
+
+func TestCheckI2_FailsTier2EvidenceWhenChargedOrActive(t *testing.T) {
+	cases := []struct {
+		name              string
+		totalTokens       int64
+		reservationStatus string
+	}{
+		{name: "nonzero_tokens", totalTokens: 1, reservationStatus: "refunded"},
+		{name: "active_reservation", totalTokens: 0, reservationStatus: "active"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			results := []buyer.Result{{HTTPStatus: 503, RequestID: "req-tier2"}}
+			ledger := &reconcile.Result{
+				GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+					RequestID:         "req-tier2",
+					Outcome:           "tier2_hash_verified_required",
+					TotalTokens:       tc.totalTokens,
+					ReservationStatus: tc.reservationStatus,
+				}},
+			}
+
+			c := checkI2(results, ledger)
+
+			if c.Passed || c.Skipped {
+				t.Fatalf("I2 should fail invalid tier2 evidence: %+v", c)
+			}
+			if !contains(c.OffendingIDs, "req-tier2") {
+				t.Fatalf("offending IDs=%v want req-tier2", c.OffendingIDs)
+			}
+		})
+	}
+}
+
+func TestCheckI2_PassesGenericZeroToken5xxAuditOnlyWhenRefunded(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 503, RequestID: "req-upstream"}}
+	ledger := &reconcile.Result{
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			RequestID:         "req-upstream",
+			Outcome:           "upstream_error",
+			TotalTokens:       0,
+			ReservationStatus: "refunded",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if !c.Passed || c.Skipped {
+		t.Fatalf("I2 should pass zero-token refunded generic 5xx audit evidence: %+v", c)
+	}
+}
+
+func TestCheckI2_FailsGenericZeroToken5xxAuditWhenNotRefunded(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 503, RequestID: "req-upstream"}}
+	ledger := &reconcile.Result{
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			RequestID:         "req-upstream",
+			Outcome:           "upstream_error",
+			TotalTokens:       0,
+			ReservationStatus: "active",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if c.Passed || c.Skipped {
+		t.Fatalf("I2 should fail zero-token active generic 5xx audit evidence: %+v", c)
+	}
+	if !contains(c.OffendingIDs, "req-upstream") {
+		t.Fatalf("offending IDs=%v want req-upstream", c.OffendingIDs)
+	}
+}
+
+func TestCheckI2_FailsGeneric5xxAuditWithNonzeroTokens(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 503, RequestID: "req-upstream"}}
+	ledger := &reconcile.Result{
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			RequestID:         "req-upstream",
+			Outcome:           "upstream_error",
+			TotalTokens:       7,
+			ReservationStatus: "active",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if c.Passed || c.Skipped {
+		t.Fatalf("I2 should fail generic 5xx settlement evidence with active reservation: %+v", c)
+	}
+	if !contains(c.OffendingIDs, "req-upstream") {
+		t.Fatalf("offending IDs=%v want req-upstream", c.OffendingIDs)
+	}
+}
+
+func TestCheckI2_PassesGeneric5xxSettlementWithNonzeroTokens(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 502, RequestID: "req-upstream"}}
+	ledger := &reconcile.Result{
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			RequestID:         "req-upstream",
+			Outcome:           "upstream_error",
+			TotalTokens:       7,
+			ReservationStatus: "settled",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if !c.Passed || c.Skipped {
+		t.Fatalf("I2 should pass prompt-billed generic 5xx settlement evidence: %+v", c)
+	}
+}
+
+func TestCheckI2_PassesValidAuditEvidenceWithout5xx(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 400, RequestID: "req-tier2-400"}}
+	ledger := &reconcile.Result{
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+			RequestID:         "req-tier2-400",
+			Outcome:           "tier2_hard_pin_predicate_failed",
+			TotalTokens:       0,
+			ReservationStatus: "refunded",
+		}},
+	}
+
+	c := checkI2(results, ledger)
+
+	if !c.Passed || c.Skipped {
+		t.Fatalf("I2 should pass valid refunded audit evidence without 5xx responses: %+v", c)
+	}
+}
+
+func TestCheckI2_FailsInvalidAuditEvidenceWithout5xx(t *testing.T) {
+	cases := []struct {
+		name              string
+		requestID         string
+		outcome           string
+		totalTokens       int64
+		reservationStatus string
+	}{
+		{
+			name:              "tier2_400_active",
+			requestID:         "req-tier2-400",
+			outcome:           "tier2_hard_pin_predicate_failed",
+			totalTokens:       0,
+			reservationStatus: "active",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			results := []buyer.Result{{HTTPStatus: 400, RequestID: tc.requestID}}
+			ledger := &reconcile.Result{
+				GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{{
+					RequestID:         tc.requestID,
+					Outcome:           tc.outcome,
+					TotalTokens:       tc.totalTokens,
+					ReservationStatus: tc.reservationStatus,
+				}},
+			}
+
+			c := checkI2(results, ledger)
+
+			if c.Passed || c.Skipped {
+				t.Fatalf("I2 should fail invalid audit evidence without 5xx responses: %+v", c)
+			}
+			if !contains(c.OffendingIDs, tc.requestID) {
+				t.Fatalf("offending IDs=%v want %s", c.OffendingIDs, tc.requestID)
+			}
+		})
+	}
+}
+
+func TestCheckI2_IgnoresUnownedInvalidAuditEvidenceWithout5xx(t *testing.T) {
+	results := []buyer.Result{{HTTPStatus: 200, RequestID: "owned-ok"}}
+	ledger := &reconcile.Result{
+		GatewayHasAccountID: true,
+		HarnessAccountID:    "acct-harness",
+		GatewaySettlementRequests: []reconcile.SettlementRequestIdentity{
+			{
+				AccountID:         "acct-harness",
+				RequestID:         "owned-ok",
+				Outcome:           "ok",
+				TotalTokens:       7,
+				ReservationStatus: "settled",
+			},
+			{
+				AccountID:         "acct-other",
+				RequestID:         "other-tier2-400",
+				Outcome:           "tier2_hard_pin_predicate_failed",
+				TotalTokens:       0,
+				ReservationStatus: "active",
+			},
+		},
+	}
+
+	c := checkI2(results, ledger)
+
+	if !c.Passed || c.Skipped {
+		t.Fatalf("I2 should ignore unowned invalid audit evidence in live window: %+v", c)
+	}
+}
+
 func TestCheckI2_PassesWhen5xxSettlementMatchesHarnessAccount(t *testing.T) {
 	results := []buyer.Result{{HTTPStatus: 502, RequestID: "req-5xx"}}
 	ledger := &reconcile.Result{

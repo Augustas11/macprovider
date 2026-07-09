@@ -311,17 +311,25 @@ func checkI2(results []buyer.Result, ledger *reconcile.Result) Check {
 		c.Detail = fmt.Sprintf("%d 5xx responses observed but settlement DB not configured", fiveXX)
 		return c
 	}
-	settled := map[string]bool{}
+	settled := map[string]reconcile.SettlementRequestIdentity{}
 	if ledger.GatewayHasAccountID {
 		for _, row := range ledger.GatewaySettlementRequests {
 			if row.AccountID == "" || row.RequestID == "" {
 				continue
 			}
-			settled[row.AccountID+"|"+row.RequestID] = true
+			settled[row.AccountID+"|"+row.RequestID] = row
 		}
 	} else {
+		for _, row := range ledger.GatewaySettlementRequests {
+			if row.RequestID == "" {
+				continue
+			}
+			settled[row.RequestID] = row
+		}
 		for _, id := range ledger.GatewaySettlementRequestIDs {
-			settled[id] = true
+			if _, ok := settled[id]; !ok {
+				settled[id] = reconcile.SettlementRequestIdentity{RequestID: id}
+			}
 		}
 	}
 	for _, r := range results {
@@ -338,30 +346,81 @@ func checkI2(results []buyer.Result, ledger *reconcile.Result) Check {
 				orphans = append(orphans, r.RequestID)
 				continue
 			}
-			if !settled[ledger.HarnessAccountID+"|"+r.RequestID] {
+			row, ok := settled[ledger.HarnessAccountID+"|"+r.RequestID]
+			if !ok || !valid5xxSettlementEvidence(row) {
 				orphans = append(orphans, r.RequestID)
 			}
 			continue
 		}
-		if !settled[r.RequestID] {
+		row, ok := settled[r.RequestID]
+		if !ok || !valid5xxSettlementEvidence(row) {
 			orphans = append(orphans, r.RequestID)
 		}
 	}
-	if fiveXX == 0 {
+	invalidAuditRows := invalidGatewayAuditEvidenceIDs(results, ledger)
+	if fiveXX == 0 && len(invalidAuditRows) == 0 {
 		c.Passed = true
 		c.Detail = "no 5xx responses observed"
 		return c
 	}
-	if len(orphans) == 0 {
+	if len(orphans) == 0 && len(invalidAuditRows) == 0 {
 		c.Passed = true
-		c.Detail = fmt.Sprintf("%d 5xx responses, all have gateway settlement rows", fiveXX)
+		c.Detail = fmt.Sprintf("%d 5xx responses, all have valid gateway settlement/audit rows", fiveXX)
 		return c
 	}
 	c.Passed = false
-	c.OffendingIDs = orphans
-	c.EvidenceCount = len(orphans)
-	c.Detail = fmt.Sprintf("%d 5xx responses without a request id — billing-bypass risk", len(orphans))
+	c.OffendingIDs = append(append([]string{}, orphans...), invalidAuditRows...)
+	c.EvidenceCount = len(c.OffendingIDs)
+	c.Detail = fmt.Sprintf("%d 5xx responses without valid gateway settlement/audit evidence; %d invalid gateway audit rows — billing-bypass risk", len(orphans), len(invalidAuditRows))
 	return c
+}
+
+func valid5xxSettlementEvidence(row reconcile.SettlementRequestIdentity) bool {
+	if isRefundedAuditOnlyOutcome(row.Outcome) {
+		return row.TotalTokens == 0 && row.ReservationStatus == "refunded"
+	}
+	if row.ReservationStatus != "" {
+		if row.TotalTokens == 0 {
+			return row.ReservationStatus == "refunded"
+		}
+		return row.ReservationStatus == "settled"
+	}
+	return true
+}
+
+func invalidGatewayAuditEvidenceIDs(results []buyer.Result, ledger *reconcile.Result) []string {
+	invalid := []string{}
+	owned := harnessOwnedRequestIDs(results)
+	for _, row := range ledger.GatewaySettlementRequests {
+		if row.RequestID == "" || !owned[row.RequestID] || !isRefundedAuditOnlyOutcome(row.Outcome) {
+			continue
+		}
+		if ledger.GatewayHasAccountID {
+			if ledger.HarnessAccountID == "" || row.AccountID != ledger.HarnessAccountID {
+				continue
+			}
+		}
+		if valid5xxSettlementEvidence(row) {
+			continue
+		}
+		invalid = append(invalid, row.RequestID)
+	}
+	return invalid
+}
+
+func harnessOwnedRequestIDs(results []buyer.Result) map[string]bool {
+	owned := map[string]bool{}
+	for _, r := range results {
+		if r.RequestID == "" {
+			continue
+		}
+		owned[r.RequestID] = true
+	}
+	return owned
+}
+
+func isRefundedAuditOnlyOutcome(outcome string) bool {
+	return outcome == "no_provider_available" || strings.HasPrefix(outcome, "tier2_")
 }
 
 // I3 — no charged-tokens > delivered-tokens. This consumes the

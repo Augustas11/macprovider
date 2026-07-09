@@ -296,8 +296,11 @@ type MatchedPair struct {
 }
 
 type SettlementRequestIdentity struct {
-	AccountID string `json:"account_id,omitempty"`
-	RequestID string `json:"request_id"`
+	AccountID         string `json:"account_id,omitempty"`
+	RequestID         string `json:"request_id"`
+	Outcome           string `json:"outcome,omitempty"`
+	TotalTokens       int64  `json:"total_tokens,omitempty"`
+	ReservationStatus string `json:"reservation_status,omitempty"`
 }
 
 // snapshotWindow returns the SQL query bounds for a reconcile run.
@@ -406,11 +409,14 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 	}
 	r.GatewayRows = len(gwRows)
 	for _, g := range gwRows {
-		if isSettlementComplete(g.Outcome) {
+		if isGatewayAuditCompleteOutcome(g.Outcome) {
 			r.GatewaySettlementRequestIDs = append(r.GatewaySettlementRequestIDs, g.RequestID)
 			r.GatewaySettlementRequests = append(r.GatewaySettlementRequests, SettlementRequestIdentity{
-				AccountID: g.AccountID,
-				RequestID: g.RequestID,
+				AccountID:         g.AccountID,
+				RequestID:         g.RequestID,
+				Outcome:           g.Outcome,
+				TotalTokens:       g.TotalTokens,
+				ReservationStatus: g.ReservationStatus,
 			})
 		}
 		switch {
@@ -772,7 +778,7 @@ func seedHarnessAccountIDFromGatewaySettlements(r *Result, results []buyer.Resul
 	}
 	accounts := map[string]bool{}
 	for _, g := range gwRows {
-		if !ids[g.RequestID] || !isSettlementComplete(g.Outcome) || g.AccountID == "" {
+		if !ids[g.RequestID] || !isGatewayAuditCompleteOutcome(g.Outcome) || g.AccountID == "" {
 			continue
 		}
 		accounts[g.AccountID] = true
@@ -1132,13 +1138,13 @@ func isGatewayOKOutcome(outcome string) bool {
 }
 
 // isSettlementComplete returns true for any gateway outcome value that
-// represents a complete settlement event from a money-path perspective.
-// "ok" is the canonical happy-path value; the rest are SPEC-006 § 17.7
-// streaming-fallback outcomes — the gateway still writes a usage_events
-// row with bytes emitted so far, so the audit trail is complete. From
-// the reconciler's point of view, any of these rows is a valid match
-// for a harness-success result (the harness saw a 200 + a terminator
-// signal, the gateway recorded the settlement row).
+// represents a complete, matchable settlement event from a money-path
+// perspective. "ok" is the canonical happy-path value; the rest are
+// SPEC-006 § 17.7 streaming-fallback outcomes — the gateway still writes
+// a usage_events row with bytes emitted so far, so the audit trail is
+// complete. From the reconciler's point of view, any of these rows is a
+// valid match for a harness-success result (the harness saw a 200 + a
+// terminator signal, the gateway recorded the settlement row).
 //
 // Source enumeration: phase5-gateway/internal/router/chat_proxy.go
 // settleAfterCommit() / settleBeforeResponse() call sites.
@@ -1167,6 +1173,10 @@ func isSettlementComplete(outcome string) bool {
 		return true
 	}
 	return false
+}
+
+func isGatewayAuditCompleteOutcome(outcome string) bool {
+	return isSettlementComplete(outcome) || outcome == "no_provider_available" || strings.HasPrefix(outcome, "tier2_")
 }
 
 type coordRow struct {
@@ -1200,13 +1210,14 @@ type gwRow struct {
 	// alone can hit a cross-account row on a shared gateway. Empty
 	// string means the snapshot pre-dates the column (legacy / partial
 	// migration), in which case the matcher treats it as a noop.
-	AccountID        string
-	PromptTokens     int64
-	CompletionTokens int64
-	TotalTokens      int64
-	TokenSource      string
-	Outcome          string
-	CreatedAt        time.Time
+	AccountID         string
+	PromptTokens      int64
+	CompletionTokens  int64
+	TotalTokens       int64
+	TokenSource       string
+	Outcome           string
+	ReservationStatus string
+	CreatedAt         time.Time
 }
 
 // queryCoordinator returns coordinator rows + a schema flag reporting
@@ -1457,6 +1468,36 @@ func gatewayTokenExprs(db *sql.DB) (string, string, string, error) {
 	return promptExpr, completionExpr, totalExpr, nil
 }
 
+func gatewayReservationStatusExpr(db *sql.DB, hasUsageAccountID bool) (string, error) {
+	hasQuota, err := tableExists(db, "quota_reservations")
+	if err != nil {
+		return "", fmt.Errorf("probe quota_reservations: %w", err)
+	}
+	if !hasQuota {
+		return "''", nil
+	}
+	hasRequestID, err := columnExists(db, "quota_reservations", "request_id")
+	if err != nil {
+		return "", fmt.Errorf("probe quota_reservations.request_id: %w", err)
+	}
+	hasStatus, err := columnExists(db, "quota_reservations", "status")
+	if err != nil {
+		return "", fmt.Errorf("probe quota_reservations.status: %w", err)
+	}
+	if !hasRequestID || !hasStatus {
+		return "''", nil
+	}
+	where := "qr.request_id = usage_events.request_id"
+	hasQuotaAccountID, err := columnExists(db, "quota_reservations", "account_id")
+	if err != nil {
+		return "", fmt.Errorf("probe quota_reservations.account_id: %w", err)
+	}
+	if hasUsageAccountID && hasQuotaAccountID {
+		where += " AND qr.account_id = usage_events.account_id"
+	}
+	return fmt.Sprintf("COALESCE((SELECT qr.status FROM quota_reservations qr WHERE %s ORDER BY qr.rowid DESC LIMIT 1), '')", where), nil
+}
+
 // queryGateway returns gateway usage_events rows + a schema flag
 // reporting whether the usage_events.account_id column exists in the
 // snapshot. Same shape as queryCoordinator.
@@ -1490,10 +1531,14 @@ func queryGateway(path string, start, end time.Time) ([]gwRow, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	reservationStatusExpr, err := gatewayReservationStatusExpr(db, hasAcct)
+	if err != nil {
+		return nil, false, err
+	}
 	rows, err := db.Query(fmt.Sprintf(`
-				SELECT request_id, %s, %s, %s, %s, %s, outcome, created_at
-				FROM usage_events
-			`, acctExpr, promptExpr, completionExpr, totalExpr, tokenSourceExpr))
+					SELECT request_id, %s, %s, %s, %s, %s, outcome, %s, created_at
+					FROM usage_events
+				`, acctExpr, promptExpr, completionExpr, totalExpr, tokenSourceExpr, reservationStatusExpr))
 	if err != nil {
 		return nil, false, err
 	}
@@ -1502,7 +1547,7 @@ func queryGateway(path string, start, end time.Time) ([]gwRow, bool, error) {
 	for rows.Next() {
 		var g gwRow
 		var ts string
-		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.PromptTokens, &g.CompletionTokens, &g.TotalTokens, &g.TokenSource, &g.Outcome, &ts); err != nil {
+		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.PromptTokens, &g.CompletionTokens, &g.TotalTokens, &g.TokenSource, &g.Outcome, &g.ReservationStatus, &ts); err != nil {
 			return nil, false, err
 		}
 		g.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
@@ -1566,12 +1611,16 @@ func queryGatewayByIDs(path string, ids []string) ([]gwRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	reservationStatusExpr, err := gatewayReservationStatusExpr(db, hasAcct)
+	if err != nil {
+		return nil, err
+	}
 	placeholders, args := inClause(ids)
 	rows, err := db.Query(fmt.Sprintf(`
-				SELECT request_id, %s, %s, %s, %s, %s, outcome, created_at
-				FROM usage_events
-			WHERE request_id IN (%s)
-		`, acctExpr, promptExpr, completionExpr, totalExpr, tokenSourceExpr, placeholders), args...)
+					SELECT request_id, %s, %s, %s, %s, %s, outcome, %s, created_at
+					FROM usage_events
+				WHERE request_id IN (%s)
+			`, acctExpr, promptExpr, completionExpr, totalExpr, tokenSourceExpr, reservationStatusExpr, placeholders), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1580,7 +1629,7 @@ func queryGatewayByIDs(path string, ids []string) ([]gwRow, error) {
 	for rows.Next() {
 		var g gwRow
 		var ts string
-		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.PromptTokens, &g.CompletionTokens, &g.TotalTokens, &g.TokenSource, &g.Outcome, &ts); err != nil {
+		if err := rows.Scan(&g.RequestID, &g.AccountID, &g.PromptTokens, &g.CompletionTokens, &g.TotalTokens, &g.TokenSource, &g.Outcome, &g.ReservationStatus, &ts); err != nil {
 			return nil, err
 		}
 		g.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)

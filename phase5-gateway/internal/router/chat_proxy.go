@@ -402,7 +402,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, cancelUpstream, upCtx, structuredStreaming, window, timing)
 		return
 	}
-	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted)
+	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, retryExhausted, window)
 }
 
 func (s *Server) doCoordinatorChatWithRetry(upCtx context.Context, r *http.Request, accountID string, buildUpReq func() (*http.Request, error)) (*http.Response, bool, error) {
@@ -563,7 +563,7 @@ func (b *coord503PrefixErrBody) Read(p []byte) (int, error) {
 
 func (b *coord503PrefixErrBody) Close() error { return nil }
 
-func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted bool) {
+func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted bool, window string) {
 	body, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 	if err != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
@@ -576,10 +576,10 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
 			return
 		}
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
 		return
 	}
 	if resp.StatusCode == http.StatusGatewayTimeout {
@@ -595,20 +595,20 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	// reservation and pass the OpenAI-shaped error body through verbatim so
 	// the buyer sees an actionable 404 instead of an opaque 502.
 	if resp.StatusCode == http.StatusNotFound {
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
 		return
 	}
 	if coordinatorTier2PolicyError(resp.StatusCode, body) {
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
 		return
 	}
 	if coordinatorIdempotencyError(resp.StatusCode, body) {
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
 		if coordinatorValidationError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, window)
 			return
 		}
 		if isNullUsageProviderError(body) {
@@ -676,10 +676,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 			return
 		}
-		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -696,20 +696,20 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		// See forwardNonStreamingChat for the matching non-stream branch.
 		if resp.StatusCode == http.StatusNotFound {
 			body, _ := io.ReadAll(resp.Body)
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 			return
 		}
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorValidationError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 			return
 		}
 		if coordinatorIdempotencyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 			return
 		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
-			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 			return
 		}
 		if !s.settleBeforeStreamingResponseWithCoordinatorFinality(w, r, subject, promptEstimate, completionFromHeaderCapped(resp.Header, maxTokens), maxUsageTokens, "gateway_estimated", "upstream_error", resp.Header) {
@@ -1064,15 +1064,20 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
 }
 
-func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens int64, retryExhausted bool) {
-	if retryExhausted &&
-		len(bytes.TrimSpace(body)) > 0 &&
-		isCoordNoProviderAvailable503(resp.StatusCode, body) {
-		if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "no_provider_available") {
+func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens int64, retryExhausted bool, window string) {
+	if (resp.StatusCode >= 500 && resp.StatusCode < 600) || coordinatorTier2PolicyError(resp.StatusCode, body) {
+		if !s.recordRefundedCoordinatorAudit(w, r, subject, window, refundedCoordinatorAuditOutcome(resp.StatusCode, body)) {
 			return
 		}
-	} else {
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+	}
+	if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+		slog.Error("gateway no-provider refund failed after audit row",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"error", err,
+		)
+		writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+		return
 	}
 	if len(bytes.TrimSpace(body)) == 0 && resp.StatusCode == http.StatusServiceUnavailable {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "no_provider_available", "No provider available")
@@ -1083,6 +1088,48 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
+}
+
+func refundedCoordinatorAuditOutcome(status int, body []byte) string {
+	if isCoordNoProviderAvailable503(status, body) {
+		return "no_provider_available"
+	}
+	if code := openAIErrorCode(body); code != "" {
+		return code
+	}
+	return "upstream_error"
+}
+
+func (s *Server) recordRefundedCoordinatorAudit(w http.ResponseWriter, r *http.Request, subject usageSubject, window, outcome string) bool {
+	if window == "" {
+		window = s.now().UTC().Format("2006-01-02")
+	}
+	if outcome == "" {
+		outcome = "upstream_error"
+	}
+	if err := s.store.EnsureUsageEvent(context.Background(), storage.UsageEvent{
+		RequestID:        requestID(r),
+		AccountID:        subject.AccountID,
+		DemoIdentity:     subject.DemoIdentity,
+		WindowDate:       window,
+		PromptTokens:     0,
+		CompletionTokens: 0,
+		TotalTokens:      0,
+		TokenSource:      "gateway_estimated",
+		Outcome:          outcome,
+		CreatedAt:        s.now(),
+	}); err != nil {
+		slog.Error("gateway refunded coordinator audit row failed",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"outcome", outcome,
+			"error", err,
+		)
+		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+		return false
+	}
+	return true
 }
 
 func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens, maxTokens int64) {

@@ -13,6 +13,7 @@ package reconcile
 import (
 	"database/sql"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -419,6 +420,194 @@ func TestSseErrorCorroboratesOutcome_232_R6(t *testing.T) {
 			got := sseErrorCorroboratesOutcome(tc.code, tc.outcome)
 			if got != tc.want {
 				t.Errorf("sseErrorCorroboratesOutcome(%q, %q) = %v, want %v", tc.code, tc.outcome, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNoProviderAuditOutcomeSupportsI2ButNotI1SuccessMatching(t *testing.T) {
+	if isSettlementComplete("no_provider_available") {
+		t.Fatal("no_provider_available must not be matchable as a harness-success settlement")
+	}
+	if !isGatewayAuditCompleteOutcome("no_provider_available") {
+		t.Fatal("no_provider_available should count as terminal gateway audit evidence for I2 reconciliation")
+	}
+
+	now := time.Now()
+	results := []buyer.Result{
+		{RequestID: "h_503", Outcome: "http_error", StartUTC: now, EndUTC: now},
+	}
+	gwRows := []gwRow{
+		{RequestID: "h_503", Outcome: "no_provider_available", CompletionTokens: 0, CreatedAt: now},
+	}
+	r := &Result{}
+	leftoverGw, _ := matchPairs(r, results, gwRows, nil)
+	if len(r.MatchedSuccesses) != 0 {
+		t.Fatalf("failed harness 503 must not produce matched success pairs, got %d", len(r.MatchedSuccesses))
+	}
+	collectUnmatchedGatewayOK(r, leftoverGw)
+	if len(r.UnmatchedGatewayOKRows) != 0 {
+		t.Fatalf("refunded no-provider audit row must not be reported as I1 gateway orphan, got %v", r.UnmatchedGatewayOKRows)
+	}
+	for _, g := range gwRows {
+		if isGatewayAuditCompleteOutcome(g.Outcome) {
+			r.GatewaySettlementRequestIDs = append(r.GatewaySettlementRequestIDs, g.RequestID)
+		}
+	}
+	if len(r.GatewaySettlementRequestIDs) != 1 || r.GatewaySettlementRequestIDs[0] != "h_503" {
+		t.Fatalf("I2 audit evidence request IDs = %v, want [h_503]", r.GatewaySettlementRequestIDs)
+	}
+}
+
+func TestTier2AuditOutcomesSupportI2ButNotI1SuccessMatching(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{name: "503_hash_verified_required", status: http.StatusServiceUnavailable, code: "tier2_hash_verified_required"},
+		{name: "503_hash_mismatch", status: http.StatusServiceUnavailable, code: "tier2_hash_mismatch"},
+		{name: "503_encrypted_leg_required", status: http.StatusServiceUnavailable, code: "tier2_encrypted_leg_required"},
+		{name: "503_attestation_required", status: http.StatusServiceUnavailable, code: "tier2_attestation_required"},
+		{name: "400_hard_pin_predicate_failed", status: http.StatusBadRequest, code: "tier2_hard_pin_predicate_failed"},
+	}
+	now := time.Now()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if isSettlementComplete(tc.code) {
+				t.Fatalf("%s must not be matchable as a harness-success settlement", tc.code)
+			}
+			if !isGatewayAuditCompleteOutcome(tc.code) {
+				t.Fatalf("%s should count as terminal gateway audit evidence for I2 reconciliation", tc.code)
+			}
+
+			results := []buyer.Result{{
+				RequestID:  "h_" + tc.name,
+				Outcome:    "http_error",
+				HTTPStatus: tc.status,
+				StartUTC:   now,
+				EndUTC:     now,
+			}}
+			gwRows := []gwRow{{
+				RequestID:        "h_" + tc.name,
+				Outcome:          tc.code,
+				CompletionTokens: 0,
+				TotalTokens:      0,
+				CreatedAt:        now,
+			}}
+			r := &Result{}
+			leftoverGw, _ := matchPairs(r, results, gwRows, nil)
+			if len(r.MatchedSuccesses) != 0 {
+				t.Fatalf("failed harness tier2 response must not produce matched success pairs, got %d", len(r.MatchedSuccesses))
+			}
+			collectUnmatchedGatewayOK(r, leftoverGw)
+			if len(r.UnmatchedGatewayOKRows) != 0 {
+				t.Fatalf("refunded tier2 audit row must not be reported as I1 gateway orphan, got %v", r.UnmatchedGatewayOKRows)
+			}
+			for _, g := range gwRows {
+				if isGatewayAuditCompleteOutcome(g.Outcome) {
+					r.GatewaySettlementRequests = append(r.GatewaySettlementRequests, SettlementRequestIdentity{
+						RequestID:         g.RequestID,
+						Outcome:           g.Outcome,
+						TotalTokens:       g.TotalTokens,
+						ReservationStatus: "refunded",
+					})
+				}
+			}
+			if len(r.GatewaySettlementRequests) != 1 {
+				t.Fatalf("GatewaySettlementRequests=%v, want one tier2 audit evidence row", r.GatewaySettlementRequests)
+			}
+			evidence := r.GatewaySettlementRequests[0]
+			if evidence.RequestID != "h_"+tc.name || evidence.Outcome != tc.code || evidence.TotalTokens != 0 || evidence.ReservationStatus != "refunded" {
+				t.Fatalf("gateway audit evidence = %+v, want request %s zero-token refunded", evidence, tc.code)
+			}
+		})
+	}
+}
+
+func TestRunNoProviderAuditEvidenceDoesNotBecomeI1Orphan(t *testing.T) {
+	gwPath := newTestGatewayDB(t)
+	coordPath := newTestCoordDB(t)
+	startUTC := time.Date(2026, 7, 9, 15, 0, 0, 0, time.UTC)
+	endUTC := startUTC.Add(10 * time.Second)
+	insertGwRow(t, gwPath, "h_503_run", "acct-A", 0, "no_provider_available", startUTC.Add(time.Second))
+	insertQuotaReservation(t, gwPath, "h_503_run", "acct-A", "refunded", startUTC.Add(time.Second))
+
+	results := []buyer.Result{{
+		RequestID:  "h_503_run",
+		Model:      "test-model",
+		Outcome:    "http_error",
+		HTTPStatus: http.StatusServiceUnavailable,
+		StartUTC:   startUTC.Add(time.Second),
+		EndUTC:     startUTC.Add(2 * time.Second),
+	}}
+
+	r, err := Run(makeScenario(coordPath, gwPath), results, startUTC, endUTC)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(r.MatchedSuccesses) != 0 {
+		t.Fatalf("failed harness 503 must not produce matched success pairs, got %d", len(r.MatchedSuccesses))
+	}
+	if len(r.UnmatchedGatewayOKRows) != 0 {
+		t.Fatalf("refunded no-provider audit row must not be reported as I1 gateway orphan, got %v", r.UnmatchedGatewayOKRows)
+	}
+	if len(r.GatewaySettlementRequests) != 1 {
+		t.Fatalf("GatewaySettlementRequests=%v, want one no-provider audit evidence row", r.GatewaySettlementRequests)
+	}
+	evidence := r.GatewaySettlementRequests[0]
+	if evidence.RequestID != "h_503_run" || evidence.AccountID != "acct-A" || evidence.Outcome != "no_provider_available" || evidence.TotalTokens != 0 || evidence.ReservationStatus != "refunded" {
+		t.Fatalf("gateway audit evidence = %+v, want acct/request no_provider zero-token refunded", evidence)
+	}
+}
+
+func TestRunTier2AuditEvidenceDoesNotBecomeI1Orphan(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{name: "503_hash_verified_required", status: http.StatusServiceUnavailable, code: "tier2_hash_verified_required"},
+		{name: "503_hash_mismatch", status: http.StatusServiceUnavailable, code: "tier2_hash_mismatch"},
+		{name: "503_encrypted_leg_required", status: http.StatusServiceUnavailable, code: "tier2_encrypted_leg_required"},
+		{name: "503_attestation_required", status: http.StatusServiceUnavailable, code: "tier2_attestation_required"},
+		{name: "400_hard_pin_predicate_failed", status: http.StatusBadRequest, code: "tier2_hard_pin_predicate_failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gwPath := newTestGatewayDB(t)
+			coordPath := newTestCoordDB(t)
+			startUTC := time.Date(2026, 7, 9, 15, 0, 0, 0, time.UTC)
+			endUTC := startUTC.Add(10 * time.Second)
+			requestID := "h_tier2_" + tc.name
+			insertGwRow(t, gwPath, requestID, "acct-A", 0, tc.code, startUTC.Add(time.Second))
+			insertQuotaReservation(t, gwPath, requestID, "acct-A", "refunded", startUTC.Add(time.Second))
+
+			results := []buyer.Result{{
+				RequestID:  requestID,
+				Model:      "test-model",
+				Outcome:    "http_error",
+				HTTPStatus: tc.status,
+				StartUTC:   startUTC.Add(time.Second),
+				EndUTC:     startUTC.Add(2 * time.Second),
+			}}
+
+			r, err := Run(makeScenario(coordPath, gwPath), results, startUTC, endUTC)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(r.MatchedSuccesses) != 0 {
+				t.Fatalf("failed harness tier2 response must not produce matched success pairs, got %d", len(r.MatchedSuccesses))
+			}
+			if len(r.UnmatchedGatewayOKRows) != 0 {
+				t.Fatalf("refunded tier2 audit row must not be reported as I1 gateway orphan, got %v", r.UnmatchedGatewayOKRows)
+			}
+			if len(r.GatewaySettlementRequests) != 1 {
+				t.Fatalf("GatewaySettlementRequests=%v, want one tier2 audit evidence row", r.GatewaySettlementRequests)
+			}
+			evidence := r.GatewaySettlementRequests[0]
+			if evidence.RequestID != requestID || evidence.AccountID != "acct-A" || evidence.Outcome != tc.code || evidence.TotalTokens != 0 || evidence.ReservationStatus != "refunded" {
+				t.Fatalf("gateway audit evidence = %+v, want acct/request %s zero-token refunded", evidence, tc.code)
 			}
 		})
 	}
@@ -1337,11 +1526,21 @@ func newTestGatewayDB(t *testing.T) string {
 	if _, err := db.Exec(`CREATE TABLE usage_events (
 		request_id        TEXT NOT NULL,
 		account_id        TEXT NOT NULL DEFAULT '',
+		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
 		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		total_tokens      INTEGER NOT NULL DEFAULT 0,
 		outcome           TEXT NOT NULL,
 		created_at        TEXT NOT NULL
 	)`); err != nil {
 		t.Fatalf("create usage_events: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE quota_reservations (
+		request_id TEXT NOT NULL,
+		account_id TEXT NOT NULL DEFAULT '',
+		status     TEXT NOT NULL,
+		created_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create quota_reservations: %v", err)
 	}
 	return path
 }
@@ -1354,10 +1553,25 @@ func insertGwRow(t *testing.T, path, requestID, accountID string, completionToke
 	}
 	defer db.Close()
 	if _, err := db.Exec(
-		`INSERT INTO usage_events(request_id, account_id, completion_tokens, outcome, created_at) VALUES (?, ?, ?, ?, ?)`,
-		requestID, accountID, completionTokens, outcome, createdAt.UTC().Format(time.RFC3339Nano),
+		`INSERT INTO usage_events(request_id, account_id, completion_tokens, total_tokens, outcome, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		requestID, accountID, completionTokens, completionTokens, outcome, createdAt.UTC().Format(time.RFC3339Nano),
 	); err != nil {
 		t.Fatalf("insert gw row: %v", err)
+	}
+}
+
+func insertQuotaReservation(t *testing.T, path, requestID, accountID, status string, createdAt time.Time) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open gateway db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(
+		`INSERT INTO quota_reservations(request_id, account_id, status, created_at) VALUES (?, ?, ?, ?)`,
+		requestID, accountID, status, createdAt.UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatalf("insert quota reservation: %v", err)
 	}
 }
 
