@@ -3503,6 +3503,38 @@ func TestNonStreamingSanitizesInvalidCachedPromptTokensWithoutRejectingUsage(t *
 	}
 }
 
+// TestNonStreamingOverCapUsageClampsInsteadOfRejecting is the non-streaming
+// analog of the over-cap clamp fix (2026-07-09 canary-probe finding): a prompt
+// whose provider-reported tokens exceed the reservation cap (completion within
+// max_tokens) settles provider_reported bounded to the cap, and the buyer still
+// receives the provider's actual usage counts — instead of a rejection.
+func TestNonStreamingOverCapUsageClampsInsteadOfRejecting(t *testing.T) {
+	body := `{"model":"llama","max_tokens":5,"messages":[{"role":"user","content":"ok"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		responseBody := `{"id":"chatcmpl_overcap","usage":{"prompt_tokens":200,"completion_tokens":1,"total_tokens":201},"choices":[{"message":{"content":"ok"}}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, responseBody), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_overcap_nonstream")
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	// Visibility: buyer sees the provider's actual prompt count, not a rejection.
+	if !strings.Contains(resp.Body.String(), `"prompt_tokens":200`) {
+		t.Fatalf("over-cap usage was not forwarded to buyer: %s", resp.Body.String())
+	}
+	capTokens := promptCapTokens([]byte(body)) + 5
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_overcap_nonstream")
+	if outcome != "ok" || source != "provider_reported" || completion != 1 || prompt != capTokens-1 {
+		t.Fatalf("usage event outcome/source/prompt/completion = %s/%s/%d/%d, want ok/provider_reported/%d/1 (bounded to cap=%d)", outcome, source, prompt, completion, capTokens-1, capTokens)
+	}
+}
+
 func TestNonStreamingSynthesizesCompleteUsageWhenProviderUsageAbsent(t *testing.T) {
 	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"legacy usage"}]}`
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
