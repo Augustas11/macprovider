@@ -18,6 +18,67 @@ final class ChatCompletionRequestTests: XCTestCase {
         }
     }
 
+    // Default aliases: [] preserves prior behavior — a non-matching model still 404s.
+    func testDefaultEmptyAliasesStillReturnsNotFound() throws {
+        let request = try makeRequest(model: "mlx-community/Other-Model")
+
+        XCTAssertThrowsError(try request.validateModelMatches("qwen3-coder-30b-a3b-instruct", aliases: [])) { error in
+            let apiError = error as? APIError
+            XCTAssertEqual(apiError?.status, 404)
+            XCTAssertEqual(apiError?.code, "model_not_found")
+        }
+    }
+
+    // Request model equals the loaded id → passes even with aliases present.
+    func testLoadedIDMatchWithAliasesPresent() throws {
+        let request = try makeRequest(model: "qwen3-coder-30b-a3b-instruct")
+
+        XCTAssertNoThrow(try request.validateModelMatches(
+            "qwen3-coder-30b-a3b-instruct",
+            aliases: ["mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"]
+        ))
+    }
+
+    // Request model equals an alias entry (ascii case-insensitive) → passes.
+    func testAliasMatchIsAsciiCaseInsensitive() throws {
+        let request = try makeRequest(model: "MLX-COMMUNITY/qwen3-coder-30b-a3b-instruct-4bit")
+
+        XCTAssertNoThrow(try request.validateModelMatches(
+            "qwen3-coder-30b-a3b-instruct",
+            aliases: ["mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"]
+        ))
+    }
+
+    // Request model matches neither the loaded id nor any alias → 404.
+    func testNeitherLoadedNorAliasReturnsNotFound() throws {
+        let request = try makeRequest(model: "some-other-model")
+
+        XCTAssertThrowsError(try request.validateModelMatches(
+            "qwen3-coder-30b-a3b-instruct",
+            aliases: ["mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"]
+        )) { error in
+            let apiError = error as? APIError
+            XCTAssertEqual(apiError?.status, 404)
+            XCTAssertEqual(apiError?.code, "model_not_found")
+        }
+    }
+
+    // Empty-string alias entries must never match (no accidental match on "").
+    // The request model is non-empty (parse rejects ""), and an all-empty alias
+    // list must be treated as no alias at all → 404.
+    func testEmptyStringAliasEntryIsIgnored() throws {
+        let request = try makeRequest(model: "unrelated-model")
+
+        XCTAssertThrowsError(try request.validateModelMatches(
+            "qwen3-coder-30b-a3b-instruct",
+            aliases: [""]
+        )) { error in
+            let apiError = error as? APIError
+            XCTAssertEqual(apiError?.status, 404)
+            XCTAssertEqual(apiError?.code, "model_not_found")
+        }
+    }
+
     func testFractionalMaxTokensIsRejected() throws {
         let body: [String: Any] = [
             "model": "m",

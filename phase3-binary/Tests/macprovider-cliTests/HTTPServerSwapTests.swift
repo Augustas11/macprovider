@@ -172,6 +172,72 @@ final class HTTPServerSwapTests: XCTestCase {
         }
     }
 
+    // ModelRuntime gate (BUILD_SPEC relay_serve_model_id_alias): the
+    // coordinator-advertised catalog id is accepted as an alias by
+    // acquireRequestHandle while the configured model is the one loaded.
+    func testCatalogAliasAcceptedByAcquireHandleWhenConfiguredLoaded() async throws {
+        let runtime = ModelRuntime(
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            modelHash: "hash-a",
+            warmSwapEnabled: false,
+            catalogModelIDAlias: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            loader: { _ in throw HTTPServerSwapTestError.unexpectedContainerLoader },
+            testLoader: { target in (target, "hash-a") },
+            testCompletion: { _, _ in
+                CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            }
+        )
+        let request = try makeRequest(model: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit")
+        let handle = try await runtime.acquireRequestHandle(request)
+        await runtime.unregisterInFlight(handle.registrationID)
+    }
+
+    // The configured served id itself is still accepted (unchanged behavior).
+    func testConfiguredModelIDStillAcceptedWithAliasConfigured() async throws {
+        let runtime = ModelRuntime(
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            modelHash: "hash-a",
+            warmSwapEnabled: false,
+            catalogModelIDAlias: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            loader: { _ in throw HTTPServerSwapTestError.unexpectedContainerLoader },
+            testLoader: { target in (target, "hash-a") },
+            testCompletion: { _, _ in
+                CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            }
+        )
+        let request = try makeRequest(model: "qwen3-coder-30b-a3b-instruct")
+        let handle = try await runtime.acquireRequestHandle(request)
+        await runtime.unregisterInFlight(handle.registrationID)
+    }
+
+    // After a warm-swap loads a DIFFERENT model, the alias must NOT apply: the
+    // configured model is no longer the one loaded, so the catalog-id request is
+    // rejected 404 (mirrors coordinatorWireModelID's servedModelID == loadedModelID
+    // guard).
+    func testCatalogAliasRejectedByAcquireHandleAfterWarmSwap() async throws {
+        let runtime = ModelRuntime(
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            modelHash: "hash-a",
+            warmSwapEnabled: true,
+            catalogModelIDAlias: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            loader: { _ in throw HTTPServerSwapTestError.unexpectedContainerLoader },
+            testLoader: { target in (target, "hash-b") }
+        )
+
+        let swapTask = try await runtime.beginSwap(targetModelID: "some-other-model")
+        try await swapTask.value
+
+        let request = try makeRequest(model: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit")
+        do {
+            let handle = try await runtime.acquireRequestHandle(request)
+            await runtime.unregisterInFlight(handle.registrationID)
+            XCTFail("catalog alias must not apply after warm-swap to a different model")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 404)
+            XCTAssertEqual(error.code, "model_not_found")
+        }
+    }
+
     private func makeRequest(model: String) throws -> ChatCompletionRequest {
         let body: [String: Any] = [
             "model": model,

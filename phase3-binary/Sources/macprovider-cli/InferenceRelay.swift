@@ -1,6 +1,17 @@
 import Foundation
 import MacProviderCore
 
+/// Normalizes an optional catalog-alias string into the `aliases:` array shape
+/// expected by `ChatCompletionRequest.validateModelMatches`. Trims whitespace
+/// and newlines to match the normalization applied to
+/// `catalogModelIDForCoordinator` in CoordinatorClient (see lines 324-327);
+/// returns `[]` for nil/empty so the default no-alias behavior is preserved.
+func modelIDAliasList(_ value: String?) -> [String] {
+    guard let value else { return [] }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? [] : [trimmed]
+}
+
 actor InferenceRelay {
     typealias SendFrame = @Sendable (sending [String: Any]) async throws -> Void
     typealias TrustDemotion = @Sendable (_ reason: String) async -> Void
@@ -13,6 +24,7 @@ actor InferenceRelay {
     private let modelRuntime: any ModelRuntimeServing
     private let providerStatus: ProviderStatus
     private let loadedModelID: String?
+    private let catalogModelIDAlias: String?
     private let warmSwapEnabled: Bool
     private let maxActiveRequests: Int
     private let maxBodyBytes: Int
@@ -30,6 +42,7 @@ actor InferenceRelay {
         modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
         loadedModelID: String?,
+        catalogModelIDAlias: String? = nil,
         warmSwapEnabled: Bool = false,
         maxActiveRequests: Int,
         maxBodyBytes: Int,
@@ -43,6 +56,7 @@ actor InferenceRelay {
         self.modelRuntime = modelRuntime
         self.providerStatus = providerStatus
         self.loadedModelID = loadedModelID
+        self.catalogModelIDAlias = catalogModelIDAlias
         self.warmSwapEnabled = warmSwapEnabled
         self.maxActiveRequests = max(1, maxActiveRequests)
         self.maxBodyBytes = max(1, maxBodyBytes)
@@ -138,7 +152,7 @@ actor InferenceRelay {
         let state = RelayRequestState()
         let receiptBuilder = receiptBuilder
         let receiptProviderID = receiptProviderID
-        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, warmSwapEnabled, sendFrame, tier2Session, state, settlementMetadata, streamInterval] in
+        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, catalogModelIDAlias, warmSwapEnabled, sendFrame, tier2Session, state, settlementMetadata, streamInterval] in
             await Self.process(
                 requestID: requestID,
                 body: body,
@@ -147,6 +161,7 @@ actor InferenceRelay {
                 modelRuntime: modelRuntime,
                 providerStatus: providerStatus,
                 loadedModelID: loadedModelID,
+                catalogModelIDAlias: catalogModelIDAlias,
                 warmSwapEnabled: warmSwapEnabled,
                 tier2Session: tier2Session,
                 receiptBuilder: receiptBuilder,
@@ -230,6 +245,7 @@ actor InferenceRelay {
         modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
         loadedModelID: String?,
+        catalogModelIDAlias: String?,
         warmSwapEnabled: Bool,
         tier2Session: Tier2ProviderSession?,
         receiptBuilder: ReceiptBuilder?,
@@ -251,7 +267,16 @@ actor InferenceRelay {
             let validationModelID = warmSwapEnabled
                 ? await modelRuntime.currentSnapshot().modelID
                 : loadedModelID
-            try request.validateModelMatches(validationModelID)
+            // Accept the coordinator-advertised catalog id as an alias only while
+            // the configured model is the one currently served — the exact predicate
+            // coordinatorWireModelID uses to decide whether to advertise it
+            // (servedModelID == loadedModelID). This holds even when warm-swap is
+            // enabled but the configured model is still loaded; after a swap to a
+            // different model the alias no longer applies.
+            let relayAliases = (validationModelID != nil && validationModelID == loadedModelID)
+                ? modelIDAliasList(catalogModelIDAlias)
+                : []
+            try request.validateModelMatches(validationModelID, aliases: relayAliases)
         if stream {
             let trace = EgressPerfTrace()
             completionResult = try await EgressPerfTraceKey.$current.withValue(trace) {

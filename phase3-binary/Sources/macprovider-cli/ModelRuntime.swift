@@ -320,6 +320,14 @@ actor ModelRuntime: ModelRuntimeServing {
     private var state: SwapState = .ready
     private var targetModelID: String?
     private var currentModelID: String?
+    // The model id this runtime was configured to serve (constant across
+    // warm-swaps). Used to gate the catalog-id alias so the alias only applies
+    // while the configured model is the one currently loaded.
+    private let modelID: String?
+    // Coordinator-advertised catalog id (e.g. mlx-community/…) accepted as an
+    // alias for the configured served model. nil when unset. See BUILD_SPEC
+    // relay_serve_model_id_alias.
+    private let catalogModelIDAlias: String?
     private var currentContainer: ModelContainer?
     private var currentDraftModelID: String?
     private var currentDraftTargetModelID: String?
@@ -392,10 +400,13 @@ actor ModelRuntime: ModelRuntimeServing {
         prefillStepSize: Int = 512,
         maxBatch: Int = 1,
         warmSwapEnabled: Bool = false,
-        swapDrainTimeoutSeconds: Int = 30
+        swapDrainTimeoutSeconds: Int = 30,
+        catalogModelIDAlias: String? = nil
     ) async throws {
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
+        self.modelID = modelID
+        self.catalogModelIDAlias = catalogModelIDAlias
         self.currentModelID = modelID
         self.currentDraftModelID = nil
         self.currentDraftTargetModelID = nil
@@ -485,6 +496,7 @@ actor ModelRuntime: ModelRuntimeServing {
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
         providerStatus: ProviderStatus? = nil,
+        catalogModelIDAlias: String? = nil,
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
         testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
@@ -492,6 +504,8 @@ actor ModelRuntime: ModelRuntimeServing {
         testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
     ) {
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
+        self.modelID = modelID
+        self.catalogModelIDAlias = catalogModelIDAlias
         self.currentModelID = modelID
         self.currentContainer = nil
         self.currentDraftModelID = normalizedDraftModelID
@@ -884,7 +898,14 @@ actor ModelRuntime: ModelRuntimeServing {
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
         let snapshot = requestStartSnapshot()
         try Self.validateReady(snapshot.state)
-        try request.validateModelMatches(snapshot.modelID)
+        // Accept the coordinator-advertised catalog id as an alias only while the
+        // configured model is the one currently loaded (mirrors
+        // coordinatorWireModelID's servedModelID == loadedModelID guard). After a
+        // warm-swap to a different model the alias must not apply.
+        let aliases = (snapshot.modelID != nil && snapshot.modelID == self.modelID)
+            ? modelIDAliasList(catalogModelIDAlias)
+            : []
+        try request.validateModelMatches(snapshot.modelID, aliases: aliases)
         try Self.validateToolChoiceScope(request)
         let drainCancelled = DrainCancelToken()
         let registrationID = registerInFlight { drainCancelled.fire() }
