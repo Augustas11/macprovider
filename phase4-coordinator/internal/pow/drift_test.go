@@ -51,27 +51,100 @@ func TestEvaluateHeartbeatTPSDrift(t *testing.T) {
 	evaluator.now = func() time.Time { return time.Unix(0, 0) }
 
 	alerts := evaluator.EvaluateHeartbeat(context.Background(), pool.Provider{
-		ProviderID:            "mac",
-		AssignedID:            "sess-1",
-		ModelID:               "qwen3-coder-30b-a3b-instruct",
-		ThroughputTPSEstimate: 10,
-		HashStatus:            pool.HashStatusVerified,
-		ModelHash:             "abc123",
+		ProviderID:              "mac",
+		AssignedID:              "sess-1",
+		ModelID:                 "qwen3-coder-30b-a3b-instruct",
+		ThroughputTPSEstimate:   0.1,
+		RequestsServedSinceLast: 2,
+		ThroughputTPSSinceLast:  10,
+		HashStatus:              pool.HashStatusVerified,
+		ModelHash:               "abc123",
 	})
 	if len(alerts) != 1 || alerts[0].Signal != "tps" {
 		t.Fatalf("alerts = %#v, want single tps alert", alerts)
 	}
 
 	alerts = evaluator.EvaluateHeartbeat(context.Background(), pool.Provider{
-		ProviderID:            "mac",
-		AssignedID:            "sess-1",
-		ModelID:               "qwen3-coder-30b-a3b-instruct",
-		ThroughputTPSEstimate: 15,
-		HashStatus:            pool.HashStatusVerified,
-		ModelHash:             "abc123",
+		ProviderID:              "mac",
+		AssignedID:              "sess-1",
+		ModelID:                 "qwen3-coder-30b-a3b-instruct",
+		ThroughputTPSEstimate:   0.1,
+		RequestsServedSinceLast: 2,
+		ThroughputTPSSinceLast:  15,
+		HashStatus:              pool.HashStatusVerified,
+		ModelHash:               "abc123",
 	})
 	if len(alerts) != 0 {
 		t.Fatalf("expected no alert above threshold, got %#v", alerts)
+	}
+}
+
+func TestEvaluateHeartbeatTPSDriftIgnoresIdleCapacityEstimate(t *testing.T) {
+	t.Parallel()
+	catalog := mustCatalog(t, `{
+			"version":"test","source":"operator_curated_autotune_candidate_catalog",
+			"rows":{"qwen3-coder-30b-a3b-instruct":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","min_ram_gb":28,"bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500}}}
+		}`)
+	evidence := autotune.VerifiedEvidence{
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{{
+			ModelKey:     "qwen3-coder-30b-a3b-instruct",
+			ModelID:      "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+			SustainedTPS: 20,
+		}},
+	}
+	evaluator := NewEvaluator(TelemetryDriftConfig{
+		Enabled:           true,
+		TPSRatioThreshold: 0.70,
+		TPSMinAbsolute:    5,
+		AlertCooldown:     time.Second,
+	}, catalog, stubEvidence{evidence: evidence, ok: true}, 30*24*time.Hour)
+	evaluator.now = func() time.Time { return time.Unix(0, 0) }
+
+	alerts := evaluator.EvaluateHeartbeat(context.Background(), pool.Provider{
+		ProviderID:            "mac",
+		AssignedID:            "sess-1",
+		ModelID:               "qwen3-coder-30b-a3b-instruct",
+		ThroughputTPSEstimate: 0.123,
+		HashStatus:            pool.HashStatusVerified,
+	})
+	if len(alerts) != 0 {
+		t.Fatalf("idle heartbeat alerts = %#v, want none", alerts)
+	}
+}
+
+func TestEvaluateHeartbeatTPSDriftIgnoresSingleRequestWindow(t *testing.T) {
+	t.Parallel()
+	catalog := mustCatalog(t, `{
+			"version":"test","source":"operator_curated_autotune_candidate_catalog",
+			"rows":{"qwen3-coder-30b-a3b-instruct":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","min_ram_gb":28,"bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500}}}
+		}`)
+	evidence := autotune.VerifiedEvidence{
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{{
+			ModelKey:     "qwen3-coder-30b-a3b-instruct",
+			ModelID:      "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+			SustainedTPS: 20,
+		}},
+	}
+	evaluator := NewEvaluator(TelemetryDriftConfig{
+		Enabled:           true,
+		TPSRatioThreshold: 0.70,
+		TPSMinAbsolute:    5,
+		AlertCooldown:     time.Second,
+	}, catalog, stubEvidence{evidence: evidence, ok: true}, 30*24*time.Hour)
+	evaluator.now = func() time.Time { return time.Unix(0, 0) }
+
+	alerts := evaluator.EvaluateHeartbeat(context.Background(), pool.Provider{
+		ProviderID:              "mac",
+		AssignedID:              "sess-1",
+		ModelID:                 "qwen3-coder-30b-a3b-instruct",
+		RequestsServedSinceLast: 1,
+		ThroughputTPSSinceLast:  1.5,
+		HashStatus:              pool.HashStatusVerified,
+	})
+	if len(alerts) != 0 {
+		t.Fatalf("single-request heartbeat alerts = %#v, want none", alerts)
 	}
 }
 
@@ -101,11 +174,45 @@ func TestEvaluateHeartbeatHashArtifactDrift(t *testing.T) {
 		AssignedID:            "sess-1",
 		ModelID:               "qwen3-coder-30b-a3b-instruct",
 		ThroughputTPSEstimate: 20,
-		HashStatus:            pool.HashStatusVerified,
+		HashStatus:            pool.HashStatusUncatalogued,
 		ModelHash:             "cafebabe",
 	})
 	if len(alerts) != 1 || alerts[0].Signal != "hash_artifact" {
 		t.Fatalf("alerts = %#v, want hash_artifact", alerts)
+	}
+}
+
+func TestEvaluateHeartbeatSuppressesArtifactDriftForVerifiedTier2Hash(t *testing.T) {
+	t.Parallel()
+	catalog := mustCatalog(t, `{
+			"version":"test","source":"operator_curated_autotune_candidate_catalog",
+			"rows":{"qwen3-coder-30b-a3b-instruct":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","min_ram_gb":28,"bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500}}}
+		}`)
+	evidence := autotune.VerifiedEvidence{
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{{
+			ModelKey:       "qwen3-coder-30b-a3b-instruct",
+			SustainedTPS:   20,
+			ArtifactSHA256: "snapshot-artifact-hash",
+		}},
+	}
+	evaluator := NewEvaluator(TelemetryDriftConfig{
+		Enabled:                  true,
+		HashAlertOnArtifactDrift: true,
+		AlertCooldown:            time.Second,
+	}, catalog, stubEvidence{evidence: evidence, ok: true}, 30*24*time.Hour)
+	evaluator.now = func() time.Time { return time.Unix(0, 0) }
+
+	alerts := evaluator.EvaluateHeartbeat(context.Background(), pool.Provider{
+		ProviderID:            "mac",
+		AssignedID:            "sess-1",
+		ModelID:               "qwen3-coder-30b-a3b-instruct",
+		ThroughputTPSEstimate: 20,
+		HashStatus:            pool.HashStatusVerified,
+		ModelHash:             "runtime-manifest-hash",
+	})
+	if len(alerts) != 0 {
+		t.Fatalf("expected verified Tier2 hash to suppress artifact drift, got %#v", alerts)
 	}
 }
 
@@ -154,10 +261,12 @@ func TestTelemetryDriftCooldownSuppressesRepeat(t *testing.T) {
 	evaluator.now = func() time.Time { return now }
 
 	provider := pool.Provider{
-		ProviderID:            "mac",
-		AssignedID:            "sess-1",
-		ModelID:               "qwen3-coder-30b-a3b-instruct",
-		ThroughputTPSEstimate: 1,
+		ProviderID:              "mac",
+		AssignedID:              "sess-1",
+		ModelID:                 "qwen3-coder-30b-a3b-instruct",
+		ThroughputTPSEstimate:   1,
+		RequestsServedSinceLast: 2,
+		ThroughputTPSSinceLast:  1,
 	}
 	if alerts := evaluator.EvaluateHeartbeat(context.Background(), provider); len(alerts) != 1 {
 		t.Fatalf("first alert = %#v", alerts)

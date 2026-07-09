@@ -94,20 +94,22 @@ const (
 )
 
 type Provider struct {
-	ProviderID            string  `json:"provider_id"`
-	AssignedID            string  `json:"assigned_id"`
-	Hostname              string  `json:"hostname"`
-	ModelID               string  `json:"model_id"`
-	ModelParamsB          float64 `json:"model_params_b"`
-	RAMGB                 int     `json:"ram_gb"`
-	MaxContextTokens      int     `json:"max_context_tokens"`
-	MaxConcurrency        int     `json:"max_concurrency"`
-	SlotsFree             int     `json:"slots_free"`
-	SlotsTotal            int     `json:"slots_total"`
-	ThroughputTPSEstimate float64 `json:"throughput_tps_estimate"`
-	ModelLoadTimeMs       int64   `json:"model_load_time_ms,omitempty"`
-	EndpointURL           string  `json:"endpoint_url"`
-	Tier                  Tier    `json:"tier"`
+	ProviderID              string  `json:"provider_id"`
+	AssignedID              string  `json:"assigned_id"`
+	Hostname                string  `json:"hostname"`
+	ModelID                 string  `json:"model_id"`
+	ModelParamsB            float64 `json:"model_params_b"`
+	RAMGB                   int     `json:"ram_gb"`
+	MaxContextTokens        int     `json:"max_context_tokens"`
+	MaxConcurrency          int     `json:"max_concurrency"`
+	SlotsFree               int     `json:"slots_free"`
+	SlotsTotal              int     `json:"slots_total"`
+	ThroughputTPSEstimate   float64 `json:"throughput_tps_estimate"`
+	RequestsServedSinceLast int     `json:"-"`
+	ThroughputTPSSinceLast  float64 `json:"-"`
+	ModelLoadTimeMs         int64   `json:"model_load_time_ms,omitempty"`
+	EndpointURL             string  `json:"endpoint_url"`
+	Tier                    Tier    `json:"tier"`
 	// AuthState records how the connect was admitted. Empty string
 	// preserves pre-v0.8.3 behavior (routable, billable). Set to
 	// AuthBearerlessDuplicate by the duplicate-tokenless admit path
@@ -1266,15 +1268,17 @@ type ReceiptRotationEvent struct {
 type ReceiptRotationEventEmitter func(event ReceiptRotationEvent)
 
 type HeartbeatUpdate struct {
-	Status                State
-	ModelID               string
-	ModelParamsB          float64
-	RAMGB                 int
-	MaxContextTokens      int
-	MaxConcurrency        int
-	SlotsFree             int
-	SlotsTotal            int
-	ThroughputTPSEstimate float64
+	Status                  State
+	ModelID                 string
+	ModelParamsB            float64
+	RAMGB                   int
+	MaxContextTokens        int
+	MaxConcurrency          int
+	SlotsFree               int
+	SlotsTotal              int
+	ThroughputTPSEstimate   float64
+	RequestsServedSinceLast int
+	ThroughputTPSSinceLast  float64
 	// ModelHash is the raw lowercase hex hash from the heartbeat when
 	// ModelHashPresent is true; ignored otherwise. Populated from the SPEC-011
 	// v0.5 optional heartbeat field per SPEC-002 v1.3.5 §7.1 R-7.1.4.
@@ -1340,6 +1344,8 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.SlotsFree = hb.SlotsFree
 	p.SlotsTotal = hb.SlotsTotal
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
+	p.RequestsServedSinceLast = hb.RequestsServedSinceLast
+	p.ThroughputTPSSinceLast = hb.ThroughputTPSSinceLast
 	if len(hb.LastAutoupdateEvent) > 0 {
 		p.LastAutoupdateEvent = append(p.LastAutoupdateEvent[:0], hb.LastAutoupdateEvent...)
 	}

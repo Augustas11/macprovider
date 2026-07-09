@@ -1989,7 +1989,7 @@ func (s *Server) runWarmupGate(provider pool.Provider) {
 
 func (s *Server) runWarmupGateAttempt(provider pool.Provider, attempt int) bool {
 	body, err := json.Marshal(map[string]any{
-		"model": provider.ModelID,
+		"model": providerProbeModelID(provider),
 		"messages": []map[string]string{{
 			"role":    "user",
 			"content": "Reply with ok.",
@@ -2006,6 +2006,13 @@ func (s *Server) runWarmupGateAttempt(provider pool.Provider, attempt int) bool 
 		return s.runHTTPWarmupGateAttempt(ctx, provider, body)
 	}
 	return s.runWSWarmupGateAttempt(ctx, provider, attempt, body)
+}
+
+func providerProbeModelID(provider pool.Provider) string {
+	if modelKey := strings.TrimSpace(provider.MaxAdmittedModelKey); modelKey != "" {
+		return modelKey
+	}
+	return provider.ModelID
 }
 
 func (s *Server) runWSWarmupGateAttempt(ctx context.Context, provider pool.Provider, attempt int, body []byte) bool {
@@ -2252,8 +2259,9 @@ func (s *Server) deleteCanarySanction(providerID string) {
 }
 
 func (s *Server) runCanaryProbeAttempt(provider pool.Provider) canaryAttemptResult {
-	challenges, modelClassBank := s.cfg.Pool.CanaryChallengesForModel(provider.ModelID)
-	probe, err := buildCanaryProbe(provider.ModelID, s.canaryMaxTokens(), challenges, modelClassBank)
+	probeModelID := providerProbeModelID(provider)
+	challenges, modelClassBank := s.cfg.Pool.CanaryChallengesForModel(probeModelID)
+	probe, err := buildCanaryProbe(probeModelID, s.canaryMaxTokens(), challenges, modelClassBank)
 	if err != nil {
 		return canaryAttemptResult{outcome: canaryProbeSkip}
 	}
@@ -2685,22 +2693,24 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		state = pool.StateDegraded
 	}
 	entry, gap, ok := s.pool.ApplyHeartbeat(providerID, assignedID, pool.HeartbeatUpdate{
-		Status:                state,
-		ModelID:               hb.ModelID,
-		ModelParamsB:          hb.ModelParamsB,
-		RAMGB:                 hb.RAMGB,
-		MaxContextTokens:      hb.MaxContextTokens,
-		MaxConcurrency:        hb.MaxConcurrency,
-		SlotsFree:             hb.SlotsFree,
-		SlotsTotal:            hb.SlotsTotal,
-		ThroughputTPSEstimate: hb.ThroughputTPSEstimate,
-		ModelHash:             hb.ModelHash,
-		ModelHashPresent:      presence.ModelHash,
-		Loading:               hb.Loading,
-		LoadingPresent:        presence.Loading,
-		LastAutoupdateEvent:   hb.LastAutoupdateEvent,
-		HardwareCapacity:      poolHardwareCapacity(hb.HardwareSummary),
-		At:                    s.now(),
+		Status:                  state,
+		ModelID:                 hb.ModelID,
+		ModelParamsB:            hb.ModelParamsB,
+		RAMGB:                   hb.RAMGB,
+		MaxContextTokens:        hb.MaxContextTokens,
+		MaxConcurrency:          hb.MaxConcurrency,
+		SlotsFree:               hb.SlotsFree,
+		SlotsTotal:              hb.SlotsTotal,
+		ThroughputTPSEstimate:   hb.ThroughputTPSEstimate,
+		RequestsServedSinceLast: hb.RequestsServedSinceLast,
+		ThroughputTPSSinceLast:  hb.ThroughputTPSSinceLast,
+		ModelHash:               hb.ModelHash,
+		ModelHashPresent:        presence.ModelHash,
+		Loading:                 hb.Loading,
+		LoadingPresent:          presence.Loading,
+		LastAutoupdateEvent:     hb.LastAutoupdateEvent,
+		HardwareCapacity:        poolHardwareCapacity(hb.HardwareSummary),
+		At:                      s.now(),
 	})
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Msg("heartbeat for unknown provider")
