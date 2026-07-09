@@ -348,7 +348,29 @@ final class Spec028PlumbingTests: XCTestCase {
     func testTokenizerArtifactFingerprintBindsTokenizerFiles() throws {
         let first = try makeTokenizerSnapshot(tokenizerJSON: #"{"model":"same"}"#, configJSON: #"{"eos_token":"</s>"}"#)
         let matching = try makeTokenizerSnapshot(tokenizerJSON: #"{"model":"same"}"#, configJSON: #"{"eos_token":"</s>"}"#)
+        let matchingExceptChatTemplate = try makeTokenizerSnapshot(
+            tokenizerJSON: #"{"model":"same"}"#,
+            configJSON: #"{"eos_token":"</s>","chat_template":"different default assistant prompt"}"#
+        )
+        let matchingFastTokenizerWithRedundantMerges = try makeTokenizerSnapshot(
+            tokenizerJSON: #"{"model":"same"}"#,
+            configJSON: #"{"eos_token":"</s>"}"#,
+            mergesTXT: "redundant BPE sidecar ignored when tokenizer.json is present"
+        )
+        let divergentConfig = try makeTokenizerSnapshot(tokenizerJSON: #"{"model":"same"}"#, configJSON: #"{"eos_token":"<eos>"}"#)
         let divergent = try makeTokenizerSnapshot(tokenizerJSON: #"{"model":"different"}"#, configJSON: #"{"eos_token":"</s>"}"#)
+        let slowTokenizer = try makeTokenizerSnapshot(
+            tokenizerJSON: nil,
+            configJSON: #"{"eos_token":"</s>"}"#,
+            vocabJSON: #"{"hello":0}"#,
+            mergesTXT: "h e"
+        )
+        let divergentSlowTokenizer = try makeTokenizerSnapshot(
+            tokenizerJSON: nil,
+            configJSON: #"{"eos_token":"</s>"}"#,
+            vocabJSON: #"{"hello":0}"#,
+            mergesTXT: "x y"
+        )
         let empty = FileManager.default.temporaryDirectory
             .appendingPathComponent("spec028-empty-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
@@ -357,9 +379,25 @@ final class Spec028PlumbingTests: XCTestCase {
             try ModelRuntime.tokenizerArtifactFingerprint(in: first),
             try ModelRuntime.tokenizerArtifactFingerprint(in: matching)
         )
+        XCTAssertEqual(
+            try ModelRuntime.tokenizerArtifactFingerprint(in: first),
+            try ModelRuntime.tokenizerArtifactFingerprint(in: matchingExceptChatTemplate)
+        )
+        XCTAssertEqual(
+            try ModelRuntime.tokenizerArtifactFingerprint(in: first),
+            try ModelRuntime.tokenizerArtifactFingerprint(in: matchingFastTokenizerWithRedundantMerges)
+        )
+        XCTAssertNotEqual(
+            try ModelRuntime.tokenizerArtifactFingerprint(in: first),
+            try ModelRuntime.tokenizerArtifactFingerprint(in: divergentConfig)
+        )
         XCTAssertNotEqual(
             try ModelRuntime.tokenizerArtifactFingerprint(in: first),
             try ModelRuntime.tokenizerArtifactFingerprint(in: divergent)
+        )
+        XCTAssertNotEqual(
+            try ModelRuntime.tokenizerArtifactFingerprint(in: slowTokenizer),
+            try ModelRuntime.tokenizerArtifactFingerprint(in: divergentSlowTokenizer)
         )
         XCTAssertNil(try ModelRuntime.tokenizerArtifactFingerprint(in: empty))
     }
@@ -498,6 +536,51 @@ final class Spec028PlumbingTests: XCTestCase {
         XCTAssertEqual(spec.topP, baseline.topP)
         XCTAssertEqual(spec.maxTokens, baseline.maxTokens)
         XCTAssertEqual(spec.messages.map(\.content), baseline.messages.map(\.content))
+    }
+
+    func testSpec028BenchmarkEvaluationGatesTTFTRegression() throws {
+        let now = Date()
+        let evaluation = try Spec028BenchmarkEvaluation.evaluate(
+            baselineSamples: [
+                benchmarkSample(
+                    phase: "baseline",
+                    tokensPerSecond: 20,
+                    ttftMilliseconds: 100,
+                    endedAtUnixSeconds: now.timeIntervalSince1970 - 10
+                ),
+            ],
+            specSamples: [
+                benchmarkSample(
+                    phase: "spec",
+                    tokensPerSecond: 28,
+                    ttftMilliseconds: 130,
+                    draftedTokens: 100,
+                    acceptedTokens: 95,
+                    endedAtUnixSeconds: now.timeIntervalSince1970 - 5
+                ),
+            ],
+            sustainedSamples: [
+                benchmarkSample(
+                    phase: "sustained",
+                    tokensPerSecond: 27,
+                    ttftMilliseconds: 120,
+                    draftedTokens: 100,
+                    acceptedTokens: 95,
+                    endedAtUnixSeconds: now.timeIntervalSince1970
+                ),
+            ],
+            sustainedEndedAt: now,
+            lastWindowSeconds: 30,
+            recommendRatioFloor: 1.15,
+            maxP95LatencyRatio: 2.0,
+            maxP95TTFTRatio: 1.0,
+            recommendAcceptanceFloor: 0.30
+        )
+
+        XCTAssertEqual(evaluation.tpsRatio, 1.4, accuracy: 0.001)
+        XCTAssertEqual(evaluation.ttftP95Ratio ?? 0, 1.3, accuracy: 0.001)
+        XCTAssertFalse(evaluation.recommendEnable)
+        XCTAssertTrue(evaluation.recommendationReasons.contains("p95 TTFT ratio 1.300 > 1.000"))
     }
 
     func testAC10CanaryEvaluationRequiresRatioAcceptanceAndSustainedWindow() throws {
@@ -751,12 +834,25 @@ final class Spec028PlumbingTests: XCTestCase {
         return root
     }
 
-    private func makeTokenizerSnapshot(tokenizerJSON: String, configJSON: String) throws -> URL {
+    private func makeTokenizerSnapshot(
+        tokenizerJSON: String?,
+        configJSON: String,
+        vocabJSON: String? = nil,
+        mergesTXT: String? = nil
+    ) throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("spec028-tokenizer-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try Data(tokenizerJSON.utf8).write(to: root.appendingPathComponent("tokenizer.json"))
+        if let tokenizerJSON {
+            try Data(tokenizerJSON.utf8).write(to: root.appendingPathComponent("tokenizer.json"))
+        }
         try Data(configJSON.utf8).write(to: root.appendingPathComponent("tokenizer_config.json"))
+        if let vocabJSON {
+            try Data(vocabJSON.utf8).write(to: root.appendingPathComponent("vocab.json"))
+        }
+        if let mergesTXT {
+            try Data(mergesTXT.utf8).write(to: root.appendingPathComponent("merges.txt"))
+        }
         return root
     }
 
@@ -798,6 +894,29 @@ final class Spec028PlumbingTests: XCTestCase {
             acceptedTokens: acceptedTokens,
             acceptanceRate: draftedTokens > 0 ? Double(acceptedTokens) / Double(draftedTokens) : nil,
             chunks: chunks,
+            thermalState: "nominal"
+        )
+    }
+
+    private func benchmarkSample(
+        phase: String,
+        tokensPerSecond: Double,
+        ttftMilliseconds: Int64,
+        draftedTokens: Int = 0,
+        acceptedTokens: Int = 0,
+        endedAtUnixSeconds: Double
+    ) -> Spec028BenchmarkSample {
+        Spec028BenchmarkSample(
+            phase: phase,
+            promptTokens: 10,
+            completionTokens: 20,
+            elapsedSeconds: 20 / tokensPerSecond,
+            tokensPerSecond: tokensPerSecond,
+            ttftMilliseconds: ttftMilliseconds,
+            draftedTokens: draftedTokens,
+            acceptedTokens: acceptedTokens,
+            streamedChunks: 20,
+            endedAtUnixSeconds: endedAtUnixSeconds,
             thermalState: "nominal"
         )
     }
