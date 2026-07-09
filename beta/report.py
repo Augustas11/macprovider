@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import re
 import sqlite3
 import statistics
@@ -24,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+
+import spec029
 
 BETA_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = BETA_DIR / "config.yaml"
@@ -38,7 +41,7 @@ def fetch_rows(conn: sqlite3.Connection, date_iso: str) -> list[sqlite3.Row]:
     cur = conn.cursor()
     cur.row_factory = sqlite3.Row
     cur.execute(
-        "SELECT * FROM runs WHERE substr(ts_utc, 1, 10) = ? ORDER BY ts_utc",
+        "SELECT * FROM runs WHERE substr(ts_utc, 1, 10) = ? ORDER BY ts_utc, id",
         (date_iso,),
     )
     return cur.fetchall()
@@ -56,6 +59,10 @@ def median_or_none(xs: list[float]) -> float | None:
     return statistics.median(xs) if xs else None
 
 
+def row_get(row: sqlite3.Row, key: str, default=None):
+    return row[key] if key in row.keys() else default
+
+
 def summarize_per_workload(rows: list[sqlite3.Row]) -> list[dict]:
     by_name: dict[str, list[sqlite3.Row]] = {}
     for r in rows:
@@ -67,8 +74,12 @@ def summarize_per_workload(rows: list[sqlite3.Row]) -> list[dict]:
         totals = [r["total_ms"] for r in oks if r["total_ms"] is not None]
         tps = [r["throughput_tps"] for r in oks if r["throughput_tps"] is not None]
         leaks = sum(1 for r in group if r["stop_token_leak"])
+        corpus_classes = sorted({row_get(r, "corpus_class") for r in group if row_get(r, "corpus_class")})
+        ram_tiers = sorted({row_get(r, "ram_tier_key") for r in group if row_get(r, "ram_tier_key")})
         out.append({
             "name": name,
+            "corpus_class": ",".join(corpus_classes) if corpus_classes else None,
+            "ram_tiers": ",".join(ram_tiers) if ram_tiers else None,
             "n": len(group),
             "ok": len(oks),
             "fail": len(group) - len(oks),
@@ -116,6 +127,8 @@ def render(date_iso: str, rows: list[sqlite3.Row]) -> str:
     tunnel_url = rows[0]["tunnel_url"] if rows else "—"
     model = rows[0]["model"] if rows else "—"
     per_wl = summarize_per_workload(rows)
+    spec029_cells = spec029.cells_from_rows(rows)
+    spec029_summary = spec029.class_aware_report(spec029_cells, f"beta-report-{date_iso}") if spec029_cells else None
 
     parts: list[str] = []
     parts.append(f"<!doctype html><html><head><meta charset=utf-8><title>Phase 2 — {date_iso}</title><style>{CSS}</style></head><body>")
@@ -134,6 +147,7 @@ def render(date_iso: str, rows: list[sqlite3.Row]) -> str:
     parts.append("<h2>Per-workload medians</h2>")
     parts.append("<table><thead><tr>"
                  "<th>Workload</th>"
+                 "<th>Corpus</th><th>RAM tier</th>"
                  "<th class=num>N</th><th class=num>OK</th><th class=num>Fail</th>"
                  "<th class=num>Median TTFT</th><th class=num>Median total</th>"
                  "<th class=num>Median tok/s</th><th class=num>Leaks</th>"
@@ -141,6 +155,8 @@ def render(date_iso: str, rows: list[sqlite3.Row]) -> str:
     for w in per_wl:
         parts.append("<tr>")
         parts.append(f"<td>{html.escape(w['name'])}</td>")
+        parts.append(f"<td>{html.escape(w['corpus_class'] or '—')}</td>")
+        parts.append(f"<td>{html.escape(w['ram_tiers'] or '—')}</td>")
         parts.append(f"<td class=num>{w['n']}</td>")
         parts.append(f"<td class=num>{w['ok']}</td>")
         fail_cls = "num bad" if w['fail'] else "num"
@@ -153,9 +169,94 @@ def render(date_iso: str, rows: list[sqlite3.Row]) -> str:
         parts.append("</tr>")
     parts.append("</tbody></table>")
 
+    if spec029_summary:
+        parts.append("<h2>SPEC-029 class-aware sweep</h2>")
+        parts.append("<table><thead><tr>"
+                     "<th>Model</th><th>Workload</th><th>Corpus</th><th>RAM tier</th>"
+                     "<th>Status</th><th>No-winner reason</th>"
+                     "<th class=num>Samples</th><th class=num>Cells</th>"
+                     "<th>Metrics</th><th>Gate</th><th>Winner tuple</th><th>Tie-breaker reason</th><th>Tie-breakers</th><th>Candidate source</th><th>Source</th>"
+                     "</tr></thead><tbody>")
+        for p in spec029_summary["partitions"] + spec029_summary["streaming_probes"]:
+            gate = p["gate_policy"]
+            metrics = p.get("profile_metrics") or {}
+            gate_text = (
+                f"n>={gate['min_samples']}, "
+                f"p95 TTFT<={gate['max_p95_ttft_ms']}ms, "
+                f"leak<={gate['max_stop_token_leak_rate']}"
+            )
+            metrics_text = (
+                f"median_tps={fmt(metrics.get('median_tps'), '', 1)}, "
+                f"p95_ttft={fmt(metrics.get('p95_ttft_ms'), 'ms', 0)}, "
+                f"leak={fmt(metrics.get('stop_token_leak_rate'), '', 3)}, "
+                f"spec_accept={fmt(metrics.get('spec_decode_acceptance_rate'), '', 3)}"
+            )
+            winner = p["winner_tuple"]
+            winner_text = html.escape(str(winner)) if winner else "—"
+            tie_text = ", ".join(p.get("tie_breaker_order") or [])
+            parts.append("<tr>")
+            parts.append(f"<td>{html.escape(p.get('model') or '—')}</td>")
+            parts.append(f"<td>{html.escape(p['workload'])}</td>")
+            parts.append(f"<td>{html.escape(p.get('corpus_class') or '—')}</td>")
+            parts.append(f"<td>{html.escape(p['ram_tier_key'])}</td>")
+            parts.append(f"<td>{html.escape(p['status'])}</td>")
+            parts.append(f"<td>{html.escape(p.get('no_winner_reason') or '—')}</td>")
+            parts.append(f"<td class=num>{metrics.get('sample_count', '—')}</td>")
+            parts.append(f"<td class=num>{p.get('evaluated_cell_count', '—')}</td>")
+            parts.append(f"<td>{html.escape(metrics_text)}</td>")
+            parts.append(f"<td>{html.escape(gate_text)}</td>")
+            parts.append(f"<td><code>{winner_text}</code></td>")
+            parts.append(f"<td>{html.escape(p.get('tie_breaker_reason') or '—')}</td>")
+            parts.append(f"<td>{html.escape(tie_text or '—')}</td>")
+            parts.append(f"<td>{html.escape(p.get('candidate_source') or '—')}</td>")
+            parts.append(f"<td>{html.escape(p.get('source') or '—')}</td>")
+            parts.append("</tr>")
+        parts.append("</tbody></table>")
+
+        parts.append("<h2>SPEC-029 evaluated cells</h2>")
+        parts.append("<table><thead><tr>"
+                     "<th>Model</th><th>Workload</th><th>RAM tier</th><th>Cell</th>"
+                     "<th class=num>Samples</th><th class=num>Failures</th>"
+                     "<th>Metrics</th><th>Draft</th><th>Source</th>"
+                     "</tr></thead><tbody>")
+        for cell in spec029_summary["evaluated_cells"]:
+            cell_text = (
+                f"kv_bits={cell['kv_bits']}, "
+                f"context={cell['max_context_override']}, "
+                f"concurrency={cell['max_concurrency_override']}"
+            )
+            metrics_text = (
+                f"p95_ttft={fmt(cell['p95_ttft_ms'], 'ms', 0)}, "
+                f"median_tps={fmt(cell['median_tps'], '', 1)}, "
+                f"leak={fmt(cell['stop_token_leak_rate'], '', 3)}, "
+                f"spec_accept={fmt(cell['spec_decode_acceptance_rate'], '', 3)}"
+            )
+            draft_text = "—"
+            if cell.get("draft_model") or cell.get("draft_model_artifact_sha256") or cell.get("num_draft_tokens"):
+                draft_text = (
+                    f"model={cell.get('draft_model') or '—'}, "
+                    f"sha256={cell.get('draft_model_artifact_sha256') or '—'}, "
+                    f"tokens={cell.get('num_draft_tokens') or '—'}"
+                )
+                if cell.get("draft_validation_error"):
+                    draft_text += f", validation={cell['draft_validation_error']}"
+            parts.append("<tr>")
+            parts.append(f"<td>{html.escape(cell.get('model') or '—')}</td>")
+            parts.append(f"<td>{html.escape(cell['workload'])}</td>")
+            parts.append(f"<td>{html.escape(cell['ram_tier_key'])}</td>")
+            parts.append(f"<td>{html.escape(cell_text)}</td>")
+            parts.append(f"<td class=num>{cell['successful_sample_count']}</td>")
+            parts.append(f"<td class=num>{cell['hard_failure_count']}</td>")
+            parts.append(f"<td>{html.escape(metrics_text)}</td>")
+            parts.append(f"<td>{html.escape(draft_text)}</td>")
+            parts.append(f"<td>{html.escape(cell.get('candidate_source') or '—')}</td>")
+            parts.append("</tr>")
+        parts.append("</tbody></table>")
+
     parts.append("<h2>All runs</h2>")
     parts.append("<table><thead><tr>"
                  "<th>Time (UTC)</th><th>Workload</th>"
+                 "<th>Corpus</th><th>RAM tier</th><th>RAM source</th><th>Cell source</th><th>Host RAM</th><th>Cell</th>"
                  "<th class=num>Status</th><th class=num>TTFT</th><th class=num>Total</th>"
                  "<th class=num>In</th><th class=num>Out</th><th class=num>tok/s</th>"
                  "<th>Notes</th>"
@@ -169,12 +270,38 @@ def render(date_iso: str, rows: list[sqlite3.Row]) -> str:
             notes_bits.append(f"<span class=bad>{html.escape(r['error'][:120])}</span>")
         if r["stop_token_leak"]:
             notes_bits.append("<span class=bad>stop-token leak</span>")
+        metric_reason = row_get(r, "metric_unavailable_reason")
+        if metric_reason:
+            notes_bits.append(f"<span class=muted>{html.escape(metric_reason)}</span>")
+        non_runnable_reason = row_get(r, "non_runnable_reason")
+        if non_runnable_reason:
+            notes_bits.append(f"<span class=bad>{html.escape(non_runnable_reason)}</span>")
         if r["response_preview"] and not r["error"]:
             notes_bits.append(f"<span class=preview>{html.escape(r['response_preview'][:120])}</span>")
         notes = " · ".join(notes_bits) if notes_bits else "<span class=muted>—</span>"
         parts.append(f"<tr{row_cls}>")
         parts.append(f"<td>{time_only}</td>")
         parts.append(f"<td>{html.escape(r['workload'])}</td>")
+        parts.append(f"<td>{html.escape(row_get(r, 'corpus_class', '—') or '—')}</td>")
+        parts.append(f"<td>{html.escape(row_get(r, 'ram_tier_key', '—') or '—')}</td>")
+        parts.append(f"<td>{html.escape(row_get(r, 'provider_ram_source', '—') or '—')}</td>")
+        parts.append(f"<td>{html.escape(row_get(r, 'cell_execution_source', '—') or '—')}</td>")
+        host_ram = row_get(r, "host_ram_bytes")
+        parts.append(f"<td>{html.escape(fmt(host_ram))}</td>")
+        cell_bits = []
+        if row_get(r, "kv_bits") is not None:
+            cell_bits.append(f"kv_bits={row_get(r, 'kv_bits')}")
+        if row_get(r, "max_context_override") is not None:
+            cell_bits.append(f"context={row_get(r, 'max_context_override')}")
+        if row_get(r, "max_concurrency_override") is not None:
+            cell_bits.append(f"concurrency={row_get(r, 'max_concurrency_override')}")
+        if row_get(r, "draft_model"):
+            cell_bits.append(f"draft={row_get(r, 'draft_model')}")
+        if row_get(r, "num_draft_tokens") is not None:
+            cell_bits.append(f"draft_tokens={row_get(r, 'num_draft_tokens')}")
+        if row_get(r, "candidate_source"):
+            cell_bits.append(f"source={row_get(r, 'candidate_source')}")
+        parts.append(f"<td>{html.escape(', '.join(cell_bits) if cell_bits else '—')}</td>")
         parts.append(f"<td class=num>{r['http_status'] if r['http_status'] is not None else '—'}</td>")
         parts.append(f"<td class=num>{fmt(r['ttft_ms'], ' ms', 0)}</td>")
         parts.append(f"<td class=num>{fmt(r['total_ms'], ' ms', 0)}</td>")
@@ -185,7 +312,7 @@ def render(date_iso: str, rows: list[sqlite3.Row]) -> str:
         parts.append("</tr>")
     parts.append("</tbody></table>")
 
-    parts.append(f"<p class=muted>Generated {datetime.now(timezone.utc).isoformat(timespec='seconds')}</p>")
+    parts.append(f"<p class=muted>Generated for UTC date {html.escape(date_iso)}</p>")
     parts.append("</body></html>")
     return "".join(parts)
 
@@ -195,6 +322,12 @@ def write_report(date_iso: str, conn: sqlite3.Connection, out_dir: Path) -> Path
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{date_iso}.html"
     out_path.write_text(render(date_iso, rows))
+    spec029_cells = spec029.cells_from_rows(rows)
+    if spec029_cells:
+        json_path = out_dir / f"{date_iso}.spec029.json"
+        summary = spec029.class_aware_report(spec029_cells, f"beta-report-{date_iso}")
+        summary["raw_trials"] = [spec029.trial_row_json(row) for row in rows]
+        json_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     return out_path
 
 

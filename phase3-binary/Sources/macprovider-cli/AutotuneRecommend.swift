@@ -447,6 +447,111 @@ struct CandidateCatalog: Decodable, Equatable {
         }
     }
 
+    struct WorkloadRecommended: Decodable, Equatable {
+        var kvBits: Int
+        var maxContextOverride: Int
+        var maxConcurrencyOverride: Int
+        var draftModel: String?
+        var draftModelArtifactSHA256: String?
+        var numDraftTokens: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case kvBits = "kv_bits"
+            case maxContextOverride = "max_context_override"
+            case maxConcurrencyOverride = "max_concurrency_override"
+            case draftModel = "draft_model"
+            case draftModelArtifactSHA256 = "draft_model_artifact_sha256"
+            case numDraftTokens = "num_draft_tokens"
+        }
+    }
+
+    struct WorkloadGatePolicy: Decodable, Equatable {
+        var minSamples: Int
+        var maxP95TTFTMS: Int
+        var maxStopTokenLeakRate: Double
+        var minMedianTPS: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case minSamples = "min_samples"
+            case maxP95TTFTMS = "max_p95_ttft_ms"
+            case maxStopTokenLeakRate = "max_stop_token_leak_rate"
+            case minMedianTPS = "min_median_tps"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            for key in [CodingKeys.minSamples, .maxP95TTFTMS, .maxStopTokenLeakRate, .minMedianTPS] {
+                guard c.contains(key) else {
+                    throw AutotuneRecommendError.invalidStaticJSON("workload gate_policy \(key.stringValue)")
+                }
+            }
+            minSamples = try c.decode(Int.self, forKey: .minSamples)
+            maxP95TTFTMS = try c.decode(Int.self, forKey: .maxP95TTFTMS)
+            maxStopTokenLeakRate = try c.decode(Double.self, forKey: .maxStopTokenLeakRate)
+            minMedianTPS = try c.decodeIfPresent(Double.self, forKey: .minMedianTPS)
+        }
+    }
+
+    struct WorkloadProfileMetrics: Decodable, Equatable {
+        var medianTPS: Double?
+        var p95TTFTMS: Double?
+        var stopTokenLeakRate: Double?
+        var specDecodeAcceptanceRate: Double?
+        var sampleCount: Int
+
+        enum CodingKeys: String, CodingKey {
+            case medianTPS = "median_tps"
+            case p95TTFTMS = "p95_ttft_ms"
+            case stopTokenLeakRate = "stop_token_leak_rate"
+            case specDecodeAcceptanceRate = "spec_decode_acceptance_rate"
+            case sampleCount = "sample_count"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            for key in [CodingKeys.medianTPS, .p95TTFTMS, .stopTokenLeakRate, .specDecodeAcceptanceRate, .sampleCount] {
+                guard c.contains(key) else {
+                    throw AutotuneRecommendError.invalidStaticJSON("workload profile metric \(key.stringValue)")
+                }
+            }
+            medianTPS = try c.decodeIfPresent(Double.self, forKey: .medianTPS)
+            p95TTFTMS = try c.decodeIfPresent(Double.self, forKey: .p95TTFTMS)
+            stopTokenLeakRate = try c.decodeIfPresent(Double.self, forKey: .stopTokenLeakRate)
+            specDecodeAcceptanceRate = try c.decodeIfPresent(Double.self, forKey: .specDecodeAcceptanceRate)
+            sampleCount = try c.decode(Int.self, forKey: .sampleCount)
+        }
+    }
+
+    struct WorkloadProfile: Decodable, Equatable {
+        var status: String?
+        var noWinnerReason: String?
+        var recommended: WorkloadRecommended?
+        var gatePolicy: WorkloadGatePolicy
+        var profileMetrics: WorkloadProfileMetrics
+        var source: String
+        var candidateSource: String?
+
+        enum CodingKeys: String, CodingKey {
+            case status
+            case noWinnerReason = "no_winner_reason"
+            case recommended
+            case gatePolicy = "gate_policy"
+            case profileMetrics = "profile_metrics"
+            case source
+            case candidateSource = "candidate_source"
+        }
+    }
+
+    struct DraftCandidate: Decodable, Equatable {
+        var draftModel: String
+        var draftModelArtifactSHA256: String
+
+        enum CodingKeys: String, CodingKey {
+            case draftModel = "draft_model"
+            case draftModelArtifactSHA256 = "draft_model_artifact_sha256"
+        }
+    }
+
     struct Row: Decodable, Equatable {
         var modelID: String
         var modelRevision: String?
@@ -456,6 +561,8 @@ struct CandidateCatalog: Decodable, Equatable {
         var benchGate: BenchGate
         var runtimeStatus: String
         var notes: String?
+        var draftCandidates: [DraftCandidate]?
+        var workloadProfiles: [String: [String: WorkloadProfile]]?
 
         enum CodingKeys: String, CodingKey {
             case modelID = "model_id"
@@ -466,6 +573,50 @@ struct CandidateCatalog: Decodable, Equatable {
             case benchGate = "bench_gate"
             case runtimeStatus = "runtime_status"
             case notes
+            case draftCandidates = "draft_candidates"
+            case workloadProfiles = "workload_profiles"
+            case perClass = "per_class"
+        }
+
+        init(
+            modelID: String,
+            modelRevision: String?,
+            modelSHA256: String?,
+            minRAMGB: Int,
+            minBandwidthTier: BandwidthTier,
+            benchGate: BenchGate,
+            runtimeStatus: String,
+            notes: String?,
+            draftCandidates: [DraftCandidate]? = nil,
+            workloadProfiles: [String: [String: WorkloadProfile]]? = nil
+        ) {
+            self.modelID = modelID
+            self.modelRevision = modelRevision
+            self.modelSHA256 = modelSHA256
+            self.minRAMGB = minRAMGB
+            self.minBandwidthTier = minBandwidthTier
+            self.benchGate = benchGate
+            self.runtimeStatus = runtimeStatus
+            self.notes = notes
+            self.draftCandidates = draftCandidates
+            self.workloadProfiles = workloadProfiles
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            if c.contains(.perClass) {
+                throw AutotuneRecommendError.invalidStaticJSON("per_class alias is forbidden")
+            }
+            modelID = try c.decode(String.self, forKey: .modelID)
+            modelRevision = try c.decodeIfPresent(String.self, forKey: .modelRevision)
+            modelSHA256 = try c.decodeIfPresent(String.self, forKey: .modelSHA256)
+            minRAMGB = try c.decode(Int.self, forKey: .minRAMGB)
+            minBandwidthTier = try c.decode(BandwidthTier.self, forKey: .minBandwidthTier)
+            benchGate = try c.decode(BenchGate.self, forKey: .benchGate)
+            runtimeStatus = try c.decode(String.self, forKey: .runtimeStatus)
+            notes = try c.decodeIfPresent(String.self, forKey: .notes)
+            draftCandidates = try c.decodeIfPresent([DraftCandidate].self, forKey: .draftCandidates)
+            workloadProfiles = try c.decodeIfPresent([String: [String: WorkloadProfile]].self, forKey: .workloadProfiles)
         }
     }
 
@@ -517,13 +668,189 @@ struct CandidateCatalog: Decodable, Equatable {
                     throw AutotuneRecommendError.invalidStaticJSON("model_sha256 for \(key)")
                 }
             }
+            try Self.validateWorkloadProfiles(row.workloadProfiles, rowKey: key, draftCandidates: row.draftCandidates)
         }
         return self
+    }
+
+    private static func validateWorkloadProfiles(
+        _ workloadProfiles: [String: [String: WorkloadProfile]]?,
+        rowKey: String,
+        draftCandidates: [DraftCandidate]?
+    ) throws {
+        guard let workloadProfiles else { return }
+        let allowedWorkloads = Set(["short_chat", "medium_with_system", "long_context", "code_completion", "agent_style"])
+        let allowedTiers = Set(["8gb", "16gb", "32gb", "64gb_plus"])
+        let allowedNoWinnerReasons = Set(["insufficient_samples", "gate_unmet", "hard_failure", "no_cells_evaluated"])
+        let draftContextCaps = ["8gb": 8_192, "16gb": 20_000, "32gb": 50_000, "64gb_plus": 120_000]
+
+        for (workload, tiers) in workloadProfiles {
+            guard allowedWorkloads.contains(workload) else {
+                throw AutotuneRecommendError.invalidStaticJSON("workload_profiles workload for \(rowKey)")
+            }
+            guard !tiers.isEmpty else {
+                throw AutotuneRecommendError.invalidStaticJSON("workload_profiles tiers for \(rowKey)")
+            }
+            for (tier, profile) in tiers {
+                guard allowedTiers.contains(tier) else {
+                    throw AutotuneRecommendError.invalidStaticJSON("workload_profiles tier for \(rowKey)")
+                }
+                try validateWorkloadProfile(
+                    profile,
+                    workload: workload,
+                    tier: tier,
+                    rowKey: rowKey,
+                    allowedNoWinnerReasons: allowedNoWinnerReasons,
+                    draftContextCaps: draftContextCaps,
+                    draftCandidates: draftCandidates
+                )
+            }
+        }
+    }
+
+    private static func validateWorkloadProfile(
+        _ profile: WorkloadProfile,
+        workload: String,
+        tier: String,
+        rowKey: String,
+        allowedNoWinnerReasons: Set<String>,
+        draftContextCaps: [String: Int],
+        draftCandidates: [DraftCandidate]?
+    ) throws {
+        guard !profile.source.isEmpty else {
+            throw AutotuneRecommendError.invalidStaticJSON("workload profile source for \(rowKey)")
+        }
+        guard let expectedTTFT = spec029DefaultMaxP95TTFTMS[workload],
+              profile.gatePolicy.minSamples == 20,
+              profile.gatePolicy.maxP95TTFTMS == expectedTTFT,
+              profile.gatePolicy.maxStopTokenLeakRate == 0,
+              profile.gatePolicy.minMedianTPS == nil
+        else {
+            throw AutotuneRecommendError.invalidStaticJSON("workload gate_policy for \(rowKey)")
+        }
+        if let median = profile.profileMetrics.medianTPS, (!median.isFinite || median < 0) {
+            throw AutotuneRecommendError.invalidStaticJSON("workload median_tps for \(rowKey)")
+        }
+        if let ttft = profile.profileMetrics.p95TTFTMS, (!ttft.isFinite || ttft < 0) {
+            throw AutotuneRecommendError.invalidStaticJSON("workload p95_ttft_ms for \(rowKey)")
+        }
+        if let leak = profile.profileMetrics.stopTokenLeakRate, (!leak.isFinite || leak < 0 || leak > 1) {
+            throw AutotuneRecommendError.invalidStaticJSON("workload stop_token_leak_rate for \(rowKey)")
+        }
+        if let acceptance = profile.profileMetrics.specDecodeAcceptanceRate, (!acceptance.isFinite || acceptance < 0 || acceptance > 1) {
+            throw AutotuneRecommendError.invalidStaticJSON("workload spec_decode_acceptance_rate for \(rowKey)")
+        }
+        guard profile.profileMetrics.sampleCount >= 0 else {
+            throw AutotuneRecommendError.invalidStaticJSON("workload sample_count for \(rowKey)")
+        }
+
+        if profile.status == "no_winner" {
+            guard let reason = profile.noWinnerReason, allowedNoWinnerReasons.contains(reason) else {
+                throw AutotuneRecommendError.invalidStaticJSON("workload no_winner_reason for \(rowKey)")
+            }
+            guard profile.recommended == nil,
+                  profile.profileMetrics.medianTPS == nil,
+                  profile.profileMetrics.p95TTFTMS == nil,
+                  profile.profileMetrics.stopTokenLeakRate == nil,
+                  profile.profileMetrics.specDecodeAcceptanceRate == nil
+            else {
+                throw AutotuneRecommendError.invalidStaticJSON("workload no_winner profile_metrics for \(rowKey)")
+            }
+            switch reason {
+            case "no_cells_evaluated", "hard_failure":
+                guard profile.profileMetrics.sampleCount == 0 else {
+                    throw AutotuneRecommendError.invalidStaticJSON("workload no_winner sample_count for \(rowKey)")
+                }
+            case "insufficient_samples":
+                guard profile.profileMetrics.sampleCount > 0,
+                      profile.profileMetrics.sampleCount < profile.gatePolicy.minSamples
+                else {
+                    throw AutotuneRecommendError.invalidStaticJSON("workload no_winner sample_count for \(rowKey)")
+                }
+            case "gate_unmet":
+                guard profile.profileMetrics.sampleCount >= profile.gatePolicy.minSamples else {
+                    throw AutotuneRecommendError.invalidStaticJSON("workload no_winner sample_count for \(rowKey)")
+                }
+            default:
+                throw AutotuneRecommendError.invalidStaticJSON("workload no_winner_reason for \(rowKey)")
+            }
+            return
+        }
+
+        guard profile.status == nil || profile.status == "winner" else {
+            throw AutotuneRecommendError.invalidStaticJSON("workload status for \(rowKey)")
+        }
+        guard profile.noWinnerReason == nil, let recommended = profile.recommended else {
+            throw AutotuneRecommendError.invalidStaticJSON("workload winner recommended for \(rowKey)")
+        }
+        guard recommended.kvBits >= 0,
+              recommended.maxContextOverride > 0,
+              recommended.maxConcurrencyOverride > 0,
+              let p95TTFTMS = profile.profileMetrics.p95TTFTMS,
+              p95TTFTMS <= Double(profile.gatePolicy.maxP95TTFTMS),
+              let stopTokenLeakRate = profile.profileMetrics.stopTokenLeakRate,
+              stopTokenLeakRate <= profile.gatePolicy.maxStopTokenLeakRate,
+              profile.profileMetrics.sampleCount >= profile.gatePolicy.minSamples
+        else {
+            throw AutotuneRecommendError.invalidStaticJSON("workload winner metrics for \(rowKey)")
+        }
+
+        let hasAnyDraftField = recommended.draftModel != nil || recommended.draftModelArtifactSHA256 != nil || recommended.numDraftTokens != nil
+        guard hasAnyDraftField else { return }
+        guard recommended.draftModel != nil,
+              let draftSHA = recommended.draftModelArtifactSHA256,
+              isHex(draftSHA, count: 64),
+              let numDraftTokens = recommended.numDraftTokens,
+              (1 ... 16).contains(numDraftTokens),
+              recommended.maxConcurrencyOverride <= 1,
+              let cap = draftContextCaps[tier],
+              recommended.maxContextOverride <= cap,
+              let candidateSource = profile.candidateSource,
+              isApprovedSpec029DraftSource(candidateSource),
+              staticDraftCandidateBindingIsValid(
+                  source: candidateSource,
+                  recommended: recommended,
+                  draftCandidates: draftCandidates
+              )
+        else {
+            throw AutotuneRecommendError.invalidStaticJSON("workload speculative recommended for \(rowKey)")
+        }
+    }
+
+    private static func staticDraftCandidateBindingIsValid(
+        source: String,
+        recommended: WorkloadRecommended,
+        draftCandidates: [DraftCandidate]?
+    ) -> Bool {
+        guard source.hasPrefix("static_draft_candidates:") else { return true }
+        guard let draftModel = recommended.draftModel,
+              let draftSHA = recommended.draftModelArtifactSHA256,
+              let draftCandidates
+        else {
+            return false
+        }
+        return draftCandidates.contains {
+            $0.draftModel == draftModel && $0.draftModelArtifactSHA256 == draftSHA
+        }
+    }
+
+    private static func isApprovedSpec029DraftSource(_ source: String) -> Bool {
+        source.hasPrefix("static_draft_candidates:")
+            || source.hasPrefix("research_fixture:")
+            || source.hasPrefix("local_operator_override:")
     }
 
     private static func isHex(_ value: String, count: Int) -> Bool {
         value.count == count && value.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) }
     }
+
+    private static let spec029DefaultMaxP95TTFTMS = [
+        "short_chat": 8_000,
+        "medium_with_system": 12_000,
+        "long_context": 60_000,
+        "code_completion": 12_000,
+        "agent_style": 20_000,
+    ]
 }
 
 struct RateCardProjection: Decodable, Equatable {

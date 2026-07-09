@@ -25,7 +25,9 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -38,6 +40,7 @@ import yaml
 import workloads
 import workloads_adversarial
 import stop_tokens
+import spec029
 
 BETA_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = BETA_DIR / "config.yaml"
@@ -70,6 +73,25 @@ CREATE TABLE IF NOT EXISTS runs (
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     throughput_tps REAL,
+    host_ram_bytes INTEGER,
+    ram_tier_key TEXT,
+    provider_ram_source TEXT,
+    cell_execution_source TEXT,
+    non_runnable_reason TEXT,
+    corpus_class TEXT,
+    max_context_override INTEGER,
+    max_concurrency_override INTEGER,
+    kv_bits INTEGER,
+    metric_unavailable_reason TEXT,
+    draft_model TEXT,
+    draft_model_artifact_sha256 TEXT,
+    num_draft_tokens INTEGER,
+    drafted_tokens INTEGER,
+    accepted_tokens INTEGER,
+    spec_decode_acceptance_rate REAL,
+    candidate_source TEXT,
+    winner_status TEXT,
+    no_winner_reason TEXT,
     stop_token_leak INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     response_preview TEXT
@@ -106,6 +128,32 @@ CREATE TABLE IF NOT EXISTS full_responses (
     full_content TEXT
 );
 """
+
+RUNS_SPEC029_COLUMNS = {
+    "host_ram_bytes": "INTEGER",
+    "ram_tier_key": "TEXT",
+    "provider_ram_source": "TEXT",
+    "cell_execution_source": "TEXT",
+    "non_runnable_reason": "TEXT",
+    "corpus_class": "TEXT",
+    "max_context_override": "INTEGER",
+    "max_concurrency_override": "INTEGER",
+    "kv_bits": "INTEGER",
+    "metric_unavailable_reason": "TEXT",
+    "draft_model": "TEXT",
+    "draft_model_artifact_sha256": "TEXT",
+    "num_draft_tokens": "INTEGER",
+    "drafted_tokens": "INTEGER",
+    "accepted_tokens": "INTEGER",
+    "spec_decode_acceptance_rate": "REAL",
+    "candidate_source": "TEXT",
+    "winner_status": "TEXT",
+    "no_winner_reason": "TEXT",
+}
+
+
+class Spec029CellApplyError(RuntimeError):
+    """A configured SPEC-029 cell was attempted but could not be made runnable."""
 
 
 def load_config(path: Path) -> dict:
@@ -164,14 +212,24 @@ def resolve_model(cfg: dict, verbose: bool = False) -> str:
 
     # Set cfg["model"] so downstream code just uses cfg["model"]
     cfg["model"] = model_id
+    cfg["_selected_model_entry"] = entry if isinstance(entry, dict) else {"id": model_id}
     return model_id
 
 
 def open_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA)
+    ensure_runs_spec029_columns(conn)
     conn.commit()
     return conn
+
+
+def ensure_runs_spec029_columns(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+    for name, type_name in RUNS_SPEC029_COLUMNS.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {type_name}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_spec029_partition ON runs(workload, ram_tier_key)")
 
 
 def detect_leak(text: str) -> bool:
@@ -192,6 +250,34 @@ def strip_leaks_model(text: str, model_id: str) -> str:
     """Per-model stop-token stripping."""
     regex = stop_tokens.get_leak_regex(model_id)
     return regex.sub("", text or "")
+
+
+def extract_spec_decode_metrics(data: dict[str, Any], usage: dict[str, Any] | None = None) -> dict[str, Any]:
+    usage = usage or {}
+    spec_decode = data.get("spec_decode") if isinstance(data.get("spec_decode"), dict) else {}
+
+    def first(*keys):
+        for source in (data, usage, spec_decode):
+            for key in keys:
+                value = source.get(key)
+                if value is not None:
+                    return value
+        return None
+
+    drafted = first("drafted_tokens", "spec_decode_drafted_tokens", "spec_decode_drafted_tokens_since_last")
+    accepted = first("accepted_tokens", "spec_decode_accepted_tokens", "spec_decode_accepted_tokens_since_last")
+    acceptance_rate = first("spec_decode_acceptance_rate", "acceptance_rate")
+    if acceptance_rate is None and drafted not in (None, 0) and accepted is not None:
+        acceptance_rate = accepted / drafted
+
+    out: dict[str, Any] = {}
+    if drafted is not None:
+        out["drafted_tokens"] = drafted
+    if accepted is not None:
+        out["accepted_tokens"] = accepted
+    if acceptance_rate is not None:
+        out["spec_decode_acceptance_rate"] = acceptance_rate
+    return out
 
 
 def fire_nonstream(url: str, model: str, body: dict, timeout: float) -> dict:
@@ -224,6 +310,7 @@ def fire_nonstream(url: str, model: str, body: dict, timeout: float) -> dict:
     usage = data.get("usage") or {}
     out["prompt_tokens"] = usage.get("prompt_tokens")
     out["completion_tokens"] = usage.get("completion_tokens")
+    out.update(extract_spec_decode_metrics(data, usage))
     if out["completion_tokens"] and total_ms > 0:
         out["throughput_tps"] = out["completion_tokens"] / (total_ms / 1000.0)
 
@@ -233,6 +320,65 @@ def fire_nonstream(url: str, model: str, body: dict, timeout: float) -> dict:
     return out
 
 
+def apply_spec029_cell(cfg: dict, cell: dict[str, Any], dry_run: bool, verbose: bool = False) -> str:
+    """Apply or prove the configured SPEC-029 cell before collecting samples."""
+    normalized = spec029.normalize_sweep_cell(cell, cfg)
+    spec_cfg = cfg.get("spec029_sweep") or {}
+    if dry_run:
+        return "dry_run"
+
+    control_url = spec_cfg.get("cell_control_url") or cfg.get("spec029_cell_control_url")
+    if control_url:
+        payload = {"model": cfg["model"], "cell": normalized}
+        try:
+            response = requests.post(control_url, json=payload, timeout=cfg.get("timeout_s", 180))
+        except requests.RequestException as exc:
+            raise Spec029CellApplyError(f"SPEC-029 cell control request failed: {exc}") from exc
+        if response.status_code < 200 or response.status_code >= 300:
+            raise Spec029CellApplyError(f"SPEC-029 cell control failed HTTP {response.status_code}: {response.text[:200]}")
+        return "cell_control_url"
+
+    command = spec_cfg.get("cell_apply_command") or cfg.get("spec029_cell_apply_command")
+    if command:
+        env = os.environ.copy()
+        env.update({
+            "SPEC029_MODEL": str(cfg["model"]),
+            "SPEC029_KV_BITS": str(normalized["kv_bits"]),
+            "SPEC029_MAX_CONTEXT_OVERRIDE": str(normalized["max_context_override"]),
+            "SPEC029_MAX_CONCURRENCY_OVERRIDE": str(normalized["max_concurrency_override"]),
+            "SPEC029_DRAFT_MODEL": str(normalized.get("draft_model") or ""),
+            "SPEC029_DRAFT_MODEL_ARTIFACT_SHA256": str(normalized.get("draft_model_artifact_sha256") or ""),
+            "SPEC029_NUM_DRAFT_TOKENS": str(normalized.get("num_draft_tokens") or ""),
+        })
+        args = command if isinstance(command, list) else shlex.split(str(command))
+        try:
+            subprocess.run(args, check=True, timeout=spec_cfg.get("cell_apply_timeout_s", 180), env=env)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            raise Spec029CellApplyError(f"SPEC-029 cell apply command failed: {exc}") from exc
+        return "cell_apply_command"
+
+    raise RuntimeError(
+        "SPEC-029 sweep requires spec029_sweep.cell_control_url, "
+        "or spec029_sweep.cell_apply_command"
+    )
+
+
+def validate_spec029_cell_execution_config(cfg: dict, dry_run: bool) -> None:
+    if dry_run:
+        return
+    spec_cfg = cfg.get("spec029_sweep") or {}
+    mechanisms = [
+        bool(spec_cfg.get("cell_control_url") or cfg.get("spec029_cell_control_url")),
+        bool(spec_cfg.get("cell_apply_command") or cfg.get("spec029_cell_apply_command")),
+    ]
+    count = sum(1 for enabled in mechanisms if enabled)
+    if count != 1:
+        raise RuntimeError(
+            "SPEC-029 sweep requires exactly one cell execution mechanism: "
+            "cell_control_url or cell_apply_command"
+        )
+
+
 def fire_stream(url: str, model: str, body: dict, timeout: float) -> dict:
     """POST a streaming request, parse SSE. Returns a metrics dict with TTFT."""
     payload = {"model": model, **body, "stream": True}
@@ -240,6 +386,7 @@ def fire_stream(url: str, model: str, body: dict, timeout: float) -> dict:
     ttft_ms: float | None = None
     pieces: list[str] = []
     usage: dict[str, Any] = {}
+    last_chunk: dict[str, Any] = {}
     http_status: int | None = None
     error: str | None = None
 
@@ -278,6 +425,7 @@ def fire_stream(url: str, model: str, body: dict, timeout: float) -> dict:
                         pieces.append(piece)
                 if chunk.get("usage"):
                     usage = chunk["usage"]
+                last_chunk = chunk
     except requests.RequestException as e:
         error = f"{type(e).__name__}: {e}"
 
@@ -292,6 +440,7 @@ def fire_stream(url: str, model: str, body: dict, timeout: float) -> dict:
         "stop_token_leak": detect_leak_model(content, model),
         "response_preview": strip_leaks_model(content, model)[:300],
     }
+    out.update(extract_spec_decode_metrics(last_chunk, usage))
     out["_full_content"] = content
     if error:
         out["error"] = error
@@ -300,11 +449,25 @@ def fire_stream(url: str, model: str, body: dict, timeout: float) -> dict:
     return out
 
 
-def run_one(cfg: dict, name: str, conn: sqlite3.Connection, verbose: bool, dry_run: bool) -> dict:
+def run_one(
+    cfg: dict,
+    name: str,
+    conn: sqlite3.Connection,
+    verbose: bool,
+    dry_run: bool,
+    cell: dict[str, Any] | None = None,
+    force_stream: bool = False,
+    provider_ram: spec029.ProviderRAM | None = None,
+    cell_execution_source: str | None = None,
+    metrics_override: dict[str, Any] | None = None,
+) -> dict:
     builder = workloads.REGISTRY.get(name)
     if builder is None:
         raise SystemExit(f"unknown workload: {name} (try --list)")
     body = builder()
+    normalized_cell = spec029.normalize_sweep_cell(cell, cfg) if cell is not None else None
+    if force_stream:
+        body["stream"] = True
     streamed = bool(body.get("stream"))
     url = cfg["tunnel_url"].rstrip("/") + "/v1/chat/completions"
 
@@ -313,11 +476,15 @@ def run_one(cfg: dict, name: str, conn: sqlite3.Connection, verbose: bool, dry_r
             print(f"[dry-run] {name} stream={streamed} max_tokens={body.get('max_tokens')}")
         return {}
 
-    if streamed:
+    if metrics_override is not None:
+        metrics = metrics_override
+    elif streamed:
         metrics = fire_stream(url, cfg["model"], body, cfg.get("timeout_s", 180))
     else:
         metrics = fire_nonstream(url, cfg["model"], body, cfg.get("timeout_s", 180))
 
+    provider_ram = provider_ram or spec029.resolve_provider_ram(cfg)
+    cell = normalized_cell if normalized_cell is not None else spec029.sweep_cell_from_config(cfg)
     row = {
         "ts_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "workload": name,
@@ -330,6 +497,29 @@ def run_one(cfg: dict, name: str, conn: sqlite3.Connection, verbose: bool, dry_r
         "prompt_tokens": metrics.get("prompt_tokens"),
         "completion_tokens": metrics.get("completion_tokens"),
         "throughput_tps": metrics.get("throughput_tps"),
+        "host_ram_bytes": provider_ram.host_ram_bytes,
+        "ram_tier_key": provider_ram.ram_tier_key,
+        "provider_ram_source": provider_ram.source,
+        "cell_execution_source": cell_execution_source,
+        "non_runnable_reason": metrics.get("non_runnable_reason"),
+        "corpus_class": spec029.corpus_class_for_workload(name),
+        "max_context_override": cell.get("max_context_override"),
+        "max_concurrency_override": cell.get("max_concurrency_override"),
+        "kv_bits": cell.get("kv_bits"),
+        "metric_unavailable_reason": spec029.metric_unavailable_reason(
+            metrics.get("prompt_tokens"),
+            metrics.get("completion_tokens"),
+            metrics.get("throughput_tps"),
+        ),
+        "draft_model": cell.get("draft_model"),
+        "draft_model_artifact_sha256": cell.get("draft_model_artifact_sha256"),
+        "num_draft_tokens": cell.get("num_draft_tokens"),
+        "drafted_tokens": metrics.get("drafted_tokens"),
+        "accepted_tokens": metrics.get("accepted_tokens"),
+        "spec_decode_acceptance_rate": metrics.get("spec_decode_acceptance_rate"),
+        "candidate_source": cell.get("candidate_source"),
+        "winner_status": None,
+        "no_winner_reason": None,
         "stop_token_leak": int(bool(metrics.get("stop_token_leak"))),
         "error": metrics.get("error"),
         "response_preview": metrics.get("response_preview"),
@@ -337,11 +527,27 @@ def run_one(cfg: dict, name: str, conn: sqlite3.Connection, verbose: bool, dry_r
     cur = conn.execute(
         """INSERT INTO runs (ts_utc, workload, model, tunnel_url, streamed,
                               http_status, ttft_ms, total_ms, prompt_tokens,
-                              completion_tokens, throughput_tps, stop_token_leak,
+                              completion_tokens, throughput_tps, host_ram_bytes,
+                              ram_tier_key, provider_ram_source, cell_execution_source,
+                              non_runnable_reason, corpus_class, max_context_override,
+                              max_concurrency_override, kv_bits,
+                              metric_unavailable_reason, draft_model,
+                              draft_model_artifact_sha256, num_draft_tokens,
+                              drafted_tokens, accepted_tokens,
+                              spec_decode_acceptance_rate, candidate_source,
+                              winner_status, no_winner_reason, stop_token_leak,
                               error, response_preview)
            VALUES (:ts_utc, :workload, :model, :tunnel_url, :streamed,
                    :http_status, :ttft_ms, :total_ms, :prompt_tokens,
-                   :completion_tokens, :throughput_tps, :stop_token_leak,
+                   :completion_tokens, :throughput_tps, :host_ram_bytes,
+                   :ram_tier_key, :provider_ram_source, :cell_execution_source,
+                   :non_runnable_reason, :corpus_class, :max_context_override,
+                   :max_concurrency_override, :kv_bits,
+                   :metric_unavailable_reason, :draft_model,
+                   :draft_model_artifact_sha256, :num_draft_tokens,
+                   :drafted_tokens, :accepted_tokens,
+                   :spec_decode_acceptance_rate, :candidate_source,
+                   :winner_status, :no_winner_reason, :stop_token_leak,
                    :error, :response_preview)""",
         row,
     )
@@ -374,6 +580,64 @@ def run_one(cfg: dict, name: str, conn: sqlite3.Connection, verbose: bool, dry_r
                 f"leak={row['stop_token_leak']}"
             )
     return row
+
+
+def run_spec029_sweep(cfg: dict, conn: sqlite3.Connection, verbose: bool, dry_run: bool) -> list[dict]:
+    provider_ram = spec029.resolve_provider_ram(cfg, require=True)
+    if provider_ram.host_ram_bytes is None:
+        raise RuntimeError("SPEC-029 sweep requires provider_host_ram_bytes or provider_ram_gib")
+    targets = spec029.spec029_workloads_from_config(cfg)
+    cells = spec029.sweep_cells_from_config(cfg, require_grid=True)
+    samples_per_cell = spec029.spec029_samples_per_cell(cfg)
+    validate_spec029_cell_execution_config(cfg, dry_run)
+    rows: list[dict] = []
+
+    if verbose:
+        print(
+            "harness: SPEC-029 sweep "
+            f"model={cfg['model']} provider_ram_tier={provider_ram.ram_tier_key} "
+            f"cells={len(cells)} workloads={len(targets)} samples_per_cell={samples_per_cell}"
+        )
+
+    for name in targets:
+        for cell in cells:
+            try:
+                cell_execution_source = apply_spec029_cell(cfg, cell, dry_run, verbose=verbose)
+            except Spec029CellApplyError as exc:
+                rows.append(
+                    run_one(
+                        cfg,
+                        name,
+                        conn,
+                        verbose,
+                        dry_run,
+                        cell=cell,
+                        force_stream=True,
+                        provider_ram=provider_ram,
+                        cell_execution_source="cell_apply_failed",
+                        metrics_override={
+                            "error": str(exc),
+                            "non_runnable_reason": "cell_apply_failed",
+                            "response_preview": str(exc)[:300],
+                        },
+                    )
+                )
+                continue
+            for _ in range(samples_per_cell):
+                rows.append(
+                    run_one(
+                        cfg,
+                        name,
+                        conn,
+                        verbose,
+                        dry_run,
+                        cell=cell,
+                        force_stream=True,
+                        provider_ram=provider_ram,
+                        cell_execution_source=cell_execution_source,
+                    )
+                )
+    return rows
 
 
 def run_one_adversarial(cfg: dict, name: str, conn: sqlite3.Connection, verbose: bool, dry_run: bool) -> dict:
@@ -438,7 +702,7 @@ def main() -> int:
         const="cooperative",
         default=None,
         metavar="PROFILE",
-        help="fire a batch list from config. PROFILE is 'cooperative' (default) or 'adversarial'.",
+        help="fire a batch list from config. PROFILE is 'cooperative' (default), 'adversarial', or 'spec029'.",
     )
     ap.add_argument("--list", action="store_true", help="list registered workloads and exit")
     ap.add_argument("--dry-run", action="store_true", help="build prompts but skip HTTP")
@@ -461,7 +725,7 @@ def main() -> int:
 
     try:
         # Resolve targets + which runner to use based on profile.
-        profile = args.batch  # None | "cooperative" | "adversarial"
+        profile = args.batch  # None | "cooperative" | "adversarial" | "spec029"
         targets: list[str]
         if args.once:
             # --once falls back to cooperative registry unless the name is in
@@ -473,6 +737,15 @@ def main() -> int:
             if not targets:
                 sys.exit("config: batch_adversarial is empty; add workloads or use --once")
             is_adversarial = True
+        elif profile == "spec029":
+            rows = run_spec029_sweep(cfg, conn, args.verbose, args.dry_run)
+            failures = sum(
+                1 for row in rows
+                if row.get("error") or (row.get("http_status") and row["http_status"] != 200)
+            )
+            if args.verbose:
+                print(f"harness: done, {failures} failure(s)")
+            return 0 if failures == 0 else 1
         elif profile == "cooperative":
             targets = list(cfg.get("batch") or [])
             if not targets:
