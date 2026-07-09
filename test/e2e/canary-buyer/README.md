@@ -67,6 +67,40 @@ By default it writes a `.prom` textfile to
 To push instead, set `CANARY_PUSHGATEWAY=http://host:9091` (in the plist
 `EnvironmentVariables` or the environment).
 
+## Schedule it (always-on Linux host, e.g. Pearl — every 30 min)
+
+Prefer this over a lab Mac when you have an always-on host: a sleeping Mac
+creates blind spots. Units ship next to this README (`canary-buyer.service`,
+`canary-buyer.timer`).
+
+```bash
+apt-get install -y nodejs            # Ubuntu 24.04 ships node 18 (probe-compatible)
+install -d -o macprovider -g macprovider -m 0755 /opt/macprovider/canary-buyer
+cp probe.mjs run-canary.sh /opt/macprovider/canary-buyer/
+install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider/canary-buyer
+# buyer token via a 0640 env file — never inline in the unit, never echoed:
+printf 'MACPROVIDER_BUYER_TOKEN=%s\n' "$TOKEN" > /etc/macprovider/canary-buyer.env
+chown root:macprovider /etc/macprovider/canary-buyer.env && chmod 0640 /etc/macprovider/canary-buyer.env
+cp canary-buyer.service canary-buyer.timer /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now canary-buyer.timer
+systemctl start canary-buyer.service   # run once now; check `journalctl -u canary-buyer`
+```
+
+### Alerting without Prometheus — dead-man's-switch heartbeat
+
+No Prometheus/pushgateway is required. The service runs with `--fail-on-degraded`,
+so a down gateway or unserviceable model makes the run **exit non-zero** (visible
+in `journalctl -u canary-buyer`) and the wrapper then **does not** ping the
+heartbeat. Point `CANARY_HEARTBEAT_URL` at a BetterStack "Heartbeat" (or
+healthchecks.io) monitor with an expected period ≥ the timer interval: a healthy
+run pings it; a degraded/failed/missed run leaves it stale and the monitor
+alerts. Add to `/etc/macprovider/canary-buyer.env`:
+
+```
+CANARY_HEARTBEAT_URL=https://uptime.betterstack.com/api/v1/heartbeat/<token>
+```
+(https required unless `CANARY_ALLOW_INSECURE=1`; the URL carries no buyer token.)
+
 ## Configuration
 
 All env, all optional except the token:
@@ -83,6 +117,7 @@ All env, all optional except the token:
 | `CANARY_REQ_TIMEOUT_MS` | `45000` | per-request timeout |
 | `CANARY_STICKY_PREFIX_LINES` | `80` | shared-prefix size (~10 tok/line) for the sticky KV-cache test; must exceed the provider's prefix-cache granularity or turn-2 `cached_prompt_tokens` is always 0 |
 | `CANARY_ALLOW_INSECURE` | *(unset)* | set `1` to permit `http`/localhost/private-host targets (local mock testing only). By default `CANARY_BASE`/`CANARY_PUSHGATEWAY` must be `https` and non-private, so the buyer token can't be sent to an arbitrary origin. |
+| `CANARY_HEARTBEAT_URL` | *(unset)* | https dead-man's-switch ping (BetterStack/healthchecks). Pinged by `run-canary.sh` only on a healthy (exit-0) run; a degraded run with `--fail-on-degraded` leaves it stale so the upstream monitor alerts. |
 
 The buyer token is redacted from all logs, stdout, and artifacts even if a
 mispointed gateway echoes the `Authorization` header.

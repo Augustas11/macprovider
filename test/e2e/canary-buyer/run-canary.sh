@@ -43,6 +43,32 @@ fi
 # Artifact rotation (keep newest 200) is handled inside probe.mjs in Node, so no
 # filename can be misparsed by the shell into an unintended delete.
 
+# Optional dead-man's-switch heartbeat. When CANARY_HEARTBEAT_URL is set (an
+# https BetterStack / healthchecks-style ping URL), the wrapper pings it ONLY
+# when the probe exits 0 (healthy). A degraded run (with --fail-on-degraded) or a
+# probe that never runs leaves the heartbeat stale, so the upstream monitor
+# alerts. The heartbeat URL carries no buyer token, but we still require https so
+# a mispointed URL can't be reached over cleartext (CANARY_ALLOW_INSECURE=1
+# bypasses, for local testing only).
+if [[ -n "${CANARY_HEARTBEAT_URL:-}" ]]; then
+  if [[ "$CANARY_HEARTBEAT_URL" != https://* && "${CANARY_ALLOW_INSECURE:-}" != "1" ]]; then
+    echo "canary: CANARY_HEARTBEAT_URL must be https (set CANARY_ALLOW_INSECURE=1 to allow http)" >&2
+    exit 2
+  fi
+  if "$NODE_BIN" "$HERE/probe.mjs" \
+      --metrics-out "$CANARY_METRICS_OUT" \
+      --json-out "$CANARY_JSON_OUT" \
+      "$@"; then
+    curl -fsS -m 10 "$CANARY_HEARTBEAT_URL" >/dev/null 2>&1 \
+      || echo "canary: heartbeat ping failed (probe was healthy)" >&2
+    exit 0
+  else
+    rc=$?
+    echo "canary: probe exited $rc; heartbeat NOT pinged (dead-man switch will fire)" >&2
+    exit "$rc"
+  fi
+fi
+
 exec "$NODE_BIN" "$HERE/probe.mjs" \
   --metrics-out "$CANARY_METRICS_OUT" \
   --json-out "$CANARY_JSON_OUT" \
