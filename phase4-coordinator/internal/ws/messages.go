@@ -286,6 +286,29 @@ type InferenceResponseEnd struct {
 	Receipt string `json:"receipt,omitempty"`
 }
 
+// SELivenessChallenge is sent by the coordinator to a provider that completed
+// SE attestation (macprovider-se-p256-v1). The provider MUST sign the
+// nonce+timestamp and echo both fields back in an SELivenessResponse.
+// Distinct from auth attestation_challenge (Pillar-C token freshness).
+type SELivenessChallenge struct {
+	Type      string `json:"type"`
+	Version   int    `json:"version"`
+	Nonce     string `json:"nonce"`
+	Timestamp string `json:"timestamp"`
+}
+
+// SELivenessResponse is sent by the provider in reply to an SELivenessChallenge.
+// Coordinator verifies nonce+timestamp echo and ES256 signature over
+// UTF-8(nonce+timestamp) using the stored SE public key.
+type SELivenessResponse struct {
+	Type      string `json:"type"`
+	Version   int    `json:"version"`
+	Nonce     string `json:"nonce"`
+	Timestamp string `json:"timestamp"`
+	PublicKey string `json:"public_key"`
+	Signature string `json:"signature"`
+}
+
 type CancelRequest struct {
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`

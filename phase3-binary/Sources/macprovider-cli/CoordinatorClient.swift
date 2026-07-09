@@ -191,6 +191,10 @@ actor CoordinatorClient {
     private let receiptKeyRotationTimeoutNanoseconds: UInt64
     private let connectAndRunOverride: (@Sendable () async throws -> Void)?
     private let attestationGenerator: Tier2AttestationTokenGenerating
+    // SE liveness challenge signing (Phase 1, Track P1-C).
+    // Nil until first challenge; lazily loads SecureEnclaveIdentity on arm64.
+    // Tests inject a SELivenessTestSigning double via the init parameter.
+    private var seLivenessSigner: (any SELivenessSigning)?
     // M1-1 / XSEC-1: the factory now takes a URLRequest so the binary can
     // attach an Authorization: Bearer header when a provider token is
     // configured. The header is required when the coordinator runs with
@@ -258,7 +262,15 @@ actor CoordinatorClient {
         sendOverride: SendOverride? = nil,
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
         receiptKeyRotationTimeoutNanoseconds: UInt64 = 55 * 1_000_000_000,
-        attestationGenerator: Tier2AttestationTokenGenerating = ManagedDeviceAttestationGenerator(),
+        attestationGenerator: Tier2AttestationTokenGenerating = {
+            #if arch(arm64)
+            if let seGen = SecureEnclaveAttestationGenerator.loadIfAvailable() {
+                return seGen
+            }
+            #endif
+            return ManagedDeviceAttestationGenerator()
+        }(),
+        seLivenessSignerOverride: (any SELivenessSigning)? = nil,
         webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { providerWebSocketSession.webSocketTask(with: $0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         pairingController: PairingController? = nil,
@@ -321,6 +333,7 @@ actor CoordinatorClient {
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
         self.receiptKeyRotationTimeoutNanoseconds = receiptKeyRotationTimeoutNanoseconds
         self.attestationGenerator = attestationGenerator
+        self.seLivenessSigner = seLivenessSignerOverride
         self.webSocketFactory = webSocketFactory
         self.providerToken = config.providerToken.flatMap { value in
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -833,6 +846,7 @@ actor CoordinatorClient {
             modelRuntime: modelRuntime,
             providerStatus: providerStatus,
             loadedModelID: loadedModelID,
+            catalogModelIDAlias: catalogModelIDForCoordinator,
             warmSwapEnabled: warmSwapEnabled,
             maxActiveRequests: maxActiveRequests,
             maxBodyBytes: maxBodyBytes,
@@ -1136,6 +1150,8 @@ actor CoordinatorClient {
         case "warm_up":
             try await sendStateUpdate(state: .degraded, reason: "coordinator warm_up requested")
             try await sendStateUpdate(state: .ready, reason: "warm_up complete")
+        case "se_liveness_challenge":
+            try await handleSELivenessChallenge(dict)
         default:
             try await sendNAK(
                 inReplyTo: type,
@@ -2341,6 +2357,55 @@ actor CoordinatorClient {
                 "message": message,
             ],
         ])
+    }
+
+    // MARK: - SE Liveness Challenge (Phase 1, Track P1-C)
+
+    private func handleSELivenessChallenge(_ dict: [String: Any]) async throws {
+        guard
+            let nonce = dict["nonce"] as? String,
+            let timestamp = dict["timestamp"] as? String,
+            !nonce.isEmpty
+        else {
+            print("WARN se_liveness_challenge missing nonce or timestamp — ignoring")
+            return
+        }
+
+        // Lazily load the SE identity on arm64; use injected signer in tests.
+        if seLivenessSigner == nil {
+            #if arch(arm64)
+            if let seIdentity = try? SecureEnclaveIdentity.loadOrCreate() {
+                seLivenessSigner = seIdentity
+            } else {
+                print("WARN SE liveness challenge received but SecureEnclaveIdentity unavailable — ignoring")
+                return
+            }
+            #else
+            print("WARN SE liveness challenge received on non-arm64 — ignoring")
+            return
+            #endif
+        }
+
+        guard let signer = seLivenessSigner else { return }
+
+        let message = (nonce + timestamp).data(using: .utf8)!
+        let signature: Data
+        do {
+            signature = try signer.sign(message)
+        } catch {
+            print("ERROR SE liveness signing failed: \(error.localizedDescription)")
+            return
+        }
+
+        try await send([
+            "type": "se_liveness_response",
+            "version": 1,
+            "nonce": nonce,
+            "timestamp": timestamp,
+            "public_key": signer.publicKeyBase64,
+            "signature": signature.base64EncodedString(),
+        ])
+        print("se_liveness_response sent (nonce prefix: \(nonce.prefix(8))…)")
     }
 
     func authInitialMessage(

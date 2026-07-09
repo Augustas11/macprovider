@@ -460,6 +460,16 @@ type Tier2Config struct {
 	AttestationFormats   []string `yaml:"attestation_formats"`
 	AllowMockAttestation bool     `yaml:"allow_mock_attestation"`
 
+	// SE liveness challenge settings (Phase 1, Track P1-C).
+	// Only sent to providers whose SE pubkey is recorded (attestation_tier=self_signed).
+	SELivenessIntervalS   int `yaml:"se_liveness_interval_s"`
+	SELivenessTimeoutS    int `yaml:"se_liveness_timeout_s"`
+	SELivenessMaxFailures int `yaml:"se_liveness_max_failures"`
+
+	// MDM enrollment profile generation (Phase 2, Track P2-A, Scenario B).
+	// Profile generation is enabled when MDM.EnrollmentBaseURL is non-empty.
+	MDM Tier2MDMConfig `yaml:"mdm"`
+
 	BehavioralSafetyEnabled    bool    `yaml:"behavioral_safety_enabled"`
 	OutputSizeCapBytes         int64   `yaml:"output_size_cap_bytes"`
 	OutputBytesPerTokenCeiling int     `yaml:"output_bytes_per_token_ceiling"`
@@ -468,6 +478,40 @@ type Tier2Config struct {
 	ResponseTimeAnomalyEnabled bool    `yaml:"response_time_anomaly_enabled"`
 	ResponseTimeAnomalyFactor  float64 `yaml:"response_time_anomaly_factor"`
 	ResponseTimeAnomalyMinMS   int64   `yaml:"response_time_anomaly_min_ms"`
+}
+
+// Tier2MDMConfig holds Phase 2 Track P2-A MDM enrollment profile settings.
+// All fields are optional — profile generation is disabled when
+// EnrollmentBaseURL is empty. Signer fields are optional; profiles are served
+// unsigned (with a loud error log) when signing is not configured or fails.
+type Tier2MDMConfig struct {
+	// EnrollmentBaseURL is the canonical HTTPS base URL used to build SCEP and
+	// MDM connect URLs inside the generated .mobileconfig. MUST be set
+	// explicitly; the coordinator never derives this from the inbound request's
+	// Host header — a client-controlled Host would let an attacker obtain a
+	// coordinator-signed profile pointing enrollment at their own server.
+	EnrollmentBaseURL string `yaml:"enrollment_base_url"`
+
+	// MDMServerURL is the full MicroMDM /mdm/connect URL. When empty, falls
+	// back to EnrollmentBaseURL + "/mdm/connect".
+	MDMServerURL string `yaml:"mdm_server_url"`
+
+	// SCEPUrl is the full SCEP endpoint URL. When empty, falls back to
+	// EnrollmentBaseURL + "/scep".
+	SCEPUrl string `yaml:"scep_url"`
+
+	// PushTopic is the APNs push topic tied to the MDM push certificate,
+	// e.g. "com.apple.mgmt.External.<uuid>". This is a placeholder until the
+	// macprovider APNs certificate is provisioned; the profile is syntactically
+	// valid without it but push-based MDM commands will not function.
+	PushTopic string `yaml:"push_topic"`
+
+	// ProfileSignerCertPath and ProfileSignerKeyPath point to PEM-encoded
+	// signing cert + private key for optional CMS signing of generated
+	// profiles. When empty, profiles are served unsigned (macOS will show
+	// "Unsigned" in the install prompt, which is acceptable for enrollment).
+	ProfileSignerCertPath string `yaml:"profile_signer_cert_path"`
+	ProfileSignerKeyPath  string `yaml:"profile_signer_key_path"`
 }
 
 type CoordinatorAdvertisedVersion struct {
@@ -778,6 +822,9 @@ func Default() Config {
 			},
 		},
 		Tier2: Tier2Config{
+			SELivenessIntervalS:            300,
+			SELivenessTimeoutS:             30,
+			SELivenessMaxFailures:          3,
 			ObserveEnabled:                 false,
 			CatalogPath:                    "",
 			CatalogPublicKey:               "",
@@ -789,7 +836,7 @@ func Default() Config {
 			RequireAttestation:             false,
 			AttestationRoots:               []string{},
 			AttestationMaxAgeS:             600,
-			AttestationFormats:             []string{"apple-managed-device-attestation-acme-v1"},
+			AttestationFormats:             []string{"apple-managed-device-attestation-acme-v1", "macprovider-se-p256-v1"},
 			AllowMockAttestation:           false,
 			BehavioralSafetyEnabled:        false,
 			OutputSizeCapBytes:             0,

@@ -75,6 +75,147 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertTrue(telemetry.records.isEmpty)
     }
 
+    // Money-path regression (BUILD_SPEC relay_serve_model_id_alias): the
+    // coordinator advertises config.modelCatalogModelID as this provider's
+    // model_id and relays buyer requests carrying it. With the served model
+    // configured (warm-swap off), a WS-relayed request whose `model` is the
+    // catalog alias must be accepted and served, not 404'd.
+    func testCatalogAliasAcceptedWhenConfiguredModelLoaded() async throws {
+        let runtime = FakeStreamingRuntime()
+        let status = ProviderStatus(
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: "qwen3-coder-30b-a3b-instruct",
+            catalogModelIDAlias: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            warmSwapEnabled: false,
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+
+        let body = #"{"model":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":false}"#
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-alias-accept",
+            "stream": false,
+            "body": body,
+        ])
+
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: {
+            await recorder.frames
+        }
+        let end = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(
+            end["status"] as? String,
+            "complete",
+            "catalog alias must be accepted and served when the configured model is loaded"
+        )
+    }
+
+    // Contrast: with no alias configured, the same catalog-id request is a
+    // genuine model mismatch and must be rejected 404 (surfaced by the relay as
+    // an error_model_not_loaded terminal frame).
+    func testCatalogAliasRequestRejectedWhenNoAliasConfigured() async throws {
+        let runtime = FakeStreamingRuntime()
+        let status = ProviderStatus(
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: "qwen3-coder-30b-a3b-instruct",
+            catalogModelIDAlias: nil,
+            warmSwapEnabled: false,
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+
+        let body = #"{"model":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":false}"#
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-alias-reject",
+            "stream": false,
+            "body": body,
+        ])
+
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: {
+            await recorder.frames
+        }
+        let end = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(end["status"] as? String, "error_model_not_loaded")
+    }
+
+    // Money-path regression (audit HIGH — relay warm-swap gate): coordinatorWireModelID
+    // advertises the catalog id whenever the *configured* model is the served snapshot,
+    // even when warm-swap is enabled. So with warmSwapEnabled == true but the current
+    // snapshot still the configured model, a relayed request for the catalog alias must
+    // still be accepted (the relay gate keys on validationModelID == loadedModelID, not
+    // on warmSwapEnabled). Before the fix this 404'd.
+    func testCatalogAliasAcceptedUnderWarmSwapWhenConfiguredModelStillLoaded() async throws {
+        let runtime = FakeReceiptCompletionRuntime(servedSnapshot: RuntimeSnapshot(
+            state: .ready,
+            container: nil,
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            modelHash: nil
+        ))
+        let status = ProviderStatus(
+            modelID: "qwen3-coder-30b-a3b-instruct",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: "qwen3-coder-30b-a3b-instruct",
+            catalogModelIDAlias: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit",
+            warmSwapEnabled: true,
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+
+        let body = #"{"model":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":false}"#
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-alias-warmswap",
+            "stream": false,
+            "body": body,
+        ])
+
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: {
+            await recorder.frames
+        }
+        let end = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(
+            end["status"] as? String,
+            "complete",
+            "catalog alias must be accepted under warm-swap when the configured model is still the served snapshot"
+        )
+    }
+
     func testUnknownCancelIsIdempotent() async throws {
         let runtime = try await ModelRuntime(modelID: nil)
         let status = ProviderStatus(

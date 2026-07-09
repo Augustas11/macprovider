@@ -23,6 +23,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/explorer"
+	"github.com/augstar/macprovider-coordinator/internal/mdm"
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/pow"
@@ -827,11 +828,22 @@ func main() {
 		hardwareEvidence = registerHandler.HandleHardwareEvidence
 		logger.Info().Msg("SPEC-026 app-track register route mounted on buyer port")
 	}
+	// Phase 2 Track P2-A: MDM enrollment profile endpoint.
+	// Enabled when tier2.mdm.enrollment_base_url is configured.
+	var enrollHandler http.HandlerFunc
+	if cfg.Tier2.MDM.EnrollmentBaseURL != "" {
+		eh := buildEnrollHandler(cfg, logger)
+		enrollHandler = eh.HandleEnroll
+		logger.Info().
+			Str("base_url", cfg.Tier2.MDM.EnrollmentBaseURL).
+			Msg("MDM enrollment profile route mounted on buyer port (/v1/enroll)")
+	}
 	buyerHandler := buyerHandlerWithOptionalProviderEndpoints(
 		buyerServer.Handler(),
 		cfg.Onboarding.AppTrackRegisterEnabled,
 		register,
 		hardwareEvidence,
+		enrollHandler,
 		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
 	)
 
@@ -1113,18 +1125,49 @@ func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Ha
 	})
 }
 
-func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence http.HandlerFunc, malibuAccrual http.Handler) http.Handler {
+func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence, enroll http.HandlerFunc, malibuAccrual http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	if enabled {
 		mux.HandleFunc("/v1/providers/register", register)
 		mux.HandleFunc("/v1/providers/hardware-evidence", hardwareEvidence)
 	}
 	mux.HandleFunc("/v1/provider/wallet", appTrackWalletNotImplementedHandler)
+	if enroll != nil {
+		mux.HandleFunc("/v1/enroll", enroll)
+	}
 	if malibuAccrual != nil {
 		mux.Handle("/v1/provider/malibu-accrual", malibuAccrual)
 	}
 	mux.Handle("/", base)
 	return mux
+}
+
+// buildEnrollHandler constructs the MDM enrollment handler for POST /v1/enroll.
+// Called only when tier2.mdm.enrollment_base_url is configured.
+func buildEnrollHandler(cfg config.Config, logger zerolog.Logger) *onboarding.EnrollHandler {
+	mdmCfg := cfg.Tier2.MDM
+	eh := &onboarding.EnrollHandler{
+		MDMConfig: mdm.Config{
+			EnrollmentBaseURL: mdmCfg.EnrollmentBaseURL,
+			MDMServerURL:      mdmCfg.MDMServerURL,
+			SCEPUrl:           mdmCfg.SCEPUrl,
+			PushTopic:         mdmCfg.PushTopic,
+		},
+		Logger: logger,
+	}
+	if mdmCfg.ProfileSignerCertPath != "" && mdmCfg.ProfileSignerKeyPath != "" {
+		signer, err := onboarding.NewFileProfileSigner(mdmCfg.ProfileSignerCertPath, mdmCfg.ProfileSignerKeyPath)
+		if err != nil {
+			logger.Error().Err(err).
+				Str("cert_path", mdmCfg.ProfileSignerCertPath).
+				Str("key_path", mdmCfg.ProfileSignerKeyPath).
+				Msg("MDM profile signer init failed — profiles will be served unsigned")
+		} else {
+			eh.Signer = signer
+			logger.Info().Msg("MDM enrollment profile CMS signer loaded")
+		}
+	}
+	return eh
 }
 
 func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB, connectivity rewards.ProviderConnectivity) http.Handler {
@@ -1291,6 +1334,9 @@ var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
 	"RequireEncryptedLeg":            tier2HotReloadable,
 	"RequireAttestation":             tier2HotReloadable,
 	"AttestationMaxAgeS":             tier2HotReloadable,
+	"SELivenessIntervalS":             tier2HotReloadable,
+	"SELivenessTimeoutS":              tier2HotReloadable,
+	"SELivenessMaxFailures":           tier2HotReloadable,
 	"BehavioralSafetyEnabled":        tier2HotReloadable,
 	"OutputSizeCapBytes":             tier2HotReloadable,
 	"OutputBytesPerTokenCeiling":     tier2HotReloadable,
@@ -1299,6 +1345,9 @@ var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
 	"ResponseTimeAnomalyEnabled":     tier2HotReloadable,
 	"ResponseTimeAnomalyFactor":      tier2HotReloadable,
 	"ResponseTimeAnomalyMinMS":       tier2HotReloadable,
+	// MDM enrollment config — startup-only: changing push cert or SCEP
+	// settings mid-flight would invalidate already-issued profiles.
+	"MDM": tier2StartupOnly,
 }
 
 func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
