@@ -1,6 +1,6 @@
 package mdm
 
-// signMobileconfig creates a CMS SignedData (PKCS#7) envelope for a
+// SignMobileconfig creates a CMS SignedData (PKCS#7) envelope for a
 // .mobileconfig plist, enabling macOS to display the signer's identity at
 // install time. Signing is install-time trust only — it does not affect the
 // SCEP or MDM protocol trust chain inside the profile.
@@ -8,7 +8,7 @@ package mdm
 // Implements RFC 5652 §5 SignedData with:
 //   - SHA-256 digest algorithm
 //   - RSA or ECDSA (P-256) signature algorithm, inferred from the key type
-//   - Explicit signed attributes (content type + message digest)
+//   - Explicit signed attributes (content type, signing time, message digest)
 //   - The signing certificate embedded in the CertificateSet
 
 import (
@@ -37,35 +37,13 @@ var (
 	oidAttrSigningTime   = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 5}
 )
 
-// signedAttribute is a CMS SignedAttribute (RFC 5652 §5.3).
-type signedAttribute struct {
-	Type   asn1.ObjectIdentifier
-	Values asn1.RawValue `asn1:"set"`
-}
-
-// issuerAndSerialNumber identifies the signer by certificate issuer + serial.
-type issuerAndSerialNumber struct {
-	Issuer       pkix.RDNSequence
-	SerialNumber *big.Int
-}
-
-// signMobileconfig produces a DER-encoded CMS SignedData wrapping the given
+// SignMobileconfig produces a DER-encoded CMS SignedData wrapping the given
 // plist bytes. The content is embedded (encapContentInfo.eContent present).
-func signMobileconfig(content []byte, cert *x509.Certificate, key crypto.Signer) ([]byte, error) {
+func SignMobileconfig(content []byte, cert *x509.Certificate, key crypto.Signer) ([]byte, error) {
 	// 1. Compute the message digest of the content.
 	digest := sha256.Sum256(content)
 
-	// 2. Build the signed attributes (content type, signing time, message digest).
-	//    Order matters: attributes must be in DER SET order (OID-sorted) for
-	//    correct signature verification, but encoding/asn1 does not auto-sort
-	//    SET OF — we order them by OID value manually.
-	//
-	//    OID ordering: 1.2.840.113549.1.9.3 (contentType) < 1.2.840.113549.1.9.4
-	//    (messageDigest) < 1.2.840.113549.1.9.5 (signingTime) by DER SET rules.
-	//    Actually, RFC 5652 says ordered SET is not required for SignedAttributes
-	//    (they are defined as IMPLICIT [0] SET OF Attribute, receiver must re-sort).
-	//    We build them in a deterministic order that produces a valid signature.
-
+	// 2. Build the signed attributes: contentType, signingTime, messageDigest.
 	contentTypeVal, err := asn1.Marshal(oidPKCS7Data)
 	if err != nil {
 		return nil, fmt.Errorf("cms: marshal content type value: %w", err)
@@ -79,8 +57,6 @@ func signMobileconfig(content []byte, cert *x509.Certificate, key crypto.Signer)
 		return nil, fmt.Errorf("cms: marshal signing time: %w", err)
 	}
 
-	// Each Attribute is SEQUENCE { OID, SET { value } }.
-	// Build as raw bytes so we control the SET encoding precisely.
 	attrContentType, err := marshalAttribute(oidAttrContentType, contentTypeVal)
 	if err != nil {
 		return nil, fmt.Errorf("cms: marshal contentType attr: %w", err)
@@ -94,15 +70,13 @@ func signMobileconfig(content []byte, cert *x509.Certificate, key crypto.Signer)
 		return nil, fmt.Errorf("cms: marshal messageDigest attr: %w", err)
 	}
 
-	// signedAttrsBytes is the concatenation of attribute DER encodings, which
-	// will be wrapped in an explicit SET tag for both storage and signing.
+	// signedAttrsInner is the concatenation of attribute DER encodings wrapped
+	// as an IMPLICIT [0] SET in the SignerInfo.
 	signedAttrsInner := append(attrContentType, attrSigningTime...)
 	signedAttrsInner = append(signedAttrsInner, attrMessageDigest...)
 
-	// 3. Compute the signature over the DER SET encoding of signedAttrs.
-	//    RFC 5652 §5.4: the message authentication code is computed over the
-	//    complete DER encoding of the SignedAttributes, re-tagged as a SET
-	//    (tag 0x31) — NOT as the IMPLICIT [0] tag used in the SignerInfo.
+	// 3. Signature is computed over the DER SET encoding of signedAttrs
+	//    (RFC 5652 §5.4 — re-tagged as universal SET 0x31).
 	signedAttrsDER, err := marshalSET(signedAttrsInner)
 	if err != nil {
 		return nil, fmt.Errorf("cms: marshal signed attributes SET: %w", err)
@@ -129,23 +103,9 @@ func signMobileconfig(content []byte, cert *x509.Certificate, key crypto.Signer)
 		return nil, fmt.Errorf("cms: unsupported key type %T", key)
 	}
 
-	// 4. Build SignerInfo.
-	//    SignerInfo version is 1 when using issuerAndSerialNumber (RFC 5652 §5.3).
-	issuerRDN := pkix.RDNSequence{}
-	if err := issuerRDN.FillFromRDNSequence(&cert.Issuer); err != nil {
-		return nil, fmt.Errorf("cms: encode issuer: %w", err)
-	}
-	issuerDER, err := asn1.Marshal(issuerRDN)
-	if err != nil {
-		return nil, fmt.Errorf("cms: marshal issuer: %w", err)
-	}
-	issuerAndSN := issuerAndSerialNumber{
-		SerialNumber: cert.SerialNumber,
-	}
-	if rest, err2 := asn1.Unmarshal(issuerDER, &issuerAndSN.Issuer); err2 != nil || len(rest) != 0 {
-		return nil, fmt.Errorf("cms: unmarshal issuer RDN: %w", err2)
-	}
-	sidDER, err := asn1.Marshal(issuerAndSN)
+	// 4. Build IssuerAndSerialNumber using the raw DER issuer from the cert.
+	//    cert.RawIssuer is the already-encoded Name (SEQUENCE of SETs).
+	sidDER, err := marshalIssuerAndSN(cert.RawIssuer, cert.SerialNumber)
 	if err != nil {
 		return nil, fmt.Errorf("cms: marshal issuerAndSN: %w", err)
 	}
@@ -155,7 +115,7 @@ func signMobileconfig(content []byte, cert *x509.Certificate, key crypto.Signer)
 		return nil, fmt.Errorf("cms: build signerInfo: %w", err)
 	}
 
-	// 5. Build EncapsulatedContentInfo with the plist bytes.
+	// 5. EncapsulatedContentInfo with the plist bytes.
 	contentDER, err := asn1.Marshal(content) // OCTET STRING
 	if err != nil {
 		return nil, fmt.Errorf("cms: marshal content: %w", err)
@@ -180,7 +140,7 @@ func signMobileconfig(content []byte, cert *x509.Certificate, key crypto.Signer)
 		return nil, fmt.Errorf("cms: marshal digestAlg SET: %w", err)
 	}
 
-	// 7. Certificates [0] IMPLICIT — the raw certificate DER bytes.
+	// 7. Certificates [0] IMPLICIT — raw certificate DER.
 	certTagged := asn1.RawValue{Class: asn1.ClassContextSpecific, Tag: 0, IsCompound: true, Bytes: cert.Raw}
 	certsDER, err := asn1.Marshal(certTagged)
 	if err != nil {
@@ -193,8 +153,8 @@ func signMobileconfig(content []byte, cert *x509.Certificate, key crypto.Signer)
 		return nil, fmt.Errorf("cms: marshal signerInfos SET: %w", err)
 	}
 
-	// 9. SignedData SEQUENCE {version(1), digestAlgs, encapCI, certs[0], signerInfos}.
-	versionDER, err := asn1.Marshal(1) // version = 1
+	// 9. SignedData SEQUENCE { version(1), digestAlgs, encapCI, certs[0], signerInfos }.
+	versionDER, err := asn1.Marshal(1)
 	if err != nil {
 		return nil, fmt.Errorf("cms: marshal version: %w", err)
 	}
@@ -225,9 +185,19 @@ func signMobileconfig(content []byte, cert *x509.Certificate, key crypto.Signer)
 	return marshalSEQUENCE(ciInner)
 }
 
+// marshalIssuerAndSN encodes IssuerAndSerialNumber by embedding raw DER issuer
+// bytes directly, avoiding round-trip issues with pkix.RDNSequence re-ordering.
+func marshalIssuerAndSN(rawIssuer []byte, serial *big.Int) ([]byte, error) {
+	serialDER, err := asn1.Marshal(serial)
+	if err != nil {
+		return nil, fmt.Errorf("cms: marshal serial: %w", err)
+	}
+	inner := append(rawIssuer, serialDER...)
+	return marshalSEQUENCE(inner)
+}
+
 // marshalAttribute encodes a CMS Attribute as:
 // SEQUENCE { OID, SET { preEncodedValue } }
-// where preEncodedValue is already DER-encoded.
 func marshalAttribute(oid asn1.ObjectIdentifier, valueDER []byte) ([]byte, error) {
 	oidDER, err := asn1.Marshal(oid)
 	if err != nil {
@@ -240,16 +210,7 @@ func marshalAttribute(oid asn1.ObjectIdentifier, valueDER []byte) ([]byte, error
 	return marshalSEQUENCE(append(oidDER, setDER...))
 }
 
-// buildSignerInfoDER assembles the raw DER bytes for a SignerInfo:
-//
-//	SignerInfo ::= SEQUENCE {
-//	  version              INTEGER (1),
-//	  sid                  IssuerAndSerialNumber,
-//	  digestAlgorithm      AlgorithmIdentifier,
-//	  signedAttrs     [0] IMPLICIT SET OF Attribute,
-//	  signatureAlgorithm   AlgorithmIdentifier,
-//	  signature            OCTET STRING
-//	}
+// buildSignerInfoDER assembles the raw DER bytes for a SignerInfo.
 func buildSignerInfoDER(sidDER, signedAttrsInner []byte, sigAlgOID asn1.ObjectIdentifier, sigBytes []byte) ([]byte, error) {
 	vDER, err := asn1.Marshal(1)
 	if err != nil {
@@ -259,8 +220,7 @@ func buildSignerInfoDER(sidDER, signedAttrsInner []byte, sigAlgOID asn1.ObjectId
 	if err != nil {
 		return nil, err
 	}
-	// signedAttrs is stored as IMPLICIT [0] SET (class context-specific, tag 0).
-	// We use the raw bytes of the inner attributes and wrap with the implicit tag.
+	// signedAttrs stored as IMPLICIT [0] SET (context-specific, tag 0).
 	signedAttrsImplicit := asn1.RawValue{
 		Class:      asn1.ClassContextSpecific,
 		Tag:        0,
@@ -309,8 +269,8 @@ func marshalSET(inner []byte) ([]byte, error) {
 	})
 }
 
-// mustMarshalOID marshals an OID to DER. Panics on error (OIDs are static
-// constants — failure is a programming error, not a runtime condition).
+// mustMarshalOID panics on error — OID constants are static and failure is a
+// programming error.
 func mustMarshalOID(oid asn1.ObjectIdentifier) []byte {
 	b, err := asn1.Marshal(oid)
 	if err != nil {

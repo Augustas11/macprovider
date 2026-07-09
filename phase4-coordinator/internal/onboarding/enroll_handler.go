@@ -186,5 +186,5 @@ type fileProfileSigner struct {
 }
 
 func (s *fileProfileSigner) Sign(profile []byte) ([]byte, error) {
-	return signMobileconfig(profile, s.cert, s.key)
+	return mdm.SignMobileconfig(profile, s.cert, s.key)
 }

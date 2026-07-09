@@ -1125,18 +1125,49 @@ func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Ha
 	})
 }
 
-func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence http.HandlerFunc, malibuAccrual http.Handler) http.Handler {
+func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence, enroll http.HandlerFunc, malibuAccrual http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	if enabled {
 		mux.HandleFunc("/v1/providers/register", register)
 		mux.HandleFunc("/v1/providers/hardware-evidence", hardwareEvidence)
 	}
 	mux.HandleFunc("/v1/provider/wallet", appTrackWalletNotImplementedHandler)
+	if enroll != nil {
+		mux.HandleFunc("/v1/enroll", enroll)
+	}
 	if malibuAccrual != nil {
 		mux.Handle("/v1/provider/malibu-accrual", malibuAccrual)
 	}
 	mux.Handle("/", base)
 	return mux
+}
+
+// buildEnrollHandler constructs the MDM enrollment handler for POST /v1/enroll.
+// Called only when tier2.mdm.enrollment_base_url is configured.
+func buildEnrollHandler(cfg config.Config, logger zerolog.Logger) *onboarding.EnrollHandler {
+	mdmCfg := cfg.Tier2.MDM
+	eh := &onboarding.EnrollHandler{
+		MDMConfig: mdm.Config{
+			EnrollmentBaseURL: mdmCfg.EnrollmentBaseURL,
+			MDMServerURL:      mdmCfg.MDMServerURL,
+			SCEPUrl:           mdmCfg.SCEPUrl,
+			PushTopic:         mdmCfg.PushTopic,
+		},
+		Logger: logger,
+	}
+	if mdmCfg.ProfileSignerCertPath != "" && mdmCfg.ProfileSignerKeyPath != "" {
+		signer, err := onboarding.NewFileProfileSigner(mdmCfg.ProfileSignerCertPath, mdmCfg.ProfileSignerKeyPath)
+		if err != nil {
+			logger.Error().Err(err).
+				Str("cert_path", mdmCfg.ProfileSignerCertPath).
+				Str("key_path", mdmCfg.ProfileSignerKeyPath).
+				Msg("MDM profile signer init failed — profiles will be served unsigned")
+		} else {
+			eh.Signer = signer
+			logger.Info().Msg("MDM enrollment profile CMS signer loaded")
+		}
+	}
+	return eh
 }
 
 func malibuAccrualHandler(cfg config.Config, tokenStore *auth.Store, rewardsDB *sql.DB, connectivity rewards.ProviderConnectivity) http.Handler {
