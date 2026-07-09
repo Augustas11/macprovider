@@ -19,7 +19,7 @@ Use workload class as a partition/filter over the existing grid, not as one glob
 This is operationally equivalent to measuring K copies of the grid, but it keeps the semantics clean:
 
 - Each partition has one winner for one traffic shape.
-- Storage can add `workload_class` or `workload_name` to trial/report rows without changing the meaning of existing `runs.workload`.
+- Storage can add `corpus_class` to trial/report rows without changing the meaning of existing `runs.workload`.
 - Failure gates and tie-breakers can be class-local.
 - The implementation can reuse the existing per-workload report posture rather than invent a global compromise winner.
 
@@ -49,7 +49,7 @@ Acceptance rate is expected to vary by content shape. A shared `num_draft_tokens
 
 - Pick winners independently per class.
 - Do not let one class dominate another class's winner.
-- If a single legacy default must be exported, derive it from an explicit buyer-traffic weighting policy, not from hidden precedence.
+- If a single legacy default is ever exported, derive it from an explicit buyer-traffic weighting policy, not from hidden precedence; SPEC-029 v0.1 blocks that export until the policy is defined.
 
 There is no current request-time class classifier in the provider/coordinator path. Therefore v0.1 should publish per-class winners as data and keep runtime serving on the existing single chosen config until a follow-up routing SPEC decides how a buyer request gets a trusted class label.
 
@@ -66,33 +66,36 @@ Recommended additive shape:
   "model_id": "example/target",
   "workload_profiles": {
     "code_completion": {
-      "recommended": {
-        "kv_bits": 4,
-        "max_context_override": 20000,
-        "max_concurrency_override": 1,
-        "draft_model": "example/draft",
-        "draft_model_artifact_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "num_draft_tokens": 4
-      },
-      "gate_policy": {
-        "max_p95_ttft_ms": 12000,
-        "max_stop_token_leak_rate": 0,
-        "min_sustained_tps": null
-      },
-      "profile_metrics": {
-        "median_tps": 8.5,
-        "p95_ttft_ms": 2400,
-        "stop_token_leak_rate": 0,
-        "spec_decode_acceptance_rate": 0.42,
-        "sample_count": 5
-      },
-      "source": "sweep-workload-class-2026-07"
+      "16gb": {
+        "recommended": {
+          "kv_bits": 4,
+          "max_context_override": 20000,
+          "max_concurrency_override": 1,
+          "draft_model": "example/draft",
+          "draft_model_artifact_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "num_draft_tokens": 4
+        },
+        "gate_policy": {
+          "min_samples": 20,
+          "max_p95_ttft_ms": 12000,
+          "max_stop_token_leak_rate": 0,
+          "min_median_tps": null
+        },
+        "profile_metrics": {
+          "median_tps": 8.5,
+          "p95_ttft_ms": 2400,
+          "stop_token_leak_rate": 0,
+          "spec_decode_acceptance_rate": 0.42,
+          "sample_count": 20
+        },
+        "source": "sweep-workload-class-2026-07"
+      }
     }
   }
 }
 ```
 
-Use `workload_profiles` rather than `per_class` in the normative SPEC because the keys are harness workload names in v0.1, not a general traffic taxonomy. The nested object should avoid the existing top-level `bench_gate` key so SPEC-023's advisory catalog gates are not confused with workload-specific gate policy and measured profile metrics.
+Use `workload_profiles` rather than `per_class` in the normative SPEC because the first-level keys are harness workload names in v0.1, not a general request taxonomy. Nesting by RAM tier is required because SPEC-028 draft context caps are tier-specific. The nested object should avoid the existing top-level `bench_gate` key so SPEC-023's advisory catalog gates are not confused with workload-specific gate policy and measured profile metrics.
 
 The same static feed trust domain should sign the additive catalog. The current public key is baked into the installer recommendation code with key ID `streamvc-autotune-static-v4` (`phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:684`), and the static-key README describes the single feed trust model and re-signing process (`phase3-binary/dist/static/keys/README.md:32`). A new key would imply a new trust domain; class profiles are still operator-curated candidate recommendations, so reusing the current static key is correct.
 
