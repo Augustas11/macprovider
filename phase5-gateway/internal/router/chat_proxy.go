@@ -60,6 +60,8 @@ const (
 	maxStreamingFallbackMetadataBytes = int64(64 << 10)
 )
 
+var errStreamingIdleTimeout = errors.New("streaming upstream idle timeout")
+
 type settlementFinalityAction int
 
 const (
@@ -822,17 +824,51 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewaySerializedEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "stream_truncated", reservationWindow, resp)
 	}
+	settleObservedContent := func(outcome string) {
+		if estimateTokensFromBytes(emitted) > maxStreamingCompletionTokens(maxTokens) {
+			outcome = "stream_output_exceeded"
+		}
+		if hasSettlementFinalityTrailerDeclaration(resp) {
+			holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if !s.boundStreamingSettlementHold(holdCtx, r, subject, coordinatorSettlementFinality{
+				Action:  settlementFinalityHold,
+				Outcome: outcome,
+				Reason:  "gateway_" + outcome,
+			}) {
+				slog.Error("gateway failed to persist local terminal streaming settlement hold",
+					"request_id", requestID(r),
+					"account_id", subject.AccountID,
+					"settlement_outcome", outcome,
+				)
+			}
+			return
+		}
+		s.settleAfterCommit(r, subject, promptEstimate, gatewayContentEstimatedCompletion(), maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
+	}
 	settleCancelled := func() {
 		cancelCoordinator()
-		s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewaySerializedEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "client_disconnect", reservationWindow, resp)
+		settleObservedContent("client_disconnect")
+	}
+	settleIdleTimeout := func() {
+		cancelCoordinator()
+		if terminalStructuredErrorCode != "" {
+			refundTerminalStructuredError()
+			return
+		}
+		if structuredStreaming {
+			writeStructuredOutputTimeoutSSE(w, requestID(r))
+		} else {
+			writeSSEError(w, "Provider timed out during streaming", "api_error", "provider_timeout")
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		settleObservedContent("provider_timeout")
 	}
 	forwardLine := func(line []byte) bool {
 		select {
 		case <-r.Context().Done():
-			if reported != nil {
-				settleReported("client_disconnect")
-				return false
-			}
 			settleCancelled()
 			return false
 		default:
@@ -949,10 +985,6 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		if _, err := w.Write(line); err != nil {
 			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
-			if reported != nil {
-				settleReported("client_disconnect")
-				return false
-			}
 			settleCancelled()
 			return false
 		}
@@ -962,7 +994,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		return true
 	}
 	for {
-		line, err := reader.ReadSlice('\n')
+		line, err := readStreamingLineWithIdleTimeout(r.Context(), reader, s.cfg.StreamingIdleTimeout(), cancelCoordinator, resp.Body)
 		if errors.Is(err, bufio.ErrBufferFull) {
 			slog.Error("streaming coordinator line exceeded limit", "request_id", requestID(r), "max_line_bytes", maxStreamingLineBytes)
 			// Gateway-side truncation due to oversized line — NOT a
@@ -976,6 +1008,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			settleTruncated()
 			return
 		}
+		if errors.Is(err, errStreamingIdleTimeout) {
+			slog.Warn("streaming coordinator idle timeout", "request_id", requestID(r), "timeout_ms", s.cfg.Timeouts.StreamingIdleMS)
+			settleIdleTimeout()
+			return
+		}
 		if len(line) > 0 {
 			if !forwardLine(line) {
 				return
@@ -987,11 +1024,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if err == io.EOF {
 			break
 		}
-		if errors.Is(r.Context().Err(), context.Canceled) {
-			if reported != nil {
-				settleReported("client_disconnect")
-				return
-			}
+		if r.Context().Err() != nil {
 			settleCancelled()
 			return
 		}
@@ -1030,7 +1063,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			if flusher != nil {
 				flusher.Flush()
 			}
-			s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, gatewaySerializedEstimatedCompletion(), maxUsageTokens, "gateway_estimated", "provider_timeout", reservationWindow, resp)
+			settleObservedContent("provider_timeout")
 			return
 		}
 		writeProviderDisconnectedSSE(w)
@@ -1040,11 +1073,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		settleTruncated()
 		return
 	}
-	if errors.Is(r.Context().Err(), context.Canceled) {
-		if reported != nil {
-			settleReported("client_disconnect")
-			return
-		}
+	if r.Context().Err() != nil {
 		settleCancelled()
 		return
 	}
@@ -1062,6 +1091,36 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		outcome = "stream_output_exceeded"
 	}
 	s.settleStreamingAfterCommitWithCoordinatorFinality(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow, resp)
+}
+
+type streamingReadResult struct {
+	line []byte
+	err  error
+}
+
+func readStreamingLineWithIdleTimeout(ctx context.Context, reader *bufio.Reader, idleTimeout time.Duration, cancelUpstream func(), body io.Closer) ([]byte, error) {
+	if idleTimeout <= 0 {
+		return reader.ReadSlice('\n')
+	}
+	ch := make(chan streamingReadResult, 1)
+	go func() {
+		line, err := reader.ReadSlice('\n')
+		ch <- streamingReadResult{line: line, err: err}
+	}()
+	timer := time.NewTimer(idleTimeout)
+	defer timer.Stop()
+	select {
+	case result := <-ch:
+		return result.line, result.err
+	case <-timer.C:
+		cancelUpstream()
+		_ = body.Close()
+		return nil, errStreamingIdleTimeout
+	case <-ctx.Done():
+		cancelUpstream()
+		_ = body.Close()
+		return nil, ctx.Err()
+	}
 }
 
 func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens int64, retryExhausted bool, window string) {

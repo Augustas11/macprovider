@@ -101,6 +101,10 @@ timeouts:
   # 300s total bound still fails fast on a truly hung coordinator.
   coordinator_header_timeout_seconds: 300
   streaming_cancel_ms: 500
+  # Post-first-byte stream idle timeout. If the coordinator stops producing
+  # SSE bytes, terminate with provider_timeout before buyer clients hit their
+  # own shorter request deadlines.
+  streaming_idle_ms: 10000
 
 retry_503:
   # Retries coordinator 503 no_provider_available AND transient 502 provider

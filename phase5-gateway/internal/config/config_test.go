@@ -37,6 +37,16 @@ func TestGatewayHeaderTimeoutDefaultCoversFullRequestBudget(t *testing.T) {
 	}
 }
 
+func TestStreamingIdleTimeoutDefaultTerminatesBeforeBuyerHarnessTimeout(t *testing.T) {
+	cfg := Default()
+	if cfg.Timeouts.StreamingIdleMS != 10000 {
+		t.Fatalf("StreamingIdleMS=%d want 10000", cfg.Timeouts.StreamingIdleMS)
+	}
+	if got := cfg.StreamingIdleTimeout().Milliseconds(); got != int64(cfg.Timeouts.StreamingIdleMS) {
+		t.Fatalf("StreamingIdleTimeout=%dms want %dms", got, cfg.Timeouts.StreamingIdleMS)
+	}
+}
+
 // Validate must reject configs where CoordinatorHeaderTimeoutSeconds is
 // below CoordinatorRequestSeconds — this is the runtime backstop for the
 // deploy-time check-deploy-config.sh C2b gate. A gateway started outside
