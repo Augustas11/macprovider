@@ -12,6 +12,7 @@
 #   MALIBU_DOWNLOAD_SSH_KEY   default ~/.ssh/pearl_operator_ed25519
 #   MALIBU_DOWNLOAD_VPS_USER  default root
 #   MALIBU_DOWNLOAD_WEBROOT   default /var/www/malibu-download
+#   MALIBU_DOWNLOAD_KNOWN_HOSTS  pinned Pearl host key (see scripts/dist/)
 #   VERIFY_MALIBU_DOWNLOAD=1   run verify-malibu-download.sh after upload
 
 set -euo pipefail
@@ -20,6 +21,8 @@ die() {
   printf '[publish-malibu-latest-dmg] ERROR: %s\n' "$*" >&2
   exit 1
 }
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 tag="${1:-}"
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "usage: $0 vX.Y.Z"
@@ -68,20 +71,20 @@ EOF
   exit 0
 fi
 
-SSH="ssh -i $SSH_KEY -o ConnectTimeout=15 -p 22 $VPS_USER@$VPS_HOST"
-SCP="scp -i $SSH_KEY -P 22"
+# shellcheck source=malibu-download-ssh.sh
+source "$SCRIPT_DIR/malibu-download-ssh.sh"
 
-$SSH "install -d -o www-data -g www-data -m 0755 $WEBROOT"
-$SCP "$asset" "$VPS_USER@$VPS_HOST:/tmp/malibu-${versioned_key}" >/dev/null
-$SCP "$work/${dmg_name}.sha256" "$VPS_USER@$VPS_HOST:/tmp/malibu-${dmg_name}.sha256" >/dev/null
+malibu_download_ssh "install -d -o www-data -g www-data -m 0755 $WEBROOT"
+malibu_download_scp "$asset" "$VPS_USER@$VPS_HOST:/tmp/malibu-${versioned_key}" >/dev/null
+malibu_download_scp "$work/${dmg_name}.sha256" "$VPS_USER@$VPS_HOST:/tmp/malibu-${dmg_name}.sha256" >/dev/null
 appcast="$work/appcast.xml"
 if [[ -f "$appcast" ]]; then
-  $SCP "$appcast" "$VPS_USER@$VPS_HOST:/tmp/malibu-appcast.xml" >/dev/null
+  malibu_download_scp "$appcast" "$VPS_USER@$VPS_HOST:/tmp/malibu-appcast.xml" >/dev/null
 else
   printf '[publish-malibu-latest-dmg] WARN: appcast.xml missing from release %s\n' "$tag" >&2
 fi
 
-$SSH "set -e
+malibu_download_ssh "set -e
   install -o www-data -g www-data -m 0644 /tmp/malibu-${versioned_key} ${WEBROOT}/${versioned_key}
   install -o www-data -g www-data -m 0644 /tmp/malibu-${versioned_key} ${WEBROOT}/${latest_key}
   install -o www-data -g www-data -m 0644 /tmp/malibu-${dmg_name}.sha256 ${WEBROOT}/${dmg_name}.sha256
@@ -96,6 +99,5 @@ printf '[publish-malibu-latest-dmg] ok: %s/%s + latest.dmg on Pearl (sha256=%s)\
   "$WEBROOT" "$versioned_key" "$sha256"
 
 if [[ "${VERIFY_MALIBU_DOWNLOAD:-0}" == "1" ]]; then
-  script_dir="$(cd "$(dirname "$0")" && pwd)"
-  bash "$script_dir/verify-malibu-download.sh"
+  bash "$SCRIPT_DIR/verify-malibu-download.sh"
 fi
