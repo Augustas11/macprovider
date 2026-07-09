@@ -31,6 +31,14 @@ pool:
   # and forces the next probe to be enforced. The real fix for the 3500→7000
   # cold-30B false-fail (see proof-of-weights-implementation.md §5).
   canary_cold_start_grace_s: 300
+  # Wall-time latency gates (max_ttft_ms / min_sustained_tps) are observe-only by
+  # default: the canary is non-streaming so those metrics are unreliable (real
+  # warm canary TTFT sits ~6s, TPS reads noisy). observe logs breaches without
+  # sanctioning; nonce-correctness always enforces. Flip to enforce ONLY after
+  # validating metric stability for the target providers (and keep max_ttft_ms
+  # generous — >= 7000 — to fit the non-streaming round-trip). See
+  # proof-of-weights-implementation.md §5.
+  canary_latency_enforcement: observe
   # Challenge bank — both entries embed {nonce} (hex, 4 bytes, upper-case).
   # Rotate periodically; keep this file deployment-specific.
   canary_challenges:
@@ -44,5 +52,7 @@ pool:
     qwen3-coder-30b-a3b-instruct:
       - prompt: "Reply with exactly: CANARY-{nonce}"
         expected: "CANARY-{nonce}"
-        max_ttft_ms: 3500
+        # Non-streaming canary round-trip for a warm 30B measures ~6s, so keep
+        # max_ttft_ms >= 7000 even in observe mode to avoid noisy breach logs.
+        max_ttft_ms: 7000
         min_sustained_tps: 20

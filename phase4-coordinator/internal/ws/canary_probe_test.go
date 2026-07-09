@@ -16,32 +16,38 @@ func TestEvaluateCanaryProbeLatencyGates(t *testing.T) {
 		MaxTTFTMS:       800,
 		MinSustainedTPS: 12,
 	}
-	pass := evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 15}, false)
-	if pass != canaryProbePass {
-		t.Fatalf("latency pass = %q", pass)
+	// grace=false, enforce=true throughout this block (steady-state enforce mode).
+	eval := func(out string, m canaryProbeMetrics, grace bool) (canaryProbeOutcome, canaryFailReason) {
+		return evaluateCanaryProbe(challenge, out, "ABCD", m, grace, true)
 	}
-	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 900, SustainedTPS: 15}, false) != canaryProbeFail {
-		t.Fatal("expected ttft fail")
+	if o, r := eval("ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 15}, false); o != canaryProbePass || r != canaryFailNone {
+		t.Fatalf("enforce within gates = %q/%q", o, r)
 	}
-	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 8}, false) != canaryProbeFail {
-		t.Fatal("expected tps fail")
+	if o, r := eval("ABCD", canaryProbeMetrics{TTFTMS: 900, SustainedTPS: 15}, false); o != canaryProbeFail || r != canaryFailTTFT {
+		t.Fatalf("expected ttft_breach, got %q/%q", o, r)
 	}
-	if evaluateCanaryProbe(challenge, "wrong", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 15}, false) != canaryProbeFail {
-		t.Fatal("expected answer fail")
+	if o, r := eval("ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 8}, false); o != canaryProbeFail || r != canaryFailTPS {
+		t.Fatalf("expected tps_breach, got %q/%q", o, r)
 	}
-	// Cold-start grace waives BOTH wall-time latency gates (canary probes are
-	// non-streaming, so max_ttft_ms and min_sustained_tps are both cold-
-	// contaminated): a slow-but-correct answer passes.
-	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 8}, true) != canaryProbePass {
-		t.Fatal("expected cold-start grace to waive both latency gates for a correct answer")
+	if o, r := eval("wrong", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 15}, false); o != canaryProbeFail || r != canaryFailNonce {
+		t.Fatalf("expected nonce_mismatch, got %q/%q", o, r)
+	}
+	// Cold-start grace waives BOTH wall-time latency gates (enforce mode).
+	if o, r := eval("ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 8}, true); o != canaryProbePass || r != canaryFailNone {
+		t.Fatalf("expected grace to waive both latency gates, got %q/%q", o, r)
 	}
 	// Grace never waives the answer-correctness gate.
-	if evaluateCanaryProbe(challenge, "wrong", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 15}, true) != canaryProbeFail {
-		t.Fatal("cold-start grace must NOT waive the answer-correctness gate")
+	if o, r := eval("wrong", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 15}, true); o != canaryProbeFail || r != canaryFailNonce {
+		t.Fatalf("grace must NOT waive nonce gate, got %q/%q", o, r)
 	}
-	// Without grace, both latency gates are still enforced.
-	if evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 8}, false) != canaryProbeFail {
-		t.Fatal("without grace the sustained-tps gate must still fail")
+
+	// Observe mode (default): a nonce-correct probe NEVER fails on latency, even
+	// with a hard breach and no grace. The nonce gate still enforces.
+	if o, r := evaluateCanaryProbe(challenge, "ABCD", "ABCD", canaryProbeMetrics{TTFTMS: 9000, SustainedTPS: 1}, false, false); o != canaryProbePass || r != canaryFailNone {
+		t.Fatalf("observe mode must not sanction latency, got %q/%q", o, r)
+	}
+	if o, r := evaluateCanaryProbe(challenge, "wrong", "ABCD", canaryProbeMetrics{TTFTMS: 700, SustainedTPS: 15}, false, false); o != canaryProbeFail || r != canaryFailNonce {
+		t.Fatalf("observe mode must still enforce nonce, got %q/%q", o, r)
 	}
 }
 
