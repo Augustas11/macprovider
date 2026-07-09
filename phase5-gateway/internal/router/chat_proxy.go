@@ -618,7 +618,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		completion := completionFromHeaderCapped(resp.Header, maxTokens)
-		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "upstream_error", resp.Header) {
+		if !s.settleOrRefundPreStreamUpstreamError(w, r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "upstream_error", resp.StatusCode, body, resp.Header, false, window) {
 			return
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
@@ -714,7 +714,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body, promptEstimate, maxUsageTokens, retryExhausted, reservationWindow)
 			return
 		}
-		if !s.settleBeforeStreamingResponseWithCoordinatorFinality(w, r, subject, promptEstimate, completionFromHeaderCapped(resp.Header, maxTokens), maxUsageTokens, "gateway_estimated", "upstream_error", resp.Header) {
+		if !s.settleOrRefundPreStreamUpstreamError(w, r, subject, promptEstimate, completionFromHeaderCapped(resp.Header, maxTokens), maxUsageTokens, "gateway_estimated", "upstream_error", resp.StatusCode, body, resp.Header, true, reservationWindow) {
 			return
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
@@ -1189,6 +1189,38 @@ func (s *Server) recordRefundedCoordinatorAudit(w http.ResponseWriter, r *http.R
 		return false
 	}
 	return true
+}
+
+func (s *Server) settleOrRefundPreStreamUpstreamError(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, status int, body []byte, h http.Header, boundHold bool, window string) bool {
+	if !shouldRefundLegacyPreStreamProvider502(status, body, h) {
+		return s.settleBeforeResponseWithCoordinatorFinalityPolicy(w, r, subject, prompt, completion, maxTotal, source, outcome, h, boundHold)
+	}
+	if !s.recordRefundedCoordinatorAudit(w, r, subject, window, outcome) {
+		return false
+	}
+	if err := s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix()); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
+		slog.Error("gateway pre-stream upstream-error refund failed after audit row",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"outcome", outcome,
+			"error", err,
+		)
+		writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+		return false
+	}
+	return true
+}
+
+func shouldRefundLegacyPreStreamProvider502(status int, body []byte, h http.Header) bool {
+	if status != http.StatusBadGateway || hasAnySettlementFinalityHeader(h) {
+		return false
+	}
+	switch openAIErrorCode(body) {
+	case "provider_error", "provider_failed", "provider_disconnected":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte, promptEstimate, maxUsageTokens, maxTokens int64) {
