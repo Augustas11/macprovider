@@ -15,6 +15,14 @@ enum RFC8785JCS {
     }
 
     static func canonicalString(_ value: Value) throws -> String {
+        try canonicalString(value, normalizeStrings: true)
+    }
+
+    static func canonicalStringRawStrings(_ value: Value) throws -> String {
+        try canonicalString(value, normalizeStrings: false)
+    }
+
+    private static func canonicalString(_ value: Value, normalizeStrings: Bool) throws -> String {
         switch value {
         case .object(let object):
             let keys = object.keys.sorted(by: utf16LexicographicLess)
@@ -22,13 +30,13 @@ enum RFC8785JCS {
                 guard let member = object[key] else {
                     throw Error.missingObjectMember(key)
                 }
-                return "\(escapeString(key, normalizeNFC: false)):\(try canonicalString(member))"
+                return "\(escapeString(key, normalizeNFC: false)):\(try canonicalString(member, normalizeStrings: normalizeStrings))"
             }
             return "{\(members.joined(separator: ","))}"
         case .array(let array):
-            return try "[\(array.map { try canonicalString($0) }.joined(separator: ","))]"
+            return try "[\(array.map { try canonicalString($0, normalizeStrings: normalizeStrings) }.joined(separator: ","))]"
         case .string(let string):
-            return escapeString(string, normalizeNFC: true)
+            return escapeString(string, normalizeNFC: normalizeStrings)
         case .rawString(let string):
             return escapeString(string, normalizeNFC: false)
         case .int(let int):

@@ -1,0 +1,93 @@
+[
+  {
+    "id": "request_payload",
+    "expected_sha256": "sha256:20cff86ed6f6fd472ddf7ff8b7ed3e7c3a634e84ed423bd65b3ba0433acd0cea",
+    "payload": {
+      "probe_version": "losslessness_probe_v1",
+      "probe_id": "probe-fixture-001",
+      "probe_nonce": "00112233445566778899aabbccddeeff",
+      "expires_at": "2026-07-09T12:01:00Z",
+      "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+      "target_model_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "target_generation": 1,
+      "draft_model_id": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+      "draft_artifact_binding": {
+        "draft_model_id": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+        "draft_artifact_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "tokenizer_identity": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "compatibility_check_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "draft_generation": 2,
+      "tokenizer_identity": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sampling_profile": {
+        "temperature": 0.7,
+        "top_p": 1
+      },
+      "corpus_version": "spec029-corpus-v1",
+      "threshold_version": "spec029-threshold-v1",
+      "prompts": [
+        {
+          "prompt_id": "synthetic-code-001",
+          "prompt": "Return the next token distribution for this synthetic coordinator prompt.",
+          "coordinator_owned": true,
+          "buyer_origin": false
+        }
+      ],
+      "measurement_positions": [
+        4,
+        8
+      ],
+      "requested_k": 64,
+      "support_selection": "support_selection_v1",
+      "max_prompts": 4,
+      "max_stochastic_positions": 8,
+      "timeout_ms": 60000
+    }
+  },
+  {
+    "id": "measurement_result_payload",
+    "expected_sha256": "sha256:ef24c3561e210e5eb889adf90886a9317114e06006bcf0f7a699d2b93dcbc21e",
+    "payload": {
+      "probe_id": "probe-fixture-001",
+      "probe_nonce": "00112233445566778899aabbccddeeff",
+      "probe_request_digest": "sha256:20cff86ed6f6fd472ddf7ff8b7ed3e7c3a634e84ed423bd65b3ba0433acd0cea",
+      "result_kind": "measurement",
+      "target_model_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "target_generation": 1,
+      "draft_artifact_binding": {
+        "draft_model_id": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+        "draft_artifact_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "tokenizer_identity": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "compatibility_check_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "draft_generation": 2,
+      "tokenizer_identity": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "positions": []
+    }
+  },
+  {
+    "id": "provider_inconclusive_payload",
+    "expected_sha256": "sha256:5076a7383c9b5d87d809ce97669ae18f1268525378cf0c813a24db15a6632963",
+    "payload": {
+      "probe_id": "probe-fixture-001",
+      "probe_nonce": "00112233445566778899aabbccddeeff",
+      "probe_request_digest": "sha256:20cff86ed6f6fd472ddf7ff8b7ed3e7c3a634e84ed423bd65b3ba0433acd0cea",
+      "result_kind": "provider_inconclusive",
+      "provider_reason_code": "inconclusive:unsupported_sampler",
+      "target_model_hash": null,
+      "target_generation": null,
+      "draft_artifact_binding": null,
+      "draft_generation": null,
+      "identity_unavailable_reason": "sampler hook unavailable"
+    }
+  },
+  {
+    "id": "raw_rfc8785_string_payload",
+    "expected_sha256": "sha256:09d6bff957ca9f04e3e0949343e522bcd217f02830d6b4607e97a564b207f8cb",
+    "payload": {
+      "probe_id": "unicode-probe",
+      "prompt": "Café",
+      "top_p": 1.0
+    }
+  }
+]

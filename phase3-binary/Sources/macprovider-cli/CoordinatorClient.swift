@@ -1130,6 +1130,8 @@ actor CoordinatorClient {
                 return
             }
             try await inferenceRelay.handleInferenceRequest(dict)
+        case LosslessnessProbeProtocol.requestType, LosslessnessProbeProtocol.encryptedRequestType:
+            try await handleLosslessnessProbeRequest(dict)
         case "cancel_request":
             guard wsTunneledMode, let inferenceRelay else {
                 try await sendNAK(
@@ -1158,6 +1160,84 @@ actor CoordinatorClient {
                 code: "unknown_message_type",
                 message: "Unrecognized message type: '\(type)'"
             )
+        }
+    }
+
+    private func handleLosslessnessProbeRequest(_ message: [String: Any]) async throws {
+        guard appConfig.losslessnessProbeEnabled else {
+            try await sendNAK(
+                inReplyTo: message["type"] as? String ?? LosslessnessProbeProtocol.requestType,
+                code: "losslessness_probe_disabled",
+                message: "losslessness_probe_v1 is disabled by provider config"
+            )
+            return
+        }
+
+        do {
+            try await handleEnabledLosslessnessProbeRequest(message)
+        } catch is LosslessnessProbeError {
+            try await sendNAK(
+                inReplyTo: message["type"] as? String ?? LosslessnessProbeProtocol.requestType,
+                code: "invalid_message",
+                message: "invalid losslessness_probe_v1 request"
+            )
+        } catch is Tier2ProviderError {
+            try await sendNAK(
+                inReplyTo: message["type"] as? String ?? LosslessnessProbeProtocol.requestType,
+                code: "invalid_message",
+                message: "invalid losslessness_probe_v1 encrypted request"
+            )
+        }
+    }
+
+    private func handleEnabledLosslessnessProbeRequest(_ message: [String: Any]) async throws {
+        let encrypted = message["type"] as? String == LosslessnessProbeProtocol.encryptedRequestType
+        let outer: [String: Any]
+        var encryptedRequestID: String?
+        if encrypted {
+            guard let tier2Session,
+                  let requestID = message["request_id"] as? String, !requestID.isEmpty
+            else {
+                try await sendNAK(inReplyTo: LosslessnessProbeProtocol.encryptedRequestType, code: "invalid_message", message: "losslessness encrypted request requires Tier-2 session and request_id")
+                return
+            }
+            encryptedRequestID = requestID
+            outer = try tier2Session.openLosslessnessProbeRequestPayload(message: message, requestID: requestID).outerEnvelope
+        } else {
+            if tier2Session != nil {
+                try await sendNAK(inReplyTo: LosslessnessProbeProtocol.requestType, code: "invalid_message", message: "losslessness plaintext request rejected for active Tier-2 session")
+                return
+            }
+            outer = message
+        }
+
+        let requestEnvelope = try LosslessnessProbeProtocol.decodeEnvelope(outer, expectedType: LosslessnessProbeProtocol.requestType)
+        let requestPayload = try LosslessnessProbeProtocol.decodeRequestPayload(requestEnvelope.payload)
+        if let encryptedRequestID, encryptedRequestID != requestEnvelope.probeID {
+            try await sendNAK(inReplyTo: LosslessnessProbeProtocol.encryptedRequestType, code: "invalid_message", message: "losslessness encrypted request_id must match probe_id")
+            return
+        }
+        let inconclusive = LosslessnessProbeRuntime.providerInconclusiveForUnavailableSampler(
+            probeID: requestEnvelope.probeID,
+            probeNonce: requestPayload.probeNonce,
+            requestDigest: requestEnvelope.probeRequestDigest
+        )
+        let resultDigest = try LosslessnessProbeProtocol.digest(payload: inconclusive)
+        let resultOuter: [String: Any] = [
+            "type": LosslessnessProbeProtocol.resultType,
+            "probe_id": requestEnvelope.probeID,
+            "probe_request_digest": requestEnvelope.probeRequestDigest,
+            "probe_result_digest": resultDigest,
+            "payload": inconclusive,
+        ]
+
+        if encrypted {
+            guard let tier2Session else {
+                throw LosslessnessProbeError.invalidEnvelope
+            }
+            try await send(tier2Session.sealLosslessnessProbeResult(requestID: encryptedRequestID ?? requestEnvelope.probeID, outerEnvelope: resultOuter))
+        } else {
+            try await send(resultOuter)
         }
     }
 

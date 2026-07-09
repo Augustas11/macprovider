@@ -312,21 +312,21 @@ type PoolConfig struct {
 	WakeGapThresholdS       int `yaml:"wake_gap_threshold_s"`
 	// WakeGapThresholdMs, when > 0, overrides WakeGapThresholdS for
 	// millisecond-precision test scenarios. Not for production use.
-	WakeGapThresholdMs      int                                `yaml:"wake_gap_threshold_ms"`
-	WarmupFallbackS         int                                `yaml:"warmup_fallback_s"`
-	WarmupGateEnabled       bool                               `yaml:"warmup_gate_enabled"`
-	WarmupGateTimeoutS      int                                `yaml:"warmup_gate_timeout_s"`
-	WarmupGateMaxTokens     int                                `yaml:"warmup_gate_max_tokens"`
-	DegradedBackoffS        int                                `yaml:"degraded_backoff_s"`
-	DegradedMaxRetries      int                                `yaml:"degraded_max_retries"`
-	DegradedProbeAfter502   bool                               `yaml:"degraded_probe_after_502"`
-	BreakerFailureThreshold int                                `yaml:"breaker_failure_threshold"`
-	BreakerWindowS          int                                `yaml:"breaker_window_s"`
-	CanaryEnabled           bool                               `yaml:"canary_enabled"`
-	CanaryIntervalS         int                                `yaml:"canary_interval_s"`
-	CanaryTimeoutS          int                                `yaml:"canary_timeout_s"`
-	CanaryMaxTokens         int                                `yaml:"canary_max_tokens"`
-	CanaryFailureThreshold  int                                `yaml:"canary_failure_threshold"`
+	WakeGapThresholdMs      int  `yaml:"wake_gap_threshold_ms"`
+	WarmupFallbackS         int  `yaml:"warmup_fallback_s"`
+	WarmupGateEnabled       bool `yaml:"warmup_gate_enabled"`
+	WarmupGateTimeoutS      int  `yaml:"warmup_gate_timeout_s"`
+	WarmupGateMaxTokens     int  `yaml:"warmup_gate_max_tokens"`
+	DegradedBackoffS        int  `yaml:"degraded_backoff_s"`
+	DegradedMaxRetries      int  `yaml:"degraded_max_retries"`
+	DegradedProbeAfter502   bool `yaml:"degraded_probe_after_502"`
+	BreakerFailureThreshold int  `yaml:"breaker_failure_threshold"`
+	BreakerWindowS          int  `yaml:"breaker_window_s"`
+	CanaryEnabled           bool `yaml:"canary_enabled"`
+	CanaryIntervalS         int  `yaml:"canary_interval_s"`
+	CanaryTimeoutS          int  `yaml:"canary_timeout_s"`
+	CanaryMaxTokens         int  `yaml:"canary_max_tokens"`
+	CanaryFailureThreshold  int  `yaml:"canary_failure_threshold"`
 	// CanaryColdStartGraceS relaxes the WALL-TIME latency gates (max_ttft_ms and
 	// min_sustained_tps) for the first grace-window seconds after a provider
 	// connects. Canary probes are non-streaming, so both metrics are measured
@@ -337,9 +337,10 @@ type PoolConfig struct {
 	// probe to be enforced — so this cannot be used to evade sanctions. Size it
 	// to cover a cold large-model load (observed ~8s TTFT for a cold 30B; a full
 	// load can take tens of seconds).
-	CanaryColdStartGraceS   int                                `yaml:"canary_cold_start_grace_s"`
-	CanaryChallenges        []CanaryChallengeConfig            `yaml:"canary_challenges"`
-	ModelClassChallenges    map[string][]CanaryChallengeConfig `yaml:"model_class_challenges"`
+	CanaryColdStartGraceS int                                `yaml:"canary_cold_start_grace_s"`
+	CanaryChallenges      []CanaryChallengeConfig            `yaml:"canary_challenges"`
+	ModelClassChallenges  map[string][]CanaryChallengeConfig `yaml:"model_class_challenges"`
+	LosslessnessProbe     LosslessnessProbeConfig            `yaml:"losslessness_probe"`
 }
 
 type CanaryChallengeConfig struct {
@@ -381,6 +382,18 @@ func (p PoolConfig) CanaryChallengesForModel(modelID string) ([]CanaryChallengeC
 		}
 	}
 	return p.CanaryChallenges, false
+}
+
+type LosslessnessProbeConfig struct {
+	Enabled                  bool `yaml:"enabled"`
+	IntervalS                int  `yaml:"interval_s"`
+	TimeoutS                 int  `yaml:"timeout_s"`
+	MaxConcurrentPerProvider int  `yaml:"max_concurrent_per_provider"`
+	MaxPromptsPerProbe       int  `yaml:"max_prompts_per_probe"`
+	MaxStochasticPositions   int  `yaml:"max_stochastic_positions"`
+	ProfileFreshnessTTLHours int  `yaml:"profile_freshness_ttl_hours"`
+	EvidenceRetentionDays    int  `yaml:"evidence_retention_days"`
+	BackoffMaxS              int  `yaml:"backoff_max_s"`
 }
 
 type RoutingConfig struct {
@@ -775,6 +788,17 @@ func Default() Config {
 			CanaryTimeoutS:          30,
 			CanaryMaxTokens:         8,
 			CanaryFailureThreshold:  3,
+			LosslessnessProbe: LosslessnessProbeConfig{
+				Enabled:                  false,
+				IntervalS:                3600,
+				TimeoutS:                 60,
+				MaxConcurrentPerProvider: 1,
+				MaxPromptsPerProbe:       4,
+				MaxStochasticPositions:   8,
+				ProfileFreshnessTTLHours: 24,
+				EvidenceRetentionDays:    30,
+				BackoffMaxS:              21600,
+			},
 		},
 		Routing: RoutingConfig{
 			PreflightThresholdTokens:      4096,
@@ -1425,6 +1449,16 @@ func (c Config) Validate() error {
 			if err := validateCanaryChallengeList("pool.model_class_challenges."+modelID, challenges); err != nil {
 				return err
 			}
+		}
+	}
+	if c.Pool.LosslessnessProbe.Enabled {
+		lp := c.Pool.LosslessnessProbe
+		if lp.IntervalS != 3600 || lp.TimeoutS != 60 || lp.MaxConcurrentPerProvider != 1 ||
+			lp.MaxPromptsPerProbe <= 0 || lp.MaxPromptsPerProbe > 4 ||
+			lp.MaxStochasticPositions <= 0 || lp.MaxStochasticPositions > 8 ||
+			lp.ProfileFreshnessTTLHours != 24 || lp.EvidenceRetentionDays != 30 ||
+			lp.BackoffMaxS <= 0 || lp.BackoffMaxS > 21600 {
+			return fmt.Errorf("pool.losslessness_probe settings violate SPEC-029 v0.1-draft prototype bounds")
 		}
 	}
 	if c.Admission.ProvisionalAdmissionRatePerHour <= 0 {

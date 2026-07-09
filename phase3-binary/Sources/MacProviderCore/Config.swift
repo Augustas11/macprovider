@@ -60,6 +60,7 @@ public struct AppConfig: Equatable, Sendable {
     public var kvBitsOverride: Int?
     public var drainTimeoutSeconds: Int
     public var warmupEnabled: Bool
+    public var losslessnessProbeEnabled: Bool
     public var maxRequestBodyBytes: Int
     public var tier2MDAArtifactPath: String?
     public var supportedModels: [String]?
@@ -139,6 +140,7 @@ public struct AppConfig: Equatable, Sendable {
             kvBitsOverride: nil,
             drainTimeoutSeconds: 30,
             warmupEnabled: true,
+            losslessnessProbeEnabled: false,
             maxRequestBodyBytes: 10 * 1024 * 1024,
             tier2MDAArtifactPath: nil,
             supportedModels: nil,
@@ -378,6 +380,7 @@ public enum ConfigLoader {
         try assign(&config.kvBitsOverride, from: dict, key: "kv_bits", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: dict, key: "drain_timeout_s", expected: "integer")
         try assign(&config.warmupEnabled, from: dict, key: "warmup_enabled", expected: "boolean")
+        try assign(&config.losslessnessProbeEnabled, from: dict, key: "losslessness_probe_enabled", expected: "boolean")
         try assign(&config.maxRequestBodyBytes, from: dict, key: "max_request_body_bytes", expected: "integer")
         try assign(&config.tier2MDAArtifactPath, from: dict, key: "tier2_mda_artifact_path", expected: "string")
         try assign(&config.supportedModels, from: dict, key: "supported_models", expected: "array of strings or comma-separated string")
@@ -430,6 +433,7 @@ public enum ConfigLoader {
         try assign(&config.kvBitsOverride, from: environment, env: "MACPROVIDER_KV_BITS", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: environment, env: "MACPROVIDER_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.warmupEnabled, from: environment, env: "MACPROVIDER_WARMUP_ENABLED", expected: "boolean")
+        try assign(&config.losslessnessProbeEnabled, from: environment, env: "MACPROVIDER_LOSSLESSNESS_PROBE_ENABLED", expected: "boolean")
         try assign(&config.maxRequestBodyBytes, from: environment, env: "MACPROVIDER_MAX_REQUEST_BODY_BYTES", expected: "integer")
         try assign(&config.tier2MDAArtifactPath, from: environment, env: "MACPROVIDER_TIER2_MDA_ARTIFACT_PATH", expected: "string")
         config.supportedModels = SupportedModels.parseCSV(environment["MACPROVIDER_SUPPORTED_MODELS"]) ?? config.supportedModels

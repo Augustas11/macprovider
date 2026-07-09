@@ -85,6 +85,100 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(frames[0]["estimated_wait_ms"] as? Int, 0)
     }
 
+    func testEncryptedLosslessnessProbeRejectsCarrierRequestIDMismatch() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, losslessnessProbeEnabled: true)
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data(repeating: 0x33, count: 4),
+            p2cNonceBase: Data(repeating: 0x44, count: 4)
+        )
+        try await client.acceptAuthResponseForTest([
+            "type": "auth_response",
+            "version": 2,
+            "status": "accepted",
+            "assigned_id": "assigned-v2",
+            "heartbeat_interval_s": 30,
+            "tier2_session": [
+                "encrypted_leg": [
+                    "enabled": true,
+                    "alg": Tier2ProviderSession.aeadSuite,
+                    "kid": "kid-test",
+                ],
+            ],
+        ], session: session)
+
+        let payload: [String: Any] = [
+            "probe_version": LosslessnessProbeProtocol.version,
+            "probe_id": "payload-probe",
+            "probe_nonce": "00112233445566778899aabbccddeeff",
+            "expires_at": "2026-07-09T12:01:00Z",
+            "model_id": "model-a",
+            "target_model_hash": "sha256:target",
+            "target_generation": 1,
+            "draft_model_id": "draft-a",
+            "draft_artifact_binding": [
+                "draft_model_id": "draft-a",
+                "draft_artifact_sha256": "sha256:draft",
+                "tokenizer_identity": "tok-v1",
+                "compatibility_check_digest": "sha256:compat",
+            ],
+            "draft_generation": 1,
+            "tokenizer_identity": "tok-v1",
+            "sampling_profile": [
+                "temperature": 0.7,
+                "top_p": 1.0,
+            ],
+            "corpus_version": "corpus-v1",
+            "threshold_version": "threshold-v1",
+            "prompts": [
+                [
+                    "prompt_id": "synthetic-1",
+                    "prompt": "Synthetic coordinator-owned prompt.",
+                    "coordinator_owned": true,
+                    "buyer_origin": false,
+                ],
+            ],
+            "measurement_positions": [4],
+            "requested_k": 64,
+            "support_selection": LosslessnessProbeProtocol.supportSelection,
+            "max_prompts": 4,
+            "max_stochastic_positions": 8,
+            "timeout_ms": 60_000,
+        ]
+        let digest = try LosslessnessProbeProtocol.digest(payload: payload)
+        let outer: [String: Any] = [
+            "type": LosslessnessProbeProtocol.requestType,
+            "probe_id": "payload-probe",
+            "probe_request_digest": digest,
+            "payload": payload,
+        ]
+        let encrypted = try Tier2ProviderSession.sealLosslessnessRequestForTest(
+            session: session,
+            requestID: "carrier-probe",
+            outerEnvelope: outer
+        )
+
+        try await client.handleCoordinatorPayloadForTest(encrypted)
+
+        let frames = await recorder.frames
+        let nak = try XCTUnwrap(frames.last)
+        XCTAssertEqual(nak["type"] as? String, "nak")
+        XCTAssertEqual(nak["in_reply_to"] as? String, LosslessnessProbeProtocol.encryptedRequestType)
+        let error = try XCTUnwrap(nak["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "invalid_message")
+    }
+
     func testDrainWithNoInflightSendsCompleteAndResetsReady() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
@@ -2240,7 +2334,8 @@ final class CoordinatorClientTests: XCTestCase {
         sendOverride: CoordinatorClient.SendOverride? = nil,
         watchdogExitHook: (@Sendable (String) -> Void)? = nil,
         publishesSpecDecodeTelemetry: Bool = false,
-        modelCatalogModelID: String? = nil
+        modelCatalogModelID: String? = nil,
+        losslessnessProbeEnabled: Bool = false
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
@@ -2250,6 +2345,7 @@ final class CoordinatorClientTests: XCTestCase {
         config.drainTimeoutSeconds = drainTimeoutSeconds
         config.enableWarmSwap = enableWarmSwap
         config.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry
+        config.losslessnessProbeEnabled = losslessnessProbeEnabled
         let runtime: ModelRuntime
         if let modelRuntime {
             runtime = modelRuntime
