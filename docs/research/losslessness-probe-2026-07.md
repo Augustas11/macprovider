@@ -10,9 +10,9 @@ MacProvider should add an overt, coordinator-issued losslessness probe before an
 
 The safest v0.1 shape is:
 
-- Use the existing coordinator canary scheduler and sanction plumbing as the operational lane, but add a new `losslessness_probe_v1` profile instead of overloading nonce echo canaries.
+- Use the existing coordinator canary scheduler, jitter, retry, and persistence plumbing as the operational lane, but keep losslessness-specific eligibility and disablement state instead of overloading nonce echo canary sanctions.
 - Send probes out-of-band to providers through a dedicated WS/provider-control message, not as buyer-like `/v1/chat/completions` traffic.
-- Ask providers for compact per-position distributions for plain target decoding and speculative decoding. The provider returns top-K normalized probabilities plus residual tail mass; the coordinator recomputes total-variation distance.
+- Ask providers for compact per-position distributions for plain target decoding and speculative decoding. The provider returns full-distribution probabilities over shared support plus residual tail mass; the coordinator recomputes `tv_lower` and `tv_upper`.
 - Default to `K=64`, retry at `K=256` when tail mass or threshold proximity makes the result inconclusive, and do not rely on repeated sampled-token counts as the quarantine-grade mechanism.
 - Rotate temperature settings across `{0.2, 0.5, 0.7, 1.0}` with `top_p=1.0`; keep `temperature=0.0` as a control for token-exact greedy equality.
 - Publish probe results as out-of-band coordinator telemetry keyed by provider, model hash, draft model id, sampling profile, and probe id. Future SPEC-015 receipt versions may optionally bind a digest, but this research does not recommend changing v0.4 receipts.
@@ -116,9 +116,12 @@ Use compact probability snapshots, not generated samples, as the normative v0.1 
     {
       "index": 0,
       "context_hash": "sha256:...",
-      "plain_topk": [{"token_id": 123, "p": 0.201}],
+      "plain_top_k_token_ids": [123],
+      "spec_top_k_token_ids": [123],
+      "support_token_ids": [123],
+      "plain_support": [{"token_id": 123, "p": 0.201}],
       "plain_tail_mass": 0.006,
-      "spec_topk": [{"token_id": 123, "p": 0.199}],
+      "spec_support": [{"token_id": 123, "p": 0.199}],
       "spec_tail_mass": 0.007,
       "plain_plain_baseline_topk": [{"token_id": 123, "p": 0.202}],
       "plain_plain_baseline_tail_mass": 0.006
@@ -131,13 +134,19 @@ The coordinator recomputes:
 
 ```text
 support = union(topk_token_ids(plain), topk_token_ids(spec))
-TV_bound = 0.5 * (
-  sum_{token in support} |p_plain(token) - p_spec(token)|
+support_diff = sum_{token in support} |p_plain(token) - p_spec(token)|
+tv_lower = 0.5 * (
+  support_diff
   + |plain_tail_mass - spec_tail_mass|
+)
+tv_upper = 0.5 * (
+  support_diff
+  + plain_tail_mass
+  + spec_tail_mass
 )
 ```
 
-This is a bound over the reported support plus residual tail mass. It avoids leaking raw logits and avoids treating provider-supplied scalar verdicts as authoritative. The provider may include a scalar for local debugging, but the coordinator's recomputation is canonical.
+`tv_lower` is the minimum total-variation distance consistent with shared-support probabilities plus aggregate tail masses, and `tv_upper` is the conservative upper bound. Pass decisions use `tv_upper`; quarantine decisions use `tv_lower`. This avoids leaking raw logits and avoids treating provider-supplied scalar verdicts as authoritative. The provider may include a scalar for local debugging, but the coordinator's recomputation is canonical.
 
 ### K/N choice
 
@@ -186,8 +195,8 @@ Thresholds should be profile-specific and require a local reference baseline bef
 
 | Metric | Warning | Quarantine candidate |
 |---|---:|---:|
-| Median `TV_bound` across positions | `> 0.02` | `> 0.05` |
-| Any single high-entropy position `TV_bound` | `> 0.05` | `> 0.10` |
+| Median `tv_upper` / `tv_lower` across positions | warn when `tv_upper > 0.01` | quarantine when `tv_lower > 0.05` |
+| Any single high-entropy position `tv_upper` / `tv_lower` | warn when `tv_upper > 0.02` | quarantine when `tv_lower > 0.10` |
 | Tail mass after K=256 retry | `> 0.005` | inconclusive, not quarantine |
 
 High-entropy positions should be chosen because low-entropy positions can pass trivially. The prompt corpus should include short general chat, code completion, instruction following, and tool-call-like JSON contexts, then select measurement positions where the target distribution is not nearly deterministic.
@@ -195,11 +204,11 @@ High-entropy positions should be chosen because low-entropy positions can pass t
 Sanction gating:
 
 1. A first `quarantine_candidate` emits a warning and schedules an immediate retry.
-2. A second consecutive `quarantine_candidate` for the same `(provider_id, assigned_id, target_model_hash, draft_model_id, sampling_profile)` may feed the existing canary failure counter.
-3. The existing thresholded canary sanction path can then degrade pinned providers or mark provisional providers unavailable.
-4. `inconclusive` does not increment the canary failure counter.
+2. A second consecutive `quarantine_candidate` for the same `(provider_id, assigned_id, target_model_hash, draft_model_id, draft_artifact_binding, draft_generation, sampling_profile, corpus_version, threshold_version)` disables only stochastic speculative decoding for that exact key.
+3. Losslessness failures remain isolated from echo-canary/general provider-readiness counters and from non-speculative provider availability.
+4. `inconclusive` uses losslessness-specific retry/block handling and does not increment the echo-canary/general provider-readiness counter.
 
-This matches the current registry's thresholded failure model while preventing one noisy probe from removing a provider.
+This can reuse canary scheduler, jitter, retry, and persistence plumbing, but the eligibility state and counters remain losslessness-specific so a noisy or failing probe cannot remove a provider from non-speculative traffic.
 
 ## D. Publishing Surface
 
@@ -229,8 +238,10 @@ Publish out-of-band coordinator telemetry:
   "sampling_profile": {"temperature": 0.7, "top_p": 1.0, "top_k": null},
   "k": 64,
   "status": "pass",
-  "median_tv_bound": 0.011,
-  "max_tv_bound": 0.018,
+  "median_tv_lower": 0.006,
+  "max_tv_lower": 0.009,
+  "median_tv_upper": 0.011,
+  "max_tv_upper": 0.018,
   "max_tail_mass": 0.004,
   "positions_measured": 8,
   "created_at": "2026-07-09T12:00:00Z"
@@ -264,7 +275,7 @@ Recommended rules:
 - If the provider swaps target model or draft model during the probe, the result is `inconclusive:model_swap`.
 - A model swap triggers an immediate probe for the new `(target_model_hash, draft_model_id)` pair after the provider reports ready and draft compatibility checked.
 - Old probe results do not carry forward across target-swap boundaries.
-- Draft-load failure after a target swap leaves the provider serving without stochastic spec decode and emits `inconclusive:draft_unavailable` or `warn:draft_disabled`, not a losslessness failure.
+- Draft-load failure after a target swap leaves the provider serving without stochastic spec decode and emits `inconclusive:draft_unavailable` or `inconclusive:draft_identity_unbound`, not a losslessness failure.
 
 Failing loudly as inconclusive is better than silently invalidating the result because operations need to see swap churn and because a stale pass must not authorize stochastic decoding for a new model snapshot.
 
@@ -288,8 +299,8 @@ Draft SPEC-029 as a narrow, overt, out-of-band probe:
 
 - It extends coordinator canaries with a new probe profile and telemetry event.
 - It does not change SPEC-015 v0.4 receipts, SPEC-022 settlement, SPEC-028 receipt invariants, buyer API fields, or billable usage.
-- It uses coordinator-recomputed top-K plus tail TV bounds rather than provider-provided scalar verdicts.
+- It uses coordinator-recomputed shared-support plus tail TV lower/upper bounds rather than provider-provided scalar verdicts.
 - It treats warm-swap, high tail mass, missing sampler support, and timeouts as inconclusive.
-- It requires repeated confirmed failures before feeding the current canary sanction path.
+- It requires repeated confirmed failures before disabling only the exact losslessness profile key; it never feeds the echo-canary sanction counter or general provider-readiness path.
 
 The main remaining human decisions are threshold ownership, whether K=64/K=256 is acceptable for v0.1, whether out-of-band telemetry is sufficient for rollout governance, and which prompt corpus becomes normative.
