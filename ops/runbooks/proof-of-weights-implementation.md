@@ -81,6 +81,25 @@ pool:
 
 Full downgrade cheat smoke (30B claim + 8B serve) requires a dedicated lab provider loading the wrong weights; latency gates exercise the same sanction path.
 
+**Cold-start grace (2026-07-09):** a cold 30B load produces ~8s TTFT on
+reconnect, which false-fails a static `max_ttft_ms` (the reason the live tune
+had bumped 3500→7000). The fix is `pool.canary_cold_start_grace_s` (default 0):
+for that many seconds after a provider connects, the wall-time latency gates
+(`max_ttft_ms` AND `min_sustained_tps` — canary probes are non-streaming, so
+both are measured over wall time and cold-contaminated) are waived. The
+nonce-correctness gate is NEVER relaxed, so anti-downgrade is unchanged. Staging
+overlay sets `300`, so `max_ttft_ms` can stay at the real production target
+(3500) instead of a padded value.
+
+The grace is sanction-safe (three codex audit rounds hardened it): a graced
+probe is NEUTRAL for the failure counter (it neither counts as a fail nor clears
+enforced-window fails), and it FORCES the next probe to be enforced (the
+`enforce-next` flag is cleared only after a *current, recorded* enforced probe,
+so a reconnect mid-probe cannot re-open grace). A chronically-slow provider
+therefore still fails the interleaved enforced probes and is sanctioned. A waived
+probe logs `provider canary TTFT gate waived during cold-start grace window` with
+`canary_ttft_ms` + `connected_age`.
+
 ---
 
 ## §6 — W4 telemetry drift alerts

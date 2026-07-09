@@ -62,6 +62,12 @@ pool:
   canary_timeout_s: 120
   canary_max_tokens: 16
   canary_failure_threshold: 3   # provisional ban; pinned → degrade at 2
+  canary_cold_start_grace_s: 0  # >0 waives the wall-time latency gates
+                                # (max_ttft_ms + min_sustained_tps; probes are
+                                # non-streaming) for N s after connect (cold
+                                # load). Nonce-correctness always enforced; a
+                                # graced probe is neutral + forces the next
+                                # probe enforced. Set ~300 with latency gates.
   # OPoI v0 challenge bank reference (enable in staging overlay, not here).
   # Every entry must contain {nonce} in both prompt and expected.
   # canary_challenges:

@@ -47,6 +47,9 @@ pool:
   canary_timeout_s: 120
   canary_max_tokens: 16
   canary_failure_threshold: 3   # provisional ban; pinned → degrade at 2
+  canary_cold_start_grace_s: 300 # waive wall-time latency gates (max_ttft_ms +
+                                 # min_sustained_tps) 300s after connect; nonce
+                                 # always enforced, graced probe neutral+enforced-next
   # OPoI v0 challenge bank — every entry must contain {nonce} in both prompt and expected.
   # Rotate or extend periodically; keep deployment-specific for model security.
   canary_challenges:

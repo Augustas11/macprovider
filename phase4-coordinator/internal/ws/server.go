@@ -59,6 +59,13 @@ type Server struct {
 	warmups         sync.Map
 	canaries        sync.Map
 	canaryDue       sync.Map
+	// enforceNextCanary marks provider IDs (presence = true) whose NEXT canary
+	// probe must be enforced (no cold-start grace). Set after a graced-neutral
+	// probe and cleared after any recorded (enforced) probe, so a graced probe
+	// is always followed by an enforced one — a provider cannot arrange (via
+	// reconnect / due-timing churn) to only ever be probed under grace and evade
+	// the TTFT sanction. Keyed by PROVIDER ID so it survives reconnects.
+	enforceNextCanary sync.Map
 	canarySanctions CanarySanctionStore
 	tokens          TokenValidator
 	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
@@ -2213,12 +2220,42 @@ func (s *Server) runCanaryProbe(provider pool.Provider) bool {
 		s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary skipped")
 		return false
 	}
+	// Neutral only when the probe PASSED because of grace. LatencyGraced is set
+	// on a latency breach before the correctness check, so a wrong-nonce answer
+	// that is also latency-breaching would otherwise be neutralized here and
+	// partially waive the correctness gate (R3 SECURITY/ARCHITECT HIGH). A
+	// failing (wrong-nonce) probe must fall through and be recorded as a failure.
+	if outcome == canaryProbePass && attempt.metrics.LatencyGraced {
+		s.log.Info().
+			Str("provider_id", provider.ProviderID).
+			Int("canary_ttft_ms", attempt.metrics.TTFTMS).
+			Int("max_ttft_ms", attempt.challenge.MaxTTFTMS).
+			Dur("connected_age", s.now().Sub(provider.ConnectedAt)).
+			Msg("provider canary TTFT gate waived during cold-start grace window")
+		// A graced (correct-but-TTFT-slow) probe is NEUTRAL for the canary
+		// sanction counter: it is not recorded, so it neither counts as a
+		// failure nor CLEARS failures accrued on enforced probes (R2 SECURITY
+		// HIGH). It also FORCES the next probe to be enforced, so a
+		// chronically-slow provider cannot arrange (via reconnect / due-timing
+		// churn) to only ever be probed under grace (R3 SECURITY HIGH).
+		// Correctness + model-class OPoI identity were already recorded above.
+		s.enforceNextCanary.Store(provider.ProviderID, struct{}{})
+		return true
+	}
 	passed := outcome == canaryProbePass
 	checkedAt := s.now()
 	result := s.pool.RecordCanaryResult(provider.ProviderID, provider.AssignedID, passed, checkedAt, s.canaryFailureThreshold())
 	if !result.Current {
+		// Stale session (the provider reconnected during this enforced probe):
+		// the result did NOT apply, so DO NOT clear enforceNextCanary — the next
+		// probe must still be enforced. Clearing it here would let a slow provider
+		// reconnect during every forced enforced probe and be graced again on the
+		// fresh session, re-opening the all-graced evasion (R4 SECURITY HIGH).
 		return false
 	}
+	// A current, enforced probe was recorded — clear the pending-enforcement flag
+	// so a future genuine cold start can be graced again.
+	s.enforceNextCanary.Delete(provider.ProviderID)
 	if passed {
 		if result.SanctionCleared {
 			s.deleteCanarySanction(provider.ProviderID)
@@ -2352,7 +2389,11 @@ func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Prov
 			if end.Status != "complete" {
 				return canaryProbeFail, metrics
 			}
-			return evaluateCanaryProbe(probe.Challenge, output.String(), probe.Expected, metrics), metrics
+			grace := s.canaryColdStartActive(provider)
+			if grace && challengeLatencyBreach(probe.Challenge, metrics) {
+				metrics.LatencyGraced = true
+			}
+			return evaluateCanaryProbe(probe.Challenge, output.String(), probe.Expected, metrics, grace), metrics
 		case <-relay.Errors:
 			return canaryProbeFail, canaryProbeMetrics{}
 		case <-ctx.Done():
@@ -2397,7 +2438,37 @@ func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Pr
 		}
 		metrics = canaryMetricsFromTiming(start, time.Time{}, completedAt, tokens)
 	}
-	return evaluateCanaryProbe(probe.Challenge, output, probe.Expected, metrics), metrics
+	grace := s.canaryColdStartActive(provider)
+	if grace && challengeLatencyBreach(probe.Challenge, metrics) {
+		metrics.LatencyGraced = true
+	}
+	return evaluateCanaryProbe(probe.Challenge, output, probe.Expected, metrics, grace), metrics
+}
+
+// canaryColdStartActive reports whether the next canary probe for this provider
+// should waive the wall-time latency gates (a freshly (re)connected provider may
+// still be cold-loading a large model). Grace applies only while the provider is
+// within the configured window since ConnectedAt AND its NEXT probe is not
+// flagged for enforcement. The nonce-correctness gate is never relaxed (see
+// evaluateCanaryProbe), and a graced probe is neutral for sanctions and forces
+// the following probe to be enforced (see runCanaryProbe), so a chronically-slow
+// provider cannot evade the TTFT sanction via reconnect / due-timing churn — it
+// still fails the interleaved enforced probes and accrues canary failures.
+func (s *Server) canaryColdStartActive(provider pool.Provider) bool {
+	grace := s.cfg.Pool.CanaryColdStartGraceS
+	if grace <= 0 || provider.ConnectedAt.IsZero() || strings.TrimSpace(provider.ProviderID) == "" {
+		return false
+	}
+	age := s.now().Sub(provider.ConnectedAt)
+	// Only a genuinely recent, non-future connect is within the cold-start window.
+	if age < 0 || age >= time.Duration(grace)*time.Second {
+		return false
+	}
+	// A graced probe must be followed by an enforced one before grace re-arms.
+	if _, mustEnforce := s.enforceNextCanary.Load(provider.ProviderID); mustEnforce {
+		return false
+	}
+	return true
 }
 
 func (s *Server) buildCanaryBody(modelID string, maxTokens int) ([]byte, string, error) {

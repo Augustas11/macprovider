@@ -24,6 +24,13 @@ pool:
   canary_timeout_s: 120
   canary_max_tokens: 16
   canary_failure_threshold: 3   # 3 consecutive fails → provisional ban
+  # Waive the wall-time latency gates (max_ttft_ms + min_sustained_tps; canary
+  # probes are non-streaming) for the first 300s after a provider connects: a
+  # cold large-model load (observed ~8s TTFT for a cold 30B) must not false-fail
+  # on reconnect. Nonce-correctness is still enforced, a graced probe is neutral
+  # and forces the next probe to be enforced. The real fix for the 3500→7000
+  # cold-30B false-fail (see proof-of-weights-implementation.md §5).
+  canary_cold_start_grace_s: 300
   # Challenge bank — both entries embed {nonce} (hex, 4 bytes, upper-case).
   # Rotate periodically; keep this file deployment-specific.
   canary_challenges:

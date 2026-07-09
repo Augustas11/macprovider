@@ -29,6 +29,11 @@ type canaryProbeMetrics struct {
 	TTFTMS       int
 	SustainedTPS float64
 	LatencyGated bool
+	// LatencyGraced is set when a latency gate (max_ttft_ms or min_sustained_tps)
+	// WOULD have failed but was waived because the provider was inside its
+	// cold-start grace window. Surfaced in logs so a genuinely-slow provider
+	// hiding behind grace stays visible.
+	LatencyGraced bool
 }
 
 type canaryAttemptResult struct {
@@ -97,17 +102,34 @@ func challengeHasLatencyGates(challenge config.CanaryChallengeConfig) bool {
 	return challenge.MaxTTFTMS > 0 || challenge.MinSustainedTPS > 0
 }
 
-func evaluateCanaryProbe(challenge config.CanaryChallengeConfig, output string, expected string, metrics canaryProbeMetrics) canaryProbeOutcome {
+// challengeLatencyBreach reports whether the probe metrics violate a configured
+// latency gate (max_ttft_ms or min_sustained_tps).
+func challengeLatencyBreach(challenge config.CanaryChallengeConfig, metrics canaryProbeMetrics) bool {
+	if challenge.MaxTTFTMS > 0 && metrics.TTFTMS > challenge.MaxTTFTMS {
+		return true
+	}
+	if challenge.MinSustainedTPS > 0 && (math.IsNaN(metrics.SustainedTPS) || math.IsInf(metrics.SustainedTPS, 0) || metrics.SustainedTPS < challenge.MinSustainedTPS) {
+		return true
+	}
+	return false
+}
+
+// evaluateCanaryProbe returns the probe outcome. The nonce-correctness gate
+// (model identity / anti-downgrade) is ALWAYS enforced. When coldStartGrace is
+// true, BOTH latency gates are waived: canary probes are non-streaming
+// (stream:false), so max_ttft_ms and min_sustained_tps are both measured over
+// wall time (no reliable first-token/decode split) and are dominated by a cold
+// model load. A graced probe is additionally NEUTRAL for the sanction counter
+// (see runCanaryProbe), so waiving the latency gates here cannot be abused to
+// clear enforced-window failures.
+func evaluateCanaryProbe(challenge config.CanaryChallengeConfig, output string, expected string, metrics canaryProbeMetrics, coldStartGrace bool) canaryProbeOutcome {
 	if !canaryAnswerMatches(output, expected) {
 		return canaryProbeFail
 	}
-	if !challengeHasLatencyGates(challenge) {
+	if coldStartGrace {
 		return canaryProbePass
 	}
-	if challenge.MaxTTFTMS > 0 && metrics.TTFTMS > challenge.MaxTTFTMS {
-		return canaryProbeFail
-	}
-	if challenge.MinSustainedTPS > 0 && (math.IsNaN(metrics.SustainedTPS) || math.IsInf(metrics.SustainedTPS, 0) || metrics.SustainedTPS < challenge.MinSustainedTPS) {
+	if challengeLatencyBreach(challenge, metrics) {
 		return canaryProbeFail
 	}
 	return canaryProbePass
