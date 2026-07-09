@@ -3503,6 +3503,38 @@ func TestNonStreamingSanitizesInvalidCachedPromptTokensWithoutRejectingUsage(t *
 	}
 }
 
+// TestNonStreamingOverCapUsageClampsInsteadOfRejecting is the non-streaming
+// analog of the over-cap clamp fix (2026-07-09 canary-probe finding): a prompt
+// whose provider-reported tokens exceed the reservation cap (completion within
+// max_tokens) settles provider_reported bounded to the cap, and the buyer still
+// receives the provider's actual usage counts — instead of a rejection.
+func TestNonStreamingOverCapUsageClampsInsteadOfRejecting(t *testing.T) {
+	body := `{"model":"llama","max_tokens":5,"messages":[{"role":"user","content":"ok"}]}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		responseBody := `{"id":"chatcmpl_overcap","usage":{"prompt_tokens":200,"completion_tokens":1,"total_tokens":201},"choices":[{"message":{"content":"ok"}}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, responseBody), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_overcap_nonstream")
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	// Visibility: buyer sees the provider's actual prompt count, not a rejection.
+	if !strings.Contains(resp.Body.String(), `"prompt_tokens":200`) {
+		t.Fatalf("over-cap usage was not forwarded to buyer: %s", resp.Body.String())
+	}
+	capTokens := promptCapTokens([]byte(body)) + 5
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, "acct_overcap_nonstream")
+	if outcome != "ok" || source != "provider_reported" || completion != 1 || prompt != capTokens-1 {
+		t.Fatalf("usage event outcome/source/prompt/completion = %s/%s/%d/%d, want ok/provider_reported/%d/1 (bounded to cap=%d)", outcome, source, prompt, completion, capTokens-1, capTokens)
+	}
+}
+
 func TestNonStreamingSynthesizesCompleteUsageWhenProviderUsageAbsent(t *testing.T) {
 	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"legacy usage"}]}`
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -3569,7 +3601,6 @@ func TestUsageFromJSONValidatesProviderReportedUsage(t *testing.T) {
 		{name: "overflow", body: `{"usage":{"prompt_tokens":9223372036854775807,"completion_tokens":1}}`},
 		{name: "inconsistent_total", body: `{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":4}}`},
 		{name: "explicit_zero_total_mismatch", body: `{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":0}}`},
-		{name: "exceeds_request_bound", body: `{"usage":{"prompt_tokens":1,"completion_tokens":10,"total_tokens":11}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, ok, err := usageFromJSON([]byte(tc.body), 10, 10); !ok || err == nil {
@@ -3608,6 +3639,17 @@ func TestUsageFromJSONValidatesProviderReportedUsage(t *testing.T) {
 	}
 	if _, ok, err := usageFromJSON([]byte(`{"usage":null}`), 10, 10); ok || err != nil {
 		t.Fatalf("usage null ok=%v err=%v, want absent usage", ok, err)
+	}
+	// Over-cap usage is CLAMPED to the reservation cap (mirrors the coordinator's
+	// bounded charge), not rejected — so the buyer keeps a provider_reported
+	// usage frame instead of losing usage and being billed on gateway_estimated.
+	// Regression for the 2026-07-09 canary-probe finding.
+	clamped, ok, err := usageFromJSON([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":10,"total_tokens":11}}`), 10, 10)
+	if err != nil || !ok {
+		t.Fatalf("over-cap usage ok=%v err=%v, want clamped accept", ok, err)
+	}
+	if clamped.PromptTokens != 0 || clamped.CompletionTokens != 10 || clamped.TotalTokens != 10 {
+		t.Fatalf("over-cap clamp = %#v, want prompt=0 completion=10 total=10 (bounded to cap=10)", clamped)
 	}
 }
 
@@ -3665,11 +3707,18 @@ func TestEstimatePromptTokensHeadroomCoversAir5(t *testing.T) {
 	}
 
 	// Sanity: a malicious provider reporting prompt=10000 for the same
-	// 115-byte body must STILL trip the cap. Headroom doesn't break
-	// the over-billing defense.
+	// body must STILL be bounded to the buyer's reservation. The clamp caps
+	// the settled total at maxUsageTokens (mirrors the coordinator's bounded
+	// charge) instead of dropping usage — the over-billing defense holds; the
+	// buyer just keeps a bounded provider_reported usage frame rather than
+	// losing usage and being billed on gateway_estimated.
 	abusiveUsage := []byte(`{"usage":{"prompt_tokens":10000,"completion_tokens":1,"total_tokens":10001}}`)
-	if _, _, err := usageFromJSON(abusiveUsage, maxUsageTokens, maxTokens); err == nil {
-		t.Fatalf("expected cap rejection for prompt=10000 on a 115-byte body (cap=%d)", maxUsageTokens)
+	clampedAbusive, ok, err := usageFromJSON(abusiveUsage, maxUsageTokens, maxTokens)
+	if err != nil || !ok {
+		t.Fatalf("abusive over-cap usage ok=%v err=%v, want clamped accept", ok, err)
+	}
+	if clampedAbusive.TotalTokens != maxUsageTokens || clampedAbusive.CompletionTokens != 1 || clampedAbusive.PromptTokens != maxUsageTokens-1 {
+		t.Fatalf("abusive clamp = %#v, want total=%d completion=1 prompt=%d (bounded to cap)", clampedAbusive, maxUsageTokens, maxUsageTokens-1)
 	}
 
 	// R1 CODE HIGH #1: a malicious provider must NOT be able to spend
@@ -5130,6 +5179,51 @@ func TestStreamingSanitizesInvalidCachedPromptTokensWithoutRejectingUsage(t *tes
 	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
 	if outcome != "unverified_streaming" || source != "provider_reported" || prompt != 3 || completion != 2 {
 		t.Fatalf("usage event outcome/source/prompt/completion = %s/%s/%d/%d, want unverified_streaming/provider_reported/3/2", outcome, source, prompt, completion)
+	}
+}
+
+// TestStreamingOverCapUsageClampsInsteadOfDroppingFrame regresses the
+// 2026-07-09 canary-probe finding: when a provider's honest token count
+// exceeds the reservation-derived validation cap (common for token-dense
+// prompts the byte heuristic under-counts), the gateway used to drop the
+// usage frame from the buyer stream and force settlement to gateway_estimated
+// byte estimates. It must instead forward the frame (buyer keeps usage
+// visibility) and settle provider_reported, clamped to the reservation cap.
+func TestStreamingOverCapUsageClampsInsteadOfDroppingFrame(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":5,"messages":[{"role":"user","content":"ok"}]}`
+	accountID := "acct_stream_overcap_usage"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := strings.Join([]string{
+			`data: {"id":"chatcmpl","choices":[{"delta":{"content":"ok"}}]}`,
+			`data: {"id":"chatcmpl","usage":{"prompt_tokens":200,"completion_tokens":1,"total_tokens":201},"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n\n")
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	// Visibility fix: the usage frame is forwarded with the provider's ACTUAL
+	// prompt count, not dropped.
+	if !strings.Contains(resp.Body.String(), `"prompt_tokens":200`) {
+		t.Fatalf("over-cap usage frame was dropped from buyer stream: %s", resp.Body.String())
+	}
+	// Billing fix: settled provider_reported (not gateway_estimated), clamped to
+	// the reservation cap.
+	capTokens := promptCapTokens([]byte(body)) + 5
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
+	if source != "provider_reported" {
+		t.Fatalf("over-cap settlement source=%s outcome=%s, want provider_reported (not gateway_estimated)", source, outcome)
+	}
+	if completion != 1 || prompt != capTokens-1 {
+		t.Fatalf("over-cap clamped tokens prompt/completion = %d/%d, want %d/1 (bounded to cap=%d)", prompt, completion, capTokens-1, capTokens)
 	}
 }
 

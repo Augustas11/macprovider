@@ -2255,11 +2255,37 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64, allowComple
 		return tokenUsage{}, true, fmt.Errorf("usage completion_tokens exceeds request max_tokens")
 	}
 	sum := usage.PromptTokens + usage.CompletionTokens
-	if sum > maxUsageTokens {
-		return tokenUsage{}, true, fmt.Errorf("usage token total exceeds request maximum")
-	}
+	// Validate provider self-consistency on the ORIGINAL reported values before
+	// any clamp.
 	if rawUsage.TotalTokens != nil && usage.TotalTokens != sum {
 		return tokenUsage{}, true, fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
+	}
+	if sum > maxUsageTokens {
+		// The provider's honest token count exceeded the reservation-derived
+		// validation cap — common for token-dense prompts the byte heuristic
+		// under-counts. Clamp to the cap (reduce prompt tokens first, then
+		// completion) instead of rejecting: this mirrors the coordinator's
+		// "charge bounded prompt tokens" behavior so the buyer keeps a
+		// provider_reported usage frame and bounded billing, instead of losing
+		// usage visibility and being silently billed on gateway_estimated byte
+		// estimates. Never charges beyond the buyer's reservation hold. The
+		// buyer-facing usage frame still reports the provider's actual counts
+		// (only cached_prompt_tokens is rewritten downstream); this clamp bounds
+		// only the value settled against the reservation.
+		overage := sum - maxUsageTokens
+		if overage <= usage.PromptTokens {
+			usage.PromptTokens -= overage
+		} else {
+			usage.CompletionTokens -= overage - usage.PromptTokens
+			usage.PromptTokens = 0
+		}
+		if usage.CompletionTokens < 0 {
+			usage.CompletionTokens = 0
+		}
+		if usage.CachedPromptTokens > usage.PromptTokens {
+			usage.CachedPromptTokens = usage.PromptTokens
+		}
+		sum = usage.PromptTokens + usage.CompletionTokens
 	}
 	usage.TotalTokens = sum
 	return usage, true, nil
@@ -2425,6 +2451,12 @@ const promptHeadroomTokens = 64
 // cap=33; provider tokenized to prompt=30+completion=4=34 → falsely
 // rejected as invalid_provider_usage. Adding +64 to the cap (only)
 // fixes the false reject without inflating any billed quantity.
+//
+// NOTE: this cap equals the reservation hold (chat_proxy §"Validation
+// cap matches the reservation exposure"), so it cannot be widened
+// without widening every request's quota hold. Token-dense prompts
+// that still exceed it are handled by the clamp in usageFromJSON
+// (bounded provider_reported billing) rather than a wider cap.
 func promptCapTokens(body []byte) int64 {
 	return estimatePromptTokens(body) + promptHeadroomTokens
 }
