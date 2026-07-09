@@ -23,6 +23,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/explorer"
+	"github.com/augstar/macprovider-coordinator/internal/mdm"
 	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/pow"
@@ -827,11 +828,22 @@ func main() {
 		hardwareEvidence = registerHandler.HandleHardwareEvidence
 		logger.Info().Msg("SPEC-026 app-track register route mounted on buyer port")
 	}
+	// Phase 2 Track P2-A: MDM enrollment profile endpoint.
+	// Enabled when tier2.mdm.enrollment_base_url is configured.
+	var enrollHandler http.HandlerFunc
+	if cfg.Tier2.MDM.EnrollmentBaseURL != "" {
+		eh := buildEnrollHandler(cfg, logger)
+		enrollHandler = eh.HandleEnroll
+		logger.Info().
+			Str("base_url", cfg.Tier2.MDM.EnrollmentBaseURL).
+			Msg("MDM enrollment profile route mounted on buyer port (/v1/enroll)")
+	}
 	buyerHandler := buyerHandlerWithOptionalProviderEndpoints(
 		buyerServer.Handler(),
 		cfg.Onboarding.AppTrackRegisterEnabled,
 		register,
 		hardwareEvidence,
+		enrollHandler,
 		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
 	)
 
@@ -1302,6 +1314,9 @@ var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
 	"ResponseTimeAnomalyEnabled":     tier2HotReloadable,
 	"ResponseTimeAnomalyFactor":      tier2HotReloadable,
 	"ResponseTimeAnomalyMinMS":       tier2HotReloadable,
+	// MDM enrollment config — startup-only: changing push cert or SCEP
+	// settings mid-flight would invalidate already-issued profiles.
+	"MDM": tier2StartupOnly,
 }
 
 func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
