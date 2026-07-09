@@ -54,29 +54,31 @@ func TestCanaryColdStartActiveIsChurnSafe(t *testing.T) {
 		return pool.Provider{ProviderID: "p1", ConnectedAt: connectedAt}
 	}
 
-	// Fresh connect → grace armed and active.
+	// Fresh connect within the window → graced.
 	if !s.canaryColdStartActive(p(base)) {
-		t.Fatal("fresh connect should be graced")
+		t.Fatal("fresh connect within window should be graced")
 	}
-	// Still within the original window → active.
-	now = base.Add(200 * time.Second)
-	if !s.canaryColdStartActive(p(base)) {
-		t.Fatal("within window should stay graced")
+	// Past the window → not graced, even with a stale ConnectedAt.
+	now = base.Add(400 * time.Second)
+	if s.canaryColdStartActive(p(base)) {
+		t.Fatal("past the cold-start window should not be graced")
 	}
-	// Reconnect-churn AFTER the original expiry with a fresh ConnectedAt must NOT
-	// re-arm grace while inside the cooldown — the TTFT gate is enforced again.
-	now = base.Add(310 * time.Second)
-	if s.canaryColdStartActive(p(now)) {
-		t.Fatal("reconnect-churn within cooldown must NOT re-arm grace")
-	}
-	// Future / negative-age connect is never graced (clock skew guard).
-	if s.canaryColdStartActive(p(now.Add(time.Hour))) {
+	now = base
+	// Future / negative-age connect is never graced (clock-skew guard).
+	if s.canaryColdStartActive(p(base.Add(time.Hour))) {
 		t.Fatal("future ConnectedAt must not be graced")
 	}
-	// A genuinely new cold start past the cooldown re-arms grace.
-	now = base.Add(601 * time.Second)
+	// Alternation guard: once the previous probe was graced (enforceNextCanary
+	// set), the next probe is enforced even with a fresh reconnect ConnectedAt —
+	// so churn cannot arrange to only ever be probed under grace.
+	s.enforceNextCanary.Store("p1", struct{}{})
+	if s.canaryColdStartActive(p(now)) {
+		t.Fatal("must enforce the probe following a graced one, despite fresh connect")
+	}
+	// After an enforced probe clears the flag, a genuine cold start is graced again.
+	s.enforceNextCanary.Delete("p1")
 	if !s.canaryColdStartActive(p(now)) {
-		t.Fatal("a new cold start past cooldown should re-arm grace")
+		t.Fatal("grace should re-arm after an enforced probe clears the flag")
 	}
 	// Disabled when grace <= 0.
 	s.cfg.Pool.CanaryColdStartGraceS = 0
