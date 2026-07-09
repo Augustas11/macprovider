@@ -34,7 +34,23 @@ type canaryProbeMetrics struct {
 	// cold-start grace window. Surfaced in logs so a genuinely-slow provider
 	// hiding behind grace stays visible.
 	LatencyGraced bool
+	// FailReason records WHY a probe failed (nonce_mismatch, ttft_breach,
+	// tps_breach, incomplete, relay_error) so prod canary-failure logs are
+	// diagnosable. Empty on a pass.
+	FailReason canaryFailReason
 }
+
+// canaryFailReason identifies why a canary probe failed. Empty on pass.
+type canaryFailReason string
+
+const (
+	canaryFailNone       canaryFailReason = ""
+	canaryFailNonce      canaryFailReason = "nonce_mismatch"
+	canaryFailTTFT       canaryFailReason = "ttft_breach"
+	canaryFailTPS        canaryFailReason = "tps_breach"
+	canaryFailIncomplete canaryFailReason = "incomplete"
+	canaryFailRelay      canaryFailReason = "relay_error"
+)
 
 type canaryAttemptResult struct {
 	outcome        canaryProbeOutcome
@@ -102,37 +118,47 @@ func challengeHasLatencyGates(challenge config.CanaryChallengeConfig) bool {
 	return challenge.MaxTTFTMS > 0 || challenge.MinSustainedTPS > 0
 }
 
+// latencyBreachReason returns the specific latency gate the metrics violate
+// (ttft_breach checked before tps_breach), or canaryFailNone if neither.
+func latencyBreachReason(challenge config.CanaryChallengeConfig, metrics canaryProbeMetrics) canaryFailReason {
+	if challenge.MaxTTFTMS > 0 && metrics.TTFTMS > challenge.MaxTTFTMS {
+		return canaryFailTTFT
+	}
+	if challenge.MinSustainedTPS > 0 && (math.IsNaN(metrics.SustainedTPS) || math.IsInf(metrics.SustainedTPS, 0) || metrics.SustainedTPS < challenge.MinSustainedTPS) {
+		return canaryFailTPS
+	}
+	return canaryFailNone
+}
+
 // challengeLatencyBreach reports whether the probe metrics violate a configured
 // latency gate (max_ttft_ms or min_sustained_tps).
 func challengeLatencyBreach(challenge config.CanaryChallengeConfig, metrics canaryProbeMetrics) bool {
-	if challenge.MaxTTFTMS > 0 && metrics.TTFTMS > challenge.MaxTTFTMS {
-		return true
-	}
-	if challenge.MinSustainedTPS > 0 && (math.IsNaN(metrics.SustainedTPS) || math.IsInf(metrics.SustainedTPS, 0) || metrics.SustainedTPS < challenge.MinSustainedTPS) {
-		return true
-	}
-	return false
+	return latencyBreachReason(challenge, metrics) != canaryFailNone
 }
 
-// evaluateCanaryProbe returns the probe outcome. The nonce-correctness gate
-// (model identity / anti-downgrade) is ALWAYS enforced. When coldStartGrace is
-// true, BOTH latency gates are waived: canary probes are non-streaming
-// (stream:false), so max_ttft_ms and min_sustained_tps are both measured over
-// wall time (no reliable first-token/decode split) and are dominated by a cold
-// model load. A graced probe is additionally NEUTRAL for the sanction counter
-// (see runCanaryProbe), so waiving the latency gates here cannot be abused to
-// clear enforced-window failures.
-func evaluateCanaryProbe(challenge config.CanaryChallengeConfig, output string, expected string, metrics canaryProbeMetrics, coldStartGrace bool) canaryProbeOutcome {
+// evaluateCanaryProbe returns the probe outcome and, on failure, the reason.
+// The nonce-correctness gate (model identity / anti-downgrade) is ALWAYS
+// enforced. The wall-time latency gates (max_ttft_ms / min_sustained_tps)
+// SANCTION only when enforceLatency is true — canary probes are non-streaming
+// (stream:false), so those metrics are structurally unreliable, and observe
+// mode (the default) never fails a nonce-correct probe on latency. When
+// enforceLatency is true, coldStartGrace additionally waives BOTH latency gates
+// for the cold-start window; a graced probe is NEUTRAL for the sanction counter
+// (see runCanaryProbe), so waiving cannot be abused to clear enforced-window
+// failures.
+func evaluateCanaryProbe(challenge config.CanaryChallengeConfig, output string, expected string, metrics canaryProbeMetrics, coldStartGrace bool, enforceLatency bool) (canaryProbeOutcome, canaryFailReason) {
 	if !canaryAnswerMatches(output, expected) {
-		return canaryProbeFail
+		return canaryProbeFail, canaryFailNonce
 	}
-	if coldStartGrace {
-		return canaryProbePass
+	// Nonce correct. Latency gates sanction only in enforce mode, and are waived
+	// during the cold-start grace window even then.
+	if !enforceLatency || coldStartGrace {
+		return canaryProbePass, canaryFailNone
 	}
-	if challengeLatencyBreach(challenge, metrics) {
-		return canaryProbeFail
+	if reason := latencyBreachReason(challenge, metrics); reason != canaryFailNone {
+		return canaryProbeFail, reason
 	}
-	return canaryProbePass
+	return canaryProbePass, canaryFailNone
 }
 
 func canaryMetricsFromTiming(start time.Time, firstTokenAt time.Time, completedAt time.Time, completionTokens int) canaryProbeMetrics {

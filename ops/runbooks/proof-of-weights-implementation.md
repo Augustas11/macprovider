@@ -68,8 +68,9 @@ pool:
     qwen3-coder-30b-a3b-instruct:
       - prompt: What is the code {nonce}? Reply with only the code.
         expected: '{nonce}'
-        max_ttft_ms: 3500
+        max_ttft_ms: 7000        # non-streaming round-trip; keep generous
         min_sustained_tps: 20
+  canary_latency_enforcement: observe   # observe (default) | enforce
 ```
 
 **Export:** `model_class_opoi_pass` on `/poolz` when a model-class bank was used.
@@ -98,7 +99,34 @@ enforced-window fails), and it FORCES the next probe to be enforced (the
 so a reconnect mid-probe cannot re-open grace). A chronically-slow provider
 therefore still fails the interleaved enforced probes and is sanctioned. A waived
 probe logs `provider canary TTFT gate waived during cold-start grace window` with
-`canary_ttft_ms` + `connected_age`.
+`canary_ttft_ms` + `connected_age`. Grace only applies when
+`canary_latency_enforcement: enforce` (see below).
+
+**Latency enforcement mode (2026-07-09):** the wall-time latency gates
+(`max_ttft_ms` / `min_sustained_tps`) are **unreliable** on a non-streaming
+canary. The probe sends `stream:false`, so the coordinator has no real
+first-token boundary: measured `canary_ttft_ms` swings from ~125ms to ~7000ms and
+`canary_sustained_tps` from ~7 to ~27000 for the *same healthy provider*. During
+the W3 rollout, tightening Pearl `max_ttft_ms` to 3500 (matching the *streaming*
+buyer-probe TTFT of ~1200ms) made a warm provider fail the gate 3-in-a-row →
+sanctioned → intermittent buyer 503s. The buyer path is streaming and shows the
+true numbers; the non-streaming canary does not.
+
+`pool.canary_latency_enforcement` (default **`observe`**) governs whether a
+latency breach SANCTIONS:
+
+- **`observe`** (default): a nonce-correct probe that breaches a latency gate is
+  **not** failed; it logs `provider canary latency breach observed (not enforced)`
+  with `canary_latency_reason` + `canary_ttft_ms`/`canary_sustained_tps`. TPS is
+  also tracked by `proof_of_weights.telemetry_drift`. The nonce gate still
+  enforces (anti-downgrade unchanged).
+- **`enforce`**: latency breaches fail the probe (subject to
+  `canary_cold_start_grace_s`). Use ONLY after validating metric stability; keep
+  `max_ttft_ms >= 7000` to fit the non-streaming round-trip.
+
+The `provider canary failed` log now carries `canary_fail_reason`
+(`nonce_mismatch` | `ttft_breach` | `tps_breach` | `incomplete` | `relay_error`)
+so a prod failure is diagnosable.
 
 ---
 

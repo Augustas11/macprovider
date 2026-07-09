@@ -67,7 +67,12 @@ pool:
                                 # non-streaming) for N s after connect (cold
                                 # load). Nonce-correctness always enforced; a
                                 # graced probe is neutral + forces the next
-                                # probe enforced. Set ~300 with latency gates.
+                                # probe enforced. Only meaningful with
+                                # canary_latency_enforcement=enforce.
+  canary_latency_enforcement: observe  # observe (default) | enforce. The
+                                # wall-time latency gates are unreliable on a
+                                # non-streaming canary; observe logs breaches
+                                # without sanctioning. Nonce gate always enforced.
   # OPoI v0 challenge bank reference (enable in staging overlay, not here).
   # Every entry must contain {nonce} in both prompt and expected.
   # canary_challenges:

@@ -2239,6 +2239,21 @@ func (s *Server) runCanaryProbe(provider pool.Provider) bool {
 		s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary skipped")
 		return false
 	}
+	// Observe mode (default): a nonce-correct probe that breaches a wall-time
+	// latency gate is NOT sanctioned (the non-streaming metric is unreliable),
+	// but the breach is logged so operators keep the signal. TPS drift is also
+	// tracked via proof_of_weights.telemetry_drift.
+	if outcome == canaryProbePass && attempt.modelClassBank && !s.cfg.Pool.CanaryLatencyEnforced() &&
+		challengeLatencyBreach(attempt.challenge, attempt.metrics) {
+		s.log.Info().
+			Str("provider_id", provider.ProviderID).
+			Str("canary_latency_reason", string(latencyBreachReason(attempt.challenge, attempt.metrics))).
+			Int("canary_ttft_ms", attempt.metrics.TTFTMS).
+			Int("max_ttft_ms", attempt.challenge.MaxTTFTMS).
+			Float64("canary_sustained_tps", attempt.metrics.SustainedTPS).
+			Float64("min_sustained_tps", attempt.challenge.MinSustainedTPS).
+			Msg("provider canary latency breach observed (not enforced)")
+	}
 	// Neutral only when the probe PASSED because of grace. LatencyGraced is set
 	// on a latency breach before the correctness check, so a wrong-nonce answer
 	// that is also latency-breaching would otherwise be neutralized here and
@@ -2288,6 +2303,9 @@ func (s *Server) runCanaryProbe(provider pool.Provider) bool {
 		Str("provider_id", provider.ProviderID).
 		Int("canary_fail_count", result.Count).
 		Int("canary_failure_threshold", result.Threshold)
+	if attempt.metrics.FailReason != canaryFailNone {
+		event = event.Str("canary_fail_reason", string(attempt.metrics.FailReason))
+	}
 	if result.Tripped != pool.CanaryTripNone {
 		event = event.Str("canary_trip", string(result.Tripped))
 	}
@@ -2406,17 +2424,21 @@ func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Prov
 				metrics = canaryMetricsFromTiming(start, firstTokenAt, completedAt, tokens)
 			}
 			if end.Status != "complete" {
+				metrics.FailReason = canaryFailIncomplete
 				return canaryProbeFail, metrics
 			}
-			grace := s.canaryColdStartActive(provider)
+			enforceLatency := s.cfg.Pool.CanaryLatencyEnforced()
+			grace := enforceLatency && s.canaryColdStartActive(provider)
 			if grace && challengeLatencyBreach(probe.Challenge, metrics) {
 				metrics.LatencyGraced = true
 			}
-			return evaluateCanaryProbe(probe.Challenge, output.String(), probe.Expected, metrics, grace), metrics
+			outcome, reason := evaluateCanaryProbe(probe.Challenge, output.String(), probe.Expected, metrics, grace, enforceLatency)
+			metrics.FailReason = reason
+			return outcome, metrics
 		case <-relay.Errors:
-			return canaryProbeFail, canaryProbeMetrics{}
+			return canaryProbeFail, canaryProbeMetrics{FailReason: canaryFailRelay}
 		case <-ctx.Done():
-			return canaryProbeFail, canaryProbeMetrics{}
+			return canaryProbeFail, canaryProbeMetrics{FailReason: canaryFailRelay}
 		}
 	}
 }
@@ -2434,15 +2456,15 @@ func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Pr
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := providerhttp.Client.Do(req)
 	if err != nil {
-		return canaryProbeFail, canaryProbeMetrics{}
+		return canaryProbeFail, canaryProbeMetrics{FailReason: canaryFailRelay}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return canaryProbeFail, canaryProbeMetrics{}
+		return canaryProbeFail, canaryProbeMetrics{FailReason: canaryFailRelay}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return canaryProbeFail, canaryProbeMetrics{}
+		return canaryProbeFail, canaryProbeMetrics{FailReason: canaryFailRelay}
 	}
 	completedAt := time.Now()
 	output := strings.Join(canaryPayloadContents(raw), "")
@@ -2457,11 +2479,14 @@ func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Pr
 		}
 		metrics = canaryMetricsFromTiming(start, time.Time{}, completedAt, tokens)
 	}
-	grace := s.canaryColdStartActive(provider)
+	enforceLatency := s.cfg.Pool.CanaryLatencyEnforced()
+	grace := enforceLatency && s.canaryColdStartActive(provider)
 	if grace && challengeLatencyBreach(probe.Challenge, metrics) {
 		metrics.LatencyGraced = true
 	}
-	return evaluateCanaryProbe(probe.Challenge, output, probe.Expected, metrics, grace), metrics
+	outcome, reason := evaluateCanaryProbe(probe.Challenge, output, probe.Expected, metrics, grace, enforceLatency)
+	metrics.FailReason = reason
+	return outcome, metrics
 }
 
 // canaryColdStartActive reports whether the next canary probe for this provider

@@ -150,6 +150,35 @@ func TestCanaryColdStartGraceValidation(t *testing.T) {
 	}
 }
 
+func TestCanaryLatencyEnforcementValidation(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+
+	// Default (empty) normalizes to observe and validates.
+	if cfg.Pool.CanaryLatencyEnforcement != "" {
+		t.Fatalf("default canary_latency_enforcement should be empty, got %q", cfg.Pool.CanaryLatencyEnforcement)
+	}
+	if cfg.Pool.CanaryLatencyMode() != "observe" || cfg.Pool.CanaryLatencyEnforced() {
+		t.Fatalf("empty enforcement must normalize to observe (not enforced)")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("empty enforcement should validate: %v", err)
+	}
+	for _, mode := range []string{"observe", "enforce", "ENFORCE", "Observe"} {
+		cfg.Pool.CanaryLatencyEnforcement = mode
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("mode %q should validate: %v", mode, err)
+		}
+	}
+	if cfg.Pool.CanaryLatencyEnforcement = "enforce"; !cfg.Pool.CanaryLatencyEnforced() {
+		t.Fatal("enforce mode must report enforced")
+	}
+	cfg.Pool.CanaryLatencyEnforcement = "sanction"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "canary_latency_enforcement") {
+		t.Fatalf("invalid enforcement should fail validation, got %v", err)
+	}
+}
+
 func TestProviderWebSocketBoundsDefaultAndValidate(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"

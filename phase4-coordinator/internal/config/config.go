@@ -337,10 +337,35 @@ type PoolConfig struct {
 	// probe to be enforced — so this cannot be used to evade sanctions. Size it
 	// to cover a cold large-model load (observed ~8s TTFT for a cold 30B; a full
 	// load can take tens of seconds).
-	CanaryColdStartGraceS int                                `yaml:"canary_cold_start_grace_s"`
-	CanaryChallenges      []CanaryChallengeConfig            `yaml:"canary_challenges"`
-	ModelClassChallenges  map[string][]CanaryChallengeConfig `yaml:"model_class_challenges"`
-	LosslessnessProbe     LosslessnessProbeConfig            `yaml:"losslessness_probe"`
+	CanaryColdStartGraceS int `yaml:"canary_cold_start_grace_s"`
+	// CanaryLatencyEnforcement controls whether the WALL-TIME latency gates
+	// (max_ttft_ms / min_sustained_tps) SANCTION a provider or are observe-only.
+	// Canary probes are non-streaming (stream:false), so these wall-time metrics
+	// are structurally unreliable — measured TTFT/TPS swing widely for the same
+	// healthy provider depending on relay chunk timing. Default "observe": a
+	// latency breach on a nonce-correct probe is logged (canary_latency_observed)
+	// but does NOT count as a canary failure. "enforce": a latency breach fails
+	// the probe (subject to CanaryColdStartGraceS). The nonce-correctness gate is
+	// ALWAYS enforced in both modes. Empty = "observe".
+	CanaryLatencyEnforcement string                             `yaml:"canary_latency_enforcement"`
+	CanaryChallenges         []CanaryChallengeConfig            `yaml:"canary_challenges"`
+	ModelClassChallenges     map[string][]CanaryChallengeConfig `yaml:"model_class_challenges"`
+	LosslessnessProbe        LosslessnessProbeConfig            `yaml:"losslessness_probe"`
+}
+
+// CanaryLatencyMode normalizes CanaryLatencyEnforcement (empty defaults to
+// observe).
+func (p PoolConfig) CanaryLatencyMode() string {
+	if strings.EqualFold(strings.TrimSpace(p.CanaryLatencyEnforcement), "enforce") {
+		return "enforce"
+	}
+	return "observe"
+}
+
+// CanaryLatencyEnforced reports whether latency-gate breaches sanction the
+// provider (enforce mode) or are observe-only (default).
+func (p PoolConfig) CanaryLatencyEnforced() bool {
+	return p.CanaryLatencyMode() == "enforce"
 }
 
 type CanaryChallengeConfig struct {
@@ -1434,6 +1459,11 @@ func (c Config) Validate() error {
 	}
 	if c.Pool.CanaryColdStartGraceS < 0 {
 		return fmt.Errorf("pool canary_cold_start_grace_s must be >= 0")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Pool.CanaryLatencyEnforcement)) {
+	case "", "observe", "enforce":
+	default:
+		return fmt.Errorf("pool canary_latency_enforcement must be \"observe\" or \"enforce\"")
 	}
 	if c.Pool.CanaryEnabled {
 		if len(c.Pool.CanaryChallenges) == 0 && len(c.Pool.ModelClassChallenges) == 0 {

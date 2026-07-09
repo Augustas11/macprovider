@@ -50,6 +50,16 @@ pool:
   canary_cold_start_grace_s: 300 # waive wall-time latency gates (max_ttft_ms +
                                  # min_sustained_tps) 300s after connect; nonce
                                  # always enforced, graced probe neutral+enforced-next
+                                 # (only meaningful when canary_latency_enforcement=enforce)
+  # canary_latency_enforcement controls whether the wall-time latency gates
+  # (max_ttft_ms / min_sustained_tps) SANCTION or are observe-only. Canary probes
+  # are non-streaming (stream:false), so these metrics are structurally unreliable
+  # (measured TTFT/TPS swing widely for the same healthy provider). Default
+  # "observe": a latency breach on a nonce-correct probe is LOGGED
+  # (provider canary latency breach observed) but does NOT fail the canary. Set
+  # "enforce" only if you have validated the metric is stable for your providers.
+  # The nonce-correctness gate is ALWAYS enforced in both modes.
+  canary_latency_enforcement: observe
   # OPoI v0 challenge bank — every entry must contain {nonce} in both prompt and expected.
   # Rotate or extend periodically; keep deployment-specific for model security.
   canary_challenges:
