@@ -40,13 +40,8 @@ if [[ -z "$NODE_BIN" ]]; then
   exit 2
 fi
 
-# Keep only the most recent 200 JSON artifacts. Enumerate NUL-safe so odd
-# filenames can't cause unintended deletions.
-if [[ -d "$CANARY_JSON_OUT" ]]; then
-  ( cd "$CANARY_JSON_OUT" 2>/dev/null &&
-      ls -1t canary-*.json 2>/dev/null | tail -n +201 |
-      while IFS= read -r f; do [[ -f "$f" ]] && rm -f -- "$f"; done ) || true
-fi
+# Artifact rotation (keep newest 200) is handled inside probe.mjs in Node, so no
+# filename can be misparsed by the shell into an unintended delete.
 
 exec "$NODE_BIN" "$HERE/probe.mjs" \
   --metrics-out "$CANARY_METRICS_OUT" \

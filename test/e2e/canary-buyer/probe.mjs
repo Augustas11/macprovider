@@ -36,6 +36,9 @@
  *   CANARY_REQ_TIMEOUT_MS per-request timeout (default 45000)
  */
 
+import net from 'node:net';
+import dns from 'node:dns/promises';
+
 const args = parseArgs(process.argv.slice(2));
 
 const CONFIG = {
@@ -91,7 +94,11 @@ function authHeaders(extra = {}) {
 function redact(text) {
   if (text == null) return text;
   let s = String(text);
-  if (CONFIG.token) s = s.split(CONFIG.token).join('***');
+  // Only scrub the literal token when it is long enough to be a real credential
+  // (harness buyer keys are mp_ + 20+ chars). A pathologically short token would
+  // otherwise corrupt legitimate output by matching common substrings. The
+  // Bearer-pattern scrub below still catches the credential regardless.
+  if (CONFIG.token && CONFIG.token.length >= 8) s = s.split(CONFIG.token).join('***');
   return s.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer ***');
 }
 
@@ -110,24 +117,78 @@ function parseSafeUrl(raw, label) {
   if (u.protocol !== 'https:' && !(insecure && u.protocol === 'http:')) {
     throw new Error(`${label} must be https (set CANARY_ALLOW_INSECURE=1 to allow http for local testing)`);
   }
-  if (!insecure && isPrivateHost(u.hostname)) {
+  if (!insecure && isPrivateHostname(u.hostname)) {
     throw new Error(`${label} points at a private/loopback host (set CANARY_ALLOW_INSECURE=1 to allow)`);
   }
   return u;
 }
-function isPrivateHost(host) {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === 'localhost' || h.endsWith('.localhost') || h === '') return true;
-  if (h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')) return true;
-  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (m) {
-    const a = Number(m[1]);
-    const b = Number(m[2]);
-    if (a === 127 || a === 10 || a === 0) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
+
+// Resolve the host and reject if it maps to a private address, closing the
+// static-misconfiguration / private-DNS SSRF case that a literal-hostname check
+// misses. Pure DNS-rebinding (a flip between this check and fetch's own resolve)
+// is an inherent limitation of dependency-free fetch and is accepted as a
+// residual risk for this operator-run internal tool; `redirect: 'manual'` on the
+// token-bearing requests closes the redirect-based variant.
+async function assertResolvesPublic(u, label) {
+  if (env('CANARY_ALLOW_INSECURE') === '1') return;
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  if (net.isIP(host)) return; // literal IP already screened by isPrivateHostname
+  let addrs;
+  try {
+    addrs = await dns.lookup(host, { all: true });
+  } catch {
+    throw new Error(`${label} host ${host} does not resolve`);
   }
+  for (const { address } of addrs) {
+    if (isPrivateIp(address)) {
+      throw new Error(`${label} host ${host} resolves to a private address`);
+    }
+  }
+}
+
+function isPrivateHostname(host) {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (h === '' || h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (net.isIP(h)) return isPrivateIp(h);
+  return false; // a real hostname is screened at resolve time by assertResolvesPublic
+}
+
+function isPrivateIp(ip) {
+  const fam = net.isIP(ip);
+  if (!fam) return false;
+  const addr = ip.toLowerCase();
+  if (fam === 6) {
+    // IPv4-mapped/compat, in dotted (::ffff:127.0.0.1) or hex (::ffff:7f00:1)
+    // form — URL parsing normalizes to the latter, so handle both.
+    const v4 = ipv4FromMapped(addr);
+    if (v4) return isPrivateIp4(v4);
+    if (addr === '::' || addr === '::1') return true; // unspecified + loopback
+    const first = addr.split(':')[0];
+    if (/^fe[89ab]/.test(first)) return true; // fe80::/10 link-local
+    if (/^f[cd]/.test(first)) return true; // fc00::/7 unique-local
+    return false;
+  }
+  return isPrivateIp4(addr);
+}
+function ipv4FromMapped(addr) {
+  const m = addr.match(/^(?:::ffff:|::)([0-9a-f.:]+)$/);
+  if (!m) return null;
+  const tail = m[1];
+  if (tail.includes('.')) return tail; // already dotted
+  const groups = tail.split(':').filter((g) => g.length);
+  if (groups.length !== 2) return null; // low 32 bits are exactly two hex groups
+  const [g1, g2] = groups.map((g) => parseInt(g, 16));
+  if (!Number.isInteger(g1) || !Number.isInteger(g2)) return null;
+  return `${(g1 >> 8) & 0xff}.${g1 & 0xff}.${(g2 >> 8) & 0xff}.${g2 & 0xff}`;
+}
+function isPrivateIp4(ip) {
+  const p = ip.split('.').map(Number);
+  if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a, b] = p;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
   return false;
 }
 
@@ -137,6 +198,7 @@ async function getStatus() {
   const ctl = AbortSignal.timeout(CONFIG.reqTimeoutMs);
   const r = await fetch(`${CONFIG.base}/v1/status`, {
     headers: authHeaders({ Accept: 'application/json' }),
+    redirect: 'manual',
     signal: ctl,
   });
   const text = await r.text();
@@ -168,7 +230,17 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
     const r = await fetch(`${CONFIG.base}/v1/chat/completions`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ model, messages, stream: true, max_tokens: maxTokens }),
+      // include_usage requests the final usage chunk in the stream — without it
+      // a spec-strict gateway omits usage and decode-TPS/cache-ratio go silently
+      // null while the request still counts as serviceable.
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: true,
+        max_tokens: maxTokens,
+        stream_options: { include_usage: true },
+      }),
+      redirect: 'manual',
       signal: AbortSignal.timeout(CONFIG.reqTimeoutMs),
     });
     requestId = r.headers.get('x-request-id') || '';
@@ -226,7 +298,10 @@ async function streamOne({ model, messages, conversationId, maxTokens }) {
       }
     }
   } catch (e) {
-    return { ok: false, status: 0, error: redact(`stream error: ${e.message || e}`), requestId, provider };
+    // Distinguish a request timeout (AbortError from AbortSignal.timeout) from
+    // other connect/DNS/TLS/reset failures so the outcome buckets stay honest.
+    const kind = e && e.name === 'TimeoutError' ? 'timeout' : 'network_error';
+    return { ok: false, status: 0, kind, error: redact(`${kind}: ${e.message || e}`), requestId, provider };
   }
 
   const end = now();
@@ -271,14 +346,19 @@ async function sampleModel(model) {
     provider: '',
   };
 
-  const record = (r) => {
+  // Metric collection is per sample class: only the short-request loop feeds the
+  // TTFT distribution, only the long-request loop feeds sustained TPS. Mixing
+  // them would contaminate TTFT percentiles with long-generation requests and
+  // TPS with 8-token noise. `collect` selects which array (if any) this request
+  // contributes to; every request still contributes to outcome counts.
+  const record = (r, collect = {}) => {
     res.samples++;
     if (r.provider && !res.provider) res.provider = r.provider;
     const bucket = outcomeBucket(r);
     res.outcomes[bucket] = (res.outcomes[bucket] || 0) + 1;
     if (r.ok) {
-      res.ttftMs.push(r.ttftMs);
-      if (r.decodeTps != null) res.decodeTps.push(r.decodeTps);
+      if (collect.ttft) res.ttftMs.push(r.ttftMs);
+      if (collect.tps && r.decodeTps != null) res.decodeTps.push(r.decodeTps);
     } else if (!res.firstError) {
       res.firstError = `HTTP ${r.status}: ${r.error || ''}`.slice(0, 200);
     }
@@ -292,7 +372,7 @@ async function sampleModel(model) {
       messages: [{ role: 'user', content: 'Say: ready.' }],
       maxTokens: 8,
     });
-    record(r);
+    record(r, { ttft: true });
     if (i < CONFIG.ttftSamples - 1) await sleep(CONFIG.intervalMs);
   }
 
@@ -307,7 +387,7 @@ async function sampleModel(model) {
       ],
       maxTokens: CONFIG.tpsMaxTokens,
     });
-    record(r);
+    record(r, { tps: true });
   }
 
   // 3. Sticky KV-cache reuse — two turns, same conversation tag.
@@ -344,13 +424,16 @@ async function sampleModel(model) {
     }
   }
 
-  res.serviceable = res.ttftMs.length > 0 ? 1 : 0;
+  // Serviceable iff any request across all classes produced a token (a 2xx
+  // outcome), not just the TTFT loop — a model that fails short probes but
+  // serves long ones is still serving.
+  res.serviceable = (res.outcomes['2xx'] || 0) > 0 ? 1 : 0;
   return res;
 }
 
 function outcomeBucket(r) {
   if (r.ok) return '2xx';
-  if (r.status === 0) return 'timeout';
+  if (r.status === 0) return r.kind === 'timeout' ? 'timeout' : 'network_error';
   if (r.status === 502) return '502';
   if (r.status === 200) return 'empty';
   if (r.status >= 500) return '5xx';
@@ -461,8 +544,9 @@ function toProm(run) {
     for (const q of ['p50', 'p95', 'p99']) {
       if (m.ttft_ms[q] != null) L.push(`macprovider_canary_ttft_ms{${lbl({ ...base, quantile: q })}} ${m.ttft_ms[q]}`);
     }
+    // Only the p50 quantile is emitted to Prometheus; mean stays in the JSON
+    // artifact (a mean under a quantile label misleads Prometheus consumers).
     if (m.decode_tps.p50 != null) L.push(`macprovider_canary_decode_tps{${lbl({ ...base, quantile: 'p50' })}} ${round(m.decode_tps.p50)}`);
-    if (m.decode_tps.mean != null) L.push(`macprovider_canary_decode_tps{${lbl({ ...base, quantile: 'mean' })}} ${round(m.decode_tps.mean)}`);
     if (m.cached_prompt_ratio != null) L.push(`macprovider_canary_cached_prompt_ratio{${lbl(base)}} ${round(m.cached_prompt_ratio, 4)}`);
   }
   return L.join('\n') + '\n';
@@ -479,6 +563,7 @@ async function pushMetrics(text) {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
     body: text,
+    redirect: 'manual',
     signal: AbortSignal.timeout(15000),
   });
   if (!r.ok) throw new Error(`pushgateway HTTP ${r.status}`);
@@ -492,10 +577,14 @@ async function main() {
     process.exit(2);
   }
   try {
-    parseSafeUrl(`${CONFIG.base}/v1/status`, 'CANARY_BASE');
-    if (CONFIG.pushgateway) parseSafeUrl(CONFIG.pushgateway, 'CANARY_PUSHGATEWAY');
+    const baseUrl = parseSafeUrl(`${CONFIG.base}/v1/status`, 'CANARY_BASE');
+    await assertResolvesPublic(baseUrl, 'CANARY_BASE');
+    if (CONFIG.pushgateway) {
+      const pgUrl = parseSafeUrl(CONFIG.pushgateway, 'CANARY_PUSHGATEWAY');
+      await assertResolvesPublic(pgUrl, 'CANARY_PUSHGATEWAY');
+    }
   } catch (e) {
-    console.error(`FAIL: ${e.message}`);
+    console.error(`FAIL: ${redact(e.message)}`);
     process.exit(2);
   }
   const runStartUnix = Math.floor(realUnix());
@@ -517,22 +606,29 @@ async function main() {
 
   const results = [];
   for (const model of models) {
-    process.stderr.write(`probing ${model} ...\n`);
+    process.stderr.write(redact(`probing ${model} ...\n`));
     const r = await sampleModel(model);
     results.push(r);
     const t = r.ttftMs.length ? `ttft_p50=${percentile(r.ttftMs, 50)}ms p95=${percentile(r.ttftMs, 95)}ms` : 'ttft=none';
     const tps = r.decodeTps.length ? `tps_p50=${round(percentile(r.decodeTps, 50))}` : 'tps=none';
     const cache = r.cachedRatio != null ? `cache=${round(r.cachedRatio, 3)}` : 'cache=n/a';
+    // redact: a hostile gateway could plant the token in a server-controlled
+    // field (model id, provider id, error) that lands in this progress line.
     console.error(
-      `  ${model}: serviceable=${r.serviceable} ${t} ${tps} ${cache} outcomes=${JSON.stringify(r.outcomes)}${r.firstError ? ` firstErr="${r.firstError}"` : ''}`
+      redact(
+        `  ${model}: serviceable=${r.serviceable} ${t} ${tps} ${cache} outcomes=${JSON.stringify(r.outcomes)}${r.firstError ? ` firstErr="${r.firstError}"` : ''}`
+      )
     );
   }
 
   const run = buildRun(status, results, runStartUnix);
-  const prom = toProm(run);
+  // Redact every serialized sink, not just error text: any server-controlled
+  // string (model/provider id, coordinator status) could carry the token.
+  const prom = redact(toProm(run));
+  const runJson = redact(JSON.stringify(run, null, 2));
 
   // stdout: the JSON run summary (machine-readable). Diagnostics go to stderr.
-  console.log(JSON.stringify(run, null, 2));
+  console.log(runJson);
 
   if (CONFIG.metricsOut) {
     await writeAtomic(CONFIG.metricsOut, prom);
@@ -541,7 +637,8 @@ async function main() {
   if (CONFIG.jsonOut) {
     const fname = `canary-${run.run_at.replace(/[:.]/g, '-')}.json`;
     const path = await joinPath(CONFIG.jsonOut, fname);
-    await writeAtomic(path, JSON.stringify(run, null, 2) + '\n');
+    await writeAtomic(path, runJson + '\n');
+    await rotateArtifacts(CONFIG.jsonOut, 200);
     console.error(`wrote artifact → ${path}`);
   }
   if (CONFIG.pushgateway) {
@@ -549,7 +646,7 @@ async function main() {
       await pushMetrics(prom);
       console.error(`pushed metrics → ${CONFIG.pushgateway}`);
     } catch (e) {
-      console.error(`WARN: pushgateway failed: ${e.message}`);
+      console.error(`WARN: pushgateway failed: ${redact(e.message)}`);
     }
   }
 
@@ -573,15 +670,44 @@ function realUnix() {
 
 async function writeAtomic(path, content) {
   const fs = await import('node:fs/promises');
-  const tmp = `${path}.tmp-${process.pid}`;
+  // Unpredictable temp name + exclusive create (wx) so a pre-planted symlink in
+  // a writable output dir can't redirect the write; restrictive mode on create.
+  const tmp = `${path}.tmp-${process.pid}-${randUUID()}`;
   await fs.mkdir(dirname(path), { recursive: true }).catch(() => {});
-  await fs.writeFile(tmp, content);
+  await fs.writeFile(tmp, content, { flag: 'wx', mode: 0o600 });
   await fs.rename(tmp, path);
 }
 async function joinPath(dir, file) {
   const fs = await import('node:fs/promises');
   await fs.mkdir(dir, { recursive: true }).catch(() => {});
   return dir.replace(/\/$/, '') + '/' + file;
+}
+
+// Keep only the newest `keep` canary artifacts. Done in Node (readdir/stat/
+// unlink) rather than shell so no filename can be misparsed into a bad delete.
+async function rotateArtifacts(dir, keep) {
+  const fs = await import('node:fs/promises');
+  let names;
+  try {
+    names = await fs.readdir(dir);
+  } catch {
+    return;
+  }
+  const files = names.filter((f) => /^canary-.*\.json$/.test(f));
+  if (files.length <= keep) return;
+  const stated = [];
+  for (const f of files) {
+    try {
+      const st = await fs.stat(`${dir.replace(/\/$/, '')}/${f}`);
+      stated.push({ f, mtime: st.mtimeMs });
+    } catch {
+      /* skip unstatable entry */
+    }
+  }
+  stated.sort((a, b) => b.mtime - a.mtime);
+  for (const { f } of stated.slice(keep)) {
+    await fs.unlink(`${dir.replace(/\/$/, '')}/${f}`).catch(() => {});
+  }
 }
 function dirname(p) {
   const i = p.lastIndexOf('/');
