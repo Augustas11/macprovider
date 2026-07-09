@@ -59,6 +59,11 @@ type Server struct {
 	warmups         sync.Map
 	canaries        sync.Map
 	canaryDue       sync.Map
+	// canaryGrace maps provider ID -> cold-start grace expiry (time.Time).
+	// Keyed by PROVIDER ID (not session) so reconnect-churn cannot keep
+	// resetting ConnectedAt to stay perpetually inside grace. See
+	// canaryColdStartActive.
+	canaryGrace     sync.Map
 	canarySanctions CanarySanctionStore
 	tokens          TokenValidator
 	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
@@ -2418,14 +2423,41 @@ func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Pr
 
 // canaryColdStartActive reports whether the provider is within its cold-start
 // grace window since connecting, during which the max_ttft_ms latency gate is
-// relaxed (see PoolConfig.CanaryColdStartGraceS). The nonce-correctness and
-// min_sustained_tps gates are never relaxed.
+// relaxed (see PoolConfig.CanaryColdStartGraceS). The nonce-correctness gate is
+// never relaxed (and min_sustained_tps is relaxed only for HTTP probes that
+// lack a real decode window — see evaluateCanaryProbe).
+//
+// Grace is anchored to the PROVIDER ID, not the session: the first cold-start
+// arms an expiry (ConnectedAt + window) that is reused, never extended, across
+// reconnects, and only re-arms after a cooldown of one full window past that
+// expiry. This bounds a reconnect-churn attacker to at most a ~50% duty cycle
+// of waived TTFT — during the enforced windows a chronically-slow provider still
+// accrues canary failures and is sanctioned. Waived breaches are also logged.
 func (s *Server) canaryColdStartActive(provider pool.Provider) bool {
 	grace := s.cfg.Pool.CanaryColdStartGraceS
-	if grace <= 0 || provider.ConnectedAt.IsZero() {
+	if grace <= 0 || provider.ConnectedAt.IsZero() || strings.TrimSpace(provider.ProviderID) == "" {
 		return false
 	}
-	return s.now().Sub(provider.ConnectedAt) < time.Duration(grace)*time.Second
+	window := time.Duration(grace) * time.Second
+	now := s.now()
+	age := now.Sub(provider.ConnectedAt)
+	// Only a genuinely recent, non-future connect can trigger cold-start grace.
+	if age < 0 || age >= window {
+		return false
+	}
+	if v, ok := s.canaryGrace.Load(provider.ProviderID); ok {
+		exp := v.(time.Time)
+		if now.Before(exp) {
+			return true // grace already armed for this provider and still active
+		}
+		if now.Sub(exp) < window {
+			return false // recently expired — within cooldown, block reconnect-churn re-arm
+		}
+	}
+	// Arm (first cold-start, or a genuinely new one past the cooldown), anchored
+	// to this connect so grace never outlasts ConnectedAt + window.
+	s.canaryGrace.Store(provider.ProviderID, provider.ConnectedAt.Add(window))
+	return true
 }
 
 func (s *Server) buildCanaryBody(modelID string, maxTokens int) ([]byte, string, error) {
