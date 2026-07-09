@@ -6508,6 +6508,116 @@ func TestCoordinator404ModelNotFoundPassesThroughAndDoesNotChargeQuota(t *testin
 	}
 }
 
+func TestCoordinatorPreStream502ProviderErrorAuditsZeroAndRefunds(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non_stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			coordBody := `{"error":{"code":"provider_error","message":"provider failed before streaming","param":null,"type":"api_error"}}`
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return responseWithBody(http.StatusBadGateway, http.Header{"Content-Type": []string{"application/json"}}, coordBody), nil
+			})}
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				cfg.Retry503.MaxAttempts = 2
+				cfg.Retry503.BackoffBaseMs = 10
+				cfg.Retry503.BackoffMaxMs = 10
+			}, WithHTTPClient(client))
+			accountID := "acct_prestream_502_" + name
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+			body := `{"model":"model-a","max_tokens":1000,"messages":[{"role":"user","content":"x"}]}`
+			if stream {
+				body = `{"model":"model-a","max_tokens":1000,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+			}
+			resp := postChat(t, h, fullKey, body, nil)
+
+			if resp.Code != http.StatusBadGateway {
+				t.Fatalf("status=%d, want 502 body=%s", resp.Code, resp.Body.String())
+			}
+			assertErrorCode(t, resp.Body.String(), "upstream_provider_error")
+			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+			quota := readQuota(t, usageResp)
+			if used := quota["daily_tokens_used"].(float64); used != 0 {
+				t.Fatalf("daily_tokens_used=%v, want 0", used)
+			}
+			if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+				t.Fatalf("daily_tokens_reserved=%v, want 0", reserved)
+			}
+			outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
+			if outcome != "upstream_error" || source != "gateway_estimated" || prompt != 0 || completion != 0 {
+				t.Fatalf("usage event outcome=%q source=%q prompt=%d completion=%d, want upstream_error/gateway_estimated/0/0", outcome, source, prompt, completion)
+			}
+		})
+	}
+}
+
+func TestCoordinatorPreStream502ProviderErrorObserveModeKeepsLegacySettlement(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non_stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			headers := http.Header{"Content-Type": []string{"application/json"}}
+			headers.Set(settlementModeHeader, "observe")
+			assertPreStream502LegacySettlement(t, name, stream, "provider_error", headers)
+		})
+	}
+}
+
+func TestCoordinatorPreStream502NonProviderErrorKeepsLegacySettlement(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non_stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			assertPreStream502LegacySettlement(t, name, stream, "coordinator_internal_error", http.Header{"Content-Type": []string{"application/json"}})
+		})
+	}
+}
+
+func assertPreStream502LegacySettlement(t *testing.T, name string, stream bool, code string, headers http.Header) {
+	t.Helper()
+	coordBody := fmt.Sprintf(`{"error":{"code":%q,"message":"coordinator error before streaming","param":null,"type":"api_error"}}`, code)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusBadGateway, headers.Clone(), coordBody), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Retry503.Enabled = false
+	}, WithHTTPClient(client))
+	accountID := "acct_prestream_502_legacy_" + code + "_" + name
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	body := `{"model":"model-a","max_tokens":1000,"messages":[{"role":"user","content":"x"}]}`
+	if stream {
+		body = `{"model":"model-a","max_tokens":1000,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+	}
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d, want 502 body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "upstream_provider_error")
+	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	quota := readQuota(t, usageResp)
+	wantPrompt := float64(estimatePromptTokens([]byte(body)))
+	if used := quota["daily_tokens_used"].(float64); used != wantPrompt {
+		t.Fatalf("daily_tokens_used=%v, want prompt estimate %v", used, wantPrompt)
+	}
+	if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+		t.Fatalf("daily_tokens_reserved=%v, want 0", reserved)
+	}
+	outcome, source, completion, prompt := usageEventOutcomeAndTokens(t, dbPath, accountID)
+	if outcome != "upstream_error" || source != "gateway_estimated" || prompt != int64(wantPrompt) || completion != 0 {
+		t.Fatalf("usage event outcome=%q source=%q prompt=%d completion=%d, want upstream_error/gateway_estimated/%d/0", outcome, source, prompt, completion, int64(wantPrompt))
+	}
+}
+
 func TestCoordinatorGenericValidationErrorsPassThroughAndDoNotChargeQuota(t *testing.T) {
 	cases := []struct {
 		name   string
