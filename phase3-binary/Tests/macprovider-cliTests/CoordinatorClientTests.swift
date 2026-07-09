@@ -1862,10 +1862,10 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.19")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.19")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.19")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.19")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.20")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.20")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.8.20")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.8.20")
     }
 
     func testAuthInitialDefaultsToSingleEntryCatalog() async throws {
