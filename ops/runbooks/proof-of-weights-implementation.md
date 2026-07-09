@@ -78,9 +78,17 @@ pool:
 **Pearl smoke (2026-07-08):**
 
 - Normal gates: `provider canary passed`, `model_class_opoi_pass: true`.
-- Induced fail: temporary `max_ttft_ms: 1` → `provider canary failed` with `canary_ttft_ms: 1124` (latency gate path). Overlay reverted to `max_ttft_ms: 3500`.
+- Induced-fail smoke exercises the latency SANCTION path only under
+  `canary_latency_enforcement: enforce`: temporarily set `enforce` +
+  `max_ttft_ms: 1` → `provider canary failed` with `canary_fail_reason:
+  ttft_breach`. Under the default `observe`, the same breach logs `provider
+  canary latency breach observed (not enforced)` and does NOT increment the
+  sanction counter. Restore `observe` (and `max_ttft_ms: 7000`) after.
+- **Restart-required:** `pool.canary_latency_enforcement` (and every `pool.*`
+  canary setting) is read at startup. SIGHUP reloads tier2 / billing config
+  only — flipping observe↔enforce needs a coordinator restart.
 
-Full downgrade cheat smoke (30B claim + 8B serve) requires a dedicated lab provider loading the wrong weights; latency gates exercise the same sanction path.
+Full downgrade cheat smoke (30B claim + 8B serve) requires a dedicated lab provider loading the wrong weights; the NONCE gate (always enforced) exercises the sanction path regardless of latency-enforcement mode.
 
 **Cold-start grace (2026-07-09):** a cold 30B load produces ~8s TTFT on
 reconnect, which false-fails a static `max_ttft_ms` (the reason the live tune

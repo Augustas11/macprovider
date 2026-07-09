@@ -58,7 +58,10 @@ pool:
   # "observe": a latency breach on a nonce-correct probe is LOGGED
   # (provider canary latency breach observed) but does NOT fail the canary. Set
   # "enforce" only if you have validated the metric is stable for your providers.
-  # The nonce-correctness gate is ALWAYS enforced in both modes.
+  # The nonce-correctness gate is ALWAYS enforced in both modes. NOTE: like all
+  # pool.* canary settings this is read at startup only — SIGHUP reloads tier2 /
+  # billing config, NOT the pool block, so changing this requires a coordinator
+  # restart to take effect.
   canary_latency_enforcement: observe
   # OPoI v0 challenge bank — every entry must contain {nonce} in both prompt and expected.
   # Rotate or extend periodically; keep deployment-specific for model security.

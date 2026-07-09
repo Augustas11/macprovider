@@ -73,6 +73,8 @@ pool:
                                 # wall-time latency gates are unreliable on a
                                 # non-streaming canary; observe logs breaches
                                 # without sanctioning. Nonce gate always enforced.
+                                # Startup-only (SIGHUP reloads tier2/billing, not
+                                # pool) — a restart is required to change it.
   # OPoI v0 challenge bank reference (enable in staging overlay, not here).
   # Every entry must contain {nonce} in both prompt and expected.
   # canary_challenges:
