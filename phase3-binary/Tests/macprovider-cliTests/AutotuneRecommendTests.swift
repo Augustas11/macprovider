@@ -80,6 +80,104 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(catalogRow.minBandwidthTier, .c)
     }
 
+    func testCandidateCatalogDecodesSpec029WorkloadProfiles() throws {
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(Self.spec029CatalogJSON(workloadProfilesJSON: Self.validSpec029ProfilesJSON).utf8)
+        )
+        let row = try XCTUnwrap(catalog.rows["fixture-model"])
+        let profiles = try XCTUnwrap(row.workloadProfiles)
+
+        let code = try XCTUnwrap(profiles["code_completion"]?["16gb"])
+        XCTAssertEqual(code.status, "winner")
+        XCTAssertEqual(code.recommended?.kvBits, 4)
+        XCTAssertEqual(code.recommended?.draftModelArtifactSHA256, String(repeating: "0", count: 64))
+        XCTAssertEqual(code.recommended?.numDraftTokens, 4)
+        XCTAssertEqual(code.profileMetrics.sampleCount, 20)
+        XCTAssertEqual(code.source, "spec029-report-fixture")
+        XCTAssertEqual(code.candidateSource, "research_fixture:spec029-test")
+
+        let short = try XCTUnwrap(profiles["short_chat"]?["8gb"])
+        XCTAssertEqual(short.recommended?.kvBits, 8)
+        XCTAssertNil(short.recommended?.draftModel)
+
+        let long = try XCTUnwrap(profiles["long_context"]?["16gb"])
+        XCTAssertEqual(long.status, "no_winner")
+        XCTAssertEqual(long.noWinnerReason, "insufficient_samples")
+        XCTAssertNil(long.recommended)
+        XCTAssertNil(long.profileMetrics.medianTPS)
+        XCTAssertEqual(long.profileMetrics.sampleCount, 7)
+
+        let staticProfiles = #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(candidateSource: "static_draft_candidates:fixture"))}}"#
+        let staticCatalog = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(Self.spec029CatalogJSON(workloadProfilesJSON: staticProfiles, draftCandidatesJSON: Self.spec029DraftCandidatesJSON).utf8)
+        )
+        let staticProfile = try XCTUnwrap(staticCatalog.rows["fixture-model"]?.workloadProfiles?["code_completion"]?["16gb"])
+        XCTAssertEqual(staticProfile.candidateSource, "static_draft_candidates:fixture")
+    }
+
+    func testCandidateCatalogRejectsInvalidSpec029WorkloadProfiles() throws {
+        let invalidProfiles: [(String, String)] = [
+            ("invalid tier", #"{"code_completion":{"24gb":\#(Self.spec029WinnerProfileJSON())}}"#),
+            ("unknown workload", #"{"unknown_workload":{"16gb":\#(Self.spec029WinnerProfileJSON())}}"#),
+            ("streaming probe published", #"{"streaming_check":{"16gb":\#(Self.spec029WinnerProfileJSON())}}"#),
+            ("empty source", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(source: ""))}}"#),
+            ("generic draft candidate source", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(candidateSource: "fixture"))}}"#),
+            ("missing draft candidate source", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(candidateSource: nil))}}"#),
+            ("static draft missing catalog binding", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(candidateSource: "static_draft_candidates:fixture"))}}"#),
+            ("unknown no-winner reason", #"{"long_context":{"16gb":\#(Self.spec029NoWinnerProfileJSON(reason: "unknown"))}}"#),
+            ("missing no-winner reason", #"{"long_context":{"16gb":{"status":"no_winner","gate_policy":{"min_samples":20,"max_p95_ttft_ms":60000,"max_stop_token_leak_rate":0,"min_median_tps":null},"profile_metrics":{"median_tps":null,"p95_ttft_ms":null,"stop_token_leak_rate":null,"spec_decode_acceptance_rate":null,"sample_count":7},"source":"fixture"}}}"#),
+            ("no cells with sample count", #"{"long_context":{"16gb":\#(Self.spec029NoWinnerProfileJSON(reason: "no_cells_evaluated", sampleCount: 1))}}"#),
+            ("insufficient samples with zero count", #"{"long_context":{"16gb":\#(Self.spec029NoWinnerProfileJSON(reason: "insufficient_samples", sampleCount: 0))}}"#),
+            ("gate unmet below min samples", #"{"long_context":{"16gb":\#(Self.spec029NoWinnerProfileJSON(reason: "gate_unmet", sampleCount: 19))}}"#),
+            ("no-winner with recommended", #"{"long_context":{"16gb":{"status":"no_winner","no_winner_reason":"insufficient_samples","recommended":{"kv_bits":4,"max_context_override":20000,"max_concurrency_override":1},"gate_policy":{"min_samples":20,"max_p95_ttft_ms":60000,"max_stop_token_leak_rate":0,"min_median_tps":null},"profile_metrics":{"median_tps":null,"p95_ttft_ms":null,"stop_token_leak_rate":null,"spec_decode_acceptance_rate":null,"sample_count":7},"source":"fixture"}}}"#),
+            ("winner missing required metrics", #"{"code_completion":{"16gb":{"status":"winner","recommended":{"kv_bits":4,"max_context_override":20000,"max_concurrency_override":1},"gate_policy":{"min_samples":20,"max_p95_ttft_ms":12000,"max_stop_token_leak_rate":0,"min_median_tps":null},"profile_metrics":{"median_tps":8.5,"p95_ttft_ms":null,"stop_token_leak_rate":0,"spec_decode_acceptance_rate":null,"sample_count":20},"source":"fixture"}}}"#),
+            ("winner p95 fails gate", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(p95TTFTMS: 12_001))}}"#),
+            ("winner leak fails gate", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(stopTokenLeakRate: 0.01))}}"#),
+            ("partial draft tuple", #"{"code_completion":{"16gb":{"status":"winner","recommended":{"kv_bits":4,"max_context_override":20000,"max_concurrency_override":1,"draft_model":"mlx-community/Fixture-Draft-4bit"},"gate_policy":{"min_samples":20,"max_p95_ttft_ms":12000,"max_stop_token_leak_rate":0,"min_median_tps":null},"profile_metrics":{"median_tps":8.5,"p95_ttft_ms":2400,"stop_token_leak_rate":0,"spec_decode_acceptance_rate":null,"sample_count":20},"source":"fixture","candidate_source":"research_fixture:spec029-test"}}}"#),
+            ("invalid draft hash", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(draftHash: "ABC"))}}"#),
+            ("uppercase draft hash", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(draftHash: String(repeating: "A", count: 64)))}}"#),
+            ("invalid draft tokens", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(numDraftTokens: 17))}}"#),
+            ("draft context over cap", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(maxContext: 50_000))}}"#),
+            ("draft concurrency over cap", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(maxConcurrency: 2))}}"#),
+            ("non-default gate", #"{"code_completion":{"16gb":\#(Self.spec029WinnerProfileJSON(maxP95TTFTMS: 999_999))}}"#),
+            ("omitted gate null", #"{"code_completion":{"16gb":{"status":"winner","recommended":{"kv_bits":4,"max_context_override":20000,"max_concurrency_override":1},"gate_policy":{"min_samples":20,"max_p95_ttft_ms":12000,"max_stop_token_leak_rate":0},"profile_metrics":{"median_tps":8.5,"p95_ttft_ms":2400,"stop_token_leak_rate":0,"spec_decode_acceptance_rate":null,"sample_count":20},"source":"fixture"}}}"#),
+            ("omitted nullable metric", #"{"code_completion":{"16gb":{"status":"winner","recommended":{"kv_bits":4,"max_context_override":20000,"max_concurrency_override":1},"gate_policy":{"min_samples":20,"max_p95_ttft_ms":12000,"max_stop_token_leak_rate":0,"min_median_tps":null},"profile_metrics":{"p95_ttft_ms":2400,"stop_token_leak_rate":0,"spec_decode_acceptance_rate":null,"sample_count":20},"source":"fixture"}}}"#),
+        ]
+
+        for (label, profiles) in invalidProfiles {
+            XCTAssertThrowsError(
+                try AutotuneStaticInputs.decodeCandidateCatalog(Data(Self.spec029CatalogJSON(workloadProfilesJSON: profiles).utf8)),
+                label
+            )
+        }
+
+        XCTAssertThrowsError(
+            try AutotuneStaticInputs.decodeCandidateCatalog(
+                Data(Self.spec029CatalogJSON(workloadProfilesJSON: Self.validSpec029ProfilesJSON, rowExtraJSON: #""per_class":{}"#).utf8)
+            ),
+            "forbidden per_class alias"
+        )
+    }
+
+    func testSpec029WorkloadProfilesDoNotChangeRecommendationSelection() throws {
+        let baseline = try makeRequest()
+        var profiled = baseline
+        let fixture = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(Self.spec029CatalogJSON(workloadProfilesJSON: Self.validSpec029ProfilesJSON).utf8)
+        )
+        profiled.candidateCatalog.rows["qwen3-coder-30b-a3b-instruct"]?.workloadProfiles =
+            fixture.rows["fixture-model"]?.workloadProfiles
+
+        let engine = AutotuneRecommendEngine()
+        let baselineResult = engine.recommend(baseline)
+        let profiledResult = engine.recommend(profiled)
+
+        XCTAssertEqual(profiled.candidateCatalog.rows["qwen3-coder-30b-a3b-instruct"]?.workloadProfiles?.isEmpty, false)
+        XCTAssertEqual(profiledResult.recommendedModel, baselineResult.recommendedModel)
+        XCTAssertEqual(profiledResult.candidates, baselineResult.candidates)
+        XCTAssertEqual(profiledResult.warnings, baselineResult.warnings)
+    }
+
     func testRecommendationJSONIncludesApplyReadyServeConfigWhenProvided() throws {
         let request = try makeRequest()
         let result = AutotuneRecommendEngine().recommend(request)
@@ -1948,6 +2046,145 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(transcript.contains("per million completion tokens"), transcript)
         XCTAssertFalse(transcript.contains("/hr"), transcript)
         XCTAssertFalse(transcript.contains("starter"), transcript)
+    }
+
+    private static let validSpec029ProfilesJSON = """
+    {
+      "code_completion": {
+        "16gb": \(spec029WinnerProfileJSON())
+      },
+      "short_chat": {
+        "8gb": {
+          "status": "winner",
+          "recommended": {
+            "kv_bits": 8,
+            "max_context_override": 8192,
+            "max_concurrency_override": 1
+          },
+          "gate_policy": {
+            "min_samples": 20,
+            "max_p95_ttft_ms": 8000,
+            "max_stop_token_leak_rate": 0,
+            "min_median_tps": null
+          },
+          "profile_metrics": {
+            "median_tps": null,
+            "p95_ttft_ms": 700,
+            "stop_token_leak_rate": 0,
+            "spec_decode_acceptance_rate": null,
+            "sample_count": 20
+          },
+          "source": "fixture"
+        }
+      },
+      "long_context": {
+        "16gb": \(spec029NoWinnerProfileJSON())
+      }
+    }
+    """
+
+    private static let spec029DraftCandidatesJSON = """
+    [
+      {
+        "draft_model": "mlx-community/Fixture-Draft-4bit",
+        "draft_model_artifact_sha256": "\(String(repeating: "0", count: 64))"
+      }
+    ]
+    """
+
+    private static func spec029CatalogJSON(
+        workloadProfilesJSON: String,
+        draftCandidatesJSON: String? = nil,
+        rowExtraJSON: String? = nil
+    ) -> String {
+        let draftCandidatesLine = draftCandidatesJSON.map { ",\n              \"draft_candidates\": \($0)" } ?? ""
+        let rowExtraLine = rowExtraJSON.map { ",\n              \($0)" } ?? ""
+        return """
+        {
+          "version": "fixture-spec029",
+          "generated_at": "2026-07-09T00:00:00Z",
+          "source": "operator_curated_autotune_candidate_catalog",
+          "rows": {
+            "fixture-model": {
+              "model_id": "mlx-community/Fixture-Model-4bit",
+              "model_revision": "\(String(repeating: "a", count: 40))",
+              "model_sha256": "\(String(repeating: "b", count: 64))",
+              "min_ram_gb": 12,
+              "min_bandwidth_tier": "C",
+              "bench_gate": {
+                "min_sustained_tps": 1,
+                "max_4k_ttft_ms": 1000
+              },
+              "runtime_status": "recommendable"\(draftCandidatesLine),
+              "workload_profiles": \(workloadProfilesJSON)\(rowExtraLine)
+            }
+          }
+        }
+        """
+    }
+
+    private static func spec029WinnerProfileJSON(
+        draftHash: String = String(repeating: "0", count: 64),
+        numDraftTokens: Int = 4,
+        maxContext: Int = 20_000,
+        maxConcurrency: Int = 1,
+        maxP95TTFTMS: Int = 12_000,
+        p95TTFTMS: Int = 2_400,
+        stopTokenLeakRate: Double = 0,
+        source: String = "spec029-report-fixture",
+        candidateSource: String? = "research_fixture:spec029-test"
+    ) -> String {
+        let candidateSourceLine = candidateSource.map { ",\n          \"candidate_source\": \"\($0)\"" } ?? ""
+        return """
+        {
+          "status": "winner",
+          "recommended": {
+            "kv_bits": 4,
+            "max_context_override": \(maxContext),
+            "max_concurrency_override": \(maxConcurrency),
+            "draft_model": "mlx-community/Fixture-Draft-4bit",
+            "draft_model_artifact_sha256": "\(draftHash)",
+            "num_draft_tokens": \(numDraftTokens)
+          },
+          "gate_policy": {
+            "min_samples": 20,
+            "max_p95_ttft_ms": \(maxP95TTFTMS),
+            "max_stop_token_leak_rate": 0,
+            "min_median_tps": null
+          },
+          "profile_metrics": {
+            "median_tps": 8.5,
+            "p95_ttft_ms": \(p95TTFTMS),
+            "stop_token_leak_rate": \(stopTokenLeakRate),
+            "spec_decode_acceptance_rate": 0.42,
+            "sample_count": 20
+          },
+          "source": "\(source)"\(candidateSourceLine)
+        }
+        """
+    }
+
+    private static func spec029NoWinnerProfileJSON(reason: String = "insufficient_samples", sampleCount: Int = 7) -> String {
+        """
+        {
+          "status": "no_winner",
+          "no_winner_reason": "\(reason)",
+          "gate_policy": {
+            "min_samples": 20,
+            "max_p95_ttft_ms": 60000,
+            "max_stop_token_leak_rate": 0,
+            "min_median_tps": null
+          },
+          "profile_metrics": {
+            "median_tps": null,
+            "p95_ttft_ms": null,
+            "stop_token_leak_rate": null,
+            "spec_decode_acceptance_rate": null,
+            "sample_count": \(sampleCount)
+          },
+          "source": "fixture"
+        }
+        """
     }
 
     private func makeRequest(modelKey: String = "qwen3-coder-30b-a3b-instruct") throws -> AutotuneRecommendRequest {

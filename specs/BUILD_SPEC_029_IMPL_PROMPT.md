@@ -26,13 +26,13 @@ Controlling contract:
 - `.omc/logs/sweep-workload-class-open-questions-2026-07.md`.
 - Repo rules in `AGENTS.md` and `CLAUDE.md`.
 
-SPEC-029 currently says: "Draft, research round. Implementation MUST NOT begin
-before maintainer review." If that status is still present and the user has
-not explicitly authorized implementing draft SPEC-029, STOP after reporting
-that maintainer authorization is required. If maintainer authorization has
-been given, implement the SPEC exactly; do not re-litigate the product
-decisions. If code reveals a true SPEC ambiguity, stop and surface it as a
-SPEC follow-up instead of silently changing the contract in code.
+If SPEC-029 status still says "Draft, research round. Implementation MUST NOT
+begin before maintainer review" and the user has not explicitly authorized
+implementing draft SPEC-029, STOP after reporting that maintainer authorization
+is required. If maintainer authorization has been given, implement the SPEC
+exactly; do not re-litigate the product decisions. If code reveals a true SPEC
+ambiguity, stop and surface it as a SPEC follow-up instead of silently changing
+the contract in code.
 
 Clean-room boundary: do not inspect Darkbloom / layr-labs `d-inference`
 source.

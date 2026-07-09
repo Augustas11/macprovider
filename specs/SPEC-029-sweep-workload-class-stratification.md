@@ -1,7 +1,7 @@
 # SPEC-029 - Sweep Workload-Class Stratification
 
 **Version:** 0.1-draft
-**Status:** Draft, research round. Implementation MUST NOT begin before maintainer review.
+**Status:** Draft, implementation authorized by maintainer request on 2026-07-09 for PR #387.
 **Date drafted:** 2026-07-09
 **Depends on:** SPEC-013, SPEC-023, SPEC-028, beta buyer harness workload/report schema.
 
@@ -31,7 +31,6 @@ This SPEC is a companion to SPEC-028. Speculative decoding adds draft-model and 
 - No settlement, receipt, or billing schema change.
 - No modification to SPEC-013 or SPEC-028.
 - No requirement to regenerate old class-blind sweep reports.
-- No implementation changes in this draft PR.
 
 ## 3. Terms
 
