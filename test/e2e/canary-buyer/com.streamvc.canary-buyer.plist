@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent template — runs the canary buyer probe every 30 minutes on a lab Mac.
+
+  Install (per-user LaunchAgent):
+    1. Edit REPLACE_REPO_PATH below to the absolute checkout path.
+    2. Optionally set CANARY_PUSHGATEWAY / CANARY_MODELS in EnvironmentVariables.
+    3. cp com.streamvc.canary-buyer.plist ~/Library/LaunchAgents/
+    4. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.streamvc.canary-buyer.plist
+    5. launchctl kickstart -p gui/$(id -u)/com.streamvc.canary-buyer   # run once now
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.streamvc.canary-buyer
+    rm ~/Library/LaunchAgents/com.streamvc.canary-buyer.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.streamvc.canary-buyer</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>REPLACE_REPO_PATH/test/e2e/canary-buyer/run-canary.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>CANARY_BASE</key>
+    <string>https://api.streamvc.live</string>
+    <!-- Uncomment to push to a Prometheus pushgateway instead of relying on the
+         node_exporter textfile collector:
+    <key>CANARY_PUSHGATEWAY</key>
+    <string>http://127.0.0.1:9091</string>
+    -->
+    <!-- Uncomment to pin an explicit model set instead of deriving from /v1/status:
+    <key>CANARY_MODELS</key>
+    <string>mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit</string>
+    -->
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>1800</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>REPLACE_HOME/Library/Logs/canary-buyer.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>REPLACE_HOME/Library/Logs/canary-buyer.err.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
