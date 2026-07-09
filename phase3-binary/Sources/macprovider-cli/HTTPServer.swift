@@ -9,19 +9,22 @@ struct HTTPServer: Sendable {
     let providerStatus: ProviderStatus
     let receiptBuilder: ReceiptBuilder?
     let idlePrewarmer: IdlePrewarmer?
+    let catalogModelIDAlias: String?
 
     init(
         config: AppConfig,
         modelRuntime: ModelRuntime,
         providerStatus: ProviderStatus,
         receiptBuilder: ReceiptBuilder?,
-        idlePrewarmer: IdlePrewarmer? = nil
+        idlePrewarmer: IdlePrewarmer? = nil,
+        catalogModelIDAlias: String? = nil
     ) {
         self.config = config
         self.modelRuntime = modelRuntime
         self.providerStatus = providerStatus
         self.receiptBuilder = receiptBuilder
         self.idlePrewarmer = idlePrewarmer
+        self.catalogModelIDAlias = catalogModelIDAlias
     }
 
     func run() throws {
@@ -45,7 +48,8 @@ struct HTTPServer: Sendable {
                             warmSwapEnabled: config.enableWarmSwap,
                             maxBodyBytes: config.maxRequestBodyBytes,
                             receiptBuilder: receiptBuilder,
-                            idlePrewarmer: idlePrewarmer
+                            idlePrewarmer: idlePrewarmer,
+                            catalogModelIDAlias: catalogModelIDAlias
                         )
                     )
                 }
@@ -71,6 +75,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private let maxBodyBytes: Int
     private let receiptBuilder: ReceiptBuilder?
     private let idlePrewarmer: IdlePrewarmer?
+    private let catalogModelIDAlias: String?
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
     private var bodyTooLarge = false
@@ -84,7 +89,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         warmSwapEnabled: Bool,
         maxBodyBytes: Int,
         receiptBuilder: ReceiptBuilder? = nil,
-        idlePrewarmer: IdlePrewarmer? = nil
+        idlePrewarmer: IdlePrewarmer? = nil,
+        catalogModelIDAlias: String? = nil
     ) {
         self.modelID = modelID
         self.providerID = providerID
@@ -95,6 +101,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         self.maxBodyBytes = maxBodyBytes
         self.receiptBuilder = receiptBuilder
         self.idlePrewarmer = idlePrewarmer
+        self.catalogModelIDAlias = catalogModelIDAlias
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -264,7 +271,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 .withConversationKey(requestHead?.headers.first(name: "X-MacProvider-Provider-Conversation"))
             parsedRequest = request
             if !warmSwapEnabled {
-                try request.validateModelMatches(modelID)
+                try request.validateModelMatches(modelID, aliases: modelIDAliasList(catalogModelIDAlias))
             }
 
             if request.stream {

@@ -180,13 +180,17 @@ public struct ChatCompletionRequest: Sendable {
         self.conversationKey = conversationKey
     }
 
-    public func validateModelMatches(_ loadedModel: String?) throws {
+    public func validateModelMatches(_ loadedModel: String?, aliases: [String] = []) throws {
         guard let loadedModel else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
-        guard Self.asciiCaseInsensitiveEquals(model, loadedModel) else {
-            throw APIError(status: 404, message: "Model not found", code: "model_not_found")
+        if Self.asciiCaseInsensitiveEquals(model, loadedModel) {
+            return
         }
+        for alias in aliases where !alias.isEmpty && Self.asciiCaseInsensitiveEquals(model, alias) {
+            return
+        }
+        throw APIError(status: 404, message: "Model not found", code: "model_not_found")
     }
 
     public var allowsSpeculativeDecoding: Bool {

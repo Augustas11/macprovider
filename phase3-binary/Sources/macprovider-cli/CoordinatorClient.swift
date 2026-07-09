@@ -846,6 +846,7 @@ actor CoordinatorClient {
             modelRuntime: modelRuntime,
             providerStatus: providerStatus,
             loadedModelID: loadedModelID,
+            catalogModelIDAlias: catalogModelIDForCoordinator,
             warmSwapEnabled: warmSwapEnabled,
             maxActiveRequests: maxActiveRequests,
             maxBodyBytes: maxBodyBytes,

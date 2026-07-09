@@ -487,6 +487,16 @@ struct ServeCommand: AsyncParsableCommand {
         // not set an explicit override. Explicit config/env/CLI always wins.
         let effectiveKVBits = resolved.kvBitsOverride
             ?? KVQuantRecommendation.recommendedKVBits(for: resolved.model ?? "")
+        // The coordinator advertises config.modelCatalogModelID as this
+        // provider's model_id while inference is served locally under
+        // config.model. Accept the advertised catalog id as a serve alias so
+        // relayed buyer requests carrying it are not 404'd. Trimmed here to
+        // match CoordinatorClient's catalogModelIDForCoordinator normalization;
+        // nil/empty → no alias.
+        let catalogModelIDAlias: String? = resolved.modelCatalogModelID.flatMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
         let modelRuntime = try await ModelRuntime(
             modelID: resolved.model,
             modelLoadPath: resolved.modelArtifactPath,
@@ -498,7 +508,8 @@ struct ServeCommand: AsyncParsableCommand {
             prefillStepSize: resolved.prefillStepSize,
             maxBatch: resolved.maxConcurrencyOverride ?? 1,
             warmSwapEnabled: resolved.enableWarmSwap,
-            swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds
+            swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
+            catalogModelIDAlias: catalogModelIDAlias
         )
         // The serve runtime defaults `--max-batch` to 1 (the prior
         // single-slot behavior). Operators opting in via --max-batch >1
@@ -626,7 +637,8 @@ struct ServeCommand: AsyncParsableCommand {
             modelRuntime: modelRuntime,
             providerStatus: providerStatus,
             receiptBuilder: receiptRuntime.builder,
-            idlePrewarmer: idlePrewarmer
+            idlePrewarmer: idlePrewarmer,
+            catalogModelIDAlias: catalogModelIDAlias
         )
         let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket, idlePrewarmer: idlePrewarmer)
         defer {
