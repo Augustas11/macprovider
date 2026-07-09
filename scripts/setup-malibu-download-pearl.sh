@@ -34,8 +34,9 @@ NGINX_SITE="$SCRIPT_DIR/dist/nginx-download.malibu.tech.conf"
 [[ -f "$NGINX_SITE" ]] || { echo "missing $NGINX_SITE" >&2; exit 1; }
 [[ -f "$SSH_KEY" ]] || { echo "missing SSH key: $SSH_KEY" >&2; exit 1; }
 
-SSH="ssh -i $SSH_KEY -o ConnectTimeout=10 -p 22 $VPS_USER@$VPS_HOST"
-SCP="scp -i $SSH_KEY -P 22"
+MALIBU_DOWNLOAD_SSH_CONNECT_TIMEOUT=10
+# shellcheck source=malibu-download-ssh.sh
+source "$SCRIPT_DIR/malibu-download-ssh.sh"
 
 log() { printf '[setup-malibu-download-pearl] %s\n' "$*"; }
 
@@ -68,7 +69,7 @@ EOF
 }
 
 log "step 1/7: confirm SSH"
-$SSH 'hostname >/dev/null && echo ok' >/dev/null
+malibu_download_ssh 'hostname >/dev/null && echo ok' >/dev/null
 
 log "step 2/7: DNS check"
 if dns_ready; then
@@ -96,7 +97,7 @@ else
 fi
 
 log "step 3/7: ensure certbot + docroot on Pearl"
-$SSH "set -e
+malibu_download_ssh "set -e
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -qq -y certbot python3-certbot-nginx nginx >/dev/null || true
   install -d -o www-data -g www-data -m 0755 /var/www/html
@@ -104,8 +105,8 @@ $SSH "set -e
 "
 
 log "step 4/7: upload nginx site + install port-80 stub"
-$SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-malibu-download.conf" >/dev/null
-$SSH "set -e
+malibu_download_scp "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-malibu-download.conf" >/dev/null
+malibu_download_ssh "set -e
   if [ ! -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]; then
     cat > /etc/nginx/sites-available/$DOMAIN <<'NGINX_STUB'
 server {
@@ -136,7 +137,7 @@ NGINX_STUB
 
 if [[ "${SKIP_CERT:-0}" != "1" ]] && dns_ready; then
   log "step 5/7: obtain Let's Encrypt cert (webroot)"
-  $SSH "set -e
+  malibu_download_ssh "set -e
     if [ -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]; then
       echo '  cert already present'
     else
@@ -145,7 +146,7 @@ if [[ "${SKIP_CERT:-0}" != "1" ]] && dns_ready; then
   "
 
   log "step 6/7: install full TLS vhost"
-  $SSH "set -e
+  malibu_download_ssh "set -e
     install -o root -g root -m 0644 /tmp/nginx-malibu-download.conf /etc/nginx/sites-available/$DOMAIN
     rm -f /tmp/nginx-malibu-download.conf
     ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
@@ -153,7 +154,7 @@ if [[ "${SKIP_CERT:-0}" != "1" ]] && dns_ready; then
   "
 else
   log "step 5-6/7: skipped TLS (add name.com A record, then re-run without SKIP_DNS_WAIT)"
-  $SSH "rm -f /tmp/nginx-malibu-download.conf" || true
+  malibu_download_ssh "rm -f /tmp/nginx-malibu-download.conf" || true
 fi
 
 log "step 7/7: verify Pearl endpoint"

@@ -1,0 +1,3 @@
+# Pearl VPS host key for download.malibu.tech (159.223.165.194).
+# Refresh with: ssh-keyscan -t ed25519 159.223.165.194
+159.223.165.194 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH6BDJCMyc+Jw2+U3D+i4clQCGMgBRYri++4jUE3mY+p
