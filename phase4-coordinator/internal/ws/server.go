@@ -47,27 +47,37 @@ const (
 )
 
 type Server struct {
-	cfg             config.Config
-	tier2Mu         sync.RWMutex
-	tier2           config.Tier2Config
-	pool            *pool.Registry
-	log             zerolog.Logger
-	now             func() time.Time
-	newUUID         func() string
-	timers          sync.Map
-	pending         sync.Map
-	warmups         sync.Map
-	canaries        sync.Map
-	canaryDue       sync.Map
+	cfg       config.Config
+	tier2Mu   sync.RWMutex
+	tier2     config.Tier2Config
+	pool      *pool.Registry
+	log       zerolog.Logger
+	now       func() time.Time
+	newUUID   func() string
+	timers    sync.Map
+	pending   sync.Map
+	warmups   sync.Map
+	canaries  sync.Map
+	canaryDue sync.Map
 	// enforceNextCanary marks provider IDs (presence = true) whose NEXT canary
 	// probe must be enforced (no cold-start grace). Set after a graced-neutral
 	// probe and cleared after any recorded (enforced) probe, so a graced probe
 	// is always followed by an enforced one — a provider cannot arrange (via
 	// reconnect / due-timing churn) to only ever be probed under grace and evade
 	// the TTFT sanction. Keyed by PROVIDER ID so it survives reconnects.
-	enforceNextCanary sync.Map
-	canarySanctions CanarySanctionStore
-	tokens          TokenValidator
+	enforceNextCanary             sync.Map
+	losslessnessPending           sync.Map
+	losslessnessNonceIndex        sync.Map
+	losslessnessDigestIndex       sync.Map
+	losslessnessProfilesMu        sync.Mutex
+	losslessnessProfiles          map[LosslessnessProfileKey]LosslessnessProfileRecord
+	losslessnessStateMu           sync.Mutex
+	losslessnessDraftAdmissions   map[losslessnessDraftAdmissionKey]LosslessnessDraftAdmissionRecord
+	losslessnessTargetGenerations map[string]int
+	losslessnessProfileCursor     map[string]int
+	losslessnessTelemetry         []LosslessnessTelemetryEvent
+	canarySanctions               CanarySanctionStore
+	tokens                        TokenValidator
 	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
 	// issuer roles can be wired independently. Production wires the same
 	// concrete *auth.Store to both (see main.go), but tests can override
@@ -384,16 +394,20 @@ type pendingPreflight struct {
 
 func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger, opts ...Option) *Server {
 	s := &Server{
-		cfg:         cfg,
-		tier2:       cfg.Tier2,
-		pool:        registry,
-		log:         logger,
-		now:         func() time.Time { return time.Now().UTC() },
-		newUUID:     func() string { return uuid.NewString() },
-		started:     time.Now().UTC(),
-		unauth:      make(chan struct{}, cfg.ProviderWSMaxUnauthenticatedConn()),
-		unauthPerIP: map[string]int{},
-		version:     "dev",
+		cfg:                           cfg,
+		tier2:                         cfg.Tier2,
+		pool:                          registry,
+		log:                           logger,
+		now:                           func() time.Time { return time.Now().UTC() },
+		newUUID:                       func() string { return uuid.NewString() },
+		started:                       time.Now().UTC(),
+		unauth:                        make(chan struct{}, cfg.ProviderWSMaxUnauthenticatedConn()),
+		unauthPerIP:                   map[string]int{},
+		losslessnessProfiles:          map[LosslessnessProfileKey]LosslessnessProfileRecord{},
+		losslessnessDraftAdmissions:   map[losslessnessDraftAdmissionKey]LosslessnessDraftAdmissionRecord{},
+		losslessnessTargetGenerations: map[string]int{},
+		losslessnessProfileCursor:     map[string]int{},
+		version:                       "dev",
 	}
 	s.authAttempts = newAuthAttemptStore(1024)
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
@@ -418,6 +432,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	}
 	if registry != nil {
 		go s.runSELivenessLoop()
+	}
+	if cfg.Pool.LosslessnessProbe.Enabled && registry != nil {
+		go s.runLosslessnessProbeLoop()
 	}
 	return s
 }
@@ -1830,6 +1847,8 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleDrainStatus(conn, providerID, assignedID, payload)
 	case "se_liveness_response":
 		s.handleSELivenessResponse(providerID, assignedID, payload)
+	case losslessnessResultType, losslessnessEncryptedResultType:
+		s.handleLosslessnessProbeResult(providerID, assignedID, payload)
 	default:
 		// SPEC-002 v1.5.1 R-2 / issue #197 R5 security: envelope.Type
 		// is provider-controlled and reaches structured logs only on

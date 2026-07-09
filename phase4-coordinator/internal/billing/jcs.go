@@ -19,8 +19,16 @@ import (
 type RawJSONString string
 
 func CanonicalJSON(v any) ([]byte, error) {
+	return canonicalJSON(v, true)
+}
+
+func CanonicalJSONRawStrings(v any) ([]byte, error) {
+	return canonicalJSON(v, false)
+}
+
+func canonicalJSON(v any, normalizeStrings bool) ([]byte, error) {
 	var b bytes.Buffer
-	if err := writeJCS(&b, v); err != nil {
+	if err := writeJCS(&b, v, normalizeStrings); err != nil {
 		return nil, err
 	}
 	return b.Bytes(), nil
@@ -35,12 +43,15 @@ func CanonicalSHA256Hex(v any) (string, []byte, error) {
 	return hex.EncodeToString(sum[:]), canonical, nil
 }
 
-func writeJCS(b *bytes.Buffer, v any) error {
+func writeJCS(b *bytes.Buffer, v any, normalizeStrings bool) error {
 	switch x := v.(type) {
 	case nil:
 		b.WriteString("null")
 	case string:
-		b.WriteString(escapeJCSString(norm.NFC.String(x)))
+		if normalizeStrings {
+			x = norm.NFC.String(x)
+		}
+		b.WriteString(escapeJCSString(x))
 	case RawJSONString:
 		b.WriteString(escapeJCSString(string(x)))
 	case bool:
@@ -71,7 +82,7 @@ func writeJCS(b *bytes.Buffer, v any) error {
 			if i > 0 {
 				b.WriteByte(',')
 			}
-			if err := writeJCS(b, item); err != nil {
+			if err := writeJCS(b, item, normalizeStrings); err != nil {
 				return err
 			}
 		}
@@ -91,7 +102,7 @@ func writeJCS(b *bytes.Buffer, v any) error {
 			}
 			b.WriteString(escapeJCSString(key))
 			b.WriteByte(':')
-			if err := writeJCS(b, x[key]); err != nil {
+			if err := writeJCS(b, x[key], normalizeStrings); err != nil {
 				return err
 			}
 		}
