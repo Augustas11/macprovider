@@ -194,3 +194,20 @@ SPEC-028 was not oversold in principle: Qwen2.5-Coder 7B / 1.5B showed a real
 throughput improvement and high acceptance locally. The current implementation
 is not ready for default enablement because TTFT regressed and larger model
 pairs require Apple Silicon hardware with more unified memory.
+
+## 2026-07-09 re-verification (isolated worktree)
+
+- Branch rebased cleanly onto current `origin/main` (only conflict was
+  subcommand registration list in `MacProviderCLI.swift` from concurrent
+  additions of `DecodeBenchCommand` + `EnrollCommand`; resolved to include
+  `Spec028BenchmarkCommand.self`).
+- `swift test --package-path phase3-binary --filter 'Spec028PlumbingTests'`
+  → 30 tests executed (1 skipped), 0 failures.
+- Debug `swift build --package-path phase3-binary --product macprovider-cli`
+  succeeds.
+- This host: 32 GB unified memory (matches the "local" M5 env used for the
+  original matrix; reconfirms 32B/7B pair is not feasible here without
+  narrower diagnostics or more RAM).
+- All work performed in fresh sibling worktree per house rules
+  (`../macprovider-spec028-bench` on `codex/spec028-benchmark-handoff`).
+  Canonical checkout untouched.
