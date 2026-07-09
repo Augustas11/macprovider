@@ -43,5 +43,19 @@
   "implementation_signals": {
     "kvcache_offset_graph_traceable": false,
     "note": "Heuristic: KVCache.swift on upstream main still uses Swift Int offset in KVCacheSimple.update (checked 2026-07-07)."
+  },
+  "watchlist": {
+    "omlx": {
+      "repo": "jundot/omlx",
+      "homepage": "https://omlx.ai",
+      "benchmark_page_url": "https://omlx.ai/benchmarks",
+      "latest_release_tag": "v0.5.0.dev3",
+      "benchmark_page_schema_version": "2026-07-09",
+      "community_benchmark_rows_approx": 321280,
+      "submission_min_app_version": "v0.2.6",
+      "runbook_tasks": ["RESEARCH_231", "catalog-calibration"],
+      "engine_delta_to_macprovider": 0.85,
+      "notes": "Community board uses mlx-lm Python; macprovider mlx-swift-lm 3.31.4. Calibration source only — not a runtime dependency. See specs/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md."
+    }
   }
 }
