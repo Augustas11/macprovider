@@ -13,13 +13,13 @@ Catalog baseline: `published-2026-07-07-p2-qwen3-8b` (9 recommendable rows)
 4. **Existing gates are mostly well-calibrated** for MoE rows published 2026-07-03–07 (`gpt-oss-20b`, `gemma-4-26b-a4b-it`, `qwen3-8b`) where macprovider local autotune exists. Largest mismatch: **`nvidia/nemotron-3-nano-30b-a3b` `min_sustained_tps=30`** — oMLX sparse for the 30B-A3B pin; proxy data suggests gate is **too tight** on Tier-C 32 GB.
 5. **`qwen3-32b` gate `min_sustained_tps=15`** is **borderline too tight** for Tier-B M-Pro 48 GB: oMLX p50 TG @4k ≈ 11 tok/s on M4 Pro → macprovider-adjusted **~9 tok/s**, below gate. Recommend **10** or restrict to Tier-A.
 6. **`qwen2.5-coder-32b-instruct` gate `min_sustained_tps=20`** is **slightly tight** for M4 Max: oMLX p50 @4k ≈ 17 → adjusted **~14**. Recommend **15** pending local repro.
-7. **Top oMLX demand not in catalog:** `Qwen3.6-35B-A3B` (~3.7k+ filtered rows for 64k context alone), `Qwen3.6-27B`, `Qwen3.5-35B-A3B`, `gemma-4-31b-it`. Only **`Qwen3.6-35B-A3B`** has a clear `mlx-community` path worth a P1 row after local bench.
+7. **Top oMLX demand not in catalog:** `Qwen3.6-35B-A3B` (~3.7k+ filtered rows). **Not bootstrap-able on the M5 32 GB executor** (~20.4 GB weights, VLM pin, tier-B gate) — deferred to **M4 Max 48 GB+** per runbook § Executor hardware profile.
 8. **Community fine-tunes** (`Qwythos-9B`, Heretic uncensored merges, Claude-opus distill names) should map to **`runtime_status: experimental`** or `research_only` — never signed catalog without artifact pin.
 9. **TTFT from PP proxy** (`4096/PP×1000`) underestimates macprovider Stage-1 TTFT by **1.3–2.5×** on cold start; use only for sanity bounds on `max_4k_ttft_ms`, not as a substitute for autotune p95.
 10. **Gate slack policy:** set `min_sustained_tps = floor(p25_oMLX × engine_delta × 0.90)`; never below **75% of local macprovider median** when local bench exists.
 11. **SPEC-023 v0.2+ gates are advisory QoS** — oMLX calibration informs hardware-evidence drift and operator publish discipline; soft gates mean oMLX-only evidence cannot justify *raising* `min_sustained_tps` without local repro.
 12. **Rate-card follow-up:** adding `Qwen3.6-35B-A3B` would need RESEARCH_227 repricing lane (~$0.16/M MoE); no dollar changes in this memo.
-13. **Next operator actions:** monthly `omlx-benchmark-snapshot-2026-07.json`; quarterly memo rerun; 8 falsification benches listed in Part 5 before any P0 gate change ships.
+13. **Next operator actions:** monthly oMLX snapshot; quarterly memo rerun; **off-executor** falsification (FB-02..04) before any P0/P1 catalog PR — **not** on M5 32 GB executor (`beta/catalog-expansion/P3-r231-gate-calibration.md`).
 14. **Confidence:** catalog rows with **both** oMLX cell n≥10 and macprovider autotune = **high**; oMLX-only dense 32B / Nemotron 30B = **medium**; community-merge aliases = **low**.
 
 ---
@@ -255,7 +255,7 @@ Max 15 ranked changes. Evidence types: **oMLX**, **local-bench**, **both**, **ex
 |---|---|---|---|---|---|---|
 | **P0** | `min_sustained_tps` ↓ | `nvidia/nemotron-3-nano-30b-a3b` | **30** | **20** | oMLX proxy + RESEARCH_227 rank 68; no local 30B bench | false reject providers |
 | **P0** | `min_sustained_tps` ↓ | `qwen3-32b` | **15** | **10** | oMLX M4 Pro p50=11 → adj 9 (oMLX); RESEARCH_226 dense tier | admit slow 32B on M-Pro |
-| **P1** | new row | `qwen3.6-35b-a3b` | — | TPS **18**, RAM **32**, tier **B**, TTFT **3500** | oMLX demand #1; RESEARCH_227 MoE lane | artifact pin + local repro required |
+| **P1** | new row | `qwen3.6-35b-a3b` | — | TPS **18**, RAM **32**, tier **B**, TTFT **3500** | oMLX demand #1 | **BLOCKED on executor** — needs M4 Max 48 GB+ + text-only pin; see P3-r231 |
 | **P1** | `min_sustained_tps` ↓ | `qwen2.5-coder-32b-instruct` | **20** | **15** | oMLX M4 Max p50=17 → adj 14 (oMLX) | buyer QoS on M4 Max |
 | **P2** | `min_sustained_tps` ↓ | `meta-llama/llama-3.2-3b-instruct` | **15** | **8** | oMLX M1 8GB TG=2 (oMLX); Entry 116 8GB target | admits non-viable 8GB? — pair with RAM floor |
 | **P2** | `min_ram_gb` ↑ | `meta-llama/llama-3.2-3b-instruct` | **4** | **8** | oMLX shows 8GB config TG=2; 4GB not viable | blocks 8GB row intent — **conflicts Entry 116**; defer |
@@ -273,7 +273,7 @@ Max 15 ranked changes. Evidence types: **oMLX**, **local-bench**, **both**, **ex
 
 - No proposal lowers `model_sha256` requirements.
 - P1 `qwen3.6-35b-a3b` requires HF snapshot + SPEC-023 §3.2 hash before publish.
-- oMLX-only P0 items (`nemotron`, `qwen3-32b`) require **falsification benches** (Part 5) before merge.
+- oMLX-only P0 items (`nemotron`, `qwen3-32b`) require **off-executor** falsification (Part 5) before merge — **not** on M5 32 GB executor.
 
 ---
 
@@ -364,14 +364,16 @@ Added to `beta/throughput-engineering/UPSTREAM_WATCH.json`:
 
 ### 5.3 Falsification benches (post-delta)
 
-Run on macprovider `mlx-swift-lm` 3.31.4 before shipping P0/P1 catalog changes:
+**Executor policy (2026-07-09):** M5 32 GB Air is **not** eligible for FB-02..04. Do not run improbable load/bench attempts. Queue for **M4 Pro 48 GB+** / **M4 Max 64 GB+** only (`PLAN_MODEL_CATALOG_EXPANSION_RUNBOOK.md` § P3-R231).
+
+Run on macprovider `mlx-swift-lm` 3.31.4 **on assigned tier hardware** before shipping P0/P1 catalog changes:
 
 | ID | Model | Chip target | Context | Expected TG band | Pass criterion |
 |---|---|---|---|---|---|
 | FB-01 | `NVIDIA-Nemotron-3-Nano-30B-A3B-4bit` | M5 32GB | 4k | **18–28** tok/s | median ≥20 if gate→20 |
 | FB-02 | `Qwen3-32B-4bit` | M4 Pro 48GB | 4k | **8–14** tok/s | median ≥10 if gate→10 |
 | FB-03 | `Qwen2.5-Coder-32B-Instruct-4bit` | M4 Max 64GB | 4k | **12–20** tok/s | median ≥15 if gate→15 |
-| FB-04 | `Qwen3.6-35B-A3B-4bit` | M4 Max 48GB | 4k | **20–35** tok/s | median ≥18 before new row |
+| FB-04 | `Qwen3.6-35B-A3B-4bit` (text-only pin TBD) | **M4 Max 48 GB+** | 4k | **20–35** tok/s | median ≥18 before new row — **BLOCKED on M5 32 GB** |
 | FB-05 | `Llama-3.2-3B-Instruct-4bit` | M4 16GB | 4k | **10–25** tok/s | median ≥8 if gate→8 |
 | FB-06 | `gpt-oss-20b-MXFP4-Q8` | M5 32GB | 4k | **15–25** tok/s | regression guard ≥15 |
 | FB-07 | `gemma-4-26b-a4b-it-4bit` | M5 32GB | 4k | **10–15** tok/s | regression guard ≥10 |
@@ -505,4 +507,4 @@ Append to `beta/DECISION_CRITERIA.md` when acting on this memo:
 
 ---
 
-*Memo complete. Next step: operator monthly snapshot + FB-01..FB-03 falsification on task hardware before catalog PR.*
+*Memo complete. Implementation runbook: `PLAN_MODEL_CATALOG_EXPANSION_RUNBOOK.md` v0.1.13 § P3-R231 + `beta/catalog-expansion/P3-r231-gate-calibration.md`. No catalog PR from this executor until off-executor HW.*

@@ -1,8 +1,8 @@
 # PLAN — Model Catalog Expansion Runbook
 
-**Version:** 0.1.12  
-**Date:** 2026-07-07  
-**Status:** PARKED — P0–P2 complete; P3/P4 deferred (not normative spec)  
+**Version:** 0.1.13  
+**Date:** 2026-07-09  
+**Status:** PARKED — P0–P2 complete; P3-R231 gate work scoped to executor limits (not normative spec)  
 **Source analysis:** Model-catalog expansion exploration (2026-07-07 Cursor session)  
 **Pinned session role:** This document is the **single plan-of-record**. Executor agents update task status here; the pinned planning session verifies gates and revises sequencing.
 
@@ -17,6 +17,43 @@
    - Produces the listed **Artifacts** under `beta/catalog-expansion/` (create dir on first run).
    - Updates the **Status tracker** table at the bottom of this file (or posts artifact paths back to pinned session for update).
 3. **Do not skip P0.** Phases P1–P4 assume P0 gates are GREEN or explicitly WAIVED with rationale in `beta/catalog-expansion/P0_SUMMARY.md`.
+4. **Do not bench impossible models on the executor.** See § *Executor hardware profile* before any load, autotune, or gate-setting task. oMLX advisory data does **not** override these hard limits.
+
+### Executor hardware profile (mandatory)
+
+> **Locked 2026-07-09** after RESEARCH_231 hardware-fit review. This Mac is the **only** catalog bench executor today; it cannot bootstrap models outside this envelope.
+
+| Field | Value |
+|-------|-------|
+| **Machine** | MacBook Air (Mac17,3) |
+| **Chip** | Apple M5 (10 cores) — **Tier-C** (`BandwidthTier.derive`) |
+| **RAM** | **32 GB** unified (`hw.memsize` = 34,359,738,368) |
+| **48 / 64 GB tiers** | **Not available** on this executor |
+| **Proven bench history** | P0-01, P1-01, P2-02 (gpt-oss, Gemma-4 26B A4B, Qwen3-8B) |
+
+### Bench eligibility rules (hard — no exceptions)
+
+An executor agent **must not** attempt `serve`, `autotune`, `decode-bench`, or gate derivation on this Mac when **any** rule fails:
+
+| # | Rule | Rationale |
+|---|------|-----------|
+| **E1** | Estimated resident weights + KV@4k + **4 GB headroom ≤ 28 GB** | Autotune admission uses `memoryGB − 4` on 32 GB (`SPEC-023` §5) |
+| **E2** | Target catalog `min_bandwidth_tier` is **`C`** | Executor is M-Base; Tier-B/A gates need Tier-B/A hardware |
+| **E3** | `config.json` `model_type` matches mlx-swift-lm **text** registry (P0-05 style) | VLM / `*ForConditionalGeneration` pins with `vision_config` are **out of scope** here |
+| **E4** | Model is not a **new row** requiring Tier-B+ economics | RESEARCH_231 P1 candidates (e.g. Qwen3.6-35B-A3B @ ~20.4 GB, tier B) need **M4 Max 48 GB+** |
+
+**Do not run “load probes” or “maybe it fits” experiments** on models that fail E1–E4. Use oMLX data as advisory input only; schedule off-executor hardware for local repro.
+
+### Executor bench envelope (what this Mac *can* bootstrap)
+
+| Class | Example models | Max resident observed / estimated | Status on executor |
+|-------|----------------|-----------------------------------|--------------------|
+| Small dense ≤8B | `qwen3-8b`, Llama 3.1/3.2 3B | ~5–7 GB | **OK** — P2-02 validated |
+| Small MoE ≤20B nominal | `gpt-oss-20b` | ~11 GB | **OK** — P1-01 sanity |
+| Mid MoE ~26–30B nominal | `gemma-4-26b-a4b-it`, `qwen3-coder-30b-a3b` | ~15–17 GB | **OK** — P0-01 / catalog live; tight at 32 GB |
+| Mid MoE ~35B / dense 32B | `Qwen3.6-35B-A3B`, `qwen3-32b`, `qwen2.5-coder-32b` | ~19–22 GB+ | **BLOCKED** — exceeds safe envelope and/or tier |
+| Nemotron-30B-A3B local falsification | `nvidia/nemotron-3-nano-30b-a3b` | ~32 GB `min_ram_gb`; never locally benched | **BLOCKED** — oMLX-only gate deltas until Tier-B HW |
+| Flagship / Tier-A | P4-01..03 candidates | 48 GB+ | **BLOCKED** — already G5 |
 
 ### Artifact layout
 
@@ -34,6 +71,7 @@ beta/catalog-expansion/
   P1-gemma4-catalog-rollout.md
   P2-small-tier-catalog.md
   P3-vlm-decision.md
+  P3-r231-gate-calibration.md
   P4-flagship-bench.md
 ```
 
@@ -49,6 +87,7 @@ beta/catalog-expansion/
 | **G3** | P2 artifacts + G2 stable 48h *(waivable in pre-beta — see tracker)* | Small-tier publish |
 | **G4** | P3 decision record (VLM yes/no) | Any VLM engine work |
 | **G5** | P4 bench on Tier-A hardware | Flagship catalog rows |
+| **G6** | RESEARCH_231 gate/new-row work: local bench only on eligible executor HW (§ Executor hardware profile) | oMLX-only catalog publishes without required tier hardware |
 
 ---
 
@@ -450,6 +489,80 @@ Align all three baked strings (`bakedCandidateCatalogJSON`, `bakedDemandRankJSON
 
 ---
 
+# P3-R231 — RESEARCH_231 gate calibration (executor-scoped)
+
+> **Goal:** Act on [`specs/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md`](RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md) Part 3 deltas **without** attempting impossible benches on the M5 32 GB executor.  
+> **Input:** oMLX advisory data + existing local benches (P1-01, P2-02).  
+> **Requires:** G3 closed (current catalog `published-2026-07-07-p2-qwen3-8b`).
+
+## P3-R231-00 — Executor scope lock (do first)
+
+| Field | Value |
+|-------|-------|
+| **ID** | `P3-R231-00` |
+| **Action** | Record executor limits in artifact; **no load/bench** on BLOCKED rows |
+| **Artifact** | `beta/catalog-expansion/P3-r231-gate-calibration.md` § Executor scope |
+
+**BLOCKED on M5 32 GB executor (do not probe):**
+
+| Memo item | Why blocked on executor |
+|-----------|-------------------------|
+| **P1 new row `qwen3.6-35b-a3b`** | ~20.4 GB weights; VLM pin (`vision_config`); tier **B** gate; needs **M4 Max 48 GB+** + text-only MLX pin on proper HW |
+| **P0 gate `qwen3-32b` 15→10** | FB-02 requires **M4 Pro 48 GB**; dense ~19 GB resident |
+| **P1 gate `qwen2.5-coder-32b` 20→15** | FB-03 requires **M4 Max 64 GB** |
+| **P0 gate `nemotron-3-nano` 30→20** | FB-01 not run; 30B MoE at catalog `min_ram_gb: 32` — no local repro on executor; oMLX-only |
+| **FB-04..FB-05** | Wrong hardware class entirely |
+
+**Permitted on executor (already done — hold):**
+
+| Memo item | Local evidence |
+|-----------|----------------|
+| `gpt-oss-20b`, `gemma-4-26b-a4b-it`, `qwen3-8b` gates | P1-01 / P2-02 — **keep** |
+
+### Pass / fail
+
+| Result | Criteria |
+|--------|----------|
+| **PASS** | Artifact lists BLOCKED vs OK rows; no improbable bench attempted on executor |
+| **FAIL** | Any `autotune`/`serve` run on a BLOCKED row from the table above |
+
+---
+
+## P3-R231-01 — Advisory-only gate memo (no catalog PR)
+
+| Field | Value |
+|-------|-------|
+| **ID** | `P3-R231-01` |
+| **Prerequisites** | P3-R231-00 PASS |
+| **Deliverable** | Ranked gate deltas tagged `oMLX-only / blocked-local` — **no** `autotune-candidates.json` edit |
+
+### Procedure
+
+1. Copy RESEARCH_231 Part 3 P0/P1 items into artifact with columns: `local_bench_status`, `required_hardware`, `executor_eligible`.
+2. Mark every P0/P1 delta without local repro as **`DEFERRED — needs off-executor HW`**.
+3. Do **not** open a catalog PR from oMLX-only evidence while executor cannot falsify.
+
+### Pass / fail
+
+| Result | Criteria |
+|--------|----------|
+| **PASS** | Operator has a single deferred queue keyed to hardware tier |
+| **FAIL** | Catalog JSON changed without local bench on eligible executor or off-executor HW |
+
+---
+
+## P3-R231-02 — Off-executor bench queue (future)
+
+| Field | Value |
+|-------|-------|
+| **ID** | `P3-R231-02` |
+| **Status** | **`BLOCKED`** until M4 Pro 48 GB+ or M4 Max 64 GB+ machine available |
+| **Tasks** | FB-02, FB-03, FB-04 (nemotron FB-01 deferred — oMLX-only until assigned HW) |
+
+When hardware appears, repeat **P1-01 clean-machine protocol** on the **target tier machine only**. Do not substitute M5 32 GB results for Tier-B/A gate proposals.
+
+---
+
 # P3 — VLM decision (planning only in this runbook)
 
 > **Goal:** Go/no-go on multimodal before any engine sprint.  
@@ -549,6 +662,7 @@ You are executing task {TASK_ID} from the MacProvider catalog expansion runbook.
 
 Read: specs/PLAN_MODEL_CATALOG_EXPANSION_RUNBOOK.md § {TASK_ID}
 Rules: CLAUDE.md worktree isolation; read-only unless task requires catalog/code changes.
+Hardware: Read § Executor hardware profile FIRST — do not bench models that fail rules E1–E4.
 Deliver: artifacts listed in task section under beta/catalog-expansion/
 Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for pinned session.
 ```
@@ -558,7 +672,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 # Status tracker
 
 > **Maintained by:** executor agents + pinned planning session.  
-> Last updated: 2026-07-07 (P2 CLOSED — prod feed-path fix verified; runbook PARKED)
+> Last updated: 2026-07-09 (P3-R231 scoped — executor bench envelope locked)
 
 | Task ID | Phase | Status | Gate | Artifact | Notes |
 |---------|-------|--------|------|----------|-------|
@@ -578,6 +692,9 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 | P2-02 | P2 | **`PASS`** | G3 | `beta/catalog-expansion/P2-small-tier-catalog.md` | `qwen3-8b` 9th model; `published-2026-07-07-p2-qwen3-8b`; #466 merged; prod verified 9 rows 2026-07-07 |
 | P2-03 | P2 | **`DONE`** | G3 | `beta/catalog-expansion/P2-baked-live-drift.md` | Nemotron baked rate-card drift; merged #464 |
 | P2 rollup | P2 | **`CLOSED`** | **G3** | `P2-small-tier-catalog.md` | P2-02 + P2-03 complete; P2-01 deferred; prod feed-path fix applied (see note) |
+| P3-R231-00 | P3-R231 | **`PASS`** | G6 | `beta/catalog-expansion/P3-r231-gate-calibration.md` | Executor scope locked 2026-07-09; no improbable benches |
+| P3-R231-01 | P3-R231 | **`PASS`** | G6 | `beta/catalog-expansion/P3-r231-gate-calibration.md` | oMLX gate deltas deferred — off-executor HW required |
+| P3-R231-02 | P3-R231 | **`BLOCKED`** | G6 | — | Needs M4 Pro 48 GB+ / M4 Max 64 GB+ |
 | P3-01 | P3 | `PENDING` | G4 | — | Operator decision |
 | P4-01 | P4 | `BLOCKED` | G5 | — | P0-03 GREEN; needs Tier-A HW bench |
 | P4-02 | P4 | `BLOCKED` | G5 | — | P0-03 GREEN; needs Tier-A HW bench |
@@ -593,6 +710,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL for p
 | G3 | **`CLOSED — WAIVED`** (pre-beta; 48h soak non-informative; prod verified 9-model feed 2026-07-07) | 2026-07-07 |
 | G4 | `OPEN` | — |
 | G5 | `OPEN` | — |
+| G6 | **`CLOSED — executor scope locked`** | 2026-07-09 — RESEARCH_231 catalog PRs blocked until off-executor HW |
 
 ### Prod deploy note (P2-02 feed-path remediation, 2026-07-07)
 
@@ -621,3 +739,4 @@ P2-02 executor SCP'd signed static feeds to `/opt/macprovider/static/`, but the 
 | 0.1.10 | 2026-07-07 | G3 WAIVED pre-beta; P2 unblocked; P2-03 → P2-02 order; P2-01 deferred |
 | 0.1.11 | 2026-07-07 | P2-03 DONE (#464); P2-02 PASS — `qwen3-8b` small-tier live |
 | 0.1.12 | 2026-07-07 | P2/G3 CLOSED — prod feed-path fix (`static/` → `autotune/` + restart); runbook PARKED |
+| 0.1.13 | 2026-07-09 | Executor hardware profile + P3-R231: RESEARCH_231 gate/new-row work BLOCKED on M5 32 GB; no improbable benches |
