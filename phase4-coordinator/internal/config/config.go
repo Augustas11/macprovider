@@ -327,13 +327,16 @@ type PoolConfig struct {
 	CanaryTimeoutS          int                                `yaml:"canary_timeout_s"`
 	CanaryMaxTokens         int                                `yaml:"canary_max_tokens"`
 	CanaryFailureThreshold  int                                `yaml:"canary_failure_threshold"`
-	// CanaryColdStartGraceS relaxes ONLY the max_ttft_ms latency gate for the
-	// first grace-window seconds after a provider connects. A freshly
-	// (re)connected provider may still be cold-loading a large model, so a
-	// correct-but-slow answer must not trip a latency sanction. 0 (default)
-	// disables it; the nonce-correctness and min_sustained_tps gates are never
-	// relaxed. Size it to cover a cold large-model TTFT (observed ~8s for a
-	// cold 30B; a full model load can take tens of seconds).
+	// CanaryColdStartGraceS relaxes the WALL-TIME latency gates (max_ttft_ms and
+	// min_sustained_tps) for the first grace-window seconds after a provider
+	// connects. Canary probes are non-streaming, so both metrics are measured
+	// over wall time and are dominated by a cold large-model load; a
+	// correct-but-slow answer must not trip a latency sanction on (re)connect.
+	// 0 (default) disables it. The nonce-correctness gate is NEVER relaxed, a
+	// graced probe is neutral for the sanction counter, and it forces the next
+	// probe to be enforced — so this cannot be used to evade sanctions. Size it
+	// to cover a cold large-model load (observed ~8s TTFT for a cold 30B; a full
+	// load can take tens of seconds).
 	CanaryColdStartGraceS   int                                `yaml:"canary_cold_start_grace_s"`
 	CanaryChallenges        []CanaryChallengeConfig            `yaml:"canary_challenges"`
 	ModelClassChallenges    map[string][]CanaryChallengeConfig `yaml:"model_class_challenges"`

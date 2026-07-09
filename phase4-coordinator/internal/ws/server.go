@@ -2242,15 +2242,20 @@ func (s *Server) runCanaryProbe(provider pool.Provider) bool {
 		s.enforceNextCanary.Store(provider.ProviderID, struct{}{})
 		return true
 	}
-	// This is an enforced (recorded) probe — clear any pending enforcement flag
-	// so a future genuine cold start can be graced again.
-	s.enforceNextCanary.Delete(provider.ProviderID)
 	passed := outcome == canaryProbePass
 	checkedAt := s.now()
 	result := s.pool.RecordCanaryResult(provider.ProviderID, provider.AssignedID, passed, checkedAt, s.canaryFailureThreshold())
 	if !result.Current {
+		// Stale session (the provider reconnected during this enforced probe):
+		// the result did NOT apply, so DO NOT clear enforceNextCanary — the next
+		// probe must still be enforced. Clearing it here would let a slow provider
+		// reconnect during every forced enforced probe and be graced again on the
+		// fresh session, re-opening the all-graced evasion (R4 SECURITY HIGH).
 		return false
 	}
+	// A current, enforced probe was recorded — clear the pending-enforcement flag
+	// so a future genuine cold start can be graced again.
+	s.enforceNextCanary.Delete(provider.ProviderID)
 	if passed {
 		if result.SanctionCleared {
 			s.deleteCanarySanction(provider.ProviderID)
