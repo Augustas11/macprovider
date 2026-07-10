@@ -257,7 +257,11 @@ for this gate. The policy is named `verified_model_settlement` and has at least:
   validated to 1..900). It MUST NOT be derived from
   `settlement.recovery_grace_seconds` (SPEC-005 recovery-grace, default 30s),
   which retains its distinct recovery-grace meaning; conflating the two would
-  quarantine receipts arriving 30–300s after terminal state under `enforce`;
+  quarantine receipts arriving 30–300s after terminal state under `enforce`.
+  The pending-deadline default 300 was introduced under route-snapshot policy
+  version `spec022-prereq-v1` (bumped from `spec022-prereq-v0`, which pinned
+  the prior 30s-derived deadline); existing `v0` rows keep settling under
+  their original 30s deadline, only new rows adopt 300s/`v1`;
 - `require_hash_verified`: always true when `mode: enforce`;
 - `catalog_policy`: active catalog id/signature key rules.
 

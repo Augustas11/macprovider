@@ -55,7 +55,14 @@ const (
 	settlementModeHeader              = "X-MacProvider-Settlement-Mode"
 	settlementPolicyVersionHeader     = "X-MacProvider-Settlement-Policy-Version"
 	settlementPendingUntilHeader      = "X-MacProvider-Settlement-Pending-Deadline-Unix-Ms"
-	settlementPolicyVersion           = "spec022-prereq-v0"
+	// settlementPolicyVersion is the current coordinator route-snapshot
+	// policy version (see billing.RouteSnapshotPolicyVersion). It was
+	// bumped v0 -> v1 when the settlement pending-deadline default moved
+	// from 30s to 300s (SPEC-022). legacySettlementPolicyVersion is kept
+	// accepted below so rows/receipts pinned to the prior version during
+	// the rollout window keep settling instead of holding indefinitely.
+	settlementPolicyVersion           = "spec022-prereq-v1"
+	legacySettlementPolicyVersion     = "spec022-prereq-v0"
 	settlementHoldFallbackTTL         = 5 * time.Minute
 	maxStreamingFallbackMetadataBytes = int64(64 << 10)
 )
@@ -1669,7 +1676,7 @@ func coordinatorSettlementFinalityFromHeaders(h http.Header) coordinatorSettleme
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "invalid_settlement_mode"}
 	}
 	policyVersion := strings.TrimSpace(h.Get(settlementPolicyVersionHeader))
-	if policyVersion != settlementPolicyVersion {
+	if policyVersion != settlementPolicyVersion && policyVersion != legacySettlementPolicyVersion {
 		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "invalid_settlement_policy_version"}
 	}
 	outcome := strings.TrimSpace(h.Get(settlementOutcomeHeader))

@@ -61,7 +61,12 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	sessionID := stringPtrOrNil(provider.AssignedID)
 	pendingDeadline := settlementCfg.PendingDeadlineSeconds
 	if pendingDeadline <= 0 {
-		pendingDeadline = config.Default().Settlement.PendingDeadlineSeconds
+		// Fail-closed: an unvalidated caller publishing a zero/negative
+		// deadline must not silently settle under a substituted default.
+		// The validated YAML config path never reaches here (config.Validate
+		// enforces 1..900); this only guards SetSettlementConfig callers
+		// that bypass that validation.
+		return skipOrEnforceError("invalid settlement pending deadline seconds")
 	}
 	snapshot := billing.RouteSnapshot{
 		AccountScope:                      accountScopeForSettlement(b.accountID),
