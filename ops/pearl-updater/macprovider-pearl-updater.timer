@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for a signed Pearl backend release
+Documentation=https://github.com/Augustas11/macprovider/blob/main/ops/runbooks/pearl-release-updater.md
+
+[Timer]
+OnCalendar=*-*-* 04:17:00 UTC
+RandomizedDelaySec=15min
+Persistent=true
+Unit=macprovider-pearl-updater.service
+
+[Install]
+WantedBy=timers.target

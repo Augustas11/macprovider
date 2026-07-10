@@ -43,6 +43,30 @@ if "gh release download" in text:
     raise SystemExit("release workflow must publish the captured workflow files")
 if "actions/upload-artifact@v" in text or "actions/download-artifact@v" in text:
     raise SystemExit("artifact actions must be pinned by commit")
+for requirement in (
+    'go-version: "1.26.4"',
+    "GOTOOLCHAIN=local",
+    "CGO_ENABLED=0 GOOS=linux GOARCH=amd64",
+    "go build -mod=readonly -trimpath",
+    "coordinator-linux-amd64",
+    "coordinator-cli-linux-amd64",
+    "gateway-linux-amd64",
+):
+    if requirement not in build:
+        raise SystemExit(f"reviewed Pearl build contract is missing: {requirement}")
+if "go build" in publish or publish.find("Setup Go for Pearl binaries") >= 0:
+    raise SystemExit("Pearl compilation must remain in the unprivileged build job")
+restore = publish.split("- name: Restore captured unsigned inputs", 1)[1].split("\n      - name:", 1)[0]
+for asset in ("coordinator-linux-amd64", "coordinator-cli-linux-amd64", "gateway-linux-amd64"):
+    if asset not in restore:
+        raise SystemExit(f"Pearl artifact does not cross the reviewed build boundary: {asset}")
+prepare = publish.split("- name: Prepare release assets", 1)[1].split("\n      - name:", 1)[0]
+metadata_position = prepare.find('release_assets+=("$pearl_metadata" "$pearl_metadata_sig")')
+provenance_position = prepare.find("scripts/build-release-provenance.py")
+if metadata_position < 0 or provenance_position < 0 or metadata_position > provenance_position:
+    raise SystemExit("signed Pearl metadata must enter the release set before provenance")
+if "ops/pearl-updater/release-signing-public.pem" not in prepare:
+    raise SystemExit("Pearl metadata signature is not checked against the updater trust anchor")
 lines = text.splitlines()
 for index, line in enumerate(lines):
     match = re.match(r"^(\s*)run:\s*\|", line)

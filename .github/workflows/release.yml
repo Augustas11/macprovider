@@ -73,6 +73,56 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
           bash scripts/verify-release-toolchain.sh "$RUNNER_TEMP/release-toolchain.json"
 
+      - name: Setup Go for Pearl binaries
+        # Pinned to actions/setup-go v6.5.0. Linux binaries are cross-compiled
+        # without CGO and carried as unsigned inputs into the protected signer.
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.26.4"
+          cache-dependency-path: |
+            phase4-coordinator/go.sum
+            phase5-gateway/go.sum
+
+      - name: Build Pearl linux-amd64 binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_source.outputs.tag }}"
+          (
+            cd phase4-coordinator
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath \
+              -ldflags "-s -w -X main.version=$tag" \
+              -o "$RUNNER_TEMP/coordinator-linux-amd64" ./cmd/coordinator
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath \
+              -ldflags "-s -w" \
+              -o "$RUNNER_TEMP/coordinator-cli-linux-amd64" ./cmd/coordinator-cli
+          )
+          (
+            cd phase5-gateway
+            GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -mod=readonly -trimpath \
+              -ldflags "-s -w -X main.version=$tag" \
+              -o "$RUNNER_TEMP/gateway-linux-amd64" ./cmd/gateway
+          )
+          file "$RUNNER_TEMP/coordinator-linux-amd64" \
+            "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
+            "$RUNNER_TEMP/gateway-linux-amd64" \
+            | tee pearl-file.txt
+          grep -q "coordinator-linux-amd64: ELF 64-bit.*x86-64" pearl-file.txt
+          grep -q "coordinator-cli-linux-amd64: ELF 64-bit.*x86-64" pearl-file.txt
+          grep -q "gateway-linux-amd64: ELF 64-bit.*x86-64" pearl-file.txt
+          for binary in coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64; do
+            go version -m "$RUNNER_TEMP/$binary" > "$RUNNER_TEMP/$binary.buildinfo"
+            grep -Fq 'GOOS=linux' "$RUNNER_TEMP/$binary.buildinfo"
+            grep -Fq 'GOARCH=amd64' "$RUNNER_TEMP/$binary.buildinfo"
+          done
+          strings "$RUNNER_TEMP/coordinator-linux-amd64" > "$RUNNER_TEMP/coordinator-linux-amd64.strings"
+          strings "$RUNNER_TEMP/gateway-linux-amd64" > "$RUNNER_TEMP/gateway-linux-amd64.strings"
+          grep -Fq "$tag" "$RUNNER_TEMP/coordinator-linux-amd64.strings"
+          grep -Fq "$tag" "$RUNNER_TEMP/gateway-linux-amd64.strings"
+
       - name: Install reviewed XcodeGen artifact
         shell: bash
         run: |
@@ -117,6 +167,9 @@ jobs:
           cp "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" unsigned-release-inputs/
           tar czf unsigned-release-inputs/Malibu.app.tar.gz -C "$RUNNER_TEMP" Malibu.app
           cp "$RUNNER_TEMP/release-toolchain.json" unsigned-release-inputs/
+          cp "$RUNNER_TEMP/coordinator-linux-amd64" \
+            "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
+            "$RUNNER_TEMP/gateway-linux-amd64" unsigned-release-inputs/
 
       - name: Upload unsigned build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -157,6 +210,12 @@ jobs:
           cp "$RUNNER_TEMP/unsigned-release-inputs/phase3-binary-m4-${tag}.tar.gz" \
             "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
           cp "$RUNNER_TEMP/unsigned-release-inputs/release-toolchain.json" release-toolchain.json
+          for binary in coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64; do
+            source="$RUNNER_TEMP/unsigned-release-inputs/$binary"
+            test -f "$source"
+            test ! -L "$source"
+            install -m 0755 "$source" "$binary"
+          done
           tar xzf "$RUNNER_TEMP/unsigned-release-inputs/Malibu.app.tar.gz" -C "$RUNNER_TEMP"
           test -d "$RUNNER_TEMP/Malibu.app"
 
@@ -721,7 +780,15 @@ jobs:
           app_asset="Malibu-${tag}.pkg"
           app_dmg_asset="Malibu-${tag}.dmg"
           appcast_asset="appcast.xml"
+          coordinator_asset="coordinator-linux-amd64"
+          coordinator_cli_asset="coordinator-cli-linux-amd64"
+          gateway_asset="gateway-linux-amd64"
+          pearl_metadata="pearl-release.json"
+          pearl_metadata_sig="pearl-release.json.sig"
           test -f "$src"
+          test -f "$coordinator_asset"
+          test -f "$coordinator_cli_asset"
+          test -f "$gateway_asset"
           if [ -z "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" ]; then
             echo "MACPROVIDER_RELEASE_SIGNING_KEY_PEM secret is required" >&2
             exit 1
@@ -732,7 +799,7 @@ jobs:
           }
           trap cleanup_release_signing_key EXIT
           cp "$src" "$tar_asset"
-          release_assets=("$tar_asset")
+          release_assets=("$tar_asset" "$coordinator_asset" "$coordinator_cli_asset" "$gateway_asset")
           if [ -f "$pkg_src" ]; then
             cp "$pkg_src" "$pkg_asset"
             release_assets+=("$pkg_asset")
@@ -747,6 +814,58 @@ jobs:
             cp "$app_src" "$app_asset"
             release_assets+=("$app_asset")
           fi
+          coordinator_sha="$(shasum -a 256 "$coordinator_asset" | awk '{print $1}')"
+          coordinator_cli_sha="$(shasum -a 256 "$coordinator_cli_asset" | awk '{print $1}')"
+          gateway_sha="$(shasum -a 256 "$gateway_asset" | awk '{print $1}')"
+          RELEASE_TAG="$tag" \
+          RELEASE_COMMIT="${{ needs.build.outputs.commit }}" \
+          COORDINATOR_SHA="$coordinator_sha" \
+          COORDINATOR_CLI_SHA="$coordinator_cli_sha" \
+          GATEWAY_SHA="$gateway_sha" \
+          python3 - <<'PY'
+          import json
+          import os
+
+          tag = os.environ["RELEASE_TAG"]
+          metadata = {
+              "schema_version": 1,
+              "repository": "Augustas11/macprovider",
+              "tag": tag,
+              "release_version": tag.removeprefix("v"),
+              "commit": os.environ["RELEASE_COMMIT"],
+              "architecture": "linux-amd64",
+              "provider_advertised_version": tag.removeprefix("v"),
+              "components": {
+                  "coordinator": {
+                      "asset": "coordinator-linux-amd64",
+                      "sha256": os.environ["COORDINATOR_SHA"],
+                      "embedded_version": tag,
+                  },
+                  "gateway": {
+                      "asset": "gateway-linux-amd64",
+                      "sha256": os.environ["GATEWAY_SHA"],
+                      "embedded_version": tag,
+                  },
+              },
+              "operator_artifacts": {
+                  "coordinator_cli": {
+                      "asset": "coordinator-cli-linux-amd64",
+                      "sha256": os.environ["COORDINATOR_CLI_SHA"],
+                  },
+              },
+          }
+          with open("pearl-release.json", "w", encoding="utf-8") as output:
+              json.dump(metadata, output, sort_keys=True, separators=(",", ":"))
+              output.write("\n")
+          PY
+          printf "%s\n" "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > "$release_signing_key"
+          chmod 600 "$release_signing_key"
+          openssl dgst -sha256 -sign "$release_signing_key" \
+            -out "$pearl_metadata_sig" "$pearl_metadata"
+          openssl dgst -sha256 \
+            -verify ops/pearl-updater/release-signing-public.pem \
+            -signature "$pearl_metadata_sig" "$pearl_metadata"
+          release_assets+=("$pearl_metadata" "$pearl_metadata_sig")
           python3 scripts/build-release-provenance.py \
             "$tag" "${{ needs.build.outputs.commit }}" "$GITHUB_REPOSITORY" \
             "${{ needs.build.outputs.prerelease }}" release-toolchain.json \
@@ -757,8 +876,6 @@ jobs:
             shasum -a 256 "$release_asset" >> checksums.txt
           done
           printf "%s\n" "${release_assets[@]}" > release-assets.txt
-          printf "%s\n" "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > "$release_signing_key"
-          chmod 600 "$release_signing_key"
           openssl dgst -sha256 -sign "$release_signing_key" -out checksums.txt.sig checksums.txt
           echo "asset=$tar_asset" >> "$GITHUB_OUTPUT"
 

@@ -1,0 +1,3240 @@
+#!/usr/bin/env python3
+"""Signed, transactional Pearl coordinator/gateway release updater.
+
+Production trust anchors are intentionally not configurable. Test-only path
+overrides require MACPROVIDER_UPDATER_TESTING=1 and are rejected otherwise.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import dataclasses
+import errno
+import fcntl
+import hashlib
+import http.client
+import json
+import os
+import pwd
+import re
+import resource
+import secrets
+import shlex
+import shutil
+import stat
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any, Callable
+
+
+PINNED_REPOSITORY = "Augustas11/macprovider"
+PINNED_PUBLIC_KEY = Path("/usr/local/share/macprovider/release-signing-public.pem")
+CONFIG_PATH = Path("/etc/macprovider/pearl-updater.conf")
+INSTALL_ROOT = Path("/opt/macprovider")
+STATE_ROOT = Path("/var/lib/macprovider-pearl-updater")
+AUDIT_PATH = Path("/var/lib/macprovider-pearl-updater/audit.jsonl")
+LOCK_PATH = Path("/run/lock/macprovider-pearl-updater.lock")
+GATE_STATE_ROOT = Path("/run/macprovider-pearl-updater")
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+SYSTEMD_ROOT = Path("/etc/systemd/system")
+INDEPENDENT_ALERT_ENV_PATH = Path("/etc/macprovider/monitor.env")
+VALIDATOR_ACCOUNT = "macprovider-updater-validate"
+GATED_SERVICE_UNITS = (
+    "macprovider-coordinator.service",
+    "macprovider-gateway.service",
+    "canary-buyer.service",
+    "macprovider-archive-rotate.service",
+    "stats-billing-mirror.service",
+)
+TRANSACTION_GATE_DROPIN_NAME = "50-pearl-updater-transaction-gate.conf"
+TRANSACTION_GATE_DROPIN_TEXT = "[Service]\nExecStartPre=+/usr/local/sbin/macprovider-pearl-update-gate %n\n"
+AUXILIARY_UNITS = (
+    "macprovider-archive-rotate.timer",
+    "macprovider-archive-rotate.service",
+    "stats-billing-mirror.timer",
+    "stats-billing-mirror.service",
+)
+COORDINATOR_ASSET = "coordinator-linux-amd64"
+GATEWAY_ASSET = "gateway-linux-amd64"
+CONTROL_ASSETS = (
+    "pearl-release.json",
+    "pearl-release.json.sig",
+    "checksums.txt",
+    "checksums.txt.sig",
+)
+SEMVER_RE = re.compile(r"^(?:v)?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+MAX_CANDIDATE_OUTPUT_BYTES = 64 * 1024
+CANARY_AUTHORITY_VERSION = "issue-524-r1"
+CANARY_AUTHORITY_COMMIT = "a7f271a7ab818cef79543194b5c190c011ce3018"
+CANARY_UNIT_BUDGET_S = 660
+JOURNAL_SCHEMA_VERSION = 1
+CURRENT_RELEASE_SCHEMA_VERSION = 1
+ROLLBACK_STEPS = (
+    "quiescence",
+    "binaries",
+    "configurations",
+    "databases",
+    "success_state",
+    "backend_services",
+    "auxiliary_services",
+    "serving_validation",
+    "auxiliary_timers",
+    "canary_timer",
+)
+CANARY_AUTHORITY_FILES = {
+    Path("/opt/macprovider-canary-buyer/probe.mjs"): "95f1c8fd38f26e7d3722e0935d9519120d9d5fdafb99ed39d20f1349cd9288fc",
+    Path("/opt/macprovider-canary-buyer/run-canary.sh"): "38ac1c3cd3b8c966e11a3160cef843d5abf26d70bf67a0887eaa235b9cd2f9af",
+    Path("/etc/systemd/system/canary-buyer.service"): "6b9fcf9242e089c972b485e898fe41c66454f4c1eaa7212505010b05f4cc7b98",
+    Path("/etc/systemd/system/canary-buyer.timer"): "520dbf02f8108aee11c5237449a5a6e0f48590d0a739e1025e179d5710abc7f1",
+}
+
+
+class UpdateError(RuntimeError):
+    pass
+
+
+class NoEligibleRelease(UpdateError):
+    pass
+
+
+class LockBusy(UpdateError):
+    pass
+
+
+class CommandTimeout(UpdateError):
+    pass
+
+
+class AssetNotFound(UpdateError):
+    pass
+
+
+@dataclasses.dataclass(frozen=True, order=True)
+class SemVer:
+    major: int
+    minor: int
+    patch: int
+
+    @classmethod
+    def parse(cls, value: str) -> "SemVer":
+        match = SEMVER_RE.fullmatch(value.strip())
+        if not match:
+            raise UpdateError(f"invalid semantic version: {value!r}")
+        return cls(*(int(part) for part in match.groups()))
+
+    def __str__(self) -> str:
+        return f"{self.major}.{self.minor}.{self.patch}"
+
+
+@dataclasses.dataclass(frozen=True)
+class Config:
+    enabled: bool = False
+    minimum_version: SemVer = SemVer(1, 8, 26)
+    allow_provider_drain: bool = False
+    download_attempts: int = 3
+    retry_backoff_s: int = 3
+    request_timeout_s: int = 30
+    download_timeout_s: int = 300
+    gateway_drain_timeout_s: int = 90
+    gateway_drain_steady_s: int = 5
+    provider_recovery_timeout_s: int = 240
+    service_health_timeout_s: int = 60
+    canary_timeout_s: int = 720
+    revoked_versions_file: Path = Path("/etc/macprovider/pearl-updater.revoked")
+    deadman_heartbeat_id: str = ""
+    deadman_api_token_file: Path = Path("/etc/macprovider/pearl-updater.betterstack-token")
+
+
+@dataclasses.dataclass(frozen=True)
+class Component:
+    asset: str
+    sha256: str
+    embedded_version: str
+
+
+@dataclasses.dataclass(frozen=True)
+class Release:
+    tag: str
+    version: SemVer
+    commit: str
+    provider_advertised_version: str
+    coordinator: Component
+    gateway: Component
+    directory: Path
+
+
+@dataclasses.dataclass(frozen=True)
+class InstalledRelease:
+    coordinator: SemVer
+    gateway: SemVer
+    coordinator_sha256: str
+    gateway_sha256: str
+    durable: dict[str, Any] | None
+
+    @property
+    def downgrade_floor(self) -> SemVer:
+        versions = [self.coordinator, self.gateway]
+        if self.durable is not None:
+            versions.append(SemVer.parse(str(self.durable["version"])))
+        return max(versions)
+
+    def is_coherent_with(self, release: Release) -> bool:
+        if self.coordinator != release.version or self.gateway != release.version:
+            return False
+        if self.coordinator_sha256 != release.coordinator.sha256 or self.gateway_sha256 != release.gateway.sha256:
+            return False
+        if self.durable is None:
+            return False
+        expected = {
+            "schema_version": CURRENT_RELEASE_SCHEMA_VERSION,
+            "version": str(release.version),
+            "tag": release.tag,
+            "commit": release.commit,
+            "coordinator_sha256": release.coordinator.sha256,
+            "gateway_sha256": release.gateway.sha256,
+        }
+        return all(self.durable.get(key) == value for key, value in expected.items())
+
+
+@dataclasses.dataclass(frozen=True)
+class CoordinatorRuntime:
+    base_config: Path
+    overlay_config: Path | None
+    environment: dict[str, str]
+
+
+@dataclasses.dataclass(frozen=True)
+class RuntimeIdentity:
+    coordinator_version: str
+    gateway_version: str
+    advertised_version: str
+
+
+@dataclasses.dataclass(frozen=True)
+class ConfigUpdate:
+    target: Path
+    staged: Path
+    original_sha256: str
+    previous_version: str
+    next_version: str
+
+
+def _trusted_file_stat(
+    path: Path,
+    description: str,
+    *,
+    trusted_uid: int,
+    private: bool = False,
+) -> os.stat_result:
+    try:
+        file_stat = path.lstat()
+    except OSError as exc:
+        raise UpdateError(f"cannot inspect {description} {path}: {exc}") from exc
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise UpdateError(f"{description} is not a regular file: {path}")
+    if file_stat.st_uid != trusted_uid:
+        raise UpdateError(
+            f"{description} owner uid is {file_stat.st_uid}, expected {trusted_uid}: {path}"
+        )
+    if file_stat.st_nlink != 1:
+        raise UpdateError(f"{description} must have exactly one link: {path}")
+    if stat.S_IMODE(file_stat.st_mode) & 0o022:
+        raise UpdateError(f"{description} must not be writable by group or other: {path}")
+    if private and stat.S_IMODE(file_stat.st_mode) & 0o077:
+        raise UpdateError(f"{description} must not be accessible by group or other: {path}")
+    return file_stat
+
+
+def _trusted_directory(
+    path: Path,
+    description: str,
+    *,
+    trusted_uid: int,
+    mode: int | None = 0o700,
+) -> None:
+    try:
+        directory_stat = path.lstat()
+    except OSError as exc:
+        raise UpdateError(f"cannot inspect {description} {path}: {exc}") from exc
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        raise UpdateError(f"{description} is not a directory: {path}")
+    if directory_stat.st_uid != trusted_uid:
+        raise UpdateError(
+            f"{description} owner uid is {directory_stat.st_uid}, expected {trusted_uid}: {path}"
+        )
+    actual_mode = stat.S_IMODE(directory_stat.st_mode)
+    if mode is not None and actual_mode != mode:
+        raise UpdateError(f"{description} mode must be {mode:04o}: {path}")
+    if mode is None and actual_mode & 0o022:
+        raise UpdateError(f"{description} must not be writable by group or other: {path}")
+
+
+def _open_trusted_read(
+    path: Path,
+    description: str,
+    *,
+    trusted_uid: int,
+    private: bool = False,
+) -> Any:
+    before = _trusted_file_stat(path, description, trusted_uid=trusted_uid, private=private)
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise UpdateError("this platform cannot safely open trusted updater inputs")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise UpdateError(f"cannot open {description} {path}: {exc}") from exc
+    try:
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise UpdateError(f"{description} changed while opening: {path}")
+        if not stat.S_ISREG(after.st_mode) or after.st_nlink != 1:
+            raise UpdateError(f"{description} changed to an unsafe file: {path}")
+        return os.fdopen(descriptor, "r", encoding="utf-8")
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _read_trusted_text(
+    path: Path,
+    description: str,
+    *,
+    trusted_uid: int,
+    private: bool = False,
+    limit: int = 1024 * 1024,
+) -> str:
+    with _open_trusted_read(
+        path,
+        description,
+        trusted_uid=trusted_uid,
+        private=private,
+    ) as handle:
+        payload = handle.read(limit + 1)
+    if len(payload) > limit:
+        raise UpdateError(f"{description} exceeds the updater safety limit: {path}")
+    return payload
+
+
+def _path_entry_exists(path: Path) -> bool:
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise UpdateError(f"cannot inspect path {path}: {exc}") from exc
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _secure_atomic_write(
+    path: Path,
+    payload: bytes,
+    *,
+    mode: int = 0o600,
+    uid: int | None = None,
+    gid: int | None = None,
+) -> None:
+    if not path.parent.is_dir():
+        raise UpdateError(f"secure write parent directory is unavailable: {path.parent}")
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise UpdateError("this platform cannot safely create updater state")
+    descriptor = os.open(temporary, flags | os.O_NOFOLLOW, mode)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(payload)
+            handle.flush()
+            if uid is not None or gid is not None:
+                os.fchown(descriptor, -1 if uid is None else uid, -1 if gid is None else gid)
+            os.fchmod(descriptor, mode)
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def bool_value(value: str, key: str) -> bool:
+    if value == "1":
+        return True
+    if value == "0":
+        return False
+    raise UpdateError(f"{key} must be 0 or 1")
+
+
+def bounded_int(value: str, key: str, minimum: int, maximum: int) -> int:
+    if not value.isascii() or not value.isdigit():
+        raise UpdateError(f"{key} must be an integer")
+    parsed = int(value)
+    if parsed < minimum or parsed > maximum:
+        raise UpdateError(f"{key} must be between {minimum} and {maximum}")
+    return parsed
+
+
+def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
+    values: dict[str, str] = {}
+    if _path_entry_exists(path):
+        if trusted_uid is None:
+            text = path.read_text(encoding="utf-8")
+        else:
+            text = _read_trusted_text(
+                path,
+                "updater configuration",
+                trusted_uid=trusted_uid,
+                private=True,
+            )
+        for number, raw in enumerate(text.splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                raise UpdateError(f"{path}:{number}: expected KEY=VALUE")
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip()
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+                raise UpdateError(f"{path}:{number}: invalid key")
+            if key in values:
+                raise UpdateError(f"{path}:{number}: duplicate key {key}")
+            values[key] = value
+    known = {
+        "PEARL_UPDATER_ENABLED",
+        "PEARL_UPDATER_MINIMUM_VERSION",
+        "PEARL_UPDATER_ALLOW_PROVIDER_DRAIN",
+        "PEARL_UPDATER_DOWNLOAD_ATTEMPTS",
+        "PEARL_UPDATER_RETRY_BACKOFF_S",
+        "PEARL_UPDATER_REQUEST_TIMEOUT_S",
+        "PEARL_UPDATER_DOWNLOAD_TIMEOUT_S",
+        "PEARL_UPDATER_GATEWAY_DRAIN_TIMEOUT_S",
+        "PEARL_UPDATER_GATEWAY_DRAIN_STEADY_S",
+        "PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S",
+        "PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S",
+        "PEARL_UPDATER_CANARY_TIMEOUT_S",
+        "PEARL_UPDATER_REVOKED_VERSIONS_FILE",
+        "PEARL_UPDATER_DEADMAN_HEARTBEAT_ID",
+        "PEARL_UPDATER_DEADMAN_API_TOKEN_FILE",
+    }
+    unknown = sorted(set(values) - known)
+    if unknown:
+        raise UpdateError(f"unknown updater configuration key: {unknown[0]}")
+    return Config(
+        enabled=bool_value(values.get("PEARL_UPDATER_ENABLED", "0"), "PEARL_UPDATER_ENABLED"),
+        minimum_version=SemVer.parse(values.get("PEARL_UPDATER_MINIMUM_VERSION", "1.8.26")),
+        allow_provider_drain=bool_value(
+            values.get("PEARL_UPDATER_ALLOW_PROVIDER_DRAIN", "0"),
+            "PEARL_UPDATER_ALLOW_PROVIDER_DRAIN",
+        ),
+        download_attempts=bounded_int(values.get("PEARL_UPDATER_DOWNLOAD_ATTEMPTS", "3"), "download attempts", 1, 10),
+        retry_backoff_s=bounded_int(values.get("PEARL_UPDATER_RETRY_BACKOFF_S", "3"), "retry backoff", 0, 60),
+        request_timeout_s=bounded_int(values.get("PEARL_UPDATER_REQUEST_TIMEOUT_S", "30"), "request timeout", 5, 300),
+        download_timeout_s=bounded_int(values.get("PEARL_UPDATER_DOWNLOAD_TIMEOUT_S", "300"), "download timeout", 30, 1800),
+        gateway_drain_timeout_s=bounded_int(values.get("PEARL_UPDATER_GATEWAY_DRAIN_TIMEOUT_S", "90"), "gateway drain timeout", 5, 600),
+        gateway_drain_steady_s=bounded_int(values.get("PEARL_UPDATER_GATEWAY_DRAIN_STEADY_S", "5"), "gateway drain steady", 1, 30),
+        provider_recovery_timeout_s=bounded_int(values.get("PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S", "240"), "provider recovery timeout", 10, 900),
+        service_health_timeout_s=bounded_int(values.get("PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S", "60"), "service health timeout", 5, 300),
+        canary_timeout_s=bounded_int(values.get("PEARL_UPDATER_CANARY_TIMEOUT_S", "720"), "canary timeout", 700, 1800),
+        revoked_versions_file=Path(values.get("PEARL_UPDATER_REVOKED_VERSIONS_FILE", "/etc/macprovider/pearl-updater.revoked")),
+        deadman_heartbeat_id=values.get("PEARL_UPDATER_DEADMAN_HEARTBEAT_ID", ""),
+        deadman_api_token_file=Path(
+            values.get(
+                "PEARL_UPDATER_DEADMAN_API_TOKEN_FILE",
+                "/etc/macprovider/pearl-updater.betterstack-token",
+            )
+        ),
+    )
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def parse_checksums(path: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        fields = raw.split()
+        if len(fields) != 2 or not SHA256_RE.fullmatch(fields[0]) or not ASSET_RE.fullmatch(fields[1]):
+            raise UpdateError(f"checksums.txt:{number}: invalid entry")
+        if fields[1] in result:
+            raise UpdateError(f"checksums.txt:{number}: duplicate asset {fields[1]}")
+        result[fields[1]] = fields[0]
+    return result
+
+
+def validate_elf_amd64(path: Path) -> None:
+    with path.open("rb") as handle:
+        header = handle.read(64)
+    if len(header) < 20 or header[:4] != b"\x7fELF":
+        raise UpdateError(f"{path.name}: not an ELF binary")
+    if header[4] != 2 or header[5] != 1:
+        raise UpdateError(f"{path.name}: expected 64-bit little-endian ELF")
+    machine = struct.unpack("<H", header[18:20])[0]
+    if machine != 62:
+        raise UpdateError(f"{path.name}: expected linux/amd64 ELF, machine={machine}")
+
+
+class FileLock:
+    def __init__(self, path: Path, *, required_uid: int = 0):
+        self.path = path
+        self.required_uid = required_uid
+        self.handle: Any = None
+
+    def __enter__(self) -> "FileLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise UpdateError("this platform cannot safely open the updater lock without following symlinks")
+        try:
+            descriptor = os.open(self.path, flags | os.O_NOFOLLOW, 0o600)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                raise UpdateError(f"refusing symlinked updater lock: {self.path}") from exc
+            raise UpdateError(f"cannot open updater lock {self.path}: {exc}") from exc
+        try:
+            lock_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(lock_stat.st_mode):
+                raise UpdateError(f"updater lock is not a regular file: {self.path}")
+            if lock_stat.st_uid != self.required_uid:
+                raise UpdateError(
+                    f"updater lock owner uid is {lock_stat.st_uid}, expected {self.required_uid}: {self.path}"
+                )
+            if lock_stat.st_nlink != 1:
+                raise UpdateError(f"updater lock must have exactly one link: {self.path}")
+            os.fchmod(descriptor, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(descriptor)
+            raise LockBusy("another Pearl updater invocation holds the lock") from exc
+        except Exception:
+            os.close(descriptor)
+            raise
+        self.handle = os.fdopen(descriptor, "r+", encoding="utf-8")
+        self.handle.seek(0)
+        self.handle.truncate(0)
+        self.handle.write(f"{os.getpid()}\n")
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if self.handle:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            self.handle.close()
+
+
+class Updater:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        public_key: Path = PINNED_PUBLIC_KEY,
+        install_root: Path = INSTALL_ROOT,
+        state_root: Path = STATE_ROOT,
+        audit_path: Path = AUDIT_PATH,
+        lock_path: Path = LOCK_PATH,
+        gateway_db: Path | None = None,
+        databases: tuple[Path, ...] = (),
+        gate_state_root: Path = GATE_STATE_ROOT,
+        boot_id_path: Path = BOOT_ID_PATH,
+        trusted_uid: int = 0,
+        candidate_uid: int | None = None,
+        candidate_gid: int | None = None,
+        isolate_candidate_network: bool = False,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
+        self.config = config
+        self.public_key = public_key
+        self.install_root = install_root
+        self.state_root = state_root
+        self.audit_path = audit_path
+        self.lock_path = lock_path
+        self.gateway_db = gateway_db
+        self.databases = databases
+        self.gate_state_root = gate_state_root
+        self.boot_id_path = boot_id_path
+        self.trusted_uid = trusted_uid
+        self.candidate_uid = trusted_uid if candidate_uid is None else candidate_uid
+        self.candidate_gid = trusted_uid if candidate_gid is None else candidate_gid
+        self.isolate_candidate_network = isolate_candidate_network
+        self.sleep = sleep
+        self.transaction: Path | None = None
+        self.config_update: ConfigUpdate | None = None
+        self.coordinator_runtime_state: CoordinatorRuntime | None = None
+        self.runtime_config_hashes: dict[Path, str] = {}
+        self.rollback_armed = False
+        self.canary_timer_was_active = False
+        self.canary_service_was_active = False
+        self.previous_services: dict[str, bool] = {}
+        self.previous_auxiliary_units: dict[str, bool] = {}
+        self.previous_versions: dict[str, str] = {}
+        self.deadman_previous_paused: bool | None = None
+        self.deadman_restore_required = False
+        self.journal: dict[str, Any] | None = None
+        self.reconciling = False
+        self.live_mutation_started = False
+
+    def run_command(
+        self,
+        argv: list[str],
+        *,
+        check: bool = True,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(argv, check=check, text=True, capture_output=True, timeout=timeout, env=env)
+        except subprocess.TimeoutExpired as exc:
+            raise CommandTimeout(f"command timed out after {timeout}s: {argv[0]}") from exc
+
+    def run_candidate_command(
+        self,
+        argv: list[str],
+        *,
+        timeout: int,
+        cwd: Path,
+        environment: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        minimal_environment = {
+            "HOME": "/nonexistent",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+            "TMPDIR": "/tmp",
+        }
+        if environment:
+            minimal_environment.update(environment)
+        command = list(argv)
+        run_kwargs: dict[str, Any] = {
+            "check": False,
+            "text": True,
+            "capture_output": True,
+            "timeout": timeout,
+            "env": minimal_environment,
+            "cwd": cwd,
+            "close_fds": True,
+            "start_new_session": True,
+        }
+        if self.isolate_candidate_network:
+            unshare = shutil.which("unshare")
+            chroot = shutil.which("chroot")
+            setpriv = shutil.which("setpriv")
+            if not unshare or not chroot or not setpriv:
+                raise UpdateError("candidate isolation requires unshare, setpriv, and chroot")
+            try:
+                sandbox_root = cwd.resolve(strict=True)
+                translated: list[str] = []
+                for argument in command:
+                    candidate_path = Path(argument)
+                    if candidate_path.is_absolute():
+                        resolved = candidate_path.resolve(strict=True)
+                        try:
+                            relative = resolved.relative_to(sandbox_root)
+                        except ValueError as exc:
+                            raise UpdateError("candidate command attempted to access a path outside its sandbox") from exc
+                        translated.append("/" + relative.as_posix())
+                    else:
+                        translated.append(argument)
+            except OSError as exc:
+                raise UpdateError(f"candidate sandbox path cannot be resolved: {exc}") from exc
+            command = [
+                unshare,
+                "--mount",
+                "--pid",
+                "--net",
+                "--ipc",
+                "--uts",
+                "--fork",
+                "--kill-child",
+                setpriv,
+                "--no-new-privs",
+                "--",
+                chroot,
+                f"--userspec={self.candidate_uid}:{self.candidate_gid}",
+                f"--groups={self.candidate_gid}",
+                str(sandbox_root),
+                *translated,
+            ]
+            run_kwargs["cwd"] = "/"
+        else:
+            if self.candidate_uid != os.geteuid() or self.candidate_gid != os.getegid():
+                run_kwargs.update(
+                    user=self.candidate_uid,
+                    group=self.candidate_gid,
+                    extra_groups=(),
+                )
+            run_kwargs["umask"] = 0o077
+        try:
+            if self.isolate_candidate_network:
+                def limit_candidate_output() -> None:
+                    resource.setrlimit(
+                        resource.RLIMIT_FSIZE,
+                        (MAX_CANDIDATE_OUTPUT_BYTES, MAX_CANDIDATE_OUTPUT_BYTES),
+                    )
+
+                run_kwargs.pop("capture_output", None)
+                with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout, tempfile.TemporaryFile(
+                    mode="w+", encoding="utf-8"
+                ) as stderr:
+                    result = subprocess.run(
+                        command,
+                        **run_kwargs,
+                        stdout=stdout,
+                        stderr=stderr,
+                        preexec_fn=limit_candidate_output,
+                    )
+                    stdout.seek(0)
+                    stderr.seek(0)
+                    return subprocess.CompletedProcess(
+                        result.args,
+                        result.returncode,
+                        stdout.read(MAX_CANDIDATE_OUTPUT_BYTES + 1),
+                        stderr.read(MAX_CANDIDATE_OUTPUT_BYTES + 1),
+                    )
+            return subprocess.run(command, **run_kwargs)
+        except subprocess.TimeoutExpired as exc:
+            raise CommandTimeout(f"candidate command timed out after {timeout}s: {argv[0]}") from exc
+
+    def _ensure_private_directory(self, path: Path, description: str) -> None:
+        if not _path_entry_exists(path):
+            _trusted_directory(
+                path.parent,
+                f"{description} parent",
+                trusted_uid=self.trusted_uid,
+                mode=None,
+            )
+            path.mkdir(mode=0o700)
+        _trusted_directory(path, description, trusted_uid=self.trusted_uid, mode=0o700)
+
+    @property
+    def journal_path(self) -> Path:
+        return self.state_root / "active-transaction.json"
+
+    def _journal_transition(self, phase: str, **updates: object) -> None:
+        if self.journal is None:
+            return
+        self.journal.update(updates)
+        self.journal["phase"] = phase
+        self.journal["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self._ensure_private_directory(self.state_root, "updater state directory")
+        if _path_entry_exists(self.journal_path):
+            self._trusted_regular_file(self.journal_path, "updater phase journal", private=True)
+        payload = json.dumps(self.journal, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        _secure_atomic_write(self.journal_path, payload)
+
+    def _start_journal(self, release: Release, previous: SemVer) -> None:
+        previous_advertised = (
+            self.config_update.previous_version if self.config_update is not None else str(previous)
+        )
+        self.journal = {
+            "schema_version": JOURNAL_SCHEMA_VERSION,
+            "phase": "prepared",
+            "release": {
+                "tag": release.tag,
+                "version": str(release.version),
+                "commit": release.commit,
+                "provider_advertised_version": release.provider_advertised_version,
+                "coordinator_sha256": release.coordinator.sha256,
+                "gateway_sha256": release.gateway.sha256,
+            },
+            "previous_version": str(previous),
+            "previous_advertised_version": previous_advertised,
+            "transaction_id": secrets.token_hex(32),
+            "boot_id": self._boot_id(),
+            "transaction": None,
+            "rollback_armed": False,
+            "rollback_in_progress": False,
+            "rollback_completed_steps": [],
+            "live_mutation_started": False,
+            "success_persisted": False,
+            "previous_services": {},
+            "previous_auxiliary_units": {},
+            "previous_versions": {},
+            "database_paths": [],
+            "database_config_hashes": {},
+            "canary_timer_was_active": None,
+            "canary_service_was_active": None,
+            "deadman_previous_paused": None,
+            "deadman_restore_required": False,
+        }
+        self._journal_transition("prepared")
+
+    def _load_journal(self) -> dict[str, Any] | None:
+        if not _path_entry_exists(self.journal_path):
+            return None
+        raw = _read_trusted_text(
+            self.journal_path,
+            "updater phase journal",
+            trusted_uid=self.trusted_uid,
+            private=True,
+        )
+        try:
+            payload = json.loads(raw)
+        except ValueError as exc:
+            raise UpdateError("updater phase journal is invalid JSON") from exc
+        if not isinstance(payload, dict) or payload.get("schema_version") != JOURNAL_SCHEMA_VERSION:
+            raise UpdateError("updater phase journal schema is unsupported")
+        return payload
+
+    def _clear_journal(self) -> None:
+        self.journal_path.unlink(missing_ok=True)
+        if _path_entry_exists(self.state_root):
+            _fsync_directory(self.state_root)
+        self.journal = None
+
+    def audit(self, event: str, outcome: str, **fields: object) -> None:
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "event": event,
+            "outcome": outcome,
+            **fields,
+        }
+        self._ensure_private_directory(self.audit_path.parent, "updater audit directory")
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise UpdateError("this platform cannot safely open the updater audit log")
+        if _path_entry_exists(self.audit_path):
+            before = _trusted_file_stat(
+                self.audit_path,
+                "updater audit log",
+                trusted_uid=self.trusted_uid,
+                private=True,
+            )
+            descriptor = os.open(self.audit_path, flags | os.O_NOFOLLOW)
+            after = os.fstat(descriptor)
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                os.close(descriptor)
+                raise UpdateError("updater audit log changed while opening")
+        else:
+            descriptor = os.open(
+                self.audit_path,
+                flags | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(self.audit_path.parent)
+        with contextlib.suppress(Exception):
+            self.run_command(
+                ["logger", "-t", "macprovider-pearl-updater", json.dumps(record, sort_keys=True)],
+                timeout=5,
+            )
+
+    def download(self, url: str, destination: Path) -> None:
+        request = urllib.request.Request(url, headers={"User-Agent": "macprovider-pearl-updater/1"})
+        last_error: Exception | None = None
+        for attempt in range(1, self.config.download_attempts + 1):
+            deadline = time.monotonic() + self.config.download_timeout_s
+            try:
+                with urllib.request.urlopen(request, timeout=self.config.request_timeout_s) as response:
+                    expected_header = response.headers.get("Content-Length")
+                    expected: int | None = None
+                    if expected_header is not None:
+                        try:
+                            expected = int(expected_header)
+                        except ValueError as exc:
+                            raise UpdateError(f"invalid Content-Length for {destination.name}") from exc
+                        if expected < 0 or expected > MAX_DOWNLOAD_BYTES:
+                            raise UpdateError(f"download size rejected for {destination.name}: {expected}")
+                    written = 0
+                    with destination.open("wb") as output:
+                        while True:
+                            if time.monotonic() >= deadline:
+                                raise UpdateError(f"download deadline exceeded for {destination.name}")
+                            block = response.read(1024 * 1024)
+                            if not block:
+                                break
+                            written += len(block)
+                            if written > MAX_DOWNLOAD_BYTES:
+                                raise UpdateError(f"download size limit exceeded for {destination.name}")
+                            output.write(block)
+                if expected is not None and written != expected:
+                    raise UpdateError(f"partial download for {destination.name}")
+                return
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    destination.unlink(missing_ok=True)
+                    raise AssetNotFound(f"release asset not found: {url}") from exc
+                last_error = exc
+                destination.unlink(missing_ok=True)
+                if attempt < self.config.download_attempts:
+                    self.sleep(self.config.retry_backoff_s * attempt)
+            except (OSError, urllib.error.URLError, http.client.HTTPException, UpdateError) as exc:
+                last_error = exc
+                destination.unlink(missing_ok=True)
+                if attempt < self.config.download_attempts:
+                    self.sleep(self.config.retry_backoff_s * attempt)
+        raise UpdateError(f"download failed for {url}: {last_error}")
+
+    def verify_signature(self, payload: Path, signature: Path) -> None:
+        key_payload = _read_trusted_text(
+            self.public_key,
+            "pinned release public key",
+            trusted_uid=self.trusted_uid,
+            limit=64 * 1024,
+        ).encode("utf-8")
+        key_snapshot = payload.parent / f".release-key-{os.getpid()}-{time.time_ns()}.pem"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+        descriptor = os.open(key_snapshot, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(key_payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            result = self.run_command(
+                ["openssl", "dgst", "-sha256", "-verify", str(key_snapshot), "-signature", str(signature), str(payload)],
+                check=False,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                raise UpdateError(f"signature verification failed for {payload.name}")
+        finally:
+            os.close(descriptor)
+            key_snapshot.unlink(missing_ok=True)
+
+    def release_tags(self) -> list[str]:
+        url = f"https://api.github.com/repos/{PINNED_REPOSITORY}/releases?per_page=30"
+        with tempfile.TemporaryDirectory(prefix="pearl-release-list-") as tmp:
+            path = Path(tmp) / "releases.json"
+            self.download(url, path)
+            try:
+                rows = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError) as exc:
+                raise UpdateError("GitHub release list is invalid JSON") from exc
+        tags = []
+        if not isinstance(rows, list):
+            raise UpdateError("GitHub release list is not an array")
+        for row in rows:
+            if isinstance(row, dict) and not row.get("draft") and not row.get("prerelease"):
+                tag = row.get("tag_name")
+                if isinstance(tag, str) and SEMVER_RE.fullmatch(tag):
+                    tags.append(tag)
+        return sorted(set(tags), key=SemVer.parse, reverse=True)
+
+    def acquire_release(self, work: Path, source_dir: Path | None, requested_tag: str | None) -> Release:
+        if source_dir is not None:
+            for asset in (*CONTROL_ASSETS, COORDINATOR_ASSET, GATEWAY_ASSET):
+                source = source_dir / asset
+                if not source.is_file():
+                    raise UpdateError(f"test source missing asset: {asset}")
+                shutil.copyfile(source, work / asset)
+            return self.verify_release(work, requested_tag)
+
+        tags = [requested_tag] if requested_tag else self.release_tags()
+        for tag in tags:
+            if tag is None or not SEMVER_RE.fullmatch(tag):
+                raise UpdateError(f"invalid requested release tag: {tag}")
+            candidate = work / tag
+            candidate.mkdir(mode=0o700)
+            base = f"https://github.com/{PINNED_REPOSITORY}/releases/download/{tag}"
+            try:
+                self.download(f"{base}/pearl-release.json", candidate / "pearl-release.json")
+            except AssetNotFound:
+                self.audit("release_skipped", "missing_signed_pearl_metadata", candidate=tag)
+                if requested_tag:
+                    raise
+                shutil.rmtree(candidate)
+                continue
+            for asset in CONTROL_ASSETS[1:]:
+                self.download(f"{base}/{asset}", candidate / asset)
+            for asset in (COORDINATOR_ASSET, GATEWAY_ASSET):
+                self.download(f"{base}/{asset}", candidate / asset)
+            return self.verify_release(candidate, tag)
+        self.audit("release_selection", "no_eligible_release")
+        raise NoEligibleRelease("no signed Pearl release with the required artifact set was found")
+
+    def verify_release(self, directory: Path, expected_tag: str | None) -> Release:
+        checksums_path = directory / "checksums.txt"
+        metadata_path = directory / "pearl-release.json"
+        self.verify_signature(checksums_path, directory / "checksums.txt.sig")
+        self.verify_signature(metadata_path, directory / "pearl-release.json.sig")
+        checksums = parse_checksums(checksums_path)
+        for name in ("pearl-release.json", "pearl-release.json.sig", COORDINATOR_ASSET, GATEWAY_ASSET):
+            if name not in checksums:
+                raise UpdateError(f"signed checksums omit required asset: {name}")
+            if sha256_file(directory / name) != checksums[name]:
+                raise UpdateError(f"checksum mismatch for {name}")
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise UpdateError("release metadata is invalid JSON") from exc
+        release = self.parse_metadata(metadata, directory)
+        if expected_tag and release.tag != expected_tag:
+            raise UpdateError(f"signed metadata tag {release.tag} does not match selected tag {expected_tag}")
+        for component in (release.coordinator, release.gateway):
+            if component.sha256 != checksums[component.asset]:
+                raise UpdateError(f"metadata/checksums disagreement for {component.asset}")
+            path = directory / component.asset
+            validate_elf_amd64(path)
+            self.audit(
+                "release_component_verified",
+                "static_success",
+                candidate=release.tag,
+                asset=component.asset,
+                sha256=component.sha256,
+            )
+        self.audit(
+            "release_control_set_verified",
+            "success",
+            candidate=release.tag,
+            commit=release.commit,
+            provider_advertised_version=release.provider_advertised_version,
+        )
+        return release
+
+    def verify_candidate_versions(self, release: Release) -> None:
+        self._assert_candidate_validation_directory(release.directory)
+        for component in (release.coordinator, release.gateway):
+            path = release.directory / component.asset
+            self._assert_candidate_validation_file(path, executable=True)
+            result = self.run_candidate_command(
+                [str(path), "--version"],
+                timeout=10,
+                cwd=release.directory,
+            )
+            if result.returncode != 0 or result.stdout.strip() != component.embedded_version:
+                raise UpdateError(f"embedded version validation failed for {component.asset}; output suppressed")
+            self.audit(
+                "release_component_verified",
+                "success",
+                candidate=release.tag,
+                asset=component.asset,
+                sha256=component.sha256,
+                embedded_version=component.embedded_version,
+            )
+
+    def _assert_candidate_validation_directory(self, path: Path) -> None:
+        try:
+            entry = path.lstat()
+        except OSError as exc:
+            raise UpdateError(f"cannot inspect candidate validation directory {path}: {exc}") from exc
+        if not stat.S_ISDIR(entry.st_mode):
+            raise UpdateError(f"candidate validation directory is not a directory: {path}")
+        if entry.st_uid != self.trusted_uid or entry.st_gid != self.candidate_gid:
+            raise UpdateError(
+                f"candidate validation directory ownership must be {self.trusted_uid}:{self.candidate_gid}: {path}"
+            )
+        if stat.S_IMODE(entry.st_mode) != 0o750:
+            raise UpdateError(f"candidate validation directory mode must be 0750: {path}")
+
+    def _assert_candidate_validation_file(self, path: Path, *, executable: bool) -> None:
+        entry = self._trusted_regular_file(path, "candidate validation file")
+        expected_mode = 0o550 if executable else 0o640
+        if entry.st_gid != self.candidate_gid or stat.S_IMODE(entry.st_mode) != expected_mode:
+            raise UpdateError(
+                f"candidate validation file ownership/mode must be "
+                f"{self.trusted_uid}:{self.candidate_gid} {expected_mode:04o}: {path}"
+            )
+
+    def stage_candidate_validation(self, release: Release, work_root: Path) -> Release:
+        try:
+            work_resolved = work_root.resolve(strict=True)
+            release_resolved = release.directory.resolve(strict=True)
+        except OSError as exc:
+            raise UpdateError(f"candidate staging path cannot be resolved: {exc}") from exc
+        if release_resolved != work_resolved and release_resolved.parent != work_resolved:
+            raise UpdateError("verified release directory is outside the updater work root")
+        for directory in (work_root,):
+            entry = directory.lstat()
+            if not stat.S_ISDIR(entry.st_mode) or entry.st_uid != self.trusted_uid:
+                raise UpdateError(f"candidate staging root is not a trusted directory: {directory}")
+            os.chown(directory, self.trusted_uid, self.candidate_gid, follow_symlinks=False)
+            os.chmod(directory, 0o750, follow_symlinks=False)
+        validation = work_root / f"candidate-validation-{os.getpid()}-{time.time_ns()}"
+        validation.mkdir(mode=0o700)
+        os.chown(validation, self.trusted_uid, self.candidate_gid, follow_symlinks=False)
+        os.chmod(validation, 0o750, follow_symlinks=False)
+        for component in (release.coordinator, release.gateway):
+            source = release.directory / component.asset
+            self._trusted_regular_file(source, f"verified {component.asset}")
+            if sha256_file(source) != component.sha256:
+                raise UpdateError(f"verified candidate changed before staging: {component.asset}")
+            destination = validation / component.asset
+            self.atomic_replace(
+                source,
+                destination,
+                uid=self.trusted_uid,
+                gid=self.candidate_gid,
+                mode=0o550,
+            )
+            self._assert_candidate_validation_file(destination, executable=True)
+            if sha256_file(destination) != component.sha256:
+                raise UpdateError(f"candidate staging checksum mismatch: {component.asset}")
+        _fsync_directory(validation)
+        self._assert_candidate_validation_directory(validation)
+        return dataclasses.replace(release, directory=validation)
+
+    def stage_candidate_config(self, directory: Path, name: str, payload: str) -> Path:
+        self._assert_candidate_validation_directory(directory)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name):
+            raise UpdateError(f"invalid candidate validation config name: {name}")
+        destination = directory / name
+        _secure_atomic_write(
+            destination,
+            payload.encode("utf-8"),
+            mode=0o640,
+            uid=self.trusted_uid,
+            gid=self.candidate_gid,
+        )
+        self._assert_candidate_validation_file(destination, executable=False)
+        return destination
+
+    def parse_metadata(self, metadata: object, directory: Path) -> Release:
+        if not isinstance(metadata, dict) or metadata.get("schema_version") != 1:
+            raise UpdateError("unsupported Pearl release metadata schema")
+        if metadata.get("repository") != PINNED_REPOSITORY or metadata.get("architecture") != "linux-amd64":
+            raise UpdateError("release metadata repository/architecture mismatch")
+        tag = metadata.get("tag")
+        commit = metadata.get("commit")
+        advertised = metadata.get("provider_advertised_version")
+        if not isinstance(tag, str) or not SEMVER_RE.fullmatch(tag):
+            raise UpdateError("release metadata tag is invalid")
+        version = SemVer.parse(tag)
+        if metadata.get("release_version") != str(version):
+            raise UpdateError("release metadata version/tag mismatch")
+        if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
+            raise UpdateError("release metadata commit is invalid")
+        if not isinstance(advertised, str):
+            raise UpdateError("release metadata advertised version is missing")
+        SemVer.parse(advertised)
+        if advertised != str(version):
+            raise UpdateError("release metadata advertised version must match the release version")
+        components = metadata.get("components")
+        if not isinstance(components, dict):
+            raise UpdateError("release metadata components are missing")
+
+        def component(name: str, required_asset: str) -> Component:
+            row = components.get(name)
+            if not isinstance(row, dict) or row.get("asset") != required_asset:
+                raise UpdateError(f"release metadata {name} asset mismatch")
+            digest, embedded = row.get("sha256"), row.get("embedded_version")
+            if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+                raise UpdateError(f"release metadata {name} checksum invalid")
+            if embedded not in (tag, str(version)):
+                raise UpdateError(f"release metadata {name} embedded version invalid")
+            return Component(required_asset, digest, str(embedded))
+
+        return Release(tag, version, commit, advertised, component("coordinator", COORDINATOR_ASSET), component("gateway", GATEWAY_ASSET), directory)
+
+    def revoked_versions(self) -> set[SemVer]:
+        result: set[SemVer] = set()
+        if not _path_entry_exists(self.config.revoked_versions_file):
+            raise UpdateError(f"required revoked versions policy is missing: {self.config.revoked_versions_file}")
+        if not self.config.revoked_versions_file.is_absolute():
+            raise UpdateError("revoked versions file must be absolute")
+        text = _read_trusted_text(
+            self.config.revoked_versions_file,
+            "revoked versions policy",
+            trusted_uid=self.trusted_uid,
+            private=True,
+        )
+        for number, raw in enumerate(text.splitlines(), 1):
+            value = raw.split("#", 1)[0].strip()
+            if value:
+                try:
+                    result.add(SemVer.parse(value))
+                except UpdateError as exc:
+                    raise UpdateError(f"{self.config.revoked_versions_file}:{number}: {exc}") from exc
+        return result
+
+    def installed_release(self) -> InstalledRelease:
+        state = self.state_root / "current-release.json"
+        durable: dict[str, Any] | None = None
+        if _path_entry_exists(state):
+            try:
+                payload = json.loads(
+                    _read_trusted_text(
+                        state,
+                        "installed release state",
+                        trusted_uid=self.trusted_uid,
+                        private=True,
+                    )
+                )
+                if not isinstance(payload, dict):
+                    raise TypeError("state is not an object")
+                SemVer.parse(str(payload["version"]))
+                durable = payload
+            except (KeyError, TypeError, ValueError, OSError, UpdateError) as exc:
+                raise UpdateError(f"installed release state is invalid: {state}") from exc
+        binaries: dict[str, SemVer] = {}
+        hashes: dict[str, str] = {}
+        for name in ("coordinator", "gateway"):
+            binary = self.install_root / name
+            self._trusted_regular_file(binary, f"installed {name} binary")
+            result = self.run_command([str(binary), "--version"], check=False, timeout=10)
+            if result.returncode != 0 or not SEMVER_RE.fullmatch(result.stdout.strip()):
+                raise UpdateError(f"installed {name} does not report a semantic version")
+            binaries[name] = SemVer.parse(result.stdout.strip())
+            hashes[name] = sha256_file(binary)
+        return InstalledRelease(
+            binaries["coordinator"],
+            binaries["gateway"],
+            hashes["coordinator"],
+            hashes["gateway"],
+            durable,
+        )
+
+    def eligibility(self, release: Release) -> tuple[SemVer, str]:
+        installed = self.installed_release()
+        current = installed.downgrade_floor
+        if release.version in self.revoked_versions():
+            self.audit("release_eligibility", "rejected_revoked", candidate=release.tag, current=str(current))
+            raise UpdateError(f"release {release.tag} is revoked")
+        if release.version < self.config.minimum_version:
+            self.audit("release_eligibility", "rejected_below_minimum", candidate=release.tag, current=str(current))
+            raise UpdateError(f"release {release.tag} is below the minimum allowed version")
+        if release.version < current:
+            self.audit("release_eligibility", "rejected_downgrade", candidate=release.tag, current=str(current))
+            raise UpdateError(f"downgrade rejected: installed={current} candidate={release.version}")
+        if release.version == current:
+            if installed.is_coherent_with(release):
+                self.audit("release_eligibility", "already_current", candidate=release.tag, current=str(current))
+                return current, "already_current"
+            self.audit(
+                "release_eligibility",
+                "repair_pair",
+                candidate=release.tag,
+                current=str(current),
+                coordinator=str(installed.coordinator),
+                gateway=str(installed.gateway),
+                durable_version=str(installed.durable.get("version")) if installed.durable else "missing",
+                coordinator_sha256=installed.coordinator_sha256,
+                gateway_sha256=installed.gateway_sha256,
+            )
+            return current, "repair_pair"
+        self.audit("release_eligibility", "upgrade", candidate=release.tag, current=str(current))
+        return current, "upgrade"
+
+    def assess_candidate(self, release: Release) -> tuple[SemVer, str]:
+        current, decision = self.eligibility(release)
+        self.verify_candidate_versions(release)
+        return current, decision
+
+    def _trusted_regular_file(self, path: Path, description: str, *, private: bool = False) -> os.stat_result:
+        return _trusted_file_stat(
+            path,
+            description,
+            trusted_uid=self.trusted_uid,
+            private=private,
+        )
+
+    def _trusted_config_file(self, path: Path) -> None:
+        self._trusted_regular_file(path, "coordinator config")
+
+    def validate_recovery_inputs(self, config_path: Path) -> None:
+        if not config_path.is_absolute():
+            raise UpdateError("updater configuration path must be absolute")
+        self._trusted_regular_file(config_path, "updater configuration", private=True)
+        _trusted_directory(
+            self.state_root.parent,
+            "updater state parent directory",
+            trusted_uid=self.trusted_uid,
+            mode=None,
+        )
+        if _path_entry_exists(self.state_root):
+            _trusted_directory(
+                self.state_root,
+                "updater state directory",
+                trusted_uid=self.trusted_uid,
+                mode=0o700,
+            )
+        if _path_entry_exists(self.audit_path.parent):
+            _trusted_directory(
+                self.audit_path.parent,
+                "updater audit directory",
+                trusted_uid=self.trusted_uid,
+                mode=0o700,
+            )
+        if _path_entry_exists(self.audit_path):
+            self._trusted_regular_file(self.audit_path, "updater audit log", private=True)
+
+    def validate_independent_alert_configuration(self) -> None:
+        parent = INDEPENDENT_ALERT_ENV_PATH.parent
+        try:
+            parent_stat = parent.lstat()
+        except OSError as exc:
+            raise UpdateError(f"cannot inspect independent-alert config directory {parent}: {exc}") from exc
+        if (
+            not stat.S_ISDIR(parent_stat.st_mode)
+            or parent_stat.st_uid != self.trusted_uid
+            or parent_stat.st_gid != self.candidate_gid
+            or stat.S_IMODE(parent_stat.st_mode) != 0o750
+        ):
+            raise UpdateError("independent-alert config directory must have exact trusted ownership and mode 0750")
+        if INDEPENDENT_ALERT_ENV_PATH == Path("/etc/macprovider/monitor.env"):
+            etc_stat = Path("/etc").lstat()
+            if (
+                not stat.S_ISDIR(etc_stat.st_mode)
+                or etc_stat.st_uid != self.trusted_uid
+                or stat.S_IMODE(etc_stat.st_mode) & 0o022
+            ):
+                raise UpdateError("independent-alert config ancestor /etc is unsafe")
+        try:
+            env_stat = INDEPENDENT_ALERT_ENV_PATH.lstat()
+        except OSError as exc:
+            raise UpdateError(
+                f"cannot inspect independent-alert config {INDEPENDENT_ALERT_ENV_PATH}: {exc}"
+            ) from exc
+        if (
+            not stat.S_ISREG(env_stat.st_mode)
+            or env_stat.st_uid != self.trusted_uid
+            or env_stat.st_gid != self.candidate_gid
+            or env_stat.st_nlink != 1
+            or stat.S_IMODE(env_stat.st_mode) != 0o640
+        ):
+            raise UpdateError("independent-alert config must have exact trusted ownership and mode 0640")
+        text = _read_trusted_text(
+            INDEPENDENT_ALERT_ENV_PATH,
+            "independent-alert configuration",
+            trusted_uid=self.trusted_uid,
+            limit=64 * 1024,
+        )
+        values: dict[str, str] = {}
+        for number, source in enumerate(text.splitlines(), 1):
+            line = source.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                raise UpdateError(f"{INDEPENDENT_ALERT_ENV_PATH}:{number}: expected KEY=VALUE")
+            key, value = (part.strip() for part in line.split("=", 1))
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or key in values:
+                raise UpdateError(f"{INDEPENDENT_ALERT_ENV_PATH}:{number}: invalid or duplicate key")
+            values[key] = value
+        for key in ("ALERT_EMAIL", "GMAIL_USER", "GMAIL_APP_PASSWORD"):
+            if not values.get(key):
+                raise UpdateError(f"independent Gmail alert is not configured: {key} is empty")
+
+    def validate_policy_inputs(self, config_path: Path) -> None:
+        self.validate_recovery_inputs(config_path)
+        for path, description in (
+            (self.public_key, "pinned release public key"),
+            (self.config.revoked_versions_file, "revoked versions policy"),
+            (self.config.deadman_api_token_file, "dead-man API token"),
+        ):
+            if not path.is_absolute():
+                raise UpdateError(f"{description} path must be absolute")
+        self._trusted_regular_file(self.public_key, "pinned release public key")
+        self._trusted_regular_file(
+            self.config.revoked_versions_file,
+            "revoked versions policy",
+            private=True,
+        )
+        self._trusted_regular_file(
+            self.config.deadman_api_token_file,
+            "dead-man API token",
+            private=True,
+        )
+        self.validate_independent_alert_configuration()
+
+    def coordinator_runtime(self) -> CoordinatorRuntime:
+        result = self.run_command(
+            ["systemctl", "show", "--property=MainPID", "--value", "macprovider-coordinator.service"],
+            check=False,
+            timeout=10,
+        )
+        value = result.stdout.strip()
+        if result.returncode != 0 or not value.isascii() or not value.isdigit() or int(value) <= 0:
+            raise UpdateError("could not identify the running coordinator process")
+        proc = Path("/proc") / value
+
+        def proc_bytes(name: str) -> bytes:
+            try:
+                with (proc / name).open("rb") as handle:
+                    payload = handle.read(1024 * 1024 + 1)
+            except OSError as exc:
+                raise UpdateError(f"could not read coordinator {name}: {exc}") from exc
+            if len(payload) > 1024 * 1024:
+                raise UpdateError(f"coordinator {name} exceeds the updater safety limit")
+            return payload
+
+        argv = [os.fsdecode(item) for item in proc_bytes("cmdline").split(b"\0") if item]
+        if not argv or Path(argv[0]) != self.install_root / "coordinator":
+            raise UpdateError("running coordinator executable does not match the pinned Pearl install path")
+
+        def flag_value(name: str, *, required: bool) -> str | None:
+            values: list[str] = []
+            for index, argument in enumerate(argv[1:]):
+                if argument == name:
+                    absolute_index = index + 1
+                    if absolute_index + 1 >= len(argv):
+                        raise UpdateError(f"running coordinator has an incomplete {name} flag")
+                    values.append(argv[absolute_index + 1])
+                elif argument.startswith(name + "="):
+                    values.append(argument.split("=", 1)[1])
+            if len(values) > 1:
+                raise UpdateError(f"running coordinator has duplicate {name} flags")
+            if required and not values:
+                raise UpdateError(f"running coordinator omits required {name}")
+            return values[0] if values else None
+
+        base = Path(str(flag_value("--config", required=True)))
+        expected_base = self.install_root / "coordinator.yaml"
+        if base != expected_base:
+            raise UpdateError(f"running coordinator config is {base}, expected {expected_base}")
+        overlay_value = flag_value("--config-overlay", required=False)
+        overlay = Path(overlay_value) if overlay_value else None
+        for path in (base, overlay):
+            if path is not None:
+                if not path.is_absolute():
+                    raise UpdateError(f"coordinator config path must be absolute: {path}")
+                self._trusted_config_file(path)
+
+        environment: dict[str, str] = {}
+        for item in proc_bytes("environ").split(b"\0"):
+            if not item or b"=" not in item:
+                continue
+            key, raw_value = item.split(b"=", 1)
+            environment[os.fsdecode(key)] = os.fsdecode(raw_value)
+        referenced: set[str] = set()
+        for path in (base, overlay):
+            if path is None:
+                continue
+            text = _read_trusted_text(
+                path,
+                "coordinator config",
+                trusted_uid=self.trusted_uid,
+            )
+            referenced.update(re.findall(r"\benv:([A-Z][A-Z0-9_]*)\b", text))
+        missing = sorted(name for name in referenced if not environment.get(name))
+        if missing:
+            raise UpdateError(f"running coordinator environment omits required config variable: {missing[0]}")
+        minimal_environment = {name: environment[name] for name in sorted(referenced)}
+        return CoordinatorRuntime(base, overlay, minimal_environment)
+
+    def gateway_config_path(self) -> Path:
+        result = self.run_command(
+            ["systemctl", "show", "--property=MainPID", "--value", "macprovider-gateway.service"],
+            check=False,
+            timeout=10,
+        )
+        value = result.stdout.strip()
+        if result.returncode != 0 or not value.isascii() or not value.isdigit() or int(value) <= 0:
+            raise UpdateError("could not identify the running gateway process")
+        try:
+            payload = (Path("/proc") / value / "cmdline").read_bytes()
+        except OSError as exc:
+            raise UpdateError(f"could not read gateway cmdline: {exc}") from exc
+        if len(payload) > 1024 * 1024:
+            raise UpdateError("gateway cmdline exceeds the updater safety limit")
+        argv = [os.fsdecode(item) for item in payload.split(b"\0") if item]
+        if not argv or Path(argv[0]) != self.install_root / "gateway":
+            raise UpdateError("running gateway executable does not match the pinned Pearl install path")
+        values: list[str] = []
+        for index, argument in enumerate(argv[1:]):
+            if argument == "--config":
+                absolute_index = index + 1
+                if absolute_index + 1 >= len(argv):
+                    raise UpdateError("running gateway has an incomplete --config flag")
+                values.append(argv[absolute_index + 1])
+            elif argument.startswith("--config="):
+                values.append(argument.split("=", 1)[1])
+        if len(values) != 1:
+            raise UpdateError("running gateway must have exactly one --config flag")
+        path = Path(values[0])
+        expected = self.install_root / "gateway.yaml"
+        if path != expected:
+            raise UpdateError(f"running gateway config is {path}, expected {expected}")
+        self._trusted_config_file(path)
+        return path
+
+    def stats_mirror_runtime(self) -> tuple[tuple[Path, ...], Path]:
+        requested = ("FragmentPath", "DropInPaths", "NeedDaemonReload")
+        result = self.run_command(
+            [
+                "systemctl",
+                "show",
+                *(f"--property={name}" for name in requested),
+                "stats-billing-mirror.service",
+            ],
+            check=False,
+            timeout=10,
+        )
+        properties: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                properties[key] = value
+        if result.returncode != 0:
+            raise UpdateError("could not identify the loaded stats billing mirror unit")
+        fragment = Path(properties.get("FragmentPath", ""))
+        expected = SYSTEMD_ROOT / "stats-billing-mirror.service"
+        if fragment != expected:
+            raise UpdateError(f"loaded stats billing mirror unit is {fragment}, expected {expected}")
+        gate_dropin = SYSTEMD_ROOT / "stats-billing-mirror.service.d" / TRANSACTION_GATE_DROPIN_NAME
+        if properties.get("DropInPaths") != str(gate_dropin):
+            raise UpdateError("stats billing mirror service has unverified systemd drop-ins")
+        if properties.get("NeedDaemonReload") != "no":
+            raise UpdateError("systemd must reload the verified stats billing mirror service before rollout")
+        self._trusted_regular_file(fragment, "stats billing mirror unit")
+        if _read_trusted_text(
+            gate_dropin,
+            "stats billing mirror transaction-gate drop-in",
+            trusted_uid=self.trusted_uid,
+        ) != TRANSACTION_GATE_DROPIN_TEXT:
+            raise UpdateError("stats billing mirror transaction-gate drop-in content is invalid")
+        text = _read_trusted_text(fragment, "stats billing mirror unit", trusted_uid=self.trusted_uid)
+        commands = [line.split("=", 1)[1] for line in text.splitlines() if line.startswith("ExecStart=")]
+        if len(commands) != 1:
+            raise UpdateError("stats billing mirror unit must have exactly one ExecStart")
+        try:
+            argv = shlex.split(commands[0], posix=True)
+        except ValueError as exc:
+            raise UpdateError("stats billing mirror ExecStart cannot be parsed safely") from exc
+        if not argv or argv[0] != "/opt/macprovider-stats/stats-billing-mirror":
+            raise UpdateError("stats billing mirror executable does not match the pinned Pearl path")
+        sqlite_values: list[str] = []
+        for index, argument in enumerate(argv[1:]):
+            if argument == "--sqlite":
+                absolute_index = index + 1
+                if absolute_index + 1 >= len(argv):
+                    raise UpdateError("stats billing mirror has an incomplete --sqlite flag")
+                sqlite_values.append(argv[absolute_index + 1])
+            elif argument.startswith("--sqlite="):
+                sqlite_values.append(argument.split("=", 1)[1])
+        if len(sqlite_values) != 1:
+            raise UpdateError("stats billing mirror must have exactly one --sqlite flag")
+        return (fragment, gate_dropin), self._database_path(sqlite_values[0], "stats billing mirror --sqlite")
+
+    @staticmethod
+    def _yaml_section_scalar(text: str, path: Path, section: str, field: str, *, required: bool) -> str | None:
+        section_re = re.compile(rf"^{re.escape(section)}:\s*(?:#.*)?$")
+        field_re = re.compile(
+            rf"^ +{re.escape(field)}: *(?:\"([^\"]*)\"|'([^']*)'|([^#\s]+)) *(?:#.*)?$"
+        )
+        section_count = 0
+        in_section = False
+        values: list[str] = []
+        for raw in text.splitlines():
+            if "\t" in raw:
+                raise UpdateError(f"tabs are not allowed in updater-parsed YAML: {path}")
+            if raw and not raw.startswith((" ", "#")):
+                in_section = section_re.fullmatch(raw) is not None
+                if in_section:
+                    section_count += 1
+                continue
+            if in_section:
+                match = field_re.fullmatch(raw)
+                if match:
+                    values.append(next(value for value in match.groups() if value is not None))
+        if section_count > 1 or len(values) > 1:
+            raise UpdateError(f"ambiguous {section}.{field} in {path}")
+        if not values:
+            if required:
+                raise UpdateError(f"effective config omits {section}.{field}: {path}")
+            return None
+        return values[0]
+
+    @staticmethod
+    def _database_path(value: str, description: str) -> Path:
+        if not re.fullmatch(r"/[A-Za-z0-9._/-]+", value):
+            raise UpdateError(f"{description} must be an absolute path using safe characters")
+        path = Path(value)
+        if path != Path(os.path.normpath(value)) or ".." in path.parts:
+            raise UpdateError(f"{description} must be a normalized absolute path")
+        return path
+
+    def capture_database_paths(self) -> None:
+        if self.gateway_db is not None:
+            paths = (self.gateway_db, *self.databases)
+            config_hashes: dict[Path, str] = {}
+        else:
+            runtime = self.coordinator_runtime_state or self.coordinator_runtime()
+            coordinator_paths = [runtime.base_config]
+            if runtime.overlay_config is not None:
+                coordinator_paths.append(runtime.overlay_config)
+            effective: dict[tuple[str, str], str] = {}
+            for config_path in coordinator_paths:
+                text = _read_trusted_text(config_path, "coordinator config", trusted_uid=self.trusted_uid)
+                for key in (("storage", "db_path"), ("malibu_emission", "sqlite_payout_db_path")):
+                    value = self._yaml_section_scalar(text, config_path, *key, required=False)
+                    if value is not None:
+                        effective[key] = value
+            storage = effective.get(("storage", "db_path"))
+            if storage is None:
+                raise UpdateError("effective coordinator config omits storage.db_path")
+            gateway_config = self.gateway_config_path()
+            gateway_text = _read_trusted_text(gateway_config, "gateway config", trusted_uid=self.trusted_uid)
+            gateway = self._yaml_section_scalar(gateway_text, gateway_config, "storage", "db_path", required=True)
+            assert gateway is not None
+            stats_unit_inputs, stats_database = self.stats_mirror_runtime()
+            resolved = [
+                self._database_path(gateway, "gateway storage.db_path"),
+                self._database_path(storage, "coordinator storage.db_path"),
+                stats_database,
+            ]
+            payout = effective.get(("malibu_emission", "sqlite_payout_db_path"))
+            if payout:
+                resolved.append(self._database_path(payout, "coordinator malibu_emission.sqlite_payout_db_path"))
+            paths = tuple(resolved)
+            config_hashes = {
+                path: sha256_file(path) for path in (*coordinator_paths, gateway_config, *stats_unit_inputs)
+            }
+        if any(not path.is_absolute() for path in paths) or len(set(paths)) != len(paths):
+            raise UpdateError("effective database paths must be distinct absolute paths")
+        self.gateway_db = paths[0]
+        self.databases = tuple(paths)
+        self.runtime_config_hashes = config_hashes
+        self._journal_transition(
+            "database_paths_captured",
+            database_paths=[str(path) for path in paths],
+            database_config_hashes={str(path): digest for path, digest in config_hashes.items()},
+        )
+
+    @staticmethod
+    def _advertised_field(text: str, path: Path) -> tuple[int, re.Match[str], list[str]] | None:
+        lines = text.splitlines(keepends=True)
+        section_count = 0
+        in_section = False
+        matches: list[tuple[int, re.Match[str]]] = []
+        section_re = re.compile(r"^coordinator_advertised_version:\s*(?:#.*)?(?:\r?\n)?$")
+        field_re = re.compile(
+            r"^( +latest_binary_version: *)(?:\"([^\"]*)\"|'([^']*)'|([^#\s]+))( *(?:#.*)?)(\r?\n)?$"
+        )
+        for index, line in enumerate(lines):
+            if line and not line.startswith((" ", "\t", "\r", "\n")):
+                in_section = section_re.fullmatch(line) is not None
+                if in_section:
+                    section_count += 1
+                continue
+            if in_section:
+                match = field_re.fullmatch(line)
+                if match:
+                    matches.append((index, match))
+        if section_count > 1 or len(matches) > 1:
+            raise UpdateError(f"ambiguous coordinator advertised-version field in {path}")
+        if not matches:
+            return None
+        index, match = matches[0]
+        return index, match, lines
+
+    def prepare_config_update(self, release: Release) -> ConfigUpdate:
+        self._assert_candidate_validation_directory(release.directory)
+        runtime = self.coordinator_runtime()
+        self.coordinator_runtime_state = runtime
+        config_paths = [runtime.base_config]
+        if runtime.overlay_config is not None:
+            config_paths.append(runtime.overlay_config)
+        located: list[tuple[Path, int, re.Match[str], list[str]]] = []
+        config_texts: dict[Path, str] = {}
+        config_hashes: dict[Path, str] = {}
+        for path in config_paths:
+            text = _read_trusted_text(
+                path,
+                "coordinator config",
+                trusted_uid=self.trusted_uid,
+            )
+            config_texts[path] = text
+            config_hashes[path] = sha256_file(path)
+            field = self._advertised_field(text, path)
+            if field is not None:
+                located.append((path, *field))
+        if not located:
+            raise UpdateError("effective coordinator configuration has no advertised binary version field")
+        target, index, match, lines = located[-1]
+        previous = next(value for value in match.groups()[1:4] if value is not None)
+        lines[index] = f'{match.group(1)}"{release.provider_advertised_version}"{match.group(5)}{match.group(6) or ""}'
+        staged_configs: dict[Path, Path] = {}
+        for config_index, path in enumerate(config_paths):
+            payload = "".join(lines) if path == target else config_texts[path]
+            staged_path = self.stage_candidate_config(
+                release.directory,
+                f"coordinator-validation-{config_index}.yaml",
+                payload,
+            )
+            staged_configs[path] = staged_path
+        staged = staged_configs[target]
+
+        validation_base = staged_configs[runtime.base_config]
+        validation_argv = [
+            str(release.directory / release.coordinator.asset),
+            "--config",
+            str(validation_base),
+        ]
+        if runtime.overlay_config is not None:
+            validation_overlay = staged_configs[runtime.overlay_config]
+            validation_argv.extend(["--config-overlay", str(validation_overlay)])
+        validation_argv.append("--validate-config")
+        result = self.run_candidate_command(
+            validation_argv,
+            timeout=30,
+            cwd=release.directory,
+            environment=runtime.environment,
+        )
+        if result.returncode != 0 or result.stdout.strip() != "config: ok":
+            raise UpdateError("candidate rejected the staged coordinator config; output suppressed")
+        for path, expected_hash in config_hashes.items():
+            if sha256_file(path) != expected_hash:
+                raise UpdateError(f"coordinator config changed during candidate validation: {path}")
+        update = ConfigUpdate(
+            target=target,
+            staged=staged,
+            original_sha256=config_hashes[target],
+            previous_version=previous,
+            next_version=release.provider_advertised_version,
+        )
+        self.config_update = update
+        self.audit(
+            "coordinator_config_verified",
+            "success",
+            candidate=release.tag,
+            target=str(target),
+            previous_version=previous,
+            next_version=release.provider_advertised_version,
+        )
+        return update
+
+    @staticmethod
+    def _systemd_seconds(value: str) -> int:
+        match = re.fullmatch(r"([0-9]+)(us|ms|s|min|h)", value)
+        if not match:
+            raise UpdateError(f"unsupported systemd duration: {value!r}")
+        amount = int(match.group(1))
+        unit = match.group(2)
+        if unit == "us":
+            return amount // 1_000_000
+        if unit == "ms":
+            return amount // 1_000
+        if unit == "s":
+            return amount
+        if unit == "min":
+            return amount * 60
+        return amount * 3600
+
+    def verify_canary_authority(self) -> None:
+        unit_paths: dict[str, Path] = {}
+        for path, expected in CANARY_AUTHORITY_FILES.items():
+            self._trusted_regular_file(path, "canary rollout-authority file")
+            actual = sha256_file(path)
+            if actual != expected:
+                raise UpdateError(
+                    f"canary rollout authority {CANARY_AUTHORITY_VERSION} hash mismatch for {path}"
+                )
+            if path.name in ("canary-buyer.service", "canary-buyer.timer"):
+                unit_paths[path.name] = path
+        if set(unit_paths) != {"canary-buyer.service", "canary-buyer.timer"}:
+            raise UpdateError("canary rollout authority omits a required systemd unit")
+
+        loaded: dict[str, dict[str, str]] = {}
+        for unit, unit_path in unit_paths.items():
+            requested = ["FragmentPath", "DropInPaths", "NeedDaemonReload"]
+            if unit.endswith(".service"):
+                requested.append("TimeoutStartUSec")
+            result = self.run_command(
+                ["systemctl", "show", *(f"--property={name}" for name in requested), unit],
+                check=False,
+                timeout=10,
+            )
+            properties: dict[str, str] = {}
+            for line in result.stdout.splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    properties[key] = value
+            if result.returncode != 0 or properties.get("FragmentPath") != str(unit_path):
+                raise UpdateError(f"systemd is not using the verified {unit} fragment")
+            expected_dropins = ""
+            if unit == "canary-buyer.service":
+                gate_dropin = SYSTEMD_ROOT / "canary-buyer.service.d" / TRANSACTION_GATE_DROPIN_NAME
+                if _read_trusted_text(
+                    gate_dropin,
+                    "canary transaction-gate drop-in",
+                    trusted_uid=self.trusted_uid,
+                ) != TRANSACTION_GATE_DROPIN_TEXT:
+                    raise UpdateError("canary transaction-gate drop-in content is invalid")
+                expected_dropins = str(gate_dropin)
+            if properties.get("DropInPaths", "") != expected_dropins:
+                raise UpdateError(f"{unit} has unverified systemd drop-ins")
+            if properties.get("NeedDaemonReload") != "no":
+                raise UpdateError(f"systemd must reload the verified {unit} before rollout")
+            loaded[unit] = properties
+        unit_budget = self._systemd_seconds(loaded["canary-buyer.service"].get("TimeoutStartUSec", ""))
+        if unit_budget != CANARY_UNIT_BUDGET_S:
+            raise UpdateError(
+                f"verified canary-buyer.service budget is {unit_budget}s, expected {CANARY_UNIT_BUDGET_S}s"
+            )
+        if self.config.canary_timeout_s <= unit_budget:
+            raise UpdateError("updater canary timeout must exceed the verified canary unit budget")
+        self.audit(
+            "canary_rollout_authority_verified",
+            "success",
+            authority=CANARY_AUTHORITY_VERSION,
+            authority_commit=CANARY_AUTHORITY_COMMIT,
+            unit_budget_s=unit_budget,
+            updater_timeout_s=self.config.canary_timeout_s,
+        )
+
+    def _deadman_api_token(self) -> str:
+        path = self.config.deadman_api_token_file
+        token = _read_trusted_text(
+            path,
+            "dead-man API token",
+            trusted_uid=self.trusted_uid,
+            private=True,
+            limit=4096,
+        )
+        if len(token) > 4096:
+            raise UpdateError("dead-man API token exceeds the safety limit")
+        token = token.strip()
+        if not token or any(character.isspace() for character in token):
+            raise UpdateError("dead-man API token is empty or contains whitespace")
+        return token
+
+    def validate_deadman_configuration(self) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", self.config.deadman_heartbeat_id):
+            raise UpdateError("PEARL_UPDATER_DEADMAN_HEARTBEAT_ID is missing or invalid")
+        if not self.config.deadman_api_token_file.is_absolute():
+            raise UpdateError("PEARL_UPDATER_DEADMAN_API_TOKEN_FILE must be absolute")
+        return self._deadman_api_token()
+
+    @staticmethod
+    def _deadman_get_state(payload: object) -> bool:
+        try:
+            attributes = payload["data"]["attributes"]  # type: ignore[index]
+            status_value = attributes["status"]
+            paused_at = attributes["paused_at"]
+        except (KeyError, TypeError) as exc:
+            raise UpdateError("dead-man GET response omitted status/paused_at") from exc
+        if status_value not in ("paused", "pending", "up", "down"):
+            raise UpdateError("dead-man GET response returned an unsupported status")
+        if status_value == "paused":
+            if not isinstance(paused_at, str) or not paused_at.strip():
+                raise UpdateError("dead-man paused status omitted paused_at")
+            return True
+        if paused_at is not None:
+            raise UpdateError("dead-man active status returned a non-null paused_at")
+        return False
+
+    def deadman_request(self, method: str, paused: bool | None = None) -> bool:
+        token = self.validate_deadman_configuration()
+        url = (
+            "https://uptime.betterstack.com/api/v2/heartbeats/"
+            + self.config.deadman_heartbeat_id
+        )
+        body: bytes | None = None
+        headers = {
+            "Accept": "application/json",
+            "Authorization": "Bearer " + token,
+            "User-Agent": "macprovider-pearl-updater/1",
+        }
+        if method == "PATCH":
+            if paused is None:
+                raise UpdateError("dead-man PATCH requires a paused state")
+            body = json.dumps({"paused": paused}, separators=(",", ":")).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        elif method != "GET" or paused is not None:
+            raise UpdateError("unsupported dead-man API request")
+        request = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=self.config.request_timeout_s) as response:
+                if response.status < 200 or response.status >= 300:
+                    raise UpdateError(f"dead-man API returned HTTP {response.status}")
+                payload_bytes = response.read(1024 * 1024 + 1)
+        except (OSError, urllib.error.URLError, http.client.HTTPException) as exc:
+            raise UpdateError(f"dead-man API {method} failed") from exc
+        if len(payload_bytes) > 1024 * 1024:
+            raise UpdateError("dead-man API response exceeds the safety limit")
+        try:
+            payload = json.loads(payload_bytes)
+        except ValueError as exc:
+            raise UpdateError("dead-man API response is invalid JSON") from exc
+        if method == "GET":
+            return self._deadman_get_state(payload)
+        try:
+            attributes = payload["data"]["attributes"]
+            attributes["paused_at"]
+        except (KeyError, TypeError) as exc:
+            raise UpdateError("dead-man PATCH response omitted paused_at") from exc
+        observed = self.deadman_request("GET")
+        if observed is not paused:
+            raise UpdateError("dead-man API did not apply the requested paused state")
+        return observed
+
+    def enter_deadman_maintenance(self) -> None:
+        previous = self.deadman_request("GET")
+        self.deadman_previous_paused = previous
+        self._journal_transition(
+            "deadman_state_captured",
+            deadman_previous_paused=previous,
+            deadman_restore_required=False,
+        )
+        if previous:
+            self.audit("deadman_maintenance", "already_paused")
+            return
+        self.deadman_restore_required = True
+        self._journal_transition(
+            "deadman_pause_pending",
+            deadman_restore_required=True,
+        )
+        try:
+            self.deadman_request("PATCH", True)
+        except Exception as exc:
+            restore_error: Exception | None = None
+            try:
+                self.deadman_request("PATCH", False)
+                self.deadman_restore_required = False
+            except Exception as restore_exc:
+                restore_error = restore_exc
+            if restore_error:
+                raise UpdateError(
+                    f"could not enter dead-man maintenance: {exc}; restoring active monitoring also failed: {restore_error}"
+                ) from exc
+            raise
+        self.audit("deadman_maintenance", "paused")
+        self._journal_transition("deadman_paused")
+
+    def restore_deadman_monitoring(self) -> None:
+        if not self.deadman_restore_required:
+            return
+        if self.deadman_previous_paused is not False:
+            raise UpdateError("dead-man prior state is unavailable for restoration")
+        self._journal_transition("deadman_restore_pending")
+        self.deadman_request("PATCH", False)
+        self.deadman_restore_required = False
+        self._journal_transition("deadman_restored", deadman_restore_required=False)
+        self.audit("deadman_maintenance", "restored_active")
+
+    def get_json(self, url: str) -> dict[str, Any]:
+        request = urllib.request.Request(url, headers={"User-Agent": "macprovider-pearl-updater/1"})
+        with urllib.request.urlopen(request, timeout=self.config.request_timeout_s) as response:
+            if response.status != 200:
+                raise UpdateError(f"health request returned HTTP {response.status}: {url}")
+            data = response.read(1024 * 1024 + 1)
+        if len(data) > 1024 * 1024:
+            raise UpdateError(f"health response too large: {url}")
+        try:
+            payload = json.loads(data)
+        except ValueError as exc:
+            raise UpdateError(f"health response is invalid JSON: {url}") from exc
+        if not isinstance(payload, dict):
+            raise UpdateError(f"health response is not an object: {url}")
+        return payload
+
+    def _boot_id(self) -> str:
+        value = _read_trusted_text(
+            self.boot_id_path,
+            "kernel boot identifier",
+            trusted_uid=self.trusted_uid,
+            limit=128,
+        ).strip()
+        if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value):
+            raise UpdateError("kernel boot identifier is invalid")
+        return value
+
+    def _permit_path(self, unit: str) -> Path:
+        if unit not in GATED_SERVICE_UNITS:
+            raise UpdateError(f"unit is not protected by the transaction gate: {unit}")
+        return self.gate_state_root / "permits" / f"{unit}.json"
+
+    def issue_start_permit(self, unit: str, *, ttl_s: int = 30) -> Path | None:
+        if unit not in GATED_SERVICE_UNITS or self.journal is None:
+            return None
+        transaction_id = self.journal.get("transaction_id")
+        journal_boot_id = self.journal.get("boot_id")
+        if not isinstance(transaction_id, str) or not re.fullmatch(r"[0-9a-f]{64}", transaction_id):
+            raise UpdateError("phase journal transaction identifier is invalid")
+        if journal_boot_id != self._boot_id():
+            raise UpdateError("phase journal boot identifier does not match the current boot")
+        if ttl_s < 1 or ttl_s > 600:
+            raise UpdateError("transaction start permit lifetime is out of bounds")
+        self._ensure_private_directory(self.gate_state_root, "updater runtime gate directory")
+        permit_directory = self.gate_state_root / "permits"
+        self._ensure_private_directory(permit_directory, "updater start-permit directory")
+        path = self._permit_path(unit)
+        if _path_entry_exists(path):
+            self._trusted_regular_file(path, "updater start permit", private=True)
+            path.unlink()
+            _fsync_directory(permit_directory)
+        payload = {
+            "schema_version": 1,
+            "unit": unit,
+            "transaction_id": transaction_id,
+            "boot_id": journal_boot_id,
+            "expires_at": int(time.time()) + ttl_s,
+            "nonce": secrets.token_hex(32),
+        }
+        _secure_atomic_write(
+            path,
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n",
+        )
+        return path
+
+    def revoke_start_permit(self, path: Path | None) -> None:
+        if path is None:
+            return
+        path.unlink(missing_ok=True)
+        if _path_entry_exists(path.parent):
+            _fsync_directory(path.parent)
+
+    def service_active(self, unit: str) -> bool:
+        result = self.run_command(
+            ["systemctl", "is-active", "--quiet", unit],
+            check=False,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return True
+        if result.returncode == 3:
+            return False
+        raise UpdateError(f"could not determine systemd active state for {unit}")
+
+    def assert_unit_quiescent(self, unit: str) -> None:
+        result = self.run_command(
+            [
+                "systemctl",
+                "show",
+                "--property=ActiveState",
+                "--property=SubState",
+                "--property=Job",
+                unit,
+            ],
+            check=False,
+            timeout=10,
+        )
+        properties: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                properties[key] = value
+        if result.returncode != 0:
+            raise UpdateError(f"could not prove {unit} quiescent")
+        if properties.get("ActiveState") != "inactive":
+            raise UpdateError(f"{unit} is not inactive")
+        if properties.get("Job", "") not in ("", "0"):
+            raise UpdateError(f"{unit} still has a queued systemd job")
+
+    def systemctl(self, action: str, unit: str) -> None:
+        self._journal_transition(
+            f"systemctl_{action}_pending",
+            pending_action={"kind": "systemctl", "action": action, "unit": unit},
+        )
+        permit = self.issue_start_permit(unit) if action == "start" else None
+        try:
+            result = self.run_command(["systemctl", action, unit], check=False, timeout=420)
+        except CommandTimeout as exc:
+            if action == "start":
+                cleanup = self.run_command(["systemctl", "stop", unit], check=False, timeout=420)
+                if cleanup.returncode != 0:
+                    raise UpdateError(f"systemctl start {unit} timed out and cancellation failed") from exc
+            raise
+        finally:
+            self.revoke_start_permit(permit)
+        if result.returncode != 0:
+            with contextlib.suppress(Exception):
+                self.audit("service_action", "failed", action=action, unit=unit, reason=result.stderr.strip())
+            raise UpdateError(f"systemctl {action} {unit} failed: {result.stderr.strip()}")
+        self.audit("service_action", "success", action=action, unit=unit)
+        self._journal_transition(
+            f"systemctl_{action}_complete",
+            pending_action=None,
+        )
+
+    def run_canary_gate(self) -> None:
+        unit = "canary-buyer.service"
+        self._journal_transition(
+            "canary_gate_pending",
+            pending_action={"kind": "canary_gate", "unit": unit},
+        )
+        permit = self.issue_start_permit(unit)
+        try:
+            result = self.run_command(
+                ["systemctl", "start", unit],
+                check=False,
+                timeout=self.config.canary_timeout_s,
+            )
+        except CommandTimeout as exc:
+            self._journal_transition(
+                "canary_gate_cancel_pending",
+                pending_action={"kind": "systemctl", "action": "stop", "unit": unit},
+            )
+            cleanup = self.run_command(
+                ["systemctl", "stop", unit],
+                check=False,
+                timeout=420,
+            )
+            if cleanup.returncode != 0 or self.service_active(unit):
+                raise UpdateError(
+                    "canary-buyer exceeded the updater deadline and its systemd job could not be cancelled"
+                ) from exc
+            raise UpdateError(
+                "canary-buyer exceeded the updater deadline; its systemd job was cancelled"
+            ) from exc
+        finally:
+            self.revoke_start_permit(permit)
+        if result.returncode != 0:
+            raise UpdateError(f"canary-buyer final serving gate failed: {result.stderr.strip()}")
+        state = self.run_command(
+            ["systemctl", "show", "--property=Result", "--value", unit],
+            check=False,
+            timeout=10,
+        )
+        if state.returncode != 0 or state.stdout.strip() != "success":
+            raise UpdateError("canary-buyer final serving gate did not complete successfully")
+        self.audit(
+            "canary_serving_gate",
+            "success",
+            authority=CANARY_AUTHORITY_VERSION,
+        )
+        self._journal_transition("canary_gate_complete", pending_action=None)
+
+    def wait_for(self, description: str, timeout_s: int, check: Callable[[], bool]) -> None:
+        deadline = time.monotonic() + timeout_s
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                if check():
+                    self.audit("rollout_check", "success", check=description)
+                    return
+            except Exception as exc:  # health convergence is retried until deadline
+                last_error = exc
+            self.sleep(2)
+        detail = f": {last_error}" if last_error else ""
+        with contextlib.suppress(Exception):
+            self.audit("rollout_check", "failed", check=description, reason=str(last_error) if last_error else "timeout")
+        raise UpdateError(f"timeout waiting for {description}{detail}")
+
+    def gateway_reservations(self) -> int:
+        if self.gateway_db is None:
+            raise UpdateError("effective gateway database path was not captured")
+        result = self.run_command(
+            [
+                "sqlite3",
+                "-bail",
+                str(self.gateway_db),
+                "SELECT (SELECT COUNT(*) FROM concurrency_reservations WHERE status='active') + "
+                "(SELECT COUNT(*) FROM quota_reservations WHERE status='active');",
+            ],
+            check=False,
+            timeout=10,
+        )
+        value = result.stdout.strip()
+        if result.returncode != 0 or not value.isascii() or not value.isdigit():
+            raise UpdateError("could not prove gateway in-flight reservation count")
+        return int(value)
+
+    def drain_gateway(self) -> None:
+        deadline = time.monotonic() + self.config.gateway_drain_timeout_s
+        zero_since: float | None = None
+        while time.monotonic() < deadline:
+            count = self.gateway_reservations()
+            if count == 0:
+                zero_since = zero_since or time.monotonic()
+                if time.monotonic() - zero_since >= self.config.gateway_drain_steady_s:
+                    return
+            else:
+                zero_since = None
+            self.sleep(1)
+        raise UpdateError("gateway drain timeout; active reservations remain")
+
+    def capture_rollout_state(self) -> None:
+        self.capture_database_paths()
+        coord = self.get_json("http://127.0.0.1:8444/healthz")
+        pool_size = coord.get("pool_size")
+        if type(pool_size) is not int or pool_size < 0:
+            raise UpdateError("coordinator health omitted a valid pool_size")
+        if pool_size > 0 and not self.config.allow_provider_drain:
+            raise UpdateError(
+                f"provider drain protection: {pool_size} connected provider(s); set PEARL_UPDATER_ALLOW_PROVIDER_DRAIN=1 only after verifying graceful-drain-capable clients"
+            )
+        self.previous_services = {
+            "macprovider-coordinator.service": self.service_active("macprovider-coordinator.service"),
+            "macprovider-gateway.service": self.service_active("macprovider-gateway.service"),
+        }
+        if not all(self.previous_services.values()):
+            raise UpdateError("coordinator and gateway must both be active before rollout")
+        self.canary_timer_was_active = self.service_active("canary-buyer.timer")
+        self.canary_service_was_active = self.service_active("canary-buyer.service")
+        self.previous_auxiliary_units = {
+            unit: self.service_active(unit) for unit in AUXILIARY_UNITS
+        }
+        self.previous_versions = self.read_installed_versions()
+        self._journal_transition(
+            "runtime_state_captured",
+            previous_services=dict(self.previous_services),
+            canary_timer_was_active=self.canary_timer_was_active,
+            canary_service_was_active=self.canary_service_was_active,
+            previous_auxiliary_units=dict(self.previous_auxiliary_units),
+            previous_versions=dict(self.previous_versions),
+        )
+
+    def read_installed_versions(self) -> dict[str, str]:
+        versions: dict[str, str] = {}
+        for name in ("coordinator", "gateway"):
+            result = self.run_command([str(self.install_root / name), "--version"], check=False, timeout=10)
+            value = result.stdout.strip()
+            if result.returncode != 0 or not value or len(value) > 128:
+                raise UpdateError(f"could not capture previous {name} embedded version")
+            versions[name] = value
+        return versions
+
+    def stop_for_rollout(self) -> None:
+        if not self.previous_services:
+            self.capture_rollout_state()
+        for unit in ("macprovider-archive-rotate.timer", "stats-billing-mirror.timer"):
+            self.systemctl("stop", unit)
+        for unit in ("macprovider-archive-rotate.service", "stats-billing-mirror.service"):
+            self.systemctl("stop", unit)
+        for unit in AUXILIARY_UNITS:
+            self.assert_unit_quiescent(unit)
+        self.systemctl("stop", "canary-buyer.timer")
+        self.systemctl("stop", "canary-buyer.service")
+        self.assert_unit_quiescent("canary-buyer.timer")
+        self.assert_unit_quiescent("canary-buyer.service")
+        self.drain_gateway()
+        self.systemctl("stop", "macprovider-gateway.service")
+        self.assert_unit_quiescent("macprovider-gateway.service")
+        if self.gateway_reservations() != 0:
+            raise UpdateError("gateway stopped with active reservations")
+        self.wait_for(
+            "coordinator active requests to drain",
+            self.config.gateway_drain_timeout_s,
+            lambda: self.get_json("http://127.0.0.1:8444/healthz").get("requests_active") == 0,
+        )
+        self.systemctl("stop", "macprovider-coordinator.service")
+        self.assert_unit_quiescent("macprovider-coordinator.service")
+        self._journal_transition("traffic_quiesced")
+
+    def sqlite_backup(self, source: Path, destination: Path) -> None:
+        result = self.run_command(["sqlite3", "-bail", str(source), f".backup '{destination}'"], check=False, timeout=300)
+        if result.returncode != 0 or not destination.is_file():
+            raise UpdateError(f"SQLite snapshot failed for {source}: {result.stderr.strip()}")
+        check = self.run_command(["sqlite3", "-bail", str(destination), "PRAGMA integrity_check;"], check=False, timeout=300)
+        if check.returncode != 0 or check.stdout.strip() != "ok":
+            raise UpdateError(f"SQLite snapshot integrity check failed for {source}")
+        destination.chmod(0o600)
+        with destination.open("rb") as handle:
+            os.fsync(handle.fileno())
+
+    @staticmethod
+    def _durable_copy(source: Path, destination: Path) -> None:
+        shutil.copyfile(source, destination)
+        os.chmod(destination, 0o600)
+        with destination.open("rb") as handle:
+            os.fsync(handle.fileno())
+
+    @staticmethod
+    def _write_json(path: Path, payload: object) -> None:
+        _secure_atomic_write(
+            path,
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n",
+        )
+
+    def snapshot(self, release: Release) -> Path:
+        if self.config_update is None:
+            raise UpdateError("coordinator config update was not prepared")
+        for path, expected_hash in self.runtime_config_hashes.items():
+            self._trusted_config_file(path)
+            if sha256_file(path) != expected_hash:
+                raise UpdateError(f"runtime database configuration changed after capture: {path}")
+        self._ensure_private_directory(self.state_root, "updater state directory")
+        transactions_root = self.state_root / "transactions"
+        self._ensure_private_directory(transactions_root, "updater transaction directory")
+        tx = transactions_root / f"{time.time_ns()}-{release.tag}"
+        tx.mkdir(mode=0o700)
+        component_manifest: dict[str, str] = {}
+        for name in ("coordinator", "gateway"):
+            source = self.install_root / name
+            self._trusted_regular_file(source, f"installed {name} binary")
+            self._durable_copy(source, tx / name)
+            component_manifest[name] = sha256_file(tx / name)
+        if sha256_file(self.config_update.target) != self.config_update.original_sha256:
+            raise UpdateError("coordinator advertised-version config changed after candidate validation")
+        config_dir = tx / "configurations"
+        config_dir.mkdir(mode=0o700)
+        config_manifest = []
+        config_paths = [self.install_root / "coordinator.yaml", self.install_root / "gateway.yaml"]
+        if self.config_update.target not in config_paths:
+            config_paths.append(self.config_update.target)
+        for index, source in enumerate(config_paths):
+            self._trusted_config_file(source)
+            source_stat = source.stat()
+            snapshot_name = f"{index}.config"
+            self._durable_copy(source, config_dir / snapshot_name)
+            config_manifest.append(
+                {
+                    "source": str(source),
+                    "snapshot": snapshot_name,
+                    "uid": source_stat.st_uid,
+                    "gid": source_stat.st_gid,
+                    "mode": stat.S_IMODE(source_stat.st_mode),
+                    "sha256": sha256_file(config_dir / snapshot_name),
+                }
+            )
+        self._write_json(tx / "configuration-manifest.json", config_manifest)
+        previous_versions = self.previous_versions or self.read_installed_versions()
+        self._write_json(tx / "previous-versions.json", previous_versions)
+        self._write_json(
+            tx / "previous-runtime.json",
+            {
+                "coordinator_version": previous_versions["coordinator"],
+                "gateway_version": previous_versions["gateway"],
+                "advertised_version": self.config_update.previous_version,
+            },
+        )
+        current_state = self.state_root / "current-release.json"
+        state_manifest = {"existed": _path_entry_exists(current_state)}
+        if state_manifest["existed"]:
+            self._trusted_regular_file(current_state, "installed release state", private=True)
+            self._durable_copy(current_state, tx / "previous-current-release.json")
+            state_manifest["sha256"] = sha256_file(tx / "previous-current-release.json")
+        self._write_json(tx / "state-manifest.json", state_manifest)
+        db_dir = tx / "databases"
+        db_dir.mkdir(mode=0o700)
+        manifest = []
+        for index, source in enumerate(self.databases):
+            entry = source.lstat() if _path_entry_exists(source) else None
+            if entry is not None:
+                if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
+                    raise UpdateError(f"database snapshot source is not a safe regular file: {source}")
+                destination = db_dir / f"{index}.sqlite"
+                self.sqlite_backup(source, destination)
+                manifest.append(
+                    {
+                        "source": str(source),
+                        "existed": True,
+                        "snapshot": destination.name,
+                        "uid": entry.st_uid,
+                        "gid": entry.st_gid,
+                        "mode": stat.S_IMODE(entry.st_mode),
+                        "sha256": sha256_file(destination),
+                    }
+                )
+            else:
+                manifest.append({"source": str(source), "existed": False})
+        self._write_json(tx / "database-manifest.json", manifest)
+        self._write_json(tx / "component-manifest.json", component_manifest)
+        for directory in (config_dir, db_dir, tx, transactions_root, self.state_root):
+            _fsync_directory(directory)
+        self.transaction = tx
+        self._journal_transition(
+            "snapshot_ready",
+            transaction=str(tx),
+            rollback_armed=False,
+            live_mutation_started=False,
+        )
+        return tx
+
+    def atomic_replace(self, source: Path, destination: Path, *, uid: int, gid: int, mode: int) -> None:
+        self._journal_transition(
+            "file_replace_pending",
+            pending_action={"kind": "file_replace", "destination": str(destination)},
+        )
+        temporary = destination.with_name(
+            f".{destination.name}.pearl-updater-{os.getpid()}-{time.time_ns()}"
+        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise UpdateError("this platform cannot safely stage updater files")
+        descriptor = os.open(temporary, flags | os.O_NOFOLLOW, mode)
+        try:
+            with source.open("rb") as input_handle, os.fdopen(descriptor, "wb", closefd=False) as output:
+                shutil.copyfileobj(input_handle, output)
+                output.flush()
+                os.fchown(descriptor, uid, gid)
+                os.fchmod(descriptor, mode)
+                os.fsync(descriptor)
+            os.replace(temporary, destination)
+            _fsync_directory(destination.parent)
+        finally:
+            os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+        self._journal_transition("file_replace_complete", pending_action=None)
+
+    def atomic_install(self, source: Path, destination: Path) -> None:
+        destination_stat = self._trusted_regular_file(destination, f"installed {destination.name} binary")
+        self.atomic_replace(
+            source,
+            destination,
+            uid=0,
+            gid=destination_stat.st_gid,
+            mode=0o750,
+        )
+
+    def install_release(self, release: Release) -> None:
+        if self.config_update is None:
+            raise UpdateError("coordinator config update was not prepared")
+        for component_name, component in (
+            ("coordinator", release.coordinator),
+            ("gateway", release.gateway),
+        ):
+            candidate = release.directory / component.asset
+            self._trusted_regular_file(candidate, f"staged {component_name} binary")
+            if sha256_file(candidate) != component.sha256:
+                raise UpdateError(f"staged {component_name} binary changed after signature verification")
+        self._trusted_config_file(self.config_update.target)
+        if sha256_file(self.config_update.target) != self.config_update.original_sha256:
+            raise UpdateError("coordinator advertised-version config changed after snapshot")
+        self.atomic_install(release.directory / release.coordinator.asset, self.install_root / "coordinator")
+        self.audit("release_component_installed", "success", candidate=release.tag, component="coordinator")
+        self.atomic_install(release.directory / release.gateway.asset, self.install_root / "gateway")
+        self.audit("release_component_installed", "success", candidate=release.tag, component="gateway")
+        target_stat = self.config_update.target.stat()
+        self.atomic_replace(
+            self.config_update.staged,
+            self.config_update.target,
+            uid=target_stat.st_uid,
+            gid=target_stat.st_gid,
+            mode=stat.S_IMODE(target_stat.st_mode),
+        )
+        self.audit(
+            "coordinator_config_installed",
+            "success",
+            candidate=release.tag,
+            target=str(self.config_update.target),
+            advertised_version=self.config_update.next_version,
+        )
+
+    def local_coordinator_identity_ready(self, identity: RuntimeIdentity, require_pool: bool) -> bool:
+        health = self.get_json("http://127.0.0.1:8444/healthz")
+        if health.get("status") != "ok" or health.get("version") != identity.coordinator_version:
+            return False
+        if health.get("recommended_binary_version") != identity.advertised_version:
+            return False
+        return not require_pool or (
+            type(health.get("pool_ready")) is int
+            and health["pool_ready"] > 0
+            and type(health.get("pool_policy_ready")) is int
+            and health["pool_policy_ready"] > 0
+        )
+
+    def local_gateway_identity_ready(self, identity: RuntimeIdentity) -> bool:
+        health = self.get_json("http://127.0.0.1:9443/healthz")
+        return health.get("status") == "ok" and health.get("version") == identity.gateway_version
+
+    @staticmethod
+    def release_identity(release: Release) -> RuntimeIdentity:
+        return RuntimeIdentity(release.tag, release.tag, release.provider_advertised_version)
+
+    def local_coordinator_ready(self, release: Release, require_pool: bool) -> bool:
+        return self.local_coordinator_identity_ready(self.release_identity(release), require_pool)
+
+    def local_gateway_ready(self, release: Release) -> bool:
+        return self.local_gateway_identity_ready(self.release_identity(release))
+
+    def gateway_serving_ready(self) -> bool:
+        status = self.get_json("http://127.0.0.1:9443/v1/status")
+        pool = status.get("pool")
+        return (
+            status.get("status") not in (None, "down")
+            and isinstance(pool, dict)
+            and type(pool.get("ready")) is int
+            and pool["ready"] > 0
+        )
+
+    def public_identity_ready(self, identity: RuntimeIdentity) -> bool:
+        coordinator = self.get_json("https://coordinator.streamvc.live/healthz")
+        gateway = self.get_json("https://api.streamvc.live/healthz")
+        return (
+            coordinator.get("status") == "ok"
+            and coordinator.get("version") == identity.coordinator_version
+            and coordinator.get("recommended_binary_version") == identity.advertised_version
+            and gateway.get("status") == "ok"
+            and gateway.get("version") == identity.gateway_version
+        )
+
+    def public_ready(self, release: Release) -> bool:
+        return self.public_identity_ready(self.release_identity(release))
+
+    def prove_serving_recovery(self, identity: RuntimeIdentity) -> None:
+        self.wait_for(
+            "provider reconnect and warmup",
+            self.config.provider_recovery_timeout_s,
+            lambda: self.local_coordinator_identity_ready(identity, True),
+        )
+        self.wait_for("gateway serving status", self.config.provider_recovery_timeout_s, self.gateway_serving_ready)
+        self.wait_for(
+            "public TLS health/version",
+            self.config.service_health_timeout_s,
+            lambda: self.public_identity_ready(identity),
+        )
+        self.run_canary_gate()
+
+    def verify_rollout(self, release: Release) -> None:
+        self.systemctl("start", "macprovider-coordinator.service")
+        self.wait_for(
+            "coordinator systemd active state",
+            self.config.service_health_timeout_s,
+            lambda: self.service_active("macprovider-coordinator.service"),
+        )
+        self.wait_for("coordinator health/version", self.config.service_health_timeout_s, lambda: self.local_coordinator_ready(release, False))
+        self.systemctl("start", "macprovider-gateway.service")
+        self.wait_for(
+            "gateway systemd active state",
+            self.config.service_health_timeout_s,
+            lambda: self.service_active("macprovider-gateway.service"),
+        )
+        self.wait_for("gateway health/version", self.config.service_health_timeout_s, lambda: self.local_gateway_ready(release))
+        self.restore_auxiliary_services()
+        self.prove_serving_recovery(self.release_identity(release))
+        self.restore_auxiliary_timers()
+        if self.canary_timer_was_active:
+            self.systemctl("start", "canary-buyer.timer")
+
+    def _transaction_json(self, tx: Path, name: str) -> Any:
+        return json.loads(
+            _read_trusted_text(
+                tx / name,
+                f"rollback {name}",
+                trusted_uid=self.trusted_uid,
+                private=True,
+            )
+        )
+
+    def validate_transaction(self, tx: Path) -> None:
+        expected_parent = (self.state_root / "transactions").resolve()
+        try:
+            if tx.parent.resolve() != expected_parent:
+                raise UpdateError("rollback transaction is outside the updater state root")
+        except OSError as exc:
+            raise UpdateError("rollback transaction path cannot be resolved") from exc
+        _trusted_directory(tx, "rollback transaction", trusted_uid=self.trusted_uid, mode=0o700)
+        component_manifest = self._transaction_json(tx, "component-manifest.json")
+        if not isinstance(component_manifest, dict) or set(component_manifest) != {"coordinator", "gateway"}:
+            raise UpdateError("rollback component manifest is invalid")
+        for name in ("coordinator", "gateway"):
+            snapshot = tx / name
+            self._trusted_regular_file(snapshot, f"rollback {name} snapshot", private=True)
+            if component_manifest[name] != sha256_file(snapshot):
+                raise UpdateError(f"rollback {name} snapshot checksum mismatch")
+        for manifest_name, directory_name in (
+            ("configuration-manifest.json", "configurations"),
+            ("database-manifest.json", "databases"),
+        ):
+            rows = self._transaction_json(tx, manifest_name)
+            if not isinstance(rows, list):
+                raise UpdateError(f"rollback {manifest_name} is invalid")
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise UpdateError(f"rollback {manifest_name} row is invalid")
+                if manifest_name == "database-manifest.json" and row.get("existed") is False:
+                    if set(row) != {"source", "existed"} or not isinstance(row.get("source"), str):
+                        raise UpdateError("rollback absent-database row is invalid")
+                    continue
+                if not isinstance(row.get("snapshot"), str):
+                    raise UpdateError(f"rollback {manifest_name} row is invalid")
+                if manifest_name == "database-manifest.json" and row.get("existed") is not True:
+                    raise UpdateError("rollback database row omits prior existence state")
+                snapshot = tx / directory_name / row["snapshot"]
+                self._trusted_regular_file(snapshot, f"rollback {directory_name} snapshot", private=True)
+                if row.get("sha256") != sha256_file(snapshot):
+                    raise UpdateError(f"rollback {directory_name} snapshot checksum mismatch")
+        state_manifest = self._transaction_json(tx, "state-manifest.json")
+        if not isinstance(state_manifest, dict) or type(state_manifest.get("existed")) is not bool:
+            raise UpdateError("rollback state manifest is invalid")
+        if state_manifest["existed"]:
+            previous_state = tx / "previous-current-release.json"
+            self._trusted_regular_file(previous_state, "rollback installed release state", private=True)
+            if state_manifest.get("sha256") != sha256_file(previous_state):
+                raise UpdateError("rollback installed release state checksum mismatch")
+        previous_versions = self._transaction_json(tx, "previous-versions.json")
+        if not isinstance(previous_versions, dict) or set(previous_versions) != {"coordinator", "gateway"}:
+            raise UpdateError("rollback previous versions manifest is invalid")
+        previous_runtime = self._transaction_json(tx, "previous-runtime.json")
+        if not isinstance(previous_runtime, dict) or set(previous_runtime) != {
+            "coordinator_version",
+            "gateway_version",
+            "advertised_version",
+        } or any(not isinstance(value, str) or not value or len(value) > 128 for value in previous_runtime.values()):
+            raise UpdateError("rollback previous runtime manifest is invalid")
+
+    def quiesce_for_restore(self) -> None:
+        for unit in (
+            "macprovider-archive-rotate.timer",
+            "stats-billing-mirror.timer",
+            "macprovider-archive-rotate.service",
+            "stats-billing-mirror.service",
+            "canary-buyer.timer",
+            "canary-buyer.service",
+            "macprovider-gateway.service",
+            "macprovider-coordinator.service",
+        ):
+            self.systemctl("stop", unit)
+        for unit in (
+            "macprovider-archive-rotate.timer",
+            "stats-billing-mirror.timer",
+            "macprovider-archive-rotate.service",
+            "stats-billing-mirror.service",
+            "canary-buyer.timer",
+            "canary-buyer.service",
+            "macprovider-gateway.service",
+            "macprovider-coordinator.service",
+        ):
+            self.assert_unit_quiescent(unit)
+        self._journal_transition("rollback_quiescence_proven")
+
+    def _rollback_completed_steps(self) -> list[str]:
+        if self.journal is None:
+            return []
+        completed = self.journal.get("rollback_completed_steps", [])
+        if not isinstance(completed, list) or any(step not in ROLLBACK_STEPS for step in completed):
+            raise UpdateError("phase journal rollback progress is invalid")
+        expected = list(ROLLBACK_STEPS[: len(completed)])
+        if completed != expected:
+            raise UpdateError("phase journal rollback progress is non-sequential")
+        return list(completed)
+
+    def _rollback_step(self, name: str, action: Callable[[], None]) -> None:
+        if self.journal is None:
+            action()
+            return
+        completed = self._rollback_completed_steps()
+        if name in completed:
+            return
+        expected = ROLLBACK_STEPS[len(completed)] if len(completed) < len(ROLLBACK_STEPS) else None
+        if name != expected:
+            raise UpdateError(f"rollback step {name} is out of sequence")
+        self._journal_transition(
+            f"rollback_{name}_pending",
+            rollback_in_progress=True,
+            rollback_armed=True,
+            success_persisted=False,
+        )
+        action()
+        completed.append(name)
+        self._journal_transition(
+            f"rollback_{name}_complete",
+            rollback_in_progress=True,
+            rollback_armed=True,
+            success_persisted=False,
+            rollback_completed_steps=completed,
+            pending_action=None,
+        )
+
+    def _restore_binaries(self, tx: Path) -> None:
+        for name in ("coordinator", "gateway"):
+            self.atomic_install(tx / name, self.install_root / name)
+
+    def _restore_configurations(self, tx: Path) -> None:
+        config_manifest = self._transaction_json(tx, "configuration-manifest.json")
+        for row in config_manifest:
+            self.atomic_replace(
+                tx / "configurations" / row["snapshot"],
+                Path(row["source"]),
+                uid=int(row["uid"]),
+                gid=int(row["gid"]),
+                mode=int(row["mode"]),
+            )
+
+    def _restore_databases(self, tx: Path) -> None:
+        manifest = self._transaction_json(tx, "database-manifest.json")
+        for row in manifest:
+            destination = Path(row["source"])
+            self._journal_transition(
+                "database_sidecars_remove_pending",
+                pending_action={"kind": "database_sidecars_remove", "destination": str(destination)},
+            )
+            destination.with_name(destination.name + "-wal").unlink(missing_ok=True)
+            destination.with_name(destination.name + "-shm").unlink(missing_ok=True)
+            _fsync_directory(destination.parent)
+            self._journal_transition("database_sidecars_removed", pending_action=None)
+            if row["existed"] is True:
+                self.atomic_replace(
+                    tx / "databases" / row["snapshot"],
+                    destination,
+                    uid=int(row["uid"]),
+                    gid=int(row["gid"]),
+                    mode=int(row["mode"]),
+                )
+            else:
+                self._journal_transition(
+                    "database_remove_pending",
+                    pending_action={"kind": "database_remove", "destination": str(destination)},
+                )
+                destination.unlink(missing_ok=True)
+                _fsync_directory(destination.parent)
+                self._journal_transition("database_removed", pending_action=None)
+
+    def _restore_success_state(self, tx: Path) -> None:
+        state_manifest = self._transaction_json(tx, "state-manifest.json")
+        current_state = self.state_root / "current-release.json"
+        if state_manifest.get("existed") is True:
+            state_stat = (tx / "previous-current-release.json").stat()
+            self.atomic_replace(
+                tx / "previous-current-release.json",
+                current_state,
+                uid=self.trusted_uid,
+                gid=state_stat.st_gid,
+                mode=0o600,
+            )
+        else:
+            self._journal_transition(
+                "success_state_remove_pending",
+                pending_action={"kind": "state_remove", "destination": str(current_state)},
+            )
+            current_state.unlink(missing_ok=True)
+            self._journal_transition("success_state_removed", pending_action=None)
+        _fsync_directory(self.state_root)
+
+    def restore_backend_runtime(self, identity: RuntimeIdentity) -> None:
+        if self.service_active("macprovider-gateway.service"):
+            self.systemctl("stop", "macprovider-gateway.service")
+            self.assert_unit_quiescent("macprovider-gateway.service")
+        if self.previous_services.get("macprovider-coordinator.service"):
+            if not self.service_active("macprovider-coordinator.service"):
+                self.systemctl("start", "macprovider-coordinator.service")
+            self.wait_for(
+                "rolled-back coordinator systemd active state",
+                self.config.service_health_timeout_s,
+                lambda: self.service_active("macprovider-coordinator.service"),
+            )
+            self.wait_for(
+                "rolled-back coordinator health/version",
+                self.config.service_health_timeout_s,
+                lambda: self.local_coordinator_identity_ready(identity, False),
+            )
+        else:
+            self.systemctl("stop", "macprovider-coordinator.service")
+            self.assert_unit_quiescent("macprovider-coordinator.service")
+        if self.previous_services.get("macprovider-gateway.service"):
+            if not self.previous_services.get("macprovider-coordinator.service"):
+                raise UpdateError("cannot restore gateway without its previously active coordinator")
+            if not self.service_active("macprovider-gateway.service"):
+                self.systemctl("start", "macprovider-gateway.service")
+            self.wait_for(
+                "rolled-back gateway systemd active state",
+                self.config.service_health_timeout_s,
+                lambda: self.service_active("macprovider-gateway.service"),
+            )
+            self.wait_for(
+                "rolled-back gateway health/version",
+                self.config.service_health_timeout_s,
+                lambda: self.local_gateway_identity_ready(identity),
+            )
+        else:
+            self.systemctl("stop", "macprovider-gateway.service")
+            self.assert_unit_quiescent("macprovider-gateway.service")
+
+    def _restore_backend_services(self, tx: Path) -> None:
+        previous_runtime = self._transaction_json(tx, "previous-runtime.json")
+        self.restore_backend_runtime(RuntimeIdentity(**previous_runtime))
+
+    def _prove_rollback_serving(self, tx: Path) -> None:
+        previous_runtime = self._transaction_json(tx, "previous-runtime.json")
+        self.prove_serving_recovery(RuntimeIdentity(**previous_runtime))
+
+    def restore_auxiliary_services(self) -> None:
+        for unit in ("macprovider-archive-rotate.service", "stats-billing-mirror.service"):
+            desired = self.previous_auxiliary_units.get(unit)
+            if type(desired) is not bool:
+                raise UpdateError(f"previous auxiliary state unavailable for {unit}")
+            if desired:
+                child_permit = None
+                if unit == "macprovider-archive-rotate.service":
+                    child_permit = self.issue_start_permit("macprovider-gateway.service", ttl_s=600)
+                try:
+                    self.systemctl("start", unit)
+                finally:
+                    self.revoke_start_permit(child_permit)
+            else:
+                self.systemctl("stop", unit)
+                self.assert_unit_quiescent(unit)
+
+    def restore_auxiliary_timers(self) -> None:
+        for unit in ("macprovider-archive-rotate.timer", "stats-billing-mirror.timer"):
+            desired = self.previous_auxiliary_units.get(unit)
+            if type(desired) is not bool:
+                raise UpdateError(f"previous auxiliary state unavailable for {unit}")
+            if desired:
+                self.systemctl("start", unit)
+            else:
+                self.systemctl("stop", unit)
+                self.assert_unit_quiescent(unit)
+
+    def _restore_canary_timer(self) -> None:
+        if self.canary_timer_was_active:
+            self.systemctl("start", "canary-buyer.timer")
+
+    def restore_transaction(self) -> None:
+        if self.transaction is None:
+            raise UpdateError("rollback transaction is unavailable")
+        tx = self.transaction
+        self.validate_transaction(tx)
+        self._journal_transition(
+            "rollback_in_progress",
+            rollback_in_progress=True,
+            rollback_armed=True,
+            success_persisted=False,
+        )
+        self._rollback_step("quiescence", self.quiesce_for_restore)
+        self._rollback_step("binaries", lambda: self._restore_binaries(tx))
+        self._rollback_step("configurations", lambda: self._restore_configurations(tx))
+        self._rollback_step("databases", lambda: self._restore_databases(tx))
+        self._rollback_step("success_state", lambda: self._restore_success_state(tx))
+        self._rollback_step("backend_services", lambda: self._restore_backend_services(tx))
+        self._rollback_step("auxiliary_services", self.restore_auxiliary_services)
+        self._rollback_step("serving_validation", lambda: self._prove_rollback_serving(tx))
+        self._rollback_step("auxiliary_timers", self.restore_auxiliary_timers)
+        self._rollback_step("canary_timer", self._restore_canary_timer)
+        self.rollback_armed = False
+        self.live_mutation_started = False
+        self._journal_transition(
+            "rollback_complete",
+            rollback_armed=False,
+            rollback_in_progress=False,
+            live_mutation_started=False,
+            success_persisted=False,
+        )
+
+    def restore_previous_services(self) -> None:
+        if set(self.previous_versions) != {"coordinator", "gateway"}:
+            raise UpdateError("previous backend versions are unavailable for runtime restoration")
+        advertised = self.config_update.previous_version if self.config_update is not None else None
+        if advertised is None and self.journal is not None:
+            value = self.journal.get("previous_advertised_version")
+            advertised = value if isinstance(value, str) and value else None
+        if advertised is None:
+            raise UpdateError("previous advertised version is unavailable for runtime restoration")
+        identity = RuntimeIdentity(
+            self.previous_versions["coordinator"],
+            self.previous_versions["gateway"],
+            advertised,
+        )
+        self.restore_backend_runtime(identity)
+        self.restore_auxiliary_services()
+        self.prove_serving_recovery(identity)
+        self.restore_auxiliary_timers()
+        if self.canary_timer_was_active:
+            if not self.service_active("canary-buyer.timer"):
+                self.systemctl("start", "canary-buyer.timer")
+        else:
+            self.systemctl("stop", "canary-buyer.timer")
+            self.assert_unit_quiescent("canary-buyer.timer")
+        self._journal_transition("runtime_state_restored")
+
+    @staticmethod
+    def committed_release(payload: object) -> Release:
+        if not isinstance(payload, dict):
+            raise UpdateError("phase journal committed release is invalid")
+        required = {
+            "tag",
+            "version",
+            "commit",
+            "provider_advertised_version",
+            "coordinator_sha256",
+            "gateway_sha256",
+        }
+        if set(payload) != required:
+            raise UpdateError("phase journal committed release fields are invalid")
+        tag = payload["tag"]
+        version_value = payload["version"]
+        commit = payload["commit"]
+        advertised = payload["provider_advertised_version"]
+        coordinator_sha = payload["coordinator_sha256"]
+        gateway_sha = payload["gateway_sha256"]
+        if not isinstance(tag, str) or not SEMVER_RE.fullmatch(tag):
+            raise UpdateError("phase journal committed release tag is invalid")
+        version = SemVer.parse(str(version_value))
+        if version != SemVer.parse(tag):
+            raise UpdateError("phase journal committed release version mismatches its tag")
+        if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
+            raise UpdateError("phase journal committed release commit is invalid")
+        if not isinstance(advertised, str) or SemVer.parse(advertised) != version:
+            raise UpdateError("phase journal committed advertised version is invalid")
+        if not isinstance(coordinator_sha, str) or not SHA256_RE.fullmatch(coordinator_sha):
+            raise UpdateError("phase journal committed coordinator hash is invalid")
+        if not isinstance(gateway_sha, str) or not SHA256_RE.fullmatch(gateway_sha):
+            raise UpdateError("phase journal committed gateway hash is invalid")
+        return Release(
+            tag,
+            version,
+            commit,
+            advertised,
+            Component(COORDINATOR_ASSET, coordinator_sha, tag),
+            Component(GATEWAY_ASSET, gateway_sha, tag),
+            Path("/committed-release"),
+        )
+
+    def reconcile_committed_success(self, payload: dict[str, Any]) -> None:
+        release = self.committed_release(payload.get("release"))
+        if not self.installed_release().is_coherent_with(release):
+            raise UpdateError("committed candidate state or installed release pair is incoherent")
+        self.verify_rollout(release)
+        self._journal_transition("committed_success_reverified")
+
+    def persist_success(self, release: Release, previous: SemVer) -> None:
+        state = {
+            "schema_version": CURRENT_RELEASE_SCHEMA_VERSION,
+            "version": str(release.version),
+            "tag": release.tag,
+            "commit": release.commit,
+            "previous_version": str(previous),
+            "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "coordinator_sha256": release.coordinator.sha256,
+            "gateway_sha256": release.gateway.sha256,
+            "transaction": str(self.transaction),
+        }
+        self._ensure_private_directory(self.state_root, "updater state directory")
+        path = self.state_root / "current-release.json"
+        if _path_entry_exists(path):
+            self._trusted_regular_file(path, "installed release state", private=True)
+        self._journal_transition(
+            "success_state_persist_pending",
+            pending_action={"kind": "state_replace", "destination": str(path)},
+        )
+        _secure_atomic_write(
+            path,
+            json.dumps(state, sort_keys=True, indent=2).encode("utf-8") + b"\n",
+        )
+        self._journal_transition("success_state_persisted", pending_action=None, success_persisted=True)
+
+    def apply(self, release: Release, previous: SemVer) -> None:
+        self.audit("rollout_started", "in_progress", candidate=release.tag, previous=str(previous))
+        self._start_journal(release, previous)
+        try:
+            self.capture_rollout_state()
+            self.enter_deadman_maintenance()
+            self.stop_for_rollout()
+            self.audit("traffic_quiesced", "success", candidate=release.tag)
+            self.snapshot(release)
+            self.audit("rollback_snapshot_created", "success", candidate=release.tag, transaction=str(self.transaction))
+            self.rollback_armed = True
+            self.live_mutation_started = True
+            self._journal_transition(
+                "live_mutation_armed",
+                rollback_armed=True,
+                live_mutation_started=True,
+            )
+            self.install_release(release)
+            self.audit("release_pair_installed", "success", candidate=release.tag)
+            self.verify_rollout(release)
+            self.audit("serving_gates_completed", "success", candidate=release.tag)
+            self.persist_success(release, previous)
+            self.restore_deadman_monitoring()
+            self.rollback_armed = False
+            self.live_mutation_started = False
+            self._journal_transition(
+                "complete",
+                rollback_armed=False,
+                live_mutation_started=False,
+            )
+            self.audit("rollout_completed", "success", candidate=release.tag, transaction=str(self.transaction))
+            self._clear_journal()
+        except Exception as exc:
+            rollback_error: Exception | None = None
+            rollback_attempted = self.rollback_armed
+            if rollback_attempted:
+                try:
+                    self.restore_transaction()
+                except Exception as restore_exc:
+                    rollback_error = restore_exc
+            elif self.previous_services:
+                try:
+                    self.restore_previous_services()
+                except Exception as restore_exc:
+                    rollback_error = restore_exc
+            deadman_error: Exception | None = None
+            if self.deadman_restore_required:
+                try:
+                    self.restore_deadman_monitoring()
+                except Exception as restore_exc:
+                    deadman_error = restore_exc
+            self.audit(
+                "rollout_failed",
+                "rolled_back"
+                if rollback_attempted and rollback_error is None and deadman_error is None
+                else "failed",
+                candidate=release.tag,
+                reason=str(exc),
+                rollback_error=str(rollback_error) if rollback_error else "",
+                deadman_error=str(deadman_error) if deadman_error else "",
+            )
+            if rollback_error or deadman_error:
+                details = []
+                if rollback_error:
+                    details.append(f"rollback also failed: {rollback_error}")
+                if deadman_error:
+                    details.append(f"dead-man restoration also failed: {deadman_error}")
+                raise UpdateError(f"rollout failed: {exc}; {'; '.join(details)}") from exc
+            self._clear_journal()
+            raise
+
+    def reconcile(self) -> bool:
+        payload = self._load_journal()
+        if payload is None:
+            return False
+        self.journal = payload
+        self.reconciling = True
+        recovered_phase = str(payload.get("phase", "unknown"))
+        try:
+            transaction_id = payload.get("transaction_id")
+            if not isinstance(transaction_id, str) or not re.fullmatch(r"[0-9a-f]{64}", transaction_id):
+                raise UpdateError("phase journal transaction identifier is invalid")
+            recorded_boot_id = payload.get("boot_id")
+            if not isinstance(recorded_boot_id, str) or not re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                recorded_boot_id,
+            ):
+                raise UpdateError("phase journal boot identifier is invalid")
+            current_boot_id = self._boot_id()
+            previous_services = payload.get("previous_services")
+            if not isinstance(previous_services, dict):
+                raise UpdateError("phase journal previous service state is invalid")
+            for key, value in previous_services.items():
+                if key not in ("macprovider-coordinator.service", "macprovider-gateway.service") or type(value) is not bool:
+                    raise UpdateError("phase journal previous service state is invalid")
+            if previous_services and set(previous_services) != {
+                "macprovider-coordinator.service",
+                "macprovider-gateway.service",
+            }:
+                raise UpdateError("phase journal previous service set is invalid")
+            self.previous_services = dict(previous_services)
+            auxiliary_units = payload.get("previous_auxiliary_units", {})
+            if not isinstance(auxiliary_units, dict):
+                raise UpdateError("phase journal auxiliary service state is invalid")
+            if auxiliary_units and set(auxiliary_units) != set(AUXILIARY_UNITS):
+                raise UpdateError("phase journal auxiliary service set is invalid")
+            if any(type(value) is not bool for value in auxiliary_units.values()):
+                raise UpdateError("phase journal auxiliary service state is invalid")
+            self.previous_auxiliary_units = dict(auxiliary_units)
+            previous_versions = payload.get("previous_versions", {})
+            if not isinstance(previous_versions, dict):
+                raise UpdateError("phase journal previous versions are invalid")
+            if previous_versions and (
+                set(previous_versions) != {"coordinator", "gateway"}
+                or any(not isinstance(value, str) or not value or len(value) > 128 for value in previous_versions.values())
+            ):
+                raise UpdateError("phase journal previous versions are invalid")
+            self.previous_versions = dict(previous_versions)
+            database_paths = payload.get("database_paths", [])
+            if not isinstance(database_paths, list) or any(
+                not isinstance(value, str) or not Path(value).is_absolute() for value in database_paths
+            ) or len(database_paths) != len(set(database_paths)):
+                raise UpdateError("phase journal database paths are invalid")
+            if database_paths:
+                self.gateway_db = Path(database_paths[0])
+                self.databases = tuple(Path(value) for value in database_paths)
+            database_config_hashes = payload.get("database_config_hashes", {})
+            if not isinstance(database_config_hashes, dict) or any(
+                not isinstance(path, str)
+                or not Path(path).is_absolute()
+                or not isinstance(digest, str)
+                or not SHA256_RE.fullmatch(digest)
+                for path, digest in database_config_hashes.items()
+            ):
+                raise UpdateError("phase journal database config hashes are invalid")
+            self.runtime_config_hashes = {
+                Path(path): digest for path, digest in database_config_hashes.items()
+            }
+            previous_advertised = payload.get("previous_advertised_version")
+            if previous_services and (
+                not isinstance(previous_advertised, str) or not SEMVER_RE.fullmatch(previous_advertised)
+            ):
+                raise UpdateError("phase journal previous advertised version is invalid")
+            timer_state = payload.get("canary_timer_was_active")
+            service_state = payload.get("canary_service_was_active")
+            if timer_state is not None and type(timer_state) is not bool:
+                raise UpdateError("phase journal canary timer state is invalid")
+            if service_state is not None and type(service_state) is not bool:
+                raise UpdateError("phase journal canary service state is invalid")
+            if previous_services and (
+                set(auxiliary_units) != set(AUXILIARY_UNITS)
+                or set(previous_versions) != {"coordinator", "gateway"}
+                or type(timer_state) is not bool
+                or type(service_state) is not bool
+            ):
+                raise UpdateError("phase journal captured runtime state is incomplete")
+            self.canary_timer_was_active = bool(timer_state)
+            self.canary_service_was_active = bool(service_state)
+            previous_paused = payload.get("deadman_previous_paused")
+            if previous_paused is not None and type(previous_paused) is not bool:
+                raise UpdateError("phase journal dead-man state is invalid")
+            self.deadman_previous_paused = previous_paused
+            self.deadman_restore_required = payload.get("deadman_restore_required") is True
+            transaction_value = payload.get("transaction")
+            if transaction_value is not None:
+                if not isinstance(transaction_value, str) or not Path(transaction_value).is_absolute():
+                    raise UpdateError("phase journal transaction path is invalid")
+                self.transaction = Path(transaction_value)
+            rollback_armed = payload.get("rollback_armed", False)
+            if type(rollback_armed) is not bool:
+                raise UpdateError("phase journal rollback state is invalid")
+            self.rollback_armed = rollback_armed
+            rollback_in_progress = payload.get("rollback_in_progress", False)
+            if type(rollback_in_progress) is not bool:
+                raise UpdateError("phase journal rollback state is invalid")
+            self._rollback_completed_steps()
+            live_mutation_started = payload.get("live_mutation_started", False)
+            success_persisted = payload.get("success_persisted", False)
+            if type(live_mutation_started) is not bool or type(success_persisted) is not bool:
+                raise UpdateError("phase journal mutation state is invalid")
+            if rollback_in_progress and success_persisted:
+                raise UpdateError("phase journal cannot mark rollback and rollout success simultaneously")
+            self.live_mutation_started = live_mutation_started
+            self._journal_transition("reconciliation_started", boot_id=current_boot_id)
+            if success_persisted:
+                self.reconcile_committed_success(payload)
+                self.rollback_armed = False
+                self.live_mutation_started = False
+            elif self.rollback_armed or rollback_in_progress:
+                if self.transaction is None:
+                    raise UpdateError("phase journal armed rollback without a transaction")
+                self.restore_transaction()
+                self.rollback_armed = False
+            elif self.previous_services:
+                self.restore_previous_services()
+            if self.deadman_restore_required:
+                self.restore_deadman_monitoring()
+            self._journal_transition(
+                "reconciliation_complete",
+                rollback_armed=False,
+                live_mutation_started=False,
+            )
+            self.audit("rollout_reconciliation", "success", recovered_phase=recovered_phase)
+            self._clear_journal()
+            return True
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                self.audit("rollout_reconciliation", "failed", reason=str(exc))
+            raise
+        finally:
+            self.reconciling = False
+
+
+def test_path(default: Path, env_name: str, testing: bool) -> Path:
+    override = os.environ.get(env_name)
+    if override and not testing:
+        raise UpdateError(f"{env_name} is test-only")
+    return Path(override) if override else default
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--plan", action="store_true", help="verify and report the newest eligible release without changing Pearl")
+    mode.add_argument("--apply", action="store_true", help="perform a guarded transactional rollout")
+    mode.add_argument("--reconcile", action="store_true", help="recover an interrupted rollout from its durable phase journal")
+    parser.add_argument("--tag", help="select one exact vMAJOR.MINOR.PATCH release")
+    parser.add_argument("--source-dir", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--config", type=Path, default=CONFIG_PATH)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    testing = os.environ.get("MACPROVIDER_UPDATER_TESTING") == "1"
+    if args.source_dir and not testing:
+        raise UpdateError("--source-dir is available only with MACPROVIDER_UPDATER_TESTING=1")
+    if os.environ.get("PEARL_UPDATER_TEST_GATEWAY_DB") and not testing:
+        raise UpdateError("PEARL_UPDATER_TEST_GATEWAY_DB is test-only")
+    if not testing and os.geteuid() != 0:
+        raise UpdateError("the production Pearl updater must run as root")
+    trusted_uid = os.geteuid() if testing else 0
+    if not args.config.is_absolute():
+        raise UpdateError("updater configuration path must be absolute")
+    config = load_config(args.config, trusted_uid=trusted_uid)
+    if args.apply and not config.enabled:
+        raise UpdateError("production apply is disabled; set PEARL_UPDATER_ENABLED=1 in the root-owned config")
+    if testing:
+        candidate_uid = os.geteuid()
+        candidate_gid = os.getegid()
+    else:
+        try:
+            account = pwd.getpwnam(VALIDATOR_ACCOUNT)
+        except KeyError as exc:
+            raise UpdateError(f"{VALIDATOR_ACCOUNT} service account is missing") from exc
+        if account.pw_uid == 0 or account.pw_gid == 0:
+            raise UpdateError(f"{VALIDATOR_ACCOUNT} service account must not use the root uid or gid")
+        candidate_uid = account.pw_uid
+        candidate_gid = account.pw_gid
+    updater = Updater(
+        config,
+        public_key=test_path(PINNED_PUBLIC_KEY, "PEARL_UPDATER_TEST_PUBLIC_KEY", testing),
+        install_root=test_path(INSTALL_ROOT, "PEARL_UPDATER_TEST_INSTALL_ROOT", testing),
+        state_root=test_path(STATE_ROOT, "PEARL_UPDATER_TEST_STATE_ROOT", testing),
+        audit_path=test_path(AUDIT_PATH, "PEARL_UPDATER_TEST_AUDIT_PATH", testing),
+        lock_path=test_path(LOCK_PATH, "PEARL_UPDATER_TEST_LOCK_PATH", testing),
+        gateway_db=(
+            Path(os.environ["PEARL_UPDATER_TEST_GATEWAY_DB"])
+            if testing and os.environ.get("PEARL_UPDATER_TEST_GATEWAY_DB")
+            else None
+        ),
+        trusted_uid=trusted_uid,
+        candidate_uid=candidate_uid,
+        candidate_gid=candidate_gid,
+        isolate_candidate_network=not testing,
+    )
+    lock_uid = trusted_uid
+    with FileLock(updater.lock_path, required_uid=lock_uid), tempfile.TemporaryDirectory(prefix="macprovider-pearl-update-") as temporary:
+        updater.validate_recovery_inputs(args.config)
+        updater.reconcile()
+        if args.reconcile:
+            return 0
+        updater.validate_policy_inputs(args.config)
+        try:
+            release = updater.acquire_release(Path(temporary), args.source_dir, args.tag)
+            release = updater.stage_candidate_validation(release, Path(temporary))
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                updater.audit(
+                    "release_acquisition",
+                    "failed",
+                    requested_tag=args.tag or "latest",
+                    reason=str(exc),
+                )
+            raise
+        current, decision = updater.assess_candidate(release)
+        config_update = updater.prepare_config_update(release)
+        updater.verify_canary_authority()
+        updater.validate_deadman_configuration()
+        if decision == "already_current" and config_update.previous_version != config_update.next_version:
+            decision = "repair_config"
+            updater.audit(
+                "release_eligibility",
+                "repair_config",
+                candidate=release.tag,
+                current=str(current),
+                previous_advertised_version=config_update.previous_version,
+                next_advertised_version=config_update.next_version,
+            )
+        plan = {
+            "action": decision,
+            "candidate": release.tag,
+            "candidate_commit": release.commit,
+            "current_version": str(current),
+            "provider_advertised_version": release.provider_advertised_version,
+            "advertised_version_config": str(config_update.target),
+            "canary_rollout_authority": CANARY_AUTHORITY_VERSION,
+            "deadman_maintenance": "betterstack-paused-during-apply",
+            "repository": PINNED_REPOSITORY,
+        }
+        print(json.dumps(plan, sort_keys=True))
+        updater.audit("release_plan", decision, **plan)
+        if args.plan:
+            return 0
+        if decision == "already_current":
+            updater.audit("rollout_skipped", "already_current", candidate=release.tag, current=str(current))
+            return 0
+        updater.apply(release, current)
+        return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except LockBusy as exc:
+        print(f"macprovider-pearl-update: {exc}", file=sys.stderr)
+        raise SystemExit(75)
+    except UpdateError as exc:
+        print(f"macprovider-pearl-update: {exc}", file=sys.stderr)
+        raise SystemExit(1)

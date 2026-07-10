@@ -1,0 +1,38 @@
+[Unit]
+Description=Reconcile an interrupted Pearl backend rollout at boot
+Documentation=https://github.com/Augustas11/macprovider/blob/main/ops/runbooks/pearl-release-updater.md
+After=network-online.target
+Wants=network-online.target
+Before=macprovider-coordinator.service macprovider-gateway.service canary-buyer.service canary-buyer.timer macprovider-archive-rotate.service macprovider-archive-rotate.timer stats-billing-mirror.service stats-billing-mirror.timer macprovider-pearl-updater.service
+ConditionPathExists=/var/lib/macprovider-pearl-updater/active-transaction.json
+OnFailure=macprovider-pearl-updater-alert@%n.service
+OnFailureJobMode=replace-irreversibly
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/local/sbin/macprovider-pearl-update --reconcile
+TimeoutStartSec=infinity
+UMask=0077
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=true
+LockPersonality=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=macprovider-pearl-updater-reconcile
+
+[Install]
+WantedBy=multi-user.target
