@@ -250,7 +250,7 @@ jobs:
           NOTARIZE_ZIP="$SIGNING_TMP/notary.zip"
           (cd "$WORK" && /usr/bin/ditto -c -k --keepParent macprovider-cli "$NOTARIZE_ZIP")
 
-          xcrun notarytool submit "$NOTARIZE_ZIP" \
+          scripts/notarytool-submit-with-retry.sh "$NOTARIZE_ZIP" \
             --apple-id "$APPLE_NOTARY_APPLE_ID" \
             --password "$APPLE_NOTARY_PASSWORD" \
             --team-id "$APPLE_NOTARY_TEAM_ID" \
@@ -303,7 +303,7 @@ jobs:
               "$UNSIGNED_PKG"
             productsign --sign "$INSTALLER_ID" "$UNSIGNED_PKG" "$SIGNED_PKG"
 
-            xcrun notarytool submit "$SIGNED_PKG" \
+            scripts/notarytool-submit-with-retry.sh "$SIGNED_PKG" \
               --apple-id "$APPLE_NOTARY_APPLE_ID" \
               --password "$APPLE_NOTARY_PASSWORD" \
               --team-id "$APPLE_NOTARY_TEAM_ID" \
@@ -384,7 +384,7 @@ jobs:
           NOTARIZE_ZIP="$RUNNER_TEMP/Malibu-notary.zip"
           /usr/bin/ditto -c -k --keepParent "$APP" "$NOTARIZE_ZIP"
 
-          xcrun notarytool submit "$NOTARIZE_ZIP" \
+          scripts/notarytool-submit-with-retry.sh "$NOTARIZE_ZIP" \
             --apple-id "$APPLE_NOTARY_APPLE_ID" \
             --password "$APPLE_NOTARY_PASSWORD" \
             --team-id "$APPLE_NOTARY_TEAM_ID" \
@@ -414,7 +414,7 @@ jobs:
           rm -rf "$DMG_STAGE"
 
           codesign --sign "$SIGNING_ID" --timestamp "$GITHUB_WORKSPACE/$DIST_DMG"
-          xcrun notarytool submit "$GITHUB_WORKSPACE/$DIST_DMG" \
+          scripts/notarytool-submit-with-retry.sh "$GITHUB_WORKSPACE/$DIST_DMG" \
             --apple-id "$APPLE_NOTARY_APPLE_ID" \
             --password "$APPLE_NOTARY_PASSWORD" \
             --team-id "$APPLE_NOTARY_TEAM_ID" \
@@ -459,7 +459,7 @@ jobs:
 
           # Notarize the .pkg separately from the .app inside — Apple
           # notary treats the two as distinct submissions.
-          xcrun notarytool submit "$GITHUB_WORKSPACE/$DIST_PKG" \
+          scripts/notarytool-submit-with-retry.sh "$GITHUB_WORKSPACE/$DIST_PKG" \
             --apple-id "$APPLE_NOTARY_APPLE_ID" \
             --password "$APPLE_NOTARY_PASSWORD" \
             --team-id "$APPLE_NOTARY_TEAM_ID" \
