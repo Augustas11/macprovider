@@ -549,7 +549,7 @@ func signedReceiptHeader(t *testing.T, priv ed25519.PrivateKey, pub ed25519.Publ
 }
 
 func TestAuditPromptRejectsManualOnlyAcceptance(t *testing.T) {
-	prompt := readRepoFile(t, "specs/AUDIT_SPEC_015_IMPL_STEP_11_PROMPT.md")
+	prompt := readRepoFile(t, "audits/spec-015/AUDIT_SPEC_015_IMPL_STEP_11_PROMPT.md")
 	re := regexp.MustCompile(`(?i)no AC is .*manual|manual verification`)
 	if !re.MatchString(prompt) {
 		t.Fatalf("Step 11 audit prompt does not explicitly reject manual-only acceptance")
