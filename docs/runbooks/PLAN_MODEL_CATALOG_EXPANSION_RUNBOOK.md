@@ -491,7 +491,7 @@ Align all three baked strings (`bakedCandidateCatalogJSON`, `bakedDemandRankJSON
 
 # P3-R231 — RESEARCH_231 gate calibration (executor-scoped)
 
-> **Goal:** Act on [`specs/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md`](RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md) Part 3 deltas **without** attempting impossible benches on the M5 32 GB executor.  
+> **Goal:** Act on [`docs/research/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md`](../research/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md) Part 3 deltas **without** attempting impossible benches on the M5 32 GB executor.  
 > **Input:** oMLX advisory data + existing local benches (P1-01, P2-02).  
 > **Requires:** G3 closed (current catalog `published-2026-07-07-p2-qwen3-8b`).
 
