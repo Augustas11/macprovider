@@ -1219,6 +1219,38 @@ func TestAutotuneCatalogAdmissionRejectsPreviousReleaseWithChangedSelectedRow(t 
 	}
 }
 
+func TestAutotuneCatalogAdmissionRejectsPreviousReleaseWithChangedSelectedRowPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy string
+	}{
+		{name: "draft candidates", policy: `,"draft_candidates":[{"draft_model":"mlx-community/draft","draft_model_artifact_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]`},
+		{name: "workload profiles", policy: `,"workload_profiles":{"short_chat":{"8gb":{"status":"no_winner"}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			current := mustAutotuneCatalog(t)
+			previousBytes := bytes.Replace(current.RawJSON, []byte(`"version":"test"`), []byte(`"version":"previous"`), 1)
+			previousBytes = bytes.Replace(previousBytes, []byte(`"runtime_status":"recommendable"}`), []byte(`"runtime_status":"recommendable"`+tc.policy+`}`), 1)
+			previous, err := autotune.ParseCatalog(previousBytes)
+			if err != nil {
+				t.Fatalf("ParseCatalog(previous): %v", err)
+			}
+			previous.SignerKeyID = current.SignerKeyID
+			h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+				providerws.WithAutotuneCatalog(current, previous),
+			}, func(*config.Config) {})
+			defer h.HTTP.Close()
+			hello := validHello("m4-anon")
+			hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+			addCatalogAdmissionMetadata(t, hello, previous)
+			code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
+			if code != providerws.CloseInvalidHello || reason != "catalog_incompatible" {
+				t.Fatalf("code=%d reason=%q", code, reason)
+			}
+		})
+	}
+}
+
 func TestAutotuneCatalogAdmissionRejectsPermanentlyTombstonedPreviousRelease(t *testing.T) {
 	current := mustAutotuneCatalog(t)
 	previousBytes := bytes.Replace(

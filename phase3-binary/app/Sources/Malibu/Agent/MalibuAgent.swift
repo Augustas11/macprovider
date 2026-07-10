@@ -260,6 +260,10 @@ final class MalibuAgent: ObservableObject {
             if let recommended = status.recommendedVersion {
                 snapshot.coordinatorRecommendedVersion = ProviderCLIVersion.normalize(recommended)
             }
+        } else {
+            // Never carry a prior authoritative serving verdict across a
+            // failed status/readiness refresh.
+            snapshot.markCoordinatorReadinessUnknown()
         }
         reconcileNetworkState(localReady: localReady)
         await refreshLatestReleaseIfNeeded()
@@ -300,12 +304,11 @@ final class MalibuAgent: ObservableObject {
         return health.ready
     }
 
-    /// Serving requires the CLI's explicit buyer-serving state. Older installed
-    /// CLIs remain readable through the coordinator-connected compatibility path.
+    /// Serving requires the CLI's coordinator-authoritative buyer-serving
+    /// state. A WebSocket connection proves transport only, not admission.
     private func reconcileNetworkState(localReady: Bool) {
         guard snapshot.state != .paused else { return }
         let buyerServing = snapshot.networkState == "buyer_serving"
-            || (snapshot.networkState == nil && snapshot.coordinatorConnected == true)
         if localReady && buyerServing {
             snapshot.state = .serving
             snapshot.lastError = nil
@@ -328,6 +331,10 @@ final class MalibuAgent: ObservableObject {
             return "Model loaded locally · catalog integrity check failed; not serving buyers"
         case "local_donor":
             return "Model loaded locally · local donor mode does not serve buyer traffic"
+        case "not_buyer_serving":
+            return "Model loaded locally · coordinator has not admitted this provider for buyer traffic"
+        case "buyer_serving_unknown":
+            return "Model loaded locally · coordinator buyer-serving status is temporarily unknown"
         case "live_verified":
             return snapshot.coordinatorConnected == true
                 ? "Model loaded locally · waiting for buyer-serving admission"
@@ -341,7 +348,9 @@ final class MalibuAgent: ObservableObject {
         case .none:
             return "Model loaded locally · checking coordinator connection…"
         case .some(true):
-            return "Checking background provider…"
+            return snapshot.networkState == nil
+                ? "Model loaded locally · coordinator connected; buyer-serving status unknown"
+                : "Checking background provider…"
         }
     }
 

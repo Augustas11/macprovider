@@ -509,6 +509,34 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(AutotuneRecommendEngine.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey))
     }
 
+    func testRowIdentityBindsCanonicalDraftAndWorkloadPolicy() throws {
+        let raw = Self.policyIdentityCatalogJSON()
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(raw.utf8))
+        let identity = try XCTUnwrap(catalog.rowIdentity(for: "fixture"))
+
+        XCTAssertEqual(identity, "e6591bdf9f126f3b3013daf325e1cfbd33a8d5c08f35f785569b5ed1a46b1acf")
+
+        let changedDraft = try AutotuneStaticInputs.decodeCandidateCatalog(Data(
+            raw.replacingOccurrences(
+                of: String(repeating: "0", count: 64),
+                with: String(repeating: "1", count: 64)
+            ).utf8
+        ))
+        let changedWorkload = try AutotuneStaticInputs.decodeCandidateCatalog(Data(
+            raw.replacingOccurrences(of: "shared-schema-corpus", with: "changed-source").utf8
+        ))
+        let equivalentPolicy = try AutotuneStaticInputs.decodeCandidateCatalog(Data(
+            raw.replacingOccurrences(
+                of: "\"source\":\"shared-schema-corpus\"",
+                with: "\"source\":\"shared-schema-corpus\",\"candidate_source\":null,\"ignored_nested\":true"
+            ).utf8
+        ))
+
+        XCTAssertNotEqual(changedDraft.rowIdentity(for: "fixture"), identity)
+        XCTAssertNotEqual(changedWorkload.rowIdentity(for: "fixture"), identity)
+        XCTAssertEqual(equivalentPolicy.rowIdentity(for: "fixture"), identity)
+    }
+
     func testRateCardFallsThroughToDefaultForArbitraryModelKey() throws {
         // v1.7.6 Track A1: any model without a specific rate-card row
         // falls through to the "default" row so probe-feasible models
@@ -2000,49 +2028,59 @@ final class AutotuneRecommendTests: XCTestCase {
         ))
     }
 
-    // MARK: - v1.7.9 Track A5 (Option B) — soft TPS + TTFT gates
+    // MARK: - Signed catalog TPS + TTFT admission parity
 
-    func testTPSBelowGateNoLongerBlocksEligibilityButEmitsWarning() throws {
+    func testTPSBelowSignedCatalogGateBlocksRecommendation() throws {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
-        // Force TPS below the catalog gate (20 tok/s for qwen3-coder in
-        // baked-2026-07-03; was 25 in baked-2026-07-02). Keep it high
-        // enough that expected_net_usd_per_hour still clears the
-        // $0.005/hr paid threshold.
-        benchmark.sustainedTPS = 15
+        let minimum = try XCTUnwrap(request.candidateCatalog.rows[modelKey]).benchGate.minSustainedTPS
+        benchmark.sustainedTPS = minimum.nextDown
         request.benchmarks[modelKey] = benchmark
 
         let result = AutotuneRecommendEngine().recommend(request)
 
-        XCTAssertEqual(result.recommendedModel, modelKey,
-            "v1.7.9 Option B: TPS below catalog gate must not veto eligibility")
-        XCTAssertTrue(result.warnings.contains(.tpsBelowGate))
-        XCTAssertFalse(result.warnings.contains(.noEligibleModel))
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
+        XCTAssertTrue(
+            try XCTUnwrap(result.allCandidates.first { $0.catalogKey == modelKey }).why
+                .contains("below signed catalog minimum")
+        )
     }
 
-    func testTTFTAboveGateNoLongerBlocksEligibilityButEmitsWarning() throws {
+    func testTTFTAboveSignedCatalogGateBlocksRecommendation() throws {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
         var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
-        // Force TTFT above the catalog ceiling (3000ms for qwen3-coder).
-        benchmark.ttftMS = 6_000
+        let maximum = try XCTUnwrap(request.candidateCatalog.rows[modelKey]).benchGate.max4KTTFTMS
+        benchmark.ttftMS = maximum + 1
         request.benchmarks[modelKey] = benchmark
 
         let result = AutotuneRecommendEngine().recommend(request)
 
-        XCTAssertEqual(result.recommendedModel, modelKey,
-            "v1.7.9 Option B: TTFT above catalog ceiling must not veto eligibility")
-        XCTAssertTrue(result.warnings.contains(.ttftAboveGate))
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertTrue(result.warnings.contains(.noEligibleModel))
+        XCTAssertTrue(
+            try XCTUnwrap(result.allCandidates.first { $0.catalogKey == modelKey }).why
+                .contains("exceeds signed catalog maximum")
+        )
     }
 
-    func testNoTPSWarningWhenBenchmarkClearsGate() throws {
-        let result = AutotuneRecommendEngine().recommend(try makeRequest())
-        XCTAssertFalse(result.warnings.contains(.tpsBelowGate))
-        XCTAssertFalse(result.warnings.contains(.ttftAboveGate))
+    func testSignedCatalogGateBoundariesAreInclusiveLikeCoordinator() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        let candidate = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        benchmark.sustainedTPS = candidate.benchGate.minSustainedTPS
+        benchmark.ttftMS = candidate.benchGate.max4KTTFTMS
+        request.benchmarks[modelKey] = benchmark
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertEqual(result.recommendedModel, modelKey)
     }
 
-    func testDonorModeInheritsTPSAndTTFTRelaxation() throws {
+    func testDonorModeAlsoRejectsSignedCatalogGateFailures() throws {
         var request = try makeRequest(modelKey: "qwen3-32b")
         request.donorMode = true
         request.hardware.bandwidthTier = .a
@@ -2052,7 +2090,7 @@ final class AutotuneRecommendTests: XCTestCase {
         benchmark.ttftMS = 100_000
         request.benchmarks["qwen3-32b"] = benchmark
 
-        XCTAssertTrue(AutotuneRecommendEngine.donorModeAdmitted(
+        XCTAssertFalse(AutotuneRecommendEngine.donorModeAdmitted(
             modelKey: "qwen3-32b",
             candidate: request.candidateCatalog.rows["qwen3-32b"],
             request: request
@@ -2381,6 +2419,12 @@ final class AutotuneRecommendTests: XCTestCase {
       }
     }
     """
+
+    private static func policyIdentityCatalogJSON() -> String {
+        """
+        {"version":"policy-identity-v1","generated_at":"2026-07-10T20:00:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"fixture":{"model_id":"mlx-community/Fixture-4bit","model_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","model_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","min_ram_gb":8,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommendable","draft_candidates":[{"draft_model":"mlx-community/Fixture-Draft-4bit","draft_model_artifact_sha256":"\(String(repeating: "0", count: 64))"}],"workload_profiles":{"short_chat":{"8gb":{"status":"no_winner","no_winner_reason":"no_cells_evaluated","gate_policy":{"min_samples":20,"max_p95_ttft_ms":8000,"max_stop_token_leak_rate":0,"min_median_tps":null},"profile_metrics":{"median_tps":null,"p95_ttft_ms":null,"stop_token_leak_rate":null,"spec_decode_acceptance_rate":null,"sample_count":0},"source":"shared-schema-corpus"}}}}}}
+        """
+    }
 
     private static let spec029DraftCandidatesJSON = """
     [

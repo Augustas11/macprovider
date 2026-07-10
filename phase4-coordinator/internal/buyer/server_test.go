@@ -1305,8 +1305,65 @@ func TestPoolCheckReportsExactCatalogAdmissionAndServingEligibility(t *testing.T
 			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if response["buyer_serving"] != tc.buyerServing || response["catalog_admission_mode"] != "current" || response["catalog_release_id"] != "release-current" || response["catalog_candidate_sha256"] != strings.Repeat("a", 64) || response["catalog_row_identity"] != strings.Repeat("b", 64) {
+			if response["buyer_serving"] != tc.buyerServing || response["catalog_admission_mode"] != "current" || response["catalog_release_id"] != "release-current" || response["catalog_candidate_sha256"] != strings.Repeat("a", 64) || response["catalog_row_identity"] != strings.Repeat("b", 64) || response["catalog_evidence_source"] != "provider_reported" {
 				t.Fatalf("response = %+v", response)
+			}
+		})
+	}
+}
+
+func TestPoolCheckReadinessEvidenceIsPublicAndLegacyIsNotBuyerServing(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		admissionMode string
+		buyerServing  bool
+		withEnvelope  bool
+	}{
+		{name: "current envelope", admissionMode: "current", buyerServing: true, withEnvelope: true},
+		{name: "legacy remains visible", admissionMode: "legacy", buyerServing: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := pool.NewRegistry(nil)
+			now := time.Now().UTC()
+			provider := &pool.Provider{
+				ProviderID:           "readiness-provider",
+				AssignedID:           "session-1",
+				ModelID:              "model-a",
+				MaxContextTokens:     20000,
+				MaxConcurrency:       1,
+				SlotsFree:            1,
+				SlotsTotal:           1,
+				State:                pool.StateReady,
+				LastHeartbeatAt:      now,
+				LastActivityAt:       now,
+				ConnectedAt:          now,
+				CatalogAdmissionMode: tc.admissionMode,
+			}
+			if tc.withEnvelope {
+				provider.CatalogReleaseID = "release-current"
+				provider.CatalogPolicyVersion = "autotune-policy-v1"
+				provider.CandidateCatalogSHA256 = strings.Repeat("a", 64)
+				provider.CatalogSignerKeyID = "signer-v4"
+				provider.CandidateRowIdentity = strings.Repeat("b", 64)
+			}
+			registry.Register(provider, nil)
+			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithInternalAuthKey("operator-secret"))
+			req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=readiness-provider&details=readiness", nil)
+			req.RemoteAddr = "198.51.100.1:12345"
+			rr := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+			}
+			var response map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response["buyer_serving"] != tc.buyerServing || response["catalog_admission_mode"] != tc.admissionMode || response["catalog_evidence_source"] != "provider_reported" {
+				t.Fatalf("response = %+v", response)
+			}
+			if tc.withEnvelope && (response["catalog_release_id"] != "release-current" || response["catalog_policy_version"] != "autotune-policy-v1" || response["catalog_candidate_sha256"] != strings.Repeat("a", 64) || response["catalog_signer_key_id"] != "signer-v4" || response["catalog_row_identity"] != strings.Repeat("b", 64)) {
+				t.Fatalf("readiness envelope = %+v", response)
 			}
 		})
 	}
@@ -1338,6 +1395,64 @@ func TestPoolCheckRateLimitsPerIP(t *testing.T) {
 		if rr.Code != want {
 			t.Fatalf("request %d status = %d, want %d body=%s", i+1, rr.Code, want, rr.Body.String())
 		}
+	}
+}
+
+func TestPoolCheckReadinessUsesProviderScopedBurstBehindNAT(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	register(registry, "p2", "session-2", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	for i := 0; i < 70; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1&details=readiness", nil)
+		req.RemoteAddr = "198.51.100.10:12345"
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, req)
+		want := http.StatusOK
+		if i >= 6 {
+			want = http.StatusTooManyRequests
+		}
+		if rr.Code != want {
+			t.Fatalf("p1 request %d status = %d, want %d body=%s", i+1, rr.Code, want, rr.Body.String())
+		}
+		if want == http.StatusTooManyRequests && rr.Header().Get("Retry-After") != "1" {
+			t.Fatalf("Retry-After = %q", rr.Header().Get("Retry-After"))
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p2&details=readiness", nil)
+	req.RemoteAddr = "198.51.100.10:54321"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("second provider behind same NAT status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPoolCheckReadinessBoundsRotatingProviderIDsPerSource(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	for i := 0; i < 61; i++ {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/pool/check?provider_id=rotating-%d&details=readiness", i), nil)
+		req.RemoteAddr = "198.51.100.10:12345"
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, req)
+		if i < 60 && rr.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d unexpectedly rate limited", i+1)
+		}
+		if i == 60 && rr.Code != http.StatusTooManyRequests {
+			t.Fatalf("request %d status = %d, want %d body=%s", i+1, rr.Code, http.StatusTooManyRequests, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=independent&details=readiness", nil)
+	req.RemoteAddr = "198.51.100.11:12345"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code == http.StatusTooManyRequests {
+		t.Fatalf("independent source unexpectedly rate limited: body=%s", rr.Body.String())
 	}
 }
 

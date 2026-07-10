@@ -48,6 +48,15 @@ The stable model identity is:
 The whole-feed digest remains tamper and release evidence. It is not the sole
 identity for benchmark reuse or provider admission because unrelated rows,
 notes, or whitespace must not invalidate every provider.
+Previous-release admission additionally requires semantic equality of the
+selected row's `draft_candidates` and `workload_profiles`; those policy-bearing
+fields may not cross the compatibility bridge merely because the stable model
+identity is unchanged. Cached benchmark row identity appends a cross-language
+RFC 8785 digest of those same fields when present. The provider exposes that
+verified row identity in local status, and the installer requires it to equal
+the coordinator admission envelope instead of maintaining a third canonical
+JSON implementation in shell. Omitted and explicit `null` optional policy
+fields are equivalent; arrays/objects and their contents remain significant.
 
 ## 2. Trust and failure policy
 
@@ -168,12 +177,25 @@ Stage and activate atomically:
    race rollback against an SSH command still writing release files. On every
    coordinator start, the guard independently restores an orphaned transaction
    whenever the controller lock is no longer held, covering Pearl reboot.
-4. Build a complete snapshot of the exact binary, config, catalog pointers,
-   signed Tier-2 catalog, main unit, recovery/watchdog units, enablement symlink
-   or `/dev/null` mask, and prior active state in a root-only staging directory.
-   Write `complete`, then atomically rename it to
+4. Build a complete snapshot of every release artifact changed after this
+   boundary: coordinator, CLI, and three stats binaries; config and convenience
+   backups; catalog pointers and signed Tier-2 catalog; coordinator, recovery,
+   watchdog, and stats unit files; timer enablement links and active state;
+   request-log ACLs; and all coordinator/stats nginx snippets, vhosts, and
+   enablement links. Files that were absent are represented by an absent marker
+   and are removed during rollback. Write `complete`, then atomically rename it to
    `/opt/macprovider/.coordinator-deploy-rollback`. Recovery rejects and
-   preserves any incomplete publication.
+   preserves any incomplete publication. Recovery stops sidecar scheduling,
+   restores the graph, reloads systemd, restores prior runtime state, validates
+   nginx, and reloads the restored nginx graph before consuming the snapshot.
+   The deploy likewise freezes all stats timers/services immediately after
+   publishing the snapshot and does not reactivate them until every public and
+   canary check passes, preventing an uncommitted sidecar binary from producing
+   external database effects.
+   Package installation, Unix principal/directory creation, TCP tuning, and
+   successfully issued ACME certificates are independent idempotent
+   infrastructure transactions and intentionally remain in place; ACME stub and
+   live nginx configuration files are release artifacts and are rolled back.
 5. Upload a versioned directory such as
    `/opt/macprovider/autotune/releases/<release-id>/`.
 6. On Pearl, verify manifest hashes, signatures, schemas, file ownership, and
@@ -187,13 +209,27 @@ Stage and activate atomically:
 10. Fetch each JSON and sidecar endpoint separately. Compare exact SHA-256 with
    staged files and re-verify public signatures.
 11. Confirm coordinator health reports the intended release and signer.
-12. Set `CATALOG_CANARY_PROVIDER_ID` to a real enrolled canary provider before
-   running the deploy and provide `CATALOG_CANARY_AUTH_TOKEN` for the protected
-   deployment-evidence view. The deploy must poll `/v1/pool/check` until that
-   exact provider reports `buyer_serving: true`, `catalog_admission_mode: current`,
-   the exact active release/policy/digest/signer envelope, and a valid selected
-   row identity. A legacy bridge, previous release, truly degraded provider,
-   missing identity, or unknown canary is a deployment failure.
+12. Set `CATALOG_CANARY_PROVIDER_ID` to a real enrolled canary provider and
+   provide `CATALOG_CANARY_AUTH_TOKEN` for the protected compatibility view.
+   The deploy must poll `/v1/pool/check` until that exact provider reports
+   `buyer_serving: true`, `catalog_admission_mode: current`, the exact active
+   release/policy/digest/signer envelope, a valid selected row identity, and
+   `catalog_evidence_source: provider_reported`. These authenticated hello fields
+   prove coordinator admission compatibility; they are not independent proof of
+   the provider's on-disk bytes.
+13. Set `CATALOG_CANARY_SSH_TARGET` to the operator-controlled canary Mac and
+   `CATALOG_CANARY_SSH_KEY` to a dedicated read-only operator key. Ensure its SSH
+   host key is already present in `known_hosts`. The deploy reads the six shipped
+   files below `CATALOG_CANARY_INSTALL_DIR` (default
+   `macprovider/catalog-release`) through no-follow directory handles and
+   compares every SHA-256 with the locally verified release before commit. The
+   remote proof must also match `~/.config/macprovider/provider_id`, the live
+   `live.streamvc.macprovider` launchd PID and executable inode, that PID's
+   configured listening port, and its local catalog status. This prevents an
+   admitted provider and a different host with matching bytes from satisfying
+   the same canary gate. A legacy bridge, previous release, byte
+   mismatch, truly degraded provider, missing identity, unknown canary, or SSH
+   trust failure is a deployment failure.
 
 Only after all checks pass, write the committed marker and remove the snapshot.
 If rollback itself fails, preserve the snapshot, emit the distinct exit status
@@ -225,18 +261,32 @@ uses the same transaction contract:
    staged binary/resources/config/plist.
 7. Restart and read back effective model, artifact digest, catalog release,
    signer, trust source, and mode.
-8. Require local health and an active coordinator session that confirms either
-   the current live release or the explicitly recognized previous release
-   before committing the transaction.
+8. Require local health plus the coordinator's authoritative public readiness
+   verdict for the exact provider. A WebSocket connection alone is not serving
+   proof. `/v1/status` reports `buyer_serving` only after an exact, non-redirected
+   `details=readiness` response confirms full routing eligibility and a current
+   or explicitly recognized previous release; rejection is
+   `not_buyer_serving`, and timeouts/rate limits are `buyer_serving_unknown`.
+   Malibu invalidates a prior serving verdict whenever status refresh fails.
+   Readiness limiting uses a high-capacity per-source aggregate ahead of a
+   provider-scoped burst bucket. This bounds rotating-ID abuse while preserving
+   headroom and provider fairness for cohorts behind one NAT, with `Retry-After`
+   plus provider-jittered retries. The installer and self-update commit only on
+   authoritative `buyer_serving`; the public display state may be `degraded` while a busy
+   provider is still buyer-serving, so it is not an additional commit gate.
 9. On failure, restore every snapshot component and previous service state.
 
-The shell installer persists its transaction under
-`~/Library/Application Support/macprovider/install-transaction` before changing
-live files.
-It arms `live.streamvc.macprovider-install-recovery`, which observes the
-installer process and performs the persisted rollback if the installer is
-killed, the host restarts, or the next install detects an orphaned transaction.
-The installer removes the recovery LaunchAgent only after readiness commits.
+The shell installer takes a kernel-held, no-follow per-user mutex at
+`~/.config/macprovider/install.lock` before provider identity selection. It
+persists each transaction under
+`~/.config/macprovider/install-recovery-<installer-pid>` before changing live
+files and deterministically restores any orphan before a later install begins.
+It arms the LaunchAgent `live.streamvc.macprovider-install-recovery`, whose
+plist lives in `~/Library/LaunchAgents/` and independently observes the exact
+installer process start. The agent serializes behind the same mutex and performs
+the persisted rollback if the installer is killed or the host restarts. The
+installer removes the recovery LaunchAgent only after exact coordinator
+admission and buyer-serving readiness commit.
 An existing installation invoked with the start-skipping debug override is
 rolled back instead of committing an unverified stopped replacement; the
 override remains usable for a first install.
@@ -273,6 +323,17 @@ not invent a shortage. The multiplier is bounded to `0.5...2.0`. v0.6 preserves
 fleet diversification remains an observed rollout decision rather than a client
 side random choice.
 
+Provider recommendation and coordinator admission use the same benchmark
+boundary: thermal throttling, measured TPS below `min_sustained_tps`, or TTFT
+above `max_4k_ttft_ms` is a hard eligibility failure. Equality at either signed
+threshold passes. Swap remains a surfaced operator warning rather than a hidden
+coordinator-only rejection.
+The recovered immutable v4 catalog contains historical free-text notes that
+call some gates advisory. Those notes are provenance only; the structured,
+signed `bench_gate` fields and the coordinator admission cap are normative.
+Correct the wording only in a newly signed release—never rewrite the recovered
+release in place.
+
 Operator output explains hardware fit, measured throughput, expected payout,
 demand/shortage contribution, source age, and confidence. Operators retain an
 explicit opt-out.
@@ -295,7 +356,9 @@ requires local readiness and an active coordinator session that confirms the
 current release or the bounded recognized previous release. It does not claim
 that a buyer request is currently queued. Catalog integrity or update-required
 warnings stop recommendation before model downloads or benchmark execution;
-freshness reports such state as stale.
+freshness reports such state as stale. A coordinator connection without an
+explicit `network_state` is rendered as connected with serving status unknown;
+it must never be promoted to `buyer_serving` by the CLI or Malibu.
 
 ## 10. Rollout sequence
 
@@ -327,8 +390,9 @@ freshness reports such state as stale.
 - [ ] Coordinator refuses configured unverified feeds on every restart; no hot
       reload path bypasses verification.
 - [ ] Deploy verifies exact staged-versus-served hashes, observes the named
-      canary buyer-serving on the exact current catalog envelope, and rolls
-      back atomically on failure.
+      canary buyer-serving on the exact current catalog envelope, independently
+      binds the trusted canary Mac's provider identity and live executable to
+      its exact installed release bytes, and rolls back atomically on failure.
 - [ ] Controller loss during a live mutation is serialized behind the remote
       operation barrier; rollback restores the exact prior Tier-2 catalog.
 - [ ] launchd contains no mutable config overrides.

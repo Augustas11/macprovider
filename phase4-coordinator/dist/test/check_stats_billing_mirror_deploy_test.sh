@@ -41,7 +41,7 @@ grep -qF 'install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-billing
   fail "deploy script missing billing mirror binary install"
 grep -qF 'setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite' "$DEPLOY_SH" ||
   fail "deploy script must grant narrow SQLite file ACL"
-grep -qF "echo '  warning: setfacl not available; stats billing mirror will remain disabled until macprovider-stats can read request-log.sqlite'" "$DEPLOY_SH" ||
+grep -qF "echo '  warning: setfacl/getfacl not available; stats billing mirror will remain disabled until rollback-safe ACL management is available'" "$DEPLOY_SH" ||
   fail "deploy script must keep setfacl warning single-quoted inside SSH install block"
 grep -qF 'su -s /bin/sh -c "test -r /var/lib/macprovider/request-log.sqlite" macprovider-stats' "$DEPLOY_SH" ||
   fail "deploy script must only enable mirror when stats user can read sqlite source"

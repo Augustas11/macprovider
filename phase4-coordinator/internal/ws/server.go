@@ -1705,15 +1705,19 @@ func (s *Server) catalogAdmission(hello Hello) (string, bool) {
 		return "", false
 	}
 	// A recognized previous release is compatible only while the selected
-	// model row is byte-for-byte policy-equivalent to the active release.
-	// This permits unrelated catalog updates without admitting stale model
-	// artifacts, gates, or policy.
+	// model row identity and policy-bearing structured fields are semantically
+	// equivalent to the active release. This permits unrelated catalog updates
+	// without admitting stale model artifacts, gates, speculative decoding, or
+	// workload policy.
 	activeKey, _, ok := catalog.HighestClaimedTier(hello.ModelID)
 	if !ok {
 		return "", false
 	}
 	activeRowIdentity, ok := catalog.RowIdentity(activeKey)
 	if !ok || !strings.EqualFold(providerRowIdentity, activeRowIdentity) {
+		return "", false
+	}
+	if admissionMode == "previous" && !providerCatalog.PolicyEquivalent(key, catalog, activeKey) {
 		return "", false
 	}
 	return admissionMode, true

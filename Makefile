@@ -81,6 +81,8 @@ test-dist:
 	bash scripts/test-install-launchd-enable.sh
 	bash phase3-binary/dist/test/install_fresh_evidence.test.sh
 	bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
+	bash phase3-binary/dist/test/install_transaction_lock.test.sh
+	bash phase3-binary/dist/test/install_coordinator_admission.test.sh
 	bash phase3-binary/dist/test/provider_upgrade_transaction.test.sh
 	bash scripts/test-watchdog-inline-drift.sh
 	bash phase3-binary/dist/test/watchdog_rollback_paths.test.sh

@@ -331,11 +331,16 @@ type ReceiptPubkeyPrevious struct {
 // removed it: when Tier-2 hash enforcement is disabled, hash-mismatched
 // providers must still route, and a non-config-aware predicate cannot model
 // that. Buyer routing (chat completions, hard-pin) calls RoutingEligible()
-// alongside tier2ProviderExcludedStatus to enforce hash policy. Catalog and
-// health surfaces separately exclude pending receipt-key publication while
-// preserving ready providers that are temporarily out of free slots.
+// alongside tier2ProviderExcludedStatus to enforce hash policy. Catalog-aware
+// deployments also keep metadata-free legacy bridge sessions operator-visible
+// while excluding them from buyer routing. Catalog and health surfaces
+// separately exclude pending receipt-key publication while preserving ready
+// providers that are temporarily out of free slots.
 func (p Provider) RoutingEligible() bool {
 	if p.AuthState == AuthBearerlessDuplicate || p.AuthState == AuthSelfMinted {
+		return false
+	}
+	if p.CatalogAdmissionMode == "legacy" {
 		return false
 	}
 	if len(p.PendingReceiptPubkey) > 0 {
@@ -350,6 +355,9 @@ func (p Provider) RoutingEligible() bool {
 // sessions stay visible but not advertised as usable serving capacity.
 func (p Provider) CapacityEligible() bool {
 	if p.AuthState == AuthBearerlessDuplicate || p.AuthState == AuthSelfMinted {
+		return false
+	}
+	if p.CatalogAdmissionMode == "legacy" {
 		return false
 	}
 	if len(p.PendingReceiptPubkey) > 0 {

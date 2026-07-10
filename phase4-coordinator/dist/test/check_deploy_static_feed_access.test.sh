@@ -60,8 +60,50 @@ grep -q 'had-previous-target' "$RECOVER_SH" ||
 grep -q 'had-tier2-catalog' "$DEPLOY_SH" && grep -q 'restore_regular had-tier2-catalog' "$RECOVER_SH" ||
   fail "coordinator rollback must preserve the exact Tier-2 signed catalog"
 
+grep -q 'had-coordinator-cli' "$DEPLOY_SH" && grep -q 'restore_regular had-coordinator-cli' "$RECOVER_SH" ||
+  fail "coordinator rollback must preserve the matching operator CLI"
+
+for marker in had-stats-inventory-binary had-stats-billing-binary had-stats-hardware-binary \
+  had-stats-inventory-service had-stats-inventory-timer \
+  had-stats-billing-service had-stats-billing-timer \
+  had-stats-hardware-service had-stats-hardware-timer; do
+  grep -q "$marker" "$DEPLOY_SH" && grep -q "$marker" "$RECOVER_SH" ||
+    fail "coordinator rollback coverage missing for $marker"
+done
+
+for marker in had-nginx-stats-shared had-nginx-stats-security-headers \
+  had-nginx-stats-cors-429 had-nginx-stats-proxy-public \
+  had-nginx-stats-proxy-partner had-nginx-coordinator-site \
+  had-nginx-stats-site had-nginx-coordinator-enabled had-nginx-stats-enabled; do
+  grep -q "$marker" "$DEPLOY_SH" && grep -q "$marker" "$RECOVER_SH" ||
+    fail "nginx rollback coverage missing for $marker"
+done
+
+grep -q 'snapshot_acl /var/lib/macprovider/request-log.sqlite' "$DEPLOY_SH" &&
+  grep -q 'restore_acl had-request-log-db-acl' "$RECOVER_SH" ||
+  fail "request-log ACL changes must be captured and restored"
+
+grep -q 'try-reload-or-restart nginx' "$RECOVER_SH" ||
+  fail "rollback must validate and activate the restored nginx graph"
+
+freeze_line=$(grep -nF '# Freeze sidecar execution for the release window.' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+binary_install_line=$(grep -nF 'install -o root -g macprovider-stats -m 0750 $DEPLOY_TMP/stats-inventory-sync-linux-amd64' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+sidecar_activate_line=$(grep -nF '# Sidecars remain frozen until every coordinator/catalog/canary check has' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+commit_line=$(grep -nF 'touch /opt/macprovider/.coordinator-deploy-rollback/committed' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+[ -n "$freeze_line" ] && [ -n "$binary_install_line" ] && [ "$freeze_line" -lt "$binary_install_line" ] ||
+  fail "stats sidecars must freeze before transaction binaries are replaced"
+[ -n "$sidecar_activate_line" ] && [ -n "$commit_line" ] && [ "$sidecar_activate_line" -lt "$commit_line" ] ||
+  fail "stats sidecars must reactivate only as the final pre-commit mutation"
+
 grep -q 'flock -n /opt/macprovider/.coordinator-deploy.lock' "$DEPLOY_SH" ||
   fail "deploy must hold a controller-lifetime remote lock"
+
+grep -q 'O_NOFOLLOW' "$DEPLOY_SH" && grep -q 'info.st_nlink != 1' "$DEPLOY_SH" &&
+  grep -q 'unsafe coordinator deploy lock' "$DEPLOY_SH" ||
+  fail "deploy lock setup must reject symlinks, hardlinks, and unsafe ownership/modes"
+
+grep -q 'sidecar unit did not stop:' "$DEPLOY_SH" ||
+  fail "deploy must prove every loaded sidecar is inactive before replacement"
 
 grep -q 'recover interrupted coordinator deploy' "$DEPLOY_SH" ||
   fail "deploy must recover an interrupted transaction before reading live state"
@@ -105,17 +147,37 @@ grep -q 'CATALOG_CANARY_PROVIDER_ID is required' "$DEPLOY_SH" ||
 grep -q 'CATALOG_CANARY_AUTH_TOKEN is required' "$DEPLOY_SH" ||
   fail "deploy must require authenticated canary evidence"
 
+grep -q 'CATALOG_CANARY_SSH_TARGET is required' "$DEPLOY_SH" ||
+  fail "deploy must require a trusted canary host for exact installed-byte verification"
+
+grep -q 'StrictHostKeyChecking=yes' "$DEPLOY_SH" ||
+  fail "trusted canary verification must check the SSH host key"
+
 grep -q '/v1/pool/check?provider_id=\$CATALOG_CANARY_PROVIDER_ID&details=deployment' "$DEPLOY_SH" ||
   fail "deploy must gate completion on provider pool admission"
 
 grep -q 'value.get("buyer_serving") is not True' "$DEPLOY_SH" ||
   fail "deploy canary must require explicit buyer-serving capacity"
 
+grep -q 'value.get("catalog_evidence_source") != "provider_reported"' "$DEPLOY_SH" ||
+  fail "deploy must treat coordinator catalog fields as provider-reported compatibility evidence"
+
 grep -q 'value.get("catalog_admission_mode") != "current"' "$DEPLOY_SH" ||
   fail "deploy canary must reject legacy and previous catalog admissions"
 
 grep -q 'value.get("catalog_candidate_sha256") != sys.argv\[5\]' "$DEPLOY_SH" ||
   fail "deploy canary must match the active candidate catalog digest"
+
+grep -q 'canary catalog byte mismatch' "$DEPLOY_SH" ||
+  fail "deploy must compare exact installed canary catalog bytes before commit"
+
+grep -q 'canary provider identity mismatch' "$DEPLOY_SH" &&
+  grep -q 'live canary provider is not the verified installation binary' "$DEPLOY_SH" &&
+  grep -q 'live canary provider status does not match the expected identity and catalog' "$DEPLOY_SH" ||
+  fail "exact-byte proof must bind the named provider, live process, and local catalog status"
+
+grep -q 'O_NOFOLLOW' "$DEPLOY_SH" && grep -q 'dir_fd=' "$DEPLOY_SH" ||
+  fail "trusted canary files must be opened no-follow through directory file descriptors"
 
 grep -q '/v1/demand-rank' "$DEPLOY_SH" ||
   fail "deploy smoke must probe /v1/demand-rank"

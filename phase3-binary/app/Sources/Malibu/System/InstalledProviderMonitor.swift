@@ -77,7 +77,9 @@ enum InstalledProviderMonitor {
         }
     }
 
-    static func fetchStatus(port: Int, timeout: TimeInterval = 2) async -> StatusSnapshot? {
+    // /v1/status includes an authoritative coordinator readiness lookup and may
+    // wait through one 1-second rate-limit window before answering.
+    static func fetchStatus(port: Int, timeout: TimeInterval = 5) async -> StatusSnapshot? {
         let url = URL(string: "http://127.0.0.1:\(port)/v1/status")!
         var request = URLRequest(url: url)
         request.httpMethod = "GET"

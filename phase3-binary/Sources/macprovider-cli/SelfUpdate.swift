@@ -391,6 +391,8 @@ struct SelfUpdate {
         guard let port = config?.port else { return false }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
+            // /v1/status only emits buyer_serving after the coordinator's
+            // public readiness endpoint confirms full routing eligibility.
             if let status = try? await LocalStatusClient.fetch(port: port),
                status["network_state"] as? String == "buyer_serving" {
                 return true

@@ -252,6 +252,18 @@ func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 	if pendingReceiptKey.CapacityEligible() {
 		t.Fatal("pending receipt pubkey sessions must be excluded from published serving capacity")
 	}
+	legacyCatalog := base
+	legacyCatalog.CatalogAdmissionMode = "legacy"
+	if legacyCatalog.RoutingEligible() || legacyCatalog.CapacityEligible() {
+		t.Fatal("metadata-free legacy catalog sessions must remain visible but receive no buyer traffic or serving-capacity credit")
+	}
+	for _, mode := range []string{"", "not_required", "current", "previous"} {
+		admitted := base
+		admitted.CatalogAdmissionMode = mode
+		if !admitted.RoutingEligible() || !admitted.CapacityEligible() {
+			t.Fatalf("catalog admission mode %q should remain routing and capacity eligible", mode)
+		}
+	}
 }
 
 func TestRecordCanaryResultTripsProvisionalUnavailable(t *testing.T) {

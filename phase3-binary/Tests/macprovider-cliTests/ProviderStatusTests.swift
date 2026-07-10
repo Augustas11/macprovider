@@ -71,7 +71,9 @@ final class ProviderStatusTests: XCTestCase {
             releaseID: "release-a",
             digest: String(repeating: "a", count: 64),
             signerKeyID: "streamvc-autotune-static-v5",
-            source: "coordinator"
+            source: "coordinator",
+            policyVersion: "autotune-policy-v1",
+            rowIdentity: String(repeating: "e", count: 64)
         )
         let context = ProviderCatalogStatusContext(
             trust: trust,
@@ -88,13 +90,17 @@ final class ProviderStatusTests: XCTestCase {
             await status.snapshot(),
             providerID: "provider-a",
             coordinatorURL: "wss://coordinator.streamvc.live/provider/ws",
-            catalogStatus: context
+            catalogStatus: context,
+            coordinatorBuyerServing: true
         )
         let catalog = body["catalog"] as? [String: Any]
 
         XCTAssertEqual(body["network_state"] as? String, "buyer_serving")
+        XCTAssertEqual(body["buyer_serving_authority"] as? String, "coordinator")
         XCTAssertEqual(catalog?["state"] as? String, "live_verified")
         XCTAssertEqual(catalog?["signer_key_id"] as? String, "streamvc-autotune-static-v5")
+        XCTAssertEqual(catalog?["policy_version"] as? String, "autotune-policy-v1")
+        XCTAssertEqual(catalog?["row_identity"] as? String, String(repeating: "e", count: 64))
     }
 
     func testStatusDoesNotCallOfflineFallbackBuyerServing() async {
@@ -151,10 +157,125 @@ final class ProviderStatusTests: XCTestCase {
             await status.snapshot(),
             providerID: "provider-a",
             coordinatorURL: "wss://coordinator.streamvc.live/ws/provider",
-            catalogStatus: context
+            catalogStatus: context,
+            coordinatorBuyerServing: true
         )
         XCTAssertEqual(body["network_state"] as? String, "buyer_serving")
         XCTAssertEqual((body["catalog"] as? [String: Any])?["state"] as? String, "safe_offline_fallback")
+    }
+
+    func testStatusNeverInfersBuyerServingWhenCoordinatorVerdictIsUnknownOrFalse() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        await status.setCoordinatorSession(connected: true)
+        let context = ProviderCatalogStatusContext(
+            trust: ServeCommand.CatalogRuntimeTrust(
+                state: "live_verified",
+                releaseID: "release-a",
+                digest: String(repeating: "a", count: 64),
+                signerKeyID: "signer-v5",
+                source: "coordinator"
+            ),
+            donorMode: false,
+            catalogKey: "model-key",
+            catalogModelID: "org/model",
+            modelRevision: nil,
+            artifactSHA256: nil,
+            configuredReleaseID: nil,
+            configuredCatalogDigest: nil
+        )
+
+        let unknown = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.streamvc.live/ws/provider",
+            catalogStatus: context
+        )
+        let rejected = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.streamvc.live/ws/provider",
+            catalogStatus: context,
+            coordinatorBuyerServing: false
+        )
+
+        XCTAssertEqual(unknown["network_state"] as? String, "buyer_serving_unknown")
+        XCTAssertEqual(unknown["buyer_serving_authority"] as? String, "unknown")
+        XCTAssertEqual(rejected["network_state"] as? String, "not_buyer_serving")
+        XCTAssertEqual(rejected["buyer_serving_authority"] as? String, "coordinator")
+    }
+
+    func testCoordinatorReadinessURLUsesPublicReadinessEndpoint() throws {
+        let url = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
+            coordinatorURL: "wss://coordinator.streamvc.live/v1/ws/provider?ignored=true",
+            providerID: "provider a"
+        ))
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+
+        XCTAssertEqual(components.scheme, "https")
+        XCTAssertEqual(components.host, "coordinator.streamvc.live")
+        XCTAssertEqual(components.path, "/v1/pool/check")
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: components.queryItems?.map { ($0.name, $0.value) } ?? []), [
+            "provider_id": "provider a",
+            "details": "readiness",
+        ])
+        XCTAssertNil(CoordinatorReadinessClient.readinessURL(
+            coordinatorURL: "http://coordinator.streamvc.live/v1/ws/provider",
+            providerID: "provider-a"
+        ))
+    }
+
+    func testCoordinatorReadinessVerdictRejectsRedirectsAndNonAdmittedServingClaims() throws {
+        let requestURL = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
+            coordinatorURL: "wss://coordinator.streamvc.live/v1/ws/provider",
+            providerID: "provider-a"
+        ))
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: requestURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        let redirected = try XCTUnwrap(HTTPURLResponse(
+            url: URL(string: "https://attacker.invalid/v1/pool/check")!,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        func body(mode: String, serving: Bool = true) -> Data {
+            Data("""
+            {"provider_id":"provider-a","buyer_serving":\(serving),"catalog_admission_mode":"\(mode)","catalog_evidence_source":"provider_reported"}
+            """.utf8)
+        }
+
+        XCTAssertEqual(CoordinatorReadinessClient.verdict(
+            data: body(mode: "current"), response: response, requestURL: requestURL, providerID: "provider-a"
+        ), true)
+        XCTAssertEqual(CoordinatorReadinessClient.verdict(
+            data: body(mode: "previous"), response: response, requestURL: requestURL, providerID: "provider-a"
+        ), true)
+        XCTAssertNil(CoordinatorReadinessClient.verdict(
+            data: body(mode: "legacy"), response: response, requestURL: requestURL, providerID: "provider-a"
+        ))
+        XCTAssertNil(CoordinatorReadinessClient.verdict(
+            data: body(mode: "current"), response: redirected, requestURL: requestURL, providerID: "provider-a"
+        ))
+        XCTAssertEqual(CoordinatorReadinessClient.verdict(
+            data: body(mode: "legacy", serving: false), response: response, requestURL: requestURL, providerID: "provider-a"
+        ), false)
+    }
+
+    func testCoordinatorReadinessRetryUsesProviderScopedJitterAndRetryAfter() {
+        let first = CoordinatorReadinessClient.retryDelayNanoseconds(
+            providerID: "provider-a",
+            retryAfterHeader: "1"
+        )
+        let second = CoordinatorReadinessClient.retryDelayNanoseconds(
+            providerID: "provider-b",
+            retryAfterHeader: "1"
+        )
+        XCTAssertGreaterThanOrEqual(first, 1_050_000_000)
+        XCTAssertLessThanOrEqual(first, 1_300_000_000)
+        XCTAssertNotEqual(first, second)
     }
 
     func testSpecDecodeStatusSuppressesTelemetryOnRuntimeGenerationMismatch() async {

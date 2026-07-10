@@ -48,17 +48,13 @@ enum AutotuneRecommendWarning: String, CaseIterable {
     /// should be aware that heavy real-world context loads may push
     /// this Mac into swap.
     case swapObservedUnderLoad = "swap_observed_under_load"
-    /// v1.7.9 Track A5 (Option B): the recommended candidate's measured
-    /// sustained TPS was below the catalog's `min_sustained_tps` gate
-    /// for its row. The gate is now a soft signal — the ACTUAL gate is
-    /// `expected_net_usd_per_hour >= $0.005/hr`, since a provider with
-    /// slower-than-nominal TPS still earns at the reduced measured rate.
-    /// Buyers routing to this provider get slower inference than the
-    /// catalog gate implied.
+    /// Retained for decoding recommendation artifacts written by older
+    /// binaries. Current recommendations treat the signed catalog's
+    /// `min_sustained_tps` as a hard eligibility gate.
     case tpsBelowGate = "tps_below_gate"
-    /// v1.7.9 Track A5 (Option B): the recommended candidate's measured
-    /// 4K TTFT was above the catalog's `max_4k_ttft_ms` ceiling. Same
-    /// soft-signal reasoning as `tpsBelowGate`.
+    /// Retained for decoding recommendation artifacts written by older
+    /// binaries. Current recommendations treat the signed catalog's
+    /// `max_4k_ttft_ms` as a hard eligibility gate.
     case ttftAboveGate = "ttft_above_gate"
 }
 
@@ -718,7 +714,7 @@ struct CandidateCatalog: Decodable, Equatable {
 
     func rowIdentity(for key: String) -> String? {
         guard let row = rows[key] else { return nil }
-        let fields = [
+        var fields = [
             policyVersion,
             key,
             row.modelID,
@@ -730,8 +726,75 @@ struct CandidateCatalog: Decodable, Equatable {
             String(row.benchGate.max4KTTFTMS),
             row.runtimeStatus,
         ]
+        let policyDigest: String?
+        do {
+            policyDigest = try Self.policyDigest(for: row)
+        } catch {
+            return nil
+        }
+        if let policyDigest {
+            fields.append("policy:\(policyDigest)")
+        }
         let framed = fields.map { "\($0.utf8.count):\($0)" }.joined(separator: "|")
         return Data(SHA256.hash(data: Data(framed.utf8))).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Bind cached benchmark evidence to runtime-selection policy while
+    /// retaining historical identities for rows that predate these fields.
+    /// The coordinator computes the same digest over RFC 8785 canonical JSON.
+    private static func policyDigest(for row: Row) throws -> String? {
+        var policy: [String: RFC8785JCS.Value] = [:]
+        if let draftCandidates = row.draftCandidates {
+            policy["draft_candidates"] = .array(draftCandidates.map { candidate in
+                .object([
+                    "draft_model": .string(candidate.draftModel),
+                    "draft_model_artifact_sha256": .string(candidate.draftModelArtifactSHA256),
+                ])
+            })
+        }
+        if let workloadProfiles = row.workloadProfiles {
+            policy["workload_profiles"] = .object(workloadProfiles.mapValues { tiers in
+                .object(tiers.mapValues(workloadProfileCanonicalValue))
+            })
+        }
+        guard !policy.isEmpty else { return nil }
+        return try RFC8785JCS.sha256Hex(of: .object(policy))
+    }
+
+    private static func workloadProfileCanonicalValue(_ profile: WorkloadProfile) -> RFC8785JCS.Value {
+        var value: [String: RFC8785JCS.Value] = [
+            "gate_policy": .object([
+                "min_samples": .int(profile.gatePolicy.minSamples),
+                "max_p95_ttft_ms": .int(profile.gatePolicy.maxP95TTFTMS),
+                "max_stop_token_leak_rate": .double(profile.gatePolicy.maxStopTokenLeakRate),
+                "min_median_tps": profile.gatePolicy.minMedianTPS.map(RFC8785JCS.Value.double) ?? .null,
+            ]),
+            "profile_metrics": .object([
+                "median_tps": profile.profileMetrics.medianTPS.map(RFC8785JCS.Value.double) ?? .null,
+                "p95_ttft_ms": profile.profileMetrics.p95TTFTMS.map(RFC8785JCS.Value.double) ?? .null,
+                "stop_token_leak_rate": profile.profileMetrics.stopTokenLeakRate.map(RFC8785JCS.Value.double) ?? .null,
+                "spec_decode_acceptance_rate": profile.profileMetrics.specDecodeAcceptanceRate.map(RFC8785JCS.Value.double) ?? .null,
+                "sample_count": .int(profile.profileMetrics.sampleCount),
+            ]),
+            "source": .string(profile.source),
+        ]
+        if let status = profile.status { value["status"] = .string(status) }
+        if let reason = profile.noWinnerReason { value["no_winner_reason"] = .string(reason) }
+        if let source = profile.candidateSource { value["candidate_source"] = .string(source) }
+        if let recommended = profile.recommended {
+            var recommendation: [String: RFC8785JCS.Value] = [
+                "kv_bits": .int(recommended.kvBits),
+                "max_context_override": .int(recommended.maxContextOverride),
+                "max_concurrency_override": .int(recommended.maxConcurrencyOverride),
+            ]
+            if let model = recommended.draftModel { recommendation["draft_model"] = .string(model) }
+            if let digest = recommended.draftModelArtifactSHA256 {
+                recommendation["draft_model_artifact_sha256"] = .string(digest)
+            }
+            if let count = recommended.numDraftTokens { recommendation["num_draft_tokens"] = .int(count) }
+            value["recommended"] = .object(recommendation)
+        }
+        return .object(value)
     }
 
     private static func validateWorkloadProfiles(
@@ -1460,7 +1523,12 @@ struct AutotuneRecommendEngine {
                 tokensPerSecond: tps.rounded6,
                 memoryHeadroomGB: headroom.rounded6,
                 confidence: confidence,
-                why: why(modelKey: modelKey, eligible: eligible),
+                why: why(
+                    modelKey: modelKey,
+                    candidate: candidate,
+                    benchmark: benchmark,
+                    eligible: eligible
+                ),
                 rawScore: expectedEarningsScore.rounded6
             )
         }
@@ -1512,18 +1580,6 @@ struct AutotuneRecommendEngine {
             if request.benchmarks[target.catalogKey]?.swapDetected == true {
                 warnings.insert(.swapObservedUnderLoad)
             }
-            // v1.7.9 Track A5: catalog TPS/TTFT gates are soft signals.
-            // Surface the gap when the recommended candidate misses either
-            // gate so the operator sees the QoS delta vs catalog expectation.
-            if let benchmark = request.benchmarks[target.catalogKey],
-               let candidateRow = request.candidateCatalog.rows[target.catalogKey] {
-                if benchmark.sustainedTPS < Double(candidateRow.benchGate.minSustainedTPS) {
-                    warnings.insert(.tpsBelowGate)
-                }
-                if benchmark.ttftMS > candidateRow.benchGate.max4KTTFTMS {
-                    warnings.insert(.ttftAboveGate)
-                }
-            }
         }
 
         let resultCandidates = eligible.isEmpty ? Array(scored.prefix(5)) : Array(eligible.prefix(5))
@@ -1566,11 +1622,13 @@ struct AutotuneRecommendEngine {
         guard candidate.minRAMGB <= request.hardware.memoryGB - Self.safetyMarginGB else { return false }
         guard request.hardware.bandwidthTier.satisfies(minimum: candidate.minBandwidthTier) else { return false }
         guard let benchmark else { return false }
-        // v1.7.6 Track A2a: swapDetected relaxed to soft-signal.
-        // v1.7.9 Track A5 (Option B): sustainedTPS and ttftMS are advisory.
-        // thermalThrottleDetected stays a hard-block because throttled
-        // TPS measurements are unreliable.
+        // Keep provider-side recommendation admission identical to the
+        // coordinator's benchmark gate: TPS below the signed minimum and
+        // TTFT above the signed maximum are hard failures. Equality passes.
+        // Thermal throttling remains a separate hard block because throttled
+        // measurements are unreliable; swap remains an operator warning.
         return !benchmark.thermalThrottleDetected
+            && Self.benchmarkClearsSignedCatalogGates(benchmark, candidate: candidate)
             && Self.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey)
     }
 
@@ -1587,8 +1645,9 @@ struct AutotuneRecommendEngine {
         candidate: CandidateCatalog.Row?,
         request: AutotuneRecommendRequest
     ) -> Bool {
-        // v1.7.6 Track A2a + v1.7.9 Track A5: donor mode inherits the
-        // paid-tier relaxations. Only thermal throttle stays a hard-block.
+        // Donor recommendations use the same signed performance gates so a
+        // locally-applied fallback cannot later appear network-admissible with
+        // benchmark evidence the coordinator would reject.
         guard let candidate,
               ["candidate", "listed", "recommendable"].contains(candidate.runtimeStatus),
               candidate.modelRevision != nil,
@@ -1596,11 +1655,21 @@ struct AutotuneRecommendEngine {
               candidate.minRAMGB <= request.hardware.memoryGB - safetyMarginGB,
               request.hardware.bandwidthTier.satisfies(minimum: candidate.minBandwidthTier),
               let benchmark = request.benchmarks[modelKey],
-              !benchmark.thermalThrottleDetected
+              !benchmark.thermalThrottleDetected,
+              benchmarkClearsSignedCatalogGates(benchmark, candidate: candidate)
         else {
             return false
         }
         return cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey)
+    }
+
+    static func benchmarkClearsSignedCatalogGates(
+        _ benchmark: CandidateBenchmark,
+        candidate: CandidateCatalog.Row
+    ) -> Bool {
+        benchmark.sustainedTPS.isFinite
+            && benchmark.sustainedTPS >= candidate.benchGate.minSustainedTPS
+            && benchmark.ttftMS <= candidate.benchGate.max4KTTFTMS
     }
 
     static func cachedBenchmarkAdmitted(_ benchmark: CandidateBenchmark, request: AutotuneRecommendRequest, modelKey: String) -> Bool {
@@ -1636,9 +1705,36 @@ struct AutotuneRecommendEngine {
         return "high"
     }
 
-    private func why(modelKey: String, eligible: Bool) -> String {
+    private func why(
+        modelKey: String,
+        candidate: CandidateCatalog.Row,
+        benchmark: CandidateBenchmark?,
+        eligible: Bool
+    ) -> String {
         if eligible {
             return "\(modelKey) has the best expected provider earnings after measured throughput, buyer demand, and supply deficit.".prefixString(140)
+        }
+        if let benchmark {
+            var signedGateFailures: [String] = []
+            if !benchmark.sustainedTPS.isFinite {
+                signedGateFailures.append("TPS evidence is non-finite")
+            } else if benchmark.sustainedTPS < candidate.benchGate.minSustainedTPS {
+                signedGateFailures.append(
+                    String(
+                        format: "TPS %.3f is below signed catalog minimum %.3f",
+                        benchmark.sustainedTPS,
+                        candidate.benchGate.minSustainedTPS
+                    )
+                )
+            }
+            if benchmark.ttftMS > candidate.benchGate.max4KTTFTMS {
+                signedGateFailures.append(
+                    "TTFT \(benchmark.ttftMS)ms exceeds signed catalog maximum \(candidate.benchGate.max4KTTFTMS)ms"
+                )
+            }
+            if !signedGateFailures.isEmpty {
+                return ("\(modelKey): " + signedGateFailures.joined(separator: "; ")).prefixString(140)
+            }
         }
         return "\(modelKey) did not clear one or more recommendation gates.".prefixString(140)
     }

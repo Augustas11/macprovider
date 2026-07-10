@@ -248,6 +248,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let coordinatorURL = coordinatorURL
         let catalogStatus = catalogStatus
         Task.detached { @Sendable [providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus] in
+            async let coordinatorBuyerServing = CoordinatorReadinessClient.fetch(
+                coordinatorURL: coordinatorURL,
+                providerID: providerID
+            )
             let snapshot = await providerStatus.snapshot()
             let runtimeSnapshot = warmSwapEnabled ? await modelRuntime.currentSnapshot() : nil
             let telemetryMatchesRuntime = runtimeSnapshot.map { $0.specDecodeGeneration == snapshot.specDecodeGeneration } ?? true
@@ -261,7 +265,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    runtimeSnapshot: runtimeSnapshot,
 	                    specDecodeTelemetryMatchesRuntime: telemetryMatchesRuntime,
 	                    specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible,
-                        catalogStatus: catalogStatus
+	                    catalogStatus: catalogStatus,
+	                    coordinatorBuyerServing: await coordinatorBuyerServing
 	                )
             )
         }
@@ -1214,7 +1219,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         runtimeSnapshot: RuntimeSnapshot? = nil,
         specDecodeTelemetryMatchesRuntime: Bool = true,
         specDecodeTelemetryRuntimeEligible: Bool = true,
-        catalogStatus: ProviderCatalogStatusContext? = nil
+        catalogStatus: ProviderCatalogStatusContext? = nil,
+        coordinatorBuyerServing: Bool? = nil
     ) -> [String: Any] {
         let effectiveModelID = runtimeSnapshot?.modelID ?? snapshot.modelID
         let effectiveModelLoaded = runtimeSnapshot.map { $0.container != nil || $0.modelID != nil } ?? snapshot.modelLoaded
@@ -1265,16 +1271,26 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             } else if (trustState == "live_verified"
                 || (trustState == "safe_offline_fallback" && snapshot.catalogCompatibilityConfirmed))
                 && localReady && snapshot.coordinatorConnected {
-                networkState = "buyer_serving"
+                switch coordinatorBuyerServing {
+                case true:
+                    networkState = "buyer_serving"
+                case false:
+                    networkState = "not_buyer_serving"
+                case nil:
+                    networkState = "buyer_serving_unknown"
+                }
             } else {
                 networkState = trustState
             }
             body["network_state"] = networkState
+            body["buyer_serving_authority"] = coordinatorBuyerServing == nil ? "unknown" : "coordinator"
             body["catalog"] = [
                 "state": trustState,
                 "release_id": jsonNullable(catalogStatus.trust?.releaseID ?? catalogStatus.configuredReleaseID),
                 "digest": jsonNullable(catalogStatus.trust?.digest ?? catalogStatus.configuredCatalogDigest),
                 "signer_key_id": jsonNullable(catalogStatus.trust?.signerKeyID),
+                "policy_version": jsonNullable(catalogStatus.trust?.policyVersion),
+                "row_identity": jsonNullable(catalogStatus.trust?.rowIdentity),
                 "source": jsonNullable(catalogStatus.trust?.source),
                 "catalog_key": jsonNullable(catalogStatus.catalogKey),
                 "model_id": jsonNullable(catalogStatus.catalogModelID),

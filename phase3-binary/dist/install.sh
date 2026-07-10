@@ -20,6 +20,9 @@ CONFIG_DIR="$HOME/.config/macprovider"
 CONFIG_PATH="$CONFIG_DIR/config.yaml"
 PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
 RECOMMENDATION_PATH="$CONFIG_DIR/last-recommendation.json"
+INSTALL_LOCK_PATH="$CONFIG_DIR/install.lock"
+INSTALL_RECOVERY_LABEL="live.streamvc.macprovider-install-recovery"
+INSTALL_RECOVERY_PLIST_PATH="$HOME/Library/LaunchAgents/${INSTALL_RECOVERY_LABEL}.plist"
 LIVE_CONFIG_PATH="$CONFIG_PATH"
 LIVE_PROVIDER_ID_PATH="$PROVIDER_ID_PATH"
 MANIFEST_DIR="$HOME/Library/Application Support/macprovider"
@@ -70,6 +73,9 @@ INSTALL_TX_WATCHDOG_WAS_ACTIVE=0
 INSTALL_TX_WATCHDOG_WAS_DISABLED=0
 INSTALL_TX_ROLLING_BACK=0
 INSTALL_TX_BINARY_KIND="symlink"
+INSTALL_LOCK_HELD=0
+INSTALL_LOCK_TOKEN=""
+INSTALL_LOCK_HOLDER_PID=""
 CUTOVER_STARTED=0
 AUTOTUNE_RECOMMENDATION_REQUIRED=0
 
@@ -277,6 +283,346 @@ for arg in "$@"; do
   esac
 done
 
+release_install_lock() {
+  [ "$INSTALL_LOCK_HELD" -eq 1 ] || return 0
+  case "$INSTALL_LOCK_HOLDER_PID" in
+    ''|*[!0-9]*) return 70 ;;
+  esac
+  kill -TERM "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+  wait "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+  INSTALL_LOCK_HELD=0
+  INSTALL_LOCK_TOKEN=""
+  INSTALL_LOCK_HOLDER_PID=""
+}
+
+assert_install_lock_ownership() {
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  [ "$INSTALL_LOCK_HELD" -eq 1 ] \
+    || die 70 "installer lock is not held; refusing protected install mutation"
+  case "$INSTALL_LOCK_HOLDER_PID" in
+    ''|*[!0-9]*) die 70 "installer lock helper identity is invalid; refusing protected install mutation" ;;
+  esac
+  [ -n "$INSTALL_LOCK_TOKEN" ] \
+    || die 70 "installer lock token is missing; refusing protected install mutation"
+  python3 - "$HOME" "$CONFIG_DIR" "$INSTALL_LOCK_PATH" "$$" \
+    "$INSTALL_LOCK_TOKEN" "$INSTALL_LOCK_HOLDER_PID" <<'PY' \
+    || die 70 "installer lock ownership was lost; refusing protected install mutation"
+import fcntl
+import json
+import os
+import stat
+import subprocess
+import sys
+
+home, config_dir, lock_path, owner_pid_text, token, holder_pid_text = sys.argv[1:]
+owner_pid = int(owner_pid_text)
+holder_pid = int(holder_pid_text)
+uid = os.getuid()
+
+def process_start(pid):
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+def boot_session():
+    result = subprocess.run(
+        ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    if value:
+        return value
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+home = os.path.normpath(home)
+config_dir = os.path.normpath(config_dir)
+if os.path.commonpath([home, config_dir]) != home:
+    raise SystemExit("config directory escaped HOME")
+directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+directory_fd = os.open(config_dir, directory_flags)
+lock_fd = None
+try:
+    lock_fd = os.open(
+        os.path.basename(lock_path),
+        os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_fd,
+    )
+    info = os.fstat(lock_fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError("installer lock is not an owned private regular file")
+    payload = os.read(lock_fd, 4097)
+    if len(payload) > 4096:
+        raise RuntimeError("installer lock record is oversized")
+    record = json.loads(payload.decode("utf-8"))
+    current_boot = boot_session()
+    if not current_boot:
+        raise RuntimeError("could not identify the current boot session")
+    expected = {
+        "pid": owner_pid,
+        "process_start": process_start(owner_pid),
+        "boot_session": current_boot,
+        "token": token,
+        "holder_pid": holder_pid,
+        "holder_process_start": process_start(holder_pid),
+    }
+    if not expected["process_start"] or not expected["holder_process_start"]:
+        raise RuntimeError("installer owner or lock helper is no longer live")
+    if record != expected:
+        raise RuntimeError("installer lock record no longer matches this process")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pass
+    else:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        raise RuntimeError("installer lock helper no longer owns the kernel lock")
+finally:
+    if lock_fd is not None:
+        os.close(lock_fd)
+    os.close(directory_fd)
+PY
+}
+
+acquire_install_lock() {
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  lock_status_path="$(mktemp "${TMPDIR:-/tmp}/macprovider-install-lock.XXXXXX")" \
+    || die 70 "could not allocate installer lock handshake"
+  python3 - "$HOME" "$CONFIG_DIR" "$INSTALL_LOCK_PATH" "$$" "$lock_status_path" <<'PY' &
+import fcntl
+import json
+import os
+import secrets
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+home, config_dir, lock_path, owner_pid_text, status_path = sys.argv[1:]
+owner_pid = int(owner_pid_text)
+uid = os.getuid()
+
+def write_status(value):
+    flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(status_path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
+            raise RuntimeError("unsafe installer lock handshake")
+        os.write(fd, (value + "\n").encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+def process_start(pid):
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+def boot_session():
+    result = subprocess.run(
+        ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    if value:
+        return value
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+home = os.path.normpath(home)
+config_dir = os.path.normpath(config_dir)
+if os.path.commonpath([home, config_dir]) != home:
+    raise SystemExit("config directory must remain inside HOME")
+current = home
+for component in os.path.relpath(config_dir, home).split(os.sep):
+    current = os.path.join(current, component)
+    try:
+        info = os.lstat(current)
+    except FileNotFoundError:
+        os.mkdir(current, 0o700)
+        info = os.lstat(current)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise SystemExit(f"config path is not a no-follow directory: {current}")
+    if info.st_uid != uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit(f"config path is not private to the installing user: {current}")
+
+directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+directory_fd = os.open(config_dir, directory_flags)
+lock_fd = None
+try:
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(os.path.basename(lock_path), flags, 0o600, dir_fd=directory_fd)
+    info = os.fstat(lock_fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError("installer lock is not an owned private regular file")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        write_status("busy")
+        raise SystemExit(73)
+    current_boot = boot_session()
+    if not current_boot:
+        raise RuntimeError("could not identify the current boot session")
+    existing_payload = os.read(lock_fd, 4097)
+    if len(existing_payload) > 4096:
+        raise RuntimeError("installer lock record is oversized")
+    if existing_payload.strip():
+        try:
+            existing = json.loads(existing_payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("installer lock record is invalid") from error
+        existing_pid = existing.get("pid")
+        existing_start = existing.get("process_start")
+        existing_boot = existing.get("boot_session")
+        if (
+            isinstance(existing_pid, int)
+            and isinstance(existing_start, str)
+            and existing_start
+            and existing_boot == current_boot
+            and process_start(existing_pid) == existing_start
+        ):
+            # The kernel-lock helper may have crashed or been killed while its
+            # installer owner remained active. The durable owner record fences
+            # out a replacement claimant until that exact owner identity dies.
+            write_status("busy")
+            raise SystemExit(73)
+    token = secrets.token_hex(32)
+    parent_start = process_start(owner_pid)
+    if not parent_start:
+        raise RuntimeError("installer parent process disappeared before lock acquisition")
+    record = {
+        "pid": owner_pid,
+        "process_start": parent_start,
+        "boot_session": current_boot,
+        "token": token,
+        "holder_pid": os.getpid(),
+        "holder_process_start": process_start(os.getpid()),
+    }
+    payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    os.lseek(lock_fd, 0, os.SEEK_SET)
+    os.ftruncate(lock_fd, 0)
+    os.write(lock_fd, payload)
+    os.fsync(lock_fd)
+    os.fsync(directory_fd)
+    write_status(f"ok:{token}")
+    stopping = False
+    def stop(_signum, _frame):
+        nonlocal_stopping[0] = True
+    nonlocal_stopping = [False]
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    while not nonlocal_stopping[0]:
+        if process_start(owner_pid) != parent_start:
+            break
+        time.sleep(0.25)
+except SystemExit:
+    raise
+except BaseException as error:
+    try:
+        write_status(f"error:{error}")
+    except BaseException:
+        pass
+    raise
+finally:
+    if lock_fd is not None:
+        os.close(lock_fd)
+    os.close(directory_fd)
+PY
+  INSTALL_LOCK_HOLDER_PID=$!
+  lock_wait=0
+  while [ "$lock_wait" -lt 100 ] && [ ! -s "$lock_status_path" ]; do
+    if ! kill -0 "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.05
+    lock_wait=$((lock_wait + 1))
+  done
+  lock_result="$(cat "$lock_status_path" 2>/dev/null || true)"
+  rm -f "$lock_status_path"
+  case "$lock_result" in
+    ok:*) INSTALL_LOCK_TOKEN="${lock_result#ok:}" ;;
+    busy)
+      wait "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+      INSTALL_LOCK_HOLDER_PID=""
+      die 73 "another macprovider installer is active; wait for it to finish"
+      ;;
+    *)
+      kill -TERM "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+      wait "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+      INSTALL_LOCK_HOLDER_PID=""
+      die 70 "could not acquire the no-follow installer lock: ${lock_result#error:}"
+      ;;
+  esac
+  INSTALL_LOCK_HELD=1
+}
+
+recover_orphaned_install_transactions() {
+  [ "$DRY_RUN" -eq 0 ] || return 0
+  assert_install_lock_ownership
+  orphan_list="$(python3 - "$CONFIG_DIR" <<'PY'
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+uid = os.getuid()
+for name in sorted(os.listdir(root)):
+    if not name.startswith("install-recovery-") or name.endswith(".staging") or ".committed." in name:
+        continue
+    path = os.path.join(root, name)
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != uid:
+        raise SystemExit(f"unsafe orphan recovery bundle: {path}")
+    for required in ("state.sh", "recover.sh"):
+        child = os.path.join(path, required)
+        child_info = os.lstat(child)
+        if not stat.S_ISREG(child_info.st_mode) or stat.S_ISLNK(child_info.st_mode) or child_info.st_uid != uid:
+            raise SystemExit(f"unsafe orphan recovery artifact: {child}")
+    print(path)
+PY
+  )" || die 70 "could not safely enumerate orphan install transactions"
+  [ -n "$orphan_list" ] || return 0
+  while IFS= read -r orphan; do
+    [ -n "$orphan" ] || continue
+    log "Recovering interrupted install transaction before starting a new install: $orphan"
+    recovery_rc=0
+    bash "$orphan/recover.sh" || recovery_rc=$?
+    if [ "$recovery_rc" -eq 75 ]; then
+      wait_attempt=0
+      while [ "$wait_attempt" -lt 30 ] && [ -d "$orphan" ]; do
+        sleep 1
+        wait_attempt=$((wait_attempt + 1))
+      done
+      [ ! -d "$orphan" ] || die 75 "interrupted install recovery is still active: $orphan"
+      continue
+    fi
+    [ "$recovery_rc" -eq 0 ] || die 70 "interrupted install recovery failed; run exactly: bash '$orphan/recover.sh'"
+    rm -rf "$orphan" || die 70 "recovered orphan transaction could not be retired: $orphan"
+  done <<EOF
+$orphan_list
+EOF
+}
+
 restore_existing_provider_if_start_skipped() {
   [ "$SKIP_PROVIDER_START" -eq 1 ] || return 1
   [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] || return 1
@@ -310,6 +656,12 @@ cleanup() {
       if [ "$cleanup_rc" -eq 0 ]; then
         cleanup_rc=70
       fi
+    fi
+  fi
+  if ! release_install_lock; then
+    log "ERROR: installer lock ownership could not be released safely: $INSTALL_LOCK_PATH"
+    if [ "$cleanup_rc" -eq 0 ]; then
+      cleanup_rc=70
     fi
   fi
   exit "$cleanup_rc"
@@ -358,6 +710,13 @@ write_install_recovery_artifacts() {
     printf 'REC_WATCHDOG_LABEL=%q\n' "$WATCHDOG_LABEL"
     printf 'REC_MANIFEST_PATH=%q\n' "$MANIFEST_PATH"
     printf 'REC_LOG_DIR=%q\n' "$LOG_DIR"
+    printf 'REC_INSTALL_RECOVERY_LABEL=%q\n' "$INSTALL_RECOVERY_LABEL"
+    printf 'REC_INSTALL_RECOVERY_PLIST_PATH=%q\n' "$INSTALL_RECOVERY_PLIST_PATH"
+    printf 'REC_INSTALL_LOCK_PATH=%q\n' "$INSTALL_LOCK_PATH"
+    printf 'REC_INSTALL_LOCK_TOKEN=%q\n' "$INSTALL_LOCK_TOKEN"
+    printf 'REC_INSTALLER_PID=%q\n' "$$"
+    printf 'REC_INSTALLER_PROCESS_START=%q\n' "$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    printf 'REC_INSTALLER_BOOT_SESSION=%q\n' "$(sysctl -n kern.bootsessionuuid 2>/dev/null || true)"
     printf 'REC_MANUAL_READY_TIMEOUT_SECONDS=%q\n' "15"
     printf 'REC_UID=%q\n' "$UID"
     printf 'REC_HAD_INSTALL_DIR=%q\n' "$INSTALL_TX_HAD_INSTALL_DIR"
@@ -385,6 +744,149 @@ RECOVERY_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 70
 . "$RECOVERY_DIR/state.sh" || exit 70
 
 recovery_log() { printf '[macprovider-recovery] %s\n' "$*" >&2; }
+acquire_recovery_claim() {
+  claim_status="$(mktemp "${TMPDIR:-/tmp}/macprovider-recovery-claim.XXXXXX")" || return 70
+  python3 - "$RECOVERY_DIR/recovery.lock" "$$" "$claim_status" <<'PY' &
+import fcntl
+import json
+import os
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+path, parent_pid_text, status_path = sys.argv[1:]
+parent_pid = int(parent_pid_text)
+uid = os.getuid()
+def process_start(pid):
+    return subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="], check=False,
+        capture_output=True, text=True,
+    ).stdout.strip()
+def boot_session():
+    value = subprocess.run(
+        ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"], check=False,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if value:
+        return value
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+def write_status(value):
+    fd = os.open(status_path, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
+            raise RuntimeError("unsafe recovery lock handshake")
+        os.write(fd, (value + "\n").encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(path, flags, 0o600)
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError("unsafe recovery lock")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        write_status("busy")
+        raise SystemExit(75)
+    current_boot = boot_session()
+    if not current_boot:
+        raise RuntimeError("could not identify recovery boot session")
+    existing_payload = os.read(fd, 4097)
+    if len(existing_payload) > 4096:
+        raise RuntimeError("recovery lock record is oversized")
+    if existing_payload.strip():
+        try:
+            existing = json.loads(existing_payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("recovery lock record is invalid") from error
+        existing_pid = existing.get("pid")
+        existing_start = existing.get("process_start")
+        if (
+            isinstance(existing_pid, int)
+            and isinstance(existing_start, str)
+            and existing_start
+            and existing.get("boot_session") == current_boot
+            and process_start(existing_pid) == existing_start
+        ):
+            write_status("busy")
+            raise SystemExit(75)
+    parent_start = process_start(parent_pid)
+    if not parent_start:
+        raise RuntimeError("recovery parent disappeared")
+    record = {
+        "pid": parent_pid,
+        "process_start": parent_start,
+        "boot_session": current_boot,
+        "holder_pid": os.getpid(),
+        "holder_process_start": process_start(os.getpid()),
+    }
+    payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, payload)
+    os.fsync(fd)
+    write_status("ok")
+    stopping = [False]
+    signal.signal(signal.SIGTERM, lambda _signal, _frame: stopping.__setitem__(0, True))
+    while not stopping[0]:
+        current = process_start(parent_pid)
+        if current != parent_start:
+            break
+        time.sleep(0.25)
+except SystemExit:
+    raise
+except BaseException as error:
+    try:
+        write_status(f"error:{error}")
+    except BaseException:
+        pass
+    raise
+finally:
+    os.close(fd)
+PY
+  RECOVERY_CLAIM_HOLDER_PID=$!
+  claim_wait=0
+  while [ "$claim_wait" -lt 100 ] && [ ! -s "$claim_status" ]; do
+    kill -0 "$RECOVERY_CLAIM_HOLDER_PID" >/dev/null 2>&1 || break
+    sleep 0.05
+    claim_wait=$((claim_wait + 1))
+  done
+  claim_result="$(cat "$claim_status" 2>/dev/null || true)"
+  rm -f "$claim_status"
+  case "$claim_result" in
+    ok) return 0 ;;
+    busy)
+      wait "$RECOVERY_CLAIM_HOLDER_PID" >/dev/null 2>&1 || true
+      RECOVERY_CLAIM_HOLDER_PID=""
+      recovery_log "Recovery is already active for this transaction."
+      return 75
+      ;;
+    *)
+      kill -TERM "$RECOVERY_CLAIM_HOLDER_PID" >/dev/null 2>&1 || true
+      wait "$RECOVERY_CLAIM_HOLDER_PID" >/dev/null 2>&1 || true
+      RECOVERY_CLAIM_HOLDER_PID=""
+      recovery_log "Could not acquire recovery claim: ${claim_result#error:}"
+      return 70
+      ;;
+  esac
+}
+release_recovery_claim() {
+  if [ -n "${RECOVERY_CLAIM_HOLDER_PID:-}" ]; then
+    kill -TERM "$RECOVERY_CLAIM_HOLDER_PID" >/dev/null 2>&1 || true
+    wait "$RECOVERY_CLAIM_HOLDER_PID" >/dev/null 2>&1 || true
+  fi
+}
+acquire_recovery_claim || exit $?
+trap release_recovery_claim EXIT
 path_exists() { [ -e "$1" ] || [ -L "$1" ]; }
 paths_match() {
   source_path="$1"
@@ -826,7 +1328,108 @@ exit 0
 RECOVERY_SCRIPT
   chmod 700 "$recovery_script" || return 1
   bash -n "$recovery_script" || return 1
-  [ -s "$state_path" ] && [ -s "$recovery_script" ]
+  observer_script="$recovery_dir/observe.sh"
+  cat > "$observer_script" <<'OBSERVER_SCRIPT'
+#!/usr/bin/env bash
+set -u
+
+RECOVERY_DIR="$(cd "$(dirname "$0")" && pwd)" || exit 70
+# shellcheck disable=SC1091
+. "$RECOVERY_DIR/state.sh" || exit 70
+
+process_start() {
+  ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+while [ -d "$RECOVERY_DIR" ] \
+  && [ "$(sysctl -n kern.bootsessionuuid 2>/dev/null || true)" = "$REC_INSTALLER_BOOT_SESSION" ] \
+  && [ "$(process_start "$REC_INSTALLER_PID")" = "$REC_INSTALLER_PROCESS_START" ]; do
+  sleep 1
+done
+
+[ -d "$RECOVERY_DIR" ] || exit 0
+exec python3 - "$RECOVERY_DIR" "$REC_INSTALL_LOCK_PATH" \
+  "$REC_INSTALL_RECOVERY_PLIST_PATH" "$REC_UID" "$REC_INSTALL_RECOVERY_LABEL" <<'PY'
+import fcntl
+import os
+import shutil
+import stat
+import subprocess
+import sys
+
+recovery_dir, lock_path, plist_path, uid, label = sys.argv[1:]
+lock_fd = os.open(lock_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(lock_fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit("unsafe installer lock; automatic recovery refused")
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    if not os.path.isdir(recovery_dir):
+        raise SystemExit(0)
+    result = subprocess.run(["bash", os.path.join(recovery_dir, "recover.sh")], check=False)
+    if result.returncode == 75:
+        raise SystemExit(0)
+    if result.returncode != 0:
+        print(
+            f"[macprovider-recovery] Automatic interrupted-install recovery failed. "
+            f"Run exactly: bash {os.path.join(recovery_dir, 'recover.sh')!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(result.returncode)
+    shutil.rmtree(recovery_dir)
+    try:
+        os.unlink(plist_path)
+    except FileNotFoundError:
+        pass
+    subprocess.run(
+        ["launchctl", "bootout", f"gui/{uid}/{label}"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+finally:
+    os.close(lock_fd)
+PY
+OBSERVER_SCRIPT
+  chmod 700 "$observer_script" || return 1
+  bash -n "$observer_script" || return 1
+  [ -s "$state_path" ] && [ -s "$recovery_script" ] && [ -s "$observer_script" ]
+}
+
+disarm_install_recovery_agent() {
+  launchctl bootout "gui/$UID/$INSTALL_RECOVERY_LABEL" >/dev/null 2>&1 || true
+  rm -f "$INSTALL_RECOVERY_PLIST_PATH"
+}
+
+arm_install_recovery_agent() {
+  [ -n "$INSTALL_TX_BACKUP" ] && [ -x "$INSTALL_TX_BACKUP/observe.sh" ] || return 70
+  mkdir -p "$(dirname "$INSTALL_RECOVERY_PLIST_PATH")" || return 70
+  disarm_install_recovery_agent || return 70
+  plist_temp="${INSTALL_RECOVERY_PLIST_PATH}.tmp.$$"
+  python3 - "$plist_temp" "$INSTALL_RECOVERY_LABEL" "$INSTALL_TX_BACKUP/observe.sh" \
+    "$INSTALL_TX_BACKUP/recovery-observer.out.log" "$INSTALL_TX_BACKUP/recovery-observer.err.log" <<'PY'
+import os
+import plistlib
+import sys
+
+path, label, observer, stdout_path, stderr_path = sys.argv[1:]
+payload = {
+    "Label": label,
+    "ProgramArguments": ["/bin/bash", observer],
+    "RunAtLoad": True,
+    "KeepAlive": False,
+    "StandardOutPath": stdout_path,
+    "StandardErrorPath": stderr_path,
+}
+with open(path, "wb") as handle:
+    plistlib.dump(payload, handle, fmt=plistlib.FMT_XML, sort_keys=True)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chmod(path, 0o600)
+PY
+  mv "$plist_temp" "$INSTALL_RECOVERY_PLIST_PATH" || return 70
+  launchctl bootstrap "gui/$UID" "$INSTALL_RECOVERY_PLIST_PATH" >/dev/null 2>&1 || return 70
+  launchctl kickstart -k "gui/$UID/$INSTALL_RECOVERY_LABEL" >/dev/null 2>&1 || return 70
 }
 
 launchd_label_is_disabled() {
@@ -1028,6 +1631,7 @@ stop_owned_manual_provider() {
 
 begin_install_transaction() {
   [ "$DRY_RUN" -eq 0 ] || return 0
+  assert_install_lock_ownership
   recovery_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   recovery_staging="$CONFIG_DIR/install-recovery-$recovery_id.staging"
   INSTALL_TX_BACKUP="$CONFIG_DIR/install-recovery-$recovery_id"
@@ -1107,6 +1711,9 @@ begin_install_transaction() {
   mv "$recovery_staging" "$INSTALL_TX_BACKUP" \
     || die 70 "could not publish durable recovery data; current install was not changed (partial recovery data: $recovery_staging)"
   INSTALL_TX_ACTIVE=1
+  assert_install_lock_ownership
+  arm_install_recovery_agent \
+    || die 70 "could not arm independent interrupted-install recovery before live mutation"
   if [ "$INSTALL_TX_WATCHDOG_WAS_ACTIVE" -eq 1 ]; then
     launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
       || die 70 "could not suspend the existing watchdog for the protected install transaction"
@@ -1132,6 +1739,11 @@ rollback_install_transaction() {
     INSTALL_TX_ROLLING_BACK=0
     return 70
   fi
+  if ! disarm_install_recovery_agent; then
+    log "ERROR: rollback succeeded but the interrupted-install recovery agent could not be disarmed"
+    INSTALL_TX_ROLLING_BACK=0
+    return 70
+  fi
   if ! rm -rf "$INSTALL_TX_BACKUP"; then
     log "ERROR: rollback succeeded but verified recovery data could not be removed: $INSTALL_TX_BACKUP"
     log "Run exactly if recovery is needed again: bash '$INSTALL_TX_BACKUP/recover.sh'"
@@ -1144,6 +1756,7 @@ rollback_install_transaction() {
 }
 
 commit_install_transaction() {
+  assert_install_lock_ownership
   if [ -n "$INSTALL_TX_BACKUP" ] && [ -d "$INSTALL_TX_BACKUP" ]; then
     retired_recovery="${INSTALL_TX_BACKUP}.committed.$$"
     mv "$INSTALL_TX_BACKUP" "$retired_recovery" \
@@ -1153,6 +1766,8 @@ commit_install_transaction() {
     # best-effort cleanup fails partway through.
     INSTALL_TX_COMMITTED=1
     INSTALL_TX_ACTIVE=0
+    disarm_install_recovery_agent \
+      || die 70 "new install committed but interrupted-install recovery could not be disarmed"
     if ! rm -rf "$retired_recovery"; then
       log "WARNING: install committed but retired recovery data could not be removed: $retired_recovery"
     fi
@@ -1205,6 +1820,9 @@ ensure_port_free() {
   stop_own_provider="${1:-0}"
   if [ "$DRY_RUN" -eq 1 ]; then
     return
+  fi
+  if [ "$stop_own_provider" -eq 1 ]; then
+    assert_install_lock_ownership
   fi
   validate_port_value "$PORT"
   if ! command -v lsof >/dev/null 2>&1; then
@@ -2183,6 +2801,9 @@ prepare_staged_config() {
 }
 
 activate_staged_config() {
+  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ]; then
+    assert_install_lock_ownership
+  fi
   [ -n "$STAGED_CONFIG_PATH" ] && [ -f "$STAGED_CONFIG_PATH" ] \
     || die 5 "staged provider config is missing at cutover"
   mkdir -p "$CONFIG_DIR"
@@ -2376,6 +2997,7 @@ ensure_provider_credentials() {
     # material into the protected live transaction immediately so #547's
     # rollback helper can preserve custody even if later evidence or startup
     # admission fails. The incumbent process remains running until cutover.
+    assert_install_lock_ownership
     mkdir -p "$CONFIG_DIR"
     bootstrap_config_temp="$LIVE_CONFIG_PATH.bootstrap.$$"
     cp "$STAGED_CONFIG_PATH" "$bootstrap_config_temp" \
@@ -2527,6 +3149,9 @@ use_fresh_recommendation_if_available() {
 }
 
 install_binary() {
+  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ]; then
+    assert_install_lock_ownership
+  fi
   run mkdir -p "$BIN_DIR" "$INSTALL_DIR"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "Would install macprovider-cli to $BINARY_PATH"
@@ -2617,6 +3242,9 @@ clear_quarantine() {
 }
 
 install_plist() {
+  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ]; then
+    assert_install_lock_ownership
+  fi
   model="$1"
   provider_id="$2"
   coordinator_url="$3"
@@ -3468,6 +4096,9 @@ install_watchdog() {
     log "Would write watchdog to $WATCHDOG_PATH and bootstrap $WATCHDOG_LABEL"
     return
   fi
+  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ]; then
+    assert_install_lock_ownership
+  fi
   log "Installing watchdog LaunchAgent (operator-visibility safety net for iss-189-class wedges)."
   mkdir -p "$WATCHDOG_DIR" "$LOG_DIR" "$(dirname "$WATCHDOG_PLIST_PATH")"
   legacy_watchdog="$WATCHDOG_DIR/watchdog.sh"
@@ -3488,6 +4119,9 @@ install_watchdog() {
 }
 
 write_install_manifest() {
+  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ]; then
+    assert_install_lock_ownership
+  fi
   version="${1:-unknown}"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "Would write install manifest to $MANIFEST_PATH"
@@ -3525,6 +4159,9 @@ EOF
 
 start_manual_service() {
   [ "$LAUNCHD_INSTALLED" -eq 1 ] && return
+  if [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ]; then
+    assert_install_lock_ownership
+  fi
   log "Starting macprovider-cli directly for non-launchd self-test."
   mkdir -p "$LOG_DIR"
   (
@@ -3739,8 +4376,75 @@ wait_for_coordinator() {
   coordinator_base="$2"
   deadline=$(( $(date +%s) + 30 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    response="$(curl -fsS --max-time 5 "$coordinator_base/v1/pool/check?provider_id=$(urlencode "$provider_id")" 2>/dev/null || true)"
-    if printf "%s" "$response" | grep -q '"state"[[:space:]]*:[[:space:]]*"ready"'; then
+    response="$(curl -fsS --max-time 5 "$coordinator_base/v1/pool/check?provider_id=$(urlencode "$provider_id")&details=readiness" 2>/dev/null || true)"
+    local_status="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/status" 2>/dev/null || true)"
+    if python3 - "$provider_id" "$response" "$local_status" \
+      "$INSTALL_DIR/catalog-release/release.json" \
+      "$INSTALL_DIR/catalog-release/autotune-candidates.json" <<'PY' 2>/dev/null
+import hashlib
+import json
+import re
+import sys
+
+provider_id, response_raw, local_raw, release_path, candidates_path = sys.argv[1:]
+response = json.loads(response_raw)
+local = json.loads(local_raw)
+with open(release_path, "rb") as handle:
+    release = json.load(handle)
+with open(candidates_path, "rb") as handle:
+    candidate_bytes = handle.read()
+candidates = json.loads(candidate_bytes)
+
+candidate_feed = release["feeds"]["autotune-candidates.json"]
+candidate_sha = hashlib.sha256(candidate_bytes).hexdigest()
+if candidate_sha != candidate_feed["sha256"]:
+    raise SystemExit(1)
+if candidates["version"] != release["release_id"] or candidates["policy_version"] != release["policy_version"]:
+    raise SystemExit(1)
+
+catalog = local.get("catalog")
+if not isinstance(catalog, dict):
+    raise SystemExit(1)
+model = local.get("model")
+key = catalog.get("catalog_key")
+rows = candidates.get("rows")
+if not isinstance(rows, dict):
+    raise SystemExit(1)
+if not isinstance(key, str) or key not in rows or rows[key].get("model_id") != model:
+    raise SystemExit(1)
+row_identity = catalog.get("row_identity")
+if re.fullmatch(r"[0-9a-f]{64}", row_identity or "") is None:
+    raise SystemExit(1)
+if catalog.get("policy_version") != candidates["policy_version"]:
+    raise SystemExit(1)
+
+expected = {
+    "catalog_release_id": release["release_id"],
+    "catalog_policy_version": release["policy_version"],
+    "catalog_candidate_sha256": candidate_sha,
+    "catalog_signer_key_id": candidate_feed["signer_key_id"],
+    "catalog_row_identity": row_identity,
+}
+if local.get("provider_id") != provider_id or local.get("network_state") != "buyer_serving":
+    raise SystemExit(1)
+if catalog.get("release_id") != expected["catalog_release_id"]:
+    raise SystemExit(1)
+if catalog.get("digest") != expected["catalog_candidate_sha256"]:
+    raise SystemExit(1)
+if catalog.get("signer_key_id") != expected["catalog_signer_key_id"]:
+    raise SystemExit(1)
+if response.get("provider_id") != provider_id:
+    raise SystemExit(1)
+if response.get("buyer_serving") is not True:
+    raise SystemExit(1)
+if response.get("catalog_evidence_source") != "provider_reported":
+    raise SystemExit(1)
+if response.get("catalog_admission_mode") not in {"current", "previous"}:
+    raise SystemExit(1)
+if any(response.get(field) != value for field, value in expected.items()):
+    raise SystemExit(1)
+PY
+    then
       return 0
     fi
     sleep 2
@@ -3770,6 +4474,8 @@ main() {
     require_tool "$tool"
   done
   validate_install_dir
+  acquire_install_lock
+  recover_orphaned_install_transactions
 
   ram_gb="$(detect_ram_gb)"
   model=""
@@ -3819,6 +4525,7 @@ main() {
       log "Re-run macprovider-cli autotune --recommend --apply when you want to change the active provider model."
       exit 0
     fi
+    assert_install_lock_ownership
     ensure_port_free 1
     install_binary
     activate_staged_config
@@ -3838,6 +4545,7 @@ main() {
     # Candidate providers load full model weights. Stop the incumbent before
     # benchmarks so unified-memory pressure cannot disrupt buyer traffic or
     # corrupt benchmark results through contention.
+    assert_install_lock_ownership
     ensure_port_free 1
     CUTOVER_STARTED=1
     select_autotune_benchmark_port
@@ -3859,6 +4567,7 @@ main() {
   # Cut over only after the staged CLI has completed catalog validation and
   # freshness evaluation; when benchmarks are required the incumbent is
   # deliberately stopped first to avoid double-loading model weights.
+  assert_install_lock_ownership
   ensure_port_free 1
   CUTOVER_STARTED=1
   install_binary
@@ -3874,18 +4583,15 @@ main() {
     exit 6
   fi
 
-  # The new installation becomes authoritative only after every durable file
-  # and launchd mutation has completed and the required local model endpoint is
-  # serving. Coordinator reachability is intentionally outside this boundary:
-  # degraded connectivity must not roll back a locally working provider.
-  commit_install_transaction
-
-  log "Waiting up to 30s for coordinator pool visibility."
+  # Keep rollback armed until coordinator admission proves that this exact
+  # locally verified catalog envelope is buyer-routable. A merely connected or
+  # locally ready provider is not a completed network upgrade.
+  log "Waiting up to 30s for exact coordinator catalog admission and buyer-serving readiness."
   if ! wait_for_coordinator "$provider_id" "$coordinator_base"; then
-    log "Installed locally. Coordinator connection failed; provider will join the pool when connectivity and provisional admission are available."
-    log "This is AC-1a degraded mode, not AC-1 build-complete success."
+    log "Coordinator did not admit the exact local catalog envelope for buyer traffic; rolling back."
     exit 6
   fi
+  commit_install_transaction
 
   pid="$(print_pid || true)"
   log "Ready to serve."

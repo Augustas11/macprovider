@@ -20,6 +20,8 @@ names = {
     "cleanup", "install_tx_path_matches", "stage_install_tx_path",
     "write_install_recovery_artifacts", "begin_install_transaction",
     "rollback_install_transaction", "commit_install_transaction",
+    "arm_install_recovery_agent", "disarm_install_recovery_agent",
+    "release_install_lock",
     "launchd_label_is_disabled", "capture_manual_provider_for_recovery",
     "pid_is_live_non_zombie", "stop_owned_manual_provider",
     "validate_port_value", "ensure_port_free",
@@ -69,6 +71,10 @@ printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
 service_file="$CASE_ROOT/service-active"
 disabled_file="$CASE_ROOT/service-disabled"
 case "$*" in
+  *macprovider-install-recovery*)
+    service_file="$CASE_ROOT/recovery-service-active"
+    disabled_file="$CASE_ROOT/recovery-service-disabled"
+    ;;
   *macprovider-watchdog*)
     service_file="$CASE_ROOT/watchdog-service-active"
     disabled_file="$CASE_ROOT/watchdog-service-disabled"
@@ -89,6 +95,10 @@ case "$1" in
     rm -f "$service_file"
     ;;
   bootstrap)
+    if printf '%s' "$*" | grep -q 'macprovider-install-recovery'; then
+      : > "$service_file"
+      exit 0
+    fi
     if [ "${FAIL_ONCE_ACTION:-}" = "bootstrap" ] && [ -f "$CASE_ROOT/fail-once" ]; then
       rm -f "$CASE_ROOT/fail-once"
       exit 42
@@ -97,6 +107,9 @@ case "$1" in
     : > "$service_file"
     ;;
   kickstart)
+    if printf '%s' "$*" | grep -q 'macprovider-install-recovery'; then
+      exit 0
+    fi
     if [ "${FAIL_ONCE_ACTION:-}" = "kickstart" ] && [ -f "$CASE_ROOT/fail-once" ]; then
       rm -f "$CASE_ROOT/fail-once"
       exit 43
@@ -334,6 +347,9 @@ run_case() {
       CONFIG_PATH="$CONFIG_DIR/config.yaml"
       PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
       RECOMMENDATION_PATH="$CONFIG_DIR/last-recommendation.json"
+      INSTALL_LOCK_PATH="$CONFIG_DIR/install.lock"
+      INSTALL_RECOVERY_LABEL="live.streamvc.macprovider-install-recovery"
+      INSTALL_RECOVERY_PLIST_PATH="$HOME/Library/LaunchAgents/${INSTALL_RECOVERY_LABEL}.plist"
       PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
       WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
       WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
@@ -362,9 +378,16 @@ run_case() {
       INSTALL_TX_WATCHDOG_WAS_DISABLED=0
       INSTALL_TX_ROLLING_BACK=0
       INSTALL_TX_BINARY_KIND="symlink"
+      INSTALL_LOCK_HELD=0
+      INSTALL_LOCK_TOKEN="test-lock-token"
+      INSTALL_LOCK_HOLDER_PID=""
       log() { printf "[test] %s\n" "$*" >&2; }
       die() { code="$1"; shift; printf "[test] ERROR: %s\n" "$*" >&2; exit "$code"; }
       source "$FUNCTIONS_PATH"
+      # Mutex ownership is covered by install_transaction_lock.test.sh. These
+      # fixtures isolate transaction snapshot/rollback behavior without a live
+      # background flock helper.
+      assert_install_lock_ownership() { :; }
       trap cleanup EXIT
       begin_install_transaction
       if [ "$INSTALL_PHASE" = "manual-self-test" ]; then
@@ -478,6 +501,9 @@ assert_recovery_preserved() {
   [ -n "$recovery" ]
   [ -s "$recovery/state.sh" ]
   [ -s "$recovery/recover.sh" ]
+  [ -x "$recovery/observe.sh" ]
+  grep -F 'REC_INSTALL_RECOVERY_LABEL=live.streamvc.macprovider-install-recovery' "$recovery/state.sh" >/dev/null
+  grep -F 'fcntl.flock(lock_fd, fcntl.LOCK_EX)' "$recovery/observe.sh" >/dev/null
   grep -F "Run exactly: bash '$recovery/recover.sh'" "$root/stderr.log" >/dev/null
 }
 

@@ -2,15 +2,20 @@
 set -eu
 
 ROOT=${MACPROVIDER_ROOT:-/opt/macprovider}
+STATS_ROOT=${MACPROVIDER_STATS_ROOT:-/opt/macprovider-stats}
 SYSTEMD_ROOT=${MACPROVIDER_SYSTEMD_ROOT:-/etc/systemd/system}
+NGINX_ROOT=${MACPROVIDER_NGINX_ROOT:-/etc/nginx}
 SYSTEMCTL=${MACPROVIDER_SYSTEMCTL:-systemctl}
 FLOCK=${MACPROVIDER_FLOCK:-flock}
+SETFACL=${MACPROVIDER_SETFACL:-setfacl}
+NGINX=${MACPROVIDER_NGINX:-nginx}
 LOCK_FILE=${MACPROVIDER_DEPLOY_LOCK_FILE:-/opt/macprovider/.coordinator-deploy.lock}
 OPERATION_LOCK_FILE=${MACPROVIDER_DEPLOY_OPERATION_LOCK_FILE:-/opt/macprovider/.coordinator-deploy-operation.lock}
 ROLLBACK="$ROOT/.coordinator-deploy-rollback"
 CATALOG_ROOT="$ROOT/autotune"
 UNIT="$SYSTEMD_ROOT/macprovider-coordinator.service"
 WANTS_LINK="$SYSTEMD_ROOT/multi-user.target.wants/macprovider-coordinator.service"
+TIMERS_WANTS="$SYSTEMD_ROOT/timers.target.wants"
 RECOVERY_HELPER="$ROOT/coordinator-deploy-recover"
 RECOVERY_UNIT="$SYSTEMD_ROOT/macprovider-coordinator-deploy-recovery.service"
 WATCHDOG_UNIT="$SYSTEMD_ROOT/macprovider-coordinator-deploy-watchdog.service"
@@ -77,11 +82,92 @@ restore_link_or_file() {
   fi
 }
 
+restore_acl() {
+  marker=$1
+  snapshot=$2
+  if [ -f "$ROLLBACK/$marker" ]; then
+    [ -f "$ROLLBACK/$snapshot" ] || {
+      echo "rollback snapshot missing $snapshot" >&2
+      exit 1
+    }
+    "$SETFACL" --restore="$ROLLBACK/$snapshot"
+  fi
+}
+
+restore_active_state() {
+  unit_name=$1
+  active_marker=$2
+  if [ -f "$ROLLBACK/$active_marker" ]; then
+    "$SYSTEMCTL" start "$unit_name"
+  else
+    "$SYSTEMCTL" stop "$unit_name" 2>/dev/null || true
+    if "$SYSTEMCTL" is-active --quiet "$unit_name"; then
+      echo "$unit_name remained active after rollback stop" >&2
+      exit 1
+    fi
+  fi
+}
+
+# Stop sidecar scheduling before replacing its units and executables. This
+# prevents a timer firing against a half-restored release.
+for rollback_unit in \
+  stats-inventory-sync.timer stats-inventory-sync.service \
+  stats-billing-mirror.timer stats-billing-mirror.service \
+  stats-hardware-verifier.timer stats-hardware-verifier.service; do
+  load_state=$("$SYSTEMCTL" show -p LoadState --value "$rollback_unit")
+  [ "$load_state" = "not-found" ] && continue
+  "$SYSTEMCTL" stop "$rollback_unit"
+  active_state=$("$SYSTEMCTL" show -p ActiveState --value "$rollback_unit")
+  case "$active_state" in
+    inactive|failed) ;;
+    *) echo "$rollback_unit did not stop before rollback: state=$active_state" >&2; exit 1 ;;
+  esac
+done
+
 restore_regular had-coordinator coordinator "$ROOT/coordinator"
+restore_regular had-coordinator-cli coordinator-cli "$ROOT/coordinator-cli"
+restore_regular had-coordinator-prev coordinator.prev "$ROOT/coordinator.prev"
 restore_regular had-config coordinator.yaml "$ROOT/coordinator.yaml"
+restore_regular had-config-prev coordinator.yaml.prev "$ROOT/coordinator.yaml.prev"
+config_backup_name=$(cat "$ROLLBACK/config-backup-name" 2>/dev/null || true)
+case "$config_backup_name" in
+  coordinator.yaml.bak-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
+    restore_regular had-config-dated-backup coordinator-dated-backup "$ROOT/$config_backup_name"
+    ;;
+  *) echo "invalid rollback config backup name: $config_backup_name" >&2; exit 1 ;;
+esac
 restore_regular had-tier2-catalog tier2-catalog.json "$TIER2_CATALOG"
+restore_regular had-stats-inventory-binary stats-inventory-sync "$STATS_ROOT/stats-inventory-sync"
+restore_regular had-stats-billing-binary stats-billing-mirror "$STATS_ROOT/stats-billing-mirror"
+restore_regular had-stats-hardware-binary stats-hardware-verifier "$STATS_ROOT/stats-hardware-verifier"
 restore_link_or_file had-service-unit macprovider-coordinator.service "$UNIT"
 restore_link_or_file had-wants-link macprovider-coordinator.wants "$WANTS_LINK"
+
+restore_link_or_file had-stats-inventory-service stats-inventory-sync.service "$SYSTEMD_ROOT/stats-inventory-sync.service"
+restore_link_or_file had-stats-inventory-timer stats-inventory-sync.timer "$SYSTEMD_ROOT/stats-inventory-sync.timer"
+restore_link_or_file had-stats-billing-service stats-billing-mirror.service "$SYSTEMD_ROOT/stats-billing-mirror.service"
+restore_link_or_file had-stats-billing-timer stats-billing-mirror.timer "$SYSTEMD_ROOT/stats-billing-mirror.timer"
+restore_link_or_file had-stats-hardware-service stats-hardware-verifier.service "$SYSTEMD_ROOT/stats-hardware-verifier.service"
+restore_link_or_file had-stats-hardware-timer stats-hardware-verifier.timer "$SYSTEMD_ROOT/stats-hardware-verifier.timer"
+restore_link_or_file had-stats-inventory-wants stats-inventory-sync.wants "$TIMERS_WANTS/stats-inventory-sync.timer"
+restore_link_or_file had-stats-billing-wants stats-billing-mirror.wants "$TIMERS_WANTS/stats-billing-mirror.timer"
+restore_link_or_file had-stats-hardware-wants stats-hardware-verifier.wants "$TIMERS_WANTS/stats-hardware-verifier.timer"
+
+restore_link_or_file had-nginx-stats-shared stats-shared.conf "$NGINX_ROOT/conf.d/stats-shared.conf"
+restore_link_or_file had-nginx-stats-security-headers stats-security-headers.conf "$NGINX_ROOT/conf.d/stats-security-headers.conf"
+restore_link_or_file had-nginx-stats-cors-429 cors-429.conf "$NGINX_ROOT/conf.d/cors-429.conf"
+restore_link_or_file had-nginx-stats-proxy-public stats-proxy-public.conf "$NGINX_ROOT/conf.d/stats-proxy-public.conf"
+restore_link_or_file had-nginx-stats-proxy-partner stats-proxy-partner.conf "$NGINX_ROOT/conf.d/stats-proxy-partner.conf"
+restore_link_or_file had-nginx-coordinator-site nginx-coordinator.site "$NGINX_ROOT/sites-available/coordinator.streamvc.live"
+restore_link_or_file had-nginx-stats-site nginx-stats.site "$NGINX_ROOT/sites-available/stats.streamvc.live"
+restore_link_or_file had-nginx-coordinator-enabled nginx-coordinator.enabled "$NGINX_ROOT/sites-enabled/coordinator.streamvc.live"
+restore_link_or_file had-nginx-stats-enabled nginx-stats.enabled "$NGINX_ROOT/sites-enabled/stats.streamvc.live"
+restore_link_or_file had-nginx-coordinator-full nginx-coordinator.full "$NGINX_ROOT/sites-available/coordinator.streamvc.live.full"
+
+restore_acl had-request-log-dir-acl request-log-dir.acl
+restore_acl had-request-log-db-acl request-log-db.acl
+restore_acl had-request-log-wal-acl request-log-wal.acl
+restore_acl had-request-log-shm-acl request-log-shm.acl
 
 previous=$(cat "$ROLLBACK/catalog-current-target" 2>/dev/null || true)
 case "$previous" in
@@ -116,6 +202,12 @@ restore_link_or_file had-guard-dropin 10-deploy-transaction-guard.conf "$GUARD_D
 
 if [ "$MODE" = "--recover" ]; then
   $SYSTEMCTL daemon-reload
+  restore_active_state stats-inventory-sync.timer stats-inventory-timer-was-active
+  restore_active_state stats-inventory-sync.service stats-inventory-service-was-active
+  restore_active_state stats-billing-mirror.timer stats-billing-timer-was-active
+  restore_active_state stats-billing-mirror.service stats-billing-service-was-active
+  restore_active_state stats-hardware-verifier.timer stats-hardware-timer-was-active
+  restore_active_state stats-hardware-verifier.service stats-hardware-service-was-active
   if [ -f "$ROLLBACK/restart-attempted" ]; then
     if [ -f "$ROLLBACK/service-was-active" ]; then
       $SYSTEMCTL restart macprovider-coordinator
@@ -133,6 +225,12 @@ else
   # that follows without recursively restarting the service.
   $SYSTEMCTL daemon-reload
 fi
+
+# The nginx files are part of the same release transaction. Validate the
+# restored graph before making it live; preserve the snapshot if validation or
+# reload fails so an operator can recover manually.
+"$NGINX" -t
+"$SYSTEMCTL" try-reload-or-restart nginx
 
 restore_link_or_file had-recovery-helper coordinator-deploy-recover "$RECOVERY_HELPER"
 rm -rf "$ROLLBACK"
