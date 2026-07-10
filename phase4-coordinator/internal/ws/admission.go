@@ -225,6 +225,25 @@ func (a *AdmissionManager) Reject(providerID, reason string) {
 	a.persistLocked()
 }
 
+// Unreject removes an operator rejection and persists the recovery so the
+// provider can reconnect after a false-positive sanction or operator review.
+// The operation is idempotent; false means there was no rejection to remove.
+func (a *AdmissionManager) Unreject(providerID string) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	reason, ok := a.rejected[providerID]
+	if !ok {
+		return false, nil
+	}
+	delete(a.rejected, providerID)
+	if err := a.saveLocked(); err != nil {
+		a.rejected[providerID] = reason
+		a.reportStoreErrorLocked(err)
+		return false, err
+	}
+	return true, nil
+}
+
 func (a *AdmissionManager) Rejected(providerID string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -297,17 +316,21 @@ func (a *AdmissionManager) Prune(cutoff time.Time) (deletedRecords, deletedRejec
 }
 
 func (a *AdmissionManager) persistLocked() {
-	if a.store == nil {
-		return
+	if err := a.saveLocked(); err != nil {
+		a.reportStoreErrorLocked(err)
 	}
-	if err := a.store.SaveAdmissionState(context.Background(), AdmissionState{
+}
+
+func (a *AdmissionManager) saveLocked() error {
+	if a.store == nil {
+		return nil
+	}
+	return a.store.SaveAdmissionState(context.Background(), AdmissionState{
 		Admissions:     append([]time.Time(nil), a.admissions...),
 		Records:        cloneAdmissionRecords(a.records),
 		Rejected:       cloneStringMap(a.rejected),
 		RequestWindows: cloneTimeWindows(a.requestWindows),
-	}); err != nil {
-		a.reportStoreErrorLocked(err)
-	}
+	})
 }
 
 func (a *AdmissionManager) reportStoreErrorLocked(err error) {

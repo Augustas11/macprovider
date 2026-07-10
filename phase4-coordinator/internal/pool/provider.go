@@ -45,6 +45,7 @@ const (
 	RecoveryReasonBreaker         RecoveryReason = "breaker"
 	RecoveryReasonProviderFailure RecoveryReason = "provider_failure"
 	RecoveryReasonCanary          RecoveryReason = "canary"
+	RecoveryReasonOperatorClear   RecoveryReason = "operator_clear"
 
 	HashStatusVerified           HashStatus = "hash_verified"
 	HashStatusMismatch           HashStatus = "hash_mismatch"
@@ -549,6 +550,41 @@ func (r *Registry) CanarySanctions() []CanarySanctionSnapshot {
 		})
 	}
 	return out
+}
+
+// ClearCanarySanction removes coordinator-owned canary failure state for a
+// provider after an authenticated operator recovery action. A live session is
+// deliberately left in its current state; a fresh reconnect + warmup must
+// prove it routable again.
+func (r *Registry) ClearCanarySanction(providerID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	_, hadPersistedSanction := r.canarySanctions[providerID]
+	delete(r.canarySanctions, providerID)
+
+	hadRuntimeState := false
+	p := r.providers[providerID]
+	if p != nil {
+		hadRuntimeState = p.CanaryFailCount > 0 || p.CanaryLastFailedAt != nil
+		p.CanaryFailCount = 0
+		p.CanaryLastFailedAt = nil
+	}
+	if hold, held := r.recoveryHolds[providerID]; held && hold.reason == RecoveryReasonCanary {
+		hadRuntimeState = true
+		if p != nil && p.AssignedID == hold.assignedID && p.State == StateDegraded {
+			// Keep this exact session unroutable until reconnect + warmup proves
+			// it healthy. Converting the reason also makes repeated operator
+			// clears idempotent.
+			r.recoveryHolds[providerID] = recoveryHold{
+				assignedID: hold.assignedID,
+				reason:     RecoveryReasonOperatorClear,
+			}
+		} else {
+			delete(r.recoveryHolds, providerID)
+		}
+	}
+	return hadPersistedSanction || hadRuntimeState
 }
 
 func cloneTimePtr(t *time.Time) *time.Time {

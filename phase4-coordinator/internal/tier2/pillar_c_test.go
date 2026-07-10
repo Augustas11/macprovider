@@ -85,6 +85,9 @@ func TestVerifyAttestationTokenMissingOrInvalidStates(t *testing.T) {
 	if got := VerifyAttestationToken(nil, cfg, nil, "auth-test", "provider-a", "", now, zerolog.Nop()); got != pool.AttestationStatusNotRequired {
 		t.Fatalf("default missing token status=%q want not_required", got)
 	}
+	if got := VerifyAttestationToken(json.RawMessage("null"), cfg, []byte("challenge-1"), "auth-test", "provider-a", "", now, zerolog.Nop()); got != pool.AttestationStatusNotRequired {
+		t.Fatalf("optional JSON null status=%q want not_required", got)
+	}
 	cfg.RequireAttestation = true
 	cfg.AttestationRoots = []string{"mock-root"}
 	cfg.AllowMockAttestation = true

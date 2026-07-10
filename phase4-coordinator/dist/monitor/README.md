@@ -10,7 +10,8 @@ TRANSITIONS, not every poll.
 - `macprovider-monitor.py` → `/opt/macprovider/monitor.py`
 - `macprovider-monitor.service` + `macprovider-monitor.timer` → `/etc/systemd/system/`
 - `/etc/macprovider/monitor.env` (created on deploy; holds optional email creds)
-- state: `/var/lib/macprovider/monitor-state.json`
+- state: `/var/lib/macprovider-monitor/monitor-state.json` (or the systemd
+  `STATE_DIRECTORY` override)
 
 ## Deploy
 ```sh
