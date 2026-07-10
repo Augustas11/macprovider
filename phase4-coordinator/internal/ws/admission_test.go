@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -136,6 +137,57 @@ func TestAdmissionManagerPersistenceSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestAdmissionManagerUnrejectPersistsAcrossRestart(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	store, err := NewSQLiteAdmissionStore(db)
+	if err != nil {
+		t.Fatalf("admission store: %v", err)
+	}
+	cfg := config.AdmissionConfig{}
+	adm := NewAdmissionManager(cfg, nil)
+	adm.SetPersistence(store, func(err error) { t.Fatalf("persist admission: %v", err) })
+	adm.Reject("provider-a", "false-positive canary")
+
+	if cleared, err := adm.Unreject("provider-a"); err != nil || !cleared {
+		t.Fatal("unreject did not report the persisted rejection")
+	}
+	if adm.Rejected("provider-a") {
+		t.Fatal("provider remained rejected after recovery")
+	}
+	if cleared, err := adm.Unreject("provider-a"); err != nil || cleared {
+		t.Fatal("idempotent unreject reported a second removal")
+	}
+
+	restarted := NewAdmissionManager(cfg, nil)
+	restarted.SetPersistence(store, func(err error) { t.Fatalf("reload admission: %v", err) })
+	if restarted.Rejected("provider-a") {
+		t.Fatal("cleared rejection returned after restart")
+	}
+}
+
+func TestAdmissionManagerUnrejectPersistenceFailureKeepsRejection(t *testing.T) {
+	adm := NewAdmissionManager(config.AdmissionConfig{}, nil)
+	adm.Reject("provider-a", "operator")
+	storeErr := errors.New("sqlite unavailable")
+	var reported error
+	adm.SetPersistence(failingAdmissionStateStore{err: storeErr}, func(err error) { reported = err })
+
+	cleared, err := adm.Unreject("provider-a")
+	if cleared || !errors.Is(err, storeErr) {
+		t.Fatalf("unreject = cleared:%v err:%v, want durable failure", cleared, err)
+	}
+	if !errors.Is(reported, storeErr) {
+		t.Fatalf("reported error = %v, want %v", reported, storeErr)
+	}
+	if !adm.Rejected("provider-a") {
+		t.Fatal("failed durable recovery removed in-memory rejection")
+	}
+}
+
 // TestAdmissionManagerPruneShrinksStateBeyondCutoff pins the M2-5 / XPERF-2
 // guarantee: ProvisionalRetentionDays actually takes effect. Without the
 // pruner the existing admission state grew without bound — the audit
@@ -189,4 +241,16 @@ func TestAdmissionManagerPruneShrinksStateBeyondCutoff(t *testing.T) {
 	if adm.Rejected("old-1") {
 		t.Fatal("old rejection survived prune (record was dropped, rejection should follow)")
 	}
+}
+
+type failingAdmissionStateStore struct {
+	err error
+}
+
+func (f failingAdmissionStateStore) LoadAdmissionState(context.Context) (AdmissionState, error) {
+	return AdmissionState{}, nil
+}
+
+func (f failingAdmissionStateStore) SaveAdmissionState(context.Context, AdmissionState) error {
+	return f.err
 }

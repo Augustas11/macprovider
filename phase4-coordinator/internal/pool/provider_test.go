@@ -455,6 +455,58 @@ func TestLoadedCanarySanctionHoldsPinnedProviderAfterRestart(t *testing.T) {
 	}
 }
 
+func TestClearCanarySanctionRecoversOnlyCanaryHeldProvider(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:     "pinned-recovery",
+		AssignedID:     "session-a",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, nil)
+	at := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	registry.RecordCanaryResult("pinned-recovery", "session-a", false, at, 1)
+
+	if !registry.ClearCanarySanction("pinned-recovery") {
+		t.Fatal("clear did not report canary state")
+	}
+	recovered, ok := registry.Resolve("pinned-recovery", "session-a")
+	if !ok {
+		t.Fatal("provider not found after recovery")
+	}
+	if recovered.State != StateDegraded || recovered.CanaryFailCount != 0 || recovered.CanaryLastFailedAt != nil {
+		t.Fatalf("recovered provider = %+v, want current session degraded with cleared canary failures", recovered)
+	}
+	if registry.CanaryRecoveryEligible("pinned-recovery", "session-a") {
+		t.Fatal("canary recovery hold survived operator recovery")
+	}
+	if sanctions := registry.CanarySanctions(); len(sanctions) != 0 {
+		t.Fatalf("canary sanctions = %+v, want none", sanctions)
+	}
+	if registry.ClearCanarySanction("pinned-recovery") {
+		t.Fatal("idempotent clear reported stale canary state")
+	}
+	replacement := &Provider{
+		ProviderID:     "pinned-recovery",
+		AssignedID:     "session-b",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(replacement, nil)
+	reconnected, ok := registry.Resolve("pinned-recovery", "session-b")
+	if !ok || reconnected.State != StateReady || !reconnected.RoutingEligible() {
+		t.Fatalf("reconnected provider = %+v, want fresh ready session", reconnected)
+	}
+}
+
 func TestStaleTerminalCanaryPassDoesNotClearSanction(t *testing.T) {
 	registry := NewRegistry(nil)
 	provider := &Provider{

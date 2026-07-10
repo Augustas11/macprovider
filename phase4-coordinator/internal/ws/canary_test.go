@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -782,10 +783,212 @@ func waitForCanary(t *testing.T, done <-chan struct{}) {
 	}
 }
 
+func TestOperatorDeleteRejectClearsAdmissionAndCanarySanctions(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.OperatorKey = "test-operator-key"
+	registry := pool.NewRegistry(nil)
+	registry.LoadCanarySanctions([]pool.CanarySanctionSnapshot{{
+		ProviderID: "provider-a",
+		FailCount:  3,
+	}})
+	store := &recordingCanarySanctionStore{}
+	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
+	s.admission.Reject("provider-a", "false-positive canary")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/admin/reject/provider-a", nil)
+	if err != nil {
+		t.Fatalf("recovery request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-operator-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("recover provider: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("recovery status = %d, want 200", resp.StatusCode)
+	}
+	if s.admission.Rejected("provider-a") {
+		t.Fatal("admission rejection survived operator recovery")
+	}
+	if sanctions := registry.CanarySanctions(); len(sanctions) != 0 {
+		t.Fatalf("runtime canary sanctions = %+v, want none", sanctions)
+	}
+	if deleted := store.deletedProviders(); len(deleted) != 1 || deleted[0] != "provider-a" {
+		t.Fatalf("persisted sanction deletions = %v, want provider-a", deleted)
+	}
+}
+
+func TestOperatorDeleteRejectFailsClosedWhenCanaryPersistenceFails(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.OperatorKey = "test-operator-key"
+	registry := pool.NewRegistry(nil)
+	registry.LoadCanarySanctions([]pool.CanarySanctionSnapshot{{
+		ProviderID: "provider-a",
+		FailCount:  3,
+	}})
+	store := &recordingCanarySanctionStore{deleteErr: errors.New("sqlite unavailable")}
+	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
+	s.admission.Reject("provider-a", "false-positive canary")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/admin/reject/provider-a", nil)
+	if err != nil {
+		t.Fatalf("recovery request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-operator-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("recover provider: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("recovery status = %d, want 500", resp.StatusCode)
+	}
+	if !s.admission.Rejected("provider-a") {
+		t.Fatal("failed durable recovery removed admission rejection")
+	}
+	if sanctions := registry.CanarySanctions(); len(sanctions) != 1 {
+		t.Fatalf("runtime canary sanctions = %+v, want retained sanction", sanctions)
+	}
+}
+
+func TestOperatorDeleteRejectFailsClosedWhenAdmissionPersistenceFails(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.OperatorKey = "test-operator-key"
+	registry := pool.NewRegistry(nil)
+	registry.LoadCanarySanctions([]pool.CanarySanctionSnapshot{{
+		ProviderID: "provider-a",
+		FailCount:  3,
+	}})
+	store := &recordingCanarySanctionStore{}
+	s := NewServer(cfg, registry, zerolog.Nop(), WithCanarySanctionStore(store))
+	s.admission.Reject("provider-a", "false-positive canary")
+	s.admission.SetPersistence(failingAdmissionStateStore{err: errors.New("sqlite unavailable")}, nil)
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/admin/reject/provider-a", nil)
+	if err != nil {
+		t.Fatalf("recovery request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-operator-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("recover provider: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("recovery status = %d, want 500", resp.StatusCode)
+	}
+	if !s.admission.Rejected("provider-a") {
+		t.Fatal("failed durable recovery removed admission rejection")
+	}
+	if sanctions := registry.CanarySanctions(); len(sanctions) != 1 {
+		t.Fatalf("runtime canary sanctions = %+v, want retained sanction", sanctions)
+	}
+}
+
+func TestOperatorDeleteRejectRequiresAuthAndCanonicalProviderID(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.OperatorKey = "test-operator-key"
+	s := NewServer(cfg, pool.NewRegistry(nil), zerolog.Nop())
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	unauthorized, err := http.NewRequest(http.MethodDelete, ts.URL+"/admin/reject/provider-a", nil)
+	if err != nil {
+		t.Fatalf("unauthorized request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(unauthorized)
+	if err != nil {
+		t.Fatalf("unauthorized recovery: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, want 401", resp.StatusCode)
+	}
+
+	invalid, err := http.NewRequest(http.MethodDelete, ts.URL+"/admin/reject/provider%2Fchild", nil)
+	if err != nil {
+		t.Fatalf("invalid provider request: %v", err)
+	}
+	invalid.Header.Set("Authorization", "Bearer test-operator-key")
+	resp, err = http.DefaultClient.Do(invalid)
+	if err != nil {
+		t.Fatalf("invalid provider recovery: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid provider status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestOperatorRecoveryFencesInflightCanaryResult(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"wrong"}}]}`))
+	}))
+	defer ts.Close()
+
+	registry := pool.NewRegistry(nil)
+	provider := &pool.Provider{
+		ProviderID:     "http-p1",
+		AssignedID:     "http-s1",
+		ModelID:        "model-a",
+		Tier:           pool.TierProvisional,
+		InferencePath:  pool.InferencePathHTTPForwarding,
+		EndpointURL:    ts.URL,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, nil)
+	cfg := config.Default()
+	cfg.Pool.CanaryFailureThreshold = 1
+	cfg.Pool.CanaryTimeoutS = 2
+	cfg.Pool.CanaryChallenges = []config.CanaryChallengeConfig{testCanaryChallenge()}
+	s := NewServer(cfg, registry, zerolog.Nop())
+	epoch := s.canaryEpoch(provider.ProviderID).Load()
+	done := make(chan struct{})
+	go func() {
+		s.runCanaryProbeAtEpoch(*provider, epoch)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canary request did not start")
+	}
+	if _, _, err := s.recoverProvider(provider.ProviderID); err != nil {
+		t.Fatalf("operator recovery: %v", err)
+	}
+	close(release)
+	waitForCanary(t, done)
+
+	got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider not found")
+	}
+	if got.CanaryFailCount != 0 || got.State != pool.StateReady || s.admission.Rejected(provider.ProviderID) {
+		t.Fatalf("stale canary result survived recovery fence: %+v", got)
+	}
+}
+
 type recordingCanarySanctionStore struct {
-	mu      sync.Mutex
-	saved   []pool.CanarySanctionSnapshot
-	deleted []string
+	mu        sync.Mutex
+	saved     []pool.CanarySanctionSnapshot
+	deleted   []string
+	deleteErr error
 }
 
 func (s *recordingCanarySanctionStore) LoadCanarySanctions(context.Context) ([]pool.CanarySanctionSnapshot, error) {
@@ -802,6 +1005,9 @@ func (s *recordingCanarySanctionStore) UpsertCanarySanction(_ context.Context, s
 func (s *recordingCanarySanctionStore) DeleteCanarySanction(_ context.Context, providerID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	s.deleted = append(s.deleted, providerID)
 	return nil
 }

@@ -568,6 +568,13 @@ $SSH 'set -e
   else
     echo "  /etc/macprovider/coordinator.env not yet present; operator must drop it with mode 0640 (root:macprovider)"
   fi
+  if [ -f /etc/macprovider/monitor.env ]; then
+    chown root:macprovider /etc/macprovider/monitor.env
+    chmod 0640 /etc/macprovider/monitor.env
+    echo "  enforced monitor.env perms: root:macprovider 0640"
+  else
+    echo "  /etc/macprovider/monitor.env not yet present; optional monitor email alerts remain disabled"
+  fi
   if [ -f /etc/macprovider-stats/stats-hardware-inventory.yaml ]; then
     chown root:macprovider-stats /etc/macprovider-stats/stats-hardware-inventory.yaml
     chmod 0640 /etc/macprovider-stats/stats-hardware-inventory.yaml

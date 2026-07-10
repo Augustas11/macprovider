@@ -3,11 +3,13 @@ package ws
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/google/uuid"
 )
@@ -96,8 +98,8 @@ func (s *Server) handleAdminPromote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminReject(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		w.Header().Set("Allow", http.MethodPost+", "+http.MethodDelete)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -108,6 +110,37 @@ func (s *Server) handleAdminReject(w http.ResponseWriter, r *http.Request) {
 	providerID := strings.TrimPrefix(r.URL.Path, "/admin/reject/")
 	if providerID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "missing provider_id", "code": "invalid_request"}})
+		return
+	}
+	if err := config.ValidateProviderID(providerID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "invalid provider_id", "code": "invalid_provider_id"}})
+		return
+	}
+	if r.Method == http.MethodDelete {
+		admissionCleared, canaryCleared, err := s.recoverProvider(providerID)
+		if err != nil {
+			s.log.Error().Err(err).
+				Str("admin_action", "provider_rejection_clear_failed").
+				Str("provider_id", providerID).
+				Msg("provider operator recovery failed")
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{
+				"message": "provider recovery persistence failed",
+				"code":    "provider_recovery_failed",
+			}})
+			return
+		}
+		s.log.Info().
+			Str("admin_action", "provider_rejection_cleared").
+			Str("provider_id", providerID).
+			Bool("admission_rejection_cleared", admissionCleared).
+			Bool("canary_sanction_cleared", canaryCleared).
+			Msg("provider operator recovery completed")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"provider_id":                 providerID,
+			"status":                      "recovered",
+			"admission_rejection_cleared": admissionCleared,
+			"canary_sanction_cleared":     canaryCleared,
+		})
 		return
 	}
 	var body struct {
@@ -128,6 +161,29 @@ func (s *Server) handleAdminReject(w http.ResponseWriter, r *http.Request) {
 		"provider_id": providerID,
 		"status":      "rejected",
 	})
+}
+
+func (s *Server) recoverProvider(providerID string) (admissionCleared, canaryCleared bool, err error) {
+	s.canaryRecoveryMu.Lock()
+	defer s.canaryRecoveryMu.Unlock()
+
+	// Invalidate every probe that captured the prior epoch. A probe already
+	// applying its result holds the read lock and completes before this clear;
+	// a probe still in flight observes the new epoch and discards its result.
+	s.canaryEpoch(providerID).Add(1)
+	if err := s.deleteCanarySanction(providerID); err != nil {
+		return false, false, fmt.Errorf("delete durable canary sanction: %w", err)
+	}
+	if s.admission != nil {
+		admissionCleared, err = s.admission.Unreject(providerID)
+		if err != nil {
+			return false, false, fmt.Errorf("persist admission recovery: %w", err)
+		}
+	}
+	canaryCleared = s.pool.ClearCanarySanction(providerID)
+	s.canaryDue.Delete(providerID)
+	s.enforceNextCanary.Delete(providerID)
+	return admissionCleared, canaryCleared, nil
 }
 
 func (s *Server) handleProviderAuthPolicySeedCutover(w http.ResponseWriter, r *http.Request) {
