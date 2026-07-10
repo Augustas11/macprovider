@@ -30,6 +30,15 @@ make_fixture() {
   cat > "$root/home/.local/share/macprovider/autoupdate/pending.json" <<EOF
 {"update_id":"123e4567-e89b-42d3-a456-426614174000","target_version":"1.8.10","target_path":"$root/bin/macprovider-cli","backup_path":"$root/bin/.macprovider-cli.rollback-123e4567-e89b-42d3-a456-426614174000","size":10,"mode":493,"sha256":"$hash","marker_deadline":"2000-01-01T00:00:00Z"}
 EOF
+  : > "$root/launchctl.log"
+  cat > "$root/bin/launchctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MACPROVIDER_FAKE_LAUNCHCTL_LOG"
+if [ "${1:-}" = "print" ]; then
+  printf 'pid = 123\nlast exit status = 0\n'
+fi
+EOF
+  chmod +x "$root/bin/launchctl"
 }
 
 run_reconcile() {
@@ -38,9 +47,13 @@ run_reconcile() {
   HOME="$root/home" \
   MACPROVIDER_BINARY_PATH="$root/bin/macprovider-cli" \
   MACPROVIDER_LOG_DIR="$root/logs" \
+  MACPROVIDER_FAKE_LAUNCHCTL_LOG="$root/launchctl.log" \
+  PATH="$root/bin:$PATH" \
   bash "$script" --reconcile-autoupdate
   cmp -s "$root/bin/macprovider-cli" <(printf "old-binary")
   [ ! -e "$root/home/.local/share/macprovider/autoupdate/pending.json" ]
+  grep -F "bootstrap gui/" "$root/launchctl.log" >/dev/null
+  grep -F "kickstart -k gui/" "$root/launchctl.log" >/dev/null
 }
 
 make_fixture "$TMP/standalone"

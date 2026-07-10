@@ -30,8 +30,8 @@ LOG_PATH="$LOG_DIR/watchdog.log"
 # cold-cache model load — re-disarms the watchdog and prevents the
 # stale-arming restart loop the R1 fix did not cover (R2 ARCH HIGH).
 #
-# Grace rule: after we DO kick, we wait at least KICK_GRACE_SECONDS
-# before kicking again. This covers the post-kick model-reload
+# Grace rule: after we observe a restart-worthy failure, we wait at least KICK_GRACE_SECONDS
+# before logging another restart request. This covers the post-restart model-reload
 # window without re-triggering on the gap between launchd respawn
 # and re-establishing the coordinator socket.
 STATE_DIR="${MACPROVIDER_WATCHDOG_STATE_DIR:-$HOME/.local/share/macprovider-watchdog/state}"
@@ -157,10 +157,8 @@ local_provider_health_ok() {
   "$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/health" >/dev/null 2>&1
 }
 
-kick_provider() {
-  log "kicking $LABEL via launchctl kickstart -k gui/$UID/$LABEL"
-  launchctl kickstart -k "gui/$UID/$LABEL" >> "$LOG_PATH" 2>&1 || \
-    log "launchctl kickstart returned non-zero (likely benign — process may already be restarting)"
+note_provider_restart_request() {
+  log "provider restart requested for $LABEL but skipped: launchd KeepAlive is the sole runtime manager"
 }
 
 now_epoch() { date -u +%s; }
@@ -588,7 +586,7 @@ main() {
   if [ -z "$provider_pid" ]; then
     log "provider process unhealthy: expected exactly one macprovider-cli at $BINARY_PATH"
     now_epoch > "$LAST_KICK_FILE"
-    kick_provider
+    note_provider_restart_request
     exit 0
   fi
   boot_id="$(current_boot_id)"
@@ -608,9 +606,9 @@ main() {
         exit 0
       fi
     fi
-    log "provider process $provider_pid failed local /v1/health after arming; kicking $LABEL"
+    log "provider process $provider_pid failed local /v1/health after arming; leaving restart ownership to launchd KeepAlive for $LABEL"
     now_epoch > "$LAST_KICK_FILE"
-    kick_provider
+    note_provider_restart_request
     exit 0
   fi
   armed_boot=""

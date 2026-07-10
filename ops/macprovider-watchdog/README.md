@@ -1,18 +1,26 @@
 # macprovider-watchdog
 
-External LaunchAgent that verifies the installed Mac provider process
-is alive and locally healthy. It ships alongside every install of
-`macprovider-cli` via the public `get.streamvc.live/install.sh` flow.
+External LaunchAgent that observes the installed Mac provider process
+and runs auto-update rollback recovery. It ships alongside every
+install of `macprovider-cli` via the public
+`get.streamvc.live/install.sh` flow.
 
 ## What it does
 
 Every 60 seconds, `watchdog.sh` checks that exactly one installed
 `macprovider-cli` process is running and that the provider's local
-`/v1/health` endpoint responds successfully. If either check fails,
-it issues `launchctl kickstart -k gui/$UID/live.streamvc.macprovider`
-so launchd restarts the provider. Coordinator TCP state is logged as
-advisory only; another process reaching the coordinator is not treated
-as proof that the provider is healthy.
+`/v1/health` endpoint responds successfully. If either check fails, it
+logs the condition and leaves restart ownership to the main
+`live.streamvc.macprovider` LaunchAgent's `KeepAlive` policy. This is
+intentional: #520 made the companion watchdog observer-only so there is
+one routine runtime manager for the provider singleton. Coordinator TCP
+state is logged as advisory only; another process reaching the
+coordinator is not treated as proof that the provider is healthy.
+
+The watchdog still runs auto-update rollback recovery. A rollback may
+bootstrap/kick the main provider label after restoring the prior binary
+so the restored executable takes effect; that is a bounded recovery
+action, not routine liveness ownership.
 
 It reads the provider identity from
 `~/.config/macprovider/config.yaml` (the file
@@ -46,7 +54,7 @@ LaunchAgent before bootstrapping the new one.
 ### Inspect
 
 The watchdog logs to `~/Library/Logs/macprovider/watchdog.log` (only
-when it detects an issue or kicks the provider — healthy ticks are
+when it detects an issue or performs rollback work — healthy ticks are
 silent so the log does not bloat). To see whether the LaunchAgent is
 loaded:
 
@@ -70,14 +78,13 @@ The main provider uninstaller (`phase3-binary/dist/uninstall.sh`)
 removes the watchdog too — operators only need this when they want to
 remove the watchdog without removing the provider.
 
-## Why this is operator-visibility insurance, not the fix
+## Why this is observer visibility, not runtime ownership
 
-The underlying bug is in the Swift WebSocket reconnect loop. PR #204
-landed the in-process bounded send + Darwin.exit(1) liveness watchdog
-that prevents the wedge from happening at all on new builds. This
-external LaunchAgent is the belt-and-suspenders safety net for
-operators still on older builds, and a long-tail catch for any future
-regression in the in-process protection.
+The provider process owns in-process liveness checks, and the main
+`live.streamvc.macprovider` LaunchAgent owns routine restarts through
+`KeepAlive`. This external LaunchAgent records local-health evidence for
+operators and performs bounded auto-update rollback recovery, but it does
+not kickstart the provider for normal liveness failures.
 
 ## Environment overrides (advanced)
 

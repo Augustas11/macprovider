@@ -470,16 +470,10 @@ struct ServeCommand: AsyncParsableCommand {
         // downstream.
         unsetenv("MACPROVIDER_PROVIDER_TOKEN")
 
-        try Self.runSupportedModelsPreflight(&resolved)
-        try Self.runDrainTimeoutPreflight(resolved)
-        try Self.runServingKnobsPreflight(resolved)
-        try Self.runSpecDecodeHeartbeatCompatibilityPreflight(
-            resolved,
-            coordinatorAcceptsSpecDecodeTelemetry: Self.bundledCoordinatorAcceptsSpecDecodeTelemetry
-        )
-        try Self.runSpecDecodeCapacityPreflight(&resolved)
-        try await Self.runModelArtifactPreflight(resolved, joiningCoordinator: !noJoin)
-        let verifiedDraftModelLoadPath = try Self.runDraftModelArtifactPreflight(resolved, joiningCoordinator: !noJoin)
+        let startupPreflight = try await Self.runServeStartupPreflights(&resolved, joiningCoordinator: !noJoin)
+        let serveLock = startupPreflight.serveLock
+        defer { serveLock.release() }
+        let verifiedDraftModelLoadPath = startupPreflight.verifiedDraftModelLoadPath
 
         printResolvedConfiguration(resolved)
 
@@ -651,6 +645,95 @@ struct ServeCommand: AsyncParsableCommand {
         }
         try withExtendedLifetime(terminationHandlers) {
             try server.run()
+        }
+    }
+
+    static func acquireProviderServeLock(_ config: AppConfig) throws -> ProviderServeLock {
+        do {
+            return try ProviderServeLock.acquire(providerID: config.providerID, port: config.port)
+        } catch let error as ProviderServeLockError {
+            FileHandle.standardError.write(Data((
+                "provider singleton conflict: \(error.description)\n"
+            ).utf8))
+            throw ExitCode(1)
+        }
+    }
+
+    struct ServeStartupPreflightResult {
+        let serveLock: ProviderServeLock
+        let verifiedDraftModelLoadPath: String?
+    }
+
+    static func runServeStartupPreflights(
+        _ resolved: inout AppConfig,
+        joiningCoordinator: Bool,
+        coordinatorAcceptsSpecDecodeTelemetry: Bool = Self.bundledCoordinatorAcceptsSpecDecodeTelemetry,
+        portIsOpen: (Int) -> Bool = MacProviderPortProbe.isOpen,
+        acquireServeLock: (AppConfig) throws -> ProviderServeLock = Self.acquireProviderServeLock,
+        staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
+        artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
+    ) async throws -> ServeStartupPreflightResult {
+        let serveLock = try Self.runPreModelStartupPreflights(
+            &resolved,
+            coordinatorAcceptsSpecDecodeTelemetry: coordinatorAcceptsSpecDecodeTelemetry,
+            portIsOpen: portIsOpen,
+            acquireServeLock: acquireServeLock
+        )
+        do {
+            try await Self.runModelArtifactPreflight(
+                resolved,
+                joiningCoordinator: joiningCoordinator,
+                staticInputs: staticInputs,
+                artifactResolver: artifactResolver
+            )
+            let verifiedDraftModelLoadPath = try Self.runDraftModelArtifactPreflight(
+                resolved,
+                joiningCoordinator: joiningCoordinator
+            )
+            return ServeStartupPreflightResult(
+                serveLock: serveLock,
+                verifiedDraftModelLoadPath: verifiedDraftModelLoadPath
+            )
+        } catch {
+            serveLock.release()
+            throw error
+        }
+    }
+
+    static func runPreModelStartupPreflights(
+        _ resolved: inout AppConfig,
+        coordinatorAcceptsSpecDecodeTelemetry: Bool = Self.bundledCoordinatorAcceptsSpecDecodeTelemetry,
+        portIsOpen: (Int) -> Bool = MacProviderPortProbe.isOpen,
+        acquireServeLock: (AppConfig) throws -> ProviderServeLock = Self.acquireProviderServeLock
+    ) throws -> ProviderServeLock {
+        try Self.runSupportedModelsPreflight(&resolved)
+        try Self.runDrainTimeoutPreflight(resolved)
+        try Self.runServingKnobsPreflight(resolved)
+        try Self.runSpecDecodeHeartbeatCompatibilityPreflight(
+            resolved,
+            coordinatorAcceptsSpecDecodeTelemetry: coordinatorAcceptsSpecDecodeTelemetry
+        )
+        try Self.runSpecDecodeCapacityPreflight(&resolved)
+
+        let serveLock = try acquireServeLock(resolved)
+        do {
+            try Self.assertServePortAvailable(resolved, portIsOpen: portIsOpen)
+        } catch {
+            serveLock.release()
+            throw error
+        }
+        return serveLock
+    }
+
+    static func assertServePortAvailable(
+        _ config: AppConfig,
+        portIsOpen: (Int) -> Bool = MacProviderPortProbe.isOpen
+    ) throws {
+        guard !portIsOpen(config.port) else {
+            FileHandle.standardError.write(Data((
+                "provider singleton conflict: 127.0.0.1:\(config.port) already has a listener\n"
+            ).utf8))
+            throw ExitCode(1)
         }
     }
 
