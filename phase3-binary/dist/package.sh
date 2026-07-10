@@ -27,6 +27,7 @@ xcodebuild -scheme macprovider-cli \
            -configuration Release \
            -destination 'platform=macOS,arch=arm64' \
            -derivedDataPath "$RELEASE_DIR" \
+           -onlyUsePackageVersionsFromResolvedFile \
            -skipPackagePluginValidation \
            -skipMacroValidation \
            clean build 2>&1 | tail -20

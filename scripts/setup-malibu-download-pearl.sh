@@ -17,7 +17,6 @@
 #   DOMAIN     default download.malibu.tech
 #   EMAIL      default augstar@gmail.com
 #   SKIP_DNS_WAIT=1   install nginx/docroot without waiting for public DNS
-#   PUBLISH_TAG=v1.8.19  run publish-malibu-latest-dmg.sh after setup
 
 set -euo pipefail
 
@@ -26,16 +25,19 @@ VPS_HOST="${VPS_HOST:-159.223.165.194}"
 VPS_USER="${VPS_USER:-root}"
 DOMAIN="${DOMAIN:-download.malibu.tech}"
 EMAIL="${EMAIL:-augstar@gmail.com}"
-PUBLISH_TAG="${PUBLISH_TAG:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NGINX_SITE="$SCRIPT_DIR/dist/nginx-download.malibu.tech.conf"
 
 [[ -f "$NGINX_SITE" ]] || { echo "missing $NGINX_SITE" >&2; exit 1; }
 [[ -f "$SSH_KEY" ]] || { echo "missing SSH key: $SSH_KEY" >&2; exit 1; }
+[[ "$VPS_USER" == root ]] || { echo "VPS_USER must be root" >&2; exit 1; }
+[[ "$VPS_HOST" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "invalid VPS_HOST" >&2; exit 1; }
+[[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "invalid DOMAIN" >&2; exit 1; }
+[[ "$EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || { echo "invalid EMAIL" >&2; exit 1; }
 
-MALIBU_DOWNLOAD_SSH_CONNECT_TIMEOUT=10
-# shellcheck source=malibu-download-ssh.sh
+export MALIBU_DOWNLOAD_SSH_CONNECT_TIMEOUT=10
+# shellcheck source=scripts/malibu-download-ssh.sh
 source "$SCRIPT_DIR/malibu-download-ssh.sh"
 
 log() { printf '[setup-malibu-download-pearl] %s\n' "$*"; }
@@ -70,6 +72,22 @@ EOF
 
 log "step 1/7: confirm SSH"
 malibu_download_ssh 'hostname >/dev/null && echo ok' >/dev/null
+# shellcheck disable=SC2016 # The expressions intentionally run as root remotely.
+remote_stage="$(malibu_download_ssh 'set -e
+  umask 077
+  install -d -o root -g root -m 0700 /root/.malibu-setup
+  stage="$(mktemp -d /root/.malibu-setup/stage.XXXXXXXX)"
+  [ "$(stat -c "%u:%g:%a:%h:%F" "$stage")" = "0:0:700:2:directory" ]
+  printf "%s\n" "$stage"
+')"
+[[ "$remote_stage" =~ ^/root/\.malibu-setup/stage\.[A-Za-z0-9]{8}$ ]] || {
+  echo "unsafe remote staging directory: $remote_stage" >&2
+  exit 1
+}
+cleanup_remote_stage() {
+  malibu_download_ssh "rm -rf -- '$remote_stage'" >/dev/null 2>&1 || true
+}
+trap cleanup_remote_stage EXIT
 
 log "step 2/7: DNS check"
 if dns_ready; then
@@ -100,12 +118,23 @@ log "step 3/7: ensure certbot + docroot on Pearl"
 malibu_download_ssh "set -e
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -qq -y certbot python3-certbot-nginx nginx >/dev/null || true
-  install -d -o www-data -g www-data -m 0755 /var/www/html
-  install -d -o www-data -g www-data -m 0755 /var/www/malibu-download
+  install -d -o root -g root -m 0755 /var/www/html
+  install -d -o root -g root -m 0755 /var/www/malibu-download
 "
 
 log "step 4/7: upload nginx site + install port-80 stub"
-malibu_download_scp "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-malibu-download.conf" >/dev/null
+nginx_sha256="$(shasum -a 256 "$NGINX_SITE" | awk '{print $1}')"
+malibu_download_scp "$NGINX_SITE" "$VPS_USER@$VPS_HOST:$remote_stage/nginx.conf" >/dev/null
+remote_nginx_sha256="$(malibu_download_ssh "set -e
+  chown root:root '$remote_stage/nginx.conf'
+  chmod 0600 '$remote_stage/nginx.conf'
+  [ \"\$(stat -c '%u:%g:%a:%h:%F' '$remote_stage/nginx.conf')\" = '0:0:600:1:regular file' ]
+  sha256sum '$remote_stage/nginx.conf' | awk '{print \$1}'
+")"
+[[ "$remote_nginx_sha256" == "$nginx_sha256" ]] || {
+  echo "uploaded nginx config sha256 mismatch" >&2
+  exit 1
+}
 malibu_download_ssh "set -e
   if [ ! -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]; then
     cat > /etc/nginx/sites-available/$DOMAIN <<'NGINX_STUB'
@@ -147,15 +176,16 @@ if [[ "${SKIP_CERT:-0}" != "1" ]] && dns_ready; then
 
   log "step 6/7: install full TLS vhost"
   malibu_download_ssh "set -e
-    install -o root -g root -m 0644 /tmp/nginx-malibu-download.conf /etc/nginx/sites-available/$DOMAIN
-    rm -f /tmp/nginx-malibu-download.conf
+    install -o root -g root -m 0644 '$remote_stage/nginx.conf' /etc/nginx/sites-available/$DOMAIN
     ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
     nginx -t && systemctl reload nginx
   "
 else
   log "step 5-6/7: skipped TLS (add name.com A record, then re-run without SKIP_DNS_WAIT)"
-  malibu_download_ssh "rm -f /tmp/nginx-malibu-download.conf" || true
 fi
+
+cleanup_remote_stage
+trap - EXIT
 
 log "step 7/7: verify Pearl endpoint"
 if curl -fsS --max-time 15 --resolve "$DOMAIN:443:$VPS_HOST" "https://$DOMAIN/appcast.xml" >/dev/null 2>&1; then
@@ -166,8 +196,4 @@ else
   log "  Pearl docroot ready; run publish-malibu-latest-dmg.sh after DNS"
 fi
 
-if [[ -n "$PUBLISH_TAG" ]]; then
-  bash "$SCRIPT_DIR/publish-malibu-latest-dmg.sh" "$PUBLISH_TAG"
-fi
-
-log "DONE. After DNS + cert: bash scripts/publish-malibu-latest-dmg.sh vX.Y.Z && bash scripts/verify-malibu-download.sh"
+log "DONE. After DNS + cert, publish only from the protected release workflow or numeric-ID recovery runbook."
