@@ -478,6 +478,8 @@ final class CoordinatorClientTests: XCTestCase {
 
         let request = try XCTUnwrap(factory.lastRequest, "factory never received a URLRequest")
         XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertEqual(socket.pingCountSnapshot(), 0, "provider auth must not wait for a coordinator PONG")
+        XCTAssertTrue(socket.sentFrames().contains { $0["type"] as? String == "hello" })
     }
 
     // Regression: M1-1 follow-up (codex security audit 2026-06-11). The
@@ -1983,10 +1985,10 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.21")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.21")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.21")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.21")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.25")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.25")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.8.25")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.8.25")
     }
 
     func testAuthInitialDefaultsToSingleEntryCatalog() async throws {

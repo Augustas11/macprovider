@@ -6,7 +6,6 @@ import CryptoKit
 protocol ProviderWebSocketTask: AnyObject, Sendable {
     func resume()
     func send(_ message: URLSessionWebSocketTask.Message) async throws
-    func sendPing() async throws
     func receive() async throws -> URLSessionWebSocketTask.Message
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
     var closeCodeRawValueForDiagnostics: Int? { get }
@@ -98,43 +97,6 @@ struct CoordinatorReceiptRotationCommittedRecoveryFailed: Error, CustomStringCon
     }
 }
 
-// Guards a CheckedContinuation so it resumes exactly once. URLSession's
-// pongReceiveHandler can fire more than once on a connection abort (observed
-// in the field: NSPOSIXErrorDomain Code=53 "Software caused connection
-// abort"), which previously double-resumed the continuation and tripped a
-// SWIFT TASK CONTINUATION MISUSE fatalError — crashing the whole provider on
-// a single transient WS blip. NSLock-guarded flag matches the @unchecked
-// Sendable idiom used elsewhere in this file (CaffeinateSleepAssertion).
-private final class ResumeOnceGuard: @unchecked Sendable {
-    private let lock = NSLock()
-    private var resumed = false
-    /// Returns true exactly once — for the first caller. All later calls
-    /// return false so the continuation is never resumed twice.
-    func claim() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if resumed { return false }
-        resumed = true
-        return true
-    }
-}
-
-extension URLSessionWebSocketTask {
-    func sendPing() async throws {
-        let once = ResumeOnceGuard()
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            sendPing { error in
-                guard once.claim() else { return }
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: ())
-                }
-            }
-        }
-    }
-}
-
 protocol ProviderSleepAssertion: AnyObject, Sendable {
     func stop()
 }
@@ -176,7 +138,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 actor CoordinatorClient {
     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
 
-    static let binaryVersion = "1.8.24"
+    static let binaryVersion = "1.8.25"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -989,36 +951,7 @@ actor CoordinatorClient {
         webSocket = socket
         socket.resume()
         Self.keepaliveDebug("ws_resume url=\(Self.redactedURL(coordinatorURL)) token=\(providerToken == nil ? "absent" : "present")")
-        try await Self.waitForWebSocketReady(socket)
         return socket
-    }
-
-    /// URLSessionWebSocketTask.send() fails with NSPOSIXErrorDomain Code=57
-    /// ("Socket is not connected") when called immediately after resume(), before
-    /// the TCP/TLS/WS handshake completes. Reconnect loops then spam WARN lines
-    /// and leave the provider absent from the pool during the backoff window.
-    private static func waitForWebSocketReady(_ socket: ProviderWebSocketTask, timeoutSeconds: Double = 15) async throws {
-        guard let urlTask = socket as? URLSessionWebSocketTask else { return }
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        var lastError: Error?
-        while Date() < deadline {
-            if Task.isCancelled { throw CancellationError() }
-            switch urlTask.state {
-            case .completed, .canceling:
-                throw lastError ?? CoordinatorAuthError.invalidMessage("WebSocket closed before ready")
-            case .running:
-                do {
-                    try await urlTask.sendPing()
-                    return
-                } catch {
-                    lastError = error
-                }
-            default:
-                break
-            }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        throw lastError ?? CoordinatorAuthError.invalidMessage("WebSocket timed out waiting for ready")
     }
 
     private func connectAndRunTier2(socket: ProviderWebSocketTask) async throws {
