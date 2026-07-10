@@ -31,6 +31,10 @@ func TestProviderTokensRequiredByDefault(t *testing.T) {
 	if cfg.Auth.AllowTokenlessProvisionalBootstrap {
 		t.Fatal("auth.allow_tokenless_provisional_bootstrap should default to false")
 	}
+	if cfg.Auth.CredentialBootstrapMintsGlobalHour != 128 || cfg.Auth.CredentialBootstrapUnconfirmedMax != 64 {
+		t.Fatalf("credential bootstrap global defaults = %d/%d, want 128/64",
+			cfg.Auth.CredentialBootstrapMintsGlobalHour, cfg.Auth.CredentialBootstrapUnconfirmedMax)
+	}
 }
 
 func TestLoadRejectsWeakOperatorKeys(t *testing.T) {

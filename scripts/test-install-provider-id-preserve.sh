@@ -19,7 +19,6 @@ workdir="$(mktemp -d "${TMPDIR:-/tmp}/macprovider-install-provider-id.XXXXXX")"
 trap 'rm -f "$lib"; rm -rf "$workdir"' EXIT
 
 {
-  awk '/^sanitize_handle\(\)/, /^}/' "$INSTALL_SH"
   awk '/^read_config_provider_id\(\)/, /^}/' "$INSTALL_SH"
   awk '/^choose_provider_id\(\)/, /^}/' "$INSTALL_SH"
 } > "$lib"
@@ -53,5 +52,12 @@ rm -f "$PROVIDER_ID_PATH"
 chosen="$(choose_provider_id)"
 [ "$chosen" = "p_upiv4dug6kmmcpavsyqjmt35andgfpbf4ztrrnhlqdjqirhprcxq" ] \
   || die "expected config.yaml fallback after empty provider_id file, got: $chosen"
+
+rm -f "$CONFIG_PATH"
+chosen="$(choose_provider_id)"
+case "$chosen" in
+  mp-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) die "fresh install did not generate a 128-bit provider auth principal: $chosen" ;;
+esac
 
 printf '[install-provider-id-test] installer preserves provider_id across reinstall ok\n'

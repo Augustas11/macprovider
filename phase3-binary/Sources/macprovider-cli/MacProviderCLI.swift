@@ -11,7 +11,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, RotateKeyCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, DecodeBenchCommand.self, EnrollCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -538,7 +538,38 @@ struct ServeCommand: AsyncParsableCommand {
         )
         await modelRuntime.setProviderStatus(providerStatus)
         let receiptKeyStore = KeychainReceiptKeyStore()
+        let receiptIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey]
+        let persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)?
+        if let providerID = resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           BootstrapAuthCommand.isCredentialBootstrapPrincipal(providerID),
+           resolved.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            if let persistedIdentity = try receiptKeyStore.loadBootstrapIdentity(providerId: providerID) {
+                receiptIdentitySigningKeyCandidates = [persistedIdentity]
+                persistReceiptIdentitySigningKey = nil
+            } else {
+                guard let currentKey = try receiptKeyStore.loadCurrent(providerId: providerID) else {
+                    throw ValidationError("provider bootstrap receipt identity is missing from Keychain; refuse bearer admission")
+                }
+                var candidates = [currentKey]
+                if let previousKey = try receiptKeyStore.loadPrevious(providerId: providerID),
+                   previousKey.rawRepresentation != currentKey.rawRepresentation {
+                    candidates.append(previousKey)
+                }
+                receiptIdentitySigningKeyCandidates = candidates
+                persistReceiptIdentitySigningKey = { key in
+                    _ = try receiptKeyStore.loadOrStoreBootstrapIdentity(
+                        providerId: providerID,
+                        candidate: key
+                    )
+                }
+            }
+        } else {
+            receiptIdentitySigningKeyCandidates = []
+            persistReceiptIdentitySigningKey = nil
+        }
         let receiptRuntime = try Self.makeReceiptRuntime(config: resolved, keyStore: receiptKeyStore)
+        let providerReceiptPublicKey = receiptRuntime.publicKeyBase64
+            ?? receiptIdentitySigningKeyCandidates.first.map { Data($0.publicKey.rawRepresentation).base64EncodedString() }
         if resolved.donorMode {
             FileHandle.standardError.write(Data("DONOR MODE: coordinator join disabled; serving local HTTP only.\n".utf8))
         }
@@ -560,9 +591,11 @@ struct ServeCommand: AsyncParsableCommand {
                     #endif
                     return ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
                 }(),
-                providerReceiptPublicKey: receiptRuntime.publicKeyBase64,
+                providerReceiptPublicKey: providerReceiptPublicKey,
                 receiptBuilder: receiptRuntime.builder,
-                identityBridge: identityBridge
+                identityBridge: identityBridge,
+                receiptIdentitySigningKeyCandidates: receiptIdentitySigningKeyCandidates,
+                persistReceiptIdentitySigningKey: persistReceiptIdentitySigningKey
             )
         }
         let idlePrewarmLogger = IdlePrewarmLogger { object in

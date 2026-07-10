@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -44,6 +46,11 @@ var ErrPendingPairOTMissing = errors.New("pending pair_ot missing")
 var ErrAppTrackExistingTokenNoProof = errors.New("existing active token requires current bearer proof")
 var ErrAppTrackReissueCooldown = errors.New("app-track provider token reissue cooldown active")
 var ErrOAuthStateRateLimited = errors.New("oauth state rate limited")
+var ErrBootstrapIdentityMismatch = errors.New("bootstrap receipt identity mismatch")
+var ErrBootstrapTokenUsed = errors.New("bootstrap token was already used")
+var ErrBootstrapTokenExpired = errors.New("bootstrap token expired")
+var ErrBootstrapRateLimited = errors.New("bootstrap mint rate limited")
+var ErrBootstrapOutstandingLimit = errors.New("bootstrap outstanding token limit reached")
 
 type Store struct {
 	db *sql.DB
@@ -73,6 +80,26 @@ type AdmissionPairMint struct {
 	PairOT        string
 	ExpiresAt     time.Time
 	Paired        bool
+}
+
+type BootstrapMintRequest struct {
+	ProviderID          string
+	ProviderName        string
+	SourceIP            string
+	ReceiptPubkey       []byte
+	Now                 time.Time
+	TTL                 time.Duration
+	PerIPLimitPerHour   int
+	PerProviderPerHour  int
+	GlobalLimitPerHour  int
+	UnconfirmedIDMax    int
+	OutstandingTokenMax int
+}
+
+type BootstrapMint struct {
+	TokenRecord   TokenRecord
+	ProviderToken string
+	Replaced      bool
 }
 
 type OAuthState struct {
@@ -333,6 +360,31 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 			ts TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_apptrack_register_reissues_provider_ts ON apptrack_register_reissues(provider_id, ts)`,
+		`CREATE TABLE IF NOT EXISTS provider_bootstrap_identities (
+			provider_id TEXT PRIMARY KEY,
+			receipt_pubkey BLOB NOT NULL UNIQUE,
+			created_at TEXT NOT NULL,
+			confirmed_at TEXT,
+			expires_at TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS bootstrap_mint_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			provider_id TEXT NOT NULL,
+			source_ip TEXT NOT NULL,
+			ts TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bootstrap_mint_log_provider_ts ON bootstrap_mint_log(provider_id, ts)`,
+		`CREATE INDEX IF NOT EXISTS idx_bootstrap_mint_log_ip_ts ON bootstrap_mint_log(source_ip, ts)`,
+		`CREATE TABLE IF NOT EXISTS bootstrap_gc_audit (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			last_run_at TEXT NOT NULL,
+			last_removed_identities INTEGER NOT NULL,
+			last_removed_tokens INTEGER NOT NULL,
+			last_removed_logs INTEGER NOT NULL,
+			total_removed_identities INTEGER NOT NULL,
+			total_removed_tokens INTEGER NOT NULL,
+			total_removed_logs INTEGER NOT NULL
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
@@ -340,6 +392,40 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		}
 	}
 	if err := ensureColumnTx(ctx, tx, "oauth_states", "origin_hash", `ALTER TABLE oauth_states ADD COLUMN origin_hash TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_issued", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_issued INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_expires_at", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_expires_at TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "provider_bootstrap_identities", "confirmed_at", `ALTER TABLE provider_bootstrap_identities ADD COLUMN confirmed_at TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "provider_bootstrap_identities", "expires_at", `ALTER TABLE provider_bootstrap_identities ADD COLUMN expires_at TEXT`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE provider_bootstrap_identities
+   SET confirmed_at = COALESCE(confirmed_at, created_at)
+ WHERE EXISTS (
+       SELECT 1 FROM provider_tokens
+        WHERE provider_tokens.provider_id = provider_bootstrap_identities.provider_id
+          AND provider_tokens.bootstrap_issued = 1
+          AND provider_tokens.last_used_at IS NOT NULL
+   )`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE provider_bootstrap_identities
+   SET expires_at = (
+       SELECT MAX(provider_tokens.bootstrap_expires_at)
+         FROM provider_tokens
+        WHERE provider_tokens.provider_id = provider_bootstrap_identities.provider_id
+          AND provider_tokens.bootstrap_issued = 1
+   )
+ WHERE confirmed_at IS NULL AND expires_at IS NULL`); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -489,6 +575,296 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 		return TokenRecord{}, "", err
 	}
 	return TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: createdAt}, token, nil
+}
+
+// MintBootstrapToken is the only credential-bootstrap mutation path. The
+// receipt-key TOFU binding, durable rate checks, bounded transactional GC,
+// same-key unused-token replacement, and new token insert share one
+// BEGIN IMMEDIATE transaction. A response-loss retry can therefore replace
+// only the bootstrap token owned by the exact key that proved the fresh v2
+// challenge; ordinary and used tokens are never revoked by this path, while
+// expired never-used rows are collected with their unconfirmed bindings.
+func (s *Store) MintBootstrapToken(ctx context.Context, req BootstrapMintRequest) (BootstrapMint, error) {
+	if err := config.ValidateProviderID(req.ProviderID); err != nil {
+		return BootstrapMint{}, err
+	}
+	if !IsCredentialBootstrapPrincipal(req.ProviderID) {
+		return BootstrapMint{}, ErrBootstrapIdentityMismatch
+	}
+	req.ProviderName = strings.TrimSpace(req.ProviderName)
+	req.SourceIP = strings.TrimSpace(req.SourceIP)
+	if req.ProviderName == "" || req.SourceIP == "" {
+		return BootstrapMint{}, fmt.Errorf("bootstrap provider name and source ip are required")
+	}
+	if len(req.ReceiptPubkey) != ed25519.PublicKeySize {
+		return BootstrapMint{}, fmt.Errorf("bootstrap receipt public key must be %d bytes", ed25519.PublicKeySize)
+	}
+	if req.Now.IsZero() {
+		req.Now = time.Now().UTC()
+	} else {
+		req.Now = req.Now.UTC()
+	}
+	if req.TTL <= 0 || req.PerIPLimitPerHour <= 0 || req.PerProviderPerHour <= 0 ||
+		req.GlobalLimitPerHour <= 0 || req.UnconfirmedIDMax <= 0 || req.OutstandingTokenMax <= 0 {
+		return BootstrapMint{}, fmt.Errorf("bootstrap limits and ttl must be positive")
+	}
+	newToken, err := randomHex(32)
+	if err != nil {
+		return BootstrapMint{}, err
+	}
+
+	var out BootstrapMint
+	var decisionErr error
+	err = sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		nowText := timeText(req.Now)
+		cutoffText := timeText(req.Now.Add(-time.Hour))
+		expiresText := timeText(req.Now.Add(req.TTL))
+
+		removedLogs, err := deleteRows(ctx, conn, `DELETE FROM bootstrap_mint_log WHERE ts < ?`, cutoffText)
+		if err != nil {
+			return err
+		}
+		removedTokens, err := deleteRows(ctx, conn, `
+DELETE FROM provider_tokens
+ WHERE bootstrap_issued = 1
+   AND last_used_at IS NULL
+   AND bootstrap_expires_at IS NOT NULL
+   AND bootstrap_expires_at <= ?`, nowText)
+		if err != nil {
+			return err
+		}
+		removedIdentities, err := deleteRows(ctx, conn, `
+DELETE FROM provider_bootstrap_identities
+ WHERE confirmed_at IS NULL
+   AND expires_at IS NOT NULL
+   AND expires_at <= ?
+   AND NOT EXISTS (
+       SELECT 1 FROM provider_tokens
+        WHERE provider_tokens.provider_id = provider_bootstrap_identities.provider_id
+          AND provider_tokens.bootstrap_issued = 1
+          AND provider_tokens.last_used_at IS NOT NULL
+   )`, nowText)
+		if err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO bootstrap_gc_audit (
+    id, last_run_at, last_removed_identities, last_removed_tokens, last_removed_logs,
+    total_removed_identities, total_removed_tokens, total_removed_logs
+) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+    last_run_at = excluded.last_run_at,
+    last_removed_identities = excluded.last_removed_identities,
+    last_removed_tokens = excluded.last_removed_tokens,
+    last_removed_logs = excluded.last_removed_logs,
+    total_removed_identities = bootstrap_gc_audit.total_removed_identities + excluded.last_removed_identities,
+    total_removed_tokens = bootstrap_gc_audit.total_removed_tokens + excluded.last_removed_tokens,
+    total_removed_logs = bootstrap_gc_audit.total_removed_logs + excluded.last_removed_logs`,
+			nowText, removedIdentities, removedTokens, removedLogs, removedIdentities, removedTokens, removedLogs); err != nil {
+			return err
+		}
+
+		var storedPubkey []byte
+		var confirmedAt sql.NullString
+		identityErr := conn.QueryRowContext(ctx, `
+SELECT receipt_pubkey, confirmed_at
+  FROM provider_bootstrap_identities
+ WHERE provider_id = ?`, req.ProviderID).Scan(&storedPubkey, &confirmedAt)
+		if identityErr != nil && identityErr != sql.ErrNoRows {
+			return identityErr
+		}
+		identityExists := identityErr == nil
+		if identityExists && !bytes.Equal(storedPubkey, req.ReceiptPubkey) {
+			decisionErr = ErrBootstrapIdentityMismatch
+			return nil
+		}
+
+		var active struct {
+			ID        int64
+			Issued    int
+			ExpiresAt sql.NullString
+			LastUsed  sql.NullString
+		}
+		activeErr := conn.QueryRowContext(ctx, `
+SELECT id, bootstrap_issued, bootstrap_expires_at, last_used_at
+  FROM provider_tokens
+ WHERE provider_id = ? AND revoked_at IS NULL
+ LIMIT 1`, req.ProviderID).Scan(&active.ID, &active.Issued, &active.ExpiresAt, &active.LastUsed)
+		if activeErr != nil && activeErr != sql.ErrNoRows {
+			return activeErr
+		}
+		activeExists := activeErr == nil
+		if activeExists {
+			if active.Issued != 1 || !identityExists {
+				decisionErr = ErrBootstrapIdentityMismatch
+				return nil
+			}
+			if active.LastUsed.Valid || confirmedAt.Valid {
+				decisionErr = ErrBootstrapTokenUsed
+				return nil
+			}
+			expiresAt, parseErr := time.Parse(time.RFC3339, active.ExpiresAt.String)
+			if !active.ExpiresAt.Valid || parseErr != nil || !expiresAt.After(req.Now) {
+				decisionErr = ErrBootstrapTokenExpired
+				return nil
+			}
+		} else if identityExists {
+			// Confirmed ownership is permanent. An unconfirmed identity should
+			// only reach this branch if its expiry metadata is malformed; fail
+			// closed instead of allowing a chosen-key replacement.
+			if confirmedAt.Valid {
+				decisionErr = ErrBootstrapTokenUsed
+			} else {
+				decisionErr = ErrBootstrapTokenExpired
+			}
+			return nil
+		}
+
+		var ipMints, providerMints, globalMints int
+		if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM bootstrap_mint_log
+ WHERE source_ip = ? AND ts >= ?`, req.SourceIP, cutoffText).Scan(&ipMints); err != nil {
+			return err
+		}
+		if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM bootstrap_mint_log
+ WHERE provider_id = ? AND ts >= ?`, req.ProviderID, cutoffText).Scan(&providerMints); err != nil {
+			return err
+		}
+		if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM bootstrap_mint_log
+ WHERE ts >= ?`, cutoffText).Scan(&globalMints); err != nil {
+			return err
+		}
+		if ipMints >= req.PerIPLimitPerHour || providerMints >= req.PerProviderPerHour || globalMints >= req.GlobalLimitPerHour {
+			decisionErr = ErrBootstrapRateLimited
+			return nil
+		}
+
+		if !activeExists {
+			var outstanding, unconfirmed int
+			if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1)
+  FROM provider_tokens
+ WHERE bootstrap_issued = 1
+   AND revoked_at IS NULL
+   AND last_used_at IS NULL
+   AND bootstrap_expires_at > ?`, nowText).Scan(&outstanding); err != nil {
+				return err
+			}
+			if outstanding >= req.OutstandingTokenMax {
+				decisionErr = ErrBootstrapOutstandingLimit
+				return nil
+			}
+			if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1)
+  FROM provider_bootstrap_identities
+ WHERE confirmed_at IS NULL`).Scan(&unconfirmed); err != nil {
+				return err
+			}
+			if !identityExists && unconfirmed >= req.UnconfirmedIDMax {
+				decisionErr = ErrBootstrapOutstandingLimit
+				return nil
+			}
+		}
+
+		if activeExists {
+			res, err := conn.ExecContext(ctx, `
+UPDATE provider_tokens
+   SET revoked_at = ?
+ WHERE id = ?
+   AND revoked_at IS NULL
+   AND last_used_at IS NULL
+   AND bootstrap_issued = 1`, nowText, active.ID)
+			if err != nil {
+				return err
+			}
+			affected, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if affected != 1 {
+				return ErrBootstrapTokenUsed
+			}
+			if _, err := conn.ExecContext(ctx, `
+UPDATE provider_bootstrap_identities
+   SET expires_at = ?
+ WHERE provider_id = ? AND confirmed_at IS NULL`, expiresText, req.ProviderID); err != nil {
+				return err
+			}
+			out.Replaced = true
+		} else {
+			if _, err := conn.ExecContext(ctx, `
+INSERT INTO provider_bootstrap_identities (provider_id, receipt_pubkey, created_at, expires_at)
+VALUES (?, ?, ?, ?)`, req.ProviderID, req.ReceiptPubkey, nowText, expiresText); err != nil {
+				if isConstraintFailure(err) {
+					decisionErr = ErrBootstrapIdentityMismatch
+					return nil
+				}
+				return err
+			}
+		}
+
+		prefix := newToken[:tokenDisplayPrefixLength]
+		res, err := conn.ExecContext(ctx, `
+INSERT INTO provider_tokens (
+    token_hash, token_prefix, provider_id, provider_name, created_at,
+    bootstrap_issued, bootstrap_expires_at
+) VALUES (?, ?, ?, ?, ?, 1, ?)`,
+			tokenHash(newToken), prefix, req.ProviderID, req.ProviderName, nowText, expiresText)
+		if err != nil {
+			if isActiveProviderTokenConstraintFailure(err) {
+				return ErrActiveTokenAlreadyExists
+			}
+			return err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO bootstrap_mint_log (provider_id, source_ip, ts)
+VALUES (?, ?, ?)`, req.ProviderID, req.SourceIP, nowText); err != nil {
+			return err
+		}
+		out.TokenRecord = TokenRecord{
+			ID: id, TokenPrefix: prefix, ProviderID: req.ProviderID,
+			ProviderName: req.ProviderName, CreatedAt: nowText,
+		}
+		out.ProviderToken = newToken
+		return nil
+	})
+	if err != nil {
+		return BootstrapMint{}, err
+	}
+	if decisionErr != nil {
+		return BootstrapMint{}, decisionErr
+	}
+	return out, nil
+}
+
+// IsCredentialBootstrapPrincipal recognizes installer-generated auth
+// principals. The 128-bit lowercase suffix is deliberately unrelated to the
+// operator-facing hostname/display name, so an unauthenticated client cannot
+// permanently preclaim a predictable handle.
+func IsCredentialBootstrapPrincipal(providerID string) bool {
+	if len(providerID) != len("mp-")+32 || !strings.HasPrefix(providerID, "mp-") {
+		return false
+	}
+	for _, c := range providerID[len("mp-"):] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func deleteRows(ctx context.Context, conn *sql.Conn, query string, args ...any) (int64, error) {
+	res, err := conn.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (string, error) {
@@ -693,12 +1069,41 @@ func (s *Store) ValidateToken(ctx context.Context, token string) (string, bool, 
 	}
 	hash := tokenHash(token)
 	var providerID string
-	err := s.db.QueryRowContext(ctx, `SELECT provider_id FROM provider_tokens WHERE token_hash = ? AND revoked_at IS NULL`, hash).Scan(&providerID)
-	if err == sql.ErrNoRows {
-		return "", false, nil
-	}
+	valid := false
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var id int64
+		var bootstrapIssued int
+		var bootstrapExpiresAt, lastUsedAt sql.NullString
+		err := conn.QueryRowContext(ctx, `
+SELECT id, provider_id, bootstrap_issued, bootstrap_expires_at, last_used_at
+  FROM provider_tokens
+ WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''`, hash).
+			Scan(&id, &providerID, &bootstrapIssued, &bootstrapExpiresAt, &lastUsedAt)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if bootstrapIssued == 1 && !lastUsedAt.Valid {
+			now := time.Now().UTC()
+			expiresAt, parseErr := time.Parse(time.RFC3339, bootstrapExpiresAt.String)
+			if !bootstrapExpiresAt.Valid || parseErr != nil || !expiresAt.After(now) {
+				_, err := conn.ExecContext(ctx, `
+UPDATE provider_tokens
+   SET revoked_at = ?
+ WHERE id = ? AND revoked_at IS NULL AND last_used_at IS NULL`, timeText(now), id)
+				return err
+			}
+		}
+		valid = true
+		return nil
+	})
 	if err != nil {
 		return "", false, err
+	}
+	if !valid {
+		return "", false, nil
 	}
 	if providerID == "" {
 		return "", false, nil
@@ -706,57 +1111,181 @@ func (s *Store) ValidateToken(ctx context.Context, token string) (string, bool, 
 	return providerID, true, nil
 }
 
+// LookupBootstrapIdentityPubkey returns the durable receipt-key owner for an
+// installer-generated provider ID. Confirmed ownership is permanent. Before
+// first accepted admission, the binding is usable only while its matching
+// provisional bearer is active and unexpired. This lets the normal bearer-v2
+// handshake prove the same identity that minted the credential without
+// trusting a self-declared key or an ephemeral provider-pool entry.
+func (s *Store) LookupBootstrapIdentityPubkey(ctx context.Context, providerID string) ([]byte, bool, error) {
+	if !IsCredentialBootstrapPrincipal(providerID) {
+		return nil, false, nil
+	}
+	nowText := timeText(time.Now().UTC())
+	var pubkey []byte
+	err := s.db.QueryRowContext(ctx, `
+SELECT i.receipt_pubkey
+  FROM provider_bootstrap_identities i
+ WHERE i.provider_id = ?
+   AND (
+       i.confirmed_at IS NOT NULL
+       OR (
+           i.confirmed_at IS NULL
+           AND i.expires_at IS NOT NULL
+           AND i.expires_at > ?
+           AND EXISTS (
+               SELECT 1
+                 FROM provider_tokens t
+                WHERE t.provider_id = i.provider_id
+                  AND t.bootstrap_issued = 1
+                  AND t.revoked_at IS NULL
+                  AND t.last_used_at IS NULL
+                  AND t.bootstrap_expires_at IS NOT NULL
+                  AND t.bootstrap_expires_at > ?
+           )
+       )
+   )`, providerID, nowText, nowText).Scan(&pubkey)
+	if err == sql.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if len(pubkey) != ed25519.PublicKeySize {
+		return nil, false, nil
+	}
+	return append([]byte(nil), pubkey...), true, nil
+}
+
+// BootstrapIdentityExists distinguishes a legacy mp-* principal that predates
+// credential bootstrap from a principal whose durable binding exists but is
+// no longer active. Callers may preserve legacy verification only for the
+// former; the latter must fail closed rather than falling back to live state.
+func (s *Store) BootstrapIdentityExists(ctx context.Context, providerID string) (bool, error) {
+	if !IsCredentialBootstrapPrincipal(providerID) {
+		return false, nil
+	}
+	var exists int
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS(
+    SELECT 1 FROM provider_bootstrap_identities WHERE provider_id = ?
+)`, providerID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
+}
+
 func (s *Store) MarkTokenUsed(ctx context.Context, token string) error {
 	if token == "" {
 		return fmt.Errorf("token is required")
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE provider_tokens SET last_used_at = ? WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''`, nowString(), tokenHash(token))
+	_, ok, err := s.validateAndMaybeConfirmToken(ctx, token, true)
 	if err != nil {
 		return err
 	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
+	if !ok {
 		return fmt.Errorf("no active token found")
 	}
 	return nil
 }
 
-// ValidateAndMarkTokenUsed atomically validates a bearer and stamps its
-// `last_used_at`. SPEC-003 v0.8.4 (fix-pass-5) — closes the TOCTOU
-// window between separate `ValidateToken` and `MarkTokenUsed` calls
-// that the codex code-review (PR #69 fix-pass-4) flagged: between the
-// two, a concurrent tokenless connect could see `last_used_at IS NULL`
-// and self-heal-revoke the legitimate row, then mint a fresh bearer
-// for the attacker. This atomic UPDATE-RETURNING closes the window by
-// stamping `last_used_at` in the same statement that the validation
-// reads from. SQLite WAL serializes writers; once this call returns
-// (providerID, true, nil), the row's `last_used_at` is set and any
-// subsequent `RevokeUnusedTokenForProvider` skips this row.
+// ValidateAndMarkTokenUsed validates a bearer and stamps ordinary or already
+// confirmed credentials under one BEGIN IMMEDIATE transaction. A fresh
+// bootstrap bearer is deliberately left unconsumed: the WS admission path must
+// call MarkTokenUsed only after provider-ID binding and every hello/evidence/
+// admission check has succeeded, and before registration or an accepted
+// response. Until that boundary, failed sessions remain reclaimable and
+// bounded by the bootstrap TTL. Expired unused bootstrap bearers are revoked
+// atomically here.
 //
 // Callers SHOULD use this instead of `ValidateToken` for any WS-connect
 // validation; legacy `ValidateToken` is retained for read-only paths
 // that don't need to record use (operator tooling, status checks).
 func (s *Store) ValidateAndMarkTokenUsed(ctx context.Context, token string) (string, bool, error) {
+	return s.validateAndMaybeConfirmToken(ctx, token, false)
+}
+
+func (s *Store) validateAndMaybeConfirmToken(ctx context.Context, token string, confirmBootstrap bool) (string, bool, error) {
 	if token == "" {
 		return "", false, nil
 	}
 	hash := tokenHash(token)
 	var providerID string
-	err := s.db.QueryRowContext(ctx,
-		`UPDATE provider_tokens
-		    SET last_used_at = ?
-		  WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''
-		  RETURNING provider_id`,
-		nowString(), hash,
-	).Scan(&providerID)
-	if err == sql.ErrNoRows {
-		return "", false, nil
-	}
+	valid := false
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var id int64
+		var bootstrapIssued int
+		var bootstrapExpiresAt, lastUsedAt sql.NullString
+		err := conn.QueryRowContext(ctx, `
+SELECT id, provider_id, bootstrap_issued, bootstrap_expires_at, last_used_at
+  FROM provider_tokens
+ WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''`, hash).
+			Scan(&id, &providerID, &bootstrapIssued, &bootstrapExpiresAt, &lastUsedAt)
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		now := time.Now().UTC()
+		nowText := timeText(now)
+		if bootstrapIssued == 1 && !lastUsedAt.Valid {
+			expiresAt, parseErr := time.Parse(time.RFC3339, bootstrapExpiresAt.String)
+			if !bootstrapExpiresAt.Valid || parseErr != nil || !expiresAt.After(now) {
+				if _, err := conn.ExecContext(ctx, `
+UPDATE provider_tokens
+   SET revoked_at = ?
+ WHERE id = ? AND revoked_at IS NULL AND last_used_at IS NULL`, nowText, id); err != nil {
+					return err
+				}
+				return nil
+			}
+			if !confirmBootstrap {
+				valid = true
+				return nil
+			}
+		}
+
+		res, err := conn.ExecContext(ctx, `
+UPDATE provider_tokens
+   SET last_used_at = ?
+ WHERE id = ? AND revoked_at IS NULL`, nowText, id)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return nil
+		}
+		if bootstrapIssued == 1 && !lastUsedAt.Valid {
+			res, err := conn.ExecContext(ctx, `
+UPDATE provider_bootstrap_identities
+   SET confirmed_at = COALESCE(confirmed_at, ?), expires_at = NULL
+ WHERE provider_id = ?`, nowText, providerID)
+			if err != nil {
+				return err
+			}
+			confirmed, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if confirmed != 1 {
+				return fmt.Errorf("bootstrap identity missing for provider %q", providerID)
+			}
+		}
+		valid = true
+		return nil
+	})
 	if err != nil {
 		return "", false, err
+	}
+	if !valid {
+		return "", false, nil
 	}
 	if providerID == "" {
 		return "", false, nil
@@ -1351,6 +1880,10 @@ func isActiveProviderTokenConstraintFailure(err error) bool {
 	return strings.Contains(msg, "constraint failed") &&
 		(strings.Contains(msg, "idx_provider_tokens_one_active_per_provider") ||
 			strings.Contains(msg, "provider_tokens.provider_id"))
+}
+
+func isConstraintFailure(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "constraint failed")
 }
 
 func isHexPrefix(prefix string) bool {

@@ -482,6 +482,46 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertTrue(socket.sentFrames().contains { $0["type"] as? String == "hello" })
     }
 
+    func testCredentialBootstrapForcesV2WhenWSTunneledModeIsDisabled() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = false
+        let receiptKey = Curve25519.Signing.PrivateKey()
+        let receiptPublicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: false,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let socket = FakeProviderWebSocketTask(receiveResults: [.failure(CancellationError())])
+        let factory = FakeProviderWebSocketFactory(sockets: [socket])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            providerReceiptPublicKey: receiptPublicKey,
+            credentialBootstrap: true,
+            bootstrapReceiptSigningKey: receiptKey
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+        } catch {
+        }
+
+        let first = try XCTUnwrap(socket.sentFrames().first)
+        XCTAssertEqual(first["type"] as? String, "auth_request")
+        XCTAssertEqual(first["version"] as? Int, 2)
+        XCTAssertEqual(first["stage"] as? String, "initial")
+        XCTAssertEqual(first["credential_bootstrap"] as? Bool, true)
+    }
+
     // Regression: M1-1 follow-up (codex security audit 2026-06-11). The
     // NoRedirectURLSessionDelegate refuses HTTP redirects on the provider
     // WS task so the Authorization: Bearer <token> header cannot leak to an
@@ -1972,6 +2012,151 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNil(proof["provider_receipt_public_key"])
     }
 
+    func testCredentialBootstrapIsExplicitAcrossHandshakeStages() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let receiptKey = Curve25519.Signing.PrivateKey()
+        let receiptPublicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: false,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerReceiptPublicKey: receiptPublicKey,
+            credentialBootstrap: true,
+            bootstrapReceiptSigningKey: receiptKey
+        )
+        let attempt = Tier2AuthAttempt()
+        let hello = await client.helloMessage()
+        let initial = await client.authInitialMessage(attempt: attempt)
+        let proof = try await client.authProofMessage(challenge: [
+            "type": "auth_challenge",
+            "version": 2,
+            "auth_attempt_id": "auth-bootstrap",
+            "assigned_id": "assigned-bootstrap",
+            "attestation_challenge": Data(repeating: 0x11, count: 32).base64URLUnpadded(),
+            "attestation_formats": ["macprovider-se-p256-v1"],
+            "coordinator_ecdh_public_key": Data(repeating: 0x22, count: 32).base64URLUnpadded(),
+            "selected_aead_suite": Tier2ProviderSession.aeadSuite,
+            "selected_aead": Tier2ProviderSession.aeadSuite,
+            "key_id": "bootstrap-kid",
+            "expires_at": "2026-07-10T20:00:00Z",
+        ], attempt: attempt, initialMessage: initial)
+
+        XCTAssertNil(hello["credential_bootstrap"])
+        XCTAssertEqual(initial["credential_bootstrap"] as? Bool, true)
+        XCTAssertEqual(initial["provider_receipt_public_key"] as? String, receiptPublicKey)
+        XCTAssertEqual(proof["credential_bootstrap"] as? Bool, true)
+        XCTAssertNotNil(proof["identity_signature"] as? String)
+        XCTAssertNotNil(proof["identity_signature_transcript_sha256"] as? String)
+    }
+
+    func testOrdinaryBearerV2SignsWithPersistedReceiptIdentity() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let receiptKey = Curve25519.Signing.PrivateKey()
+        let receiptPublicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerReceiptPublicKey: receiptPublicKey,
+            receiptIdentitySigningKey: receiptKey
+        )
+        let attempt = Tier2AuthAttempt()
+        let initial = await client.authInitialMessage(attempt: attempt)
+        let proof = try await client.authProofMessage(challenge: [
+            "type": "auth_challenge",
+            "version": 2,
+            "auth_attempt_id": "auth-receipt-identity",
+            "attestation_challenge": Data(repeating: 0x11, count: 32).base64URLUnpadded(),
+        ], attempt: attempt, initialMessage: initial)
+
+        let transcript = try XCTUnwrap(proof["identity_signature_transcript_sha256"] as? String)
+        let signatureBase64 = try XCTUnwrap(proof["identity_signature"] as? String)
+        let signature = try XCTUnwrap(Data(base64Encoded: signatureBase64))
+        let payload = try CoordinatorClient.receiptIdentityPayload(
+            authAttemptID: "auth-receipt-identity",
+            providerID: "provider-test",
+            providerECDHPublicKey: attempt.publicKeyBase64URL,
+            transcriptSHA256: transcript
+        )
+        XCTAssertTrue(receiptKey.publicKey.isValidSignature(signature, for: payload))
+        XCTAssertEqual(transcript, try CoordinatorClient.initialAuthTranscriptHashBase64(initial))
+        XCTAssertNil(proof["credential_bootstrap"])
+    }
+
+    func testOrdinaryBearerV2SelectsHistoricalBootstrapIdentityFromChallengeHint() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let currentReceiptKey = Curve25519.Signing.PrivateKey()
+        let originalBootstrapKey = Curve25519.Signing.PrivateKey()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerReceiptPublicKey: Data(currentReceiptKey.publicKey.rawRepresentation).base64EncodedString(),
+            receiptIdentitySigningKeyCandidates: [currentReceiptKey, originalBootstrapKey]
+        )
+        let attempt = Tier2AuthAttempt()
+        let initial = await client.authInitialMessage(attempt: attempt)
+        let proof = try await client.authProofMessage(challenge: [
+            "type": "auth_challenge",
+            "version": 2,
+            "auth_attempt_id": "auth-upgrade-identity",
+            "attestation_challenge": Data(repeating: 0x21, count: 32).base64URLUnpadded(),
+            "bootstrap_identity_public_key": Data(originalBootstrapKey.publicKey.rawRepresentation).base64EncodedString(),
+        ], attempt: attempt, initialMessage: initial)
+
+        let transcript = try XCTUnwrap(proof["identity_signature_transcript_sha256"] as? String)
+        let signature = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(proof["identity_signature"] as? String)))
+        let payload = try CoordinatorClient.receiptIdentityPayload(
+            authAttemptID: "auth-upgrade-identity",
+            providerID: "provider-test",
+            providerECDHPublicKey: attempt.publicKeyBase64URL,
+            transcriptSHA256: transcript
+        )
+        XCTAssertTrue(originalBootstrapKey.publicKey.isValidSignature(signature, for: payload))
+        XCTAssertFalse(currentReceiptKey.publicKey.isValidSignature(signature, for: payload))
+    }
+
+    func testOrdinaryBearerV2RefusesCandidateThatDoesNotMatchDurableHint() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let unrelatedKey = Curve25519.Signing.PrivateKey()
+        let durableKey = Curve25519.Signing.PrivateKey()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerReceiptPublicKey: Data(unrelatedKey.publicKey.rawRepresentation).base64EncodedString(),
+            receiptIdentitySigningKeyCandidates: [unrelatedKey]
+        )
+        let attempt = Tier2AuthAttempt()
+        let initial = await client.authInitialMessage(attempt: attempt)
+        let proof = try await client.authProofMessage(challenge: [
+            "type": "auth_challenge",
+            "version": 2,
+            "auth_attempt_id": "auth-mismatched-identity",
+            "attestation_challenge": Data(repeating: 0x31, count: 32).base64URLUnpadded(),
+            "bootstrap_identity_public_key": Data(durableKey.publicKey.rawRepresentation).base64EncodedString(),
+        ], attempt: attempt, initialMessage: initial)
+
+        XCTAssertNil(proof["identity_signature"])
+        XCTAssertNil(proof["identity_signature_transcript_sha256"])
+    }
+
     func testBinaryVersion_AdvertisesSPEC020V17AcrossHandshakeFrames() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
@@ -2459,7 +2644,11 @@ final class CoordinatorClientTests: XCTestCase {
         watchdogExitHook: (@Sendable (String) -> Void)? = nil,
         publishesSpecDecodeTelemetry: Bool = false,
         modelCatalogModelID: String? = nil,
-        losslessnessProbeEnabled: Bool = false
+        losslessnessProbeEnabled: Bool = false,
+        credentialBootstrap: Bool = false,
+        bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey? = nil,
+        receiptIdentitySigningKey: Curve25519.Signing.PrivateKey? = nil,
+        receiptIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey] = []
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
@@ -2495,6 +2684,10 @@ final class CoordinatorClientTests: XCTestCase {
             pairingController: pairingController,
             connectAndRunOverride: connectAndRunOverride,
             providerReceiptPublicKey: providerReceiptPublicKey,
+            credentialBootstrap: credentialBootstrap,
+            bootstrapReceiptSigningKey: bootstrapReceiptSigningKey,
+            receiptIdentitySigningKey: receiptIdentitySigningKey,
+            receiptIdentitySigningKeyCandidates: receiptIdentitySigningKeyCandidates,
             watchdogExitHook: watchdogExitHook ?? defaultWatchdogHook
         ))
     }

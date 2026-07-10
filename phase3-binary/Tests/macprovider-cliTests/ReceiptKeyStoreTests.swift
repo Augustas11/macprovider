@@ -45,6 +45,26 @@ final class ReceiptKeyStoreTests: XCTestCase {
         XCTAssertEqual(first.publicKey.rawRepresentation, second.publicKey.rawRepresentation)
     }
 
+    func testBootstrapIdentityRemainsStableAcrossReceiptRotation() throws {
+        let providerId = "bootstrap-identity-" + UUID().uuidString
+        cleanupKeychainReceiptKeys(providerId: providerId)
+        defer { cleanupKeychainReceiptKeys(providerId: providerId) }
+        let store = KeychainReceiptKeyStore()
+        let first: Curve25519.Signing.PrivateKey
+        do {
+            first = try store.loadOrGenerate(providerId: providerId)
+        } catch ReceiptKeyStoreError.keychainReadFailed(_, let status) where status == errSecParam && ProcessInfo.processInfo.environment["CI"] != "true" {
+            throw XCTSkip("local sandbox denied Keychain receipt-key lookup with errSecParam; CI must run this test without skipping")
+        }
+        let identity = try store.loadOrStoreBootstrapIdentity(providerId: providerId, candidate: first)
+        let replacement = Curve25519.Signing.PrivateKey()
+        try store.swapToCurrent(providerId: providerId, newKey: replacement)
+
+        XCTAssertEqual(try store.loadCurrent(providerId: providerId)?.rawRepresentation, replacement.rawRepresentation)
+        XCTAssertEqual(try store.loadBootstrapIdentity(providerId: providerId)?.rawRepresentation, identity.rawRepresentation)
+        XCTAssertEqual(identity.rawRepresentation, first.rawRepresentation)
+    }
+
     func testStoreNewRejectsDuplicateCurrentKey() throws {
         let store = InMemoryReceiptKeyStore()
         let key = Curve25519.Signing.PrivateKey()
@@ -197,5 +217,9 @@ private func cleanupKeychainReceiptKeys(providerId: String) {
     _ = SecItemDelete(KeychainReceiptKeyStore.baseQuery(
         providerId: providerId,
         service: KeychainReceiptKeyStore.previousService
+    ) as CFDictionary)
+    _ = SecItemDelete(KeychainReceiptKeyStore.baseQuery(
+        providerId: providerId,
+        service: KeychainReceiptKeyStore.bootstrapIdentityService
     ) as CFDictionary)
 }

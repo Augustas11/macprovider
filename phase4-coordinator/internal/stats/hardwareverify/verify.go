@@ -13,7 +13,12 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const verifierDecisionVersion = "hardware-verifier.v1"
+const verifierDecisionVersion = "hardware-verifier.v2"
+const evidenceSchemaVersion = "hardware_evidence.autotune.v1"
+const maxEvidenceAge = 7 * 24 * time.Hour
+const futureSkew = 5 * time.Minute
+
+const VerifiedDecisionReason = verifierDecisionVersion + ":verified_trusted_hardware"
 
 type Store struct {
 	db *sql.DB
@@ -67,6 +72,12 @@ type Benchmark struct {
 	TTFTMS                  int     `json:"ttft_ms"`
 	SwapDetected            bool    `json:"swap_detected"`
 	ThermalThrottleDetected bool    `json:"thermal_throttle_detected"`
+	ArtifactSHA256          string  `json:"artifact_sha256"`
+	CandidateCatalogSHA256  string  `json:"candidate_catalog_sha256"`
+	BenchmarkID             string  `json:"benchmark_id,omitempty"`
+	GeneratedAt             string  `json:"generated_at"`
+	BinaryVersion           string  `json:"binary_version"`
+	HardwareIdentityHash    string  `json:"hardware_identity_hash"`
 }
 
 type Decision struct {
@@ -221,10 +232,14 @@ SELECT j.id, j.provider_id, j.chip, j.chip_normalized, j.unified_memory_gb,
 }
 
 func Evaluate(job Job) Decision {
+	return evaluateAt(job, time.Now().UTC())
+}
+
+func evaluateAt(job Job, now time.Time) Decision {
 	if strings.TrimSpace(job.ProviderID) == "" {
 		return reject("missing_provider_id")
 	}
-	if job.GeneratedAt.Before(time.Now().UTC().Add(-7 * 24 * time.Hour)) {
+	if job.GeneratedAt.Before(now.Add(-maxEvidenceAge)) || job.GeneratedAt.After(now.Add(futureSkew)) {
 		return reject("stale_job")
 	}
 	if job.MemoryGB < 8 || job.MemoryGB > 4096 {
@@ -237,14 +252,81 @@ func Evaluate(job Job) Decision {
 	if err := json.Unmarshal(job.Evidence, &evidence); err != nil {
 		return reject("invalid_evidence_json")
 	}
-	if evidence.ProviderID != "" && evidence.ProviderID != job.ProviderID {
+	if evidence.SchemaVersion != evidenceSchemaVersion {
+		return reject("schema_version_mismatch")
+	}
+	if evidence.ProviderID != job.ProviderID {
 		return reject("provider_id_mismatch")
 	}
-	if strings.TrimSpace(evidence.Hardware.HardwareIdentityHash) == "" {
-		return reject("missing_hardware_identity_hash")
+	evidenceGeneratedAt, err := time.Parse(time.RFC3339, evidence.GeneratedAt)
+	if err != nil {
+		return reject("invalid_evidence_generated_at")
+	}
+	if !evidenceGeneratedAt.Equal(job.GeneratedAt) {
+		return reject("evidence_generated_at_mismatch")
+	}
+	if evidenceGeneratedAt.Before(now.Add(-maxEvidenceAge)) || evidenceGeneratedAt.After(now.Add(futureSkew)) {
+		return reject("stale_evidence")
+	}
+	if normalizeChip(evidence.Hardware.Chip) != job.ChipNormalized {
+		return reject("chip_mismatch")
+	}
+	if evidence.Hardware.MemoryGB != job.MemoryGB {
+		return reject("memory_mismatch")
+	}
+	if !strings.EqualFold(strings.TrimSpace(evidence.Hardware.BandwidthTier), strings.TrimSpace(job.BandwidthTier)) {
+		return reject("bandwidth_tier_mismatch")
+	}
+	if strings.TrimSpace(evidence.Hardware.OSVersion) != strings.TrimSpace(job.OSVersion) {
+		return reject("os_version_mismatch")
+	}
+	if strings.TrimSpace(evidence.Hardware.BinaryVersion) != strings.TrimSpace(job.BinaryVersion) {
+		return reject("binary_version_mismatch")
+	}
+	if !isLowerSHA256(evidence.Hardware.HardwareIdentityHash) {
+		return reject("invalid_hardware_identity_hash")
+	}
+	if !isLowerSHA256(evidence.CandidateCatalogSHA256) {
+		return reject("invalid_candidate_catalog_sha256")
 	}
 	if len(evidence.Benchmarks) == 0 {
 		return reject("missing_benchmarks")
+	}
+	seenModelKeys := make(map[string]struct{}, len(evidence.Benchmarks))
+	for _, benchmark := range evidence.Benchmarks {
+		modelKey := strings.TrimSpace(benchmark.ModelKey)
+		if modelKey == "" || strings.TrimSpace(benchmark.ModelID) == "" {
+			return reject("missing_benchmark_model_binding")
+		}
+		if _, exists := seenModelKeys[modelKey]; exists {
+			return reject("duplicate_benchmark_model_key")
+		}
+		seenModelKeys[modelKey] = struct{}{}
+		if !isLowerSHA256(benchmark.ArtifactSHA256) {
+			return reject("invalid_benchmark_artifact_sha256")
+		}
+		if benchmark.CandidateCatalogSHA256 != evidence.CandidateCatalogSHA256 {
+			return reject("benchmark_catalog_mismatch")
+		}
+		if benchmark.BinaryVersion != evidence.Hardware.BinaryVersion {
+			return reject("benchmark_binary_version_mismatch")
+		}
+		if benchmark.HardwareIdentityHash != evidence.Hardware.HardwareIdentityHash {
+			return reject("benchmark_hardware_identity_mismatch")
+		}
+		benchmarkGeneratedAt, parseErr := time.Parse(time.RFC3339, benchmark.GeneratedAt)
+		if parseErr != nil {
+			return reject("invalid_benchmark_generated_at")
+		}
+		if benchmarkGeneratedAt.Before(now.Add(-maxEvidenceAge)) || benchmarkGeneratedAt.After(now.Add(futureSkew)) {
+			return reject("stale_benchmark")
+		}
+		if math.IsNaN(benchmark.SustainedTPS) || math.IsInf(benchmark.SustainedTPS, 0) || benchmark.SustainedTPS <= 0 {
+			return reject("invalid_benchmark_tps")
+		}
+		if benchmark.TTFTMS <= 0 {
+			return reject("invalid_benchmark_ttft")
+		}
 	}
 	if !hasPositiveBenchmark(evidence.Benchmarks) {
 		return reject("missing_positive_benchmark")
@@ -258,7 +340,7 @@ func Evaluate(job Job) Decision {
 	if !job.ChipProfileMatched {
 		return reject("missing_trusted_chip_profile")
 	}
-	return Decision{Verified: true, Reason: verifierDecisionVersion + ":verified_trusted_hardware"}
+	return Decision{Verified: true, Reason: VerifiedDecisionReason}
 }
 
 func promoteJob(ctx context.Context, tx *sql.Tx, job Job, decision Decision) error {
@@ -334,4 +416,16 @@ func hasPositiveBenchmark(benchmarks []Benchmark) bool {
 func normalizeChip(chip string) string {
 	chip = strings.ToLower(strings.TrimSpace(chip))
 	return strings.Join(strings.Fields(chip), " ")
+}
+
+func isLowerSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

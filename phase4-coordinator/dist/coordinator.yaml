@@ -67,6 +67,15 @@ auth:
   # must carry a top-level provider_token persisted by the macprovider binary.
   require_provider_tokens: true
   allow_tokenless_provisional_bootstrap: true
+  # Receipt-key-authenticated credential recovery is deliberately short-lived
+  # and bounded per source/identity, globally per hour, and across outstanding
+  # unconfirmed identities.
+  credential_bootstrap_mints_per_ip_hour: 8
+  credential_bootstrap_mints_per_id_hour: 3
+  credential_bootstrap_mints_global_hour: 128
+  credential_bootstrap_unconfirmed_max: 64
+  credential_bootstrap_outstanding_max: 64
+  credential_bootstrap_token_ttl_s: 600
   operator_keys:
     spec026_a: env:OPERATOR_AUTH_POLICY_A
     spec026_b: env:OPERATOR_AUTH_POLICY_B

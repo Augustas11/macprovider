@@ -51,7 +51,9 @@ import (
 	tcpg "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/augstar/macprovider-coordinator/internal/onboarding"
 	stats "github.com/augstar/macprovider-coordinator/internal/stats"
+	"github.com/augstar/macprovider-coordinator/internal/stats/hardwareverify"
 	statsmigrations "github.com/augstar/macprovider-coordinator/internal/stats/migrations"
 )
 
@@ -1280,8 +1282,14 @@ func TestHardwareProfileRoleGrantsAndVerificationGuard(t *testing.T) {
 	).Scan(&verified); err != nil {
 		t.Fatalf("admin scan same-chip verified: %v", err)
 	}
-	if !verified {
-		t.Fatalf("same-chip provider_onboarding update cleared verified; want preserved")
+	if verified {
+		t.Fatalf("memory-changed provider_onboarding update preserved verified; want cleared")
+	}
+
+	if _, err := adminDB.ExecContext(ctx,
+		`UPDATE provider_hardware_profiles SET verified = TRUE WHERE provider_id = 'p-hw'`,
+	); err != nil {
+		t.Fatalf("operator reverify row: %v", err)
 	}
 
 	if _, err := onboardingDB.ExecContext(ctx, `
@@ -1416,6 +1424,138 @@ func TestHardwareVerifierPromotionGuard(t *testing.T) {
 	}
 	if !contains(err.Error(), "may not update finalized") {
 		t.Fatalf("finalized job update error = %q, want finalized guard", err.Error())
+	}
+}
+
+func TestHardwareEvidenceReplayStoreLoadsDecisionState(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+	store, err := onboarding.OpenPGStore(fx.roleDSN(roleProviderOnboard))
+	if err != nil {
+		t.Fatalf("open onboarding store: %v", err)
+	}
+	defer store.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tests := []struct {
+		providerID     string
+		evidenceSHA    string
+		status         string
+		decisionReason string
+	}{
+		{providerID: "p-replay-pending", evidenceSHA: "replay-pending", status: "pending"},
+		{providerID: "p-replay-waiting", evidenceSHA: "replay-waiting", status: "waiting_trust", decisionReason: "hardware-verifier.v2:trust_missing"},
+		{providerID: "p-replay-verified", evidenceSHA: "replay-verified", status: "verified", decisionReason: hardwareverify.VerifiedDecisionReason},
+		{providerID: "p-replay-legacy", evidenceSHA: "replay-legacy", status: "verified", decisionReason: "hardware-verifier.v1:verified"},
+		{providerID: "p-replay-rejected", evidenceSHA: "replay-rejected", status: "rejected", decisionReason: "hardware-verifier.v2:benchmark_invalid"},
+	}
+	for _, tc := range tests {
+		var id int64
+		if err := adminDB.QueryRowContext(ctx, `
+INSERT INTO hardware_verification_jobs (
+    provider_id, source, status, chip, chip_normalized, unified_memory_gb,
+    bandwidth_tier, os_version, binary_version, benchmark_count,
+    max_sustained_tps, generated_at, decision_reason, evidence, evidence_sha256
+) VALUES (
+    $1, 'autotune', $2, 'Apple M5', 'apple m5', 32,
+    'C', '15.5', '1.8.26', 1,
+    42.5, now(), $3, '{}'::jsonb, $4
+)
+RETURNING id`, tc.providerID, tc.status, tc.decisionReason, tc.evidenceSHA).Scan(&id); err != nil {
+			t.Fatalf("seed %s: %v", tc.status, err)
+		}
+		record, found, err := store.ExistingHardwareVerificationJob(ctx, tc.providerID, tc.evidenceSHA)
+		if err != nil {
+			t.Fatalf("load %s: %v", tc.status, err)
+		}
+		if !found || record.JobID != id || record.EvidenceSHA != tc.evidenceSHA ||
+			record.Status != tc.status || record.DecisionReason != tc.decisionReason {
+			t.Fatalf("loaded %s record = %+v found=%v", tc.status, record, found)
+		}
+	}
+}
+
+func TestProviderOnboardingDecisionReasonGrantUpgradesApplied008(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB, err := sql.Open("postgres", fx.adminDSN())
+	if err != nil {
+		t.Fatalf("open admin: %v", err)
+	}
+	t.Cleanup(func() { _ = adminDB.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if _, err := adminDB.ExecContext(ctx, `
+CREATE TABLE schema_migrations_spec017 (
+    version INT PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`); err != nil {
+		t.Fatalf("create migration table: %v", err)
+	}
+	all, err := statsmigrations.All()
+	if err != nil {
+		t.Fatalf("load migrations: %v", err)
+	}
+	for _, migration := range all {
+		if migration.Version >= 15 {
+			continue
+		}
+		if _, err := adminDB.ExecContext(ctx, migration.SQL); err != nil {
+			t.Fatalf("apply historical migration %03d_%s: %v", migration.Version, migration.Name, err)
+		}
+		if _, err := adminDB.ExecContext(ctx,
+			`INSERT INTO schema_migrations_spec017 (version, name) VALUES ($1, $2)`,
+			migration.Version, migration.Name,
+		); err != nil {
+			t.Fatalf("record historical migration %03d_%s: %v", migration.Version, migration.Name, err)
+		}
+	}
+	if _, err := adminDB.ExecContext(ctx, fmt.Sprintf(
+		`ALTER ROLE %s WITH LOGIN PASSWORD '%s'`, roleProviderOnboard, roleRuntimePassword,
+	)); err != nil {
+		t.Fatalf("enable provider_onboarding login: %v", err)
+	}
+
+	store, err := onboarding.OpenPGStore(fx.roleDSN(roleProviderOnboard))
+	if err != nil {
+		t.Fatalf("open onboarding store: %v", err)
+	}
+	defer store.Close()
+	if err := store.Smoke(ctx); err == nil || !strings.Contains(strings.ToLower(err.Error()), "permission denied") {
+		t.Fatalf("pre-upgrade Smoke error=%v, want decision_reason permission denied", err)
+	}
+
+	if err := statsmigrations.Apply(ctx, adminDB); err != nil {
+		t.Fatalf("apply pending forward migrations: %v", err)
+	}
+	if err := store.Smoke(ctx); err != nil {
+		t.Fatalf("post-upgrade Smoke: %v", err)
+	}
+	const providerID = "p-upgrade-replay"
+	const evidenceSHA = "upgrade-replay-sha"
+	var jobID int64
+	if err := adminDB.QueryRowContext(ctx, `
+INSERT INTO hardware_verification_jobs (
+    provider_id, source, status, chip, chip_normalized, unified_memory_gb,
+    bandwidth_tier, os_version, binary_version, benchmark_count,
+    max_sustained_tps, generated_at, decision_reason, evidence, evidence_sha256
+) VALUES (
+    $1, 'autotune', 'waiting_trust', 'Apple M5', 'apple m5', 32,
+    'C', '15.5', '1.8.26', 1, 42.5, now(),
+    'hardware-verifier.v2:trust_missing', '{}'::jsonb, $2
+)
+RETURNING id`, providerID, evidenceSHA).Scan(&jobID); err != nil {
+		t.Fatalf("seed replay row: %v", err)
+	}
+	record, found, err := store.ExistingHardwareVerificationJob(ctx, providerID, evidenceSHA)
+	if err != nil {
+		t.Fatalf("replay read after upgrade: %v", err)
+	}
+	if !found || record.JobID != jobID || record.Status != "waiting_trust" ||
+		record.DecisionReason != "hardware-verifier.v2:trust_missing" {
+		t.Fatalf("replay read after upgrade = %+v found=%v", record, found)
 	}
 }
 

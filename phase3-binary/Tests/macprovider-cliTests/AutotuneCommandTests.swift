@@ -152,11 +152,15 @@ final class AutotuneCommandTests: XCTestCase {
         let command = try AutotuneCommand.parse([
             "--recommend",
             "--freshness-check",
+            "--submit-hardware-evidence",
+            "--require-hardware-evidence",
             "--donor-mode",
         ])
 
         XCTAssertTrue(command.recommend)
         XCTAssertTrue(command.freshnessCheck)
+        XCTAssertTrue(command.submitHardwareEvidence)
+        XCTAssertTrue(command.requireHardwareEvidence)
         XCTAssertTrue(command.donorMode)
     }
 
@@ -170,6 +174,18 @@ final class AutotuneCommandTests: XCTestCase {
     func testFreshnessCheckRequiresRecommend() {
         XCTAssertThrowsError(try AutotuneCommand.parse([
             "--freshness-check",
+        ]))
+    }
+
+    func testRequiredHardwareEvidenceRequiresRecommend() {
+        XCTAssertThrowsError(try AutotuneCommand.parse(["--require-hardware-evidence"]))
+    }
+
+    func testRequiredHardwareEvidenceRejectsSubmissionOptOut() {
+        XCTAssertThrowsError(try AutotuneCommand.parse([
+            "--recommend",
+            "--require-hardware-evidence",
+            "--no-submit-hardware-evidence",
         ]))
     }
 

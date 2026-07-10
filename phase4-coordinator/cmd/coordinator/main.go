@@ -450,11 +450,13 @@ func main() {
 	// interface layer (codex architect review on PR #44, interface
 	// segregation MINOR).
 	wsOpts = append(wsOpts, providerws.WithTokenIssuer(tokenStore))
+	wsOpts = append(wsOpts, providerws.WithBootstrapTokenStore(tokenStore))
 	wsOpts = append(wsOpts, providerws.WithGitHubAuthStore(tokenStore))
 	if statsPools != nil {
 		wsOpts = append(wsOpts, providerws.WithIdlePrewarmRecorder(statsprewarm.NewRecorder(statsPools.Rollup)))
 		wsOpts = append(wsOpts, providerws.WithIdlePrewarmMetrics(metricsHandle))
 		wsOpts = append(wsOpts, providerws.WithModelHashMismatchMetrics(metricsHandle))
+		wsOpts = append(wsOpts, providerws.WithCredentialBootstrapMetrics(metricsHandle))
 	}
 	var onboardingStore *onboarding.PGStore
 	if cfg.Onboarding.AppTrackRegisterEnabled {
@@ -1337,9 +1339,9 @@ var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
 	"RequireEncryptedLeg":            tier2HotReloadable,
 	"RequireAttestation":             tier2HotReloadable,
 	"AttestationMaxAgeS":             tier2HotReloadable,
-	"SELivenessIntervalS":             tier2HotReloadable,
-	"SELivenessTimeoutS":              tier2HotReloadable,
-	"SELivenessMaxFailures":           tier2HotReloadable,
+	"SELivenessIntervalS":            tier2HotReloadable,
+	"SELivenessTimeoutS":             tier2HotReloadable,
+	"SELivenessMaxFailures":          tier2HotReloadable,
 	"BehavioralSafetyEnabled":        tier2HotReloadable,
 	"OutputSizeCapBytes":             tier2HotReloadable,
 	"OutputBytesPerTokenCeiling":     tier2HotReloadable,

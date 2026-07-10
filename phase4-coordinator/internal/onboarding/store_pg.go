@@ -119,7 +119,7 @@ func (s *PGStore) Smoke(ctx context.Context) error {
 	if _, err := s.db.ExecContext(timeout, `SELECT provider_id, last_reported_at FROM provider_hardware_profiles LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_hardware_profiles read: %w", err)
 	}
-	if _, err := s.db.ExecContext(timeout, `SELECT id, evidence_sha256 FROM hardware_verification_jobs LIMIT 1`); err != nil {
+	if _, err := s.db.ExecContext(timeout, `SELECT id, status, decision_reason, evidence_sha256 FROM hardware_verification_jobs LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke hardware_verification_jobs read: %w", err)
 	}
 	if _, err := s.db.ExecContext(timeout, `

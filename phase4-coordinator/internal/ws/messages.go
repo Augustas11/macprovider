@@ -29,6 +29,7 @@ type Hello struct {
 	BinaryVersion         string          `json:"binary_version"`
 	Attestation           json.RawMessage `json:"attestation"`
 	EndpointURL           *string         `json:"endpoint_url,omitempty"`
+	CredentialBootstrap   bool            `json:"credential_bootstrap,omitempty"`
 }
 
 const (
@@ -83,6 +84,7 @@ type AuthRequest struct {
 	IdentityTranscriptSHA256 string          `json:"identity_signature_transcript_sha256,omitempty"`
 	SupportedModels          []string        `json:"supported_models,omitempty"`
 	PublishesSupportedModels bool            `json:"publishes_supported_models,omitempty"`
+	CredentialBootstrap      bool            `json:"credential_bootstrap,omitempty"`
 }
 
 type Spec010Presence struct {
@@ -109,6 +111,7 @@ type AuthChallenge struct {
 	SelectedAEAD             string   `json:"selected_aead,omitempty"`
 	KeyID                    string   `json:"key_id,omitempty"`
 	ExpiresAt                string   `json:"expires_at"`
+	BootstrapIdentityPubkey  string   `json:"bootstrap_identity_public_key,omitempty"`
 }
 
 type AuthResponse struct {
@@ -432,6 +435,11 @@ func ParseHello(payload []byte) (Hello, string, error) {
 		}
 		h.EndpointURL = &endpoint
 	}
+	if v, ok := raw["credential_bootstrap"]; ok {
+		if string(v) == "null" || json.Unmarshal(v, &h.CredentialBootstrap) != nil {
+			return Hello{}, "credential_bootstrap", fmt.Errorf("credential_bootstrap must be a bool")
+		}
+	}
 	return h, "", nil
 }
 
@@ -551,6 +559,11 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 		}
 		req.EndpointURL = &endpoint
 	}
+	if v, ok := raw["credential_bootstrap"]; ok {
+		if string(v) == "null" || json.Unmarshal(v, &req.CredentialBootstrap) != nil {
+			return AuthRequest{}, Spec010Presence{}, "credential_bootstrap", fmt.Errorf("credential_bootstrap must be a bool")
+		}
+	}
 	if err := requireString(raw, "provider_ecdh_public_key", &req.ProviderECDHPublicKey); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
@@ -658,6 +671,11 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 			return AuthRequest{}, Spec010Presence{}, "identity_signature_transcript_sha256", err
 		}
 	}
+	if v, ok := raw["credential_bootstrap"]; ok {
+		if string(v) == "null" || json.Unmarshal(v, &req.CredentialBootstrap) != nil {
+			return AuthRequest{}, Spec010Presence{}, "credential_bootstrap", fmt.Errorf("credential_bootstrap must be a bool")
+		}
+	}
 	// Proof-stage MUST keep the bare "supported_models" badField (NOT
 	// the locked initial-stage substring) — AC-K.15's surfacing
 	// contract is initial-stage-only, and the R2V regression test
@@ -706,6 +724,7 @@ func (r AuthRequest) Hello() Hello {
 		ModelLoadTimeMs:       r.ModelLoadTimeMs,
 		BinaryVersion:         r.BinaryVersion,
 		EndpointURL:           r.EndpointURL,
+		CredentialBootstrap:   r.CredentialBootstrap,
 	}
 }
 

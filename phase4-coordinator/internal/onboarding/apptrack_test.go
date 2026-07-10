@@ -17,6 +17,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/stats/hardwareverify"
 )
 
 func TestHandleAppTrackRegisterSuccess(t *testing.T) {
@@ -68,35 +69,7 @@ func TestHandleHardwareEvidenceQueuesAuthenticatedAutotuneEvidence(t *testing.T)
 		validateOK:         true,
 		validateProviderID: "mac",
 	}, nil)
-	body := map[string]any{
-		"schema_version":           "hardware_evidence.autotune.v1",
-		"provider_id":              "mac",
-		"generated_at":             now.Format(time.RFC3339),
-		"candidate_catalog_sha256": strings.Repeat("b", 64),
-		"recommended_model":        "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
-		"hardware": map[string]any{
-			"chip":                   "Apple M5",
-			"memory_gb":              32,
-			"bandwidth_tier":         "C",
-			"detected":               true,
-			"os_version":             "15.5",
-			"binary_version":         "1.7.9",
-			"hardware_identity_hash": strings.Repeat("c", 64),
-		},
-		"benchmarks": []map[string]any{{
-			"model_key":                 "qwen-7b",
-			"model_id":                  "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
-			"sustained_tps":             42.5,
-			"ttft_ms":                   1200,
-			"swap_detected":             false,
-			"thermal_throttle_detected": false,
-			"artifact_sha256":           strings.Repeat("d", 64),
-			"candidate_catalog_sha256":  strings.Repeat("b", 64),
-			"generated_at":              now.Format(time.RFC3339),
-			"binary_version":            "1.7.9",
-			"hardware_identity_hash":    strings.Repeat("c", 64),
-		}},
-	}
+	body := validHardwareEvidenceBody(now)
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
@@ -121,6 +94,48 @@ func TestHandleHardwareEvidenceQueuesAuthenticatedAutotuneEvidence(t *testing.T)
 	}
 }
 
+func TestCanonicalHardwareEvidenceSHAMatchesSwiftJCS(t *testing.T) {
+	evidence := HardwareEvidenceRequest{
+		SchemaVersion:          hardwareEvidenceSchemaVersion,
+		ProviderID:             "mac",
+		GeneratedAt:            "2026-08-29T10:40:00Z",
+		CandidateCatalogSHA256: strings.Repeat("a", 64),
+		RecommendedModel:       "model-a",
+		Hardware: HardwareEvidenceHardware{
+			Chip:                 "Apple M5",
+			MemoryGB:             32,
+			BandwidthTier:        "C",
+			Detected:             true,
+			OSVersion:            "15.5",
+			BinaryVersion:        "1.7.9",
+			HardwareIdentityHash: "hash",
+		},
+		Benchmarks: []HardwareEvidenceBenchmark{{
+			ModelKey:                "model-a",
+			ModelID:                 "mlx-community/model-a",
+			SustainedTPS:            42.5,
+			TTFTMS:                  1200,
+			SwapDetected:            false,
+			ThermalThrottleDetected: false,
+			ArtifactSHA256:          strings.Repeat("b", 64),
+			CandidateCatalogSHA256:  strings.Repeat("a", 64),
+			BenchmarkID:             "bench-1",
+			GeneratedAt:             "2026-08-29T10:40:00Z",
+			BinaryVersion:           "1.7.9",
+			HardwareIdentityHash:    "hash",
+		}},
+	}
+
+	sha, _, err := canonicalEvidenceSHA(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "017420974f7c52fe16595f28a347e6368e93dfc3c0b57d3eefeb5b655c18335c"
+	if sha != want {
+		t.Fatalf("evidence SHA=%q want Swift JCS SHA %q", sha, want)
+	}
+}
+
 func TestHandleHardwareEvidenceRejectsProviderMismatch(t *testing.T) {
 	handler := testRegisterHandler(&fakeStatsDB{}, &fakeAuthStore{
 		validateOK:         true,
@@ -135,6 +150,40 @@ func TestHandleHardwareEvidenceRejectsProviderMismatch(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleHardwareEvidenceEnforcesPostgresTimestampPrecision(t *testing.T) {
+	now := time.Date(2026, 7, 10, 12, 0, 0, 123456000, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		generated  string
+		wantStatus int
+	}{
+		{name: "microsecond", generated: "2026-07-10T12:00:00.123456Z", wantStatus: http.StatusOK},
+		{name: "zero padded nanoseconds", generated: "2026-07-10T12:00:00.123456000Z", wantStatus: http.StatusOK},
+		{name: "precision loss", generated: "2026-07-10T12:00:00.123456789Z", wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stats := &fakeStatsDB{}
+			handler := testRegisterHandler(stats, &fakeAuthStore{
+				validateOK: true, validateProviderID: "mac",
+			}, nil)
+			handler.Now = func() time.Time { return now }
+			body := validHardwareEvidenceBody(now)
+			body["generated_at"] = tc.generated
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", bytes.NewReader(raw))
+			req.Header.Set("Authorization", "Bearer token")
+			rr := httptest.NewRecorder()
+			handler.HandleHardwareEvidence(rr, req)
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status=%d body=%s want=%d", rr.Code, rr.Body.String(), tc.wantStatus)
+			}
+		})
 	}
 }
 
@@ -174,7 +223,10 @@ func TestHandleHardwareEvidenceMapsDBAdmissionCap(t *testing.T) {
 		validateProviderID: "mac",
 	}, nil)
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
-	body := []byte(`{"schema_version":"hardware_evidence.autotune.v1","provider_id":"mac","generated_at":"` + now.Format(time.RFC3339) + `","hardware":{"chip":"Apple M5","memory_gb":32,"bandwidth_tier":"C","detected":true,"os_version":"15.5","binary_version":"1.7.9","hardware_identity_hash":"abc"},"benchmarks":[]}`)
+	body, err := json.Marshal(validHardwareEvidenceBody(now))
+	if err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer provider-token")
 	rr := httptest.NewRecorder()
@@ -183,6 +235,160 @@ func TestHandleHardwareEvidenceMapsDBAdmissionCap(t *testing.T) {
 
 	if rr.Code != http.StatusTooManyRequests {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleHardwareEvidenceReturnsExistingReplayBeforeProviderRateLimit(t *testing.T) {
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	body, err := json.Marshal(validHardwareEvidenceBody(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var evidence HardwareEvidenceRequest
+	if err := json.Unmarshal(body, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	evidenceSHA, _, err := canonicalEvidenceSHA(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name           string
+		status         string
+		decisionReason string
+		wantHTTP       int
+		wantStatus     string
+	}{
+		{name: "pending", status: hardwareEvidenceJobPending, wantHTTP: http.StatusOK, wantStatus: hardwareEvidenceResponseExisting},
+		{name: "waiting trust", status: hardwareEvidenceJobWaitingTrust, decisionReason: "hardware-verifier.v2:trust_missing", wantHTTP: http.StatusOK, wantStatus: hardwareEvidenceResponseExisting},
+		{name: "current verified trusted", status: hardwareEvidenceJobVerified, decisionReason: hardwareverify.VerifiedDecisionReason, wantHTTP: http.StatusOK, wantStatus: hardwareEvidenceResponseVerified},
+		{name: "rejected", status: "rejected", decisionReason: "hardware-verifier.v2:benchmark_invalid", wantHTTP: http.StatusConflict},
+		{name: "failed", status: "failed", decisionReason: "worker_failed", wantHTTP: http.StatusConflict},
+		{name: "legacy verified", status: hardwareEvidenceJobVerified, decisionReason: "hardware-verifier.v1:verified", wantHTTP: http.StatusConflict},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stats := &fakeStatsDB{
+				existingEvidenceFound: true,
+				existingEvidenceRecord: HardwareEvidenceJobRecord{
+					JobID:          41,
+					EvidenceSHA:    evidenceSHA,
+					Status:         tc.status,
+					DecisionReason: tc.decisionReason,
+				},
+			}
+			handler := testRegisterHandler(stats, &fakeAuthStore{
+				validateOK:         true,
+				validateProviderID: "mac",
+			}, nil)
+			handler.HardwareEvidenceProviderRateLimiter = denyLimiter{}
+			req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer provider-token")
+			rr := httptest.NewRecorder()
+
+			handler.HandleHardwareEvidence(rr, req)
+
+			if rr.Code != tc.wantHTTP {
+				t.Fatalf("status=%d want=%d body=%s", rr.Code, tc.wantHTTP, rr.Body.String())
+			}
+			if tc.wantStatus != "" && !strings.Contains(rr.Body.String(), `"status":"`+tc.wantStatus+`"`) {
+				t.Fatalf("body=%s want response status %q", rr.Body.String(), tc.wantStatus)
+			}
+			if stats.evidenceProviderID != "" {
+				t.Fatal("duplicate replay inserted a new verification job")
+			}
+			if stats.existingEvidenceProviderID != "mac" || stats.existingEvidenceSHA != evidenceSHA {
+				t.Fatalf("unexpected duplicate lookup provider=%q sha=%q", stats.existingEvidenceProviderID, stats.existingEvidenceSHA)
+			}
+		})
+	}
+}
+
+func TestHandleHardwareEvidenceRejectsReboundOrStaleBenchmarkBindings(t *testing.T) {
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{
+			name: "catalog rebound",
+			mutate: func(body map[string]any) {
+				body["benchmarks"].([]map[string]any)[0]["candidate_catalog_sha256"] = strings.Repeat("a", 64)
+			},
+		},
+		{
+			name: "binary rebound",
+			mutate: func(body map[string]any) {
+				body["benchmarks"].([]map[string]any)[0]["binary_version"] = "1.8.0"
+			},
+		},
+		{
+			name: "hardware rebound",
+			mutate: func(body map[string]any) {
+				body["benchmarks"].([]map[string]any)[0]["hardware_identity_hash"] = strings.Repeat("a", 64)
+			},
+		},
+		{
+			name: "stale benchmark",
+			mutate: func(body map[string]any) {
+				body["benchmarks"].([]map[string]any)[0]["generated_at"] = now.Add(-8 * 24 * time.Hour).Format(time.RFC3339)
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := validHardwareEvidenceBody(now)
+			tc.mutate(body)
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler := testRegisterHandler(&fakeStatsDB{}, &fakeAuthStore{
+				validateOK:         true,
+				validateProviderID: "mac",
+			}, nil)
+			req := httptest.NewRequest(http.MethodPost, "/v1/providers/hardware-evidence", bytes.NewReader(raw))
+			req.Header.Set("Authorization", "Bearer provider-token")
+			rr := httptest.NewRecorder()
+			handler.HandleHardwareEvidence(rr, req)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func validHardwareEvidenceBody(now time.Time) map[string]any {
+	return map[string]any{
+		"schema_version":           "hardware_evidence.autotune.v1",
+		"provider_id":              "mac",
+		"generated_at":             now.Format(time.RFC3339),
+		"candidate_catalog_sha256": strings.Repeat("b", 64),
+		"recommended_model":        "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+		"hardware": map[string]any{
+			"chip":                   "Apple M5",
+			"memory_gb":              32,
+			"bandwidth_tier":         "C",
+			"detected":               true,
+			"os_version":             "15.5",
+			"binary_version":         "1.7.9",
+			"hardware_identity_hash": strings.Repeat("c", 64),
+		},
+		"benchmarks": []map[string]any{{
+			"model_key":                 "qwen-7b",
+			"model_id":                  "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+			"sustained_tps":             42.5,
+			"ttft_ms":                   1200,
+			"swap_detected":             false,
+			"thermal_throttle_detected": false,
+			"artifact_sha256":           strings.Repeat("d", 64),
+			"candidate_catalog_sha256":  strings.Repeat("b", 64),
+			"benchmark_id":              "bench-1",
+			"generated_at":              now.Format(time.RFC3339),
+			"binary_version":            "1.7.9",
+			"hardware_identity_hash":    strings.Repeat("c", 64),
+		}},
 	}
 }
 
@@ -785,30 +991,35 @@ func testRegisterHandler(stats *fakeStatsDB, authStore *fakeAuthStore, metrics *
 }
 
 type fakeStatsDB struct {
-	mu                   sync.Mutex
-	nonceErr             error
-	upsertErr            error
-	checkKeyErr          error
-	nonceProviderID      string
-	nonceSourceIP        string
-	nonceObservedAt      time.Time
-	nonceCalls           int
-	upsertProviderID     string
-	upsertAttested       bool
-	upsertAppAttestKeyID []byte
-	hardwareProviderID   string
-	hardwareSummary      HardwareSummary
-	hardwareObservedAt   time.Time
-	hardwareCalls        int
-	hardwareErr          error
-	hardwareBlock        <-chan struct{}
-	hardwareStarted      chan struct{}
-	hardwareStartedOnce  sync.Once
-	evidenceProviderID   string
-	evidenceRequest      HardwareEvidenceRequest
-	evidenceGeneratedAt  time.Time
-	evidenceRecord       HardwareEvidenceJobRecord
-	evidenceErr          error
+	mu                         sync.Mutex
+	nonceErr                   error
+	upsertErr                  error
+	checkKeyErr                error
+	nonceProviderID            string
+	nonceSourceIP              string
+	nonceObservedAt            time.Time
+	nonceCalls                 int
+	upsertProviderID           string
+	upsertAttested             bool
+	upsertAppAttestKeyID       []byte
+	hardwareProviderID         string
+	hardwareSummary            HardwareSummary
+	hardwareObservedAt         time.Time
+	hardwareCalls              int
+	hardwareErr                error
+	hardwareBlock              <-chan struct{}
+	hardwareStarted            chan struct{}
+	hardwareStartedOnce        sync.Once
+	evidenceProviderID         string
+	evidenceRequest            HardwareEvidenceRequest
+	evidenceGeneratedAt        time.Time
+	evidenceRecord             HardwareEvidenceJobRecord
+	evidenceErr                error
+	existingEvidenceProviderID string
+	existingEvidenceSHA        string
+	existingEvidenceRecord     HardwareEvidenceJobRecord
+	existingEvidenceFound      bool
+	existingEvidenceErr        error
 }
 
 func (f *fakeStatsDB) UpsertProviderIdentity(ctx context.Context, providerID string, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
@@ -861,9 +1072,23 @@ func (f *fakeStatsDB) InsertHardwareVerificationJob(ctx context.Context, provide
 		return HardwareEvidenceJobRecord{}, f.evidenceErr
 	}
 	if f.evidenceRecord.JobID == 0 {
-		f.evidenceRecord = HardwareEvidenceJobRecord{JobID: 7, EvidenceSHA: strings.Repeat("a", 64)}
+		evidenceSHA, _, err := canonicalEvidenceSHA(evidence)
+		if err != nil {
+			return HardwareEvidenceJobRecord{}, err
+		}
+		f.evidenceRecord = HardwareEvidenceJobRecord{
+			JobID:       7,
+			EvidenceSHA: evidenceSHA,
+			Status:      hardwareEvidenceJobPending,
+		}
 	}
 	return f.evidenceRecord, nil
+}
+
+func (f *fakeStatsDB) ExistingHardwareVerificationJob(ctx context.Context, providerID, evidenceSHA string) (HardwareEvidenceJobRecord, bool, error) {
+	f.existingEvidenceProviderID = providerID
+	f.existingEvidenceSHA = evidenceSHA
+	return f.existingEvidenceRecord, f.existingEvidenceFound, f.existingEvidenceErr
 }
 
 type fakeAppAttestVerifier struct {

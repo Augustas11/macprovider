@@ -57,17 +57,18 @@ import (
 // case; production code passes prometheus.DefaultRegisterer (or
 // a coordinator-owned named registry).
 type Metrics struct {
-	RequestTotal           *prometheus.CounterVec
-	PartnerKeyRequestTotal *prometheus.CounterVec
-	RollupLagSeconds       *prometheus.GaugeVec
-	RollupErrorsTotal      *prometheus.CounterVec
-	RollupPanicTotal       *prometheus.CounterVec
-	RateLimitExceededTotal *prometheus.CounterVec
-	RegisterRateLimitHits  *prometheus.CounterVec
-	RegisterSource         *prometheus.CounterVec
-	RegisterHardwareErrors prometheus.Counter
-	IdlePrewarmEventTotal  *prometheus.CounterVec
-	ModelHashMismatchTotal prometheus.Counter
+	RequestTotal             *prometheus.CounterVec
+	PartnerKeyRequestTotal   *prometheus.CounterVec
+	RollupLagSeconds         *prometheus.GaugeVec
+	RollupErrorsTotal        *prometheus.CounterVec
+	RollupPanicTotal         *prometheus.CounterVec
+	RateLimitExceededTotal   *prometheus.CounterVec
+	RegisterRateLimitHits    *prometheus.CounterVec
+	RegisterSource           *prometheus.CounterVec
+	RegisterHardwareErrors   prometheus.Counter
+	IdlePrewarmEventTotal    *prometheus.CounterVec
+	ModelHashMismatchTotal   prometheus.Counter
+	CredentialBootstrapTotal *prometheus.CounterVec
 }
 
 // New registers all five metrics against reg and returns the
@@ -154,6 +155,13 @@ func New(reg prometheus.Registerer) *Metrics {
 				Help: "Count of provider hash status transitions to hash_mismatch (Proof of Weights W1 observability).",
 			},
 		),
+		CredentialBootstrapTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "credential_bootstrap_total",
+				Help: "Count of v2 receipt-key credential bootstrap outcomes using a closed-set outcome label.",
+			},
+			[]string{"outcome"},
+		),
 	}
 }
 
@@ -218,4 +226,17 @@ func (m *Metrics) IncModelHashMismatch() {
 		return
 	}
 	m.ModelHashMismatchTotal.Inc()
+}
+
+func (m *Metrics) IncCredentialBootstrap(outcome string) {
+	if m == nil || m.CredentialBootstrapTotal == nil {
+		return
+	}
+	switch outcome {
+	case "minted", "recovered", "rejected_v1", "rejected_identity", "rejected_used",
+		"rejected_expired", "rejected_rate", "rejected_outstanding", "store_error":
+	default:
+		return
+	}
+	m.CredentialBootstrapTotal.WithLabelValues(outcome).Inc()
 }
