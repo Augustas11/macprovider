@@ -19,7 +19,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-009 | MacProvider Console v2 | 0.1 | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
 | SPEC-010 | Provider Model Catalog | 1.5 | [SPEC-010-model-catalog.md](SPEC-010-model-catalog.md) |
 | SPEC-011 | Operator-Pushed Warm Swap | 0.5 | [SPEC-011-operator-pushed-warm-swap.md](SPEC-011-operator-pushed-warm-swap.md) |
-| SPEC-012 | Provider Model Catalog & Warm Swap | 0.3 | [SPEC-012-source.md](SPEC-012-source.md) |
+| SPEC-012 | Source spec history (Provider Model Catalog & Warm Swap, since split into SPEC-010/011/013) | 0.3 | [SPEC-012-source.md](SPEC-012-source.md) |
 | SPEC-013 | `macprovider-cli autotune` subcommand | 0.3 | [SPEC-013-cli-autotune.md](SPEC-013-cli-autotune.md) |
 | SPEC-014 | Provider Portal (seller-facing web surface) | 0.8 | [SPEC-014-provider-portal.md](SPEC-014-provider-portal.md) |
 | SPEC-015 | Verifiable inference receipts | 0.4.2 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
@@ -31,6 +31,9 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-022 | Verified model settlement | v0.1.4 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.5 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing | 0.1 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
+| SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.1 | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
+| SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.13 | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
+| SPEC-027 | Provider Proof of Ownership for App-Track Wallet Changes | v0.1 | [SPEC-027-provider-proof-of-ownership.md](SPEC-027-provider-proof-of-ownership.md) |
 | SPEC-028 | MLX Speculative Decoding for Provider Serve | 0.2-draft | [SPEC-028-mlx-speculative-decoding.md](SPEC-028-mlx-speculative-decoding.md) |
 | SPEC-029 | Sweep Workload-Class Stratification | 0.1-draft | [SPEC-029-sweep-workload-class-stratification.md](SPEC-029-sweep-workload-class-stratification.md) |
 <!-- AUTOGEN:spec-index END -->

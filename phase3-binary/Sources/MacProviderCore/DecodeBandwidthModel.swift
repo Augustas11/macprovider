@@ -27,7 +27,7 @@ import Foundation
 ///
 /// - Note: Ported for MacProvider from the upstream `ProviderBenchmark` clean-room
 ///   reference via `git show origin/master:provider-swift/Sources/ProviderBenchmark/DecodeBandwidthModel.swift`.
-///   T2-02 of `specs/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md`.
+///   T2-02 of `docs/runbooks/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md`.
 public enum DecodeBandwidthModel {
 
     // MARK: - Bytes per parameter

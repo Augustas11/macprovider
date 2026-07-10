@@ -202,7 +202,7 @@ case the summaries elide.
 ## Phase-B benchmark suite (B1-B7)
 
 Scenarios that declare a `benchmark:` block evaluate the network-
-performance invariants from `specs/SPEC-NETWORK-BENCHMARK-v0.1.md`
+performance invariants from `docs/notes/SPEC-NETWORK-BENCHMARK-v0.1.md`
 alongside I1-I4. The benchmark is REPORTING-ONLY — FAIL verdicts log
 but do not change the harness exit code (I1-I4 still gate via exit 10).
 

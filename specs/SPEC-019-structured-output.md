@@ -50,7 +50,7 @@ chat-completions request fields).
 
 SPEC-018 v0.2.4 is the precondition. The SPEC body is locked at `7e50832` via
 PR #202, and the implementation landed at `c77313a` via PR #209
-(`specs/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
+(`specs/design/spec-018/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
 commit anchors). SPEC-018 §10b names structured-output response synthesis as the
 follow-on surface promoted after streaming-incremental wire contract stability
 (`specs/SPEC-018-agentic-tool-calling.md:671-675`, follow-on surface list).
@@ -1617,7 +1617,7 @@ Audit trajectory:
 
 Precondition: SPEC-018 v0.2.4 LOCKED at `7e50832` via PR #202, with
 implementation shipped at `c77313a` via PR #209
-(`specs/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
+(`specs/design/spec-018/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
 commit anchors).
 
 Successor: SPEC-019 v0.2 IMPL — same playbook as v0.1.5 IMPL (PR #225).

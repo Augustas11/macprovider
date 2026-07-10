@@ -77,4 +77,4 @@ Use P1-01 clean-machine protocol on the **target tier only**.
 - **No** `autotune-candidates.json` changes from oMLX-only RESEARCH_231 P0/P1 items until local bench on eligible hardware.
 - RESEARCH_231 remains the **advisory input** for off-executor scheduling.
 
-**Runbook:** `specs/PLAN_MODEL_CATALOG_EXPANSION_RUNBOOK.md` v0.1.13 § P3-R231.
+**Runbook:** `docs/runbooks/PLAN_MODEL_CATALOG_EXPANSION_RUNBOOK.md` v0.1.13 § P3-R231.

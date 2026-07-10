@@ -1,7 +1,7 @@
 # P0 rollup — Model catalog expansion verification
 
 **Date:** 2026-07-07  
-**Plan:** `specs/PLAN_MODEL_CATALOG_EXPANSION_RUNBOOK.md`  
+**Plan:** `docs/runbooks/PLAN_MODEL_CATALOG_EXPANSION_RUNBOOK.md`  
 **Gate:** **G0 PROCEED**
 
 ---

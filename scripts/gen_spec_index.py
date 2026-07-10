@@ -33,6 +33,8 @@ TITLE_RE = re.compile(r"^#\s+SPEC[-\s]0*(\d+)\s*[—–:\-]\s*(.+?)\s*$", re.I)
 # Version header is written `**Version:** 1.6 (...)` — the colon sits inside the
 # bold markers, so strip all `*` before matching rather than trying to anchor them.
 VER_RE = re.compile(r"^Version\s*:\s*(\S+)", re.I)
+# some specs (025+) carry the version in a `Status: DRAFT v0.13 · …` line instead
+STATUS_RE = re.compile(r"^Status\b.*?\b(v?\d+\.\d+(?:\.\d+)?)", re.I)
 FNAME_RE = re.compile(r"^SPEC-0*(\d+)-", re.I)
 
 
@@ -54,9 +56,15 @@ def parse_spec(path: str):
         return None
     version = None
     for line in head[:15]:
-        vm = VER_RE.match(line.replace("*", "").strip())
+        clean = line.replace("*", "").strip()
+        vm = VER_RE.match(clean)
         if vm:
             version = vm.group(1).rstrip(".,;")
+            break
+        # second convention (SPEC-025+): `Status: DRAFT v0.13 · Owner: …`
+        sm = STATUS_RE.match(clean)
+        if sm:
+            version = sm.group(1)
             break
     if version is None:
         return None

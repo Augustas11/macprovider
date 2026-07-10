@@ -31,7 +31,7 @@
 #
 # Cost estimate (~60 requests × 64 max_tokens): order of $0.03-0.06.
 #
-# See specs/SPEC-NETWORK-BENCHMARK-v0.1.md for thresholds + invariants.
+# See docs/notes/SPEC-NETWORK-BENCHMARK-v0.1.md for thresholds + invariants.
 name: sustained_throughput
 description: |
   2 concurrent buyers, streaming, max_tokens=64, 5-min steady window.

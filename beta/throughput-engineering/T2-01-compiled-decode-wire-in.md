@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-07  
 **Branch:** `perf/t2-01-compiled-decode`  
-**Runbook:** `specs/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md` § T2-01  
+**Runbook:** `docs/runbooks/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md` § T2-01  
 **Verdict:** YELLOW
 
 ---

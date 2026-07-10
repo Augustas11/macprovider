@@ -4,7 +4,7 @@
 **Date:** 2026-07-08  
 **Audience:** Coordinator billing + Malibu app implementers  
 **Session:** **C** — new Cursor session; **money-path PR required** for all ledger changes.  
-**Spec:** `specs/SPEC-MALIBU-EMISSION-LEDGER.md`  
+**Spec:** `docs/notes/SPEC-MALIBU-EMISSION-LEDGER.md`  
 **Related:** [`mining-program-bootstrap.md`](./mining-program-bootstrap.md) (Session D), [`opoi-challenge-implementation.md`](./opoi-challenge-implementation.md) (Session A)
 
 ---

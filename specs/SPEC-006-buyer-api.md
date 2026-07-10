@@ -125,7 +125,7 @@
 - Adds AC-26 through AC-37 for the new security, lifecycle, feedback, capacity, provider-transparency, demo-token, and quota-settlement requirements.
 
 **Change log v0.1:**
-- Initial draft following design exploration in specs/SPEC-006-design.md.
+- Initial draft following design exploration in specs/design/spec-006/SPEC-006-design.md.
 - Locked design choices captured from operator pre-commitments (see Section 2).
 - Defines the separate Go gateway service at phase5-gateway/ and the buyer-facing HTTP surface at https://api.streamvc.live.
 - Defines authentication, key issuance, quota enforcement, usage accounting, feedback capture, status transparency, kill switches, capacity-burst protection, storage contracts, front-door contracts, instrumentation, failure modes, audit categories, and acceptance criteria.

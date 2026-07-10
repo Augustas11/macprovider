@@ -1,7 +1,7 @@
 # T0 rollup — Throughput measurement foundation
 
 **Date:** 2026-07-07  
-**Plan:** `specs/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md`  
+**Plan:** `docs/runbooks/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md`  
 **Gate:** **TG0 PROCEED** (YELLOW — 2/3 baseline models; Gemma deferred to T1-01)
 
 ---
