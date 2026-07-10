@@ -119,7 +119,35 @@ def splice(readme_text: str, table: str) -> str:
     return f"{pre}{marker_line}\n{table}\n{END}{post}"
 
 
+def lint_root() -> int:
+    """Fail if any TRACKED specs/*.md is neither a canonical spec nor an allowed
+    meta file — keeps specs/ root canonical-only so the reorg doesn't erode.
+    Uses `git ls-files` (not glob) so local untracked scratch is ignored."""
+    import subprocess
+    repo = os.path.abspath(os.path.dirname(SPECS_DIR))
+    keep = {"README.md", "REORG_PLAN.md", "TEMPLATE.md", "PROCESS.md"}
+    all_tracked = subprocess.run(["git", "ls-files", "specs/*.md"],
+                                 capture_output=True, text=True, cwd=repo).stdout.split()
+    # only specs/ ROOT — subdirs (specs/design/**, specs/v0_3-design/**) are
+    # intentionally non-canonical design records, not clutter.
+    tracked = [rel for rel in all_tracked if rel.count("/") == 1]
+    bad = [rel for rel in tracked
+           if os.path.basename(rel) not in keep
+           and parse_spec(os.path.join(repo, rel)) is None]
+    if bad:
+        print("error: non-canonical files tracked in specs/ root — relocate them "
+              "(audits/ or docs/) or give them a canonical spec header:",
+              file=sys.stderr)
+        for rel in bad:
+            print(f"  {rel}", file=sys.stderr)
+        return 1
+    print(f"ok: specs/ root is canonical-only ({len(tracked)} tracked)", file=sys.stderr)
+    return 0
+
+
 def main() -> int:
+    if "--lint" in sys.argv[1:]:
+        return lint_root()
     check = "--check" in sys.argv[1:]
     specs = collect()
     print(f"canonical specs: {len(specs)}", file=sys.stderr)
