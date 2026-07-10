@@ -6,12 +6,16 @@
 #
 # Install (Pearl):
 #   apt-get install -y nodejs            # >= 18 (ships probe-compatible ESM)
-#   install -d -o macprovider -g macprovider -m 0755 /opt/macprovider/canary-buyer
-#   cp probe.mjs run-canary.sh /opt/macprovider/canary-buyer/
-#   install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider/canary-buyer
-#   # buyer token via 0640 env file (NEVER inline in this unit):
-#   #   printf 'MACPROVIDER_BUYER_TOKEN=%s\n' "$TOKEN" > /etc/macprovider/canary-buyer.env
-#   #   chown root:macprovider /etc/macprovider/canary-buyer.env && chmod 0640 ...
+#   install -d -o root -g root -m 0755 /opt/macprovider-canary-buyer
+#   install -o root -g root -m 0755 probe.mjs run-canary.sh /opt/macprovider-canary-buyer/
+#   # Credentials remain root-only at rest and are exposed by systemd only to
+#   # this service's isolated dynamic identity:
+#   #   install -o root -g root -m 0600 /dev/null /etc/macprovider/canary-buyer.token
+#   #   install -o root -g root -m 0600 /dev/null /etc/macprovider/canary-buyer.heartbeat
+#   #   printf '%s\n' "$TOKEN" > /etc/macprovider/canary-buyer.token
+#   #   printf '%s\n' "$HEARTBEAT_URL" > /etc/macprovider/canary-buyer.heartbeat
+#   #   rm -f /etc/macprovider/canary-buyer.env  # rotate both copied secrets first
+#   #   test ! -e /etc/macprovider/canary-buyer.env
 #   cp canary-buyer.service canary-buyer.timer /etc/systemd/system/
 #   systemctl daemon-reload && systemctl enable --now canary-buyer.timer
 [Unit]
@@ -21,21 +25,27 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=macprovider
-Group=macprovider
-# Buyer token (MACPROVIDER_BUYER_TOKEN) and optional CANARY_HEARTBEAT_URL live
-# here, mode 0640 root:macprovider. The "-" tolerates a missing file so the unit
-# fails loud (no token) rather than refusing to load.
-EnvironmentFile=-/etc/macprovider/canary-buyer.env
+DynamicUser=true
+LoadCredential=buyer_token:/etc/macprovider/canary-buyer.token
+LoadCredential=heartbeat_url:/etc/macprovider/canary-buyer.heartbeat
 Environment=CANARY_BASE=https://api.streamvc.live
 Environment=CANARY_NODE_BIN=/usr/bin/node
-Environment=CANARY_METRICS_OUT=/var/lib/macprovider/canary-buyer/canary_buyer.prom
-Environment=CANARY_JSON_OUT=/var/lib/macprovider/canary-buyer/artifacts
-# --fail-on-degraded: exit non-zero when the gateway is down or any model is
-# unserviceable, so the run FAILS (visible in journald) and the heartbeat is not
-# pinged (dead-man switch fires upstream).
-ExecStart=/bin/bash /opt/macprovider/canary-buyer/run-canary.sh --fail-on-degraded
-TimeoutStartSec=180
+Environment=CANARY_METRICS_OUT=/var/lib/macprovider-canary-buyer/canary_buyer.prom
+Environment=CANARY_JSON_OUT=/var/lib/macprovider-canary-buyer/artifacts
+# Production must never silently degrade back to journal-only monitoring.
+Environment=CANARY_REQUIRE_HEARTBEAT=1
+# A scheduled run may overlap the mandatory AEAD session handoff. Retry the
+# entire strict probe once; no partial-success attempt is ever declared healthy.
+Environment=CANARY_DEGRADED_RETRIES=1
+Environment=CANARY_RETRY_DELAY_SECONDS=15
+Environment=CANARY_PROBE_TIMEOUT_SECONDS=300
+Environment=CANARY_TIMEOUT_BIN=/usr/bin/timeout
+# --fail-on-degraded: exit non-zero for availability, request failures, TTFT,
+# decode-TPS, cache, or missing-signal regressions, so the heartbeat is not
+# pinged and deploys can use this same service as their final serving gate.
+ExecStart=/bin/bash /opt/macprovider-canary-buyer/run-canary.sh --fail-on-degraded
+# Two bounded 5-minute attempts plus retry delay and process/service overhead.
+TimeoutStartSec=11min
 # Hardening — the probe only needs outbound https + its own state dir.
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -44,7 +54,8 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
-ReadWritePaths=/var/lib/macprovider/canary-buyer
+StateDirectory=macprovider-canary-buyer
+StateDirectoryMode=0750
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=canary-buyer

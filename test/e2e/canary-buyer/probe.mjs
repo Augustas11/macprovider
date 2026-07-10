@@ -39,6 +39,8 @@
 import net from 'node:net';
 import dns from 'node:dns/promises';
 import { webcrypto } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // `crypto` is a global on Node 20+ / browsers, but NOT on Node 18 (where it's
 // gated behind a flag). Fall back to node:crypto's webcrypto so the probe runs
@@ -54,12 +56,15 @@ const CONFIG = {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
-  ttftSamples: intEnv('CANARY_TTFT_SAMPLES', 12),
-  tpsSamples: intEnv('CANARY_TPS_SAMPLES', 3),
-  tpsMaxTokens: intEnv('CANARY_TPS_MAX_TOKENS', 128),
-  intervalMs: intEnv('CANARY_INTERVAL_MS', 1500),
-  reqTimeoutMs: intEnv('CANARY_REQ_TIMEOUT_MS', 45000),
-  stickyPrefixLines: intEnv('CANARY_STICKY_PREFIX_LINES', 80),
+  ttftSamples: intEnv('CANARY_TTFT_SAMPLES', 12, 1, 20),
+  tpsSamples: intEnv('CANARY_TPS_SAMPLES', 3, 1, 10),
+  tpsMaxTokens: intEnv('CANARY_TPS_MAX_TOKENS', 128, 1, 512),
+  intervalMs: intEnv('CANARY_INTERVAL_MS', 1500, 1, 10000),
+  reqTimeoutMs: intEnv('CANARY_REQ_TIMEOUT_MS', 45000, 1000, 120000),
+  stickyPrefixLines: intEnv('CANARY_STICKY_PREFIX_LINES', 80, 1, 1000),
+  maxTtftP95Ms: numberEnv('CANARY_MAX_TTFT_P95_MS', 7000),
+  minDecodeTpsP50: numberEnv('CANARY_MIN_DECODE_TPS_P50', 15),
+  minCachedPromptRatio: numberEnv('CANARY_MIN_CACHED_PROMPT_RATIO', 0.1),
   metricsOut: args['metrics-out'] || env('CANARY_METRICS_OUT') || '',
   jsonOut: args['json-out'] || env('CANARY_JSON_OUT') || '',
   pushgateway: args['pushgateway'] || env('CANARY_PUSHGATEWAY') || '',
@@ -70,9 +75,26 @@ const CONFIG = {
 function env(k) {
   return process.env[k] && process.env[k].length ? process.env[k] : '';
 }
-function intEnv(k, d) {
-  const v = parseInt(env(k), 10);
-  return Number.isFinite(v) && v > 0 ? v : d;
+function intEnv(k, d, minimum, maximum) {
+  const raw = env(k);
+  if (!raw) return d;
+  if (!/^(0|[1-9][0-9]*)$/.test(raw)) {
+    throw new Error(`${k} must be an integer between ${minimum} and ${maximum}`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${k} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return value;
+}
+function numberEnv(k, d) {
+  const raw = env(k);
+  if (!raw) return d;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${k} must be a non-negative number`);
+  }
+  return value;
 }
 function parseArgs(argv) {
   const out = {};
@@ -602,6 +624,71 @@ function round(v, d = 2) {
   return Math.round(v * f) / f;
 }
 
+/**
+ * Return the buyer-visible reasons that make a run unsafe as a deploy gate.
+ * Availability alone is insufficient: a release that serves one token while
+ * dropping other requests or losing latency, throughput, or cache signals must
+ * not ping the heartbeat.
+ */
+export function degradedReasons(run, thresholds = {}) {
+  const limits = {
+    maxTtftP95Ms: thresholds.maxTtftP95Ms ?? 7000,
+    minDecodeTpsP50: thresholds.minDecodeTpsP50 ?? 15,
+    minCachedPromptRatio: thresholds.minCachedPromptRatio ?? 0.1,
+    minTtftSamples: thresholds.ttftSamples ?? 12,
+    minTpsSamples: thresholds.tpsSamples ?? 3,
+  };
+  const reasons = [];
+  if (!run || run.up !== 1) reasons.push('gateway_down');
+
+  for (const model of run?.models || []) {
+    const id = model.model || '<unknown>';
+    if (model.serviceable !== 1) {
+      reasons.push(`${id}:unserviceable`);
+      continue;
+    }
+    const outcomes = model.outcomes;
+    if (!outcomes || typeof outcomes !== 'object' || Array.isArray(outcomes)) {
+      reasons.push(`${id}:request_outcome_signal_missing`);
+    } else {
+      const counts = Object.entries(outcomes);
+      const validCounts = counts.every(([, count]) => Number.isInteger(count) && count >= 0);
+      const total = validCounts ? counts.reduce((sum, [, count]) => sum + count, 0) : 0;
+      if (!validCounts || total < 1) {
+        reasons.push(`${id}:request_outcome_signal_missing`);
+      } else {
+        const failed = counts.reduce((sum, [outcome, count]) => sum + (outcome === '2xx' ? 0 : count), 0);
+        if (failed > 0) {
+          reasons.push(`${id}:failed_requests_${failed}_gt_0`);
+        }
+      }
+    }
+    if (!model.ttft_ms || model.ttft_ms.n < 1 || model.ttft_ms.p95 == null) {
+      reasons.push(`${id}:ttft_signal_missing`);
+    } else if (model.ttft_ms.n < limits.minTtftSamples) {
+      reasons.push(`${id}:ttft_samples_${model.ttft_ms.n}_lt_${limits.minTtftSamples}`);
+    } else if (model.ttft_ms.p95 > limits.maxTtftP95Ms) {
+      reasons.push(`${id}:ttft_p95_${round(model.ttft_ms.p95)}ms_gt_${limits.maxTtftP95Ms}ms`);
+    }
+    if (!model.decode_tps || model.decode_tps.n < 1 || model.decode_tps.p50 == null) {
+      reasons.push(`${id}:decode_tps_signal_missing`);
+    } else if (model.decode_tps.n < limits.minTpsSamples) {
+      reasons.push(`${id}:decode_tps_samples_${model.decode_tps.n}_lt_${limits.minTpsSamples}`);
+    } else if (model.decode_tps.p50 < limits.minDecodeTpsP50) {
+      reasons.push(`${id}:decode_tps_p50_${round(model.decode_tps.p50)}_lt_${limits.minDecodeTpsP50}`);
+    }
+    if (model.cached_prompt_ratio == null) {
+      reasons.push(`${id}:cache_signal_missing`);
+    } else if (model.cached_prompt_ratio < limits.minCachedPromptRatio) {
+      reasons.push(`${id}:cache_ratio_${round(model.cached_prompt_ratio, 4)}_lt_${limits.minCachedPromptRatio}`);
+    }
+  }
+  if (run?.up === 1 && (!Array.isArray(run.models) || run.models.length === 0)) {
+    reasons.push('no_models_probed');
+  }
+  return reasons;
+}
+
 async function pushMetrics(text) {
   const url = `${CONFIG.pushgateway.replace(/\/$/, '')}/metrics/job/${encodeURIComponent(CONFIG.pushJob)}`;
   const r = await fetch(url, {
@@ -699,9 +786,9 @@ async function main() {
   // launchd should not treat a bad-network run as a probe crash). Opt into a
   // non-zero exit for CI/alerting with --fail-on-degraded.
   if (CONFIG.failOnDegraded) {
-    const anyUnserviceable = run.up === 0 || run.models.some((m) => !m.serviceable);
-    if (anyUnserviceable) {
-      console.error('DEGRADED: gateway down or a model unserviceable');
+    const reasons = degradedReasons(run, CONFIG);
+    if (reasons.length) {
+      console.error(`DEGRADED: ${reasons.join(', ')}`);
       process.exit(1);
     }
   }
@@ -764,7 +851,21 @@ function dirname(p) {
   return i <= 0 ? '.' : p.slice(0, i);
 }
 
-main().catch((e) => {
-  console.error('FATAL:', redact(e.message || String(e)));
-  process.exit(2);
-});
+export function directInvocationDecision(argvPath, modulePath = fileURLToPath(import.meta.url), resolver = realpathSync) {
+  if (!argvPath) return false;
+  return resolver(argvPath) === modulePath;
+}
+
+let invokedAsScript = false;
+try {
+  invokedAsScript = directInvocationDecision(process.argv[1]);
+} catch (error) {
+  console.error('FATAL:', redact(`cannot resolve executable path: ${error.message || String(error)}`));
+  process.exitCode = 2;
+}
+if (invokedAsScript) {
+  main().catch((e) => {
+    console.error('FATAL:', redact(e.message || String(e)));
+    process.exit(2);
+  });
+}
