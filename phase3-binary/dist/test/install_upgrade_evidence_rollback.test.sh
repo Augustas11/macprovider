@@ -311,6 +311,9 @@ run_case() {
   fi
   if [ "$install_phase" = "credential-self-test" ]; then
     printf 'model: old-model\n' > "$root/home/.config/macprovider/config.yaml"
+  elif [ "$install_phase" = "ordinary-token-self-test" ]; then
+    printf 'model: old-model\nprovider_id: upgrade-provider\nprovider_token: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' \
+      > "$root/home/.config/macprovider/config.yaml"
   fi
   [ -z "$pre_begin_fault" ] || : > "$root/$pre_begin_fault"
 
@@ -377,6 +380,9 @@ run_case() {
       if [ "$INSTALL_PHASE" = "credential-self-test" ]; then
         printf "model: new-model\nprovider_id: mp-0123456789abcdef0123456789abcdef\nprovider_token: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" > "$CONFIG_PATH"
         printf "mp-0123456789abcdef0123456789abcdef\n" > "$PROVIDER_ID_PATH"
+      elif [ "$INSTALL_PHASE" = "ordinary-token-self-test" ]; then
+        printf "model: new-model\nprovider_id: upgrade-provider\nprovider_token: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n" > "$CONFIG_PATH"
+        printf "upgrade-provider\n" > "$PROVIDER_ID_PATH"
       else
         printf "model: new-model\nprovider_id: upgrade-provider\n" > "$CONFIG_PATH"
         printf "new-provider\n" > "$PROVIDER_ID_PATH"
@@ -412,7 +418,7 @@ MANUAL
           kill -0 "$MANUAL_PID"
           exit 9
           ;;
-        self-test|credential-self-test)
+        self-test|credential-self-test|ordinary-token-self-test)
           launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
           launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || true
           launchctl enable "gui/$UID/live.streamvc.macprovider"
@@ -534,6 +540,17 @@ for phase in plist watchdog bootstrap kickstart self-test; do
   [ -f "$root/watchdog-service-active" ]
   [ -z "$(recovery_dir "$root")" ]
 done
+
+# Ordinary operator-issued credentials are already present in the previous
+# config snapshot. The bootstrap-preservation helper must leave them to normal
+# rollback rather than treating a non-mp provider ID as a recovery error.
+run_case ordinary_token_restore "" "" "" ordinary-token-self-test
+root="$TMP/ordinary_token_restore"
+[ "$(cat "$root/rc")" -eq 9 ]
+assert_old_install "$root"
+grep -F 'provider_token: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+  "$root/home/.config/macprovider/config.yaml" >/dev/null
+[ -z "$(recovery_dir "$root")" ]
 
 # A bootstrap bearer may already be durably confirmed before a later local
 # readiness failure. Rollback restores the last-known-good payload and service

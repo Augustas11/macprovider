@@ -482,6 +482,144 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertTrue(socket.sentFrames().contains { $0["type"] as? String == "hello" })
     }
 
+    func testInvalidInstallerBootstrapBearerRecoversWithSameKeyWithoutResendingStaleToken() async throws {
+        let directory = try Self.makeTemporaryDirectory(prefix: "bootstrap-recovery-")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configURL = directory.appendingPathComponent("config.yaml")
+        let providerID = "mp-0123456789abcdef0123456789abcdef"
+        let staleToken = String(repeating: "a", count: 64)
+        let recoveredToken = String(repeating: "b", count: 64)
+        try Data("""
+        model: model-a
+        coordinator_url: wss://127.0.0.1:8444/ws/provider
+        provider_id: \(providerID)
+        provider_token: \(staleToken)
+        """.utf8).write(to: configURL)
+
+        var config = AppConfig.defaults(configPath: configURL.path)
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = providerID
+        config.model = "model-a"
+        config.providerToken = staleToken
+        let receiptKey = Curve25519.Signing.PrivateKey()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let rejected = FakeProviderWebSocketTask(
+            receiveResults: [.failure(CancellationError())],
+            closeCodeRawValue: 4005,
+            closeReasonText: "invalid_token"
+        )
+        let responder = FakeTier2AuthResponder(
+            outcome: .accepted,
+            providerID: providerID,
+            assignedProviderToken: recoveredToken
+        )
+        let recovered = FakeProviderWebSocketTask(
+            receiveResults: [],
+            receiveOverride: { socket in
+                try await responder.receive(from: socket)
+            }
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [rejected, recovered])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            receiptIdentitySigningKey: receiptKey
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+            XCTFail("successful credential recovery should request an authenticated reconnect")
+        } catch is CoordinatorAuthUpgradeReconnect {
+        } catch {
+            XCTFail("unexpected recovery error: \(error)")
+        }
+
+        let requests = factory.requestsSnapshot()
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer \(staleToken)")
+        XCTAssertNil(requests[1].value(forHTTPHeaderField: "Authorization"))
+        let loaded = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: configURL.path),
+            environment: [:]
+        )
+        XCTAssertEqual(loaded.providerToken, recoveredToken)
+    }
+
+    func testConfirmedInstallerBootstrapCredentialRecoveryFailsClosedWithoutMutation() async throws {
+        let directory = try Self.makeTemporaryDirectory(prefix: "bootstrap-confirmed-")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configURL = directory.appendingPathComponent("config.yaml")
+        let providerID = "mp-fedcba9876543210fedcba9876543210"
+        let confirmedToken = String(repeating: "c", count: 64)
+        try Data("""
+        model: model-a
+        coordinator_url: wss://127.0.0.1:8444/ws/provider
+        provider_id: \(providerID)
+        provider_token: \(confirmedToken)
+        """.utf8).write(to: configURL)
+
+        var config = AppConfig.defaults(configPath: configURL.path)
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = providerID
+        config.model = "model-a"
+        config.providerToken = confirmedToken
+        let receiptKey = Curve25519.Signing.PrivateKey()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let rejectedBearer = FakeProviderWebSocketTask(
+            receiveResults: [.failure(CancellationError())],
+            closeCodeRawValue: 4005,
+            closeReasonText: "invalid_token"
+        )
+        let rejectedRecovery = FakeProviderWebSocketTask(
+            receiveResults: [.failure(CancellationError())],
+            closeCodeRawValue: 4005,
+            closeReasonText: "bootstrap_token_used"
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [rejectedBearer, rejectedRecovery])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            receiptIdentitySigningKey: receiptKey
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+            XCTFail("confirmed credential mismatch must fail closed")
+        } catch let CoordinatorAuthError.rejected(code, _) {
+            XCTAssertEqual(code, "invalid_token")
+        } catch {
+            XCTFail("unexpected confirmed-credential error: \(error)")
+        }
+
+        let requests = factory.requestsSnapshot()
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests[0].value(forHTTPHeaderField: "Authorization"), "Bearer \(confirmedToken)")
+        XCTAssertNil(requests[1].value(forHTTPHeaderField: "Authorization"))
+        let loaded = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: configURL.path),
+            environment: [:]
+        )
+        XCTAssertEqual(loaded.providerToken, confirmedToken)
+    }
+
     func testCredentialBootstrapForcesV2WhenWSTunneledModeIsDisabled() async throws {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
@@ -2784,13 +2922,22 @@ private extension ISO8601DateFormatter {
 private actor FakeTier2AuthResponder {
     private let outcome: FakeTier2AuthOutcome
     private let assignedID: String
+    private let providerID: String
+    private let assignedProviderToken: String?
     private let coordinatorPrivateKey = Curve25519.KeyAgreement.PrivateKey()
     private var receiveCount = 0
     private var keyID: String?
 
-    init(outcome: FakeTier2AuthOutcome, assignedID: String = "assigned-rotation") {
+    init(
+        outcome: FakeTier2AuthOutcome,
+        assignedID: String = "assigned-rotation",
+        providerID: String = "provider-test",
+        assignedProviderToken: String? = nil
+    ) {
         self.outcome = outcome
         self.assignedID = assignedID
+        self.providerID = providerID
+        self.assignedProviderToken = assignedProviderToken
     }
 
     func receive(from socket: FakeProviderWebSocketTask) async throws -> URLSessionWebSocketTask.Message {
@@ -2806,7 +2953,7 @@ private actor FakeTier2AuthResponder {
             let providerPublicRaw = try Data(base64URLUnpadded: providerPublic)
             let coordinatorPublicRaw = coordinatorPrivateKey.publicKey.rawRepresentation
             let derivedKeyID = fakeTier2KeyID(
-                providerID: "provider-test",
+                providerID: providerID,
                 assignedID: assignedID,
                 providerPublicKey: providerPublicRaw,
                 coordinatorPublicKey: coordinatorPublicRaw,
@@ -2828,7 +2975,7 @@ private actor FakeTier2AuthResponder {
         case 2:
             switch outcome {
             case .accepted:
-                return .string(Self.jsonString([
+                var response: [String: Any] = [
                     "type": "auth_response",
                     "version": 2,
                     "status": "accepted",
@@ -2842,7 +2989,11 @@ private actor FakeTier2AuthResponder {
                             "kid": keyID ?? "",
                         ],
                     ],
-                ]))
+                ]
+                if let assignedProviderToken {
+                    response["assigned_provider_token"] = assignedProviderToken
+                }
+                return .string(Self.jsonString(response))
             case .rejected(let code, let message):
                 return .string(Self.jsonString([
                     "type": "auth_response",
@@ -2974,6 +3125,7 @@ private struct StaticAttestationGenerator: Tier2AttestationTokenGenerating, @unc
 private final class FakeProviderWebSocketFactory: @unchecked Sendable {
     private let queue = DispatchQueue(label: "FakeProviderWebSocketFactory")
     private var sockets: [FakeProviderWebSocketTask]
+    private var requests: [URLRequest] = []
 
     init(sockets: [FakeProviderWebSocketTask]) {
         self.sockets = sockets
@@ -2984,9 +3136,14 @@ private final class FakeProviderWebSocketFactory: @unchecked Sendable {
     func makeSocket(for request: URLRequest) -> ProviderWebSocketTask {
         queue.sync {
             lastRequest = request
+            requests.append(request)
             precondition(!sockets.isEmpty, "fake web socket factory exhausted")
             return sockets.removeFirst()
         }
+    }
+
+    func requestsSnapshot() -> [URLRequest] {
+        queue.sync { requests }
     }
 }
 

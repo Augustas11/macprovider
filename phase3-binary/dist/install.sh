@@ -426,9 +426,12 @@ token = scalar(failed_text, "provider_token")
 if token is None:
     raise SystemExit(0)
 if not isinstance(provider_id, str) or re.fullmatch(r"mp-[0-9a-f]{32}", provider_id) is None:
-    raise SystemExit("failed install credential has invalid provider_id")
+    # Ordinary operator-issued identities are restored from the transaction
+    # backup unchanged. Only installer-bootstrap identities participate in
+    # durable same-key recovery and therefore need cross-rollback preservation.
+    raise SystemExit(0)
 if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None:
-    raise SystemExit("failed install credential has invalid provider_token")
+    raise SystemExit(0)
 
 if os.path.exists(restored_path):
     with open(restored_path, "r", encoding="utf-8") as handle:
@@ -534,7 +537,7 @@ swap_restore binary-path "$REC_BINARY_PATH" "$BINARY_CANDIDATE" "$REC_HAD_BINARY
 swap_restore config.yaml "$REC_CONFIG_PATH" "$CONFIG_CANDIDATE" "$REC_HAD_CONFIG" || recovery_failed "could not restore the previous config"
 swap_restore provider_id "$REC_PROVIDER_ID_PATH" "$PROVIDER_ID_CANDIDATE" "$REC_HAD_PROVIDER_ID" || recovery_failed "could not restore the previous provider id"
 preserve_failed_bootstrap_credential "$FAILED_CURRENT_DIR/config.yaml" "$REC_CONFIG_PATH" "$REC_PROVIDER_ID_PATH" \
-  || recovery_failed "could not preserve the confirmed bootstrap credential through rollback"
+  || recovery_failed "could not preserve the installer bootstrap credential through rollback"
 swap_restore provider.plist "$REC_PLIST_PATH" "$PLIST_CANDIDATE" "$REC_HAD_PLIST" || recovery_failed "could not restore the previous launchd plist"
 swap_restore watchdog-dir "$REC_WATCHDOG_DIR" "$WATCHDOG_DIR_CANDIDATE" "$REC_HAD_WATCHDOG_DIR" || recovery_failed "could not restore the previous watchdog directory"
 swap_restore watchdog.plist "$REC_WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_CANDIDATE" "$REC_HAD_WATCHDOG_PLIST" || recovery_failed "could not restore the previous watchdog plist"

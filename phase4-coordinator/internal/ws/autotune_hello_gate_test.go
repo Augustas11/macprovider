@@ -185,12 +185,18 @@ func TestAutotuneHelloGateRechecksEvidenceAfterChallenge(t *testing.T) {
 			CandidateCatalogSHA256: catalog.SHA256,
 		}},
 	}
-	store := &sequencedAutotuneEvidence{responses: []stubAutotuneEvidence{
+	evidenceStore := &sequencedAutotuneEvidence{responses: []stubAutotuneEvidence{
 		{evidence: evidence, ok: true},
 		{ok: false},
 	}}
+	tokenStore, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	defer tokenStore.Close()
 	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
-		providerws.WithAutotuneHelloGate(catalog, store),
+		providerws.WithAutotuneHelloGate(catalog, evidenceStore),
+		providerws.WithTokenIssuer(tokenStore),
 	}, func(cfg *config.Config) {
 		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
 		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
@@ -221,11 +227,76 @@ func TestAutotuneHelloGateRechecksEvidenceAfterChallenge(t *testing.T) {
 	if code != providerws.CloseInvalidHello || reason != "autotune_evidence_required" {
 		t.Fatalf("post-proof close=%d reason=%q", code, reason)
 	}
-	if got := store.callCount(); got != 2 {
+	if got := evidenceStore.callCount(); got != 2 {
 		t.Fatalf("autotune evidence lookups=%d, want initial and post-proof checks", got)
 	}
 	if got := h.Registry.Count(); got != 0 {
 		t.Fatalf("post-proof evidence loss registered %d providers", got)
+	}
+	if active, err := tokenStore.HasActiveTokenForProvider(context.Background(), "m4-anon"); err != nil || active {
+		t.Fatalf("post-proof evidence loss left active token=%v err=%v", active, err)
+	}
+}
+
+func TestAutotuneHelloGateV1RejectionDoesNotConsumeProvisionalCapacity(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	evidence := autotune.VerifiedEvidence{
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{{
+			ModelKey:               "small",
+			ModelID:                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+			SustainedTPS:           20,
+			TTFTMS:                 1000,
+			ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
+			CandidateCatalogSHA256: catalog.SHA256,
+		}},
+	}
+	evidenceStore := &sequencedAutotuneEvidence{responses: []stubAutotuneEvidence{
+		{ok: false},
+		{evidence: evidence, ok: true},
+	}}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, evidenceStore),
+	}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Admission.ProvisionalPoolMax = 1
+		cfg.Admission.ProvisionalAdmissionRatePerHour = 10
+		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	})
+	defer h.HTTP.Close()
+
+	hello := validHello("m4-anon")
+	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
+	if code != providerws.CloseInvalidHello || reason != "autotune_evidence_required" {
+		t.Fatalf("first close=%d reason=%q", code, reason)
+	}
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("second dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("second hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("second response: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("second response opcode=%v, want text", op)
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("second response json: %v", err)
+	}
+	if ack["type"] != "hello_ack" {
+		t.Fatalf("second response type=%v, want hello_ack", ack["type"])
+	}
+	if got := evidenceStore.callCount(); got != 2 {
+		t.Fatalf("autotune evidence lookups=%d, want one per V1 attempt", got)
 	}
 }
 

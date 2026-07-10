@@ -553,7 +553,75 @@ actor CoordinatorClient {
             try await connectAndRunOverride()
             return
         }
-        try await connectAndRun()
+        do {
+            try await connectAndRun()
+        } catch let error as CoordinatorAuthError {
+            guard case .rejected(let code, _) = error,
+                  code == "invalid_token",
+                  await recoverInvalidBootstrapCredential() else {
+                throw error
+            }
+            // The recovery handshake persisted a fresh same-key credential.
+            // Re-enter the ordinary authenticated path immediately; only that
+            // path may confirm the credential and register the provider.
+            throw CoordinatorAuthUpgradeReconnect()
+        }
+    }
+
+    /// Recover an installer bootstrap credential only after the coordinator
+    /// explicitly rejects its bearer. The recovery handshake omits the stale
+    /// bearer and proves the durable Keychain receipt identity instead. The
+    /// coordinator permits replacement only while that exact identity remains
+    /// unconfirmed; confirmed ownership and ordinary operator tokens fail
+    /// closed without local mutation.
+    private func recoverInvalidBootstrapCredential() async -> Bool {
+        guard !credentialBootstrap,
+              BootstrapAuthCommand.isCredentialBootstrapPrincipal(providerID),
+              let receiptKey = receiptIdentitySigningKeys.first else {
+            return false
+        }
+        var recoveryConfig = appConfig
+        recoveryConfig.providerToken = nil
+        let publicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
+        guard let recoveryClient = CoordinatorClient(
+            config: recoveryConfig,
+            modelRuntime: modelRuntime,
+            providerStatus: providerStatus,
+            reconnectGraceNanoseconds: reconnectGraceNanoseconds,
+            reconnectInitialBackoffNanoseconds: reconnectInitialBackoffNanoseconds,
+            receiptKeyRotationTimeoutNanoseconds: receiptKeyRotationTimeoutNanoseconds,
+            attestationGenerator: attestationGenerator,
+            webSocketFactory: webSocketFactory,
+            sleepAssertionFactory: { nil },
+            pairingController: pairingController,
+            providerReceiptPublicKey: publicKey,
+            credentialBootstrap: true,
+            bootstrapReceiptSigningKey: receiptKey,
+            watchdogExitHook: watchdogExitHook
+        ) else {
+            return false
+        }
+
+        do {
+            try await recoveryClient.connectAndRunOnce()
+        } catch is CoordinatorAuthUpgradeReconnect {
+            let loaded = try? ConfigLoader.load(
+                cli: CLIOverrides(configPath: configPath),
+                environment: [:]
+            )
+            guard let recovered = loaded?.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !recovered.isEmpty else {
+                Self.keepaliveDebug("bootstrap_credential_recovery_persist_missing")
+                return false
+            }
+            providerToken = recovered
+            Self.keepaliveDebug("bootstrap_credential_recovery_succeeded")
+            return true
+        } catch {
+            Self.keepaliveDebug("bootstrap_credential_recovery_failed error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
+            return false
+        }
+        return false
     }
 
     func connectAndRunOnceForTest() async throws {
@@ -965,13 +1033,14 @@ actor CoordinatorClient {
         // CloseInvalidToken when auth.require_provider_tokens=true.
         // The token never appears in log lines — redactedURL only logs the
         // URL, not headers, and we don't dump headers anywhere.
-        if let token = providerToken {
+        let attachesBearer = !credentialBootstrap && providerToken != nil
+        if attachesBearer, let token = providerToken {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         let socket = webSocketFactory(request)
         webSocket = socket
         socket.resume()
-        Self.keepaliveDebug("ws_resume url=\(Self.redactedURL(coordinatorURL)) token=\(providerToken == nil ? "absent" : "present")")
+        Self.keepaliveDebug("ws_resume url=\(Self.redactedURL(coordinatorURL)) token=\(attachesBearer ? "present" : "absent")")
         return socket
     }
 
@@ -1013,6 +1082,11 @@ actor CoordinatorClient {
                 code: "invalid_auth_request",
                 message: reason.isEmpty ? "coordinator closed invalid auth_request" : reason
             )
+        case 4005 where reason == "invalid_token" ||
+            reason == "bootstrap_identity_mismatch" ||
+            reason == "bootstrap_token_used" ||
+            reason == "bootstrap_token_expired":
+            return .rejected(code: reason, message: reason)
         case 4000 where reason == "unrecognized auth message":
             return .invalidMessage(reason)
         default:

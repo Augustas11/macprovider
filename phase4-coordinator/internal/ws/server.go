@@ -1307,17 +1307,17 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	// flow: RejectTOFU closes; Minted embeds; Skip admits with the
 	// provided AuthState; eviction defense protects existing routable
 	// sessions from bearer-less duplicates.
-	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, initial.Hostname)
-	if outcome == provisionalTokenRejectTOFU {
-		s.close(conn, CloseInvalidToken, "invalid_token")
-		return "", ""
-	}
 	maxAdmittedModelKey, maxAdmittedModelID, gateOK := s.checkAutotuneHelloGate(conn, initial.Hello())
 	if !gateOK {
 		return "", ""
 	}
 	entry.MaxAdmittedModelKey = maxAdmittedModelKey
 	entry.MaxAdmittedModelID = maxAdmittedModelID
+	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, initial.Hostname)
+	if outcome == provisionalTokenRejectTOFU {
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", ""
+	}
 	if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
 		return "", ""
 	}
@@ -1488,7 +1488,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		// validateProviderToken at upgrade. A fresh bootstrap credential is
 		// consumed only after this admission path and all evidence checks pass.
 	}
-	tier, closeCode, closeReason := s.checkOrRecordAdmission(hello, pinned, recordAdmission)
+	tier, closeCode, closeReason := s.checkOrRecordAdmission(hello, pinned, false)
 	if closeCode != 0 {
 		s.close(conn, closeCode, closeReason)
 		return nil, false
@@ -1532,6 +1532,13 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 	maxAdmittedModelKey, maxAdmittedModelID, gateOK := s.checkAutotuneHelloGate(conn, hello)
 	if !gateOK {
 		return nil, false
+	}
+	if recordAdmission {
+		tier, closeCode, closeReason = s.checkOrRecordAdmission(hello, pinned, true)
+		if closeCode != 0 {
+			s.close(conn, closeCode, closeReason)
+			return nil, false
+		}
 	}
 	initialState := pool.StateReady
 	if s.cfg.Pool.WarmupGateEnabled {
