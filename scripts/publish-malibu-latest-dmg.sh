@@ -1,20 +1,5 @@
 #!/usr/bin/env bash
-# Publish Malibu-{tag}.dmg to download.malibu.tech (Pearl VPS nginx docroot).
-#
-# Downloads release assets from GitHub, copies to Pearl via SSH, and refreshes
-# latest.dmg + appcast.xml for Sparkle.
-#
-# Usage:
-#   bash scripts/publish-malibu-latest-dmg.sh v1.8.19
-#
-# Environment:
-#   MALIBU_DOWNLOAD_VPS_HOST  default 159.223.165.194
-#   MALIBU_DOWNLOAD_SSH_KEY   default ~/.ssh/pearl_operator_ed25519
-#   MALIBU_DOWNLOAD_VPS_USER  default root
-#   MALIBU_DOWNLOAD_WEBROOT   default /var/www/malibu-download
-#   MALIBU_DOWNLOAD_KNOWN_HOSTS  pinned Pearl host key (see scripts/dist/)
-#   VERIFY_MALIBU_DOWNLOAD=1   run verify-malibu-download.sh after upload
-
+# Publish a locally captured, signed Malibu release set to Pearl.
 set -euo pipefail
 
 die() {
@@ -22,82 +7,147 @@ die() {
   exit 1
 }
 
+[[ "$#" == 6 ]] ||
+  die "usage: $0 MANIFEST DMG APPCAST CHECKSUMS SIGNATURE PROVENANCE"
+
+manifest="$1"
+asset="$2"
+appcast="$3"
+checksums="$4"
+signature="$5"
+provenance="$6"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-tag="${1:-}"
-[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "usage: $0 vX.Y.Z"
+bash "$SCRIPT_DIR/verify-malibu-publication-set.sh" \
+  "$manifest" "$asset" "$appcast" "$checksums" "$signature" "$provenance"
 
-repo="${GITHUB_REPOSITORY:-Augustas11/macprovider}"
-dmg_name="Malibu-${tag}.dmg"
-versioned_key="Malibu-${tag}.dmg"
-latest_key="latest.dmg"
+read -r tag commit release_number publication_id dmg_asset_id appcast_asset_id < <(
+  python3 - "$manifest" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+tag = manifest["tag"]
+assets = manifest["assets"]
+print(
+    tag,
+    manifest["commit"],
+    manifest["release_id"],
+    manifest["publication_id"],
+    assets[f"Malibu-{tag}.dmg"]["id"],
+    assets["appcast.xml"]["id"],
+)
+PY
+)
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "manifest tag is invalid"
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || die "manifest commit is invalid"
+[[ "$release_number" =~ ^[1-9][0-9]*$ ]] || die "manifest release id is invalid"
+[[ "$publication_id" =~ ^[0-9a-f]{64}$ ]] || die "manifest publication id is invalid"
+[[ "$dmg_asset_id" =~ ^[1-9][0-9]*$ && "$appcast_asset_id" =~ ^[1-9][0-9]*$ ]] ||
+  die "manifest publication asset ids are invalid"
 
 VPS_HOST="${MALIBU_DOWNLOAD_VPS_HOST:-159.223.165.194}"
 SSH_KEY="${MALIBU_DOWNLOAD_SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
 VPS_USER="${MALIBU_DOWNLOAD_VPS_USER:-root}"
 WEBROOT="${MALIBU_DOWNLOAD_WEBROOT:-/var/www/malibu-download}"
+[[ "$VPS_USER" == root ]] || die "Pearl publication requires the root SSH account"
+[[ "$WEBROOT" =~ ^/[A-Za-z0-9._/-]+$ && "$WEBROOT" != *'/../'* && "$WEBROOT" != */.. ]] ||
+  die "unsafe webroot"
+[[ -f "$SSH_KEY" && ! -L "$SSH_KEY" ]] ||
+  die "SSH key missing or symlinked: $SSH_KEY (refusing a partial public publication)"
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/malibu-publish.XXXXXX")"
-cleanup() { rm -rf "$work"; }
-trap cleanup EXIT
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
 
-gh release download "$tag" \
-  --repo "$repo" \
-  --pattern "$dmg_name" \
-  --pattern "appcast.xml" \
-  --dir "$work" \
-  --clobber
+dmg_name="Malibu-${tag}.dmg"
+checksum_file="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/Malibu-${tag}.XXXXXX.sha256")"
+printf '%s  %s\n' "$(sha256_file "$asset")" "$dmg_name" >"$checksum_file"
 
-asset="$work/$dmg_name"
-[[ -f "$asset" ]] || die "release asset missing: $dmg_name"
-
-sha256="$(shasum -a 256 "$asset" | awk '{print $1}')"
-printf '%s  %s\n' "$sha256" "$dmg_name" > "$work/${dmg_name}.sha256"
-
-if [[ ! -f "$SSH_KEY" ]]; then
-  cat <<EOF
-[publish-malibu-latest-dmg] No SSH key at $SSH_KEY — manual step required.
-
-1. Run: bash scripts/setup-malibu-download-pearl.sh
-2. Upload $dmg_name to ${WEBROOT} on Pearl as:
-     ${versioned_key}
-     ${latest_key}
-     appcast.xml
-     SHA-256: $sha256
-3. name.com DNS: download.malibu.tech A -> ${VPS_HOST}
-4. GitHub Release fallback:
-     https://github.com/$repo/releases/download/$tag/$dmg_name
-EOF
-  exit 0
-fi
-
-# shellcheck source=malibu-download-ssh.sh
+# Resolved relative to this script at runtime.
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/malibu-download-ssh.sh"
 
-malibu_download_ssh "install -d -o www-data -g www-data -m 0755 $WEBROOT"
-malibu_download_scp "$asset" "$VPS_USER@$VPS_HOST:/tmp/malibu-${versioned_key}" >/dev/null
-malibu_download_scp "$work/${dmg_name}.sha256" "$VPS_USER@$VPS_HOST:/tmp/malibu-${dmg_name}.sha256" >/dev/null
-appcast="$work/appcast.xml"
-if [[ -f "$appcast" ]]; then
-  malibu_download_scp "$appcast" "$VPS_USER@$VPS_HOST:/tmp/malibu-appcast.xml" >/dev/null
-else
-  printf '[publish-malibu-latest-dmg] WARN: appcast.xml missing from release %s\n' "$tag" >&2
-fi
-
-malibu_download_ssh "set -e
-  install -o www-data -g www-data -m 0644 /tmp/malibu-${versioned_key} ${WEBROOT}/${versioned_key}
-  install -o www-data -g www-data -m 0644 /tmp/malibu-${versioned_key} ${WEBROOT}/${latest_key}
-  install -o www-data -g www-data -m 0644 /tmp/malibu-${dmg_name}.sha256 ${WEBROOT}/${dmg_name}.sha256
-  rm -f /tmp/malibu-${versioned_key} /tmp/malibu-${dmg_name}.sha256
-  if [ -f /tmp/malibu-appcast.xml ]; then
-    install -o www-data -g www-data -m 0644 /tmp/malibu-appcast.xml ${WEBROOT}/appcast.xml
-    rm -f /tmp/malibu-appcast.xml
+remote_stage=""
+cleanup() {
+  rm -f "$checksum_file"
+  if [[ -n "$remote_stage" && "$remote_stage" =~ ^/root/\.malibu-publish/stage\.[A-Za-z0-9]+$ ]]; then
+    malibu_download_ssh "rm -rf -- '$remote_stage'" >/dev/null 2>&1 || true
   fi
+}
+trap cleanup EXIT
+
+# This block intentionally expands only on Pearl.
+# shellcheck disable=SC2016
+remote_stage="$(malibu_download_ssh 'set -eu
+  umask 077
+  install -d -o root -g root -m 0700 /root/.malibu-publish
+  stage="$(mktemp -d /root/.malibu-publish/stage.XXXXXXXX)"
+  chown root:root "$stage"
+  chmod 0700 "$stage"
+  printf "%s\n" "$stage"')"
+[[ "$remote_stage" =~ ^/root/\.malibu-publish/stage\.[A-Za-z0-9]+$ ]] ||
+  die "Pearl returned an unsafe staging path"
+
+helper="$SCRIPT_DIR/install-malibu-publication.sh"
+declare -a local_paths=("$manifest" "$asset" "$appcast" "$checksum_file" "$helper")
+declare -a remote_names=(publication-manifest.json "$dmg_name" appcast.xml "${dmg_name}.sha256" install-helper)
+declare -a expected_hashes=()
+for index in "${!local_paths[@]}"; do
+  expected_hashes+=("$(sha256_file "${local_paths[$index]}")")
+  malibu_download_scp \
+    "${local_paths[$index]}" \
+    "$VPS_USER@$VPS_HOST:$remote_stage/${remote_names[$index]}" >/dev/null
+done
+
+specs=""
+for index in "${!remote_names[@]}"; do
+  mode=0600
+  [[ "${remote_names[$index]}" == install-helper ]] && mode=0700
+  specs+=" '${remote_names[$index]}:${expected_hashes[$index]}:$mode'"
+done
+
+malibu_download_ssh "set -euo pipefail
+  stage='$remote_stage'
+  cleanup_remote() { rm -rf -- \"\$stage\"; }
+  trap cleanup_remote EXIT
+  for spec in$specs; do
+    name=\"\${spec%%:*}\"
+    rest=\"\${spec#*:}\"
+    expected=\"\${rest%%:*}\"
+    mode=\"\${rest##*:}\"
+    path=\"\$stage/\$name\"
+    chown root:root \"\$path\"
+    chmod \"\$mode\" \"\$path\"
+    meta=\"\$(stat -c '%u:%g:%a:%h:%F' \"\$path\")\"
+    expected_meta=\"0:0:\${mode#0}:1:regular file\"
+    [ \"\$meta\" = \"\$expected_meta\" ] || {
+      echo \"unsafe transferred file \$path: \$meta\" >&2
+      exit 1
+    }
+    actual=\"\$(sha256sum \"\$path\" | awk '{print \$1}')\"
+    [ \"\$actual\" = \"\$expected\" ] || {
+      echo \"transferred sha256 mismatch for \$path\" >&2
+      exit 1
+    }
+  done
+  \"\$stage/install-helper\" \
+    '$WEBROOT' '$tag' '$publication_id' \
+    \"\$stage/publication-manifest.json\" \
+    \"\$stage/$dmg_name\" \
+    \"\$stage/appcast.xml\" \
+    \"\$stage/${dmg_name}.sha256\"
 "
+remote_stage=""
 
-printf '[publish-malibu-latest-dmg] ok: %s/%s + latest.dmg on Pearl (sha256=%s)\n' \
-  "$WEBROOT" "$versioned_key" "$sha256"
+printf '[publish-malibu-latest-dmg] ok: %s/%s + latest.dmg on Pearl (release=%s assets=%s,%s commit=%s)\n' \
+  "$WEBROOT" "$dmg_name" "$release_number" "$dmg_asset_id" "$appcast_asset_id" "$commit"
 
-if [[ "${VERIFY_MALIBU_DOWNLOAD:-0}" == "1" ]]; then
+if [[ "${VERIFY_MALIBU_DOWNLOAD:-0}" == 1 ]]; then
   bash "$SCRIPT_DIR/verify-malibu-download.sh"
 fi

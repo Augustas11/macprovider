@@ -4,7 +4,7 @@
 # Requires:
 #   - Malibu-{tag}.dmg at phase3-binary/app/dist/ (or pass DMG=...)
 #   - SPARKLE_EDDSA_PRIVATE_KEY (base64 Ed25519 seed) or SPARKLE_PRIVATE_KEY_FILE
-#   - curl + tar (Sparkle release tools downloaded on demand)
+#   - curl + tar (reviewed Sparkle release tools downloaded on demand)
 #
 # Usage:
 #   SPARKLE_EDDSA_PRIVATE_KEY=... bash scripts/generate-malibu-appcast.sh v1.8.18
@@ -25,24 +25,34 @@ dmg="${DMG:-$repo_root/phase3-binary/app/dist/Malibu-${tag}.dmg}"
   exit 1
 }
 
-sparkle_version="${SPARKLE_VERSION:-2.6.4}"
-tools_dir="${SPARKLE_TOOLS_DIR:-$repo_root/.cache/sparkle-${sparkle_version}}"
-if [[ ! -x "$tools_dir/bin/generate_appcast" ]]; then
-  mkdir -p "$(dirname "$tools_dir")"
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/sparkle-tools.XXXXXX")"
-  curl -fsSL -o "$tmp/sparkle.tar.xz" \
-    "https://github.com/sparkle-project/Sparkle/releases/download/${sparkle_version}/Sparkle-${sparkle_version}.tar.xz"
-  rm -rf "$tools_dir"
-  mkdir -p "$tools_dir"
-  tar -xJf "$tmp/sparkle.tar.xz" -C "$tools_dir" --strip-components=0
-  rm -rf "$tmp"
-fi
-
+sparkle_version="2.6.4"
+sparkle_sha256="50612a06038abc931f16011d7903b8326a362c1074dabccb718404ce8e585f0b"
+tools_dir="$(mktemp -d "${TMPDIR:-/tmp}/sparkle-tools.XXXXXX")"
 key_file=""
-cleanup_key() {
-  [[ -n "$key_file" && -f "$key_file" ]] && rm -f "$key_file"
+work=""
+cleanup() {
+  if [[ -n "$key_file" && "$key_file" != "${SPARKLE_PRIVATE_KEY_FILE:-}" ]]; then
+    rm -f "$key_file"
+  fi
+  [[ -n "$work" ]] && rm -rf "$work"
+  rm -rf "$tools_dir"
 }
-trap cleanup_key EXIT
+trap cleanup EXIT
+archive="$tools_dir/Sparkle-${sparkle_version}.tar.xz"
+curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 \
+  -o "$archive" \
+  "https://github.com/sparkle-project/Sparkle/releases/download/${sparkle_version}/Sparkle-${sparkle_version}.tar.xz"
+actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+[[ "$actual_sha256" == "$sparkle_sha256" ]] || {
+  echo "Sparkle tools sha256 mismatch: got $actual_sha256" >&2
+  exit 1
+}
+tar -xJf "$archive" -C "$tools_dir"
+generate_appcast="$tools_dir/bin/generate_appcast"
+[[ -f "$generate_appcast" && ! -L "$generate_appcast" && -x "$generate_appcast" ]] || {
+  echo "reviewed Sparkle generate_appcast tool is missing" >&2
+  exit 1
+}
 
 if [[ -n "${SPARKLE_PRIVATE_KEY_FILE:-}" ]]; then
   key_file="$SPARKLE_PRIVATE_KEY_FILE"
@@ -55,9 +65,6 @@ else
 fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/malibu-appcast.XXXXXX")"
-cleanup_work() { rm -rf "$work"; }
-trap cleanup_work EXIT
-trap cleanup_key EXIT
 
 cp "$dmg" "$work/Malibu-${tag}.dmg"
 release_notes="$work/release-notes.html"
@@ -65,7 +72,7 @@ cat > "$release_notes" <<EOF
 <html><body><p>Malibu ${tag} — see the GitHub release for notes.</p></body></html>
 EOF
 
-"$tools_dir/bin/generate_appcast" \
+"$generate_appcast" \
   --ed-key-file "$key_file" \
   --download-url-prefix "https://download.malibu.tech/" \
   "$work"
