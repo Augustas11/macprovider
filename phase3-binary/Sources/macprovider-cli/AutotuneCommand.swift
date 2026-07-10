@@ -786,6 +786,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         let selectedForConfig = paidSelected ?? donorSelected
         let applyingDonorFallback = paidSelected == nil && selectedForConfig == donorSelected
         let serveConfig: RecommendationCore?
+        var configurationApplied = false
         if let selected = selectedForConfig,
            let selectedBenchmark = request.benchmarks[selected.catalogKey],
            let selectedRow = catalog.value.rows[selected.catalogKey] {
@@ -820,6 +821,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 now: now,
                 donorMode: applyingDonorFallback
             )
+            configurationApplied = true
             if emitJSON {
                 FileHandle.standardError.write(Data("\(applied.summary)\n".utf8))
             } else {
@@ -829,7 +831,7 @@ struct AutotuneCommand: AsyncParsableCommand {
         if emitJSON {
             print(result.jsonString(serveConfig: serveConfig, donorMode: applyingDonorFallback))
         } else {
-            print(result.humanTranscript())
+            print(result.humanTranscript(configurationApplied: configurationApplied))
         }
         for warning in result.warnings {
             FileHandle.standardError.write(Data("\(warning.rawValue)\n".utf8))

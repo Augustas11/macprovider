@@ -2145,6 +2145,13 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(transcript.contains("starter"), transcript)
     }
 
+    func testTranscriptDoesNotOfferUnreadYPrompt() throws {
+        let result = AutotuneRecommendEngine().recommend(try makeRequest())
+
+        XCTAssertFalse(result.humanTranscript().contains("[Y/n]"))
+        XCTAssertTrue(result.humanTranscript(configurationApplied: true).contains("macprovider-cli serve"))
+    }
+
     private static let validSpec029ProfilesJSON = """
     {
       "code_completion": {

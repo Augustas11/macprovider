@@ -1482,10 +1482,13 @@ extension AutotuneRecommendResult {
         """
     }
 
-    func humanTranscript() -> String {
+    func humanTranscript(configurationApplied: Bool = false) -> String {
         let machineOrChip = hardware.machine ?? hardware.chip
         if let recommendedModel,
            let candidate = selectedCandidate ?? candidates.first(where: { $0.model == recommendedModel }) {
+            let nextStep = configurationApplied
+                ? "Configuration applied. Start the provider with:\n              macprovider-cli serve"
+                : "To apply this recommendation, rerun with --apply. Then start the provider with:\n              macprovider-cli serve"
             return """
             Detected \(machineOrChip), \(hardware.memoryGB) GB unified memory, Tier \(hardware.bandwidthTier.rawValue).
             Benchmarked \(candidates.filter(\.eligible).count) compatible models against rate card \(rateCardVersion) and demand rank \(demandRankVersion).
@@ -1495,7 +1498,7 @@ extension AutotuneRecommendResult {
                   \(formatPerTokenRate(candidate.completionRateUSDPerMillionTokens)) per million completion tokens
             Real earnings scale with buyer demand and your uptime.
 
-            Start provider with \(recommendedModel)? [Y/n]
+            \(nextStep)
             """
         }
         let best = donorFallbackModel ?? "none"
