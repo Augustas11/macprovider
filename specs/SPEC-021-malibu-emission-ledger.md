@@ -1,10 +1,10 @@
-# SPEC-MALIBU-EMISSION-LEDGER — $MALIBU bootstrap rewards emission
+# SPEC-021 — MALIBU bootstrap rewards emission ledger
 
 **Version:** 0.1.0 (2026-07-08)  
 **Status:** DRAFT — implementation target for Session C (`ops/runbooks/malibu-bootstrap-emission.md`)  
 **Depends on:** SPEC-026 v0.13 §5.1–§5.2, §5.5, §10 step 8; SPEC-017 v0.1.8 (`provider_rewards_ledger`); SPEC-016 v0.1.19 (`provider_payout_addresses` projection); SPEC-022 (verified-receipt-only USDC earnings)
 
-**Note on numbering:** SPEC-026 prose references "SPEC-028 (MALIBU rewards emission ledger)". The repo's `SPEC-028-mlx-speculative-decoding.md` is unrelated MLX work. This document is the authoritative emission-ledger spec under the name `SPEC-MALIBU-EMISSION-LEDGER`.
+**Note on numbering:** This is canonical **SPEC-021** (assigned 2026-07-10 in a corpus-hygiene pass; promoted from `docs/notes/SPEC-MALIBU-EMISSION-LEDGER.md` into `specs/`). Earlier SPEC-026 prose called the emission ledger "SPEC-028"; that was a mislabel — `SPEC-028-mlx-speculative-decoding.md` is unrelated MLX work — and those references now point to SPEC-021. The human-readable name `SPEC-MALIBU-EMISSION-LEDGER` remains a valid alias used by code comments, migrations (`012_malibu_emission_ledger.up.sql`), and runbooks.
 
 ---
 

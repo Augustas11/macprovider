@@ -1,7 +1,11 @@
 # SPEC-011 — Operator-Pushed Warm Swap
 
 **Version:** 0.5 (post round-3 polish pass — LOCK candidate)
-**Status:** Draft (pre round-4 LOCK-confirmation audit)
+**Status:** **LOCKED** at v0.5 (2026-06-06, Decision-log Entry 55 —
+codex round-4 returned 0/0/0). Implemented end-to-end (operator-pushed
+warm swap, NDJSON control socket, opt-in `model_hash`/`loading` heartbeat,
+`operator_model_swap` audit event). The former "pre round-4" status was
+never flipped.
 **Date drafted:** 2026-06-06
 **Depends on (REQUIRED):** SPEC-010 v1.5 (LOCKED 2026-06-06,
 Decision-log Entry 54) — SPEC-010 provides `supported_models[]`

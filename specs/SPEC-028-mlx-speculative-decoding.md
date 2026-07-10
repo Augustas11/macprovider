@@ -1,7 +1,7 @@
 # SPEC-028 — MLX Speculative Decoding for Provider Serve
 
 **Version:** 0.2-draft
-**Status:** Draft (research round; not locked; implementation MUST NOT begin before human review)
+**Status:** Draft doc — but IMPLEMENTED IN CODE. Speculative decoding shipped via PR-C (#399) and benchmark-evidence work (#402) on 2026-07-05+ (`--draft-model`/`--num-draft-tokens`, `CompiledDecode`, `spec028-canary`/`spec028-benchmark` subcommands, spec-decode heartbeat telemetry). The v0.2 "implementation MUST NOT begin before human review" gate was overtaken by events; this document needs a post-implementation revision to become the normative record of what actually shipped.
 **Date drafted:** 2026-07-05
 **Revision history:**
 - v0.1 (2026-07-05): initial research-round draft.

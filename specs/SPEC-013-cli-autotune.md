@@ -1,7 +1,11 @@
 # SPEC-013 — `macprovider-cli autotune` subcommand
 
 **Version:** 0.3 (round-2 audit response — LOCK candidate)
-**Status:** Draft (pre round-3 closure-confirmation audit)
+**Status:** Implemented & shipped — the `autotune` subcommand has been
+in production for weeks and is the substrate SPEC-023 v0.5 builds on.
+Core mechanics match this spec; the installer-integrated recommend surface
+(`--recommend`/`--donor-mode`/`--submit-hardware-evidence`) is owned by
+SPEC-023. The "pre round-3" audit status was never updated after ship.
 **Date drafted:** 2026-06-18
 **Depends on:** SPEC-001 v1.4 (`macprovider-cli serve` flags `--kv-bits`, `--max-context`, `--max-batch` per PR #105), SPEC-010 v1.5 (provider-advertised `supported_models[]` shape, model id semantics)
 **Companion to (LOCKED):** SPEC-002 v1.3.5 (no coordinator-side change required), SPEC-003 v0.9.2 (autotune is invoked before / between `macprovider-cli serve` lifetimes; not part of install flow; SPEC-013 v0.2 binds the launchd label and drain sequence to SPEC-003 §FR-C5)

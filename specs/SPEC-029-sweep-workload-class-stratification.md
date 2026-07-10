@@ -1,7 +1,7 @@
 # SPEC-029 - Sweep Workload-Class Stratification
 
 **Version:** 0.1-draft
-**Status:** Draft, implementation authorized by maintainer request on 2026-07-09 for PR #387.
+**Status:** Implemented (guardrails) & merged — PR #387 landed as commit 963449a (2026-07-09; CI green, 3 codex lanes 0 C/H/M). Per-workload winners are not yet published (FR-7 conditional: awaits a real-hardware sweep), so `workload_profiles` is intentionally absent from the static candidates catalog — expected, not drift. (Note: an unrelated `SPEC-029-losslessness-probe.md` was renumbered to canonical SPEC-030 on 2026-07-10 to resolve a number collision with this spec.)
 **Date drafted:** 2026-07-09
 **Depends on:** SPEC-013, SPEC-023, SPEC-028, beta buyer harness workload/report schema.
 

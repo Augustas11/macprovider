@@ -1,7 +1,7 @@
 # SPEC-020 - Provider autoupdate
 
 Version: v0.1.4
-Status: Draft
+Status: Implemented & shipped — live in production (this path ran the 2026-07-10 incident-recovery autoupdate to CLI 1.8.21). The "Draft" status was never updated. Known open drift: code defaults `accept_provisional: true` (`AutoUpdateTrustState.swift`), which contradicts this spec's normative trust table (provisional → notify-only); reconcile by flipping the default or amending the table in a v0.1.5 pass.
 
 ## Goal
 

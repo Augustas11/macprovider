@@ -2,6 +2,16 @@
 
 Status: DRAFT v0.1 · Owner: augstar · Target: 2026 Q3
 
+**Note (2026-07-10, honesty pass):** Most of P0–P4 shipped, but the §3.1 portal
+deep-link onboarding (`malibu://` scheme) and the §5 architecture (wrapper spawns
+a bundled CLI child; SMAppService owns lifecycle; App track does NOT install the
+watchdog) were SUPERSEDED by the CLI-wrapper refactor (PR #418, 2026-07-06):
+onboarding now runs the CLI-track `install.sh` (which installs the watchdog) and
+Malibu adopts/monitors the launchd-managed CLI. The `malibu://` flow was removed.
+This spec needs a v0.2 revision to match the shipped architecture; until then,
+treat SPEC-026 §6/§7 plus the `phase3-binary/app/Sources/Malibu/` sources as the
+source of truth for onboarding.
+
 ## 0. Terminology
 
 - **CLI track** — existing `macprovider-cli` binary + `install.sh` + `live.streamvc.macprovider-watchdog` LaunchAgent. Developer-facing.

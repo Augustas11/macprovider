@@ -1,5 +1,9 @@
-# SPEC-007 - Internal Operator Protocol Explorer
-Dependency lines: depends on `specs/SPEC-002-coordinator.md`, `specs/SPEC-005-billing.md`, `specs/SPEC-006-buyer-api.md`, `specs/SPEC-007-explorer-design.md`, and `specs/SPEC-007-operator-decisions.md`.
+# SPEC-007 — Internal Operator Protocol Explorer
+
+**Version:** 0.5
+**Status:** Implemented & shipped — the coordinator `internal/explorer` package enforces this spec's read-only + typed-path MUSTs (served at `/admin/explorer/*`). Restored to the canonical `specs/` root on 2026-07-10 (corpus-hygiene pass) from `specs/design/spec-007/`, where the supporting design, operator-decision, and audit records remain.
+
+Dependency lines: depends on `specs/SPEC-002-coordinator.md`, `specs/SPEC-005-billing.md`, `specs/SPEC-006-buyer-api.md`, `specs/design/spec-007/SPEC-007-explorer-design.md`, and `specs/design/spec-007/SPEC-007-operator-decisions.md`.
 Normative language in this document uses RFC 2119 meanings for MUST, MUST NOT, SHOULD,
 SHOULD NOT, and MAY. SPEC-007 v0.5 defines an internal, read-only,
 single-operator explorer for the Mac Provider protocol. The explorer is an operator
