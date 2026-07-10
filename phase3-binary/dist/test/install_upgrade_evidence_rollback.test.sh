@@ -54,6 +54,7 @@ make_case() {
   ln -s "$home/macprovider/macprovider-cli" "$home/.local/bin/macprovider-cli"
   printf 'model: old-model\nprovider_id: upgrade-provider\n' > "$home/.config/macprovider/config.yaml"
   printf 'upgrade-provider\n' > "$home/.config/macprovider/provider_id"
+  printf '{"model_id":"old-model","generated_at":"old"}\n' > "$home/.config/macprovider/last-recommendation.json"
   printf '<plist>old</plist>\n' > "$home/Library/LaunchAgents/live.streamvc.macprovider.plist"
   printf 'old-watchdog\n' > "$home/.local/share/macprovider-watchdog/macprovider-health-monitor"
   printf '<plist>old-watchdog</plist>\n' > "$home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
@@ -332,6 +333,7 @@ run_case() {
       CONFIG_DIR="$HOME/.config/macprovider"
       CONFIG_PATH="$CONFIG_DIR/config.yaml"
       PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
+      RECOMMENDATION_PATH="$CONFIG_DIR/last-recommendation.json"
       PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
       WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
       WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
@@ -350,6 +352,7 @@ run_case() {
       INSTALL_TX_HAD_BINARY_PATH=0
       INSTALL_TX_HAD_CONFIG=0
       INSTALL_TX_HAD_PROVIDER_ID=0
+      INSTALL_TX_HAD_RECOMMENDATION=0
       INSTALL_TX_HAD_PLIST=0
       INSTALL_TX_HAD_WATCHDOG_DIR=0
       INSTALL_TX_HAD_WATCHDOG_PLIST=0
@@ -387,6 +390,7 @@ run_case() {
         printf "model: new-model\nprovider_id: upgrade-provider\n" > "$CONFIG_PATH"
         printf "new-provider\n" > "$PROVIDER_ID_PATH"
       fi
+      printf "{\"model_id\":\"new-model\",\"generated_at\":\"new\"}\n" > "$RECOMMENDATION_PATH"
       printf "<plist>new</plist>\n" > "$PLIST_PATH"
       printf "new-watchdog\n" > "$WATCHDOG_DIR/macprovider-health-monitor"
       printf "<plist>new-watchdog</plist>\n" > "$WATCHDOG_PLIST_PATH"
@@ -456,6 +460,7 @@ assert_old_install() {
   grep -F 'old-resource' "$home/macprovider/mlx.metallib" >/dev/null
   grep -F 'model: old-model' "$home/.config/macprovider/config.yaml" >/dev/null
   grep -F 'upgrade-provider' "$home/.config/macprovider/provider_id" >/dev/null
+  grep -F '"model_id":"old-model"' "$home/.config/macprovider/last-recommendation.json" >/dev/null
   grep -F '<plist>old</plist>' "$home/Library/LaunchAgents/live.streamvc.macprovider.plist" >/dev/null
   grep -F 'old-watchdog' "$home/.local/share/macprovider-watchdog/macprovider-health-monitor" >/dev/null
   grep -F '<plist>old-watchdog</plist>' "$home/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist" >/dev/null

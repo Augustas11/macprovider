@@ -93,6 +93,25 @@ func TestBootstrapTokenRejectsOrdinaryAndExpiredCredentials(t *testing.T) {
 		}
 	})
 
+	t.Run("ordinary revoked token", func(t *testing.T) {
+		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		providerID := bootstrapPrincipal("ordinary-revoked-owner")
+		record, _, err := store.IssueToken(ctx, providerID, "ordinary revoked")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.RevokeToken(ctx, record.TokenPrefix); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.MintBootstrapToken(ctx, bootstrapRequest("ordinary-revoked-owner", "192.0.2.22", key, now)); !errors.Is(err, auth.ErrBootstrapIdentityMismatch) {
+			t.Fatalf("revoked ordinary token converted to bootstrap identity: err=%v", err)
+		}
+	})
+
 	t.Run("expired bootstrap token", func(t *testing.T) {
 		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 		if err != nil {
@@ -105,13 +124,36 @@ func TestBootstrapTokenRejectsOrdinaryAndExpiredCredentials(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		different := bootstrapRequest("expired-owner", "192.0.2.3", bytes.Repeat([]byte{0x34}, 32), now.Add(2*time.Minute))
+		if _, err := store.MintBootstrapToken(ctx, different); !errors.Is(err, auth.ErrBootstrapIdentityMismatch) {
+			t.Fatalf("different key reclaimed expired bootstrap identity: err=%v", err)
+		}
 		retry := bootstrapRequest("expired-owner", "192.0.2.3", key, now.Add(2*time.Minute))
 		replacement, err := store.MintBootstrapToken(ctx, retry)
-		if err != nil || replacement.ProviderToken == "" {
-			t.Fatalf("expired unused principal was not collected and reminted: mint=%+v err=%v", replacement, err)
+		if err != nil || !replacement.Replaced || replacement.ProviderToken == "" {
+			t.Fatalf("expired same-key principal was not recovered: mint=%+v err=%v", replacement, err)
 		}
 		if _, valid, _ := store.ValidateToken(ctx, mint.ProviderToken); valid {
 			t.Fatal("expired bootstrap token remained active")
+		}
+	})
+
+	t.Run("operator revoked bootstrap token", func(t *testing.T) {
+		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		req := bootstrapRequest("operator-revoked-bootstrap", "192.0.2.23", key, now)
+		mint, err := store.MintBootstrapToken(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.RevokeToken(ctx, mint.TokenRecord.TokenPrefix); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.MintBootstrapToken(ctx, bootstrapRequest("operator-revoked-bootstrap", "192.0.2.23", key, now.Add(time.Second))); !errors.Is(err, auth.ErrBootstrapTokenUsed) {
+			t.Fatalf("operator-revoked bootstrap token recovered: err=%v", err)
 		}
 	})
 }
@@ -241,8 +283,16 @@ SELECT COUNT(1), total_removed_identities, total_removed_tokens, total_removed_l
   FROM bootstrap_gc_audit`).Scan(&auditRows, &removedIdentities, &removedTokens, &removedLogs); err != nil {
 		t.Fatal(err)
 	}
-	if auditRows != 1 || removedIdentities < 1 || removedTokens < 1 || removedLogs < 2 {
+	if auditRows != 1 || removedIdentities != 0 || removedTokens < 1 || removedLogs < 2 {
 		t.Fatalf("gc audit rows=%d identities=%d tokens=%d logs=%d", auditRows, removedIdentities, removedTokens, removedLogs)
+	}
+	var expiredKey []byte
+	if err := db.QueryRowContext(ctx, `
+SELECT receipt_pubkey FROM provider_bootstrap_identities WHERE provider_id = ?`, expired.ProviderID).Scan(&expiredKey); err != nil {
+		t.Fatalf("expired custody binding was collected: %v", err)
+	}
+	if !bytes.Equal(expiredKey, expired.ReceiptPubkey) {
+		t.Fatalf("expired custody key changed: got=%x want=%x", expiredKey, expired.ReceiptPubkey)
 	}
 	var confirmedAt sql.NullString
 	if err := db.QueryRowContext(ctx, `
@@ -465,8 +515,8 @@ SELECT t.last_used_at, i.confirmed_at
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(1) FROM provider_bootstrap_identities WHERE provider_id = ?`, req.ProviderID).Scan(&identityCount); err != nil {
 		t.Fatal(err)
 	}
-	if tokenCount != 0 || identityCount != 0 {
-		t.Fatalf("expired rejected-session rows were not reclaimed: tokens=%d identities=%d", tokenCount, identityCount)
+	if tokenCount != 0 || identityCount != 1 {
+		t.Fatalf("expired rejected-session token was not reclaimed with custody retained: tokens=%d identities=%d", tokenCount, identityCount)
 	}
 }
 

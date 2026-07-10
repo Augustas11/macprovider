@@ -233,6 +233,9 @@ func TestAutotuneHelloGateRechecksEvidenceAfterChallenge(t *testing.T) {
 	if got := h.Registry.Count(); got != 0 {
 		t.Fatalf("post-proof evidence loss registered %d providers", got)
 	}
+	if records := h.Provider.Admission().Records(nil); len(records) != 0 {
+		t.Fatalf("post-proof evidence loss consumed durable admission: %+v", records)
+	}
 	if active, err := tokenStore.HasActiveTokenForProvider(context.Background(), "m4-anon"); err != nil || active {
 		t.Fatalf("post-proof evidence loss left active token=%v err=%v", active, err)
 	}

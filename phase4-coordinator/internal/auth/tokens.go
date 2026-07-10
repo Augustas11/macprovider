@@ -365,6 +365,7 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 			receipt_pubkey BLOB NOT NULL UNIQUE,
 			created_at TEXT NOT NULL,
 			confirmed_at TEXT,
+			operator_revoked_at TEXT,
 			expires_at TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS bootstrap_mint_log (
@@ -404,6 +405,9 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_bootstrap_identities", "expires_at", `ALTER TABLE provider_bootstrap_identities ADD COLUMN expires_at TEXT`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "provider_bootstrap_identities", "operator_revoked_at", `ALTER TABLE provider_bootstrap_identities ADD COLUMN operator_revoked_at TEXT`); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -583,7 +587,9 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 // BEGIN IMMEDIATE transaction. A response-loss retry can therefore replace
 // only the bootstrap token owned by the exact key that proved the fresh v2
 // challenge; ordinary and used tokens are never revoked by this path, while
-// expired never-used rows are collected with their unconfirmed bindings.
+// expired never-used token rows are collected while their receipt-key custody
+// bindings remain durable. Keeping the binding lets the exact same installer
+// recover after token TTL without allowing a different key to reclaim the ID.
 func (s *Store) MintBootstrapToken(ctx context.Context, req BootstrapMintRequest) (BootstrapMint, error) {
 	if err := config.ValidateProviderID(req.ProviderID); err != nil {
 		return BootstrapMint{}, err
@@ -633,20 +639,11 @@ DELETE FROM provider_tokens
 		if err != nil {
 			return err
 		}
-		removedIdentities, err := deleteRows(ctx, conn, `
-DELETE FROM provider_bootstrap_identities
- WHERE confirmed_at IS NULL
-   AND expires_at IS NOT NULL
-   AND expires_at <= ?
-   AND NOT EXISTS (
-       SELECT 1 FROM provider_tokens
-        WHERE provider_tokens.provider_id = provider_bootstrap_identities.provider_id
-          AND provider_tokens.bootstrap_issued = 1
-          AND provider_tokens.last_used_at IS NOT NULL
-   )`, nowText)
-		if err != nil {
-			return err
-		}
+		// Receipt-key bindings are custody records, not disposable lease rows.
+		// Their expiry only removes them from the live-unconfirmed quota; the
+		// binding itself must survive so post-TTL recovery can compare the exact
+		// original key and operator revocation remains authoritative.
+		removedIdentities := int64(0)
 		if _, err := conn.ExecContext(ctx, `
 INSERT INTO bootstrap_gc_audit (
     id, last_run_at, last_removed_identities, last_removed_tokens, last_removed_logs,
@@ -665,16 +662,37 @@ ON CONFLICT(id) DO UPDATE SET
 		}
 
 		var storedPubkey []byte
-		var confirmedAt sql.NullString
+		var confirmedAt, operatorRevokedAt sql.NullString
 		identityErr := conn.QueryRowContext(ctx, `
-SELECT receipt_pubkey, confirmed_at
+SELECT receipt_pubkey, confirmed_at, operator_revoked_at
   FROM provider_bootstrap_identities
- WHERE provider_id = ?`, req.ProviderID).Scan(&storedPubkey, &confirmedAt)
+ WHERE provider_id = ?`, req.ProviderID).Scan(&storedPubkey, &confirmedAt, &operatorRevokedAt)
 		if identityErr != nil && identityErr != sql.ErrNoRows {
 			return identityErr
 		}
 		identityExists := identityErr == nil
 		if identityExists && !bytes.Equal(storedPubkey, req.ReceiptPubkey) {
+			decisionErr = ErrBootstrapIdentityMismatch
+			return nil
+		}
+		if identityExists && operatorRevokedAt.Valid {
+			decisionErr = ErrBootstrapTokenUsed
+			return nil
+		}
+
+		// Bootstrap is not an alternate issuance path for an operator-managed
+		// principal. Preserve that provenance even after the ordinary token is
+		// revoked so a former credential holder cannot resurrect access with a
+		// locally available receipt key.
+		var ordinaryHistory int
+		if err := conn.QueryRowContext(ctx, `
+SELECT EXISTS(
+    SELECT 1 FROM provider_tokens
+     WHERE provider_id = ? AND bootstrap_issued = 0
+)`, req.ProviderID).Scan(&ordinaryHistory); err != nil {
+			return err
+		}
+		if ordinaryHistory == 1 {
 			decisionErr = ErrBootstrapIdentityMismatch
 			return nil
 		}
@@ -709,15 +727,13 @@ SELECT id, bootstrap_issued, bootstrap_expires_at, last_used_at
 				return nil
 			}
 		} else if identityExists {
-			// Confirmed ownership is permanent. An unconfirmed identity should
-			// only reach this branch if its expiry metadata is malformed; fail
-			// closed instead of allowing a chosen-key replacement.
+			// Confirmed ownership is permanent. An unconfirmed exact-key binding
+			// may outlive its provisional token and is the authorized recovery
+			// path; malformed or operator-revoked bindings failed above.
 			if confirmedAt.Valid {
 				decisionErr = ErrBootstrapTokenUsed
-			} else {
-				decisionErr = ErrBootstrapTokenExpired
+				return nil
 			}
-			return nil
 		}
 
 		var ipMints, providerMints, globalMints int
@@ -759,7 +775,10 @@ SELECT COUNT(1)
 			if err := conn.QueryRowContext(ctx, `
 SELECT COUNT(1)
   FROM provider_bootstrap_identities
- WHERE confirmed_at IS NULL`).Scan(&unconfirmed); err != nil {
+ WHERE confirmed_at IS NULL
+   AND operator_revoked_at IS NULL
+   AND expires_at IS NOT NULL
+   AND expires_at > ?`, nowText).Scan(&unconfirmed); err != nil {
 				return err
 			}
 			if !identityExists && unconfirmed >= req.UnconfirmedIDMax {
@@ -790,6 +809,16 @@ UPDATE provider_tokens
 UPDATE provider_bootstrap_identities
    SET expires_at = ?
  WHERE provider_id = ? AND confirmed_at IS NULL`, expiresText, req.ProviderID); err != nil {
+				return err
+			}
+			out.Replaced = true
+		} else if identityExists {
+			if _, err := conn.ExecContext(ctx, `
+UPDATE provider_bootstrap_identities
+   SET expires_at = ?
+ WHERE provider_id = ?
+   AND confirmed_at IS NULL
+   AND operator_revoked_at IS NULL`, expiresText, req.ProviderID); err != nil {
 				return err
 			}
 			out.Replaced = true
@@ -1127,6 +1156,7 @@ func (s *Store) LookupBootstrapIdentityPubkey(ctx context.Context, providerID st
 SELECT i.receipt_pubkey
   FROM provider_bootstrap_identities i
  WHERE i.provider_id = ?
+   AND i.operator_revoked_at IS NULL
    AND (
        i.confirmed_at IS NOT NULL
        OR (
@@ -1304,41 +1334,78 @@ func (s *Store) RevokeToken(ctx context.Context, tokenPrefix string) (TokenRecor
 	if !isHexPrefix(prefix) {
 		return TokenRecord{}, fmt.Errorf("token prefix must contain only hex characters")
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM provider_tokens WHERE substr(token_prefix, 1, ?) = ? AND revoked_at IS NULL LIMIT 2`, len(prefix), prefix)
-	if err != nil {
-		return TokenRecord{}, err
-	}
-	defer rows.Close()
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return TokenRecord{}, err
+	var revokedID int64
+	var decisionErr error
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		rows, err := conn.QueryContext(ctx, `
+SELECT id, provider_id, bootstrap_issued
+  FROM provider_tokens
+ WHERE substr(token_prefix, 1, ?) = ? AND revoked_at IS NULL
+ LIMIT 2`, len(prefix), prefix)
+		if err != nil {
+			return err
 		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return TokenRecord{}, err
-	}
-	if len(ids) == 0 {
-		return TokenRecord{}, fmt.Errorf("no active token found for prefix %s", prefix)
-	}
-	if len(ids) > 1 {
-		return TokenRecord{}, fmt.Errorf("ambiguous active token prefix %s", prefix)
-	}
-	revokedAt := nowString()
-	res, err := s.db.ExecContext(ctx, `UPDATE provider_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, revokedAt, ids[0])
+		defer rows.Close()
+		type candidate struct {
+			id              int64
+			providerID      string
+			bootstrapIssued int
+		}
+		var candidates []candidate
+		for rows.Next() {
+			var item candidate
+			if err := rows.Scan(&item.id, &item.providerID, &item.bootstrapIssued); err != nil {
+				return err
+			}
+			candidates = append(candidates, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if len(candidates) == 0 {
+			decisionErr = fmt.Errorf("no active token found for prefix %s", prefix)
+			return nil
+		}
+		if len(candidates) > 1 {
+			decisionErr = fmt.Errorf("ambiguous active token prefix %s", prefix)
+			return nil
+		}
+		item := candidates[0]
+		revokedAt := nowString()
+		res, err := conn.ExecContext(ctx, `
+UPDATE provider_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, revokedAt, item.id)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			decisionErr = fmt.Errorf("no active token found for prefix %s", prefix)
+			return nil
+		}
+		if item.bootstrapIssued == 1 {
+			if _, err := conn.ExecContext(ctx, `
+UPDATE provider_bootstrap_identities
+   SET operator_revoked_at = COALESCE(operator_revoked_at, ?)
+ WHERE provider_id = ?`, revokedAt, item.providerID); err != nil {
+				return err
+			}
+		}
+		revokedID = item.id
+		return nil
+	})
 	if err != nil {
 		return TokenRecord{}, err
 	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return TokenRecord{}, err
+	if decisionErr != nil {
+		return TokenRecord{}, decisionErr
 	}
-	if affected == 0 {
-		return TokenRecord{}, fmt.Errorf("no active token found for prefix %s", prefix)
-	}
-	return s.tokenByID(ctx, ids[0])
+	return s.tokenByID(ctx, revokedID)
 }
 
 func (s *Store) ListTokens(ctx context.Context) ([]TokenRecord, error) {

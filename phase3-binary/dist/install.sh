@@ -21,6 +21,7 @@ BINARY_PATH="$BIN_DIR/macprovider-cli"
 CONFIG_DIR="$HOME/.config/macprovider"
 CONFIG_PATH="$CONFIG_DIR/config.yaml"
 PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
+RECOMMENDATION_PATH="$CONFIG_DIR/last-recommendation.json"
 MANIFEST_DIR="$HOME/Library/Application Support/macprovider"
 MANIFEST_PATH="$MANIFEST_DIR/install_manifest.json"
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
@@ -53,6 +54,7 @@ INSTALL_TX_HAD_INSTALL_DIR=0
 INSTALL_TX_HAD_BINARY_PATH=0
 INSTALL_TX_HAD_CONFIG=0
 INSTALL_TX_HAD_PROVIDER_ID=0
+INSTALL_TX_HAD_RECOMMENDATION=0
 INSTALL_TX_HAD_PLIST=0
 INSTALL_TX_HAD_WATCHDOG_DIR=0
 INSTALL_TX_HAD_WATCHDOG_PLIST=0
@@ -276,6 +278,7 @@ write_install_recovery_artifacts() {
     printf 'REC_BINARY_PATH=%q\n' "$BINARY_PATH"
     printf 'REC_CONFIG_PATH=%q\n' "$CONFIG_PATH"
     printf 'REC_PROVIDER_ID_PATH=%q\n' "$PROVIDER_ID_PATH"
+    printf 'REC_RECOMMENDATION_PATH=%q\n' "$RECOMMENDATION_PATH"
     printf 'REC_PLIST_PATH=%q\n' "$PLIST_PATH"
     printf 'REC_WATCHDOG_DIR=%q\n' "$WATCHDOG_DIR"
     printf 'REC_WATCHDOG_PLIST_PATH=%q\n' "$WATCHDOG_PLIST_PATH"
@@ -288,6 +291,7 @@ write_install_recovery_artifacts() {
     printf 'REC_HAD_BINARY_PATH=%q\n' "$INSTALL_TX_HAD_BINARY_PATH"
     printf 'REC_HAD_CONFIG=%q\n' "$INSTALL_TX_HAD_CONFIG"
     printf 'REC_HAD_PROVIDER_ID=%q\n' "$INSTALL_TX_HAD_PROVIDER_ID"
+    printf 'REC_HAD_RECOMMENDATION=%q\n' "$INSTALL_TX_HAD_RECOMMENDATION"
     printf 'REC_HAD_PLIST=%q\n' "$INSTALL_TX_HAD_PLIST"
     printf 'REC_HAD_WATCHDOG_DIR=%q\n' "$INSTALL_TX_HAD_WATCHDOG_DIR"
     printf 'REC_HAD_WATCHDOG_PLIST=%q\n' "$INSTALL_TX_HAD_WATCHDOG_PLIST"
@@ -480,6 +484,7 @@ INSTALL_CANDIDATE="${REC_INSTALL_DIR}.macprovider-restore.$$"
 BINARY_CANDIDATE="${REC_BINARY_PATH}.macprovider-restore.$$"
 CONFIG_CANDIDATE="${REC_CONFIG_PATH}.macprovider-restore.$$"
 PROVIDER_ID_CANDIDATE="${REC_PROVIDER_ID_PATH}.macprovider-restore.$$"
+RECOMMENDATION_CANDIDATE="${REC_RECOMMENDATION_PATH}.macprovider-restore.$$"
 PLIST_CANDIDATE="${REC_PLIST_PATH}.macprovider-restore.$$"
 WATCHDOG_DIR_CANDIDATE="${REC_WATCHDOG_DIR}.macprovider-restore.$$"
 WATCHDOG_PLIST_CANDIDATE="${REC_WATCHDOG_PLIST_PATH}.macprovider-restore.$$"
@@ -499,6 +504,9 @@ if [ "$REC_HAD_CONFIG" -eq 1 ]; then
 fi
 if [ "$REC_HAD_PROVIDER_ID" -eq 1 ]; then
   stage_restore "$RECOVERY_DIR/provider_id" "$PROVIDER_ID_CANDIDATE" file || recovery_failed "could not stage and verify the previous provider id"
+fi
+if [ "$REC_HAD_RECOMMENDATION" -eq 1 ]; then
+  stage_restore "$RECOVERY_DIR/last-recommendation.json" "$RECOMMENDATION_CANDIDATE" file || recovery_failed "could not stage and verify the previous recommendation"
 fi
 if [ "$REC_HAD_PLIST" -eq 1 ]; then
   stage_restore "$RECOVERY_DIR/provider.plist" "$PLIST_CANDIDATE" file || recovery_failed "could not stage and verify the previous launchd plist"
@@ -536,6 +544,7 @@ swap_restore install-dir "$REC_INSTALL_DIR" "$INSTALL_CANDIDATE" "$REC_HAD_INSTA
 swap_restore binary-path "$REC_BINARY_PATH" "$BINARY_CANDIDATE" "$REC_HAD_BINARY_PATH" || recovery_failed "could not restore the previous CLI path"
 swap_restore config.yaml "$REC_CONFIG_PATH" "$CONFIG_CANDIDATE" "$REC_HAD_CONFIG" || recovery_failed "could not restore the previous config"
 swap_restore provider_id "$REC_PROVIDER_ID_PATH" "$PROVIDER_ID_CANDIDATE" "$REC_HAD_PROVIDER_ID" || recovery_failed "could not restore the previous provider id"
+swap_restore last-recommendation.json "$REC_RECOMMENDATION_PATH" "$RECOMMENDATION_CANDIDATE" "$REC_HAD_RECOMMENDATION" || recovery_failed "could not restore the previous recommendation"
 preserve_failed_bootstrap_credential "$FAILED_CURRENT_DIR/config.yaml" "$REC_CONFIG_PATH" "$REC_PROVIDER_ID_PATH" \
   || recovery_failed "could not preserve the installer bootstrap credential through rollback"
 swap_restore provider.plist "$REC_PLIST_PATH" "$PLIST_CANDIDATE" "$REC_HAD_PLIST" || recovery_failed "could not restore the previous launchd plist"
@@ -739,7 +748,7 @@ PY
   recovery_log "Restored prior manual provider pid=$RESTORED_MANUAL_PID with exact prior argv and port ownership."
 fi
 
-recovery_log "Previous provider, watchdog, manifest, service, and manual-process states were restored and verified."
+recovery_log "Previous provider, recommendation, watchdog, manifest, service, and manual-process states were restored and verified."
 exit 0
 RECOVERY_SCRIPT
   chmod 700 "$recovery_script" || return 1
@@ -979,6 +988,11 @@ begin_install_transaction() {
     stage_install_tx_path "$PROVIDER_ID_PATH" "$recovery_staging/provider_id" file \
       || die 70 "could not stage and verify the previous provider id; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_PROVIDER_ID=1
+  fi
+  if [ -f "$RECOMMENDATION_PATH" ]; then
+    stage_install_tx_path "$RECOMMENDATION_PATH" "$recovery_staging/last-recommendation.json" file \
+      || die 70 "could not stage and verify the previous recommendation; current install was not changed (partial recovery data: $recovery_staging)"
+    INSTALL_TX_HAD_RECOMMENDATION=1
   fi
   if [ -f "$PLIST_PATH" ]; then
     stage_install_tx_path "$PLIST_PATH" "$recovery_staging/provider.plist" file \

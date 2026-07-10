@@ -1244,18 +1244,6 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		releaseUnauth()
 		return "", ""
 	}
-	if tier, ok := s.recordProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
-		return "", ""
-	} else {
-		entry.Tier = tier
-	}
-	registered := false
-	defer func() {
-		if !registered && entry.Tier == pool.TierProvisional {
-			s.admission.ReleasePendingProvisional()
-		}
-	}()
-
 	entry.EncryptedLeg = true
 	entry.AttestationStatus = attestationStatus
 	if attestResult.SEResult != nil {
@@ -1313,6 +1301,21 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	entry.MaxAdmittedModelKey = maxAdmittedModelKey
 	entry.MaxAdmittedModelID = maxAdmittedModelID
+	// This is the first durable admission mutation in the v2 path. Keep it
+	// after the post-challenge evidence recheck so a provider whose evidence
+	// disappears during authentication cannot consume an hourly admission or
+	// leave a provisional record behind.
+	if tier, ok := s.recordProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
+		return "", ""
+	} else {
+		entry.Tier = tier
+	}
+	registered := false
+	defer func() {
+		if !registered && entry.Tier == pool.TierProvisional {
+			s.admission.ReleasePendingProvisional()
+		}
+	}()
 	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, initial.Hostname)
 	if outcome == provisionalTokenRejectTOFU {
 		s.close(conn, CloseInvalidToken, "invalid_token")

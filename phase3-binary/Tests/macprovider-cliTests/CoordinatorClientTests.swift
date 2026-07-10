@@ -552,6 +552,67 @@ final class CoordinatorClientTests: XCTestCase {
             environment: [:]
         )
         XCTAssertEqual(loaded.providerToken, recoveredToken)
+        XCTAssertGreaterThan(recovered.cancelCountSnapshot(), 0)
+    }
+
+    func testInvalidMalibuManagedBearerDoesNotEnterCLIBootstrapRecovery() async throws {
+        let directory = try Self.makeTemporaryDirectory(prefix: "bootstrap-malibu-boundary-")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let configURL = directory.appendingPathComponent("config.yaml")
+        let providerID = "mp-00112233445566778899aabbccddeeff"
+        let staleToken = String(repeating: "d", count: 64)
+        try Data("""
+        model: model-a
+        coordinator_url: wss://127.0.0.1:8444/ws/provider
+        provider_id: \(providerID)
+        provider_token: \(staleToken)
+        managed_by: malibu-app
+        """.utf8).write(to: configURL)
+
+        var config = AppConfig.defaults(configPath: configURL.path)
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = providerID
+        config.model = "model-a"
+        config.providerToken = staleToken
+        config.managedBy = "malibu-app"
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let rejected = FakeProviderWebSocketTask(
+            receiveResults: [.failure(CancellationError())],
+            closeCodeRawValue: 4005,
+            closeReasonText: "invalid_token"
+        )
+        let unusedRecovery = FakeProviderWebSocketTask(receiveResults: [])
+        let factory = FakeProviderWebSocketFactory(sockets: [rejected, unusedRecovery])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            receiptIdentitySigningKey: Curve25519.Signing.PrivateKey()
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+            XCTFail("Malibu-managed invalid bearer must fail closed")
+        } catch let CoordinatorAuthError.rejected(code, _) {
+            XCTAssertEqual(code, "invalid_token")
+        } catch {
+            XCTFail("unexpected Malibu-managed recovery error: \(error)")
+        }
+
+        XCTAssertEqual(factory.requestsSnapshot().count, 1)
+        let loaded = try ConfigLoader.load(
+            cli: CLIOverrides(configPath: configURL.path),
+            environment: [:]
+        )
+        XCTAssertEqual(loaded.providerToken, staleToken)
     }
 
     func testConfirmedInstallerBootstrapCredentialRecoveryFailsClosedWithoutMutation() async throws {

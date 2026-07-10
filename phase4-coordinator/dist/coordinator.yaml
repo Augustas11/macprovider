@@ -68,8 +68,9 @@ auth:
   require_provider_tokens: true
   allow_tokenless_provisional_bootstrap: true
   # Receipt-key-authenticated credential recovery is deliberately short-lived
-  # and bounded per source/identity, globally per hour, and across outstanding
-  # unconfirmed identities.
+  # and bounded per source/identity, globally per hour, and across live
+  # unconfirmed leases. Expired receipt-key custody bindings remain durable so
+  # only the original installer can recover after token TTL.
   credential_bootstrap_mints_per_ip_hour: 8
   credential_bootstrap_mints_per_id_hour: 3
   credential_bootstrap_mints_global_hour: 128

@@ -576,7 +576,9 @@ actor CoordinatorClient {
     /// closed without local mutation.
     private func recoverInvalidBootstrapCredential() async -> Bool {
         guard !credentialBootstrap,
+              appConfig.managedBy != "malibu-app",
               BootstrapAuthCommand.isCredentialBootstrapPrincipal(providerID),
+              let rejectedToken = providerToken,
               let receiptKey = receiptIdentitySigningKeys.first else {
             return false
         }
@@ -605,12 +607,14 @@ actor CoordinatorClient {
         do {
             try await recoveryClient.connectAndRunOnce()
         } catch is CoordinatorAuthUpgradeReconnect {
+            await recoveryClient.stop()
             let loaded = try? ConfigLoader.load(
                 cli: CLIOverrides(configPath: configPath),
                 environment: [:]
             )
             guard let recovered = loaded?.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !recovered.isEmpty else {
+                  !recovered.isEmpty,
+                  recovered != rejectedToken else {
                 Self.keepaliveDebug("bootstrap_credential_recovery_persist_missing")
                 return false
             }
@@ -618,9 +622,11 @@ actor CoordinatorClient {
             Self.keepaliveDebug("bootstrap_credential_recovery_succeeded")
             return true
         } catch {
+            await recoveryClient.stop()
             Self.keepaliveDebug("bootstrap_credential_recovery_failed error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
             return false
         }
+        await recoveryClient.stop()
         return false
     }
 
