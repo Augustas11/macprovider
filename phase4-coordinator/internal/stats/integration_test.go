@@ -1240,13 +1240,23 @@ func TestHardwareProfileRoleGrantsAndVerificationGuard(t *testing.T) {
 		t.Fatalf("provider_onboarding insert set verified=true; want default/trigger false")
 	}
 
+	var onboardingVerified bool
+	if err := onboardingDB.QueryRowContext(ctx,
+		`SELECT verified FROM provider_hardware_profiles WHERE provider_id = 'p-hw'`,
+	).Scan(&onboardingVerified); err != nil {
+		t.Fatalf("provider_onboarding select verified capacity gate: %v", err)
+	}
+	if onboardingVerified {
+		t.Fatalf("provider_onboarding selected verified=true before operator verification")
+	}
+
 	_, err = onboardingDB.QueryContext(ctx,
-		`SELECT verified FROM provider_hardware_profiles WHERE provider_id = 'p-hw'`)
+		`SELECT source FROM provider_hardware_profiles WHERE provider_id = 'p-hw'`)
 	if err == nil {
-		t.Fatalf("provider_onboarding unexpectedly selected verified")
+		t.Fatalf("provider_onboarding unexpectedly selected source")
 	}
 	if !contains(err.Error(), "permission denied") {
-		t.Fatalf("provider_onboarding select verified: expected permission denied, got %q", err.Error())
+		t.Fatalf("provider_onboarding select source: expected permission denied, got %q", err.Error())
 	}
 
 	_, err = onboardingDB.ExecContext(ctx,

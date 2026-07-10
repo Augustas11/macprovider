@@ -212,6 +212,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 		"unified_memory_gb",
 		"verified",
 		") ON provider_hardware_profiles TO provider_onboarding",
+		"GRANT SELECT (\n    chip_normalized,\n    unified_memory_gb\n) ON hardware_verification_jobs TO provider_onboarding",
 	} {
 		mustContain(t, autotuneCurrentHardwareGateGrants, needle,
 			"autotune admission can compare the current verified capacity tuple")

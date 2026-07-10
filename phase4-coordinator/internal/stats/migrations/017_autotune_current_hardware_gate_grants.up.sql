@@ -8,3 +8,8 @@ GRANT SELECT (
     unified_memory_gb,
     verified
 ) ON provider_hardware_profiles TO provider_onboarding;
+
+GRANT SELECT (
+    chip_normalized,
+    unified_memory_gb
+) ON hardware_verification_jobs TO provider_onboarding;
