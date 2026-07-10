@@ -589,14 +589,15 @@ type AuthConfig struct {
 	// provisional provider to reach the self-serve mint/TOFU path. Existing
 	// used-token identities still reject tokenless reconnects; enable only
 	// for public onboarding.
-	AllowTokenlessProvisionalBootstrap bool              `yaml:"allow_tokenless_provisional_bootstrap"`
-	CredentialBootstrapMintsPerIPHour  int               `yaml:"credential_bootstrap_mints_per_ip_hour"`
-	CredentialBootstrapMintsPerIDHour  int               `yaml:"credential_bootstrap_mints_per_id_hour"`
-	CredentialBootstrapMintsGlobalHour int               `yaml:"credential_bootstrap_mints_global_hour"`
-	CredentialBootstrapUnconfirmedMax  int               `yaml:"credential_bootstrap_unconfirmed_max"`
-	CredentialBootstrapOutstandingMax  int               `yaml:"credential_bootstrap_outstanding_max"`
-	CredentialBootstrapTokenTTLS       int               `yaml:"credential_bootstrap_token_ttl_s"`
-	GitHubOAuth                        GitHubOAuthConfig `yaml:"github_oauth"`
+	AllowTokenlessProvisionalBootstrap    bool              `yaml:"allow_tokenless_provisional_bootstrap"`
+	CredentialBootstrapMintsPerIPHour     int               `yaml:"credential_bootstrap_mints_per_ip_hour"`
+	CredentialBootstrapMintsPerIDHour     int               `yaml:"credential_bootstrap_mints_per_id_hour"`
+	CredentialBootstrapMintsGlobalHour    int               `yaml:"credential_bootstrap_mints_global_hour"`
+	CredentialBootstrapUnconfirmedMax     int               `yaml:"credential_bootstrap_unconfirmed_max"`
+	CredentialBootstrapOutstandingMax     int               `yaml:"credential_bootstrap_outstanding_max"`
+	CredentialBootstrapTokenTTLS          int               `yaml:"credential_bootstrap_token_ttl_s"`
+	CredentialBootstrapIdentityRetentionS int               `yaml:"credential_bootstrap_identity_retention_s"`
+	GitHubOAuth                           GitHubOAuthConfig `yaml:"github_oauth"`
 }
 
 type GitHubOAuthConfig struct {
@@ -1007,13 +1008,14 @@ func Default() Config {
 			RequestsPerMinuteCap:          60,
 		},
 		Auth: AuthConfig{
-			RequireProviderTokens:              true,
-			CredentialBootstrapMintsPerIPHour:  8,
-			CredentialBootstrapMintsPerIDHour:  3,
-			CredentialBootstrapMintsGlobalHour: 128,
-			CredentialBootstrapUnconfirmedMax:  64,
-			CredentialBootstrapOutstandingMax:  64,
-			CredentialBootstrapTokenTTLS:       600,
+			RequireProviderTokens:                 true,
+			CredentialBootstrapMintsPerIPHour:     8,
+			CredentialBootstrapMintsPerIDHour:     3,
+			CredentialBootstrapMintsGlobalHour:    128,
+			CredentialBootstrapUnconfirmedMax:     64,
+			CredentialBootstrapOutstandingMax:     64,
+			CredentialBootstrapTokenTTLS:          600,
+			CredentialBootstrapIdentityRetentionS: 604800,
 		},
 		Proxy: ProxyConfig{
 			// Default trusts loopback only. Production sits behind nginx on
@@ -1397,8 +1399,12 @@ func (c Config) Validate() error {
 	}
 	if c.Auth.CredentialBootstrapMintsPerIPHour <= 0 || c.Auth.CredentialBootstrapMintsPerIDHour <= 0 ||
 		c.Auth.CredentialBootstrapMintsGlobalHour <= 0 || c.Auth.CredentialBootstrapUnconfirmedMax <= 0 ||
-		c.Auth.CredentialBootstrapOutstandingMax <= 0 || c.Auth.CredentialBootstrapTokenTTLS <= 0 {
-		return fmt.Errorf("auth credential-bootstrap mint limits, outstanding max, and token ttl must be > 0")
+		c.Auth.CredentialBootstrapOutstandingMax <= 0 || c.Auth.CredentialBootstrapTokenTTLS <= 0 ||
+		c.Auth.CredentialBootstrapIdentityRetentionS <= 0 {
+		return fmt.Errorf("auth credential-bootstrap mint limits, outstanding max, token ttl, and identity retention must be > 0")
+	}
+	if c.Auth.CredentialBootstrapIdentityRetentionS <= c.Auth.CredentialBootstrapTokenTTLS {
+		return fmt.Errorf("auth.credential_bootstrap_identity_retention_s must exceed auth.credential_bootstrap_token_ttl_s")
 	}
 	if c.WS.WriteBufferSize <= 0 {
 		return fmt.Errorf("ws.write_buffer_size must be > 0")

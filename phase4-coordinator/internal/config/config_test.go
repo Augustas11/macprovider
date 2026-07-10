@@ -35,6 +35,18 @@ func TestProviderTokensRequiredByDefault(t *testing.T) {
 		t.Fatalf("credential bootstrap global defaults = %d/%d, want 128/64",
 			cfg.Auth.CredentialBootstrapMintsGlobalHour, cfg.Auth.CredentialBootstrapUnconfirmedMax)
 	}
+	if cfg.Auth.CredentialBootstrapIdentityRetentionS != 7*24*60*60 {
+		t.Fatalf("credential bootstrap identity retention=%d want seven days", cfg.Auth.CredentialBootstrapIdentityRetentionS)
+	}
+}
+
+func TestCredentialBootstrapIdentityRetentionMustExceedTokenTTL(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Auth.CredentialBootstrapIdentityRetentionS = cfg.Auth.CredentialBootstrapTokenTTLS
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "identity_retention_s must exceed") {
+		t.Fatalf("Validate error=%v", err)
+	}
 }
 
 func TestLoadRejectsWeakOperatorKeys(t *testing.T) {

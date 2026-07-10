@@ -69,15 +69,19 @@ auth:
   allow_tokenless_provisional_bootstrap: true
   # Receipt-key-authenticated credential recovery is deliberately short-lived
   # and bounded per source/identity, globally per hour, and across live
-  # unconfirmed custody bindings. Expired bindings remain durable so only the
-  # original installer can recover after token TTL; operators tombstone
-  # abandoned bindings with coordinator-cli revoke-bootstrap-identity.
+  # unconfirmed custody bindings. Expired bindings remain exact-key recoverable
+  # for the retention window below. Operators enumerate them with
+  # coordinator-cli list-bootstrap-identities and tombstone abandoned bindings
+  # with coordinator-cli revoke-bootstrap-identity.
   credential_bootstrap_mints_per_ip_hour: 8
   credential_bootstrap_mints_per_id_hour: 3
   credential_bootstrap_mints_global_hour: 128
   credential_bootstrap_unconfirmed_max: 64
   credential_bootstrap_outstanding_max: 64
   credential_bootstrap_token_ttl_s: 600
+  # Never-admitted receipt identities remain recoverable for seven days after
+  # token expiry. Confirmed identities and operator tombstones are permanent.
+  credential_bootstrap_identity_retention_s: 604800
   operator_keys:
     spec026_a: env:OPERATOR_AUTH_POLICY_A
     spec026_b: env:OPERATOR_AUTH_POLICY_B

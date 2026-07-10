@@ -69,6 +69,14 @@ type TokenRecord struct {
 	LastUsedAt   sql.NullString
 }
 
+type BootstrapIdentityRecord struct {
+	ProviderID        string
+	CreatedAt         string
+	ExpiresAt         sql.NullString
+	ConfirmedAt       sql.NullString
+	OperatorRevokedAt sql.NullString
+}
+
 type PairOTMint struct {
 	PairOT    string
 	ClaimURL  string
@@ -95,6 +103,7 @@ type BootstrapMintRequest struct {
 	GlobalLimitPerHour  int
 	UnconfirmedIDMax    int
 	OutstandingTokenMax int
+	IdentityRetention   time.Duration
 }
 
 type BootstrapMint struct {
@@ -601,8 +610,9 @@ SELECT EXISTS(
 // only the bootstrap token owned by the exact key that proved the fresh v2
 // challenge; ordinary and used tokens are never revoked by this path, while
 // expired never-used token rows are collected while their receipt-key custody
-// bindings remain durable. Keeping the binding lets the exact same installer
-// recover after token TTL without allowing a different key to reclaim the ID.
+// bindings remain available for the configured recovery window. Confirmed and
+// operator-revoked bindings remain durable; never-admitted random IDs are
+// collected after retention so unauthenticated storage remains time-bounded.
 func (s *Store) MintBootstrapToken(ctx context.Context, req BootstrapMintRequest) (BootstrapMint, error) {
 	if err := config.ValidateProviderID(req.ProviderID); err != nil {
 		return BootstrapMint{}, err
@@ -623,9 +633,12 @@ func (s *Store) MintBootstrapToken(ctx context.Context, req BootstrapMintRequest
 	} else {
 		req.Now = req.Now.UTC()
 	}
-	if req.TTL <= 0 || req.PerIPLimitPerHour <= 0 || req.PerProviderPerHour <= 0 ||
+	if req.TTL <= 0 || req.IdentityRetention <= 0 || req.PerIPLimitPerHour <= 0 || req.PerProviderPerHour <= 0 ||
 		req.GlobalLimitPerHour <= 0 || req.UnconfirmedIDMax <= 0 || req.OutstandingTokenMax <= 0 {
 		return BootstrapMint{}, fmt.Errorf("bootstrap limits and ttl must be positive")
+	}
+	if req.IdentityRetention <= req.TTL {
+		return BootstrapMint{}, fmt.Errorf("bootstrap identity retention must exceed token ttl")
 	}
 	newToken, err := randomHex(32)
 	if err != nil {
@@ -637,6 +650,7 @@ func (s *Store) MintBootstrapToken(ctx context.Context, req BootstrapMintRequest
 	err = sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		nowText := timeText(req.Now)
 		cutoffText := timeText(req.Now.Add(-time.Hour))
+		identityCutoffText := timeText(req.Now.Add(-req.IdentityRetention))
 		expiresText := timeText(req.Now.Add(req.TTL))
 
 		removedLogs, err := deleteRows(ctx, conn, `DELETE FROM bootstrap_mint_log WHERE ts < ?`, cutoffText)
@@ -652,11 +666,19 @@ DELETE FROM provider_tokens
 		if err != nil {
 			return err
 		}
-		// Receipt-key bindings are custody records, not disposable lease rows.
-		// Their expiry only removes them from the live-unconfirmed quota; the
-		// binding itself must survive so post-TTL recovery can compare the exact
-		// original key and operator revocation remains authoritative.
-		removedIdentities := int64(0)
+		// Unconfirmed receipt-key bindings survive token expiry for the configured
+		// recovery window, then become safe to collect: their random 128-bit
+		// provider IDs were never admitted or exposed through the live pool.
+		// Confirmed ownership and operator tombstones remain durable forever.
+		removedIdentities, err := deleteRows(ctx, conn, `
+DELETE FROM provider_bootstrap_identities
+ WHERE confirmed_at IS NULL
+   AND operator_revoked_at IS NULL
+   AND expires_at IS NOT NULL
+   AND expires_at <= ?`, identityCutoffText)
+		if err != nil {
+			return err
+		}
 		if _, err := conn.ExecContext(ctx, `
 INSERT INTO bootstrap_gc_audit (
     id, last_run_at, last_removed_identities, last_removed_tokens, last_removed_logs,
@@ -789,7 +811,9 @@ SELECT COUNT(1)
 SELECT COUNT(1)
   FROM provider_bootstrap_identities
  WHERE confirmed_at IS NULL
-   AND operator_revoked_at IS NULL`).Scan(&unconfirmed); err != nil {
+   AND operator_revoked_at IS NULL
+   AND expires_at IS NOT NULL
+   AND expires_at > ?`, nowText).Scan(&unconfirmed); err != nil {
 				return err
 			}
 			if !identityExists && unconfirmed >= req.UnconfirmedIDMax {
@@ -1524,6 +1548,32 @@ UPDATE provider_tokens
 	return decisionErr
 }
 
+func (s *Store) ListBootstrapIdentities(ctx context.Context) ([]BootstrapIdentityRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT provider_id, created_at, expires_at, confirmed_at, operator_revoked_at
+  FROM provider_bootstrap_identities
+ ORDER BY created_at, provider_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []BootstrapIdentityRecord
+	for rows.Next() {
+		var record BootstrapIdentityRecord
+		if err := rows.Scan(
+			&record.ProviderID,
+			&record.CreatedAt,
+			&record.ExpiresAt,
+			&record.ConfirmedAt,
+			&record.OperatorRevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
 func (s *Store) ListTokens(ctx context.Context) ([]TokenRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, token_prefix, provider_id, provider_name, created_at, revoked_at, last_used_at FROM provider_tokens ORDER BY id`)
 	if err != nil {
@@ -1730,42 +1780,53 @@ func (s *Store) MintAdmissionTokenAndPairOT(ctx context.Context, providerID, pro
 	if err != nil {
 		return AdmissionPairMint{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return AdmissionPairMint{}, err
-	}
-	defer tx.Rollback()
 	hash := tokenHash(providerToken)
 	prefix := providerToken[:tokenDisplayPrefixLength]
 	nowText := timeText(now)
-	res, err := tx.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, nowText)
-	if err != nil {
-		if isActiveProviderTokenConstraintFailure(err) {
-			return AdmissionPairMint{}, ErrActiveTokenAlreadyExists
+	var out AdmissionPairMint
+	err = sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		if IsCredentialBootstrapPrincipal(providerID) {
+			var bootstrapIdentityExists int
+			if err := conn.QueryRowContext(ctx, `
+SELECT EXISTS(
+    SELECT 1 FROM provider_bootstrap_identities WHERE provider_id = ?
+)`, providerID).Scan(&bootstrapIdentityExists); err != nil {
+				return err
+			}
+			if bootstrapIdentityExists == 1 {
+				return ErrBootstrapIdentityExists
+			}
 		}
-		return AdmissionPairMint{}, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return AdmissionPairMint{}, err
-	}
-	var owned int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM provider_ownership WHERE provider_id = ?`, providerID).Scan(&owned); err != nil {
-		return AdmissionPairMint{}, err
-	}
-	out := AdmissionPairMint{
-		TokenRecord:   TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: nowText},
-		ProviderToken: providerToken,
-	}
-	if owned == 0 {
-		out.PairOT = pairOT
-		out.ExpiresAt = now.Add(10 * time.Minute).UTC()
-		out.Paired = true
-		if _, err := tx.ExecContext(ctx, `INSERT INTO pair_ots (id, provider_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, pairOT, providerID, timeText(out.ExpiresAt), nowText); err != nil {
-			return AdmissionPairMint{}, err
+		res, err := conn.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, nowText)
+		if err != nil {
+			if isActiveProviderTokenConstraintFailure(err) {
+				return ErrActiveTokenAlreadyExists
+			}
+			return err
 		}
-	}
-	if err := tx.Commit(); err != nil {
+		id, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		var owned int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(1) FROM provider_ownership WHERE provider_id = ?`, providerID).Scan(&owned); err != nil {
+			return err
+		}
+		out = AdmissionPairMint{
+			TokenRecord:   TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: nowText},
+			ProviderToken: providerToken,
+		}
+		if owned == 0 {
+			out.PairOT = pairOT
+			out.ExpiresAt = now.Add(10 * time.Minute).UTC()
+			out.Paired = true
+			if _, err := conn.ExecContext(ctx, `INSERT INTO pair_ots (id, provider_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, pairOT, providerID, timeText(out.ExpiresAt), nowText); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return AdmissionPairMint{}, err
 	}
 	return out, nil

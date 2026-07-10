@@ -1210,6 +1210,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			GlobalLimitPerHour:  s.cfg.Auth.CredentialBootstrapMintsGlobalHour,
 			UnconfirmedIDMax:    s.cfg.Auth.CredentialBootstrapUnconfirmedMax,
 			OutstandingTokenMax: s.cfg.Auth.CredentialBootstrapOutstandingMax,
+			IdentityRetention:   time.Duration(s.cfg.Auth.CredentialBootstrapIdentityRetentionS) * time.Second,
 		})
 		if err != nil {
 			s.rejectCredentialBootstrap(conn, err)
