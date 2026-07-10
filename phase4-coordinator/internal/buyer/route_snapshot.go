@@ -59,9 +59,9 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		return nil, err
 	}
 	sessionID := stringPtrOrNil(provider.AssignedID)
-	pendingDeadline := settlementCfg.RecoveryGraceSeconds
+	pendingDeadline := settlementCfg.PendingDeadlineSeconds
 	if pendingDeadline <= 0 {
-		pendingDeadline = config.Default().Settlement.RecoveryGraceSeconds
+		pendingDeadline = config.Default().Settlement.PendingDeadlineSeconds
 	}
 	snapshot := billing.RouteSnapshot{
 		AccountScope:                      accountScopeForSettlement(b.accountID),

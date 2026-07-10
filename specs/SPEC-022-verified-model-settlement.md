@@ -252,7 +252,12 @@ for this gate. The policy is named `verified_model_settlement` and has at least:
 - `entrypoints`: covered paid entrypoints;
 - `receipt_profile`: accepted settlement-capable receipt profile/version set;
 - `pending_deadline_seconds`: receipt deadline measured from request terminal
-  time, default 300 and maximum 900;
+  time, default 300 and maximum 900. This value is backed by its own
+  coordinator config key `settlement.pending_deadline_seconds` (default 300,
+  validated to 1..900). It MUST NOT be derived from
+  `settlement.recovery_grace_seconds` (SPEC-005 recovery-grace, default 30s),
+  which retains its distinct recovery-grace meaning; conflating the two would
+  quarantine receipts arriving 30–300s after terminal state under `enforce`;
 - `require_hash_verified`: always true when `mode: enforce`;
 - `catalog_policy`: active catalog id/signature key rules.
 
