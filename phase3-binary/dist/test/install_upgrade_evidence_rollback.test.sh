@@ -21,6 +21,7 @@ names = {
     "write_install_recovery_artifacts", "begin_install_transaction",
     "rollback_install_transaction", "commit_install_transaction",
     "launchd_label_is_disabled", "capture_manual_provider_for_recovery",
+    "pid_is_live_non_zombie", "stop_owned_manual_provider",
     "validate_port_value", "ensure_port_free",
 }
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
@@ -131,6 +132,19 @@ exec /bin/mv "$@"
 EOF
   chmod +x "$root/bin/mv"
 
+  cat > "$root/bin/rm" <<'EOF'
+#!/usr/bin/env bash
+if [ -f "$CASE_ROOT/fail-retired-rm" ]; then
+  for argument in "$@"; do
+    case "$argument" in
+      *.committed.*) exit 62 ;;
+    esac
+  done
+fi
+exec /bin/rm "$@"
+EOF
+  chmod +x "$root/bin/rm"
+
   cat > "$root/bin/lsof" <<'EOF'
 #!/usr/bin/env bash
 arguments="$*"
@@ -150,6 +164,8 @@ fi
 [ -n "$manual_pid" ] || exit 1
 if printf '%s\n' "$arguments" | grep -q -- '-d txt'; then
   printf 'p%s\nn%s\n' "$manual_pid" "$CASE_ROOT/home/macprovider/macprovider-cli"
+elif printf '%s\n' "$arguments" | grep -q -- '-d cwd'; then
+  printf 'p%s\nn%s\n' "$manual_pid" "$CASE_ROOT/manual-cwd"
 elif printf ' %s ' "$arguments" | grep -q -- ' -t '; then
   [ ! -f "$CASE_ROOT/manual-never-bind" ] || exit 1
   printf '%s\n' "$manual_pid"
@@ -193,6 +209,10 @@ PY
 #include <sys/socket.h>
 #include <unistd.h>
 
+static void write_hex(FILE *log, const char *value) {
+  for (const unsigned char *p = (const unsigned char *)value; *p != '\0'; p++) fprintf(log, "%02x", *p);
+}
+
 int main(int argc, char **argv) {
   int port = 0;
   const char *log_path = NULL;
@@ -223,22 +243,44 @@ int main(int argc, char **argv) {
   }
   fprintf(log, "\n");
   fclose(log);
+  char cwd[4096];
+  const char *context = getenv("MACPROVIDER_RECOVERY_CONTEXT");
+  const char *path = getenv("PATH");
+  char context_path[8192];
+  if (getcwd(cwd, sizeof(cwd)) == NULL || context == NULL || path == NULL) return 5;
+  if (snprintf(context_path, sizeof(context_path), "%s.context", log_path) >= (int)sizeof(context_path)) return 6;
+  FILE *context_log = fopen(context_path, "a");
+  if (!context_log) return 7;
+  fprintf(context_log, "%d|", getpid());
+  write_hex(context_log, cwd);
+  fprintf(context_log, "|");
+  write_hex(context_log, context);
+  fprintf(context_log, "|");
+  write_hex(context_log, path);
+  fprintf(context_log, "\n");
+  fclose(context_log);
   for (;;) pause();
 }
 EOF
   cc -O2 -o "$root/home/macprovider/macprovider-cli" "$root/manual-provider.c"
   shasum -a 256 "$root/home/macprovider/macprovider-cli" | awk '{print $1}' > "$root/manual-old.sha256"
   printf '%s\n' "$port" > "$root/manual-port"
+  mkdir -p "$root/manual-cwd"
   # Literal shell syntax and lossy-ps edge cases prove argv is captured from
   # KERN_PROCARGS2 and replayed as bytes, never parsed or evaluated by a shell.
   # shellcheck disable=SC2016
-  "$root/home/macprovider/macprovider-cli" --port "$port" --model old-model \
-    --fixture-log "$root/manual-fixture.log" \
-    --bind-gate "$root/manual-never-bind" \
-    --whitespace $'two words\twith tab' \
-    --quotes "say \"hello\" and 'goodbye'" \
-    --backslashes 'C:\Models\Qwen\file' \
-    --metacharacters ';touch ${IFS}'"$root/pwned"' & | $(printf nope) * ? [x]' &
+  (
+    cd "$root/manual-cwd"
+    MACPROVIDER_RECOVERY_CONTEXT=$'exact context with spaces\tand tab; $(not evaluated)' \
+      PATH="$root/bin:/usr/bin:/bin" \
+      exec "$root/home/macprovider/macprovider-cli" --port "$port" --model old-model \
+        --fixture-log "$root/manual-fixture.log" \
+        --bind-gate "$root/manual-never-bind" \
+        --whitespace $'two words\twith tab' \
+        --quotes "say \"hello\" and 'goodbye'" \
+        --backslashes 'C:\Models\Qwen\file' \
+        --metacharacters ';touch ${IFS}'"$root/pwned"' & | $(printf nope) * ? [x]'
+  ) &
   manual_pid=$!
   printf '%s\n' "$manual_pid" > "$root/manual-current.pid"
   for _ in $(seq 1 20); do
@@ -266,6 +308,9 @@ run_case() {
   if [ "$prior_state" = "manual" ]; then
     rm -f "$root/service-active"
     start_manual_fixture "$root"
+  fi
+  if [ "$install_phase" = "credential-self-test" ]; then
+    printf 'model: old-model\n' > "$root/home/.config/macprovider/config.yaml"
   fi
   [ -z "$pre_begin_fault" ] || : > "$root/$pre_begin_fault"
 
@@ -329,8 +374,13 @@ run_case() {
         printf "new-binary\n" > "$INSTALL_DIR/macprovider-cli"
       fi
       printf "new-resource\n" > "$INSTALL_DIR/mlx.metallib"
-      printf "model: new-model\nprovider_id: upgrade-provider\n" > "$CONFIG_PATH"
-      printf "new-provider\n" > "$PROVIDER_ID_PATH"
+      if [ "$INSTALL_PHASE" = "credential-self-test" ]; then
+        printf "model: new-model\nprovider_id: mp-0123456789abcdef0123456789abcdef\nprovider_token: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" > "$CONFIG_PATH"
+        printf "mp-0123456789abcdef0123456789abcdef\n" > "$PROVIDER_ID_PATH"
+      else
+        printf "model: new-model\nprovider_id: upgrade-provider\n" > "$CONFIG_PATH"
+        printf "new-provider\n" > "$PROVIDER_ID_PATH"
+      fi
       printf "<plist>new</plist>\n" > "$PLIST_PATH"
       printf "new-watchdog\n" > "$WATCHDOG_DIR/macprovider-health-monitor"
       printf "<plist>new-watchdog</plist>\n" > "$WATCHDOG_PLIST_PATH"
@@ -349,7 +399,20 @@ run_case() {
           FAIL_ONCE_ACTION=kickstart launchctl kickstart -k "gui/$UID/live.streamvc.macprovider"
           ;;
         manual-self-test) exit 9 ;;
-        self-test)
+        new-manual-self-test)
+          cat > "$INSTALL_DIR/macprovider-cli" <<'MANUAL'
+#!/usr/bin/env bash
+trap "" TERM
+while :; do sleep 1; done
+MANUAL
+          chmod +x "$INSTALL_DIR/macprovider-cli"
+          "$INSTALL_DIR/macprovider-cli" &
+          MANUAL_PID=$!
+          printf "%s\n" "$MANUAL_PID" > "$CASE_ROOT/new-manual.pid"
+          kill -0 "$MANUAL_PID"
+          exit 9
+          ;;
+        self-test|credential-self-test)
           launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
           launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || true
           launchctl enable "gui/$UID/live.streamvc.macprovider"
@@ -360,6 +423,11 @@ run_case() {
           launchctl kickstart -k "gui/$UID/$WATCHDOG_LABEL"
           exit 9
           ;;
+        commit-cleanup)
+          : > "$CASE_ROOT/fail-retired-rm"
+          commit_install_transaction
+          exit 0
+          ;;
       esac
       case "$ROLLBACK_FAULT" in
         fail-restore-cp|fail-config-mv) : > "$CASE_ROOT/$ROLLBACK_FAULT" ;;
@@ -369,7 +437,8 @@ run_case() {
   case_rc=$?
   set -e
   printf '%s\n' "$case_rc" > "$root/rc"
-  if [ "$install_phase" = "manual-self-test" ] && [ "$case_rc" -ne 9 ]; then
+  if { [ "$install_phase" = "manual-self-test" ] || [ "$install_phase" = "new-manual-self-test" ]; } \
+      && [ "$case_rc" -ne 9 ]; then
     cat "$root/stderr.log" >&2
   fi
 }
@@ -466,6 +535,57 @@ for phase in plist watchdog bootstrap kickstart self-test; do
   [ -z "$(recovery_dir "$root")" ]
 done
 
+# A bootstrap bearer may already be durably confirmed before a later local
+# readiness failure. Rollback restores the last-known-good payload and service
+# files without deleting the newly confirmed provider identity and token.
+run_case confirmed_credential_restore "" "" "" credential-self-test
+root="$TMP/confirmed_credential_restore"
+[ "$(cat "$root/rc")" -eq 9 ]
+grep -F 'old-binary' "$root/home/macprovider/macprovider-cli" >/dev/null
+grep -F 'old-resource' "$root/home/macprovider/mlx.metallib" >/dev/null
+grep -F 'model: old-model' "$root/home/.config/macprovider/config.yaml" >/dev/null
+grep -F 'provider_id: "mp-0123456789abcdef0123456789abcdef"' \
+  "$root/home/.config/macprovider/config.yaml" >/dev/null
+grep -F 'provider_token: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  "$root/home/.config/macprovider/config.yaml" >/dev/null
+[ "$(cat "$root/home/.config/macprovider/provider_id")" = 'mp-0123456789abcdef0123456789abcdef' ]
+grep -F '<plist>old</plist>' "$root/home/Library/LaunchAgents/live.streamvc.macprovider.plist" >/dev/null
+grep -F 'old-watchdog' "$root/home/.local/share/macprovider-watchdog/macprovider-health-monitor" >/dev/null
+grep -F '"version":"old"' "$root/home/Library/Application Support/macprovider/install_manifest.json" >/dev/null
+[ -z "$(recovery_dir "$root")" ]
+
+# Once commit atomically retires the active bundle, a best-effort rm failure is
+# only cleanup debt: EXIT must not roll the admitted new install back.
+run_case commit_cleanup_failure "" "" "" commit-cleanup
+root="$TMP/commit_cleanup_failure"
+[ "$(cat "$root/rc")" -eq 0 ]
+grep -F 'new-binary' "$root/home/macprovider/macprovider-cli" >/dev/null
+grep -F 'new-resource' "$root/home/macprovider/mlx.metallib" >/dev/null
+grep -F 'model: new-model' "$root/home/.config/macprovider/config.yaml" >/dev/null
+committed_recovery="$(find "$root/home/.config/macprovider" -maxdepth 1 -type d \
+  -name 'install-recovery-*.committed.*' -print -quit)"
+[ -n "$committed_recovery" ]
+[ -s "$committed_recovery/state.sh" ]
+grep -F 'WARNING: install committed but retired recovery data could not be removed' "$root/stderr.log" >/dev/null
+if grep -F 'Install did not pass admission' "$root/stderr.log" >/dev/null; then
+  echo "retired recovery cleanup failure triggered rollback" >&2
+  exit 1
+fi
+
+# A newly launched manual provider can ignore TERM. Admission failure must
+# escalate to KILL, prove the exact owned pid is dead, and only then replace
+# its files with the previous installation.
+run_case new_manual_term_ignoring "" "" "" new-manual-self-test
+root="$TMP/new_manual_term_ignoring"
+[ "$(cat "$root/rc")" -eq 9 ]
+new_manual_pid="$(cat "$root/new-manual.pid")"
+if kill -0 "$new_manual_pid" >/dev/null 2>&1; then
+  echo "TERM-ignoring newly installed manual provider survived rollback" >&2
+  exit 1
+fi
+assert_old_install "$root"
+[ -z "$(recovery_dir "$root")" ]
+
 # Enabled/disabled and active/inactive launchd state is part of the transaction,
 # not just plist contents.
 run_case disabled_inactive_restore "" "" "" self-test disabled-inactive
@@ -522,6 +642,26 @@ if decoded[0] != expected:
     raise SystemExit(f"fixture did not start with expected exact argv: {decoded[0]!r}")
 if decoded[1] != decoded[0]:
     raise SystemExit(f"restored argv differs from exact original: {decoded!r}")
+PY
+python3 - "$root/manual-fixture.log.context" "$root" <<'PY'
+import os
+import sys
+
+log_path, root = sys.argv[1:]
+with open(log_path, "r", encoding="ascii") as handle:
+    lines = [line.rstrip("\n").split("|") for line in handle]
+if len(lines) != 2 or any(len(line) != 4 for line in lines):
+    raise SystemExit(f"expected original and restored process context records, got {lines!r}")
+decoded = [[bytes.fromhex(field) for field in line[1:]] for line in lines]
+expected = [
+    os.fsencode(os.path.realpath(root + "/manual-cwd")),
+    b"exact context with spaces\tand tab; $(not evaluated)",
+    os.fsencode(root + "/bin:/usr/bin:/bin"),
+]
+if decoded[0] != expected:
+    raise SystemExit(f"fixture did not start with expected cwd/environment: {decoded[0]!r}")
+if decoded[1] != decoded[0]:
+    raise SystemExit(f"restored cwd/environment differs from exact original: {decoded!r}")
 PY
 [ ! -e "$root/pwned" ]
 [ "$(shasum -a 256 "$root/home/macprovider/macprovider-cli" | awk '{print $1}')" = "$(cat "$root/manual-old.sha256")" ]

@@ -351,6 +351,126 @@ recovery_failed() {
   recovery_log "Recovery data was preserved. Retry exactly: bash '$RECOVERY_DIR/recover.sh'"
   exit 70
 }
+pid_is_live_non_zombie() {
+  candidate_pid="$1"
+  kill -0 "$candidate_pid" >/dev/null 2>&1 || return 1
+  candidate_state="$(ps -p "$candidate_pid" -o stat= 2>/dev/null | awk '{print $1}')"
+  case "$candidate_state" in
+    Z*|'') return 1 ;;
+    *) return 0 ;;
+  esac
+}
+stop_owned_manual_provider() {
+  candidate_pid="$1"
+  expected_executable="$2"
+  alternate_executable="${3:-}"
+  expected_port="${4:-}"
+  if [ -n "$expected_port" ]; then
+    observed_port_pids="$(lsof -nP -iTCP:"$expected_port" -sTCP:LISTEN -t 2>/dev/null || true)"
+    printf '%s\n' "$observed_port_pids" | grep -Fxq "$candidate_pid" || return 1
+  fi
+  observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+  if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+    return 1
+  fi
+  kill -TERM "$candidate_pid" >/dev/null 2>&1 || return 1
+  stop_attempt=0
+  while [ "$stop_attempt" -lt 20 ] && pid_is_live_non_zombie "$candidate_pid"; do
+    sleep 0.1
+    stop_attempt=$((stop_attempt + 1))
+  done
+  if pid_is_live_non_zombie "$candidate_pid"; then
+    observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+    if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+      return 1
+    fi
+    kill -KILL "$candidate_pid" >/dev/null 2>&1 || return 1
+    stop_attempt=0
+    while [ "$stop_attempt" -lt 20 ] && pid_is_live_non_zombie "$candidate_pid"; do
+      sleep 0.1
+      stop_attempt=$((stop_attempt + 1))
+    done
+  fi
+  ! pid_is_live_non_zombie "$candidate_pid"
+}
+preserve_failed_bootstrap_credential() {
+  failed_config="$1"
+  restored_config="$2"
+  restored_provider_id="$3"
+  [ -f "$failed_config" ] || return 0
+  python3 - "$failed_config" "$restored_config" "$restored_provider_id" <<'PY'
+import json
+import os
+import re
+import sys
+
+failed_path, restored_path, provider_id_path = sys.argv[1:]
+
+def scalar(text, key):
+    prefix = key + ":"
+    values = [line[len(prefix):].strip() for line in text.splitlines() if line.startswith(prefix)]
+    if not values:
+        return None
+    raw = values[-1]
+    if raw.startswith('"'):
+        try:
+            return json.loads(raw)
+        except Exception as error:
+            raise SystemExit(f"invalid {key} scalar") from error
+    return raw
+
+with open(failed_path, "r", encoding="utf-8") as handle:
+    failed_text = handle.read()
+provider_id = scalar(failed_text, "provider_id")
+token = scalar(failed_text, "provider_token")
+if token is None:
+    raise SystemExit(0)
+if not isinstance(provider_id, str) or re.fullmatch(r"mp-[0-9a-f]{32}", provider_id) is None:
+    raise SystemExit("failed install credential has invalid provider_id")
+if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None:
+    raise SystemExit("failed install credential has invalid provider_token")
+
+if os.path.exists(restored_path):
+    with open(restored_path, "r", encoding="utf-8") as handle:
+        restored_text = handle.read()
+    lines = [
+        line for line in restored_text.splitlines()
+        if not line.startswith("provider_id:") and not line.startswith("provider_token:")
+    ]
+    lines.append("provider_id: " + json.dumps(provider_id))
+    lines.append("provider_token: " + token)
+    updated = "\n".join(lines) + "\n"
+else:
+    updated = failed_text if failed_text.endswith("\n") else failed_text + "\n"
+
+parent = os.path.dirname(restored_path)
+os.makedirs(parent, mode=0o700, exist_ok=True)
+temporary = restored_path + ".credential.tmp"
+with open(temporary, "w", encoding="utf-8") as handle:
+    handle.write(updated)
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chmod(temporary, 0o600)
+os.replace(temporary, restored_path)
+
+provider_id_parent = os.path.dirname(provider_id_path)
+os.makedirs(provider_id_parent, mode=0o700, exist_ok=True)
+provider_id_temporary = provider_id_path + ".credential.tmp"
+with open(provider_id_temporary, "w", encoding="utf-8") as handle:
+    handle.write(provider_id + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chmod(provider_id_temporary, 0o600)
+os.replace(provider_id_temporary, provider_id_path)
+
+for directory in {parent, provider_id_parent}:
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+PY
+}
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$" || recovery_failed "could not create recovery run id"
 INSTALL_CANDIDATE="${REC_INSTALL_DIR}.macprovider-restore.$$"
@@ -403,14 +523,9 @@ if [ -s "$RECOVERY_DIR/new-manual.pid" ]; then
   case "$NEW_MANUAL_PID" in
     ''|*[!0-9]*) recovery_failed "recorded manual provider pid is invalid" ;;
   esac
-  if kill -0 "$NEW_MANUAL_PID" >/dev/null 2>&1; then
-    NEW_MANUAL_COMMAND="$(ps -p "$NEW_MANUAL_PID" -o command= 2>/dev/null || true)"
-    case "$NEW_MANUAL_COMMAND" in
-      "$REC_INSTALL_DIR/macprovider-cli"|"$REC_INSTALL_DIR/macprovider-cli "*)
-        kill "$NEW_MANUAL_PID" >/dev/null 2>&1 || recovery_failed "could not stop the failed manual provider process"
-        ;;
-      *) recovery_log "Recorded manual provider pid $NEW_MANUAL_PID no longer belongs to macprovider-cli; leaving it untouched." ;;
-    esac
+  if pid_is_live_non_zombie "$NEW_MANUAL_PID"; then
+    stop_owned_manual_provider "$NEW_MANUAL_PID" "$REC_INSTALL_DIR/macprovider-cli" \
+      || recovery_failed "could not stop and prove death of the failed manual provider process"
   fi
 fi
 
@@ -418,6 +533,8 @@ swap_restore install-dir "$REC_INSTALL_DIR" "$INSTALL_CANDIDATE" "$REC_HAD_INSTA
 swap_restore binary-path "$REC_BINARY_PATH" "$BINARY_CANDIDATE" "$REC_HAD_BINARY_PATH" || recovery_failed "could not restore the previous CLI path"
 swap_restore config.yaml "$REC_CONFIG_PATH" "$CONFIG_CANDIDATE" "$REC_HAD_CONFIG" || recovery_failed "could not restore the previous config"
 swap_restore provider_id "$REC_PROVIDER_ID_PATH" "$PROVIDER_ID_CANDIDATE" "$REC_HAD_PROVIDER_ID" || recovery_failed "could not restore the previous provider id"
+preserve_failed_bootstrap_credential "$FAILED_CURRENT_DIR/config.yaml" "$REC_CONFIG_PATH" "$REC_PROVIDER_ID_PATH" \
+  || recovery_failed "could not preserve the confirmed bootstrap credential through rollback"
 swap_restore provider.plist "$REC_PLIST_PATH" "$PLIST_CANDIDATE" "$REC_HAD_PLIST" || recovery_failed "could not restore the previous launchd plist"
 swap_restore watchdog-dir "$REC_WATCHDOG_DIR" "$WATCHDOG_DIR_CANDIDATE" "$REC_HAD_WATCHDOG_DIR" || recovery_failed "could not restore the previous watchdog directory"
 swap_restore watchdog.plist "$REC_WATCHDOG_PLIST_PATH" "$WATCHDOG_PLIST_CANDIDATE" "$REC_HAD_WATCHDOG_PLIST" || recovery_failed "could not restore the previous watchdog plist"
@@ -473,7 +590,7 @@ import time
 record_path, executable, stdout_path, stderr_path, pid_path, timeout_text = sys.argv[1:]
 with open(record_path, "r", encoding="utf-8") as handle:
     record = json.load(handle)
-if set(record) != {"version", "arguments_b64", "binary_sha256", "port"} or record["version"] != 2:
+if set(record) != {"version", "arguments_b64", "environment_b64", "working_directory_b64", "binary_sha256", "port"} or record["version"] != 3:
     raise SystemExit("invalid manual provider recovery schema")
 encoded_arguments = record["arguments_b64"]
 if not isinstance(encoded_arguments, list) or len(encoded_arguments) > 128:
@@ -491,6 +608,35 @@ for encoded in encoded_arguments:
     arguments.append(argument)
 if sum(map(len, arguments)) > 65536:
     raise SystemExit("manual provider argument bounds exceeded")
+try:
+    working_directory = base64.b64decode(record["working_directory_b64"], validate=True)
+except Exception as error:
+    raise SystemExit("invalid manual provider working directory") from error
+if (base64.b64encode(working_directory).decode("ascii") != record["working_directory_b64"]
+        or b"\x00" in working_directory or not working_directory.startswith(b"/")
+        or len(working_directory) > 4096 or not os.path.isdir(working_directory)):
+    raise SystemExit("invalid manual provider working directory")
+encoded_environment = record["environment_b64"]
+if not isinstance(encoded_environment, list) or len(encoded_environment) > 512:
+    raise SystemExit("invalid manual provider environment")
+environment = {}
+environment_bytes = 0
+for encoded in encoded_environment:
+    if not isinstance(encoded, str) or len(encoded) > 16384:
+        raise SystemExit("invalid manual provider environment encoding")
+    try:
+        entry = base64.b64decode(encoded, validate=True)
+    except Exception as error:
+        raise SystemExit("invalid manual provider environment encoding") from error
+    if base64.b64encode(entry).decode("ascii") != encoded or b"\x00" in entry or len(entry) > 8192 or b"=" not in entry:
+        raise SystemExit("invalid manual provider environment encoding")
+    key, value = entry.split(b"=", 1)
+    if not key or b"=" in key or key in environment:
+        raise SystemExit("invalid manual provider environment key")
+    environment[key] = value
+    environment_bytes += len(entry)
+if environment_bytes > 262144:
+    raise SystemExit("manual provider environment bounds exceeded")
 port = record["port"]
 if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
     raise SystemExit("invalid manual provider port")
@@ -518,7 +664,7 @@ temporary = pid_path + ".tmp"
 try:
     with open(stdout_path, "ab", buffering=0) as stdout, open(stderr_path, "ab", buffering=0) as stderr:
         process = subprocess.Popen(
-            [os.fsencode(executable), *arguments], cwd=os.fsencode(os.path.dirname(executable)),
+            [os.fsencode(executable), *arguments], cwd=working_directory, env=environment,
             stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
             start_new_session=True, close_fds=True,
         )
@@ -617,8 +763,11 @@ capture_manual_provider_for_recovery() {
   manual_executable="$(lsof -nP -a -p "$manual_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
   [ -n "$manual_executable" ] \
     || die 70 "could not capture the existing manual provider invocation before stopping it"
+  manual_cwd="$(lsof -nP -a -p "$manual_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+  [ -n "$manual_cwd" ] \
+    || die 70 "could not capture the existing manual provider working directory before stopping it"
   python3 - "$manual_pid" "$manual_executable" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" \
-    "$PORT" "$INSTALL_TX_BACKUP/manual-provider.json" <<'PY' \
+    "$manual_cwd" "$PORT" "$INSTALL_TX_BACKUP/manual-provider.json" <<'PY' \
     || die 70 "existing manual provider invocation was not safe to preserve; current provider was left running"
 import base64
 import ctypes
@@ -628,7 +777,7 @@ import os
 import struct
 import sys
 
-pid_text, observed_executable, install_executable, path_executable, port, output = sys.argv[1:]
+pid_text, observed_executable, install_executable, path_executable, observed_cwd, port, output = sys.argv[1:]
 if sys.platform != "darwin":
     raise SystemExit("exact process argv capture requires macOS KERN_PROCARGS2")
 try:
@@ -691,6 +840,26 @@ if len(arguments) > 128 or any(b"\x00" in argument or len(argument) > 4096 for a
     raise SystemExit("manual provider argument bounds exceeded")
 if sum(map(len, arguments)) > 65536:
     raise SystemExit("manual provider argument bounds exceeded")
+environment = []
+while offset < len(data):
+    entry_end = data.find(b"\x00", offset)
+    if entry_end < offset:
+        raise SystemExit("truncated KERN_PROCARGS2 environment")
+    if entry_end == offset:
+        break
+    entry = data[offset:entry_end]
+    if b"=" not in entry:
+        break
+    environment.append(entry)
+    offset = entry_end + 1
+if len(environment) > 512 or any(len(entry) > 8192 for entry in environment) or sum(map(len, environment)) > 262144:
+    raise SystemExit("manual provider environment bounds exceeded")
+environment_keys = [entry.split(b"=", 1)[0] for entry in environment]
+if any(not key or b"=" in key for key in environment_keys) or len(set(environment_keys)) != len(environment_keys):
+    raise SystemExit("manual provider environment is invalid")
+working_directory = os.path.realpath(observed_cwd)
+if not os.path.isabs(working_directory) or not os.path.isdir(working_directory):
+    raise SystemExit("manual provider working directory is invalid")
 port_bytes = port.encode("ascii")
 if not any(
     (argument == b"--port" and index + 1 < len(arguments) and arguments[index + 1] == port_bytes)
@@ -701,8 +870,10 @@ if not any(
 with open(observed, "rb") as handle:
     digest = hashlib.sha256(handle.read()).hexdigest()
 record = {
-    "version": 2,
+    "version": 3,
     "arguments_b64": [base64.b64encode(argument).decode("ascii") for argument in arguments],
+    "environment_b64": [base64.b64encode(entry).decode("ascii") for entry in environment],
+    "working_directory_b64": base64.b64encode(os.fsencode(working_directory)).decode("ascii"),
     "binary_sha256": digest,
     "port": int(port),
 }
@@ -720,6 +891,54 @@ try:
 finally:
     os.close(directory_fd)
 PY
+}
+
+pid_is_live_non_zombie() {
+  candidate_pid="$1"
+  kill -0 "$candidate_pid" >/dev/null 2>&1 || return 1
+  candidate_state="$(ps -p "$candidate_pid" -o stat= 2>/dev/null | awk '{print $1}')"
+  case "$candidate_state" in
+    Z*|'') return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+stop_owned_manual_provider() {
+  candidate_pid="$1"
+  expected_executable="$2"
+  alternate_executable="${3:-}"
+  expected_port="${4:-}"
+  if [ -n "$expected_port" ]; then
+    observed_port_pids="$(lsof -nP -iTCP:"$expected_port" -sTCP:LISTEN -t 2>/dev/null || true)"
+    printf '%s\n' "$observed_port_pids" | grep -Fxq "$candidate_pid" || return 1
+  fi
+  observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+  if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+    return 1
+  fi
+  kill -TERM "$candidate_pid" >/dev/null 2>&1 || return 1
+  stop_attempt=0
+  while [ "$stop_attempt" -lt 20 ] && pid_is_live_non_zombie "$candidate_pid"; do
+    sleep 0.1
+    stop_attempt=$((stop_attempt + 1))
+  done
+  if pid_is_live_non_zombie "$candidate_pid"; then
+    observed_executable="$(lsof -nP -a -p "$candidate_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+    if [ "$observed_executable" != "$expected_executable" ] && { [ -z "$alternate_executable" ] || [ "$observed_executable" != "$alternate_executable" ]; }; then
+      return 1
+    fi
+    kill -KILL "$candidate_pid" >/dev/null 2>&1 || return 1
+    stop_attempt=0
+    while [ "$stop_attempt" -lt 20 ] && pid_is_live_non_zombie "$candidate_pid"; do
+      sleep 0.1
+      stop_attempt=$((stop_attempt + 1))
+    done
+  fi
+  if ! pid_is_live_non_zombie "$candidate_pid"; then
+    wait "$candidate_pid" >/dev/null 2>&1 || true
+    return 0
+  fi
+  return 1
 }
 
 begin_install_transaction() {
@@ -807,22 +1026,12 @@ rollback_install_transaction() {
   fi
   INSTALL_TX_ROLLING_BACK=1
   log "Install did not pass admission; restoring the previous provider installation."
-  if [ -n "$MANUAL_PID" ] && kill -0 "$MANUAL_PID" >/dev/null 2>&1; then
-    manual_command="$(ps -p "$MANUAL_PID" -o command= 2>/dev/null || true)"
-    case "$manual_command" in
-      "$INSTALL_DIR/macprovider-cli"|"$INSTALL_DIR/macprovider-cli "*)
-        if ! kill "$MANUAL_PID" >/dev/null 2>&1; then
-          log "ERROR: could not stop the failed manual provider process; recovery data was preserved at $INSTALL_TX_BACKUP"
-          INSTALL_TX_ROLLING_BACK=0
-          return 70
-        fi
-        ;;
-      *)
-        log "ERROR: manual provider pid $MANUAL_PID no longer belongs to $INSTALL_DIR/macprovider-cli; recovery data was preserved at $INSTALL_TX_BACKUP"
-        INSTALL_TX_ROLLING_BACK=0
-        return 70
-        ;;
-    esac
+  if [ -n "$MANUAL_PID" ] && pid_is_live_non_zombie "$MANUAL_PID"; then
+    if ! stop_owned_manual_provider "$MANUAL_PID" "$INSTALL_DIR/macprovider-cli"; then
+      log "ERROR: could not stop and prove death of the failed manual provider process; recovery data was preserved at $INSTALL_TX_BACKUP"
+      INSTALL_TX_ROLLING_BACK=0
+      return 70
+    fi
   fi
   if ! bash "$INSTALL_TX_BACKUP/recover.sh"; then
     log "ERROR: automatic rollback failed; recovery data was preserved at $INSTALL_TX_BACKUP"
@@ -843,8 +1052,18 @@ rollback_install_transaction() {
 
 commit_install_transaction() {
   if [ -n "$INSTALL_TX_BACKUP" ] && [ -d "$INSTALL_TX_BACKUP" ]; then
-    rm -rf "$INSTALL_TX_BACKUP" \
-      || die 70 "new install passed admission but durable recovery data could not be removed: $INSTALL_TX_BACKUP"
+    retired_recovery="${INSTALL_TX_BACKUP}.committed.$$"
+    mv "$INSTALL_TX_BACKUP" "$retired_recovery" \
+      || die 70 "new install passed admission but durable recovery data could not be retired: $INSTALL_TX_BACKUP"
+    # Crossing this rename is the no-rollback boundary. From here onward the
+    # recovery bundle cannot be mistaken for an active transaction even if
+    # best-effort cleanup fails partway through.
+    INSTALL_TX_COMMITTED=1
+    INSTALL_TX_ACTIVE=0
+    if ! rm -rf "$retired_recovery"; then
+      log "WARNING: install committed but retired recovery data could not be removed: $retired_recovery"
+    fi
+    return 0
   fi
   INSTALL_TX_COMMITTED=1
   INSTALL_TX_ACTIVE=0
@@ -926,9 +1145,13 @@ ensure_port_free() {
     launchctl bootout "gui/$UID" "$PLIST_PATH" 2>/dev/null || true
     sleep 2
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
-      log "Port $PORT still held after launchctl bootout; trying pkill of own-service PID."
-      kill -TERM $holding_pids 2>/dev/null || true
-      sleep 2
+      log "Port $PORT still held after launchctl bootout; stopping each revalidated macprovider-cli PID."
+      for holding_pid in $holding_pids; do
+        if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -Fxq "$holding_pid"; then
+          stop_owned_manual_provider "$holding_pid" "$INSTALL_DIR/macprovider-cli" "$BINARY_PATH" "$PORT" \
+            || die 70 "could not safely stop macprovider-cli pid $holding_pid after revalidating executable and port ownership"
+        fi
+      done
     fi
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
       die 6 "could not stop existing macprovider-cli on port $PORT; please stop manually and retry"

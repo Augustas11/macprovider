@@ -866,7 +866,7 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 	return provisionalTokenMinted, token, "", "", pool.AuthSelfMinted
 }
 
-func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
+func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
 	hello, badField, err := ParseHello(payload)
 	if err != nil {
 		s.close(conn, CloseInvalidHello, "invalid_hello: "+badField)
@@ -889,7 +889,19 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseInvalidHello, "credential_bootstrap_requires_v2")
 		return "", ""
 	}
-	entry, ok := s.prepareProviderAdmission(conn, auth, hello, true)
+	if auth.IsCredentialBootstrapPrincipal(hello.ProviderID) && s.bootstrapTokens != nil {
+		exists, lookupErr := s.bootstrapTokens.BootstrapIdentityExists(context.Background(), hello.ProviderID)
+		if lookupErr != nil {
+			s.log.Warn().Err(lookupErr).Str("provider_id", hello.ProviderID).Msg("bootstrap identity v1 downgrade lookup failed")
+			s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_lookup_failed")
+			return "", ""
+		}
+		if exists {
+			s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_requires_v2")
+			return "", ""
+		}
+	}
+	entry, ok := s.prepareProviderAdmission(conn, connectionAuth, hello, true)
 	if !ok {
 		return "", ""
 	}
@@ -907,12 +919,12 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	// the provided AuthState (BearerValidated / BearerlessDuplicate /
 	// empty) and let the registry eviction defense + RoutingEligible
 	// gates take over.
-	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
+	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, hello.Hostname)
 	if outcome == provisionalTokenRejectTOFU {
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		return "", ""
 	}
-	if !s.confirmAdmittedProviderToken(conn, auth) {
+	if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
 		return "", ""
 	}
 	entry.AuthState = authState
@@ -1030,7 +1042,17 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	supportedModelsPresent := initialPresence.SupportedModels
 	publishesPresent := initialPresence.PublishesSupportedModels
 	retainSpec010 := supportedModelsPresent || publishesPresent
-	retainAuthAttempt := retainSpec010 || s.identitySignatures != nil || initial.CredentialBootstrap
+	durableBootstrapIdentity := false
+	if !initial.CredentialBootstrap && auth.IsCredentialBootstrapPrincipal(initial.ProviderID) && s.bootstrapTokens != nil {
+		var lookupErr error
+		durableBootstrapIdentity, lookupErr = s.bootstrapTokens.BootstrapIdentityExists(context.Background(), initial.ProviderID)
+		if lookupErr != nil {
+			s.log.Warn().Err(lookupErr).Str("provider_id", initial.ProviderID).Msg("bootstrap identity proof requirement lookup failed")
+			s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_lookup_failed")
+			return "", ""
+		}
+	}
+	retainAuthAttempt := retainSpec010 || s.identitySignatures != nil || durableBootstrapIdentity || initial.CredentialBootstrap
 	if retainAuthAttempt {
 		state := AuthAttemptState{
 			AuthAttemptID:            authAttemptID,
@@ -1135,7 +1157,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_proof_required")
 		return "", ""
 	}
-	if !initial.CredentialBootstrap && s.identitySignatures != nil && !s.verifyIdentitySignature(context.Background(), initial, proof, retained) {
+	if !initial.CredentialBootstrap && (s.identitySignatures != nil || durableBootstrapIdentity) && !s.verifyIdentitySignature(context.Background(), initial, proof, retained) {
 		s.sendAuthRejection(conn, "identity_signature_required", "identity_signature_required")
 		s.close(conn, CloseIdentitySignatureRequired, "identity_signature_required")
 		return "", ""
@@ -1290,6 +1312,12 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		return "", ""
 	}
+	maxAdmittedModelKey, maxAdmittedModelID, gateOK := s.checkAutotuneHelloGate(conn, initial.Hello())
+	if !gateOK {
+		return "", ""
+	}
+	entry.MaxAdmittedModelKey = maxAdmittedModelKey
+	entry.MaxAdmittedModelID = maxAdmittedModelID
 	if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
 		return "", ""
 	}
@@ -1501,47 +1529,9 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 			tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
 		}
 	}
-	maxAdmittedModelKey := ""
-	maxAdmittedModelID := ""
-	if s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
-		if s.autotuneCatalog == nil || s.autotuneEvidence == nil {
-			s.log.Error().Str("provider_id", hello.ProviderID).Msg("autotune hello gate enabled but dependencies are not wired")
-			s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
-			return nil, false
-		}
-		ttl := time.Duration(s.cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
-		evidence, ok, err := s.autotuneEvidence.LatestVerified(context.Background(), hello.ProviderID, ttl)
-		if err != nil {
-			s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("autotune hello gate evidence lookup failed")
-			s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
-			return nil, false
-		}
-		if !ok {
-			s.log.Info().
-				Str("provider_id", hello.ProviderID).
-				Str("event", "autotune_evidence_required").
-				Str("model_id", hello.ModelID).
-				Msg("autotune hello gate rejected connect without verified hardware evidence")
-			s.close(conn, CloseInvalidHello, "autotune_evidence_required")
-			return nil, false
-		}
-		decision := autotune.EvaluateHelloGate(s.autotuneCatalog, evidence, hello.ModelID)
-		if !decision.Allowed {
-			s.log.Info().
-				Str("provider_id", hello.ProviderID).
-				Str("event", decision.Reason).
-				Str("model_id", hello.ModelID).
-				Str("claimed_model_key", decision.ClaimedModelKey).
-				Str("max_admitted_model_class", decision.MaxAdmittedModelKey).
-				Str("max_admitted_model_id", decision.MaxAdmittedModelID).
-				Int("claimed_min_ram_gb", decision.ClaimedMinRAMGB).
-				Int("max_admitted_min_ram_gb", decision.MaxAdmittedMinRAMGB).
-				Msg("autotune hello gate rejected provider model claim")
-			s.close(conn, CloseInvalidHello, decision.Reason)
-			return nil, false
-		}
-		maxAdmittedModelKey = decision.MaxAdmittedModelKey
-		maxAdmittedModelID = decision.MaxAdmittedModelID
+	maxAdmittedModelKey, maxAdmittedModelID, gateOK := s.checkAutotuneHelloGate(conn, hello)
+	if !gateOK {
+		return nil, false
 	}
 	initialState := pool.StateReady
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -1574,6 +1564,49 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		MaxAdmittedModelKey:   maxAdmittedModelKey,
 		MaxAdmittedModelID:    maxAdmittedModelID,
 	}, true
+}
+
+func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, string, bool) {
+	if !s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
+		return "", "", true
+	}
+	if s.autotuneCatalog == nil || s.autotuneEvidence == nil {
+		s.log.Error().Str("provider_id", hello.ProviderID).Msg("autotune hello gate enabled but dependencies are not wired")
+		s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
+		return "", "", false
+	}
+	ttl := time.Duration(s.cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
+	evidence, ok, err := s.autotuneEvidence.LatestVerified(context.Background(), hello.ProviderID, ttl)
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("autotune hello gate evidence lookup failed")
+		s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
+		return "", "", false
+	}
+	if !ok {
+		s.log.Info().
+			Str("provider_id", hello.ProviderID).
+			Str("event", "autotune_evidence_required").
+			Str("model_id", hello.ModelID).
+			Msg("autotune hello gate rejected connect without verified hardware evidence")
+		s.close(conn, CloseInvalidHello, "autotune_evidence_required")
+		return "", "", false
+	}
+	decision := autotune.EvaluateHelloGate(s.autotuneCatalog, evidence, hello.ModelID)
+	if !decision.Allowed {
+		s.log.Info().
+			Str("provider_id", hello.ProviderID).
+			Str("event", decision.Reason).
+			Str("model_id", hello.ModelID).
+			Str("claimed_model_key", decision.ClaimedModelKey).
+			Str("max_admitted_model_class", decision.MaxAdmittedModelKey).
+			Str("max_admitted_model_id", decision.MaxAdmittedModelID).
+			Int("claimed_min_ram_gb", decision.ClaimedMinRAMGB).
+			Int("max_admitted_min_ram_gb", decision.MaxAdmittedMinRAMGB).
+			Msg("autotune hello gate rejected provider model claim")
+		s.close(conn, CloseInvalidHello, decision.Reason)
+		return "", "", false
+	}
+	return decision.MaxAdmittedModelKey, decision.MaxAdmittedModelID, true
 }
 
 func (s *Server) recordProviderAdmission(conn net.Conn, hello Hello, pinned bool) (pool.Tier, bool) {

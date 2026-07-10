@@ -28,21 +28,20 @@ func initialAuthTranscriptHash(payload []byte) ([32]byte, error) {
 }
 
 func (s *Server) verifyIdentitySignature(ctx context.Context, initial AuthRequest, proof AuthRequest, retained AuthAttemptState) bool {
-	if s.identitySignatures == nil {
-		return true
-	}
-	exemptUntil, grantedBy, ok, err := s.identitySignatures.LookupProviderAuthPolicy(ctx, proof.ProviderID)
-	if err != nil {
-		s.log.Warn().Err(err).Str("provider_id", proof.ProviderID).Msg("identity signature auth-policy lookup failed")
-		return false
-	}
-	if ok && exemptUntil != nil && exemptUntil.After(s.now()) {
-		s.log.Info().
-			Str("provider_id", proof.ProviderID).
-			Str("granted_by", grantedBy).
-			Time("signature_exempt_until", exemptUntil.UTC()).
-			Msg("provider_auth_policy_exempt_used")
-		return true
+	if s.identitySignatures != nil {
+		exemptUntil, grantedBy, ok, err := s.identitySignatures.LookupProviderAuthPolicy(ctx, proof.ProviderID)
+		if err != nil {
+			s.log.Warn().Err(err).Str("provider_id", proof.ProviderID).Msg("identity signature auth-policy lookup failed")
+			return false
+		}
+		if ok && exemptUntil != nil && exemptUntil.After(s.now()) {
+			s.log.Info().
+				Str("provider_id", proof.ProviderID).
+				Str("granted_by", grantedBy).
+				Time("signature_exempt_until", exemptUntil.UTC()).
+				Msg("provider_auth_policy_exempt_used")
+			return true
+		}
 	}
 	signature, err := base64.StdEncoding.DecodeString(proof.IdentitySignature)
 	if err != nil || len(signature) != ed25519.SignatureSize {
