@@ -38,6 +38,11 @@ func TestBuildCanaryBodyUsesPrivateChallengeTemplates(t *testing.T) {
 	if req.Model != "model-a" || req.MaxTokens != 8 || req.Stream {
 		t.Fatalf("canary request = %+v", req)
 	}
+	// Greedy decoding must be pinned so a healthy provider echoes the nonce
+	// exactly rather than sampling and hallucinating it (spurious nonce_mismatch).
+	if req.Temperature == nil || *req.Temperature != 0 {
+		t.Fatalf("canary request temperature = %v, want 0", req.Temperature)
+	}
 	if len(req.Messages) != 1 || req.Messages[0].Role != "user" {
 		t.Fatalf("messages = %+v", req.Messages)
 	}
@@ -591,10 +596,11 @@ func TestHTTPCanaryEndpointResetCountsAsFailure(t *testing.T) {
 }
 
 type decodedCanaryBody struct {
-	Model     string `json:"model"`
-	MaxTokens int    `json:"max_tokens"`
-	Stream    bool   `json:"stream"`
-	Messages  []struct {
+	Model       string   `json:"model"`
+	MaxTokens   int      `json:"max_tokens"`
+	Stream      bool     `json:"stream"`
+	Temperature *float64 `json:"temperature"`
+	Messages    []struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"messages"`
