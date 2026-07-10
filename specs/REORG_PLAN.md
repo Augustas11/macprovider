@@ -46,7 +46,7 @@ specs/
   ...
 audits/
   spec-001/ … spec-029/         # round-N audit files move here, grouped by spec
-.omc/prompts/                   # agent PROMPT/ABSORB files move here (disposable exhaust)
+audits/_prompts/                   # agent PROMPT/ABSORB files move here (disposable exhaust)
 docs/notes/                     # impl/step notes that are worth keeping
 ```
 
@@ -70,7 +70,7 @@ done
 ```
 (Dry-run first; hand-place the handful that don't self-identify a spec number.)
 
-**P2 — evacuate prompts.** `git mv specs/*_PROMPT.md specs/ABSORB_* .omc/prompts/`.
+**P2 — evacuate prompts.** `git mv specs/*_PROMPT.md specs/ABSORB_* audits/_prompts/`.
 These are agent scaffolding, not spec content.
 
 **P3 — normalize names.** Rename the non-conforming work-item docs
