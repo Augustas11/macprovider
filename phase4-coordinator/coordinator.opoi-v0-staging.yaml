@@ -22,7 +22,9 @@ pool:
   canary_enabled: true
   canary_interval_s: 300        # 5 min for staging observation
   canary_timeout_s: 120
-  canary_max_tokens: 16
+  # Leave room for a short model preamble before the nonce response. A 16-token
+  # cap intermittently truncated the 30B canary and was reported as incomplete.
+  canary_max_tokens: 32
   canary_failure_threshold: 3   # 3 consecutive fails → provisional ban
   # Waive the wall-time latency gates (max_ttft_ms + min_sustained_tps; canary
   # probes are non-streaming) for the first 300s after a provider connects: a

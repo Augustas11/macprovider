@@ -66,12 +66,16 @@ pool:
   canary_enabled: true
   model_class_challenges:
     qwen3-coder-30b-a3b-instruct:
-      - prompt: What is the code {nonce}? Reply with only the code.
-        expected: '{nonce}'
+      - prompt: "Reply with exactly: CANARY-{nonce}"
+        expected: "CANARY-{nonce}"
         max_ttft_ms: 7000        # non-streaming round-trip; keep generous
         min_sustained_tps: 20
   canary_latency_enforcement: observe   # observe (default) | enforce
 ```
+
+Keep `canary_max_tokens` at 32 or higher for this bank. A lower cap can
+truncate a model preamble before the nonce and report an `incomplete` canary
+failure even when the model identity is correct.
 
 **Export:** `model_class_opoi_pass` on `/poolz` when a model-class bank was used.
 
