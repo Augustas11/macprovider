@@ -5,7 +5,7 @@ import MLXNN
 
 /// Per-token decode forward wrapped in `MLX.compile()`, gated by
 /// `MACPROVIDER_COMPILED_DECODE`. Ported from `perf/mlx-compile-bf16` for
-/// T2-01 of `specs/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md`.
+/// T2-01 of `docs/runbooks/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md`.
 ///
 /// Compile-with-state correctness rules followed here:
 ///   * Per-token input shape is fixed at `[1, 1]` (B=1). The compiler

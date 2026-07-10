@@ -11,7 +11,7 @@ import (
 
 func TestSPEC022D8AcceptanceCoverageMapIncludesAllACs(t *testing.T) {
 	repoRoot := filepath.Clean("../../..")
-	docPath := filepath.Join(repoRoot, "specs/SPEC-022-IMPL-DELIVERABLE-8.md")
+	docPath := filepath.Join(repoRoot, "specs/design/spec-022/SPEC-022-IMPL-DELIVERABLE-8.md")
 	raw, err := os.ReadFile(docPath)
 	if err != nil {
 		t.Fatalf("read D8 coverage map: %v", err)

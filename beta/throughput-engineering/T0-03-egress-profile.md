@@ -4,7 +4,7 @@
 **Date:** 2026-07-07  
 **Branch:** `perf/egress-trace-t0-03`  
 **Status:** INSTRUMENTATION MERGED — awaiting live measurement  
-**Runbook:** `specs/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md § T0-03`
+**Runbook:** `docs/runbooks/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md § T0-03`
 
 ---
 
@@ -171,7 +171,7 @@ measurement should be collected alongside T0-02 before TG0 is formally signed of
 | RED | >15% | Open reassessment of #479 |
 
 **Structural verdict: GREEN** — NWConnection cluster remains DEFER per
-`specs/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md § DEFERRED`.
+`docs/runbooks/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md § DEFERRED`.
 
 ---
 

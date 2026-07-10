@@ -1,5 +1,5 @@
 // Package benchmark implements the phase-B network performance suite
-// defined in specs/SPEC-NETWORK-BENCHMARK-v0.1.md.
+// defined in docs/notes/SPEC-NETWORK-BENCHMARK-v0.1.md.
 //
 // Where phase-A invariants (I1-I4) are pass/fail correctness gates
 // ("the network does not lie"), the benchmark invariants (B1-B6) are

@@ -2549,7 +2549,7 @@ challenge each and propose pins for v0.2.
   (Deprecation header + `rel="deprecation"` link relation), RFC 4648
   (base64url encoding for partner-key format §3.7), RFC 7232 (304 Not
   Modified semantics §5.9), RFC 2119 (MUST / SHOULD / MAY)
-- `specs/SPEC-017-advisor-round-2026-06-25.md` (codex advisor
+- `specs/design/spec-017/SPEC-017-advisor-round-2026-06-25.md` (codex advisor
   round establishing the four locked decisions Q1-Q4 of §2;
   canonical in-repo copy — the source `omc ask` artifact lives
   outside the worktree and is not citable from inside this SPEC)

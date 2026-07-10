@@ -2,7 +2,7 @@
 
 This runbook covers operator-facing surfaces introduced or changed by SPEC-018
 v0.2 ("narrow Cline drop-in"). Read it alongside SPEC-018 §10d and the IMPL
-notes at `specs/SPEC-018-v0_2-IMPL-NOTES.md`.
+notes at `specs/design/spec-018/SPEC-018-v0_2-IMPL-NOTES.md`.
 
 ## Prerequisites
 
@@ -199,6 +199,6 @@ reports a regression, this is the rollback target.
 ## See also
 
 - SPEC body: `specs/SPEC-018-agentic-tool-calling.md`
-- IMPL notes: `specs/SPEC-018-v0_2-IMPL-NOTES.md`
+- IMPL notes: `specs/design/spec-018/SPEC-018-v0_2-IMPL-NOTES.md`
 - Lock-amendment discipline: §10c.1 in the SPEC
 - v0.3 deferred design: `specs/v0_3-design/`

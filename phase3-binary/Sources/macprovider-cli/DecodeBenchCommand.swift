@@ -7,7 +7,7 @@ import MacProviderCore
 
 /// `decode-bench` — pure decode-loop benchmark, no coordinator, no WS.
 ///
-/// T0-01 of `specs/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md`. Loads the same
+/// T0-01 of `docs/runbooks/PLAN_THROUGHPUT_ENGINEERING_RUNBOOK.md`. Loads the same
 /// `LLMModelFactory` / `MLXLMCommon` path the serve runtime uses, runs
 /// a fixed-length prefill + decode, and reports prefill TPS, decode TPS
 /// (p50 across N runs after one warmup), and decode wall time as JSON.

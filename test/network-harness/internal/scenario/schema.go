@@ -101,7 +101,7 @@ type Scenario struct {
 	ChaosEvents []ChaosEvent `yaml:"chaos_events"`
 
 	// Benchmark, when Enabled, runs the phase-B benchmark suite (B1-B6)
-	// against this scenario's results. See specs/SPEC-NETWORK-BENCHMARK-v0.1.md.
+	// against this scenario's results. See docs/notes/SPEC-NETWORK-BENCHMARK-v0.1.md.
 	Benchmark Benchmark `yaml:"benchmark"`
 
 	HardwareMatrix     []HardwareMatrixRow `yaml:"hardware_matrix"`

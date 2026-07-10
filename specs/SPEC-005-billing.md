@@ -297,7 +297,7 @@ satisfied); the full close moves to v0.5.
 - Fixed R1 M-8 by removing unreachable provider-not-reached usage_source rows.
 
 **Change log v0.1:**
-- Initial draft following `specs/SPEC-005-design.md` and `specs/SPEC-005-operator-decisions.md`.
+- Initial draft following `specs/design/spec-005/SPEC-005-design.md` and `specs/design/spec-005/SPEC-005-operator-decisions.md`.
 - Encodes D1-D12 as read-only locked decisions in section  2.
 - Defines the coordinator-side provider-credit ledger, weekly settlement-ready batch, recovery algorithm, and four JSON endpoints.
 - Closes H-005 by mirroring SPEC-006 v0.8.1 section  17.7 with deterministic provider-credit formulas.
@@ -392,7 +392,7 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 
 ## 2. Locked decisions
 
-This section reproduces the operator pre-commitments from `specs/SPEC-005-operator-decisions.md`.
+This section reproduces the operator pre-commitments from `specs/design/spec-005/SPEC-005-operator-decisions.md`.
 It is read-only. It records decisions; it does not reopen them.
 Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 

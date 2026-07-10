@@ -1,4 +1,4 @@
-# SPEC-010 — Provider Model Catalog & Warm Swap
+# SPEC-012 — Source spec history (Provider Model Catalog & Warm Swap, since split into SPEC-010/011/013)
 
 **Version:** 0.3
 **Status:** Draft (post round-2 audit, pre round-3 audit)
