@@ -82,6 +82,18 @@ functions (e.g. 14 at the next Malibu release).
 
 ---
 
+## Carried follow-ups (surfaced by Wave A codex audits)
+
+New items the audit loop surfaced as **pre-existing** (attribution-confirmed) and
+carried documented rather than blocking the PR that found them:
+
+| # | Item | Axes | Effort | Source |
+|---|------|------|--------|--------|
+| 18 | **Gateway charges buyer on pre-dispatch `route_snapshot_failed`.** When the coordinator returns 500 `route_snapshot_failed` before provider dispatch, the gateway reads absent finality headers as `Legacy` and settles the reservation on the prompt estimate — the buyer is debited for a request with no provider invocation. Should be a pre-dispatch no-charge refund (both streaming modes). | **M** B | S–M | #546 round-2 audit |
+| 19 | **`route_snapshot_policy_version` derivation.** It is a static literal marking default cutovers (v0=30s, v1=300s) but does not uniquely encode a runtime-reconfigured `pending_deadline_seconds`; report-by-policy-version aggregation merges different effective deadlines. Full derivation belongs to the unimplemented SPEC-022 R-1.1 policy object. | D | M | #546 round-2 audit |
+
+---
+
 ## Decision gates (operator)
 
 - **G1 (item 2, after ledger probe):** if honest long completions are being
@@ -102,3 +114,4 @@ functions (e.g. 14 at the next Malibu release).
 | Date | Item | State |
 |------|------|-------|
 | 2026-07-10 | Runbook created; Wave A kicked off (1a+16, 2-probe, 3) | in progress |
+| 2026-07-10 | Item 3 (SPEC-022 deadline, #546) — 3 codex rounds + attribution lane to 0 C/H/M; 2 pre-existing MEDIUMs carried as items 18/19 | approved, merging |
