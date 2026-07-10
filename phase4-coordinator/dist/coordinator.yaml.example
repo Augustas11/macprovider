@@ -60,7 +60,7 @@ pool:
   canary_enabled: false
   canary_interval_s: 300        # 5 min staging; use 600 for initial production
   canary_timeout_s: 120
-  canary_max_tokens: 16
+  canary_max_tokens: 32
   canary_failure_threshold: 3   # provisional ban; pinned → degrade at 2
   canary_cold_start_grace_s: 0  # >0 waives the wall-time latency gates
                                 # (max_ttft_ms + min_sustained_tps; probes are

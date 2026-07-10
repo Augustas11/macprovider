@@ -60,7 +60,7 @@ pool:
   canary_enabled: true
   canary_interval_s: 300          # provisional; use 600 on production initially
   canary_timeout_s: 120
-  canary_max_tokens: 16
+  canary_max_tokens: 32
   canary_failure_threshold: 3     # provisional → ban; pinned → degrade at 2
   canary_challenges:
     - prompt: "Reply with exactly: CANARY-{nonce}"
@@ -73,7 +73,9 @@ pool:
 
 - Every challenge **must** include `{nonce}` in prompt and expected (`server.go:2216-2217`).
 - Expected answer must be **exact** after trim (`canaryAnswerMatches`).
-- Use **deterministic** short outputs (low `max_tokens`) to minimize MLX variance.
+- Use **deterministic** short outputs with a bounded `max_tokens` budget. The
+  deployment baseline is 32 tokens: lower caps can truncate a short preamble
+  before the nonce and surface as `canary_fail_reason: incomplete`.
 
 ### 2.3 Model-specific banks (Session B / W3)
 

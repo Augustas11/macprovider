@@ -619,9 +619,12 @@ func TestOnboardingCoordinatorDomainMustBeBareLowercaseHost(t *testing.T) {
 }
 
 // TestCanaryOPoIV0StagingOverlayParsesAndValidates verifies that the OPoI v0
-// staging overlay YAML unmarshals into a valid canary config block (both
-// challenges contain {nonce} in prompt and expected).
+// staging overlay YAML unmarshals into a valid canary config block, including
+// the output budget needed to avoid truncating a nonce response.
 func TestCanaryOPoIV0StagingOverlayParsesAndValidates(t *testing.T) {
+	if got := Default().Pool.CanaryMaxTokens; got < 32 {
+		t.Fatalf("default canary_max_tokens = %d, want >= 32", got)
+	}
 	b, err := os.ReadFile(filepath.Clean("../../coordinator.opoi-v0-staging.yaml"))
 	if err != nil {
 		t.Fatalf("read staging overlay: %v", err)
@@ -632,6 +635,9 @@ func TestCanaryOPoIV0StagingOverlayParsesAndValidates(t *testing.T) {
 	}
 	if !cfg.Pool.CanaryEnabled {
 		t.Fatal("staging overlay must have canary_enabled: true")
+	}
+	if cfg.Pool.CanaryMaxTokens < 32 {
+		t.Fatalf("staging overlay canary_max_tokens = %d, want >= 32", cfg.Pool.CanaryMaxTokens)
 	}
 	if len(cfg.Pool.CanaryChallenges) == 0 {
 		t.Fatal("staging overlay must have at least one canary_challenge")

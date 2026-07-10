@@ -45,7 +45,7 @@ pool:
   canary_enabled: true
   canary_interval_s: 300        # 5 min; use 600 on production initially
   canary_timeout_s: 120
-  canary_max_tokens: 16
+  canary_max_tokens: 32
   canary_failure_threshold: 3   # provisional ban; pinned → degrade at 2
   canary_cold_start_grace_s: 300 # waive wall-time latency gates (max_ttft_ms +
                                  # min_sustained_tps) 300s after connect; nonce

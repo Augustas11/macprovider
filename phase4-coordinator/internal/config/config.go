@@ -811,7 +811,7 @@ func Default() Config {
 			CanaryEnabled:           false,
 			CanaryIntervalS:         300,
 			CanaryTimeoutS:          30,
-			CanaryMaxTokens:         8,
+			CanaryMaxTokens:         32,
 			CanaryFailureThreshold:  3,
 			LosslessnessProbe: LosslessnessProbeConfig{
 				Enabled:                  false,
