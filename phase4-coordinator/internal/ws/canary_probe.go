@@ -107,6 +107,14 @@ func buildCanaryBodyFromRandomWithChallenge(modelID string, maxTokens int, chall
 		}},
 		"max_tokens": maxTokens,
 		"stream":     false,
+		// Pin greedy decoding. The canary challenge requires the provider to echo
+		// a random nonce EXACTLY (anti-downgrade identity proof); without this the
+		// provider samples at its own default temperature and a model that serves
+		// fine otherwise (e.g. a 4-bit qwen3-coder-30b) hallucinates the nonce
+		// ("CANARY-A1B2C3" -> "CANARY-A1By2C3" -> garbage), producing spurious
+		// nonce_mismatch failures that bench a healthy provider. Measured
+		// 2026-07-10: temperature 0 -> 6/6 exact echo; default temp -> 0/8.
+		"temperature": 0,
 	})
 	if err != nil {
 		return nil, "", config.CanaryChallengeConfig{}, err
