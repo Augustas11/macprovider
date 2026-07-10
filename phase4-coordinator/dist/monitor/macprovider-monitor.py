@@ -28,7 +28,10 @@ import urllib.request
 from email.message import EmailMessage
 
 ENV_FILE = "/etc/macprovider/monitor.env"
-STATE_FILE = "/var/lib/macprovider/monitor-state.json"
+STATE_FILE = os.path.join(
+    os.environ.get("STATE_DIRECTORY", "/var/lib/macprovider-monitor"),
+    "monitor-state.json",
+)
 HEALTHZ = "http://127.0.0.1:8444/healthz"
 POOLZ = "http://127.0.0.1:8444/poolz"
 GW_STATUS = "http://127.0.0.1:9443/v1/status"
