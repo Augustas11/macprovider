@@ -9,6 +9,8 @@ protocol ProviderWebSocketTask: AnyObject, Sendable {
     func sendPing() async throws
     func receive() async throws -> URLSessionWebSocketTask.Message
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
+    var closeCodeRawValueForDiagnostics: Int? { get }
+    var closeReasonTextForDiagnostics: String? { get }
 }
 
 // M1-1 follow-up (codex security audit 2026-06-11): refuse HTTP redirects
@@ -44,7 +46,16 @@ private let providerWebSocketSession: URLSession = {
     )
 }()
 
-extension URLSessionWebSocketTask: ProviderWebSocketTask {}
+extension URLSessionWebSocketTask: ProviderWebSocketTask {
+    var closeCodeRawValueForDiagnostics: Int? {
+        let rawValue = closeCode.rawValue
+        return rawValue == URLSessionWebSocketTask.CloseCode.invalid.rawValue ? nil : rawValue
+    }
+
+    var closeReasonTextForDiagnostics: String? {
+        closeReason.flatMap { String(data: $0, encoding: .utf8) }
+    }
+}
 
 protocol ReceiptKeyRotatingCoordinatorClient: Sendable {
     func reconnectWithNewKey(
@@ -188,6 +199,7 @@ actor CoordinatorClient {
     private let receiptBuilder: ReceiptBuilder?
     private var receiptRotationInFlight = false
     private let reconnectGraceNanoseconds: UInt64
+    private let reconnectInitialBackoffNanoseconds: UInt64
     private let receiptKeyRotationTimeoutNanoseconds: UInt64
     private let connectAndRunOverride: (@Sendable () async throws -> Void)?
     private let attestationGenerator: Tier2AttestationTokenGenerating
@@ -261,6 +273,7 @@ actor CoordinatorClient {
         providerStatus: ProviderStatus,
         sendOverride: SendOverride? = nil,
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
+        reconnectInitialBackoffNanoseconds: UInt64 = 1_000_000_000,
         receiptKeyRotationTimeoutNanoseconds: UInt64 = 55 * 1_000_000_000,
         attestationGenerator: Tier2AttestationTokenGenerating = {
             #if arch(arm64)
@@ -295,7 +308,7 @@ actor CoordinatorClient {
         // Issue #189: injectable in tests; production uses Darwin.exit(1)
         // so the launchd KeepAlive contract recovers the wedged process.
         watchdogExitHook: @escaping @Sendable (String) -> Void = { reason in
-            FileHandle.standardError.write(Data("FATAL coordinator heartbeat watchdog: \(reason)\n".utf8))
+            FileHandle.standardError.write(Data("FATAL coordinator recovery watchdog: \(reason)\n".utf8))
             Darwin.exit(1)
         }
     ) {
@@ -331,6 +344,7 @@ actor CoordinatorClient {
         self.providerReceiptPublicKey = providerReceiptPublicKey
         self.receiptBuilder = receiptBuilder
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
+        self.reconnectInitialBackoffNanoseconds = reconnectInitialBackoffNanoseconds
         self.receiptKeyRotationTimeoutNanoseconds = receiptKeyRotationTimeoutNanoseconds
         self.attestationGenerator = attestationGenerator
         self.seLivenessSigner = seLivenessSignerOverride
@@ -454,14 +468,16 @@ actor CoordinatorClient {
     }
 
     private func runReconnectLoop() async {
-        var backoffSeconds: UInt64 = 1
+        var backoffNanoseconds = reconnectInitialBackoffNanoseconds
         var failedAttempts = 0
+        var consecutiveAuthProtocolFailures = 0
         while !Task.isCancelled {
             do {
                 try await connectAndRunOnce()
                 await cleanupConnection()
-                backoffSeconds = 1
+                backoffNanoseconds = reconnectInitialBackoffNanoseconds
                 failedAttempts = 0
+                consecutiveAuthProtocolFailures = 0
             } catch is CancellationError {
                 await cleanupConnection()
                 return
@@ -473,8 +489,9 @@ actor CoordinatorClient {
                 await cleanupConnection()
                 print("coordinator reconnect attempt 1 scheduled after drain")
                 try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
-                backoffSeconds = 1
+                backoffNanoseconds = reconnectInitialBackoffNanoseconds
                 failedAttempts = 0
+                consecutiveAuthProtocolFailures = 0
             } catch is CoordinatorAuthUpgradeReconnect {
                 // FR-C9.3: tokenless bootstrap minted a bearer; reconnect immediately
                 // so the coordinator registers auth_state=bearer_validated and the
@@ -482,17 +499,69 @@ actor CoordinatorClient {
                 await cleanupConnection()
                 print("coordinator reconnect scheduled after provisional token adoption")
                 try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
-                backoffSeconds = 1
+                backoffNanoseconds = reconnectInitialBackoffNanoseconds
                 failedAttempts = 0
+                consecutiveAuthProtocolFailures = 0
             } catch {
                 await cleanupConnection()
                 failedAttempts += 1
+                if Self.isFatalAuthProtocolFailure(error) {
+                    consecutiveAuthProtocolFailures += 1
+                } else {
+                    consecutiveAuthProtocolFailures = 0
+                }
+                if consecutiveAuthProtocolFailures >= 3 {
+                    let lastError = Self.sanitizedDiagnosticText(String(describing: error))
+                    let reason = "coordinator auth handshake failed \(consecutiveAuthProtocolFailures) consecutive times before session acceptance; last_error=\(lastError)"
+                    FileHandle.standardError.write(Data("FATAL coordinator auth watchdog: \(reason)\n".utf8))
+                    watchdogExitHook(reason)
+                    return
+                }
                 if failedAttempts >= 3 {
                     print("WARN coordinator reconnect failed attempt_count=\(failedAttempts) last_error=\(error)")
                 }
-                try? await Task.sleep(nanoseconds: backoffSeconds * 1_000_000_000)
-                backoffSeconds = min(backoffSeconds * 2, 60)
+                try? await Task.sleep(nanoseconds: backoffNanoseconds)
+                backoffNanoseconds = backoffNanoseconds >= 30 * 1_000_000_000
+                    ? 60 * 1_000_000_000
+                    : backoffNanoseconds * 2
             }
+        }
+    }
+
+    private static func sanitizedDiagnosticText(_ value: String, maxLength: Int = 240) -> String {
+        guard maxLength > 0 else { return "" }
+        var result = ""
+        result.reserveCapacity(min(value.count, maxLength + 3))
+        var appended = 0
+        for scalar in value.unicodeScalars {
+            guard appended < maxLength else {
+                result.append("...")
+                return result
+            }
+            if CharacterSet.controlCharacters.contains(scalar) ||
+                CharacterSet.newlines.contains(scalar) {
+                result.append(" ")
+            } else {
+                result.unicodeScalars.append(scalar)
+            }
+            appended += 1
+        }
+        return result
+    }
+
+    private static func isFatalAuthProtocolFailure(_ error: Error) -> Bool {
+        guard let authError = error as? CoordinatorAuthError else {
+            return false
+        }
+        switch authError {
+        case .rejected(let code, _):
+            return code == "invalid_auth_request"
+        case .invalidMessage(let message):
+            let lowered = message.lowercased()
+            return lowered.contains("auth_request") ||
+                lowered.contains("auth_response") ||
+                lowered.contains("auth_challenge") ||
+                lowered.contains("unrecognized auth message")
         }
     }
 
@@ -953,20 +1022,48 @@ actor CoordinatorClient {
     }
 
     private func connectAndRunTier2(socket: ProviderWebSocketTask) async throws {
-        let authAttempt = Tier2AuthAttempt()
-        let initialMessage = await authInitialMessage(attempt: authAttempt)
-        try await send(initialMessage)
-        let challenge: [String: Any] = try await receiveAuthChallenge(from: socket)
-        let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
-        try await send(try await authProofMessage(
-            challenge: challenge,
-            attempt: authAttempt,
-            initialMessage: initialMessage
-        ))
-        let response = try await receiveAuthResponse(from: socket)
-        try await acceptAuthResponse(response, session: session)
-        installTier2Session(session, socket: socket)
-        try await receiveLoop(socket)
+        do {
+            let authAttempt = Tier2AuthAttempt()
+            let initialMessage = await authInitialMessage(attempt: authAttempt)
+            try await send(initialMessage)
+            let challenge: [String: Any] = try await receiveAuthChallenge(from: socket)
+            let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
+            try await send(try await authProofMessage(
+                challenge: challenge,
+                attempt: authAttempt,
+                initialMessage: initialMessage
+            ))
+            let response = try await receiveAuthResponse(from: socket)
+            try await acceptAuthResponse(response, session: session)
+            installTier2Session(session, socket: socket)
+            try await receiveLoop(socket)
+        } catch {
+            guard !coordinatorSessionAccepted else {
+                throw error
+            }
+            if let closeError = Self.authProtocolErrorFromCloseDiagnostics(socket) {
+                throw closeError
+            }
+            throw error
+        }
+    }
+
+    private static func authProtocolErrorFromCloseDiagnostics(_ socket: ProviderWebSocketTask) -> CoordinatorAuthError? {
+        guard let closeCode = socket.closeCodeRawValueForDiagnostics else {
+            return nil
+        }
+        let reason = sanitizedDiagnosticText(socket.closeReasonTextForDiagnostics ?? "")
+        switch closeCode {
+        case 4001 where reason.hasPrefix("invalid_auth_request"):
+            return .rejected(
+                code: "invalid_auth_request",
+                message: reason.isEmpty ? "coordinator closed invalid auth_request" : reason
+            )
+        case 4000 where reason == "unrecognized auth message":
+            return .invalidMessage(reason)
+        default:
+            return nil
+        }
     }
 
     private func connectAndRunLegacy(socket: ProviderWebSocketTask) async throws {

@@ -253,6 +253,127 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(attemptCount, 2)
     }
 
+    func testTier2InvalidAuthRequestCloseIsClassifiedForRecovery() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = true
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let socket = FakeProviderWebSocketTask(
+            receiveResults: [.failure(CoordinatorClientTestError.closedByCoordinator)],
+            closeCodeRawValue: 4001,
+            closeReasonText: "invalid_auth_request: type\nforged\u{2028}line"
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [socket])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil }
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+            XCTFail("invalid auth_request close should throw")
+        } catch let CoordinatorAuthError.rejected(code, message) {
+            XCTAssertEqual(code, "invalid_auth_request")
+            XCTAssertEqual(message, "invalid_auth_request: type forged line")
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testRepeatedInvalidAuthRequestFailuresFireRecoveryHook() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let attempts = ReconnectAttemptRecorder()
+        let captured = CapturedWatchdogReason()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            reconnectInitialBackoffNanoseconds: 1_000_000,
+            connectAndRunOverride: {
+                _ = await attempts.recordAttempt()
+                throw CoordinatorAuthError.rejected(
+                    code: "invalid_auth_request",
+                    message: "invalid auth_request"
+                )
+            },
+            watchdogExitHook: { reason in
+                Task { await captured.set(reason) }
+            }
+        )
+
+        await client.start()
+        try await Self.waitUntil(timeoutNanoseconds: 1_000_000_000) {
+            await captured.value() != nil
+        }
+        await client.stop()
+
+        let attemptCount = await attempts.currentCount()
+        XCTAssertEqual(attemptCount, 3)
+        let capturedReason = await captured.value()
+        let reason = try XCTUnwrap(capturedReason)
+        XCTAssertTrue(reason.contains("auth handshake failed 3 consecutive times"), reason)
+        XCTAssertTrue(reason.contains("invalid_auth_request"), reason)
+    }
+
+    func testTransientReconnectFailureResetsAuthProtocolFailureStreak() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let attempts = ReconnectAttemptRecorder()
+        let captured = CapturedWatchdogReason()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            reconnectInitialBackoffNanoseconds: 1_000_000,
+            connectAndRunOverride: {
+                let attempt = await attempts.recordAttempt()
+                switch attempt {
+                case 1, 2, 4, 5:
+                    throw CoordinatorAuthError.rejected(
+                        code: "invalid_auth_request",
+                        message: "invalid auth_request"
+                    )
+                case 3:
+                    throw CoordinatorClientTestError.closedByCoordinator
+                default:
+                    throw CancellationError()
+                }
+            },
+            watchdogExitHook: { reason in
+                Task { await captured.set(reason) }
+            }
+        )
+
+        await client.start()
+        try await Self.waitUntil(timeoutNanoseconds: 1_000_000_000) {
+            await attempts.currentCount() >= 6
+        }
+        await client.stop()
+
+        let capturedReason = await captured.value()
+        XCTAssertNil(capturedReason, "transient reconnect failures should reset the auth protocol failure streak")
+        let attemptCount = await attempts.currentCount()
+        XCTAssertGreaterThanOrEqual(attemptCount, 6)
+    }
+
     // Regression: M1-1 / XSEC-1. When config.providerToken is set, the WS
     // connect attaches "Authorization: Bearer <token>". When unset, no
     // Authorization header is sent (preserves the legacy fleet's ability
@@ -2324,6 +2445,7 @@ final class CoordinatorClientTests: XCTestCase {
         recorder: CoordinatorFrameRecorder,
         drainTimeoutSeconds: Int = 1,
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
+        reconnectInitialBackoffNanoseconds: UInt64 = 1_000_000_000,
         receiptKeyRotationTimeoutNanoseconds: UInt64 = 55 * 1_000_000_000,
         enableWarmSwap: Bool = false,
         modelRuntime: ModelRuntime? = nil,
@@ -2364,6 +2486,7 @@ final class CoordinatorClientTests: XCTestCase {
             providerStatus: status,
             sendOverride: sendOverride ?? defaultSendOverride,
             reconnectGraceNanoseconds: reconnectGraceNanoseconds,
+            reconnectInitialBackoffNanoseconds: reconnectInitialBackoffNanoseconds,
             receiptKeyRotationTimeoutNanoseconds: receiptKeyRotationTimeoutNanoseconds,
             attestationGenerator: attestationGenerator,
             sleepAssertionFactory: { nil },
@@ -2408,6 +2531,7 @@ private enum CoordinatorClientTestError: Error {
     case unexpectedContainerLoader
     case sendStateUpdateFailed
     case missingProviderECDHPublicKey
+    case closedByCoordinator
 }
 
 // Issue #189: thread-safe sink for the injected watchdog exit hook.
@@ -2680,6 +2804,8 @@ private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked
     private(set) var resumeCount = 0
     private(set) var cancelCount = 0
     private var pingCount = 0
+    let closeCodeRawValueForDiagnostics: Int?
+    let closeReasonTextForDiagnostics: String?
     private let sendErrorTypes: Set<String>
     private let receiveOverrideIgnoresCancellation: Bool
     private let receiveOverride: (@Sendable (FakeProviderWebSocketTask) async throws -> URLSessionWebSocketTask.Message)?
@@ -2687,12 +2813,16 @@ private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked
     init(
         receiveResults: [Result<URLSessionWebSocketTask.Message, Error>],
         receiveDelayNanoseconds: UInt64 = 0,
+        closeCodeRawValue: Int? = nil,
+        closeReasonText: String? = nil,
         sendErrorTypes: Set<String> = [],
         receiveOverrideIgnoresCancellation: Bool = false,
         receiveOverride: (@Sendable (FakeProviderWebSocketTask) async throws -> URLSessionWebSocketTask.Message)? = nil
     ) {
         self.receiveResults = receiveResults
         self.receiveDelayNanoseconds = receiveDelayNanoseconds
+        self.closeCodeRawValueForDiagnostics = closeCodeRawValue
+        self.closeReasonTextForDiagnostics = closeReasonText
         self.sendErrorTypes = sendErrorTypes
         self.receiveOverrideIgnoresCancellation = receiveOverrideIgnoresCancellation
         self.receiveOverride = receiveOverride
