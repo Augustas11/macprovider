@@ -1,6 +1,7 @@
 # XcodeGen spec for Malibu.app
 #
-# Generate: brew install xcodegen && (cd phase3-binary/app && xcodegen generate)
+# Generate with the reviewed XcodeGen artifact installed by
+# scripts/install-pinned-xcodegen.sh.
 # Build:    xcodebuild -project Malibu.xcodeproj -scheme Malibu -configuration Release
 #
 # The CLI binary (macprovider-cli) is built separately from the SwiftPM
@@ -20,15 +21,15 @@ options:
 packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
-    from: 2.6.4
+    exactVersion: 2.6.4
 
 settings:
   base:
     SWIFT_VERSION: "5.9"
     ENABLE_HARDENED_RUNTIME: YES
     CODE_SIGN_STYLE: Manual
-    MARKETING_VERSION: "1.8.21"
-    CURRENT_PROJECT_VERSION: "20"
+    MARKETING_VERSION: "1.8.26"
+    CURRENT_PROJECT_VERSION: "26"
     OTHER_SWIFT_FLAGS: "-strict-concurrency=complete"
 
 targets:

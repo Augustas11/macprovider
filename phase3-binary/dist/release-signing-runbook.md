@@ -21,12 +21,12 @@ releases. The package is not a standalone GUI installer; its preinstall
 script fails direct Installer.app installs so operators do not bypass
 `install.sh`'s user-level config, launchd, and support-file setup.
 
-The signing step is **conditional on operator-supplied secrets**. If
-`APPLE_DEVELOPER_ID_CERT_P12_BASE64` is empty, the step emits a
-GitHub Actions warning and ships an adhoc-signed binary (current
-behavior). Fresh installs on macOS ≥ 26.3.1 will fail
-`launchctl bootstrap` until the secrets are populated. This runbook
-documents the one-time operator setup.
+Production releases fail closed unless the operator-supplied signing,
+notarization, Sparkle, checksum-signing, and Pearl publication secrets are
+available through the protected `production-release` environment. The release
+workflow no longer publishes an adhoc-signed compatibility artifact: fresh
+installs on macOS >= 26.3.1 cannot run it through launchd, so such an artifact
+is not a production release.
 
 ## Why this exists
 
@@ -99,10 +99,83 @@ will not accept the main password. Label it "macprovider notarytool".
 <https://developer.apple.com/account> → Membership → Team ID. Looks
 like a 10-character alphanumeric string.
 
-### 6. Populate GitHub Secrets
+### 6. Configure the protected GitHub release boundary
+
+Do not apply these settings while a release is in flight. The commands below
+are the exact intended external configuration; this repository change does not
+execute them. Use a reviewer other than the account that dispatches releases,
+because self-review is disabled.
+
+Resolve the reviewer and repository IDs, then create/update the environment:
+
+```bash
+export REPO=Augustas11/macprovider
+export RELEASE_REVIEWER='<different trusted GitHub login>'
+export REVIEWER_ID="$(gh api "users/$RELEASE_REVIEWER" --jq .id)"
+
+gh api --method PUT "repos/$REPO/environments/production-release" \
+  -H 'X-GitHub-Api-Version: 2026-03-10' \
+  --input - <<JSON
+{
+  "wait_timer": 0,
+  "prevent_self_review": true,
+  "reviewers": [{"type": "User", "id": $REVIEWER_ID}],
+  "deployment_branch_policy": {
+    "protected_branches": false,
+    "custom_branch_policies": true
+  }
+}
+JSON
+
+gh api --method POST \
+  "repos/$REPO/environments/production-release/deployment-branch-policies" \
+  -H 'X-GitHub-Api-Version: 2026-03-10' \
+  -f name=main -f type=branch
+```
+
+Enable immutable releases, then install the active `v*` tag ruleset. GitHub user
+ID `28995904` is the `Augustas11` tagger bypass used only for the deliberate tag
+creation command in step 8; no role, team, deploy key, or GitHub App/Actions
+integration bypass is allowed.
+
+```bash
+gh api --method PUT "repos/$REPO/immutable-releases" \
+  -H 'X-GitHub-Api-Version: 2026-03-10'
+
+gh api --method POST "repos/$REPO/rulesets" \
+  -H 'X-GitHub-Api-Version: 2026-03-10' \
+  --input - <<'JSON'
+{
+  "name": "Immutable production release tags",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": [
+    {"actor_id": 28995904, "actor_type": "User", "bypass_mode": "always"}
+  ],
+  "conditions": {
+    "ref_name": {"include": ["refs/tags/v*"], "exclude": []}
+  },
+  "rules": [
+    {"type": "creation"},
+    {"type": "update"},
+    {"type": "deletion"}
+  ]
+}
+JSON
+```
+
+The workflow checks all three controls through
+`scripts/verify-github-release-posture.sh` before it publishes. GitHub API
+references:
+
+- <https://docs.github.com/en/rest/deployments/environments>
+- <https://docs.github.com/en/rest/repos/rules>
+- <https://docs.github.com/en/rest/repos/repos>
+
+### 7. Populate environment secrets
 
 At <https://github.com/Augustas11/macprovider/settings/secrets/actions>,
-add these repository secrets:
+select the `production-release` environment and add these environment secrets:
 
 | Secret name | Value |
 |---|---|
@@ -113,23 +186,70 @@ add these repository secrets:
 | `APPLE_NOTARY_APPLE_ID` | The enrolled Apple ID email |
 | `APPLE_NOTARY_PASSWORD` | The app-specific password from step 4 |
 | `APPLE_NOTARY_TEAM_ID` | The Team ID from step 5 |
+| `SPARKLE_EDDSA_PRIVATE_KEY` | Sparkle Ed25519 private key matching `SUPublicEDKey` in `phase3-binary/app/project.yml` |
+| `MACPROVIDER_RELEASE_SIGNING_KEY_PEM` | P-256 private key matching the public key embedded in `phase3-binary/dist/install.sh` |
+| `MALIBU_DOWNLOAD_SSH_KEY` | Root SSH private key for the Pearl publication host |
+| `MALIBU_DOWNLOAD_VPS_HOST` | Pearl publication host address |
+| `RELEASE_POSTURE_TOKEN` | Fine-grained token with repository Administration read and Actions read access |
 
-The existing `MACPROVIDER_RELEASE_SIGNING_KEY_PEM` secret
-(checksums.txt signing) is unrelated and stays as-is.
+Do not duplicate release secrets at repository scope. The unsigned `build` job
+has only `contents: read`, does not reference secrets, and uploads a one-day
+artifact. Only the reviewed `sign_publish` job can enter the protected
+environment and read the release secrets.
 
-### 7. Cut a release and verify
+The unsigned build is content-pinned as part of the reviewed commit:
+`phase3-binary/Package.resolved` and `phase3-binary/app/Package.resolved`
+must match the dispatch commit byte-for-byte, Malibu resolves Sparkle at its
+reviewed 2.6.4 revision, and XcodeGen 2.45.4 is installed only from its fixed
+release archive after SHA-256 verification. The signing job likewise verifies
+the fixed Sparkle 2.6.4 tools archive before extraction and deletes the Apple
+keychain and imported signing material before invoking `generate_appcast`.
 
-Push a new tag (e.g. `v1.3.2`). The workflow's "Sign + notarize binary"
-step now activates. Expected duration: 1-15 minutes for notarization,
-on top of the existing ~5-10 minute build. The step:
+### 8. Cut a release and verify
 
-1. Imports the `.p12` into a transient keychain
-2. Codesigns the binary with `--options runtime --timestamp`
-3. Notarizes via `xcrun notarytool submit --wait`
-4. Re-tars with the signed, notarization-accepted binary
-5. Builds a signed flat `.pkg` when the Installer certificate secrets exist
-6. Notarizes and staples the `.pkg`
-7. Deletes the transient keychain
+Merge the release commit to `main`, create the tag from the freshly fetched
+`origin/main` tip, and dispatch the workflow from `main`. A tag push does not
+trigger the workflow and Actions cannot create the tag.
+
+```bash
+export TAG=vX.Y.Z
+git fetch origin main --tags
+export RELEASE_COMMIT="$(git rev-parse origin/main)"
+git tag -s "$TAG" "$RELEASE_COMMIT" -m "macprovider-cli $TAG"
+git push origin "refs/tags/$TAG"
+
+test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$RELEASE_COMMIT"
+test "$(git ls-remote origin "refs/tags/$TAG^{}" | awk '{print $1}')" = "$RELEASE_COMMIT"
+gh workflow run release.yml --repo Augustas11/macprovider --ref main \
+  -f version="$TAG" -f prerelease=false
+```
+
+The protected job pauses for the independent environment review. Expected
+duration after approval is 1-15 minutes for notarization, on top of the
+existing build. The workflow:
+
+1. Validates the dispatch version and prerelease flag before using either
+2. Imports the `.p12` into a transient keychain
+3. Codesigns the binary with `--options runtime --timestamp`
+4. Notarizes via `xcrun notarytool submit --wait`
+5. Re-tars with the signed, notarization-accepted binary
+6. Builds a signed flat `.pkg` when the Installer certificate secrets exist
+7. Notarizes and staples the `.pkg`
+8. Deletes the transient keychain before running the digest-pinned Sparkle tool
+9. Verifies `checksums.txt.sig` against the canonical public key embedded in
+   `install.sh`, then verifies the exact signed provenance/asset set
+10. Creates a draft GitHub release and re-fetches every uploaded asset through
+    the captured numeric release ID
+11. Revalidates `origin/main`, the protected tag, repository release posture,
+    checksum signature, numeric ID, and asset digests immediately before the
+    numeric API transition from draft to public
+12. Re-fetches the published numeric release and requires GitHub immutability
+    before producing the Pearl publication manifest
+
+If any draft verification or final gate fails, the workflow does not make the
+release public and does not publish to Pearl. Inspect or delete the retained
+draft by numeric ID before deliberately retrying; never replace assets on a
+public immutable release.
 
 Expected release assets:
 
@@ -138,6 +258,8 @@ Expected release assets:
   container for `install.sh`
 - `checksums.txt`
 - `checksums.txt.sig`
+- `release-provenance.json` — signed through `checksums.txt`; binds every
+  release asset hash to the exact tag, commit, and repository
 
 The tarball remains the canonical `macprovider-cli update` artifact until
 the self-update implementation explicitly learns the package path.
@@ -199,6 +321,39 @@ bash scripts/verify-malibu-release-artifacts.sh Malibu-vX.Y.Z.dmg
 
 Expect `codesign --verify`, `stapler validate`, and `spctl` to pass
 without `xattr -d`.
+
+## Numeric-ID-only Pearl recovery
+
+Normal Pearl publication uses files captured in the same protected workflow;
+it never redownloads by tag. Manual recovery likewise requires the immutable
+numeric release ID and the five numeric asset IDs recorded by GitHub. Do not
+substitute tag-based download commands or regenerate `checksums.txt`.
+
+```bash
+export GITHUB_REPOSITORY=Augustas11/macprovider
+export GH_TOKEN='<fine-grained contents:read token>'
+export MALIBU_DOWNLOAD_SSH_KEY="$HOME/.ssh/pearl_operator_ed25519"
+
+# Run from an isolated clean worktree whose HEAD is the exact reviewed commit.
+test "$(git rev-parse HEAD)" = '<40-hex reviewed origin/main commit>'
+
+bash scripts/recover-malibu-publication.sh \
+  vX.Y.Z '<40-hex reviewed origin/main commit>' \
+  '<release ID>' \
+  '<Malibu DMG asset ID>' \
+  '<appcast.xml asset ID>' \
+  '<checksums.txt asset ID>' \
+  '<checksums.txt.sig asset ID>' \
+  '<release-provenance.json asset ID>'
+```
+
+Recovery fails unless the numeric release is immutable and its exact tag,
+commit, asset IDs, GitHub SHA-256 digests, signed checksums/provenance, Malibu
+DMG Apple signature/notarization/staple, Sparkle Ed25519 signature and appcast
+URL/length/version all agree. Pearl receives the verified files in an
+unpredictable root-owned `0700` staging directory; the helper publishes a
+root-owned `0755`/`0644` immutable graph. A permanent tag manifest rejects
+same-tag drift and versioned download pointers are never retargeted.
 
 ## Related
 

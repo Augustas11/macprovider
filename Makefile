@@ -48,6 +48,11 @@ test-integration:
 # that an env:NAME-indirected secret is deferred to runtime rather than
 # false-failing the gate (the 2026-06-17 regression that forced SKIP_C2_CHECK=1).
 test-dist:
+	bash scripts/test-coordinator-advertised-version-test.sh
+	bash scripts/test-release-tag-target.sh
+	bash scripts/test-release-security-posture.sh
+	bash scripts/test-release-toolchain.sh
+	bash scripts/test-release-publication-provenance.sh
 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
 	bash -n phase5-gateway/dist/deploy-pearl-vps.sh
 	bash phase4-coordinator/dist/test/check_deploy_config_test.sh

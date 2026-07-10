@@ -1,0 +1,8 @@
+# Malibu marketing version	Sparkle/CFBundle build number
+#
+# Append one strictly increasing entry for every Malibu release. The baseline
+# records the last correctly versioned release before this ledger was added;
+# releases v1.8.22-v1.8.25 reused stale app metadata and are intentionally not
+# represented as valid Malibu releases.
+1.8.21	20
+1.8.26	26
