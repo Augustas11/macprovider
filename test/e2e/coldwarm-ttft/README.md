@@ -105,6 +105,18 @@ COLDWARM_BASE=https://<lab-gateway> \
 Loop it: induce cold → capture → repeat. Over many cycles the store accumulates
 enough cold samples for a real p99.
 
+## Model id — use the FULL catalog id (not the short rate-card key)
+
+Pass the **full** model id the provider advertises — the one `/v1/status` returns,
+e.g. `mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit` — or leave `--model` /
+`COLDWARM_MODEL` unset to auto-derive it from `/v1/status`. Do **not** use the
+short rate-card key `qwen3-coder-30b-a3b-instruct`: post-#510 the provider
+advertises the full catalog id, and a buyer request for the short id returns
+`404 model_not_found` (the coordinator's `ModelKnown` only knows the advertised
+full id; there's no `routing.model_classes` alias). This bit the harness on
+2026-07-10 — its default was the short id. Same convention as P1's canary-buyer
+probe, which derives models from `/v1/status`.
+
 ## Schedule it (lab host)
 
 **systemd** (always-on lab Linux host): `coldwarm-warm.{service,timer}` accumulate

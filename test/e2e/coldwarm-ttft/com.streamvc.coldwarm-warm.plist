@@ -35,9 +35,15 @@
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>COLDWARM_BASE</key>
     <string>https://api.streamvc.live</string>
-    <!-- Pin the model set explicitly to keep the store consistent across runs: -->
+    <!-- Pin the model explicitly to keep the store's matrix keys consistent.
+         Use the FULL catalog model id the provider advertises (what /v1/status
+         returns), NOT the short rate-card key: post-#510 the provider advertises
+         `mlx-community/…` and a buyer request for the short id
+         `qwen3-coder-30b-a3b-instruct` 404s `model_not_found`. Leave COLDWARM_MODEL
+         unset to auto-derive from /v1/status (also the full id) — either is fine,
+         but never hardcode the short id. (2026-07-10 incident learning.) -->
     <key>COLDWARM_MODEL</key>
-    <string>qwen3-coder-30b-a3b-instruct</string>
+    <string>mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit</string>
   </dict>
 
   <key>StartInterval</key>

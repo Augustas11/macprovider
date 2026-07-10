@@ -9,7 +9,10 @@
 # The token is never echoed. Diagnostics go to stderr / the service log.
 #
 # Usage:
-#   run-coldwarm.sh --scenario warm --model qwen3-coder-30b-a3b-instruct
+#   run-coldwarm.sh --scenario warm --model mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit
+#   (use the FULL id the provider advertises / that /v1/status returns — the short
+#    rate-card key qwen3-coder-30b-a3b-instruct 404s post-#510. Or omit --model to
+#    auto-derive from /v1/status.)
 #   run-coldwarm.sh --scenario cold --state cold      # after inducing cold
 #   run-coldwarm.sh --build-matrix
 set -euo pipefail
