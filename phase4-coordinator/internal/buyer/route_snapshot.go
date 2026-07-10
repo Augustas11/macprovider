@@ -61,12 +61,16 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	sessionID := stringPtrOrNil(provider.AssignedID)
 	pendingDeadline := settlementCfg.PendingDeadlineSeconds
 	if pendingDeadline <= 0 {
-		// Fail-closed: an unvalidated caller publishing a zero/negative
-		// deadline must not silently settle under a substituted default.
-		// The validated YAML config path never reaches here (config.Validate
-		// enforces 1..900); this only guards SetSettlementConfig callers
-		// that bypass that validation.
-		return skipOrEnforceError("invalid settlement pending deadline seconds")
+		// Fail-open to the SPEC-022 default (300s) rather than fail-closed.
+		// Fail-closing emits route_snapshot_failed pre-dispatch, which the
+		// gateway currently settles on estimate (charging the buyer for a
+		// request with no provider invocation). Fail-open to 300 is the
+		// safe choice until the gateway treats route_snapshot_failed as a
+		// pre-dispatch no-charge — tracked as a carried follow-up.
+		// Validated YAML config already rejects deadline 0 (config.Validate
+		// enforces 1..900); this fallback only guards an unvalidated
+		// in-memory caller, where fail-open is benign.
+		pendingDeadline = config.Default().Settlement.PendingDeadlineSeconds
 	}
 	snapshot := billing.RouteSnapshot{
 		AccountScope:                      accountScopeForSettlement(b.accountID),

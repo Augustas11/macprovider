@@ -949,6 +949,34 @@ NOT synthesize missing route snapshots after the fact.
    through routing, receipt verification, buyer debit, settlement, quarantine,
    and payout exclusion.
 
+## Known limitations / carried follow-ups
+
+These are pre-existing gaps surfaced during the `pending_deadline_seconds`
+audit (2026-07). Neither is new or worsened by that change; both are carried
+as documented follow-ups rather than blocking it.
+
+- **(A) Gateway settles `route_snapshot_failed` on estimate instead of
+  no-charge.** When the coordinator fails to persist a route snapshot
+  pre-dispatch (e.g. `route_snapshot_failed`), no provider invocation occurs,
+  but the gateway currently reads the absent settlement-finality headers as
+  legacy and settles the reservation on the estimated prompt-token count —
+  i.e. it can debit the buyer for a request that never reached a provider.
+  The gateway SHOULD instead treat a pre-dispatch `route_snapshot_failed` as
+  a no-charge refund. This is pre-existing gateway error-classification
+  behavior, independent of the pending-deadline change; carried as a
+  follow-up.
+- **(B) `route_snapshot_policy_version` marks default-cutover, not
+  runtime-reconfiguration.** The policy version literal (`spec022-prereq-v0`
+  = 30s-deadline era, `spec022-prereq-v1` = 300s-deadline era) marks when the
+  *default* pending-deadline changed, but does not uniquely encode a
+  runtime-reconfigured deadline — an operator SIGHUP-changing
+  `settlement.pending_deadline_seconds` keeps the same policy-version
+  literal. Per-row settlement stays correct (each row pins and hashes its
+  own deadline independent of the version string), so this only affects
+  report-by-policy-version aggregation, not settlement correctness. Fully
+  deriving the version from the effective policy object is the unimplemented
+  SPEC-022 R-1.1 policy object; carried as a follow-up.
+
 ## Open questions
 
 None for v0.1.4. Deferred implementation details belong in the receipt-profile
