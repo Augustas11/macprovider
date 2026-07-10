@@ -1,13 +1,21 @@
-# SPEC-029 Losslessness Probe
+# SPEC-030 — Losslessness Probe
 
 **Status:** v0.1-draft
 **Date:** 2026-07-09
 **Depends on:** SPEC-015 v0.4.2, SPEC-022, SPEC-028
 **Companion research:** `docs/research/losslessness-probe-2026-07.md`
 
+**Numbering note:** Promoted to canonical **SPEC-030** (2026-07-10, corpus-hygiene
+pass; moved from `specs/design/spec-029/`) to resolve a number collision with
+`SPEC-029-sweep-workload-class-stratification.md`. The on-wire protocol constant
+remains `losslessness_probe_v1` and the JCS fixtures remain under
+`phase4-coordinator/test/jcs_fixtures/spec029/`; those code identifiers are
+intentionally NOT renamed here — renaming a shipped wire constant is a
+back-compat-bearing code change, out of scope for this doc relocation.
+
 ## 1. Purpose
 
-SPEC-029 defines an overt, coordinator-issued probe that measures whether a provider's speculative decoding path preserves the target model's next-token distribution under selected stochastic sampling profiles.
+SPEC-030 defines an overt, coordinator-issued probe that measures whether a provider's speculative decoding path preserves the target model's next-token distribution under selected stochastic sampling profiles.
 
 The v0.1 probe is cooperative implementation-health evidence. It can gate stochastic speculative-decoding eligibility for the exact provider/model/draft/profile key under test, but it does not prove malicious-provider honesty, compute integrity, or model-weight integrity. Stronger claims require a later covert or independently verifiable probe spec.
 
@@ -55,7 +63,7 @@ Out of scope:
 
 **TV upper bound:** The maximum total-variation distance consistent with reported shared-support probabilities and aggregate tail masses outside that shared support.
 
-**Draft artifact binding:** A probe-local immutable draft identity from the SPEC-029 draft admission record. It includes `draft_model_id`, `draft_artifact_sha256`, `tokenizer_identity`, and `compatibility_check_digest`. It is not added to SPEC-015 receipts or provider heartbeat.
+**Draft artifact binding:** A probe-local immutable draft identity from the SPEC-030 draft admission record. It includes `draft_model_id`, `draft_artifact_sha256`, `tokenizer_identity`, and `compatibility_check_digest`. It is not added to SPEC-015 receipts or provider heartbeat.
 
 **Profile key:** `(provider_id, assigned_id, model_id, target_model_hash, target_generation, draft_model_id, draft_artifact_binding, draft_generation, sampling_profile, corpus_version, threshold_version)`.
 
@@ -71,11 +79,11 @@ Out of scope:
 
 V0.1 probes are overt. A provider can know that it is handling `losslessness_probe_v1`.
 
-Therefore SPEC-029 MUST NOT be used to claim that a malicious provider honestly ran the requested model or honestly reported distributions. V0.1 detects cooperative implementation bugs, sampler drift, stale artifacts, and operational regressions. A provider that fabricates matching plain/spec shared-support distributions can defeat the v0.1 proof surface.
+Therefore SPEC-030 MUST NOT be used to claim that a malicious provider honestly ran the requested model or honestly reported distributions. V0.1 detects cooperative implementation bugs, sampler drift, stale artifacts, and operational regressions. A provider that fabricates matching plain/spec shared-support distributions can defeat the v0.1 proof surface.
 
 The coordinator MUST present v0.1 results as self-attested implementation-health evidence. A fresh `pass_fresh` MAY allow stochastic speculative decoding only for the exact profile key after a separate rollout decision. It MUST NOT improve settlement trust, model authenticity trust, payout trust, or general provider readiness.
 
-The approval owner for v0.1 corpus, threshold, calibration, retention, and rollout-consumer decisions is the **MacProvider SPEC Maintainers** group: repository maintainers responsible for SPEC-028, SPEC-029, and coordinator/provider release gates. Approval MUST be recorded in the PR or decision log that changes the relevant corpus, threshold, calibration, retention, or rollout rule.
+The approval owner for v0.1 corpus, threshold, calibration, retention, and rollout-consumer decisions is the **MacProvider SPEC Maintainers** group: repository maintainers responsible for SPEC-028, SPEC-030, and coordinator/provider release gates. Approval MUST be recorded in the PR or decision log that changes the relevant corpus, threshold, calibration, retention, or rollout rule.
 
 ## 5. Normative Requirements
 
@@ -138,7 +146,7 @@ Provider work for probes is non-billable and MUST NOT emit SPEC-015 settlement r
 
 The wire protocol uses an outer envelope plus an inner JCS payload carried in a required `payload` field. The request digest is computed over RFC8785/JCS canonical JSON of the request `payload` before `probe_request_digest` is attached to the outer envelope. The result digest is computed over RFC8785/JCS canonical JSON of the result `payload` before `probe_result_digest` is attached to the outer envelope.
 
-For cleartext provider-control sessions, the WS frame is the outer envelope below. For encrypted Tier-2 provider-control sessions, SPEC-029 MUST use a dedicated provider-control carrier, not the existing `inference_request` carrier:
+For cleartext provider-control sessions, the WS frame is the outer envelope below. For encrypted Tier-2 provider-control sessions, SPEC-030 MUST use a dedicated provider-control carrier, not the existing `inference_request` carrier:
 
 - Request visible frame: `type = "losslessness_probe_v1.encrypted_request"`, `request_id = probe_id`, `stream = false`, `encrypted = true`, and `enc`.
 - Request AAD: visible frame type, direction `c2p`, `request_id`, `stream = false`, `provider_id`, `assigned_id`, and sequence number.
@@ -225,7 +233,7 @@ Verdicts MUST be keyed by exact sampling profile. The coordinator MUST NOT aggre
 
 The v0.1 corpus MUST be coordinator-owned, synthetic, and versioned. It MUST NOT contain buyer-origin prompts, buyer outputs, secrets, credentials, private code, or production conversation material.
 
-The corpus owner role is the SPEC-028/SPEC-029 maintainer group. Any corpus or threshold change MUST create a new `corpus_version` or `threshold_version`, and existing `pass_fresh` state for affected keys MUST become `expired`.
+The corpus owner role is the SPEC-028/SPEC-030 maintainer group. Any corpus or threshold change MUST create a new `corpus_version` or `threshold_version`, and existing `pass_fresh` state for affected keys MUST become `expired`.
 
 The coordinator MUST send exact prompts and exact measurement-position indexes. The provider MUST measure every requested position without substitution. Dropped, substituted, or extra positions MUST produce `inconclusive:position_mismatch`.
 
@@ -420,7 +428,7 @@ Profile freshness TTL is 24 hours after the latest pass for the same profile key
 
 The coordinator MUST also maintain `losslessness_grid_state` keyed by the grid key. It is `all_profiles_fresh` only when every required stochastic sampling profile and the greedy control have `pass_fresh` profile state for the same grid key. Any missing, stale, warning, blocked, disabled, inconclusive, or expired profile state MUST make the grid state `not_ready`.
 
-SPEC-029 only produces evidence for a SPEC-028 rollout decision. The rollout consumer rule is:
+SPEC-030 only produces evidence for a SPEC-028 rollout decision. The rollout consumer rule is:
 
 1. `all_profiles_fresh` is required before stochastic speculative decoding can be enabled for a grid key.
 2. A SPEC-028 rollout PR or decision-log entry approved by MacProvider SPEC Maintainers MUST explicitly name the grid key, feature flag, allowed sampling profiles, and rollback condition.
@@ -549,11 +557,11 @@ Dashboard aggregates MAY summarize provider health, but aggregates MUST NOT coll
 
 ### FR-17 Receipt and usage invariants
 
-SPEC-029 MUST NOT add fields to SPEC-015 v0.4 receipts or v0.4 `usage`.
+SPEC-030 MUST NOT add fields to SPEC-015 v0.4 receipts or v0.4 `usage`.
 
-SPEC-029 MUST NOT require a SPEC-022 settlement change.
+SPEC-030 MUST NOT require a SPEC-022 settlement change.
 
-SPEC-029 MUST NOT alter buyer token accounting, payout accounting, receipt verification, or external verifier behavior.
+SPEC-030 MUST NOT alter buyer token accounting, payout accounting, receipt verification, or external verifier behavior.
 
 Future receipt versions MAY bind a digest of recent losslessness probe status, but that is outside v0.1.
 
@@ -591,7 +599,7 @@ Covert probes MUST be specified separately because they interact with buyer traf
 
 ## 7. Acceptance Criteria
 
-Before SPEC-029 can move toward LOCK:
+Before SPEC-030 can move toward LOCK:
 
 1. A protocol fixture covers the WS request/result JSON schema, required `payload` envelope field, cleartext and Tier-2 encrypted probe carriers, measurement and provider-inconclusive result variants, auth/session binding, nonce, expiry, inner-payload request digest, inner-payload result digest, replay rejection, timeout, and bounded K.
 2. A draft-admission fixture covers `draft_admission_v1`, including draft artifact SHA-256, tokenizer identity, compatibility check digest, generation increment, expiry, and the no-heartbeat/no-receipt boundary.

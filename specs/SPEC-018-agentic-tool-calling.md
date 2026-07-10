@@ -2,7 +2,7 @@
 
 **Version:** 0.2.4 (2026-06-27, r4 polish — AC-44 citation fix + AC-56 deletion + §3 ordering note + §3.9-deleted breadcrumb + §10c.1 governance note)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4.1, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.3 (receipts canonical output binding — see AC-17)
-**Status:** Draft — codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0; v0.2.4 r4 polish absorbed; LOCK CANDIDATE pending PR.
+**Status:** **LOCKED** at v0.2.4 & shipped — spec PR #202 and IMPL PR #209 both landed (multi-turn acceptance, token-incremental streaming, `tool_call_id` validation, 1 MiB/2 MiB byte caps). codex 4-lane r4 0/0/0; Claude blind-spot r2 0/0/0. SPEC-019 already depends on this as "LOCKED". The former "LOCK CANDIDATE pending PR" line was never flipped after merge. (Known open gap: AC-45's `X-MacProvider-Streaming-Mode` header is stripped by the public gateway per SPEC-006 §8.3 allowlist, so its "header absent" fail condition is live on `api.streamvc.live` — resolve by allowlisting the header in SPEC-006 + gateway, or scope AC-45 to the coordinator surface.)
 
 ## Quick orientation
 

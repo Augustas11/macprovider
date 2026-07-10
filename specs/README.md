@@ -15,6 +15,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-004 | Smart Router | 0.3.1 | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, Settlement, and Provider Rewards | 0.5 | [SPEC-005-billing.md](SPEC-005-billing.md) |
 | SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.7 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
+| SPEC-007 | Internal Operator Protocol Explorer | 0.5 | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.3 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
 | SPEC-010 | Provider Model Catalog | 1.5 | [SPEC-010-model-catalog.md](SPEC-010-model-catalog.md) |
@@ -28,6 +29,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.4 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.4 | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.4 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
+| SPEC-021 | MALIBU bootstrap rewards emission ledger | 0.1.0 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
 | SPEC-022 | Verified model settlement | v0.1.4 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.5 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing | 0.1 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
@@ -36,6 +38,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-027 | Provider Proof of Ownership for App-Track Wallet Changes | v0.1 | [SPEC-027-provider-proof-of-ownership.md](SPEC-027-provider-proof-of-ownership.md) |
 | SPEC-028 | MLX Speculative Decoding for Provider Serve | 0.2-draft | [SPEC-028-mlx-speculative-decoding.md](SPEC-028-mlx-speculative-decoding.md) |
 | SPEC-029 | Sweep Workload-Class Stratification | 0.1-draft | [SPEC-029-sweep-workload-class-stratification.md](SPEC-029-sweep-workload-class-stratification.md) |
+| SPEC-030 | Losslessness Probe | v0.1 | [SPEC-030-losslessness-probe.md](SPEC-030-losslessness-probe.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**

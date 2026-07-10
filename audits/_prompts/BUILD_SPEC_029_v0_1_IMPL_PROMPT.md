@@ -13,7 +13,7 @@ pwd
 git status -sb
 git fetch origin
 sed -n '1,80p' CLAUDE.md
-sed -n '1,40p' specs/SPEC-029-losslessness-probe.md
+sed -n '1,40p' specs/SPEC-030-losslessness-probe.md
 ```
 
 Work on a feature branch or isolated implementation worktree, never local
@@ -24,12 +24,12 @@ git worktree add ../macprovider-impl-spec-029-losslessness -b impl/spec-029-loss
 cd ../macprovider-impl-spec-029-losslessness
 ```
 
-If `specs/SPEC-029-losslessness-probe.md` is not present at the implementation
+If `specs/SPEC-030-losslessness-probe.md` is not present at the implementation
 base, STOP and rebase onto the branch that contains SPEC-029.
 
 SPEC-029 is allowed to drive implementation only after one of these is true:
 
-1. `specs/SPEC-029-losslessness-probe.md` is marked `v0.1 LOCKED`; or
+1. `specs/SPEC-030-losslessness-probe.md` is marked `v0.1 LOCKED`; or
 2. the user explicitly asks for a draft/prototype implementation from the
    current SPEC-029 draft.
 
@@ -38,7 +38,7 @@ draft. Do not silently implement a draft protocol as production behavior.
 
 Controlling contract:
 
-- `specs/SPEC-029-losslessness-probe.md`.
+- `specs/SPEC-030-losslessness-probe.md`.
 - `docs/research/losslessness-probe-2026-07.md` as non-normative background
   only.
 - `specs/SPEC-028-mlx-speculative-decoding.md`.
@@ -76,7 +76,7 @@ This is a probe/evidence surface only. It MUST NOT:
 Read before coding:
 
 1. `CLAUDE.md`.
-2. `specs/SPEC-029-losslessness-probe.md` end-to-end.
+2. `specs/SPEC-030-losslessness-probe.md` end-to-end.
 3. `docs/research/losslessness-probe-2026-07.md` for context only; the SPEC is
    normative when they differ.
 4. `specs/SPEC-028-mlx-speculative-decoding.md`, especially the provider

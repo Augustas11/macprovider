@@ -3,7 +3,7 @@
 **Version:** 0.1  
 **Date:** 2026-07-08  
 **Audience:** Coordinator + macprovider-cli implementers  
-**Spec:** `specs/SPEC-OPOI-CHALLENGE-WS.md`  
+**Spec:** _not yet written_ — `specs/SPEC-OPOI-CHALLENGE-WS.md` was planned but was never created (confirmed absent 2026-07-10). This runbook plus the coordinator `internal/pow` + `internal/autotune` gate code are the interim normative source; promoting proof-of-weights / OPoI to a canonical SPEC is tracked follow-up work.  
 **Research:** `research/pouw-apple-silicon-mining-alternatives.md`
 
 ---
@@ -267,7 +267,7 @@ phase4-coordinator/internal/ws/server.go              # handler + schedule
 phase4-coordinator/internal/ws/opoi_test.go         # new
 phase4-coordinator/coordinator.yaml.example           # canary bank docs
 phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift
-docs/ or specs/SPEC-OPOI-CHALLENGE-WS.md              # normative
+# (SPEC-OPOI-CHALLENGE-WS.md was planned as the normative home but is not yet written — see header)
 ops/runbooks/opoi-challenge-implementation.md         # this file
 ```
 

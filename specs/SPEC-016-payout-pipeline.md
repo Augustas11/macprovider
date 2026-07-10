@@ -1,8 +1,15 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
 **Version:** 0.1.20 (2026-07-04, draft — Wave 2 provider-token custody. Payout attempts require provider-token trust: pinned/operator-issued, bearer-validated, or explicit self_minted_verified proof. Tokenless self-minted sessions are not payout eligible.)
-**Status:** Draft (design-only — no IMPL until operator funds hot
-wallet and discharges the eight §9 prerequisites).
+**Status:** Draft (design-only on `main` — no `internal/payout/` package is
+merged, which is correct: the operator has not funded the hot wallet or
+discharged the eight §9 prerequisites). NOTE (2026-07-10): a full IMPL is
+parked in open PR #164 (branch `impl/spec-016`), whose spec copy has advanced
+to v0.1.22 — this canonical `main` copy (v0.1.20) has forked from its own IMPL
+branch and should be reconciled when #164 lands. `main` already ships SPEC-016
+*consumers* (the rewards wallet-address mirror and the SPEC-005 §4.5.1
+`ClaimPayoutReady` claim contract), so "no IMPL" describes the payout runner,
+not the entire surface.
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
 mode + synchronous=FULL requirement; §11.4 earnings endpoint;
 §2.1 D1 donation-only / no-custodial framing),

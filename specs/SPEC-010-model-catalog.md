@@ -1,8 +1,14 @@
 # SPEC-010 — Provider Model Catalog
 
 **Version:** 1.5
-**Status:** Draft (post round-5 audit response, pre round-6
-audit — convergence target: 0 CRITICAL / 0 MAJOR → LOCK)
+**Status:** **LOCKED** at v1.5 (2026-06-06, Decision-log Entry 54 —
+codex round-6 returned 0 CRITICAL / 0 MAJOR / 0 MINOR). Implemented on
+both sides (provider `supported_models[]` advertisement, coordinator
+`Provider` extension, opt-in `/v1/status` echo). The former "pre round-6"
+status predated the lock and was never flipped. (Known open gap: the
+R-3.3.4 `seenModels` union of `supported_models` is not implemented, so
+declared-but-cold models 404 instead of the spec'd 503 — implement or
+strike in a v1.6 pass.)
 **Date drafted:** 2026-06-06
 **Companion to (LOCKED):** SPEC-001 v1.2.4, SPEC-002 v1.3.4,
 SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.

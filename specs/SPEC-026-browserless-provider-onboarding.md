@@ -2,6 +2,21 @@
 
 Status: DRAFT v0.13 · Owner: augstar · Target: 2026 Q3
 
+**Note (2026-07-10, honesty pass):** The §6.1/§7.2 in-app register→autotune→spawn
+client flow was SUPERSEDED by the CLI-wrapper refactor (PR #418, 2026-07-06):
+`LaunchProviderController` now runs `install.sh` and Malibu monitors the
+launchd-managed CLI; `RegisterClient.postRegister` and the `MALIBU_ONBOARD_V2`
+flag (hence §8's migration matrix and AC-026-09) no longer exist in the app
+sources. Coordinator-side surfaces (App-track `/v1/providers/register`, App Attest
+team/bundle pins, `identity_signature`, wallet-change 501) still conform. This
+spec needs a revision to match the shipped client architecture.
+
+**Numbering:** earlier revisions of this spec referred to the MALIBU rewards
+emission ledger by the number 028. That was a mislabel — the number 028 belongs
+to the unrelated MLX speculative-decoding spec (`specs/SPEC-028-mlx-speculative-decoding.md`)
+— so every emission-ledger reference below now points to canonical **SPEC-021**
+(`specs/SPEC-021-malibu-emission-ledger.md`).
+
 ## Change log
 
 **v0.13 (2026-07-04, Wave 2 token-custody hardening).** Wave 2
@@ -216,14 +231,14 @@ reduction). v0.8 targeted fixes:
   backend contract lives in SPEC-027. v0.8 makes §6.2 say the
   App-track pending-swap display is deferred to SPEC-027; no
   guarantee is offered by SPEC-026.
-- **§10 + §11 MALIBU-until-SPEC-028 gate (SEC HIGH).** v0.7
+- **§10 + §11 MALIBU-until-SPEC-021 gate (SEC HIGH).** v0.7
   allowed the App-side flag flip without a normative MALIBU
   gate. v0.8 adds an explicit deploy-checklist gate: the
   App-side flag flip MUST NOT enable withdrawable MALIBU
-  emissions until EITHER SPEC-028 ships OR the operator has
+  emissions until EITHER SPEC-021 ships OR the operator has
   configured a hold mode that prevents any MALIBU withdrawal
   before Trusted unlock. §11 sybil-defense narrative gains a
-  qualifier: the stack is coherent only after SPEC-028 or an
+  qualifier: the stack is coherent only after SPEC-021 or an
   equivalent normative hold is live.
 - **§1.2 wallet-signing non-goal wording tightened (ARCH LOW).**
   Rewritten to make clear that only the wallet-signing UX
@@ -235,7 +250,7 @@ reduction). v0.8 targeted fixes:
   Entry 102 still had residual wording about email fail-closed
   + HMAC cancel URL being active in SPEC-026; v0.8 states
   SPEC-026 explicitly does NOT cover those and points at
-  SPEC-027 / SPEC-028 / SPEC-016 addendum for each moved-out
+  SPEC-027 / SPEC-021 / SPEC-016 addendum for each moved-out
   primitive.
 
 **v0.7 (2026-07-03, R6 scope-reduction pass).** R6 architect flagged
@@ -273,7 +288,7 @@ but not defined here:
   re-ratification at first wallet bind. All the R4-R6 audit
   findings on this surface stay open against SPEC-027, not
   SPEC-026. This SPEC gains only a §9.3 pointer.
-- **SPEC-028 (MALIBU rewards emission ledger)** —
+- **SPEC-021 (MALIBU rewards emission ledger)** —
   `provider_rewards_ledger` MALIBU extension
   (`amount_malibu` + `withdrawal_hold_reason`), the
   `wallet_daily_malibu_emission` aggregate under SERIALIZABLE
@@ -282,17 +297,17 @@ but not defined here:
   WAL replication worker + staleness monitoring, replay-through-cap
   at bind time. SPEC-026 §5.1 keeps only the sybil-defense
   narrative (non-withdrawable, per-wallet cap, replay at bind)
-  and delegates enforcement primitives to SPEC-028.
+  and delegates enforcement primitives to SPEC-021.
 
 **Ordering.** SPEC-026 v0.7 can merge and its `/register` +
-proof-stage auth can ship without SPEC-027 or SPEC-028. What
+proof-stage auth can ship without SPEC-027 or SPEC-021. What
 does NOT ship without them:
 
 - Provisional MALIBU emissions cannot be honored as
-  non-withdrawable until SPEC-028 ships; before that, all
+  non-withdrawable until SPEC-021 ships; before that, all
   provisional providers are effectively pre-Trusted (or
   emissions are held in an ad-hoc coordinator hold outside the
-  spec). SPEC-028 SHOULD land before real MALIBU flow starts.
+  spec). SPEC-021 SHOULD land before real MALIBU flow starts.
 - Wallet-swap coercion defense (App-track) is not covered until
   SPEC-027 ships. SPEC-016 §3 EIP-712 wallet proof-of-possession
   still provides the underlying protection; App-track UI (email
@@ -1391,13 +1406,13 @@ ceiling. The load-bearing sybil defense is the combination of
 provisional non-withdrawable $MALIBU + verified-receipt-only earnings
 (SPEC-022) + per-wallet emission cap.
 
-**Enforcement primitives — deferred to SPEC-028.** The prose
+**Enforcement primitives — deferred to SPEC-021.** The prose
 "non-withdrawable" and "per-wallet cap" phrases above are
 enforced by a rewards-emission ledger (schema, isolation, and
 cross-DB projection of the SPEC-016 payout-address binding) that
 v0.6 attempted to define inline. v0.7 rescopes that subsystem
-to a follow-up SPEC-028 (MALIBU rewards emission ledger).
-SPEC-028 owns:
+to a follow-up SPEC-021 (MALIBU rewards emission ledger).
+SPEC-021 owns:
 
 - `provider_rewards_ledger` MALIBU extension
   (`amount_malibu` + `withdrawal_hold_reason`; existing
@@ -1411,7 +1426,7 @@ SPEC-028 owns:
   `provider_payout_addresses` table, maintained by a
   replication worker off SPEC-016's data source (WAL
   replication, trigger-outbox, or periodic snapshot polling —
-  choice deferred to SPEC-028).
+  choice deferred to SPEC-021).
 - Staleness monitoring using a replication-health metric
   (worker heartbeat + WAL lag), NOT the age of the most
   recent wallet-binding row.
@@ -1419,18 +1434,18 @@ SPEC-028 owns:
   the same aggregate lock as live emissions.
 
 **Ordering implication for SPEC-026 v0.7.** Provisional
-$MALIBU cannot be honored as non-withdrawable until SPEC-028
+$MALIBU cannot be honored as non-withdrawable until SPEC-021
 ships. Two operational stances are compatible with SPEC-026
-alone: (a) MALIBU emissions do not flow at all until SPEC-028
+alone: (a) MALIBU emissions do not flow at all until SPEC-021
 lands (safest), (b) MALIBU emissions flow ad-hoc under an
-informal coordinator-side hold that will fold into SPEC-028's
+informal coordinator-side hold that will fold into SPEC-021's
 `withdrawal_hold_reason` column at cutover. The operator
 picks. In either case, SPEC-026 §5.1 sybil-defense narrative
 (provisional tier, per-wallet cap principle) is authoritative
-for spec purposes; SPEC-028 owns enforcement.
+for spec purposes; SPEC-021 owns enforcement.
 
 The 100 MALIBU/day per-bound-wallet cap number is a starting
-guess pending cohort telemetry (§13 open question). SPEC-028
+guess pending cohort telemetry (§13 open question). SPEC-021
 MUST make the cap config-backed.
 
 ### 5.2 Trust unlock criteria (economic + non-economic)
@@ -2099,7 +2114,7 @@ runs.
    - Rollback script tested for each migration.
 
    Schema for SPEC-027 (verified-email + wallet-swap coercion)
-   and SPEC-028 (MALIBU rewards emission ledger) is out of scope
+   and SPEC-021 (MALIBU rewards emission ledger) is out of scope
    for this checklist; those specs own their own deploy gates.
 
    **Phase 1b — row seeding, deploys ONLY at auth-verifier
@@ -2151,7 +2166,7 @@ runs.
    server-side `provider_auth_policy` allowlist is authoritative.
 8. **MALIBU emission stance decided.** The App-side flag flip MUST
    NOT enable **withdrawable** MALIBU emissions until EITHER:
-   - **SPEC-028 (MALIBU rewards emission ledger) has shipped to
+   - **SPEC-021 (MALIBU rewards emission ledger) has shipped to
      production**, providing enforceable `withdrawal_hold_reason`
      + per-wallet cap semantics, OR
    - **The operator has configured an equivalent hold mode** that
@@ -2226,7 +2241,7 @@ the design.
 
 **Prerequisite for this stack to hold.** The non-withdrawable
 provisional $MALIBU + per-wallet cap layers are ENFORCEABLE only
-once SPEC-028 (MALIBU rewards emission ledger) has shipped OR the
+once SPEC-021 (MALIBU rewards emission ledger) has shipped OR the
 operator has stood up an equivalent hold mode per §10 step 8.
 Between SPEC-026 merge and either of those milestones, the
 "non-withdrawable" invariant is prose-only and MUST NOT be relied
@@ -2348,7 +2363,7 @@ criteria in §5.2 by 25%.
   cycle. Any Provisional-tier restrictions (payout delay, emission
   cap, non-withdrawable) reinstate; existing settled receipts are
   not clawed back. **Note:** enforcement of "non-withdrawable"
-  and "emission cap" is deferred to SPEC-028; this AC verifies the
+  and "emission cap" is deferred to SPEC-021; this AC verifies the
   status-transition side, not the ledger-hold enforcement.
 - **AC-026-15.** §8.4 import/migration dialog with a CLI-owned
   config present but no App marker: the dialog presents "Import

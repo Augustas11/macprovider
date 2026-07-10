@@ -1,5 +1,12 @@
 # SPEC-029 Implementation Notes
 
+> **Numbering (2026-07-10):** the spec these notes implement was promoted to
+> canonical **SPEC-030** (`specs/SPEC-030-losslessness-probe.md`); the canonical
+> **SPEC-029** number now belongs to the unrelated sweep-workload-class spec. This
+> file, its `spec029/` fixtures, and the `losslessness_probe_v1` wire constant keep
+> the `029`/`spec029` labels deliberately — renaming a shipped wire identifier is
+> out of scope. See `beta/DECISION_CRITERIA.md` Entry 127.
+
 Status: prototype implementation from `v0.1-draft`.
 
 Source-of-truth commit: `adef83ef16c039b5be1da310a5666bf200fc1708`
