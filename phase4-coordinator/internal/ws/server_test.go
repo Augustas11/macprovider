@@ -280,7 +280,7 @@ func TestProviderAuthV2RegistersEncryptedSession(t *testing.T) {
 	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
 		t.Fatalf("auth_response = %+v", response)
 	}
-	if response.Tier2Session == nil || !response.Tier2Session.EncryptedLeg.Enabled || response.Tier2Session.EncryptedLeg.KID != challenge.KeyID || response.Tier2Session.Attestation.Status != string(pool.AttestationStatusUnsupported) {
+	if response.Tier2Session == nil || !response.Tier2Session.EncryptedLeg.Enabled || response.Tier2Session.EncryptedLeg.KID != challenge.KeyID || response.Tier2Session.Attestation.Status != string(pool.AttestationStatusNotRequired) {
 		t.Fatalf("tier2 auth_response session = %+v", response.Tier2Session)
 	}
 	if !response.Tier2Session.EncryptedLeg.ResponseChunkPlaintextEnvelope {
@@ -290,7 +290,7 @@ func TestProviderAuthV2RegistersEncryptedSession(t *testing.T) {
 		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
 		return ok &&
 			provider.EncryptedLeg &&
-			provider.AttestationStatus == pool.AttestationStatusUnsupported &&
+			provider.AttestationStatus == pool.AttestationStatusNotRequired &&
 			provider.ModelLoadTimeMs == 1234 &&
 			provider.Tier2Session != nil &&
 			provider.Tier2Session.ResponseChunkPlaintextEnvelope &&

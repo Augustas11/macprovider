@@ -773,6 +773,70 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(state.verdict, .eligible)
     }
 
+    func testFromCoordinatorPayloadTreatsOptionalAttestationAsEligible() throws {
+        let payload: [String: Any] = [
+            "type": "auth_response",
+            "status": "accepted",
+            "tier": "pinned",
+            "tier2_session": [
+                "attestation": ["status": "not_required"]
+            ]
+        ]
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-test",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+            p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+        )
+
+        let state = AutoUpdateTrustState.fromCoordinatorPayload(
+            payload,
+            isV2: true,
+            session: session,
+            providerToken: nil,
+            assignedProviderTokenAdopted: false
+        )
+
+        XCTAssertTrue(state.isEligible)
+        XCTAssertEqual(state.verdict, .eligible)
+    }
+
+    func testFromCoordinatorPayloadStillBlocksUnsupportedAttestation() throws {
+        let payload: [String: Any] = [
+            "type": "auth_response",
+            "status": "accepted",
+            "tier": "pinned",
+            "tier2_session": [
+                "attestation": ["status": "unsupported"]
+            ]
+        ]
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-test",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+            p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+        )
+
+        let state = AutoUpdateTrustState.fromCoordinatorPayload(
+            payload,
+            isV2: true,
+            session: session,
+            providerToken: nil,
+            assignedProviderTokenAdopted: false
+        )
+
+        XCTAssertFalse(state.isEligible)
+        XCTAssertEqual(state.verdict, .attestationFailed)
+    }
+
     // Config loader must accept the flag from both YAML flat key,
     // YAML nested `autoupdate.accept_provisional`, and the env var.
     func testConfigLoaderReadsAcceptProvisionalFromYAMLFlatAndNestedAndEnv() throws {

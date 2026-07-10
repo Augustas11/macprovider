@@ -112,7 +112,11 @@ func verifyAttestationTokenInternal(raw json.RawMessage, cfg config.Tier2Config,
 			logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "missing_token", "tier2.require_attestation")
 			return pool.AttestationStatusFailed, nil
 		}
-		return pool.AttestationStatusUnsupported, nil
+		// A missing token is a capability absence, not an unsupported token
+		// format. When attestation is optional, report the policy decision
+		// explicitly so clients do not treat the accepted session as an
+		// attestation failure during autoupdate eligibility checks.
+		return pool.AttestationStatusNotRequired, nil
 	}
 	if len(raw) > MaxAttestationEnvelopeBytes {
 		logAttestationEvent(logger, "attestation_token_too_large", "WARN", providerID, "reject", "token_too_large", "tier2.attestation_max_age_s")
