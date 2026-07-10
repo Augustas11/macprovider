@@ -61,6 +61,22 @@ final class MalibuAgent: ObservableObject {
     func start() async {
         guard !isShuttingDown else { return }
 
+        guard ProviderConfig.readProviderID() != nil else {
+            snapshot.state = .error
+            snapshot.lastError = "Not set up yet. Click Launch Provider to activate."
+            return
+        }
+        guard StartupState.launchdInstallEvidenceExists() else {
+            snapshot.state = .error
+            snapshot.lastError = "Not set up yet. Click Launch Provider to run the installer."
+            return
+        }
+        guard await ProviderConfig.isConfigured else {
+            snapshot.state = .error
+            snapshot.lastError = "Not set up yet. Click Launch Provider to activate."
+            return
+        }
+
         // Release any Malibu-spawned CLI from older builds before attaching to launchd.
         await releaseSpawnedChildForLaunchdMonitor()
 
@@ -73,22 +89,6 @@ final class MalibuAgent: ObservableObject {
         if let failure = providerStartFailure {
             snapshot.state = .error
             snapshot.lastError = failure
-            return
-        }
-
-        guard ProviderConfig.readProviderID() != nil else {
-            snapshot.state = .error
-            snapshot.lastError = "Not set up yet. Click Launch Provider to activate."
-            return
-        }
-        guard StartupState.launchdInstallEvidenceExists() else {
-            snapshot.state = .error
-            snapshot.lastError = "Not set up yet. Click Launch Provider to run the installer."
-            return
-        }
-        guard await ProviderConfig.isConfigured || ProviderConfig.readHTTPPort() != nil else {
-            snapshot.state = .error
-            snapshot.lastError = "Not set up yet. Click Launch Provider to activate."
             return
         }
         guard !isShuttingDown else { return }

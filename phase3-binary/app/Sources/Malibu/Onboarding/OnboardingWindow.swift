@@ -119,6 +119,13 @@ private struct OnboardingRootView: View {
                     }
                 }
             }
+        case .importingProviderIdentity:
+            stageRow(
+                title: "Importing provider identity",
+                detail: "Saving the provider identity to Keychain before connecting Malibu."
+            ) {
+                ProgressView().controlSize(.small)
+            }
         case let .live(model, tier):
             VStack(alignment: .leading, spacing: 16) {
                 stageRow(title: "Provider live", detail: "Serving \(model). Trust tier: \(tier.rawValue).") {

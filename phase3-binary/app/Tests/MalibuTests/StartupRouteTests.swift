@@ -9,6 +9,10 @@ final class StartupRouteTests: XCTestCase {
             ("launchd-config-starting", state(config: true, marker: true, launchd: true, healthy: false), .startAgent),
             ("legacy-app-config", state(config: true, marker: true, launchd: false, healthy: false), .showOnboarding),
             ("cli-owned", state(config: true, marker: false, launchd: false, healthy: false), .showImportDialog),
+            ("launchd-cli-owned-healthy", state(config: true, marker: false, launchd: true, healthy: true), .showImportDialog),
+            ("launchd-cli-owned-starting", state(config: true, marker: false, launchd: true, healthy: false), .showImportDialog),
+            ("app-owned-missing-identity-healthy", state(config: true, marker: true, configured: false, launchd: true, healthy: true), .showOnboarding),
+            ("app-owned-missing-identity-starting", state(config: true, marker: true, configured: false, launchd: true, healthy: false), .showOnboarding),
             ("launchd-only", state(config: false, marker: false, launchd: true, healthy: false), .showOnboarding),
             ("fresh", state(config: false, marker: false, launchd: false, healthy: false), .showOnboarding)
         ]
@@ -80,12 +84,14 @@ final class StartupRouteTests: XCTestCase {
     private func state(
         config: Bool,
         marker: Bool,
+        configured: Bool? = nil,
         launchd: Bool,
         healthy: Bool
     ) -> StartupState {
         StartupState(
             configExists: config,
             appMarkerExists: marker,
+            appIdentityConfigured: configured ?? marker,
             launchdInstallEvidenceExists: launchd,
             backgroundProviderHealthy: healthy
         )
