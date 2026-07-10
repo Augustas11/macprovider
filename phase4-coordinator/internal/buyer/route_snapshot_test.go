@@ -192,6 +192,78 @@ func TestRouteSnapshotsPersistBeforeDispatchAndRetryAttempts(t *testing.T) {
 	}
 }
 
+// TestRouteSnapshotPendingDeadlineUsesDedicatedKeyNotRecoveryGrace locks the
+// money-path wiring: settlement.pending_deadline_seconds and
+// settlement.recovery_grace_seconds are set to distinct values and the
+// persisted route snapshot must use the former. A future refactor that
+// reverts the pending-deadline derivation back to RecoveryGraceSeconds would
+// fail this test (it would not, with equal values).
+func TestRouteSnapshotPendingDeadlineUsesDedicatedKeyNotRecoveryGrace(t *testing.T) {
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "pending-deadline-wiring-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	settlementCfg := config.Default().Settlement
+	settlementCfg.RecoveryGraceSeconds = 17
+	settlementCfg.PendingDeadlineSeconds = 321
+	billingStore.SetSettlementConfig(settlementCfg)
+	cfg := config.Default().Rewards
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeProviderOK(w)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry(nil)
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x82}, 32))
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := routeSnapshotCount(t, dbPath); got != 1 {
+		t.Fatalf("route snapshots=%d want 1", got)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var pendingDeadline int64
+	if err := db.QueryRow(`SELECT pending_deadline_seconds FROM settlement_route_snapshots`).Scan(&pendingDeadline); err != nil {
+		t.Fatalf("query pending_deadline_seconds: %v", err)
+	}
+	if pendingDeadline != 321 {
+		t.Fatalf("pending_deadline_seconds=%d, want 321 (settlement.pending_deadline_seconds); a wiring regression to recovery_grace_seconds would yield 17", pendingDeadline)
+	}
+}
+
 func TestSettlementOutputDoesNotUseV04ReceiptTerminalTimestamp(t *testing.T) {
 	tier2.ResetForTest()
 	t.Cleanup(tier2.ResetForTest)

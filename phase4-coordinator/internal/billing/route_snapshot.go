@@ -12,7 +12,16 @@ import (
 )
 
 const (
-	RouteSnapshotPolicyVersion       = "spec022-prereq-v0"
+	// RouteSnapshotPolicyVersion is bumped whenever the effective settlement
+	// policy that route snapshots are pinned to changes materially — e.g.
+	// the pending_deadline_seconds default (30 -> 300, see
+	// settlement.pending_deadline_seconds). Existing rows keep their
+	// original version (immutable per row); this only affects new
+	// snapshots. Cross-service consumers that gate on an exact version
+	// string (currently phase5-gateway's settlementPolicyVersion check)
+	// must accept both this and the immediately-prior version during
+	// rollout so in-flight/legacy rows keep settling.
+	RouteSnapshotPolicyVersion       = "spec022-prereq-v1"
 	RouteSnapshotModeObserve         = "observe"
 	RouteSnapshotModeEnforce         = "enforce"
 	MaxPendingReceiptDeadlineSeconds = 900

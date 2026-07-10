@@ -252,7 +252,16 @@ for this gate. The policy is named `verified_model_settlement` and has at least:
 - `entrypoints`: covered paid entrypoints;
 - `receipt_profile`: accepted settlement-capable receipt profile/version set;
 - `pending_deadline_seconds`: receipt deadline measured from request terminal
-  time, default 300 and maximum 900;
+  time, default 300 and maximum 900. This value is backed by its own
+  coordinator config key `settlement.pending_deadline_seconds` (default 300,
+  validated to 1..900). It MUST NOT be derived from
+  `settlement.recovery_grace_seconds` (SPEC-005 recovery-grace, default 30s),
+  which retains its distinct recovery-grace meaning; conflating the two would
+  quarantine receipts arriving 30–300s after terminal state under `enforce`.
+  The pending-deadline default 300 was introduced under route-snapshot policy
+  version `spec022-prereq-v1` (bumped from `spec022-prereq-v0`, which pinned
+  the prior 30s-derived deadline); existing `v0` rows keep settling under
+  their original 30s deadline, only new rows adopt 300s/`v1`;
 - `require_hash_verified`: always true when `mode: enforce`;
 - `catalog_policy`: active catalog id/signature key rules.
 
@@ -939,6 +948,34 @@ NOT synthesize missing route snapshots after the fact.
 9. End-to-end acceptance: run non-streaming and streaming paid request tests
    through routing, receipt verification, buyer debit, settlement, quarantine,
    and payout exclusion.
+
+## Known limitations / carried follow-ups
+
+These are pre-existing gaps surfaced during the `pending_deadline_seconds`
+audit (2026-07). Neither is new or worsened by that change; both are carried
+as documented follow-ups rather than blocking it.
+
+- **(A) Gateway settles `route_snapshot_failed` on estimate instead of
+  no-charge.** When the coordinator fails to persist a route snapshot
+  pre-dispatch (e.g. `route_snapshot_failed`), no provider invocation occurs,
+  but the gateway currently reads the absent settlement-finality headers as
+  legacy and settles the reservation on the estimated prompt-token count —
+  i.e. it can debit the buyer for a request that never reached a provider.
+  The gateway SHOULD instead treat a pre-dispatch `route_snapshot_failed` as
+  a no-charge refund. This is pre-existing gateway error-classification
+  behavior, independent of the pending-deadline change; carried as a
+  follow-up.
+- **(B) `route_snapshot_policy_version` marks default-cutover, not
+  runtime-reconfiguration.** The policy version literal (`spec022-prereq-v0`
+  = 30s-deadline era, `spec022-prereq-v1` = 300s-deadline era) marks when the
+  *default* pending-deadline changed, but does not uniquely encode a
+  runtime-reconfigured deadline — an operator SIGHUP-changing
+  `settlement.pending_deadline_seconds` keeps the same policy-version
+  literal. Per-row settlement stays correct (each row pins and hashes its
+  own deadline independent of the version string), so this only affects
+  report-by-policy-version aggregation, not settlement correctness. Fully
+  deriving the version from the effective policy object is the unimplemented
+  SPEC-022 R-1.1 policy object; carried as a follow-up.
 
 ## Open questions
 

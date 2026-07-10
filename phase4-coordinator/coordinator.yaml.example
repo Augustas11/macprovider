@@ -227,6 +227,11 @@ settlement:
   startup_reconcile_window_hours: 24
   nightly_reconcile_window_days: 7
   recovery_grace_seconds: 30
+  # SPEC-022 receipt pending-deadline (distinct from recovery_grace_seconds
+  # above): how long after request terminal state a settlement receipt may
+  # still arrive before the row deadline-quarantines under enforce mode.
+  # Default 300, max 900.
+  pending_deadline_seconds: 300
   job_enabled: true
 
 # SPEC-005 v0.4 §11.5 launch-gate item 10. Quarantine resolution

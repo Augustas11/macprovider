@@ -728,6 +728,7 @@ type SettlementConfig struct {
 	StartupReconcileWindowHours int    `yaml:"startup_reconcile_window_hours"`
 	NightlyReconcileWindowDays  int    `yaml:"nightly_reconcile_window_days"`
 	RecoveryGraceSeconds        int    `yaml:"recovery_grace_seconds"`
+	PendingDeadlineSeconds      int    `yaml:"pending_deadline_seconds"`
 	VerifiedModelSettlementMode string `yaml:"verified_model_settlement_mode"`
 	JobEnabled                  bool   `yaml:"job_enabled"`
 }
@@ -934,6 +935,7 @@ func Default() Config {
 			StartupReconcileWindowHours: 24,
 			NightlyReconcileWindowDays:  7,
 			RecoveryGraceSeconds:        30,
+			PendingDeadlineSeconds:      300,
 			VerifiedModelSettlementMode: "observe",
 			JobEnabled:                  true,
 		},
@@ -1570,6 +1572,12 @@ func (c Config) Validate() error {
 	}
 	if c.Settlement.RecoveryGraceSeconds > 900 {
 		return fmt.Errorf("settlement.recovery_grace_seconds must be <= 900")
+	}
+	if c.Settlement.PendingDeadlineSeconds < 1 {
+		return fmt.Errorf("settlement.pending_deadline_seconds must be >= 1")
+	}
+	if c.Settlement.PendingDeadlineSeconds > 900 {
+		return fmt.Errorf("settlement.pending_deadline_seconds must be <= 900")
 	}
 	if c.Settlement.VerifiedModelSettlementMode != "observe" && c.Settlement.VerifiedModelSettlementMode != "enforce" {
 		return fmt.Errorf("settlement.verified_model_settlement_mode must be observe or enforce")
