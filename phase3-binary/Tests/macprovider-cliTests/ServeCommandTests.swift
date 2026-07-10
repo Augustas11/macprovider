@@ -93,6 +93,61 @@ final class ServeCommandTests: XCTestCase {
         XCTAssertFalse(factoryInvoked)
     }
 
+    func testServeStartupPreflightsAcquireSingletonBeforeModelArtifactPreflight() async throws {
+        let lockDirectory = try tempDir()
+        let heldLock = try ProviderServeLock.acquire(providerID: "mac", port: 61_919, directory: lockDirectory)
+        defer { heldLock.release() }
+        var config = configWithInvalidArtifact(port: 61_919)
+
+        do {
+            _ = try await ServeCommand.runServeStartupPreflights(
+                &config,
+                joiningCoordinator: false,
+                portIsOpen: { _ in false },
+                acquireServeLock: { config in
+                    do {
+                        return try ProviderServeLock.acquire(
+                            providerID: config.providerID,
+                            port: config.port,
+                            directory: lockDirectory
+                        )
+                    } catch is ProviderServeLockError {
+                        throw ExitCode(1)
+                    }
+                }
+            )
+            XCTFail("duplicate serve startup must fail before model artifact preflight")
+        } catch {
+            XCTAssertEqual(error as? ExitCode, ExitCode(1))
+        }
+    }
+
+    func testServeStartupPreflightsRejectOpenPortBeforeModelArtifactPreflightAndReleaseLock() async throws {
+        let lockDirectory = try tempDir()
+        var config = configWithInvalidArtifact(port: 61_920)
+
+        do {
+            _ = try await ServeCommand.runServeStartupPreflights(
+                &config,
+                joiningCoordinator: false,
+                portIsOpen: { port in port == 61_920 },
+                acquireServeLock: { config in
+                    try ProviderServeLock.acquire(
+                        providerID: config.providerID,
+                        port: config.port,
+                        directory: lockDirectory
+                    )
+                }
+            )
+            XCTFail("legacy listener on serve port must fail before model artifact preflight")
+        } catch {
+            XCTAssertEqual(error as? ExitCode, ExitCode(1))
+        }
+
+        let retryLock = try ProviderServeLock.acquire(providerID: "retry", port: 61_920, directory: lockDirectory)
+        retryLock.release()
+    }
+
     func testReceiptBuilderDisabledByDefault() throws {
         var config = AppConfig.defaults()
         config.providerID = "provider-a"
@@ -427,6 +482,16 @@ final class ServeCommandTests: XCTestCase {
         try Data("weights".utf8).write(to: root.appendingPathComponent("model.safetensors"))
         try Data("{}".utf8).write(to: root.appendingPathComponent("config.json"))
         return root
+    }
+
+    private func configWithInvalidArtifact(port: Int) -> AppConfig {
+        var config = AppConfig.defaults()
+        config.providerID = "mac"
+        config.port = port
+        config.model = "test-public-model"
+        config.modelArtifactPath = "/tmp/macprovider-missing-\(UUID().uuidString)"
+        config.modelArtifactSHA256 = String(repeating: "a", count: 64)
+        return config
     }
 
     private func tempDir() throws -> URL {

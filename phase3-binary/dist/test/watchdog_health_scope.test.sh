@@ -42,7 +42,11 @@ EOF
 chmod +x "$TMP/bin/pgrep"
 : > "$TMP/launchctl.log"
 run_watchdog
-grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null
+if grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
+  echo "companion watchdog must not kickstart the provider singleton" >&2
+  exit 1
+fi
+grep -F 'launchd KeepAlive is the sole runtime manager' "$TMP/logs/watchdog.log" >/dev/null
 
 rm -rf "$TMP/bin" "$TMP/logs" "$TMP/launchctl.log" "$TMP/home/.local/share/macprovider-watchdog/state"
 make_fake_common
@@ -109,6 +113,11 @@ mkdir -p "$TMP/home/.local/share/macprovider-watchdog/state"
 printf "boot-a" > "$TMP/home/.local/share/macprovider-watchdog/state/armed"
 : > "$TMP/launchctl.log"
 run_watchdog
-grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null
+if grep -F 'kickstart -k' "$TMP/launchctl.log" >/dev/null; then
+  echo "companion watchdog must observe unhealthy providers without becoming a second runtime manager" >&2
+  exit 1
+fi
+grep -F 'provider process 4242 failed local /v1/health after arming; leaving restart ownership to launchd KeepAlive' "$TMP/logs/watchdog.log" >/dev/null
+grep -F 'launchd KeepAlive is the sole runtime manager' "$TMP/logs/watchdog.log" >/dev/null
 
 echo "watchdog health scope ok"
