@@ -43,6 +43,39 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(rateRow.providerShareBPS, 9_000)
     }
 
+    func testBakedLlama32CatalogUsesVerifiedPinnedSnapshotHash() throws {
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        )
+        let row = try XCTUnwrap(catalog.rows["meta-llama/llama-3.2-3b-instruct"])
+
+        XCTAssertEqual(row.modelID, "mlx-community/Llama-3.2-3B-Instruct-4bit")
+        XCTAssertEqual(row.modelRevision, "7f0dc925e0d0afb0322d96f9255cfddf2ba5636e")
+        XCTAssertEqual(row.modelSHA256, "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90")
+        XCTAssertEqual(row.minRAMGB, 4)
+        XCTAssertEqual(row.runtimeStatus, "recommendable")
+    }
+
+    func testOlderSignedCatalogFallsBackToCorrectedBakedCatalog() async throws {
+        let staleFeed = AutotuneStaticInputs.bakedCandidateCatalogJSON
+            .replacingOccurrences(of: "published-2026-07-10-llama32-hash-repair", with: "published-2026-07-07-p2-qwen3-8b")
+            .replacingOccurrences(of: "2026-07-10T00:00:00Z", with: "2026-07-07T12:00:00Z")
+            .replacingOccurrences(of: "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90", with: "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a")
+        let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA=="}"#.utf8)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? sidecar : Data(staleFeed.utf8) },
+            verifySignature: { _, _ in true },
+            now: { Self.date("2026-07-10T10:00:00Z") }
+        )
+
+        let selection = await inputs.loadCandidateCatalog()
+        let row = try XCTUnwrap(selection.value.rows["meta-llama/llama-3.2-3b-instruct"])
+
+        XCTAssertTrue(selection.usedFallback)
+        XCTAssertTrue(selection.warnings.contains(.candidateCatalogFallbackUsed))
+        XCTAssertEqual(row.modelSHA256, "e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90")
+    }
+
     func testPublishedStaticNemotronInputsArePaidRecommendableAndSigned() throws {
         let modelKey = "nvidia/nemotron-3-nano-30b-a3b"
         let staticDir = URL(fileURLWithPath: #filePath)
@@ -1663,7 +1696,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: "provider-a")
         try Data("""
-        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-07-p2-drift","demand_rank_version":"published-2026-07-07-p2-qwen3-8b","candidate_catalog_version":"published-2026-07-07-p2-qwen3-8b","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-07-p2-drift","demand_rank_version":"published-2026-07-07-p2-qwen3-8b","candidate_catalog_version":"published-2026-07-10-llama32-hash-repair","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
 
         let staleSince = await StatusCommand.staleRecommendationSince(
