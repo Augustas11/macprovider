@@ -21,14 +21,7 @@ enum ProviderConfig {
     // the CLI unauthenticated or trampling a config the CLI track owns.
     static var isConfigured: Bool {
         get async {
-            let paths = ProviderPaths.current
-            let fm = FileManager.default
-            guard fm.fileExists(atPath: paths.configFile.path),
-                  fm.fileExists(atPath: paths.appMarkerFile.path),
-                  let providerID = readProviderID() else {
-                return false
-            }
-            return await KeychainStore.readProviderToken(providerID: providerID) != nil
+            await isConfigured(paths: .current)
         }
     }
 

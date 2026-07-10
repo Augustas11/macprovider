@@ -14,12 +14,14 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(harness.cliImportRuns, 1)
         XCTAssertEqual(harness.monitorRuns, 1)
         XCTAssertEqual(harness.loginItemRegistrations, 1)
+        XCTAssertEqual(harness.startAgentRuns, 1)
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
     func testLaunchSkipsInstallerWhenLocalProviderAlreadyHealthy() async {
         let harness = Harness()
         harness.localInstallSucceeded = true
+        harness.appIdentityConfigured = true
         let controller = LaunchProviderController(dependencies: harness.dependencies())
 
         await controller.launch()
@@ -28,6 +30,7 @@ final class LaunchProviderControllerTests: XCTestCase {
         XCTAssertEqual(harness.cliImportRuns, 0)
         XCTAssertEqual(harness.monitorRuns, 1)
         XCTAssertEqual(harness.loginItemRegistrations, 1)
+        XCTAssertEqual(harness.startAgentRuns, 1)
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
@@ -46,6 +49,7 @@ final class LaunchProviderControllerTests: XCTestCase {
             XCTFail("expected failed cliInstall stage")
         }
         XCTAssertEqual(harness.loginItemRegistrations, 0)
+        XCTAssertEqual(harness.startAgentRuns, 0)
         XCTAssertEqual(harness.monitorRuns, 0)
     }
 
@@ -62,7 +66,8 @@ final class LaunchProviderControllerTests: XCTestCase {
         } else {
             XCTFail("expected failed cliInstall stage after monitor timeout")
         }
-        XCTAssertEqual(harness.loginItemRegistrations, 1)
+        XCTAssertEqual(harness.loginItemRegistrations, 0)
+        XCTAssertEqual(harness.startAgentRuns, 0)
     }
 
     func testRetryRerunsInstallAfterFailure() async {
@@ -75,32 +80,121 @@ final class LaunchProviderControllerTests: XCTestCase {
         await controller.retry()
 
         XCTAssertEqual(harness.cliInstallRuns, 2)
+        XCTAssertEqual(harness.startAgentRuns, 1)
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
     func testRefreshFromExistingInstallConnectsWithoutInstaller() async {
         let harness = Harness()
         harness.localInstallSucceeded = true
+        harness.appIdentityConfigured = true
         let controller = LaunchProviderController(dependencies: harness.dependencies())
 
         await controller.refreshFromExistingInstall()
 
         XCTAssertEqual(harness.cliInstallRuns, 0)
         XCTAssertEqual(harness.monitorRuns, 1)
+        XCTAssertEqual(harness.loginItemRegistrations, 1)
+        XCTAssertEqual(harness.startAgentRuns, 1)
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
     }
 
-    func testImportFailureToleratedWhenProviderAlreadyHealthy() async {
+    func testPermanentImportFailureDoesNotWaitForProviderStart() async {
         let harness = Harness()
-        harness.cliImportError = NSError(domain: "tests", code: 2, userInfo: [NSLocalizedDescriptionKey: "import failed"])
+        harness.cliImportErrors = [
+            NSError(domain: "tests", code: 2, userInfo: [NSLocalizedDescriptionKey: "import failed"])
+        ]
         let controller = LaunchProviderController(dependencies: harness.dependencies())
 
         await controller.launch()
 
         XCTAssertEqual(harness.cliInstallRuns, 1)
         XCTAssertEqual(harness.cliImportRuns, 1)
+        XCTAssertEqual(harness.monitorRuns, 0)
+        XCTAssertEqual(harness.importRetryWaits, 0)
+        XCTAssertEqual(harness.loginItemRegistrations, 0)
+        XCTAssertEqual(harness.startAgentRuns, 0)
+        if case let .failed(stage, retryable, message) = controller.stage {
+            XCTAssertEqual(stage, "identityImport")
+            XCTAssertTrue(retryable)
+            XCTAssertEqual(message, "import failed")
+        } else {
+            XCTFail("expected retryable failed stage after permanent import failure")
+        }
+    }
+
+    func testTokenlessFirstImportRetriesAfterProviderBecomesHealthy() async {
+        let harness = Harness()
+        harness.markLocalInstallSucceededAfterInstall = false
+        harness.cliImportErrors = [ProviderConfig.SaveError.missingProviderToken]
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(harness.cliImportRuns, 2)
         XCTAssertEqual(harness.monitorRuns, 1)
+        XCTAssertEqual(harness.loginItemRegistrations, 1)
+        XCTAssertEqual(harness.startAgentRuns, 1)
+        XCTAssertEqual(harness.importRetryWaits, 0)
         XCTAssertEqual(controller.stage, .live(model: harness.configModel, tier: .provisional))
+    }
+
+    func testRetryAfterPersistentImportFailureDoesNotBypassIdentityImport() async {
+        let harness = Harness()
+        harness.cliImportErrors = Array(
+            repeating: ProviderConfig.SaveError.missingProviderToken,
+            count: 2 * (MalibuOnboardingTimeouts.providerTokenImportRetryAttempts + 1)
+        )
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.launch()
+        await controller.retry()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(
+            harness.cliImportRuns,
+            2 * (MalibuOnboardingTimeouts.providerTokenImportRetryAttempts + 1)
+        )
+        XCTAssertEqual(harness.monitorRuns, 2)
+        XCTAssertEqual(harness.loginItemRegistrations, 0)
+        XCTAssertEqual(harness.startAgentRuns, 0)
+        XCTAssertEqual(harness.importRetryWaits, 2 * (MalibuOnboardingTimeouts.providerTokenImportRetryAttempts - 1))
+        if case let .failed(stage, retryable, message) = controller.stage {
+            XCTAssertEqual(stage, "identityImport")
+            XCTAssertTrue(retryable)
+            XCTAssertEqual(
+                message,
+                "Provider identity was not fully imported after the background provider became healthy. Retry setup once the provider token is available."
+            )
+        } else {
+            XCTFail("expected retryable failed stage after retry exhausts identity import again")
+        }
+    }
+
+    func testExistingInstallPermanentImportFailureDoesNotBypassIdentityImport() async {
+        let harness = Harness()
+        harness.localInstallSucceeded = true
+        harness.cliImportErrors = [
+            ProviderConfig.SaveError.importKeychainVerificationFailed
+        ]
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 0)
+        XCTAssertEqual(harness.cliImportRuns, 1)
+        XCTAssertEqual(harness.monitorRuns, 0)
+        XCTAssertEqual(harness.loginItemRegistrations, 0)
+        XCTAssertEqual(harness.startAgentRuns, 0)
+        XCTAssertEqual(harness.importRetryWaits, 0)
+        if case let .failed(stage, retryable, message) = controller.stage {
+            XCTAssertEqual(stage, "identityImport")
+            XCTAssertTrue(retryable)
+            XCTAssertEqual(message, "The imported provider token could not be verified in Keychain.")
+        } else {
+            XCTFail("expected identityImport failure after permanent import error")
+        }
     }
 
     func testLaunchMonitorFailureSurfacesProviderStartFailure() async {
@@ -122,17 +216,44 @@ final class LaunchProviderControllerTests: XCTestCase {
         }
     }
 
+    func testAttachFailureDoesNotRegisterLoginItemOrMarkLive() async {
+        let harness = Harness()
+        harness.attachHealthy = false
+        harness.providerStartFailureMessage = "provider attach failed"
+        let controller = LaunchProviderController(dependencies: harness.dependencies())
+
+        await controller.launch()
+
+        XCTAssertEqual(harness.cliInstallRuns, 1)
+        XCTAssertEqual(harness.cliImportRuns, 1)
+        XCTAssertEqual(harness.monitorRuns, 1)
+        XCTAssertEqual(harness.startAgentRuns, 1)
+        XCTAssertEqual(harness.loginItemRegistrations, 0)
+        if case let .failed(stage, retryable, message) = controller.stage {
+            XCTAssertEqual(stage, "cliInstall")
+            XCTAssertTrue(retryable)
+            XCTAssertEqual(message, "provider attach failed")
+        } else {
+            XCTFail("expected failed cliInstall stage after attach failure")
+        }
+    }
+
     private final class Harness {
         var localInstallSucceeded = false
         var localInstallSucceededAfterInstall = false
+        var markLocalInstallSucceededAfterInstall = true
         var cliInstallRuns = 0
         var cliImportRuns = 0
         var monitorRuns = 0
         var loginItemRegistrations = 0
+        var startAgentRuns = 0
+        var importRetryWaits = 0
         var monitorHealthy = true
+        var attachHealthy = true
+        var appIdentityConfigured = false
         var providerStartFailureMessage: String?
         var cliInstallError: Error?
-        var cliImportError: Error?
+        var cliImportErrors: [Error] = []
         var configModel = "mlx-community/Qwen2.5-7B-Instruct-4bit"
         var installLogLines: [String] = []
 
@@ -147,19 +268,30 @@ final class LaunchProviderControllerTests: XCTestCase {
                 runCLIInstall: { onLogLine in
                     self.cliInstallRuns += 1
                     if let error = self.cliInstallError { throw error }
-                    self.localInstallSucceededAfterInstall = true
+                    self.localInstallSucceededAfterInstall = self.markLocalInstallSucceededAfterInstall
                     onLogLine("install.sh finished")
                 },
                 importCLIConfigAfterInstall: {
                     self.cliImportRuns += 1
-                    if let error = self.cliImportError { throw error }
+                    if !self.cliImportErrors.isEmpty {
+                        throw self.cliImportErrors.removeFirst()
+                    }
+                    self.appIdentityConfigured = true
                 },
-                monitorInstalledProvider: {
+                waitForInstalledProviderHealth: {
                     self.monitorRuns += 1
                     return self.monitorHealthy
                 },
+                attachInstalledProviderAfterInstall: {
+                    self.startAgentRuns += 1
+                    return self.attachHealthy
+                },
                 readConfigModel: { self.configModel },
-                providerStartFailure: { self.providerStartFailureMessage }
+                providerStartFailure: { self.providerStartFailureMessage },
+                appIdentityConfigured: { self.appIdentityConfigured },
+                waitBeforeImportRetry: {
+                    self.importRetryWaits += 1
+                }
             )
         }
     }

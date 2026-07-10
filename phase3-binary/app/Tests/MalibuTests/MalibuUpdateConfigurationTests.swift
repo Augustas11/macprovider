@@ -18,15 +18,15 @@ final class MalibuUpdateConfigurationTests: XCTestCase {
     }
 
     func testVersionedDownloadURLUsesTagSuffix() {
-        let url = MalibuUpdateConfiguration.releaseDownloadURL(tag: "v1.8.20")
-        XCTAssertEqual(url.absoluteString, "https://download.malibu.tech/Malibu-v1.8.20.dmg")
+        let url = MalibuUpdateConfiguration.releaseDownloadURL(tag: "v1.8.21")
+        XCTAssertEqual(url.absoluteString, "https://download.malibu.tech/Malibu-v1.8.21.dmg")
     }
 
     func testReleaseNotesURLPointsAtGitHubTag() {
-        let url = MalibuUpdateConfiguration.releaseNotesURL(tag: "v1.8.20")
+        let url = MalibuUpdateConfiguration.releaseNotesURL(tag: "v1.8.21")
         XCTAssertEqual(
             url.absoluteString,
-            "https://github.com/Augustas11/macprovider/releases/tag/v1.8.20"
+            "https://github.com/Augustas11/macprovider/releases/tag/v1.8.21"
         )
     }
 }

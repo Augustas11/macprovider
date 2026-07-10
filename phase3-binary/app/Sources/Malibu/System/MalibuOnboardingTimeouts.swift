@@ -69,6 +69,14 @@ enum MalibuOnboardingTimeouts {
     /// frame." on 2026-07-05 v1.8.4 fresh-install smoke retry.
     static let firstServingFrameSec: TimeInterval = 600
 
+    /// Fresh CLI-track installs mint and persist `provider_token` after the
+    /// coordinator handshake, which can land just after `install.sh` exits.
+    /// Malibu retries the Keychain import briefly after the launchd provider is
+    /// healthy so this race does not bounce the user back to Retry. Total
+    /// post-health retry budget is roughly 30s: 15 attempts with 14 sleeps.
+    static let providerTokenImportRetryAttempts: Int = 15
+    static let providerTokenImportRetryIntervalSec: TimeInterval = 2
+
     /// Poll interval for `waitForFirstServing`. The controller polls
     /// `snapshot.state` because the state machine transitions there are
     /// event-driven inside MalibuAgent but the controller wants a
