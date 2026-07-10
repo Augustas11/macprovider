@@ -137,6 +137,16 @@ type Provider struct {
 	ModelHash      string     `json:"model_hash,omitempty"`
 	HashStatus     HashStatus `json:"hash_status,omitempty"`
 	EncryptedLeg   bool       `json:"encrypted_leg,omitempty"`
+	// Catalog admission captures the exact signed recommendation envelope that
+	// was accepted for this live session. Deployment canaries use these fields
+	// to distinguish a current catalog-aware provider from a legacy bridge
+	// connection or a bounded previous-release admission.
+	CatalogAdmissionMode   string `json:"catalog_admission_mode,omitempty"`
+	CatalogReleaseID       string `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion   string `json:"catalog_policy_version,omitempty"`
+	CandidateCatalogSHA256 string `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID     string `json:"catalog_signer_key_id,omitempty"`
+	CandidateRowIdentity   string `json:"catalog_row_identity,omitempty"`
 	// SPEC-015 v0.1.3 / SPEC-001 v1.6 — raw ed25519 public key bytes
 	// populated from auth_request.provider_receipt_public_key when present.
 	ReceiptPubkey []byte `json:"-"`

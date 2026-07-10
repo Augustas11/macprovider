@@ -80,17 +80,14 @@ enum CLIInstallRunner {
         if exitCode == 0 {
             return
         }
-        if exitCode == 6, await localInstallSucceeded() {
-            await onLogLine(
-                "[macprovider-install] Provider is running locally. Coordinator pool visibility can take a few more minutes — this is normal for new installs."
-            )
-            return
-        }
+        // Every non-zero installer exit leaves the durable transaction
+        // uncommitted and triggers rollback. A healthy local process may be
+        // the restored previous release, so it cannot prove this install won.
         throw Error.nonZeroExit(exitCode)
     }
 
-    /// install.sh exit 6 means AC-1a degraded mode: local install OK, coordinator
-    /// pool check timed out after 30s. Treat as success when health + manifest agree.
+    /// Reports whether an already-installed provider is locally healthy. This
+    /// is used to resume onboarding, never to override a failed install exit.
     static func localInstallSucceeded() async -> Bool {
         guard let port = ProviderConfig.readHTTPPort(),
               ProviderConfig.readProviderID() != nil else {

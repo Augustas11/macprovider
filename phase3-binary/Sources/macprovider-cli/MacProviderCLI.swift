@@ -278,12 +278,40 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    struct CatalogRuntimeTrust: Sendable {
+        let state: String
+        let releaseID: String
+        let digest: String
+        let signerKeyID: String?
+        let source: String
+        let policyVersion: String?
+        let rowIdentity: String?
+
+        init(
+            state: String,
+            releaseID: String,
+            digest: String,
+            signerKeyID: String?,
+            source: String,
+            policyVersion: String? = nil,
+            rowIdentity: String? = nil
+        ) {
+            self.state = state
+            self.releaseID = releaseID
+            self.digest = digest
+            self.signerKeyID = signerKeyID
+            self.source = source
+            self.policyVersion = policyVersion
+            self.rowIdentity = rowIdentity
+        }
+    }
+
     static func runModelArtifactPreflight(
         _ resolved: AppConfig,
         joiningCoordinator: Bool = true,
         staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
-    ) async throws {
+    ) async throws -> CatalogRuntimeTrust? {
         guard let expected = resolved.modelArtifactSHA256 else {
             if resolved.modelArtifactPath != nil {
                 FileHandle.standardError.write(Data("model_artifact_path requires model_artifact_sha256 for a verified local snapshot\n".utf8))
@@ -297,7 +325,7 @@ struct ServeCommand: AsyncParsableCommand {
                 FileHandle.standardError.write(Data("coordinator join requires model_artifact_sha256 from autotune --recommend --apply\n".utf8))
                 throw ExitCode(2)
             }
-            return
+            return nil
         }
         guard expected.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
             FileHandle.standardError.write(Data("model_artifact_sha256 must be 64 lowercase hex characters\n".utf8))
@@ -322,7 +350,7 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
         if resolved.donorMode || joiningCoordinator {
-            try await runModelCatalogPreflight(
+            return try await runModelCatalogPreflight(
                 resolved,
                 modelPath: artifactPath,
                 actualArtifactSHA256: actual,
@@ -331,6 +359,7 @@ struct ServeCommand: AsyncParsableCommand {
                 artifactResolver: artifactResolver
             )
         }
+        return nil
     }
 
     private static func runModelCatalogPreflight(
@@ -340,7 +369,7 @@ struct ServeCommand: AsyncParsableCommand {
         requireRecommendable: Bool,
         staticInputs: AutotuneStaticInputs,
         artifactResolver: CachedModelArtifactResolver
-    ) async throws {
+    ) async throws -> CatalogRuntimeTrust {
         guard let key = resolved.modelCatalogKey,
               let modelID = resolved.modelCatalogModelID,
               let revision = resolved.modelCatalogRevision,
@@ -386,6 +415,17 @@ struct ServeCommand: AsyncParsableCommand {
 
         let catalog = await staticInputs.loadCandidateCatalog()
         let actualCatalogHash = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes)
+        let trustBlockingWarnings: Set<AutotuneRecommendWarning> = [
+            .candidateCatalogIntegrityFailure,
+            .candidateCatalogUpdateRequired,
+        ]
+        if requireRecommendable && !trustBlockingWarnings.isDisjoint(with: catalog.warnings) {
+            let state = catalog.warnings.contains(.candidateCatalogIntegrityFailure)
+                ? "catalog_integrity_failure"
+                : "catalog_update_required"
+            FileHandle.standardError.write(Data("\(state): refusing coordinator join with an untrusted or incompatible catalog release\n".utf8))
+            throw ExitCode(2)
+        }
         // Row admission against the *current* signed catalog is the security gate.
         // The stored model_catalog_version/hash envelope records which autotune --apply
         // revision wrote config.yaml; a coordinator catalog publish that only adds or
@@ -410,15 +450,37 @@ struct ServeCommand: AsyncParsableCommand {
                 .utf8
             ))
         }
+        let state: String
+        if catalog.warnings.contains(.candidateCatalogIntegrityFailure) {
+            state = "catalog_integrity_failure"
+        } else if catalog.warnings.contains(.candidateCatalogUpdateRequired) {
+            state = "catalog_update_required"
+        } else if catalog.usedFallback {
+            state = "safe_offline_fallback"
+        } else {
+            state = "live_verified"
+        }
+        return CatalogRuntimeTrust(
+            state: state,
+            releaseID: catalog.value.version,
+            digest: actualCatalogHash,
+            signerKeyID: catalog.signerKeyID,
+            source: catalog.usedFallback ? "baked" : "coordinator",
+            policyVersion: catalog.value.policyVersion,
+            rowIdentity: catalog.value.rowIdentity(for: key)
+        )
     }
 
     static func makeCoordinatorClient(
         noJoin: Bool,
         donorMode: Bool = false,
+        catalogTrustState: String? = nil,
         factory: () -> CoordinatorClient?
     ) -> CoordinatorClient? {
         guard !noJoin else { return nil }
         guard !donorMode else { return nil }
+        guard catalogTrustState != "catalog_integrity_failure",
+              catalogTrustState != "catalog_update_required" else { return nil }
         return factory()
     }
 
@@ -578,7 +640,11 @@ struct ServeCommand: AsyncParsableCommand {
         // when building the auth_request proof stage; ControlSocketServer
         // drains them onto the connected Malibu.app control socket.
         let identityBridge = IdentitySignatureBridge()
-        let coordinatorClient = Self.makeCoordinatorClient(noJoin: noJoin, donorMode: resolved.donorMode) {
+        let coordinatorClient = Self.makeCoordinatorClient(
+            noJoin: noJoin,
+            donorMode: resolved.donorMode,
+            catalogTrustState: startupPreflight.catalogTrust?.state
+        ) {
             CoordinatorClient(
                 config: resolved,
                 modelRuntime: modelRuntime,
@@ -594,6 +660,11 @@ struct ServeCommand: AsyncParsableCommand {
                 providerReceiptPublicKey: providerReceiptPublicKey,
                 receiptBuilder: receiptRuntime.builder,
                 identityBridge: identityBridge,
+                catalogReleaseID: startupPreflight.catalogTrust?.releaseID,
+                catalogPolicyVersion: startupPreflight.catalogTrust?.policyVersion,
+                catalogCandidateSHA256: startupPreflight.catalogTrust?.digest,
+                catalogSignerKeyID: startupPreflight.catalogTrust?.signerKeyID,
+                catalogRowIdentity: startupPreflight.catalogTrust?.rowIdentity,
                 receiptIdentitySigningKeyCandidates: receiptIdentitySigningKeyCandidates,
                 persistReceiptIdentitySigningKey: persistReceiptIdentitySigningKey
             )
@@ -665,7 +736,8 @@ struct ServeCommand: AsyncParsableCommand {
             providerStatus: providerStatus,
             receiptBuilder: receiptRuntime.builder,
             idlePrewarmer: idlePrewarmer,
-            catalogModelIDAlias: catalogModelIDAlias
+            catalogModelIDAlias: catalogModelIDAlias,
+            catalogTrust: startupPreflight.catalogTrust
         )
         let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket, idlePrewarmer: idlePrewarmer)
         defer {
@@ -695,6 +767,7 @@ struct ServeCommand: AsyncParsableCommand {
     struct ServeStartupPreflightResult {
         let serveLock: ProviderServeLock
         let verifiedDraftModelLoadPath: String?
+        let catalogTrust: CatalogRuntimeTrust?
     }
 
     static func runServeStartupPreflights(
@@ -713,7 +786,7 @@ struct ServeCommand: AsyncParsableCommand {
             acquireServeLock: acquireServeLock
         )
         do {
-            try await Self.runModelArtifactPreflight(
+            let catalogTrust = try await Self.runModelArtifactPreflight(
                 resolved,
                 joiningCoordinator: joiningCoordinator,
                 staticInputs: staticInputs,
@@ -725,7 +798,8 @@ struct ServeCommand: AsyncParsableCommand {
             )
             return ServeStartupPreflightResult(
                 serveLock: serveLock,
-                verifiedDraftModelLoadPath: verifiedDraftModelLoadPath
+                verifiedDraftModelLoadPath: verifiedDraftModelLoadPath,
+                catalogTrust: catalogTrust
             )
         } catch {
             serveLock.release()
@@ -856,7 +930,7 @@ struct SelfTestCommand: AsyncParsableCommand {
         let resolved = try ConfigLoader.load(
             cli: CLIOverrides(model: model, configPath: config)
         )
-        try await ServeCommand.runModelArtifactPreflight(resolved, joiningCoordinator: false)
+        _ = try await ServeCommand.runModelArtifactPreflight(resolved, joiningCoordinator: false)
         let runtime = try await ModelRuntime(
             modelID: resolved.model,
             modelLoadPath: Self.modelLoadPath(for: resolved),

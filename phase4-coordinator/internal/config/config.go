@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -8,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -127,10 +130,39 @@ type MalibuEmissionConfig struct {
 // served on the buyer mux (/v1/demand-rank, /v1/autotune-candidates, and
 // their .sig sidecars). Empty paths disable that feed (404).
 type AutotuneFeedsConfig struct {
-	DemandRankPath            string `yaml:"demand_rank_path"`
-	DemandRankSigPath         string `yaml:"demand_rank_sig_path"`
-	AutotuneCandidatesPath    string `yaml:"autotune_candidates_path"`
-	AutotuneCandidatesSigPath string `yaml:"autotune_candidates_sig_path"`
+	DemandRankPath            string            `yaml:"demand_rank_path"`
+	DemandRankSigPath         string            `yaml:"demand_rank_sig_path"`
+	AutotuneCandidatesPath    string            `yaml:"autotune_candidates_path"`
+	AutotuneCandidatesSigPath string            `yaml:"autotune_candidates_sig_path"`
+	PublicKeys                map[string]string `yaml:"public_keys"`
+}
+
+// DecodePublicKeyring validates and decodes the configured key-ID-to-Ed25519
+// trust map. Keys use canonical padded standard base64 so operator mistakes do
+// not silently select a different decoder or byte representation.
+func (c AutotuneFeedsConfig) DecodePublicKeyring() (map[string]ed25519.PublicKey, error) {
+	keyIDs := make([]string, 0, len(c.PublicKeys))
+	for keyID := range c.PublicKeys {
+		keyIDs = append(keyIDs, keyID)
+	}
+	sort.Strings(keyIDs)
+
+	keyring := make(map[string]ed25519.PublicKey, len(c.PublicKeys))
+	for _, keyID := range keyIDs {
+		if keyID == "" || strings.TrimSpace(keyID) != keyID {
+			return nil, fmt.Errorf("autotune.public_keys contains an invalid key ID %q", keyID)
+		}
+		encoded := c.PublicKeys[keyID]
+		decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
+		if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded {
+			return nil, fmt.Errorf("autotune.public_keys.%s must be canonical padded base64", keyID)
+		}
+		if len(decoded) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("autotune.public_keys.%s must decode to %d bytes", keyID, ed25519.PublicKeySize)
+		}
+		keyring[keyID] = ed25519.PublicKey(append([]byte(nil), decoded...))
+	}
+	return keyring, nil
 }
 
 // StatsConfig is the SPEC-017 Network Stats API config block.
@@ -1732,6 +1764,7 @@ func (c Config) requireAutotuneEvidenceFeeds() error {
 
 func (c Config) validateAutotuneFeeds() error {
 	a := c.AutotuneFeeds
+	configured := false
 	pairs := []struct {
 		label    string
 		jsonPath string
@@ -1749,6 +1782,14 @@ func (c Config) validateAutotuneFeeds() error {
 		if jsonPath == "" || sigPath == "" {
 			return fmt.Errorf("autotune.%s_path and autotune.%s_sig_path must both be set", p.label, p.label)
 		}
+		configured = true
+	}
+	keyring, err := a.DecodePublicKeyring()
+	if err != nil {
+		return err
+	}
+	if configured && len(keyring) == 0 {
+		return fmt.Errorf("autotune.public_keys must contain at least one Ed25519 public key when a feed is configured")
 	}
 	return nil
 }

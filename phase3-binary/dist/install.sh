@@ -4,10 +4,8 @@
 # Launchd template substitutions performed by this script:
 #   __USER_HOME__       -> absolute installing user's HOME
 #   __BINARY_PATH__     -> absolute ~/.local/bin/macprovider-cli path
-#   __PROVIDER_ID__     -> sanitized provider handle
-#   __COORDINATOR_URL__ -> WSS coordinator URL
 #   __LOG_DIR__         -> absolute ~/Library/Logs/macprovider path
-#   __MODEL_ID__        -> selected MLX model id
+#   __CONFIG_PATH__     -> absolute provider config path
 
 set -euo pipefail
 
@@ -22,8 +20,11 @@ CONFIG_DIR="$HOME/.config/macprovider"
 CONFIG_PATH="$CONFIG_DIR/config.yaml"
 PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
 RECOMMENDATION_PATH="$CONFIG_DIR/last-recommendation.json"
+LIVE_CONFIG_PATH="$CONFIG_PATH"
+LIVE_PROVIDER_ID_PATH="$PROVIDER_ID_PATH"
 MANIFEST_DIR="$HOME/Library/Application Support/macprovider"
 MANIFEST_PATH="$MANIFEST_DIR/install_manifest.json"
+EXISTING_INSTALL_WAS_PRESENT=0
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
 # Issue #191: ship the macprovider-watchdog LaunchAgent alongside
@@ -42,6 +43,11 @@ DRY_RUN=0
 NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
 NO_LAUNCHD="${MACPROVIDER_NO_LAUNCHD:-0}"
 TMPDIR_PATH=""
+staging_dir=""
+STAGED_CONFIG_PATH=""
+STAGED_PROVIDER_ID_PATH=""
+AUTOTUNE_BENCHMARK_PORT=""
+MACPROVIDER_CLI_EXECUTABLE="$INSTALL_DIR/macprovider-cli"
 LAUNCHD_INSTALLED=0
 WATCHDOG_INSTALLED=0
 MANUAL_PID=""
@@ -64,6 +70,8 @@ INSTALL_TX_WATCHDOG_WAS_ACTIVE=0
 INSTALL_TX_WATCHDOG_WAS_DISABLED=0
 INSTALL_TX_ROLLING_BACK=0
 INSTALL_TX_BINARY_KIND="symlink"
+CUTOVER_STARTED=0
+AUTOTUNE_RECOMMENDATION_REQUIRED=0
 
 log() { printf "[macprovider-install] %s\n" "$*"; }
 die() {
@@ -71,6 +79,52 @@ die() {
   shift
   printf "[macprovider-install] ERROR: %s\n" "$*" >&2
   exit "$code"
+}
+
+validate_install_dir() {
+  validated="$({ python3 - "$INSTALL_DIR" "$HOME" <<'PY'
+import os
+import stat
+import sys
+
+raw, raw_home = sys.argv[1:]
+if not raw.startswith("/"):
+    raise SystemExit("install directory must be absolute")
+if any(part in {".", ".."} for part in raw.split("/")):
+    raise SystemExit("install directory must not contain traversal components")
+
+home = os.path.normpath(raw_home)
+target = os.path.normpath(raw)
+if target == home:
+    raise SystemExit("install directory must not be HOME itself")
+try:
+    if os.path.commonpath([home, target]) != home:
+        raise SystemExit("install directory must be inside HOME")
+except ValueError:
+    raise SystemExit("install directory must be inside HOME")
+
+uid = os.getuid()
+current = home
+relative = os.path.relpath(target, home)
+for component in ["."] + relative.split(os.sep):
+    if component != ".":
+        current = os.path.join(current, component)
+    if not os.path.lexists(current):
+        continue
+    info = os.lstat(current)
+    if stat.S_ISLNK(info.st_mode):
+        raise SystemExit(f"install path contains symlink component: {current}")
+    if not stat.S_ISDIR(info.st_mode):
+        raise SystemExit(f"install path component is not a directory: {current}")
+    if info.st_uid != uid:
+        raise SystemExit(f"install path component is not owned by the installing user: {current}")
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit(f"install path component is group/world-writable: {current}")
+
+print(target)
+PY
+  } 2>&1)" || die 7 "unsafe MACPROVIDER_INSTALL_DIR: $validated"
+  INSTALL_DIR="$validated"
 }
 
 validate_port_value() {
@@ -130,14 +184,15 @@ validate_port_value() {
 # freshness-check call site does).
 run_macprovider_cli_with_amfi_retry() {
   local rc=0
-  "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
+  local cli_path="$MACPROVIDER_CLI_EXECUTABLE"
+  "$cli_path" "$@" || rc=$?
   if [ "$rc" -ne 137 ]; then
     return "$rc"
   fi
   log "macprovider-cli was SIGKILL'd on first invocation (rc=$rc); likely a transient AMFI code-signature race after pkg install. Retrying once after 2s." >&2
   sleep 2
   rc=0
-  "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
+  "$cli_path" "$@" || rc=$?
   if [ "$rc" -ne 137 ]; then
     return "$rc"
   fi
@@ -148,27 +203,27 @@ run_macprovider_cli_with_amfi_retry() {
     log "inode refresh: mktemp failed; leaving the original binary in place." >&2
     return "$rc"
   fi
-  if ! cp "$INSTALL_DIR/macprovider-cli" "$tmp" 2>/dev/null; then
+  if ! cp "$cli_path" "$tmp" 2>/dev/null; then
     log "inode refresh: cp to $tmp failed; leaving the original binary in place." >&2
     rm -f "$tmp"
     return "$rc"
   fi
-  if ! rm -f "$INSTALL_DIR/macprovider-cli"; then
-    log "inode refresh: rm of $INSTALL_DIR/macprovider-cli failed; the binary is still there but the inode was not refreshed." >&2
+  if ! rm -f "$cli_path"; then
+    log "inode refresh: rm of $cli_path failed; the binary is still there but the inode was not refreshed." >&2
     rm -f "$tmp"
     return "$rc"
   fi
-  if ! cp "$tmp" "$INSTALL_DIR/macprovider-cli"; then
-    log "inode refresh: cp-back of $tmp -> $INSTALL_DIR/macprovider-cli failed; the binary at $INSTALL_DIR/macprovider-cli is now missing. Restore from $tmp: cp \"$tmp\" \"$INSTALL_DIR/macprovider-cli\" && chmod +x \"$INSTALL_DIR/macprovider-cli\"." >&2
+  if ! cp "$tmp" "$cli_path"; then
+    log "inode refresh: cp-back of $tmp -> $cli_path failed; the binary at $cli_path is now missing. Restore from $tmp and chmod it executable." >&2
     return "$rc"
   fi
-  if ! chmod +x "$INSTALL_DIR/macprovider-cli"; then
-    log "inode refresh: chmod +x on $INSTALL_DIR/macprovider-cli failed; the binary is present but may not be executable. Run: chmod +x \"$INSTALL_DIR/macprovider-cli\"." >&2
+  if ! chmod +x "$cli_path"; then
+    log "inode refresh: chmod +x on $cli_path failed; the binary is present but may not be executable." >&2
     return "$rc"
   fi
   rm -f "$tmp"
   rc=0
-  "$INSTALL_DIR/macprovider-cli" "$@" || rc=$?
+  "$cli_path" "$@" || rc=$?
   if [ "$rc" -eq 137 ]; then
     log "macprovider-cli was SIGKILL'd after the inode refresh; this is likely a genuine signature failure rather than the AMFI cache." >&2
   fi
@@ -201,7 +256,6 @@ Environment overrides:
   MACPROVIDER_GITHUB_REPO        owner/repo for GitHub Releases
   MACPROVIDER_VERSION            pin installer to vMAJOR.MINOR.PATCH
                                  (pipe-side form: curl ... | MACPROVIDER_VERSION=v1.7.11 bash)
-  MACPROVIDER_MODEL              model id to install
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
   MACPROVIDER_PORT               local HTTP port
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
@@ -222,6 +276,25 @@ for arg in "$@"; do
     *) die 7 "unknown argument: $arg" ;;
   esac
 done
+
+restore_existing_provider_if_start_skipped() {
+  [ "$SKIP_PROVIDER_START" -eq 1 ] || return 1
+  [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] || return 1
+  if [ "$CUTOVER_STARTED" -eq 0 ]; then
+    log "No replacement provider will be started; discarding staged files without touching the active provider."
+    if [ "${INSTALL_TX_WATCHDOG_WAS_ACTIVE:-0}" -eq 1 ]; then
+      launchctl bootstrap "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || return 1
+      launchctl kickstart -k "gui/$UID/$WATCHDOG_LABEL" >/dev/null 2>&1 || return 1
+    fi
+    commit_install_transaction || return 1
+    log "The active provider release remained online and unchanged."
+    return 0
+  fi
+  log "No replacement provider will be started; restoring the previous ready provider release."
+  rollback_install_transaction || return 1
+  log "Previous provider release restored. The requested update was not activated."
+  return 0
+}
 
 cleanup() {
   cleanup_rc=$?
@@ -1014,6 +1087,9 @@ begin_install_transaction() {
       || die 70 "could not stage and verify the previous install manifest; current install was not changed (partial recovery data: $recovery_staging)"
     INSTALL_TX_HAD_MANIFEST=1
   fi
+  if [ "$INSTALL_TX_HAD_INSTALL_DIR" -eq 1 ] || [ "$INSTALL_TX_HAD_BINARY_PATH" -eq 1 ] || [ "$INSTALL_TX_HAD_MANIFEST" -eq 1 ]; then
+    EXISTING_INSTALL_WAS_PRESENT=1
+  fi
   if launchctl print "gui/$UID/live.streamvc.macprovider" >/dev/null 2>&1; then
     INSTALL_TX_SERVICE_WAS_ACTIVE=1
   fi
@@ -1143,11 +1219,15 @@ ensure_port_free() {
   # F-603-V7-2: an existing macprovider-cli on this port is the normal
   # upgrade-in-place case. Stop that service and continue; only foreign
   # holders should block the install.
-  if pgrep -lf 'macprovider-cli.*--port' 2>/dev/null | awk -v pids="$holding_pids" '
-    BEGIN { n = split(pids, pid_list, "\n"); for (i = 1; i <= n; i++) wanted[pid_list[i]] = 1 }
-    wanted[$1] { found = 1 }
-    END { exit found ? 0 : 1 }
-  '; then
+  own_provider_holds_port=0
+  for holding_pid in $holding_pids; do
+    holding_executable="$(lsof -a -p "$holding_pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+    if [ "$holding_executable" = "$INSTALL_DIR/macprovider-cli" ]; then
+      own_provider_holds_port=1
+      break
+    fi
+  done
+  if [ "$own_provider_holds_port" -eq 1 ]; then
     if [ "$stop_own_provider" != "1" ]; then
       log "Existing macprovider-cli holding port $PORT; will stop it after release verification."
       return
@@ -1737,7 +1817,7 @@ validate_inputs() {
   reject_newlines "provider_id" "$provider_id"
   reject_newlines "coordinator_url" "$coordinator_url"
   case "$model" in
-    ''|*[!A-Za-z0-9._/:+-]*) die 7 "model contains unsupported characters" ;;
+    *[!A-Za-z0-9._/:+-]*) die 7 "model contains unsupported characters" ;;
   esac
   case "$provider_id" in
     ''|*[!a-z0-9-]*) die 7 "provider_id contains unsupported characters" ;;
@@ -1958,6 +2038,14 @@ validate_staged_entries() {
   entries="$1"
   label="$2"
   has_binary=0
+  has_metallib=0
+  has_bundle=0
+  has_catalog_manifest=0
+  has_catalog_keyring=0
+  has_catalog_candidates=0
+  has_catalog_candidates_signature=0
+  has_catalog_demand=0
+  has_catalog_demand_signature=0
   while IFS= read -r entry; do
     normalized_entry="$entry"
     while :; do
@@ -1977,10 +2065,32 @@ validate_staged_entries() {
         has_binary=1
         ;;
       mlx.metallib)
+        has_metallib=1
         ;;
       THIRD-PARTY-NOTICES.txt)
         ;;
       *.bundle|*.bundle/*)
+        has_bundle=1
+        ;;
+      catalog-release|catalog-release/)
+        ;;
+      catalog-release/release.json)
+        has_catalog_manifest=1
+        ;;
+      catalog-release/trusted-keys.json)
+        has_catalog_keyring=1
+        ;;
+      catalog-release/autotune-candidates.json)
+        has_catalog_candidates=1
+        ;;
+      catalog-release/autotune-candidates.json.sig)
+        has_catalog_candidates_signature=1
+        ;;
+      catalog-release/demand-rank.json)
+        has_catalog_demand=1
+        ;;
+      catalog-release/demand-rank.json.sig)
+        has_catalog_demand_signature=1
         ;;
       *)
         die 5 "unexpected $label member: $entry"
@@ -1991,6 +2101,14 @@ $entries
 EOF
 
   [ "$has_binary" -eq 1 ] || die 5 "$label does not contain macprovider-cli"
+  [ "$has_metallib" -eq 1 ] || die 5 "$label does not contain mlx.metallib"
+  [ "$has_bundle" -eq 1 ] || die 5 "$label does not contain a SwiftPM resource bundle"
+  [ "$has_catalog_manifest" -eq 1 ] || die 5 "$label does not contain catalog-release/release.json"
+  [ "$has_catalog_keyring" -eq 1 ] || die 5 "$label does not contain catalog-release/trusted-keys.json"
+  [ "$has_catalog_candidates" -eq 1 ] || die 5 "$label does not contain catalog-release/autotune-candidates.json"
+  [ "$has_catalog_candidates_signature" -eq 1 ] || die 5 "$label does not contain catalog-release/autotune-candidates.json.sig"
+  [ "$has_catalog_demand" -eq 1 ] || die 5 "$label does not contain catalog-release/demand-rank.json"
+  [ "$has_catalog_demand_signature" -eq 1 ] || die 5 "$label does not contain catalog-release/demand-rank.json.sig"
 }
 
 validate_package() {
@@ -2043,39 +2161,125 @@ stage_release_payload() {
       die 5 "release asset was not selected"
       ;;
   esac
+  chmod +x "$staging_dir/macprovider-cli" 2>/dev/null || true
+  [ -x "$staging_dir/macprovider-cli" ] || die 5 "staged macprovider-cli is not executable"
+  MACPROVIDER_CLI_EXECUTABLE="$staging_dir/macprovider-cli"
+}
+
+prepare_staged_config() {
+  [ -n "$staging_dir" ] || die 5 "release payload must be staged before config preparation"
+  STAGED_CONFIG_PATH="$staging_dir/config.yaml"
+  STAGED_PROVIDER_ID_PATH="$staging_dir/provider_id"
+  if [ -f "$LIVE_CONFIG_PATH" ]; then
+    cp "$LIVE_CONFIG_PATH" "$STAGED_CONFIG_PATH" || die 5 "failed to stage existing provider config"
+    chmod 600 "$STAGED_CONFIG_PATH" 2>/dev/null || true
+  fi
+  if [ -f "$LIVE_PROVIDER_ID_PATH" ]; then
+    cp "$LIVE_PROVIDER_ID_PATH" "$STAGED_PROVIDER_ID_PATH" || die 5 "failed to stage existing provider identity"
+    chmod 600 "$STAGED_PROVIDER_ID_PATH" 2>/dev/null || true
+  fi
+  CONFIG_PATH="$STAGED_CONFIG_PATH"
+  PROVIDER_ID_PATH="$STAGED_PROVIDER_ID_PATH"
+}
+
+activate_staged_config() {
+  [ -n "$STAGED_CONFIG_PATH" ] && [ -f "$STAGED_CONFIG_PATH" ] \
+    || die 5 "staged provider config is missing at cutover"
+  mkdir -p "$CONFIG_DIR"
+  config_temp="$LIVE_CONFIG_PATH.install.$$"
+  cp "$STAGED_CONFIG_PATH" "$config_temp" || die 5 "failed to prepare provider config activation"
+  chmod 600 "$config_temp" 2>/dev/null || true
+  mv "$config_temp" "$LIVE_CONFIG_PATH" || die 5 "failed to activate provider config"
+  if [ -f "$STAGED_PROVIDER_ID_PATH" ]; then
+    provider_id_temp="$LIVE_PROVIDER_ID_PATH.install.$$"
+    cp "$STAGED_PROVIDER_ID_PATH" "$provider_id_temp" || die 5 "failed to prepare provider identity activation"
+    chmod 600 "$provider_id_temp" 2>/dev/null || true
+    mv "$provider_id_temp" "$LIVE_PROVIDER_ID_PATH" || die 5 "failed to activate provider identity"
+  fi
+  CONFIG_PATH="$LIVE_CONFIG_PATH"
+  PROVIDER_ID_PATH="$LIVE_PROVIDER_ID_PATH"
+}
+
+semantic_merge_config() {
+  config_path="$1"
+  model_value="$2"
+  provider_id_value="$3"
+  coordinator_url_value="$4"
+  port_value="$5"
+  python3 - "$config_path" "$model_value" "$provider_id_value" "$coordinator_url_value" "$port_value" <<'PY'
+import json
+import os
+import re
+import sys
+import tempfile
+
+path, model, provider_id, coordinator_url, port = sys.argv[1:]
+owned = {
+    "coordinator_url": json.dumps(coordinator_url),
+    "provider_id": json.dumps(provider_id),
+    "port": str(int(port)),
+}
+if model:
+    owned["model"] = json.dumps(model)
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+except FileNotFoundError:
+    lines = []
+
+merged = []
+seen = set()
+top_level_key = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)[ \t]*:")
+for line in lines:
+    match = top_level_key.match(line)
+    key = match.group(1) if match else None
+    if key not in owned:
+        merged.append(line)
+        continue
+    if key in seen:
+        continue
+    merged.append(f"{key}: {owned[key]}")
+    seen.add(key)
+
+for key in ("model", "coordinator_url", "provider_id", "port"):
+    if key not in owned:
+        continue
+    if key not in seen:
+        merged.append(f"{key}: {owned[key]}")
+
+directory = os.path.dirname(path)
+os.makedirs(directory, mode=0o700, exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix=".config.yaml.merge-", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(merged) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
 }
 
 write_config() {
   model="$1"
   provider_id="$2"
   coordinator_url="$3"
-  existing_provider_token_line="$(read_config_provider_token_line || true)"
   run mkdir -p "$CONFIG_DIR"
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "Would write provider_id to $PROVIDER_ID_PATH and config to $CONFIG_PATH"
+    log "Would semantic-merge provider identity, coordinator URL, and port into $CONFIG_PATH; verified autotune supplies model provenance."
     return
   fi
-  printf "%s\n" "$provider_id" > "$PROVIDER_ID_PATH"
-  cat > "$CONFIG_PATH" <<EOF
-model: "$(yaml_escape "$model")"
-coordinator_url: "$(yaml_escape "$coordinator_url")"
-provider_id: "$(yaml_escape "$provider_id")"
-port: $PORT
-EOF
-  if [ -n "$existing_provider_token_line" ]; then
-    printf "%s\n" "$existing_provider_token_line" >> "$CONFIG_PATH"
-  fi
+  provider_id_temp="$PROVIDER_ID_PATH.tmp.$$"
+  printf "%s\n" "$provider_id" > "$provider_id_temp"
+  chmod 600 "$provider_id_temp" 2>/dev/null || true
+  mv "$provider_id_temp" "$PROVIDER_ID_PATH"
+  semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT"
   chmod 600 "$CONFIG_PATH" "$PROVIDER_ID_PATH" 2>/dev/null || true
-}
-
-read_config_provider_token_line() {
-  [ -f "$CONFIG_PATH" ] || return 1
-  awk '
-    /^provider_token[[:space:]]*:/ {
-      print
-      exit
-    }
-  ' "$CONFIG_PATH"
 }
 
 read_config_model() {
@@ -2086,6 +2290,16 @@ read_config_model() {
       sub(/^model:[[:space:]]*/, "", value)
       gsub(/^"|"$/, "", value)
       print value
+      exit
+    }
+  ' "$CONFIG_PATH"
+}
+
+read_config_provider_token_line() {
+  [ -f "$CONFIG_PATH" ] || return 1
+  awk '
+    /^provider_token[[:space:]]*:/ {
+      print
       exit
     }
   ' "$CONFIG_PATH"
@@ -2148,13 +2362,37 @@ ensure_provider_credentials() {
     return 0
   fi
   provider_id="$(read_config_provider_id || true)"
-  is_bootstrap_principal "$provider_id" \
-    || die 6 "tokenless credential bootstrap requires a fresh high-entropy mp-* provider ID; this existing predictable ID needs an operator-issued ownership credential"
+  case "$provider_id" in
+    mp-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) die 6 "tokenless credential bootstrap requires a fresh high-entropy mp-* provider ID; this existing predictable ID needs an operator-issued ownership credential" ;;
+  esac
   log "Acquiring first-install provider credential before evidence admission."
   run_macprovider_cli_with_amfi_retry bootstrap-auth --timeout-seconds 30 --config "$CONFIG_PATH" \
     || die 6 "provider credential bootstrap failed before evidence admission"
   [ -n "$(read_config_provider_token_line || true)" ] \
     || die 6 "provider credential bootstrap completed without persisting provider_token"
+  if [ -n "${STAGED_CONFIG_PATH:-}" ] && [ "$CONFIG_PATH" = "$STAGED_CONFIG_PATH" ]; then
+    # Coordinator bootstrap creates a durable principal. Publish its exact key
+    # material into the protected live transaction immediately so #547's
+    # rollback helper can preserve custody even if later evidence or startup
+    # admission fails. The incumbent process remains running until cutover.
+    mkdir -p "$CONFIG_DIR"
+    bootstrap_config_temp="$LIVE_CONFIG_PATH.bootstrap.$$"
+    cp "$STAGED_CONFIG_PATH" "$bootstrap_config_temp" \
+      || die 70 "could not preserve the bootstrapped provider credential for rollback"
+    chmod 600 "$bootstrap_config_temp" 2>/dev/null || true
+    mv "$bootstrap_config_temp" "$LIVE_CONFIG_PATH" \
+      || die 70 "could not publish the bootstrapped provider credential for rollback"
+    if [ -f "$STAGED_PROVIDER_ID_PATH" ]; then
+      bootstrap_provider_id_temp="$LIVE_PROVIDER_ID_PATH.bootstrap.$$"
+      cp "$STAGED_PROVIDER_ID_PATH" "$bootstrap_provider_id_temp" \
+        || die 70 "could not preserve the bootstrapped provider identity for rollback"
+      chmod 600 "$bootstrap_provider_id_temp" 2>/dev/null || true
+      mv "$bootstrap_provider_id_temp" "$LIVE_PROVIDER_ID_PATH" \
+        || die 70 "could not publish the bootstrapped provider identity for rollback"
+    fi
+    CUTOVER_STARTED=1
+  fi
 }
 
 submit_required_hardware_evidence() {
@@ -2164,16 +2402,40 @@ submit_required_hardware_evidence() {
     || die 6 "authenticated hardware evidence admission failed before service start"
 }
 
+select_autotune_benchmark_port() {
+  requested="${MACPROVIDER_AUTOTUNE_PORT:-}"
+  if [ -n "$requested" ]; then
+    validate_port_value "$requested"
+    [ "$requested" != "$PORT" ] || die 7 "autotune benchmark port must differ from live provider port $PORT"
+    if lsof -nP -iTCP:"$requested" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
+      die 7 "autotune benchmark port $requested is already in use"
+    fi
+    AUTOTUNE_BENCHMARK_PORT="$requested"
+    return
+  fi
+
+  candidate=19080
+  while [ "$candidate" -le 19179 ]; do
+    if [ "$candidate" != "$PORT" ] && ! lsof -nP -iTCP:"$candidate" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
+      AUTOTUNE_BENCHMARK_PORT="$candidate"
+      return
+    fi
+    candidate=$((candidate + 1))
+  done
+  die 7 "no free autotune benchmark port is available in 19080-19179"
+}
+
 run_autotune_recommend_apply() {
   if [ "$DRY_RUN" -eq 1 ]; then
     log "Would run paid-yield recommendation before service start."
     return 0
   fi
-  if [ ! -x "$INSTALL_DIR/macprovider-cli" ]; then
-    die 5 "installed macprovider-cli missing before autotune recommendation"
+  if [ ! -x "${MACPROVIDER_CLI_EXECUTABLE:-$INSTALL_DIR/macprovider-cli}" ]; then
+    die 5 "staged macprovider-cli missing before autotune recommendation"
   fi
   log "Running paid-yield recommendation before service start."
-  if run_macprovider_cli_with_amfi_retry autotune --recommend --apply --no-submit-hardware-evidence --config "$CONFIG_PATH"; then
+  if run_macprovider_cli_with_amfi_retry autotune --recommend --apply \
+    --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence; then
     recommended_model="$(read_config_model || true)"
     artifact_path="$(read_config_artifact_path || true)"
     artifact_sha="$(read_config_artifact_sha || true)"
@@ -2196,7 +2458,8 @@ run_autotune_recommend_apply() {
     log "No paid model currently clears the minimum net-yield threshold on this Mac."
     if prompt_yes_no "Enable donor mode? [y/N]" "N"; then
       log "Applying donor-mode configuration."
-      run_macprovider_cli_with_amfi_retry autotune --recommend --apply --donor-mode --no-submit-hardware-evidence --config "$CONFIG_PATH" \
+      run_macprovider_cli_with_amfi_retry autotune --recommend --apply --donor-mode \
+        --port "${AUTOTUNE_BENCHMARK_PORT:-19080}" --config "$CONFIG_PATH" --no-submit-hardware-evidence \
         || die 6 "donor-mode recommendation failed before service start"
       recommended_model="$(read_config_model || true)"
       artifact_path="$(read_config_artifact_path || true)"
@@ -2225,7 +2488,7 @@ use_fresh_recommendation_if_available() {
   if [ "$DRY_RUN" -eq 1 ]; then
     return 1
   fi
-  if [ ! -x "$INSTALL_DIR/macprovider-cli" ] || [ ! -f "$CONFIG_PATH" ]; then
+  if [ ! -x "$MACPROVIDER_CLI_EXECUTABLE" ] || [ ! -f "$CONFIG_PATH" ]; then
     return 1
   fi
 
@@ -2270,7 +2533,9 @@ install_binary() {
     log "Would keep release support files in $INSTALL_DIR"
     return
   fi
-  stage_release_payload
+  if [ -z "$staging_dir" ] || [ ! -x "$staging_dir/macprovider-cli" ]; then
+    stage_release_payload
+  fi
 
   # CRITICAL: mlx-swift loads Metal kernels from mlx.metallib and/or
   # .bundle directories adjacent to the binary. We install the REAL binary
@@ -2288,8 +2553,14 @@ install_binary() {
   if [ -f "$staging_dir/mlx.metallib" ]; then
     cp "$staging_dir/mlx.metallib" "$INSTALL_DIR/mlx.metallib"
   fi
+  rm -f "$INSTALL_DIR/THIRD-PARTY-NOTICES.txt"
+  if [ -f "$staging_dir/THIRD-PARTY-NOTICES.txt" ]; then
+    cp "$staging_dir/THIRD-PARTY-NOTICES.txt" "$INSTALL_DIR/THIRD-PARTY-NOTICES.txt"
+  fi
   find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec rm -rf {} +
   find "$staging_dir" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$INSTALL_DIR"/ \;
+  rm -rf "$INSTALL_DIR/catalog-release"
+  cp -R "$staging_dir/catalog-release" "$INSTALL_DIR/catalog-release"
 
   # Atomic symlink swap at the canonical path.
   rm -f "$BINARY_PATH"
@@ -2297,6 +2568,7 @@ install_binary() {
 
   [ -x "$real_binary" ] || die 5 "macprovider-cli was not installed at $real_binary"
   [ -L "$BINARY_PATH" ] || die 5 "symlink not created at $BINARY_PATH"
+  MACPROVIDER_CLI_EXECUTABLE="$real_binary"
 }
 
 check_install_dir_clean() {
@@ -2306,7 +2578,7 @@ check_install_dir_clean() {
   local entries
   # F-603-V7-7: warn on mixed-state directories such as leftover Python
   # virtualenvs, but do not block an otherwise valid partner upgrade.
-  entries=$(ls -A "$INSTALL_DIR" 2>/dev/null | grep -vE '^(macprovider-cli(\.v[0-9.]+\.bak)?|mlx\.metallib|.*\.bundle)$' | head -20 || true)
+  entries=$(ls -A "$INSTALL_DIR" 2>/dev/null | grep -vE '^(macprovider-cli(\.v[0-9.]+\.bak)?|mlx\.metallib|THIRD-PARTY-NOTICES\.txt|catalog-release|.*\.bundle)$' | head -20 || true)
   if [ -n "$entries" ]; then
     log "WARNING: $INSTALL_DIR contains non-macprovider entries:"
     while IFS= read -r entry; do
@@ -2327,6 +2599,7 @@ check_path_hint() {
 }
 
 clear_quarantine() {
+  quarantine_path="${1:-$INSTALL_DIR}"
   if ! command -v xattr >/dev/null 2>&1; then
     log "xattr not found; skipping quarantine cleanup."
     return
@@ -2335,10 +2608,9 @@ clear_quarantine() {
     log "Package release passed Gatekeeper assessment; quarantine cleanup is not required."
     return
   fi
-  log "Tarball release may carry a quarantine attribute. Clearing it lets macOS run the CLI."
-  if prompt_yes_no "Clear quarantine attribute on $BINARY_PATH and $INSTALL_DIR? [Y/n]" "Y"; then
-    run xattr -dr com.apple.quarantine "$BINARY_PATH"
-    run xattr -dr com.apple.quarantine "$INSTALL_DIR"
+  log "Tarball release may carry a quarantine attribute. Clearing it lets macOS run the staged CLI."
+  if prompt_yes_no "Clear quarantine attribute on the verified staged release? [Y/n]" "Y"; then
+    run xattr -dr com.apple.quarantine "$quarantine_path"
   else
     die 7 "user declined quarantine cleanup"
   fi
@@ -2372,9 +2644,6 @@ install_plist() {
 }
 
 render_plist() {
-  model="$(xml_escape "$1")"
-  provider_id="$(xml_escape "$2")"
-  coordinator_url="$(xml_escape "$3")"
   user_home="$(xml_escape "$HOME")"
   install_prefix="$(xml_escape "$INSTALL_DIR")"
   config_path="$(xml_escape "$CONFIG_PATH")"
@@ -2393,14 +2662,9 @@ render_plist() {
   <key>ProgramArguments</key>
   <array>
     <string>$binary_path</string>
-    <string>--port</string>
-    <string>$PORT</string>
-    <string>--model</string>
-    <string>$model</string>
-    <string>--provider-id</string>
-    <string>$provider_id</string>
-    <string>--coordinator</string>
-    <string>$coordinator_url</string>
+    <string>serve</string>
+    <string>--config</string>
+    <string>$config_path</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -2441,16 +2705,7 @@ EOF
 write_watchdog_script() {
   cat <<'WATCHDOG_EOF' > "$WATCHDOG_PATH"
 #!/usr/bin/env bash
-# macprovider-watchdog: local provider liveness monitor plus
-# auto-update rollback observer.
-#
-# Health verdict: exactly one installed macprovider-cli process must be
-# running and its local /v1/health endpoint must answer. Coordinator TCP
-# reachability is advisory logging only; a missing ESTABLISHED coordinator
-# connection no longer causes a kick by itself.
-
 set -euo pipefail
-
 LABEL="${MACPROVIDER_WATCHDOG_LABEL:-live.streamvc.macprovider}"
 CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
 BINARY_PATH="${MACPROVIDER_BINARY_PATH:-$HOME/macprovider/macprovider-cli}"
@@ -2458,46 +2713,14 @@ COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.streamvc.live}"
 COORDINATOR_PORT="${MACPROVIDER_COORDINATOR_PORT:-443}"
 LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
 LOG_PATH="$LOG_DIR/watchdog.log"
-# Issue #191 R1 architect HIGH: arming + grace state. Without
-# these, a first-time install can spin in a restart loop — the
-# Swift CLI loads the model BEFORE connecting to the coordinator
-# (cold-cache model load is 10-20 minutes), and a watchdog that
-# kicks on "no ESTABLISHED connection" would Darwin.exit the
-# process every 60s before it ever opens its socket.
-#
-# Arming rule: the watchdog stays disarmed (no kicks) until it
-# observes at least ONE successful ESTABLISHED connection IN THE
-# CURRENT BOOT. The armed marker stores the boot id (kern.boottime
-# sec) so a reboot — which restarts the provider into a fresh
-# cold-cache model load — re-disarms the watchdog and prevents the
-# stale-arming restart loop the R1 fix did not cover (R2 ARCH HIGH).
-#
-# Grace rule: after we observe a restart-worthy failure, we wait at least KICK_GRACE_SECONDS
-# before logging another restart request. This covers the post-restart model-reload
-# window without re-triggering on the gap between launchd respawn
-# and re-establishing the coordinator socket.
 STATE_DIR="${MACPROVIDER_WATCHDOG_STATE_DIR:-$HOME/.local/share/macprovider-watchdog/state}"
 ARMED_FILE="$STATE_DIR/armed"
 LAST_KICK_FILE="$STATE_DIR/last_kick"
 KICK_GRACE_SECONDS="${MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS:-300}"
-
 mkdir -p "$LOG_DIR" "$STATE_DIR"
-
-# Boot id: per-boot identifier sourced from kern.bootsessionuuid.
-# Apple-provided UUID is immutable for the lifetime of a single
-# boot (verified against XNU sysctl: read-only). Unlike
-# kern.boottime, this value is NOT affected by NTP / manual
-# wall-clock time correction (R3 architect MEDIUM #1), so a
-# clock-set event during a wedge cannot silently re-disarm the
-# watchdog and let the wedge persist.
 current_boot_id() {
   sysctl -n kern.bootsessionuuid 2>/dev/null
 }
-
-# Acceptable formats in config.yaml are: `provider_id: ID` (yaml
-# key) or `provider-id: ID` (alternate hyphenated form some operator
-# tools have written historically). Either matches and surfaces the
-# value with surrounding whitespace stripped.
 read_provider_id() {
   if [ ! -f "$CONFIG_PATH" ]; then
     return 1
@@ -2513,7 +2736,6 @@ read_provider_id() {
     }
   ' "$CONFIG_PATH"
 }
-
 read_config_port() {
   if [ ! -f "$CONFIG_PATH" ]; then
     return 1
@@ -2528,13 +2750,9 @@ read_config_port() {
     }
   ' "$CONFIG_PATH"
 }
-
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 log() { printf "[%s] %s\n" "$(ts)" "$*" >> "$LOG_PATH"; }
-
 resolve_coordinator_ip() {
-  # First try dscacheutil (no network call if already cached);
-  # fall back to host(1) which most macs have via bind-utils.
   ip="$(dscacheutil -q host -a name "$COORDINATOR_HOST" 2>/dev/null \
         | awk '/^ip_address:/ { print $2; exit }')"
   if [ -z "$ip" ] && command -v host >/dev/null 2>&1; then
@@ -2543,22 +2761,17 @@ resolve_coordinator_ip() {
   fi
   printf "%s" "${ip:-}"
 }
-
 has_established_conn() {
   ip="$1"
   if [ -z "$ip" ]; then
     return 1
   fi
-  # BSD netstat on macOS: print ESTABLISHED TCP rows; awk matches
-  # the foreign-address column against our coordinator IP:port.
-  # Format: Proto Recv-Q Send-Q Local-Address Foreign-Address (state)
   netstat -an -p tcp 2>/dev/null \
     | awk -v target="${ip}.${COORDINATOR_PORT}" '
         $0 ~ /ESTABLISHED/ && $5 == target { found = 1; exit }
         END { exit found ? 0 : 1 }
       '
 }
-
 provider_process_pid() {
   expected="$BINARY_PATH"
   if command -v realpath >/dev/null 2>&1 && [ -e "$expected" ]; then
@@ -2578,7 +2791,6 @@ provider_process_pid() {
   [ "$count" -eq 1 ] || return 1
   printf "%s" "$matches" | awk 'NF { print; exit }'
 }
-
 local_health_listener_owned_by_provider() {
   provider_pid="$1"
   port="$2"
@@ -2587,7 +2799,6 @@ local_health_listener_owned_by_provider() {
   fi
   lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | awk -v pid="$provider_pid" '$1 == pid { found = 1 } END { exit found ? 0 : 1 }'
 }
-
 local_provider_health_ok() {
   provider_pid="$1"
   port="$(read_config_port || true)"
@@ -2598,13 +2809,10 @@ local_provider_health_ok() {
   curl_bin="${MACPROVIDER_CURL:-/usr/bin/curl}"
   "$curl_bin" -fsS --max-time 2 "http://127.0.0.1:${port}/v1/health" >/dev/null 2>&1
 }
-
 note_provider_restart_request() {
   log "provider restart requested for $LABEL but skipped: launchd KeepAlive is the sole runtime manager"
 }
-
 now_epoch() { date -u +%s; }
-
 autoupdate_recovery_tick() {
   AUTUPDATE_STATE_ROOT="${MACPROVIDER_AUTOUPDATE_STATE_ROOT:-$HOME/.local/share/macprovider/autoupdate}" \
   MACPROVIDER_LABEL="$LABEL" \
@@ -2622,7 +2830,7 @@ import stat
 import subprocess
 import sys
 import time
-
+import uuid
 root = os.environ["AUTUPDATE_STATE_ROOT"]
 label = os.environ["MACPROVIDER_LABEL"]
 log_path = os.environ["LOG_PATH"]
@@ -2630,14 +2838,11 @@ pending = os.path.join(root, "pending.json")
 lock_path = os.path.join(root, "update.lock")
 uid = os.getuid()
 provider_user = pwd.getpwuid(uid).pw_name
-
 def ts():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
 def log(message):
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(f"[{ts()}] autoupdate {message}\n")
-
 def event(outcome, phase, failure_class, reason, marker=None):
     payload = {
         "event": "provider_autoupdate_watchdog",
@@ -2653,7 +2858,6 @@ def event(outcome, phase, failure_class, reason, marker=None):
         payload["update_id"] = marker.get("update_id", "")
         payload["target_version"] = marker.get("target_version", "")
     log(json.dumps(payload, sort_keys=True, separators=(",", ":")))
-
 def reject_path(path, must_exist=True):
     try:
         st = os.lstat(path)
@@ -2680,7 +2884,6 @@ def reject_path(path, must_exist=True):
     except FileNotFoundError:
         pass
     return st
-
 def verify_root():
     current = root
     parts = []
@@ -2695,7 +2898,6 @@ def verify_root():
             st = reject_path(path)
             if not stat.S_ISDIR(st.st_mode):
                 raise RuntimeError(f"not_directory:{path}")
-
 def read_marker():
     fd = os.open(pending, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
@@ -2705,7 +2907,6 @@ def read_marker():
     marker = json.loads(raw.decode("utf-8"))
     validate_marker_strict(marker)
     return marker
-
 def validate_marker_strict(marker):
     required = {"update_id", "target_version", "target_path", "backup_path", "size", "mode", "sha256", "marker_deadline"}
     if not required.issubset(marker.keys()):
@@ -2726,6 +2927,16 @@ def validate_marker_strict(marker):
         raise RuntimeError("marker_mode_invalid")
     if not re.match(r"^[0-9a-f]{64}$", str(marker["sha256"])):
         raise RuntimeError("marker_sha256_invalid")
+    release_backup = marker.get("release_backup_path")
+    release_sha = marker.get("release_backup_sha256")
+    if (release_backup is None) != (release_sha is None):
+        raise RuntimeError("marker_release_backup_incomplete")
+    if release_backup is not None:
+        value = str(release_backup)
+        if not os.path.isabs(value) or value.endswith("/") or "/../" in value or "/./" in value:
+            raise RuntimeError("marker_release_backup_path_invalid")
+        if not re.match(r"^[0-9a-f]{64}$", str(release_sha)):
+            raise RuntimeError("marker_release_backup_sha256_invalid")
     raw_deadline = str(marker["marker_deadline"])
     if not raw_deadline.endswith("Z"):
         raise RuntimeError("marker_deadline_invalid")
@@ -2738,7 +2949,6 @@ def validate_marker_strict(marker):
     future_tolerance = post_start_window + 30 * 60
     if deadline > now + datetime.timedelta(seconds=future_tolerance):
         raise RuntimeError("marker_deadline_out_of_bounds")
-
 def current_binary_version(path):
     try:
         result = subprocess.run([path, "--version"], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
@@ -2747,7 +2957,6 @@ def current_binary_version(path):
     output = f"{result.stdout}\n{result.stderr}"
     match = re.search(r"([0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z.-]+)?)", output)
     return match.group(1) if match else ""
-
 def read_success_sentinel(path):
     reject_path(path)
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -2762,15 +2971,14 @@ def read_success_sentinel(path):
         "update_id": update_id,
         "binary_version": str(payload.get("binary_version", "")),
     }
-
 def process_success_sentinel(marker):
-    validate_restore_inputs(marker)
     binary_dir = os.path.dirname(marker["target_path"])
     for name in os.listdir(binary_dir):
         if not name.startswith(".macprovider-cli.success-"):
             continue
         sentinel = os.path.join(binary_dir, name)
         try:
+            validate_restore_inputs(marker)
             payload = read_success_sentinel(sentinel)
             sentinel_version = payload["binary_version"]
             current_version = current_binary_version(marker["target_path"])
@@ -2790,6 +2998,9 @@ def process_success_sentinel(marker):
                 os.unlink(marker["backup_path"])
             except FileNotFoundError:
                 pass
+            release_backup = marker.get("release_backup_path")
+            if release_backup:
+                shutil.rmtree(release_backup, ignore_errors=True)
             try:
                 os.unlink(lock_path)
             except FileNotFoundError:
@@ -2804,7 +3015,6 @@ def process_success_sentinel(marker):
             except FileNotFoundError:
                 pass
     return False
-
 def sha256(path):
     h = hashlib.sha256()
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -2817,13 +3027,11 @@ def sha256(path):
     finally:
         os.close(fd)
     return h.hexdigest()
-
 def binary_path_without_pending():
     candidate = os.environ.get("MACPROVIDER_BINARY_PATH", "")
     if candidate:
         return candidate
     return shutil.which("macprovider-cli") or ""
-
 def known_binary_dir():
     configured = os.environ.get("MACPROVIDER_BINARY_DIR", "")
     if configured:
@@ -2846,7 +3054,6 @@ def known_binary_dir():
     if binary:
         return os.path.realpath(os.path.dirname(binary))
     return ""
-
 def scan_without_pending():
     binary = binary_path_without_pending()
     if not binary:
@@ -2873,7 +3080,8 @@ def scan_without_pending():
                 log(f"deleted_stale_backup={path}")
             except FileNotFoundError:
                 pass
-
+        elif name.startswith(".macprovider-cli.release-rollback-"):
+            shutil.rmtree(path, ignore_errors=True)
 def quarantine(reason, marker=None):
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     dest = os.path.join(root, f"pending-quarantined-{stamp}.json")
@@ -2882,12 +3090,10 @@ def quarantine(reason, marker=None):
         log(f"pending_marker_quarantined={dest} reason={reason}")
     except FileNotFoundError:
         pass
-
 def marker_deadline_expired(marker):
     raw_deadline = str(marker["marker_deadline"])
     deadline = datetime.datetime.strptime(raw_deadline, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
     return datetime.datetime.now(datetime.timezone.utc) >= deadline
-
 def lock_is_held_by_other_process():
     os.makedirs(root, mode=0o700, exist_ok=True)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -2903,7 +3109,6 @@ def lock_is_held_by_other_process():
         except OSError:
             pass
         os.close(fd)
-
 def validate_restore_inputs(marker):
     backup = marker["backup_path"]
     target = marker["target_path"]
@@ -2931,12 +3136,126 @@ def validate_restore_inputs(marker):
         raise RuntimeError("backup_size_mismatch")
     if sha256(backup) != str(marker["sha256"]):
         raise RuntimeError("backup_sha256_mismatch")
-    return backup, target
-
+    release_backup = marker.get("release_backup_path")
+    if release_backup:
+        expected_release_backup = os.path.join(os.path.dirname(target), f".macprovider-cli.release-rollback-{update_id}")
+        if release_backup != expected_release_backup:
+            raise RuntimeError("release_backup_path_derivation_mismatch")
+        if os.path.realpath(os.path.dirname(release_backup)) != trusted_dir:
+            raise RuntimeError("unsupported_install_topology:release_backup_outside_binary_dir")
+        release_st = reject_path(release_backup)
+        if not stat.S_ISDIR(release_st.st_mode):
+            raise RuntimeError("release_backup_not_directory")
+        allowed = lambda name: name in {"mlx.metallib", "THIRD-PARTY-NOTICES.txt", "catalog-release"} or name.endswith(".bundle")
+        if any(not allowed(name) for name in os.listdir(release_backup)):
+            raise RuntimeError("release_backup_unexpected_entry")
+        if release_tree_sha256(release_backup) != str(marker["release_backup_sha256"]):
+            raise RuntimeError("release_backup_sha256_mismatch")
+    return backup, target, release_backup
+def release_tree_sha256(root_path):
+    records = []
+    for current, directory_names, file_names in os.walk(root_path, topdown=True, followlinks=False):
+        directory_names.sort()
+        file_names.sort()
+        for name in directory_names + file_names:
+            path = os.path.join(current, name)
+            item_st = reject_path(path)
+            relative = os.path.relpath(path, root_path)
+            if "\x00" in relative or "\n" in relative or relative == ".." or relative.startswith("../"):
+                raise RuntimeError("release_tree_path_invalid")
+            mode = stat.S_IMODE(item_st.st_mode)
+            if stat.S_ISDIR(item_st.st_mode):
+                record = f"d\0{relative}\0{mode}\0"
+            elif stat.S_ISREG(item_st.st_mode):
+                record = f"f\0{relative}\0{mode}\0{item_st.st_size}\0{sha256(path)}\0"
+            else:
+                raise RuntimeError("release_tree_entry_invalid")
+            records.append((relative, record.encode("utf-8")))
+    digest = hashlib.sha256()
+    for _, record in sorted(records, key=lambda item: item[0]):
+        digest.update(record)
+    return digest.hexdigest()
+def owned_release_resource(name):
+    return name in {"mlx.metallib", "THIRD-PARTY-NOTICES.txt", "catalog-release"} or name.endswith(".bundle")
+def copy_release_resources(source, destination):
+    for name in os.listdir(source):
+        if not owned_release_resource(name):
+            raise RuntimeError("release_backup_unexpected_entry")
+        source_path = os.path.join(source, name)
+        destination_path = os.path.join(destination, name)
+        if os.path.isdir(source_path):
+            shutil.copytree(source_path, destination_path, symlinks=False, copy_function=shutil.copy2)
+        else:
+            shutil.copy2(source_path, destination_path, follow_symlinks=False)
+def fsync_release_tree(root_path):
+    directories = []
+    for current, directory_names, file_names in os.walk(root_path, topdown=True, followlinks=False):
+        directories.append(current)
+        for name in file_names:
+            path = os.path.join(current, name)
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    for path in reversed(directories):
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+def atomic_copy_binary(source, target, mode):
+    temporary = os.path.join(os.path.dirname(target), f".macprovider-cli.rollback-restore-{uuid.uuid4()}")
+    try:
+        source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            destination_fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), mode)
+            try:
+                while True:
+                    chunk = os.read(source_fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    offset = 0
+                    while offset < len(chunk):
+                        written = os.write(destination_fd, chunk[offset:])
+                        if written <= 0:
+                            raise RuntimeError("rollback_binary_write_failed")
+                        offset += written
+                os.fchmod(destination_fd, mode)
+                os.fsync(destination_fd)
+            finally:
+                os.close(destination_fd)
+        finally:
+            os.close(source_fd)
+        os.replace(temporary, target)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 def restore(marker):
-    backup, target = validate_restore_inputs(marker)
-    os.chmod(backup, int(marker["mode"]))
-    os.replace(backup, target)
+    backup, target, release_backup = validate_restore_inputs(marker)
+    target_directory = os.path.dirname(target)
+    if release_backup:
+        staging = os.path.join(target_directory, f".macprovider-cli.release-restore-{uuid.uuid4()}")
+        os.mkdir(staging, 0o700)
+        try:
+            copy_release_resources(release_backup, staging)
+            fsync_release_tree(staging)
+            for name in os.listdir(target_directory):
+                if not owned_release_resource(name):
+                    continue
+                live_path = os.path.join(target_directory, name)
+                if os.path.isdir(live_path):
+                    shutil.rmtree(live_path)
+                else:
+                    os.unlink(live_path)
+            for name in os.listdir(staging):
+                os.replace(os.path.join(staging, name), os.path.join(target_directory, name))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    atomic_copy_binary(backup, target, int(marker["mode"]))
     dir_fd = os.open(os.path.dirname(target), os.O_RDONLY)
     try:
         os.fsync(dir_fd)
@@ -2955,8 +3274,14 @@ def restore(marker):
         os.unlink(lock_path)
     except FileNotFoundError:
         pass
-    event("failure", "rollback", classify_post_start_failure(marker), "restored_prior_binary", marker)
-
+    try:
+        os.unlink(backup)
+    except FileNotFoundError:
+        pass
+    if release_backup:
+        shutil.rmtree(release_backup, ignore_errors=True)
+    reason = "restored_prior_release" if release_backup else "restored_prior_binary"
+    event("failure", "rollback", classify_post_start_failure(marker), reason, marker)
 def classify_post_start_failure(marker):
     try:
         printed = subprocess.run(["launchctl", "print", f"gui/{uid}/{label}"], check=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5).stdout.lower()
@@ -2979,7 +3304,6 @@ def classify_post_start_failure(marker):
     if current_version and current_version != str(marker["target_version"]):
         return "post_start_rejoin_timeout"
     return "post_start_rejoin_timeout"
-
 try:
     if not os.path.exists(pending):
         scan_without_pending()
@@ -3015,13 +3339,10 @@ except Exception as exc:
     log(f"recovery_error={exc}")
 PY
 }
-
 main() {
   autoupdate_recovery_tick
   pid="$(read_provider_id || true)"
   if [ -z "$pid" ]; then
-    # Provider not yet installed / configured. Stay silent; if the
-    # operator installs later we'll start working on the next tick.
     exit 0
   fi
   provider_pid="$(provider_process_pid || true)"
@@ -3067,19 +3388,12 @@ main() {
     exit 0
   fi
   if has_established_conn "$coord_ip"; then
-    # Healthy. Stay silent so the log file does not bloat.
     exit 0
   fi
   log "warning: provider process $provider_pid is locally healthy, but no ESTABLISHED TCP to ${coord_ip}:${COORDINATOR_PORT} for provider_id=${pid}"
-  # No ESTABLISHED connection. Coordinator TCP state is advisory only:
-  # the health verdict is the installed provider process plus local
-  # /v1/health. Do not kick solely because another process can or
-  # cannot reach the coordinator.
   exit 0
 }
-
 main "$@"
-
 WATCHDOG_EOF
   chmod 0755 "$WATCHDOG_PATH"
 }
@@ -3210,9 +3524,6 @@ EOF
 }
 
 start_manual_service() {
-  model="$1"
-  provider_id="$2"
-  coordinator_url="$3"
   [ "$LAUNCHD_INSTALLED" -eq 1 ] && return
   log "Starting macprovider-cli directly for non-launchd self-test."
   mkdir -p "$LOG_DIR"
@@ -3221,10 +3532,8 @@ start_manual_service() {
     # F-603-V7-4: direct background self-test also invokes the real binary
     # so MLX resolves adjacent Metal resources.
     nohup "$INSTALL_DIR/macprovider-cli" \
-      --port "$PORT" \
-      --model "$model" \
-      --provider-id "$provider_id" \
-      --coordinator "$coordinator_url" \
+      serve \
+      --config "$CONFIG_PATH" \
       > "$LOG_DIR/macprovider.out.log" \
       2> "$LOG_DIR/macprovider.err.log" &
     echo "$!"
@@ -3448,9 +3757,8 @@ print_pid() {
 }
 
 print_autotune_handoff() {
-  provider_id="$1"
   printf "To tune throughput / latency parameters for your specific Mac, run:\n"
-  printf "  macprovider-cli autotune --provider-id %s\n" "$provider_id"
+  printf '  macprovider-cli autotune --config "%s"\n' "$CONFIG_PATH"
   printf "To refresh the paid-model recommendation after install or update, run:\n"
   printf "  macprovider-cli autotune --recommend --apply\n"
 }
@@ -3461,14 +3769,15 @@ main() {
   for tool in curl tar shasum grep sed awk date hostname mktemp openssl find python3 lsof cmp diff readlink ps; do
     require_tool "$tool"
   done
+  validate_install_dir
 
   ram_gb="$(detect_ram_gb)"
-  model="$(choose_model "$ram_gb")"
+  model=""
   provider_id="$(choose_provider_id)"
   coordinator_url="$(choose_coordinator_url)"
   coordinator_base="$(coordinator_http_base "$coordinator_url")"
   validate_inputs "$model" "$provider_id" "$coordinator_url"
-  log "Target model: $model"
+  log "Model selection: signed catalog recommendation after release verification"
   log "Provider ID: $provider_id"
   log "Coordinator: $coordinator_url"
   log "Binary path: $BINARY_PATH"
@@ -3486,8 +3795,6 @@ main() {
     exit 0
   fi
 
-  check_catalog_ram_metadata "$coordinator_base" "$model" "$ram_gb" || true
-
   tag="$(resolve_release_tag)"
   if [ -n "${MACPROVIDER_VERSION:-}" ]; then
     log "Using operator-pinned version: $tag (via MACPROVIDER_VERSION)"
@@ -3499,15 +3806,23 @@ main() {
   validate_release_payload
   check_install_dir_clean
   begin_install_transaction
-  ensure_port_free 1
-  install_binary
-  check_path_hint
-  clear_quarantine
+  stage_release_payload
+  clear_quarantine "$staging_dir"
+  prepare_staged_config
+  log "Validating signed catalog and stored recommendation with the staged release while the current provider remains available."
   if ! use_fresh_recommendation_if_available; then
     write_config "$model" "$provider_id" "$coordinator_url"
-    run_autotune_recommend_apply
+    AUTOTUNE_RECOMMENDATION_REQUIRED=1
   fi
   if [ "$SKIP_PROVIDER_START" -eq 1 ]; then
+    if restore_existing_provider_if_start_skipped; then
+      log "Re-run macprovider-cli autotune --recommend --apply when you want to change the active provider model."
+      exit 0
+    fi
+    ensure_port_free 1
+    install_binary
+    activate_staged_config
+    check_path_hint
     write_install_manifest "$tag"
     # An explicit no-start choice has no new local service to validate, but its
     # manifest mutation is still covered by the recovery transaction.
@@ -3519,6 +3834,36 @@ main() {
     log "  macprovider-cli autotune --recommend --apply --donor-mode"
     exit 0
   fi
+  if [ "$AUTOTUNE_RECOMMENDATION_REQUIRED" -eq 1 ]; then
+    # Candidate providers load full model weights. Stop the incumbent before
+    # benchmarks so unified-memory pressure cannot disrupt buyer traffic or
+    # corrupt benchmark results through contention.
+    ensure_port_free 1
+    CUTOVER_STARTED=1
+    select_autotune_benchmark_port
+    run_autotune_recommend_apply
+    if [ "$SKIP_PROVIDER_START" -eq 1 ]; then
+      if restore_existing_provider_if_start_skipped; then
+        log "Re-run macprovider-cli autotune --recommend --apply when you want to change the active provider model."
+        exit 0
+      fi
+      install_binary
+      activate_staged_config
+      check_path_hint
+      write_install_manifest "$tag"
+      commit_install_transaction
+      log "Install complete without starting a provider service."
+      exit 0
+    fi
+  fi
+  # Cut over only after the staged CLI has completed catalog validation and
+  # freshness evaluation; when benchmarks are required the incumbent is
+  # deliberately stopped first to avoid double-loading model weights.
+  ensure_port_free 1
+  CUTOVER_STARTED=1
+  install_binary
+  activate_staged_config
+  check_path_hint
   install_plist "$model" "$provider_id" "$coordinator_url"
   install_watchdog "$coordinator_url"
   write_install_manifest "$tag"
@@ -3547,7 +3892,7 @@ main() {
   log "PID: ${pid:-unknown}"
   log "Logs: tail -f $LOG_DIR/macprovider.out.log $LOG_DIR/macprovider.err.log"
   log "Coordinator pool check: $coordinator_base/v1/pool/check?provider_id=$(urlencode "$provider_id")"
-  print_autotune_handoff "$provider_id"
+  print_autotune_handoff
   log "Uninstall: bash <(curl -fsSL https://get.streamvc.live/uninstall.sh)"
 }
 

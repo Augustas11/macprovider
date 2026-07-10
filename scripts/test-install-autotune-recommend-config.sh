@@ -33,6 +33,7 @@ DRY_RUN=0
 SKIP_PROVIDER_START=0
 model="initial/model"
 mkdir -p "$INSTALL_DIR"
+MACPROVIDER_CLI_EXECUTABLE="$INSTALL_DIR/macprovider-cli"
 
 log() {
   printf '[macprovider-install] %s\n' "$*" >/dev/null
@@ -51,9 +52,17 @@ prompt_yes_no() {
   return 0
 }
 
+# This harness exercises recommendation/config behavior, not the installer's
+# AMFI retry ladder. The extracted functions call through this boundary, so
+# provide the direct execution behavior explicitly.
+run_macprovider_cli_with_amfi_retry() {
+  "$INSTALL_DIR/macprovider-cli" "$@"
+}
+
 write_recommendation_config() {
   cat > "$CONFIG_PATH" <<EOF_CONFIG
 model: "$1"
+provider_id: "mp-0123456789abcdef0123456789abcdef"
 model_artifact_path: "$2"
 model_artifact_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 EOF_CONFIG
@@ -62,6 +71,7 @@ EOF_CONFIG
 write_donor_recommendation_config() {
   cat > "$CONFIG_PATH" <<'EOF_CONFIG'
 model: "org/donor-model"
+provider_id: "mp-0123456789abcdef0123456789abcdef"
 model_artifact_path: "/tmp/macprovider-donor-snapshot"
 model_artifact_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 donor_mode: true
@@ -75,6 +85,7 @@ set -euo pipefail
 config=""
 donor=0
 freshness=0
+command="${1:-}"
 for arg in "$@"; do
   case "$arg" in
     --donor-mode) donor=1 ;;
@@ -90,6 +101,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$config" ] || exit 64
+
+if [ "$command" = "bootstrap-auth" ]; then
+  printf 'provider_token: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' >> "$config"
+  exit 0
+fi
 
 if [ "$freshness" -eq 1 ]; then
   exit "${FAKE_FRESHNESS_RC:-0}"
@@ -113,6 +129,7 @@ fi
 
 cat > "$config" <<'EOF_PAID'
 model: "org/paid-model"
+provider_id: "mp-0123456789abcdef0123456789abcdef"
 model_artifact_path: "/tmp/macprovider-paid-snapshot"
 model_artifact_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 EOF_PAID

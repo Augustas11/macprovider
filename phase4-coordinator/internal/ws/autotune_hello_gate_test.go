@@ -122,6 +122,7 @@ func TestAutotuneHelloGateAllowsUnderTierClaim(t *testing.T) {
 
 	hello := validHello("m4-anon")
 	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, hello, catalog)
 	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -144,12 +145,18 @@ func TestAutotuneHelloGateAllowsUnderTierClaim(t *testing.T) {
 	if ack["type"] != "hello_ack" {
 		t.Fatalf("ack type = %v", ack["type"])
 	}
+	if ack["catalog_compatible"] != true || ack["catalog_release_id"] != catalog.Version || ack["catalog_candidate_sha256"] != catalog.SHA256 {
+		t.Fatalf("catalog admission ack = %+v", ack)
+	}
 	provider, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
 	if !ok {
 		t.Fatal("provider not registered")
 	}
 	if provider.MaxAdmittedModelKey != "small" {
 		t.Fatalf("MaxAdmittedModelKey = %q, want small", provider.MaxAdmittedModelKey)
+	}
+	if provider.CatalogAdmissionMode != "current" || provider.CatalogReleaseID != catalog.Version || provider.CatalogPolicyVersion != catalog.PolicyVersion || provider.CandidateCatalogSHA256 != catalog.SHA256 || provider.CatalogSignerKeyID != catalog.SignerKeyID || provider.CandidateRowIdentity == "" {
+		t.Fatalf("catalog admission evidence = %+v", provider)
 	}
 	if provider.MaxAdmittedModelID != "mlx-community/Llama-3.2-3B-Instruct-4bit" {
 		t.Fatalf("MaxAdmittedModelID = %q", provider.MaxAdmittedModelID)
@@ -1069,12 +1076,208 @@ func readCredentialBootstrapClose(t *testing.T, conn net.Conn, buffered *bufio.R
 	return gobwas.ParseCloseFrameData(frame.Payload)
 }
 
+func TestAutotuneCatalogAdmissionRejectsPartialAndMismatchedMetadata(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{ok: false}),
+	}, func(*config.Config) {})
+	defer h.HTTP.Close()
+
+	tests := map[string]func(map[string]any){
+		"partial": func(hello map[string]any) { hello["catalog_release_id"] = catalog.Version },
+		"release": func(hello map[string]any) {
+			addCatalogAdmissionMetadata(t, hello, catalog)
+			hello["catalog_release_id"] = "other"
+		},
+		"policy": func(hello map[string]any) {
+			addCatalogAdmissionMetadata(t, hello, catalog)
+			hello["catalog_policy_version"] = "other"
+		},
+		"digest": func(hello map[string]any) {
+			addCatalogAdmissionMetadata(t, hello, catalog)
+			hello["catalog_candidate_sha256"] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		},
+		"signer": func(hello map[string]any) {
+			addCatalogAdmissionMetadata(t, hello, catalog)
+			hello["catalog_signer_key_id"] = "other"
+		},
+		"row": func(hello map[string]any) {
+			addCatalogAdmissionMetadata(t, hello, catalog)
+			hello["catalog_row_identity"] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			hello := validHello("m4-anon")
+			hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+			mutate(hello)
+			code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
+			if code != providerws.CloseInvalidHello || reason != "catalog_incompatible" {
+				t.Fatalf("code=%d reason=%q", code, reason)
+			}
+		})
+	}
+}
+
+func TestAutotuneCatalogAdmissionWorksWithDefaultDisabledEvidenceGate(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneCatalog(catalog),
+	}, func(cfg *config.Config) {
+		if cfg.ProofOfWeights.RequireAutotuneHelloGate {
+			t.Fatal("test requires the default-disabled evidence gate")
+		}
+	})
+	defer h.HTTP.Close()
+
+	hello := validHello("m4-anon")
+	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, hello, catalog)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack["type"] != "hello_ack" || ack["catalog_compatible"] != true || ack["catalog_release_id"] != catalog.Version {
+		t.Fatalf("catalog admission ack = %+v", ack)
+	}
+}
+
+func TestAutotuneCatalogAdmissionAcceptsRecognizedPreviousReleaseWithStableRow(t *testing.T) {
+	current := mustAutotuneCatalog(t)
+	previous, err := autotune.ParseCatalog(bytes.Replace(current.RawJSON, []byte(`"version":"test"`), []byte(`"version":"previous"`), 1))
+	if err != nil {
+		t.Fatalf("ParseCatalog(previous): %v", err)
+	}
+	previous.SignerKeyID = current.SignerKeyID
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneCatalog(current, previous),
+	}, func(*config.Config) {})
+	defer h.HTTP.Close()
+
+	hello := validHello("m4-anon")
+	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, hello, previous)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack["catalog_compatible"] != true || ack["catalog_release_id"] != current.Version {
+		t.Fatalf("previous release compatibility ack = %+v", ack)
+	}
+	provider, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
+	if !ok {
+		t.Fatal("previous-release provider not registered")
+	}
+	if provider.CatalogAdmissionMode != "previous" || provider.CatalogReleaseID != previous.Version || provider.CandidateCatalogSHA256 != previous.SHA256 || provider.CandidateRowIdentity == "" {
+		t.Fatalf("previous-release catalog admission evidence = %+v", provider)
+	}
+}
+
+func TestAutotuneCatalogAdmissionRejectsPreviousReleaseWithChangedSelectedRow(t *testing.T) {
+	current := mustAutotuneCatalog(t)
+	previousBytes := bytes.Replace(current.RawJSON, []byte(`"version":"test"`), []byte(`"version":"previous"`), 1)
+	previousBytes = bytes.Replace(previousBytes, []byte(`"min_ram_gb":4`), []byte(`"min_ram_gb":5`), 1)
+	previous, err := autotune.ParseCatalog(previousBytes)
+	if err != nil {
+		t.Fatalf("ParseCatalog(previous): %v", err)
+	}
+	previous.SignerKeyID = current.SignerKeyID
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneCatalog(current, previous),
+	}, func(*config.Config) {})
+	defer h.HTTP.Close()
+	hello := validHello("m4-anon")
+	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, hello, previous)
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
+	if code != providerws.CloseInvalidHello || reason != "catalog_incompatible" {
+		t.Fatalf("code=%d reason=%q", code, reason)
+	}
+}
+
+func TestAutotuneCatalogAdmissionRejectsPermanentlyTombstonedPreviousRelease(t *testing.T) {
+	current := mustAutotuneCatalog(t)
+	previousBytes := bytes.Replace(
+		current.RawJSON,
+		[]byte(`"version":"test"`),
+		[]byte(`"version":"published-2026-07-07-p2-qwen3-8b"`),
+		1,
+	)
+	previous, err := autotune.ParseCatalog(previousBytes)
+	if err != nil {
+		t.Fatalf("ParseCatalog(previous): %v", err)
+	}
+	previous.SignerKeyID = current.SignerKeyID
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneCatalog(current, previous),
+	}, func(*config.Config) {})
+	defer h.HTTP.Close()
+	hello := validHello("m4-anon")
+	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, hello, previous)
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
+	if code != providerws.CloseInvalidHello || reason != "catalog_incompatible" {
+		t.Fatalf("code=%d reason=%q", code, reason)
+	}
+}
+
+func TestAutotuneCatalogAdmissionV2ExactReleaseIsAcknowledged(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneCatalog(catalog),
+	}, func(*config.Config) {})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	initial["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	addCatalogAdmissionMetadata(t, initial, catalog)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || !response.CatalogCompatible || response.CatalogReleaseID != catalog.Version || response.CandidateCatalogSHA256 != catalog.SHA256 {
+		t.Fatalf("auth response = %+v", response)
+	}
+}
+
 func mustAutotuneCatalog(t *testing.T) *autotune.Catalog {
 	t.Helper()
 	catalog, err := autotune.ParseCatalog([]byte(`{
 		"version":"test",
 		"generated_at":"2026-07-08T00:00:00Z",
 		"source":"operator_curated_autotune_candidate_catalog",
+		"policy_version":"autotune-policy-v1",
 		"rows":{
 			"small":{"model_id":"mlx-community/Llama-3.2-3B-Instruct-4bit","model_revision":"7f0dc925e0d0afb0322d96f9255cfddf2ba5636e","model_sha256":"3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a","min_ram_gb":4,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable"},
 			"large":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","model_revision":"6e302ea604ad9ab206367e2c501d1571023e7b6d","model_sha256":"10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0","min_ram_gb":28,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3000},"runtime_status":"recommendable"}
@@ -1083,5 +1286,24 @@ func mustAutotuneCatalog(t *testing.T) *autotune.Catalog {
 	if err != nil {
 		t.Fatalf("ParseCatalog: %v", err)
 	}
+	catalog.SignerKeyID = "test-key"
 	return catalog
+}
+
+func addCatalogAdmissionMetadata(t *testing.T, message map[string]any, catalog *autotune.Catalog) {
+	t.Helper()
+	modelID, _ := message["model_id"].(string)
+	key, _, ok := catalog.HighestClaimedTier(modelID)
+	if !ok {
+		t.Fatalf("catalog row for %q", modelID)
+	}
+	rowIdentity, ok := catalog.RowIdentity(key)
+	if !ok {
+		t.Fatalf("catalog row identity for %q", key)
+	}
+	message["catalog_release_id"] = catalog.Version
+	message["catalog_policy_version"] = catalog.PolicyVersion
+	message["catalog_candidate_sha256"] = catalog.SHA256
+	message["catalog_signer_key_id"] = catalog.SignerKeyID
+	message["catalog_row_identity"] = rowIdentity
 }

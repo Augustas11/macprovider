@@ -232,6 +232,11 @@ actor CoordinatorClient {
     // (identity_signature.go:38) covers that case.
     private let identityBridge: IdentitySignatureBridge?
     private let identitySignatureTimeoutSeconds: TimeInterval
+    private let catalogReleaseID: String?
+    private let catalogPolicyVersion: String?
+    private let catalogCandidateSHA256: String?
+    private let catalogSignerKeyID: String?
+    private let catalogRowIdentity: String?
 
     init?(
         config: AppConfig,
@@ -257,6 +262,11 @@ actor CoordinatorClient {
         providerReceiptPublicKey: String? = nil,
         receiptBuilder: ReceiptBuilder? = nil,
         identityBridge: IdentitySignatureBridge? = nil,
+        catalogReleaseID: String? = nil,
+        catalogPolicyVersion: String? = nil,
+        catalogCandidateSHA256: String? = nil,
+        catalogSignerKeyID: String? = nil,
+        catalogRowIdentity: String? = nil,
         // Must sit well below the coordinator's WS handshake timeout
         // (`Config.ProviderWSHandshakeTimeout` — 10s default in Pearl's
         // production config). If our identity_signature roundtrip
@@ -331,6 +341,11 @@ actor CoordinatorClient {
         self.sendOverride = sendOverride
         self.identityBridge = identityBridge
         self.identitySignatureTimeoutSeconds = identitySignatureTimeoutSeconds
+        self.catalogReleaseID = catalogReleaseID
+        self.catalogPolicyVersion = catalogPolicyVersion
+        self.catalogCandidateSHA256 = catalogCandidateSHA256
+        self.catalogSignerKeyID = catalogSignerKeyID
+        self.catalogRowIdentity = catalogRowIdentity
         self.watchdogExitHook = watchdogExitHook
         self.streamInterval = max(1, config.streamInterval)
         self.credentialBootstrap = credentialBootstrap
@@ -1770,6 +1785,9 @@ actor CoordinatorClient {
     }
 
     private func acceptCoordinatorSession(_ payload: [String: Any], reason: String) async throws {
+        if catalogReleaseID != nil, payload["catalog_compatible"] as? Bool != true {
+            throw CoordinatorAuthError.invalidMessage("coordinator did not accept provider catalog release")
+        }
         // SPEC-003 v0.8.2 FR-C9.3 — single hook for both v1 (hello_ack)
         // and v2 (auth_response) ack paths since both funnel here.
         // Awaited so that persist-before-adopt holds: see
@@ -1810,6 +1828,9 @@ actor CoordinatorClient {
             assignedID: payload["assigned_id"] as? String,
             tier: payload["tier"] as? String,
             recommendedBinaryVersion: payload["recommended_binary_version"] as? String
+        )
+        await providerStatus.setCatalogCompatibilityConfirmed(
+            catalogReleaseID == nil || payload["catalog_compatible"] as? Bool == true
         )
         coordinatorSessionAccepted = true
         if let tier = payload["tier"] as? String {
@@ -1865,7 +1886,8 @@ actor CoordinatorClient {
 
     private func pendingSuccessfulAutoupdate(markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore()) async -> AutoUpdatePendingMarker? {
         guard let marker = try? markerStore.readPending(),
-              marker.targetVersion == Self.binaryVersion
+              marker.targetVersion == Self.binaryVersion,
+              marker.commitOwner == nil || marker.commitOwner == "coordinator"
         else {
             return nil
         }
@@ -2775,6 +2797,7 @@ actor CoordinatorClient {
         if publishesSupportedModels {
             message["publishes_supported_models"] = true
         }
+        appendCatalogAdmissionMetadata(to: &message)
         let receiptPublicKey = providerReceiptPublicKeyOverride ?? providerReceiptPublicKey
         if let receiptPublicKey, !receiptPublicKey.isEmpty {
             message["provider_receipt_public_key"] = receiptPublicKey
@@ -2789,6 +2812,14 @@ actor CoordinatorClient {
             message["credential_bootstrap"] = true
         }
         return message
+    }
+
+    private func appendCatalogAdmissionMetadata(to message: inout [String: Any]) {
+        if let catalogReleaseID { message["catalog_release_id"] = catalogReleaseID }
+        if let catalogPolicyVersion { message["catalog_policy_version"] = catalogPolicyVersion }
+        if let catalogCandidateSHA256 { message["catalog_candidate_sha256"] = catalogCandidateSHA256 }
+        if let catalogSignerKeyID { message["catalog_signer_key_id"] = catalogSignerKeyID }
+        if let catalogRowIdentity { message["catalog_row_identity"] = catalogRowIdentity }
     }
 
     func helloMessage() async -> [String: Any] {
@@ -2826,6 +2857,7 @@ actor CoordinatorClient {
         if let hashForHello {
             message["model_hash"] = hashForHello
         }
+        appendCatalogAdmissionMetadata(to: &message)
         return message
     }
 

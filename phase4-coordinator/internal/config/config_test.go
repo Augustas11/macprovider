@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,6 +10,52 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+const testAutotunePublicKeyBase64 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
+
+func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
+	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "autotune.public_keys") {
+		t.Fatalf("Validate error=%v, want public keyring requirement", err)
+	}
+
+	cfg.AutotuneFeeds.PublicKeys = map[string]string{
+		"streamvc-autotune-static-v4": testAutotunePublicKeyBase64,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate configured signed feed: %v", err)
+	}
+}
+
+func TestAutotuneFeedsRejectInvalidPublicKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		keyID   string
+		encoded string
+		want    string
+	}{
+		{name: "invalid base64", keyID: "test-key", encoded: "not-base64", want: "canonical padded base64"},
+		{name: "wrong key length", keyID: "test-key", encoded: base64.StdEncoding.EncodeToString(make([]byte, 31)), want: "decode to 32 bytes"},
+		{name: "noncanonical base64", keyID: "test-key", encoded: strings.TrimSuffix(testAutotunePublicKeyBase64, "="), want: "canonical padded base64"},
+		{name: "whitespace key ID", keyID: " test-key", encoded: testAutotunePublicKeyBase64, want: "invalid key ID"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Auth.OperatorKey = "operator-key"
+			cfg.AutotuneFeeds.PublicKeys = map[string]string{tc.keyID: tc.encoded}
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
 
 func TestModelClassRejectsMembersAndModelsTogether(t *testing.T) {
 	cfg := Default()

@@ -180,6 +180,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 
 root = os.environ["AUTUPDATE_STATE_ROOT"]
 label = os.environ["MACPROVIDER_LABEL"]
@@ -284,6 +285,16 @@ def validate_marker_strict(marker):
         raise RuntimeError("marker_mode_invalid")
     if not re.match(r"^[0-9a-f]{64}$", str(marker["sha256"])):
         raise RuntimeError("marker_sha256_invalid")
+    release_backup = marker.get("release_backup_path")
+    release_sha = marker.get("release_backup_sha256")
+    if (release_backup is None) != (release_sha is None):
+        raise RuntimeError("marker_release_backup_incomplete")
+    if release_backup is not None:
+        value = str(release_backup)
+        if not os.path.isabs(value) or value.endswith("/") or "/../" in value or "/./" in value:
+            raise RuntimeError("marker_release_backup_path_invalid")
+        if not re.match(r"^[0-9a-f]{64}$", str(release_sha)):
+            raise RuntimeError("marker_release_backup_sha256_invalid")
     raw_deadline = str(marker["marker_deadline"])
     if not raw_deadline.endswith("Z"):
         raise RuntimeError("marker_deadline_invalid")
@@ -322,13 +333,13 @@ def read_success_sentinel(path):
     }
 
 def process_success_sentinel(marker):
-    validate_restore_inputs(marker)
     binary_dir = os.path.dirname(marker["target_path"])
     for name in os.listdir(binary_dir):
         if not name.startswith(".macprovider-cli.success-"):
             continue
         sentinel = os.path.join(binary_dir, name)
         try:
+            validate_restore_inputs(marker)
             payload = read_success_sentinel(sentinel)
             sentinel_version = payload["binary_version"]
             current_version = current_binary_version(marker["target_path"])
@@ -348,6 +359,9 @@ def process_success_sentinel(marker):
                 os.unlink(marker["backup_path"])
             except FileNotFoundError:
                 pass
+            release_backup = marker.get("release_backup_path")
+            if release_backup:
+                shutil.rmtree(release_backup, ignore_errors=True)
             try:
                 os.unlink(lock_path)
             except FileNotFoundError:
@@ -431,6 +445,8 @@ def scan_without_pending():
                 log(f"deleted_stale_backup={path}")
             except FileNotFoundError:
                 pass
+        elif name.startswith(".macprovider-cli.release-rollback-"):
+            shutil.rmtree(path, ignore_errors=True)
 
 def quarantine(reason, marker=None):
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -489,12 +505,132 @@ def validate_restore_inputs(marker):
         raise RuntimeError("backup_size_mismatch")
     if sha256(backup) != str(marker["sha256"]):
         raise RuntimeError("backup_sha256_mismatch")
-    return backup, target
+    release_backup = marker.get("release_backup_path")
+    if release_backup:
+        expected_release_backup = os.path.join(os.path.dirname(target), f".macprovider-cli.release-rollback-{update_id}")
+        if release_backup != expected_release_backup:
+            raise RuntimeError("release_backup_path_derivation_mismatch")
+        if os.path.realpath(os.path.dirname(release_backup)) != trusted_dir:
+            raise RuntimeError("unsupported_install_topology:release_backup_outside_binary_dir")
+        release_st = reject_path(release_backup)
+        if not stat.S_ISDIR(release_st.st_mode):
+            raise RuntimeError("release_backup_not_directory")
+        allowed = lambda name: name in {"mlx.metallib", "THIRD-PARTY-NOTICES.txt", "catalog-release"} or name.endswith(".bundle")
+        if any(not allowed(name) for name in os.listdir(release_backup)):
+            raise RuntimeError("release_backup_unexpected_entry")
+        if release_tree_sha256(release_backup) != str(marker["release_backup_sha256"]):
+            raise RuntimeError("release_backup_sha256_mismatch")
+    return backup, target, release_backup
+
+def release_tree_sha256(root_path):
+    records = []
+    for current, directory_names, file_names in os.walk(root_path, topdown=True, followlinks=False):
+        directory_names.sort()
+        file_names.sort()
+        for name in directory_names + file_names:
+            path = os.path.join(current, name)
+            item_st = reject_path(path)
+            relative = os.path.relpath(path, root_path)
+            if "\x00" in relative or "\n" in relative or relative == ".." or relative.startswith("../"):
+                raise RuntimeError("release_tree_path_invalid")
+            mode = stat.S_IMODE(item_st.st_mode)
+            if stat.S_ISDIR(item_st.st_mode):
+                record = f"d\0{relative}\0{mode}\0"
+            elif stat.S_ISREG(item_st.st_mode):
+                record = f"f\0{relative}\0{mode}\0{item_st.st_size}\0{sha256(path)}\0"
+            else:
+                raise RuntimeError("release_tree_entry_invalid")
+            records.append((relative, record.encode("utf-8")))
+    digest = hashlib.sha256()
+    for _, record in sorted(records, key=lambda item: item[0]):
+        digest.update(record)
+    return digest.hexdigest()
+
+def owned_release_resource(name):
+    return name in {"mlx.metallib", "THIRD-PARTY-NOTICES.txt", "catalog-release"} or name.endswith(".bundle")
+
+def copy_release_resources(source, destination):
+    for name in os.listdir(source):
+        if not owned_release_resource(name):
+            raise RuntimeError("release_backup_unexpected_entry")
+        source_path = os.path.join(source, name)
+        destination_path = os.path.join(destination, name)
+        if os.path.isdir(source_path):
+            shutil.copytree(source_path, destination_path, symlinks=False, copy_function=shutil.copy2)
+        else:
+            shutil.copy2(source_path, destination_path, follow_symlinks=False)
+
+def fsync_release_tree(root_path):
+    directories = []
+    for current, directory_names, file_names in os.walk(root_path, topdown=True, followlinks=False):
+        directories.append(current)
+        for name in file_names:
+            path = os.path.join(current, name)
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    for path in reversed(directories):
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+def atomic_copy_binary(source, target, mode):
+    temporary = os.path.join(os.path.dirname(target), f".macprovider-cli.rollback-restore-{uuid.uuid4()}")
+    try:
+        source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            destination_fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), mode)
+            try:
+                while True:
+                    chunk = os.read(source_fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    offset = 0
+                    while offset < len(chunk):
+                        written = os.write(destination_fd, chunk[offset:])
+                        if written <= 0:
+                            raise RuntimeError("rollback_binary_write_failed")
+                        offset += written
+                os.fchmod(destination_fd, mode)
+                os.fsync(destination_fd)
+            finally:
+                os.close(destination_fd)
+        finally:
+            os.close(source_fd)
+        os.replace(temporary, target)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
 def restore(marker):
-    backup, target = validate_restore_inputs(marker)
-    os.chmod(backup, int(marker["mode"]))
-    os.replace(backup, target)
+    backup, target, release_backup = validate_restore_inputs(marker)
+    target_directory = os.path.dirname(target)
+    if release_backup:
+        staging = os.path.join(target_directory, f".macprovider-cli.release-restore-{uuid.uuid4()}")
+        os.mkdir(staging, 0o700)
+        try:
+            copy_release_resources(release_backup, staging)
+            fsync_release_tree(staging)
+            for name in os.listdir(target_directory):
+                if not owned_release_resource(name):
+                    continue
+                live_path = os.path.join(target_directory, name)
+                if os.path.isdir(live_path):
+                    shutil.rmtree(live_path)
+                else:
+                    os.unlink(live_path)
+            for name in os.listdir(staging):
+                os.replace(os.path.join(staging, name), os.path.join(target_directory, name))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    atomic_copy_binary(backup, target, int(marker["mode"]))
     dir_fd = os.open(os.path.dirname(target), os.O_RDONLY)
     try:
         os.fsync(dir_fd)
@@ -513,7 +649,14 @@ def restore(marker):
         os.unlink(lock_path)
     except FileNotFoundError:
         pass
-    event("failure", "rollback", classify_post_start_failure(marker), "restored_prior_binary", marker)
+    try:
+        os.unlink(backup)
+    except FileNotFoundError:
+        pass
+    if release_backup:
+        shutil.rmtree(release_backup, ignore_errors=True)
+    reason = "restored_prior_release" if release_backup else "restored_prior_binary"
+    event("failure", "rollback", classify_post_start_failure(marker), reason, marker)
 
 def classify_post_start_failure(marker):
     try:

@@ -1,0 +1,7 @@
+[Unit]
+Description=Recover an abandoned Mac Provider coordinator deploy
+
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+ExecStart=/usr/bin/flock /opt/macprovider/.coordinator-deploy.lock /usr/bin/flock /opt/macprovider/.coordinator-deploy-operation.lock /opt/macprovider/coordinator-deploy-recover --recover

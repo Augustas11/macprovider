@@ -13,6 +13,7 @@
 set -euo pipefail
 
 PHASE3_DIR=$(cd "$(dirname "$0")/.." && pwd)
+REPO_ROOT=$(cd "$PHASE3_DIR/.." && pwd)
 cd "$PHASE3_DIR"
 
 TAG=${1:-$(git rev-parse --short HEAD)}
@@ -21,6 +22,9 @@ OUT_DIR="./dist"
 TARBALL="$OUT_DIR/phase3-binary-m4-${TAG}.tar.gz"
 
 mkdir -p "$OUT_DIR"
+
+echo "==> Verifying immutable signed catalog release..."
+python3 "$REPO_ROOT/scripts/catalog-release.py" verify
 
 echo "==> Building Release configuration (this takes ~5-10 min)..."
 BUILD_LOG="$OUT_DIR/package-build.log"
@@ -66,7 +70,6 @@ ls -la "$PRODUCTS/mlx.metallib"
 
 echo "==> Gathering third-party license notices..."
 NOTICES_FILE="$OUT_DIR/THIRD-PARTY-NOTICES.txt"
-REPO_ROOT=$(cd "$PHASE3_DIR/.." && pwd)
 "$REPO_ROOT/scripts/gather-third-party-notices.sh" "$NOTICES_FILE" "$RELEASE_DIR/SourcePackages/checkouts"
 
 echo "==> Staging tarball contents..."
@@ -81,10 +84,17 @@ if [ -d "$PRODUCTS/swift-nio_NIOPosix.bundle" ]; then
     cp -r "$PRODUCTS/swift-nio_NIOPosix.bundle" "$STAGE_DIR/"
 fi
 cp "$NOTICES_FILE" "$STAGE_DIR/THIRD-PARTY-NOTICES.txt"
+mkdir -p "$STAGE_DIR/catalog-release"
+cp "$PHASE3_DIR/catalog/autotune/release.json" "$STAGE_DIR/catalog-release/"
+cp "$PHASE3_DIR/catalog/autotune/trusted-keys.json" "$STAGE_DIR/catalog-release/"
+cp "$PHASE3_DIR/dist/static/autotune-candidates.json" "$STAGE_DIR/catalog-release/"
+cp "$PHASE3_DIR/dist/static/autotune-candidates.json.sig" "$STAGE_DIR/catalog-release/"
+cp "$PHASE3_DIR/dist/static/demand-rank.json" "$STAGE_DIR/catalog-release/"
+cp "$PHASE3_DIR/dist/static/demand-rank.json.sig" "$STAGE_DIR/catalog-release/"
 
 echo "==> Packaging tarball: $TARBALL"
 # Include the binary, mlx.metallib, any SwiftPM bundle resources, and
-# THIRD-PARTY-NOTICES.txt.
+# THIRD-PARTY-NOTICES.txt, and the verified catalog release evidence.
 tar czf "$TARBALL" -C "$STAGE_DIR" .
 
 echo "==> Tarball stats:"

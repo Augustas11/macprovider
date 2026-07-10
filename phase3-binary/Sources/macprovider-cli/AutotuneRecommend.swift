@@ -26,8 +26,12 @@ enum AutotuneRecommendError: Error, Equatable, CustomStringConvertible {
 
 enum AutotuneRecommendWarning: String, CaseIterable {
     case candidateCatalogFallbackUsed = "candidate_catalog_fallback_used"
+    case candidateCatalogIntegrityFailure = "candidate_catalog_integrity_failure"
+    case candidateCatalogUpdateRequired = "candidate_catalog_update_required"
     case candidateCatalogStale = "candidate_catalog_stale"
     case demandRankFallbackUsed = "demand_rank_fallback_used"
+    case demandRankIntegrityFailure = "demand_rank_integrity_failure"
+    case demandRankUpdateRequired = "demand_rank_update_required"
     case demandRankStale = "demand_rank_stale"
     case hardwareTierUnknown = "hardware_tier_unknown"
     case rateCardFallbackUsed = "rate_card_fallback_used"
@@ -375,18 +379,36 @@ struct DemandRank: Decodable, Equatable {
         var rank: Int?
         var recommendable: Bool
         var minProviderTarget: Int
+        var readyProviderCount: Int?
+        var supplyDeficitMultiplier: Double?
+        var minDwellHours: Int?
 
         enum CodingKeys: String, CodingKey {
             case demandWeight = "demand_weight"
             case rank
             case recommendable
             case minProviderTarget = "min_provider_target"
+            case readyProviderCount = "ready_provider_count"
+            case supplyDeficitMultiplier = "supply_deficit_multiplier"
+            case minDwellHours = "min_dwell_hours"
+        }
+
+        var effectiveSupplyDeficitMultiplier: Double {
+            if let supplyDeficitMultiplier {
+                return min(2.0, max(0.5, supplyDeficitMultiplier))
+            }
+            guard let readyProviderCount, minProviderTarget > 0 else {
+                return 1.0
+            }
+            let ratio = Double(minProviderTarget) / Double(max(readyProviderCount, 1))
+            return min(2.0, max(0.5, ratio))
         }
     }
 
     var version: String
     var generatedAt: Date
     var source: String
+    var policyVersion: String
     var coldStartFloor: Double
     var diversificationBand: Double
     var rows: [String: Row]
@@ -395,6 +417,7 @@ struct DemandRank: Decodable, Equatable {
         case version
         case generatedAt = "generated_at"
         case source
+        case policyVersion = "policy_version"
         case coldStartFloor = "cold_start_floor"
         case diversificationBand = "diversification_band"
         case rows
@@ -404,6 +427,7 @@ struct DemandRank: Decodable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decode(String.self, forKey: .version)
         source = try c.decode(String.self, forKey: .source)
+        policyVersion = try c.decodeIfPresent(String.self, forKey: .policyVersion) ?? "legacy-spec-023"
         coldStartFloor = try c.decode(Double.self, forKey: .coldStartFloor)
         diversificationBand = try c.decode(Double.self, forKey: .diversificationBand)
         rows = try c.decode([String: Row].self, forKey: .rows)
@@ -415,8 +439,11 @@ struct DemandRank: Decodable, Equatable {
     }
 
     func validated() throws -> DemandRank {
-        guard source == "openrouter_completion_token_rank_operator_curated" else {
+        guard ["openrouter_completion_token_rank_operator_curated", "macprovider_buyer_supply_deficit_v1"].contains(source) else {
             throw AutotuneRecommendError.invalidStaticJSON("demand-rank source")
+        }
+        guard policyVersion == "autotune-policy-v1" else {
+            throw AutotuneRecommendError.invalidStaticJSON("demand-rank policy_version")
         }
         guard coldStartFloor == 0.15, diversificationBand == 0.85 else {
             throw AutotuneRecommendError.invalidStaticJSON("demand-rank constants")
@@ -430,6 +457,16 @@ struct DemandRank: Decodable, Equatable {
             }
             guard row.minProviderTarget >= 0 else {
                 throw AutotuneRecommendError.invalidStaticJSON("min_provider_target for \(key)")
+            }
+            if let ready = row.readyProviderCount, ready < 0 {
+                throw AutotuneRecommendError.invalidStaticJSON("ready_provider_count for \(key)")
+            }
+            if let multiplier = row.supplyDeficitMultiplier,
+               !multiplier.isFinite || !(0.5 ... 2.0).contains(multiplier) {
+                throw AutotuneRecommendError.invalidStaticJSON("supply_deficit_multiplier for \(key)")
+            }
+            if let dwell = row.minDwellHours, !(0 ... 720).contains(dwell) {
+                throw AutotuneRecommendError.invalidStaticJSON("min_dwell_hours for \(key)")
             }
         }
         return self
@@ -623,12 +660,14 @@ struct CandidateCatalog: Decodable, Equatable {
     var version: String
     var generatedAt: Date
     var source: String
+    var policyVersion: String
     var rows: [String: Row]
 
     enum CodingKeys: String, CodingKey {
         case version
         case generatedAt = "generated_at"
         case source
+        case policyVersion = "policy_version"
         case rows
     }
 
@@ -636,6 +675,7 @@ struct CandidateCatalog: Decodable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decode(String.self, forKey: .version)
         source = try c.decode(String.self, forKey: .source)
+        policyVersion = try c.decodeIfPresent(String.self, forKey: .policyVersion) ?? "legacy-spec-023"
         rows = try c.decode([String: Row].self, forKey: .rows)
         let rawDate = try c.decode(String.self, forKey: .generatedAt)
         guard let date = ISO8601DateFormatter.autotuneInternet.date(from: rawDate) else {
@@ -647,6 +687,9 @@ struct CandidateCatalog: Decodable, Equatable {
     func validated() throws -> CandidateCatalog {
         guard source == "operator_curated_autotune_candidate_catalog" else {
             throw AutotuneRecommendError.invalidStaticJSON("candidate catalog source")
+        }
+        guard policyVersion == "autotune-policy-v1" else {
+            throw AutotuneRecommendError.invalidStaticJSON("candidate catalog policy_version")
         }
         let allowedStatuses = Set(["candidate", "listed", "recommendable", "blocked"])
         for (key, row) in rows {
@@ -671,6 +714,24 @@ struct CandidateCatalog: Decodable, Equatable {
             try Self.validateWorkloadProfiles(row.workloadProfiles, rowKey: key, draftCandidates: row.draftCandidates)
         }
         return self
+    }
+
+    func rowIdentity(for key: String) -> String? {
+        guard let row = rows[key] else { return nil }
+        let fields = [
+            policyVersion,
+            key,
+            row.modelID,
+            row.modelRevision ?? "",
+            row.modelSHA256 ?? "",
+            String(row.minRAMGB),
+            row.minBandwidthTier.rawValue,
+            String(format: "%.6f", row.benchGate.minSustainedTPS),
+            String(row.benchGate.max4KTTFTMS),
+            row.runtimeStatus,
+        ]
+        let framed = fields.map { "\($0.utf8.count):\($0)" }.joined(separator: "|")
+        return Data(SHA256.hash(data: Data(framed.utf8))).map { String(format: "%02x", $0) }.joined()
     }
 
     private static func validateWorkloadProfiles(
@@ -997,6 +1058,7 @@ struct AutotuneStaticSelection<T> {
     var selectedBytes: Data
     var warnings: Set<AutotuneRecommendWarning>
     var usedFallback: Bool
+    var signerKeyID: String? = nil
 }
 
 struct AutotuneStaticInputs {
@@ -1012,9 +1074,11 @@ struct AutotuneStaticInputs {
     static let publicKeyName = "autotune_static_json_ed25519_v4"
     static let autotune_static_json_ed25519_v4 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
     static let publicKeyBase64 = autotune_static_json_ed25519_v4
+    static let defaultTrustedPublicKeys = generatedTrustedPublicKeys
 
     var fetch: (URL) async throws -> Data
-    var verifySignature: (Data, Data) -> Bool
+    var trustedPublicKeys: [String: String]
+    var verifySignature: ((Data, Data) -> Bool)?
     var now: () -> Date
 
     init(
@@ -1025,10 +1089,12 @@ struct AutotuneStaticInputs {
             }
             return data
         },
-        verifySignature: @escaping (Data, Data) -> Bool = Self.defaultSignatureVerifier,
+        trustedPublicKeys: [String: String] = Self.defaultTrustedPublicKeys,
+        verifySignature: ((Data, Data) -> Bool)? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.fetch = fetch
+        self.trustedPublicKeys = trustedPublicKeys
         self.verifySignature = verifySignature
         self.now = now
     }
@@ -1038,6 +1104,8 @@ struct AutotuneStaticInputs {
             name: "demand-rank",
             bakedBytes: Data(Self.bakedDemandRankJSON.utf8),
             fallbackWarning: .demandRankFallbackUsed,
+            integrityWarning: .demandRankIntegrityFailure,
+            updateWarning: .demandRankUpdateRequired,
             staleWarning: .demandRankStale
         ) { try Self.decodeDemandRank($0) }
     }
@@ -1047,8 +1115,26 @@ struct AutotuneStaticInputs {
             name: "autotune-candidates",
             bakedBytes: Data(Self.bakedCandidateCatalogJSON.utf8),
             fallbackWarning: .candidateCatalogFallbackUsed,
+            integrityWarning: .candidateCatalogIntegrityFailure,
+            updateWarning: .candidateCatalogUpdateRequired,
             staleWarning: .candidateCatalogStale
         ) { try Self.decodeCandidateCatalog($0) }
+    }
+
+    func loadCatalogRelease() async -> (
+        demand: AutotuneStaticSelection<DemandRank>,
+        candidate: AutotuneStaticSelection<CandidateCatalog>
+    ) {
+        var demand = await loadDemandRank()
+        var candidate = await loadCandidateCatalog()
+        let paired = demand.value.version == candidate.value.version
+            && demand.value.generatedAt == candidate.value.generatedAt
+            && demand.value.policyVersion == candidate.value.policyVersion
+        if !paired {
+            demand.warnings.insert(.demandRankIntegrityFailure)
+            candidate.warnings.insert(.candidateCatalogIntegrityFailure)
+        }
+        return (demand, candidate)
     }
 
     func loadRateCard() async -> AutotuneStaticSelection<RateCardProjection> {
@@ -1067,58 +1153,143 @@ struct AutotuneStaticInputs {
         name: String,
         bakedBytes: Data,
         fallbackWarning: AutotuneRecommendWarning,
+        integrityWarning: AutotuneRecommendWarning,
+        updateWarning: AutotuneRecommendWarning,
         staleWarning: AutotuneRecommendWarning,
         decode: (Data) throws -> T
     ) async -> AutotuneStaticSelection<T> {
         let bakedValue = (try? decode(bakedBytes))!
         let bakedGeneratedAt = generatedAt(in: bakedBytes) ?? .distantFuture
+        let jsonBytes: Data
         do {
             let jsonURL = URL(string: "https://coordinator.streamvc.live/v1/\(name)")!
-            let sigURL = URL(string: "https://coordinator.streamvc.live/v1/\(name).sig")!
-            let jsonBytes = try await fetch(jsonURL)
-            let sigBytes = try await fetch(sigURL)
-            guard sidecarIsValid(sigBytes), verifySignature(jsonBytes, sigBytes) else {
-                throw AutotuneRecommendError.invalidStaticJSON("signature \(name)")
-            }
-            let value = try decode(jsonBytes)
-            guard let fetchedGeneratedAt = generatedAt(in: jsonBytes) else {
-                throw AutotuneRecommendError.invalidStaticJSON("generated_at \(name)")
-            }
-            let current = now()
-            guard fetchedGeneratedAt >= bakedGeneratedAt,
-                  fetchedGeneratedAt <= current.addingTimeInterval(10 * 60),
-                  current.timeIntervalSince(fetchedGeneratedAt) <= 30 * 24 * 3600
-            else {
-                throw AutotuneRecommendError.invalidStaticJSON("freshness \(name)")
-            }
-            var warnings = Set<AutotuneRecommendWarning>()
-            if current.timeIntervalSince(fetchedGeneratedAt) >= 14 * 24 * 3600 {
-                warnings.insert(staleWarning)
-            }
-            return AutotuneStaticSelection(value: value, selectedBytes: jsonBytes, warnings: warnings, usedFallback: false)
+            jsonBytes = try await fetch(jsonURL)
         } catch {
-            return AutotuneStaticSelection(value: bakedValue, selectedBytes: bakedBytes, warnings: [fallbackWarning], usedFallback: true)
+            return AutotuneStaticSelection(
+                value: bakedValue,
+                selectedBytes: bakedBytes,
+                warnings: [fallbackWarning],
+                usedFallback: true,
+                signerKeyID: Self.bakedCatalogSignerKeyID
+            )
         }
+
+        let sigBytes: Data
+        do {
+            let sigURL = URL(string: "https://coordinator.streamvc.live/v1/\(name).sig")!
+            sigBytes = try await fetch(sigURL)
+        } catch {
+            return AutotuneStaticSelection(
+                value: bakedValue,
+                selectedBytes: bakedBytes,
+                warnings: [fallbackWarning, integrityWarning],
+                usedFallback: true,
+                signerKeyID: Self.bakedCatalogSignerKeyID
+            )
+        }
+
+        guard let sidecar = parsedSidecar(sigBytes), signatureIsValid(jsonBytes: jsonBytes, sidecarBytes: sigBytes, sidecar: sidecar)
+        else {
+            return AutotuneStaticSelection(
+                value: bakedValue,
+                selectedBytes: bakedBytes,
+                warnings: [fallbackWarning, integrityWarning],
+                usedFallback: true,
+                signerKeyID: Self.bakedCatalogSignerKeyID
+            )
+        }
+        guard policyVersion(in: jsonBytes) == policyVersion(in: bakedBytes) else {
+            return AutotuneStaticSelection(
+                value: bakedValue,
+                selectedBytes: bakedBytes,
+                warnings: [fallbackWarning, updateWarning],
+                usedFallback: true,
+                signerKeyID: Self.bakedCatalogSignerKeyID
+            )
+        }
+        guard let value = try? decode(jsonBytes),
+              let fetchedGeneratedAt = generatedAt(in: jsonBytes)
+        else {
+            return AutotuneStaticSelection(
+                value: bakedValue,
+                selectedBytes: bakedBytes,
+                warnings: [fallbackWarning, integrityWarning],
+                usedFallback: true,
+                signerKeyID: Self.bakedCatalogSignerKeyID
+            )
+        }
+        let current = now()
+        guard fetchedGeneratedAt >= bakedGeneratedAt,
+              fetchedGeneratedAt <= current.addingTimeInterval(10 * 60),
+              current.timeIntervalSince(fetchedGeneratedAt) <= 30 * 24 * 3600
+        else {
+            return AutotuneStaticSelection(
+                value: bakedValue,
+                selectedBytes: bakedBytes,
+                warnings: [fallbackWarning, updateWarning],
+                usedFallback: true,
+                signerKeyID: Self.bakedCatalogSignerKeyID
+            )
+        }
+        var warnings = Set<AutotuneRecommendWarning>()
+        if current.timeIntervalSince(fetchedGeneratedAt) >= 14 * 24 * 3600 {
+            warnings.insert(staleWarning)
+        }
+        return AutotuneStaticSelection(value: value, selectedBytes: jsonBytes, warnings: warnings, usedFallback: false, signerKeyID: sidecar.keyID)
     }
 
-    private func sidecarIsValid(_ data: Data) -> Bool {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    private struct SignatureSidecar {
+        var keyID: String
+        var signature: Data
+    }
+
+    private func parsedSidecar(_ data: Data) -> SignatureSidecar? {
+        guard (try? AutotuneStrictJSON.rejectDuplicateKeys(data)) != nil,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(object.keys) == Set(["key_id", "alg", "signature"]),
-              object["key_id"] as? String == Self.keyID,
+              let keyID = object["key_id"] as? String,
+              keyID == keyID.trimmingCharacters(in: .whitespacesAndNewlines),
+              !keyID.isEmpty,
+              trustedPublicKeys[keyID] != nil,
               object["alg"] as? String == "ed25519",
-              let signature = object["signature"] as? String,
-              Data(base64Encoded: signature) != nil
+              let encodedSignature = object["signature"] as? String,
+              let signature = Data(base64Encoded: encodedSignature),
+              signature.count == 64,
+              signature.base64EncodedString() == encodedSignature
+        else {
+            return nil
+        }
+        return SignatureSidecar(keyID: keyID, signature: signature)
+    }
+
+    private func signatureIsValid(jsonBytes: Data, sidecarBytes: Data, sidecar: SignatureSidecar) -> Bool {
+        if let verifySignature {
+            return verifySignature(jsonBytes, sidecarBytes)
+        }
+        guard let encodedPublicKey = trustedPublicKeys[sidecar.keyID],
+              let publicKeyBytes = Data(base64Encoded: encodedPublicKey),
+              publicKeyBytes.count == 32,
+              publicKeyBytes.base64EncodedString() == encodedPublicKey,
+              let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicKeyBytes)
         else {
             return false
         }
-        return true
+        return publicKey.isValidSignature(sidecar.signature, for: jsonBytes)
     }
 
     static func defaultSignatureVerifier(jsonBytes: Data, sidecarBytes: Data) -> Bool {
-        guard let object = try? JSONSerialization.jsonObject(with: sidecarBytes) as? [String: Any],
+        guard (try? AutotuneStrictJSON.rejectDuplicateKeys(sidecarBytes)) != nil,
+              let object = try? JSONSerialization.jsonObject(with: sidecarBytes) as? [String: Any],
+              Set(object.keys) == Set(["key_id", "alg", "signature"]),
+              let keyID = object["key_id"] as? String,
+              object["alg"] as? String == "ed25519",
               let signature = object["signature"] as? String,
               let signatureBytes = Data(base64Encoded: signature),
-              let publicKeyBytes = Data(base64Encoded: publicKeyBase64),
+              signatureBytes.count == 64,
+              signatureBytes.base64EncodedString() == signature,
+              let encodedPublicKey = defaultTrustedPublicKeys[keyID],
+              let publicKeyBytes = Data(base64Encoded: encodedPublicKey),
+              publicKeyBytes.count == 32,
               let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicKeyBytes)
         else {
             return false
@@ -1127,11 +1298,13 @@ struct AutotuneStaticInputs {
     }
 
     static func decodeDemandRank(_ data: Data) throws -> DemandRank {
-        try JSONDecoder.autotune.decode(DemandRank.self, from: data).validated()
+        try AutotuneStrictJSON.validate(data, kind: .demandRank)
+        return try JSONDecoder.autotune.decode(DemandRank.self, from: data).validated()
     }
 
     static func decodeCandidateCatalog(_ data: Data) throws -> CandidateCatalog {
-        try JSONDecoder.autotune.decode(CandidateCatalog.self, from: data).validated()
+        try AutotuneStrictJSON.validate(data, kind: .candidateCatalog)
+        return try JSONDecoder.autotune.decode(CandidateCatalog.self, from: data).validated()
     }
 
     static func decodeRateCard(_ data: Data) throws -> RateCardProjection {
@@ -1150,6 +1323,11 @@ struct AutotuneStaticInputs {
         }
         return ISO8601DateFormatter.autotuneInternet.date(from: raw)
     }
+
+    private func policyVersion(in data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object["policy_version"] as? String
+    }
 }
 
 struct CandidateBenchmark: Equatable {
@@ -1166,6 +1344,7 @@ struct CandidateBenchmark: Equatable {
     var binaryVersion: String
     var modelID: String
     var hardwareIdentityHash: String
+    var candidateRowIdentity: String = ""
 }
 
 struct AutotuneRecommendRequest {
@@ -1224,6 +1403,16 @@ struct AutotuneRecommendResult: Equatable {
 struct AutotuneRecommendEngine {
     static let safetyMarginGB = 4
     static let maxBenchmarkAge: TimeInterval = 7 * 24 * 3600
+    static let paidTrustBlockingWarnings: Set<AutotuneRecommendWarning> = [
+        .candidateCatalogIntegrityFailure,
+        .candidateCatalogUpdateRequired,
+        .demandRankIntegrityFailure,
+        .demandRankUpdateRequired,
+    ]
+
+    static func paidTrustBlocks(_ warnings: Set<AutotuneRecommendWarning>) -> Bool {
+        !warnings.isDisjoint(with: paidTrustBlockingWarnings)
+    }
 
     func recommend(_ request: AutotuneRecommendRequest) -> AutotuneRecommendResult {
         var warnings = request.warnings
@@ -1253,6 +1442,9 @@ struct AutotuneRecommendEngine {
             let completionUSD = rateRow?.usdPerMillionCompletionTokens(creditsPerMillion: request.rateCard.usdPerMillionCredits) ?? 0
             let providerShare = Double(rateRow?.providerShareBPS ?? 0) / 10_000.0
             let payoutScore = Double(rateRow?.completionRatePerMtok ?? 0) * providerShare
+            let demandScore = max(demand.demandWeight, request.demandRank.coldStartFloor)
+            let shortageScore = demand.effectiveSupplyDeficitMultiplier
+            let expectedEarningsScore = payoutScore * max(tps, 0) * demandScore * shortageScore
             let headroom = Double(request.hardware.memoryGB - Self.safetyMarginGB - candidate.minRAMGB)
             let confidence = confidence(warnings: warnings, benchmark: benchmark)
             let servedModel = rateMatch.map {
@@ -1269,7 +1461,7 @@ struct AutotuneRecommendEngine {
                 memoryHeadroomGB: headroom.rounded6,
                 confidence: confidence,
                 why: why(modelKey: modelKey, eligible: eligible),
-                rawScore: payoutScore.rounded6
+                rawScore: expectedEarningsScore.rounded6
             )
         }
         .sorted { a, b in
@@ -1366,6 +1558,7 @@ struct AutotuneRecommendEngine {
         benchmark: CandidateBenchmark?,
         request: AutotuneRecommendRequest
     ) -> Bool {
+        if !Self.paidTrustBlockingWarnings.isDisjoint(with: request.warnings) { return false }
         if !demand.recommendable { return false }
         if candidate.runtimeStatus != "recommendable" { return false }
         guard rateCardRow != nil else { return false }
@@ -1411,7 +1604,13 @@ struct AutotuneRecommendEngine {
     }
 
     static func cachedBenchmarkAdmitted(_ benchmark: CandidateBenchmark, request: AutotuneRecommendRequest, modelKey: String) -> Bool {
-        guard benchmark.candidateCatalogSHA256 == request.candidateCatalogSHA256,
+        let catalogEvidenceMatches: Bool
+        if benchmark.candidateRowIdentity.isEmpty {
+            catalogEvidenceMatches = benchmark.candidateCatalogSHA256 == request.candidateCatalogSHA256
+        } else {
+            catalogEvidenceMatches = benchmark.candidateRowIdentity == request.candidateCatalog.rowIdentity(for: modelKey)
+        }
+        guard catalogEvidenceMatches,
               benchmark.binaryVersion == request.hardware.binaryVersion,
               benchmark.modelID == request.candidateCatalog.rows[modelKey]?.modelID,
               benchmark.artifactSHA256 == request.candidateCatalog.rows[modelKey]?.modelSHA256,
@@ -1424,7 +1623,8 @@ struct AutotuneRecommendEngine {
     }
 
     private func confidence(warnings: Set<AutotuneRecommendWarning>, benchmark: CandidateBenchmark?) -> String {
-        if (warnings.contains(.rateCardFallbackUsed) && warnings.contains(.demandRankFallbackUsed))
+        if !Self.paidTrustBlockingWarnings.isDisjoint(with: warnings)
+            || (warnings.contains(.rateCardFallbackUsed) && warnings.contains(.demandRankFallbackUsed))
             || warnings.contains(.hardwareTierUnknown)
             || warnings.contains(.demandRankStale)
             || warnings.contains(.candidateCatalogStale) {
@@ -1438,7 +1638,7 @@ struct AutotuneRecommendEngine {
 
     private func why(modelKey: String, eligible: Bool) -> String {
         if eligible {
-            return "\(modelKey) has the highest provider payout per completion token among eligible models for this Mac.".prefixString(140)
+            return "\(modelKey) has the best expected provider earnings after measured throughput, buyer demand, and supply deficit.".prefixString(140)
         }
         return "\(modelKey) did not clear one or more recommendation gates.".prefixString(140)
     }
@@ -1754,9 +1954,14 @@ struct RecommendationFreshnessChecker {
             return .stale(stored.generatedAt)
         }
 
-        let demand = await staticInputs.loadDemandRank()
-        let catalog = await staticInputs.loadCandidateCatalog()
+        let release = await staticInputs.loadCatalogRelease()
+        let demand = release.demand
+        let catalog = release.candidate
         let rateCard = await staticInputs.loadRateCard()
+        let trustWarnings = demand.warnings.union(catalog.warnings)
+        if AutotuneRecommendEngine.paidTrustBlocks(trustWarnings) {
+            return .stale(stored.generatedAt)
+        }
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: providerID)
         let current = LastRecommendationState(
             generatedAt: now,
@@ -2256,7 +2461,8 @@ struct AutotuneRecommendationBenchmarker {
                         candidateCatalogSHA256: request.candidateCatalogSHA256,
                         binaryVersion: request.hardware.binaryVersion,
                         modelID: row.modelID,
-                        hardwareIdentityHash: request.hardware.hardwareIdentityHash
+                        hardwareIdentityHash: request.hardware.hardwareIdentityHash,
+                        candidateRowIdentity: request.candidateCatalog.rowIdentity(for: modelKey) ?? ""
                     )
                     if safety.swapDetected || safety.thermalThrottleDetected {
                         var flags: [String] = []
@@ -2373,21 +2579,7 @@ private extension String {
 }
 
 extension AutotuneStaticInputs {
-    // published-2026-07-06-mbase-lite: baked candidate catalog and demand
-    // rank mirror phase3-binary/dist/static/*.json byte-for-byte so serve
-    // preflight keeps matching config pins when coordinator /static/* is
-    // unreachable. Live feeds remain Ed25519-signed at
-    // coordinator.streamvc.live/static/* (v4 public key baked above).
-    // Rate card still falls back to bakedRateCardJSON below; live rate
-    // card is served from /v1/rate-card.
-    static let bakedDemandRankJSON = """
-    {"version":"published-2026-07-07-p2-qwen3-8b","generated_at":"2026-07-07T12:00:00Z","source":"openrouter_completion_token_rank_operator_curated","cold_start_floor":0.15,"diversification_band":0.85,"rows":{"qwen3-coder-30b-a3b-instruct":{"demand_weight":0.8,"rank":1,"recommendable":true,"min_provider_target":20},"openai/gpt-oss-20b":{"demand_weight":0.6,"rank":2,"recommendable":true,"min_provider_target":20},"meta-llama/llama-3.1-8b-instruct":{"demand_weight":0.45,"rank":3,"recommendable":true,"min_provider_target":15},"qwen3-32b":{"demand_weight":0.4,"rank":5,"recommendable":true,"min_provider_target":10},"qwen2.5-coder-32b-instruct":{"demand_weight":0.35,"rank":6,"recommendable":true,"min_provider_target":5},"nvidia/nemotron-3-nano-30b-a3b":{"demand_weight":0.3,"rank":68,"recommendable":true,"min_provider_target":20},"meta-llama/llama-3.2-3b-instruct":{"demand_weight":0.42,"rank":4,"recommendable":true,"min_provider_target":15},"google-gemma-4-26b-a4b-it":{"demand_weight":0.55,"rank":22,"recommendable":true,"min_provider_target":20},"qwen3-8b":{"demand_weight":0.38,"rank":18,"recommendable":true,"min_provider_target":15}}}
-    """
-
-    static let bakedCandidateCatalogJSON = """
-    {"version":"published-2026-07-10-llama32-hash-repair","generated_at":"2026-07-10T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"qwen3-coder-30b-a3b-instruct":{"model_id":"mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit","model_revision":"6e302ea604ad9ab206367e2c501d1571023e7b6d","model_sha256":"10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0","min_ram_gb":28,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500},"runtime_status":"recommendable","notes":"published 2026-07-03; v4 re-signed 2026-07-06. min_sustained_tps lowered 25->20 to reflect M5 cold-start (~23.4 tok/s measured) headroom; SPEC-023 v0.2 gates are advisory QoS, not hard blocks."},"openai/gpt-oss-20b":{"model_id":"mlx-community/gpt-oss-20b-MXFP4-Q8","model_revision":"773a7da77e569019bb0fd17a554b263738d669a3","model_sha256":"f25592861e0b7f4eb8489d9103214f3f0dc4f798bb0e4e0cd817ff2f4191f1b1","min_ram_gb":24,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable","notes":"published 2026-07-03; v4 re-signed 2026-07-06. min_sustained_tps lowered 30->15 to reflect M-Base cold-start (M5 measured ~16.7 tok/s); SPEC-023 v0.2 gates are advisory QoS."},"meta-llama/llama-3.1-8b-instruct":{"model_id":"mlx-community/Meta-Llama-3.1-8B-Instruct-4bit","model_revision":"241a666dad6cb93c8ff213d39a7f34a36bf26db4","model_sha256":"67b26d6b1c50dc8836ab3705b06276a43c74c8f66247f9b112e232b58abbd99f","min_ram_gb":12,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable","notes":"published 2026-07-06: min_ram_gb 16->12 so 16 GB Macs pass ram_gb-4 gate (Entry 116)."},"qwen3-32b":{"model_id":"mlx-community/Qwen3-32B-4bit","model_revision":"bcaaf7f538adf166c1080a2befdb4f6019f66639","model_sha256":"69169cceb643f108755f96dba26d8647862e38a7f82cb1b5b25aff8f204967aa","min_ram_gb":48,"min_bandwidth_tier":"B","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":4000},"runtime_status":"recommendable","notes":"published 2026-07-03; v4 re-signed 2026-07-06. Values unchanged from 2026-07-02: dense 32B, 48GB Mac floor (M-Pro 48GB+)."},"qwen2.5-coder-32b-instruct":{"model_id":"mlx-community/Qwen2.5-Coder-32B-Instruct-4bit","model_revision":"d1e3b690c8e225d7795bccddf971ca6be68b2012","model_sha256":"b7749cc57f37f7e9239d0f9b091bcffe6d7629e48af75e8cb84c1cdca1780973","min_ram_gb":48,"min_bandwidth_tier":"A","bench_gate":{"min_sustained_tps":20,"max_4k_ttft_ms":3500},"runtime_status":"recommendable","notes":"published 2026-07-03; v4 re-signed 2026-07-06. min_sustained_tps lowered 25->20 to broaden eligibility while keeping M-Max/Ultra tier signal."},"nvidia/nemotron-3-nano-30b-a3b":{"model_id":"mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit","model_revision":"832f602eba5d22436c258c1462bdedc5afddb42b","model_sha256":"1bc78f214f9a042eaeb290b1fa4cb29915df1028f79d8479266349166c40a71f","min_ram_gb":32,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":30,"max_4k_ttft_ms":3000},"runtime_status":"recommendable","notes":"published 2026-07-06: issue 411 Nemotron runtime validated; coordinator-side rollout active; SPEC-023 v0.3 gates are advisory QoS."},"meta-llama/llama-3.2-3b-instruct":{"model_id":"mlx-community/Llama-3.2-3B-Instruct-4bit","model_revision":"7f0dc925e0d0afb0322d96f9255cfddf2ba5636e","model_sha256":"e7e5bff4248768b4db7a53afb3b514ba5867b800f63d1abd0330eaf08e54aa90","min_ram_gb":4,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable","notes":"published 2026-07-06 Entry 116: 8 GB M-Base onboarding row; manifest hash from HF snapshot 7f0dc925."},"google-gemma-4-26b-a4b-it":{"model_id":"mlx-community/gemma-4-26b-a4b-it-4bit","model_revision":"0d77464eeb233a2da68ebf9d7dc4edaac7db956d","model_sha256":"436ce68d2ac5a27dde3b54569736fb7a69dc3b7a175d2f633147c7802b3bc88a","min_ram_gb":28,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":10,"max_4k_ttft_ms":3000},"runtime_status":"recommendable","notes":"published 2026-07-07 P1: P1-01 bench M5 32GB 12.5 tok/s sustained; min_sustained_tps=10 (~80% measured); min_ram_gb=28 (4GB headroom over 4bit weights); SPEC-023 gates advisory QoS."},"qwen3-8b":{"model_id":"mlx-community/Qwen3-8B-4bit","model_revision":"545dc4251c05440727734bcd94334791f6ab0192","model_sha256":"1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877","min_ram_gb":12,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":4500},"runtime_status":"recommendable","notes":"published 2026-07-07 P2-02: base Qwen3-8B (no Instruct MLX repo at mlx-community); P2-02 bench M5 32GB 23.9 tok/s sustained; min_ram_gb=12 (4GB headroom over 4.6GB 4bit weights); SPEC-023 gates advisory QoS."}}}
-    """
-
+    // Rate card remains an independently refreshed coordinator projection.
     static let bakedRateCardJSON = """
     {"version":"baked-2026-07-07-p2-drift","generated_at":"2026-07-07T10:47:00Z","usd_per_million_credits":1.0,"rows":{"default":{"prompt_rate_per_mtok":500000,"completion_rate_per_mtok":1000000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-32b":{"prompt_rate_per_mtok":110000,"completion_rate_per_mtok":220000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"openai/gpt-oss-20b":{"prompt_rate_per_mtok":50000,"completion_rate_per_mtok":100000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-coder-30b-a3b-instruct":{"prompt_rate_per_mtok":117500,"completion_rate_per_mtok":235000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"nemotron-3-nano-30b-a3b":{"prompt_rate_per_mtok":80000,"completion_rate_per_mtok":160000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"meta-llama/llama-3.1-8b-instruct":{"prompt_rate_per_mtok":13500,"completion_rate_per_mtok":27000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"meta-llama/llama-3.2-3b-instruct":{"prompt_rate_per_mtok":13500,"completion_rate_per_mtok":27000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen2.5-coder-32b-instruct":{"prompt_rate_per_mtok":425000,"completion_rate_per_mtok":850000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"google-gemma-4-26b-a4b-it":{"prompt_rate_per_mtok":60000,"completion_rate_per_mtok":240000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"gemma-4-26b-a4b-it":{"prompt_rate_per_mtok":60000,"completion_rate_per_mtok":240000,"provider_share_bps":9000,"global_multiplier_ppm":1000000},"qwen3-8b":{"prompt_rate_per_mtok":13500,"completion_rate_per_mtok":27000,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
     """

@@ -14,12 +14,13 @@ type VerifiedBenchmark struct {
 	ThermalThrottleDetected bool
 	ArtifactSHA256          string
 	CandidateCatalogSHA256  string
+	CandidateRowIdentity    string
 }
 
 type VerifiedEvidence struct {
-	GeneratedAt              time.Time
-	CandidateCatalogSHA256   string
-	Benchmarks               []VerifiedBenchmark
+	GeneratedAt            time.Time
+	CandidateCatalogSHA256 string
+	Benchmarks             []VerifiedBenchmark
 }
 
 type EvidenceStore interface {

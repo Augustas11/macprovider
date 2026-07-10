@@ -18,6 +18,9 @@ func TestValidateProofOfWeightsRequiresFeedsAndOnboarding(t *testing.T) {
 
 	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
 	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
+	cfg.AutotuneFeeds.PublicKeys = map[string]string{
+		"streamvc-autotune-static-v4": "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU=",
+	}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "onboarding.app_track_register_enabled") {
 		t.Fatalf("Validate() = %v, want onboarding requirement", err)
 	}
@@ -26,6 +29,9 @@ func TestValidateProofOfWeightsRequiresFeedsAndOnboarding(t *testing.T) {
 func proofOfWeightsOnboardingBaseline(cfg *config.Config) {
 	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
 	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
+	cfg.AutotuneFeeds.PublicKeys = map[string]string{
+		"streamvc-autotune-static-v4": "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU=",
+	}
 	cfg.Onboarding.AppTrackRegisterEnabled = true
 	cfg.Onboarding.PostgresDSN = "postgres://provider_onboarding@127.0.0.1/db?sslmode=disable"
 	cfg.Onboarding.AuthPolicyRequestDSN = "postgres://provider_auth_policy_requester@127.0.0.1/db?sslmode=disable"

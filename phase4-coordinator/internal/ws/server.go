@@ -112,6 +112,7 @@ type Server struct {
 	// tier2.Default()". M3-8d (audit TEST-4). See s.catalogRef().
 	catalog                    *tier2.Catalog
 	autotuneCatalog            *autotune.Catalog
+	autotuneCompatibleCatalogs map[string]*autotune.Catalog
 	autotuneEvidence           autotune.EvidenceStore
 	telemetryDrift             *pow.Evaluator
 	identitySignatures         IdentitySignatureStore
@@ -242,6 +243,21 @@ type Option func(*Server)
 func WithCatalog(c *tier2.Catalog) Option {
 	return func(s *Server) {
 		s.catalog = c
+	}
+}
+
+// WithAutotuneCatalog wires the verified release used for provider catalog
+// compatibility and acknowledgement independently of the optional evidence
+// gate.
+func WithAutotuneCatalog(catalog *autotune.Catalog, compatible ...*autotune.Catalog) Option {
+	return func(s *Server) {
+		s.autotuneCatalog = catalog
+		s.autotuneCompatibleCatalogs = make(map[string]*autotune.Catalog, len(compatible))
+		for _, previous := range compatible {
+			if previous != nil && previous.Version != "" && !autotune.IsPermanentlyRejectedReleaseID(previous.Version) && (catalog == nil || previous.Version != catalog.Version) {
+				s.autotuneCompatibleCatalogs[previous.Version] = previous
+			}
+		}
 	}
 }
 
@@ -952,6 +968,7 @@ func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payloa
 		PairOT:                    pairOT,
 		ClaimURL:                  claimURL,
 	}
+	s.populateCatalogHelloAck(&ack)
 	b, err := json.Marshal(ack)
 	if err != nil {
 		// runWriter is already running for `session`; route the Close through
@@ -1231,6 +1248,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 				ModelHash:   AuthModelHashSession{Status: string(entry.HashStatus)},
 			},
 		}
+		s.populateCatalogAuthResponse(&response)
 		rawResponse, err := json.Marshal(response)
 		if err != nil || s.writeServerText(conn, rawResponse) != nil {
 			return "", ""
@@ -1368,6 +1386,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 			ModelHash: AuthModelHashSession{Status: string(entry.HashStatus)},
 		},
 	}
+	s.populateCatalogAuthResponse(&response)
 	rawResponse, err := json.Marshal(response)
 	if err != nil {
 		// runWriter is already running for `session`; route the Close through
@@ -1478,6 +1497,18 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 			return nil, false
 		}
 	}
+	catalogAdmissionMode, catalogCompatible := s.catalogAdmission(hello)
+	if !catalogCompatible {
+		s.log.Warn().
+			Str("provider_id", hello.ProviderID).
+			Str("catalog_release_id", hello.CatalogReleaseID).
+			Str("catalog_policy_version", hello.CatalogPolicyVersion).
+			Str("catalog_candidate_sha256", hello.CandidateCatalogSHA256).
+			Str("catalog_signer_key_id", hello.CatalogSignerKeyID).
+			Msg("provider catalog release is incompatible with coordinator")
+		s.close(conn, CloseInvalidHello, "catalog_incompatible")
+		return nil, false
+	}
 	providerCfg, pinned := s.pool.Endpoint(hello.ProviderID)
 	if s.tokens != nil {
 		if auth.validated && auth.providerID != hello.ProviderID {
@@ -1549,31 +1580,37 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		initialState = pool.StateDegraded
 	}
 	return &pool.Provider{
-		ProviderID:            hello.ProviderID,
-		AssignedID:            assignedID,
-		Hostname:              hello.Hostname,
-		ModelID:               hello.ModelID,
-		ModelParamsB:          hello.ModelParamsB,
-		RAMGB:                 hello.RAMGB,
-		MaxContextTokens:      hello.MaxContextTokens,
-		MaxConcurrency:        hello.MaxConcurrency,
-		SlotsFree:             hello.MaxConcurrency,
-		SlotsTotal:            hello.MaxConcurrency,
-		ThroughputTPSEstimate: hello.ThroughputTPSEstimate,
-		ModelLoadTimeMs:       hello.ModelLoadTimeMs,
-		EndpointURL:           endpointURL,
-		Tier:                  tier,
-		InferencePath:         inferencePath,
-		AdmittedAt:            now,
-		State:                 initialState,
-		LastHeartbeatAt:       now,
-		LastActivityAt:        now,
-		ConnectedAt:           now,
-		BinaryVersion:         hello.BinaryVersion,
-		ModelHash:             hello.ModelHash,
-		HashStatus:            hashStatus,
-		MaxAdmittedModelKey:   maxAdmittedModelKey,
-		MaxAdmittedModelID:    maxAdmittedModelID,
+		ProviderID:             hello.ProviderID,
+		AssignedID:             assignedID,
+		Hostname:               hello.Hostname,
+		ModelID:                hello.ModelID,
+		ModelParamsB:           hello.ModelParamsB,
+		RAMGB:                  hello.RAMGB,
+		MaxContextTokens:       hello.MaxContextTokens,
+		MaxConcurrency:         hello.MaxConcurrency,
+		SlotsFree:              hello.MaxConcurrency,
+		SlotsTotal:             hello.MaxConcurrency,
+		ThroughputTPSEstimate:  hello.ThroughputTPSEstimate,
+		ModelLoadTimeMs:        hello.ModelLoadTimeMs,
+		EndpointURL:            endpointURL,
+		Tier:                   tier,
+		InferencePath:          inferencePath,
+		AdmittedAt:             now,
+		State:                  initialState,
+		LastHeartbeatAt:        now,
+		LastActivityAt:         now,
+		ConnectedAt:            now,
+		BinaryVersion:          hello.BinaryVersion,
+		ModelHash:              hello.ModelHash,
+		HashStatus:             hashStatus,
+		CatalogAdmissionMode:   catalogAdmissionMode,
+		CatalogReleaseID:       hello.CatalogReleaseID,
+		CatalogPolicyVersion:   hello.CatalogPolicyVersion,
+		CandidateCatalogSHA256: hello.CandidateCatalogSHA256,
+		CatalogSignerKeyID:     hello.CatalogSignerKeyID,
+		CandidateRowIdentity:   hello.CandidateRowIdentity,
+		MaxAdmittedModelKey:    maxAdmittedModelKey,
+		MaxAdmittedModelID:     maxAdmittedModelID,
 	}, true
 }
 
@@ -1618,6 +1655,90 @@ func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, str
 		return "", "", false
 	}
 	return decision.MaxAdmittedModelKey, decision.MaxAdmittedModelID, true
+}
+
+func (s *Server) catalogAdmission(hello Hello) (string, bool) {
+	catalog := s.autotuneCatalog
+	if catalog == nil {
+		return "not_required", true
+	}
+	metadata := []string{
+		hello.CatalogReleaseID,
+		hello.CatalogPolicyVersion,
+		hello.CatalogSignerKeyID,
+		hello.CandidateCatalogSHA256,
+		hello.CandidateRowIdentity,
+	}
+	present := 0
+	for _, value := range metadata {
+		if strings.TrimSpace(value) != "" {
+			present++
+		}
+	}
+	// Bridge window: pre-catalog-handshake binaries are admitted through the
+	// existing signed-catalog model/evidence gates. Once a client sends any
+	// catalog metadata it must send and match the complete release envelope.
+	if present == 0 {
+		return "legacy", true
+	}
+	if present != len(metadata) {
+		return "", false
+	}
+	providerCatalog := catalog
+	admissionMode := "current"
+	if hello.CatalogReleaseID != catalog.Version {
+		providerCatalog = s.autotuneCompatibleCatalogs[hello.CatalogReleaseID]
+		admissionMode = "previous"
+	}
+	if providerCatalog == nil ||
+		hello.CatalogPolicyVersion != providerCatalog.PolicyVersion ||
+		hello.CatalogSignerKeyID != providerCatalog.SignerKeyID ||
+		!strings.EqualFold(hello.CandidateCatalogSHA256, providerCatalog.SHA256) {
+		return "", false
+	}
+	key, _, ok := providerCatalog.HighestClaimedTier(hello.ModelID)
+	if !ok {
+		return "", false
+	}
+	providerRowIdentity, ok := providerCatalog.RowIdentity(key)
+	if !ok || !strings.EqualFold(hello.CandidateRowIdentity, providerRowIdentity) {
+		return "", false
+	}
+	// A recognized previous release is compatible only while the selected
+	// model row is byte-for-byte policy-equivalent to the active release.
+	// This permits unrelated catalog updates without admitting stale model
+	// artifacts, gates, or policy.
+	activeKey, _, ok := catalog.HighestClaimedTier(hello.ModelID)
+	if !ok {
+		return "", false
+	}
+	activeRowIdentity, ok := catalog.RowIdentity(activeKey)
+	if !ok || !strings.EqualFold(providerRowIdentity, activeRowIdentity) {
+		return "", false
+	}
+	return admissionMode, true
+}
+
+func (s *Server) populateCatalogHelloAck(ack *HelloAck) {
+	if ack == nil || s.autotuneCatalog == nil {
+		return
+	}
+	ack.CatalogCompatible = true
+	ack.CatalogReleaseID = s.autotuneCatalog.Version
+	ack.CatalogPolicyVersion = s.autotuneCatalog.PolicyVersion
+	ack.CandidateCatalogSHA256 = s.autotuneCatalog.SHA256
+	ack.CatalogSignerKeyID = s.autotuneCatalog.SignerKeyID
+}
+
+func (s *Server) populateCatalogAuthResponse(response *AuthResponse) {
+	if response == nil || s.autotuneCatalog == nil {
+		return
+	}
+	response.CatalogCompatible = true
+	response.CatalogReleaseID = s.autotuneCatalog.Version
+	response.CatalogPolicyVersion = s.autotuneCatalog.PolicyVersion
+	response.CandidateCatalogSHA256 = s.autotuneCatalog.SHA256
+	response.CatalogSignerKeyID = s.autotuneCatalog.SignerKeyID
 }
 
 func (s *Server) recordProviderAdmission(conn net.Conn, hello Hello, pinned bool) (pool.Tier, bool) {

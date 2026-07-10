@@ -27,11 +27,13 @@ type Row struct {
 }
 
 type Catalog struct {
-	Version    string
-	SHA256     string
-	RawJSON    []byte
-	rowsByKey  map[string]Row
-	keysByModel map[string][]string
+	Version       string
+	PolicyVersion string
+	SignerKeyID   string
+	SHA256        string
+	RawJSON       []byte
+	rowsByKey     map[string]Row
+	keysByModel   map[string][]string
 }
 
 func ParseCatalog(rawJSON []byte) (*Catalog, error) {
@@ -39,9 +41,10 @@ func ParseCatalog(rawJSON []byte) (*Catalog, error) {
 		return nil, fmt.Errorf("autotune candidate catalog is empty")
 	}
 	var envelope struct {
-		Version string          `json:"version"`
-		Source  string          `json:"source"`
-		Rows    map[string]Row  `json:"rows"`
+		Version       string         `json:"version"`
+		PolicyVersion string         `json:"policy_version"`
+		Source        string         `json:"source"`
+		Rows          map[string]Row `json:"rows"`
 	}
 	if err := json.Unmarshal(rawJSON, &envelope); err != nil {
 		return nil, fmt.Errorf("parse autotune candidate catalog: %w", err)
@@ -51,6 +54,9 @@ func ParseCatalog(rawJSON []byte) (*Catalog, error) {
 	}
 	if strings.TrimSpace(envelope.Version) == "" {
 		return nil, fmt.Errorf("autotune candidate catalog version is required")
+	}
+	if strings.TrimSpace(envelope.PolicyVersion) == "" {
+		envelope.PolicyVersion = "legacy-spec-023"
 	}
 	if len(envelope.Rows) == 0 {
 		return nil, fmt.Errorf("autotune candidate catalog rows are required")
@@ -78,12 +84,44 @@ func ParseCatalog(rawJSON []byte) (*Catalog, error) {
 		keysByModel[normalizedModelID] = append(keysByModel[normalizedModelID], key)
 	}
 	return &Catalog{
-		Version:     envelope.Version,
-		SHA256:      hex.EncodeToString(sum[:]),
-		RawJSON:     append([]byte(nil), rawJSON...),
-		rowsByKey:   envelope.Rows,
-		keysByModel: keysByModel,
+		Version:       envelope.Version,
+		PolicyVersion: envelope.PolicyVersion,
+		SHA256:        hex.EncodeToString(sum[:]),
+		RawJSON:       append([]byte(nil), rawJSON...),
+		rowsByKey:     envelope.Rows,
+		keysByModel:   keysByModel,
 	}, nil
+}
+
+// RowIdentity binds benchmark evidence to the catalog fields that control
+// artifact trust and admission for one model. Unrelated row updates can then
+// preserve valid evidence without accepting a changed artifact or gate.
+func (c *Catalog) RowIdentity(key string) (string, bool) {
+	row, ok := c.Row(key)
+	if !ok {
+		return "", false
+	}
+	fields := []string{
+		c.PolicyVersion,
+		key,
+		row.ModelID,
+		row.ModelRevision,
+		row.ModelSHA256,
+		fmt.Sprintf("%d", row.MinRAMGB),
+		row.MinBandwidthTier,
+		fmt.Sprintf("%.6f", row.BenchGate.MinSustainedTPS),
+		fmt.Sprintf("%d", row.BenchGate.Max4KTTFTMS),
+		row.RuntimeStatus,
+	}
+	var framed strings.Builder
+	for i, field := range fields {
+		if i > 0 {
+			framed.WriteByte('|')
+		}
+		fmt.Fprintf(&framed, "%d:%s", len([]byte(field)), field)
+	}
+	sum := sha256.Sum256([]byte(framed.String()))
+	return hex.EncodeToString(sum[:]), true
 }
 
 func (c *Catalog) Row(key string) (Row, bool) {

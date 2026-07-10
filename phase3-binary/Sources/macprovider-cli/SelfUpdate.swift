@@ -27,7 +27,9 @@ struct SelfUpdate {
     private let session: URLSession
     private let drainBeforeReplace: (() async throws -> Void)?
     private let replaceBinary: ((URL) throws -> Void)?
+    private let rollbackReplacement: (() throws -> Void)?
     private let restartLaunchd: (() throws -> Void)?
+    private let postRestartReadiness: (() async -> Bool)?
     private let markerStore: AutoUpdateMarkerStore
 
     init(
@@ -37,7 +39,9 @@ struct SelfUpdate {
         markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
         drainBeforeReplace: (() async throws -> Void)? = nil,
         replaceBinary: ((URL) throws -> Void)? = nil,
-        restartLaunchd: (() throws -> Void)? = nil
+        rollbackReplacement: (() throws -> Void)? = nil,
+        restartLaunchd: (() throws -> Void)? = nil,
+        postRestartReadiness: (() async -> Bool)? = nil
     ) {
         self.currentVersion = currentVersion
         self.releasesAPIURL = releasesAPIURL ?? Self.defaultReleasesAPIURL
@@ -45,12 +49,14 @@ struct SelfUpdate {
         self.markerStore = markerStore
         self.drainBeforeReplace = drainBeforeReplace
         self.replaceBinary = replaceBinary
+        self.rollbackReplacement = rollbackReplacement
         self.restartLaunchd = restartLaunchd
+        self.postRestartReadiness = postRestartReadiness
     }
 
     func run(checkOnly: Bool) async throws {
         let release = try await latestRelease()
-        let latest = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        let latest = try Self.validateReleaseTag(release.tagName)
         let comparison = Self.compareSemver(currentVersion, latest)
 
         if comparison != .orderedAscending {
@@ -65,13 +71,8 @@ struct SelfUpdate {
 
         let prepared = try await prepareValidatedUpdate(from: release)
         defer { prepared.cleanup() }
-        let restartError = try await applyValidatedUpdate(newBinary: prepared.newBinary)
+        try await applyValidatedUpdate(newBinary: prepared.newBinary, targetVersion: latest)
         try await persistSignedPolicyIfPresent(prepared.signedPolicy)
-        if let restartError {
-            print("Binary upgraded to v\(latest), but automatic restart failed: \(restartError)")
-            print("Run: \(restartError.recoveryCommand)")
-            return
-        }
         print("Update complete. Restart macprovider-cli to use v\(latest).")
     }
 
@@ -79,7 +80,8 @@ struct SelfUpdate {
         let release = try await releaseByTag(tag)
         let prepared = try await prepareValidatedUpdate(from: release)
         defer { prepared.cleanup() }
-        _ = try await applyValidatedUpdate(newBinary: prepared.newBinary)
+        let target = try AutoUpdateRecommendation.validate(release.tagName).normalized
+        try await applyValidatedUpdate(newBinary: prepared.newBinary, targetVersion: target)
         try await persistSignedPolicyIfPresent(prepared.signedPolicy)
     }
 
@@ -92,7 +94,9 @@ struct SelfUpdate {
     }
 
     func prepareValidatedUpdate(from release: GitHubRelease) async throws -> PreparedSelfUpdate {
-        guard let tarball = release.assets.first(where: { $0.name.hasSuffix("darwin-arm64.tar.gz") }),
+        let targetVersion = try Self.validateReleaseTag(release.tagName)
+        let canonicalTarballName = "macprovider-cli-\(release.tagName)-darwin-arm64.tar.gz"
+        guard let tarball = release.assets.first(where: { $0.name == canonicalTarballName }),
               let checksums = release.assets.first(where: { $0.name == "checksums.txt" }),
               let checksumsSignature = release.assets.first(where: { $0.name == "checksums.txt.sig" })
         else {
@@ -127,9 +131,16 @@ struct SelfUpdate {
             try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
             try validateTarball(tarballURL)
             try runProcess("/usr/bin/tar", arguments: ["-xzf", tarballURL.path, "-C", extractDir.path])
+            try Self.validateExtractedTree(extractDir)
             let newBinary = try Self.findBinary(in: extractDir)
+            try ProviderReleasePayloadTransaction.validateReleasePayload(
+                at: newBinary.deletingLastPathComponent(),
+                newBinary: newBinary
+            )
 
             try runProcess(newBinary.path, arguments: ["self-test"])
+            let stagedVersionOutput = try processOutput(newBinary.path, arguments: ["--version"])
+            try Self.requireStagedBinaryVersion(stagedVersionOutput, targetVersion: targetVersion)
             return PreparedSelfUpdate(tempDir: tempDir, newBinary: newBinary, signedPolicy: release.signedPolicy)
         } catch {
             try? FileManager.default.removeItem(at: tempDir)
@@ -137,9 +148,8 @@ struct SelfUpdate {
         }
     }
 
-    @discardableResult
-    func applyValidatedUpdateForTest(newBinary: URL) async throws -> LaunchdRestartFailure? {
-        try await applyValidatedUpdate(newBinary: newBinary)
+    func applyValidatedUpdateForTest(newBinary: URL) async throws {
+        try await applyValidatedUpdate(newBinary: newBinary, targetVersion: "1.2.1")
     }
 
     func persistSignedPolicyIfPresent(_ signedPolicy: GitHubSignedPolicy?) async throws {
@@ -168,7 +178,7 @@ struct SelfUpdate {
         }
 
         let release = try await latestRelease()
-        let version = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        let version = try Self.validateReleaseTag(release.tagName)
         try? FileManager.default.createDirectory(
             at: cacheURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -253,30 +263,55 @@ struct SelfUpdate {
         try FileManager.default.moveItem(at: downloaded, to: destination)
     }
 
-    private func replaceCurrentBinary(with newBinary: URL) throws {
-        guard let current = Bundle.main.executableURL else {
-            throw UpdateError.currentBinaryUnknown
-        }
-        let staged = current.deletingLastPathComponent()
-            .appendingPathComponent(".\(current.lastPathComponent).update-\(UUID().uuidString)")
-        try? FileManager.default.removeItem(at: staged)
-        try FileManager.default.copyItem(at: newBinary, to: staged)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staged.path)
-        if rename(staged.path, current.path) != 0 {
-            let errnoValue = errno
-            try? FileManager.default.removeItem(at: staged)
-            throw UpdateError.renameFailed(errnoValue)
-        }
-    }
-
-    private func applyValidatedUpdate(newBinary: URL) async throws -> LaunchdRestartFailure? {
+    private func applyValidatedUpdate(newBinary: URL, targetVersion: String) async throws {
         if let drainBeforeReplace {
             try await drainBeforeReplace()
         }
-        if let replaceBinary {
-            try replaceBinary(newBinary)
-        } else {
-            try replaceCurrentBinary(with: newBinary)
+
+        var pendingMarker: AutoUpdatePendingMarker?
+        var updateLock: AutoUpdateLock?
+        defer { withExtendedLifetime(updateLock) {} }
+        let current = replaceBinary == nil ? Bundle.main.executableURL : nil
+        if replaceBinary == nil {
+            guard let current else { throw UpdateError.currentBinaryUnknown }
+            updateLock = try markerStore.acquireLock()
+            let updateID = UUID().uuidString.lowercased()
+            let marker = try markerStore.preserveReleaseRollbackBackup(
+                binaryURL: current,
+                updateID: updateID,
+                targetVersion: targetVersion,
+                commitOwner: "self_update"
+            )
+            do {
+                try markerStore.writePending(marker)
+                pendingMarker = marker
+            } catch {
+                markerStore.removeRollbackBackups(marker)
+                markerStore.clearPendingAndLock(target: nil)
+                throw error
+            }
+        }
+
+        do {
+            if let replaceBinary {
+                try replaceBinary(newBinary)
+            } else if let current {
+                try markerStore.activateReleasePayload(
+                    from: newBinary.deletingLastPathComponent(),
+                    newBinary: newBinary,
+                    to: current
+                )
+            }
+        } catch {
+            do {
+                try restoreAppliedUpdate(pendingMarker)
+            } catch let rollbackError {
+                throw UpdateError.activationFailedRollbackFailed(
+                    update: String(describing: error),
+                    rollback: String(describing: rollbackError)
+                )
+            }
+            throw error
         }
         do {
             if let restartLaunchd {
@@ -284,12 +319,85 @@ struct SelfUpdate {
             } else {
                 try restartLaunchdIfInstalled()
             }
-        } catch let failure as LaunchdRestartFailure {
-            return failure
-        } catch {
-            return LaunchdRestartFailure(error: error, recoveryCommand: restartRecoveryCommand())
+        } catch let restartError {
+            do {
+                try restoreAppliedUpdate(pendingMarker)
+            } catch let rollbackError {
+                throw UpdateError.restartFailedRollbackFailed(
+                    restart: String(describing: restartError),
+                    rollback: String(describing: rollbackError)
+                )
+            }
+
+            // Restoring bytes is the critical rollback boundary. Best-effort
+            // restart of the restored release re-establishes the prior service
+            // state when launchctl itself is still available.
+            if rollbackReplacement == nil {
+                if let restartLaunchd {
+                    try? restartLaunchd()
+                } else {
+                    try? restartLaunchdIfInstalled()
+                }
+            }
+            throw UpdateError.restartFailedRollbackRestored(
+                restart: String(describing: restartError),
+                recoveryCommand: restartRecoveryCommand()
+            )
         }
-        return nil
+        let ready = if let postRestartReadiness {
+            await postRestartReadiness()
+        } else {
+            await Self.waitForBuyerServingIfManaged()
+        }
+        guard ready else {
+            do {
+                try restoreAppliedUpdate(pendingMarker)
+                if let restartLaunchd { try? restartLaunchd() } else { try? restartLaunchdIfInstalled() }
+            } catch let rollbackError {
+                throw UpdateError.restartFailedRollbackFailed(
+                    restart: "buyer-serving readiness timeout",
+                    rollback: String(describing: rollbackError)
+                )
+            }
+            throw UpdateError.restartFailedRollbackRestored(
+                restart: "buyer-serving readiness timeout",
+                recoveryCommand: restartRecoveryCommand()
+            )
+        }
+        if let pendingMarker {
+            try markerStore.completeSuccessfulUpdate(pendingMarker)
+            try markerStore.finalizeSuccessfulUpdate(pendingMarker)
+        }
+    }
+
+    private func restoreAppliedUpdate(_ pendingMarker: AutoUpdatePendingMarker?) throws {
+        if let rollbackReplacement {
+            try rollbackReplacement()
+            return
+        }
+        guard let pendingMarker else {
+            throw UpdateError.rollbackUnavailable
+        }
+        try markerStore.restoreBackup(pendingMarker)
+        markerStore.clearPendingAndLock(target: nil)
+        markerStore.removeRollbackBackups(pendingMarker)
+    }
+
+    private static func waitForBuyerServingIfManaged(timeout: TimeInterval = 90) async -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let plist = home.appendingPathComponent("Library/LaunchAgents/\(launchdLabel).plist")
+        guard FileManager.default.fileExists(atPath: plist.path) else { return true }
+        let config = try? ConfigLoader.load(cli: CLIOverrides())
+        guard let port = config?.port else { return false }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let status = try? await LocalStatusClient.fetch(port: port),
+               status["network_state"] as? String == "buyer_serving" {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+        return false
     }
 
     private func restartLaunchdIfInstalled() throws {
@@ -388,11 +496,48 @@ struct SelfUpdate {
 
     private func validateTarball(_ url: URL) throws {
         let listing = try processOutput("/usr/bin/tar", arguments: ["-tzf", url.path])
+        let verboseListing = try processOutput("/usr/bin/tar", arguments: ["-tvzf", url.path])
+        for line in verboseListing.split(separator: "\n") {
+            guard let type = line.utf8.first, type == 0x2D || type == 0x64 else {
+                throw UpdateError.unsafeArchiveEntry(String(line))
+            }
+        }
+        var normalizedEntries = Set<String>()
         for rawEntry in listing.split(separator: "\n").map(String.init) {
             let entry = rawEntry.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !entry.isEmpty else { continue }
             if entry.hasPrefix("/") || entry == ".." || entry.hasPrefix("../") || entry.contains("/../") {
                 throw UpdateError.unsafeArchiveEntry(entry)
+            }
+            let normalized = (entry as NSString).standardizingPath
+            guard normalized != ".", !normalized.hasPrefix("../"), normalized != "..",
+                  normalizedEntries.insert(normalized).inserted
+            else {
+                throw UpdateError.unsafeArchiveEntry(entry)
+            }
+        }
+    }
+
+    static func validateExtractedTreeForTest(_ root: URL) throws {
+        try validateExtractedTree(root)
+    }
+
+    private static func validateExtractedTree(_ root: URL) throws {
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else {
+            throw UpdateError.unsafeArchiveEntry(root.path)
+        }
+        for case let entry as URL in enumerator {
+            var info = stat()
+            guard lstat(entry.path, &info) == 0,
+                  info.st_uid == getuid(),
+                  (info.st_mode & (S_IWGRP | S_IWOTH)) == 0
+            else { throw UpdateError.unsafeArchiveEntry(entry.path) }
+            let type = info.st_mode & S_IFMT
+            guard type == S_IFREG || type == S_IFDIR else {
+                throw UpdateError.unsafeArchiveEntry(entry.path)
+            }
+            if type == S_IFREG, info.st_nlink != 1 {
+                throw UpdateError.unsafeArchiveEntry(entry.path)
             }
         }
     }
@@ -448,6 +593,30 @@ struct SelfUpdate {
         return .orderedSame
     }
 
+    static func validateReleaseTag(_ tag: String) throws -> String {
+        guard tag.range(of: #"^v?[0-9]+\.[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil else {
+            throw UpdateError.invalidReleaseVersion(tag)
+        }
+        do {
+            return try AutoUpdateRecommendation.validate(tag).normalized
+        } catch {
+            throw UpdateError.invalidReleaseVersion(tag)
+        }
+    }
+
+    static func requireStagedBinaryVersion(_ output: String, targetVersion: String) throws {
+        let exact = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let staged: String
+        do {
+            staged = try validateReleaseTag(exact)
+        } catch {
+            throw UpdateError.stagedVersionMismatch(expected: targetVersion, actual: exact)
+        }
+        guard staged == targetVersion else {
+            throw UpdateError.stagedVersionMismatch(expected: targetVersion, actual: staged)
+        }
+    }
+
     private static func expectedSHA256(for filename: String, in text: String) throws -> String {
         for line in text.split(separator: "\n") {
             let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
@@ -479,6 +648,196 @@ struct SelfUpdate {
             throw UpdateError.missingExtractedBinary
         }
         return match
+    }
+}
+
+struct ProviderReleasePayloadTransaction {
+    let currentBinary: URL
+    let installDirectory: URL
+    let backupDirectory: URL
+    let markerStore: AutoUpdateMarkerStore
+    private let fileManager: FileManager
+
+    init(
+        currentBinary: URL,
+        markerStore: AutoUpdateMarkerStore,
+        fileManager: FileManager = .default
+    ) throws {
+        self.currentBinary = currentBinary
+        installDirectory = currentBinary.deletingLastPathComponent()
+        backupDirectory = installDirectory.appendingPathComponent(
+            ".macprovider-cli.manual-rollback-\(UUID().uuidString.lowercased())",
+            isDirectory: true
+        )
+        self.markerStore = markerStore
+        self.fileManager = fileManager
+
+        try markerStore.validateTrustedBinaryDirectory(installDirectory)
+        try fileManager.createDirectory(
+            at: backupDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        do {
+            let currentEntries = try Self.ownedEntries(in: installDirectory, fileManager: fileManager)
+            guard currentEntries.contains(where: { $0.standardizedFileURL == currentBinary.standardizedFileURL }) else {
+                throw UpdateError.missingReleaseResource("installed macprovider-cli")
+            }
+            for entry in currentEntries {
+                try fileManager.copyItem(
+                    at: entry,
+                    to: backupDirectory.appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
+                )
+            }
+        } catch {
+            try? fileManager.removeItem(at: backupDirectory)
+            throw error
+        }
+    }
+
+    static func validateReleasePayload(
+        at payloadDirectory: URL,
+        newBinary: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        _ = try validatedPayloadEntries(
+            in: payloadDirectory,
+            newBinary: newBinary,
+            fileManager: fileManager
+        )
+    }
+
+    func activate(from payloadDirectory: URL, newBinary: URL) throws {
+        let entries = try Self.validatedPayloadEntries(
+            in: payloadDirectory,
+            newBinary: newBinary,
+            fileManager: fileManager
+        )
+
+        let stagingDirectory = installDirectory.appendingPathComponent(
+            ".macprovider-cli.activation-\(UUID().uuidString.lowercased())",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(
+            at: stagingDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? fileManager.removeItem(at: stagingDirectory) }
+
+        for entry in entries {
+            try fileManager.copyItem(
+                at: entry,
+                to: stagingDirectory.appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
+            )
+        }
+
+        try removeCurrentResources()
+        for entry in try Self.ownedEntries(in: stagingDirectory, fileManager: fileManager)
+            where entry.lastPathComponent != "macprovider-cli"
+        {
+            try fileManager.moveItem(
+                at: entry,
+                to: installDirectory.appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
+            )
+        }
+        try markerStore.atomicCopyNoFollow(
+            from: stagingDirectory.appendingPathComponent("macprovider-cli"),
+            to: currentBinary,
+            mode: 0o755
+        )
+    }
+
+    func restore() throws {
+        try removeCurrentResources()
+        let backupEntries = try Self.ownedEntries(in: backupDirectory, fileManager: fileManager)
+        for entry in backupEntries where entry.lastPathComponent != "macprovider-cli" {
+            try fileManager.copyItem(
+                at: entry,
+                to: installDirectory.appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
+            )
+        }
+        let backupBinary = backupDirectory.appendingPathComponent("macprovider-cli")
+        guard fileManager.fileExists(atPath: backupBinary.path) else {
+            throw UpdateError.missingReleaseResource("rollback macprovider-cli")
+        }
+        let attributes = try fileManager.attributesOfItem(atPath: backupBinary.path)
+        let mode = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o755
+        try markerStore.atomicCopyNoFollow(from: backupBinary, to: currentBinary, mode: mode)
+    }
+
+    func cleanup() {
+        try? fileManager.removeItem(at: backupDirectory)
+    }
+
+    private func removeCurrentResources() throws {
+        for entry in try Self.ownedEntries(in: installDirectory, fileManager: fileManager)
+            where entry.lastPathComponent != "macprovider-cli"
+        {
+            try fileManager.removeItem(at: entry)
+        }
+    }
+
+    private static func validatedPayloadEntries(
+        in directory: URL,
+        newBinary: URL,
+        fileManager: FileManager
+    ) throws -> [URL] {
+        let entries = try ownedEntries(in: directory, fileManager: fileManager)
+        guard entries.contains(where: { $0.standardizedFileURL == newBinary.standardizedFileURL }) else {
+            throw UpdateError.missingReleaseResource("macprovider-cli")
+        }
+        guard entries.contains(where: { $0.lastPathComponent == "mlx.metallib" }) else {
+            throw UpdateError.missingReleaseResource("mlx.metallib")
+        }
+        guard entries.contains(where: { $0.pathExtension == "bundle" }) else {
+            throw UpdateError.missingReleaseResource("SwiftPM resource bundle")
+        }
+        guard let catalogDirectory = entries.first(where: { $0.lastPathComponent == "catalog-release" }) else {
+            throw UpdateError.missingReleaseResource("catalog-release")
+        }
+        for requiredName in [
+            "release.json",
+            "trusted-keys.json",
+            "autotune-candidates.json",
+            "autotune-candidates.json.sig",
+            "demand-rank.json",
+            "demand-rank.json.sig",
+        ] {
+            let requiredURL = catalogDirectory.appendingPathComponent(requiredName)
+            let values = try requiredURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true else {
+                throw UpdateError.missingReleaseResource("catalog-release/\(requiredName)")
+            }
+        }
+        return entries
+    }
+
+    private static func ownedEntries(in directory: URL, fileManager: FileManager) throws -> [URL] {
+        try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        ).filter { entry in
+            let name = entry.lastPathComponent
+            guard name == "macprovider-cli"
+                    || name == "mlx.metallib"
+                    || name == "THIRD-PARTY-NOTICES.txt"
+                    || name == "catalog-release"
+                    || entry.pathExtension == "bundle"
+            else {
+                return false
+            }
+            guard let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]),
+                  values.isSymbolicLink != true
+            else {
+                return false
+            }
+            if entry.pathExtension == "bundle" || name == "catalog-release" {
+                return values.isDirectory == true
+            }
+            return values.isRegularFile == true
+        }
     }
 }
 
@@ -538,6 +897,8 @@ enum UpdateError: Error, CustomStringConvertible {
     case httpStatus(Int)
     case releaseNotFound
     case missingAsset
+    case invalidReleaseVersion(String)
+    case stagedVersionMismatch(expected: String, actual: String)
     case checksumMissing(String)
     case checksumMismatch(expected: String, actual: String)
     case checksumSignatureInvalid
@@ -549,6 +910,11 @@ enum UpdateError: Error, CustomStringConvertible {
     case untrustedReleaseAPIURL(String)
     case unsafeArchiveEntry(String)
     case insufficientDiskSpace(required: Int64, available: Int64)
+    case missingReleaseResource(String)
+    case rollbackUnavailable
+    case activationFailedRollbackFailed(update: String, rollback: String)
+    case restartFailedRollbackRestored(restart: String, recoveryCommand: String)
+    case restartFailedRollbackFailed(restart: String, rollback: String)
 
     var description: String {
         switch self {
@@ -559,7 +925,11 @@ enum UpdateError: Error, CustomStringConvertible {
         case .releaseNotFound:
             return "GitHub release tag not found"
         case .missingAsset:
-            return "Release is missing darwin-arm64 tarball, checksums.txt, or checksums.txt.sig"
+            return "Release is missing the canonical tag-bound darwin-arm64 tarball, checksums.txt, or checksums.txt.sig"
+        case .invalidReleaseVersion(let version):
+            return "Release tag is not strict semantic version: \(version)"
+        case let .stagedVersionMismatch(expected, actual):
+            return "Signed release payload version mismatch: expected \(expected), staged binary reported \(actual)"
         case .checksumMissing(let filename):
             return "checksums.txt does not contain \(filename)"
         case let .checksumMismatch(expected, actual):
@@ -582,6 +952,16 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Release archive contains unsafe entry: \(entry)"
         case let .insufficientDiskSpace(required, available):
             return "Insufficient disk space: required \(required), available \(available)"
+        case .missingReleaseResource(let resource):
+            return "Release payload is missing required resource: \(resource)"
+        case .rollbackUnavailable:
+            return "rollback_failed: no rollback mechanism is available for the applied update"
+        case let .activationFailedRollbackFailed(update, rollback):
+            return "rollback_failed: update activation failed (\(update)) and rollback failed (\(rollback))"
+        case let .restartFailedRollbackRestored(restart, recoveryCommand):
+            return "rollback_restored: restart failed (\(restart)); previous provider release restored. If needed, run: \(recoveryCommand)"
+        case let .restartFailedRollbackFailed(restart, rollback):
+            return "rollback_failed: restart failed (\(restart)) and rollback failed (\(rollback))"
         }
     }
 }
@@ -604,6 +984,7 @@ struct LocalStatusFormatter {
     static func format(_ status: [String: Any], latestVersion: String? = nil, ownerLogin: String? = nil, donorMode: Bool = false, staleRecommendationSince: Date? = nil) -> String {
         let capacity = status["capacity"] as? [String: Any] ?? [:]
         let coordinator = status["coordinator"] as? [String: Any] ?? [:]
+        let catalog = status["catalog"] as? [String: Any] ?? [:]
         let version = status["binary_version"] as? String ?? CoordinatorClient.binaryVersion
         let uptime = humanDuration(status["uptime_s"] as? Int ?? 0)
         let connected = (coordinator["connected"] as? Bool) == true ? "yes" : "no"
@@ -642,6 +1023,13 @@ struct LocalStatusFormatter {
           Session:     \(string(coordinator["session"]))
           Tier:        \(string(coordinator["tier"]))
           Recommended: \(string(coordinator["recommended_binary_version"]))
+
+        Catalog:
+          Network:     \(string(status["network_state"]))
+          Trust:       \(string(catalog["state"]))
+          Release:     \(string(catalog["release_id"]))
+          Signer:      \(string(catalog["signer_key_id"]))
+          Digest:      \(string(catalog["digest"]))
 
         Update:
           Current:     v\(version)

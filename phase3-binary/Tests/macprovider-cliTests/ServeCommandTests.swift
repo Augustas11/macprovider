@@ -93,6 +93,34 @@ final class ServeCommandTests: XCTestCase {
         XCTAssertFalse(factoryInvoked)
     }
 
+    func testSafeOfflineCatalogFallbackRequestsCoordinatorCompatibility() {
+        var factoryInvoked = false
+
+        let client = ServeCommand.makeCoordinatorClient(
+            noJoin: false,
+            catalogTrustState: "safe_offline_fallback"
+        ) {
+            factoryInvoked = true
+            return nil
+        }
+
+        XCTAssertNil(client)
+        XCTAssertTrue(factoryInvoked)
+    }
+
+    func testCatalogIntegrityFailureDoesNotJoinCoordinator() {
+        var factoryInvoked = false
+        let client = ServeCommand.makeCoordinatorClient(
+            noJoin: false,
+            catalogTrustState: "catalog_integrity_failure"
+        ) {
+            factoryInvoked = true
+            return nil
+        }
+        XCTAssertNil(client)
+        XCTAssertFalse(factoryInvoked)
+    }
+
     func testServeStartupPreflightsAcquireSingletonBeforeModelArtifactPreflight() async throws {
         let lockDirectory = try tempDir()
         let heldLock = try ProviderServeLock.acquire(providerID: "mac", port: 61_919, directory: lockDirectory)
@@ -303,7 +331,7 @@ final class ServeCommandTests: XCTestCase {
         try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
         let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         let currentCatalogJSON = """
-        {"version":"current-catalog","generated_at":"2026-07-10T12:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommendable"}}}
+        {"version":"current-catalog","generated_at":"2026-07-11T12:00:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"recommendable"}}}
         """
         let rateCardJSON = """
         {"version":"test-rate-card","generated_at":"2026-07-10T12:00:00Z","usd_per_million_credits":1.0,"rows":{"\(key)":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
@@ -321,12 +349,13 @@ final class ServeCommandTests: XCTestCase {
                     break
                 }
                 if url.path.hasSuffix(".sig") {
-                    return Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA=="}"#.utf8)
+                    let signature = Data(repeating: 0, count: 64).base64EncodedString()
+                    return Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
                 }
                 return catalogBytes
             },
             verifySignature: { _, _ in true },
-            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-07-10T12:00:00Z")! }
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-07-11T12:00:00Z")! }
         )
         var config = AppConfig.defaults()
         config.model = key
@@ -391,7 +420,7 @@ final class ServeCommandTests: XCTestCase {
         try Data("{}".utf8).write(to: snapshot.appendingPathComponent("config.json"))
         let artifactSHA = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         let catalogJSON = """
-        {"version":"test-catalog","generated_at":"2026-07-10T12:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"\(runtimeStatus)"}}}
+        {"version":"test-catalog","generated_at":"2026-07-11T12:00:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"\(key)":{"model_id":"\(modelID)","model_revision":"\(revision)","model_sha256":"\(artifactSHA)","min_ram_gb":1,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"\(runtimeStatus)"}}}
         """
         let rateCardJSON = """
         {"version":"test-rate-card","generated_at":"2026-07-10T12:00:00Z","usd_per_million_credits":1.0,"rows":{"\(rateCardKey)":{"prompt_rate_per_mtok":1,"completion_rate_per_mtok":1,"provider_share_bps":9000,"global_multiplier_ppm":1000000}}}
@@ -409,12 +438,13 @@ final class ServeCommandTests: XCTestCase {
                     break
                 }
                 if url.path.hasSuffix(".sig") {
-                    return Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA=="}"#.utf8)
+                    let signature = Data(repeating: 0, count: 64).base64EncodedString()
+                    return Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
                 }
                 return catalogBytes
             },
             verifySignature: { _, _ in true },
-            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-07-10T12:00:00Z")! }
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-07-11T12:00:00Z")! }
         )
         var config = AppConfig.defaults()
         config.donorMode = donorMode

@@ -63,6 +63,100 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(body["model_loaded"] as? Bool, true)
     }
 
+    func testStatusSeparatesLiveCatalogTrustFromBuyerServing() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        await status.setCoordinatorSession(connected: true, assignedID: "session-a")
+        let trust = ServeCommand.CatalogRuntimeTrust(
+            state: "live_verified",
+            releaseID: "release-a",
+            digest: String(repeating: "a", count: 64),
+            signerKeyID: "streamvc-autotune-static-v5",
+            source: "coordinator"
+        )
+        let context = ProviderCatalogStatusContext(
+            trust: trust,
+            donorMode: false,
+            catalogKey: "model-key",
+            catalogModelID: "org/model",
+            modelRevision: String(repeating: "b", count: 40),
+            artifactSHA256: String(repeating: "c", count: 64),
+            configuredReleaseID: "release-a",
+            configuredCatalogDigest: String(repeating: "a", count: 64)
+        )
+
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.streamvc.live/provider/ws",
+            catalogStatus: context
+        )
+        let catalog = body["catalog"] as? [String: Any]
+
+        XCTAssertEqual(body["network_state"] as? String, "buyer_serving")
+        XCTAssertEqual(catalog?["state"] as? String, "live_verified")
+        XCTAssertEqual(catalog?["signer_key_id"] as? String, "streamvc-autotune-static-v5")
+    }
+
+    func testStatusDoesNotCallOfflineFallbackBuyerServing() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        await status.setCoordinatorSession(connected: true)
+        let context = ProviderCatalogStatusContext(
+            trust: ServeCommand.CatalogRuntimeTrust(
+                state: "safe_offline_fallback",
+                releaseID: "baked-release",
+                digest: String(repeating: "d", count: 64),
+                signerKeyID: nil,
+                source: "baked"
+            ),
+            donorMode: false,
+            catalogKey: "model-key",
+            catalogModelID: "org/model",
+            modelRevision: nil,
+            artifactSHA256: nil,
+            configuredReleaseID: nil,
+            configuredCatalogDigest: nil
+        )
+
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            catalogStatus: context
+        )
+
+        XCTAssertEqual(body["network_state"] as? String, "safe_offline_fallback")
+    }
+
+    func testStatusCallsFallbackBuyerServingAfterCoordinatorCompatibilityAck() async {
+        let status = ProviderStatus(modelID: "m", modelLoaded: true, capacity: makeCapacity())
+        await status.setCoordinatorSession(connected: true)
+        await status.setCatalogCompatibilityConfirmed(true)
+        let context = ProviderCatalogStatusContext(
+            trust: ServeCommand.CatalogRuntimeTrust(
+                state: "safe_offline_fallback",
+                releaseID: "recognized-previous",
+                digest: String(repeating: "d", count: 64),
+                signerKeyID: "streamvc-autotune-static-v4",
+                source: "baked"
+            ),
+            donorMode: false,
+            catalogKey: "model-key",
+            catalogModelID: "org/model",
+            modelRevision: nil,
+            artifactSHA256: nil,
+            configuredReleaseID: nil,
+            configuredCatalogDigest: nil
+        )
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.streamvc.live/ws/provider",
+            catalogStatus: context
+        )
+        XCTAssertEqual(body["network_state"] as? String, "buyer_serving")
+        XCTAssertEqual((body["catalog"] as? [String: Any])?["state"] as? String, "safe_offline_fallback")
+    }
+
     func testSpecDecodeStatusSuppressesTelemetryOnRuntimeGenerationMismatch() async {
         let status = ProviderStatus(
             modelID: "m",

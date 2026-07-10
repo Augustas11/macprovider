@@ -61,8 +61,16 @@ struct AgentSnapshot: Equatable {
 
     var cliVersion: String?
     /// Whether macprovider-cli reports an active coordinator WebSocket session.
-    /// Distinct from local model readiness (`state == .serving` requires both).
+    /// Distinct from verified buyer-serving readiness.
     var coordinatorConnected: Bool?
+    /// Canonical provider state reported by /v1/status. `buyer_serving` is the
+    /// only state that proves local readiness, catalog trust, and admission.
+    var networkState: String?
+    var catalogState: String?
+    var catalogReleaseID: String?
+    var catalogDigest: String?
+    var catalogSignerKeyID: String?
+    var catalogSource: String?
     var coordinatorRecommendedVersion: String?
     var latestReleaseVersion: String?
     var cliUpdateInProgress: Bool
@@ -109,6 +117,12 @@ struct AgentSnapshot: Equatable {
         lastError: nil,
         cliVersion: nil,
         coordinatorConnected: nil,
+        networkState: nil,
+        catalogState: nil,
+        catalogReleaseID: nil,
+        catalogDigest: nil,
+        catalogSignerKeyID: nil,
+        catalogSource: nil,
         coordinatorRecommendedVersion: nil,
         latestReleaseVersion: nil,
         cliUpdateInProgress: false,
@@ -123,7 +137,11 @@ enum AgentSnapshotPresenter {
     }
 
     private static func isNetworkReady(_ s: AgentSnapshot) -> Bool {
-        s.state == .serving && s.coordinatorConnected == true
+        guard s.state == .serving else { return false }
+        if let networkState = s.networkState {
+            return networkState == "buyer_serving"
+        }
+        return s.coordinatorConnected == true
     }
 
     private static func isLocalOnly(_ s: AgentSnapshot) -> Bool {

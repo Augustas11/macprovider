@@ -5,6 +5,27 @@ import XCTest
 @testable import macprovider_cli
 
 final class AutotuneRecommendTests: XCTestCase {
+    func testCandidateCatalogSharedNestedSchemaCorpus() throws {
+        let corpus = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("catalog/autotune/testdata", isDirectory: true)
+
+        XCTAssertNoThrow(try AutotuneStaticInputs.decodeCandidateCatalog(
+            Data(contentsOf: corpus.appendingPathComponent("valid-workload-profile.json"))
+        ))
+        for fixture in [
+            "invalid-workload-profiles-type.json",
+            "invalid-draft-candidates-type.json",
+            "invalid-workload-no-winner-samples.json",
+        ] {
+            XCTAssertThrowsError(try AutotuneStaticInputs.decodeCandidateCatalog(
+                Data(contentsOf: corpus.appendingPathComponent(fixture))
+            ), fixture)
+        }
+    }
+
     func testRecommendationSelectsPaidEligibleRowAboveThreshold() throws {
         let request = try makeRequest()
 
@@ -466,6 +487,28 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(AutotuneRecommendEngine.cachedBenchmarkAdmitted(stale, request: request, modelKey: modelKey))
     }
 
+    func testRowIdentityPreservesEvidenceAcrossUnrelatedCatalogChange() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        benchmark.candidateRowIdentity = try XCTUnwrap(request.candidateCatalog.rowIdentity(for: modelKey))
+        benchmark.candidateCatalogSHA256 = "previous-release-digest"
+        request.benchmarks[modelKey] = benchmark
+        request.candidateCatalog.rows["qwen3-8b"]?.notes = "unrelated release note"
+
+        XCTAssertTrue(AutotuneRecommendEngine.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey))
+    }
+
+    func testRowIdentityRejectsChangedSelectedCatalogRow() throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        var benchmark = try XCTUnwrap(request.benchmarks[modelKey])
+        benchmark.candidateRowIdentity = try XCTUnwrap(request.candidateCatalog.rowIdentity(for: modelKey))
+        request.candidateCatalog.rows[modelKey]?.benchGate.minSustainedTPS += 1
+
+        XCTAssertFalse(AutotuneRecommendEngine.cachedBenchmarkAdmitted(benchmark, request: request, modelKey: modelKey))
+    }
+
     func testRateCardFallsThroughToDefaultForArbitraryModelKey() throws {
         // v1.7.6 Track A1: any model without a specific rate-card row
         // falls through to the "default" row so probe-feasible models
@@ -637,7 +680,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertFalse(result.jsonString().contains("selected_candidate"))
     }
 
-    func testPayoutScoreRanksAboveThroughputAndDemand() throws {
+    func testExpectedEarningsScoreIncludesThroughputAndDemand() throws {
         var request = try makeRequest()
         let candidateTemplate = try XCTUnwrap(request.candidateCatalog.rows.values.first)
         let demandTemplate = try XCTUnwrap(request.demandRank.rows.values.first)
@@ -682,7 +725,7 @@ final class AutotuneRecommendTests: XCTestCase {
         highThroughputCandidate.modelSHA256 = String(repeating: "c", count: 64)
         request.candidateCatalog.rows[highThroughputKey] = highThroughputCandidate
         var highDemand = demandTemplate
-        highDemand.demandWeight = 10
+        highDemand.demandWeight = 1
         request.demandRank.rows[highThroughputKey] = highDemand
         request.rateCard.rows[highThroughputKey] = RateCardProjection.Row(
             promptRatePerMtok: 13_500,
@@ -708,10 +751,10 @@ final class AutotuneRecommendTests: XCTestCase {
 
         let result = AutotuneRecommendEngine().recommend(request)
 
-        XCTAssertEqual(result.recommendedModel, highPayoutKey)
+        XCTAssertEqual(result.recommendedModel, highThroughputKey)
         XCTAssertGreaterThan(
-            try XCTUnwrap(result.candidates.first?.rawScore),
-            try XCTUnwrap(result.candidates.first { $0.model == highThroughputKey }?.rawScore)
+            try XCTUnwrap(result.allCandidates.first { $0.model == highThroughputKey }?.rawScore),
+            try XCTUnwrap(result.allCandidates.first { $0.model == highPayoutKey }?.rawScore)
         )
     }
 
@@ -771,6 +814,31 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(first.candidates.first?.rawScore, second.candidates.first?.rawScore)
     }
 
+    func testSupplyDeficitMultiplierChangesExpectedEarningsScore() throws {
+        var request = try makeRequest(modelKey: "qwen3-coder-30b-a3b-instruct")
+        let baseline = try XCTUnwrap(AutotuneRecommendEngine().recommend(request).selectedCandidate?.rawScore)
+        request.demandRank.rows["qwen3-coder-30b-a3b-instruct"]?.supplyDeficitMultiplier = 2
+        let shortage = try XCTUnwrap(AutotuneRecommendEngine().recommend(request).selectedCandidate?.rawScore)
+
+        XCTAssertEqual(shortage, baseline * 2, accuracy: 0.000001)
+    }
+
+    func testCatalogIntegrityWarningBlocksPaidRecommendation() throws {
+        var request = try makeRequest(modelKey: "qwen3-coder-30b-a3b-instruct")
+        request.warnings.insert(.candidateCatalogIntegrityFailure)
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        XCTAssertNil(result.recommendedModel)
+        XCTAssertTrue(result.allCandidates.allSatisfy { !$0.eligible })
+    }
+
+    func testPaidTrustBlockRecognizesCatalogAndDemandFailuresOnly() {
+        XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.candidateCatalogIntegrityFailure]))
+        XCTAssertTrue(AutotuneRecommendEngine.paidTrustBlocks([.demandRankUpdateRequired]))
+        XCTAssertFalse(AutotuneRecommendEngine.paidTrustBlocks([.candidateCatalogFallbackUsed, .rateCardFallbackUsed]))
+    }
+
     func testRecommendationIsDeterministicForSameDiversificationID() throws {
         let request = try makeRequest()
 
@@ -795,10 +863,11 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticFallbackAndStaleWarnings() async throws {
         let validFetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-07-07-p2-qwen3-8b", with: "fetched-2026-07-10")
-            .replacingOccurrences(of: "2026-07-01T00:00:00Z", with: "2026-07-10T00:00:00Z")
+            .replacingOccurrences(of: "published-2026-07-10-catalog-recovery-v1", with: "fetched-2026-07-15")
+            .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-07-15T00:00:00Z")
             .utf8)
-        let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA=="}"#.utf8)
+        let signature = Data(repeating: 0, count: 64).base64EncodedString()
+        let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
         let staleInputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? sidecar : validFetched },
             verifySignature: { _, _ in true },
@@ -808,7 +877,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let stale = await staleInputs.loadDemandRank()
 
         XCTAssertFalse(stale.usedFallback)
-        XCTAssertEqual(stale.value.version, "fetched-2026-07-10")
+        XCTAssertEqual(stale.value.version, "fetched-2026-07-15")
         XCTAssertTrue(stale.warnings.contains(.demandRankStale))
 
         let fallbackInputs = AutotuneStaticInputs(
@@ -823,8 +892,8 @@ final class AutotuneRecommendTests: XCTestCase {
 
     func testSignedStaticRejectsSidecarWithExtraFields() async throws {
         let fetched = Data(AutotuneStaticInputs.bakedDemandRankJSON
-            .replacingOccurrences(of: "published-2026-07-07-p2-qwen3-8b", with: "fetched-2026-07-10")
-            .replacingOccurrences(of: "2026-07-01T00:00:00Z", with: "2026-07-10T00:00:00Z")
+            .replacingOccurrences(of: "published-2026-07-10-catalog-recovery-v1", with: "fetched-2026-07-15")
+            .replacingOccurrences(of: "2026-07-10T19:00:00Z", with: "2026-07-15T00:00:00Z")
             .utf8)
         let sidecar = Data(#"{"key_id":"streamvc-autotune-static-v4","alg":"ed25519","signature":"AA==","extra":true}"#.utf8)
         let inputs = AutotuneStaticInputs(
@@ -837,6 +906,88 @@ final class AutotuneRecommendTests: XCTestCase {
 
         XCTAssertTrue(selection.usedFallback)
         XCTAssertTrue(selection.warnings.contains(.demandRankFallbackUsed))
+    }
+
+    func testSignedStaticRejectsDuplicateSidecarKeys() async throws {
+        let payload = Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
+        let signature = Data(repeating: 0, count: 64).base64EncodedString()
+        let sidecar = Data("{\"key_id\":\"streamvc-autotune-static-v4\",\"key_id\":\"streamvc-autotune-static-v4\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
+            verifySignature: { _, _ in true },
+            now: { Self.date("2026-07-11T00:00:00Z") }
+        )
+
+        let selection = await inputs.loadDemandRank()
+
+        XCTAssertTrue(selection.usedFallback)
+        XCTAssertTrue(selection.warnings.contains(.demandRankIntegrityFailure))
+    }
+
+    func testDemandJSONSuccessWithMissingSidecarIsIntegrityFailure() async {
+        let payload = Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in
+                if url.path.hasSuffix(".sig") { throw URLError(.fileDoesNotExist) }
+                return payload
+            }
+        )
+
+        let selection = await inputs.loadDemandRank()
+
+        XCTAssertTrue(selection.usedFallback)
+        XCTAssertTrue(selection.warnings.contains(.demandRankIntegrityFailure))
+    }
+
+    func testCandidateJSONSuccessWithMissingSidecarIsIntegrityFailure() async {
+        let payload = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in
+                if url.path.hasSuffix(".sig") { throw URLError(.fileDoesNotExist) }
+                return payload
+            }
+        )
+
+        let selection = await inputs.loadCandidateCatalog()
+
+        XCTAssertTrue(selection.usedFallback)
+        XCTAssertTrue(selection.warnings.contains(.candidateCatalogIntegrityFailure))
+    }
+
+    func testSignedStaticAcceptsBridgeKeyFromTrustedKeyring() async throws {
+        let payload = Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let signature = try privateKey.signature(for: payload).base64EncodedString()
+        let keyID = "streamvc-autotune-static-v5"
+        let sidecar = Data("{\"key_id\":\"\(keyID)\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+        var keyring = AutotuneStaticInputs.defaultTrustedPublicKeys
+        keyring[keyID] = privateKey.publicKey.rawRepresentation.base64EncodedString()
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
+            trustedPublicKeys: keyring,
+            now: { Self.date("2026-07-11T00:00:00Z") }
+        )
+
+        let selection = await inputs.loadDemandRank()
+
+        XCTAssertFalse(selection.usedFallback)
+        XCTAssertFalse(selection.warnings.contains(.demandRankIntegrityFailure))
+    }
+
+    func testSignedStaticUnknownKeyIsIntegrityFailure() async throws {
+        let payload = Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
+        let signature = Data(repeating: 0, count: 64).base64EncodedString()
+        let sidecar = Data("{\"key_id\":\"unknown-v9\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+        let inputs = AutotuneStaticInputs(
+            fetch: { url in url.path.hasSuffix(".sig") ? sidecar : payload },
+            verifySignature: { _, _ in true },
+            now: { Self.date("2026-07-11T00:00:00Z") }
+        )
+
+        let selection = await inputs.loadDemandRank()
+
+        XCTAssertTrue(selection.usedFallback)
+        XCTAssertTrue(selection.warnings.contains(.demandRankIntegrityFailure))
     }
 
     func testPinnedPublicKeyIsValidCurve25519SigningKey() {
@@ -1696,7 +1847,7 @@ final class AutotuneRecommendTests: XCTestCase {
         let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: "provider-a")
         try Data("""
-        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-07-p2-drift","demand_rank_version":"published-2026-07-07-p2-qwen3-8b","candidate_catalog_version":"published-2026-07-10-llama32-hash-repair","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-07-p2-drift","demand_rank_version":"published-2026-07-10-catalog-recovery-v1","candidate_catalog_version":"published-2026-07-10-catalog-recovery-v1","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
         """.utf8).write(to: stateURL)
 
         let staleSince = await StatusCommand.staleRecommendationSince(
@@ -1718,6 +1869,47 @@ final class AutotuneRecommendTests: XCTestCase {
 
         XCTAssertNil(staleSince)
         XCTAssertEqual(staleWithDifferentProvider, Optional(Self.date("2026-07-02T00:00:00Z")))
+    }
+
+    func testFreshnessIsStaleWhenRemoteCatalogIntegrityFails() async throws {
+        let dir = try tempDir()
+        let secretURL = dir.appendingPathComponent("secret")
+        let secret = Data(repeating: 9, count: 32)
+        try secret.write(to: secretURL)
+        XCTAssertEqual(chmod(secretURL.path, 0o600), 0)
+        let stateURL = dir.appendingPathComponent("last-recommendation.json")
+        let fingerprint = MachineFingerprint(ramGB: 64, chip: "Apple M4 Pro", osVersion: "macOS 15", binaryVersion: "test")
+        let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: "provider-a")
+        let catalogBytes = Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+        let catalogSHA = AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalogBytes)
+        try Data("""
+        {"generated_at":"2026-07-02T00:00:00Z","rate_card_version":"baked-2026-07-07-p2-drift","demand_rank_version":"published-2026-07-10-catalog-recovery-v1","candidate_catalog_version":"published-2026-07-10-catalog-recovery-v1","candidate_catalog_sha256":"\(catalogSHA)","benchmark_id":"bench-1","benchmark_generated_at":"2026-07-02T00:00:00Z","binary_version":"test","hardware_identity_hash":"\(identity.cacheIdentityHash)","recommended_model":"qwen3-coder-30b-a3b-instruct"}
+        """.utf8).write(to: stateURL)
+        let signature = Data(repeating: 0, count: 64).base64EncodedString()
+        let sidecar = Data("{\"key_id\":\"\(AutotuneStaticInputs.keyID)\",\"alg\":\"ed25519\",\"signature\":\"\(signature)\"}".utf8)
+        let staticInputs = AutotuneStaticInputs(
+            fetch: { url in
+                if url.path.hasSuffix(".sig") { return sidecar }
+                if url.path.hasSuffix("/demand-rank") {
+                    return Data(AutotuneStaticInputs.bakedDemandRankJSON.utf8)
+                }
+                if url.path.hasSuffix("/autotune-candidates") { return catalogBytes }
+                throw AutotuneRecommendError.invalidStaticJSON("offline")
+            },
+            verifySignature: { _, _ in false },
+            now: { Self.date("2026-07-02T00:00:00Z") }
+        )
+
+        let status = await RecommendationFreshnessChecker(
+            staticInputs: staticInputs,
+            fingerprint: fingerprint,
+            providerID: "provider-a",
+            hmacSecretURL: secretURL,
+            stateURL: stateURL,
+            now: Self.date("2026-07-02T00:00:00Z")
+        ).status()
+
+        XCTAssertEqual(status, .stale(Self.date("2026-07-02T00:00:00Z")))
     }
 
     // MARK: - Default-tier fallthrough + swap tolerance (v1.7.6 Track A1/A2a)
@@ -2211,6 +2403,7 @@ final class AutotuneRecommendTests: XCTestCase {
           "version": "fixture-spec029",
           "generated_at": "2026-07-09T00:00:00Z",
           "source": "operator_curated_autotune_candidate_catalog",
+          "policy_version": "autotune-policy-v1",
           "rows": {
             "fixture-model": {
               "model_id": "mlx-community/Fixture-Model-4bit",

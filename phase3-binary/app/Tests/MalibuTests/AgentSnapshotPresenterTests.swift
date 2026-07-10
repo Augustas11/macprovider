@@ -16,6 +16,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         var s = AgentSnapshot.empty
         s.state = .serving
         s.coordinatorConnected = true
+        s.networkState = "buyer_serving"
         XCTAssertEqual(AgentSnapshotPresenter.short(s), "Serving")
     }
 

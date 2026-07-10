@@ -68,6 +68,7 @@ type HardwareEvidenceBenchmark struct {
 	ThermalThrottleDetected bool    `json:"thermal_throttle_detected"`
 	ArtifactSHA256          string  `json:"artifact_sha256"`
 	CandidateCatalogSHA256  string  `json:"candidate_catalog_sha256"`
+	CandidateRowIdentity    string  `json:"candidate_row_identity,omitempty"`
 	BenchmarkID             string  `json:"benchmark_id,omitempty"`
 	GeneratedAt             string  `json:"generated_at"`
 	BinaryVersion           string  `json:"binary_version"`
@@ -459,6 +460,9 @@ func (h *Handler) validateHardwareEvidence(req HardwareEvidenceRequest, tokenPro
 		}
 		if b.HardwareIdentityHash != req.Hardware.HardwareIdentityHash {
 			return time.Time{}, errors.New("benchmark.hardware_identity_hash must match hardware")
+		}
+		if b.CandidateRowIdentity != "" && (len(b.CandidateRowIdentity) != 64 || !isLowerHex(b.CandidateRowIdentity)) {
+			return time.Time{}, errors.New("benchmark.candidate_row_identity must be 64 lowercase hex characters")
 		}
 	}
 	return generatedAt.UTC(), nil

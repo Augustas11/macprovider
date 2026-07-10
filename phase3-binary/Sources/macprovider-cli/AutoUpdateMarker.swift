@@ -9,8 +9,10 @@ import Foundation
 ///                                      \-> rolled_back
 ///
 /// State is represented by durable filesystem markers. The CLI writes
-/// pending.json only after the rollback backup is fsynced, then swaps the
-/// binary while holding update.lock. The restarted provider commits by writing
+/// pending.json only after the binary and owned-release rollback snapshots are
+/// fsynced, then swaps the complete release payload while holding update.lock.
+/// Legacy pending markers without a release snapshot remain binary-only. The
+/// restarted provider commits by writing
 /// a success sentinel and clearing pending.json. If a crash, sleep, or restart
 /// leaves pending.json behind past marker_deadline, both the CLI recovery path
 /// and watchdog treat that as pending_install requiring rollback, not as an
@@ -25,6 +27,35 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
     let mode: Int
     let sha256: String
     let markerDeadline: String
+    let releaseBackupPath: String?
+    let releaseBackupSHA256: String?
+    let commitOwner: String?
+
+    init(
+        updateID: String,
+        targetVersion: String,
+        targetPath: String,
+        backupPath: String,
+        size: Int,
+        mode: Int,
+        sha256: String,
+        markerDeadline: String,
+        releaseBackupPath: String? = nil,
+        releaseBackupSHA256: String? = nil,
+        commitOwner: String? = nil
+    ) {
+        self.updateID = updateID
+        self.targetVersion = targetVersion
+        self.targetPath = targetPath
+        self.backupPath = backupPath
+        self.size = size
+        self.mode = mode
+        self.sha256 = sha256
+        self.markerDeadline = markerDeadline
+        self.releaseBackupPath = releaseBackupPath
+        self.releaseBackupSHA256 = releaseBackupSHA256
+        self.commitOwner = commitOwner
+    }
 
     enum CodingKeys: String, CodingKey {
         case updateID = "update_id"
@@ -35,6 +66,9 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
         case mode
         case sha256
         case markerDeadline = "marker_deadline"
+        case releaseBackupPath = "release_backup_path"
+        case releaseBackupSHA256 = "release_backup_sha256"
+        case commitOwner = "commit_owner"
     }
 }
 
@@ -112,7 +146,9 @@ final class AutoUpdateLock: @unchecked Sendable {
     }
 }
 
-struct AutoUpdateMarkerStore: Sendable {
+// FileManager is thread-safe for independent filesystem operations. The store
+// carries no mutable shared state beyond that Foundation reference.
+struct AutoUpdateMarkerStore: @unchecked Sendable {
     let homeDirectory: URL
     let fileManager: FileManager
 
@@ -186,6 +222,11 @@ struct AutoUpdateMarkerStore: Sendable {
             .appendingPathComponent(".macprovider-cli.rollback-\(updateID)")
     }
 
+    func releaseRollbackBackupPath(binaryURL: URL, updateID: String) -> URL {
+        binaryURL.deletingLastPathComponent()
+            .appendingPathComponent(".macprovider-cli.release-rollback-\(updateID)", isDirectory: true)
+    }
+
     func successSentinelPath(binaryURL: URL, updateID: String) -> URL {
         binaryURL.deletingLastPathComponent()
             .appendingPathComponent(".macprovider-cli.success-\(updateID)")
@@ -209,6 +250,58 @@ struct AutoUpdateMarkerStore: Sendable {
             sha256: sha,
             markerDeadline: deadline
         )
+    }
+
+    func preserveReleaseRollbackBackup(
+        binaryURL: URL,
+        updateID: String,
+        targetVersion: String,
+        commitOwner: String = "coordinator"
+    ) throws -> AutoUpdatePendingMarker {
+        let installDirectory = binaryURL.deletingLastPathComponent()
+        try validateTrustedBinaryDirectory(installDirectory)
+        let attrs = try fileManager.attributesOfItem(atPath: binaryURL.path)
+        let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0o755
+        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+        let sha = try Self.sha256(file: binaryURL)
+        let binaryBackup = rollbackBackupPath(binaryURL: binaryURL, updateID: updateID)
+        let releaseBackup = releaseRollbackBackupPath(binaryURL: binaryURL, updateID: updateID)
+
+        try atomicCopyNoFollow(from: binaryURL, to: binaryBackup, mode: mode)
+        do {
+            try fileManager.createDirectory(
+                at: releaseBackup,
+                withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700]
+            )
+            for entry in try ownedReleaseResourceEntries(in: installDirectory) {
+                try validateReleaseEntry(entry)
+                try fileManager.copyItem(
+                    at: entry,
+                    to: releaseBackup.appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
+                )
+            }
+            try fsyncTree(releaseBackup)
+            let releaseSHA = try releaseTreeSHA256(releaseBackup)
+            let deadline = ISO8601DateFormatter.autoupdate.string(from: Date().addingTimeInterval(60 + 300))
+            return AutoUpdatePendingMarker(
+                updateID: updateID,
+                targetVersion: targetVersion,
+                targetPath: binaryURL.path,
+                backupPath: binaryBackup.path,
+                size: size,
+                mode: mode,
+                sha256: sha,
+                markerDeadline: deadline,
+                releaseBackupPath: releaseBackup.path,
+                releaseBackupSHA256: releaseSHA,
+                commitOwner: commitOwner
+            )
+        } catch {
+            try? fileManager.removeItem(at: releaseBackup)
+            try? fileManager.removeItem(at: binaryBackup)
+            throw error
+        }
     }
 
     func writePending(_ marker: AutoUpdatePendingMarker) throws {
@@ -251,21 +344,65 @@ struct AutoUpdateMarkerStore: Sendable {
         else {
             throw AutoUpdateMarkerError.backupCorrupt
         }
+        try validateReleaseBackup(marker)
     }
 
     func restoreBackup(_ marker: AutoUpdatePendingMarker) throws {
         try validateBackup(marker)
         let backupURL = URL(fileURLWithPath: marker.backupPath)
         let targetURL = URL(fileURLWithPath: marker.targetPath)
-        let staged = targetURL.deletingLastPathComponent()
-            .appendingPathComponent(".\(targetURL.lastPathComponent).rollback-\(UUID().uuidString)")
-        try atomicCopyNoFollow(from: backupURL, to: staged, mode: marker.mode)
-        if rename(staged.path, targetURL.path) != 0 {
-            let errnoValue = errno
-            try? fileManager.removeItem(at: staged)
-            throw AutoUpdateMarkerError.writeFailed(targetURL.path, errnoValue)
+        if let releaseBackupPath = marker.releaseBackupPath {
+            let releaseBackup = URL(fileURLWithPath: releaseBackupPath, isDirectory: true)
+            let staging = targetURL.deletingLastPathComponent()
+                .appendingPathComponent(".macprovider-cli.release-restore-\(UUID().uuidString.lowercased())", isDirectory: true)
+            try fileManager.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            defer { try? fileManager.removeItem(at: staging) }
+            for entry in try ownedReleaseResourceEntries(in: releaseBackup) {
+                try fileManager.copyItem(
+                    at: entry,
+                    to: staging.appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
+                )
+            }
+            try fsyncTree(staging)
+            try removeOwnedReleaseResources(in: targetURL.deletingLastPathComponent())
+            for entry in try ownedReleaseResourceEntries(in: staging) {
+                try fileManager.moveItem(
+                    at: entry,
+                    to: targetURL.deletingLastPathComponent()
+                        .appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
+                )
+            }
+            fsyncDirectory(targetURL.deletingLastPathComponent())
         }
-        fsyncDirectory(targetURL.deletingLastPathComponent())
+        try atomicCopyNoFollow(from: backupURL, to: targetURL, mode: marker.mode)
+    }
+
+    func activateReleasePayload(from payloadDirectory: URL, newBinary: URL, to currentBinary: URL) throws {
+        try validateReleasePayload(at: payloadDirectory, newBinary: newBinary)
+        let liveDirectory = currentBinary.deletingLastPathComponent()
+        try validateTrustedBinaryDirectory(liveDirectory)
+        let staging = liveDirectory.appendingPathComponent(
+            ".macprovider-cli.release-activation-\(UUID().uuidString.lowercased())",
+            isDirectory: true
+        )
+        try fileManager.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        defer { try? fileManager.removeItem(at: staging) }
+
+        for entry in try ownedReleaseResourceEntries(in: payloadDirectory) {
+            try fileManager.copyItem(
+                at: entry,
+                to: staging.appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
+            )
+        }
+        try fsyncTree(staging)
+        try removeOwnedReleaseResources(in: liveDirectory)
+        for entry in try ownedReleaseResourceEntries(in: staging) {
+            try fileManager.moveItem(
+                at: entry,
+                to: liveDirectory.appendingPathComponent(entry.lastPathComponent, isDirectory: entry.hasDirectoryPath)
+            )
+        }
+        try atomicCopyNoFollow(from: newBinary, to: currentBinary, mode: 0o755)
     }
 
     func cooldown(target: String, failureClass: AutoUpdateFailureClass) -> (attempt: Int, until: Date)? {
@@ -313,8 +450,7 @@ struct AutoUpdateMarkerStore: Sendable {
             targetVersion: marker.targetVersion
         )
         clearPending()
-        try? fileManager.removeItem(atPath: marker.backupPath)
-        removeLockFile()
+        removeRollbackBackups(marker)
     }
 
     func finalizeSuccessfulUpdate(_ marker: AutoUpdatePendingMarker) throws {
@@ -334,7 +470,6 @@ struct AutoUpdateMarkerStore: Sendable {
         if let target {
             recordCooldown(target: target, failureClass: failureClass)
         }
-        removeLockFile()
     }
 
     func recoverOrphanedMarker(_ marker: AutoUpdatePendingMarker) -> AutoUpdateOrphanRecoveryOutcome {
@@ -343,33 +478,28 @@ struct AutoUpdateMarkerStore: Sendable {
         } catch {
             quarantinePendingMarker()
             removeBackupIfSafe(marker.backupPath)
-            removeLockFile()
             return .markerInvalid
         }
         do {
             try validateBackup(marker)
         } catch {
             quarantinePendingMarker()
-            removeLockFile()
             return .backupCorrupt(marker, "backup_missing_or_hash_mismatch")
         }
         do {
             try restoreBackup(marker)
             clearPending()
-            try? fileManager.removeItem(atPath: marker.backupPath)
+            removeRollbackBackups(marker)
             recordCooldown(target: marker.targetVersion, failureClass: .orphanedPendingMarker)
-            removeLockFile()
             return .restored(marker)
         } catch {
             quarantinePendingMarker()
-            removeLockFile()
             return .backupCorrupt(marker, String(describing: error))
         }
     }
 
     func recoverInvalidPendingMarker() {
         quarantinePendingMarker()
-        removeLockFile()
     }
 
     private func quarantinePendingMarker() {
@@ -408,11 +538,234 @@ struct AutoUpdateMarkerStore: Sendable {
         guard expectedBackup.deletingLastPathComponent().path == targetDir.path else {
             throw AutoUpdateMarkerError.trustedRootInvalid("backup_dir_mismatch")
         }
+        switch (marker.releaseBackupPath, marker.releaseBackupSHA256) {
+        case (nil, nil):
+            break
+        case let (.some(path), .some(_)):
+            let expectedReleaseBackup = releaseRollbackBackupPath(binaryURL: targetURL, updateID: marker.updateID)
+            guard path == expectedReleaseBackup.path,
+                  expectedReleaseBackup.deletingLastPathComponent().path == targetDir.path
+            else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("release_backup_path_derivation_mismatch")
+            }
+        default:
+            throw AutoUpdateMarkerError.invalidMarker
+        }
         try validateTrustedBinaryDirectory(targetDir)
     }
 
-    private func removeLockFile() {
-        try? fileManager.removeItem(at: lockURL)
+    private func validateReleaseBackup(_ marker: AutoUpdatePendingMarker) throws {
+        guard let path = marker.releaseBackupPath,
+              let expectedSHA = marker.releaseBackupSHA256
+        else {
+            if marker.releaseBackupPath != nil || marker.releaseBackupSHA256 != nil {
+                throw AutoUpdateMarkerError.invalidMarker
+            }
+            return
+        }
+        let backup = URL(fileURLWithPath: path, isDirectory: true)
+        try validateReleaseTree(backup)
+        guard try releaseTreeSHA256(backup) == expectedSHA else {
+            throw AutoUpdateMarkerError.backupCorrupt
+        }
+        for entry in try fileManager.contentsOfDirectory(
+            at: backup,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+        ) where !isOwnedReleaseResource(entry) {
+            throw AutoUpdateMarkerError.backupCorrupt
+        }
+    }
+
+    private func validateReleasePayload(at directory: URL, newBinary: URL) throws {
+        try validateReleaseTree(directory)
+        let binaryValues = try newBinary.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard newBinary.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL,
+              newBinary.lastPathComponent == "macprovider-cli",
+              binaryValues.isRegularFile == true,
+              binaryValues.isSymbolicLink != true
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("release_binary_invalid")
+        }
+        let entries = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+        )
+        func isRegular(_ entry: URL) -> Bool {
+            let values = try? entry.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            return values?.isRegularFile == true && values?.isSymbolicLink != true
+        }
+        func isDirectory(_ entry: URL) -> Bool {
+            let values = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            return values?.isDirectory == true && values?.isSymbolicLink != true
+        }
+        guard entries.contains(where: { $0.lastPathComponent == "mlx.metallib" && isRegular($0) }),
+              entries.contains(where: { $0.lastPathComponent == "THIRD-PARTY-NOTICES.txt" && isRegular($0) }),
+              entries.contains(where: { $0.pathExtension == "bundle" && isDirectory($0) }),
+              let catalog = entries.first(where: { $0.lastPathComponent == "catalog-release" && isDirectory($0) })
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("release_payload_incomplete")
+        }
+        for required in [
+            "release.json",
+            "trusted-keys.json",
+            "autotune-candidates.json",
+            "autotune-candidates.json.sig",
+            "demand-rank.json",
+            "demand-rank.json.sig",
+        ] {
+            let values = try catalog.appendingPathComponent(required)
+                .resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("release_catalog_incomplete")
+            }
+        }
+    }
+
+    private func ownedReleaseResourceEntries(in directory: URL) throws -> [URL] {
+        try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        ).filter(isOwnedReleaseResource)
+    }
+
+    private func isOwnedReleaseResource(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        return name == "mlx.metallib"
+            || name == "THIRD-PARTY-NOTICES.txt"
+            || name == "catalog-release"
+            || url.pathExtension == "bundle"
+    }
+
+    private func removeOwnedReleaseResources(in directory: URL) throws {
+        for entry in try ownedReleaseResourceEntries(in: directory) {
+            try fileManager.removeItem(at: entry)
+        }
+    }
+
+    func removeRollbackBackups(_ marker: AutoUpdatePendingMarker) {
+        try? fileManager.removeItem(atPath: marker.backupPath)
+        if let releaseBackupPath = marker.releaseBackupPath {
+            try? fileManager.removeItem(atPath: releaseBackupPath)
+        }
+    }
+
+    private func validateReleaseTree(_ rootURL: URL) throws {
+        var rootStat = stat()
+        guard lstat(rootURL.path, &rootStat) == 0,
+              (rootStat.st_mode & S_IFMT) == S_IFDIR,
+              rootStat.st_uid == getuid(),
+              (rootStat.st_mode & (S_IWGRP | S_IWOTH)) == 0
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_root_invalid")
+        }
+        guard let enumerator = fileManager.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: []
+        ) else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_enumeration_failed")
+        }
+        for case let entry as URL in enumerator {
+            var st = stat()
+            guard lstat(entry.path, &st) == 0 else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_entry_lstat_failed")
+            }
+            guard (st.st_mode & S_IFMT) != S_IFLNK else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_symlink")
+            }
+            guard st.st_uid == getuid() else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_wrong_owner")
+            }
+            guard (st.st_mode & (S_IWGRP | S_IWOTH)) == 0 else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_writable")
+            }
+            guard (st.st_mode & S_IFMT) == S_IFDIR
+                    || ((st.st_mode & S_IFMT) == S_IFREG && st.st_nlink == 1)
+            else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_type_or_link_invalid")
+            }
+        }
+    }
+
+    private func validateReleaseEntry(_ entry: URL) throws {
+        var st = stat()
+        guard lstat(entry.path, &st) == 0,
+              (st.st_mode & S_IFMT) != S_IFLNK,
+              st.st_uid == getuid(),
+              (st.st_mode & (S_IWGRP | S_IWOTH)) == 0
+        else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("release_entry_invalid")
+        }
+        if (st.st_mode & S_IFMT) == S_IFDIR {
+            try validateReleaseTree(entry)
+        } else if (st.st_mode & S_IFMT) != S_IFREG || st.st_nlink != 1 {
+            throw AutoUpdateMarkerError.trustedRootInvalid("release_entry_invalid")
+        }
+    }
+
+    private func releaseTreeSHA256(_ rootURL: URL) throws -> String {
+        try validateReleaseTree(rootURL)
+        guard let enumerator = fileManager.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: nil,
+            options: []
+        ) else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_enumeration_failed")
+        }
+        var records: [(String, Data)] = []
+        let resolvedRootPath = rootURL.resolvingSymlinksInPath().path
+        let prefix = resolvedRootPath.hasSuffix("/") ? resolvedRootPath : resolvedRootPath + "/"
+        for case let entry as URL in enumerator {
+            var st = stat()
+            let resolvedEntryPath = entry.resolvingSymlinksInPath().path
+            guard lstat(entry.path, &st) == 0, resolvedEntryPath.hasPrefix(prefix) else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_entry_invalid")
+            }
+            let relative = String(resolvedEntryPath.dropFirst(prefix.count))
+            guard !relative.isEmpty, !relative.contains("\0"), !relative.contains("\n") else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_path_invalid")
+            }
+            let mode = Int(st.st_mode & 0o7777)
+            let record: String
+            if (st.st_mode & S_IFMT) == S_IFDIR {
+                record = "d\0\(relative)\0\(mode)\0"
+            } else if (st.st_mode & S_IFMT) == S_IFREG {
+                record = "f\0\(relative)\0\(mode)\0\(st.st_size)\0\(try Self.sha256(file: entry))\0"
+            } else {
+                throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_entry_invalid")
+            }
+            records.append((relative, Data(record.utf8)))
+        }
+        var canonical = Data()
+        for record in records.sorted(by: { $0.0 < $1.0 }) {
+            canonical.append(record.1)
+        }
+        return SHA256.hash(data: canonical).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func fsyncTree(_ rootURL: URL) throws {
+        guard let enumerator = fileManager.enumerator(at: rootURL, includingPropertiesForKeys: nil) else {
+            throw AutoUpdateMarkerError.trustedRootInvalid("release_tree_enumeration_failed")
+        }
+        var directories = [rootURL]
+        for case let entry as URL in enumerator {
+            var st = stat()
+            guard lstat(entry.path, &st) == 0 else {
+                throw AutoUpdateMarkerError.openFailed(entry.path, errno)
+            }
+            if (st.st_mode & S_IFMT) == S_IFDIR {
+                directories.append(entry)
+            } else if (st.st_mode & S_IFMT) == S_IFREG {
+                let fd = open(entry.path, O_RDONLY | O_NOFOLLOW)
+                guard fd >= 0 else { throw AutoUpdateMarkerError.openFailed(entry.path, errno) }
+                fsync(fd)
+                close(fd)
+            }
+        }
+        for directory in directories.reversed() {
+            fsyncDirectory(directory)
+        }
     }
 
     func updateSignedPolicy(minimum: String?, revoked: [String]) async throws {
@@ -460,6 +813,10 @@ struct AutoUpdateMarkerStore: Sendable {
         guard pending.updateID.range(of: uuidV4, options: .regularExpression) != nil else {
             throw AutoUpdateMarkerError.invalidMarker
         }
+        if let commitOwner = pending.commitOwner,
+           commitOwner != "coordinator", commitOwner != "self_update" {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
         guard let normalized = try? AutoUpdateRecommendation.validate(pending.targetVersion).normalized,
               normalized == pending.targetVersion
         else {
@@ -477,6 +834,18 @@ struct AutoUpdateMarkerStore: Sendable {
             throw AutoUpdateMarkerError.invalidMarker
         }
         guard pending.sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            throw AutoUpdateMarkerError.invalidMarker
+        }
+        switch (pending.releaseBackupPath, pending.releaseBackupSHA256) {
+        case (nil, nil):
+            break
+        case let (.some(path), .some(sha)):
+            guard isCanonicalAbsolutePath(path),
+                  sha.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+            else {
+                throw AutoUpdateMarkerError.invalidMarker
+            }
+        default:
             throw AutoUpdateMarkerError.invalidMarker
         }
         guard let deadline = ISO8601DateFormatter.autoupdate.date(from: pending.markerDeadline),
@@ -504,7 +873,10 @@ struct AutoUpdateMarkerStore: Sendable {
         guard let contents = try? fileManager.contentsOfDirectory(at: binaryDirectory, includingPropertiesForKeys: nil) else {
             return []
         }
-        return contents.filter { $0.lastPathComponent.hasPrefix(".macprovider-cli.rollback-") }
+        return contents.filter {
+            $0.lastPathComponent.hasPrefix(".macprovider-cli.rollback-")
+                || $0.lastPathComponent.hasPrefix(".macprovider-cli.release-rollback-")
+        }
     }
 
     func readSuccessSentinel(_ url: URL) throws -> (updateID: String, binaryVersion: String) {
@@ -781,10 +1153,10 @@ private struct SignedPolicy: Codable {
 }
 
 private extension ISO8601DateFormatter {
-    static let autoupdate: ISO8601DateFormatter = {
+    static var autoupdate: ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         return formatter
-    }()
+    }
 }

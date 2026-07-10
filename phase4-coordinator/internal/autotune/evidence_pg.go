@@ -87,6 +87,7 @@ func decodeVerifiedEvidence(raw []byte, generatedAt, benchmarkCutoff time.Time) 
 			GeneratedAt             string  `json:"generated_at"`
 			BinaryVersion           string  `json:"binary_version"`
 			HardwareIdentityHash    string  `json:"hardware_identity_hash"`
+			CandidateRowIdentity    string  `json:"candidate_row_identity"`
 		} `json:"benchmarks"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
@@ -116,7 +117,8 @@ func decodeVerifiedEvidence(raw []byte, generatedAt, benchmarkCutoff time.Time) 
 			!isLowerSHA256(strings.TrimSpace(b.ArtifactSHA256)) ||
 			b.CandidateCatalogSHA256 != catalogSHA ||
 			b.BinaryVersion != payload.Hardware.BinaryVersion ||
-			b.HardwareIdentityHash != payload.Hardware.HardwareIdentityHash {
+			b.HardwareIdentityHash != payload.Hardware.HardwareIdentityHash ||
+			(strings.TrimSpace(b.CandidateRowIdentity) != "" && !isLowerSHA256(strings.TrimSpace(b.CandidateRowIdentity))) {
 			return VerifiedEvidence{}, errors.New("verified autotune benchmark binding mismatch")
 		}
 		out.Benchmarks = append(out.Benchmarks, VerifiedBenchmark{
@@ -128,6 +130,7 @@ func decodeVerifiedEvidence(raw []byte, generatedAt, benchmarkCutoff time.Time) 
 			ThermalThrottleDetected: b.ThermalThrottleDetected,
 			ArtifactSHA256:          strings.TrimSpace(b.ArtifactSHA256),
 			CandidateCatalogSHA256:  strings.TrimSpace(b.CandidateCatalogSHA256),
+			CandidateRowIdentity:    strings.TrimSpace(b.CandidateRowIdentity),
 		})
 	}
 	return out, nil

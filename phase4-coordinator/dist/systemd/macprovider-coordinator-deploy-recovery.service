@@ -1,0 +1,7 @@
+[Unit]
+Description=Recover interrupted Mac Provider coordinator deploy
+Before=macprovider-coordinator.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/macprovider/coordinator-deploy-recover --pre-start

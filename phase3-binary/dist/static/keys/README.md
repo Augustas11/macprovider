@@ -92,23 +92,31 @@ openssl pkey -in v4.pem -outform DER | tail -c 32 | base64
 The Curve25519 wrapper the client uses accepts raw 32-byte keys, not
 PEM/DER, so the extraction step is required if you generate via OpenSSL.
 
-## Rotation procedure (for future v4 → v5)
+## Rotation procedure (v4 → v5 bridge)
 
-1. Generate a fresh keypair as above.
-2. Write PRIVATE to `~/.config/macprovider/keys/autotune-static-v5.private.base64`,
-   `chmod 0600`. Do NOT commit.
-3. Add `autotune-static-v5.public.base64` and leave earlier public keys
-   for audit/history.
-4. Update `AutotuneRecommend.swift`:
-   `keyID = "streamvc-autotune-static-v5"`,
-   `autotune_static_json_ed25519_v5 = "<new pubkey>"`,
-   `publicKeyBase64 = autotune_static_json_ed25519_v5`.
-5. Update tests: replace all `streamvc-autotune-static-v4` occurrences
-   with `-v5` and the pubkey constant name.
-6. Update `scripts/resign-autotune-static.sh`: `KEY_ID`, default key
-   path, and `AUTOTUNE_STATIC_V*_PRIVATE_KEY_PATH` env var name.
-7. Run `scripts/resign-autotune-static.sh` to produce fresh v5-signed
-   sidecars.
-8. `swift test` — full suite must pass.
-9. Add a rotation-history row above.
-10. Ship in a version bump; deploy to Pearl.
+Trusted release keys are declared in
+`phase3-binary/catalog/autotune/trusted-keys.json`. Provider and coordinator
+verifiers resolve the sidecar `key_id` through a keyring; they do not replace a
+single global key during rotation.
+
+1. Generate v5 through the approved recoverable signer or escrow process.
+2. Store the private key outside git with at least two authorized recovery
+   holders. Write the raw local signing export, when required, to
+   `~/.config/macprovider/keys/autotune-static-v5.private.base64` with mode 0600.
+3. Add the v5 public key to `trusted-keys.json` with status `bridge`. Keep v4
+   `active`.
+4. Generate, test, and release provider and coordinator builds that trust both
+   v4 and v5 while production continues to publish v4.
+5. Confirm the supported client floor has the bridge build.
+6. Set `AUTOTUNE_STATIC_KEY_ID=streamvc-autotune-static-v5` and
+   `AUTOTUNE_STATIC_PRIVATE_KEY_PATH=<secure-v5-export>` when signing the first
+   v5 release. `scripts/resign-autotune-static.sh` refuses a private key that
+   does not derive the declared public key.
+7. Run `make verify-autotune-catalog`, full Swift/Go tests, and Pearl staged
+   verification before activation.
+8. Keep v4 in the keyring through the compatibility window. Retire it only
+   after old-client usage is below the supported floor and rollback no longer
+   requires v4 publication.
+
+Never publish v5-only as the first rotation step: v4-only clients would reject
+the feed and fragment the fleet again.

@@ -165,10 +165,12 @@ logging:
 # /v1/autotune-candidates (+ .sig sidecars). Deploy refreshes from
 # phase3-binary/dist/static/ on each Pearl run.
 autotune:
-  demand_rank_path: "/opt/macprovider/autotune/demand-rank.json"
-  demand_rank_sig_path: "/opt/macprovider/autotune/demand-rank.json.sig"
-  autotune_candidates_path: "/opt/macprovider/autotune/autotune-candidates.json"
-  autotune_candidates_sig_path: "/opt/macprovider/autotune/autotune-candidates.json.sig"
+  public_keys:
+    streamvc-autotune-static-v4: "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
+  demand_rank_path: "/opt/macprovider/autotune/current/demand-rank.json"
+  demand_rank_sig_path: "/opt/macprovider/autotune/current/demand-rank.json.sig"
+  autotune_candidates_path: "/opt/macprovider/autotune/current/autotune-candidates.json"
+  autotune_candidates_sig_path: "/opt/macprovider/autotune/current/autotune-candidates.json.sig"
 
 # Wave 1 subset — Entry 92 v2 rate-card rows for canary rollout (2026-07-01).
 # Units: credits_per_mtok; stats_rollup.usd_per_million_credits=1.0 → 1M credits = $1.00.

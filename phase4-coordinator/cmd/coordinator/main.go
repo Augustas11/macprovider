@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -139,10 +140,21 @@ func main() {
 		os.Exit(1)
 	}
 	var autotuneCatalog *autotune.Catalog
+	var autotuneCompatibleCatalogs []*autotune.Catalog
 	if len(autotuneFeeds.AutotuneCandidatesJSON) > 0 {
 		autotuneCatalog, err = autotune.ParseCatalog(autotuneFeeds.AutotuneCandidatesJSON)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "autotune candidate catalog: %v\n", err)
+			os.Exit(1)
+		}
+		if autotune.IsPermanentlyRejectedReleaseID(autotuneCatalog.Version) {
+			fmt.Fprintf(os.Stderr, "autotune candidate catalog: release ID %q is permanently rejected\n", autotuneCatalog.Version)
+			os.Exit(1)
+		}
+		autotuneCatalog.SignerKeyID = autotuneFeeds.AutotuneCandidatesVerification.KeyID
+		autotuneCompatibleCatalogs, err = loadPreviousAutotuneCatalog(cfg.AutotuneFeeds)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "autotune previous catalog: %v\n", err)
 			os.Exit(1)
 		}
 	}
@@ -457,6 +469,14 @@ func main() {
 		wsOpts = append(wsOpts, providerws.WithIdlePrewarmMetrics(metricsHandle))
 		wsOpts = append(wsOpts, providerws.WithModelHashMismatchMetrics(metricsHandle))
 		wsOpts = append(wsOpts, providerws.WithCredentialBootstrapMetrics(metricsHandle))
+	}
+	if autotuneCatalog != nil {
+		wsOpts = append(wsOpts, providerws.WithAutotuneCatalog(autotuneCatalog, autotuneCompatibleCatalogs...))
+		logger.Info().
+			Str("autotune_catalog_version", autotuneCatalog.Version).
+			Int("autotune_compatible_previous_releases", len(autotuneCompatibleCatalogs)).
+			Str("autotune_catalog_signer_key_id", autotuneCatalog.SignerKeyID).
+			Msg("provider catalog compatibility enabled")
 	}
 	var onboardingStore *onboarding.PGStore
 	if cfg.Onboarding.AppTrackRegisterEnabled {
@@ -927,6 +947,58 @@ func main() {
 			return
 		}
 	}
+}
+
+// loadPreviousAutotuneCatalog loads exactly the release recorded by the
+// deployer's root-owned .previous-target marker. It is signature/schema
+// verified through the same loader as the active feed and is never discovered
+// from an unbounded directory scan.
+func loadPreviousAutotuneCatalog(cfg config.AutotuneFeedsConfig) ([]*autotune.Catalog, error) {
+	if cfg.AutotuneCandidatesPath == "" {
+		return nil, nil
+	}
+	root := filepath.Dir(filepath.Dir(cfg.AutotuneCandidatesPath))
+	targetBytes, err := os.ReadFile(filepath.Join(root, ".previous-target"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read previous-target: %w", err)
+	}
+	target := strings.TrimSpace(string(targetBytes))
+	if target == "" {
+		return nil, nil
+	}
+	releaseID := strings.TrimPrefix(target, "releases/")
+	if releaseID == target || releaseID == "" || strings.Contains(releaseID, "/") {
+		return nil, fmt.Errorf("invalid previous-target %q", target)
+	}
+	for _, r := range releaseID {
+		if !(r >= 'A' && r <= 'Z') && !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && !strings.ContainsRune("._-", r) {
+			return nil, fmt.Errorf("invalid previous-target %q", target)
+		}
+	}
+	// Compatibility is optional. Never let a stale tombstoned bridge prevent a
+	// verified current catalog from starting. The deploy rollback restores the
+	// previous binary, config, and catalog as one unit if current activation fails.
+	if autotune.IsPermanentlyRejectedReleaseID(releaseID) {
+		return nil, nil
+	}
+	previousCfg := cfg
+	previousCfg.DemandRankPath = ""
+	previousCfg.DemandRankSigPath = ""
+	previousCfg.AutotuneCandidatesPath = filepath.Join(root, target, "autotune-candidates.json")
+	previousCfg.AutotuneCandidatesSigPath = previousCfg.AutotuneCandidatesPath + ".sig"
+	feeds, err := buyer.LoadAutotuneFeeds(previousCfg)
+	if err != nil {
+		return nil, fmt.Errorf("verify %s: %w", target, err)
+	}
+	previous, err := autotune.ParseCatalog(feeds.AutotuneCandidatesJSON)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", target, err)
+	}
+	previous.SignerKeyID = feeds.AutotuneCandidatesVerification.KeyID
+	return []*autotune.Catalog{previous}, nil
 }
 
 type requestLogPruner interface {

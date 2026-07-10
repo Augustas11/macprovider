@@ -1232,6 +1232,9 @@ func TestPoolCheckReturnsProviderStateAnd404(t *testing.T) {
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"provider_id":"p1"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"state":"ready"`)) {
 		t.Fatalf("body = %s", rr.Body.String())
 	}
+	if bytes.Contains(rr.Body.Bytes(), []byte(`"buyer_serving"`)) || bytes.Contains(rr.Body.Bytes(), []byte(`"catalog_release_id"`)) {
+		t.Fatalf("public pool check leaked deployment evidence: %s", rr.Body.String())
+	}
 
 	missingReq := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=missing", nil)
 	missingReq.RemoteAddr = "198.51.100.2:12345"
@@ -1244,6 +1247,81 @@ func TestPoolCheckReturnsProviderStateAnd404(t *testing.T) {
 	}
 	if !bytes.Contains(missing.Body.Bytes(), []byte(`"error":"provider_not_found"`)) {
 		t.Fatalf("missing body = %s", missing.Body.String())
+	}
+}
+
+func TestPoolCheckReportsExactCatalogAdmissionAndServingEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		state        pool.State
+		buyerServing bool
+		tier2Config  config.Tier2Config
+	}{
+		{name: "busy remains buyer serving", state: pool.StateBusy, buyerServing: true},
+		{name: "degraded is not buyer serving", state: pool.StateDegraded, buyerServing: false},
+		{name: "tier2 excluded is not buyer serving", state: pool.StateReady, buyerServing: false, tier2Config: config.Tier2Config{RequireEncryptedLeg: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := pool.NewRegistry(nil)
+			now := time.Now().UTC()
+			registry.Register(&pool.Provider{
+				ProviderID:             "catalog-canary",
+				AssignedID:             "session-1",
+				Hostname:               "catalog-canary.local",
+				ModelID:                "model-a",
+				MaxContextTokens:       20000,
+				MaxConcurrency:         1,
+				SlotsFree:              1,
+				SlotsTotal:             1,
+				Tier:                   pool.TierPinned,
+				InferencePath:          pool.InferencePathHTTPForwarding,
+				State:                  tc.state,
+				LastHeartbeatAt:        now,
+				LastActivityAt:         now,
+				ConnectedAt:            now,
+				CatalogAdmissionMode:   "current",
+				CatalogReleaseID:       "release-current",
+				CatalogPolicyVersion:   "autotune-policy-v1",
+				CandidateCatalogSHA256: strings.Repeat("a", 64),
+				CatalogSignerKeyID:     "signer-v4",
+				CandidateRowIdentity:   strings.Repeat("b", 64),
+			}, nil)
+			server := buyer.NewServer(
+				registry,
+				zerolog.Nop(),
+				time.Unix(1716768000, 0),
+				buyer.WithInternalAuthKey("operator-secret"),
+				buyer.WithTier2Config(tc.tier2Config),
+			)
+			req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=catalog-canary&details=deployment", nil)
+			req.RemoteAddr = "198.51.100.1:12345"
+			req.Header.Set("Authorization", "Bearer operator-secret")
+			rr := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+			}
+			var response map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response["buyer_serving"] != tc.buyerServing || response["catalog_admission_mode"] != "current" || response["catalog_release_id"] != "release-current" || response["catalog_candidate_sha256"] != strings.Repeat("a", 64) || response["catalog_row_identity"] != strings.Repeat("b", 64) {
+				t.Fatalf("response = %+v", response)
+			}
+		})
+	}
+}
+
+func TestPoolCheckDeploymentEvidenceRequiresAuthorization(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithInternalAuthKey("operator-secret"))
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1&details=deployment", nil)
+	req.RemoteAddr = "198.51.100.1:12345"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
 	}
 }
 

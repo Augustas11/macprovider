@@ -137,7 +137,7 @@ struct AutoUpdater: Sendable {
             }
             try await ensureEligible(phase: .eligibility)
             let lock = try markerStore.acquireLock()
-            _ = lock
+            defer { withExtendedLifetime(lock) {} }
             let update = SelfUpdate(currentVersion: currentVersion, releasesAPIURL: releasesAPIURL, session: session)
             let release: GitHubRelease
             do {
@@ -182,15 +182,21 @@ struct AutoUpdater: Sendable {
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "autoupdate_already_pending")
         } catch AutoUpdateError.trustStateLost(let reason) {
             if let marker = commitTracker.marker ?? (try? markerStore.readPending()) {
-                if commitTracker.committedSwap,
-                   FileManager.default.fileExists(atPath: marker.targetPath),
-                   (try? AutoUpdateMarkerStore.sha256(file: URL(fileURLWithPath: marker.targetPath))) != marker.sha256
-                {
-                    try? markerStore.restoreBackup(marker)
+                var rollbackSafeToClean = !commitTracker.committedSwap
+                if commitTracker.committedSwap {
+                    do {
+                        try markerStore.restoreBackup(marker)
+                        rollbackSafeToClean = true
+                    } catch {
+                        // Keep the pending marker and both backups durable so
+                        // the watchdog can retry a failed in-process restore.
+                    }
                 }
-                if commitTracker.committedMarker || commitTracker.committedBackup {
+                if rollbackSafeToClean,
+                   commitTracker.committedMarker || commitTracker.committedBackup
+                {
                     markerStore.clearPendingAndLock(target: nil)
-                    try? FileManager.default.removeItem(atPath: marker.backupPath)
+                    markerStore.removeRollbackBackups(marker)
                 }
             }
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .trustStateLost, reason: reason)
@@ -205,38 +211,39 @@ struct AutoUpdater: Sendable {
         guard let current = currentBinaryURL() else {
             throw AutoUpdateError.currentBinaryUnknown
         }
-        let backup = markerStore.rollbackBackupPath(binaryURL: current, updateID: updateID)
-        let attrs = try FileManager.default.attributesOfItem(atPath: current.path)
-        let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0o755
-        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
-        let sha = try AutoUpdateMarkerStore.sha256(file: current)
-        try markerStore.atomicCopyNoFollow(from: current, to: backup, mode: mode)
-        tracker.committedBackup = true
-        let deadline = ISO8601DateFormatter.autoupdate.string(from: Date().addingTimeInterval(60 + 300))
-        let marker = AutoUpdatePendingMarker(
+        let marker = try markerStore.preserveReleaseRollbackBackup(
+            binaryURL: current,
             updateID: updateID,
-            targetVersion: target,
-            targetPath: current.path,
-            backupPath: backup.path,
-            size: size,
-            mode: mode,
-            sha256: sha,
-            markerDeadline: deadline
+            targetVersion: target
         )
-        try markerStore.writePending(marker)
         tracker.marker = marker
-        tracker.committedMarker = true
-        try await ensureEligible(phase: .swap)
-        let staged = current.deletingLastPathComponent()
-            .appendingPathComponent(".\(current.lastPathComponent).update-\(UUID().uuidString)")
-        try markerStore.atomicCopyNoFollow(from: newBinary, to: staged, mode: 0o755)
-        if rename(staged.path, current.path) != 0 {
-            let errnoValue = errno
-            try? FileManager.default.removeItem(at: staged)
-            try? markerStore.restoreBackup(marker)
-            throw UpdateError.renameFailed(errnoValue)
+        tracker.committedBackup = true
+        do {
+            try markerStore.writePending(marker)
+            tracker.committedMarker = true
+            try await ensureEligible(phase: .swap)
+            try markerStore.activateReleasePayload(
+                from: newBinary.deletingLastPathComponent(),
+                newBinary: newBinary,
+                to: current
+            )
+            tracker.committedSwap = true
+        } catch {
+            if tracker.committedMarker {
+                do {
+                    try markerStore.restoreBackup(marker)
+                    markerStore.clearPendingAndLock(target: nil)
+                    markerStore.removeRollbackBackups(marker)
+                } catch {
+                    // Leave the durable marker and both snapshots intact so
+                    // the independent watchdog can retry the same restore.
+                }
+            } else {
+                markerStore.removeRollbackBackups(marker)
+                markerStore.clearPendingAndLock(target: nil)
+            }
+            throw error
         }
-        tracker.committedSwap = true
     }
 
     func rollbackCommittedSwapAfterRestartFailureForTest(_ marker: AutoUpdatePendingMarker) {
@@ -254,7 +261,7 @@ struct AutoUpdater: Sendable {
         }
         try markerStore.restoreBackup(marker)
         markerStore.clearPendingAndLock(target: nil)
-        try? FileManager.default.removeItem(atPath: marker.backupPath)
+        markerStore.removeRollbackBackups(marker)
     }
 
     private func ensureEligible(phase: AutoUpdatePhase) async throws {
@@ -335,6 +342,16 @@ struct AutoUpdater: Sendable {
             return "unsafe_archive_entry"
         case UpdateError.insufficientDiskSpace:
             return "insufficient_disk_space"
+        case UpdateError.missingReleaseResource:
+            return "release_resource_missing"
+        case UpdateError.rollbackUnavailable:
+            return "rollback_unavailable"
+        case UpdateError.activationFailedRollbackFailed:
+            return "activation_failed_rollback_failed"
+        case UpdateError.restartFailedRollbackRestored:
+            return "rollback_restored"
+        case UpdateError.restartFailedRollbackFailed:
+            return "restart_failed_rollback_failed"
         case AutoUpdateError.trustStateLost(let reason):
             return reason
         case is AutoUpdateSignedPolicyPersistError:
@@ -426,10 +443,10 @@ struct AutoUpdater: Sendable {
 }
 
 private extension ISO8601DateFormatter {
-    static let autoupdate: ISO8601DateFormatter = {
+    static var autoupdate: ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         return formatter
-    }()
+    }
 }

@@ -53,6 +53,55 @@ final class InstalledProviderMonitorTests: XCTestCase {
         XCTAssertEqual(snapshot.outputTokensAllTime, 1325)
     }
 
+    func testStatusSnapshotDecodesBuyerServingCatalogTrust() throws {
+        let json = """
+        {
+          "binary_version": "0.5.0",
+          "network_state": "buyer_serving",
+          "coordinator": {
+            "connected": true,
+            "tier": "trusted",
+            "recommended_binary_version": "0.5.1"
+          },
+          "catalog": {
+            "state": "live_verified",
+            "release_id": "published-2026-07-10-catalog-recovery-v1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "signer_key_id": "streamvc-autotune-static-v4",
+            "source": "coordinator"
+          }
+        }
+        """.data(using: .utf8)!
+
+        let snapshot = try XCTUnwrap(InstalledProviderMonitor.decodeStatus(json))
+        XCTAssertEqual(snapshot.networkState, "buyer_serving")
+        XCTAssertTrue(snapshot.coordinatorConnected)
+        XCTAssertEqual(snapshot.catalogState, "live_verified")
+        XCTAssertEqual(snapshot.catalogReleaseID, "published-2026-07-10-catalog-recovery-v1")
+        XCTAssertEqual(snapshot.catalogSignerKeyID, "streamvc-autotune-static-v4")
+        XCTAssertEqual(snapshot.catalogSource, "coordinator")
+    }
+
+    func testBusyHealthStatusRemainsHealthyDuringBuyerRequest() {
+        XCTAssertTrue(InstalledProviderMonitor.isHealthyStatus("ready"))
+        XCTAssertTrue(InstalledProviderMonitor.isHealthyStatus("busy"))
+        XCTAssertFalse(InstalledProviderMonitor.isHealthyStatus("starting"))
+    }
+
+    func testStatusSnapshotKeepsOlderCLIReadableWithoutTrustFields() throws {
+        let json = """
+        {
+          "binary_version": "0.4.9",
+          "coordinator": { "connected": true, "tier": "provisional" }
+        }
+        """.data(using: .utf8)!
+
+        let snapshot = try XCTUnwrap(InstalledProviderMonitor.decodeStatus(json))
+        XCTAssertTrue(snapshot.coordinatorConnected)
+        XCTAssertNil(snapshot.networkState)
+        XCTAssertNil(snapshot.catalogState)
+    }
+
     private static func int64Value(_ value: Any?) -> Int64? {
         if let value = value as? Int64 { return value }
         if let value = value as? Int { return Int64(value) }

@@ -668,6 +668,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/v1/demand-rank.sig", s.handleDemandRankSig)
 	r.Get("/v1/autotune-candidates", s.handleAutotuneCandidates)
 	r.Get("/v1/autotune-candidates.sig", s.handleAutotuneCandidatesSig)
+	r.Get("/v1/autotune-release", s.handleAutotuneRelease)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
 	r.Get("/v1/receipt-keys/{provider_id}", s.handleReceiptKeys)
 	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotations.
@@ -1000,9 +1001,16 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 type poolCheckResponse struct {
-	ProviderID string     `json:"provider_id"`
-	Tier       pool.Tier  `json:"tier"`
-	State      pool.State `json:"state"`
+	ProviderID             string     `json:"provider_id"`
+	Tier                   pool.Tier  `json:"tier"`
+	State                  pool.State `json:"state"`
+	BuyerServing           *bool      `json:"buyer_serving,omitempty"`
+	CatalogAdmissionMode   string     `json:"catalog_admission_mode,omitempty"`
+	CatalogReleaseID       string     `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion   string     `json:"catalog_policy_version,omitempty"`
+	CandidateCatalogSHA256 string     `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID     string     `json:"catalog_signer_key_id,omitempty"`
+	CandidateRowIdentity   string     `json:"catalog_row_identity,omitempty"`
 }
 
 type receiptKeysResponse struct {
@@ -1028,6 +1036,11 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "Missing provider_id")
 		return
 	}
+	includeDeploymentEvidence := r.URL.Query().Get("details") == "deployment"
+	if includeDeploymentEvidence && !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Deployment pool evidence requires coordinator authorization")
+		return
+	}
 	for _, p := range s.pool.Snapshot() {
 		if p.ProviderID != providerID {
 			continue
@@ -1038,7 +1051,22 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		}
 		s.log.Info().Str("provider_id", providerID).Str("state", string(state)).Msg("pool check hit")
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(poolCheckResponse{ProviderID: p.ProviderID, Tier: p.Tier, State: state}); err != nil {
+		response := poolCheckResponse{
+			ProviderID: p.ProviderID,
+			Tier:       p.Tier,
+			State:      state,
+		}
+		if includeDeploymentEvidence {
+			buyerServing := s.providerBuyerServing(p)
+			response.BuyerServing = &buyerServing
+			response.CatalogAdmissionMode = p.CatalogAdmissionMode
+			response.CatalogReleaseID = p.CatalogReleaseID
+			response.CatalogPolicyVersion = p.CatalogPolicyVersion
+			response.CandidateCatalogSHA256 = p.CandidateCatalogSHA256
+			response.CatalogSignerKeyID = p.CatalogSignerKeyID
+			response.CandidateRowIdentity = p.CandidateRowIdentity
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("write pool check response failed")
 		}
 		return
@@ -1050,6 +1078,10 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		"error":       "provider_not_found",
 		"provider_id": providerID,
 	})
+}
+
+func (s *Server) providerBuyerServing(p pool.Provider) bool {
+	return p.CapacityEligible() && !s.tier2ProviderExcluded(p) && s.checkQuota(p)
 }
 
 func (s *Server) handleReceiptKeys(w http.ResponseWriter, r *http.Request) {

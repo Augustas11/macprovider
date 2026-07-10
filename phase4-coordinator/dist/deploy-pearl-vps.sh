@@ -26,6 +26,11 @@
 #                                 primary deploy — issue #244 root cause).
 #   FORCE_RESTART    default: 0   bypass connected-provider guard at step 1c/6c
 #   STRICT_PROVENANCE default: 0  fail if /healthz lacks `version` field
+#   CATALOG_CANARY_PROVIDER_ID required for production deploys. The provider
+#                    must reconnect after restart and pass authenticated
+#                    deployment evidence through /v1/pool/check before commit.
+#   CATALOG_CANARY_AUTH_TOKEN required for production deploys. Use the
+#                    coordinator operator key or gateway service token.
 #   --dry-run-local  developer-only: run the old local-config C2 check using
 #                    GATEWAY_CONFIG and exit before any SSH mutation.
 #   GATEWAY_CONFIG   used only with --dry-run-local. Production deploys validate
@@ -92,6 +97,8 @@ VPS_HOST="${VPS_HOST:-159.223.165.194}"
 VPS_USER="${VPS_USER:-root}"
 DOMAIN="${DOMAIN:-coordinator.streamvc.live}"
 EMAIL="${EMAIL:-augstar@gmail.com}"
+CATALOG_CANARY_PROVIDER_ID="${CATALOG_CANARY_PROVIDER_ID:-}"
+CATALOG_CANARY_AUTH_TOKEN="${CATALOG_CANARY_AUTH_TOKEN:-}"
 
 # Issue #244 R1 SEC HIGH-1 / CODE MED-2 / ARCH HIGH-2 — validate operator-
 # overridable values up front so they cannot inject shell metacharacters
@@ -114,6 +121,17 @@ _validate_dns_name "${STATS_DOMAIN:-stats.streamvc.live}" STATS_DOMAIN
 if ! printf '%s' "$EMAIL" | grep -Eq '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
   echo "aborting deploy: EMAIL is not a valid address: '$EMAIL'" >&2
   exit 1
+fi
+if [ "$DRY_RUN_LOCAL" != "1" ]; then
+  if ! printf '%s' "$CATALOG_CANARY_PROVIDER_ID" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
+    echo "aborting deploy: CATALOG_CANARY_PROVIDER_ID is required and must be a safe provider ID" >&2
+    echo "  Select a provider expected to reconnect after restart; deployment commits only after pool admission." >&2
+    exit 1
+  fi
+  if ! printf '%s' "$CATALOG_CANARY_AUTH_TOKEN" | grep -Eq '^[A-Za-z0-9._~-]{32,512}$'; then
+    echo "aborting deploy: CATALOG_CANARY_AUTH_TOKEN is required and must be a safe 32-512 character bearer token" >&2
+    exit 1
+  fi
 fi
 
 # R1 ARCH HIGH-2 — the baked-in vhost templates hardcode
@@ -146,6 +164,10 @@ STATS_BILLING_MIRROR_BINARY="$DIST_DIR/stats-billing-mirror-linux-amd64"
 STATS_HARDWARE_VERIFIER_BINARY="$DIST_DIR/stats-hardware-verifier-linux-amd64"
 CONFIG="$DIST_DIR/coordinator.yaml"
 SERVICE="$DIST_DIR/macprovider-coordinator.service"
+DEPLOY_RECOVER="$DIST_DIR/coordinator-deploy-recover.sh"
+DEPLOY_GUARD="$DIST_DIR/systemd/macprovider-coordinator-deploy-guard.conf"
+DEPLOY_RECOVERY_SERVICE="$DIST_DIR/systemd/macprovider-coordinator-deploy-recovery.service"
+DEPLOY_WATCHDOG_SERVICE="$DIST_DIR/systemd/macprovider-coordinator-deploy-watchdog.service"
 STATS_INVENTORY_SERVICE="$DIST_DIR/stats-inventory-sync.service"
 STATS_INVENTORY_TIMER="$DIST_DIR/stats-inventory-sync.timer"
 STATS_BILLING_MIRROR_SERVICE="$DIST_DIR/stats-billing-mirror.service"
@@ -184,6 +206,35 @@ STATIC_DEMAND_JSON="$STATIC_FEEDS_DIR/demand-rank.json"
 STATIC_DEMAND_SIG="$STATIC_FEEDS_DIR/demand-rank.json.sig"
 STATIC_AUTOTUNE_JSON="$STATIC_FEEDS_DIR/autotune-candidates.json"
 STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
+AUTOTUNE_RELEASE_MANIFEST="$DIST_DIR/../../phase3-binary/catalog/autotune/release.json"
+AUTOTUNE_TRUSTED_KEYS="$DIST_DIR/../../phase3-binary/catalog/autotune/trusted-keys.json"
+AUTOTUNE_RELEASE_VERIFY="$DIST_DIR/../../scripts/catalog-release.py"
+
+python3 "$AUTOTUNE_RELEASE_VERIFY" verify
+AUTOTUNE_RELEASE_ID="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["release_id"])
+PY
+)"
+AUTOTUNE_POLICY_VERSION="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["policy_version"])
+PY
+)"
+AUTOTUNE_CANDIDATE_SHA256="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]["autotune-candidates.json"]["sha256"])
+PY
+)"
+AUTOTUNE_CANDIDATE_SIGNER_KEY_ID="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]["autotune-candidates.json"]["signer_key_id"])
+PY
+)"
+if ! printf '%s' "$AUTOTUNE_RELEASE_ID" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
+  echo "invalid autotune release_id: $AUTOTUNE_RELEASE_ID" >&2
+  exit 1
+fi
 
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
 # FR-C9.4 strict-reject path still requires `coordinator-cli
@@ -192,12 +243,13 @@ STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
 # operator forgot to run build-linux.sh after the M2 update that
 # extended it. Fail closed — do NOT silently deploy with a stale CLI.
 for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRROR_BINARY" "$STATS_HARDWARE_VERIFIER_BINARY" \
-         "$CONFIG" "$SERVICE" "$STATS_INVENTORY_SERVICE" "$STATS_INVENTORY_TIMER" \
+         "$CONFIG" "$SERVICE" "$DEPLOY_RECOVER" "$DEPLOY_GUARD" "$DEPLOY_RECOVERY_SERVICE" "$DEPLOY_WATCHDOG_SERVICE" "$STATS_INVENTORY_SERVICE" "$STATS_INVENTORY_TIMER" \
          "$STATS_BILLING_MIRROR_SERVICE" "$STATS_BILLING_MIRROR_TIMER" \
          "$STATS_HARDWARE_VERIFIER_SERVICE" "$STATS_HARDWARE_VERIFIER_TIMER" "$NGINX_SITE" \
          "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE" \
          "$STATIC_DEMAND_JSON" "$STATIC_DEMAND_SIG" \
-         "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG"; do
+         "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG" \
+         "$AUTOTUNE_RELEASE_MANIFEST" "$AUTOTUNE_TRUSTED_KEYS" "$AUTOTUNE_RELEASE_VERIFY"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
 
@@ -236,8 +288,8 @@ _assert_vhost_template() {
 _assert_vhost_template "$NGINX_SITE"       "$DOMAIN"
 _assert_vhost_template "$NGINX_STATS_SITE" "${STATS_DOMAIN:-stats.streamvc.live}"
 
-SSH="ssh -i $SSH_KEY -o ConnectTimeout=10 -p 22 $VPS_USER@$VPS_HOST"
-SCP="scp -i $SSH_KEY -P 22"
+SSH="ssh -i $SSH_KEY -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -p 22 $VPS_USER@$VPS_HOST"
+SCP="scp -i $SSH_KEY -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -P 22"
 
 log() { printf "\n[deploy] %s\n" "$*"; }
 
@@ -304,6 +356,8 @@ fi
 # behind. Both variables are guarded with `:-` so the trap is a
 # no-op when they are unset.
 trap '
+  _deploy_rc=$?
+  _final_rc=$_deploy_rc
   rm -f "${TMP_CATALOG_PUBKEY:-}"
   rm -f "${CATALOG_SMOKE_TMP:-}"
   rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
@@ -311,7 +365,100 @@ trap '
   if [ -n "${DEPLOY_TMP:-}" ]; then
     $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
   fi
+  if [ -n "${RECOVERY_DEPLOY_TMP:-}" ]; then
+    $SSH "rm -rf $RECOVERY_DEPLOY_TMP" 2>/dev/null || true
+  fi
+  if [ "${DEPLOY_LOCK_HELD:-0}" = "1" ]; then
+    touch "${DEPLOY_LOCK_RELEASE_SENTINEL:-}"
+    exec 9>&-
+    _lock_rc=0
+    wait "${DEPLOY_LOCK_PID:-}" || _lock_rc=$?
+    if [ "$_deploy_rc" -ne 0 ] && [ "${COORDINATOR_DEPLOY_ARMED:-0}" = "1" ]; then
+      _recovery_rc=0
+      $SSH '\''
+        _wait=0
+        while [ "$(systemctl show -p ActiveState --value macprovider-coordinator-deploy-watchdog.service 2>/dev/null || true)" = activating ]; do
+          _wait=$((_wait + 1))
+          [ "$_wait" -lt 600 ] || exit 1
+          sleep 0.25
+        done
+        ! systemctl is-failed --quiet macprovider-coordinator-deploy-watchdog.service
+        test ! -d /opt/macprovider/.coordinator-deploy-rollback
+      '\'' || _recovery_rc=$?
+      if [ "$_lock_rc" -eq 0 ] && [ "$_recovery_rc" -eq 0 ]; then
+        echo "coordinator deploy rollback completed" >&2
+      else
+        cat "${DEPLOY_LOCK_STATUS:-/dev/null}" >&2 2>/dev/null || true
+        echo "CRITICAL: coordinator deploy rollback failed; snapshot preserved at /opt/macprovider/.coordinator-deploy-rollback" >&2
+        _final_rc=70
+      fi
+    fi
+  fi
+  rm -rf "${DEPLOY_LOCK_DIR:-}"
+  exit "$_final_rc"
 ' EXIT
+trap 'exit 71' HUP INT TERM
+
+if [ "$DRY_RUN_LOCAL" != "1" ]; then
+# Acquire the Pearl lease before any live config read. The remote holder owns
+# flock until the controller closes its FIFO. A remote systemd watchdog waits
+# behind this lease and a per-command operation lock, so controller loss cannot
+# race rollback against a still-running mutation SSH session.
+DEPLOY_LOCK_DIR=$(umask 077 && mktemp -d -t macprovider-deploy-lock.XXXXXXXX)
+DEPLOY_LOCK_FIFO="$DEPLOY_LOCK_DIR/stdin"
+DEPLOY_LOCK_STATUS="$DEPLOY_LOCK_DIR/status"
+DEPLOY_LOCK_WATCHDOG_ARMED="$DEPLOY_LOCK_DIR/watchdog-armed"
+DEPLOY_LOCK_RELEASE_SENTINEL="$DEPLOY_LOCK_DIR/release-requested"
+DEPLOY_CONTROLLER_PID=$$
+mkfifo -m 600 "$DEPLOY_LOCK_FIFO"
+touch "$DEPLOY_LOCK_WATCHDOG_ARMED"
+(
+  set +e
+  $SSH "command -v flock >/dev/null 2>&1 || { echo 'Pearl is missing flock' >&2; exit 127; }; if [ ! -d /opt/macprovider ]; then install -d -o root -g root -m 0700 /opt/macprovider; fi; [ ! -L /opt/macprovider ]; touch /opt/macprovider/.coordinator-deploy.lock /opt/macprovider/.coordinator-deploy-operation.lock; chown root:root /opt/macprovider/.coordinator-deploy.lock /opt/macprovider/.coordinator-deploy-operation.lock; chmod 0600 /opt/macprovider/.coordinator-deploy.lock /opt/macprovider/.coordinator-deploy-operation.lock; flock -n /opt/macprovider/.coordinator-deploy.lock sh -c 'printf \"%s\\n\" LOCKED; cat >/dev/null'"
+  _holder_rc=$?
+  if [ -f "$DEPLOY_LOCK_WATCHDOG_ARMED" ] && [ ! -f "$DEPLOY_LOCK_RELEASE_SENTINEL" ]; then
+    kill -TERM "$DEPLOY_CONTROLLER_PID" 2>/dev/null || true
+  fi
+  exit "$_holder_rc"
+) <"$DEPLOY_LOCK_FIFO" >"$DEPLOY_LOCK_STATUS" 2>&1 &
+DEPLOY_LOCK_PID=$!
+exec 9>"$DEPLOY_LOCK_FIFO"
+DEPLOY_LOCK_HELD=1
+_lock_wait=0
+while ! grep -qx LOCKED "$DEPLOY_LOCK_STATUS" 2>/dev/null; do
+  if ! kill -0 "$DEPLOY_LOCK_PID" 2>/dev/null; then
+    cat "$DEPLOY_LOCK_STATUS" >&2 || true
+    echo "aborting deploy: another coordinator deploy holds the Pearl lock" >&2
+    exit 11
+  fi
+  _lock_wait=$((_lock_wait + 1))
+  if [ "$_lock_wait" -ge 100 ]; then
+    echo "aborting deploy: timed out acquiring the Pearl deploy lock" >&2
+    exit 11
+  fi
+  sleep 0.1
+done
+if ! kill -0 "$DEPLOY_LOCK_PID" 2>/dev/null; then
+  cat "$DEPLOY_LOCK_STATUS" >&2 || true
+  echo "aborting deploy: Pearl deploy lock was lost after acquisition" >&2
+  exit 11
+fi
+
+# Recover the prior complete snapshot before using any live state as input to
+# config drift checks or a new rollback baseline.
+if $SSH 'test -d /opt/macprovider/.coordinator-deploy-rollback'; then
+  log "step 0a/9: recover interrupted coordinator deploy"
+  if ! $SSH 'test -x /opt/macprovider/coordinator-deploy-recover'; then
+    echo "aborting deploy: rollback snapshot exists but recovery helper is missing" >&2
+    echo "  Preserve /opt/macprovider/.coordinator-deploy-rollback and recover it manually." >&2
+    exit 70
+  fi
+  $SSH /opt/macprovider/coordinator-deploy-recover --recover || {
+    echo "aborting deploy: interrupted coordinator release could not be recovered; snapshot preserved" >&2
+    exit 70
+  }
+fi
+fi
 
 log "step 0/9: pre-deploy config-drift + C2 cross-check"
 # Fail closed before touching the VPS if the config to be deployed has a
@@ -425,6 +572,45 @@ fi
 log "step 1/9: confirm SSH + DNS"
 $SSH 'hostname && uptime' >/dev/null
 dig +short "$DOMAIN" | grep -q "$VPS_HOST" || { echo "DNS for $DOMAIN does not resolve to $VPS_HOST yet" >&2; exit 1; }
+
+# Install the durable pre-start recovery guard before any release file can be
+# replaced. It rolls back an armed transaction on boot/restart whenever the
+# controller-held deploy lock is no longer present.
+RECOVERY_DEPLOY_TMP=$($SSH 'umask 077 && mktemp -d -t macprovider-recovery.XXXXXXXX')
+case "$RECOVERY_DEPLOY_TMP" in
+  /tmp/macprovider-recovery.*) ;;
+  *) echo "aborting deploy: unexpected recovery staging path: $RECOVERY_DEPLOY_TMP" >&2; exit 1 ;;
+esac
+$SCP "$DEPLOY_RECOVER" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/coordinator-deploy-recover"
+$SCP "$DEPLOY_GUARD" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/10-deploy-transaction-guard.conf"
+$SCP "$DEPLOY_RECOVERY_SERVICE" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-recovery.service"
+$SCP "$DEPLOY_WATCHDOG_SERVICE" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-watchdog.service"
+$SSH "set -e
+  _helper_next=/opt/macprovider/coordinator-deploy-recover.next.\$\$
+  _unit_next=/etc/systemd/system/macprovider-coordinator-deploy-recovery.service.next.\$\$
+  _watchdog_next=/etc/systemd/system/macprovider-coordinator-deploy-watchdog.service.next.\$\$
+  install -d -o root -g root -m 0755 /etc/systemd/system/macprovider-coordinator.service.d
+  _guard_next=/etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf.next.\$\$
+  trap 'rm -f \"\$_helper_next\" \"\$_unit_next\" \"\$_watchdog_next\" \"\$_guard_next\"' EXIT HUP INT TERM
+  install -o root -g root -m 0750 $RECOVERY_DEPLOY_TMP/coordinator-deploy-recover \"\$_helper_next\"
+  mv -Tf \"\$_helper_next\" /opt/macprovider/coordinator-deploy-recover
+  install -o root -g root -m 0644 $RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-recovery.service \"\$_unit_next\"
+  mv -Tf \"\$_unit_next\" /etc/systemd/system/macprovider-coordinator-deploy-recovery.service
+  install -o root -g root -m 0644 $RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-watchdog.service \"\$_watchdog_next\"
+  mv -Tf \"\$_watchdog_next\" /etc/systemd/system/macprovider-coordinator-deploy-watchdog.service
+  install -o root -g root -m 0644 $RECOVERY_DEPLOY_TMP/10-deploy-transaction-guard.conf \"\$_guard_next\"
+  mv -Tf \"\$_guard_next\" /etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf
+  systemctl daemon-reload
+  systemctl reset-failed macprovider-coordinator-deploy-watchdog.service 2>/dev/null || true
+  systemctl start --no-block macprovider-coordinator-deploy-watchdog.service
+  _watchdog_state=\$(systemctl show -p ActiveState --value macprovider-coordinator-deploy-watchdog.service)
+  case \"\$_watchdog_state\" in
+    active|activating) ;;
+    *) echo \"coordinator deploy watchdog failed to arm: \$_watchdog_state\" >&2; exit 1 ;;
+  esac
+  rm -rf $RECOVERY_DEPLOY_TMP
+  trap - EXIT HUP INT TERM"
+RECOVERY_DEPLOY_TMP=""
 
 # Previous-deploy bypass tombstone — if the last deploy used
 # FORCE_RESTART=1 (or got manually bypassed past the connected-provider
@@ -1019,19 +1205,87 @@ REMOTE_TCP_SYSCTL
 fi
 
 log "step 4/9: upload binary + config + nginx site (with rollback snapshot)"
-# Backup the live binary BEFORE the install so a rollback is one mv away.
-# Use install(1) instead of cp -p so ownership (#244 R4+R5: root:macprovider
-# 0750) is set explicitly per-invocation rather than inherited from the
-# source — protects against drift if the .prev was ever rebuilt from a
-# snapshot under different rules.
-# See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the swap-back steps.
-$SSH 'if [ -x /opt/macprovider/coordinator ]; then
-        # R5 SEC MED: ownership matches the deploy artifacts — root:macprovider 0750.
-        install -o root -g macprovider -m 0750 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
-        echo "  snapshot saved at /opt/macprovider/coordinator.prev"
-      else
-        echo "  no live binary at /opt/macprovider/coordinator — first deploy"
-      fi'
+# Arm one coordinator release transaction before replacing any live file. The
+# late connected-provider safeguard can still refuse the restart after upload;
+# in that case the EXIT trap restores the binary, config, service unit, and
+# catalog pointer so a later reboot cannot activate an unverified release.
+$SSH "set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
+  _rollback=/opt/macprovider/.coordinator-deploy-rollback
+  _rollback_stage=\$_rollback.stage.\$\$
+  umask 077
+  if [ -e \"\$_rollback\" ] || [ -L \"\$_rollback\" ]; then
+    echo 'coordinator deploy transaction already exists; refusing to overwrite it' >&2
+    exit 1
+  fi
+  rm -rf \"\$_rollback_stage\"
+  mkdir \"\$_rollback_stage\"
+  trap 'rm -rf \"\$_rollback_stage\"' EXIT HUP INT TERM
+  chown root:root \"\$_rollback_stage\"
+  chmod 0700 \"\$_rollback_stage\"
+  if [ -x /opt/macprovider/coordinator ]; then
+    cp -p /opt/macprovider/coordinator \"\$_rollback_stage/coordinator\"
+    touch \"\$_rollback_stage/had-coordinator\"
+    install -o root -g macprovider -m 0750 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
+  fi
+  if [ -f /opt/macprovider/coordinator.yaml ]; then
+    cp -p /opt/macprovider/coordinator.yaml \"\$_rollback_stage/coordinator.yaml\"
+    touch \"\$_rollback_stage/had-config\"
+  fi
+  if [ -L /opt/macprovider/tier2-catalog.json ] || { [ -e /opt/macprovider/tier2-catalog.json ] && [ ! -f /opt/macprovider/tier2-catalog.json ]; }; then
+    echo 'unsafe existing Tier-2 catalog path' >&2
+    exit 1
+  fi
+  if [ -f /opt/macprovider/tier2-catalog.json ]; then
+    cp -p /opt/macprovider/tier2-catalog.json "\$_rollback_stage/tier2-catalog.json"
+    touch "\$_rollback_stage/had-tier2-catalog"
+  fi
+  if [ -e /etc/systemd/system/macprovider-coordinator.service ] || [ -L /etc/systemd/system/macprovider-coordinator.service ]; then
+    cp -a /etc/systemd/system/macprovider-coordinator.service \"\$_rollback_stage/macprovider-coordinator.service\"
+    touch \"\$_rollback_stage/had-service-unit\"
+  fi
+  if [ -e /etc/systemd/system/multi-user.target.wants/macprovider-coordinator.service ] || [ -L /etc/systemd/system/multi-user.target.wants/macprovider-coordinator.service ]; then
+    cp -a /etc/systemd/system/multi-user.target.wants/macprovider-coordinator.service \"\$_rollback_stage/macprovider-coordinator.wants\"
+    touch \"\$_rollback_stage/had-wants-link\"
+  fi
+  if [ -e /opt/macprovider/coordinator-deploy-recover ] || [ -L /opt/macprovider/coordinator-deploy-recover ]; then
+    cp -a /opt/macprovider/coordinator-deploy-recover \"\$_rollback_stage/coordinator-deploy-recover\"
+    touch \"\$_rollback_stage/had-recovery-helper\"
+  fi
+  if [ -e /etc/systemd/system/macprovider-coordinator-deploy-recovery.service ] || [ -L /etc/systemd/system/macprovider-coordinator-deploy-recovery.service ]; then
+    cp -a /etc/systemd/system/macprovider-coordinator-deploy-recovery.service \"\$_rollback_stage/macprovider-coordinator-deploy-recovery.service\"
+    touch \"\$_rollback_stage/had-recovery-unit\"
+  fi
+  if [ -e /etc/systemd/system/macprovider-coordinator-deploy-watchdog.service ] || [ -L /etc/systemd/system/macprovider-coordinator-deploy-watchdog.service ]; then
+    cp -a /etc/systemd/system/macprovider-coordinator-deploy-watchdog.service "\$_rollback_stage/macprovider-coordinator-deploy-watchdog.service"
+    touch "\$_rollback_stage/had-watchdog-unit"
+  fi
+  if [ -e /etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf ] || [ -L /etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf ]; then
+    cp -a /etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf \"\$_rollback_stage/10-deploy-transaction-guard.conf\"
+    touch \"\$_rollback_stage/had-guard-dropin\"
+  fi
+  _catalog_target=\$(readlink /opt/macprovider/autotune/current 2>/dev/null || true)
+  case \"\$_catalog_target\" in
+    ''|releases/*) ;;
+    *) echo \"invalid existing autotune current target: \$_catalog_target\" >&2; exit 1 ;;
+  esac
+  printf '%s' \"\$_catalog_target\" > \"\$_rollback_stage/catalog-current-target\"
+  if [ -f /opt/macprovider/autotune/.previous-target ]; then
+    cp -p /opt/macprovider/autotune/.previous-target \"\$_rollback_stage/catalog-previous-target\"
+    touch \"\$_rollback_stage/had-previous-target\"
+  fi
+  if [ ! -d /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_ID ]; then
+    touch \"\$_rollback_stage/release-was-absent\"
+  fi
+  printf '%s' '$AUTOTUNE_RELEASE_ID' > \"\$_rollback_stage/release-id\"
+  if systemctl is-active --quiet macprovider-coordinator; then
+    touch \"\$_rollback_stage/service-was-active\"
+  fi
+  touch \"\$_rollback_stage/complete\"
+  mv \"\$_rollback_stage\" \"\$_rollback\"
+  trap - EXIT HUP INT TERM"
+COORDINATOR_DEPLOY_ARMED=1
 
 # Issue #244 R5 SEC CRITICAL — stage uploaded artifacts into a fresh
 # per-deploy root-owned 0700 directory instead of predictable /tmp/X
@@ -1084,6 +1338,9 @@ $SCP "$STATIC_DEMAND_JSON"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/demand-rank.json
 $SCP "$STATIC_DEMAND_SIG"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/demand-rank.json.sig"
 $SCP "$STATIC_AUTOTUNE_JSON"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json"
 $SCP "$STATIC_AUTOTUNE_SIG"    "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json.sig"
+$SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
+$SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
+$SCP "$AUTOTUNE_RELEASE_VERIFY"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/catalog-release.py"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   $SCP "$CATALOG_SOURCE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
 fi
@@ -1095,7 +1352,10 @@ fi
 # trusting the operator's local copy. Backups live next to the live config
 # at /opt/macprovider/coordinator.yaml.bak-<UTC>.
 BACKUP_TS=$(date -u +%Y%m%dT%H%M%SZ)
-$SSH "if [ -f /opt/macprovider/coordinator.yaml ]; then
+$SSH "exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+      flock -s 8
+      if [ -f /opt/macprovider/coordinator.yaml ]; then
+        install -o root -g macprovider -m 0640 /opt/macprovider/coordinator.yaml /opt/macprovider/coordinator.yaml.prev
         install -o root -g macprovider -m 0640 /opt/macprovider/coordinator.yaml /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS
         echo '  remote-config backup saved at /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS'
       else
@@ -1103,6 +1363,8 @@ $SSH "if [ -f /opt/macprovider/coordinator.yaml ]; then
       fi"
 
 $SSH "set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
   # R5 SEC MED — deploy artifacts owned root:macprovider with group-read
   # rather than macprovider:macprovider. This prevents a compromised
   # macprovider UID from persistently rewriting its own executable /
@@ -1141,14 +1403,48 @@ $SSH "set -e
   elif [ -f /var/lib/macprovider/request-log.sqlite ]; then
     echo '  warning: setfacl not available; stats billing mirror will remain disabled until macprovider-stats can read request-log.sqlite'
   fi
-  # SPEC-023 signed recommendation feeds — loaded by coordinator at startup
-  # and served on the buyer mux (/v1/demand-rank, /v1/autotune-candidates).
-  # root:macprovider 0640 so the macprovider daemon can read them.
-  install -d -o root -g macprovider -m 0750 /opt/macprovider/autotune
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json            /opt/macprovider/autotune/demand-rank.json
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json.sig        /opt/macprovider/autotune/demand-rank.json.sig
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json   /opt/macprovider/autotune/autotune-candidates.json
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json.sig /opt/macprovider/autotune/autotune-candidates.json.sig
+  # Stage the complete immutable catalog release. Activation happens only
+  # after the late connected-provider safeguard immediately before restart.
+  _autotune_root=/opt/macprovider/autotune
+  _autotune_release=\$_autotune_root/releases/$AUTOTUNE_RELEASE_ID
+  _autotune_lock=\$_autotune_release.lock
+  _autotune_stage=\$_autotune_root/releases/.stage-$AUTOTUNE_RELEASE_ID-\$\$
+  install -d -o root -g macprovider -m 0750 \$_autotune_root \$_autotune_root/releases
+  if ! mkdir \$_autotune_lock; then
+    echo 'catalog release staging is already in progress for $AUTOTUNE_RELEASE_ID' >&2
+    exit 1
+  fi
+  trap 'rm -rf \"\$_autotune_stage\"; rmdir \"\$_autotune_lock\" 2>/dev/null || true' EXIT
+  rm -rf \$_autotune_stage
+  install -d -o root -g macprovider -m 0750 \$_autotune_stage
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json \$_autotune_stage/demand-rank.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json.sig \$_autotune_stage/demand-rank.json.sig
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json \$_autotune_stage/autotune-candidates.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json.sig \$_autotune_stage/autotune-candidates.json.sig
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/release.json \$_autotune_stage/release.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/trusted-keys.json \$_autotune_stage/trusted-keys.json
+  python3 $DEPLOY_TMP/catalog-release.py verify-directory --directory \$_autotune_stage
+  sync
+  if [ -e \$_autotune_release ]; then
+    if ! diff -qr \$_autotune_stage \$_autotune_release >/dev/null; then
+      echo 'catalog release ID $AUTOTUNE_RELEASE_ID already exists with different bytes' >&2
+      exit 1
+    fi
+    rm -rf \$_autotune_stage
+  else
+    mv \$_autotune_stage \$_autotune_release
+  fi
+  python3 $DEPLOY_TMP/catalog-release.py verify-directory --directory \$_autotune_release
+  # First rollout: the new on-disk coordinator config already points at
+  # autotune/current. Establish that path as soon as the immutable release is
+  # staged so an abort before the late restart gate cannot leave the next
+  # service restart without feeds. Existing rollouts remain untouched here.
+  if [ ! -e \$_autotune_root/current ] && [ ! -L \$_autotune_root/current ]; then
+    ln -sfn releases/$AUTOTUNE_RELEASE_ID \$_autotune_root/current.bootstrap
+    mv -Tf \$_autotune_root/current.bootstrap \$_autotune_root/current
+  fi
+  rmdir \$_autotune_lock
+  trap - EXIT
 "
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   # R4: no more `install -d` on a dynamic dirname. /opt/macprovider is
@@ -1156,6 +1452,8 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   # into it. The destination is the hardcoded canonical path validated
   # at startup; no operator-controlled value reaches the SSH command.
   $SSH "set -e
+    exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+    flock -s 8
     install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json $CATALOG_REMOTE_PATH_CANONICAL
   "
 fi
@@ -1325,6 +1623,8 @@ pearl_tls_plan_full_tls
 log "step 6b/9: install nginx artifacts + full TLS vhost for [${DOMAINS_FULL_TLS[*]:-none}]"
 # Shared http-context snippets always go in — no cert dependency.
 $SSH "set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
   install -o root -g root -m 0644 $DEPLOY_TMP/nginx-stats-shared.conf /etc/nginx/conf.d/stats-shared.conf
   install -o root -g root -m 0644 $DEPLOY_TMP/nginx-stats-security-headers.conf /etc/nginx/conf.d/stats-security-headers.conf
   install -o root -g root -m 0644 $DEPLOY_TMP/nginx-stats-cors-429.conf /etc/nginx/conf.d/cors-429.conf
@@ -1345,6 +1645,8 @@ for d in ${DOMAINS_FULL_TLS[@]+"${DOMAINS_FULL_TLS[@]}"}; do
     *) echo "  unknown domain in DOMAINS_FULL_TLS: $d (skipping)" >&2; continue ;;
   esac
   $SSH "set -e
+    exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+    flock -s 8
     install -o root -g root -m 0644 $src /etc/nginx/sites-available/$d
     ln -sf /etc/nginx/sites-available/$d /etc/nginx/sites-enabled/$d
   "
@@ -1354,6 +1656,8 @@ done
 # from the broken-v1 deploy if present. validate + reload exactly once
 # so a single bad file aborts the batch atomically.
 $SSH "set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
   rm -rf $DEPLOY_TMP
   rm -f /etc/nginx/sites-available/$DOMAIN.full
   nginx -t
@@ -1437,8 +1741,27 @@ EOF
 fi
 log "  ok: $CONNECTED_COUNT connected providers (or FORCE_RESTART=1 set)"
 
+log "  activating verified autotune release $AUTOTUNE_RELEASE_ID"
+$SSH "set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
+  _catalog_root=/opt/macprovider/autotune
+  _previous=\$(readlink \"\$_catalog_root/current\" 2>/dev/null || true)
+  case \"\$_previous\" in
+    ''|releases/*) ;;
+    *) echo \"invalid existing autotune current target: \$_previous\" >&2; exit 1 ;;
+  esac
+  printf '%s' \"\$_previous\" > \"\$_catalog_root/.previous-target\"
+  chown root:macprovider \"\$_catalog_root/.previous-target\"
+  chmod 0640 \"\$_catalog_root/.previous-target\"
+  ln -sfn releases/$AUTOTUNE_RELEASE_ID \"\$_catalog_root/current.next\"
+  mv -Tf \"\$_catalog_root/current.next\" \"\$_catalog_root/current\"
+"
 log "step 7/9: enable + start coordinator service"
 $SSH 'set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
+  touch /opt/macprovider/.coordinator-deploy-rollback/restart-attempted
   systemctl daemon-reload
   systemctl enable macprovider-coordinator
   systemctl restart macprovider-coordinator
@@ -1558,8 +1881,8 @@ fi
 # SPEC-023 signed recommendation feeds smoke (buyer mux via nginx).
 log "  verifying coordinator can read autotune feeds as macprovider"
 $SSH "set -e
-  sudo -u macprovider test -r /opt/macprovider/autotune/autotune-candidates.json
-  sudo -u macprovider test -r /opt/macprovider/autotune/demand-rank.json
+  sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-candidates.json
+  sudo -u macprovider test -r /opt/macprovider/autotune/current/demand-rank.json
 " || {
   echo "aborting smoke: macprovider cannot read /opt/macprovider/autotune/*" >&2
   exit 1
@@ -1568,21 +1891,94 @@ STATIC_SMOKE_DIR=$(umask 077 && mktemp -d -t macprovider-autotune-probe.XXXXXXXX
   echo "aborting smoke: mktemp -d failed for autotune feed probe" >&2
   exit 1
 }
-STATIC_SMOKE_BODY="$STATIC_SMOKE_DIR/body"
-for STATIC_PATH in \
-    /v1/demand-rank \
-    /v1/demand-rank.sig \
-    /v1/autotune-candidates \
-    /v1/autotune-candidates.sig; do
+for STATIC_SPEC in \
+    "/v1/demand-rank|demand-rank.json|$STATIC_DEMAND_JSON" \
+    "/v1/demand-rank.sig|demand-rank.json.sig|$STATIC_DEMAND_SIG" \
+    "/v1/autotune-candidates|autotune-candidates.json|$STATIC_AUTOTUNE_JSON" \
+    "/v1/autotune-candidates.sig|autotune-candidates.json.sig|$STATIC_AUTOTUNE_SIG"; do
+  STATIC_PATH="${STATIC_SPEC%%|*}"
+  STATIC_REST="${STATIC_SPEC#*|}"
+  STATIC_NAME="${STATIC_REST%%|*}"
+  STATIC_EXPECTED="${STATIC_REST#*|}"
+  STATIC_SMOKE_BODY="$STATIC_SMOKE_DIR/$STATIC_NAME"
   echo "  GET https://$DOMAIN$STATIC_PATH -> expect 200"
-  : > "$STATIC_SMOKE_BODY"
   STATUS=$(curl -sS -o "$STATIC_SMOKE_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN$STATIC_PATH")
   if [ "$STATUS" != "200" ]; then
     echo "SPEC-023 autotune feed smoke failed: $STATIC_PATH status=$STATUS body=$(head -c 200 "$STATIC_SMOKE_BODY")" >&2
     exit 1
   fi
+  if ! cmp -s "$STATIC_EXPECTED" "$STATIC_SMOKE_BODY"; then
+    echo "SPEC-023 autotune feed smoke failed: $STATIC_PATH bytes differ from staged release" >&2
+    exit 1
+  fi
 done
-echo "  SPEC-023 autotune feeds OK"
+cp "$AUTOTUNE_RELEASE_MANIFEST" "$STATIC_SMOKE_DIR/release.json"
+cp "$AUTOTUNE_TRUSTED_KEYS" "$STATIC_SMOKE_DIR/trusted-keys.json"
+python3 "$AUTOTUNE_RELEASE_VERIFY" verify-directory --directory "$STATIC_SMOKE_DIR"
+AUTOTUNE_STATUS_BODY="$STATIC_SMOKE_DIR/autotune-release-status.json"
+STATUS=$(curl -sS -o "$AUTOTUNE_STATUS_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN/v1/autotune-release")
+if [ "$STATUS" != "200" ]; then
+  echo "SPEC-023 autotune release status failed: status=$STATUS body=$(head -c 200 "$AUTOTUNE_STATUS_BODY")" >&2
+  exit 1
+fi
+python3 - "$AUTOTUNE_STATUS_BODY" "$AUTOTUNE_RELEASE_ID" <<'PY'
+import json, sys
+status = json.load(open(sys.argv[1], encoding="utf-8"))
+if status.get("status") != "live_verified" or status.get("release_id") != sys.argv[2]:
+    raise SystemExit("coordinator autotune release metadata does not match activated release")
+for name in ("autotune_candidates", "demand_rank"):
+    feed = status.get("feeds", {}).get(name, {})
+    if len(feed.get("sha256", "")) != 64 or not feed.get("signer_key_id"):
+        raise SystemExit(f"coordinator autotune release metadata is incomplete for {name}")
+PY
+echo "  SPEC-023 autotune feeds exact-byte and signature verification OK"
+
+# A perfect catalog endpoint does not prove providers can complete the hello
+# compatibility gate. Require one known provider to reconnect, report the
+# exact current signed release envelope, and remain buyer-serving before the
+# catalog/coordinator release is committed. buyer_serving disambiguates a busy
+# provider (publicly masked to degraded) from a truly degraded provider.
+CANARY_POOL_BODY="$STATIC_SMOKE_DIR/catalog-canary-pool.json"
+CANARY_CURL_CONFIG="$STATIC_SMOKE_DIR/catalog-canary-curl.conf"
+(umask 077 && printf 'header = "Authorization: Bearer %s"\n' "$CATALOG_CANARY_AUTH_TOKEN" > "$CANARY_CURL_CONFIG")
+CANARY_OK=0
+for CANARY_ATTEMPT in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  STATUS=$(curl --config "$CANARY_CURL_CONFIG" -sS -o "$CANARY_POOL_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 \
+    "https://$DOMAIN/v1/pool/check?provider_id=$CATALOG_CANARY_PROVIDER_ID&details=deployment" || true)
+  if [ "$STATUS" = "200" ] && python3 - \
+    "$CANARY_POOL_BODY" \
+    "$CATALOG_CANARY_PROVIDER_ID" \
+    "$AUTOTUNE_RELEASE_ID" \
+    "$AUTOTUNE_POLICY_VERSION" \
+    "$AUTOTUNE_CANDIDATE_SHA256" \
+    "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" <<'PY'
+import json, re, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+if (
+    value.get("provider_id") != sys.argv[2]
+    or value.get("buyer_serving") is not True
+    or value.get("catalog_admission_mode") != "current"
+    or value.get("catalog_release_id") != sys.argv[3]
+    or value.get("catalog_policy_version") != sys.argv[4]
+    or value.get("catalog_candidate_sha256") != sys.argv[5]
+    or value.get("catalog_signer_key_id") != sys.argv[6]
+    or re.fullmatch(r"[0-9a-f]{64}", value.get("catalog_row_identity", "")) is None
+):
+    raise SystemExit(1)
+PY
+  then
+    CANARY_OK=1
+    break
+  fi
+  sleep 5
+done
+rm -f "$CANARY_CURL_CONFIG"
+if [ "$CANARY_OK" != "1" ]; then
+  echo "SPEC-023 canary failed: provider $CATALOG_CANARY_PROVIDER_ID did not return to buyer-serving pool state" >&2
+  echo "  last status=$STATUS body=$(head -c 300 "$CANARY_POOL_BODY" 2>/dev/null || true)" >&2
+  exit 1
+fi
+echo "  SPEC-023 canary OK: provider $CATALOG_CANARY_PROVIDER_ID is admitted to the buyer pool"
 
 # R3+R4+R5 stats smoke check on STATS_DOMAIN.
 #
@@ -1658,6 +2054,13 @@ fi
 log "step 9/9: tail the coordinator journal for sanity"
 $SSH 'journalctl -u macprovider-coordinator --no-pager -n 20'
 
+$SSH 'set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
+  touch /opt/macprovider/.coordinator-deploy-rollback/committed
+  /opt/macprovider/coordinator-deploy-recover --recover
+'
+COORDINATOR_DEPLOY_ARMED=0
 log "DONE. coordinator is live at https://$DOMAIN"
 echo
 echo "Next steps:"

@@ -41,6 +41,80 @@ EOF
   chmod +x "$root/bin/launchctl"
 }
 
+add_full_release_fixture() {
+  root="$1"
+  python3 - "$root" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+binary_dir = os.path.join(root, "bin")
+pending = os.path.join(root, "home/.local/share/macprovider/autoupdate/pending.json")
+update_id = "123e4567-e89b-42d3-a456-426614174000"
+release_backup = os.path.join(binary_dir, f".macprovider-cli.release-rollback-{update_id}")
+
+def write(path, body):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(body)
+    os.chmod(path, 0o644)
+
+for relative, body in {
+    "mlx.metallib": "old-metal",
+    "THIRD-PARTY-NOTICES.txt": "old-notices",
+    "Runtime.bundle/resource": "old-bundle",
+    "catalog-release/release.json": "old-catalog",
+}.items():
+    write(os.path.join(release_backup, relative), body)
+for current, directories, _ in os.walk(release_backup):
+    os.chmod(current, 0o700 if current == release_backup else 0o755)
+
+for relative, body in {
+    "mlx.metallib": "new-metal",
+    "THIRD-PARTY-NOTICES.txt": "new-notices",
+    "Runtime.bundle/resource": "new-bundle",
+    "NewOnly.bundle/resource": "new-only",
+    "catalog-release/release.json": "new-catalog",
+}.items():
+    write(os.path.join(binary_dir, relative), body)
+
+def file_sha(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+records = []
+for current, directories, files in os.walk(release_backup):
+    directories.sort()
+    files.sort()
+    for name in directories + files:
+        path = os.path.join(current, name)
+        item = os.lstat(path)
+        relative = os.path.relpath(path, release_backup)
+        mode = stat.S_IMODE(item.st_mode)
+        if stat.S_ISDIR(item.st_mode):
+            record = f"d\0{relative}\0{mode}\0"
+        else:
+            record = f"f\0{relative}\0{mode}\0{item.st_size}\0{file_sha(path)}\0"
+        records.append((relative, record.encode()))
+digest = hashlib.sha256()
+for _, record in sorted(records):
+    digest.update(record)
+
+with open(pending, encoding="utf-8") as handle:
+    marker = json.load(handle)
+marker["release_backup_path"] = release_backup
+marker["release_backup_sha256"] = digest.hexdigest()
+with open(pending, "w", encoding="utf-8") as handle:
+    json.dump(marker, handle, sort_keys=True, separators=(",", ":"))
+PY
+}
+
 run_reconcile() {
   script="$1"
   root="$2"
@@ -61,5 +135,22 @@ run_reconcile "$STANDALONE" "$TMP/standalone"
 
 make_fixture "$TMP/inline"
 run_reconcile "$INLINE" "$TMP/inline"
+
+make_fixture "$TMP/full-standalone"
+add_full_release_fixture "$TMP/full-standalone"
+run_reconcile "$STANDALONE" "$TMP/full-standalone"
+cmp -s "$TMP/full-standalone/bin/mlx.metallib" <(printf "old-metal")
+cmp -s "$TMP/full-standalone/bin/THIRD-PARTY-NOTICES.txt" <(printf "old-notices")
+cmp -s "$TMP/full-standalone/bin/Runtime.bundle/resource" <(printf "old-bundle")
+cmp -s "$TMP/full-standalone/bin/catalog-release/release.json" <(printf "old-catalog")
+[ ! -e "$TMP/full-standalone/bin/NewOnly.bundle" ]
+[ ! -e "$TMP/full-standalone/bin/.macprovider-cli.release-rollback-123e4567-e89b-42d3-a456-426614174000" ]
+
+make_fixture "$TMP/full-inline"
+add_full_release_fixture "$TMP/full-inline"
+run_reconcile "$INLINE" "$TMP/full-inline"
+cmp -s "$TMP/full-inline/bin/mlx.metallib" <(printf "old-metal")
+cmp -s "$TMP/full-inline/bin/catalog-release/release.json" <(printf "old-catalog")
+[ ! -e "$TMP/full-inline/bin/NewOnly.bundle" ]
 
 echo "watchdog rollback paths ok"
