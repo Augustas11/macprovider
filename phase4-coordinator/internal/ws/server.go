@@ -3,6 +3,7 @@ package ws
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -89,14 +90,15 @@ type Server struct {
 	// mint behavior (e.g. mintFailingStore) without touching the
 	// validator. Codex architect review on PR #44 flagged the
 	// interface-segregation regression of mixing both on TokenValidator.
-	issuer      TokenIssuer
-	authStore   *auth.Store
-	githubOAuth githubOAuthClient
-	admission   *AdmissionManager
-	sessions    sync.Map
-	started     time.Time
-	explorer    http.Handler
-	unauth      chan struct{}
+	issuer          TokenIssuer
+	bootstrapTokens BootstrapTokenStore
+	authStore       *auth.Store
+	githubOAuth     githubOAuthClient
+	admission       *AdmissionManager
+	sessions        sync.Map
+	started         time.Time
+	explorer        http.Handler
+	unauth          chan struct{}
 	// unauthPerIP counts concurrent unauthenticated WS handshakes by remote IP.
 	// Defense-in-depth against nginx limit_conn evasion: one host can still
 	// burn the global 64-slot semaphore without per-IP shaping (M1-4 / SECU-1).
@@ -108,17 +110,19 @@ type Server struct {
 	// catalog holds an explicitly-injected tier2.Catalog for tests that
 	// want isolation from the package-singleton; nil means "use
 	// tier2.Default()". M3-8d (audit TEST-4). See s.catalogRef().
-	catalog                  *tier2.Catalog
-	autotuneCatalog          *autotune.Catalog
-	autotuneEvidence         autotune.EvidenceStore
-	telemetryDrift           *pow.Evaluator
-	identitySignatures       IdentitySignatureStore
-	authPolicyAdmin          ProviderAuthPolicyAdminStore
-	idlePrewarm              IdlePrewarmRecorder
-	idlePrewarmMetrics       IdlePrewarmMetrics
-	modelHashMismatchMetrics ModelHashMismatchMetrics
-	idlePrewarmLimits        sync.Map
-	idlePrewarmQueue         chan idlePrewarmRecord
+	catalog                    *tier2.Catalog
+	autotuneCatalog            *autotune.Catalog
+	autotuneEvidence           autotune.EvidenceStore
+	telemetryDrift             *pow.Evaluator
+	identitySignatures         IdentitySignatureStore
+	authPolicyAdmin            ProviderAuthPolicyAdminStore
+	idlePrewarm                IdlePrewarmRecorder
+	idlePrewarmMetrics         IdlePrewarmMetrics
+	modelHashMismatchMetrics   ModelHashMismatchMetrics
+	credentialBootstrapMetrics CredentialBootstrapMetrics
+	bootstrapLimiter           *bootstrapMintLimiter
+	idlePrewarmLimits          sync.Map
+	idlePrewarmQueue           chan idlePrewarmRecord
 
 	// SE liveness (Phase 1, Track P1-C).
 	// seLivenessChans maps sessionKey → chan SELivenessResponse for in-flight probes.
@@ -132,10 +136,11 @@ type Server struct {
 // so test seams can mock validation independently.
 //
 // SPEC-003 v0.8.4 (fix-pass-5) added `ValidateAndMarkTokenUsed` to close
-// the TOCTOU window between `ValidateToken` and `MarkTokenUsed`. The
-// atomic operation stamps `last_used_at` in the same DB statement that
-// validates the token, so bearer validation and token-use marking cannot
-// diverge under concurrent reconnects.
+// the TOCTOU window between `ValidateToken` and `MarkTokenUsed`. Ordinary
+// and previously confirmed credentials are marked during that atomic
+// validation. Fresh bootstrap credentials remain provisional until every
+// provider-ID-bound hello/evidence/admission check succeeds; MarkTokenUsed
+// commits that boundary before registration or an accepted response.
 //
 // `ValidateToken` is retained as a separate method for read-only
 // validations that don't need to record use (operator tooling, status).
@@ -169,10 +174,17 @@ type TokenIssuer interface {
 	HasActiveTokenForProvider(ctx context.Context, providerID string) (bool, error)
 }
 
+type BootstrapTokenStore interface {
+	MintBootstrapToken(context.Context, auth.BootstrapMintRequest) (auth.BootstrapMint, error)
+	LookupBootstrapIdentityPubkey(context.Context, string) ([]byte, bool, error)
+	BootstrapIdentityExists(context.Context, string) (bool, error)
+}
+
 type providerAuth struct {
 	validated  bool
 	providerID string
 	token      string
+	sourceIP   string
 }
 
 type IdentitySignatureStore interface {
@@ -196,6 +208,10 @@ type IdlePrewarmMetrics interface {
 
 type ModelHashMismatchMetrics interface {
 	IncModelHashMismatch()
+}
+
+type CredentialBootstrapMetrics interface {
+	IncCredentialBootstrap(outcome string)
 }
 
 const (
@@ -263,6 +279,12 @@ func WithTokenIssuer(issuer TokenIssuer) Option {
 	}
 }
 
+func WithBootstrapTokenStore(store BootstrapTokenStore) Option {
+	return func(s *Server) {
+		s.bootstrapTokens = store
+	}
+}
+
 func WithGitHubAuthStore(store *auth.Store) Option {
 	return func(s *Server) {
 		s.authStore = store
@@ -296,6 +318,12 @@ func WithIdlePrewarmMetrics(metrics IdlePrewarmMetrics) Option {
 func WithModelHashMismatchMetrics(metrics ModelHashMismatchMetrics) Option {
 	return func(s *Server) {
 		s.modelHashMismatchMetrics = metrics
+	}
+}
+
+func WithCredentialBootstrapMetrics(metrics CredentialBootstrapMetrics) Option {
+	return func(s *Server) {
+		s.credentialBootstrapMetrics = metrics
 	}
 }
 
@@ -415,6 +443,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		version:                       "dev",
 	}
 	s.authAttempts = newAuthAttemptStore(1024)
+	s.bootstrapLimiter = newBootstrapMintLimiter(cfg.Auth)
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
 	for _, opt := range opts {
 		opt(s)
@@ -569,6 +598,7 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
 		return
 	}
+	auth.sourceIP = remoteIP
 	go s.handleConn(conn, auth, func() {
 		s.releaseUnauthenticatedConn()
 		releasePerIP()
@@ -615,10 +645,9 @@ func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 		return providerAuth{}, false
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(authz, prefix))
-	// Validate-and-mark in one atomic DB operation. Pre-fix this was
-	// ValidateToken at upgrade plus a later MarkTokenUsed inside
-	// prepareProviderAdmission, so bearer validation and token-use
-	// marking could diverge under concurrent reconnects.
+	// Validate ordinary and confirmed credentials while atomically recording
+	// use. A fresh bootstrap credential remains provisional until the admitted
+	// provider-ID-bound hello is confirmed immediately before registration.
 	providerID, ok, err := s.tokens.ValidateAndMarkTokenUsed(r.Context(), token)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("provider token validation failed")
@@ -837,7 +866,7 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 	return provisionalTokenMinted, token, "", "", pool.AuthSelfMinted
 }
 
-func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
+func (s *Server) handleV1Conn(conn net.Conn, connectionAuth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
 	hello, badField, err := ParseHello(payload)
 	if err != nil {
 		s.close(conn, CloseInvalidHello, "invalid_hello: "+badField)
@@ -855,7 +884,24 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_encrypted_leg_required")
 		return "", ""
 	}
-	entry, ok := s.prepareProviderAdmission(conn, auth, hello, true)
+	if hello.CredentialBootstrap {
+		s.observeCredentialBootstrap("rejected_v1")
+		s.close(conn, CloseInvalidHello, "credential_bootstrap_requires_v2")
+		return "", ""
+	}
+	if auth.IsCredentialBootstrapPrincipal(hello.ProviderID) && s.bootstrapTokens != nil {
+		exists, lookupErr := s.bootstrapTokens.BootstrapIdentityExists(context.Background(), hello.ProviderID)
+		if lookupErr != nil {
+			s.log.Warn().Err(lookupErr).Str("provider_id", hello.ProviderID).Msg("bootstrap identity v1 downgrade lookup failed")
+			s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_lookup_failed")
+			return "", ""
+		}
+		if exists {
+			s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_requires_v2")
+			return "", ""
+		}
+	}
+	entry, ok := s.prepareProviderAdmission(conn, connectionAuth, hello, true)
 	if !ok {
 		return "", ""
 	}
@@ -873,9 +919,12 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	// the provided AuthState (BearerValidated / BearerlessDuplicate /
 	// empty) and let the registry eviction defense + RoutingEligible
 	// gates take over.
-	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
+	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, hello.Hostname)
 	if outcome == provisionalTokenRejectTOFU {
 		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", ""
+	}
+	if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
 		return "", ""
 	}
 	entry.AuthState = authState
@@ -922,7 +971,7 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	return entry.ProviderID, entry.AssignedID
 }
 
-func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
+func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
 	initial, initialPresence, badField, err := ParseAuthRequest(payload)
 	if err != nil || initial.Stage != "initial" {
 		if badField == "" {
@@ -959,7 +1008,12 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_key_exchange_failed")
 		return "", ""
 	}
-	entry, ok := s.prepareProviderAdmission(conn, auth, initial.Hello(), false)
+	var entry *pool.Provider
+	if initial.CredentialBootstrap {
+		entry, ok = s.prepareCredentialBootstrap(conn, connectionAuth, initial)
+	} else {
+		entry, ok = s.prepareProviderAdmission(conn, connectionAuth, initial.Hello(), false)
+	}
 	if !ok {
 		return "", ""
 	}
@@ -988,7 +1042,17 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	supportedModelsPresent := initialPresence.SupportedModels
 	publishesPresent := initialPresence.PublishesSupportedModels
 	retainSpec010 := supportedModelsPresent || publishesPresent
-	retainAuthAttempt := retainSpec010 || s.identitySignatures != nil
+	durableBootstrapIdentity := false
+	if !initial.CredentialBootstrap && auth.IsCredentialBootstrapPrincipal(initial.ProviderID) && s.bootstrapTokens != nil {
+		var lookupErr error
+		durableBootstrapIdentity, lookupErr = s.bootstrapTokens.BootstrapIdentityExists(context.Background(), initial.ProviderID)
+		if lookupErr != nil {
+			s.log.Warn().Err(lookupErr).Str("provider_id", initial.ProviderID).Msg("bootstrap identity proof requirement lookup failed")
+			s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_lookup_failed")
+			return "", ""
+		}
+	}
+	retainAuthAttempt := retainSpec010 || s.identitySignatures != nil || durableBootstrapIdentity || initial.CredentialBootstrap
 	if retainAuthAttempt {
 		state := AuthAttemptState{
 			AuthAttemptID:            authAttemptID,
@@ -1031,6 +1095,17 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		KeyID:                    keys.KeyID,
 		ExpiresAt:                challengeExpiresAt.Format(time.RFC3339),
 	}
+	if !initial.CredentialBootstrap && auth.IsCredentialBootstrapPrincipal(initial.ProviderID) && s.bootstrapTokens != nil {
+		pubkey, found, lookupErr := s.bootstrapTokens.LookupBootstrapIdentityPubkey(context.Background(), initial.ProviderID)
+		if lookupErr != nil {
+			s.log.Warn().Err(lookupErr).Str("provider_id", initial.ProviderID).Msg("bootstrap identity challenge lookup failed")
+			s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_lookup_failed")
+			return "", ""
+		}
+		if found {
+			challenge.BootstrapIdentityPubkey = base64.StdEncoding.EncodeToString(pubkey)
+		}
+	}
 	rawChallenge, err := json.Marshal(challenge)
 	if err != nil {
 		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_key_exchange_failed")
@@ -1061,7 +1136,8 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseInvalidHello, "invalid_auth_request: "+badField)
 		return "", ""
 	}
-	if proof.AuthAttemptID != authAttemptID || proof.ProviderID != initial.ProviderID || s.now().After(challengeExpiresAt) {
+	if proof.AuthAttemptID != authAttemptID || proof.ProviderID != initial.ProviderID ||
+		proof.CredentialBootstrap != initial.CredentialBootstrap || s.now().After(challengeExpiresAt) {
 		s.sendAuthRejection(conn, "attestation_failed", "attestation failed")
 		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
 		return "", ""
@@ -1075,7 +1151,13 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 			return "", ""
 		}
 	}
-	if s.identitySignatures != nil && !s.verifyIdentitySignature(context.Background(), initial, proof, retained) {
+	if initial.CredentialBootstrap && (!retainedOK || !verifyCredentialBootstrapIdentity(initial, proof, retained, challenge)) {
+		s.observeCredentialBootstrap("rejected_identity")
+		s.sendAuthRejection(conn, "bootstrap_identity_proof_required", "bootstrap_identity_proof_required")
+		s.close(conn, CloseIdentitySignatureRequired, "bootstrap_identity_proof_required")
+		return "", ""
+	}
+	if !initial.CredentialBootstrap && (s.identitySignatures != nil || durableBootstrapIdentity) && !s.verifyIdentitySignature(context.Background(), initial, proof, retained) {
 		s.sendAuthRejection(conn, "identity_signature_required", "identity_signature_required")
 		s.close(conn, CloseIdentitySignatureRequired, "identity_signature_required")
 		return "", ""
@@ -1109,18 +1191,60 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
 		return "", ""
 	}
-	if tier, ok := s.recordProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
-		return "", ""
-	} else {
-		entry.Tier = tier
-	}
-	registered := false
-	defer func() {
-		if !registered && entry.Tier == pool.TierProvisional {
-			s.admission.ReleasePendingProvisional()
+	if initial.CredentialBootstrap {
+		if !s.bootstrapLimiter.allow(connectionAuth.sourceIP, entry.ProviderID, s.now()) {
+			s.observeCredentialBootstrap("rejected_rate")
+			s.sendAuthRejection(conn, "credential_bootstrap_rate_limited", "credential bootstrap rate limited")
+			s.close(conn, CloseProvisionalRateLimited, "credential_bootstrap_rate_limited")
+			return "", ""
 		}
-	}()
-
+		mint, err := s.bootstrapTokens.MintBootstrapToken(context.Background(), auth.BootstrapMintRequest{
+			ProviderID:          entry.ProviderID,
+			ProviderName:        initial.Hostname,
+			SourceIP:            connectionAuth.sourceIP,
+			ReceiptPubkey:       append([]byte(nil), initial.ProviderReceiptPubkey...),
+			Now:                 s.now(),
+			TTL:                 time.Duration(s.cfg.Auth.CredentialBootstrapTokenTTLS) * time.Second,
+			PerIPLimitPerHour:   s.cfg.Auth.CredentialBootstrapMintsPerIPHour,
+			PerProviderPerHour:  s.cfg.Auth.CredentialBootstrapMintsPerIDHour,
+			GlobalLimitPerHour:  s.cfg.Auth.CredentialBootstrapMintsGlobalHour,
+			UnconfirmedIDMax:    s.cfg.Auth.CredentialBootstrapUnconfirmedMax,
+			OutstandingTokenMax: s.cfg.Auth.CredentialBootstrapOutstandingMax,
+			IdentityRetention:   time.Duration(s.cfg.Auth.CredentialBootstrapIdentityRetentionS) * time.Second,
+		})
+		if err != nil {
+			s.rejectCredentialBootstrap(conn, err)
+			return "", ""
+		}
+		response := AuthResponse{
+			Type: "auth_response", Version: 2, Status: "accepted", AssignedID: entry.AssignedID,
+			HeartbeatIntervalS: int(s.cfg.HeartbeatInterval().Seconds()), Tier: string(pool.TierProvisional),
+			AssignedProviderToken: mint.ProviderToken,
+			Tier2Session: &AuthTier2Session{
+				EncryptedLeg: AuthEncryptedLegSession{
+					Enabled: true, Alg: selectedAEAD, KID: keys.KeyID,
+					RekeyAfterRequests:             tier2Cfg.EncryptedLegRekeyAfterRequests,
+					RekeyAfterSeconds:              tier2Cfg.EncryptedLegRekeyAfterSeconds,
+					ResponseChunkPlaintextEnvelope: initial.Tier2Capabilities.ResponseChunkPlaintextEnvelope,
+				},
+				Attestation: AuthAttestationSession{Status: string(attestationStatus), RAMTierAttested: false},
+				ModelHash:   AuthModelHashSession{Status: string(entry.HashStatus)},
+			},
+		}
+		rawResponse, err := json.Marshal(response)
+		if err != nil || s.writeServerText(conn, rawResponse) != nil {
+			return "", ""
+		}
+		if mint.Replaced {
+			s.observeCredentialBootstrap("recovered")
+		} else {
+			s.observeCredentialBootstrap("minted")
+		}
+		// The unauthenticated global/per-IP semaphores remain held until the
+		// credential-bearing response has been completely written.
+		releaseUnauth()
+		return "", ""
+	}
 	entry.EncryptedLeg = true
 	entry.AttestationStatus = attestationStatus
 	if attestResult.SEResult != nil {
@@ -1172,9 +1296,33 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	// flow: RejectTOFU closes; Minted embeds; Skip admits with the
 	// provided AuthState; eviction defense protects existing routable
 	// sessions from bearer-less duplicates.
-	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(auth, entry.ProviderID, initial.Hostname)
+	maxAdmittedModelKey, maxAdmittedModelID, gateOK := s.checkAutotuneHelloGate(conn, initial.Hello())
+	if !gateOK {
+		return "", ""
+	}
+	entry.MaxAdmittedModelKey = maxAdmittedModelKey
+	entry.MaxAdmittedModelID = maxAdmittedModelID
+	// This is the first durable admission mutation in the v2 path. Keep it
+	// after the post-challenge evidence recheck so a provider whose evidence
+	// disappears during authentication cannot consume an hourly admission or
+	// leave a provisional record behind.
+	if tier, ok := s.recordProviderAdmission(conn, initial.Hello(), entry.Tier == pool.TierPinned); !ok {
+		return "", ""
+	} else {
+		entry.Tier = tier
+	}
+	registered := false
+	defer func() {
+		if !registered && entry.Tier == pool.TierProvisional {
+			s.admission.ReleasePendingProvisional()
+		}
+	}()
+	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(connectionAuth, entry.ProviderID, initial.Hostname)
 	if outcome == provisionalTokenRejectTOFU {
 		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", ""
+	}
+	if !s.confirmAdmittedProviderToken(conn, connectionAuth) {
 		return "", ""
 	}
 	entry.AuthState = authState
@@ -1239,6 +1387,89 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	return entry.ProviderID, entry.AssignedID
 }
 
+// confirmAdmittedProviderToken runs only after provider-ID binding and every
+// hello, evidence, attestation, and admission check, but before the provider is
+// registered or an acceptance frame is queued. MarkTokenUsed is confirmation-
+// neutral for ordinary credentials and atomically consumes a fresh bootstrap
+// credential. A store failure therefore cannot create a routable provider or
+// send a false accepted response.
+func (s *Server) confirmAdmittedProviderToken(conn net.Conn, connectionAuth providerAuth) bool {
+	if !connectionAuth.validated || s.tokens == nil {
+		return true
+	}
+	if err := s.tokens.MarkTokenUsed(context.Background(), connectionAuth.token); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", connectionAuth.providerID).Msg("admitted provider token confirmation failed")
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return false
+	}
+	return true
+}
+
+// prepareCredentialBootstrap validates the narrow mint-only handshake. It
+// deliberately does not reserve admission capacity, evaluate model evidence,
+// or create a routable pool entry. The caller must complete the normal v2
+// cryptographic proof (when configured), mint a brand-new token, send it, and
+// close. A bearer-authenticated or pinned provider can never use this path.
+func (s *Server) prepareCredentialBootstrap(conn net.Conn, connectionAuth providerAuth, initial AuthRequest) (*pool.Provider, bool) {
+	hello := initial.Hello()
+	if connectionAuth.validated || s.bootstrapTokens == nil || connectionAuth.sourceIP == "" {
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return nil, false
+	}
+	if !auth.IsCredentialBootstrapPrincipal(hello.ProviderID) || len(initial.ProviderReceiptPubkey) != ed25519.PublicKeySize {
+		s.observeCredentialBootstrap("rejected_identity")
+		s.close(conn, CloseIdentitySignatureRequired, "bootstrap_receipt_identity_required")
+		return nil, false
+	}
+	if _, pinned := s.pool.Endpoint(hello.ProviderID); pinned {
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return nil, false
+	}
+	if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" {
+		cmp, valid := compareSemver(hello.BinaryVersion, required)
+		if !valid || cmp < 0 {
+			s.close(conn, CloseVersionUnsupported, "version_unsupported: binary_version "+hello.BinaryVersion+" below required "+required)
+			return nil, false
+		}
+	}
+	return &pool.Provider{
+		ProviderID: hello.ProviderID,
+		AssignedID: s.newUUID(),
+		Tier:       pool.TierProvisional,
+		ModelID:    hello.ModelID,
+	}, true
+}
+
+func (s *Server) rejectCredentialBootstrap(conn net.Conn, err error) {
+	switch {
+	case errors.Is(err, auth.ErrBootstrapIdentityMismatch):
+		s.observeCredentialBootstrap("rejected_identity")
+		s.close(conn, CloseInvalidToken, "bootstrap_identity_mismatch")
+	case errors.Is(err, auth.ErrBootstrapTokenUsed):
+		s.observeCredentialBootstrap("rejected_used")
+		s.close(conn, CloseInvalidToken, "bootstrap_token_used")
+	case errors.Is(err, auth.ErrBootstrapTokenExpired):
+		s.observeCredentialBootstrap("rejected_expired")
+		s.close(conn, CloseInvalidToken, "bootstrap_token_expired")
+	case errors.Is(err, auth.ErrBootstrapRateLimited):
+		s.observeCredentialBootstrap("rejected_rate")
+		s.close(conn, CloseProvisionalRateLimited, "credential_bootstrap_rate_limited")
+	case errors.Is(err, auth.ErrBootstrapOutstandingLimit):
+		s.observeCredentialBootstrap("rejected_outstanding")
+		s.close(conn, CloseProvisionalPoolFull, "credential_bootstrap_outstanding_full")
+	default:
+		s.observeCredentialBootstrap("store_error")
+		s.log.Warn().Err(err).Msg("credential bootstrap token transaction failed")
+		s.close(conn, CloseInvalidToken, "invalid_token")
+	}
+}
+
+func (s *Server) observeCredentialBootstrap(outcome string) {
+	if s.credentialBootstrapMetrics != nil {
+		s.credentialBootstrapMetrics.IncCredentialBootstrap(outcome)
+	}
+}
+
 func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hello Hello, recordAdmission bool) (*pool.Provider, bool) {
 	if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" {
 		cmp, ok := compareSemver(hello.BinaryVersion, required)
@@ -1257,12 +1488,11 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 			s.close(conn, CloseInvalidToken, "invalid_token")
 			return nil, false
 		}
-		// `last_used_at` is now stamped atomically by
-		// validateProviderToken's ValidateAndMarkTokenUsed call at WS
-		// upgrade. The previously-here MarkTokenUsed invocation was
-		// removed because it ran after admission.
+		// Ordinary and confirmed credentials have `last_used_at` stamped by
+		// validateProviderToken at upgrade. A fresh bootstrap credential is
+		// consumed only after this admission path and all evidence checks pass.
 	}
-	tier, closeCode, closeReason := s.checkOrRecordAdmission(hello, pinned, recordAdmission)
+	tier, closeCode, closeReason := s.checkOrRecordAdmission(hello, pinned, false)
 	if closeCode != 0 {
 		s.close(conn, closeCode, closeReason)
 		return nil, false
@@ -1303,47 +1533,16 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 			tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
 		}
 	}
-	maxAdmittedModelKey := ""
-	maxAdmittedModelID := ""
-	if s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
-		if s.autotuneCatalog == nil || s.autotuneEvidence == nil {
-			s.log.Error().Str("provider_id", hello.ProviderID).Msg("autotune hello gate enabled but dependencies are not wired")
-			s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
+	maxAdmittedModelKey, maxAdmittedModelID, gateOK := s.checkAutotuneHelloGate(conn, hello)
+	if !gateOK {
+		return nil, false
+	}
+	if recordAdmission {
+		tier, closeCode, closeReason = s.checkOrRecordAdmission(hello, pinned, true)
+		if closeCode != 0 {
+			s.close(conn, closeCode, closeReason)
 			return nil, false
 		}
-		ttl := time.Duration(s.cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
-		evidence, ok, err := s.autotuneEvidence.LatestVerified(context.Background(), hello.ProviderID, ttl)
-		if err != nil {
-			s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("autotune hello gate evidence lookup failed")
-			s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
-			return nil, false
-		}
-		if !ok {
-			s.log.Info().
-				Str("provider_id", hello.ProviderID).
-				Str("event", "autotune_evidence_required").
-				Str("model_id", hello.ModelID).
-				Msg("autotune hello gate rejected connect without verified hardware evidence")
-			s.close(conn, CloseInvalidHello, "autotune_evidence_required")
-			return nil, false
-		}
-		decision := autotune.EvaluateHelloGate(s.autotuneCatalog, evidence, hello.ModelID)
-		if !decision.Allowed {
-			s.log.Info().
-				Str("provider_id", hello.ProviderID).
-				Str("event", decision.Reason).
-				Str("model_id", hello.ModelID).
-				Str("claimed_model_key", decision.ClaimedModelKey).
-				Str("max_admitted_model_class", decision.MaxAdmittedModelKey).
-				Str("max_admitted_model_id", decision.MaxAdmittedModelID).
-				Int("claimed_min_ram_gb", decision.ClaimedMinRAMGB).
-				Int("max_admitted_min_ram_gb", decision.MaxAdmittedMinRAMGB).
-				Msg("autotune hello gate rejected provider model claim")
-			s.close(conn, CloseInvalidHello, decision.Reason)
-			return nil, false
-		}
-		maxAdmittedModelKey = decision.MaxAdmittedModelKey
-		maxAdmittedModelID = decision.MaxAdmittedModelID
 	}
 	initialState := pool.StateReady
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -1376,6 +1575,49 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		MaxAdmittedModelKey:   maxAdmittedModelKey,
 		MaxAdmittedModelID:    maxAdmittedModelID,
 	}, true
+}
+
+func (s *Server) checkAutotuneHelloGate(conn net.Conn, hello Hello) (string, string, bool) {
+	if !s.cfg.ProofOfWeights.RequireAutotuneHelloGate {
+		return "", "", true
+	}
+	if s.autotuneCatalog == nil || s.autotuneEvidence == nil {
+		s.log.Error().Str("provider_id", hello.ProviderID).Msg("autotune hello gate enabled but dependencies are not wired")
+		s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
+		return "", "", false
+	}
+	ttl := time.Duration(s.cfg.ProofOfWeights.AutotuneEvidenceTTLDays) * 24 * time.Hour
+	evidence, ok, err := s.autotuneEvidence.LatestVerified(context.Background(), hello.ProviderID, ttl)
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("autotune hello gate evidence lookup failed")
+		s.close(conn, CloseInvalidHello, "autotune_gate_unavailable")
+		return "", "", false
+	}
+	if !ok {
+		s.log.Info().
+			Str("provider_id", hello.ProviderID).
+			Str("event", "autotune_evidence_required").
+			Str("model_id", hello.ModelID).
+			Msg("autotune hello gate rejected connect without verified hardware evidence")
+		s.close(conn, CloseInvalidHello, "autotune_evidence_required")
+		return "", "", false
+	}
+	decision := autotune.EvaluateHelloGate(s.autotuneCatalog, evidence, hello.ModelID)
+	if !decision.Allowed {
+		s.log.Info().
+			Str("provider_id", hello.ProviderID).
+			Str("event", decision.Reason).
+			Str("model_id", hello.ModelID).
+			Str("claimed_model_key", decision.ClaimedModelKey).
+			Str("max_admitted_model_class", decision.MaxAdmittedModelKey).
+			Str("max_admitted_model_id", decision.MaxAdmittedModelID).
+			Int("claimed_min_ram_gb", decision.ClaimedMinRAMGB).
+			Int("max_admitted_min_ram_gb", decision.MaxAdmittedMinRAMGB).
+			Msg("autotune hello gate rejected provider model claim")
+		s.close(conn, CloseInvalidHello, decision.Reason)
+		return "", "", false
+	}
+	return decision.MaxAdmittedModelKey, decision.MaxAdmittedModelID, true
 }
 
 func (s *Server) recordProviderAdmission(conn net.Conn, hello Hello, pinned bool) (pool.Tier, bool) {

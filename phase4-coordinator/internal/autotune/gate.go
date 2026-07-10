@@ -7,13 +7,13 @@ import (
 )
 
 type HelloGateDecision struct {
-	Allowed              bool
-	Reason               string
-	MaxAdmittedModelKey  string
-	MaxAdmittedModelID   string
-	MaxAdmittedMinRAMGB  int
-	ClaimedModelKey      string
-	ClaimedMinRAMGB      int
+	Allowed             bool
+	Reason              string
+	MaxAdmittedModelKey string
+	MaxAdmittedModelID  string
+	MaxAdmittedMinRAMGB int
+	ClaimedModelKey     string
+	ClaimedMinRAMGB     int
 }
 
 func ResolveMaxAdmission(catalog *Catalog, evidence VerifiedEvidence) (AdmissionCap, error) {
@@ -83,10 +83,10 @@ func benchmarkPassesGate(benchmark VerifiedBenchmark, row Row, catalogSHA256 str
 	if !strings.EqualFold(strings.TrimSpace(benchmark.CandidateCatalogSHA256), strings.TrimSpace(catalogSHA256)) {
 		return false
 	}
-	if strings.TrimSpace(benchmark.ModelID) != "" && !strings.EqualFold(strings.TrimSpace(benchmark.ModelID), strings.TrimSpace(row.ModelID)) {
+	if strings.TrimSpace(benchmark.ModelID) == "" || !strings.EqualFold(strings.TrimSpace(benchmark.ModelID), strings.TrimSpace(row.ModelID)) {
 		return false
 	}
-	if strings.TrimSpace(benchmark.ArtifactSHA256) != "" && !strings.EqualFold(strings.TrimSpace(benchmark.ArtifactSHA256), strings.TrimSpace(row.ModelSHA256)) {
+	if strings.TrimSpace(benchmark.ArtifactSHA256) == "" || !strings.EqualFold(strings.TrimSpace(benchmark.ArtifactSHA256), strings.TrimSpace(row.ModelSHA256)) {
 		return false
 	}
 	if math.IsNaN(benchmark.SustainedTPS) || math.IsInf(benchmark.SustainedTPS, 0) || benchmark.SustainedTPS < row.BenchGate.MinSustainedTPS {

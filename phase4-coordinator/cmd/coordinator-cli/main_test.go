@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -61,6 +62,69 @@ func TestRevokeAndKickRejectsMismatchedProviderOverride(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "token belongs to provider_id p1") {
 		t.Fatalf("err = %v, want provider mismatch", err)
+	}
+}
+
+func TestBootstrapIdentityOperatorCommandsCoverExpiredCustody(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := "mp-00000000000000000000000000000071"
+	now := time.Now().UTC().Add(-2 * time.Minute)
+	mint, err := store.MintBootstrapToken(context.Background(), auth.BootstrapMintRequest{
+		ProviderID: providerID, ProviderName: "expired operator custody", SourceIP: "192.0.2.71",
+		ReceiptPubkey: bytes.Repeat([]byte{0x71}, 32), Now: now, TTL: time.Minute,
+		PerIPLimitPerHour: 8, PerProviderPerHour: 3, GlobalLimitPerHour: 128,
+		UnconfirmedIDMax: 64, OutstandingTokenMax: 64, IdentityRetention: 7 * 24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PruneUnusedTokens(context.Background(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	listed := captureStdout(t, func() {
+		if err := listBootstrapIdentities([]string{"--db", dbPath, "--state", "unconfirmed-expired"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(listed, "provider_id="+providerID+" state=unconfirmed-expired") ||
+		!strings.Contains(listed, " age_s=") || !strings.Contains(listed, " collect_in_s=") ||
+		!strings.Contains(listed, "count=1") {
+		t.Fatalf("expired identity list output=%q", listed)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		captureStdout(t, func() {
+			if err := revokeBootstrapIdentity([]string{"--db", dbPath, "--provider-id", providerID}); err != nil {
+				t.Fatalf("revoke attempt %d: %v", attempt, err)
+			}
+		})
+	}
+	listed = captureStdout(t, func() {
+		if err := listBootstrapIdentities([]string{"--db", dbPath, "--state", "operator-revoked"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(listed, "provider_id="+providerID+" state=operator-revoked") {
+		t.Fatalf("revoked identity list output=%q", listed)
+	}
+	store, err = auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, valid, err := store.ValidateToken(context.Background(), mint.ProviderToken); err != nil || valid {
+		t.Fatalf("retired bootstrap bearer valid=%v err=%v", valid, err)
+	}
+	missingID := "mp-00000000000000000000000000000072"
+	if err := store.RevokeBootstrapIdentity(context.Background(), missingID); err == nil {
+		t.Fatal("missing bootstrap identity revocation unexpectedly succeeded")
 	}
 }
 

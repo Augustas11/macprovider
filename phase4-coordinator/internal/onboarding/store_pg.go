@@ -116,17 +116,22 @@ func (s *PGStore) Smoke(ctx context.Context) error {
 	if _, err := s.db.ExecContext(timeout, `SELECT 1 FROM provider_identities LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_identities read: %w", err)
 	}
-	if _, err := s.db.ExecContext(timeout, `SELECT provider_id, last_reported_at FROM provider_hardware_profiles LIMIT 1`); err != nil {
+	if _, err := s.db.ExecContext(timeout, `SELECT provider_id, chip_normalized, unified_memory_gb, verified, last_reported_at FROM provider_hardware_profiles LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke provider_hardware_profiles read: %w", err)
 	}
-	if _, err := s.db.ExecContext(timeout, `SELECT id, evidence_sha256 FROM hardware_verification_jobs LIMIT 1`); err != nil {
+	if _, err := s.db.ExecContext(timeout, `SELECT id, status, decision_reason, evidence_sha256 FROM hardware_verification_jobs LIMIT 1`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke hardware_verification_jobs read: %w", err)
 	}
 	if _, err := s.db.ExecContext(timeout, `
-SELECT generated_at, evidence
-  FROM hardware_verification_jobs
- WHERE provider_id = ''
-   AND status = 'verified'
+SELECT j.generated_at, j.evidence
+  FROM hardware_verification_jobs j
+  JOIN provider_hardware_profiles p
+    ON p.provider_id = j.provider_id
+   AND p.verified = TRUE
+   AND p.chip_normalized = j.chip_normalized
+   AND p.unified_memory_gb = j.unified_memory_gb
+ WHERE j.provider_id = ''
+   AND j.status = 'verified'
  LIMIT 0`); err != nil {
 		return fmt.Errorf("provider_onboarding smoke autotune hello gate evidence read: %w", err)
 	}

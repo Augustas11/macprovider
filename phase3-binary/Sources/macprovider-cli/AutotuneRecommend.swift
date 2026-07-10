@@ -1473,12 +1473,25 @@ extension AutotuneRecommendResult {
         """
     }
 
-    func storedStateJSON() -> String {
+    func storedStateJSON(hardwareEvidence: AutotuneHardwareEvidenceSnapshot? = nil) -> String {
         let diagnosticsJSON = probeDiagnostics.keys.sorted().map { key in
             "\(key.jsonEscaped):\(probeDiagnostics[key]!.jsonEscaped)"
         }.joined(separator: ",")
+        let evidenceJSON: String
+        if let hardwareEvidence {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            if let data = try? encoder.encode(hardwareEvidence),
+               let encoded = String(data: data, encoding: .utf8) {
+                evidenceJSON = encoded
+            } else {
+                evidenceJSON = "null"
+            }
+        } else {
+            evidenceJSON = "null"
+        }
         return """
-        {"generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"candidate_catalog_sha256":\(candidateCatalogSHA256.jsonEscaped),"benchmark_id":\(benchmarkID?.jsonEscaped ?? "null"),"benchmark_generated_at":\(benchmarkGeneratedAt.map { ISO8601DateFormatter.autotuneInternet.string(from: $0).jsonEscaped } ?? "null"),"binary_version":\(hardware.binaryVersion.jsonEscaped),"hardware_identity_hash":\(hardware.hardwareIdentityHash.jsonEscaped),"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"probe_diagnostics":{\(diagnosticsJSON)}}
+        {"generated_at":\(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt).jsonEscaped),"rate_card_version":\(rateCardVersion.jsonEscaped),"demand_rank_version":\(demandRankVersion.jsonEscaped),"candidate_catalog_version":\(candidateCatalogVersion.jsonEscaped),"candidate_catalog_sha256":\(candidateCatalogSHA256.jsonEscaped),"benchmark_id":\(benchmarkID?.jsonEscaped ?? "null"),"benchmark_generated_at":\(benchmarkGeneratedAt.map { ISO8601DateFormatter.autotuneInternet.string(from: $0).jsonEscaped } ?? "null"),"binary_version":\(hardware.binaryVersion.jsonEscaped),"hardware_identity_hash":\(hardware.hardwareIdentityHash.jsonEscaped),"recommended_model":\(recommendedModel?.jsonEscaped ?? "null"),"probe_diagnostics":{\(diagnosticsJSON)},"hardware_evidence":\(evidenceJSON)}
         """
     }
 
@@ -1535,6 +1548,7 @@ struct LastRecommendationState: Decodable, Equatable {
     var hardwareIdentityHash: String
     var recommendedModel: String?
     var probeDiagnostics: [String: String]
+    var hardwareEvidence: AutotuneHardwareEvidenceSnapshot?
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
@@ -1548,6 +1562,7 @@ struct LastRecommendationState: Decodable, Equatable {
         case hardwareIdentityHash = "hardware_identity_hash"
         case recommendedModel = "recommended_model"
         case probeDiagnostics = "probe_diagnostics"
+        case hardwareEvidence = "hardware_evidence"
     }
 
     init(
@@ -1561,7 +1576,8 @@ struct LastRecommendationState: Decodable, Equatable {
         binaryVersion: String,
         hardwareIdentityHash: String,
         recommendedModel: String?,
-        probeDiagnostics: [String: String] = [:]
+        probeDiagnostics: [String: String] = [:],
+        hardwareEvidence: AutotuneHardwareEvidenceSnapshot? = nil
     ) {
         self.generatedAt = generatedAt
         self.rateCardVersion = rateCardVersion
@@ -1574,6 +1590,7 @@ struct LastRecommendationState: Decodable, Equatable {
         self.hardwareIdentityHash = hardwareIdentityHash
         self.recommendedModel = recommendedModel
         self.probeDiagnostics = probeDiagnostics
+        self.hardwareEvidence = hardwareEvidence
     }
 
     init(from decoder: Decoder) throws {
@@ -1594,22 +1611,110 @@ struct LastRecommendationState: Decodable, Equatable {
         hardwareIdentityHash = try c.decode(String.self, forKey: .hardwareIdentityHash)
         recommendedModel = try c.decodeIfPresent(String.self, forKey: .recommendedModel)
         probeDiagnostics = try c.decodeIfPresent([String: String].self, forKey: .probeDiagnostics) ?? [:]
+        hardwareEvidence = try c.decodeIfPresent(AutotuneHardwareEvidenceSnapshot.self, forKey: .hardwareEvidence)
     }
 }
 
 enum RecommendationStateStore {
+    private enum StoreError: Error {
+        case unsafePath
+        case ioFailure
+    }
+
     static var defaultURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/macprovider/last-recommendation.json")
     }
 
-    static func write(_ result: AutotuneRecommendResult, to url: URL = defaultURL) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try result.storedStateJSON().data(using: .utf8)!.write(to: url, options: .atomic)
+    static func write(
+        _ result: AutotuneRecommendResult,
+        benchmarks: [String: CandidateBenchmark],
+        to url: URL = defaultURL
+    ) throws {
+        try ensurePrivateParentDirectory(for: url, create: true)
+        let evidence = AutotuneHardwareEvidenceSnapshot(result: result, benchmarks: benchmarks)
+        guard let data = result.storedStateJSON(hardwareEvidence: evidence).data(using: .utf8) else {
+            throw StoreError.ioFailure
+        }
+        try writePrivateFile(data, to: url)
     }
 
     static func read(from url: URL = defaultURL) throws -> LastRecommendationState {
-        try JSONDecoder.autotune.decode(LastRecommendationState.self, from: Data(contentsOf: url))
+        try ensurePrivateParentDirectory(for: url, create: false)
+        let fd = url.path.withCString { open($0, O_RDONLY | O_NOFOLLOW) }
+        guard fd >= 0 else { throw StoreError.unsafePath }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var st = stat()
+        guard fstat(fd, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG,
+              st.st_uid == getuid(),
+              (st.st_mode & 0o022) == 0
+        else {
+            try? handle.close()
+            throw StoreError.unsafePath
+        }
+        // Migrate the legacy atomic-write mode (typically 0644) only after an
+        // O_NOFOLLOW open and owner/regular-file check. Group/world-writable
+        // state is rejected rather than trusted or repaired.
+        guard fchmod(fd, 0o600) == 0 else {
+            try? handle.close()
+            throw StoreError.ioFailure
+        }
+        let data = try handle.readToEnd() ?? Data()
+        try handle.close()
+        return try JSONDecoder.autotune.decode(LastRecommendationState.self, from: data)
+    }
+
+    private static func ensurePrivateParentDirectory(for url: URL, create: Bool) throws {
+        let parent = url.deletingLastPathComponent()
+        var st = stat()
+        if lstat(parent.path, &st) != 0 {
+            guard create else { throw StoreError.unsafePath }
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+            guard lstat(parent.path, &st) == 0 else { throw StoreError.ioFailure }
+        }
+        guard (st.st_mode & S_IFMT) == S_IFDIR, st.st_uid == getuid() else {
+            throw StoreError.unsafePath
+        }
+        guard chmod(parent.path, 0o700) == 0 else { throw StoreError.ioFailure }
+    }
+
+    private static func writePrivateFile(_ data: Data, to url: URL) throws {
+        var existing = stat()
+        if lstat(url.path, &existing) == 0 {
+            guard (existing.st_mode & S_IFMT) == S_IFREG, existing.st_uid == getuid() else {
+                throw StoreError.unsafePath
+            }
+        } else if errno != ENOENT {
+            throw StoreError.ioFailure
+        }
+
+        let temporary = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        let fd = temporary.path.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600) }
+        guard fd >= 0 else { throw StoreError.ioFailure }
+        var closed = false
+        defer {
+            if !closed { close(fd) }
+            _ = unlink(temporary.path)
+        }
+        guard fchmod(fd, 0o600) == 0 else { throw StoreError.ioFailure }
+        try data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var written = 0
+            while written < data.count {
+                let count = Darwin.write(fd, base.advanced(by: written), data.count - written)
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    throw StoreError.ioFailure
+                }
+                written += count
+            }
+        }
+        guard fsync(fd) == 0 else { throw StoreError.ioFailure }
+        guard close(fd) == 0 else { throw StoreError.ioFailure }
+        closed = true
+        guard rename(temporary.path, url.path) == 0 else { throw StoreError.ioFailure }
     }
 
     static func isStale(stored: LastRecommendationState, current: LastRecommendationState, now: Date) -> Bool {

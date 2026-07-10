@@ -3567,6 +3567,9 @@ func newProviderHarnessWithOptionsAndLogger(t *testing.T, validator providerws.T
 		if issuer, ok := validator.(providerws.TokenIssuer); ok {
 			allServerOpts = append(allServerOpts, providerws.WithTokenIssuer(issuer))
 		}
+		if bootstrapStore, ok := validator.(providerws.BootstrapTokenStore); ok {
+			allServerOpts = append(allServerOpts, providerws.WithBootstrapTokenStore(bootstrapStore))
+		}
 	}
 	server := providerws.NewServer(cfg, registry, logger, allServerOpts...)
 	return providerHarness{
@@ -3708,6 +3711,51 @@ func signedIdentityProofFields(t *testing.T, priv ed25519.PrivateKey, providerID
 		t.Fatalf("canonical tuple: %v", err)
 	}
 	return map[string]any{
+		"identity_signature":                   base64.StdEncoding.EncodeToString(ed25519.Sign(priv, canonicalTuple)),
+		"identity_signature_transcript_sha256": transcriptB64,
+	}
+}
+
+func signedCredentialBootstrapProofFields(
+	t *testing.T,
+	priv ed25519.PrivateKey,
+	providerID string,
+	challenge providerws.AuthChallenge,
+	initial map[string]any,
+) map[string]any {
+	t.Helper()
+	normalizedInitial := normalizeForJCS(t, initial)
+	canonicalInitial, err := billing.CanonicalJSON(normalizedInitial)
+	if err != nil {
+		t.Fatalf("canonical bootstrap initial: %v", err)
+	}
+	transcriptHash := sha256.Sum256(canonicalInitial)
+	transcriptB64 := base64.StdEncoding.EncodeToString(transcriptHash[:])
+	challengeRaw, err := json.Marshal(challenge)
+	if err != nil {
+		t.Fatalf("marshal bootstrap challenge: %v", err)
+	}
+	var challengeWire map[string]any
+	dec := json.NewDecoder(bytes.NewReader(challengeRaw))
+	dec.UseNumber()
+	if err := dec.Decode(&challengeWire); err != nil {
+		t.Fatalf("normalize bootstrap challenge: %v", err)
+	}
+	tuple := map[string]any{
+		"challenge":                challengeWire,
+		"auth_attempt_id":          challenge.AuthAttemptID,
+		"provider_id":              providerID,
+		"binary_version":           normalizedInitial["binary_version"],
+		"provider_ecdh_public_key": normalizedInitial["provider_ecdh_public_key"],
+		"transcript_sha256":        transcriptB64,
+		"credential_bootstrap":     true,
+	}
+	canonicalTuple, err := billing.CanonicalJSON(tuple)
+	if err != nil {
+		t.Fatalf("canonical bootstrap tuple: %v", err)
+	}
+	return map[string]any{
+		"credential_bootstrap":                 true,
 		"identity_signature":                   base64.StdEncoding.EncodeToString(ed25519.Sign(priv, canonicalTuple)),
 		"identity_signature_transcript_sha256": transcriptB64,
 	}

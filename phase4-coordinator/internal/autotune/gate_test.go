@@ -123,6 +123,43 @@ func TestEvaluateHelloGateRejectsThermalThrottle(t *testing.T) {
 	}
 }
 
+func TestEvaluateHelloGateRejectsMissingModelOrArtifactBinding(t *testing.T) {
+	t.Parallel()
+	catalog := mustCatalog(t, `{
+		"version":"test",
+		"generated_at":"2026-07-08T00:00:00Z",
+		"source":"operator_curated_autotune_candidate_catalog",
+		"rows":{
+			"small":{"model_id":"mlx-community/Llama-3.2-3B-Instruct-4bit","model_revision":"7f0dc925e0d0afb0322d96f9255cfddf2ba5636e","model_sha256":"3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a","min_ram_gb":4,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":15,"max_4k_ttft_ms":2500},"runtime_status":"recommendable"}
+		}
+	}`)
+	for _, benchmark := range []autotune.VerifiedBenchmark{
+		{
+			ModelKey:               "small",
+			SustainedTPS:           20,
+			TTFTMS:                 1000,
+			ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
+			CandidateCatalogSHA256: catalog.SHA256,
+		},
+		{
+			ModelKey:               "small",
+			ModelID:                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+			SustainedTPS:           20,
+			TTFTMS:                 1000,
+			CandidateCatalogSHA256: catalog.SHA256,
+		},
+	} {
+		evidence := autotune.VerifiedEvidence{
+			CandidateCatalogSHA256: catalog.SHA256,
+			Benchmarks:             []autotune.VerifiedBenchmark{benchmark},
+		}
+		decision := autotune.EvaluateHelloGate(catalog, evidence, "mlx-community/Llama-3.2-3B-Instruct-4bit")
+		if decision.Allowed || decision.Reason != "autotune_evidence_invalid" {
+			t.Fatalf("decision = %+v", decision)
+		}
+	}
+}
+
 func mustCatalog(t *testing.T, raw string) *autotune.Catalog {
 	t.Helper()
 	catalog, err := autotune.ParseCatalog([]byte(raw))

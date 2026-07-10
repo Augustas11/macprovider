@@ -22,6 +22,7 @@ enum ReceiptKeyStoreError: Error, Equatable {
 struct KeychainReceiptKeyStore: ReceiptKeyStoring {
     static let currentService = "com.streamvc.macprovider.receipt-key"
     static let previousService = "com.streamvc.macprovider.receipt-key.prev"
+    static let bootstrapIdentityService = "com.streamvc.macprovider.bootstrap-identity-key"
     static let previousRetention: TimeInterval = 7 * 24 * 60 * 60
 
     private static let mutationLock = NSLock()
@@ -52,6 +53,45 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring {
 
     func loadCurrent(providerId: String) throws -> Curve25519.Signing.PrivateKey? {
         try loadKey(providerId: providerId, service: Self.currentService)
+    }
+
+    func loadBootstrapIdentity(providerId: String) throws -> Curve25519.Signing.PrivateKey? {
+        try loadKey(providerId: providerId, service: Self.bootstrapIdentityService)
+    }
+
+    func loadPrevious(providerId: String) throws -> Curve25519.Signing.PrivateKey? {
+        try loadKey(providerId: providerId, service: Self.previousService)
+    }
+
+    /// Preserve the first installer receipt key as a stable admission
+    /// identity. Receipt signing keys may rotate later; this slot never does.
+    /// Returning the existing winner makes concurrent bootstrap/startup races
+    /// converge without replacing established ownership.
+    func loadOrStoreBootstrapIdentity(
+        providerId: String,
+        candidate: Curve25519.Signing.PrivateKey
+    ) throws -> Curve25519.Signing.PrivateKey {
+        Self.mutationLock.lock()
+        defer { Self.mutationLock.unlock() }
+        if let existing = try loadBootstrapIdentity(providerId: providerId) {
+            return existing
+        }
+        let status = SecItemAdd(Self.addQuery(
+            providerId: providerId,
+            service: Self.bootstrapIdentityService,
+            privateKey: candidate
+        ) as CFDictionary, nil)
+        switch status {
+        case errSecSuccess:
+            return candidate
+        case errSecDuplicateItem:
+            guard let winner = try loadBootstrapIdentity(providerId: providerId) else {
+                throw ReceiptKeyStoreError.missingCurrentKey(providerId: providerId)
+            }
+            return winner
+        default:
+            throw ReceiptKeyStoreError.keychainWriteFailed(providerId: providerId, status: status)
+        }
     }
 
     func storeNew(providerId: String, privateKey: Curve25519.Signing.PrivateKey) throws {

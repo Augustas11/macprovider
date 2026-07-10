@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MacProviderCore
 
@@ -9,6 +10,7 @@ enum AutotuneHardwareEvidenceSubmission: Equatable {
 
 struct AutotuneHardwareEvidenceSubmitter {
     static let endpointPath = "/v1/providers/hardware-evidence"
+    static let acceptedResponseStatuses: Set<String> = ["queued", "existing", "verified"]
 
     var config: AppConfig?
     var session: URLSession = {
@@ -19,6 +21,10 @@ struct AutotuneHardwareEvidenceSubmitter {
     }()
 
     func submit(result: AutotuneRecommendResult, benchmarks: [String: CandidateBenchmark]) async -> AutotuneHardwareEvidenceSubmission {
+        await submit(snapshot: AutotuneHardwareEvidenceSnapshot(result: result, benchmarks: benchmarks))
+    }
+
+    func submit(snapshot: AutotuneHardwareEvidenceSnapshot) async -> AutotuneHardwareEvidenceSubmission {
         guard let config else { return .skipped("config unavailable") }
         guard let providerID = trimmedNonEmpty(config.providerID) else { return .skipped("provider_id missing") }
         guard let providerToken = trimmedNonEmpty(config.providerToken) else { return .skipped("provider_token missing") }
@@ -28,19 +34,26 @@ struct AutotuneHardwareEvidenceSubmitter {
             return .skipped("coordinator_url missing")
         }
         do {
-            let payload = try Self.payloadData(providerID: providerID, result: result, benchmarks: benchmarks)
+            let payload = try Self.canonicalPayload(
+                providerID: providerID,
+                snapshot: snapshot
+            )
             var request = URLRequest(url: endpoint)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             request.setValue("Bearer \(providerToken)", forHTTPHeaderField: "Authorization")
-            request.httpBody = payload
-            let (_, response) = try await session.data(for: request)
+            request.httpBody = payload.data
+            let (responseData, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 return .failed("non-HTTP response")
             }
             if (200..<300).contains(http.statusCode) {
-                return .submitted
+                return Self.validateSuccessResponse(
+                    responseData,
+                    expectedProviderID: providerID,
+                    expectedEvidenceSHA: payload.evidenceSHA
+                )
             }
             return .failed("HTTP \(http.statusCode)")
         } catch {
@@ -65,47 +78,121 @@ struct AutotuneHardwareEvidenceSubmitter {
     }
 
     static func payloadData(providerID: String, result: AutotuneRecommendResult, benchmarks: [String: CandidateBenchmark]) throws -> Data {
+        try payloadData(
+            providerID: providerID,
+            snapshot: AutotuneHardwareEvidenceSnapshot(result: result, benchmarks: benchmarks)
+        )
+    }
+
+    static func payloadData(
+        providerID: String,
+        snapshot: AutotuneHardwareEvidenceSnapshot
+    ) throws -> Data {
+        try canonicalPayload(providerID: providerID, snapshot: snapshot).data
+    }
+
+    static func canonicalPayload(
+        providerID: String,
+        snapshot: AutotuneHardwareEvidenceSnapshot
+    ) throws -> (data: Data, evidenceSHA: String) {
         let payload = HardwareEvidencePayload(
             schemaVersion: "hardware_evidence.autotune.v1",
             providerID: providerID,
-            generatedAt: ISO8601DateFormatter.autotuneInternet.string(from: result.generatedAt),
-            hardware: HardwarePayload(
-                chip: result.hardware.chip,
-                memoryGB: result.hardware.memoryGB,
-                bandwidthTier: result.hardware.bandwidthTier.rawValue,
-                detected: result.hardware.detected,
-                osVersion: result.hardware.osVersion,
-                binaryVersion: result.hardware.binaryVersion,
-                hardwareIdentityHash: result.hardware.hardwareIdentityHash
-            ),
-            candidateCatalogSHA256: result.candidateCatalogSHA256,
-            recommendedModel: result.recommendedModel,
-            benchmarks: benchmarks.keys.sorted().map { key in
-                let benchmark = benchmarks[key]!
-                return BenchmarkPayload(
-                    modelKey: benchmark.modelKey,
-                    modelID: benchmark.modelID,
-                    sustainedTPS: benchmark.sustainedTPS,
-                    ttftMS: benchmark.ttftMS,
-                    swapDetected: benchmark.swapDetected,
-                    thermalThrottleDetected: benchmark.thermalThrottleDetected,
-                    artifactSHA256: benchmark.artifactSHA256,
-                    candidateCatalogSHA256: benchmark.candidateCatalogSHA256,
-                    benchmarkID: benchmark.benchmarkID,
-                    generatedAt: ISO8601DateFormatter.autotuneInternet.string(from: benchmark.generatedAt),
-                    binaryVersion: benchmark.binaryVersion,
-                    hardwareIdentityHash: benchmark.hardwareIdentityHash
-                )
-            }
+            generatedAt: snapshot.generatedAt,
+            hardware: snapshot.hardware,
+            candidateCatalogSHA256: snapshot.candidateCatalogSHA256,
+            recommendedModel: snapshot.recommendedModel ?? "",
+            benchmarks: snapshot.benchmarks
         )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(payload)
+        let data = Data(try RFC8785JCS.canonicalString(payload.canonicalValue).utf8)
+        let evidenceSHA = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return (data, evidenceSHA)
+    }
+
+    static func validateSuccessResponse(
+        _ data: Data,
+        expectedProviderID: String,
+        expectedEvidenceSHA: String
+    ) -> AutotuneHardwareEvidenceSubmission {
+        let expectedKeys: Set<String> = ["status", "provider_id", "job_id", "evidence_sha"]
+        guard !data.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any],
+              Set(dictionary.keys) == expectedKeys,
+              let decoded = try? JSONDecoder().decode(HardwareEvidenceSubmissionResponse.self, from: data)
+        else {
+            return .failed("invalid success response")
+        }
+        guard acceptedResponseStatuses.contains(decoded.status) else {
+            return .failed("unexpected success status")
+        }
+        guard decoded.providerID == expectedProviderID else {
+            return .failed("success response provider_id mismatch")
+        }
+        guard decoded.jobID > 0 else {
+            return .failed("success response job_id invalid")
+        }
+        guard decoded.evidenceSHA == expectedEvidenceSHA else {
+            return .failed("success response evidence_sha mismatch")
+        }
+        return .submitted
     }
 
     private func trimmedNonEmpty(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed?.isEmpty == false ? trimmed : nil
+    }
+}
+
+/// The verifier-relevant output of an autotune run. Keeping this next to the
+/// freshness state lets an update resubmit the exact same measurement without
+/// downloading models or repeating benchmarks. `generatedAt` is immutable: a
+/// transport retry must not make stale or rebound measurements appear current.
+struct AutotuneHardwareEvidenceSnapshot: Codable, Equatable {
+    var generatedAt: String
+    var hardware: HardwarePayload
+    var candidateCatalogSHA256: String
+    var recommendedModel: String?
+    var benchmarks: [BenchmarkPayload]
+
+    enum CodingKeys: String, CodingKey {
+        case generatedAt = "generated_at"
+        case hardware
+        case candidateCatalogSHA256 = "candidate_catalog_sha256"
+        case recommendedModel = "recommended_model"
+        case benchmarks
+    }
+
+    init(result: AutotuneRecommendResult, benchmarks: [String: CandidateBenchmark]) {
+        generatedAt = ISO8601DateFormatter.autotuneInternet.string(from: result.generatedAt)
+        hardware = HardwarePayload(
+            chip: result.hardware.chip,
+            memoryGB: result.hardware.memoryGB,
+            bandwidthTier: result.hardware.bandwidthTier.rawValue,
+            detected: result.hardware.detected,
+            osVersion: result.hardware.osVersion,
+            binaryVersion: result.hardware.binaryVersion,
+            hardwareIdentityHash: result.hardware.hardwareIdentityHash
+        )
+        candidateCatalogSHA256 = result.candidateCatalogSHA256
+        recommendedModel = result.recommendedModel
+        self.benchmarks = benchmarks.keys.sorted().map { key in
+            let benchmark = benchmarks[key]!
+            return BenchmarkPayload(
+                modelKey: benchmark.modelKey,
+                modelID: benchmark.modelID,
+                sustainedTPS: benchmark.sustainedTPS,
+                ttftMS: benchmark.ttftMS,
+                swapDetected: benchmark.swapDetected,
+                thermalThrottleDetected: benchmark.thermalThrottleDetected,
+                artifactSHA256: benchmark.artifactSHA256,
+                candidateCatalogSHA256: benchmark.candidateCatalogSHA256,
+                benchmarkID: benchmark.benchmarkID,
+                generatedAt: ISO8601DateFormatter.autotuneInternet.string(from: benchmark.generatedAt),
+                binaryVersion: benchmark.binaryVersion,
+                hardwareIdentityHash: benchmark.hardwareIdentityHash
+            )
+        }
     }
 }
 
@@ -115,7 +202,7 @@ private struct HardwareEvidencePayload: Encodable {
     var generatedAt: String
     var hardware: HardwarePayload
     var candidateCatalogSHA256: String
-    var recommendedModel: String?
+    var recommendedModel: String
     var benchmarks: [BenchmarkPayload]
 
     enum CodingKeys: String, CodingKey {
@@ -129,7 +216,71 @@ private struct HardwareEvidencePayload: Encodable {
     }
 }
 
-private struct HardwarePayload: Encodable {
+private struct HardwareEvidenceSubmissionResponse: Decodable {
+    var status: String
+    var providerID: String
+    var jobID: Int64
+    var evidenceSHA: String
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case providerID = "provider_id"
+        case jobID = "job_id"
+        case evidenceSHA = "evidence_sha"
+    }
+}
+
+private extension HardwareEvidencePayload {
+    var canonicalValue: RFC8785JCS.Value {
+        .object([
+            "schema_version": .string(schemaVersion),
+            "provider_id": .string(providerID),
+            "generated_at": .string(generatedAt),
+            "hardware": hardware.canonicalValue,
+            "candidate_catalog_sha256": .string(candidateCatalogSHA256),
+            "recommended_model": .string(recommendedModel),
+            "benchmarks": .array(benchmarks.map(\.canonicalValue)),
+        ])
+    }
+}
+
+private extension HardwarePayload {
+    var canonicalValue: RFC8785JCS.Value {
+        .object([
+            "chip": .string(chip),
+            "memory_gb": .int(memoryGB),
+            "bandwidth_tier": .string(bandwidthTier),
+            "detected": .bool(detected),
+            "os_version": .string(osVersion),
+            "binary_version": .string(binaryVersion),
+            "hardware_identity_hash": .string(hardwareIdentityHash),
+        ])
+    }
+}
+
+private extension BenchmarkPayload {
+    var canonicalValue: RFC8785JCS.Value {
+        var object: [String: RFC8785JCS.Value] = [
+            "model_key": .string(modelKey),
+            "model_id": .string(modelID),
+            "sustained_tps": .double(sustainedTPS),
+            "ttft_ms": .int(ttftMS),
+            "swap_detected": .bool(swapDetected),
+            "thermal_throttle_detected": .bool(thermalThrottleDetected),
+            "artifact_sha256": .string(artifactSHA256),
+            "candidate_catalog_sha256": .string(candidateCatalogSHA256),
+            "generated_at": .string(generatedAt),
+            "binary_version": .string(binaryVersion),
+            "hardware_identity_hash": .string(hardwareIdentityHash),
+        ]
+        if let benchmarkID {
+            object["benchmark_id"] = .string(benchmarkID)
+        }
+        return .object(object)
+    }
+}
+
+struct HardwarePayload: Codable, Equatable {
     var chip: String
     var memoryGB: Int
     var bandwidthTier: String
@@ -149,7 +300,7 @@ private struct HardwarePayload: Encodable {
     }
 }
 
-private struct BenchmarkPayload: Encodable {
+struct BenchmarkPayload: Codable, Equatable {
     var modelKey: String
     var modelID: String
     var sustainedTPS: Double

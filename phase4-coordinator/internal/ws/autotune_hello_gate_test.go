@@ -1,17 +1,37 @@
 package ws_test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 )
+
+type bootstrapMarkFailingStore struct {
+	*auth.Store
+}
+
+func (s bootstrapMarkFailingStore) MarkTokenUsed(context.Context, string) error {
+	return errors.New("synthetic bootstrap confirmation failure")
+}
 
 type stubAutotuneEvidence struct {
 	evidence autotune.VerifiedEvidence
@@ -21,6 +41,29 @@ type stubAutotuneEvidence struct {
 
 func (s stubAutotuneEvidence) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
 	return s.evidence, s.ok, s.err
+}
+
+type sequencedAutotuneEvidence struct {
+	mu        sync.Mutex
+	responses []stubAutotuneEvidence
+	calls     int
+}
+
+func (s *sequencedAutotuneEvidence) LatestVerified(context.Context, string, time.Duration) (autotune.VerifiedEvidence, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.calls >= len(s.responses) {
+		return autotune.VerifiedEvidence{}, false, errors.New("unexpected autotune evidence lookup")
+	}
+	response := s.responses[s.calls]
+	s.calls++
+	return response.evidence, response.ok, response.err
+}
+
+func (s *sequencedAutotuneEvidence) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }
 
 func TestAutotuneHelloGateRejectsOverTierClaim(t *testing.T) {
@@ -127,6 +170,903 @@ func TestAutotuneHelloGateRejectsMissingEvidence(t *testing.T) {
 	if code != providerws.CloseInvalidHello || reason != "autotune_evidence_required" {
 		t.Fatalf("code=%d reason=%q", code, reason)
 	}
+}
+
+func TestAutotuneHelloGateRechecksEvidenceAfterChallenge(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	evidence := autotune.VerifiedEvidence{
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{{
+			ModelKey:               "small",
+			ModelID:                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+			SustainedTPS:           20,
+			TTFTMS:                 1000,
+			ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
+			CandidateCatalogSHA256: catalog.SHA256,
+		}},
+	}
+	evidenceStore := &sequencedAutotuneEvidence{responses: []stubAutotuneEvidence{
+		{evidence: evidence, ok: true},
+		{ok: false},
+	}}
+	tokenStore, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	defer tokenStore.Close()
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, evidenceStore),
+		providerws.WithTokenIssuer(tokenStore),
+	}, func(cfg *config.Config) {
+		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	initial["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+
+	frame, err := gobwas.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read post-proof close: %v", err)
+	}
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("post-proof opcode=%v, want close", frame.Header.OpCode)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidHello || reason != "autotune_evidence_required" {
+		t.Fatalf("post-proof close=%d reason=%q", code, reason)
+	}
+	if got := evidenceStore.callCount(); got != 2 {
+		t.Fatalf("autotune evidence lookups=%d, want initial and post-proof checks", got)
+	}
+	if got := h.Registry.Count(); got != 0 {
+		t.Fatalf("post-proof evidence loss registered %d providers", got)
+	}
+	if records := h.Provider.Admission().Records(nil); len(records) != 0 {
+		t.Fatalf("post-proof evidence loss consumed durable admission: %+v", records)
+	}
+	if active, err := tokenStore.HasActiveTokenForProvider(context.Background(), "m4-anon"); err != nil || active {
+		t.Fatalf("post-proof evidence loss left active token=%v err=%v", active, err)
+	}
+}
+
+func TestAutotuneHelloGateV1RejectionDoesNotConsumeProvisionalCapacity(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	evidence := autotune.VerifiedEvidence{
+		CandidateCatalogSHA256: catalog.SHA256,
+		Benchmarks: []autotune.VerifiedBenchmark{{
+			ModelKey:               "small",
+			ModelID:                "mlx-community/Llama-3.2-3B-Instruct-4bit",
+			SustainedTPS:           20,
+			TTFTMS:                 1000,
+			ArtifactSHA256:         "3975387f249977e5e8bfb7ed0d352f8258ac3d630f961ce1dd952f428ee7216a",
+			CandidateCatalogSHA256: catalog.SHA256,
+		}},
+	}
+	evidenceStore := &sequencedAutotuneEvidence{responses: []stubAutotuneEvidence{
+		{ok: false},
+		{evidence: evidence, ok: true},
+	}}
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, evidenceStore),
+	}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Admission.ProvisionalPoolMax = 1
+		cfg.Admission.ProvisionalAdmissionRatePerHour = 10
+		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	})
+	defer h.HTTP.Close()
+
+	hello := validHello("m4-anon")
+	hello["model_id"] = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
+	if code != providerws.CloseInvalidHello || reason != "autotune_evidence_required" {
+		t.Fatalf("first close=%d reason=%q", code, reason)
+	}
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("second dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+		t.Fatalf("second hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("second response: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("second response opcode=%v, want text", op)
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("second response json: %v", err)
+	}
+	if ack["type"] != "hello_ack" {
+		t.Fatalf("second response type=%v, want hello_ack", ack["type"])
+	}
+	if got := evidenceStore.callCount(); got != 2 {
+		t.Fatalf("autotune evidence lookups=%d, want one per V1 attempt", got)
+	}
+}
+
+func TestCredentialBootstrapV1IsRejected(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	defer store.Close()
+	catalog := mustAutotuneCatalog(t)
+	h := newProviderHarnessWithServerOptions(t, store, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{ok: false}),
+	}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	})
+	defer h.HTTP.Close()
+
+	hello := validHello("credential-only-provider")
+	hello["credential_bootstrap"] = true
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, hello)
+	if code != providerws.CloseInvalidHello || reason != "credential_bootstrap_requires_v2" {
+		t.Fatalf("close=%d reason=%q", code, reason)
+	}
+	if got := h.Registry.Count(); got != 0 {
+		t.Fatalf("credential bootstrap registered %d providers, want 0", got)
+	}
+}
+
+func TestCredentialBootstrapRejectsPredictableProviderHandle(t *testing.T) {
+	store, h := newCredentialBootstrapHarness(t, nil)
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("receipt keypair: %v", err)
+	}
+	initial := credentialBootstrapInitial(t, "office-mac", pub)
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, initial)
+	if code != providerws.CloseIdentitySignatureRequired || reason != "bootstrap_receipt_identity_required" {
+		t.Fatalf("close=%d reason=%q", code, reason)
+	}
+	if active, err := store.HasActiveTokenForProvider(context.Background(), "office-mac"); err != nil || active {
+		t.Fatalf("predictable handle created token: active=%v err=%v", active, err)
+	}
+}
+
+func TestCredentialBootstrapV2CompletesProofWithoutEvidenceOrPoolRegistration(t *testing.T) {
+	const providerID = "mp-00000000000000000000000000000001"
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	defer store.Close()
+	catalog := mustAutotuneCatalog(t)
+	h := newProviderHarnessWithServerOptions(t, store, []providerws.Option{
+		providerws.WithAutotuneHelloGate(catalog, stubAutotuneEvidence{ok: false}),
+	}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+		cfg.Tier2.RequireEncryptedLeg = true
+		cfg.ProofOfWeights.RequireAutotuneHelloGate = true
+		cfg.ProofOfWeights.AutotuneEvidenceTTLDays = 30
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	initial := validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	receiptPub, receiptPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("receipt keypair: %v", err)
+	}
+	initial["credential_bootstrap"] = true
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(receiptPub)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil,
+		signedCredentialBootstrapProofFields(t, receiptPriv, providerID, challenge, initial))
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedProviderToken == "" || response.Tier2Session == nil {
+		t.Fatalf("bootstrap response = %+v", response)
+	}
+	mintedProviderID, valid, err := store.ValidateToken(context.Background(), response.AssignedProviderToken)
+	if err != nil || !valid || mintedProviderID != providerID {
+		t.Fatalf("minted token provider=%q valid=%v err=%v", mintedProviderID, valid, err)
+	}
+	if got := h.Registry.Count(); got != 0 {
+		t.Fatalf("v2 credential bootstrap registered %d providers, want 0", got)
+	}
+}
+
+func TestCredentialBootstrapBearerV2UsesDurableReceiptIdentityWithoutOptionalStore(t *testing.T) {
+	const providerID = "mp-00000000000000000000000000000011"
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	defer store.Close()
+	h := newProviderHarnessWithServerOptions(t, store, nil, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+		cfg.Tier2.RequireEncryptedLeg = true
+	})
+	defer h.HTTP.Close()
+
+	receiptPub, receiptPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("receipt keypair: %v", err)
+	}
+	mint := completeCredentialBootstrap(t, h.HTTP.URL, providerID, receiptPub, receiptPriv)
+	if mint.AssignedProviderToken == "" {
+		t.Fatal("bootstrap response omitted bearer")
+	}
+
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	rotatedReceiptPub, rotatedReceiptPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("rotated receipt keypair: %v", err)
+	}
+	initial := validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	// Receipt publication may rotate independently. The durable bootstrap
+	// identity authorizes the complete transcript containing this candidate.
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(rotatedReceiptPub)
+	conn, _, _, err := bearerDialer(mint.AssignedProviderToken).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial bearer v2: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write bearer initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	if challenge.BootstrapIdentityPubkey != base64.StdEncoding.EncodeToString(receiptPub) {
+		t.Fatalf("bootstrap identity challenge hint=%q, want durable original key", challenge.BootstrapIdentityPubkey)
+	}
+	fields := signedIdentityProofFields(t, rotatedReceiptPriv, providerID, challenge.AuthAttemptID, initial)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil, fields)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("invalid durable-identity proof response=%+v", response)
+	}
+	code, reason := readCredentialBootstrapClose(t, conn, nil)
+	if code != providerws.CloseIdentitySignatureRequired || reason != "identity_signature_required" {
+		t.Fatalf("invalid durable-identity proof close=%d reason=%q", code, reason)
+	}
+	_ = conn.Close()
+
+	initial = validAuthInitialWithFreshKey(t, providerID)
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(rotatedReceiptPub)
+	conn, _, _, err = bearerDialer(mint.AssignedProviderToken).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("redial bearer v2: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("rewrite bearer initial: %v", err)
+	}
+	challenge = readAuthChallenge(t, conn)
+	fields = signedIdentityProofFields(t, receiptPriv, providerID, challenge.AuthAttemptID, initial)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil, fields)
+	response = readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		t.Fatalf("valid durable-identity proof response=%+v", response)
+	}
+
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || !records[0].LastUsedAt.Valid {
+		t.Fatalf("accepted signed bearer did not confirm bootstrap token: %#v", records)
+	}
+}
+
+func TestDurableBootstrapBearerCannotDowngradeToV1ButRowlessLegacyRemainsCompatible(t *testing.T) {
+	const durableProviderID = "mp-00000000000000000000000000000014"
+	const legacyProviderID = "mp-00000000000000000000000000000015"
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	defer store.Close()
+	h := newProviderHarnessWithServerOptions(t, store, nil, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+		cfg.Tier2.RequireEncryptedLeg = false
+	})
+	defer h.HTTP.Close()
+
+	durablePub, durablePriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("durable keypair: %v", err)
+	}
+	mint := completeCredentialBootstrap(t, h.HTTP.URL, durableProviderID, durablePub, durablePriv)
+	conn, buffered, _, err := bearerDialer(mint.AssignedProviderToken).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial durable v1 downgrade: %v", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello(durableProviderID))); err != nil {
+		t.Fatalf("write durable v1 hello: %v", err)
+	}
+	code, reason := readCredentialBootstrapClose(t, conn, buffered)
+	_ = conn.Close()
+	if code != providerws.CloseIdentitySignatureRequired || reason != "bootstrap_identity_requires_v2" {
+		t.Fatalf("durable v1 downgrade close=%d reason=%q", code, reason)
+	}
+
+	_, legacyBearer, err := store.IssueToken(context.Background(), legacyProviderID, "rowless legacy provider")
+	if err != nil {
+		t.Fatalf("issue rowless legacy bearer: %v", err)
+	}
+	if exists, err := store.BootstrapIdentityExists(context.Background(), legacyProviderID); err != nil || exists {
+		t.Fatalf("legacy bootstrap identity exists=%v err=%v, want absent", exists, err)
+	}
+	legacyConn, _, _, err := bearerDialer(legacyBearer).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial rowless legacy v1: %v", err)
+	}
+	defer legacyConn.Close()
+	if err := wsutil.WriteClientText(legacyConn, mustJSON(validHello(legacyProviderID))); err != nil {
+		t.Fatalf("write rowless legacy v1 hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(legacyConn)
+	if err != nil {
+		t.Fatalf("read rowless legacy v1 ack: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("rowless legacy v1 opcode=%v, want text", op)
+	}
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil || ack.Type != "hello_ack" {
+		t.Fatalf("rowless legacy v1 ack=%+v err=%v", ack, err)
+	}
+	if _, ok := h.Registry.Resolve(legacyProviderID, ack.AssignedID); !ok {
+		t.Fatal("rowless legacy v1 provider not registered")
+	}
+}
+
+func TestLegacyMPBearerV2WithoutBootstrapRowUsesLivePoolIdentity(t *testing.T) {
+	const providerID = "mp-00000000000000000000000000000012"
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	defer store.Close()
+	_, bearer, err := store.IssueToken(context.Background(), providerID, "legacy mp provider")
+	if err != nil {
+		t.Fatalf("issue legacy token: %v", err)
+	}
+	h := newProviderHarnessWithServerOptions(t, store, []providerws.Option{
+		providerws.WithIdentitySignatureStore(&fakeIdentitySignatureStore{}),
+	}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Tier2.RequireEncryptedLeg = true
+	})
+	defer h.HTTP.Close()
+	receiptPub, receiptPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("legacy receipt keypair: %v", err)
+	}
+	if _, registered := h.Registry.Register(&pool.Provider{
+		ProviderID: providerID, AssignedID: "legacy-mp", ReceiptPubkey: receiptPub,
+		ReceiptPubkeyPrev: &pool.ReceiptPubkeyPrevious{
+			Pubkey: bytes.Repeat([]byte{0x12}, ed25519.PublicKeySize), RotatedAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(time.Hour),
+		},
+	}, nil); !registered {
+		t.Fatal("register legacy live-pool identity")
+	}
+	if exists, err := store.BootstrapIdentityExists(context.Background(), providerID); err != nil || exists {
+		t.Fatalf("legacy bootstrap identity exists=%v err=%v, want absent", exists, err)
+	}
+	if live, ok := h.Registry.Resolve(providerID, ""); !ok || !bytes.Equal(live.ReceiptPubkey, receiptPub) {
+		t.Fatalf("legacy live-pool identity missing: ok=%v provider=%+v", ok, live)
+	}
+
+	conn, _, _, err := bearerDialer(bearer).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial legacy bearer v2: %v", err)
+	}
+	defer conn.Close()
+	initial := validAuthInitialWithFreshKey(t, providerID)
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(receiptPub)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write legacy initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	if challenge.BootstrapIdentityPubkey != "" {
+		t.Fatalf("legacy challenge exposed nonexistent bootstrap hint=%q", challenge.BootstrapIdentityPubkey)
+	}
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil,
+		signedIdentityProofFields(t, receiptPriv, providerID, challenge.AuthAttemptID, initial))
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" {
+		if response.Error != nil {
+			t.Fatalf("legacy mp bearer response status=%q error=%+v", response.Status, *response.Error)
+		}
+		t.Fatalf("legacy mp bearer response=%+v", response)
+	}
+}
+
+func TestInactiveBootstrapIdentityNeverFallsBackToLivePool(t *testing.T) {
+	const providerID = "mp-00000000000000000000000000000013"
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	defer store.Close()
+	h := newProviderHarnessWithServerOptions(t, store, []providerws.Option{
+		providerws.WithIdentitySignatureStore(&fakeIdentitySignatureStore{}),
+	}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+		cfg.Tier2.RequireEncryptedLeg = true
+	})
+	defer h.HTTP.Close()
+	durablePub, durablePriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("durable keypair: %v", err)
+	}
+	mint := completeCredentialBootstrap(t, h.HTTP.URL, providerID, durablePub, durablePriv)
+	if _, err := store.RevokeToken(context.Background(), mint.AssignedProviderToken[:12]); err != nil {
+		t.Fatalf("revoke bootstrap bearer: %v", err)
+	}
+	poolPub, poolPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("pool keypair: %v", err)
+	}
+	h.Registry.Register(&pool.Provider{
+		ProviderID: providerID, AssignedID: "inactive-bootstrap", ReceiptPubkey: poolPub,
+		ReceiptPubkeyPrev: &pool.ReceiptPubkeyPrevious{
+			Pubkey: bytes.Repeat([]byte{0x13}, ed25519.PublicKeySize), RotatedAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(time.Hour),
+		},
+	}, nil)
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial inactive bootstrap identity: %v", err)
+	}
+	defer conn.Close()
+	initial := validAuthInitialWithFreshKey(t, providerID)
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(poolPub)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write inactive bootstrap initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	if challenge.BootstrapIdentityPubkey != "" {
+		t.Fatalf("inactive bootstrap challenge hint=%q, want none", challenge.BootstrapIdentityPubkey)
+	}
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil,
+		signedIdentityProofFields(t, poolPriv, providerID, challenge.AuthAttemptID, initial))
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "identity_signature_required" {
+		t.Fatalf("inactive bootstrap fallback response=%+v", response)
+	}
+}
+
+func TestCredentialBootstrapRejectsMissingDifferentAndReplayedReceiptProof(t *testing.T) {
+	store, h := newCredentialBootstrapHarness(t, nil)
+
+	t.Run("missing initial receipt key", func(t *testing.T) {
+		initial := validAuthInitialWithFreshKey(t, "mp-00000000000000000000000000000009")
+		initial["credential_bootstrap"] = true
+		conn, br, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn.Close()
+		if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+			t.Fatalf("write initial: %v", err)
+		}
+		code, reason := readCredentialBootstrapClose(t, conn, br)
+		if code != providerws.CloseIdentitySignatureRequired || reason != "bootstrap_receipt_identity_required" {
+			t.Fatalf("close=%d reason=%q", code, reason)
+		}
+	})
+
+	t.Run("missing proof", func(t *testing.T) {
+		pub, _, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatalf("keypair: %v", err)
+		}
+		const providerID = "mp-00000000000000000000000000000002"
+		conn, challenge, _ := openCredentialBootstrap(t, h.HTTP.URL, providerID, pub)
+		defer conn.Close()
+		writeAuthProofWithFields(t, conn, challenge, providerID, nil, map[string]any{
+			"credential_bootstrap": true,
+		})
+		response := readAuthResponse(t, conn)
+		if response.Error == nil || response.Error.Code != "bootstrap_identity_proof_required" {
+			t.Fatalf("response=%+v", response)
+		}
+		code, reason := readCredentialBootstrapClose(t, conn, nil)
+		if code != providerws.CloseIdentitySignatureRequired || reason != "bootstrap_identity_proof_required" {
+			t.Fatalf("close=%d reason=%q", code, reason)
+		}
+	})
+
+	t.Run("different signing key", func(t *testing.T) {
+		pub, _, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatalf("published keypair: %v", err)
+		}
+		_, attacker, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatalf("attacker keypair: %v", err)
+		}
+		const providerID = "mp-00000000000000000000000000000003"
+		conn, challenge, initial := openCredentialBootstrap(t, h.HTTP.URL, providerID, pub)
+		defer conn.Close()
+		writeAuthProofWithFields(t, conn, challenge, providerID, nil,
+			signedCredentialBootstrapProofFields(t, attacker, providerID, challenge, initial))
+		response := readAuthResponse(t, conn)
+		if response.Error == nil || response.Error.Code != "bootstrap_identity_proof_required" {
+			t.Fatalf("response=%+v", response)
+		}
+		code, reason := readCredentialBootstrapClose(t, conn, nil)
+		if code != providerws.CloseIdentitySignatureRequired || reason != "bootstrap_identity_proof_required" {
+			t.Fatalf("close=%d reason=%q", code, reason)
+		}
+	})
+
+	t.Run("proof replay against fresh challenge", func(t *testing.T) {
+		pub, priv, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatalf("keypair: %v", err)
+		}
+		const providerID = "mp-00000000000000000000000000000004"
+		first, firstChallenge, firstInitial := openCredentialBootstrap(t, h.HTTP.URL, providerID, pub)
+		replayedFields := signedCredentialBootstrapProofFields(t, priv, providerID, firstChallenge, firstInitial)
+		_ = first.Close()
+
+		second, secondChallenge, _ := openCredentialBootstrap(t, h.HTTP.URL, providerID, pub)
+		defer second.Close()
+		writeAuthProofWithFields(t, second, secondChallenge, providerID, nil, replayedFields)
+		response := readAuthResponse(t, second)
+		if response.Error == nil || response.Error.Code != "bootstrap_identity_proof_required" {
+			t.Fatalf("response=%+v", response)
+		}
+		code, reason := readCredentialBootstrapClose(t, second, nil)
+		if code != providerws.CloseIdentitySignatureRequired || reason != "bootstrap_identity_proof_required" {
+			t.Fatalf("close=%d reason=%q", code, reason)
+		}
+	})
+
+	if got := h.Registry.Count(); got != 0 {
+		t.Fatalf("rejected credential bootstraps registered %d providers", got)
+	}
+	if active, err := store.HasActiveTokenForProvider(context.Background(), "mp-00000000000000000000000000000004"); err != nil || active {
+		t.Fatalf("replay created token: active=%v err=%v", active, err)
+	}
+}
+
+func TestCredentialBootstrapSameKeyRecoversResponseLossButUsedTokenFailsClosed(t *testing.T) {
+	const providerID = "mp-00000000000000000000000000000005"
+	store, h := newCredentialBootstrapHarness(t, nil)
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+
+	first := completeCredentialBootstrap(t, h.HTTP.URL, providerID, pub, priv)
+	if first.AssignedProviderToken == "" {
+		t.Fatal("first response omitted token")
+	}
+	// Simulate response/persistence loss: reconnect using only the receipt key.
+	second := completeCredentialBootstrap(t, h.HTTP.URL, providerID, pub, priv)
+	if second.AssignedProviderToken == "" || second.AssignedProviderToken == first.AssignedProviderToken {
+		t.Fatalf("recovery token first=%q second=%q", first.AssignedProviderToken, second.AssignedProviderToken)
+	}
+	if _, valid, err := store.ValidateToken(context.Background(), first.AssignedProviderToken); err != nil || valid {
+		t.Fatalf("replaced token valid=%v err=%v", valid, err)
+	}
+	if err := store.MarkTokenUsed(context.Background(), second.AssignedProviderToken); err != nil {
+		t.Fatalf("mark recovered token used: %v", err)
+	}
+
+	conn, challenge, initial := openCredentialBootstrap(t, h.HTTP.URL, providerID, pub)
+	defer conn.Close()
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil,
+		signedCredentialBootstrapProofFields(t, priv, providerID, challenge, initial))
+	code, reason := readCredentialBootstrapClose(t, conn, nil)
+	if code != providerws.CloseInvalidToken || reason != "bootstrap_token_used" {
+		t.Fatalf("used-token recovery close=%d reason=%q", code, reason)
+	}
+	if _, valid, err := store.ValidateToken(context.Background(), second.AssignedProviderToken); err != nil || !valid {
+		t.Fatalf("used token was revoked or replaced: valid=%v err=%v", valid, err)
+	}
+}
+
+func TestCredentialBootstrapBearerIsConfirmedOnlyAfterAcceptedBoundHello(t *testing.T) {
+	const providerID = "mp-0000000000000000000000000000000a"
+	store, h := newCredentialBootstrapHarness(t, func(cfg *config.Config) {
+		cfg.Tier2.RequireEncryptedLeg = false
+	})
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	first := completeCredentialBootstrap(t, h.HTTP.URL, providerID, pub, priv)
+
+	// Bearer validation succeeds, but the hello binds a different provider ID.
+	// The rejected session must not consume or permanently confirm the token.
+	conn, br, _, err := bearerDialer(first.AssignedProviderToken).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial rejected session: %v", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("mp-0000000000000000000000000000000b"))); err != nil {
+		t.Fatalf("write mismatched hello: %v", err)
+	}
+	code, reason := readCredentialBootstrapClose(t, conn, br)
+	_ = conn.Close()
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("mismatched hello close=%d reason=%q", code, reason)
+	}
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].LastUsedAt.Valid {
+		t.Fatalf("rejected hello consumed bootstrap token: %#v", records)
+	}
+
+	// Same-key recovery is still available because the rejected bearer did not
+	// cross the admission boundary.
+	second := completeCredentialBootstrap(t, h.HTTP.URL, providerID, pub, priv)
+	if second.AssignedProviderToken == first.AssignedProviderToken {
+		t.Fatal("response-loss recovery did not rotate the unused token")
+	}
+
+	// A provider-ID-bound v2 proof crosses the confirmation boundary before its
+	// auth_response; observing acceptance therefore proves ownership is permanent.
+	accepted, _, _, err := bearerDialer(second.AssignedProviderToken).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial accepted session: %v", err)
+	}
+	acceptedInitial := validAuthInitialWithFreshKey(t, providerID)
+	acceptedInitial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(pub)
+	if err := wsutil.WriteClientText(accepted, mustJSON(acceptedInitial)); err != nil {
+		t.Fatalf("write accepted initial: %v", err)
+	}
+	acceptedChallenge := readAuthChallenge(t, accepted)
+	writeAuthProofWithFields(t, accepted, acceptedChallenge, providerID, nil,
+		signedIdentityProofFields(t, priv, providerID, acceptedChallenge.AuthAttemptID, acceptedInitial))
+	acceptedResponse := readAuthResponse(t, accepted)
+	if acceptedResponse.Status != "accepted" || acceptedResponse.AssignedID != acceptedChallenge.AssignedID {
+		t.Fatalf("accepted durable bearer response=%+v", acceptedResponse)
+	}
+	_ = accepted.Close()
+
+	probe, challenge, initial := openCredentialBootstrap(t, h.HTTP.URL, providerID, pub)
+	defer probe.Close()
+	writeAuthProofWithFields(t, probe, challenge, providerID, nil,
+		signedCredentialBootstrapProofFields(t, priv, providerID, challenge, initial))
+	code, reason = readCredentialBootstrapClose(t, probe, nil)
+	if code != providerws.CloseInvalidToken || reason != "bootstrap_token_used" {
+		t.Fatalf("confirmed-token recovery close=%d reason=%q", code, reason)
+	}
+}
+
+func TestCredentialBootstrapConfirmationFailureNeverRegistersOrAccepts(t *testing.T) {
+	const providerID = "mp-0000000000000000000000000000000c"
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	defer store.Close()
+	failing := bootstrapMarkFailingStore{Store: store}
+	h := newProviderHarnessWithServerOptions(t, failing, nil, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+		cfg.Tier2.RequireEncryptedLeg = false
+	})
+	defer h.HTTP.Close()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	mint := completeCredentialBootstrap(t, h.HTTP.URL, providerID, pub, priv)
+
+	conn, _, _, err := bearerDialer(mint.AssignedProviderToken).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	initial := validAuthInitialWithFreshKey(t, providerID)
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(pub)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil,
+		signedIdentityProofFields(t, priv, providerID, challenge.AuthAttemptID, initial))
+	code, reason := readCredentialBootstrapClose(t, conn, nil)
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("confirmation failure close=%d reason=%q", code, reason)
+	}
+	if got := h.Registry.Count(); got != 0 {
+		t.Fatalf("confirmation failure registered %d providers", got)
+	}
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].LastUsedAt.Valid {
+		t.Fatalf("confirmation failure consumed bootstrap token: %#v", records)
+	}
+}
+
+func TestCredentialBootstrapRejectsBearerPinnedAndBoundDifferentKey(t *testing.T) {
+	t.Run("bearer", func(t *testing.T) {
+		store, h := newCredentialBootstrapHarness(t, nil)
+		const providerID = "mp-00000000000000000000000000000006"
+		_, bearer, err := store.IssueToken(context.Background(), providerID, "bootstrap-bearer")
+		if err != nil {
+			t.Fatalf("issue bearer: %v", err)
+		}
+		pub, _, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatalf("keypair: %v", err)
+		}
+		initial := credentialBootstrapInitial(t, providerID, pub)
+		conn, br, _, err := bearerDialer(bearer).Dial(context.Background(), wsURL(h.HTTP.URL))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer conn.Close()
+		if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+			t.Fatalf("write initial: %v", err)
+		}
+		code, reason := readCredentialBootstrapClose(t, conn, br)
+		if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+			t.Fatalf("close=%d reason=%q", code, reason)
+		}
+	})
+
+	t.Run("pinned", func(t *testing.T) {
+		const providerID = "mp-00000000000000000000000000000008"
+		_, h := newCredentialBootstrapHarness(t, func(cfg *config.Config) {
+			cfg.Providers = []config.ProviderConfig{{
+				ProviderID:  providerID,
+				EndpointURL: "https://m4.streamvc.live",
+				DisplayName: "M4 test provider",
+			}}
+		})
+		pub, _, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatalf("keypair: %v", err)
+		}
+		initial := credentialBootstrapInitial(t, providerID, pub)
+		code, reason := sendHelloExpectClose(t, h.HTTP.URL, initial)
+		if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+			t.Fatalf("close=%d reason=%q", code, reason)
+		}
+	})
+
+	t.Run("bound different key", func(t *testing.T) {
+		_, h := newCredentialBootstrapHarness(t, nil)
+		const providerID = "mp-00000000000000000000000000000007"
+		firstPub, firstPriv, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatalf("first keypair: %v", err)
+		}
+		_ = completeCredentialBootstrap(t, h.HTTP.URL, providerID, firstPub, firstPriv)
+		secondPub, secondPriv, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatalf("second keypair: %v", err)
+		}
+		conn, challenge, initial := openCredentialBootstrap(t, h.HTTP.URL, providerID, secondPub)
+		defer conn.Close()
+		writeAuthProofWithFields(t, conn, challenge, providerID, nil,
+			signedCredentialBootstrapProofFields(t, secondPriv, providerID, challenge, initial))
+		code, reason := readCredentialBootstrapClose(t, conn, nil)
+		if code != providerws.CloseInvalidToken || reason != "bootstrap_identity_mismatch" {
+			t.Fatalf("close=%d reason=%q", code, reason)
+		}
+	})
+}
+
+func newCredentialBootstrapHarness(t *testing.T, mutate func(*config.Config)) (*auth.Store, providerHarness) {
+	t.Helper()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	h := newProviderHarnessWithServerOptions(t, store, nil, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+		cfg.Tier2.RequireEncryptedLeg = true
+		if mutate != nil {
+			mutate(cfg)
+		}
+	})
+	t.Cleanup(h.HTTP.Close)
+	return store, h
+}
+
+func credentialBootstrapInitial(t *testing.T, providerID string, receiptPub ed25519.PublicKey) map[string]any {
+	t.Helper()
+	initial := validAuthInitialWithFreshKey(t, providerID)
+	initial["credential_bootstrap"] = true
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(receiptPub)
+	return initial
+}
+
+func openCredentialBootstrap(t *testing.T, serverURL, providerID string, receiptPub ed25519.PublicKey) (net.Conn, providerws.AuthChallenge, map[string]any) {
+	t.Helper()
+	initial := credentialBootstrapInitial(t, providerID, receiptPub)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(serverURL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		_ = conn.Close()
+		t.Fatalf("write initial: %v", err)
+	}
+	return conn, readAuthChallenge(t, conn), initial
+}
+
+func completeCredentialBootstrap(t *testing.T, serverURL, providerID string, receiptPub ed25519.PublicKey, receiptPriv ed25519.PrivateKey) providerws.AuthResponse {
+	t.Helper()
+	conn, challenge, initial := openCredentialBootstrap(t, serverURL, providerID, receiptPub)
+	defer conn.Close()
+	writeAuthProofWithFields(t, conn, challenge, providerID, nil,
+		signedCredentialBootstrapProofFields(t, receiptPriv, providerID, challenge, initial))
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" {
+		t.Fatalf("bootstrap response=%+v", response)
+	}
+	return response
+}
+
+func readCredentialBootstrapClose(t *testing.T, conn net.Conn, buffered *bufio.Reader) (gobwas.StatusCode, string) {
+	t.Helper()
+	var source io.Reader = conn
+	if buffered != nil {
+		source = buffered
+	}
+	frame, err := gobwas.ReadFrame(source)
+	if err != nil {
+		t.Fatalf("read credential bootstrap close: %v", err)
+	}
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("credential bootstrap opcode=%v, want close", frame.Header.OpCode)
+	}
+	return gobwas.ParseCloseFrameData(frame.Payload)
 }
 
 func mustAutotuneCatalog(t *testing.T) *autotune.Catalog {

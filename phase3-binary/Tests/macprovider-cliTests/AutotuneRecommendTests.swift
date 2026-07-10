@@ -2074,6 +2074,7 @@ final class AutotuneRecommendTests: XCTestCase {
         // Default probeDiagnostics is [:] — JSON must still be valid.
         let stored = result.storedStateJSON()
         XCTAssertTrue(stored.contains(#""probe_diagnostics":{}"#))
+        XCTAssertTrue(stored.contains(#""hardware_evidence":null"#))
         let data = try XCTUnwrap(stored.data(using: .utf8))
         _ = try JSONSerialization.jsonObject(with: data)  // round-trip parse must not throw
     }
@@ -2084,6 +2085,7 @@ final class AutotuneRecommendTests: XCTestCase {
         """
         let decoded = try JSONDecoder().decode(LastRecommendationState.self, from: Data(json.utf8))
         XCTAssertEqual(decoded.probeDiagnostics, ["qwen3-32b": "tier below minimum"])
+        XCTAssertNil(decoded.hardwareEvidence)
     }
 
     func testLastRecommendationStateDecodesOldJSONWithoutProbeDiagnostics() throws {
@@ -2093,6 +2095,7 @@ final class AutotuneRecommendTests: XCTestCase {
         """
         let decoded = try JSONDecoder().decode(LastRecommendationState.self, from: Data(json.utf8))
         XCTAssertEqual(decoded.probeDiagnostics, [String: String]())
+        XCTAssertNil(decoded.hardwareEvidence)
     }
 
     // MARK: - v4 pivot: per-token payout

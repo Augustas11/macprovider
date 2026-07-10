@@ -72,6 +72,9 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(name: .customLong("submit-hardware-evidence"), inversion: .prefixedNo, help: "With --recommend, submit local autotune hardware evidence for stats verification when provider credentials are configured.")
     var submitHardwareEvidence = true
 
+    @Flag(name: .customLong("require-hardware-evidence"), help: "With --recommend, fail before applying configuration when hardware evidence cannot be submitted.")
+    var requireHardwareEvidence = false
+
     @Flag(help: "With --recommend, check whether the stored recommendation is fresh without benchmarking.")
     var freshnessCheck = false
 
@@ -681,6 +684,12 @@ struct AutotuneCommand: AsyncParsableCommand {
         if freshnessCheck && !recommend {
             throw ValidationError("--freshness-check requires --recommend")
         }
+        if requireHardwareEvidence && !recommend {
+            throw ValidationError("--require-hardware-evidence requires --recommend")
+        }
+        if requireHardwareEvidence && !submitHardwareEvidence {
+            throw ValidationError("--require-hardware-evidence cannot be combined with --no-submit-hardware-evidence")
+        }
         guard maxDuration > 0 else {
             throw ValidationError("--max-duration must be > 0")
         }
@@ -758,12 +767,19 @@ struct AutotuneCommand: AsyncParsableCommand {
         }
         var result = AutotuneRecommendEngine().recommend(request)
         result.probeDiagnostics = outcomes.diagnostics
-        try RecommendationStateStore.write(result)
+        try RecommendationStateStore.write(result, benchmarks: request.benchmarks)
         if submitHardwareEvidence {
             let submission = await AutotuneHardwareEvidenceSubmitter(config: resolvedConfig).submit(
                 result: result,
                 benchmarks: request.benchmarks
             )
+            if let reason = Self.requiredHardwareEvidenceBlockReason(
+                submission: submission,
+                required: requireHardwareEvidence
+            ) {
+                FileHandle.standardError.write(Data("hardware_evidence_unavailable: \(reason)\n".utf8))
+                throw ExitCode(11)
+            }
             switch submission {
             case .submitted:
                 FileHandle.standardError.write(Data("hardware evidence submitted for stats verification\n".utf8))
@@ -873,13 +889,68 @@ struct AutotuneCommand: AsyncParsableCommand {
         let status = await RecommendationFreshnessChecker(providerID: resolvedConfig?.providerID).status()
         switch status {
         case .fresh:
-            print("recommendation_fresh")
+            let storedEvidence = try? RecommendationStateStore.read().hardwareEvidence
+            let evidenceOutcome = await Self.freshRecommendationEvidenceOutcome(
+                storedEvidence: storedEvidence,
+                submitEnabled: submitHardwareEvidence,
+                submit: { evidence in
+                    await AutotuneHardwareEvidenceSubmitter(config: resolvedConfig).submit(snapshot: evidence)
+                }
+            )
+            switch evidenceOutcome {
+            case .ready(let submitted):
+                if submitted {
+                    FileHandle.standardError.write(Data("hardware evidence resubmitted for stats verification\n".utf8))
+                }
+                print("recommendation_fresh")
+            case .rerunRecommendation(let reason):
+                FileHandle.standardError.write(Data("recommendation_stale: \(reason)\n".utf8))
+                throw ExitCode(10)
+            case .blocked(let reason):
+                FileHandle.standardError.write(Data("hardware_evidence_unavailable: \(reason)\n".utf8))
+                throw ExitCode(11)
+            }
         case .missing:
             FileHandle.standardError.write(Data("recommendation_stale: missing stored recommendation\n".utf8))
             throw ExitCode(10)
         case .stale(let generatedAt):
             FileHandle.standardError.write(Data("recommendation_stale: inputs changed since \(ISO8601DateFormatter.autotuneInternet.string(from: generatedAt))\n".utf8))
             throw ExitCode(10)
+        }
+    }
+
+    static func freshRecommendationEvidenceOutcome(
+        storedEvidence: AutotuneHardwareEvidenceSnapshot?,
+        submitEnabled: Bool,
+        submit: (AutotuneHardwareEvidenceSnapshot) async -> AutotuneHardwareEvidenceSubmission
+    ) async -> FreshRecommendationEvidenceOutcome {
+        guard submitEnabled else { return .ready(submitted: false) }
+        guard let storedEvidence else {
+            // Legacy state did not retain enough benchmark detail to recreate
+            // verifier evidence safely. Exit 10 makes the installer run the
+            // normal recommendation once and seed reusable evidence.
+            return .rerunRecommendation("stored hardware evidence is missing")
+        }
+        switch await submit(storedEvidence) {
+        case .submitted:
+            return .ready(submitted: true)
+        case .skipped(let reason):
+            return .blocked(reason)
+        case .failed(let reason):
+            return .blocked(reason)
+        }
+    }
+
+    static func requiredHardwareEvidenceBlockReason(
+        submission: AutotuneHardwareEvidenceSubmission,
+        required: Bool
+    ) -> String? {
+        guard required else { return nil }
+        switch submission {
+        case .submitted:
+            return nil
+        case .skipped(let reason), .failed(let reason):
+            return reason
         }
     }
 
@@ -1029,6 +1100,12 @@ struct AutotuneStage2Request {
     var port: Int
     var drainGrace: Int
     var cancellationReason: () -> AutotuneCancellationReason?
+}
+
+enum FreshRecommendationEvidenceOutcome: Equatable {
+    case ready(submitted: Bool)
+    case rerunRecommendation(String)
+    case blocked(String)
 }
 
 struct AutotuneRunDependencies {

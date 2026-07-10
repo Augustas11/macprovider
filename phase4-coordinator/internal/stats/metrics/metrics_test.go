@@ -42,6 +42,11 @@ var (
 		"none": true, "disabled": true, "busy": true, "not_idle_yet": true,
 		"thermal_pressure": true, "on_battery": true, "model_not_loaded": true,
 	}
+	allowCredentialBootstrapOutcome = map[string]bool{
+		"minted": true, "recovered": true, "rejected_v1": true,
+		"rejected_identity": true, "rejected_used": true, "rejected_expired": true,
+		"rejected_rate": true, "rejected_outstanding": true, "store_error": true,
+	}
 	// Round-1 ARCH M1 / CODE M1 fix: also scan for an
 	// Origin-fragment to prove no attacker-controlled string
 	// from the request `Origin` header lands in a label value.
@@ -78,6 +83,10 @@ func TestLabelHygiene(t *testing.T) {
 	m.IncIdlePrewarmEvent("idle_prewarm_skipped", "not_idle_yet")
 	m.IncIdlePrewarmEvent("raw-attacker-value", "not_idle_yet")
 	m.IncIdlePrewarmEvent("idle_prewarm_skipped", "raw-attacker-value")
+	for outcome := range allowCredentialBootstrapOutcome {
+		m.IncCredentialBootstrap(outcome)
+	}
+	m.IncCredentialBootstrap("raw-attacker-value")
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -140,6 +149,10 @@ func TestLabelHygiene(t *testing.T) {
 				case "reason":
 					if !allowIdlePrewarmReason[val] {
 						t.Errorf("metric %s reason=%q not in allowed set", mf.GetName(), val)
+					}
+				case "outcome":
+					if !allowCredentialBootstrapOutcome[val] {
+						t.Errorf("metric %s outcome=%q not in allowed set", mf.GetName(), val)
 					}
 				}
 			}

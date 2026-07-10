@@ -221,6 +221,10 @@ actor CoordinatorClient {
     private var sleepAssertion: ProviderSleepAssertion?
     private let sendOverride: SendOverride?
     private let streamInterval: Int
+    private let credentialBootstrap: Bool
+    private let bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey?
+    private let receiptIdentitySigningKeys: [Curve25519.Signing.PrivateKey]
+    private let persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)?
 
     // SPEC-026 §7: optional bridge for delegating identity signature to
     // Malibu.app via the control socket. `nil` when the CLI runs standalone
@@ -267,6 +271,11 @@ actor CoordinatorClient {
         // per-provider exemption at `identity_signature.go:38` then
         // decides whether to admit us.
         identitySignatureTimeoutSeconds: TimeInterval = 3,
+        credentialBootstrap: Bool = false,
+        bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey? = nil,
+        receiptIdentitySigningKey: Curve25519.Signing.PrivateKey? = nil,
+        receiptIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey] = [],
+        persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)? = nil,
         // Issue #189: injectable in tests; production uses Darwin.exit(1)
         // so the launchd KeepAlive contract recovers the wedged process.
         watchdogExitHook: @escaping @Sendable (String) -> Void = { reason in
@@ -324,6 +333,18 @@ actor CoordinatorClient {
         self.identitySignatureTimeoutSeconds = identitySignatureTimeoutSeconds
         self.watchdogExitHook = watchdogExitHook
         self.streamInterval = max(1, config.streamInterval)
+        self.credentialBootstrap = credentialBootstrap
+        if credentialBootstrap {
+            guard let bootstrapReceiptSigningKey,
+                  let providerReceiptPublicKey,
+                  Data(base64Encoded: providerReceiptPublicKey) == bootstrapReceiptSigningKey.publicKey.rawRepresentation else {
+                return nil
+            }
+        }
+        self.bootstrapReceiptSigningKey = bootstrapReceiptSigningKey
+        self.receiptIdentitySigningKeys = receiptIdentitySigningKey.map { [$0] }
+            ?? receiptIdentitySigningKeyCandidates
+        self.persistReceiptIdentitySigningKey = persistReceiptIdentitySigningKey
     }
 
     func start() async {
@@ -532,7 +553,81 @@ actor CoordinatorClient {
             try await connectAndRunOverride()
             return
         }
-        try await connectAndRun()
+        do {
+            try await connectAndRun()
+        } catch let error as CoordinatorAuthError {
+            guard case .rejected(let code, _) = error,
+                  code == "invalid_token",
+                  await recoverInvalidBootstrapCredential() else {
+                throw error
+            }
+            // The recovery handshake persisted a fresh same-key credential.
+            // Re-enter the ordinary authenticated path immediately; only that
+            // path may confirm the credential and register the provider.
+            throw CoordinatorAuthUpgradeReconnect()
+        }
+    }
+
+    /// Recover an installer bootstrap credential only after the coordinator
+    /// explicitly rejects its bearer. The recovery handshake omits the stale
+    /// bearer and proves the durable Keychain receipt identity instead. The
+    /// coordinator permits replacement only while that exact identity remains
+    /// unconfirmed; confirmed ownership and ordinary operator tokens fail
+    /// closed without local mutation.
+    private func recoverInvalidBootstrapCredential() async -> Bool {
+        guard !credentialBootstrap,
+              appConfig.managedBy != "malibu-app",
+              BootstrapAuthCommand.isCredentialBootstrapPrincipal(providerID),
+              let rejectedToken = providerToken,
+              let receiptKey = receiptIdentitySigningKeys.first else {
+            return false
+        }
+        var recoveryConfig = appConfig
+        recoveryConfig.providerToken = nil
+        let publicKey = Data(receiptKey.publicKey.rawRepresentation).base64EncodedString()
+        guard let recoveryClient = CoordinatorClient(
+            config: recoveryConfig,
+            modelRuntime: modelRuntime,
+            providerStatus: providerStatus,
+            reconnectGraceNanoseconds: reconnectGraceNanoseconds,
+            reconnectInitialBackoffNanoseconds: reconnectInitialBackoffNanoseconds,
+            receiptKeyRotationTimeoutNanoseconds: receiptKeyRotationTimeoutNanoseconds,
+            attestationGenerator: attestationGenerator,
+            webSocketFactory: webSocketFactory,
+            sleepAssertionFactory: { nil },
+            pairingController: pairingController,
+            providerReceiptPublicKey: publicKey,
+            credentialBootstrap: true,
+            bootstrapReceiptSigningKey: receiptKey,
+            watchdogExitHook: watchdogExitHook
+        ) else {
+            return false
+        }
+
+        do {
+            try await recoveryClient.connectAndRunOnce()
+        } catch is CoordinatorAuthUpgradeReconnect {
+            await recoveryClient.stop()
+            let loaded = try? ConfigLoader.load(
+                cli: CLIOverrides(configPath: configPath),
+                environment: [:]
+            )
+            guard let recovered = loaded?.providerToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !recovered.isEmpty,
+                  recovered != rejectedToken else {
+                Self.keepaliveDebug("bootstrap_credential_recovery_persist_missing")
+                return false
+            }
+            providerToken = recovered
+            Self.keepaliveDebug("bootstrap_credential_recovery_succeeded")
+            return true
+        } catch {
+            await recoveryClient.stop()
+            Self.keepaliveDebug("bootstrap_credential_recovery_failed error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
+            return false
+        }
+        await recoveryClient.stop()
+        return false
     }
 
     func connectAndRunOnceForTest() async throws {
@@ -929,7 +1024,7 @@ actor CoordinatorClient {
 
     private func connectAndRun() async throws {
         let socket = try await openWebSocket()
-        if wsTunneledMode {
+        if credentialBootstrap || wsTunneledMode {
             try await connectAndRunTier2(socket: socket)
         } else {
             try await connectAndRunLegacy(socket: socket)
@@ -944,13 +1039,14 @@ actor CoordinatorClient {
         // CloseInvalidToken when auth.require_provider_tokens=true.
         // The token never appears in log lines — redactedURL only logs the
         // URL, not headers, and we don't dump headers anywhere.
-        if let token = providerToken {
+        let attachesBearer = !credentialBootstrap && providerToken != nil
+        if attachesBearer, let token = providerToken {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         let socket = webSocketFactory(request)
         webSocket = socket
         socket.resume()
-        Self.keepaliveDebug("ws_resume url=\(Self.redactedURL(coordinatorURL)) token=\(providerToken == nil ? "absent" : "present")")
+        Self.keepaliveDebug("ws_resume url=\(Self.redactedURL(coordinatorURL)) token=\(attachesBearer ? "present" : "absent")")
         return socket
     }
 
@@ -992,6 +1088,11 @@ actor CoordinatorClient {
                 code: "invalid_auth_request",
                 message: reason.isEmpty ? "coordinator closed invalid auth_request" : reason
             )
+        case 4005 where reason == "invalid_token" ||
+            reason == "bootstrap_identity_mismatch" ||
+            reason == "bootstrap_token_used" ||
+            reason == "bootstrap_token_expired":
+            return .rejected(code: reason, message: reason)
         case 4000 where reason == "unrecognized auth message":
             return .invalidMessage(reason)
         default:
@@ -1404,6 +1505,52 @@ actor CoordinatorClient {
             "provider_id": providerID,
         ]
         proof["attestation_token"] = token ?? NSNull()
+        if credentialBootstrap {
+            guard let initialMessage,
+                  let bootstrapReceiptSigningKey else {
+                throw CoordinatorAuthError.invalidMessage("credential bootstrap receipt identity unavailable")
+            }
+            proof["credential_bootstrap"] = true
+            let transcriptSHA256 = try Self.initialAuthTranscriptHashBase64(initialMessage)
+            let payload = try Self.credentialBootstrapIdentityPayload(
+                challenge: challenge,
+                authAttemptID: attemptID,
+                providerID: providerID,
+                providerECDHPublicKey: attempt.publicKeyBase64URL,
+                transcriptSHA256: transcriptSHA256
+            )
+            let signature = try bootstrapReceiptSigningKey.signature(for: payload)
+            proof["identity_signature"] = signature.base64EncodedString()
+            proof["identity_signature_transcript_sha256"] = transcriptSHA256
+        }
+
+        // Installer-generated mp-* providers keep their bootstrap receipt key
+        // in Keychain. Reuse that durable identity for every ordinary bearer-v2
+        // admission instead of relying on the ephemeral live provider pool.
+        let receiptIdentitySigningKey: Curve25519.Signing.PrivateKey? = {
+            guard !receiptIdentitySigningKeys.isEmpty else { return nil }
+            if let expected = challenge["bootstrap_identity_public_key"] as? String {
+                return receiptIdentitySigningKeys.first(where: {
+                    Data($0.publicKey.rawRepresentation).base64EncodedString() == expected
+                })
+            }
+            return receiptIdentitySigningKeys.count == 1 ? receiptIdentitySigningKeys[0] : nil
+        }()
+        if !credentialBootstrap, let receiptIdentitySigningKey, let initialMessage {
+            if challenge["bootstrap_identity_public_key"] != nil {
+                try persistReceiptIdentitySigningKey?(receiptIdentitySigningKey)
+            }
+            let transcriptSHA256 = try Self.initialAuthTranscriptHashBase64(initialMessage)
+            let payload = try Self.receiptIdentityPayload(
+                authAttemptID: attemptID,
+                providerID: providerID,
+                providerECDHPublicKey: attempt.publicKeyBase64URL,
+                transcriptSHA256: transcriptSHA256
+            )
+            let signature = try receiptIdentitySigningKey.signature(for: payload)
+            proof["identity_signature"] = signature.base64EncodedString()
+            proof["identity_signature_transcript_sha256"] = transcriptSHA256
+        }
 
         // SPEC-026 §7: if we have both the initial-stage message (needed
         // to compute the retained transcript hash) and an
@@ -1413,7 +1560,8 @@ actor CoordinatorClient {
         // coordinator's `identitySignatures == nil` gate or per-provider
         // exemption at `identity_signature.go:38` covers the CLI-track
         // path.
-        if let identityBridge, let initialMessage,
+        if !credentialBootstrap, receiptIdentitySigningKey == nil,
+           let identityBridge, let initialMessage,
            let transcriptSHA256 = try? Self.initialAuthTranscriptHashBase64(initialMessage) {
             let request = IdentitySignatureBridge.Request(
                 authAttemptID: attemptID,
@@ -1437,6 +1585,22 @@ actor CoordinatorClient {
         return proof
     }
 
+    static func receiptIdentityPayload(
+        authAttemptID: String,
+        providerID: String,
+        providerECDHPublicKey: String,
+        transcriptSHA256: String
+    ) throws -> Data {
+        let tuple: [String: Any] = [
+            "auth_attempt_id": authAttemptID,
+            "provider_id": providerID,
+            "binary_version": Self.binaryVersion,
+            "provider_ecdh_public_key": providerECDHPublicKey,
+            "transcript_sha256": transcriptSHA256,
+        ]
+        return try CanonicalJSON.encode(CanonicalJSON.fromJSONLike(tuple))
+    }
+
     /// Compute `base64(SHA-256(CanonicalJSON(initialMessage)))`. Matches
     /// what the coordinator retains from the initial auth_request stage
     /// via `phase4-coordinator/internal/ws/identity_signature.go:15`.
@@ -1444,6 +1608,39 @@ actor CoordinatorClient {
         let canonical = try CanonicalJSON.encode(CanonicalJSON.fromJSONLike(message))
         let digest = SHA256.hash(data: canonical)
         return Data(digest).base64EncodedString()
+    }
+
+    static func credentialBootstrapIdentityPayload(
+        challenge: [String: Any],
+        authAttemptID: String,
+        providerID: String,
+        providerECDHPublicKey: String,
+        transcriptSHA256: String
+    ) throws -> Data {
+        let requiredChallengeFields = [
+            "type", "version", "auth_attempt_id", "assigned_id", "attestation_challenge",
+            "attestation_formats", "coordinator_ecdh_public_key", "selected_aead_suite", "expires_at",
+        ]
+        for field in requiredChallengeFields where challenge[field] == nil {
+            throw CoordinatorAuthError.invalidMessage("auth_challenge missing \(field)")
+        }
+        var challengeWire: [String: Any] = [:]
+        for field in requiredChallengeFields {
+            challengeWire[field] = challenge[field]
+        }
+        for field in ["selected_aead", "key_id"] where challenge[field] != nil {
+            challengeWire[field] = challenge[field]
+        }
+        let tuple: [String: Any] = [
+            "challenge": challengeWire,
+            "auth_attempt_id": authAttemptID,
+            "provider_id": providerID,
+            "binary_version": Self.binaryVersion,
+            "provider_ecdh_public_key": providerECDHPublicKey,
+            "transcript_sha256": transcriptSHA256,
+            "credential_bootstrap": true,
+        ]
+        return try CanonicalJSON.encode(CanonicalJSON.fromJSONLike(tuple))
     }
 
     private func acceptAuthResponse(_ response: [String: Any], session: Tier2ProviderSession) async throws {
@@ -2587,6 +2784,9 @@ actor CoordinatorClient {
         }
         if let modelHash = resolvedModelHash {
             message["model_hash"] = modelHash
+        }
+        if credentialBootstrap {
+            message["credential_bootstrap"] = true
         }
         return message
     }

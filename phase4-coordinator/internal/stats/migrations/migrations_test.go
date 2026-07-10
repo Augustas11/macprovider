@@ -35,6 +35,9 @@ func TestEmbeddedMigrationsLoad(t *testing.T) {
 		{12, "malibu_emission_ledger"},
 		{13, "pow_w2_hello_gate_grants"},
 		{14, "malibu_trust_unlock"},
+		{15, "provider_onboarding_hardware_decision_reason"},
+		{16, "hardware_profile_memory_reverification"},
+		{17, "autotune_current_hardware_gate_grants"},
 	}
 	if len(all) != len(want) {
 		t.Fatalf("got %d migrations, want %d", len(all), len(want))
@@ -71,7 +74,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm, powW2HelloGateGrants string
+	var schema, bootstrap, spec026, hardware, hardwareJobs, authPolicyApproveFix, idlePrewarm, powW2HelloGateGrants, onboardingDecisionReason, hardwareMemoryReverification, autotuneCurrentHardwareGateGrants string
 	for _, m := range all {
 		switch m.Name {
 		case "stats_tables":
@@ -90,6 +93,12 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 			idlePrewarm = m.SQL
 		case "pow_w2_hello_gate_grants":
 			powW2HelloGateGrants = m.SQL
+		case "provider_onboarding_hardware_decision_reason":
+			onboardingDecisionReason = m.SQL
+		case "hardware_profile_memory_reverification":
+			hardwareMemoryReverification = m.SQL
+		case "autotune_current_hardware_gate_grants":
+			autotuneCurrentHardwareGateGrants = m.SQL
 		}
 	}
 	if schema == "" {
@@ -192,6 +201,21 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 		"REVOKE CREATE ON SCHEMA public FROM provider_auth_policy_definer",
 	} {
 		mustContain(t, spec026, needle, "SPEC-026 schema/grant shape")
+	}
+	if autotuneCurrentHardwareGateGrants == "" {
+		t.Fatal("autotune current hardware gate grants forward migration body is empty")
+	}
+	for _, needle := range []string{
+		"GRANT SELECT (",
+		"provider_id",
+		"chip_normalized",
+		"unified_memory_gb",
+		"verified",
+		") ON provider_hardware_profiles TO provider_onboarding",
+		"GRANT SELECT (\n    chip_normalized,\n    unified_memory_gb\n) ON hardware_verification_jobs TO provider_onboarding",
+	} {
+		mustContain(t, autotuneCurrentHardwareGateGrants, needle,
+			"autotune admission can compare the current verified capacity tuple")
 	}
 	mustContain(t, spec026, "ON CONFLICT ON CONSTRAINT provider_auth_policy_pkey DO UPDATE",
 		"SPEC-026 approval upsert must avoid PL/pgSQL output-column ambiguity")
@@ -352,7 +376,7 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 		"ALTER ROLE stats_hardware_verifier NOLOGIN",
 		"GRANT USAGE ON SCHEMA public TO stats_hardware_verifier",
 		"GRANT SELECT (",
-		"submitted_at,\n    evidence_sha256\n) ON hardware_verification_jobs TO provider_onboarding",
+		"status,\n    submitted_at,\n    evidence_sha256\n) ON hardware_verification_jobs TO provider_onboarding",
 		"GRANT INSERT (",
 		"evidence_sha256\n) ON hardware_verification_jobs TO provider_onboarding",
 		"GRANT USAGE, SELECT ON SEQUENCE hardware_verification_jobs_id_seq TO provider_onboarding",
@@ -380,6 +404,27 @@ func TestEmbeddedSchemaShapesCorrect(t *testing.T) {
 		"GRANT SELECT ON chip_hardware_profiles TO stats_hardware_verifier",
 	} {
 		mustContain(t, hardwareJobs, needle, "hardware verification job schema/grant shape")
+	}
+	if onboardingDecisionReason == "" {
+		t.Fatal("provider_onboarding decision_reason forward migration body is empty")
+	}
+	mustContain(t, onboardingDecisionReason,
+		"GRANT SELECT (decision_reason)\nON hardware_verification_jobs\nTO provider_onboarding",
+		"existing provider_onboarding role gains replay decision_reason read")
+	if hardwareMemoryReverification == "" {
+		t.Fatal("hardware profile memory reverification forward migration body is empty")
+	}
+	hardwareMemoryReverificationCode := stripSQLComments(hardwareMemoryReverification)
+	for _, needle := range []string{
+		"CREATE OR REPLACE FUNCTION provider_hardware_profiles_guard_verification",
+		"NEW.chip_normalized IS DISTINCT FROM OLD.chip_normalized",
+		"OR NEW.unified_memory_gb IS DISTINCT FROM OLD.unified_memory_gb",
+		"NEW.verified := FALSE",
+		"NEW.verified := OLD.verified",
+		"REVOKE ALL ON FUNCTION provider_hardware_profiles_guard_verification() FROM PUBLIC",
+	} {
+		mustContain(t, hardwareMemoryReverificationCode, needle,
+			"existing deployments clear hardware verification when the capacity tuple changes")
 	}
 	mustNotContain(t, hardwareJobsCode,
 		"PASSWORD 'REPLACE_ME'",

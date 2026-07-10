@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -26,6 +27,10 @@ func main() {
 		err = issueToken(os.Args[2:])
 	case "revoke-token":
 		err = revokeToken(os.Args[2:])
+	case "revoke-bootstrap-identity":
+		err = revokeBootstrapIdentity(os.Args[2:])
+	case "list-bootstrap-identities":
+		err = listBootstrapIdentities(os.Args[2:])
 	case "list-tokens":
 		err = listTokens(os.Args[2:])
 	case "revoke-and-kick":
@@ -88,6 +93,133 @@ func revokeToken(args []string) error {
 	}
 	fmt.Printf("revoked token_prefix=%s provider_name=%s\n", record.TokenPrefix, record.ProviderName)
 	return nil
+}
+
+func revokeBootstrapIdentity(args []string) error {
+	fs := flag.NewFlagSet("revoke-bootstrap-identity", flag.ExitOnError)
+	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	providerID := fs.String("provider-id", "", "installer-generated provider ID to tombstone")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	store, err := auth.OpenStore(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.RevokeBootstrapIdentity(context.Background(), *providerID); err != nil {
+		return err
+	}
+	fmt.Printf("revoked bootstrap_identity provider_id=%s\n", *providerID)
+	return nil
+}
+
+func listBootstrapIdentities(args []string) error {
+	fs := flag.NewFlagSet("list-bootstrap-identities", flag.ExitOnError)
+	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	state := fs.String("state", "all", "filter: all|unconfirmed-live|unconfirmed-expired|confirmed|operator-revoked")
+	identityRetention := fs.Duration("identity-retention", 7*24*time.Hour, "post-token recovery retention used to show collection horizon; must match coordinator config")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	validState := map[string]bool{
+		"all": true, "unconfirmed-live": true, "unconfirmed-expired": true,
+		"confirmed": true, "operator-revoked": true,
+	}
+	if !validState[*state] {
+		return fmt.Errorf("invalid --state %q", *state)
+	}
+	if *identityRetention <= 0 {
+		return fmt.Errorf("--identity-retention must be positive")
+	}
+	store, err := auth.OpenStore(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	records, err := store.ListBootstrapIdentities(context.Background())
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	matched := 0
+	for _, record := range records {
+		recordState := bootstrapIdentityState(record, now)
+		if *state != "all" && *state != recordState {
+			continue
+		}
+		fmt.Printf(
+			"provider_id=%s state=%s age_s=%s expires_in_s=%s collect_in_s=%s created_at=%s expires_at=%s confirmed_at=%s operator_revoked_at=%s\n",
+			record.ProviderID,
+			recordState,
+			ageSeconds(record.CreatedAt, now),
+			expiresInSeconds(record.ExpiresAt, now),
+			collectInSeconds(record, now, *identityRetention),
+			record.CreatedAt,
+			nullString(record.ExpiresAt),
+			nullString(record.ConfirmedAt),
+			nullString(record.OperatorRevokedAt),
+		)
+		matched++
+	}
+	fmt.Printf("count=%d\n", matched)
+	return nil
+}
+
+func ageSeconds(createdAt string, now time.Time) string {
+	created, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return "unknown"
+	}
+	seconds := int64(now.Sub(created).Seconds())
+	if seconds < 0 {
+		seconds = 0
+	}
+	return fmt.Sprintf("%d", seconds)
+}
+
+func expiresInSeconds(expiresAt sql.NullString, now time.Time) string {
+	if !expiresAt.Valid {
+		return "-"
+	}
+	expires, err := time.Parse(time.RFC3339, expiresAt.String)
+	if err != nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d", int64(expires.Sub(now).Seconds()))
+}
+
+func collectInSeconds(record auth.BootstrapIdentityRecord, now time.Time, retention time.Duration) string {
+	if record.ConfirmedAt.Valid || record.OperatorRevokedAt.Valid || !record.ExpiresAt.Valid {
+		return "-"
+	}
+	expires, err := time.Parse(time.RFC3339, record.ExpiresAt.String)
+	if err != nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%d", int64(expires.Add(retention).Sub(now).Seconds()))
+}
+
+func bootstrapIdentityState(record auth.BootstrapIdentityRecord, now time.Time) string {
+	if record.OperatorRevokedAt.Valid {
+		return "operator-revoked"
+	}
+	if record.ConfirmedAt.Valid {
+		return "confirmed"
+	}
+	if record.ExpiresAt.Valid {
+		if expiresAt, err := time.Parse(time.RFC3339, record.ExpiresAt.String); err == nil && expiresAt.After(now) {
+			return "unconfirmed-live"
+		}
+	}
+	return "unconfirmed-expired"
+}
+
+func nullString(value sql.NullString) string {
+	if value.Valid {
+		return value.String
+	}
+	return "-"
 }
 
 func listTokens(args []string) error {
@@ -186,7 +318,7 @@ func kickProvider(adminURL, operatorKey, providerID, reason string) error {
 }
 
 // pruneTokens implements SPEC-003 v0.8 FR-C9.4 operator-side cleanup:
-// remove tokens that were minted by the self-serve path but never used
+// retire credentials that were minted by the self-serve path but never used
 // (last_used_at IS NULL) and are older than the supplied cutoff. This
 // bounds the operational cost of multi-mint when binary-side persist
 // fails repeatedly. Codex architect review on PR #44 flagged the
@@ -194,13 +326,13 @@ func kickProvider(adminURL, operatorKey, providerID, reason string) error {
 //
 // The cutoff is parsed first as a duration (e.g. "168h"), falling back
 // to an RFC3339 absolute timestamp (e.g. "2026-06-04T00:00:00Z"). Dry-
-// run mode is the default; pass --apply to actually delete rows.
+// run mode is the default; pass --apply to retire matching credentials.
 func pruneTokens(args []string) error {
 	fs := flag.NewFlagSet("prune-tokens", flag.ExitOnError)
 	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
-	olderThan := fs.String("older-than", "168h", "delete unused tokens older than this duration (e.g. 168h) or RFC3339 timestamp")
-	apply := fs.Bool("apply", false, "actually delete rows (default is dry-run)")
-	force := fs.Bool("force", false, "allow cutoffs younger than 24h (DANGEROUS: may delete tokens of providers in their first settling window before they have reconnected with Bearer)")
+	olderThan := fs.String("older-than", "168h", "retire unused tokens older than this duration (e.g. 168h) or RFC3339 timestamp")
+	apply := fs.Bool("apply", false, "actually retire credentials (default is dry-run)")
+	force := fs.Bool("force", false, "allow cutoffs younger than 24h (DANGEROUS: may invalidate tokens of providers in their first settling window before they have reconnected with Bearer)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -213,7 +345,7 @@ func pruneTokens(args []string) error {
 	// `last_used_at IS NULL` until the binary reconnects with Bearer
 	// (which happens AFTER persist completes and is several seconds out
 	// in the operational worst case). A confused operator running
-	// `--apply --older-than 0s` during the settling window would delete
+	// `--apply --older-than 0s` during the settling window would invalidate
 	// the active first-session provider's only token, bricking it under
 	// the new TOFU regime. Refuse cutoffs younger than 24h unless
 	// --force is passed explicitly.
@@ -251,16 +383,16 @@ func pruneTokens(args []string) error {
 				matched++
 			}
 		}
-		fmt.Printf("would_prune=%d\n", matched)
+		fmt.Printf("would_retire=%d\n", matched)
 		fmt.Println("NOTE: last_used_at=NULL means the binary has never authenticated with this token via Bearer. Verify each candidate is genuinely stale (not a provider currently in its self-mint -> persist -> reconnect window) before --apply.")
-		fmt.Println("re-run with --apply to actually delete")
+		fmt.Println("re-run with --apply to retire these credentials")
 		return nil
 	}
-	pruned, err := store.PruneUnusedTokens(context.Background(), cutoff)
+	retired, err := store.PruneUnusedTokens(context.Background(), cutoff)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("dry_run=false cutoff=%s pruned=%d\n", cutoffStr, pruned)
+	fmt.Printf("dry_run=false cutoff=%s retired=%d\n", cutoffStr, retired)
 	return nil
 }
 
@@ -481,5 +613,5 @@ func preFlipAuditRun(args []string, stdout io.Writer) (stale bool, err error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit> [flags]")
 }
