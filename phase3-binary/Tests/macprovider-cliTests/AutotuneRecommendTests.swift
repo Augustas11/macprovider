@@ -1273,6 +1273,58 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertThrowsError(try CachedModelArtifactResolver(hubRoot: hub).verifiedExistingArtifact(for: mismatch))
     }
 
+    func testVerifiedArtifactRepairsMismatchedCachedSnapshot() async throws {
+        let hub = try tempDir()
+        let revision = String(repeating: "b", count: 40)
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let snapshot = resolver.snapshotURL(modelID: "namespace/model", revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("stale".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+
+        let expectedDir = try tempDir()
+        try Data("fresh".utf8).write(to: expectedDir.appendingPathComponent("weights.bin"))
+        let expected = try ModelArtifactVerifier.canonicalArtifactHash(directory: expectedDir)
+        let row = CandidateCatalog.Row(
+            modelID: "namespace/model",
+            modelRevision: revision,
+            modelSHA256: expected,
+            minRAMGB: 1,
+            minBandwidthTier: .c,
+            benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
+            runtimeStatus: "recommendable",
+            notes: nil
+        )
+
+        let downloader = HuggingFaceSnapshotDownloader(
+            fetch: { request in
+                let data = Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8)
+                let url = try XCTUnwrap(request.url)
+                let response = try XCTUnwrap(
+                    HTTPURLResponse(
+                        url: url,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: nil
+                    )
+                )
+                return (data, response)
+            },
+            download: { _ in
+                let downloaded = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("autotune-download-\(UUID().uuidString).bin")
+                try Data("fresh".utf8).write(to: downloaded)
+                return (downloaded, URLResponse(url: URL(string: "https://example.test/weights.bin")!, mimeType: nil, expectedContentLength: 5, textEncodingName: nil))
+            }
+        )
+
+        let verified = try await CachedModelArtifactResolver(hubRoot: hub, downloader: downloader)
+            .verifiedArtifact(for: row)
+
+        XCTAssertEqual(verified.modelArgument, snapshot.path)
+        XCTAssertEqual(verified.sha256, expected)
+        XCTAssertEqual(try String(contentsOf: snapshot.appendingPathComponent("weights.bin")), "fresh")
+    }
+
     func testBenchmarksDiagnosesRowsSkippedByArtifactHashMismatch() async throws {
         var request = try makeRequest()
         let modelKey = "qwen3-coder-30b-a3b-instruct"
@@ -1287,7 +1339,13 @@ final class AutotuneRecommendTests: XCTestCase {
         try Data("corrupt".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
         request.benchmarks = [:]
         let benchmarker = AutotuneRecommendationBenchmarker(
-            artifactResolver: CachedModelArtifactResolver(hubRoot: hub),
+            artifactResolver: CachedModelArtifactResolver(
+                hubRoot: hub,
+                downloader: HuggingFaceSnapshotDownloader(
+                    fetch: { _ in throw AutotuneRecommendError.invalidArtifact("test network unavailable") },
+                    download: { _ in throw AutotuneRecommendError.invalidArtifact("test network unavailable") }
+                )
+            ),
             runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("runner should not start") }
         )
 
@@ -1350,7 +1408,13 @@ final class AutotuneRecommendTests: XCTestCase {
             goodArtifactPath: .feasible(medianTPS: 88, p95TTFTMS: 900)
         ])
         let benchmarker = AutotuneRecommendationBenchmarker(
-            artifactResolver: CachedModelArtifactResolver(hubRoot: hub),
+            artifactResolver: CachedModelArtifactResolver(
+                hubRoot: hub,
+                downloader: HuggingFaceSnapshotDownloader(
+                    fetch: { _ in throw AutotuneRecommendError.invalidArtifact("test network unavailable") },
+                    download: { _ in throw AutotuneRecommendError.invalidArtifact("test network unavailable") }
+                )
+            ),
             runnerFactory: { try CandidateProviderRunner(providerBinaryPath: "/bin/true") },
             prober: prober,
             safetySampler: StaticProbeSafetySampler(),

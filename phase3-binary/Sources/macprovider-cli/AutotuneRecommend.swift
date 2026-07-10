@@ -1986,19 +1986,44 @@ struct CachedModelArtifactResolver {
     }
 
     func verifiedArtifact(for row: CandidateCatalog.Row) async throws -> VerifiedModelArtifact {
-        guard let revision = row.modelRevision, let expected = row.modelSHA256 else {
+        guard let revision = row.modelRevision, row.modelSHA256 != nil else {
             throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
         }
         let snapshot = snapshotURL(modelID: row.modelID, revision: revision)
         var st = stat()
-        if lstat(snapshot.path, &st) != 0 || (st.st_mode & S_IFMT) != S_IFDIR {
-            try await downloader.downloadSnapshot(modelID: row.modelID, revision: revision, to: snapshot)
+        if lstat(snapshot.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR {
+            do {
+                return try verifiedExistingArtifact(for: row)
+            } catch let error as AutotuneRecommendError {
+                guard case .invalidArtifact(let message) = error else { throw error }
+
+                // A snapshot directory can survive a catalog republish with
+                // an old manifest, or be left corrupted by an interrupted
+                // external cache operation. Do not keep rejecting it forever:
+                // invalidate only this pinned revision and rebuild it through
+                // the downloader's staging-directory/atomic-move path.
+                do {
+                    try FileManager.default.removeItem(at: snapshot)
+                } catch {
+                    throw AutotuneRecommendError.invalidArtifact(
+                        message + "; automatic repair could not remove cached snapshot: " + String(describing: error)
+                    )
+                }
+
+                do {
+                    try await downloader.downloadSnapshot(modelID: row.modelID, revision: revision, to: snapshot)
+                } catch {
+                    throw AutotuneRecommendError.invalidArtifact(
+                        message + "; automatic repair failed: " + String(describing: error)
+                    )
+                }
+
+                return try verifiedExistingArtifact(for: row)
+            }
         }
-        let actual = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
-        guard actual == expected else {
-            throw AutotuneRecommendError.invalidArtifact("hash mismatch \(row.modelID)@\(revision)")
-        }
-        return VerifiedModelArtifact(modelArgument: snapshot.path, sha256: actual)
+
+        try await downloader.downloadSnapshot(modelID: row.modelID, revision: revision, to: snapshot)
+        return try verifiedExistingArtifact(for: row)
     }
 
     func verifiedExistingArtifact(for row: CandidateCatalog.Row) throws -> VerifiedModelArtifact {
@@ -2014,7 +2039,9 @@ struct CachedModelArtifactResolver {
         }
         let actual = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
         guard actual == expected else {
-            throw AutotuneRecommendError.invalidArtifact("hash mismatch \(row.modelID)@\(revision)")
+            throw AutotuneRecommendError.invalidArtifact(
+                "hash mismatch \(row.modelID)@\(revision) expected=\(expected) actual=\(actual)"
+            )
         }
         return VerifiedModelArtifact(modelArgument: snapshot.path, sha256: actual)
     }
