@@ -66,6 +66,8 @@ test-dist:
 	bash scripts/test-install-launchd-enable.sh
 	bash scripts/test-watchdog-inline-drift.sh
 	bash scripts/test-malibu-download-publish.sh
+	node --test test/e2e/canary-buyer/probe.test.mjs
+	bash test/e2e/canary-buyer/run-canary.test.sh
 
 vet: vet-coordinator vet-gateway vet-integration
 
