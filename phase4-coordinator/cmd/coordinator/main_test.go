@@ -297,8 +297,8 @@ func TestSetupCanarySanctionStoreHonorsCanaryEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup disabled canary store: %v", err)
 	}
-	if store != nil {
-		t.Fatal("disabled canary setup returned a store")
+	if store == nil {
+		t.Fatal("disabled canary setup must retain the store for operator recovery")
 	}
 	disabledRegistry.Register(&pool.Provider{
 		ProviderID:     "pinned-a",

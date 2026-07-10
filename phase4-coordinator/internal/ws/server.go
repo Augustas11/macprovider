@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -59,6 +60,10 @@ type Server struct {
 	warmups   sync.Map
 	canaries  sync.Map
 	canaryDue sync.Map
+	// canaryRecoveryMu fences operator recovery against canary result
+	// application. Epochs invalidate probes that began before a recovery.
+	canaryRecoveryMu sync.RWMutex
+	canaryEpochs     sync.Map // provider_id -> *atomic.Uint64
 	// enforceNextCanary marks provider IDs (presence = true) whose NEXT canary
 	// probe must be enforced (no cold-start grace). Set after a graced-neutral
 	// probe and cleared after any recorded (enforced) probe, so a graced probe
@@ -2157,9 +2162,6 @@ func (s *Server) runCanarySweep() {
 	for _, provider := range shuffledProviders(s.pool.Snapshot()) {
 		dueKey := provider.ProviderID
 		activeKeys[dueKey] = struct{}{}
-		if !s.canaryProbeEligible(provider) {
-			continue
-		}
 		nextDue, scheduled := s.canaryDue.Load(dueKey)
 		if !scheduled {
 			s.scheduleNextCanaryProbe(dueKey, now)
@@ -2168,16 +2170,27 @@ func (s *Server) runCanarySweep() {
 		if due, ok := nextDue.(time.Time); ok && now.Before(due) {
 			continue
 		}
-		key := sessionKey(provider.ProviderID, provider.AssignedID)
-		if _, loaded := s.canaries.LoadOrStore(key, struct{}{}); loaded {
+		// Eligibility and epoch capture are one recovery-fenced decision.
+		// Once the read lock is released, any operator recovery increments the
+		// epoch before this probe can apply its result.
+		s.canaryRecoveryMu.RLock()
+		if !s.canaryProbeEligible(provider) {
+			s.canaryRecoveryMu.RUnlock()
 			continue
 		}
-		go func(provider pool.Provider, key, dueKey string) {
+		key := sessionKey(provider.ProviderID, provider.AssignedID)
+		if _, loaded := s.canaries.LoadOrStore(key, struct{}{}); loaded {
+			s.canaryRecoveryMu.RUnlock()
+			continue
+		}
+		epoch := s.canaryEpoch(provider.ProviderID).Load()
+		s.canaryRecoveryMu.RUnlock()
+		go func(provider pool.Provider, key, dueKey string, epoch uint64) {
 			defer s.canaries.Delete(key)
-			if s.runCanaryProbe(provider) {
+			if s.runCanaryProbeAtEpoch(provider, epoch) {
 				s.scheduleNextCanaryProbe(dueKey, s.now())
 			}
-		}(provider, key, dueKey)
+		}(provider, key, dueKey, epoch)
 	}
 	s.canaryDue.Range(func(key, _ any) bool {
 		typedKey, ok := key.(string)
@@ -2226,7 +2239,19 @@ const (
 )
 
 func (s *Server) runCanaryProbe(provider pool.Provider) bool {
+	return s.runCanaryProbeAtEpoch(provider, s.canaryEpoch(provider.ProviderID).Load())
+}
+
+func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) bool {
 	attempt := s.runCanaryProbeAttempt(provider)
+	s.canaryRecoveryMu.RLock()
+	defer s.canaryRecoveryMu.RUnlock()
+	if s.canaryEpoch(provider.ProviderID).Load() != epoch {
+		s.log.Info().
+			Str("provider_id", provider.ProviderID).
+			Msg("discarding canary result invalidated by operator recovery")
+		return false
+	}
 	outcome := attempt.outcome
 	if attempt.modelClassBank {
 		pass := outcome == canaryProbePass
@@ -2292,7 +2317,7 @@ func (s *Server) runCanaryProbe(provider pool.Provider) bool {
 	s.enforceNextCanary.Delete(provider.ProviderID)
 	if passed {
 		if result.SanctionCleared {
-			s.deleteCanarySanction(provider.ProviderID)
+			_ = s.deleteCanarySanction(provider.ProviderID)
 		}
 		if result.Count == 0 {
 			s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary passed")
@@ -2346,15 +2371,22 @@ func (s *Server) saveCanarySanction(snapshot pool.CanarySanctionSnapshot) {
 	}
 }
 
-func (s *Server) deleteCanarySanction(providerID string) {
+func (s *Server) deleteCanarySanction(providerID string) error {
 	if s.canarySanctions == nil {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.canarySanctions.DeleteCanarySanction(ctx, providerID); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("canary sanction deletion failed")
+		return err
 	}
+	return nil
+}
+
+func (s *Server) canaryEpoch(providerID string) *atomic.Uint64 {
+	epoch, _ := s.canaryEpochs.LoadOrStore(providerID, &atomic.Uint64{})
+	return epoch.(*atomic.Uint64)
 }
 
 func (s *Server) runCanaryProbeAttempt(provider pool.Provider) canaryAttemptResult {

@@ -950,12 +950,15 @@ func mustParseTrustedProxies(cfg config.Config, logger zerolog.Logger) []netip.P
 }
 
 func setupCanarySanctionStore(ctx context.Context, cfg config.Config, db *sql.DB, registry *pool.Registry) (providerws.CanarySanctionStore, error) {
-	if !cfg.Pool.CanaryEnabled {
-		return nil, nil
-	}
 	store, err := providerws.NewSQLiteCanarySanctionStore(db)
 	if err != nil {
 		return nil, err
+	}
+	if !cfg.Pool.CanaryEnabled {
+		// Keep the store wired so an authenticated operator recovery can delete
+		// durable sanctions while probes are disabled. Do not load sanctions
+		// into the registry until canaries are enabled again.
+		return store, nil
 	}
 	canarySanctions, err := store.LoadCanarySanctions(ctx)
 	if err != nil {
