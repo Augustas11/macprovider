@@ -18,20 +18,27 @@ earnings, settlement sweeps, and payout readiness
 Recommended v0.1 shape:
 
 - Add coordinator-owned compute-integrity state keyed by
-  `(provider_id, assigned_id, model_id, target_model_hash, target_generation,
-  sampling_profile, corpus_version, threshold_version)`.
+  `(stable_provider_identity, provider_id, assigned_id, model_id,
+  target_model_hash, tokenizer_identity, sampler_stage, target_generation,
+  sampling_profile, corpus_version, threshold_version)`, with rolling windows
+  and sub-threshold counters anchored to stable provider identity rather than
+  `assigned_id`.
 - Keep SPEC-015 v0.4 receipts unchanged. Settlement inherits the provider's
   request-start compute-integrity state and returns `quarantined` with reason
   `compute_drift_quarantined` when enforce mode is active.
-- Use a hybrid reference source: coordinator-run trusted reference is the
-  authority; N-provider consensus is telemetry and anomaly detection; periodic
-  trusted-node audit catches consensus poisoning.
-- Use warn-only for at least 30 days and 10,000 eligible compute-integrity
-  canaries before enforce mode.
+- Recommend a hybrid reference source: coordinator-run trusted reference is the
+  enforcement authority; N-provider consensus is telemetry and anomaly
+  detection. The open question remains whether v0.1 enforce may run
+  trusted-reference-only with two active independent references.
+- Use warn-only calibration per covered model/hash/tokenizer/sampler-stage/
+  profile/corpus/threshold key before enforce mode. Fleet-wide canary totals are
+  additive evidence only and do not substitute for missing per-key calibration.
 - For a 100-provider x 10-model fleet at one canary per provider/model/day, plan
-  on 1,000 canaries/day. A hosted M4 Pro reference budget is about $0.012 to
-  $0.023 per canary depending on one or two reference Macs; consensus telemetry
-  at three replicas adds about $0.012/day-equivalent at the current high MoE
+  on 1,000 canaries/day. Enforce budgets assume at least two continuously active
+  comparable trusted references for every covered key; one-reference operation is
+  observe/warn-only only. Hosted M4 Pro reference budget is about $0.023 per
+  canary before shard/burst headroom; consensus telemetry at three replicas adds
+  about $0.0118/canary, about $11.80/day at N=3, at the current high MoE
   rate-card row if paid as token opportunity cost.
 
 The hard limitation is adversarial: SPEC-029 v0.1 probes are overt and explicitly
@@ -132,11 +139,14 @@ state was `quarantined_compute_drift` at request start and policy mode is
 Additive verifier surface:
 
 - Add optional input fields to the settlement context: compute-integrity policy
-  mode/version, request-start compute state, reference digest, window id, and
-  reason.
+  mode/version, request-start compute state, `reference_set_id`, all active
+  trusted `reference_event_digests`, reference-set admissibility status/digest,
+  quorum count, reference-fault check version, window id, circuit-breaker hold
+  status/scope, expiry cause, and reason.
 - Keep `SettlementVerifyResult.Outcome` as the current enum.
-- Add `Reason = "compute_drift_quarantined"` when the inherited fleet-time state
-  blocks settlement.
+- Add a reason from the closed SPEC-030 enum when the inherited fleet-time state
+  blocks settlement, including `compute_drift_quarantined` for
+  `quarantined_compute_drift`.
 - Do not add fields to the v0.4 receipt tuple or `usage`; SPEC-015 and
   SPEC-029 both forbid optional receipt/usage expansion for these probes
   (`specs/SPEC-015-receipts.md:4051`,
@@ -144,8 +154,10 @@ Additive verifier surface:
 
 ## B. Reference Distribution Source
 
-Decision: v0.1 should use a hybrid reference source with coordinator-run trusted
-reference as authority and N-provider consensus as telemetry.
+Recommendation: v0.1 should use a hybrid reference source with coordinator-run
+trusted reference as authority and N-provider consensus as telemetry. The open
+question remains whether enforce may run trusted-reference-only with two active
+independent references.
 
 | Option | Strength | Failure mode | Verdict |
 |---|---|---|---|
@@ -161,18 +173,21 @@ Reference model-hash pinning:
    that signed catalog hash.
 3. Each reference event stores `reference_model_hash`, `catalog_id`,
    `catalog_body_digest`, `reference_artifact_digest`, `tokenizer_identity`,
-   `sampling_profile`, `corpus_version`, and `threshold_version`.
+   `sampler_stage`, `sampling_profile`, `corpus_version`, and
+   `threshold_version`.
 4. Candidate providers are compared only against reference events with identical
-   `model_id`, `target_model_hash`, tokenizer identity, sampling profile, corpus,
-   and threshold version.
+   `model_id`, `target_model_hash`, tokenizer identity, sampler stage, sampling
+   profile, corpus, and threshold version.
 
 Refresh cadence:
 
 - Reference distributions are refreshed once per `target_model_hash` /
-  sampling-profile / corpus-version / threshold-version every 24 hours.
-- Refresh immediately after catalog rotation, reference-node binary/runtime
-  update, prompt corpus update, tokenizer identity change, or threshold-version
-  change.
+  tokenizer-identity / sampler-stage / sampling-profile / corpus-version /
+  threshold-version every 24 hours.
+- Refresh immediately after reference runtime/build update, runtime-build
+  provenance digest change, signed golden-fixture validation digest change,
+  tokenizer identity change, sampler-stage change, prompt corpus update,
+  threshold-version change, or catalog rotation.
 - N-provider consensus summaries refresh opportunistically from the same
   canary cadence, but they cannot produce quarantine by themselves in v0.1.
 
@@ -227,14 +242,15 @@ Single canary status:
 
 Window quarantine rule:
 
-- Evaluate a rolling 7-day window per provider/model/hash/profile/corpus/
-  threshold.
-- Require at least 5 eligible canaries in the window.
-- Quarantine when at least 3 of the latest 5 eligible canaries are
-  `quarantine_candidate`, no intervening `pass` exists after the first
-  candidate, and the trusted-reference event set is still fresh.
-- Clear back to `verified` only after 5 consecutive `pass` results across at
-  least 24 hours under the same key.
+- Evaluate a rolling 7-day window per stable provider/model/hash/tokenizer/
+  sampler-stage/profile/corpus/threshold key.
+- Require at least `min_window_canaries` eligible canaries in the window.
+- Quarantine when at least `quarantine_candidate_count` of the latest
+  `min_window_canaries` eligible canaries are `quarantine_candidate`, regardless
+  of intervening `pass` results, and the trusted-reference event set is still
+  fresh.
+- Clear back to `verified` only after `clear_pass_count` consecutive `pass`
+  results across at least 24 hours under the same key.
 
 Statistical rationale:
 
@@ -261,28 +277,35 @@ SPEC-026 has a clean onboarding flag and state matrix
 `specs/SPEC-026-browserless-provider-onboarding.md:1905`) and fresh installs
 must reach `.live` within the onboarding acceptance criteria
 (`specs/SPEC-026-browserless-provider-onboarding.md:2270`). Compute-integrity
-should not block the local App onboarding flow itself in v0.1. It should gate
-billable traffic assignment after the provider is identity-registered and before
-the provider becomes eligible for covered paid routing.
+should not block the local App onboarding flow itself in v0.1. In warn-only mode
+it should emit readiness telemetry only. Paid-routing blocks begin only in
+enforce mode after the activation gates pass.
 
 Recommended state:
 
 - `compute_integrity_onboarding_pending`: provider can connect and run
-  non-billable probes, but receives no covered paid traffic for the model/hash
-  key.
-- `compute_integrity_onboarding_passed`: provider can receive covered paid
-  traffic for that exact key when all other gates pass.
+  non-billable probes. In warn-only this is readiness telemetry only; in enforce
+  the provider receives no covered paid traffic for the full
+  stable-provider/model/hash/tokenizer/sampler-stage/generation/profile/corpus/
+  threshold onboarding key unless an approved all-profile coverage mode subsumes
+  the buyer request.
+- `compute_integrity_onboarding_verified`: provider can receive covered paid
+  traffic for that exact onboarding key or approved all-profile coverage mode
+  when all other gates pass.
 - `compute_integrity_onboarding_failed`: provider remains connected but is
-  blocked from billable traffic for that key.
-- `compute_integrity_manual_review`: operator can inspect failures and decide
+  blocked from billable traffic for that covered key only in enforce mode.
+- `blocked:manual_review_required`: operator can inspect failures and decide
   whether to reset the onboarding gate.
 
 New providers should pass 5 canaries over at least 30 minutes against the
-trusted reference before receiving covered paid traffic for a model/hash key.
-Failure mode should be retryable: one failed gate schedules exponential backoff
-and a second full gate attempt; two failed gate attempts within 24 hours move the
-key to manual review. Permanent block is too strong for v0.1 because reference
-and runtime calibration are still young.
+trusted reference before receiving covered paid traffic for a full
+stable-provider/model/hash/tokenizer/sampler-stage/generation/profile/corpus/
+threshold onboarding key in enforce mode, unless an approved all-profile
+coverage mode subsumes the buyer request. Failure mode should be retryable: one
+failed gate schedules exponential backoff and a second full gate attempt; two
+failed gate attempts within 24 hours move the key to
+`blocked:manual_review_required`. Permanent block is too strong for v0.1 because
+reference and runtime calibration are still young.
 
 ## E. SPEC-011 Warm-Swap Interaction
 
@@ -316,9 +339,13 @@ Recommended surfaces:
 
 - Public or buyer-safe read API for aggregate state:
   `/v1/providers/{provider_id}/compute-integrity` with redacted current status,
-  model id, hash, profile, window id, threshold version, and latest event digest.
+  model id, hash, tokenizer identity, sampler stage, profile, corpus, threshold
+  version, window id, latest reference-set id, and latest event digest.
 - Auditor export API for signed evidence bundles: reference events, provider
-  probe result digests, computed TV intervals, and final state transitions.
+  probe result digests, computed TV intervals, final state transitions, and the
+  inline compact evidence or signed retained-object references needed to
+  recompute settlement-impacting TV intervals for the provider/reference union
+  support.
 - No direct third-party probe issuance in v0.1.
 
 Reasoning:
@@ -347,22 +374,45 @@ Phase 1 - observe/warn-only:
   provider credit, earnings, payout readiness, or buyer-facing claims. This
   matches SPEC-022 observe-mode semantics
   (`specs/SPEC-022-verified-model-settlement.md:335`).
-- Minimum observation window: 30 days, at least 10,000 eligible canaries, at
-  least 100 provider/model/hash keys, and at least 3 catalog/model rotations or
-  reference refresh cycles.
+- Prepare approved disclosure copy before enforce: SPEC-030 is not
+  cryptographic proof, hardware integrity, or binary integrity; `warn` remains
+  payable in enforce when payable-window prerequisites are satisfied and the
+  latest valid result is warning-class below the quarantine-candidate threshold;
+  and `quarantined_compute_drift` blocks paid routing and payable settlement only
+  in enforce.
+- Minimum observation window: each covered model/hash/tokenizer/sampler-stage/
+  profile/corpus/threshold key must collect at least 30 days of warn-only data,
+  at least 100 eligible canaries, enough distinct stable provider identities for
+  the approved calibration plan, and at least one relevant trusted-reference
+  refresh after the latest reference runtime/build, runtime-build provenance
+  digest, signed golden-fixture validation digest, tokenizer, sampler-stage,
+  corpus, threshold, or catalog change. Fleet summaries can additionally require
+  at least 10,000 eligible canaries, 100 covered keys, and 3 catalog/model
+  rotations or reference refresh cycles, but they do not substitute for missing
+  per-key calibration.
 
-Phase 2 - new-provider gate:
+Phase 2 - enforce-ready onboarding telemetry:
 
-- New provider/model/hash keys must pass onboarding compute-integrity canaries
-  before covered paid routing.
-- Existing providers are grandfathered into observe mode only; they are not
-  quarantined retroactively.
+- New stable provider/model/hash/tokenizer/sampler-stage/target-generation/
+  profile/corpus/threshold keys emit onboarding readiness telemetry during
+  warn-only; this phase still does not block paid routing.
+- Existing providers are not retroactively reclassified during warn-only.
 
 Phase 3 - enforce:
 
 - Covered paid traffic snapshots request-start compute-integrity state.
+- Enforce activation requires approved disclosure surfaces for buyer, provider,
+  public, and auditor-facing copy.
+- New stable provider/model/hash/tokenizer/sampler-stage/target-generation/
+  profile/corpus/threshold keys must pass onboarding compute-integrity canaries
+  before covered paid routing, unless an approved all-profile coverage mode
+  subsumes the buyer request.
+- Existing covered keys are evaluated prospectively at enforce
+  activation; active `quarantined_compute_drift`, `blocked:<reason>`, `expired`,
+  stale, unreadable, or under-sampled states fail closed until clear rules pass.
 - If state is `quarantined_compute_drift`, settlement returns `quarantined` with
-  reason `compute_drift_quarantined`.
+  reason `compute_drift_quarantined`; other non-payable compute-integrity states
+  map to the closed SPEC-030 reason enum.
 - `zero_settled` remains reserved for verified non-creditable terminal outcomes,
   not trust failures (`specs/SPEC-022-verified-model-settlement.md:545`).
 
@@ -370,21 +420,27 @@ Phase 3 - enforce:
 
 Assumptions for concrete budgeting:
 
-- Fleet: 100 providers x 10 model/hash keys = 1,000 provider/model keys.
-- Cadence: 1 compute-integrity canary per provider/model key per day.
+- Fleet: 100 stable providers x 10 model/hash/tokenizer/sampler-stage/profile
+  keys = 1,000 covered keys.
+- Cadence: 1 compute-integrity canary per stable provider/model/hash/tokenizer/
+  sampler-stage/profile key per day.
 - Canary shape inherits SPEC-029 bounds: at most 4 prompts and 8 stochastic
   measurement positions per result (`specs/SPEC-029-losslessness-probe.md:126`).
 - Average measured context: 512 prompt-token-equivalent per position.
-- Daily reference workload: `1,000 * 4 * 8 * 512 = 16,384,000`
-  prompt-token-equivalent forward-pass tokens/day.
+- Daily reference workload per active reference replica:
+  `1,000 * 4 * 8 * 512 = 16,384,000` prompt-token-equivalent forward-pass
+  tokens/day. Two-replica enforce total: 32,768,000 forward-pass units/day before
+  shard, burst, or refresh headroom.
 
 Trusted reference node cost:
 
-- Hosted M4.L Mac mini: $349/month, about $11.63/day or $0.0116/canary.
-- Two-node active/standby or model-shard pool: about $23.26/day or
-  $0.0233/canary.
-- Self-hosted electricity-only M4 Pro at Apple max 140W and $0.15/kWh:
-  `0.140 kW * 24h * $0.15 = $0.504/day`, or $0.00050/canary, excluding
+- Hosted M4.L Mac mini: $349/month, about $11.63/day before redundancy.
+- Two continuously active reference nodes: about $23.26/day before model-shard
+  capacity. Idle standby nodes are additional and do not count toward enforce
+  quorum unless they continuously produce fresh comparable reference events.
+- Per active self-hosted electricity-only M4 Pro reference at Apple max 140W and
+  $0.15/kWh: `0.140 kW * 24h * $0.15 = $0.504/day`, or $0.00050/canary. The
+  two-active-reference enforce minimum is $1.008/day, or $0.0010/canary, before
   hardware depreciation and ops.
 
 Consensus telemetry opportunity cost:
@@ -396,7 +452,9 @@ Consensus telemetry opportunity cost:
 - With `usd_per_million_credits = 1.0` documented in config
   (`phase4-coordinator/dist/coordinator.yaml.example:179`), the high MoE row is
   $0.240/M completion-token-equivalent.
-- One 16.384M-token-equivalent daily reference stream at $0.240/M is $3.93/day.
+- One 16.384M-token-equivalent daily reference stream at $0.240/M is $3.93/day;
+  two active enforce references are $7.86/day before shard, burst, or refresh
+  headroom.
 - N=3 consensus telemetry would therefore consume about $11.80/day of
   opportunity cost if compensated at the high row, or $0.0118/canary.
 
@@ -407,16 +465,20 @@ Funding decision:
   (`specs/SPEC-029-losslessness-probe.md:135`), and adding buyer-visible usage
   would violate the strict SPEC-015 v0.4 `usage` shape.
 - Future staker-reward or provider-quality budgets can absorb consensus
-  telemetry if the network moves beyond one trusted reference node.
+  telemetry, but enforce-mode reference budgets still require at least two
+  continuously active comparable trusted references per covered key plus
+  sharding, burst, and refresh capacity.
 
 ## Self-Review
 
 - Every A-H question is answered.
 - SPEC-029 prerequisite is satisfied by `specs/SPEC-029-losslessness-probe.md`
   at v0.1-draft (`specs/SPEC-029-losslessness-probe.md:3`).
-- Reference-source decision is explicit: hybrid, with trusted reference as
-  enforcement authority.
+- Reference-source recommendation is explicit: hybrid is recommended, trusted
+  reference is enforcement authority, and trusted-reference-only enforce remains
+  an open question.
 - Thresholds are model/profile calibrated and include a window-level
   false-positive rationale.
-- Cost accounting is concrete for 1,000 canaries/day.
+- Cost accounting is concrete for 1,000 canaries/day and assumes two active
+  trusted references before enforce.
 - No code changes are required by this memo.
