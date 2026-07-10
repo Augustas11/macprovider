@@ -26,6 +26,8 @@ func main() {
 		err = issueToken(os.Args[2:])
 	case "revoke-token":
 		err = revokeToken(os.Args[2:])
+	case "revoke-bootstrap-identity":
+		err = revokeBootstrapIdentity(os.Args[2:])
 	case "list-tokens":
 		err = listTokens(os.Args[2:])
 	case "revoke-and-kick":
@@ -87,6 +89,25 @@ func revokeToken(args []string) error {
 		return err
 	}
 	fmt.Printf("revoked token_prefix=%s provider_name=%s\n", record.TokenPrefix, record.ProviderName)
+	return nil
+}
+
+func revokeBootstrapIdentity(args []string) error {
+	fs := flag.NewFlagSet("revoke-bootstrap-identity", flag.ExitOnError)
+	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	providerID := fs.String("provider-id", "", "installer-generated provider ID to tombstone")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	store, err := auth.OpenStore(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.RevokeBootstrapIdentity(context.Background(), *providerID); err != nil {
+		return err
+	}
+	fmt.Printf("revoked bootstrap_identity provider_id=%s\n", *providerID)
 	return nil
 }
 
@@ -194,13 +215,13 @@ func kickProvider(adminURL, operatorKey, providerID, reason string) error {
 //
 // The cutoff is parsed first as a duration (e.g. "168h"), falling back
 // to an RFC3339 absolute timestamp (e.g. "2026-06-04T00:00:00Z"). Dry-
-// run mode is the default; pass --apply to actually delete rows.
+// run mode is the default; pass --apply to retire matching credentials.
 func pruneTokens(args []string) error {
 	fs := flag.NewFlagSet("prune-tokens", flag.ExitOnError)
 	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
-	olderThan := fs.String("older-than", "168h", "delete unused tokens older than this duration (e.g. 168h) or RFC3339 timestamp")
-	apply := fs.Bool("apply", false, "actually delete rows (default is dry-run)")
-	force := fs.Bool("force", false, "allow cutoffs younger than 24h (DANGEROUS: may delete tokens of providers in their first settling window before they have reconnected with Bearer)")
+	olderThan := fs.String("older-than", "168h", "retire unused tokens older than this duration (e.g. 168h) or RFC3339 timestamp")
+	apply := fs.Bool("apply", false, "actually retire credentials (default is dry-run)")
+	force := fs.Bool("force", false, "allow cutoffs younger than 24h (DANGEROUS: may invalidate tokens of providers in their first settling window before they have reconnected with Bearer)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -213,7 +234,7 @@ func pruneTokens(args []string) error {
 	// `last_used_at IS NULL` until the binary reconnects with Bearer
 	// (which happens AFTER persist completes and is several seconds out
 	// in the operational worst case). A confused operator running
-	// `--apply --older-than 0s` during the settling window would delete
+	// `--apply --older-than 0s` during the settling window would invalidate
 	// the active first-session provider's only token, bricking it under
 	// the new TOFU regime. Refuse cutoffs younger than 24h unless
 	// --force is passed explicitly.
@@ -253,7 +274,7 @@ func pruneTokens(args []string) error {
 		}
 		fmt.Printf("would_prune=%d\n", matched)
 		fmt.Println("NOTE: last_used_at=NULL means the binary has never authenticated with this token via Bearer. Verify each candidate is genuinely stale (not a provider currently in its self-mint -> persist -> reconnect window) before --apply.")
-		fmt.Println("re-run with --apply to actually delete")
+		fmt.Println("re-run with --apply to retire these credentials")
 		return nil
 	}
 	pruned, err := store.PruneUnusedTokens(context.Background(), cutoff)
@@ -481,5 +502,5 @@ func preFlipAuditRun(args []string, stdout io.Writer) (stale bool, err error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit> [flags]")
 }

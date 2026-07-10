@@ -50,7 +50,7 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
         // Persist the Ed25519 receipt identity before opening the socket. If
         // the auth response or config write is lost, a retry proves a fresh
         // challenge under this exact same Keychain key and can replace only
-        // its own unused, unexpired bootstrap token.
+        // its own unused bootstrap token, including after its initial TTL.
         let receiptKeyStore = KeychainReceiptKeyStore()
         let currentReceiptKey = try receiptKeyStore.loadOrGenerate(providerId: providerID)
         let receiptKey = try receiptKeyStore.loadOrStoreBootstrapIdentity(

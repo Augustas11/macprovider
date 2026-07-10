@@ -158,6 +158,73 @@ func TestBootstrapTokenRejectsOrdinaryAndExpiredCredentials(t *testing.T) {
 	})
 }
 
+func TestIssueTokenRejectsBootstrapBoundProvider(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	req := bootstrapRequest("mixed-track-owner", "192.0.2.35", bytes.Repeat([]byte{0x65}, 32), time.Now().UTC())
+	if _, err := store.MintBootstrapToken(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeBootstrapIdentity(ctx, req.ProviderID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.IssueToken(ctx, req.ProviderID, "ordinary replacement"); !errors.Is(err, auth.ErrBootstrapIdentityExists) {
+		t.Fatalf("ordinary token crossed durable bootstrap boundary: err=%v", err)
+	}
+}
+
+func TestPruneUnusedTokensPreservesOrdinaryInstallerOwnership(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	providerID := bootstrapPrincipal("pruned-ordinary-owner")
+	record, token, err := store.IssueToken(ctx, providerID, "ordinary installer owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinaryRecord, _, err := store.IssueToken(ctx, "ordinary-prune-control", "ordinary control")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired, err := store.PruneUnusedTokens(ctx, time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired != 2 {
+		t.Fatalf("retired=%d want 2", retired)
+	}
+	row, err := lookupTokenRow(ctx, t, store, record.ID)
+	if err != nil {
+		t.Fatalf("installer ownership tombstone missing: %v", err)
+	}
+	if !row.RevokedAt.Valid {
+		t.Fatal("pruned installer ordinary token remained active")
+	}
+	if _, valid, err := store.ValidateToken(ctx, token); err != nil || valid {
+		t.Fatalf("pruned installer bearer valid=%v err=%v", valid, err)
+	}
+	records, err := store.ListTokens(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range records {
+		if candidate.ID == ordinaryRecord.ID {
+			t.Fatal("ordinary non-installer prune row was retained")
+		}
+	}
+	req := bootstrapRequest("pruned-ordinary-owner", "192.0.2.36", bytes.Repeat([]byte{0x66}, 32), time.Now().UTC())
+	if _, err := store.MintBootstrapToken(ctx, req); !errors.Is(err, auth.ErrBootstrapIdentityMismatch) {
+		t.Fatalf("pruned ordinary identity became bootstrap-claimable: err=%v", err)
+	}
+}
+
 func TestBootstrapTokenDurableRateAndOutstandingLimits(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
@@ -238,6 +305,60 @@ func TestBootstrapTokenGlobalBudgetAndUnconfirmedIdentityBound(t *testing.T) {
 			t.Fatalf("unconfirmed identity cap err=%v", err)
 		}
 	})
+
+	t.Run("expired custody remains bounded until operator tombstones it", func(t *testing.T) {
+		store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		first := bootstrapRequest("expired-identity-0", "192.0.2.32", bytes.Repeat([]byte{0x62}, 32), now)
+		first.TTL = time.Minute
+		first.UnconfirmedIDMax = 1
+		if _, err := store.MintBootstrapToken(ctx, first); err != nil {
+			t.Fatal(err)
+		}
+		second := bootstrapRequest("expired-identity-1", "192.0.2.33", bytes.Repeat([]byte{0x63}, 32), now.Add(2*time.Minute))
+		second.UnconfirmedIDMax = 1
+		if _, err := store.MintBootstrapToken(ctx, second); !errors.Is(err, auth.ErrBootstrapOutstandingLimit) {
+			t.Fatalf("expired custody escaped unconfirmed bound: err=%v", err)
+		}
+		if err := store.RevokeBootstrapIdentity(ctx, first.ProviderID); err != nil {
+			t.Fatalf("operator tombstone expired custody: %v", err)
+		}
+		if _, err := store.MintBootstrapToken(ctx, first); !errors.Is(err, auth.ErrBootstrapTokenUsed) {
+			t.Fatalf("tombstoned identity recovered: err=%v", err)
+		}
+		if _, err := store.MintBootstrapToken(ctx, second); err != nil {
+			t.Fatalf("operator tombstone did not release unconfirmed capacity: %v", err)
+		}
+	})
+}
+
+func TestRevokeBootstrapIdentityRevokesActiveBearerAtomically(t *testing.T) {
+	ctx := context.Background()
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	req := bootstrapRequest("operator-identity-revoke", "192.0.2.34", bytes.Repeat([]byte{0x64}, 32), time.Now().UTC())
+	mint, err := store.MintBootstrapToken(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeBootstrapIdentity(ctx, req.ProviderID); err != nil {
+		t.Fatal(err)
+	}
+	if _, valid, err := store.ValidateToken(ctx, mint.ProviderToken); err != nil || valid {
+		t.Fatalf("identity tombstone left bearer valid=%v err=%v", valid, err)
+	}
+	if err := store.RevokeBootstrapIdentity(ctx, req.ProviderID); err != nil {
+		t.Fatalf("identity tombstone must be idempotent: %v", err)
+	}
+	if _, err := store.MintBootstrapToken(ctx, req); !errors.Is(err, auth.ErrBootstrapTokenUsed) {
+		t.Fatalf("identity tombstone allowed remint: err=%v", err)
+	}
 }
 
 func TestBootstrapGCIsBoundedAuditableAndPreservesConfirmedOwnership(t *testing.T) {

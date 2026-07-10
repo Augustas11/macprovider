@@ -642,10 +642,6 @@ func TestInactiveBootstrapIdentityNeverFallsBackToLivePool(t *testing.T) {
 	if _, err := store.RevokeToken(context.Background(), mint.AssignedProviderToken[:12]); err != nil {
 		t.Fatalf("revoke bootstrap bearer: %v", err)
 	}
-	_, legacyBearer, err := store.IssueToken(context.Background(), providerID, "legacy fallback attempt")
-	if err != nil {
-		t.Fatalf("issue ordinary replacement token: %v", err)
-	}
 	poolPub, poolPriv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatalf("pool keypair: %v", err)
@@ -657,9 +653,9 @@ func TestInactiveBootstrapIdentityNeverFallsBackToLivePool(t *testing.T) {
 		},
 	}, nil)
 
-	conn, _, _, err := bearerDialer(legacyBearer).Dial(context.Background(), wsURL(h.HTTP.URL))
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
-		t.Fatalf("dial inactive bootstrap bearer: %v", err)
+		t.Fatalf("dial inactive bootstrap identity: %v", err)
 	}
 	defer conn.Close()
 	initial := validAuthInitialWithFreshKey(t, providerID)

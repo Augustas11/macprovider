@@ -47,6 +47,7 @@ var ErrAppTrackExistingTokenNoProof = errors.New("existing active token requires
 var ErrAppTrackReissueCooldown = errors.New("app-track provider token reissue cooldown active")
 var ErrOAuthStateRateLimited = errors.New("oauth state rate limited")
 var ErrBootstrapIdentityMismatch = errors.New("bootstrap receipt identity mismatch")
+var ErrBootstrapIdentityExists = errors.New("provider_id is bound to bootstrap identity custody")
 var ErrBootstrapTokenUsed = errors.New("bootstrap token was already used")
 var ErrBootstrapTokenExpired = errors.New("bootstrap token expired")
 var ErrBootstrapRateLimited = errors.New("bootstrap mint rate limited")
@@ -559,26 +560,38 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 	hash := tokenHash(token)
 	prefix := token[:tokenDisplayPrefixLength]
 	createdAt := nowString()
-	res, err := s.db.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, createdAt)
-	if err != nil {
-		// SPEC-003 v0.8.2 FR-C9.4 — the partial unique index installed
-		// by ensureActiveProviderIDUniqueness rejects a second active
-		// token for the same provider_id. modernc.org/sqlite surfaces
-		// this as a constraint-failure error whose Error() string
-		// contains "UNIQUE constraint failed". Map to the sentinel so
-		// the WS server can apply v0.8.3 admit-tokenless semantics
-		// (was: close with CloseInvalidToken) instead of leaking a
-		// generic DB error to the wire.
-		if isActiveProviderTokenConstraintFailure(err) {
-			return TokenRecord{}, "", ErrActiveTokenAlreadyExists
+	var record TokenRecord
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		if IsCredentialBootstrapPrincipal(providerID) {
+			var bootstrapIdentityExists int
+			if err := conn.QueryRowContext(ctx, `
+SELECT EXISTS(
+    SELECT 1 FROM provider_bootstrap_identities WHERE provider_id = ?
+)`, providerID).Scan(&bootstrapIdentityExists); err != nil {
+				return err
+			}
+			if bootstrapIdentityExists == 1 {
+				return ErrBootstrapIdentityExists
+			}
 		}
-		return TokenRecord{}, "", err
-	}
-	id, err := res.LastInsertId()
+		res, err := conn.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, createdAt)
+		if err != nil {
+			if isActiveProviderTokenConstraintFailure(err) {
+				return ErrActiveTokenAlreadyExists
+			}
+			return err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		record = TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: createdAt}
+		return nil
+	})
 	if err != nil {
 		return TokenRecord{}, "", err
 	}
-	return TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: createdAt}, token, nil
+	return record, token, nil
 }
 
 // MintBootstrapToken is the only credential-bootstrap mutation path. The
@@ -776,9 +789,7 @@ SELECT COUNT(1)
 SELECT COUNT(1)
   FROM provider_bootstrap_identities
  WHERE confirmed_at IS NULL
-   AND operator_revoked_at IS NULL
-   AND expires_at IS NOT NULL
-   AND expires_at > ?`, nowText).Scan(&unconfirmed); err != nil {
+   AND operator_revoked_at IS NULL`).Scan(&unconfirmed); err != nil {
 				return err
 			}
 			if !identityExists && unconfirmed >= req.UnconfirmedIDMax {
@@ -1070,26 +1081,85 @@ func (s *Store) RevokeUnusedTokenForProvider(ctx context.Context, providerID str
 	return n > 0, nil
 }
 
-// PruneUnusedTokens deletes tokens whose `last_used_at` is NULL and
-// whose `created_at` is older than the supplied cutoff time. Returns the
-// number of rows pruned. Used by `coordinator-cli prune-tokens` to bound
+// PruneUnusedTokens retires tokens whose `last_used_at` is NULL and whose
+// `created_at` is older than the supplied cutoff time. Returns the number of
+// rows retired. Used by `coordinator-cli prune-tokens` to bound
 // the operational cost of FR-C9.4 multi-mint-then-self-heal — a token
 // that has never been used to authenticate and is older than the
-// settling window is safe to drop.
+// settling window is safe to invalidate.
+//
+// Historical ordinary credentials for strict installer mp-* principals are
+// revoked but retained as ownership tombstones. MintBootstrapToken relies on
+// that durable provenance to prevent a pruned operator-managed identity from
+// being reclaimed through the unauthenticated bootstrap track. Bootstrap
+// token rows can be deleted because provider_bootstrap_identities is their
+// durable custody record.
 //
 // The cutoff is compared as ISO-8601 strings; tokens.go nowString
 // formats `created_at` in the same `2006-01-02T15:04:05Z` shape, and
 // lexicographic comparison is monotonic within that format.
 func (s *Store) PruneUnusedTokens(ctx context.Context, olderThan time.Time) (int64, error) {
 	cutoff := olderThan.UTC().Format("2006-01-02T15:04:05Z")
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM provider_tokens WHERE last_used_at IS NULL AND revoked_at IS NULL AND created_at < ?`,
-		cutoff,
-	)
+	nowText := nowString()
+	var retired int64
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		rows, err := conn.QueryContext(ctx, `
+SELECT id, provider_id, bootstrap_issued
+  FROM provider_tokens
+ WHERE last_used_at IS NULL
+   AND revoked_at IS NULL
+   AND created_at < ?`, cutoff)
+		if err != nil {
+			return err
+		}
+		type candidate struct {
+			id              int64
+			providerID      string
+			bootstrapIssued int
+		}
+		var candidates []candidate
+		for rows.Next() {
+			var c candidate
+			if err := rows.Scan(&c.id, &c.providerID, &c.bootstrapIssued); err != nil {
+				rows.Close()
+				return err
+			}
+			candidates = append(candidates, c)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, c := range candidates {
+			var res sql.Result
+			if c.bootstrapIssued == 0 && IsCredentialBootstrapPrincipal(c.providerID) {
+				res, err = conn.ExecContext(ctx, `
+UPDATE provider_tokens
+   SET revoked_at = ?
+ WHERE id = ? AND revoked_at IS NULL AND last_used_at IS NULL`, nowText, c.id)
+			} else {
+				res, err = conn.ExecContext(ctx, `
+DELETE FROM provider_tokens
+ WHERE id = ? AND revoked_at IS NULL AND last_used_at IS NULL`, c.id)
+			}
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			retired += n
+		}
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	return retired, nil
 }
 
 func (s *Store) ValidateToken(ctx context.Context, token string) (string, bool, error) {
@@ -1406,6 +1476,52 @@ UPDATE provider_bootstrap_identities
 		return TokenRecord{}, decisionErr
 	}
 	return s.tokenByID(ctx, revokedID)
+}
+
+// RevokeBootstrapIdentity is the operator escape hatch for an installer
+// identity whose provisional token has already expired or been collected.
+// The durable tombstone prevents future same-key recovery, while excluding the
+// reviewed identity from the bounded unconfirmed queue. Any still-active
+// bootstrap bearer is revoked in the same transaction.
+func (s *Store) RevokeBootstrapIdentity(ctx context.Context, providerID string) error {
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return err
+	}
+	if !IsCredentialBootstrapPrincipal(providerID) {
+		return ErrBootstrapIdentityMismatch
+	}
+	nowText := nowString()
+	var decisionErr error
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var exists int
+		if err := conn.QueryRowContext(ctx, `
+SELECT EXISTS(
+    SELECT 1 FROM provider_bootstrap_identities WHERE provider_id = ?
+)`, providerID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists != 1 {
+			decisionErr = fmt.Errorf("bootstrap identity not found for provider %q", providerID)
+			return nil
+		}
+		if _, err := conn.ExecContext(ctx, `
+UPDATE provider_bootstrap_identities
+   SET operator_revoked_at = COALESCE(operator_revoked_at, ?)
+ WHERE provider_id = ?`, nowText, providerID); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `
+UPDATE provider_tokens
+   SET revoked_at = COALESCE(revoked_at, ?)
+ WHERE provider_id = ? AND bootstrap_issued = 1`, nowText, providerID); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return decisionErr
 }
 
 func (s *Store) ListTokens(ctx context.Context) ([]TokenRecord, error) {
