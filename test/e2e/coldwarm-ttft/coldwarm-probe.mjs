@@ -483,15 +483,23 @@ function regimeRequest(regime, model, { long = false } = {}) {
   };
 }
 
-function toSample(regime, state, model, r, runUnix) {
+// role separates the two measurement classes, exactly as P1 does: a 'ttft'
+// sample is a short request that feeds ONLY the TTFT distribution; a 'tps' sample
+// is a longer request that feeds ONLY the sustained decode-TPS distribution.
+// Mixing them pollutes both — a short 8/16-token request has a decode window of a
+// couple ms, so its "TPS" is pure noise (observed 0.68 and 500 tok/s against
+// prod). decode_tps is therefore only retained on 'tps' samples.
+function toSample(regime, state, model, r, runUnix, role) {
+  const isTps = role === 'tps';
   return {
     ts: new Date(runUnix * 1000).toISOString(),
     model,
     regime,
     state,
+    role,
     ok: r.ok ? 1 : 0,
     ttft_ms: r.ok ? round(r.ttftMs, 1) : null,
-    decode_tps: r.ok && r.decodeTps != null ? round(r.decodeTps, 3) : null,
+    decode_tps: isTps && r.ok && r.decodeTps != null ? round(r.decodeTps, 3) : null,
     completion_tokens: r.completionTokens ?? null,
     total_ms: r.ok ? round(r.totalMs, 1) : null,
     outcome: outcomeBucket(r),
@@ -521,15 +529,16 @@ async function runWarm(model, runUnix) {
     process.stderr.write(redact(`warm ${regime} × ${CONFIG.samples} → ${model}\n`));
     for (let i = 0; i < CONFIG.samples; i++) {
       const r = await measureRegime(regime, regimeRequest(regime, model));
-      const s = toSample(regime, 'warm', model, r, runUnix);
+      const s = toSample(regime, 'warm', model, r, runUnix, 'ttft');
       out.push(s);
       logSample(s);
       if (i < CONFIG.samples - 1) await sleep(CONFIG.intervalMs);
     }
-    // one longer sample for sustained decode TPS
+    // one longer sample for sustained decode TPS (kept separate from the TTFT
+    // distribution — a short request's decode window is too small to time TPS).
     await sleep(CONFIG.intervalMs);
     const rl = await measureRegime(regime, regimeRequest(regime, model, { long: true }));
-    const sl = toSample(regime, 'warm', model, rl, runUnix);
+    const sl = toSample(regime, 'warm', model, rl, runUnix, 'tps');
     out.push(sl);
     logSample(sl);
   }
@@ -546,7 +555,8 @@ async function runCold(model, state, runUnix, store) {
   const regime = CONFIG.regime || pickBalancedRegime(store, model, state);
   process.stderr.write(redact(`${state} ${regime} (first-after-cold) → ${model}\n`));
   const r = await measureRegime(regime, regimeRequest(regime, model));
-  const s = toSample(regime, state, model, r, runUnix);
+  // The cold first-request latency IS the point — a TTFT-class sample.
+  const s = toSample(regime, state, model, r, runUnix, 'ttft');
   out.push(s);
   logSample(s);
 
@@ -556,7 +566,7 @@ async function runCold(model, state, runUnix, store) {
       for (let i = 0; i < 3; i++) {
         await sleep(CONFIG.intervalMs);
         const wr = await measureRegime(wregime, regimeRequest(wregime, model));
-        const ws = toSample(wregime, 'warm', model, wr, runUnix);
+        const ws = toSample(wregime, 'warm', model, wr, runUnix, 'ttft');
         out.push(ws);
         logSample(ws);
       }
@@ -594,14 +604,21 @@ function buildMatrix(store, runUnix) {
   const cells = [];
   for (const [key, samples] of groups) {
     const [model, regime, state] = key.split(' ');
-    const ok = samples.filter((s) => s.ok && s.ttft_ms != null);
-    const ttft = ok.map((s) => s.ttft_ms);
-    const tps = ok.filter((s) => s.decode_tps != null).map((s) => s.decode_tps);
+    // TTFT distribution comes ONLY from 'ttft'-role (short) samples; sustained
+    // decode-TPS ONLY from 'tps'-role (long) samples. Samples predating the role
+    // field (none in practice) default to 'ttft' so a short request never leaks
+    // into the TPS series (a short decode window reads garbage TPS — 0.68 and
+    // 500 tok/s observed against prod).
+    const ttftOk = samples.filter((s) => s.ok && s.ttft_ms != null && (s.role || 'ttft') === 'ttft');
+    const tpsOk = samples.filter((s) => s.ok && s.decode_tps != null && s.role === 'tps');
+    const ttft = ttftOk.map((s) => s.ttft_ms);
+    const tps = tpsOk.map((s) => s.decode_tps);
     cells.push({
       model,
       regime,
       state,
-      sample_n: ok.length,
+      sample_n: ttftOk.length,
+      tps_sample_n: tpsOk.length,
       attempts: samples.length,
       ttft_ms: {
         p50: percentile(ttft, 50),

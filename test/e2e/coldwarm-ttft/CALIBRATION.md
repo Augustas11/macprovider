@@ -102,6 +102,33 @@ From `buyer_stream.cold`:
 - `sufficient_samples` flags whether the p99 rests on ≥ `COLDWARM_MIN_SAMPLES`
   cold cycles; don't publish an SLO off a thin sample.
 
+## Findings from carrying against prod (2026-07-10)
+
+First warm accumulation against live prod (`api.streamvc.live`, provider `mac`,
+20 samples/regime) surfaced three things worth recording:
+
+1. **The "warm 30B ≈ 6s" assumption baked into the gate config is wrong.** The
+   overlay comment justifies `max_ttft_ms >= 7000` with "a warm 30B measures
+   ~6s". Measured warm envelope is far tighter — `canary_nonstream` **p50 ≈ 1.6s,
+   p95 ≈ 2.3s, p99 ≈ 2.5s**; `buyer_stream` p50 ≈ 1.4s, p99 ≈ 2.6s. The 6-7s and
+   the 65-108s breach tail (observe-mode logs) are **cold-load / concurrent-load**
+   events, not warm steady state. Consequence: the warm calibration lands near
+   `p99 2.5s × 1.5 ≈ 4000ms` (close to autotune's streaming `max_4k_ttft_ms:
+   3500-4000`); the 2026-07-09 disaster was **not** that 3500 was too tight for
+   warm — it was that nothing sized the **cold-start grace** for the tail. The
+   return-to-enforce work is grace sizing, not gate loosening.
+2. **The two regimes converge when warm** (buyer 1444ms vs canary 1641ms p50) and
+   diverge only cold — the 125ms…7000ms canary swing the spec warns about is a
+   cold/relay-timing phenomenon. Both regimes must still be measured, because the
+   divergence is exactly in the cold tail the gate must tolerate.
+3. **`min_sustained_tps=20` is effectively a dead gate.** The non-streaming TPS
+   metric is garbage in *both* directions: the live coordinator reads 17k-33k
+   tok/s (its decode window collapses to ~1ms once it captures a relay
+   firstToken), while a naive buyer-side non-streaming read is ~0.7 tok/s (whole
+   round-trip as the window, on a 1-token answer). It can never detect a
+   throughput regression. Leave it advisory; use P1's buyer-side streaming decode
+   TPS (~40 tok/s warm here) for real throughput signal.
+
 ## Current runtime baseline (Pearl, verified 2026-07-10)
 
 - Live gate (`coordinator.pearl-overlays.yaml`): 30B `max_ttft_ms: 7000`,
