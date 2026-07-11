@@ -23,14 +23,21 @@ TARBALL="$OUT_DIR/phase3-binary-m4-${TAG}.tar.gz"
 mkdir -p "$OUT_DIR"
 
 echo "==> Building Release configuration (this takes ~5-10 min)..."
-xcodebuild -scheme macprovider-cli \
-           -configuration Release \
-           -destination 'platform=macOS,arch=arm64' \
-           -derivedDataPath "$RELEASE_DIR" \
-           -onlyUsePackageVersionsFromResolvedFile \
-           -skipPackagePluginValidation \
-           -skipMacroValidation \
-           clean build 2>&1 | tail -20
+BUILD_LOG="$OUT_DIR/package-build.log"
+if ! xcodebuild -scheme macprovider-cli \
+                -configuration Release \
+                -destination 'platform=macOS,arch=arm64' \
+                -derivedDataPath "$RELEASE_DIR" \
+                -onlyUsePackageVersionsFromResolvedFile \
+                -skipPackagePluginValidation \
+                -skipMacroValidation \
+                clean build >"$BUILD_LOG" 2>&1; then
+  tail -200 "$BUILD_LOG" >&2
+  rm -f "$BUILD_LOG"
+  exit 1
+fi
+tail -20 "$BUILD_LOG"
+rm -f "$BUILD_LOG"
 
 PRODUCTS="$RELEASE_DIR/Build/Products/Release"
 

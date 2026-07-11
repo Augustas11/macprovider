@@ -21,9 +21,9 @@ second="$(git -C "$work/source" rev-parse HEAD)"
 git -C "$work/source" remote add origin "$work/remote.git"
 git -C "$work/source" push -q origin HEAD:refs/heads/main
 
-bash "$guard" v1.0.0 "$second" "$work/remote.git" | grep -q 'is absent and may be created'
+bash "$guard" v1.0.0 "$second" "$work/remote.git" --allow-absent | grep -q 'is absent and may be created'
 set +e
-bash "$guard" v1.0.0 "$second" "$work/remote.git" --require-existing >"$work/absent.out" 2>&1
+bash "$guard" v1.0.0 "$second" "$work/remote.git" >"$work/absent.out" 2>&1
 absent_status=$?
 set -e
 if [[ "$absent_status" -eq 0 ]]; then
@@ -35,6 +35,30 @@ fi
   exit 1
 }
 grep -q 'release tag v1.0.0 is absent' "$work/absent.out"
+if bash "$guard" v1.0.0 "$second" "$work/remote.git" --invalid-policy >"$work/policy.out" 2>&1; then
+  echo "tag target guard accepted an invalid absence policy" >&2
+  exit 1
+fi
+grep -q 'absence policy must be --allow-absent or --require-existing' "$work/policy.out"
+
+if (
+  cd "$work/source"
+  GITHUB_EVENT_NAME=workflow_dispatch \
+    GITHUB_REF=refs/heads/main \
+    GITHUB_SHA="$second" \
+    bash "$source_guard" v1.0.0 "$second" "$work/remote.git"
+) >"$work/source-absent.out" 2>&1; then
+  echo "strict release source guard accepted an absent tag" >&2
+  exit 1
+fi
+grep -q 'release tag v1.0.0 is absent' "$work/source-absent.out"
+(
+  cd "$work/source"
+  GITHUB_EVENT_NAME=workflow_dispatch \
+    GITHUB_REF=refs/heads/main \
+    GITHUB_SHA="$second" \
+    bash "$source_guard" v1.0.0 "$second" "$work/remote.git" --allow-absent
+) | grep -q 'ok: v1.0.0 at reviewed origin/main'
 
 git -C "$work/source" tag v1.0.0 "$second"
 git -C "$work/source" push -q origin refs/tags/v1.0.0
@@ -44,6 +68,20 @@ if bash "$guard" v1.0.0 "$first" "$work/remote.git" >"$work/lightweight-drift.ou
   exit 1
 fi
 grep -q "targets $second; refusing assets built from $first" "$work/lightweight-drift.out"
+
+git -C "$work/source" tag v1.0.3 "$first"
+git -C "$work/source" push -q origin refs/tags/v1.0.3
+if (
+  cd "$work/source"
+  GITHUB_EVENT_NAME=workflow_dispatch \
+    GITHUB_REF=refs/heads/main \
+    GITHUB_SHA="$second" \
+    bash "$source_guard" v1.0.3 "$second" "$work/remote.git" --allow-absent
+) >"$work/candidate-tag-drift.out" 2>&1; then
+  echo "candidate release source guard accepted an existing tag on the wrong commit" >&2
+  exit 1
+fi
+grep -q "targets $first; refusing assets built from $second" "$work/candidate-tag-drift.out"
 
 git -C "$work/source" tag -a v1.0.1 -m v1.0.1 "$first"
 git -C "$work/source" push -q origin refs/tags/v1.0.1
@@ -119,11 +157,24 @@ if (
   GITHUB_EVENT_NAME=workflow_dispatch \
     GITHUB_REF=refs/heads/main \
     GITHUB_SHA="$third" \
-    bash "$source_guard" v1.0.0 "$third" "$work/remote.git"
+    bash "$source_guard" v1.0.0 "$third" "$work/remote.git" --allow-absent
 ) >"$work/stale-main.out" 2>&1; then
   echo "release source guard accepted a commit not freshly equal to origin/main" >&2
   exit 1
 fi
-grep -q 'not the fresh origin/main tip' "$work/stale-main.out"
+grep -q 'candidate release commit is not the fresh origin/main tip' "$work/stale-main.out"
+
+# Once the exact immutable tag exists, protected publication may finish from
+# the captured reviewed commit even if unrelated main commits land while the
+# environment review, signing, or notarization is in progress.
+git -C "$work/source" push -q origin HEAD:refs/heads/main
+git -C "$work/source" checkout -q --detach "$second"
+(
+  cd "$work/source"
+  GITHUB_EVENT_NAME=workflow_dispatch \
+    GITHUB_REF=refs/heads/main \
+    GITHUB_SHA="$second" \
+    bash "$source_guard" v1.0.0 "$second" "$work/remote.git" --require-existing
+) | grep -q 'ok: v1.0.0 at reviewed origin/main'
 
 echo "release tag target regression checks passed"

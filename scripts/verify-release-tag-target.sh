@@ -4,7 +4,7 @@ set -euo pipefail
 tag="${1:-}"
 expected_commit="${2:-}"
 remote="${3:-origin}"
-absence_policy="${4:---allow-absent}"
+absence_policy="${4:---require-existing}"
 
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
   echo "usage: $0 vX.Y.Z EXPECTED_COMMIT [REMOTE]" >&2
