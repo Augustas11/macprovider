@@ -4,6 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build="$root/scripts/build-release-provenance.py"
 capture="$root/scripts/capture-release-publication.py"
+draft_identity="$root/scripts/verify-release-draft-identity.py"
 verify_published="$root/scripts/verify-published-release.py"
 sparkle="$root/scripts/verify-malibu-sparkle-signature.py"
 recovery="$root/scripts/recover-malibu-publication.sh"
@@ -20,6 +21,7 @@ printf 'coordinator cli payload\n' > "$work/coordinator-cli-linux-amd64"
 printf 'gateway payload\n' > "$work/gateway-linux-amd64"
 printf 'pearl metadata\n' > "$work/pearl-release.json"
 printf 'pearl metadata signature\n' > "$work/pearl-release.json.sig"
+printf 'reviewed release notes\n' > "$work/release-notes.md"
 cat >"$work/release-toolchain.json" <<'EOF'
 {"macos_sdk":{"path":"/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk","version":"15.5"},"swift":{"driver_version":"1.120.5","version":"Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)"},"xcode":{"build":"16F6","developer_dir":"/Applications/Xcode_16.4.app/Contents/Developer","version":"16.4"}}
 EOF
@@ -70,6 +72,8 @@ release = {
     "draft": False,
     "immutable": True,
     "prerelease": False,
+    "name": f"macprovider-cli {tag}",
+    "body": "reviewed release notes\n",
     "assets": assets,
 }
 (root / "release.json").write_text(json.dumps(release), encoding="utf-8")
@@ -88,7 +92,8 @@ local_assets=(
   "$work/checksums.txt"
   "$work/checksums.txt.sig"
 )
-python3 "$capture" "$work/release.json" "$work/release-provenance.json" \
+python3 "$capture" --notes-file "$work/release-notes.md" \
+  "$work/release.json" "$work/release-provenance.json" \
   "$work/publication-manifest.json" "${local_assets[@]}"
 
 python3 - "$work/release.json" "$work/release-draft.json" <<'PY'
@@ -98,8 +103,54 @@ data["draft"] = True
 data["immutable"] = False
 pathlib.Path(sys.argv[2]).write_text(json.dumps(data))
 PY
-python3 "$capture" --draft "$work/release-draft.json" "$work/release-provenance.json" \
+python3 "$capture" --draft --notes-file "$work/release-notes.md" \
+  "$work/release-draft.json" "$work/release-provenance.json" \
   "$work/draft-publication-manifest.json" "${local_assets[@]}"
+cmp "$work/publication-manifest.json" "$work/draft-publication-manifest.json"
+
+cat > "$work/release-draft-cli.json" <<EOF
+{"databaseId":401,"isDraft":true,"tagName":"$tag","targetCommitish":"$commit"}
+EOF
+[[ "$(python3 "$draft_identity" cli "$work/release-draft-cli.json" "$tag" "$commit")" == 401 ]]
+[[ "$(python3 "$draft_identity" api "$work/release-draft.json" "$tag" "$commit" --release-id 401)" == 401 ]]
+python3 - "$work/release-draft-cli.json" "$work/release-draft.json" "$work" <<'PY'
+import json
+import pathlib
+import sys
+
+cli_path, api_path, root = map(pathlib.Path, sys.argv[1:])
+cli = json.loads(cli_path.read_text())
+api = json.loads(api_path.read_text())
+cli_mutations = {
+    "id": {**cli, "databaseId": 402},
+    "draft": {**cli, "isDraft": False},
+    "tag": {**cli, "tagName": "v9.9.9"},
+    "commit": {**cli, "targetCommitish": "b" * 40},
+}
+api_mutations = {
+    "id": {**api, "id": 402},
+    "draft": {**api, "draft": False},
+    "immutable": {**api, "immutable": True},
+    "tag": {**api, "tag_name": "v9.9.9"},
+    "commit": {**api, "target_commitish": "b" * 40},
+}
+for name, value in cli_mutations.items():
+    (root / f"draft-cli-{name}.json").write_text(json.dumps(value))
+for name, value in api_mutations.items():
+    (root / f"draft-api-{name}.json").write_text(json.dumps(value))
+PY
+for fixture in "$work"/draft-cli-*.json; do
+  if python3 "$draft_identity" cli "$fixture" "$tag" "$commit" --release-id 401 >"$work/draft-identity.out" 2>&1; then
+    echo "draft identity guard accepted invalid CLI fixture: $fixture" >&2
+    exit 1
+  fi
+done
+for fixture in "$work"/draft-api-*.json; do
+  if python3 "$draft_identity" api "$fixture" "$tag" "$commit" --release-id 401 >"$work/draft-identity.out" 2>&1; then
+    echo "draft identity guard accepted invalid API fixture: $fixture" >&2
+    exit 1
+  fi
+done
 if python3 "$capture" "$work/release-draft.json" "$work/release-provenance.json" \
   "$work/premature-publication-manifest.json" "${local_assets[@]}" >"$work/draft.out" 2>&1; then
   echo "final publication capture accepted a draft release" >&2
@@ -116,12 +167,44 @@ import sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert manifest["release_id"] == 401
 assert manifest["prerelease"] is False
+assert manifest["title"] == "macprovider-cli v1.2.3"
+assert re.fullmatch(r"[0-9a-f]{64}", manifest["body_sha256"])
 assert re.fullmatch(r"[0-9a-f]{64}", manifest["publication_id"])
 assert manifest["assets"]["Malibu-v1.2.3.dmg"]["id"] == 502
 assert manifest["assets"]["appcast.xml"]["id"] == 503
 assert manifest["assets"]["coordinator-linux-amd64"]["id"] == 504
 assert manifest["assets"]["pearl-release.json.sig"]["id"] == 508
 PY
+
+for field in name body; do
+  python3 - "$work/release.json" "$work/release-presentation-drift.json" "$field" <<'PY'
+import json, pathlib, sys
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+data[sys.argv[3]] = "unreviewed presentation"
+pathlib.Path(sys.argv[2]).write_text(json.dumps(data))
+PY
+  if python3 "$capture" --notes-file "$work/release-notes.md" \
+    "$work/release-presentation-drift.json" "$work/release-provenance.json" \
+    "$work/presentation-drift-manifest.json" "${local_assets[@]}" \
+    >"$work/presentation-drift.out" 2>&1; then
+    echo "publication capture accepted release $field drift" >&2
+    exit 1
+  fi
+done
+
+python3 - "$work/release.json" "$work/release-asset-id-drift.json" <<'PY'
+import json, pathlib, sys
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+data["assets"][0]["id"] += 1000
+pathlib.Path(sys.argv[2]).write_text(json.dumps(data))
+PY
+python3 "$capture" --notes-file "$work/release-notes.md" \
+  "$work/release-asset-id-drift.json" "$work/release-provenance.json" \
+  "$work/asset-id-drift-manifest.json" "${local_assets[@]}"
+if cmp -s "$work/publication-manifest.json" "$work/asset-id-drift-manifest.json"; then
+  echo "publication manifest did not bind numeric asset identity" >&2
+  exit 1
+fi
 
 python3 - "$work/release.json" "$work/release-mutable.json" <<'PY'
 import json, pathlib, sys

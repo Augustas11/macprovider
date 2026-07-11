@@ -20,6 +20,13 @@ for file in "$SETUP" "$PUBLISH" "$INSTALL_PUBLICATION" "$VERIFY_SET" "$VERIFY" "
   [[ -f "$file" ]] || fail "missing $file"
   bash -n "$file" || fail "bash -n $file"
 done
+if grep -qE 'read -r .*< <\(python3 .*<<' "$VERIFY_SET"; then
+  fail 'publication verifier must not combine a heredoc with process substitution on Bash 3.2'
+fi
+grep -q 'expected_identity="[$](python3' "$VERIFY_SET" ||
+  fail 'publication verifier must capture signed provenance identity portably'
+grep -q 'publication_identity="[$](python3' "$VERIFY_SET" ||
+  fail 'publication verifier must capture publication identity portably'
 [[ -f "$KNOWN_HOSTS" ]] || fail "missing $KNOWN_HOSTS"
 [[ -f "$NGINX" ]] || fail "missing $NGINX"
 

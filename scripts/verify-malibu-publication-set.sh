@@ -19,7 +19,7 @@ for path in "$manifest" "$dmg" "$appcast" "$checksums" "$signature" "$provenance
   [[ -f "$path" && ! -L "$path" ]] || die "publication input is not a regular file: $path"
 done
 
-read -r expected_repository expected_tag expected_commit < <(python3 - "$provenance" <<'PY'
+expected_identity="$(python3 - "$provenance" <<'PY'
 import json
 import pathlib
 import sys
@@ -27,13 +27,14 @@ import sys
 value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 print(value.get("repository", ""), value.get("tag", ""), value.get("commit", ""))
 PY
-)
+)"
+read -r expected_repository expected_tag expected_commit <<< "$expected_identity"
 bash "$repo_root/scripts/verify-release-checksums.sh" --allow-partial \
   "$checksums" "$signature" "$provenance" \
   "$expected_repository" "$expected_tag" "$expected_commit" \
   "$dmg" "$appcast" "$provenance" >/dev/null
 
-read -r tag commit < <(python3 - "$manifest" "$dmg" "$appcast" "$checksums" "$signature" "$provenance" <<'PY'
+publication_identity="$(python3 - "$manifest" "$dmg" "$appcast" "$checksums" "$signature" "$provenance" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -90,7 +91,8 @@ if manifest.get("publication_id") != hashlib.sha256(content).hexdigest():
 
 print(tag, commit)
 PY
-)
+)"
+read -r tag commit <<< "$publication_identity"
 [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "$commit" =~ ^[0-9a-f]{40}$ ]] ||
   die "publication identity verification failed"
 

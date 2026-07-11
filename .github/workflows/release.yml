@@ -995,6 +995,10 @@ jobs:
             --target "$release_commit" \
             --verify-tag \
             --draft
+          gh release view "$tag" \
+            --json databaseId,isDraft,tagName,targetCommitish > draft-release-cli.json
+          python3 scripts/verify-release-draft-identity.py cli \
+            draft-release-cli.json "$tag" "$release_commit" > draft-release-id.txt
 
       - name: Verify draft release assets by numeric ID
         env:
@@ -1003,47 +1007,23 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
-          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > release-by-tag-api.json
-          release_id="$(python3 - <<'PY'
-          import json
-          release = json.load(open("release-by-tag-api.json", encoding="utf-8"))
-          value = release.get("id")
-          if type(value) is not int or value <= 0:
-              raise SystemExit("tag lookup did not return a numeric release id")
-          print(value)
-          PY
-          )"
+          release_commit="${{ needs.build.outputs.commit }}"
+          release_id="$(cat draft-release-id.txt)"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::captured draft release id is invalid" >&2
+            exit 1
+          }
           gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/$GITHUB_REPOSITORY/releases/$release_id" > draft-release-api.json
-          python3 - "$release_id" <<'PY'
-          import json
-          import sys
-          by_tag = json.load(open("release-by-tag-api.json", encoding="utf-8"))
-          by_id = json.load(open("draft-release-api.json", encoding="utf-8"))
-          def identity(release):
-              return {
-                  "id": release.get("id"),
-                  "tag_name": release.get("tag_name"),
-                  "target_commitish": release.get("target_commitish"),
-                  "draft": release.get("draft"),
-                  "immutable": release.get("immutable"),
-                  "assets": sorted(
-                      (asset.get("id"), asset.get("name"), asset.get("digest"))
-                      for asset in release.get("assets", [])
-                  ),
-              }
-          if identity(by_tag) != identity(by_id) or by_id.get("id") != int(sys.argv[1]):
-              raise SystemExit("tag and numeric release lookups disagree")
-          PY
+          python3 scripts/verify-release-draft-identity.py api \
+            draft-release-api.json "$tag" "$release_commit" --release-id "$release_id" >/dev/null
           release_assets=()
           while IFS= read -r release_asset; do
             [ -n "$release_asset" ] && release_assets+=("$release_asset")
           done < release-assets.txt
-          python3 scripts/capture-release-publication.py --draft \
+          python3 scripts/capture-release-publication.py --draft --notes-file release-notes.md \
             draft-release-api.json release-provenance.json draft-publication-manifest.json \
             "${release_assets[@]}" checksums.txt checksums.txt.sig
-          printf '%s\n' "$release_id" > draft-release-id.txt
 
       - name: Publish only the revalidated numeric draft
         env:
@@ -1089,31 +1069,15 @@ jobs:
             checksums.txt checksums.txt.sig release-provenance.json \
             "$GITHUB_REPOSITORY" "$tag" "$commit" \
             "${release_assets[@]}"
-          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > final-draft-by-tag.json
+          gh release view "$tag" \
+            --json databaseId,isDraft,tagName,targetCommitish > final-draft-cli.json
+          python3 scripts/verify-release-draft-identity.py cli \
+            final-draft-cli.json "$tag" "$commit" --release-id "$release_id" >/dev/null
           gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
             "repos/$GITHUB_REPOSITORY/releases/$release_id" > final-draft-by-id.json
-          python3 - "$release_id" <<'PY'
-          import json
-          import sys
-          by_tag = json.load(open("final-draft-by-tag.json", encoding="utf-8"))
-          by_id = json.load(open("final-draft-by-id.json", encoding="utf-8"))
-          def identity(release):
-              return {
-                  "id": release.get("id"),
-                  "tag_name": release.get("tag_name"),
-                  "target_commitish": release.get("target_commitish"),
-                  "draft": release.get("draft"),
-                  "immutable": release.get("immutable"),
-                  "assets": sorted(
-                      (asset.get("id"), asset.get("name"), asset.get("digest"))
-                      for asset in release.get("assets", [])
-                  ),
-              }
-          if identity(by_tag) != identity(by_id) or by_id.get("id") != int(sys.argv[1]):
-              raise SystemExit("final tag and numeric draft lookups disagree")
-          PY
-          python3 scripts/capture-release-publication.py --draft \
+          python3 scripts/verify-release-draft-identity.py api \
+            final-draft-by-id.json "$tag" "$commit" --release-id "$release_id" >/dev/null
+          python3 scripts/capture-release-publication.py --draft --notes-file release-notes.md \
             final-draft-by-id.json release-provenance.json final-draft-manifest.json \
             "${release_assets[@]}" checksums.txt checksums.txt.sig
 
@@ -1139,9 +1103,10 @@ jobs:
             "$release_id" "$PRERELEASE_INPUT" \
             immutable-release-by-id.json immutable-release-by-tag.json \
             stable-latest-release.json
-          python3 scripts/capture-release-publication.py \
+          python3 scripts/capture-release-publication.py --notes-file release-notes.md \
             immutable-release-by-id.json release-provenance.json publication-manifest.json \
             "${release_assets[@]}" checksums.txt checksums.txt.sig
+          cmp final-draft-manifest.json publication-manifest.json
 
       - name: Publish Malibu latest.dmg
         if: needs.build.outputs.prerelease == 'false'
