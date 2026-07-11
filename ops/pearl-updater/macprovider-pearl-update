@@ -12,6 +12,7 @@ import contextlib
 import dataclasses
 import errno
 import fcntl
+import grp
 import hashlib
 import http.client
 import json
@@ -46,6 +47,8 @@ BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 SYSTEMD_ROOT = Path("/etc/systemd/system")
 INDEPENDENT_ALERT_ENV_PATH = Path("/etc/macprovider/monitor.env")
 VALIDATOR_ACCOUNT = "macprovider-updater-validate"
+INDEPENDENT_ALERT_ACCOUNT = "macprovider"
+INDEPENDENT_ALERT_GROUP = "macprovider"
 GATED_SERVICE_UNITS = (
     "macprovider-coordinator.service",
     "macprovider-gateway.service",
@@ -118,6 +121,22 @@ class CommandTimeout(UpdateError):
 
 class AssetNotFound(UpdateError):
     pass
+
+
+def resolve_service_group_gid(account_name: str, group_name: str) -> int:
+    try:
+        account = pwd.getpwnam(account_name)
+    except KeyError as exc:
+        raise UpdateError(f"{account_name} service account is missing") from exc
+    if account.pw_uid == 0:
+        raise UpdateError(f"{account_name} service account must not use the root uid")
+    try:
+        group = grp.getgrnam(group_name)
+    except KeyError as exc:
+        raise UpdateError(f"{group_name} service group is missing") from exc
+    if group.gr_gid == 0:
+        raise UpdateError(f"{group_name} service group must not use the root gid")
+    return group.gr_gid
 
 
 @dataclasses.dataclass(frozen=True, order=True)
@@ -561,6 +580,7 @@ class Updater:
         trusted_uid: int = 0,
         candidate_uid: int | None = None,
         candidate_gid: int | None = None,
+        independent_alert_gid: int | None = None,
         isolate_candidate_network: bool = False,
         sleep: Callable[[float], None] = time.sleep,
     ):
@@ -577,6 +597,9 @@ class Updater:
         self.trusted_uid = trusted_uid
         self.candidate_uid = trusted_uid if candidate_uid is None else candidate_uid
         self.candidate_gid = trusted_uid if candidate_gid is None else candidate_gid
+        self.independent_alert_gid = (
+            self.candidate_gid if independent_alert_gid is None else independent_alert_gid
+        )
         self.isolate_candidate_network = isolate_candidate_network
         self.sleep = sleep
         self.transaction: Path | None = None
@@ -1280,7 +1303,7 @@ class Updater:
         if (
             not stat.S_ISDIR(parent_stat.st_mode)
             or parent_stat.st_uid != self.trusted_uid
-            or parent_stat.st_gid != self.candidate_gid
+            or parent_stat.st_gid != self.independent_alert_gid
             or stat.S_IMODE(parent_stat.st_mode) != 0o750
         ):
             raise UpdateError("independent-alert config directory must have exact trusted ownership and mode 0750")
@@ -1301,7 +1324,7 @@ class Updater:
         if (
             not stat.S_ISREG(env_stat.st_mode)
             or env_stat.st_uid != self.trusted_uid
-            or env_stat.st_gid != self.candidate_gid
+            or env_stat.st_gid != self.independent_alert_gid
             or env_stat.st_nlink != 1
             or stat.S_IMODE(env_stat.st_mode) != 0o640
         ):
@@ -3148,6 +3171,7 @@ def main(argv: list[str]) -> int:
     if testing:
         candidate_uid = os.geteuid()
         candidate_gid = os.getegid()
+        independent_alert_gid = candidate_gid
     else:
         try:
             account = pwd.getpwnam(VALIDATOR_ACCOUNT)
@@ -3157,6 +3181,10 @@ def main(argv: list[str]) -> int:
             raise UpdateError(f"{VALIDATOR_ACCOUNT} service account must not use the root uid or gid")
         candidate_uid = account.pw_uid
         candidate_gid = account.pw_gid
+        independent_alert_gid = resolve_service_group_gid(
+            INDEPENDENT_ALERT_ACCOUNT,
+            INDEPENDENT_ALERT_GROUP,
+        )
     updater = Updater(
         config,
         public_key=test_path(PINNED_PUBLIC_KEY, "PEARL_UPDATER_TEST_PUBLIC_KEY", testing),
@@ -3172,6 +3200,7 @@ def main(argv: list[str]) -> int:
         trusted_uid=trusted_uid,
         candidate_uid=candidate_uid,
         candidate_gid=candidate_gid,
+        independent_alert_gid=independent_alert_gid,
         isolate_candidate_network=not testing,
     )
     lock_uid = trusted_uid
