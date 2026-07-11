@@ -99,7 +99,7 @@ the **hello-gate admission policy** (Part A).
 | **OPoI** | "Overt Proof of Inference" — a model-class canary observation. Per this spec, **liveness-derived and non-binding**; not a weight proof. |
 | **Telemetry-drift** | Heartbeat-time heuristics (TPS below the *verified* benchmark baseline; model-hash status; artifact drift) — alert-only. |
 | **Evidence-absent close** | A hello-gate rejection curable by submitting evidence (no verified evidence in-window — never submitted or expired). |
-| **No-passing-benchmark close** | `autotune_evidence_invalid` — evidence present but no benchmark passes the *current* gate. This is **either** a genuine affirmative shortfall (thermal/TPS/TTFT) **or** policy staleness (catalog/model/artifact-SHA mismatch after a catalog rotation); see FR-HG4. |
+| **No-passing-benchmark close** | `autotune_evidence_invalid` — evidence present but no benchmark passes the *current* gate. Cause is one of: a genuine affirmative shortfall (thermal/TPS/TTFT), policy staleness (catalog/model/artifact-SHA mismatch after a catalog rotation), **or** provider semantic misbinding (submitted model-id/artifact values the gate rejects); see FR-HG4. |
 | **Affirmative-shortfall close** | A rejection where the evidence *proves* the provider cannot serve the tier: `cap_exceeded` and the hardware sub-cases of `evidence_invalid`. |
 | **Policy-unverifiable / coordinator-side close** | The coordinator cannot evaluate the claim (`uncatalogued`), or is itself not wired/erroring (`gate_unavailable`, a coordinator fault). |
 
@@ -203,7 +203,8 @@ capacity. Rather than ship that surface, v0.1 keeps the gate strict and gives th
 **operator** the levers:
 
 - **All rejections hard-close, regardless of redundancy** — no-passing-benchmark
-  (`autotune_evidence_invalid`, whether a hardware shortfall or catalog staleness),
+  (`autotune_evidence_invalid`, whether a hardware shortfall, catalog staleness, or
+  semantic misbinding),
   affirmative shortfall (`autotune_model_cap_exceeded`), policy-unverifiable /
   coordinator-side (`autotune_model_uncatalogued`, `autotune_gate_unavailable`), and
   evidence-absent (`autotune_evidence_required`, whether never-submitted or expired)
@@ -440,7 +441,7 @@ sessions keep serving during an unbounded scan does not satisfy this. Conformanc
 | FR-HG1 gate activation/ordering | Implemented | `checkAutotuneHelloGate`; both paths; pre-admission; v2 two-phase (pre-challenge + post-proof) recheck. |
 | FR-HG2 evidence lookup | **Partial** | `LatestVerified(providerID, ttl)` + TTL + grants ship. Binds evidence to the provider **credential/ID**, not live session hardware (hello carries no chip/identity hash) — a limitation (item-10's to strengthen). The benchmark result is authenticated + trust-bound, **not cryptographically signed** (only the catalog is signed). |
 | FR-HG3 capacity ceiling (resolution) | Implemented | `ResolveMaxAdmission` / `benchmarkPassesGate` resolve the ceiling correctly at hello. (Enforcement on the *served* model is FR-HG7.) |
-| FR-HG4 close-reason taxonomy + classification | **Tightens** | The five reasons ship; the evidence-absent / no-passing-benchmark (affirmative-shortfall **or** catalog-staleness) / policy-unverifiable classification is new (esp. `evidence_invalid` and `uncatalogued` as NOT probation-eligible). |
+| FR-HG4 close-reason taxonomy + classification | **Tightens** | The five reasons ship; the evidence-absent / no-passing-benchmark (affirmative-shortfall, catalog-staleness, **or** semantic-misbinding) / policy-unverifiable classification is new (esp. `evidence_invalid` and `uncatalogued` as NOT probation-eligible). |
 | FR-HG5 redundancy alert; no auto-probation | **Gap (alert)** | The below-two operator redundancy alert is new/unimplemented. "No automatic probationary admission in v0.1" matches the shipped hard-close behavior (deliberate scope decision, not a Gap); auto-probation is deferred with its full constraint set. |
 | FR-HG6 bounded mid-session expiry recheck | **Gap** | Gate runs only at hello — no bounded session-time freshness recheck; a continuously-connected provider can serve indefinitely on expired evidence. On recheck v0.1 moves the provider non-routable (no auto-probation). |
 | **FR-HG7 ceiling enforced on model transition** | **Gap (CRITICAL-class)** | The ceiling has **no routing consumer**; a heartbeat model-swap to a larger **or uncatalogued** tier bypasses the gate entirely. Required to make the hello-gate meaningful. |
@@ -485,8 +486,10 @@ Testable against the current build:
   gate — every benchmark below the TPS gate / above the TTFT gate / thermally throttled,
   **or** a catalog/model/artifact-SHA mismatch under the current catalog — closes
   `autotune_evidence_invalid` (hardware-shortfall, catalog-staleness, and semantic-
-  misbinding sub-cases all map to this reason). A single *passing* benchmark still
-  establishes a ceiling and admits (it is not `evidence_invalid`).
+  misbinding sub-cases all map to this reason). A single *passing* benchmark prevents
+  `evidence_invalid` — it establishes a ceiling — but admission may **still** be refused
+  as `autotune_model_cap_exceeded` or `autotune_model_uncatalogued` if the *claimed*
+  model exceeds that ceiling or is uncatalogued.
 - **AC-4.** With the catalog/evidence store unwired **or any evidence lookup/decode
   error**, the gate closes `autotune_gate_unavailable` (fails closed).
 - **AC-5.** A low OPoI pass-rate emits a `pow_telemetry_drift_detected` WARN (via
@@ -711,3 +714,10 @@ smaller box), which is why v0.1 ships no automatic probation.
     - **MEDIUM (architect):** FR-CFG1 opoi/canary coupling cell qualified with "when
       `telemetry_drift.enabled`"; FR-HG1 gained acceptance locks (AC-1a no-op, AC-1b
       both paths, AC-1c v2 two-phase TOCTOU).
+  - **R6 codex two-lane audit** (security already PASS; code 0C/0H/2M, architect
+    0C/0H/1M — pure consistency, no design/behavior change). Absorbed: propagated the
+    third `evidence_invalid` cause (**semantic misbinding**) to the three summaries that
+    still listed only two (§3 terminology, FR-HG5 inventory, §14 row); and corrected
+    AC-3b — a single passing benchmark prevents `evidence_invalid` but admission can
+    **still** be refused as `cap_exceeded`/`uncatalogued` if the *claimed* model exceeds
+    the ceiling.
