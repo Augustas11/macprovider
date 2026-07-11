@@ -92,7 +92,7 @@ failure even when the model identity is correct.
   canary setting) is read at startup. SIGHUP reloads tier2 / billing config
   only — flipping observe↔enforce needs a coordinator restart.
 
-Full downgrade cheat smoke (30B claim + 8B serve) requires a dedicated lab provider loading the wrong weights; the NONCE gate (always enforced) exercises the sanction path regardless of latency-enforcement mode.
+A full downgrade-cheat smoke (30B claim + 8B serve) requires a dedicated lab provider loading the wrong weights. **The nonce gate does NOT detect this** (per SPEC-032 FR-PW1): the challenge exposes the nonce in plaintext, so an 8B model can echo it correctly and pass the always-enforced nonce gate. The nonce gate exercises the sanction path only when a provider returns the *wrong text* (dead / garbled / instruction-not-followed), not when a cheaper model returns the *right* echo. A real downgrade smoke must therefore verify against a weight-bound signal (SPEC-032 FR-PW3), not the nonce echo.
 
 **Cold-start grace (2026-07-09):** a cold 30B load produces ~8s TTFT on
 reconnect, which false-fails a static `max_ttft_ms` (the reason the live tune
