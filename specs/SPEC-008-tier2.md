@@ -1643,9 +1643,17 @@ MUST represent:
   "key_binding": {
     "provider_ecdh_public_key": "base64url-32-byte-x25519-public-key",
     "provider_signing_key_id": "optional-key-id"
+  },
+  "signature": {
+    "alg": "ES256",
+    "signature": "unpadded-base64url-DER-ECDSA over SHA-256(attestation-binding/v1 payload)"
   }
 }
 ```
+
+The top-level `signature` (the session-binding signature, §7.4a) is **required for both
+formats** — a token without a valid one is rejected `attestation_failed` (SE verifies it
+against the submitted SE key; production MDA against the leaf certificate key; §7.5).
 
 The provider MUST bind the token to:
 
@@ -2564,7 +2572,9 @@ Purpose: provider returns attestation over the challenge.
     "claimed": {
       "hardware_family": "apple_silicon",
       "ram_gb": 16
-    }
+    },
+    "key_binding": { "provider_ecdh_public_key": "base64url-32-byte-x25519-public-key" },
+    "signature": { "alg": "ES256", "signature": "unpadded-base64url-DER — REQUIRED, both formats (§7.4a/§7.5)" }
   }
 }
 ```
@@ -2573,9 +2583,10 @@ The example above shows the **MDA format** and is illustrative only — it is **
 complete accepted token. The normative `attestation_token` data model (all required
 nested fields) is §7.4, and the shipped default-enabled **SE format** shape is §7.4a. In
 particular the shipped coordinator parses and **binds** more than the example shows: a
-token also carries `provider_id`, `key_binding.provider_ecdh_public_key`, and — for
-`macprovider-se-p256-v1` — the top-level `signature` session-binding block (§7.4a); a
-token missing **those** is rejected even though the illustrative JSON omits them.
+token also carries `provider_id`, `key_binding.provider_ecdh_public_key`, and the top-level
+`signature` session-binding block — the last is required for **both** formats (SE verifies
+it against the submitted SE key, production MDA against the leaf certificate key; §7.4a,
+§7.5); a token missing **those** is rejected even though the illustrative JSON omits them.
 `binary_version` is also carried and is folded into the signed binding payload (§7.4a),
 but the shipped verifier does **not** require it to be non-empty — a correctly-signed token
 with an empty/absent `binary_version` is accepted.
