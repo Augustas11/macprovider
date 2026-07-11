@@ -100,9 +100,12 @@ had bumped 3500→7000). The fix is `pool.canary_cold_start_grace_s` (default 0)
 for that many seconds after a provider connects, the wall-time latency gates
 (`max_ttft_ms` AND `min_sustained_tps` — canary probes are non-streaming, so
 both are measured over wall time and cold-contaminated) are waived. The
-nonce-correctness gate is NEVER relaxed, so anti-downgrade is unchanged. Staging
-overlay sets `300`, so `max_ttft_ms` can stay at the real production target
-(3500) instead of a padded value.
+nonce-correctness gate is NEVER relaxed, so the liveness / instruction-following
+signal is unchanged. (Note per SPEC-032 FR-PW1: the plaintext-nonce echo is a
+liveness/instruction-following check, NOT an anti-downgrade or weight-integrity
+proof — a cheaper/substituted model can echo the visible nonce.) Staging overlay
+sets `300`, so `max_ttft_ms` can stay at the real production target (3500) instead
+of a padded value.
 
 The grace is sanction-safe (three codex audit rounds hardened it): a graced
 probe is NEUTRAL for the failure counter (it neither counts as a fail nor clears
@@ -131,7 +134,8 @@ latency breach SANCTIONS:
   **not** failed; it logs `provider canary latency breach observed (not enforced)`
   with `canary_latency_reason` + `canary_ttft_ms`/`canary_sustained_tps`. TPS is
   also tracked by `proof_of_weights.telemetry_drift`. The nonce gate still
-  enforces (anti-downgrade unchanged).
+  enforces (the liveness / instruction-following signal is unchanged; it is not an
+  anti-downgrade proof — SPEC-032 FR-PW1).
 - **`enforce`**: latency breaches fail the probe (subject to
   `canary_cold_start_grace_s`). Use ONLY after validating metric stability; keep
   `max_ttft_ms >= 7000` to fit the non-streaming round-trip.

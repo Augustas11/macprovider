@@ -47,7 +47,7 @@ and whether it needs production verification before code is touched.
 | **P2 — write the missing normative baseline** |
 | 8 | Canary/degrade/sanctions spec (3 incidents/week, zero spec) | I B D | L | new spec | `internal/ws/canary_probe.go`, `canary_store.go` |
 | 9 | Proof-of-weights / OPoI + autotune hello-gate spec | S D | L | new spec | `internal/pow/drift.go`, `internal/autotune/gate.go` |
-| 10 | Hardware-evidence verifier spec (`hardware-verifier.v1`) | S D | M | new spec | `internal/stats/hardwareverify/verify.go` |
+| 10 | Hardware-evidence verifier spec (`hardware-verifier.v2`; shipped constant is `hardware-verifier.v2:verified_trusted_hardware`, not v1) | S D | M | new spec | `internal/stats/hardwareverify/verify.go` |
 | **P3 — spec-debt consolidation + rewrites** |
 | 11 | SPEC-005 v0.6 money-path bump (houses #2 + 6 columns + clamps + 10M cap + model-key normalization + SPEC-024 fold-in) | M D | L | spec, money-path | `internal/billing/formula.go`, `store.go` |
 | 12 | SPEC-001 v1.7 consolidation (spec v1.6 vs binary 1.8.26; FR-16, FR-11, control-socket frames) | D | L | spec | `CoordinatorClient.swift:1182` |
