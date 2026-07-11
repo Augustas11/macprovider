@@ -2471,11 +2471,17 @@ class Updater:
             advertised_version=self.config_update.next_version,
         )
 
-    def local_coordinator_identity_ready(self, identity: RuntimeIdentity, require_pool: bool) -> bool:
-        health = self.get_json("http://127.0.0.1:8444/healthz")
+    @staticmethod
+    def coordinator_identity_ready(health: dict[str, Any], identity: RuntimeIdentity) -> bool:
         if health.get("status") != "ok" or health.get("version") != identity.coordinator_version:
             return False
-        if health.get("recommended_binary_version") != identity.advertised_version:
+        if "recommended_binary_version" not in health:
+            return LEGACY_GIT_DESCRIBE_RE.fullmatch(identity.coordinator_version) is not None
+        return health["recommended_binary_version"] == identity.advertised_version
+
+    def local_coordinator_identity_ready(self, identity: RuntimeIdentity, require_pool: bool) -> bool:
+        health = self.get_json("http://127.0.0.1:8444/healthz")
+        if not self.coordinator_identity_ready(health, identity):
             return False
         return not require_pool or (
             type(health.get("pool_ready")) is int
@@ -2512,9 +2518,7 @@ class Updater:
         coordinator = self.get_json("https://coordinator.streamvc.live/healthz")
         gateway = self.get_json("https://api.streamvc.live/healthz")
         return (
-            coordinator.get("status") == "ok"
-            and coordinator.get("version") == identity.coordinator_version
-            and coordinator.get("recommended_binary_version") == identity.advertised_version
+            self.coordinator_identity_ready(coordinator, identity)
             and gateway.get("status") == "ok"
             and gateway.get("version") == identity.gateway_version
         )
