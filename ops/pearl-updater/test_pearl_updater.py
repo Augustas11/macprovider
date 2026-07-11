@@ -421,6 +421,52 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.get_json.return_value["recommended_binary_version"] = "1.8.26"
         self.assertFalse(self.updater.local_coordinator_ready(release, False))
 
+    def test_legacy_rollback_accepts_only_an_absent_advertised_version_field(self):
+        legacy = updater_module.RuntimeIdentity(
+            "v1.8.26-4-g64083ef",
+            "v1.8.20-4-ga5e12c2",
+            "1.8.26",
+        )
+        release = updater_module.RuntimeIdentity("v1.8.30", "v1.8.30", "1.8.30")
+        self.updater.get_json = mock.Mock(
+            return_value={
+                "status": "ok",
+                "version": legacy.coordinator_version,
+            }
+        )
+
+        self.assertTrue(self.updater.local_coordinator_identity_ready(legacy, False))
+        self.updater.get_json.return_value["recommended_binary_version"] = "1.8.25"
+        self.assertFalse(self.updater.local_coordinator_identity_ready(legacy, False))
+        self.updater.get_json.return_value["recommended_binary_version"] = None
+        self.assertFalse(self.updater.local_coordinator_identity_ready(legacy, False))
+        self.updater.get_json.return_value = {
+            "status": "ok",
+            "version": release.coordinator_version,
+        }
+        self.assertFalse(self.updater.local_coordinator_identity_ready(release, False))
+
+    def test_legacy_rollback_public_health_accepts_the_same_omission(self):
+        legacy = updater_module.RuntimeIdentity(
+            "v1.8.26-4-g64083ef",
+            "v1.8.20-4-ga5e12c2",
+            "1.8.26",
+        )
+        coordinator = {
+            "status": "ok",
+            "version": legacy.coordinator_version,
+        }
+        gateway = {
+            "status": "ok",
+            "version": legacy.gateway_version,
+        }
+        self.updater.get_json = mock.Mock(side_effect=[coordinator, gateway])
+
+        self.assertTrue(self.updater.public_identity_ready(legacy))
+        coordinator["recommended_binary_version"] = None
+        self.updater.get_json = mock.Mock(side_effect=[coordinator, gateway])
+        self.assertFalse(self.updater.public_identity_ready(legacy))
+
     def test_advertised_version_update_targets_effective_overlay(self):
         install = self.updater.install_root
         install.mkdir(parents=True)
