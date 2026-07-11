@@ -111,6 +111,45 @@ var spec018RetryableByCode = map[string]bool{
 	"duplicate_tool_call_id":                                  false,
 	"tool_call_result_out_of_order":                           false,
 	"unsupported_modelID_for_multi_turn":                      false,
+	// Round-2 3-lane re-audit sweep of PR #548: the codes below were
+	// emitted (writeError/writeErrorWithParam/routeError literal call
+	// sites) but had no explicit entry, relying on Go's map zero-value
+	// (false) — the exact shape H1/H-R2 warned about. Each was reviewed
+	// against the sweep's rule (does the path set a Retry-After/reset
+	// header, or does the message promise "retry"/"temporarily"?); none
+	// do, so false is confirmed correct and now explicit rather than
+	// implicit. TestCoordinatorErrorCodeCompleteness enforces every
+	// emitted code has an explicit entry going forward.
+	"catalog_not_found":              false, // resource lookup, permanent
+	"provider_not_found":             false, // config/admin lookup, permanent
+	"provider_response_too_large":    false, // cap-violation family (response_byte_cap_exceeded sibling)
+	"not_found":                      false, // internal settlement-finality lookup, coordinator-authorization gated
+	"unauthorized":                   false, // internal/coordinator-authorization errors, not a buyer retry signal
+	"request_log_failed":             false, // internal durable-logging fault, ambiguous — not an availability signal
+	"settlement_finality_failed":     false, // internal settlement-finality fault, coordinator-authorization gated
+	"idempotency_key_body_mismatch":  false, // client reused Idempotency-Key with a different body
+	"idempotency_key_replayed":       false, // request already recorded, not an error to retry
+	"idempotency_reservation_failed": false, // internal store-contention fault, ambiguous
+	"malformed_settlement_stream":    false, // internal settlement-protocol fault
+	"tool_call_final_close_failed":   false, // validation-shape error, permanent
+	"malformed_tool_call":            false, // validation-shape error, permanent
+	"stream_output_exceeded":         false, // cap-violation family, same bucket as response_byte_cap_exceeded
+	"session_ended":                  false, // pinned session no longer exists, permanent
+	// Tier-2 attestation/security-policy codes: conservatively false.
+	// tier2_hash_verified_required / tier2_encrypted_leg_required /
+	// tier2_attestation_required ("no attested/encrypted/hash-verified
+	// provider available") are structurally availability-shaped, but
+	// reclassifying a security-policy code requires SPEC-015 context this
+	// sweep does not have — a wrong call here has different risk
+	// characteristics than an availability code, so left false pending a
+	// dedicated SPEC-015 review rather than guessed at here.
+	"tier2_hash_verified_required":    false,
+	"tier2_encrypted_leg_required":    false,
+	"tier2_attestation_required":      false,
+	"tier2_hard_pin_predicate_failed": false,
+	"tier2_hash_mismatch":             false,
+	"tier2_aead_decrypt_failed":       false,
+	"tier2_output_encoding_invalid":   false,
 }
 
 func spec018Retryable(code string) bool {

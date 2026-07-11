@@ -418,6 +418,10 @@ func assertConcurrencyRejectHeaders(t *testing.T, resp *httptest.ResponseRecorde
 	} else if retryAfter < 1 || retryAfter > 60 {
 		t.Errorf("Retry-After=%d outside [1, 60]", retryAfter)
 	}
+	// Round-2 sweep rule: a path that sets a positive Retry-After MUST
+	// stamp retryable=true in the body — otherwise a buyer honoring one
+	// signal and a buyer honoring the other reach opposite conclusions.
+	assertBodyRetryable(t, resp.Body.String(), true)
 }
 
 // Regression: M1-8 / PERF-6. Demo requests must respect a concurrency cap.

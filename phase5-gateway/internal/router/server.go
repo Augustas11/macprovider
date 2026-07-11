@@ -871,6 +871,15 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 // gatewayRetryable, which is the correct default for the gateway's many
 // permanent/client codes (auth, validation, admin, oauth, quota-shape).
 //
+// Round-2 3-lane re-audit rule (H-R2/M-R2-2/M-R2-3): retryable, any
+// Retry-After/reset header the same path sets, and the human message
+// wording must all agree for every code — a positive Retry-After or
+// "retry later"/"temporarily" wording means the code MUST be true.
+// TestGatewayErrorCodeCompleteness enforces every code literal the error
+// writers can emit is accounted for here or in gatewayPermanentCodes, so a
+// future unclassified code fails a test instead of shipping a silent
+// false-default contradiction (closes L-R2-2).
+//
 // The coordinator-owned codes below (no_provider_available through
 // rate_limited) are included even though the gateway only ever reaches them
 // via coordinatorErrorRetryable's fallback (openAIErrorRetryable already
@@ -894,10 +903,105 @@ var gatewayRetryableByCode = map[string]bool{
 	"coordinator_unavailable": true,
 	"upstream_provider_error": true,
 	"invalid_provider_usage":  true,
+	// rate_limit_exceeded-typed 429s (H-R2 + sweep): every one of these is,
+	// by construction, a time-window condition that resolves on its own —
+	// the four named by H-R2 already ship a Retry-After or X-RateLimit-Reset
+	// header (setConcurrencyRateLimitHeaders / setRateLimitHeaders); the
+	// other four in this same family (no header today) are classified true
+	// for the identical reason so a future audit round doesn't find the same
+	// gap on a sibling code.
+	"account_request_rate_exceeded": true,
+	"account_concurrency_exceeded":  true,
+	"demo_concurrency_exceeded":     true,
+	"quota_exhausted":               true,
+	"feedback_rate_limited":         true,
+	"oauth_state_rate_limited":      true,
+	"signup_rate_limited":           true,
+	"demo_session_rate_limited":     true,
+	// Operator-controlled capacity pauses (M-R2-3 + sweep): the wording on
+	// all three ("paused"/"closed ... while capacity catches up") already
+	// promises the buyer this resolves with time; the code must agree.
+	"public_api_paused":      true,
+	"demo_paused":            true,
+	"capacity_signup_closed": true,
+}
+
+// gatewayPermanentCodes is the explicit "yes, false is correct" allow-list
+// for TestGatewayErrorCodeCompleteness: every other code literal the error
+// writers can emit (auth, validation, admin, oauth signup/account flows,
+// resource-not-found, cap/shape violations) that is genuinely not
+// retryable — retrying the identical request cannot succeed. Codes absent
+// from BOTH this set and gatewayRetryableByCode fail that test, so a new
+// code must be explicitly triaged into one set or the other rather than
+// silently defaulting to false.
+var gatewayPermanentCodes = map[string]bool{
+	"method_not_allowed": true, "invalid_window": true, "invalid_kill_switch": true,
+	"invalid_kill_switch_version": true, "invalid_capacity_signal": true,
+	"invalid_operator_token": true, "invalid_demo_token": true, "missing_bearer_token": true,
+	"invalid_api_key": true, "api_key_revoked": true, "account_blocked": true,
+	"not_found": true, "session_id_untyped": true, "query_timeout": true,
+	"oauth_callback_not_allowed": true, "oauth_action_unknown": true,
+	"oauth_return_to_not_allowed": true, "oauth_state_invalid": true,
+	"oauth_scope_forbidden": true, "invalid_handoff": true, "api_key_not_found": true,
+	"invalid_request_body": true, "request_too_large": true, "invalid_request": true,
+	"n_must_be_1": true, "max_tokens_exceeded": true, "token_limit_overflow": true,
+	"duplicate_request_id": true, "invalid_conversation_tag": true,
+	"invalid_feedback_source": true, "invalid_feedback": true, "invalid_rating": true,
+	"comment_too_long": true, "invalid_request_id": true, "invalid_feedback_scope": true,
+	"invalid_limit": true, "api_key_lookup_failed": true,
+	"request_content_encoding_unsupported": true,
+	// Internal-fault codes: absent Retry-After/reset header and no
+	// "retry later" wording, so the sweep's rule doesn't require true —
+	// these are ambiguous store/settlement faults, not availability
+	// signals, and reclassifying them is out of this sweep's scope.
+	"settlement_failed": true, "admin_state_write_failed": true,
+	"feedback_summary_failed": true, "capacity_signal_store_failed": true,
+	"capacity_tier_load_failed": true, "capacity_signal_load_failed": true,
+	"state_generation_failed": true, "session_generation_failed": true,
+	"oauth_state_store_failed": true, "oauth_exchange_failed": true,
+	"api_key_issuance_failed": true, "account_lookup_failed": true,
+	"signup_limit_check_failed": true, "account_create_failed": true,
+	"identity_create_failed": true, "signup_event_failed": true,
+	"demo_session_check_failed": true, "demo_token_issuance_failed": true,
+	"demo_session_record_failed": true, "api_key_rotation_failed": true,
+	"api_key_revoke_failed": true, "internal_error": true,
+	"coordinator_models_error": true, "tier2_metadata_unavailable": true,
+	"usage_load_failed": true, "keys_load_failed": true,
+	"coordinator_sticky_error": true, "feedback_limit_check_failed": true,
+	"feedback_store_failed": true, "settlement_reconcile_load_failed": true,
+	"nonce_unavailable": true, "docs_missing": true, "docs_render_failed": true,
+	"quota_reservation_failed": true, "concurrency_reservation_failed": true,
+	// Gateway-side stream/cap-shape codes (mirrors the coordinator's own
+	// byte/schema cap family, all false): retrying the same request/prompt
+	// deterministically re-triggers the same cap, so these are permanent
+	// from the buyer's perspective even though the underlying cause is a
+	// provider response.
+	"stream_malformed": true, "stream_output_exceeded": true, "stream_truncated": true,
 }
 
 func gatewayRetryable(code string) bool {
 	return gatewayRetryableByCode[code]
+}
+
+// gatewayRetryAfterByCode holds a fixed Retry-After value (seconds, as a
+// header string) for specific codes whose backoff window is a known
+// constant that must be preserved or set explicitly, distinct from the
+// generic 1s fast-availability default:
+//   - provisional_quota_exceeded mirrors the coordinator's own fixed 3600s
+//     window (phase4-coordinator/internal/buyer/server.go's
+//     writeErrorTypedParam). copyCleanHeaders strips the coordinator's own
+//     Retry-After as gateway-owned (issue #190) before this runs, so
+//     without this table the buyer would see retryable:true with zero
+//     backoff hint (M-R2-2) even though the coordinator already computed
+//     the right value.
+//   - the capacity-pause codes use a longer, human-pause-appropriate
+//     window (M-R2-3) — 1s is right for a fast transient blip, wrong for
+//     an operator-toggled pause that won't resolve for many seconds.
+var gatewayRetryAfterByCode = map[string]string{
+	"provisional_quota_exceeded": "3600",
+	"public_api_paused":          "30",
+	"demo_paused":                "30",
+	"capacity_signup_closed":     "30",
 }
 
 // gatewayTransientRetryAfterSeconds is a modest, bounded backoff hint the
@@ -910,26 +1014,44 @@ func gatewayRetryable(code string) bool {
 // this supplies the gateway's own value rather than leaving it absent.
 const gatewayTransientRetryAfterSeconds = "1"
 
-func setGatewayRetryAfter(w http.ResponseWriter, status int, retryable bool) {
-	if retryable && (status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout) {
+// setGatewayRetryAfter sets Retry-After when retryable, preferring a
+// code-specific fixed value (gatewayRetryAfterByCode) over the generic
+// 503/504 fast-availability default. Codes with their own request-specific
+// Retry-After (the concurrency/rate-limit family — setConcurrencyRateLimitHeaders/
+// setRateLimitHeaders, called by the handler before writeError) are 429s,
+// which this generic 503/504 gate never touches, so their existing header
+// is left alone either way.
+func setGatewayRetryAfter(w http.ResponseWriter, status int, code string, retryable bool) {
+	if !retryable {
+		return
+	}
+	if v, ok := gatewayRetryAfterByCode[code]; ok {
+		w.Header().Set("Retry-After", v)
+		return
+	}
+	if status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout {
 		w.Header().Set("Retry-After", gatewayTransientRetryAfterSeconds)
 	}
 }
 
 func writeError(w http.ResponseWriter, status int, typ, code, message string) {
 	retryable := gatewayRetryable(code)
-	setGatewayRetryAfter(w, status, retryable)
+	setGatewayRetryAfter(w, status, code, retryable)
 	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "param": nil, "code": code, "retryable": retryable}})
 }
 
 func writeSpec019PreflightError(w http.ResponseWriter, status int, code, message, param string) {
+	// Retryable is derived from the same classifier writeError/writeSSEError
+	// use, rather than hardcoded, so a future call site can't silently
+	// disagree with gatewayRetryableByCode (the exact shape of this sweep's
+	// finding, applied preemptively here).
 	writeJSON(w, status, map[string]any{
 		"error": map[string]any{
 			"message":        message,
 			"type":           "invalid_request_error",
 			"param":          param,
 			"code":           code,
-			"retryable":      false,
+			"retryable":      gatewayRetryable(code),
 			"request_id":     nil,
 			"inference_ran":  false,
 			"settlement_ran": false,

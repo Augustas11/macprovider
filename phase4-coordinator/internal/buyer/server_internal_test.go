@@ -524,10 +524,60 @@ func TestRetryableByCodeClassification(t *testing.T) {
 	permanent := []string{
 		"model_not_found", "context_exceeds_capacity", "unsupported_content_shape",
 		"invalid_request", "invalid_json", "byte_cap_exceeded",
+		// Round-2 sweep additions: reviewed and confirmed permanent.
+		"catalog_not_found", "provider_not_found", "provider_response_too_large",
+		"not_found", "unauthorized", "request_log_failed", "settlement_finality_failed",
+		"idempotency_key_body_mismatch", "idempotency_key_replayed",
+		"idempotency_reservation_failed", "malformed_settlement_stream",
+		"tool_call_final_close_failed", "malformed_tool_call", "stream_output_exceeded",
+		"session_ended", "tier2_hash_verified_required", "tier2_encrypted_leg_required",
+		"tier2_attestation_required", "tier2_hard_pin_predicate_failed",
+		"tier2_hash_mismatch", "tier2_aead_decrypt_failed", "tier2_output_encoding_invalid",
 	}
 	for _, code := range permanent {
 		if spec018Retryable(code) {
 			t.Errorf("code %q must be retryable=false", code)
+		}
+	}
+}
+
+// coordinatorEmittedErrorCodes is every literal code string passed to
+// writeError, writeErrorWithParam, a routeError{} literal, or the
+// coordinator's own writeSSEError in internal/buyer/server.go, as of the
+// round-2 3-lane re-audit sweep of PR #548. Codes reachable only via a
+// variable/tuple-returning validation helper (the JSON-schema and
+// tool-call family) are not included here — those were reviewed manually
+// earlier in the same sweep and every one already has an explicit entry in
+// spec018RetryableByCode; enumerating them would require tracing return
+// values through shared validation functions, out of proportion for this
+// completeness guard.
+var coordinatorEmittedErrorCodes = []string{
+	"catalog_not_found", "context_exceeds_capacity", "idempotency_key_body_mismatch",
+	"idempotency_key_replayed", "idempotency_reservation_failed", "idempotency_unavailable",
+	"invalid_request", "malformed_settlement_stream", "malformed_tool_call",
+	"model_not_found", "no_provider_available", "not_found", "preflight_rejected",
+	"provider_disconnected", "provider_error", "provider_failed", "provider_not_found",
+	"provider_response_too_large", "provider_timeout", "provisional_quota_exceeded",
+	"rate_limited", "request_body_too_large", "request_content_encoding_unsupported",
+	"request_log_failed", "session_ended", "settlement_finality_failed",
+	"stream_output_exceeded", "tier2_aead_decrypt_failed", "tier2_attestation_required",
+	"tier2_encrypted_leg_required", "tier2_hard_pin_predicate_failed", "tier2_hash_mismatch",
+	"tier2_hash_verified_required", "tier2_output_encoding_invalid",
+	"tool_call_final_close_failed", "unauthorized",
+}
+
+// TestCoordinatorErrorCodeCompleteness closes L-R2-2 coordinator-side: every
+// emitted code must have an EXPLICIT entry in spec018RetryableByCode (true
+// or false) — a code present in coordinatorEmittedErrorCodes but absent
+// from the map is indistinguishable, at runtime, from an explicit false via
+// Go's map zero-value, which is exactly how H2 happened in the first
+// place. This does not check the boolean VALUE (TestRetryableByCodeClassification
+// does that for the specific codes it names) — only that nobody forgot to
+// decide.
+func TestCoordinatorErrorCodeCompleteness(t *testing.T) {
+	for _, code := range coordinatorEmittedErrorCodes {
+		if _, ok := spec018RetryableByCode[code]; !ok {
+			t.Errorf("code %q is emitted but has no explicit entry in spec018RetryableByCode", code)
 		}
 	}
 }

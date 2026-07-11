@@ -1152,12 +1152,16 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 	copyCleanHeaders(w.Header(), resp.Header)
 	w.Header().Set("X-Request-ID", requestID(r))
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
-	// H1/M4: this forwards the coordinator's body verbatim, so its own
-	// retryable field (if present) is already preserved byte-for-byte in
-	// the JSON below. setGatewayRetryAfter reads that same verdict to
-	// decide whether to attach the gateway-owned Retry-After hint —
-	// copyCleanHeaders above already stripped any upstream Retry-After.
-	setGatewayRetryAfter(w, resp.StatusCode, coordinatorErrorRetryable(resp.StatusCode, body))
+	// H1/M4/M-R2-2: this forwards the coordinator's body verbatim, so its
+	// own retryable field (if present) is already preserved byte-for-byte
+	// in the JSON below. setGatewayRetryAfter reads that same verdict, plus
+	// the coordinator's own code, to decide whether to attach the
+	// gateway-owned Retry-After hint — copyCleanHeaders above already
+	// stripped any upstream Retry-After (issue #190), so a code with a
+	// known fixed backoff window (e.g. provisional_quota_exceeded's 3600s)
+	// must be restored explicitly via gatewayRetryAfterByCode or the buyer
+	// loses the backoff signal entirely, not just its precision.
+	setGatewayRetryAfter(w, resp.StatusCode, openAIErrorCode(body), coordinatorErrorRetryable(resp.StatusCode, body))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 }
@@ -1290,10 +1294,10 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("X-Request-ID", requestID(r))
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
-	// H1/M4: preserve the coordinator's own retryable verdict from body and
-	// attach the gateway-owned Retry-After hint accordingly (see
+	// H1/M4/M-R2-2: preserve the coordinator's own retryable verdict from
+	// body and attach the gateway-owned Retry-After hint accordingly (see
 	// passThroughNoProviderCoordinatorError for the same pattern).
-	setGatewayRetryAfter(w, resp.StatusCode, coordinatorErrorRetryable(resp.StatusCode, body))
+	setGatewayRetryAfter(w, resp.StatusCode, openAIErrorCode(body), coordinatorErrorRetryable(resp.StatusCode, body))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 }

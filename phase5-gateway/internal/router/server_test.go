@@ -1560,6 +1560,9 @@ func TestFeedbackRateLimitPerIP(t *testing.T) {
 		t.Fatalf("11th feedback status=%d want 429 body=%s", resp.Code, resp.Body.String())
 	}
 	assertErrorCode(t, resp.Body.String(), "feedback_rate_limited")
+	// Round-2 sweep (H-R2): an hourly per-IP rate limit is inherently
+	// temporal even though this path doesn't (yet) ship a Retry-After.
+	assertBodyRetryable(t, resp.Body.String(), true)
 }
 
 func TestFeedbackSummaryLimitsRawScan(t *testing.T) {
@@ -3937,6 +3940,14 @@ func TestQuotaExhaustedReturns429Not500(t *testing.T) {
 	if !strings.Contains(resp.Body.String(), "quota_exhausted") {
 		t.Fatalf("body missing quota_exhausted: %s", resp.Body.String())
 	}
+	// Round-2 sweep (H-R2 rate_limit_exceeded-family extension): this path
+	// ships X-RateLimit-Reset (a reset header, not a literal Retry-After —
+	// the sweep's rule treats the two as equivalent temporal signals) via
+	// setRateLimitHeaders, so quota_exhausted must be retryable=true.
+	if got := resp.Header().Get("X-RateLimit-Reset"); got == "" {
+		t.Fatalf("X-RateLimit-Reset missing on quota_exhausted 429")
+	}
+	assertBodyRetryable(t, resp.Body.String(), true)
 }
 
 func TestQuotaAdmittedOpaqueErrorRefundsBefore500(t *testing.T) {
@@ -5988,6 +5999,14 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		"provider_disconnected", "provider_failed", "provisional_quota_exceeded",
 		"preflight_rejected", "idempotency_unavailable", "rate_limited",
 		"coordinator_unavailable", "upstream_provider_error", "invalid_provider_usage",
+		// Round-2 sweep (H-R2 + rate_limit_exceeded-family extension):
+		// every temporal 429 in this family resolves on its own.
+		"account_request_rate_exceeded", "account_concurrency_exceeded",
+		"demo_concurrency_exceeded", "quota_exhausted", "feedback_rate_limited",
+		"oauth_state_rate_limited", "signup_rate_limited", "demo_session_rate_limited",
+		// Round-2 sweep (M-R2-3 + capacity-pause extension): wording on all
+		// three already promises the buyer this resolves with time.
+		"public_api_paused", "demo_paused", "capacity_signup_closed",
 	}
 	for _, code := range retryable {
 		if !gatewayRetryable(code) {
@@ -5996,11 +6015,77 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 	}
 	permanent := []string{
 		"model_not_found", "invalid_request", "method_not_allowed",
-		"invalid_api_key", "quota_exhausted", "not_found",
+		"invalid_api_key", "not_found", "request_content_encoding_unsupported",
+		"api_key_lookup_failed", "feedback_limit_check_failed", "settlement_failed",
 	}
 	for _, code := range permanent {
 		if gatewayRetryable(code) {
 			t.Errorf("code %q must be retryable=false", code)
+		}
+	}
+}
+
+// gatewayEmittedErrorCodes is every literal string passed as the `code`
+// argument to writeError, writeSSEError, or writeSpec019PreflightError
+// across the non-test .go files in this package, as of the round-2 3-lane
+// re-audit grep sweep of PR #548
+// (`grep -oE 'writeError\(w, [a-zA-Z0-9._]+, "[a-zA-Z0-9_]+", "[a-zA-Z0-9_]+"'
+// internal/router/*.go`, plus the writeSSEError/writeSpec019PreflightError
+// call sites and the one variable-resolved code, concurrencyErrCode, which
+// is always either account_concurrency_exceeded or demo_concurrency_exceeded).
+// Deriving this list is NOT automatic (a genuinely new call site with a
+// genuinely new code must be added here by hand) — its value is asserting
+// the CURRENT known set has no silent gaps, and giving the next audit
+// round a single, greppable checklist to diff a fresh sweep against.
+var gatewayEmittedErrorCodes = []string{
+	"account_blocked", "account_concurrency_exceeded", "account_create_failed",
+	"account_lookup_failed", "account_request_rate_exceeded", "admin_state_write_failed",
+	"api_key_issuance_failed", "api_key_lookup_failed", "api_key_not_found",
+	"api_key_revoke_failed", "api_key_revoked", "api_key_rotation_failed",
+	"capacity_signal_load_failed", "capacity_signal_store_failed", "capacity_signup_closed",
+	"capacity_tier_load_failed", "comment_too_long", "concurrency_reservation_failed",
+	"coordinator_models_error", "coordinator_sticky_error", "coordinator_unavailable",
+	"demo_concurrency_exceeded", "demo_paused", "demo_session_check_failed",
+	"demo_session_rate_limited", "demo_session_record_failed", "demo_token_issuance_failed",
+	"docs_missing", "docs_render_failed", "duplicate_request_id",
+	"feedback_limit_check_failed", "feedback_rate_limited", "feedback_store_failed",
+	"feedback_summary_failed", "identity_create_failed", "internal_error",
+	"invalid_api_key", "invalid_capacity_signal", "invalid_conversation_tag",
+	"invalid_demo_token", "invalid_feedback", "invalid_feedback_scope",
+	"invalid_feedback_source", "invalid_handoff", "invalid_kill_switch",
+	"invalid_kill_switch_version", "invalid_limit", "invalid_operator_token",
+	"invalid_provider_usage", "invalid_rating", "invalid_request",
+	"invalid_request_body", "invalid_request_id", "invalid_window",
+	"keys_load_failed", "max_tokens_exceeded", "method_not_allowed",
+	"missing_bearer_token", "n_must_be_1", "no_provider_available",
+	"nonce_unavailable", "not_found", "oauth_action_unknown",
+	"oauth_callback_not_allowed", "oauth_exchange_failed", "oauth_return_to_not_allowed",
+	"oauth_scope_forbidden", "oauth_state_invalid", "oauth_state_rate_limited",
+	"oauth_state_store_failed", "provider_disconnected", "provider_timeout",
+	"public_api_paused", "query_timeout", "quota_exhausted",
+	"quota_reservation_failed", "request_content_encoding_unsupported", "request_too_large",
+	"session_generation_failed", "session_id_untyped", "settlement_failed",
+	"settlement_reconcile_load_failed", "signup_event_failed", "signup_limit_check_failed",
+	"signup_rate_limited", "state_generation_failed", "stream_malformed",
+	"stream_output_exceeded", "stream_truncated", "tier2_metadata_unavailable",
+	"token_limit_overflow", "upstream_provider_error", "usage_load_failed",
+}
+
+// TestGatewayErrorCodeCompleteness closes L-R2-2 (round-2 3-lane re-audit):
+// every code in gatewayEmittedErrorCodes must be triaged into EXACTLY one
+// of gatewayRetryableByCode or gatewayPermanentCodes — never both (that
+// would mean the two maps disagree) and never neither (that's exactly how
+// H1/H-R2 happened: an emitted code silently fell through Go's map
+// zero-value to false with nobody having decided it should).
+func TestGatewayErrorCodeCompleteness(t *testing.T) {
+	for _, code := range gatewayEmittedErrorCodes {
+		_, inRetryable := gatewayRetryableByCode[code]
+		_, inPermanent := gatewayPermanentCodes[code]
+		if !inRetryable && !inPermanent {
+			t.Errorf("code %q is emitted but triaged into neither gatewayRetryableByCode nor gatewayPermanentCodes — classify it explicitly", code)
+		}
+		if inRetryable && inPermanent {
+			t.Errorf("code %q is in BOTH gatewayRetryableByCode and gatewayPermanentCodes — remove it from one", code)
 		}
 	}
 }
@@ -6041,7 +6126,10 @@ func TestWriteErrorEnvelopeCarriesRetryable(t *testing.T) {
 // TestWriteErrorSetsRetryAfterOnlyForRetryableAvailability is M4: a modest,
 // bounded Retry-After hint accompanies 503/504 responses that are
 // retryable, but not permanent-error statuses (400/404/etc.) and not
-// retryable=false 503s.
+// retryable=false 503s. Round-2 sweep adds the code-aware Retry-After cases
+// (M-R2-2 provisional_quota_exceeded 3600s passthrough default via
+// writeError directly, and M-R2-3's pause-appropriate 30s, distinct from
+// the generic 1s fast-availability default).
 func TestWriteErrorSetsRetryAfterOnlyForRetryableAvailability(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -6051,8 +6139,12 @@ func TestWriteErrorSetsRetryAfterOnlyForRetryableAvailability(t *testing.T) {
 	}{
 		{"503_transient", http.StatusServiceUnavailable, "coordinator_unavailable", "1"},
 		{"504_transient", http.StatusGatewayTimeout, "provider_timeout", "1"},
-		{"503_permanent_code_absent_from_map", http.StatusServiceUnavailable, "public_api_paused", ""},
+		{"503_permanent_code_absent_from_map", http.StatusServiceUnavailable, "settlement_failed", ""},
 		{"400_not_availability_status", http.StatusBadRequest, "invalid_request", ""},
+		{"503_capacity_pause_gets_30s_not_1s", http.StatusServiceUnavailable, "public_api_paused", "30"},
+		{"503_demo_pause_gets_30s_not_1s", http.StatusServiceUnavailable, "demo_paused", "30"},
+		{"503_signup_closed_gets_30s_not_1s", http.StatusServiceUnavailable, "capacity_signup_closed", "30"},
+		{"429_provisional_quota_gets_3600s_not_suppressed", http.StatusTooManyRequests, "provisional_quota_exceeded", "3600"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -6509,6 +6601,24 @@ func assertErrorCode(t *testing.T, raw, code string) {
 	}
 }
 
+// assertBodyRetryable is the round-2 sweep's "retryable agrees with
+// Retry-After/reset header" check: callers pair it with an assertion on
+// whatever backoff header the path sets (Retry-After, X-RateLimit-Reset*).
+func assertBodyRetryable(t *testing.T, raw string, want bool) {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Retryable bool `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		t.Fatalf("error json: %v body=%s", err, raw)
+	}
+	if body.Error.Retryable != want {
+		t.Fatalf("retryable=%v want=%v body=%s", body.Error.Retryable, want, raw)
+	}
+}
+
 func findCookie(resp *httptest.ResponseRecorder, name string) string {
 	for _, cookie := range resp.Result().Cookies() {
 		if cookie.Name == name {
@@ -6739,6 +6849,43 @@ func TestCoordinator404ModelNotFoundPassesThroughAndDoesNotChargeQuota(t *testin
 				t.Fatalf("daily_tokens_reserved=%v, want 0 — reservation must be refunded on coord 404", reserved)
 			}
 		})
+	}
+}
+
+// TestCoordinatorProvisionalQuotaExceededPreservesRetryAfter3600 is M-R2-2
+// (round-2 3-lane re-audit of PR #548): the coordinator sets its own fixed
+// Retry-After: 3600 on provisional_quota_exceeded, but copyCleanHeaders
+// strips ANY upstream Retry-After as gateway-owned (issue #190) before the
+// gateway forwards the coordinator's body verbatim. Without the
+// gatewayRetryAfterByCode code-aware restore, the buyer would see
+// retryable:true (correctly preserved from the coordinator's body) with
+// ZERO backoff hint — a buyer honoring Retry-After and one honoring
+// retryable would reach opposite conclusions about how long to wait.
+func TestCoordinatorProvisionalQuotaExceededPreservesRetryAfter3600(t *testing.T) {
+	coordBody := `{"error":{"message":"Selected provisional provider is over request quota","type":"rate_limit_exceeded","param":null,"code":"provisional_quota_exceeded","retryable":true,"request_id":null,"inference_ran":false,"settlement_ran":false}}`
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		// The coordinator's own upstream Retry-After — copyCleanHeaders
+		// must strip this (issue #190); the gateway then restores its own
+		// 3600s value via gatewayRetryAfterByCode, not by trusting this one.
+		return responseWithBody(http.StatusTooManyRequests, http.Header{
+			"Content-Type": []string{"application/json"},
+			"Retry-After":  []string{"3600"},
+		}, coordBody), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_provisional_quota")
+
+	resp := postChat(t, h, fullKey, `{"model":"model-a","max_tokens":8,"messages":[{"role":"user","content":"x"}]}`, nil)
+
+	if resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d, want 429 body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "provisional_quota_exceeded")
+	assertBodyRetryable(t, resp.Body.String(), true)
+	if got := resp.Header().Get("Retry-After"); got != "3600" {
+		t.Fatalf("Retry-After=%q, want 3600 (gatewayRetryAfterByCode must restore it after copyCleanHeaders strips the upstream value)", got)
 	}
 }
 
