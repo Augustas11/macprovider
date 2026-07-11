@@ -23,7 +23,7 @@ cross-repo interop contract the Swift provider CLI byte-matches):
   (no `0x04` prepend) with an exact-length + `IsOnCurve` check, the per-field base64
   variants (RawURL token/binding vs flexible inner body vs byte-matched
   `encryptionPublicKey`), the interop-critical **Go `encoding/json` (sorted-keys,
-  HTML-escape ON: `<`/`>`/`&` → `<`/`>`/`&` — NOT RFC-8785 JCS)**
+  HTML-escape ON: `<`/`>`/`&` -> `\u003c`/`\u003e`/`\u0026` — NOT RFC-8785 JCS)**
   canonicalization, and the **fixed 10-field** `macprovider/spec008/attestation-binding/v1`
   session-binding payload.
 - **§7.4b (new):** documents the shipped SE **liveness re-challenge** protocol
@@ -42,8 +42,29 @@ cross-repo interop contract the Swift provider CLI byte-matches):
   `tier2.attestation{state,…}` disclosure — `state` enum `none|all|partial|unsupported`
   with a separate `mixed` boolean, counting only `StateReady` providers (matches §13.3);
   the v0.3 per-model block is retained as a **deferred** forward enhancement.
+- **§13.3/§7.6 (trust honesty):** the buyer-visible **`hardware_attestation`** field is
+  derived from the tier-blind `attested` aggregate (coordinator `attestationStateForProviders`
+  → gateway `disclosure.HardwareAttestation`) with no `attestation_tier` check, so an
+  all-`self_signed` (software-key) pool discloses `hardware_attestation: "all"` — documented
+  as a **known overstatement** (the field is a misnomer for the SE path; buyers/consumers
+  MUST NOT read it as hardware proof) with the gating/rename fix carried as a forward
+  coordinator+gateway change. §7.6 makes explicit that `require_attestation` admits
+  `self_signed` and does not require hardware. §13.3's activation and counting basis were
+  reconciled to the shipped **pool-evidence-driven gateway** surface + `StateReady` counting;
+  §7.7 (the coordinator `/v1/models` surface) was distinguished from it (`ConfigActive`-gated).
+- **§4.3:** corrected — a ready SE-attested provider makes attestation **buyer-visible via
+  the gateway even at coordinator-default config** (the gateway keys off `/internal/routing`,
+  not the `/v1/models` `ConfigActive` gate); the earlier "not buyer-visible at defaults"
+  claim was wrong.
+- **§7.4/§10.4/§4.6:** reconciled attestation-token rejection transport — oversize/malformed
+  tokens collapse to WS status `attestation_failed` + close `4012`, not an HTTP-400 code (the
+  §4.6 `tier2_attestation_token_*` rows are a forward HTTP catalog).
+- **§7.5/§11.2:** documented the verifier-vs-startup asymmetry (SE needs no root, but
+  `require_attestation: true` still requires ≥1 `attestation_roots` at startup).
 - **§5.7:** clarified the hash-disclosure counting basis is slot-holders
-  (`hasAvailableSlot`, includes mismatched/uncatalogued), not the strictly-routable set.
+  (`hasAvailableSlot`); `RoutingEligible` has no hash check — the hash routing-exclusion is
+  the separate §5.5-5.6 predicate (mismatch/invalid always; uncatalogued only when
+  `require_hash_verified`).
 - **§6.4/§6.5:** corrected the transcript labels (`provider_public` /
   `coordinator_public` / `selected_aead`, which are hashed) and pinned the uint32-BE
   length framing / one-byte stream flag / JSON decode-fallback for the binary AAD.
@@ -552,19 +573,29 @@ With every `tier2.*` key at its default value, the coordinator MUST NOT reject,
 reroute, truncate, disclose stronger posture, or change buyer-visible behavior solely
 because a SPEC-008 binary was deployed.
 
-**Attestation carve-out (v0.4, shipped reality).** One narrow exception to "emit no new
-Tier-2 logs at defaults": `attestation_formats` is advertised by default (§11.1), so when
-a **SPEC-001 v2.0-candidate provider chooses to present an `attestation_token`**, the
-coordinator verifies it and emits a diagnostic `T2.C` attestation event
-(`logAttestationEvent`, INFO on success / WARN on failure) even at otherwise-default
-config. This is a provider-triggered, provider-scoped diagnostic — it does **not** run for
-legacy/Tier-1 providers (which present no token), does **not** change routing (the routing
-predicate stays gated on `require_attestation`), and is **not** buyer-visible:
-`/v1/models` still suppresses the `tier2.attestation` block at defaults because
-`tier2.ConfigActive` is false (§7.7, §13.2). The "no buyer-visible change from mere
-deployment" invariant holds; the "compute no evidence / emit no Tier-2 logs" clause is
-scoped to Pillars A/B/D and to the routing/disclosure surfaces, not to verification of a
-token a v2.0 provider volunteered.
+**Attestation carve-out (v0.4, shipped reality — two exceptions).** `attestation_formats`
+is advertised by default (§11.1), so when a **SPEC-001 v2.0-candidate provider chooses to
+present an `attestation_token`**, the coordinator verifies it and emits a diagnostic
+`T2.C` attestation event (`logAttestationEvent`, INFO on success / WARN on failure) even
+at otherwise-default config. This is a provider-triggered, provider-scoped diagnostic — it
+does **not** run for legacy/Tier-1 providers (which present no token) and does **not**
+change routing (the routing predicate stays gated on `require_attestation`). Two clauses
+of the default-preservation invariant are therefore **not** literally true at defaults and
+are scoped accordingly:
+
+1. *"Emit no new Tier-2 logs."* Scoped to Pillars A/B/D and the routing/disclosure
+   surfaces; a volunteered attestation token still produces the `T2.C` diagnostic above.
+2. *"No buyer-visible change."* The coordinator's own `/v1/models` **does** suppress the
+   `tier2.attestation` block at defaults (`tier2.ConfigActive` is false, §7.7). **But** the
+   coordinator's `/internal/routing` metadata always computes the attestation aggregate
+   (it is **not** `ConfigActive`-gated), and the **gateway** treats any non-`none`
+   attestation state as active and emits the buyer-visible Tier-2 disclosure
+   (`phase5-gateway/internal/router/disclosure.go`). So a single **ready, SE-attested
+   provider at coordinator-default config makes attestation buyer-visible via the gateway**
+   — as `hardware_attestation` (§13.3), which for the shipped self-signed SE path is a
+   known misnomer (see §13.3's overstatement note). Operators MUST NOT assume default
+   coordinator config keeps attestation off the buyer surface; the gateway path bypasses
+   the `/v1/models` `ConfigActive` gate.
 
 ### 4.4 Threat boundary
 
@@ -636,6 +667,13 @@ behavior are:
 | `tier2_output_encoding_invalid` | 502 | `server_error` | Provider response encoding validation failed. | If post-commit: emit error SSE event, close stream. |
 | `tier2_attestation_token_too_large` | 400 | `invalid_request` | Attestation token exceeds maximum encoded length of 16384 bytes. | N/A - auth |
 | `tier2_attestation_token_invalid` | 400 | `invalid_request` | Attestation token encoding or format is invalid. | N/A - auth |
+
+**Note (shipped, v0.4).** The two `tier2_attestation_token_*` rows are a **forward
+HTTP catalog**: attestation tokens are presented on the provider WebSocket auth handshake,
+where the shipped verifier collapses over-limit/malformed/invalid to attestation status
+`attestation_failed` and (when `require_attestation: true`) closes the session with WS code
+`4012`, rather than returning an HTTP 400 with these codes (§7.4, §10.4). They are retained
+for a future HTTP attestation-submission path.
 
 Messages MUST NOT reveal raw hashes, keys, attestation tokens, or trust-root
 details. Placeholders like `{model_id}` are literal substitution variables;
@@ -867,11 +905,17 @@ When Pillar A observation or enforcement is active, the aggregated
 **Counting basis (v0.4 clarification).** The `hash_verification` counts and the
 `hash_verified` summary aggregate over providers that hold an **available slot** for the
 model (shipped predicate `hasAvailableSlot`, `internal/buyer/server.go`), **not** over the
-strictly routable set. A `mismatch`/`invalid`/`uncatalogued` provider is excluded from
-*routing* (`RoutingEligible` is false) yet its evidence is still counted here — i.e.
-`mismatch_provider_count`/`invalid_provider_count`/`uncatalogued_provider_count` are
-deliberately disclosed for slot-holding-but-non-routable providers. "Routable" below is
-therefore shorthand for "holding an available slot for the model".
+strictly routable set. Slot-holding is independent of hash status:
+`pool.Provider.RoutingEligible` does **not** inspect hash status — the routing exclusion
+for bad hashes is a **separate** Tier-2 predicate (`IsHashPredicateFailure`, §5.5–5.6,
+`internal/tier2/catalog.go`) which excludes `hash_mismatch`/`hash_invalid`
+**unconditionally** and `uncatalogued` **only when `require_hash_verified: true`**. So a
+`mismatch`/`invalid` provider (always) and an `uncatalogued` provider (when
+`require_hash_verified` is true) hold a slot and are **counted here** for disclosure even
+though the hash predicate keeps them out of routing; an `uncatalogued` provider under the
+default `require_hash_verified: false` both counts here **and** routes (§5.6). "Routable"
+elsewhere in this section is shorthand for "holding an available slot for the model", which
+is the disclosure basis — not the strictly-routing-eligible set.
 
 `hash_verified` MUST be:
 
@@ -1397,11 +1441,15 @@ NOT assume every `attested` provider has a non-empty tier; a non-empty
 `attestation_tier` is currently synonymous with the SE `self_signed` path. Promoting
 MDA/mock to a labelled tier is a forward code change, out of scope for this spec-only pass.
 
-This tier is the "attestation" half of the authority SPEC-032 relies on when it names
-SPEC-008 authoritative on attestation: SPEC-032 consumes the *fact* of an
-attested/`self_signed` provider, not its cryptographic internals — and MUST treat an
-empty tier on an `attested` provider as "positively attested, strength not labelled",
-never as "not attested".
+This tier is the "attestation" half of the authority boundary SPEC-032 references when it
+names SPEC-008 authoritative on attestation. Note (v0.4, forward): SPEC-032 currently only
+*declares* SPEC-008 authoritative in its dependency header — it does **not** yet read
+`attestation_tier`/`self_signed`, and its substantive attestation content is a deferred
+future weight-binding proof, not a consumer of this tier. Should a future SPEC-032 (or any
+other consumer) key off attestation, it MUST treat an empty tier on an `attested` provider
+as "positively attested, strength not labelled", never as "not attested", and MUST NOT
+treat `self_signed` as hardware-rooted trust (see §7.6/§13.3 for how the shipped surfaces
+currently misgrade this).
 
 ### 7.4 Attestation data model
 
@@ -1461,13 +1509,22 @@ is 16384 bytes (16 KiB; `MaxAttestationTokenBytes`). Separately, the coordinator
 the **entire decoded attestation-token envelope** (the outer JSON object with `format`,
 `token`, `challenge`, `claimed`, `key_binding`, signatures, …) when it exceeds 20480 bytes
 (20 KiB; `MaxAttestationEnvelopeBytes = MaxAttestationTokenBytes + 4·1024`,
-`internal/tier2/pillar_c.go`). Coordinators MUST reject an over-limit token/envelope with
-error code `tier2_attestation_token_too_large` (HTTP 400, type `invalid_request`) and log
-`T2.C attestation_token_too_large` / `attestation_failed`.
+`internal/tier2/pillar_c.go`).
 
-Malformed tokens, including invalid base64url, invalid compact JWS, or decoded
-bytes that are not parseable as the declared format, MUST be rejected with
-`tier2_attestation_token_invalid` (HTTP 400, type `invalid_request`).
+**Rejection transport (shipped, v0.4).** Attestation tokens are presented and verified on
+the **provider WebSocket auth handshake**, not on a buyer HTTP request. In the shipped
+verifier every rejection cause — over-limit (token or envelope), invalid base64url,
+unparseable/invalid format, or signature/binding failure — collapses to attestation
+**status `attestation_failed`** (`pillar_c.go`; the too-large case logs `T2.C
+attestation_token_too_large`, others `attestation_failed`). Under
+`require_attestation: true`, the coordinator sends a WS `auth_response` carrying that
+failed status and closes the provider session with close code **4012**
+(`CloseTier2AttestationFailed`); under optional attestation the session continues with
+`attestation_failed` status. The `tier2_attestation_token_too_large` /
+`tier2_attestation_token_invalid` **HTTP 400** codes catalogued in §4.6 are the
+buyer-facing HTTP error catalog and are **not** emitted by the shipped WS verifier for a
+provider-presented token — aligning that catalog with the WS `4012`/status path (or adding
+an HTTP attestation-submission path) is a forward item.
 
 ### 7.4a Self-signed Secure-Enclave format (`macprovider-se-p256-v1`) — shipped (v0.4)
 
@@ -1477,7 +1534,8 @@ This is the **default-enabled, production attestation format** (in
 reality. It yields `attestation_tier: self_signed` (§7.3).
 
 **Token envelope.** `attestation_token.format = "macprovider-se-p256-v1"` and
-`attestation_token.token` is the **unpadded base64url** (`base64.RawURLEncoding`, strict)
+`attestation_token.token` is the **unpadded base64url** (`base64.RawURLEncoding`; the
+verifier trims surrounding whitespace first, and does not use the `.Strict()` variant)
 encoding of this JSON object:
 
 ```json
@@ -1497,10 +1555,12 @@ the P-256 key in `attestation.publicKey`.
 
 **Per-field base64 (shipped, interop-critical — the variants differ):**
 - **Outer `attestation_token.token`**: unpadded base64url only (`base64.RawURLEncoding`).
-- **Inner `attestation.publicKey` and `attestation.signature`**: decoded with a
-  *flexible* base64 reader (`decodeFlexBase64`: tries standard **and** URL-safe alphabets,
-  **with and without** padding), so a signer MAY use any of those four for those two
-  fields.
+- **Inner `attestation.publicKey` and the envelope's sibling `signature`** (the
+  body-signature field is `signature` at the top level of the decoded
+  `{"attestation":…, "signature":…}` wrapper — **not** nested inside `attestation`):
+  decoded with a *flexible* base64 reader (`decodeFlexBase64`: tries standard **and**
+  URL-safe alphabets, **with and without** padding), so a signer MAY use any of those four
+  for those two fields.
 - **Inner `attestation.encryptionPublicKey`**: this is **not** base64-decoded by the
   attestation verifier; it is compared **byte-for-byte as a string** against
   `key_binding.provider_ecdh_public_key`, which the coordinator emits as **unpadded
@@ -1520,8 +1580,8 @@ output of **Go `encoding/json` marshalling of the decoded object** (`json.Marsha
 `map[string]interface{}` produced by `json.Unmarshal` of `attestation`) — i.e. **sorted
 object keys**, Go's default **HTML-escaping ON**, and Go's default number formatting for
 any JSON number (e.g. `ram_gb`). HTML-escaping ON means the bytes `<`, `>`, `&` are
-emitted as the six-byte escapes **`<`, `>`, `&`** respectively (and
-U+2028/U+2029 as ` `/` `) — they are **not** left as literal characters. This is
+emitted as the six-byte ASCII escape sequences **`\u003c`, `\u003e`, `\u0026`** (literal
+backslash-u sequences, NOT the characters `<`/`>`/`&`), and U+2028 / U+2029 as `\u2028` / `\u2029` — they are **not** left as literal characters. This is
 **NOT RFC-8785 (JCS)**: it is the byte-for-byte output of Go's standard library, and the
 provider-side (Swift) signer MUST reproduce exactly these bytes (sign over the
 Go-canonical re-marshalling, not over its own on-wire serialization). A future migration
@@ -1647,9 +1707,19 @@ The coordinator MUST:
 The coordinator MUST reject replayed challenges.
 
 For the **MDA/mock formats**, the coordinator MUST reject tokens whose trust root is
-absent from `tier2.attestation_roots`. This root requirement does **not** apply to the
-self-signed SE format (`macprovider-se-p256-v1`), which is verified cryptographically
-against its own submitted key and is accepted with an empty `attestation_roots` (§7.4a).
+absent from `tier2.attestation_roots`. This *verifier* root requirement does **not** apply
+to the self-signed SE format (`macprovider-se-p256-v1`), which is verified
+cryptographically against its own submitted key and is accepted with an empty
+`attestation_roots` (§7.4a).
+
+**Verifier vs startup-validation asymmetry (shipped, v0.4 — known gap).** The SE token
+*verifier* needs no root, but **startup config validation** (`internal/config/config.go`;
+§11.2) still rejects `require_attestation: true` with an empty `attestation_roots`,
+unconditionally. So an operator who wants to **enforce attestation on an SE-only pool**
+cannot start with empty roots — they must supply at least one (unused) `attestation_roots`
+entry to satisfy startup even though the SE path never consults it. This is a shipped
+constraint, not a spec preference; removing the root precondition for SE-only enforcement
+is a forward config-validation change.
 
 ### 7.6 Routing predicate
 
@@ -1668,6 +1738,15 @@ When `tier2.require_attestation: true`:
   `tier2_hard_pin_predicate_failed`,
 - requests with no eligible attested provider MUST return
   `503 tier2_attestation_required`.
+
+**What `require_attestation` does and does not require (v0.4).** The predicate gates on
+attestation **status** `attested`, which **includes the `self_signed` (software-key SE)
+tier** — it does **not** consult `attestation_tier` and therefore does **not** require
+hardware-rooted attestation. With the shipped default formats, an operator setting
+`require_attestation: true` is requiring "a valid self-signed key-custody + session
+binding", not "trusted hardware". Requiring genuine hardware would need a
+`hardware`-tier-gated predicate, which the shipped code does not yet implement (§7.3,
+§13.3 overstatement note).
 
 All buyer-visible attestation errors MUST follow §4.6 and §4.7.
 
@@ -1705,10 +1784,16 @@ Field notes vs the v0.3 per-model block below: the shipped key is **`state`** (n
 **does not** emit `failed_provider_count`, `ram_tier_attested_provider_count`, or
 `format`; and it **collapses** `attestation_failed`/`attestation_stale`/`unsupported`/
 `not_required` into the single non-positive `unsupported_provider_count` bucket (so the
-failed-vs-unsupported split cannot be reconstructed from this surface). This enum matches
-the one already documented in §13.3. The Pillar A hash disclosure (§5.7) IS emitted
-**per-model** and matches §5.7 field-for-field — attestation and hash disclosure have
-different shapes on purpose.
+failed-vs-unsupported split cannot be reconstructed from this surface). The `state` enum
+**values** here are the same set §13.3 uses, but the two describe **different surfaces
+with different activation**: this section is the coordinator's own `/v1/models`, which
+attaches the `tier2` block only when `tier2.ConfigActive` is true (config-driven) and
+counts `StateReady` providers; §13.3 is the buyer-visible gateway disclosure, which is
+driven by `/internal/routing` and activates on **pool evidence** (a ready attested
+provider) regardless of coordinator config. Do not read §13.3's "activates on an attested
+provider" as applying to this `/v1/models` surface. The Pillar A hash disclosure (§5.7) IS
+emitted **per-model** and matches §5.7 field-for-field — attestation and hash disclosure
+have different shapes on purpose.
 
 With all `tier2.*` keys at defaults and no provider attestation evidence,
 `/v1/models` MUST preserve Tier-1 buyer-visible behavior (no `tier2.attestation`
@@ -1765,8 +1850,12 @@ buyer receives `503 tier2_attestation_required` when no attested provider
 remains.
 
 **AC-C-6. RAM tier honesty.**
-If the selected attestation format does not supply RAM size, `/v1/models`
-MUST NOT count RAM as attested even when device identity is attested.
+If the selected attestation format does not supply RAM size, the coordinator MUST NOT
+represent RAM as attested even when device identity is attested. (Scope note, v0.4: the
+shipped network-level `/v1/models` `tier2.attestation` object exposes **no**
+`ram_tier_attested` field at all — RAM-tier attestation counting belongs to the deferred
+per-model disclosure block, §7.7. This AC therefore constrains internal RAM-attestation
+state, not a shipped `/v1/models` field.)
 
 **AC-C-7. Valid SE attestation without a trust root (shipped SE path).**
 Given a valid `macprovider-se-p256-v1` token — a P-256 body signature over the
@@ -1779,7 +1868,7 @@ with `tier2.attestation_roots` **empty**, the provider session is marked `attest
 **AC-C-8. SE canonicalization / binding-payload fidelity.**
 A `macprovider-se-p256-v1` token whose body signature is computed over any serialization
 other than Go `encoding/json` of the decoded `attestation` (e.g. JCS, or literal
-`<`/`>`/`&` rather than `<`/`>`/`&`), or whose binding signature omits any of
+the literal characters `<`/`>`/`&` rather than the escape sequences `\u003c`/`\u003e`/`\u0026`), or whose binding signature omits any of
 the ten ordered `attestation-binding/v1` fields (§7.4a), MUST be rejected
 (`se_p256_verification_failed`).
 
@@ -2263,12 +2352,14 @@ and — for `macprovider-se-p256-v1` — the top-level `signature` session-bindi
   "signature":…}` of §7.4a.
 - Maximum encoded `token` length is 16384 bytes (16 KiB); the full decoded
   attestation-token envelope is separately capped at 20480 bytes (20 KiB) (§7.4).
-  Oversized tokens MUST be rejected with `tier2_attestation_token_too_large` (HTTP 400,
-  type `invalid_request`) and logged as `T2.C attestation_token_too_large`.
-- Malformed tokens, including invalid base64url, invalid compact JWS, or
-  decoded bytes that are not parseable as the declared format, MUST be
-  rejected with `tier2_attestation_token_invalid` (HTTP 400, type
-  `invalid_request`).
+- Oversized or malformed tokens (invalid base64url, invalid compact JWS, or decoded bytes
+  not parseable as the declared format) are rejected on the **WS auth path**: the verifier
+  returns attestation status `attestation_failed` (over-limit logs `T2.C
+  attestation_token_too_large`), which under `require_attestation: true` yields a WS
+  `auth_response` with the failed status and a close code `4012`
+  (`CloseTier2AttestationFailed`). The HTTP-400 `tier2_attestation_token_too_large` /
+  `tier2_attestation_token_invalid` codes in §4.6 are the buyer-facing catalog and are not
+  emitted by the shipped WS verifier (see §7.4).
 
 ### 10.5 Candidate `auth_response`
 
@@ -2432,7 +2523,7 @@ tier2:
   # Phase 1 / Pillar A
   catalog_path: ""                 # empty: no active model catalog
   catalog_public_key: ""           # empty unless catalog_path is set
-  require_hash_verified: false     # default false: do not filter routing
+  require_hash_verified: false     # default false: do not filter uncatalogued providers (hash_mismatch/hash_invalid are ALWAYS excluded from routing regardless — §5.5-5.6)
 
   # Phase 2 / Pillar B
   require_encrypted_leg: false     # default false: old providers route
@@ -2799,29 +2890,54 @@ For `provider_leg_encryption`, allowed values are:
 - `"partial"`: some routable provider legs are encrypted and some are not.
 - `"all"`: every currently routable provider leg is encrypted.
 
-For `hardware_attestation`, allowed values are:
+> **Trust overstatement — the `hardware_attestation` field name is a misnomer for the
+> shipped SE path (v0.4, known gap).** The buyer-visible field is literally named
+> `hardware_attestation`, but it is derived from the coordinator's attestation **status**
+> aggregate (`attestationStateForProviders` → gateway `disclosure.HardwareAttestation`)
+> **without consulting `attestation_tier`**. The shipped default-enabled attestation path
+> is self-signed Secure-Enclave (`self_signed`, §7.3), which proves only software-key
+> custody + session binding — **not** hardware. Consequently an all-`self_signed` pool of
+> ordinary software P-256 keys is disclosed to buyers as **`hardware_attestation: "all"`**,
+> a hardware-trust claim §7.3 explicitly denies. **Buyers and downstream specs MUST NOT
+> read `hardware_attestation` as proof of trusted hardware** until it is gated on a
+> genuinely hardware-rooted tier. Closing this — gating `hardware_attestation` on the
+> `hardware` tier, renaming the field, or exposing tier-aware states/counts — is a
+> forward, coordinated coordinator+gateway (`phase5-gateway`) code change, out of scope
+> for this spec-only reconciliation; it is carried as a tracked follow-up.
 
-- `"none"`: no provider has valid attestation.
-- `"unsupported"`: providers do not support the configured attestation format.
-- `"partial"`: some providers are attested and some are not.
-- `"all"`: every currently routable provider is attested.
+For `hardware_attestation`, allowed values are (each reflects attestation **status**, not
+strength — see the overstatement note above):
 
-Derivation is:
+- `"none"`: no ready provider has valid attestation.
+- `"unsupported"`: ready providers do not support the configured attestation format.
+- `"partial"`: some ready providers are attested and some are not.
+- `"all"`: every ready (`StateReady`) provider is attested. Counting is over ready
+  providers (`attestationStateForProviders`), not the strictly routing-eligible set.
 
-| Pillar C active? | require_attestation | Pool attested / unsupported / failed | hardware_attestation |
+Derivation is (`Pool …` columns count `StateReady` providers):
+
+| Buyer disclosure active? | require_attestation | Pool attested / unsupported / failed | hardware_attestation |
 |---|---|---|---|
-| No (default config) | false | any | `"none"` |
-| Yes (observe or enforce) | false | all unsupported or no token | `"unsupported"` |
-| Yes | false | mixed (some attested, some not) | `"partial"` |
-| Yes | false | all attested | `"all"` |
-| Yes | true | all attested | `"all"` |
-| Yes | true | any failed/stale/unsupported | `"partial"` if at least one provider is attested; otherwise `"unsupported"` |
+| No ready attested/unsupported provider | false | none present | `"none"` |
+| A ready provider presents attestation | false | all unsupported or no token | `"unsupported"` |
+| A ready provider presents attestation | false | mixed (some attested, some not) | `"partial"` |
+| A ready provider presents attestation | false | all attested | `"all"` |
+| — | true | all attested | `"all"` |
+| — | true | any failed/stale/unsupported | `"partial"` if at least one provider is attested; otherwise `"unsupported"` |
 
-Pillar C active means `require_attestation: true`, `observe_enabled: true`, or
-an attested provider exists in the pool. `"none"` applies only under
-default-config when Pillar C is not active. Once observation is active,
-`"unsupported"` is the floor, and providers presenting no token are counted as
-`"unsupported"`, not `"none"`.
+**Activation differs by surface (v0.4).** The **coordinator's own `/v1/models`** attaches
+the `tier2` block only when `tier2.ConfigActive` is true (config-driven: a `require_*`
+key, a catalog, or `observe_enabled`; §7.7) — so at default config it shows nothing. The
+**buyer-visible gateway disclosure**, however, is driven by the coordinator's
+`/internal/routing` metadata, which computes the attestation aggregate from pool evidence
+**regardless of config**; the gateway treats any non-`none` state as active. So
+`hardware_attestation` becomes buyer-visible as soon as a **ready provider is attested**,
+even under otherwise-default coordinator config (§4.3). `"none"` applies only when no
+ready provider is attested/unsupported. This pool-evidence activation is why the table
+keys on "a ready provider presents attestation" rather than on a `require_*`/observe flag.
+(Note the resulting phase/attestation skew: `/internal/routing` phase is computed from
+config + model-hash evidence and does **not** fold in attestation evidence, so a
+default-config pool can surface `hardware_attestation: "all"` alongside phase `0`.)
 
 For `untrusted_provider_safety`, allowed values are:
 
@@ -3133,7 +3249,9 @@ Shipped severity:
   required-attestation exclusion. (The code does **not** emit a `MAJOR` level for these;
   the richer severity mapping below is a forward enhancement.)
 
-Shipped required fields (exactly these keys):
+Shipped T2.C-specific fields (the attestation event's own keys — the serialized log line
+also carries zerolog's envelope: `level`, `message` = `"tier2 attestation event"`, and the
+production logger's `time`):
 
 - `event` (e.g. `attestation_valid`, `attestation_failed`, `attestation_stale`,
   `attestation_replay`, `provider_binding_mismatch`, `attestation_unsupported`,
