@@ -54,6 +54,13 @@ for requirement in (
 ):
     if requirement not in build:
         raise SystemExit(f"reviewed Pearl build contract is missing: {requirement}")
+for requirement in (
+    'grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64"',
+    'grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64"',
+    'grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64"',
+):
+    if requirement not in build:
+        raise SystemExit(f"Pearl ELF verification is not alignment-safe: {requirement}")
 if "go build" in publish or publish.find("Setup Go for Pearl binaries") >= 0:
     raise SystemExit("Pearl compilation must remain in the unprivileged build job")
 restore = publish.split("- name: Restore captured unsigned inputs", 1)[1].split("\n      - name:", 1)[0]
