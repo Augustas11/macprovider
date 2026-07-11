@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEPLOY_SH="$SCRIPT_DIR/../deploy-pearl-vps.sh"
 RECOVER_SH="$SCRIPT_DIR/../coordinator-deploy-recover.sh"
 WATCHDOG_UNIT="$SCRIPT_DIR/../systemd/macprovider-coordinator-deploy-watchdog.service"
+CATALOG_RUNBOOK="$SCRIPT_DIR/../../../ops/runbooks/catalog-release-provider-upgrade.md"
+PEARL_RUNBOOK="$SCRIPT_DIR/../../../ops/runbooks/pearl-release-updater.md"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -98,6 +100,14 @@ commit_line=$(grep -nF 'touch /opt/macprovider/.coordinator-deploy-rollback/comm
 grep -q 'flock -n /opt/macprovider/.coordinator-deploy.lock' "$DEPLOY_SH" ||
   fail "deploy must hold a controller-lifetime remote lock"
 
+grep -q 'flock -n /run/lock/macprovider-pearl-updater.lock flock -n /opt/macprovider/.coordinator-deploy.lock' "$DEPLOY_SH" &&
+  grep -q 'unsafe global Pearl deployment lock' "$DEPLOY_SH" ||
+  fail "direct deploy and signed updater must share one validated global mutation lock"
+
+grep -q 'cmp -s \$DEPLOY_TMP/coordinator-linux-amd64 /opt/macprovider/coordinator' "$DEPLOY_SH" &&
+  ! grep -q 'install -o root -g macprovider -m 0750 \$DEPLOY_TMP/coordinator-linux-amd64 /opt/macprovider/coordinator' "$DEPLOY_SH" ||
+  fail "direct catalog deploy must not replace one half of the signed coordinator/gateway pair"
+
 grep -q 'O_NOFOLLOW' "$DEPLOY_SH" && grep -q 'info.st_nlink != 1' "$DEPLOY_SH" &&
   grep -q 'unsafe coordinator deploy lock' "$DEPLOY_SH" ||
   fail "deploy lock setup must reject symlinks, hardlinks, and unsafe ownership/modes"
@@ -114,9 +124,16 @@ grep -q 'CRITICAL: coordinator deploy rollback failed' "$DEPLOY_SH" ||
 grep -q 'systemctl start --no-block macprovider-coordinator-deploy-watchdog.service' "$DEPLOY_SH" ||
   fail "deploy must arm a remote watchdog that survives controller loss"
 
+[ "$(grep -c 'coordinator-deploy-recover --recover-under-global' "$DEPLOY_SH")" -eq 2 ] ||
+  fail "controller-held recovery must not recursively reacquire the global deploy lock"
+
 grep -q 'TimeoutStartSec=infinity' "$WATCHDOG_UNIT" &&
-  grep -q 'ExecStart=/usr/bin/flock /opt/macprovider/.coordinator-deploy.lock /usr/bin/flock /opt/macprovider/.coordinator-deploy-operation.lock' "$WATCHDOG_UNIT" ||
-  fail "remote watchdog must wait for both the deploy lease and in-flight operation barrier"
+  grep -q 'ExecStart=/opt/macprovider/coordinator-deploy-recover --recover' "$WATCHDOG_UNIT" &&
+  grep -q 'GLOBAL_LOCK_FILE=' "$RECOVER_SH" &&
+  grep -q '\$FLOCK 7' "$RECOVER_SH" &&
+  grep -q '\$FLOCK 9' "$RECOVER_SH" &&
+  grep -q '\$FLOCK 8' "$RECOVER_SH" ||
+  fail "remote watchdog recovery must own the global, deploy, and operation locks in order"
 
 grep -q 'flock -s 8' "$DEPLOY_SH" ||
   fail "live deploy mutations must hold the shared operation barrier"
@@ -129,14 +146,21 @@ holder_line=$(grep -nF 'DEPLOY_LOCK_PID=$!' "$DEPLOY_SH" | head -n1 | cut -d: -f
 grep -q 'kill -TERM.*DEPLOY_CONTROLLER_PID' "$DEPLOY_SH" ||
   fail "lock loss must fail-stop the controller"
 
+grep -q '\["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-d", "txt", "-F", "Dfin"\]' "$DEPLOY_SH" &&
+  grep -q 'text_device == binary_info.st_dev' "$DEPLOY_SH" &&
+  grep -q 'text_inode == binary_info.st_ino' "$DEPLOY_SH" &&
+  ! grep -q 'process_info = os.stat(process_path' "$DEPLOY_SH" ||
+  fail "canary executable proof must compare the running text vnode, not the replaced pathname"
+
 grep -q 'Requires=macprovider-coordinator-deploy-recovery.service' "$SCRIPT_DIR/../systemd/macprovider-coordinator-deploy-guard.conf" ||
   fail "coordinator startup must recover orphaned deploy transactions"
 
 grep -q 'ExecStart=/opt/macprovider/coordinator-deploy-recover --pre-start' "$SCRIPT_DIR/../systemd/macprovider-coordinator-deploy-recovery.service" ||
   fail "coordinator startup recovery must run as a separate root oneshot"
 
-grep -q 'OPERATION_LOCK_FILE=' "$RECOVER_SH" && grep -q '\$FLOCK 8' "$RECOVER_SH" ||
-  fail "pre-start recovery must wait for any in-flight deploy mutation"
+grep -q 'OPERATION_LOCK_FILE=' "$RECOVER_SH" && grep -q '\$FLOCK -n 7' "$RECOVER_SH" &&
+  grep -q '\$FLOCK -n 9' "$RECOVER_SH" && grep -q '\$FLOCK 8' "$RECOVER_SH" ||
+  fail "pre-start recovery must respect the global deploy lease and wait for in-flight mutation"
 
 grep -q 'current.bootstrap' "$DEPLOY_SH" ||
   fail "deploy must establish current on first rollout before a possible late abort"
@@ -153,8 +177,17 @@ grep -q 'CATALOG_CANARY_SSH_TARGET is required' "$DEPLOY_SH" ||
 grep -q 'StrictHostKeyChecking=yes' "$DEPLOY_SH" ||
   fail "trusted canary verification must check the SSH host key"
 
-grep -q '/v1/pool/check?provider_id=\$CATALOG_CANARY_PROVIDER_ID&details=deployment' "$DEPLOY_SH" ||
-  fail "deploy must gate completion on provider pool admission"
+! grep -q '/usr/bin/proc_pidpath' "$DEPLOY_SH" ||
+  fail "Mac canary proof must not depend on nonexistent /usr/bin/proc_pidpath"
+
+grep -q 'assigned_id=\$CANARY_ASSIGNED_QUERY&details=deployment' "$DEPLOY_SH" ||
+  fail "deploy must gate completion on the exact proved provider session"
+
+grep -q 'value.get("assigned_id") != sys.argv\[3\]' "$DEPLOY_SH" ||
+  fail "deploy must reject coordinator evidence for a different assigned session"
+
+grep -q 'local_status.get("network_state") != "buyer_serving"' "$DEPLOY_SH" ||
+  fail "deploy must prove the canary Mac reports buyer-serving network state"
 
 grep -q 'value.get("buyer_serving") is not True' "$DEPLOY_SH" ||
   fail "deploy canary must require explicit buyer-serving capacity"
@@ -165,14 +198,20 @@ grep -q 'value.get("catalog_evidence_source") != "provider_reported"' "$DEPLOY_S
 grep -q 'value.get("catalog_admission_mode") != "current"' "$DEPLOY_SH" ||
   fail "deploy canary must reject legacy and previous catalog admissions"
 
-grep -q 'value.get("catalog_candidate_sha256") != sys.argv\[5\]' "$DEPLOY_SH" ||
+grep -q 'value.get("catalog_candidate_sha256") != sys.argv\[6\]' "$DEPLOY_SH" ||
   fail "deploy canary must match the active candidate catalog digest"
+
+grep -q 'read -r CANARY_ASSIGNED_ID CANARY_CATALOG_ROW_IDENTITY' "$DEPLOY_SH" &&
+  grep -q 'catalog.get("policy_version") != expected_policy_version' "$DEPLOY_SH" &&
+  grep -q 'catalog.get("row_identity", "")' "$DEPLOY_SH" &&
+  grep -q 'canary local catalog proof is not bound to the coordinator-admitted envelope' "$DEPLOY_SH" ||
+  fail "deploy canary must cross-bind exact policy and row between coordinator and Mac proof"
 
 grep -q 'canary catalog byte mismatch' "$DEPLOY_SH" ||
   fail "deploy must compare exact installed canary catalog bytes before commit"
 
 grep -q 'canary provider identity mismatch' "$DEPLOY_SH" &&
-  grep -q 'live canary provider is not the verified installation binary' "$DEPLOY_SH" &&
+  grep -q 'live canary provider text vnode is stale or not the verified installation binary' "$DEPLOY_SH" &&
   grep -q 'live canary provider status does not match the expected identity and catalog' "$DEPLOY_SH" ||
   fail "exact-byte proof must bind the named provider, live process, and local catalog status"
 
@@ -184,5 +223,21 @@ grep -q '/v1/demand-rank' "$DEPLOY_SH" ||
 
 grep -q 'chmod o+x /opt/macprovider' "$DEPLOY_SH" &&
   fail "deploy must not chmod o+x /opt/macprovider for legacy nginx static feeds"
+
+grep -q 'KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh' "$CATALOG_RUNBOOK" &&
+  grep -q 'prior provider live' "$CATALOG_RUNBOOK" &&
+  grep -q 'MACPROVIDER_EMERGENCY_ROLLBACK=1' "$CATALOG_RUNBOOK" ||
+  fail "catalog runbook must prefetch without mutation and document bounded emergency rollback"
+
+grep -q 'PEARL_UPDATER_PROVIDER_ADMISSION_POLICY=bridge_required' "$PEARL_RUNBOOK" &&
+  grep -q 'PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT=' "$PEARL_RUNBOOK" &&
+  grep -q 'PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=' "$PEARL_RUNBOOK" &&
+  ! grep -q 'proc_pidpath' "$PEARL_RUNBOOK" ||
+  fail "Pearl rollout runbook must bind bridge capacity policy and valid Mac proof tooling"
+
+grep -q 'set -euo pipefail' "$CATALOG_RUNBOOK" &&
+  grep -q 'legacy_bridge is not zero' "$CATALOG_RUNBOOK" &&
+  grep -q 'test "$(wc -l <"$EVIDENCE")" -ge 31' "$CATALOG_RUNBOOK" ||
+  fail "catalog runbook must provide fail-fast continuous zero-bridge evidence"
 
 echo "PASS: deploy autotune feed access guards present"

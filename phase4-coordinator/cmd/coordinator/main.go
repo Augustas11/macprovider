@@ -471,12 +471,25 @@ func main() {
 		wsOpts = append(wsOpts, providerws.WithCredentialBootstrapMetrics(metricsHandle))
 	}
 	if autotuneCatalog != nil {
-		wsOpts = append(wsOpts, providerws.WithAutotuneCatalog(autotuneCatalog, autotuneCompatibleCatalogs...))
-		logger.Info().
+		bridgeDeadline, err := cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadlineTime()
+		if err != nil {
+			logger.Fatal().Err(err).Msg("parse provider catalog admission bridge deadline")
+		}
+		wsOpts = append(wsOpts,
+			providerws.WithAutotuneCatalog(autotuneCatalog, autotuneCompatibleCatalogs...),
+			providerws.WithAutotuneCatalogEnforcement(cfg.AutotuneFeeds.EnforceProviderAdmission, bridgeDeadline),
+		)
+		catalogLog := logger.Info().
 			Str("autotune_catalog_version", autotuneCatalog.Version).
 			Int("autotune_compatible_previous_releases", len(autotuneCompatibleCatalogs)).
 			Str("autotune_catalog_signer_key_id", autotuneCatalog.SignerKeyID).
-			Msg("provider catalog compatibility enabled")
+			Bool("autotune_provider_admission_enforced", cfg.AutotuneFeeds.EnforceProviderAdmission)
+		if !cfg.AutotuneFeeds.EnforceProviderAdmission {
+			catalogLog = catalogLog.
+				Time("autotune_provider_admission_bridge_deadline", bridgeDeadline).
+				Dur("autotune_provider_admission_bridge_remaining", time.Until(bridgeDeadline))
+		}
+		catalogLog.Msg("provider catalog compatibility enabled")
 	}
 	var onboardingStore *onboarding.PGStore
 	if cfg.Onboarding.AppTrackRegisterEnabled {

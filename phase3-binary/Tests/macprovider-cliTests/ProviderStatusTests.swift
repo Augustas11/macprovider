@@ -207,7 +207,8 @@ final class ProviderStatusTests: XCTestCase {
     func testCoordinatorReadinessURLUsesPublicReadinessEndpoint() throws {
         let url = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
             coordinatorURL: "wss://coordinator.streamvc.live/v1/ws/provider?ignored=true",
-            providerID: "provider a"
+            providerID: "provider a",
+            assignedID: "session-a"
         ))
         let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
 
@@ -216,18 +217,21 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(components.path, "/v1/pool/check")
         XCTAssertEqual(Dictionary(uniqueKeysWithValues: components.queryItems?.map { ($0.name, $0.value) } ?? []), [
             "provider_id": "provider a",
+            "assigned_id": "session-a",
             "details": "readiness",
         ])
         XCTAssertNil(CoordinatorReadinessClient.readinessURL(
             coordinatorURL: "http://coordinator.streamvc.live/v1/ws/provider",
-            providerID: "provider-a"
+            providerID: "provider-a",
+            assignedID: "session-a"
         ))
     }
 
     func testCoordinatorReadinessVerdictRejectsRedirectsAndNonAdmittedServingClaims() throws {
         let requestURL = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
             coordinatorURL: "wss://coordinator.streamvc.live/v1/ws/provider",
-            providerID: "provider-a"
+            providerID: "provider-a",
+            assignedID: "session-a"
         ))
         let response = try XCTUnwrap(HTTPURLResponse(
             url: requestURL,
@@ -243,25 +247,92 @@ final class ProviderStatusTests: XCTestCase {
         ))
         func body(mode: String, serving: Bool = true) -> Data {
             Data("""
-            {"provider_id":"provider-a","buyer_serving":\(serving),"catalog_admission_mode":"\(mode)","catalog_evidence_source":"provider_reported"}
+            {"provider_id":"provider-a","assigned_id":"session-a","buyer_serving":\(serving),"catalog_admission_mode":"\(mode)","catalog_evidence_source":"provider_reported"}
             """.utf8)
         }
 
         XCTAssertEqual(CoordinatorReadinessClient.verdict(
-            data: body(mode: "current"), response: response, requestURL: requestURL, providerID: "provider-a"
+            data: body(mode: "current"), response: response, requestURL: requestURL, providerID: "provider-a", assignedID: "session-a"
         ), true)
         XCTAssertEqual(CoordinatorReadinessClient.verdict(
-            data: body(mode: "previous"), response: response, requestURL: requestURL, providerID: "provider-a"
+            data: body(mode: "previous"), response: response, requestURL: requestURL, providerID: "provider-a", assignedID: "session-a"
         ), true)
         XCTAssertNil(CoordinatorReadinessClient.verdict(
-            data: body(mode: "legacy"), response: response, requestURL: requestURL, providerID: "provider-a"
+            data: body(mode: "legacy"), response: response, requestURL: requestURL, providerID: "provider-a", assignedID: "session-a"
         ))
         XCTAssertNil(CoordinatorReadinessClient.verdict(
-            data: body(mode: "current"), response: redirected, requestURL: requestURL, providerID: "provider-a"
+            data: body(mode: "current"), response: redirected, requestURL: requestURL, providerID: "provider-a", assignedID: "session-a"
         ))
         XCTAssertEqual(CoordinatorReadinessClient.verdict(
-            data: body(mode: "legacy", serving: false), response: response, requestURL: requestURL, providerID: "provider-a"
+            data: body(mode: "legacy", serving: false), response: response, requestURL: requestURL, providerID: "provider-a", assignedID: "session-a"
         ), false)
+    }
+
+    func testCoordinatorReadinessVerdictRequiresExactCatalogEnvelopeForUpdateCommit() throws {
+        let requestURL = try XCTUnwrap(CoordinatorReadinessClient.readinessURL(
+            coordinatorURL: "wss://coordinator.streamvc.live/v1/ws/provider",
+            providerID: "provider-a",
+            assignedID: "assigned-a"
+        ))
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: requestURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        let expected = CoordinatorReadinessClient.ExpectedCatalogEnvelope(
+            releaseID: "release-a",
+            policyVersion: "policy-a",
+            candidateSHA256: String(repeating: "a", count: 64),
+            signerKeyID: "operator-2026-01",
+            rowIdentity: String(repeating: "b", count: 64)
+        )
+        func body(overrides: [String: Any] = [:]) throws -> Data {
+            var object: [String: Any] = [
+                "provider_id": "provider-a",
+                "assigned_id": "assigned-a",
+                "buyer_serving": true,
+                "catalog_admission_mode": "current",
+                "catalog_evidence_source": "provider_reported",
+                "catalog_release_id": "release-a",
+                "catalog_policy_version": "policy-a",
+                "catalog_candidate_sha256": String(repeating: "a", count: 64),
+                "catalog_signer_key_id": "operator-2026-01",
+                "catalog_row_identity": String(repeating: "b", count: 64),
+            ]
+            for (key, value) in overrides { object[key] = value }
+            return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        }
+
+        XCTAssertEqual(CoordinatorReadinessClient.verdict(
+            data: try body(), response: response, requestURL: requestURL, providerID: "provider-a", assignedID: "assigned-a", expected: expected
+        ), true)
+        for mismatch in [
+            ["provider_id": "configured-alias"],
+            ["assigned_id": "assigned-b"],
+            ["catalog_release_id": "release-b"],
+            ["catalog_policy_version": "policy-b"],
+            ["catalog_candidate_sha256": String(repeating: "c", count: 64)],
+            ["catalog_signer_key_id": "operator-other"],
+            ["catalog_row_identity": String(repeating: "d", count: 64)],
+        ] {
+            XCTAssertNil(CoordinatorReadinessClient.verdict(
+                data: try body(overrides: mismatch),
+                response: response,
+                requestURL: requestURL,
+                providerID: "provider-a",
+                assignedID: "assigned-a",
+                expected: expected
+            ))
+        }
+        XCTAssertEqual(CoordinatorReadinessClient.verdict(
+            data: try body(overrides: ["catalog_admission_mode": "previous"]),
+            response: response,
+            requestURL: requestURL,
+            providerID: "provider-a",
+            assignedID: "assigned-a",
+            expected: expected
+        ), true)
     }
 
     func testCoordinatorReadinessRetryUsesProviderScopedJitterAndRetryAfter() {

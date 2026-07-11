@@ -175,12 +175,9 @@ final class AutoUpdateTests: XCTestCase {
         try store.writePending(marker)
 
         XCTAssertFalse(store.updateLockIsLive())
-        do {
-            let lock = try store.acquireLock()
-            XCTAssertTrue(store.updateLockIsLive())
-            withExtendedLifetime(lock) {}
+        XCTAssertThrowsError(try store.acquireLock()) { error in
+            XCTAssertEqual(error as? AutoUpdateMarkerError, .transactionPending)
         }
-        XCTAssertFalse(store.updateLockIsLive())
 
         try store.completeSuccessfulUpdate(marker)
 
@@ -195,6 +192,132 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.lockURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.successSentinelPath(binaryURL: binary, updateID: marker.updateID).path))
+    }
+
+    func testProviderMutationOuterLockSerializesSwiftMutators() throws {
+        let fixture = try TempHome()
+        let first = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let second = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let lock = try first.acquireLock()
+
+        XCTAssertTrue(second.updateLockIsLive())
+        XCTAssertThrowsError(try second.acquireLock()) { error in
+            XCTAssertEqual(error as? AutoUpdateMarkerError, .lockContended)
+        }
+        withExtendedLifetime(lock) {}
+    }
+
+    func testProviderMutationLocksAreNormalizedToExactPrivateMode() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let lock = try store.acquireLock()
+
+        for path in [store.installerLockURL.path, store.lockURL.path] {
+            var info = stat()
+            XCTAssertEqual(lstat(path, &info), 0)
+            XCTAssertEqual(info.st_mode & 0o777, 0o600)
+            XCTAssertEqual(info.st_nlink, 1)
+        }
+        withExtendedLifetime(lock) {}
+    }
+
+    func testInnerProviderMutationLockRejectsHardlinkFIFOAndReadableMode() throws {
+        enum UnsafeLockKind: String, CaseIterable {
+            case hardlink
+            case fifo
+            case readable
+        }
+
+        for kind in UnsafeLockKind.allCases {
+            let fixture = try TempHome()
+            let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+            var initial: AutoUpdateLock? = try store.acquireLock()
+            initial = nil
+            try FileManager.default.removeItem(at: store.lockURL)
+
+            switch kind {
+            case .hardlink:
+                let source = store.root.appendingPathComponent("lock-source")
+                try Data().write(to: source)
+                XCTAssertEqual(link(source.path, store.lockURL.path), 0)
+            case .fifo:
+                XCTAssertEqual(mkfifo(store.lockURL.path, 0o600), 0)
+            case .readable:
+                try Data().write(to: store.lockURL)
+                XCTAssertEqual(chmod(store.lockURL.path, 0o644), 0)
+            }
+
+            XCTAssertTrue(store.updateLockIsLive(), "\(kind.rawValue) lock must fail closed")
+            XCTAssertThrowsError(try store.acquireLock(), "\(kind.rawValue) lock must be rejected") { error in
+                XCTAssertEqual(
+                    error as? AutoUpdateMarkerError,
+                    .trustedRootInvalid("provider_mutation_inner_lock_invalid")
+                )
+            }
+        }
+    }
+
+    func testOuterProviderMutationLockRejectsReadableMode() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        var initial: AutoUpdateLock? = try store.acquireLock()
+        initial = nil
+        XCTAssertEqual(chmod(store.installerLockURL.path, 0o644), 0)
+
+        XCTAssertThrowsError(try store.acquireLock()) { error in
+            XCTAssertEqual(
+                error as? AutoUpdateMarkerError,
+                .trustedRootInvalid("provider_mutation_outer_lock_invalid")
+            )
+        }
+    }
+
+    func testRecoveryCommitHoldsStableOuterAndInnerLockDomain() throws {
+        let fixture = try TempHome()
+        let first = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let second = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, _, backup) = try makePendingMarkerFixture(
+            store: first,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+        var before = stat()
+        XCTAssertEqual(lstat(first.lockURL.path, &before), 0)
+
+        var held: AutoUpdateLock? = try first.acquireRecoveryLock()
+        XCTAssertThrowsError(try second.acquireRecoveryLock()) { error in
+            XCTAssertEqual(error as? AutoUpdateMarkerError, .lockContended)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: first.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+
+        held = nil
+        let committer = try second.acquireRecoveryLock()
+        let current = try XCTUnwrap(second.readPending())
+        XCTAssertEqual(current, marker)
+        try second.completeSuccessfulUpdate(current)
+        try second.finalizeSuccessfulUpdate(current)
+        withExtendedLifetime(committer) {}
+
+        var after = stat()
+        XCTAssertEqual(lstat(first.lockURL.path, &after), 0)
+        XCTAssertEqual(before.st_ino, after.st_ino)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+    }
+
+    func testLiveInstallerOwnerFencesMutationAndRecoveryAfterHelperSIGKILL() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(
+            homeDirectory: fixture.url,
+            installerOwnerLiveOverride: { true }
+        )
+
+        XCTAssertTrue(store.updateLockIsLive())
+        XCTAssertThrowsError(try store.acquireLock()) { error in
+            XCTAssertEqual(error as? AutoUpdateMarkerError, .lockContended)
+        }
     }
 
     func testOrphanPendingMarkerWithValidBackupRestoresBeforeCleanup() throws {

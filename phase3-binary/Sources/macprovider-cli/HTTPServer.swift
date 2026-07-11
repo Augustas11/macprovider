@@ -248,11 +248,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let coordinatorURL = coordinatorURL
         let catalogStatus = catalogStatus
         Task.detached { @Sendable [providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus] in
+            let snapshot = await providerStatus.snapshot()
             async let coordinatorBuyerServing = CoordinatorReadinessClient.fetch(
                 coordinatorURL: coordinatorURL,
-                providerID: providerID
+                providerID: providerID,
+                assignedID: snapshot.coordinatorAssignedID
             )
-            let snapshot = await providerStatus.snapshot()
             let runtimeSnapshot = warmSwapEnabled ? await modelRuntime.currentSnapshot() : nil
             let telemetryMatchesRuntime = runtimeSnapshot.map { $0.specDecodeGeneration == snapshot.specDecodeGeneration } ?? true
             let telemetryRuntimeEligible = runtimeSnapshot.map { $0.state == .ready && $0.hasTargetCompatibleDraft } ?? true

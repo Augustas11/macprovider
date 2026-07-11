@@ -333,7 +333,9 @@ type ReceiptPubkeyPrevious struct {
 // that. Buyer routing (chat completions, hard-pin) calls RoutingEligible()
 // alongside tier2ProviderExcludedStatus to enforce hash policy. Catalog-aware
 // deployments also keep metadata-free legacy bridge sessions operator-visible
-// while excluding them from buyer routing. Catalog and health surfaces
+// and temporarily routable only during the explicitly bounded migration
+// window. Once strict admission is enabled or that deadline expires, those
+// sessions become legacy and are excluded here. Catalog and health surfaces
 // separately exclude pending receipt-key publication while preserving ready
 // providers that are temporarily out of free slots.
 func (p Provider) RoutingEligible() bool {
@@ -349,11 +351,13 @@ func (p Provider) RoutingEligible() bool {
 	return p.State == StateReady && p.SlotsFree > 0
 }
 
-// CapacityEligible reports whether a provider may be counted on serving and
-// capacity surfaces. It deliberately omits SlotsFree so busy providers still
-// count as online capacity while tokenless, duplicate, and receipt-key-rotation
-// sessions stay visible but not advertised as usable serving capacity.
-func (p Provider) CapacityEligible() bool {
+// ServingCapable reports whether an admitted provider is still part of the
+// network's buyer-serving capacity. Unlike RoutingEligible it deliberately
+// ignores transient free-slot availability: a busy provider remains serving
+// capable while finishing buyer work, but cannot receive another route until
+// a slot becomes free. Trust, catalog admission, rotation, health, Tier-2, and
+// quota gates still apply at their respective call sites.
+func (p Provider) ServingCapable() bool {
 	if p.AuthState == AuthBearerlessDuplicate || p.AuthState == AuthSelfMinted {
 		return false
 	}
@@ -364,6 +368,13 @@ func (p Provider) CapacityEligible() bool {
 		return false
 	}
 	return p.State == StateReady || p.State == StateBusy
+}
+
+// CapacityEligible is retained for existing capacity/statistics call sites.
+// New buyer-serving verdicts should use ServingCapable so they do not imply
+// that a currently busy provider is immediately RoutingEligible.
+func (p Provider) CapacityEligible() bool {
+	return p.ServingCapable()
 }
 
 func (p Provider) IsWSTunneled() bool {
@@ -993,6 +1004,22 @@ func (r *Registry) UpdateHashStatuses(statusFor func(Provider) HashStatus) int {
 			updated++
 		}
 		p.HashStatus = next
+	}
+	return updated
+}
+
+// ExpireLegacyBridgeAdmissions atomically removes every metadata-free bridge
+// session from buyer routing/capacity without disconnecting it from operator
+// visibility. The WS server calls this at the configured absolute deadline.
+func (r *Registry) ExpireLegacyBridgeAdmissions() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	updated := 0
+	for _, p := range r.providers {
+		if p.CatalogAdmissionMode == "legacy_bridge" {
+			p.CatalogAdmissionMode = "legacy"
+			updated++
+		}
 	}
 	return updated
 }

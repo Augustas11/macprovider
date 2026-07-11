@@ -75,6 +75,7 @@ struct AutoUpdatePendingMarker: Codable, Equatable {
 enum AutoUpdateMarkerError: Error, CustomStringConvertible, Equatable {
     case trustedRootInvalid(String)
     case lockContended
+    case transactionPending
     case openFailed(String, Int32)
     case writeFailed(String, Int32)
     case invalidMarker
@@ -83,7 +84,8 @@ enum AutoUpdateMarkerError: Error, CustomStringConvertible, Equatable {
     var description: String {
         switch self {
         case let .trustedRootInvalid(reason): return "trusted autoupdate root invalid: \(reason)"
-        case .lockContended: return "autoupdate lock is held by another process"
+        case .lockContended: return "provider mutation lock is held by another process"
+        case .transactionPending: return "a provider mutation transaction is still pending recovery or admission"
         case let .openFailed(path, errnoValue): return "open failed for \(path): errno \(errnoValue)"
         case let .writeFailed(path, errnoValue): return "write failed for \(path): errno \(errnoValue)"
         case .invalidMarker: return "pending marker is invalid"
@@ -133,16 +135,20 @@ enum AutoUpdateOrphanRecoveryOutcome: Equatable {
 
 final class AutoUpdateLock: @unchecked Sendable {
     let fd: Int32
+    let outerFD: Int32
     let path: URL
 
-    init(fd: Int32, path: URL) {
+    init(fd: Int32, outerFD: Int32, path: URL) {
         self.fd = fd
+        self.outerFD = outerFD
         self.path = path
     }
 
     deinit {
         flock(fd, LOCK_UN)
         close(fd)
+        flock(outerFD, LOCK_UN)
+        close(outerFD)
     }
 }
 
@@ -151,13 +157,16 @@ final class AutoUpdateLock: @unchecked Sendable {
 struct AutoUpdateMarkerStore: @unchecked Sendable {
     let homeDirectory: URL
     let fileManager: FileManager
+    private let installerOwnerLiveOverride: (@Sendable () -> Bool)?
 
     init(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        installerOwnerLiveOverride: (@Sendable () -> Bool)? = nil
     ) {
         self.homeDirectory = homeDirectory
         self.fileManager = fileManager
+        self.installerOwnerLiveOverride = installerOwnerLiveOverride
     }
 
     var root: URL {
@@ -170,6 +179,10 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
 
     var lockURL: URL {
         root.appendingPathComponent("update.lock")
+    }
+
+    var installerLockURL: URL {
+        homeDirectory.appendingPathComponent(".config/macprovider/install.lock")
     }
 
     var cooldownURL: URL {
@@ -189,32 +202,193 @@ struct AutoUpdateMarkerStore: @unchecked Sendable {
     }
 
     func acquireLock() throws -> AutoUpdateLock {
+        try acquireLock(allowPending: false)
+    }
+
+    /// Recovery and authoritative commit must serialize with installers,
+    /// updater activation, and the independent watchdog while an existing
+    /// pending marker remains armed.
+    func acquireRecoveryLock() throws -> AutoUpdateLock {
+        try acquireLock(allowPending: true)
+    }
+
+    private func acquireLock(allowPending: Bool) throws -> AutoUpdateLock {
         try ensureTrustedRoot()
+        try ensureTrustedDirectory(homeDirectory.appendingPathComponent(".config", isDirectory: true))
+        try ensureTrustedDirectory(homeDirectory.appendingPathComponent(".config/macprovider", isDirectory: true))
+        let outerFD = open(installerLockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard outerFD >= 0 else {
+            throw AutoUpdateMarkerError.openFailed(installerLockURL.path, errno)
+        }
+        var outerInfo = stat()
+        guard fstat(outerFD, &outerInfo) == 0,
+              (outerInfo.st_mode & S_IFMT) == S_IFREG,
+              outerInfo.st_uid == getuid(),
+              outerInfo.st_nlink == 1,
+              outerInfo.st_mode & (S_IRWXG | S_IRWXO) == 0
+        else {
+            close(outerFD)
+            throw AutoUpdateMarkerError.trustedRootInvalid("provider_mutation_outer_lock_invalid")
+        }
+        guard fchmod(outerFD, S_IRUSR | S_IWUSR) == 0 else {
+            close(outerFD)
+            throw AutoUpdateMarkerError.trustedRootInvalid("provider_mutation_outer_lock_mode_invalid")
+        }
+        guard flock(outerFD, LOCK_EX | LOCK_NB) == 0 else {
+            let errnoValue = errno
+            close(outerFD)
+            if errnoValue == EWOULDBLOCK {
+                throw AutoUpdateMarkerError.lockContended
+            }
+            throw AutoUpdateMarkerError.openFailed(installerLockURL.path, errnoValue)
+        }
+        guard !installerOwnerIsLive() else {
+            flock(outerFD, LOCK_UN)
+            close(outerFD)
+            throw AutoUpdateMarkerError.lockContended
+        }
         let fd = open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
         guard fd >= 0 else {
+            flock(outerFD, LOCK_UN)
+            close(outerFD)
             throw AutoUpdateMarkerError.openFailed(lockURL.path, errno)
+        }
+        var innerInfo = stat()
+        guard fstat(fd, &innerInfo) == 0,
+              (innerInfo.st_mode & S_IFMT) == S_IFREG,
+              innerInfo.st_uid == getuid(),
+              innerInfo.st_nlink == 1,
+              innerInfo.st_mode & (S_IRWXG | S_IRWXO) == 0
+        else {
+            close(fd)
+            flock(outerFD, LOCK_UN)
+            close(outerFD)
+            throw AutoUpdateMarkerError.trustedRootInvalid("provider_mutation_inner_lock_invalid")
+        }
+        guard fchmod(fd, S_IRUSR | S_IWUSR) == 0 else {
+            close(fd)
+            flock(outerFD, LOCK_UN)
+            close(outerFD)
+            throw AutoUpdateMarkerError.trustedRootInvalid("provider_mutation_inner_lock_mode_invalid")
         }
         if flock(fd, LOCK_EX | LOCK_NB) != 0 {
             let errnoValue = errno
             close(fd)
+            flock(outerFD, LOCK_UN)
+            close(outerFD)
             if errnoValue == EWOULDBLOCK {
                 throw AutoUpdateMarkerError.lockContended
             }
             throw AutoUpdateMarkerError.openFailed(lockURL.path, errnoValue)
         }
-        fchmod(fd, S_IRUSR | S_IWUSR)
-        return AutoUpdateLock(fd: fd, path: lockURL)
+        guard !installerOwnerIsLive() else {
+            flock(fd, LOCK_UN)
+            close(fd)
+            flock(outerFD, LOCK_UN)
+            close(outerFD)
+            throw AutoUpdateMarkerError.lockContended
+        }
+        if !allowPending, fileManager.fileExists(atPath: pendingURL.path) {
+            flock(fd, LOCK_UN)
+            close(fd)
+            flock(outerFD, LOCK_UN)
+            close(outerFD)
+            throw AutoUpdateMarkerError.transactionPending
+        }
+        return AutoUpdateLock(fd: fd, outerFD: outerFD, path: lockURL)
     }
 
     func updateLockIsLive() -> Bool {
+        if installerOwnerIsLive() {
+            return true
+        }
         let fd = open(lockURL.path, O_RDWR | O_NOFOLLOW)
         guard fd >= 0 else { return false }
         defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(),
+              info.st_nlink == 1,
+              info.st_mode & (S_IRWXG | S_IRWXO) == 0
+        else {
+            return true
+        }
         if flock(fd, LOCK_EX | LOCK_NB) == 0 {
             _ = flock(fd, LOCK_UN)
             return false
         }
         return errno == EWOULDBLOCK
+    }
+
+    /// The shell installer holds the same kernel lock as Swift mutators. Its
+    /// durable owner record is an additional fence for the narrow case where
+    /// the helper holding `update.lock` is SIGKILLed while the installer shell
+    /// remains alive. Refuse mutation/recovery until that exact owner identity
+    /// disappears so a killed helper cannot create an overlapping writer.
+    private func installerOwnerIsLive() -> Bool {
+        if let installerOwnerLiveOverride {
+            return installerOwnerLiveOverride()
+        }
+        let fd = open(installerLockURL.path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(),
+              info.st_nlink == 1,
+              info.st_mode & (S_IWGRP | S_IWOTH) == 0,
+              info.st_size > 0,
+              info.st_size <= 4096
+        else {
+            return false
+        }
+        let data = FileHandle(fileDescriptor: fd, closeOnDealloc: false).readDataToEndOfFile()
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pidNumber = object["pid"] as? NSNumber,
+              let recordedStart = object["process_start"] as? String,
+              !recordedStart.isEmpty,
+              let recordedBoot = object["boot_session"] as? String,
+              !recordedBoot.isEmpty,
+              currentBootSession() == recordedBoot
+        else {
+            return false
+        }
+        return processStart(pid: pid_t(pidNumber.int32Value)) == recordedStart
+    }
+
+    private func currentBootSession() -> String? {
+        var size = 0
+        guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 1 else {
+            return nil
+        }
+        var bytes = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.bootsessionuuid", &bytes, &size, nil, 0) == 0 else {
+            return nil
+        }
+        return String(cString: bytes).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func processStart(pid: pid_t) -> String? {
+        guard pid > 0 else { return nil }
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-p", String(pid), "-o", "lstart="]
+        process.standardOutput = output
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let value = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 
     func rollbackBackupPath(binaryURL: URL, updateID: String) -> URL {

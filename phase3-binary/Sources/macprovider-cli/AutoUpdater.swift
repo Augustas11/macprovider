@@ -179,6 +179,8 @@ struct AutoUpdater: Sendable {
             }
             await record(updateID: updateID, target: target, phase: .restart, outcome: .inProgress, reason: "launchctl_restart_invoked", attempt: 1)
         } catch AutoUpdateMarkerError.lockContended {
+            await fail(updateID: updateID, target: target, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "provider_mutation_in_progress")
+        } catch AutoUpdateMarkerError.transactionPending {
             await fail(updateID: updateID, target: target, phase: .eligibility, failure: .autoupdateAlreadyPending, reason: "autoupdate_already_pending")
         } catch AutoUpdateError.trustStateLost(let reason) {
             if let marker = commitTracker.marker ?? (try? markerStore.readPending()) {

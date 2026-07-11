@@ -102,6 +102,32 @@ if metadata_position < 0 or provenance_position < 0 or metadata_position > prove
     raise SystemExit("signed Pearl metadata must enter the release set before provenance")
 if "ops/pearl-updater/release-signing-public.pem" not in prepare:
     raise SystemExit("Pearl metadata signature is not checked against the updater trust anchor")
+for asset in (
+    "release.json",
+    "trusted-keys.json",
+    "autotune-candidates.json",
+    "autotune-candidates.json.sig",
+    "demand-rank.json",
+    "demand-rank.json.sig",
+):
+    if asset not in prepare:
+        raise SystemExit(f"signed Pearl transaction omits catalog asset: {asset}")
+if '"catalog": {' not in prepare or '"files": catalog_files' not in prepare:
+    raise SystemExit("signed Pearl metadata does not bind catalog identity and file digests")
+if 'provider_admission_policy:' not in text:
+    raise SystemExit("release workflow omits the provider admission policy input")
+for requirement in (
+    'PROVIDER_ADMISSION_POLICY_INPUT:',
+    'rollout_mode == "bridge_required"',
+    'rollout_mode == "strict_post_migration"',
+    '"enforce_provider_admission": False',
+    '"enforce_provider_admission": True',
+    '"bridge_duration_s": 86400',
+    '"bridge_duration_s": 0',
+    '"provider_admission_rollout": rollout',
+):
+    if requirement not in prepare:
+        raise SystemExit(f"signed Pearl metadata omits rollout policy: {requirement}")
 lines = text.splitlines()
 for index, line in enumerate(lines):
     match = re.match(r"^(\s*)run:\s*\|", line)

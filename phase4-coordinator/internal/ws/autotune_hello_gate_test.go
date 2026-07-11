@@ -1154,6 +1154,121 @@ func TestAutotuneCatalogAdmissionWorksWithDefaultDisabledEvidenceGate(t *testing
 	}
 }
 
+func TestAutotuneCatalogAdmissionLegacyBridgeIsExplicitlyEnforced(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	tests := []struct {
+		name             string
+		enforced         bool
+		bridgeDeadline   time.Time
+		wantMode         string
+		wantBuyerServing bool
+	}{
+		{
+			name:             "bridge permits metadata-free provider during rollout",
+			bridgeDeadline:   time.Now().Add(time.Hour),
+			wantMode:         "legacy_bridge",
+			wantBuyerServing: true,
+		},
+		{
+			name:           "expired bridge excludes metadata-free provider",
+			bridgeDeadline: time.Now().Add(-time.Minute),
+			wantMode:       "legacy",
+		},
+		{
+			name:     "strict enforcement excludes metadata-free provider",
+			enforced: true,
+			wantMode: "legacy",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+				providerws.WithAutotuneCatalog(catalog),
+				providerws.WithAutotuneCatalogEnforcement(tt.enforced, tt.bridgeDeadline),
+			}, func(*config.Config) {})
+			defer h.HTTP.Close()
+
+			conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.Close()
+			if err := wsutil.WriteClientText(conn, mustJSON(validHello("m4-anon"))); err != nil {
+				t.Fatalf("write hello: %v", err)
+			}
+			payload, _, err := wsutil.ReadServerData(conn)
+			if err != nil {
+				t.Fatalf("read ack: %v", err)
+			}
+			var ack map[string]any
+			if err := json.Unmarshal(payload, &ack); err != nil {
+				t.Fatalf("ack json: %v", err)
+			}
+			provider, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string))
+			if !ok {
+				t.Fatal("metadata-free provider not registered")
+			}
+			if provider.CatalogAdmissionMode != tt.wantMode {
+				t.Fatalf("CatalogAdmissionMode = %q, want %q", provider.CatalogAdmissionMode, tt.wantMode)
+			}
+			if got := provider.ServingCapable(); got != tt.wantBuyerServing {
+				t.Fatalf("ServingCapable() = %v, want %v", got, tt.wantBuyerServing)
+			}
+			if got := provider.RoutingEligible(); got != tt.wantBuyerServing {
+				t.Fatalf("RoutingEligible() = %v, want %v", got, tt.wantBuyerServing)
+			}
+		})
+	}
+}
+
+func TestAutotuneCatalogAdmissionDeadlineExpiresConnectedBridgeSession(t *testing.T) {
+	catalog := mustAutotuneCatalog(t)
+	deadline := time.Now().Add(time.Second)
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithAutotuneCatalog(catalog),
+		providerws.WithAutotuneCatalogEnforcement(false, deadline),
+	}, func(*config.Config) {})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("bridge-expiry"))); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	var ack map[string]any
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	assignedID, _ := ack["assigned_id"].(string)
+	provider, ok := h.Registry.Resolve("bridge-expiry", assignedID)
+	if !ok || provider.CatalogAdmissionMode != "legacy_bridge" {
+		t.Fatalf("initial bridge provider = (%v, %q), want registered legacy_bridge", ok, provider.CatalogAdmissionMode)
+	}
+
+	testDeadline := time.Now().Add(3 * time.Second)
+	for {
+		provider, ok = h.Registry.Resolve("bridge-expiry", assignedID)
+		if ok && provider.CatalogAdmissionMode == "legacy" {
+			break
+		}
+		if time.Now().After(testDeadline) {
+			t.Fatalf("connected bridge session did not expire: provider=(%v, %q)", ok, provider.CatalogAdmissionMode)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if provider.RoutingEligible() || provider.ServingCapable() {
+		t.Fatal("deadline-expired connected session must lose buyer routing and serving capacity")
+	}
+}
+
 func TestAutotuneCatalogAdmissionAcceptsRecognizedPreviousReleaseWithStableRow(t *testing.T) {
 	current := mustAutotuneCatalog(t)
 	previous, err := autotune.ParseCatalog(bytes.Replace(current.RawJSON, []byte(`"version":"test"`), []byte(`"version":"previous"`), 1))

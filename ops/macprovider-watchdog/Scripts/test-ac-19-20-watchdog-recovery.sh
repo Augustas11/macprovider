@@ -111,6 +111,7 @@ run_watchdog_tick_with_health() {
 }
 
 write_fixture $'old-version\n' $'new-version\n'
+LOCK_INODE_BEFORE="$(ls -di "$STATE_ROOT/update.lock" | awk '{print $1}')"
 run_watchdog_tick
 
 TARGET="$BIN_DIR/macprovider-cli"
@@ -119,8 +120,12 @@ if [ "$(cat "$TARGET")" != $'old-version' ]; then
   echo "AC-19 FAIL: valid backup was not restored" >&2
   exit 1
 fi
-if [ -e "$STATE_ROOT/pending.json" ] || [ -e "$BACKUP" ] || [ -e "$STATE_ROOT/update.lock" ]; then
-  echo "AC-19 FAIL: restored marker/backup/lock were not cleaned up" >&2
+if [ -e "$STATE_ROOT/pending.json" ] || [ -e "$BACKUP" ] || [ ! -e "$STATE_ROOT/update.lock" ]; then
+  echo "AC-19 FAIL: restored marker/backup cleanup or stable lock retention failed" >&2
+  exit 1
+fi
+if [ "$(ls -di "$STATE_ROOT/update.lock" | awk '{print $1}')" != "$LOCK_INODE_BEFORE" ]; then
+  echo "AC-19 FAIL: recovery split the stable update.lock inode" >&2
   exit 1
 fi
 

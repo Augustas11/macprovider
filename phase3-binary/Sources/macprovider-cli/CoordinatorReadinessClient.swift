@@ -4,10 +4,24 @@ import Foundation
 /// proves transport, while this endpoint applies the coordinator's full pool,
 /// catalog, capacity, and routing eligibility checks.
 enum CoordinatorReadinessClient {
-    static func readinessURL(coordinatorURL: String?, providerID: String?) -> URL? {
+    struct ExpectedCatalogEnvelope: Equatable, Sendable {
+        let releaseID: String
+        let policyVersion: String
+        let candidateSHA256: String
+        let signerKeyID: String
+        let rowIdentity: String
+    }
+
+    static func readinessURL(
+        coordinatorURL: String?,
+        providerID: String?,
+        assignedID: String?
+    ) -> URL? {
         guard let coordinatorURL,
               let providerID = providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
               !providerID.isEmpty,
+              let assignedID = assignedID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !assignedID.isEmpty,
               var components = URLComponents(string: coordinatorURL),
               components.user == nil,
               components.password == nil,
@@ -27,6 +41,7 @@ enum CoordinatorReadinessClient {
         components.path = "/v1/pool/check"
         components.queryItems = [
             URLQueryItem(name: "provider_id", value: providerID),
+            URLQueryItem(name: "assigned_id", value: assignedID),
             URLQueryItem(name: "details", value: "readiness"),
         ]
         components.fragment = nil
@@ -36,11 +51,18 @@ enum CoordinatorReadinessClient {
     static func fetch(
         coordinatorURL: String?,
         providerID: String?,
+        assignedID: String?,
+        expected: ExpectedCatalogEnvelope? = nil,
         timeout: TimeInterval = 2,
         session: URLSession = .shared
     ) async -> Bool? {
         guard let providerID = providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let url = readinessURL(coordinatorURL: coordinatorURL, providerID: providerID)
+              let assignedID = assignedID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let url = readinessURL(
+                  coordinatorURL: coordinatorURL,
+                  providerID: providerID,
+                  assignedID: assignedID
+              )
         else {
             return nil
         }
@@ -61,7 +83,14 @@ enum CoordinatorReadinessClient {
                     ))
                     continue
                 }
-                return verdict(data: data, response: response, requestURL: url, providerID: providerID)
+                return verdict(
+                    data: data,
+                    response: response,
+                    requestURL: url,
+                    providerID: providerID,
+                    assignedID: assignedID,
+                    expected: expected
+                )
             } catch {
                 return nil
             }
@@ -84,7 +113,9 @@ enum CoordinatorReadinessClient {
         data: Data,
         response: URLResponse,
         requestURL: URL,
-        providerID: String
+        providerID: String,
+        assignedID: String,
+        expected: ExpectedCatalogEnvelope? = nil
     ) -> Bool? {
         guard let http = response as? HTTPURLResponse,
               // URLSession follows redirects by default. Only the exact
@@ -97,6 +128,7 @@ enum CoordinatorReadinessClient {
         guard (200 ..< 300).contains(http.statusCode),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               object["provider_id"] as? String == providerID,
+              object["assigned_id"] as? String == assignedID,
               object["catalog_evidence_source"] as? String == "provider_reported",
               let buyerServing = object["buyer_serving"] as? Bool
         else {
@@ -108,6 +140,28 @@ enum CoordinatorReadinessClient {
         else {
             return nil
         }
+        if let expected {
+            guard object["catalog_release_id"] as? String == expected.releaseID,
+                  object["catalog_policy_version"] as? String == expected.policyVersion,
+                  normalizedDigest(object["catalog_candidate_sha256"] as? String) == normalizedDigest(expected.candidateSHA256),
+                  object["catalog_signer_key_id"] as? String == expected.signerKeyID,
+                  normalizedDigest(object["catalog_row_identity"] as? String) == normalizedDigest(expected.rowIdentity)
+            else {
+                return nil
+            }
+        }
         return true
+    }
+
+    private static func normalizedDigest(_ raw: String?) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              value.count == 64,
+              value.utf8.allSatisfy({ byte in
+                  (byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)
+              })
+        else {
+            return nil
+        }
+        return value
     }
 }

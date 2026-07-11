@@ -55,6 +55,7 @@ local = {
     "provider_id": "provider-test",
     "model": row["model_id"],
     "network_state": "buyer_serving",
+    "coordinator": {"connected": True, "session": "session-test"},
     "catalog": {
         "catalog_key": key,
         "release_id": release["release_id"],
@@ -66,6 +67,7 @@ local = {
 }
 coordinator = {
     "provider_id": "provider-test",
+    "assigned_id": "session-test",
     "state": "ready",
     "buyer_serving": True,
     "catalog_evidence_source": "provider_reported",
@@ -86,7 +88,12 @@ url="${*: -1}"
 printf '%s\n' "$url" >> "$CURL_LOG"
 case "$url" in
   http://127.0.0.1:*) cat "$LOCAL_RESPONSE" ;;
-  *) cat "$COORDINATOR_RESPONSE" ;;
+  *)
+    case "$url" in
+      *'provider_id=provider-test&assigned_id=session-test&details=readiness'*) cat "$COORDINATOR_RESPONSE" ;;
+      *) exit 22 ;;
+    esac
+    ;;
 esac
 EOF
 cat > "$TMP/bin/date" <<'EOF'
@@ -103,10 +110,13 @@ chmod +x "$TMP/bin/"*
 
 run_wait() {
   coordinator_response="$1"
+  local_response="${2:-$TMP/local.json}"
+  emergency_rollback="${3:-0}"
   : > "$TMP/date-state"
   printf '100\n' > "$TMP/date-state"
   PATH="$TMP/bin:/usr/bin:/bin" DATE_STATE="$TMP/date-state" CURL_LOG="$TMP/curl.log" \
-    LOCAL_RESPONSE="$TMP/local.json" COORDINATOR_RESPONSE="$coordinator_response" \
+    LOCAL_RESPONSE="$local_response" COORDINATOR_RESPONSE="$coordinator_response" \
+    EMERGENCY_ROLLBACK="$emergency_rollback" \
     FUNCTION_PATH="$TMP/function.sh" INSTALL_ROOT="$TMP/install" bash -c '
       set -euo pipefail
       PORT=18080
@@ -119,6 +129,20 @@ run_wait() {
 
 run_wait "$TMP/coordinator.json"
 grep -F 'details=readiness' "$TMP/curl.log" >/dev/null
+grep -F 'assigned_id=session-test' "$TMP/curl.log" >/dev/null
+
+python3 - "$TMP/coordinator.json" "$TMP/wrong-session.json" <<'PY'
+import json
+import sys
+source, destination = sys.argv[1:]
+payload = json.load(open(source, encoding="utf-8"))
+payload["assigned_id"] = "different-session"
+json.dump(payload, open(destination, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+if run_wait "$TMP/wrong-session.json"; then
+  echo "mismatched coordinator session passed admission" >&2
+  exit 1
+fi
 
 python3 - "$TMP/coordinator.json" "$TMP/mismatch.json" <<'PY'
 import json
@@ -154,6 +178,40 @@ json.dump(payload, open(destination, "w", encoding="utf-8"), separators=(",", ":
 PY
 run_wait "$TMP/busy.json"
 
+python3 - "$TMP/local.json" "$TMP/legacy-local.json" \
+  "$TMP/coordinator.json" "$TMP/legacy-coordinator.json" <<'PY'
+import json
+import sys
+
+local_source, local_destination, coordinator_source, coordinator_destination = sys.argv[1:]
+local = json.load(open(local_source, encoding="utf-8"))
+local.pop("catalog", None)
+local.pop("network_state", None)
+json.dump(local, open(local_destination, "w", encoding="utf-8"), separators=(",", ":"))
+
+coordinator = json.load(open(coordinator_source, encoding="utf-8"))
+coordinator["catalog_admission_mode"] = "legacy_bridge"
+for field in (
+    "catalog_release_id",
+    "catalog_policy_version",
+    "catalog_candidate_sha256",
+    "catalog_signer_key_id",
+    "catalog_row_identity",
+):
+    coordinator.pop(field, None)
+json.dump(coordinator, open(coordinator_destination, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+
+if run_wait "$TMP/legacy-coordinator.json" "$TMP/legacy-local.json" 0; then
+  echo "normal upgrade accepted legacy_bridge admission" >&2
+  exit 1
+fi
+run_wait "$TMP/legacy-coordinator.json" "$TMP/legacy-local.json" 1
+if run_wait "$TMP/coordinator.json" "$TMP/local.json" 1; then
+  echo "emergency rollback accepted current catalog admission instead of legacy_bridge" >&2
+  exit 1
+fi
+
 python3 - "$INSTALL_SH" <<'PY'
 import sys
 text = open(sys.argv[1], encoding="utf-8").read()
@@ -166,6 +224,12 @@ if not lock < identity:
     raise SystemExit("installer lock is not acquired before provider identity selection")
 if not admission < commit:
     raise SystemExit("install commits before exact coordinator admission")
+if 'MACPROVIDER_EMERGENCY_ROLLBACK' not in text:
+    raise SystemExit("installer omits explicit emergency rollback control")
+if 'emergency rollback requires MACPROVIDER_VERSION' not in text:
+    raise SystemExit("emergency rollback is not pinned to an explicit signed release tag")
+if 'catalog_admission_mode") != "legacy_bridge"' not in text:
+    raise SystemExit("emergency rollback is not gated on legacy_bridge buyer admission")
 
 commit_start = text.index("commit_install_transaction() {")
 commit_end = text.index("\n}\n\nrun()", commit_start)

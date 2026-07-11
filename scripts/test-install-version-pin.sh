@@ -43,11 +43,30 @@ awk '
   emit && /^\}$/ { exit }
 ' "$INSTALL_SH" >> "$lib"
 
-for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag download_release verify_sha256; do
+awk '
+  /^validate_staged_entries\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
+  /^disable_staged_autoupdate\(\)/ { emit = 1 }
+  emit { print }
+  emit && /^\}$/ { exit }
+' "$INSTALL_SH" >> "$lib"
+
+awk '
+  /^validate_emergency_target\(\)/ { emit = 1 }
+  /^disable_staged_autoupdate\(\)/ { emit = 0 }
+  emit { print }
+' "$INSTALL_SH" >> "$lib"
+
+for symbol in latest_release_tag validate_macprovider_version_tag resolve_release_tag download_release verify_sha256 validate_staged_entries validate_emergency_target verify_emergency_coordinator_advertisement validate_emergency_config_backup stage_emergency_config_backup disable_staged_autoupdate; do
   grep -q "^${symbol}()" "$lib" || fatal "could not extract $symbol from $INSTALL_SH"
 done
 
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
+MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
 GITHUB_REPO="Augustas11/macprovider"
 TMPDIR_PATH=""
 asset_path=""
@@ -56,6 +75,7 @@ checksums_path=""
 checksums_sig_path=""
 DOWNLOAD_LOG="$workdir/downloads.log"
 LOG_FILE="$workdir/log.out"
+BINARY_PATH="$workdir/installed-macprovider-cli"
 
 log() { printf '%s\n' "$*" >> "$LOG_FILE"; }
 die() {
@@ -96,6 +116,9 @@ curl() {
   case "$url" in
     *"/releases?per_page=30")
       printf '%s' "$MOCK_RELEASES_JSON"
+      ;;
+    *"/healthz")
+      printf '%s' "$MOCK_HEALTH_JSON"
       ;;
     *"/v99.0.0/"*)
       return 22
@@ -145,7 +168,9 @@ reset_mocks() {
   MOCK_SIGNATURE_FAIL=0
   MOCK_CHECKSUMS="goodhash macprovider-cli-v1.7.11-darwin-arm64.pkg"
   MOCK_RELEASES_JSON='[{"tag_name":"v1.8.0","prerelease":true},{"tag_name":"verify-v1.0.0","prerelease":false},{"tag_name":"v1.7.11","prerelease":false}]'
+  MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.30"}'
   unset MACPROVIDER_VERSION
+  EMERGENCY_ROLLBACK=0
 }
 
 run_release_chain() {
@@ -249,6 +274,133 @@ reset_mocks
 MACPROVIDER_VERSION="v1.8.0"
 tag="$(resolve_release_tag)"
 report "case9-explicit-prerelease-pin" "v1.8.0" "$tag"
+
+################################################################
+# Case 10 — emergency rollback is never an implicit latest install.
+################################################################
+reset_mocks
+EMERGENCY_ROLLBACK=1
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "case10-emergency-requires-pin" 7 "$rc"
+
+reset_mocks
+EMERGENCY_ROLLBACK=1
+MACPROVIDER_VERSION="v1.7.11"
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "case10-emergency-rejects-incompatible-floor" 7 "$rc"
+
+################################################################
+# Case 11 — only explicit emergency rollback accepts a signed legacy
+# payload shape; path allowlisting remains unchanged.
+################################################################
+legacy_entries=$'macprovider-cli\nmlx-swift_Cmlx.bundle\nmlx-swift_Cmlx.bundle/Contents\nmlx-swift_Cmlx.bundle/Contents/Resources\nmlx-swift_Cmlx.bundle/Contents/Resources/default.metallib'
+reset_mocks
+rc=0
+( validate_staged_entries "$legacy_entries" "legacy fixture" ) >/dev/null 2>&1 || rc=$?
+report "case11-normal-rejects-legacy-payload" 5 "$rc"
+
+reset_mocks
+EMERGENCY_ROLLBACK=1
+rc=0
+( validate_staged_entries "$legacy_entries" "legacy fixture" ) >/dev/null 2>&1 || rc=$?
+report "case11-emergency-accepts-legacy-payload" 0 "$rc"
+
+rc=0
+( validate_staged_entries "$legacy_entries"$'\n../escape' "legacy fixture" ) >/dev/null 2>&1 || rc=$?
+report "case11-emergency-keeps-path-allowlist" 5 "$rc"
+
+################################################################
+# Case 12 — emergency rollback adds the v1.8.30-compatible top-level
+# opt-out without rewriting any valid nested YAML representation.
+################################################################
+STAGED_CONFIG_PATH="$workdir/emergency-config.yaml"
+cat > "$STAGED_CONFIG_PATH" <<'YAML'
+provider_id: test-provider
+autoupdate:
+    enabled: true
+    interval_s: 3600
+auto_update_enabled: true
+YAML
+disable_staged_autoupdate
+report "case12-legacy-autoupdate-disabled" 1 \
+  "$(grep -c '^auto_update_enabled: false$' "$STAGED_CONFIG_PATH")"
+report "case12-old-legacy-value-removed" 0 \
+  "$(grep -c '^auto_update_enabled: true$' "$STAGED_CONFIG_PATH" || true)"
+report "case12-four-space-nested-config-preserved" 1 \
+  "$(grep -c '^    enabled: true$' "$STAGED_CONFIG_PATH")"
+
+STAGED_CONFIG_PATH="$workdir/emergency-config-flow.yaml"
+printf 'provider_id: test-provider\nautoupdate: {enabled: true, interval_s: 3600}\n' > "$STAGED_CONFIG_PATH"
+disable_staged_autoupdate
+report "case12-flow-nested-config-preserved" 1 \
+  "$(grep -c '^autoupdate: {enabled: true, interval_s: 3600}$' "$STAGED_CONFIG_PATH")"
+report "case12-flow-legacy-opt-out-added" 1 \
+  "$(grep -c '^auto_update_enabled: false$' "$STAGED_CONFIG_PATH")"
+
+################################################################
+# Case 13 — emergency rollback is older-only and requires the
+# coordinator to advertise the exact compatible rollback target.
+################################################################
+cat > "$BINARY_PATH" <<'SH'
+#!/usr/bin/env bash
+printf '1.8.31\n'
+SH
+chmod +x "$BINARY_PATH"
+reset_mocks
+rc=0
+( validate_emergency_target v1.8.30 ) >/dev/null 2>&1 || rc=$?
+report "case13-older-target-accepted" 0 "$rc"
+rc=0
+( validate_emergency_target v1.8.31 ) >/dev/null 2>&1 || rc=$?
+report "case13-equal-target-rejected" 7 "$rc"
+rc=0
+( validate_emergency_target v1.8.32 ) >/dev/null 2>&1 || rc=$?
+report "case13-newer-target-rejected" 7 "$rc"
+
+rc=0
+( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.30 ) >/dev/null 2>&1 || rc=$?
+report "case13-exact-advertisement-accepted" 0 "$rc"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.29"}'
+rc=0
+( verify_emergency_coordinator_advertisement https://coordinator.example v1.8.30 ) >/dev/null 2>&1 || rc=$?
+report "case13-mismatched-advertisement-rejected" 7 "$rc"
+
+################################################################
+# Case 14 — emergency rollback consumes the exact inventoried
+# pre-upgrade config bytes and rejects mismatched provenance.
+################################################################
+LIVE_CONFIG_PATH="$workdir/live-config.yaml"
+printf 'model: current-model\n' > "$LIVE_CONFIG_PATH"
+EMERGENCY_CONFIG_BACKUP="$workdir/prior-config.yaml"
+printf 'model: prior-model\nautoupdate: {enabled: true}\n' > "$EMERGENCY_CONFIG_BACKUP"
+chmod 600 "$EMERGENCY_CONFIG_BACKUP"
+EMERGENCY_CONFIG_SHA256="$(python3 - "$EMERGENCY_CONFIG_BACKUP" <<'PY'
+import hashlib
+import sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
+PY
+)"
+rc=0
+( validate_emergency_config_backup ) >/dev/null 2>&1 || rc=$?
+report "case14-owned-backup-accepted" 0 "$rc"
+
+STAGED_CONFIG_PATH="$workdir/staged-emergency-config.yaml"
+printf 'model: current-model\n' > "$STAGED_CONFIG_PATH"
+stage_emergency_config_backup
+report "case14-exact-backup-staged" 0 \
+  "$(cmp -s "$EMERGENCY_CONFIG_BACKUP" "$STAGED_CONFIG_PATH"; printf '%s' "$?")"
+disable_staged_autoupdate
+report "case14-prior-model-restored" 1 \
+  "$(grep -c '^model: prior-model$' "$STAGED_CONFIG_PATH")"
+report "case14-restored-config-opted-out" 1 \
+  "$(grep -c '^auto_update_enabled: false$' "$STAGED_CONFIG_PATH")"
+
+EMERGENCY_CONFIG_SHA256="$(printf '0%.0s' {1..64})"
+rc=0
+( validate_emergency_config_backup ) >/dev/null 2>&1 || rc=$?
+report "case14-mismatched-backup-hash-rejected" 7 "$rc"
 
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2

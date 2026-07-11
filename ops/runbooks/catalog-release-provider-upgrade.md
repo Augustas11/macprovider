@@ -12,7 +12,8 @@ resources.
 
 ## 1. System contract
 
-One immutable catalog release is the publication unit. A release contains:
+One immutable network release is the publication and activation unit. Its
+catalog member contains:
 
 - exact `autotune-candidates.json` and `demand-rank.json` bytes;
 - one detached Ed25519 sidecar per JSON file;
@@ -22,8 +23,20 @@ One immutable catalog release is the publication unit. A release contains:
 - the generated Swift baked resources derived from those exact JSON bytes;
 - the model artifact identities consumed by provider evidence and Tier2.
 
+The same signed network-release manifest also binds:
+
+- provider version `1.8.31`, Malibu build `31`, the provider executable, and
+  every adjacent catalog/keyring resource shipped in its archive;
+- the compatible coordinator and gateway Linux binaries as one backend pair;
+- the exact catalog release directory selected as the next `current`; the
+  activation transaction derives `previous` from the verified live pointer and
+  snapshots it before mutation;
+- coordinator configuration that advertises the same provider version.
+
 No generated output is edited independently. CI, packaging, coordinator
 startup, and deploy all verify the same release before accepting it.
+The signed Pearl updater is the unattended activation authority for the
+backend binary pair plus catalog pointers. It may not advance any member alone.
 
 The v2 ledger also records complete pre-ledger publication history. A release
 ID observed with more than one signed byte binding is never assigned a
@@ -132,13 +145,20 @@ The following are release-blocking:
 - complete historical bindings and immutable rebound-ID tombstones;
 - Swift and Go fixture agreement;
 - package inclusion of the verified manifest and feeds;
+- provider version, Malibu build ledger, archive payload, and every coordinator
+  advertisement agree at `1.8.31` / build `31`;
+- the signed Pearl manifest includes the coordinator, gateway, and all six
+  catalog payload files under one catalog release identity;
+- no backend or provider payload member is present outside its manifest, and no
+  manifest member is absent from the staged release;
 - every canonical non-retired key is present with identical bytes in generated
   Swift and coordinator configuration;
 - known-key and unknown-key regression cases (v4 today; v4/v5 after the
   approved v5 public key is added).
 
-`package.sh`, release CI, and Pearl deploy call the same verifier. A test that
-only trims, reparses, or semantically compares JSON is insufficient.
+`package.sh`, release CI, the signed Pearl updater, and direct Pearl deploy call
+the same verifier. A test that only trims, reparses, or semantically compares
+JSON is insufficient.
 
 ## 5. Coordinator activation
 
@@ -158,26 +178,291 @@ no in-process catalog reload surface. A cold start with configured but invalid
 feeds fails closed. A future hot-reload implementation must retain the active
 last-known-good in-memory release on verification failure.
 
-## 6. Pearl deployment
+### 5.1 Bounded provider migration bridge
 
-Stage and activate atomically:
+The bridge is coordinator-first; there is no provider success exception for a
+legacy coordinator.
 
-1. Acquire the controller-lifetime Pearl deploy lock before reading live state.
-   A concurrent deploy must fail. The remote holder has SSH keepalives and
-   unexpected holder exit terminates the controller path. Arm the local
-   lock-loss watcher before the holder can exit.
-2. If `/opt/macprovider/.coordinator-deploy-rollback` exists, run the installed
+1. Activate the signed coordinator+gateway+catalog payload with
+   `autotune.enforce_provider_admission: false` and an absolute RFC3339
+   `autotune.provider_admission_bridge_deadline` no more than 24 hours in the
+   future. Missing, expired, malformed, or farther deadlines prevent startup.
+   Metadata-free providers are
+   classified `legacy_bridge`, remain serving-capable, and remain visible in
+   capacity telemetry. Partial catalog metadata, invalid signatures, stale or
+   mismatched release identity, and artifact mismatch still fail closed in
+   bridge mode.
+2. Before backend activation, capture the operator-controlled canary Mac's prior
+   signed tag and prefetch the candidate without mutating the live provider:
+
+   ```bash
+   ~/macprovider/macprovider-cli --version | tee canary-prior-provider-tag.txt
+   KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.31
+   ```
+
+   The verifier downloads the complete provider asset set, verifies the signed
+   checksum manifest and artifact hash, and checks the release payload. Keep the
+   prior provider live; do not run the installer against the legacy coordinator,
+   because its exact buyer-serving admission gate correctly rolls back a
+   non-serving candidate.
+
+   Start the signed Pearl updater in one operator terminal. Only after the new
+   coordinator is locally healthy, its startup telemetry proves the configured
+   bridge deadline is active, and the updater's transaction remains rollback
+   armed, start the already pinned installer from a second terminal on this one
+   canary:
+
+   ```bash
+   curl -fsSL https://get.streamvc.live/install.sh | \
+     MACPROVIDER_VERSION=v1.8.31 MACPROVIDER_NO_PROMPT=1 bash
+   ```
+
+   The installer must commit only after this bridge coordinator returns the
+   exact `current` buyer-serving envelope. The still-armed Pearl updater then
+   requires the same provider ID, release/policy/digest/signer/row, exact six
+   catalog files, and live text vnode before it can persist backend success. If
+   the canary installer fails, its own transaction restores the prior provider
+   while the Pearl updater remains able to roll back the backend. Do not raise
+   the general recommendation to v1.8.31 until both transactions commit.
+3. Upgrade v1.8.31 provider cohorts. Each update commits only after that
+   coordinator authoritatively reports the exact provider
+   `buyer_serving:true` with `catalog_admission_mode:current|previous`. Missing
+   catalog compatibility from a legacy coordinator is not accepted.
+4. Before apply, capture a protected `/poolz` baseline containing the exact
+   provider IDs, `summary.ready`, `summary.free_slots`, and each provider's
+   routing/admission state. Record an operator-approved minimum buyer-capacity
+   floor. The signed updater commit policy must prove all of the following while
+   rollback is still armed: the local `/healthz` `pool_ready` value is at or
+   above that floor, the configured bridge is active with enough time remaining
+   for provider and backend rollback, metadata-free capacity remains admitted as
+   `legacy_bridge`, and the exact catalog-aware canary passes. One successful
+   buyer request or one current provider is not a fleet-capacity proof.
+
+   Track `legacy_bridge` session count, the startup
+   `autotune_provider_admission_bridge_deadline` / remaining-duration log
+   fields, and provider-version adoption. Before activation, record
+   `BRIDGE_STARTED_AT` and set `BRIDGE_DEADLINE` to the exact configured
+   deadline, no later than 24 hours after activation. At the deadline, the
+   coordinator mechanically reclassifies every connected `legacy_bridge`
+   session as `legacy` and excludes it from buyer routing/capacity. Before that
+   happens, either
+   proceed to strict enforcement because the zero-bridge gate passed, or stop
+   recommendations, restore upgraded providers to their prior complete release,
+   verify legacy capacity, and then roll back the backend bridge payload.
+   Extension requires a new dated decision-log entry and a new explicit config
+   deadline; an operator note or silent timer reset is invalid.
+
+   The rollback branch is executable only if its provider artifacts and cohort
+   inventory were prepared before activation. Store a root-owned inventory with
+   exact provider ID, operator SSH target, prior provider tag, retained model,
+   model artifact provenance, absolute path and SHA-256 of a retained
+   owner-only (`0600`) copy of the complete pre-upgrade config, and upgrade time
+   for every admitted cohort member. Create that backup on each Mac before
+   activation and record the emitted digest:
+
+   ```bash
+   PRIOR_CONFIG_BACKUP="$HOME/.config/macprovider/emergency-backups/${PRIOR_PROVIDER_TAG}-config.yaml"
+   mkdir -p "$(dirname "$PRIOR_CONFIG_BACKUP")"
+   chmod 700 "$(dirname "$PRIOR_CONFIG_BACKUP")"
+   install -m 600 "$HOME/.config/macprovider/config.yaml" "$PRIOR_CONFIG_BACKUP"
+   PRIOR_CONFIG_SHA256="$(shasum -a 256 "$PRIOR_CONFIG_BACKUP" | awk '{print $1}')"
+   printf 'backup=%s sha256=%s\n' "$PRIOR_CONFIG_BACKUP" "$PRIOR_CONFIG_SHA256"
+   ```
+
+   Do not use the live config path as its own backup. Emergency targets must be the
+   immediate prior signed release, must be older than the installed release,
+   and must be `v1.8.30` or newer; `v1.7.11` predates the config-compatible
+   emergency contract and is not a rollback target. For each distinct prior tag, download
+   `checksums.txt` and `checksums.txt.sig`, verify the detached signature with
+   the pinned release public key, confirm the exact Darwin package or tar asset
+   is listed, and fetch that asset successfully. A tag without its complete
+   signed asset set is not a rollback candidate.
+
+   First stop recommendations by setting the coordinator's
+   `coordinator_advertised_version.latest_binary_version` to the exact
+   `$PRIOR_PROVIDER_TAG` version and restarting it. Prove the public health
+   response reports that exact value before touching a Mac:
+
+   ```bash
+   test "$(curl -fsS https://coordinator.streamvc.live/healthz | \
+     jq -r .recommended_binary_version)" = "${PRIOR_PROVIDER_TAG#v}"
+   ```
+
+   Then restore every inventoried Mac through the
+   signed operator-pinned installer channel:
+
+   ```bash
+   curl -fsSL https://get.streamvc.live/install.sh | \
+     MACPROVIDER_VERSION="$PRIOR_PROVIDER_TAG" \
+     MACPROVIDER_EMERGENCY_ROLLBACK=1 \
+     MACPROVIDER_EMERGENCY_CONFIG_BACKUP="$PRIOR_CONFIG_BACKUP" \
+     MACPROVIDER_EMERGENCY_CONFIG_SHA256="$PRIOR_CONFIG_SHA256" \
+     MACPROVIDER_NO_PROMPT=1 bash
+   ```
+
+   This is an explicit operator-authorized emergency downgrade. The installer
+   still verifies the release signature/checksums and complete payload and takes
+   the unified mutation locks. It also requires the coordinator advertisement
+   proof above, restores the exact inventoried config bytes, and transactionally
+   adds the v1.8.30-compatible top-level autoupdate opt-out. Nested YAML is
+   preserved byte-for-byte. Before commit, the installer proves the activated
+   config hash matches its staged restored copy and that the prior model is
+   unchanged, preventing the restored binary from immediately upgrading itself.
+   Re-enable provider autoupdate only after the backend decision is complete.
+   This mode is valid only with an explicit older
+   pinned tag while the bounded bridge is active and unexpired. It may commit
+   only when the exact provider ID is authoritatively `buyer_serving:true` in
+   `catalog_admission_mode:legacy_bridge`; `legacy`, an expired bridge, missing
+   evidence, or any other admission mode fails and restores the candidate-side
+   transaction. Coordinator autoupdate remains upgrade-only and MUST NOT gain an
+   automatic downgrade exception. For every inventory row, verify the local
+   binary reports the exact prior tag, the installer log contains the expected
+   `source_sha256` and an `activated_sha256`, and the coordinator reports that provider
+   buyer-serving through `legacy_bridge`. Persist those results. Only after all
+   upgraded cohorts are restored and legacy capacity is proven may the backend
+   bridge payload be rolled back.
+5. Prove zero `legacy_bridge` continuously for 15 minutes from the protected
+   operator `/poolz` surface. Prepare a root-only curl config containing the
+   operator bearer header, set `POOLZ_CURL_CONFIG` to it, and run this on the
+   trusted operator host; any HTTP, JSON, or nonzero-count sample resets the
+   decision and requires a fresh complete run:
+
+   ```bash
+   set -euo pipefail
+   umask 077
+   : "${POOLZ_CURL_CONFIG:?root-only curl config is required}"
+   : "${MIN_READY:?protected ready-provider floor is required}"
+   : "${MIN_FREE_SLOTS:?protected free-slot floor is required}"
+   EVIDENCE="bridge-zero-$(date -u +%Y%m%dT%H%M%SZ).jsonl"
+   SAMPLE="$(mktemp -t macprovider-poolz.XXXXXX)"
+   trap 'rm -f "$SAMPLE"' EXIT
+   STARTED=$(date +%s)
+   UNTIL=$((STARTED + 900))
+   while :; do
+     curl --fail --silent --show-error --max-time 10 \
+       --config "$POOLZ_CURL_CONFIG" \
+       https://coordinator.streamvc.live/poolz >"$SAMPLE"
+     python3 - "$SAMPLE" "$EVIDENCE" "$MIN_READY" "$MIN_FREE_SLOTS" <<'PY'
+   import datetime, json, pathlib, sys
+   payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+   pool = payload.get("pool")
+   summary = payload.get("summary")
+   if not isinstance(pool, list) or not isinstance(summary, dict):
+       raise SystemExit("invalid protected pool snapshot")
+   counts = {}
+   for provider in pool:
+       mode = provider.get("catalog_admission_mode", "")
+       counts[mode] = counts.get(mode, 0) + 1
+   record = {
+       "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+       "legacy_bridge": counts.get("legacy_bridge", 0),
+       "legacy": counts.get("legacy", 0),
+       "current": counts.get("current", 0),
+       "previous": counts.get("previous", 0),
+       "ready": summary.get("ready"),
+       "free_slots": summary.get("free_slots"),
+   }
+   with pathlib.Path(sys.argv[2]).open("a", encoding="utf-8") as handle:
+       handle.write(json.dumps(record, sort_keys=True) + "\n")
+   if record["legacy_bridge"] != 0:
+       raise SystemExit("legacy_bridge is not zero")
+   for key, minimum in (("ready", int(sys.argv[3])), ("free_slots", int(sys.argv[4]))):
+       value = record[key]
+       if type(value) is not int or value < minimum:
+           raise SystemExit(f"{key} buyer capacity is below the protected floor")
+   PY
+     NOW=$(date +%s)
+     [ "$NOW" -ge "$UNTIL" ] && break
+     sleep 30
+   done
+   test "$(wc -l <"$EVIDENCE")" -ge 31
+   ```
+
+   Preserve the resulting root-only JSONL with the release evidence. Then set
+   `autotune.enforce_provider_admission: true` and restart the
+   coordinator. Restart is mandatory so every session re-admits under strict
+   policy. Metadata-free sessions then classify as `legacy`: operator-visible
+   but excluded from buyer routing and serving-capacity totals.
+
+   After this closure, every later protected release must select
+   `provider_admission_policy: strict_post_migration` in the release workflow,
+   and Pearl must run with
+   `PEARL_UPDATER_PROVIDER_ADMISSION_POLICY=strict_post_migration` plus
+   `PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=0`. The signed strict policy
+   transactionally stages `enforce_provider_admission: true` and removes any
+   old bridge deadline. Never select `bridge_required` after closure unless a
+   new dated migration decision explicitly authorizes reopening a bounded
+   bridge.
+6. Verify zero `legacy` buyer-serving rows, exact current/previous admission for
+   every serving provider, and buyer canary success. Roll back the complete
+   backend+catalog payload if strict enforcement unexpectedly removes required
+   capacity.
+
+Outside the single controlled, local-only commit-witness staging in step 2, do
+not run provider-first against a coordinator that predates this bridge. Do not
+count `legacy_bridge` as migration completion merely because it is serving.
+
+## 6. Pearl deployment authorities
+
+The signed updater and direct deploy share the global mutex and catalog
+verification rules, but they have different mutation authority and rollback
+boundaries. Do not treat them as interchangeable deployment commands.
+
+### 6.1 Shared serialization
+
+1. Acquire `/run/lock/macprovider-pearl-updater.lock` before reading or changing
+   any live backend, catalog, pointer, configuration, unit, database-writer, or
+   nginx state. The signed Pearl updater and direct deploy use this same
+   root-owned, no-follow global mutex; contention fails closed. Direct deploy
+   may retain the older coordinator controller lease and operation barrier only
+   inside this global ownership boundary for watchdog/recovery compatibility.
+   No path may acquire the global mutex while holding a legacy inner lock.
+
+### 6.2 Signed updater: backend pair plus catalog
+
+The signed updater is the only unattended authority allowed to replace the
+coordinator/gateway pair. It verifies the signed network-release manifest as
+one complete payload before snapshot or service drain. Coordinator, gateway,
+and all six catalog files must be present and hash-exact. It additionally runs
+the canonical `catalog-release.py verify-directory` verifier over the candidate
+directory so both feed Ed25519 signatures, strict schemas, canonical bytes, and
+manifest bindings are verified inside the signed outer release. It rejects a
+binary-only or catalog-only manifest.
+
+The updater snapshots and activates the backend pair and catalog together. It
+keeps rollback armed through binary health, the generic buyer canary, exact
+catalog status, and an explicit exact provider canary. Configure
+`PEARL_UPDATER_CATALOG_CANARY_PROVIDER_ID`, its root-only deployment bearer-token
+file, a host-key-pinned SSH target/key, and the canary install directory. Before
+success persistence, the selected provider must report `buyer_serving:true`,
+`catalog_admission_mode:current`, and the exact release/policy/digest/signer/row
+envelope. Independently, the updater reads all six installed catalog files on
+that Mac through no-follow handles, binds provider ID and local status to the
+same row, and proves the live launchd PID's actual text vnode and listener use
+that installation. Only then may it persist success and disarm rollback.
+
+### 6.3 Direct deploy: catalog/config validation only
+
+Direct deploy is not a backend-pair release authority. Run the signed updater
+first whenever coordinator or gateway bytes must change. Direct deploy proves
+the uploaded coordinator is byte-identical to the already installed signed
+coordinator and refuses coordinator-only replacement. Inside that boundary it
+may update catalog/config/operator sidecars and restart the installed pair.
+
+The direct-deploy recovery procedure is:
+
+1. If `/opt/macprovider/.coordinator-deploy-rollback` exists, run the installed
    recovery helper before drift checks. Never delete or replace that snapshot.
    A `committed` marker means only cleanup was interrupted; an uncommitted
    snapshot restores the old release.
-3. Install the root oneshot recovery guard and remote deploy watchdog. The
+2. Install the root oneshot recovery guard and remote deploy watchdog. The
    watchdog waits for both the controller lease and an exclusive operation
    barrier, then restores an uncommitted snapshot. Each live mutation holds the
    shared side of that barrier, so controller SIGKILL or network loss cannot
    race rollback against an SSH command still writing release files. On every
    coordinator start, the guard independently restores an orphaned transaction
    whenever the controller lock is no longer held, covering Pearl reboot.
-4. Build a complete snapshot of every release artifact changed after this
+3. Build a complete snapshot of every release artifact changed after this
    boundary: coordinator, CLI, and three stats binaries; config and convenience
    backups; catalog pointers and signed Tier-2 catalog; coordinator, recovery,
    watchdog, and stats unit files; timer enablement links and active state;
@@ -196,20 +481,24 @@ Stage and activate atomically:
    successfully issued ACME certificates are independent idempotent
    infrastructure transactions and intentionally remain in place; ACME stub and
    live nginx configuration files are release artifacts and are rolled back.
-5. Upload a versioned directory such as
+4. Upload a versioned directory such as
    `/opt/macprovider/autotune/releases/<release-id>/`.
-6. On Pearl, verify manifest hashes, signatures, schemas, file ownership, and
+5. On Pearl, verify manifest hashes, signatures, schemas, file ownership, and
    coordinator config before changing the active pointer.
-7. Record the old `current` symlink target.
-8. On the first rollout, create `current.bootstrap` at the verified staged
+6. Record the old `current` symlink target and old `previous` target record.
+7. On the first rollout, create `current.bootstrap` at the verified staged
    release before config can refer to `current`; on later rollouts, record the
    previous target in root-owned `/opt/macprovider/autotune/.previous-target`.
-9. Atomically switch `current` to the verified release and restart/reload the
-   coordinator.
-10. Fetch each JSON and sidecar endpoint separately. Compare exact SHA-256 with
+8. Stop/drain the old serving graph, prove the staged coordinator bytes equal
+   the installed signed coordinator, switch only the catalog/config surfaces
+   direct deploy owns, set `previous` to the former verified current release,
+   and restart the already installed pair. Any partial activation is failure and
+   restores the complete direct-deploy snapshot.
+9. Fetch each JSON and sidecar endpoint separately. Compare exact SHA-256 with
    staged files and re-verify public signatures.
-11. Confirm coordinator health reports the intended release and signer.
-12. Set `CATALOG_CANARY_PROVIDER_ID` to a real enrolled canary provider and
+10. Confirm coordinator and gateway health report the installed signed pair and
+   coordinator catalog status reports the intended release/signer.
+11. Set `CATALOG_CANARY_PROVIDER_ID` to a real enrolled canary provider and
    provide `CATALOG_CANARY_AUTH_TOKEN` for the protected compatibility view.
    The deploy must poll `/v1/pool/check` until that exact provider reports
    `buyer_serving: true`, `catalog_admission_mode: current`, the exact active
@@ -217,24 +506,27 @@ Stage and activate atomically:
    `catalog_evidence_source: provider_reported`. These authenticated hello fields
    prove coordinator admission compatibility; they are not independent proof of
    the provider's on-disk bytes.
-13. Set `CATALOG_CANARY_SSH_TARGET` to the operator-controlled canary Mac and
+12. Set `CATALOG_CANARY_SSH_TARGET` to the operator-controlled canary Mac and
    `CATALOG_CANARY_SSH_KEY` to a dedicated read-only operator key. Ensure its SSH
    host key is already present in `known_hosts`. The deploy reads the six shipped
    files below `CATALOG_CANARY_INSTALL_DIR` (default
    `macprovider/catalog-release`) through no-follow directory handles and
    compares every SHA-256 with the locally verified release before commit. The
    remote proof must also match `~/.config/macprovider/provider_id`, the live
-   `live.streamvc.macprovider` launchd PID and executable inode, that PID's
-   configured listening port, and its local catalog status. This prevents an
+   `live.streamvc.macprovider` launchd PID and executable path/device/inode from
+   `lsof`, that PID's configured listening port, and its local catalog status.
+   Its policy version and selected row identity must exactly match the
+   coordinator-admitted envelope. This prevents an
    admitted provider and a different host with matching bytes from satisfying
-   the same canary gate. A legacy bridge, previous release, byte
-   mismatch, truly degraded provider, missing identity, unknown canary, or SSH
-   trust failure is a deployment failure.
+   the same canary gate. A legacy bridge, previous release, byte mismatch, truly
+   degraded provider, missing identity, unknown canary, or SSH trust failure is
+   a deployment failure.
 
-Only after all checks pass, write the committed marker and remove the snapshot.
-If rollback itself fails, preserve the snapshot, emit the distinct exit status
-70, and stop; never suppress a partial restore. An HTTP 200 alone is not
-deployment success.
+Only after all direct-deploy checks pass, write its committed marker, remove
+its snapshot, and release `/run/lock/macprovider-pearl-updater.lock`. If rollback
+itself fails, preserve the snapshot, emit exit status 70, and stop; never
+suppress a partial restore. An HTTP 200 alone is not deployment success.
+
 
 ## 7. Provider install and upgrade transaction
 
@@ -247,8 +539,12 @@ uses the same transaction contract:
 
 1. Snapshot binary, adjacent resources, config, launchd plist, recommendation
    state, and the prior service state.
-2. Stage the complete signed release payload without overwriting active files.
-3. Verify binary signature/hash and resource completeness.
+2. Stage the complete signed release payload without overwriting active files:
+   versioned executable, manifest, both catalog JSON files, both detached
+   sidecars, and trusted verifier keyring.
+3. Verify binary signature/hash, manifest binding, and exact resource
+   completeness. Extra security-critical or unmanifested payload members fail
+   as closed as missing members.
 4. Copy config and provider identity into staging. Validate catalog trust and
    recommendation freshness against the staged binary and staged config while
    the old provider remains live. If benchmarks are required, stop the old
@@ -264,20 +560,36 @@ uses the same transaction contract:
 8. Require local health plus the coordinator's authoritative public readiness
    verdict for the exact provider. A WebSocket connection alone is not serving
    proof. `/v1/status` reports `buyer_serving` only after an exact, non-redirected
-   `details=readiness` response confirms full routing eligibility and a current
-   or explicitly recognized previous release; rejection is
+   `details=readiness` response confirms `buyer_serving: true` and a current or
+   explicitly recognized previous release for the exact provider; rejection is
    `not_buyer_serving`, and timeouts/rate limits are `buyer_serving_unknown`.
    Malibu invalidates a prior serving verdict whenever status refresh fails.
    Readiness limiting uses a high-capacity per-source aggregate ahead of a
    provider-scoped burst bucket. This bounds rotating-ID abuse while preserving
    headroom and provider fairness for cohorts behind one NAT, with `Retry-After`
    plus provider-jittered retries. The installer and self-update commit only on
-   authoritative `buyer_serving`; the public display state may be `degraded` while a busy
-   provider is still buyer-serving, so it is not an additional commit gate.
+   authoritative `buyer_serving`. A busy provider with zero free slots remains
+   serving-capable and may satisfy this gate even though its instantaneous
+   `RoutingEligible()` result is false. Never require or report “full routing
+   eligibility” for that busy state. A truly degraded, draining, legacy,
+   incompatible, or sanctioned provider cannot satisfy the gate.
 9. On failure, restore every snapshot component and previous service state.
 
-The shell installer takes a kernel-held, no-follow per-user mutex at
-`~/.config/macprovider/install.lock` before provider identity selection. It
+Every provider writer first takes the same kernel-held, no-follow outer mutex at
+`~/.config/macprovider/install.lock`. This includes the shell installer, manual
+CLI update, coordinator autoupdate, Malibu update, watchdog, and install or
+autoupdate recovery. Autoupdate writers and observers then take the existing
+inner `~/.local/share/macprovider/autoupdate/update.lock`. The only permitted
+order is outer `install.lock`, then inner `update.lock`; release is inner then
+outer, and no code may wait for the outer lock while holding the inner lock.
+The installer/recovery owner record binds PID, process start, boot identity,
+operation, and transaction ID, so PID reuse cannot steal installer ownership;
+Swift mutators validate that record in addition to taking the same outer kernel
+lock. A durable pending marker continues to fence new installers/updaters until
+exact admission commit or recovery. Lockfiles use stable/no-follow inodes; an
+unheld stale file is not contention.
+
+The shell installer acquires that outer lock before provider identity selection. It
 persists each transaction under
 `~/.config/macprovider/install-recovery-<installer-pid>` before changing live
 files and deterministically restores any orphan before a later install begins.
@@ -291,10 +603,10 @@ An existing installation invoked with the start-skipping debug override is
 rolled back instead of committing an unverified stopped replacement; the
 override remains usable for a first install.
 
-CLI self-update and coordinator autoupdate retain release-directory backups,
-a durable pending marker, and a stable advisory-lock inode. Manual self-update
-owns and completes its marker only after buyer-serving readiness; coordinator
-autoupdate completes its own marker after the new process rejoins. Self-update
+CLI self-update and coordinator autoupdate retain complete release-directory
+backups, a durable pending marker, and stable advisory-lock inodes. Manual
+self-update and coordinator autoupdate complete their marker only after the new
+process receives exact current-or-previous buyer-serving readiness. Self-update
 accepts only a canonical asset whose filename contains the exact release tag,
 then executes the staged binary and requires its reported version to equal that
 tag before activation; a valid older signed payload cannot be replayed as a
@@ -363,13 +675,25 @@ it must never be promoted to `buyer_serving` by the CLI or Malibu.
 ## 10. Rollout sequence
 
 1. Repair and publish the exact July 10 catalog with the still-trusted v4 key.
-2. Deploy coordinator verification and atomic release activation.
-3. Provision and recovery-test the approved v5 signer, add its public key to
+2. Publish the complete v1.8.31/build 31 provider payload and signed Pearl
+   backend-pair-plus-catalog payload without advertising the provider update.
+3. Activate coordinator verification and atomic release activation with
+   `autotune.enforce_provider_admission:false` plus an RFC3339
+   `autotune.provider_admission_bridge_deadline` no more than 24 hours away;
+   verify the startup deadline telemetry and that the catalog-aware canary
+   receives authoritative current/previous admission.
+4. Raise the coordinator recommendation to v1.8.31, upgrade canary providers,
+   then bounded cohorts. Commit each only on exact authoritative buyer-serving
+   readiness; automatically restore the complete prior provider release on
+   failure.
+5. Observe bridge telemetry until `legacy_bridge` remains zero for 15 minutes,
+   within the 24-hour bridge deadline. Then set
+   `autotune.enforce_provider_admission:true` and restart so all sessions
+   re-admit strictly. Roll back if the deadline expires or required
+   buyer-serving capacity is lost.
+6. Provision and recovery-test the approved v5 signer, add its public key to
    the canonical keyring, then ship v4+v5 bridge clients while continuing v4
    publication.
-4. Ship config-authority and transactional provider upgrades.
-5. Upgrade canary providers, then cohorts, with automatic rollback.
-6. Enable row/release compatibility admission only after catalog convergence.
 7. Publish supply-aware demand data in observe-only reporting.
 8. Enable shortage-aware selection after comparing predicted and actual buyer
    fill rate, provider revenue, churn, and model concentration.
@@ -395,6 +719,13 @@ it must never be promoted to `buyer_serving` by the CLI or Malibu.
       its exact installed release bytes, and rolls back atomically on failure.
 - [ ] Controller loss during a live mutation is serialized behind the remote
       operation barrier; rollback restores the exact prior Tier-2 catalog.
+- [ ] Signed Pearl updater and direct deploy contend on
+      `/run/lock/macprovider-pearl-updater.lock`; no test can activate a binary
+      pair or catalog pointer independently.
+- [ ] Bridge starts with `autotune.enforce_provider_admission:false`, rejects
+      partial/mismatched metadata, reaches zero `legacy_bridge` continuously
+      for 15 minutes before its 24-hour deadline, then restarts with enforcement
+      true and proves no legacy buyer-serving capacity.
 - [ ] launchd contains no mutable config overrides.
 - [ ] Existing config fields survive installer and recommendation.
 - [ ] Recommendation uses staged config plus a reserved non-live benchmark
@@ -403,6 +734,9 @@ it must never be promoted to `buyer_serving` by the CLI or Malibu.
 - [ ] Restart failure returns failure and restores binary/resources/config/plist.
 - [ ] SIGKILL/reboot-orphaned installer transaction is restored by the recovery
       LaunchAgent before another install proceeds.
+- [ ] Every Mac-side mutator acquires `install.lock` before any inner
+      `update.lock`; cross-writer, PID-reuse, boot-change, pending-fence, and
+      SIGKILL tests leave no mixed release and no deadlock.
 - [ ] Malibu distinguishes installed, locally healthy, admitted, buyer-serving,
       and rolled-back states.
 - [ ] Provider evidence survives unrelated catalog-row changes.

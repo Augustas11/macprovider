@@ -1006,6 +1006,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 type poolCheckResponse struct {
 	ProviderID             string     `json:"provider_id"`
+	AssignedID             string     `json:"assigned_id,omitempty"`
 	Tier                   pool.Tier  `json:"tier"`
 	State                  pool.State `json:"state"`
 	BuyerServing           *bool      `json:"buyer_serving,omitempty"`
@@ -1045,12 +1046,20 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 	details := r.URL.Query().Get("details")
 	includeDeploymentEvidence := details == "deployment"
 	includeReadinessEvidence := details == "readiness"
+	assignedID := sanitizeRequestLogText(r.URL.Query().Get("assigned_id"))
+	if includeReadinessEvidence && assignedID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Missing assigned_id for readiness evidence")
+		return
+	}
 	if includeDeploymentEvidence && !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Deployment pool evidence requires coordinator authorization")
 		return
 	}
 	for _, p := range s.pool.Snapshot() {
 		if p.ProviderID != providerID {
+			continue
+		}
+		if assignedID != "" && p.AssignedID != assignedID {
 			continue
 		}
 		state := p.State
@@ -1061,6 +1070,7 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		response := poolCheckResponse{
 			ProviderID: p.ProviderID,
+			AssignedID: p.AssignedID,
 			Tier:       p.Tier,
 			State:      state,
 		}
@@ -1094,7 +1104,7 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) providerBuyerServing(p pool.Provider) bool {
-	return p.CapacityEligible() && !s.tier2ProviderExcluded(p) && s.checkQuota(p)
+	return p.ServingCapable() && !s.tier2ProviderExcluded(p) && s.checkQuota(p)
 }
 
 func (s *Server) handleReceiptKeys(w http.ResponseWriter, r *http.Request) {

@@ -11,6 +11,7 @@ set -euo pipefail
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
+MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
 COORDINATOR_URL_DEFAULT="wss://coordinator.streamvc.live/ws/provider"
 COORDINATOR_BASE_DEFAULT="https://coordinator.streamvc.live"
 INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
@@ -21,6 +22,9 @@ CONFIG_PATH="$CONFIG_DIR/config.yaml"
 PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
 RECOMMENDATION_PATH="$CONFIG_DIR/last-recommendation.json"
 INSTALL_LOCK_PATH="$CONFIG_DIR/install.lock"
+PROVIDER_MUTATION_ROOT="$HOME/.local/share/macprovider/autoupdate"
+PROVIDER_MUTATION_LOCK_PATH="$PROVIDER_MUTATION_ROOT/update.lock"
+PROVIDER_MUTATION_PENDING_PATH="$PROVIDER_MUTATION_ROOT/pending.json"
 INSTALL_RECOVERY_LABEL="live.streamvc.macprovider-install-recovery"
 INSTALL_RECOVERY_PLIST_PATH="$HOME/Library/LaunchAgents/${INSTALL_RECOVERY_LABEL}.plist"
 LIVE_CONFIG_PATH="$CONFIG_PATH"
@@ -45,6 +49,11 @@ NO_WATCHDOG="${MACPROVIDER_NO_WATCHDOG:-0}"
 DRY_RUN=0
 NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
 NO_LAUNCHD="${MACPROVIDER_NO_LAUNCHD:-0}"
+EMERGENCY_ROLLBACK="${MACPROVIDER_EMERGENCY_ROLLBACK:-0}"
+EMERGENCY_CONFIG_BACKUP="${MACPROVIDER_EMERGENCY_CONFIG_BACKUP:-}"
+EMERGENCY_CONFIG_SHA256="${MACPROVIDER_EMERGENCY_CONFIG_SHA256:-}"
+EMERGENCY_STAGED_CONFIG_SHA256=""
+EMERGENCY_MODEL=""
 TMPDIR_PATH=""
 staging_dir=""
 STAGED_CONFIG_PATH=""
@@ -271,6 +280,10 @@ Environment overrides:
                                  launchd service and its companion watchdog
   MACPROVIDER_NO_WATCHDOG=1      expert/debug only: install the provider
                                  launchd service but skip the watchdog
+  MACPROVIDER_EMERGENCY_ROLLBACK=1
+                                 operator-only signed rollback to an explicit
+                                 MACPROVIDER_VERSION; commits only through an
+                                 active legacy_bridge admission
   MACPROVIDER_SKIP_HF_CHECK=1    skip HuggingFace lookup on custom model id
 USAGE
 }
@@ -304,8 +317,8 @@ assert_install_lock_ownership() {
   esac
   [ -n "$INSTALL_LOCK_TOKEN" ] \
     || die 70 "installer lock token is missing; refusing protected install mutation"
-  python3 - "$HOME" "$CONFIG_DIR" "$INSTALL_LOCK_PATH" "$$" \
-    "$INSTALL_LOCK_TOKEN" "$INSTALL_LOCK_HOLDER_PID" <<'PY' \
+  python3 - "$HOME" "$CONFIG_DIR" "$INSTALL_LOCK_PATH" "$PROVIDER_MUTATION_ROOT" \
+    "$PROVIDER_MUTATION_LOCK_PATH" "$$" "$INSTALL_LOCK_TOKEN" "$INSTALL_LOCK_HOLDER_PID" <<'PY' \
     || die 70 "installer lock ownership was lost; refusing protected install mutation"
 import fcntl
 import json
@@ -314,7 +327,7 @@ import stat
 import subprocess
 import sys
 
-home, config_dir, lock_path, owner_pid_text, token, holder_pid_text = sys.argv[1:]
+home, config_dir, lock_path, mutation_root, mutation_lock_path, owner_pid_text, token, holder_pid_text = sys.argv[1:]
 owner_pid = int(owner_pid_text)
 holder_pid = int(holder_pid_text)
 uid = os.getuid()
@@ -346,11 +359,16 @@ def boot_session():
 
 home = os.path.normpath(home)
 config_dir = os.path.normpath(config_dir)
+mutation_root = os.path.normpath(mutation_root)
 if os.path.commonpath([home, config_dir]) != home:
     raise SystemExit("config directory escaped HOME")
+if os.path.commonpath([home, mutation_root]) != home:
+    raise SystemExit("provider mutation directory escaped HOME")
 directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 directory_fd = os.open(config_dir, directory_flags)
 lock_fd = None
+mutation_directory_fd = None
+mutation_lock_fd = None
 try:
     lock_fd = os.open(
         os.path.basename(lock_path),
@@ -358,7 +376,12 @@ try:
         dir_fd=directory_fd,
     )
     info = os.fstat(lock_fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != uid
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
         raise RuntimeError("installer lock is not an owned private regular file")
     payload = os.read(lock_fd, 4097)
     if len(payload) > 4096:
@@ -386,7 +409,27 @@ try:
     else:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         raise RuntimeError("installer lock helper no longer owns the kernel lock")
+    mutation_directory_fd = os.open(mutation_root, directory_flags)
+    mutation_lock_fd = os.open(
+        os.path.basename(mutation_lock_path),
+        os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=mutation_directory_fd,
+    )
+    mutation_info = os.fstat(mutation_lock_fd)
+    if not stat.S_ISREG(mutation_info.st_mode) or mutation_info.st_uid != uid or mutation_info.st_nlink != 1 or mutation_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError("provider mutation inner lock is not an owned private regular file")
+    try:
+        fcntl.flock(mutation_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pass
+    else:
+        fcntl.flock(mutation_lock_fd, fcntl.LOCK_UN)
+        raise RuntimeError("installer helper no longer owns the provider mutation inner lock")
 finally:
+    if mutation_lock_fd is not None:
+        os.close(mutation_lock_fd)
+    if mutation_directory_fd is not None:
+        os.close(mutation_directory_fd)
     if lock_fd is not None:
         os.close(lock_fd)
     os.close(directory_fd)
@@ -397,7 +440,8 @@ acquire_install_lock() {
   [ "$DRY_RUN" -eq 0 ] || return 0
   lock_status_path="$(mktemp "${TMPDIR:-/tmp}/macprovider-install-lock.XXXXXX")" \
     || die 70 "could not allocate installer lock handshake"
-  python3 - "$HOME" "$CONFIG_DIR" "$INSTALL_LOCK_PATH" "$$" "$lock_status_path" <<'PY' &
+  python3 - "$HOME" "$CONFIG_DIR" "$INSTALL_LOCK_PATH" "$PROVIDER_MUTATION_ROOT" \
+    "$PROVIDER_MUTATION_LOCK_PATH" "$PROVIDER_MUTATION_PENDING_PATH" "$$" "$lock_status_path" <<'PY' &
 import fcntl
 import json
 import os
@@ -408,7 +452,7 @@ import subprocess
 import sys
 import time
 
-home, config_dir, lock_path, owner_pid_text, status_path = sys.argv[1:]
+home, config_dir, lock_path, mutation_root, mutation_lock_path, mutation_pending_path, owner_pid_text, status_path = sys.argv[1:]
 owner_pid = int(owner_pid_text)
 uid = os.getuid()
 
@@ -451,8 +495,11 @@ def boot_session():
 
 home = os.path.normpath(home)
 config_dir = os.path.normpath(config_dir)
+mutation_root = os.path.normpath(mutation_root)
 if os.path.commonpath([home, config_dir]) != home:
     raise SystemExit("config directory must remain inside HOME")
+if os.path.commonpath([home, mutation_root]) != home:
+    raise SystemExit("provider mutation directory must remain inside HOME")
 current = home
 for component in os.path.relpath(config_dir, home).split(os.sep):
     current = os.path.join(current, component)
@@ -469,12 +516,17 @@ for component in os.path.relpath(config_dir, home).split(os.sep):
 directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 directory_fd = os.open(config_dir, directory_flags)
 lock_fd = None
+mutation_directory_fd = None
+mutation_lock_fd = None
 try:
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     lock_fd = os.open(os.path.basename(lock_path), flags, 0o600, dir_fd=directory_fd)
     info = os.fstat(lock_fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_nlink != 1:
         raise RuntimeError("installer lock is not an owned private regular file")
+    os.fchmod(lock_fd, 0o600)
+    if stat.S_IMODE(os.fstat(lock_fd).st_mode) != 0o600:
+        raise RuntimeError("installer lock mode could not be normalized to 0600")
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -506,6 +558,42 @@ try:
             # out a replacement claimant until that exact owner identity dies.
             write_status("busy")
             raise SystemExit(73)
+    current = home
+    for component in os.path.relpath(mutation_root, home).split(os.sep):
+        current = os.path.join(current, component)
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            os.mkdir(current, 0o700)
+            info = os.lstat(current)
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise RuntimeError(f"provider mutation path is not a no-follow directory: {current}")
+        if info.st_uid != uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise RuntimeError(f"provider mutation path is not private to the installing user: {current}")
+    mutation_directory_fd = os.open(mutation_root, directory_flags)
+    mutation_lock_fd = os.open(
+        os.path.basename(mutation_lock_path),
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=mutation_directory_fd,
+    )
+    mutation_info = os.fstat(mutation_lock_fd)
+    if not stat.S_ISREG(mutation_info.st_mode) or mutation_info.st_uid != uid or mutation_info.st_nlink != 1 or mutation_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeError("provider mutation inner lock is not an owned private regular file")
+    try:
+        fcntl.flock(mutation_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        write_status("mutation-busy")
+        raise SystemExit(73)
+    try:
+        pending_info = os.lstat(mutation_pending_path)
+    except FileNotFoundError:
+        pending_info = None
+    if pending_info is not None:
+        if not stat.S_ISREG(pending_info.st_mode) or stat.S_ISLNK(pending_info.st_mode) or pending_info.st_uid != uid or pending_info.st_nlink != 1 or pending_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise RuntimeError("pending provider mutation marker is unsafe")
+        write_status("mutation-pending")
+        raise SystemExit(73)
     token = secrets.token_hex(32)
     parent_start = process_start(owner_pid)
     if not parent_start:
@@ -544,6 +632,10 @@ except BaseException as error:
         pass
     raise
 finally:
+    if mutation_lock_fd is not None:
+        os.close(mutation_lock_fd)
+    if mutation_directory_fd is not None:
+        os.close(mutation_directory_fd)
     if lock_fd is not None:
         os.close(lock_fd)
     os.close(directory_fd)
@@ -565,6 +657,16 @@ PY
       wait "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
       INSTALL_LOCK_HOLDER_PID=""
       die 73 "another macprovider installer is active; wait for it to finish"
+      ;;
+    mutation-busy)
+      wait "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+      INSTALL_LOCK_HOLDER_PID=""
+      die 73 "another provider update is active; wait for it to finish"
+      ;;
+    mutation-pending)
+      wait "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
+      INSTALL_LOCK_HOLDER_PID=""
+      die 73 "a provider update is awaiting coordinator admission or recovery; wait for it to finish"
       ;;
     *)
       kill -TERM "$INSTALL_LOCK_HOLDER_PID" >/dev/null 2>&1 || true
@@ -2550,8 +2652,18 @@ validate_macprovider_version_tag() {
 }
 
 resolve_release_tag() {
+  case "${EMERGENCY_ROLLBACK:-0}" in
+    0|1) ;;
+    *) die 7 "MACPROVIDER_EMERGENCY_ROLLBACK must be 0 or 1" ;;
+  esac
+  if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && [ -z "${MACPROVIDER_VERSION:-}" ]; then
+    die 7 "emergency rollback requires MACPROVIDER_VERSION pinned to the prior signed tag"
+  fi
   if [ -n "${MACPROVIDER_VERSION:-}" ]; then
     validate_macprovider_version_tag "$MACPROVIDER_VERSION"
+    if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && ! version_at_least "$MACPROVIDER_VERSION" "$MACPROVIDER_MIN_EMERGENCY_VERSION"; then
+      die 7 "emergency rollback target $MACPROVIDER_VERSION predates the config-compatible floor $MACPROVIDER_MIN_EMERGENCY_VERSION"
+    fi
     printf "%s" "$MACPROVIDER_VERSION"
   else
     tag="$(latest_release_tag)"
@@ -2658,6 +2770,7 @@ validate_staged_entries() {
   has_binary=0
   has_metallib=0
   has_bundle=0
+  has_bundled_metallib=0
   has_catalog_manifest=0
   has_catalog_keyring=0
   has_catalog_candidates=0
@@ -2684,6 +2797,10 @@ validate_staged_entries() {
         ;;
       mlx.metallib)
         has_metallib=1
+        ;;
+      mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib)
+        has_bundle=1
+        has_bundled_metallib=1
         ;;
       THIRD-PARTY-NOTICES.txt)
         ;;
@@ -2719,14 +2836,28 @@ $entries
 EOF
 
   [ "$has_binary" -eq 1 ] || die 5 "$label does not contain macprovider-cli"
-  [ "$has_metallib" -eq 1 ] || die 5 "$label does not contain mlx.metallib"
   [ "$has_bundle" -eq 1 ] || die 5 "$label does not contain a SwiftPM resource bundle"
-  [ "$has_catalog_manifest" -eq 1 ] || die 5 "$label does not contain catalog-release/release.json"
-  [ "$has_catalog_keyring" -eq 1 ] || die 5 "$label does not contain catalog-release/trusted-keys.json"
-  [ "$has_catalog_candidates" -eq 1 ] || die 5 "$label does not contain catalog-release/autotune-candidates.json"
-  [ "$has_catalog_candidates_signature" -eq 1 ] || die 5 "$label does not contain catalog-release/autotune-candidates.json.sig"
-  [ "$has_catalog_demand" -eq 1 ] || die 5 "$label does not contain catalog-release/demand-rank.json"
-  [ "$has_catalog_demand_signature" -eq 1 ] || die 5 "$label does not contain catalog-release/demand-rank.json.sig"
+  catalog_member_count=$((
+    has_catalog_manifest +
+    has_catalog_keyring +
+    has_catalog_candidates +
+    has_catalog_candidates_signature +
+    has_catalog_demand +
+    has_catalog_demand_signature
+  ))
+  if [ "${EMERGENCY_ROLLBACK:-0}" = "1" ] && [ "$catalog_member_count" -eq 0 ]; then
+    [ "$has_metallib" -eq 1 ] || [ "$has_bundled_metallib" -eq 1 ] \
+      || die 5 "$label does not contain signed MLX Metal kernels"
+    log "Emergency rollback accepted a signed legacy payload without catalog assets."
+  else
+    [ "$has_metallib" -eq 1 ] || die 5 "$label does not contain mlx.metallib"
+    [ "$has_catalog_manifest" -eq 1 ] || die 5 "$label does not contain catalog-release/release.json"
+    [ "$has_catalog_keyring" -eq 1 ] || die 5 "$label does not contain catalog-release/trusted-keys.json"
+    [ "$has_catalog_candidates" -eq 1 ] || die 5 "$label does not contain catalog-release/autotune-candidates.json"
+    [ "$has_catalog_candidates_signature" -eq 1 ] || die 5 "$label does not contain catalog-release/autotune-candidates.json.sig"
+    [ "$has_catalog_demand" -eq 1 ] || die 5 "$label does not contain catalog-release/demand-rank.json"
+    [ "$has_catalog_demand_signature" -eq 1 ] || die 5 "$label does not contain catalog-release/demand-rank.json.sig"
+  fi
 }
 
 validate_package() {
@@ -3185,7 +3316,11 @@ install_binary() {
   find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec rm -rf {} +
   find "$staging_dir" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$INSTALL_DIR"/ \;
   rm -rf "$INSTALL_DIR/catalog-release"
-  cp -R "$staging_dir/catalog-release" "$INSTALL_DIR/catalog-release"
+  if [ -d "$staging_dir/catalog-release" ]; then
+    cp -R "$staging_dir/catalog-release" "$INSTALL_DIR/catalog-release"
+  elif [ "${EMERGENCY_ROLLBACK:-0}" != "1" ]; then
+    die 5 "staged provider release is missing catalog-release"
+  fi
 
   # Atomic symlink swap at the canonical path.
   rm -f "$BINARY_PATH"
@@ -3464,6 +3599,7 @@ label = os.environ["MACPROVIDER_LABEL"]
 log_path = os.environ["LOG_PATH"]
 pending = os.path.join(root, "pending.json")
 lock_path = os.path.join(root, "update.lock")
+install_lock_path = os.path.expanduser("~/.config/macprovider/install.lock")
 uid = os.getuid()
 provider_user = pwd.getpwuid(uid).pw_name
 def ts():
@@ -3629,10 +3765,6 @@ def process_success_sentinel(marker):
             release_backup = marker.get("release_backup_path")
             if release_backup:
                 shutil.rmtree(release_backup, ignore_errors=True)
-            try:
-                os.unlink(lock_path)
-            except FileNotFoundError:
-                pass
             os.unlink(sentinel)
             event("success", "post_start", None, "success_sentinel_cleanup_completed", marker)
             return True
@@ -3722,21 +3854,110 @@ def marker_deadline_expired(marker):
     raw_deadline = str(marker["marker_deadline"])
     deadline = datetime.datetime.strptime(raw_deadline, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
     return datetime.datetime.now(datetime.timezone.utc) >= deadline
-def lock_is_held_by_other_process():
-    os.makedirs(root, mode=0o700, exist_ok=True)
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+def process_start(pid):
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return ""
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+def boot_session():
     try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        value = result.stdout.strip()
+        if value:
+            return value
+    except FileNotFoundError:
+        pass
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+def normalize_lock_fd(fd, path):
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != uid
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise RuntimeError(f"mutation_lock_invalid:{path}")
+    os.fchmod(fd, 0o600)
+    if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+        raise RuntimeError(f"mutation_lock_mode_invalid:{path}")
+def installer_owner_is_live(lock_fd):
+    os.lseek(lock_fd, 0, os.SEEK_SET)
+    payload = os.read(lock_fd, 4097)
+    if len(payload) > 4096:
+        raise RuntimeError("installer_owner_record_oversized")
+    if not payload.strip():
+        return False
+    try:
+        record = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("installer_owner_record_invalid") from exc
+    if not isinstance(record, dict):
+        raise RuntimeError("installer_owner_record_invalid")
+    owner_pid = record.get("pid")
+    owner_start = record.get("process_start")
+    owner_boot = record.get("boot_session")
+    if (
+        not isinstance(owner_pid, int)
+        or isinstance(owner_pid, bool)
+        or owner_pid <= 0
+        or not isinstance(owner_start, str)
+        or not owner_start
+        or not isinstance(owner_boot, str)
+        or not owner_boot
+    ):
+        raise RuntimeError("installer_owner_record_invalid")
+    current_boot = boot_session()
+    if not current_boot:
+        raise RuntimeError("installer_owner_boot_identity_unavailable")
+    return owner_boot == current_boot and process_start(owner_pid) == owner_start
+def release_transaction_locks(descriptors):
+    for descriptor in reversed(descriptors):
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+def acquire_transaction_locks():
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    os.makedirs(os.path.dirname(install_lock_path), mode=0o700, exist_ok=True)
+    descriptors = []
+    for path in (install_lock_path, lock_path):
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            normalize_lock_fd(fd, path)
+        except Exception:
+            os.close(fd)
+            release_transaction_locks(descriptors)
+            raise
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return True
-        return False
-    finally:
+            os.close(fd)
+            release_transaction_locks(descriptors)
+            return None
+        descriptors.append(fd)
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
+            owner_live = installer_owner_is_live(descriptors[0])
+        except Exception:
+            release_transaction_locks(descriptors)
+            raise
+        if owner_live:
+            release_transaction_locks(descriptors)
+            return None
+    return descriptors
 def validate_restore_inputs(marker):
     backup = marker["backup_path"]
     target = marker["target_path"]
@@ -3899,10 +4120,6 @@ def restore(marker):
     except FileNotFoundError:
         pass
     try:
-        os.unlink(lock_path)
-    except FileNotFoundError:
-        pass
-    try:
         os.unlink(backup)
     except FileNotFoundError:
         pass
@@ -3932,23 +4149,22 @@ def classify_post_start_failure(marker):
     if current_version and current_version != str(marker["target_version"]):
         return "post_start_rejoin_timeout"
     return "post_start_rejoin_timeout"
+transaction_locks = []
 try:
+    verify_root()
+    acquired = acquire_transaction_locks()
+    if acquired is None:
+        sys.exit(0)
+    transaction_locks = acquired
     if not os.path.exists(pending):
         scan_without_pending()
         sys.exit(0)
-    verify_root()
     reject_path(pending)
-    if lock_is_held_by_other_process():
-        sys.exit(0)
     try:
         marker = read_marker()
     except Exception as exc:
         event("failure", "rollback", "orphaned_pending_marker", "marker_invalid", None)
         quarantine(f"marker_invalid:{exc}", None)
-        try:
-            os.unlink(lock_path)
-        except FileNotFoundError:
-            pass
         sys.exit(0)
     if process_success_sentinel(marker):
         sys.exit(0)
@@ -3965,6 +4181,12 @@ try:
         quarantine(str(exc), marker)
 except Exception as exc:
     log(f"recovery_error={exc}")
+finally:
+    for descriptor in reversed(transaction_locks):
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 PY
 }
 main() {
@@ -4376,19 +4598,60 @@ wait_for_coordinator() {
   coordinator_base="$2"
   deadline=$(( $(date +%s) + 30 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    response="$(curl -fsS --max-time 5 "$coordinator_base/v1/pool/check?provider_id=$(urlencode "$provider_id")&details=readiness" 2>/dev/null || true)"
     local_status="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/status" 2>/dev/null || true)"
-    if python3 - "$provider_id" "$response" "$local_status" \
+    assigned_id="$(python3 - "$provider_id" "$local_status" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+provider_id, local_raw = sys.argv[1:]
+local = json.loads(local_raw)
+coordinator = local.get("coordinator")
+if local.get("provider_id") != provider_id or not isinstance(coordinator, dict):
+    raise SystemExit(1)
+assigned_id = coordinator.get("session")
+if coordinator.get("connected") is not True or not isinstance(assigned_id, str) or not assigned_id:
+    raise SystemExit(1)
+print(assigned_id)
+PY
+)"
+    if [ -z "$assigned_id" ]; then
+      sleep 2
+      continue
+    fi
+    response="$(curl -fsS --max-time 5 "$coordinator_base/v1/pool/check?provider_id=$(urlencode "$provider_id")&assigned_id=$(urlencode "$assigned_id")&details=readiness" 2>/dev/null || true)"
+    local_status="$(curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/v1/status" 2>/dev/null || true)"
+    if python3 - "$provider_id" "$assigned_id" "$response" "$local_status" \
       "$INSTALL_DIR/catalog-release/release.json" \
-      "$INSTALL_DIR/catalog-release/autotune-candidates.json" <<'PY' 2>/dev/null
+      "$INSTALL_DIR/catalog-release/autotune-candidates.json" \
+      "${EMERGENCY_ROLLBACK:-0}" <<'PY' 2>/dev/null
 import hashlib
 import json
 import re
 import sys
 
-provider_id, response_raw, local_raw, release_path, candidates_path = sys.argv[1:]
+provider_id, assigned_id, response_raw, local_raw, release_path, candidates_path, emergency_raw = sys.argv[1:]
 response = json.loads(response_raw)
 local = json.loads(local_raw)
+coordinator = local.get("coordinator")
+if not isinstance(coordinator, dict):
+    raise SystemExit(1)
+if coordinator.get("connected") is not True or coordinator.get("session") != assigned_id:
+    raise SystemExit(1)
+if response.get("assigned_id") != assigned_id:
+    raise SystemExit(1)
+if emergency_raw == "1":
+    # Coordinator buyer-serving admission for the exact connected session is
+    # the authority for this deliberately legacy-only recovery path; do not
+    # make rollback depend on optional local status fields across prior builds.
+    if local.get("provider_id") != provider_id:
+        raise SystemExit(1)
+    if response.get("provider_id") != provider_id or response.get("buyer_serving") is not True:
+        raise SystemExit(1)
+    if response.get("catalog_evidence_source") != "provider_reported":
+        raise SystemExit(1)
+    if response.get("catalog_admission_mode") != "legacy_bridge":
+        raise SystemExit(1)
+    raise SystemExit(0)
 with open(release_path, "rb") as handle:
     release = json.load(handle)
 with open(candidates_path, "rb") as handle:
@@ -4467,6 +4730,186 @@ print_autotune_handoff() {
   printf "  macprovider-cli autotune --recommend --apply\n"
 }
 
+validate_emergency_target() {
+  target="$1"
+  [ -x "$BINARY_PATH" ] || die 7 "emergency rollback requires an installed provider binary"
+  installed_version="$("$BINARY_PATH" --version 2>/dev/null | tr -d '\r\n')"
+  case "$installed_version" in
+    v*) installed_tag="$installed_version" ;;
+    *) installed_tag="v$installed_version" ;;
+  esac
+  validate_macprovider_version_tag "$installed_tag"
+  if version_at_least "$target" "$installed_tag"; then
+    die 7 "emergency rollback target $target must be older than installed $installed_tag"
+  fi
+}
+
+verify_emergency_coordinator_advertisement() {
+  coordinator_base="$1"
+  target="$2"
+  health="$(curl -fsS --max-time 10 "$coordinator_base/healthz" 2>/dev/null || true)"
+  python3 - "$target" "$health" <<'PY' \
+    || die 7 "coordinator must advertise the exact rollback target before emergency provider downgrade"
+import json
+import sys
+
+target, raw = sys.argv[1:]
+payload = json.loads(raw)
+if payload.get("recommended_binary_version") != target.removeprefix("v"):
+    raise SystemExit(1)
+PY
+}
+
+validate_emergency_config_backup() {
+  [ -n "$EMERGENCY_CONFIG_BACKUP" ] \
+    || die 7 "emergency rollback requires MACPROVIDER_EMERGENCY_CONFIG_BACKUP"
+  [ -n "$EMERGENCY_CONFIG_SHA256" ] \
+    || die 7 "emergency rollback requires MACPROVIDER_EMERGENCY_CONFIG_SHA256"
+  case "$EMERGENCY_CONFIG_BACKUP" in
+    /*) ;;
+    *) die 7 "emergency config backup path must be absolute" ;;
+  esac
+  if [[ ! "$EMERGENCY_CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    die 7 "emergency config backup sha256 must be exactly 64 lowercase hex characters"
+  fi
+  python3 - "$EMERGENCY_CONFIG_BACKUP" "$LIVE_CONFIG_PATH" "$EMERGENCY_CONFIG_SHA256" <<'PY' \
+    || die 7 "emergency config backup is not an owned private regular file with the expected sha256"
+import hashlib
+import os
+import stat
+import sys
+
+source, live, expected = sys.argv[1:]
+source_real = os.path.realpath(source)
+live_real = os.path.realpath(live)
+if source_real == live_real:
+    raise SystemExit(1)
+info = os.lstat(source)
+if (
+    not stat.S_ISREG(info.st_mode)
+    or stat.S_ISLNK(info.st_mode)
+    or info.st_uid != os.geteuid()
+    or info.st_nlink != 1
+    or stat.S_IMODE(info.st_mode) != 0o600
+    or info.st_size <= 0
+    or info.st_size > 1024 * 1024
+):
+    raise SystemExit(1)
+descriptor = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    opened = os.fstat(descriptor)
+    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+        raise SystemExit(1)
+    payload = b""
+    while True:
+        block = os.read(descriptor, 65536)
+        if not block:
+            break
+        payload += block
+        if len(payload) > 1024 * 1024:
+            raise SystemExit(1)
+finally:
+    os.close(descriptor)
+if hashlib.sha256(payload).hexdigest() != expected:
+    raise SystemExit(1)
+PY
+}
+
+stage_emergency_config_backup() {
+  python3 - "$EMERGENCY_CONFIG_BACKUP" "$EMERGENCY_CONFIG_SHA256" "$STAGED_CONFIG_PATH" <<'PY' \
+    || die 7 "failed to stage the verified pre-upgrade emergency config"
+import hashlib
+import os
+import stat
+import sys
+
+source, expected, destination = sys.argv[1:]
+source_info = os.lstat(source)
+source_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    opened = os.fstat(source_fd)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != os.geteuid()
+        or opened.st_nlink != 1
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or (opened.st_dev, opened.st_ino) != (source_info.st_dev, source_info.st_ino)
+    ):
+        raise SystemExit(1)
+    payload = b""
+    while True:
+        block = os.read(source_fd, 65536)
+        if not block:
+            break
+        payload += block
+        if len(payload) > 1024 * 1024:
+            raise SystemExit(1)
+finally:
+    os.close(source_fd)
+if not payload or hashlib.sha256(payload).hexdigest() != expected:
+    raise SystemExit(1)
+try:
+    os.unlink(destination)
+except FileNotFoundError:
+    pass
+destination_fd = os.open(
+    destination,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+    0o600,
+)
+try:
+    with os.fdopen(destination_fd, "wb", closefd=False) as output:
+        output.write(payload)
+        output.flush()
+        os.fsync(output.fileno())
+finally:
+    os.close(destination_fd)
+PY
+}
+
+disable_staged_autoupdate() {
+  python3 - "$STAGED_CONFIG_PATH" <<'PY'
+import os
+import re
+import sys
+import tempfile
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines()
+top_level_legacy = re.compile(r"^auto_update_enabled\s*:")
+merged = [line for line in lines if not top_level_legacy.match(line)]
+if merged and merged[-1].strip():
+    merged.append("")
+merged.append("auto_update_enabled: false")
+directory = os.path.dirname(path)
+fd, temporary = tempfile.mkstemp(prefix=".emergency-config-", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(merged) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+verify_emergency_config_activation() {
+  [ -n "$EMERGENCY_STAGED_CONFIG_SHA256" ] \
+    || die 7 "emergency staged config digest was not recorded"
+  actual_config_sha="$(shasum -a 256 "$LIVE_CONFIG_PATH" | awk '{print $1}')"
+  [ "$actual_config_sha" = "$EMERGENCY_STAGED_CONFIG_SHA256" ] \
+    || die 7 "activated emergency config does not match the verified staged config"
+  activated_model="$(read_config_model || true)"
+  [ -n "$activated_model" ] && [ "$activated_model" = "$EMERGENCY_MODEL" ] \
+    || die 7 "activated emergency config does not retain the inventoried model"
+  log "Emergency config proof: source_sha256=$EMERGENCY_CONFIG_SHA256 activated_sha256=$actual_config_sha model=$activated_model"
+}
+
 main() {
   detect_platform
   validate_port_value "$PORT"
@@ -4502,6 +4945,11 @@ main() {
   fi
 
   tag="$(resolve_release_tag)"
+  if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
+    validate_emergency_target "$tag"
+    verify_emergency_coordinator_advertisement "$coordinator_base" "$tag"
+    validate_emergency_config_backup
+  fi
   if [ -n "${MACPROVIDER_VERSION:-}" ]; then
     log "Using operator-pinned version: $tag (via MACPROVIDER_VERSION)"
   else
@@ -4515,10 +4963,26 @@ main() {
   stage_release_payload
   clear_quarantine "$staging_dir"
   prepare_staged_config
-  log "Validating signed catalog and stored recommendation with the staged release while the current provider remains available."
-  if ! use_fresh_recommendation_if_available; then
-    write_config "$model" "$provider_id" "$coordinator_url"
-    AUTOTUNE_RECOMMENDATION_REQUIRED=1
+  if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
+    [ "$EXISTING_INSTALL_WAS_PRESENT" -eq 1 ] \
+      || die 7 "emergency rollback requires an existing provider installation to restore"
+    [ "$SKIP_PROVIDER_START" -eq 0 ] \
+      || die 7 "emergency rollback must start and prove the restored provider before commit"
+    stage_emergency_config_backup
+    model="$(read_config_model || true)"
+    [ -n "$model" ] \
+      || die 7 "emergency rollback backup must retain its prior model"
+    EMERGENCY_MODEL="$model"
+    disable_staged_autoupdate
+    EMERGENCY_STAGED_CONFIG_SHA256="$(shasum -a 256 "$STAGED_CONFIG_PATH" | awk '{print $1}')"
+    log "Emergency rollback: restoring the verified pre-upgrade config and model while disabling provider autoupdate."
+    log "The signed prior release will commit only after exact legacy_bridge buyer admission."
+  else
+    log "Validating signed catalog and stored recommendation with the staged release while the current provider remains available."
+    if ! use_fresh_recommendation_if_available; then
+      write_config "$model" "$provider_id" "$coordinator_url"
+      AUTOTUNE_RECOMMENDATION_REQUIRED=1
+    fi
   fi
   if [ "$SKIP_PROVIDER_START" -eq 1 ]; then
     if restore_existing_provider_if_start_skipped; then
@@ -4583,13 +5047,20 @@ main() {
     exit 6
   fi
 
-  # Keep rollback armed until coordinator admission proves that this exact
-  # locally verified catalog envelope is buyer-routable. A merely connected or
-  # locally ready provider is not a completed network upgrade.
-  log "Waiting up to 30s for exact coordinator catalog admission and buyer-serving readiness."
+  # Keep rollback armed until coordinator admission proves the selected mode:
+  # exact current/previous catalog identity for normal upgrades, or exact
+  # buyer-serving legacy_bridge for an explicit signed emergency downgrade.
+  log "Waiting up to 30s for exact coordinator admission and buyer-serving readiness."
   if ! wait_for_coordinator "$provider_id" "$coordinator_base"; then
-    log "Coordinator did not admit the exact local catalog envelope for buyer traffic; rolling back."
+    if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
+      log "Coordinator did not admit the restored provider through active legacy_bridge; rolling back."
+    else
+      log "Coordinator did not admit the exact local catalog envelope for buyer traffic; rolling back."
+    fi
     exit 6
+  fi
+  if [ "$EMERGENCY_ROLLBACK" = "1" ]; then
+    verify_emergency_config_activation
   fi
   commit_install_transaction
 

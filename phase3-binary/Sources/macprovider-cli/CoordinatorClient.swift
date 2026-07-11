@@ -137,8 +137,14 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 
 actor CoordinatorClient {
     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
+    typealias CoordinatorReadiness = @Sendable (
+        String,
+        String,
+        CoordinatorReadinessClient.ExpectedCatalogEnvelope
+    ) async -> Bool?
+    typealias CatalogArtifactIdentity = @Sendable (String?) async -> String?
 
-    static let binaryVersion = "1.8.30"
+    static let binaryVersion = "1.8.31"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -237,6 +243,14 @@ actor CoordinatorClient {
     private let catalogCandidateSHA256: String?
     private let catalogSignerKeyID: String?
     private let catalogRowIdentity: String?
+    private let catalogModelSHA256: String?
+    private let catalogArtifactIdentity: CatalogArtifactIdentity
+    private let coordinatorReadiness: CoordinatorReadiness
+    private let coordinatorReadinessAttempts: Int
+    private let coordinatorReadinessRetryNanoseconds: UInt64
+    private let autoupdateMarkerStore: AutoUpdateMarkerStore
+    private var catalogWarmSwapInvalidated = false
+    private var acceptedAssignedProviderID: String?
 
     init?(
         config: AppConfig,
@@ -267,6 +281,12 @@ actor CoordinatorClient {
         catalogCandidateSHA256: String? = nil,
         catalogSignerKeyID: String? = nil,
         catalogRowIdentity: String? = nil,
+        catalogModelSHA256: String? = nil,
+        catalogArtifactIdentity: CatalogArtifactIdentity? = nil,
+        coordinatorReadiness: CoordinatorReadiness? = nil,
+        coordinatorReadinessAttempts: Int = 15,
+        coordinatorReadinessRetryNanoseconds: UInt64 = 2_000_000_000,
+        autoupdateMarkerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
         // Must sit well below the coordinator's WS handshake timeout
         // (`Config.ProviderWSHandshakeTimeout` — 10s default in Pearl's
         // production config). If our identity_signature roundtrip
@@ -346,6 +366,26 @@ actor CoordinatorClient {
         self.catalogCandidateSHA256 = catalogCandidateSHA256
         self.catalogSignerKeyID = catalogSignerKeyID
         self.catalogRowIdentity = catalogRowIdentity
+        self.catalogModelSHA256 = catalogModelSHA256
+        self.catalogArtifactIdentity = catalogArtifactIdentity ?? { modelID in
+            guard let modelID,
+                  let directory = ModelRuntime.localHuggingFaceSnapshot(for: modelID)
+            else {
+                return nil
+            }
+            return try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
+        }
+        self.coordinatorReadiness = coordinatorReadiness ?? { providerID, assignedProviderID, expected in
+            await CoordinatorReadinessClient.fetch(
+                coordinatorURL: config.coordinatorURL,
+                providerID: providerID,
+                assignedID: assignedProviderID,
+                expected: expected
+            )
+        }
+        self.coordinatorReadinessAttempts = max(1, coordinatorReadinessAttempts)
+        self.coordinatorReadinessRetryNanoseconds = coordinatorReadinessRetryNanoseconds
+        self.autoupdateMarkerStore = autoupdateMarkerStore
         self.watchdogExitHook = watchdogExitHook
         self.streamInterval = max(1, config.streamInterval)
         self.credentialBootstrap = credentialBootstrap
@@ -437,6 +477,24 @@ actor CoordinatorClient {
             case .loadFinished:
                 continue
             case .completed:
+                if catalogReleaseID != nil {
+                    let runtimeSnapshot = await modelRuntime.currentSnapshot()
+                    if await catalogRuntimeMatches(runtimeSnapshot) == false {
+                        // A catalog row identity is model-specific. Never send a
+                        // post-swap heartbeat or reconnect handshake that pairs a
+                        // new model with the boot model's signed row identity.
+                        // Keep local serving available, but fail closed on network
+                        // admission until the provider restarts with a freshly
+                        // selected catalog row.
+                        catalogWarmSwapInvalidated = true
+                        coordinatorSessionAccepted = false
+                        await providerStatus.setCatalogCompatibilityConfirmed(false)
+                        Self.keepaliveDebug("catalog warm swap requires model-specific re-admission")
+                        closeWebSocketAfterKeepaliveFailure()
+                        continue
+                    }
+                    catalogWarmSwapInvalidated = false
+                }
                 guard coordinatorSessionAccepted || webSocket == nil else {
                     continue
                 }
@@ -564,6 +622,17 @@ actor CoordinatorClient {
     }
 
     private func connectAndRunOnce() async throws {
+        if catalogReleaseID != nil, warmSwapEnabled {
+            let runtimeSnapshot = await modelRuntime.currentSnapshot()
+            if await catalogRuntimeMatches(runtimeSnapshot) == false {
+                catalogWarmSwapInvalidated = true
+            }
+        }
+        guard !catalogWarmSwapInvalidated else {
+            throw CoordinatorAuthError.invalidMessage(
+                "catalog model changed without a model-specific signed row; restart with a fresh catalog recommendation"
+            )
+        }
         if let connectAndRunOverride {
             try await connectAndRunOverride()
             return
@@ -1829,6 +1898,7 @@ actor CoordinatorClient {
             tier: payload["tier"] as? String,
             recommendedBinaryVersion: payload["recommended_binary_version"] as? String
         )
+        acceptedAssignedProviderID = (payload["assigned_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         await providerStatus.setCatalogCompatibilityConfirmed(
             catalogReleaseID == nil || payload["catalog_compatible"] as? Bool == true
         )
@@ -1839,12 +1909,41 @@ actor CoordinatorClient {
         sleepAssertion?.stop()
         sleepAssertion = sleepAssertionFactory()
         startHeartbeat(intervalSeconds: interval)
-        let completedAutoupdate = await pendingSuccessfulAutoupdate()
         try await sendStateUpdate(state: nil, reason: reason)
-        if let completedAutoupdate {
-            let markerStore = AutoUpdateMarkerStore()
-            try? markerStore.completeSuccessfulUpdate(completedAutoupdate)
-            try? markerStore.finalizeSuccessfulUpdate(completedAutoupdate)
+        if let completedAutoupdate = await pendingSuccessfulAutoupdate(),
+           await waitForCoordinatorServingCapability() {
+            do {
+                let transactionLock = try autoupdateMarkerStore.acquireRecoveryLock()
+                defer { withExtendedLifetime(transactionLock) {} }
+                guard let current = try autoupdateMarkerStore.readPending(),
+                      current == completedAutoupdate else {
+                    throw AutoUpdateMarkerError.invalidMarker
+                }
+                try autoupdateMarkerStore.completeSuccessfulUpdate(current)
+                try autoupdateMarkerStore.finalizeSuccessfulUpdate(current)
+                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                    updateID: completedAutoupdate.updateID,
+                    currentVersion: Self.binaryVersion,
+                    targetVersion: completedAutoupdate.targetVersion,
+                    phase: .postStart,
+                    outcome: .success,
+                    reason: "coordinator_admitted_serving_capability_confirmed",
+                    attempt: 1
+                ))
+            } catch {
+                // Preserve the sentinel/pending state when cleanup is
+                // incomplete so startup recovery can finish it idempotently.
+                await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
+                    updateID: completedAutoupdate.updateID,
+                    currentVersion: Self.binaryVersion,
+                    targetVersion: completedAutoupdate.targetVersion,
+                    phase: .postStart,
+                    outcome: .failure,
+                    reason: "buyer_serving_commit_cleanup_failed",
+                    attempt: 1,
+                    failureClass: .other
+                ))
+            }
         }
         if let recommended = payload["recommended_binary_version"] as? String {
             let trust = currentAutoupdateTrustState()
@@ -1884,28 +1983,56 @@ actor CoordinatorClient {
         }
     }
 
-    private func pendingSuccessfulAutoupdate(markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore()) async -> AutoUpdatePendingMarker? {
-        guard let marker = try? markerStore.readPending(),
+    private func pendingSuccessfulAutoupdate() async -> AutoUpdatePendingMarker? {
+        guard let marker = try? autoupdateMarkerStore.readPending(),
               marker.targetVersion == Self.binaryVersion,
               marker.commitOwner == nil || marker.commitOwner == "coordinator"
         else {
             return nil
         }
-        await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
-            updateID: marker.updateID,
-            currentVersion: Self.binaryVersion,
-            targetVersion: marker.targetVersion,
-            phase: .postStart,
-            outcome: .success,
-            reason: "post_start_rejoin_succeeded",
-            attempt: 1
-        ))
         return marker
+    }
+
+    /// Rollback is committed only after the coordinator's public readiness
+    /// verdict confirms admitted buyer-serving capability for the provider's
+    /// current or previous signed catalog. A connected/accepted WebSocket alone
+    /// is insufficient, while a busy provider remains serving-capable.
+    private func waitForCoordinatorServingCapability() async -> Bool {
+        guard let assignedProviderID = acceptedAssignedProviderID,
+              !assignedProviderID.isEmpty,
+              let releaseID = catalogReleaseID,
+              let policyVersion = catalogPolicyVersion,
+              let candidateSHA256 = catalogCandidateSHA256,
+              let signerKeyID = catalogSignerKeyID,
+              let rowIdentity = catalogRowIdentity
+        else {
+            return false
+        }
+        let expected = CoordinatorReadinessClient.ExpectedCatalogEnvelope(
+            releaseID: releaseID,
+            policyVersion: policyVersion,
+            candidateSHA256: candidateSHA256,
+            signerKeyID: signerKeyID,
+            rowIdentity: rowIdentity
+        )
+        for attempt in 0 ..< coordinatorReadinessAttempts {
+            if await coordinatorReadiness(providerID, assignedProviderID, expected) == true {
+                return true
+            }
+            guard attempt + 1 < coordinatorReadinessAttempts,
+                  coordinatorReadinessRetryNanoseconds > 0,
+                  !Task.isCancelled
+            else {
+                break
+            }
+            try? await Task.sleep(nanoseconds: coordinatorReadinessRetryNanoseconds)
+        }
+        return false
     }
 
     private func runStartupAutoupdateRecovery() async {
         guard let binaryURL = Bundle.main.executableURL else { return }
-        await runStartupAutoupdateRecovery(binaryURL: binaryURL, markerStore: AutoUpdateMarkerStore())
+        await runStartupAutoupdateRecovery(binaryURL: binaryURL, markerStore: autoupdateMarkerStore)
     }
 
     func runStartupAutoupdateRecoveryForTest(binaryURL: URL, markerStore: AutoUpdateMarkerStore) async {
@@ -1913,6 +2040,13 @@ actor CoordinatorClient {
     }
 
     private func runStartupAutoupdateRecovery(binaryURL: URL, markerStore: AutoUpdateMarkerStore) async {
+        let transactionLock: AutoUpdateLock
+        do {
+            transactionLock = try markerStore.acquireRecoveryLock()
+        } catch {
+            return
+        }
+        defer { withExtendedLifetime(transactionLock) {} }
         let binaryDir = binaryURL.deletingLastPathComponent()
         let pending: AutoUpdatePendingMarker?
         do {
@@ -1996,9 +2130,8 @@ actor CoordinatorClient {
             guard Self.autoupdateMarkerDeadlineExpired(marker.markerDeadline) else {
                 return
             }
-            if !markerStore.updateLockIsLive() {
-                let outcome = markerStore.recoverOrphanedMarker(marker)
-                switch outcome {
+            let outcome = markerStore.recoverOrphanedMarker(marker)
+            switch outcome {
                 case .restored(let recovered):
                     await AutoUpdateEventStore.shared.record(AutoUpdateEvent(
                         updateID: recovered.updateID,
@@ -2033,7 +2166,6 @@ actor CoordinatorClient {
                         attempt: 1,
                         failureClass: .rollbackBackupCorrupt
                     ))
-                }
             }
         } else {
             for backup in markerStore.rollbackBackups(in: binaryDir) {
@@ -2611,6 +2743,14 @@ actor CoordinatorClient {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
             let runtimeModelID = runtimeSnapshot.modelID
             let runtimeWireModelID = coordinatorWireModelID(for: runtimeModelID)
+            if catalogReleaseID != nil {
+                guard await catalogRuntimeMatches(runtimeSnapshot) else {
+                    catalogWarmSwapInvalidated = true
+                    throw CoordinatorAuthError.invalidMessage(
+                        "warm-swapped model has no model-specific signed catalog admission"
+                    )
+                }
+            }
             payload["model_id"] = runtimeWireModelID
             payload["model_params_b"] = snapshot.capacity.modelParamsB(modelID: runtimeWireModelID)
             if let modelHash = runtimeSnapshot.modelHash {
@@ -2797,7 +2937,7 @@ actor CoordinatorClient {
         if publishesSupportedModels {
             message["publishes_supported_models"] = true
         }
-        appendCatalogAdmissionMetadata(to: &message)
+        appendCatalogAdmissionMetadata(to: &message, wireModelID: wireModelID)
         let receiptPublicKey = providerReceiptPublicKeyOverride ?? providerReceiptPublicKey
         if let receiptPublicKey, !receiptPublicKey.isEmpty {
             message["provider_receipt_public_key"] = receiptPublicKey
@@ -2814,7 +2954,9 @@ actor CoordinatorClient {
         return message
     }
 
-    private func appendCatalogAdmissionMetadata(to message: inout [String: Any]) {
+    private func appendCatalogAdmissionMetadata(to message: inout [String: Any], wireModelID: String) {
+        let catalogWireModelID = catalogModelIDForCoordinator ?? loadedModelID ?? ""
+        guard !catalogWarmSwapInvalidated, wireModelID == catalogWireModelID else { return }
         if let catalogReleaseID { message["catalog_release_id"] = catalogReleaseID }
         if let catalogPolicyVersion { message["catalog_policy_version"] = catalogPolicyVersion }
         if let catalogCandidateSHA256 { message["catalog_candidate_sha256"] = catalogCandidateSHA256 }
@@ -2848,6 +2990,10 @@ actor CoordinatorClient {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
             wireModelIDForHello = coordinatorWireModelID(for: runtimeSnapshot.modelID)
             hashForHello = runtimeSnapshot.modelHash
+            if catalogReleaseID != nil,
+               await catalogRuntimeMatches(runtimeSnapshot) == false {
+                catalogWarmSwapInvalidated = true
+            }
         } else {
             wireModelIDForHello = coordinatorWireModelID(for: snapshot.modelID)
             hashForHello = snapshot.modelHash
@@ -2857,8 +3003,27 @@ actor CoordinatorClient {
         if let hashForHello {
             message["model_hash"] = hashForHello
         }
-        appendCatalogAdmissionMetadata(to: &message)
+        appendCatalogAdmissionMetadata(to: &message, wireModelID: wireModelIDForHello)
         return message
+    }
+
+    private func catalogRuntimeMatches(_ snapshot: RuntimeSnapshot) async -> Bool {
+        let catalogWireModelID = catalogModelIDForCoordinator ?? loadedModelID ?? ""
+        let wireModelID = coordinatorWireModelID(for: snapshot.modelID)
+        guard wireModelID == catalogWireModelID else { return false }
+        // Generation zero is the boot artifact already admitted by startup
+        // preflight's canonical all-file artifact-set verifier. Recompute only
+        // after a completed warm swap, including same-model-ID swaps.
+        guard snapshot.specDecodeGeneration > 0 else { return true }
+        guard let expected = catalogModelSHA256?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !expected.isEmpty else {
+            return true
+        }
+        let resolved = await catalogArtifactIdentity(snapshot.modelID)
+        let actual = resolved?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return actual == expected
     }
 
     private func send(_ payload: sending [String: Any]) async throws {

@@ -445,6 +445,7 @@ nofollow = getattr(os, \"O_NOFOLLOW\", 0)
 directory_flags = os.O_RDONLY | os.O_DIRECTORY | nofollow
 opt_fd = os.open(\"/opt\", directory_flags)
 root_fd = None
+global_lock_fd = None
 try:
     opt_info = os.fstat(opt_fd)
     if opt_info.st_uid != 0 or opt_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
@@ -474,12 +475,28 @@ try:
                 raise SystemExit(\"unsafe coordinator deploy lock: \" + name)
         finally:
             os.close(fd)
+    global_lock_fd = os.open(
+        \"/run/lock/macprovider-pearl-updater.lock\",
+        os.O_RDWR | os.O_CREAT | nofollow,
+        0o600,
+    )
+    global_info = os.fstat(global_lock_fd)
+    if (
+        not stat.S_ISREG(global_info.st_mode)
+        or global_info.st_uid != 0
+        or global_info.st_gid != 0
+        or stat.S_IMODE(global_info.st_mode) != 0o600
+        or global_info.st_nlink != 1
+    ):
+        raise SystemExit(\"unsafe global Pearl deployment lock\")
 finally:
+    if global_lock_fd is not None:
+        os.close(global_lock_fd)
     if root_fd is not None:
         os.close(root_fd)
     os.close(opt_fd)
 ' || exit \$?
-flock -n /opt/macprovider/.coordinator-deploy.lock sh -c 'printf \"%s\\n\" LOCKED; cat >/dev/null'"
+flock -n /run/lock/macprovider-pearl-updater.lock flock -n /opt/macprovider/.coordinator-deploy.lock sh -c 'printf \"%s\\n\" LOCKED; cat >/dev/null'"
   _holder_rc=$?
   if [ -f "$DEPLOY_LOCK_WATCHDOG_ARMED" ] && [ ! -f "$DEPLOY_LOCK_RELEASE_SENTINEL" ]; then
     kill -TERM "$DEPLOY_CONTROLLER_PID" 2>/dev/null || true
@@ -518,7 +535,7 @@ if $SSH 'test -d /opt/macprovider/.coordinator-deploy-rollback'; then
     echo "  Preserve /opt/macprovider/.coordinator-deploy-rollback and recover it manually." >&2
     exit 70
   fi
-  $SSH /opt/macprovider/coordinator-deploy-recover --recover || {
+  $SSH /opt/macprovider/coordinator-deploy-recover --recover-under-global || {
     echo "aborting deploy: interrupted coordinator release could not be recovered; snapshot preserved" >&2
     exit 70
   }
@@ -1522,10 +1539,13 @@ $SSH "set -e
   # config / cli. The daemon runs as macprovider; group=macprovider +
   # mode 0750 (binary/cli) and 0640 (config) give it the needed
   # read/execute access.
-  if [ -x /opt/macprovider/coordinator ]; then
-    install -o root -g macprovider -m 0750 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
+  # The signed Pearl updater is the sole authority for the coordinator/gateway
+  # runtime pair. This catalog/config deployment may restart that installed
+  # pair, but must not create a mixed release by replacing only coordinator.
+  if [ ! -x /opt/macprovider/coordinator ] || ! cmp -s $DEPLOY_TMP/coordinator-linux-amd64 /opt/macprovider/coordinator; then
+    echo 'refusing coordinator-only replacement: install the signed coordinator/gateway pair with macprovider-pearl-update first' >&2
+    exit 1
   fi
-  install -o root -g macprovider -m 0750 $DEPLOY_TMP/coordinator-linux-amd64 /opt/macprovider/coordinator
   # coordinator-cli is operator-facing, but remains part of the same release
   # and therefore has an exact durable snapshot like the daemon binary.
   install -o root -g macprovider -m 0750 $DEPLOY_TMP/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli
@@ -2062,55 +2082,12 @@ for name in ("autotune_candidates", "demand_rank"):
 PY
 echo "  SPEC-023 autotune feeds exact-byte and signature verification OK"
 
-# A perfect catalog endpoint does not prove providers can complete the hello
-# compatibility gate. Require one known provider to reconnect and remain
-# buyer-serving before the catalog/coordinator release is committed.
-# Catalog values in this response are explicitly provider-reported compatibility
-# evidence; exact installed bytes are verified independently on the trusted
-# canary host below. buyer_serving disambiguates a busy provider (publicly masked
-# to degraded) from a truly degraded provider.
+# A perfect catalog endpoint does not prove the exact canary process completed
+# the hello compatibility gate. First prove the live Mac process and capture its
+# assigned coordinator session; then query authenticated coordinator evidence
+# for that exact session below.
 CANARY_POOL_BODY="$STATIC_SMOKE_DIR/catalog-canary-pool.json"
 CANARY_CURL_CONFIG="$STATIC_SMOKE_DIR/catalog-canary-curl.conf"
-(umask 077 && printf 'header = "Authorization: Bearer %s"\n' "$CATALOG_CANARY_AUTH_TOKEN" > "$CANARY_CURL_CONFIG")
-CANARY_OK=0
-for CANARY_ATTEMPT in 1 2 3 4 5 6 7 8 9 10 11 12; do
-  STATUS=$(curl --config "$CANARY_CURL_CONFIG" -sS -o "$CANARY_POOL_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 \
-    "https://$DOMAIN/v1/pool/check?provider_id=$CATALOG_CANARY_PROVIDER_ID&details=deployment" || true)
-  if [ "$STATUS" = "200" ] && python3 - \
-    "$CANARY_POOL_BODY" \
-    "$CATALOG_CANARY_PROVIDER_ID" \
-    "$AUTOTUNE_RELEASE_ID" \
-    "$AUTOTUNE_POLICY_VERSION" \
-    "$AUTOTUNE_CANDIDATE_SHA256" \
-    "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" <<'PY'
-import json, re, sys
-value = json.load(open(sys.argv[1], encoding="utf-8"))
-if (
-    value.get("provider_id") != sys.argv[2]
-    or value.get("buyer_serving") is not True
-    or value.get("catalog_evidence_source") != "provider_reported"
-    or value.get("catalog_admission_mode") != "current"
-    or value.get("catalog_release_id") != sys.argv[3]
-    or value.get("catalog_policy_version") != sys.argv[4]
-    or value.get("catalog_candidate_sha256") != sys.argv[5]
-    or value.get("catalog_signer_key_id") != sys.argv[6]
-    or re.fullmatch(r"[0-9a-f]{64}", value.get("catalog_row_identity", "")) is None
-):
-    raise SystemExit(1)
-PY
-  then
-    CANARY_OK=1
-    break
-  fi
-  sleep 5
-done
-rm -f "$CANARY_CURL_CONFIG"
-if [ "$CANARY_OK" != "1" ]; then
-  echo "SPEC-023 canary failed: provider $CATALOG_CANARY_PROVIDER_ID did not return to buyer-serving pool state" >&2
-  echo "  last status=$STATUS body=$(head -c 300 "$CANARY_POOL_BODY" 2>/dev/null || true)" >&2
-  exit 1
-fi
-echo "  SPEC-023 compatibility canary OK: provider $CATALOG_CANARY_PROVIDER_ID is admitted to the buyer pool"
 
 # Provider hello fields are authenticated self-report, so they are not exact
 # installation proof. Read the release bundle from the operator-controlled
@@ -2134,11 +2111,19 @@ if ! "${CANARY_SSH[@]}" python3 - \
   "$CATALOG_CANARY_INSTALL_DIR" \
   "$CATALOG_CANARY_PROVIDER_ID" \
   "$AUTOTUNE_RELEASE_ID" \
+  "$AUTOTUNE_POLICY_VERSION" \
   "$AUTOTUNE_CANDIDATE_SHA256" \
   "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" > "$CANARY_INSTALLED_BODY" <<'PY'
 import hashlib, json, os, plistlib, re, stat, subprocess, sys, urllib.request
 
-catalog_path, expected_provider_id, expected_release_id, expected_digest, expected_signer = sys.argv[1:]
+(
+    catalog_path,
+    expected_provider_id,
+    expected_release_id,
+    expected_policy_version,
+    expected_digest,
+    expected_signer,
+) = sys.argv[1:]
 home = os.path.expanduser("~")
 nofollow = getattr(os, "O_NOFOLLOW", 0)
 directory_flags = os.O_RDONLY | os.O_DIRECTORY | nofollow
@@ -2187,20 +2172,6 @@ def read_regular_at(directory_fd, name, limit, require_owner=True):
     finally:
         os.close(fd)
 
-def stat_regular_at(directory_fd, name, require_owner=True, require_executable=False):
-    fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise SystemExit(f"canary path is not a regular file: {name}")
-        if require_owner and info.st_uid != os.getuid():
-            raise SystemExit(f"canary file has unexpected owner: {name}")
-        if require_executable and info.st_mode & 0o111 == 0:
-            raise SystemExit(f"canary file is not executable: {name}")
-        return info
-    finally:
-        os.close(fd)
-
 def open_parent_and_name(path):
     normalized = os.path.normpath(path)
     parent, name = os.path.split(normalized)
@@ -2208,10 +2179,48 @@ def open_parent_and_name(path):
         raise SystemExit(f"unsafe canary file path: {path}")
     return open_dir(parent or "."), name
 
+def running_text_vnode_path(pid, binary_info, expected_binary, runner=subprocess.run):
+    fields = runner(
+        ["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-d", "txt", "-F", "Dfin"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    ).stdout.splitlines()
+    text_device = text_inode = text_path = None
+    for field in fields:
+        if field.startswith("f"):
+            text_device = text_inode = text_path = None
+        elif field.startswith("D"):
+            try:
+                text_device = int(field[1:], 0)
+            except ValueError:
+                raise SystemExit("lsof returned an invalid text-vnode device")
+        elif field.startswith("i"):
+            try:
+                text_inode = int(field[1:])
+            except ValueError:
+                raise SystemExit("lsof returned an invalid text-vnode inode")
+        elif field.startswith("n"):
+            text_path = field[1:]
+        normalized_text_path = (
+            os.path.normpath(text_path.removesuffix(" (deleted)"))
+            if text_path is not None
+            else None
+        )
+        if (
+            text_device == binary_info.st_dev
+            and text_inode == binary_info.st_ino
+            and normalized_text_path == expected_binary
+        ):
+            return normalized_text_path
+    return None
+
 catalog_fd = open_dir(catalog_path)
 install_path = os.path.dirname(os.path.normpath(catalog_path)) or "."
 install_fd = open_dir(install_path)
-config_fd = provider_config_fd = None
+config_fd = provider_config_fd = binary_fd = None
 try:
     provider_config_fd = open_dir(".config/macprovider")
     provider_bytes, _ = read_regular_at(provider_config_fd, "provider_id", 1024)
@@ -2233,7 +2242,10 @@ try:
     if not isinstance(arguments, list) or len(arguments) < 4 or arguments[1:3] != ["serve", "--config"]:
         raise SystemExit("canary provider LaunchAgent has unexpected ProgramArguments")
 
-    binary_info = stat_regular_at(install_fd, "macprovider-cli", require_executable=True)
+    binary_fd = os.open("macprovider-cli", os.O_RDONLY | nofollow, dir_fd=install_fd)
+    binary_info = os.fstat(binary_fd)
+    if not stat.S_ISREG(binary_info.st_mode) or binary_info.st_uid != os.getuid() or binary_info.st_mode & 0o111 == 0:
+        raise SystemExit("canary installation binary is not a safe executable")
     install_absolute = install_path if os.path.isabs(install_path) else os.path.join(home, install_path)
     expected_binary = os.path.normpath(os.path.join(install_absolute, "macprovider-cli"))
     if os.path.normpath(arguments[0]) != expected_binary:
@@ -2251,19 +2263,9 @@ try:
     if match is None:
         raise SystemExit("canary provider LaunchAgent has no live PID")
     pid = int(match.group(1))
-    process_path = subprocess.run(
-        ["/usr/bin/proc_pidpath", str(pid)],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=10,
-    ).stdout.strip()
-    process_info = os.stat(process_path, follow_symlinks=False)
-    if not stat.S_ISREG(process_info.st_mode) or (
-        process_info.st_dev, process_info.st_ino
-    ) != (binary_info.st_dev, binary_info.st_ino):
-        raise SystemExit("live canary provider is not the verified installation binary")
+    process_path = running_text_vnode_path(pid, binary_info, expected_binary)
+    if process_path is None:
+        raise SystemExit("live canary provider text vnode is stale or not the verified installation binary")
 
     config_fd, config_name = open_parent_and_name(arguments[3])
     config_bytes, _ = read_regular_at(config_fd, config_name, 1024 * 1024)
@@ -2291,12 +2293,21 @@ try:
             raise SystemExit(f"canary local status returned HTTP {response.status}")
         local_status = json.loads(response.read(1024 * 1024))
     catalog = local_status.get("catalog")
+    coordinator = local_status.get("coordinator")
+    assigned_id = coordinator.get("session") if isinstance(coordinator, dict) else None
     if (
         local_status.get("provider_id") != expected_provider_id
+        or local_status.get("network_state") != "buyer_serving"
+        or not isinstance(coordinator, dict)
+        or coordinator.get("connected") is not True
+        or not isinstance(assigned_id, str)
+        or not assigned_id
         or not isinstance(catalog, dict)
         or catalog.get("release_id") != expected_release_id
+        or catalog.get("policy_version") != expected_policy_version
         or catalog.get("digest") != expected_digest
         or catalog.get("signer_key_id") != expected_signer
+        or re.fullmatch(r"[0-9a-f]{64}", str(catalog.get("row_identity", "")).lower()) is None
     ):
         raise SystemExit("live canary provider status does not match the expected identity and catalog")
 
@@ -2314,13 +2325,14 @@ try:
         hashes[name] = hashlib.sha256(payload).hexdigest()
     print(json.dumps({
         "provider_id": provider_id,
+        "assigned_id": assigned_id,
         "launchd_pid": pid,
         "executable_path": process_path,
         "local_status": local_status,
         "files": hashes,
     }, sort_keys=True))
 finally:
-    for fd in (config_fd, provider_config_fd, install_fd, catalog_fd):
+    for fd in (config_fd, provider_config_fd, binary_fd, install_fd, catalog_fd):
         if fd is not None:
             os.close(fd)
 PY
@@ -2329,8 +2341,65 @@ then
   exit 1
 fi
 
+# Bind coordinator admission to the exact session observed on the proved Mac.
+read -r CANARY_ASSIGNED_ID CANARY_CATALOG_ROW_IDENTITY < <(python3 - "$CANARY_INSTALLED_BODY" <<'PY'
+import json, pathlib, re, sys
+proof = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assigned_id = proof.get("assigned_id")
+row_identity = proof.get("local_status", {}).get("catalog", {}).get("row_identity")
+if not isinstance(assigned_id, str) or not assigned_id or any(ch.isspace() for ch in assigned_id):
+    raise SystemExit("canary proof has no safe assigned coordinator session")
+if re.fullmatch(r"[0-9a-f]{64}", str(row_identity).lower()) is None:
+    raise SystemExit("canary proof has no exact catalog row identity")
+print(assigned_id, str(row_identity).lower())
+PY
+) || {
+  echo "SPEC-023 canary failed: could not bind the live Mac session and catalog row" >&2
+  exit 1
+}
+CANARY_PROVIDER_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CATALOG_CANARY_PROVIDER_ID")
+CANARY_ASSIGNED_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CANARY_ASSIGNED_ID")
+(umask 077 && printf 'header = "Authorization: Bearer %s"\n' "$CATALOG_CANARY_AUTH_TOKEN" > "$CANARY_CURL_CONFIG")
+CANARY_OK=0
+for CANARY_ATTEMPT in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  STATUS=$(curl --config "$CANARY_CURL_CONFIG" -sS -o "$CANARY_POOL_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 \
+    "https://$DOMAIN/v1/pool/check?provider_id=$CANARY_PROVIDER_QUERY&assigned_id=$CANARY_ASSIGNED_QUERY&details=deployment" || true)
+  if [ "$STATUS" = "200" ] && python3 - \
+    "$CANARY_POOL_BODY" "$CATALOG_CANARY_PROVIDER_ID" "$CANARY_ASSIGNED_ID" \
+    "$AUTOTUNE_RELEASE_ID" "$AUTOTUNE_POLICY_VERSION" "$AUTOTUNE_CANDIDATE_SHA256" \
+    "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" "$CANARY_CATALOG_ROW_IDENTITY" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+if (
+    value.get("provider_id") != sys.argv[2]
+    or value.get("assigned_id") != sys.argv[3]
+    or value.get("buyer_serving") is not True
+    or value.get("catalog_evidence_source") != "provider_reported"
+    or value.get("catalog_admission_mode") != "current"
+    or value.get("catalog_release_id") != sys.argv[4]
+    or value.get("catalog_policy_version") != sys.argv[5]
+    or value.get("catalog_candidate_sha256") != sys.argv[6]
+    or value.get("catalog_signer_key_id") != sys.argv[7]
+    or str(value.get("catalog_row_identity", "")).lower() != sys.argv[8]
+):
+    raise SystemExit(1)
+PY
+  then
+    CANARY_OK=1
+    break
+  fi
+  sleep 5
+done
+rm -f "$CANARY_CURL_CONFIG"
+if [ "$CANARY_OK" != "1" ]; then
+  echo "SPEC-023 canary failed: exact session $CANARY_ASSIGNED_ID did not return buyer-serving admission" >&2
+  echo "  last status=$STATUS body=$(head -c 300 "$CANARY_POOL_BODY" 2>/dev/null || true)" >&2
+  exit 1
+fi
+
 if ! python3 - \
   "$CANARY_INSTALLED_BODY" \
+  "$CANARY_POOL_BODY" \
   "$CATALOG_CANARY_PROVIDER_ID" \
   "$AUTOTUNE_RELEASE_MANIFEST" \
   "$AUTOTUNE_TRUSTED_KEYS" \
@@ -2338,16 +2407,35 @@ if ! python3 - \
   "$STATIC_AUTOTUNE_SIG" \
   "$STATIC_DEMAND_JSON" \
   "$STATIC_DEMAND_SIG" <<'PY'
-import hashlib, json, pathlib, sys
+import hashlib, json, pathlib, re, sys
 
 proof = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-if proof.get("provider_id") != sys.argv[2] or not isinstance(proof.get("launchd_pid"), int):
+pool = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+if proof.get("provider_id") != sys.argv[3] or not isinstance(proof.get("launchd_pid"), int):
     raise SystemExit("canary proof is not bound to the selected provider and live process")
+local_status = proof.get("local_status", {})
+local_catalog = local_status.get("catalog", {})
+local_coordinator = local_status.get("coordinator", {})
+pool_row = str(pool.get("catalog_row_identity", "")).lower()
+if (
+    pool.get("provider_id") != sys.argv[3]
+    or pool.get("assigned_id") != proof.get("assigned_id")
+    or local_status.get("network_state") != "buyer_serving"
+    or local_coordinator.get("connected") is not True
+    or local_coordinator.get("session") != proof.get("assigned_id")
+    or re.fullmatch(r"[0-9a-f]{64}", pool_row) is None
+    or local_catalog.get("release_id") != pool.get("catalog_release_id")
+    or local_catalog.get("policy_version") != pool.get("catalog_policy_version")
+    or str(local_catalog.get("digest", "")).lower() != str(pool.get("catalog_candidate_sha256", "")).lower()
+    or local_catalog.get("signer_key_id") != pool.get("catalog_signer_key_id")
+    or str(local_catalog.get("row_identity", "")).lower() != pool_row
+):
+    raise SystemExit("canary local catalog proof is not bound to the coordinator-admitted envelope")
 actual = proof.get("files")
 if not isinstance(actual, dict):
     raise SystemExit("canary proof is missing installed file hashes")
 expected = {}
-for raw_path in sys.argv[3:]:
+for raw_path in sys.argv[4:]:
     path = pathlib.Path(raw_path)
     expected[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
 if actual != expected:
@@ -2482,7 +2570,7 @@ $SSH 'set -e
     echo "stats hardware verifier timer not enabled: missing /etc/macprovider-stats/stats-hardware-verifier.env"
   fi
   touch /opt/macprovider/.coordinator-deploy-rollback/committed
-  /opt/macprovider/coordinator-deploy-recover --recover
+  /opt/macprovider/coordinator-deploy-recover --recover-under-global
 '
 COORDINATOR_DEPLOY_ARMED=0
 log "DONE. coordinator is live at https://$DOMAIN"

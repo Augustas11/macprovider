@@ -187,6 +187,7 @@ label = os.environ["MACPROVIDER_LABEL"]
 log_path = os.environ["LOG_PATH"]
 pending = os.path.join(root, "pending.json")
 lock_path = os.path.join(root, "update.lock")
+install_lock_path = os.path.expanduser("~/.config/macprovider/install.lock")
 uid = os.getuid()
 provider_user = pwd.getpwuid(uid).pw_name
 
@@ -362,10 +363,6 @@ def process_success_sentinel(marker):
             release_backup = marker.get("release_backup_path")
             if release_backup:
                 shutil.rmtree(release_backup, ignore_errors=True)
-            try:
-                os.unlink(lock_path)
-            except FileNotFoundError:
-                pass
             os.unlink(sentinel)
             event("success", "post_start", None, "success_sentinel_cleanup_completed", marker)
             return True
@@ -462,21 +459,115 @@ def marker_deadline_expired(marker):
     deadline = datetime.datetime.strptime(raw_deadline, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
     return datetime.datetime.now(datetime.timezone.utc) >= deadline
 
-def lock_is_held_by_other_process():
-    os.makedirs(root, mode=0o700, exist_ok=True)
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+def process_start(pid):
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return ""
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+def boot_session():
     try:
+        result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        value = result.stdout.strip()
+        if value:
+            return value
+    except FileNotFoundError:
+        pass
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+def normalize_lock_fd(fd, path):
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != uid
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise RuntimeError(f"mutation_lock_invalid:{path}")
+    os.fchmod(fd, 0o600)
+    if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+        raise RuntimeError(f"mutation_lock_mode_invalid:{path}")
+
+def installer_owner_is_live(lock_fd):
+    os.lseek(lock_fd, 0, os.SEEK_SET)
+    payload = os.read(lock_fd, 4097)
+    if len(payload) > 4096:
+        raise RuntimeError("installer_owner_record_oversized")
+    if not payload.strip():
+        return False
+    try:
+        record = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("installer_owner_record_invalid") from exc
+    if not isinstance(record, dict):
+        raise RuntimeError("installer_owner_record_invalid")
+    owner_pid = record.get("pid")
+    owner_start = record.get("process_start")
+    owner_boot = record.get("boot_session")
+    if (
+        not isinstance(owner_pid, int)
+        or isinstance(owner_pid, bool)
+        or owner_pid <= 0
+        or not isinstance(owner_start, str)
+        or not owner_start
+        or not isinstance(owner_boot, str)
+        or not owner_boot
+    ):
+        raise RuntimeError("installer_owner_record_invalid")
+    current_boot = boot_session()
+    if not current_boot:
+        raise RuntimeError("installer_owner_boot_identity_unavailable")
+    return owner_boot == current_boot and process_start(owner_pid) == owner_start
+
+def release_transaction_locks(descriptors):
+    for descriptor in reversed(descriptors):
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+def acquire_transaction_locks():
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    os.makedirs(os.path.dirname(install_lock_path), mode=0o700, exist_ok=True)
+    descriptors = []
+    for path in (install_lock_path, lock_path):
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            normalize_lock_fd(fd, path)
+        except Exception:
+            os.close(fd)
+            release_transaction_locks(descriptors)
+            raise
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return True
-        return False
-    finally:
+            os.close(fd)
+            release_transaction_locks(descriptors)
+            return None
+        descriptors.append(fd)
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
+            owner_live = installer_owner_is_live(descriptors[0])
+        except Exception:
+            release_transaction_locks(descriptors)
+            raise
+        if owner_live:
+            release_transaction_locks(descriptors)
+            return None
+    return descriptors
 
 def validate_restore_inputs(marker):
     backup = marker["backup_path"]
@@ -646,10 +737,6 @@ def restore(marker):
     except FileNotFoundError:
         pass
     try:
-        os.unlink(lock_path)
-    except FileNotFoundError:
-        pass
-    try:
         os.unlink(backup)
     except FileNotFoundError:
         pass
@@ -681,23 +768,22 @@ def classify_post_start_failure(marker):
         return "post_start_rejoin_timeout"
     return "post_start_rejoin_timeout"
 
+transaction_locks = []
 try:
+    verify_root()
+    acquired = acquire_transaction_locks()
+    if acquired is None:
+        sys.exit(0)
+    transaction_locks = acquired
     if not os.path.exists(pending):
         scan_without_pending()
         sys.exit(0)
-    verify_root()
     reject_path(pending)
-    if lock_is_held_by_other_process():
-        sys.exit(0)
     try:
         marker = read_marker()
     except Exception as exc:
         event("failure", "rollback", "orphaned_pending_marker", "marker_invalid", None)
         quarantine(f"marker_invalid:{exc}", None)
-        try:
-            os.unlink(lock_path)
-        except FileNotFoundError:
-            pass
         sys.exit(0)
     if process_success_sentinel(marker):
         sys.exit(0)
@@ -714,6 +800,12 @@ try:
         quarantine(str(exc), marker)
 except Exception as exc:
     log(f"recovery_error={exc}")
+finally:
+    for descriptor in reversed(transaction_locks):
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 PY
 }
 

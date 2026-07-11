@@ -79,6 +79,7 @@ test-dist:
 	bash scripts/test-install-config-token-preserve.sh
 	bash scripts/test-install-provider-id-preserve.sh
 	bash scripts/test-install-launchd-enable.sh
+	bash scripts/test-install-version-pin.sh
 	bash phase3-binary/dist/test/install_fresh_evidence.test.sh
 	bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
 	bash phase3-binary/dist/test/install_transaction_lock.test.sh

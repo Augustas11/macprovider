@@ -239,6 +239,9 @@ func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 	if selfMinted.CapacityEligible() {
 		t.Fatal("AuthSelfMinted MUST be excluded from published serving capacity")
 	}
+	if selfMinted.ServingCapable() {
+		t.Fatal("AuthSelfMinted MUST be excluded from buyer-serving capability")
+	}
 	selfMintedVerified := base
 	selfMintedVerified.AuthState = AuthSelfMintedVerified
 	if !selfMintedVerified.RoutingEligible() {
@@ -252,6 +255,9 @@ func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 	if pendingReceiptKey.CapacityEligible() {
 		t.Fatal("pending receipt pubkey sessions must be excluded from published serving capacity")
 	}
+	if pendingReceiptKey.ServingCapable() {
+		t.Fatal("pending receipt pubkey sessions must be excluded from buyer-serving capability")
+	}
 	legacyCatalog := base
 	legacyCatalog.CatalogAdmissionMode = "legacy"
 	if legacyCatalog.RoutingEligible() || legacyCatalog.CapacityEligible() {
@@ -263,6 +269,46 @@ func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 		if !admitted.RoutingEligible() || !admitted.CapacityEligible() {
 			t.Fatalf("catalog admission mode %q should remain routing and capacity eligible", mode)
 		}
+		if !admitted.ServingCapable() {
+			t.Fatalf("catalog admission mode %q should remain buyer-serving capable", mode)
+		}
+	}
+	busy := base
+	busy.State = StateBusy
+	busy.SlotsFree = 0
+	if busy.RoutingEligible() || !busy.ServingCapable() {
+		t.Fatal("busy provider must be serving capable without being immediately routable")
+	}
+}
+
+func TestExpireLegacyBridgeAdmissionsRemovesBuyerServingCapacity(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:           "bridge-provider",
+		AssignedID:           "bridge-session",
+		State:                StateReady,
+		SlotsFree:            1,
+		SlotsTotal:           1,
+		CatalogAdmissionMode: "legacy_bridge",
+	}
+	if _, registered := registry.Register(provider, nil); !registered {
+		t.Fatal("register bridge provider")
+	}
+	if updated := registry.ExpireLegacyBridgeAdmissions(); updated != 1 {
+		t.Fatalf("ExpireLegacyBridgeAdmissions() = %d, want 1", updated)
+	}
+	got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("resolve expired bridge provider")
+	}
+	if got.CatalogAdmissionMode != "legacy" {
+		t.Fatalf("CatalogAdmissionMode = %q, want legacy", got.CatalogAdmissionMode)
+	}
+	if got.RoutingEligible() || got.ServingCapable() {
+		t.Fatal("expired bridge provider must remain visible but lose buyer routing and serving capacity")
+	}
+	if updated := registry.ExpireLegacyBridgeAdmissions(); updated != 0 {
+		t.Fatalf("second ExpireLegacyBridgeAdmissions() = %d, want idempotent 0", updated)
 	}
 }
 

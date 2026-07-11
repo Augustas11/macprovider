@@ -110,20 +110,23 @@ type Server struct {
 	// catalog holds an explicitly-injected tier2.Catalog for tests that
 	// want isolation from the package-singleton; nil means "use
 	// tier2.Default()". M3-8d (audit TEST-4). See s.catalogRef().
-	catalog                    *tier2.Catalog
-	autotuneCatalog            *autotune.Catalog
-	autotuneCompatibleCatalogs map[string]*autotune.Catalog
-	autotuneEvidence           autotune.EvidenceStore
-	telemetryDrift             *pow.Evaluator
-	identitySignatures         IdentitySignatureStore
-	authPolicyAdmin            ProviderAuthPolicyAdminStore
-	idlePrewarm                IdlePrewarmRecorder
-	idlePrewarmMetrics         IdlePrewarmMetrics
-	modelHashMismatchMetrics   ModelHashMismatchMetrics
-	credentialBootstrapMetrics CredentialBootstrapMetrics
-	bootstrapLimiter           *bootstrapMintLimiter
-	idlePrewarmLimits          sync.Map
-	idlePrewarmQueue           chan idlePrewarmRecord
+	catalog                       *tier2.Catalog
+	autotuneCatalog               *autotune.Catalog
+	autotuneCompatibleCatalogs    map[string]*autotune.Catalog
+	autotuneCatalogEnforced       bool
+	autotuneCatalogBridgeDeadline time.Time
+	autotuneCatalogBridgeMu       sync.Mutex
+	autotuneEvidence              autotune.EvidenceStore
+	telemetryDrift                *pow.Evaluator
+	identitySignatures            IdentitySignatureStore
+	authPolicyAdmin               ProviderAuthPolicyAdminStore
+	idlePrewarm                   IdlePrewarmRecorder
+	idlePrewarmMetrics            IdlePrewarmMetrics
+	modelHashMismatchMetrics      ModelHashMismatchMetrics
+	credentialBootstrapMetrics    CredentialBootstrapMetrics
+	bootstrapLimiter              *bootstrapMintLimiter
+	idlePrewarmLimits             sync.Map
+	idlePrewarmQueue              chan idlePrewarmRecord
 
 	// SE liveness (Phase 1, Track P1-C).
 	// seLivenessChans maps sessionKey → chan SELivenessResponse for in-flight probes.
@@ -258,6 +261,17 @@ func WithAutotuneCatalog(catalog *autotune.Catalog, compatible ...*autotune.Cata
 				s.autotuneCompatibleCatalogs[previous.Version] = previous
 			}
 		}
+	}
+}
+
+// WithAutotuneCatalogEnforcement configures strict admission or an explicitly
+// deadline-bounded fleet bridge for metadata-free providers. Config validation
+// requires a future deadline no more than 24 hours away whenever enforced is
+// false.
+func WithAutotuneCatalogEnforcement(enforced bool, bridgeDeadline time.Time) Option {
+	return func(s *Server) {
+		s.autotuneCatalogEnforced = enforced
+		s.autotuneCatalogBridgeDeadline = bridgeDeadline.UTC()
 	}
 }
 
@@ -477,6 +491,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 			return s.catalogRef().VerifyProviderHash(modelID, reportedHash)
 		})(registry)
 	}
+	if s.autotuneCatalog != nil && !s.autotuneCatalogEnforced && !s.autotuneCatalogBridgeDeadline.IsZero() && registry != nil {
+		go s.runAutotuneCatalogBridgeDeadline()
+	}
 	if cfg.Pool.CanaryEnabled && registry != nil {
 		go s.runCanaryLoop()
 	}
@@ -487,6 +504,28 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		go s.runLosslessnessProbeLoop()
 	}
 	return s
+}
+
+func (s *Server) autotuneCatalogBridgeActive() bool {
+	return !s.autotuneCatalogEnforced &&
+		!s.autotuneCatalogBridgeDeadline.IsZero() &&
+		s.now().Before(s.autotuneCatalogBridgeDeadline)
+}
+
+func (s *Server) runAutotuneCatalogBridgeDeadline() {
+	delay := time.Until(s.autotuneCatalogBridgeDeadline)
+	if delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		<-timer.C
+	}
+	s.autotuneCatalogBridgeMu.Lock()
+	updated := s.pool.ExpireLegacyBridgeAdmissions()
+	s.autotuneCatalogBridgeMu.Unlock()
+	s.log.Warn().
+		Time("autotune_provider_admission_bridge_deadline", s.autotuneCatalogBridgeDeadline).
+		Int("legacy_sessions_excluded", updated).
+		Msg("provider catalog migration bridge deadline reached; metadata-free sessions excluded from buyer serving")
 }
 
 // catalogRef returns the *tier2.Catalog this server reads through. Returns
@@ -1679,6 +1718,9 @@ func (s *Server) catalogAdmission(hello Hello) (string, bool) {
 	// existing signed-catalog model/evidence gates. Once a client sends any
 	// catalog metadata it must send and match the complete release envelope.
 	if present == 0 {
+		if s.autotuneCatalogBridgeActive() {
+			return "legacy_bridge", true
+		}
 		return "legacy", true
 	}
 	if present != len(metadata) {
@@ -1828,6 +1870,11 @@ func semverParts(value string) ([]int, bool) {
 // On refusal, the caller MUST close the connection with
 // CloseInvalidToken / "invalid_token" and not advance to ack-write.
 func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*providerSession, pool.RegisterRefusal) {
+	s.autotuneCatalogBridgeMu.Lock()
+	defer s.autotuneCatalogBridgeMu.Unlock()
+	if entry.CatalogAdmissionMode == "legacy_bridge" && !s.autotuneCatalogBridgeActive() {
+		entry.CatalogAdmissionMode = "legacy"
+	}
 	old, ok, refusal := s.pool.RegisterAtDetailed(entry, conn, s.now())
 	if !ok {
 		// SPEC-003 v0.8.3 FR-C9.4 eviction defense fired: a

@@ -7,10 +7,14 @@ SYSTEMD_ROOT=${MACPROVIDER_SYSTEMD_ROOT:-/etc/systemd/system}
 NGINX_ROOT=${MACPROVIDER_NGINX_ROOT:-/etc/nginx}
 SYSTEMCTL=${MACPROVIDER_SYSTEMCTL:-systemctl}
 FLOCK=${MACPROVIDER_FLOCK:-flock}
+PYTHON=${MACPROVIDER_PYTHON:-python3}
 SETFACL=${MACPROVIDER_SETFACL:-setfacl}
 NGINX=${MACPROVIDER_NGINX:-nginx}
+GLOBAL_LOCK_FILE=${MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE:-/run/lock/macprovider-pearl-updater.lock}
 LOCK_FILE=${MACPROVIDER_DEPLOY_LOCK_FILE:-/opt/macprovider/.coordinator-deploy.lock}
 OPERATION_LOCK_FILE=${MACPROVIDER_DEPLOY_OPERATION_LOCK_FILE:-/opt/macprovider/.coordinator-deploy-operation.lock}
+LOCK_REQUIRED_UID=${MACPROVIDER_DEPLOY_LOCK_REQUIRED_UID:-0}
+LOCK_REQUIRED_GID=${MACPROVIDER_DEPLOY_LOCK_REQUIRED_GID:-0}
 ROLLBACK="$ROOT/.coordinator-deploy-rollback"
 CATALOG_ROOT="$ROOT/autotune"
 UNIT="$SYSTEMD_ROOT/macprovider-coordinator.service"
@@ -24,9 +28,65 @@ TIER2_CATALOG="$ROOT/tier2-catalog.json"
 MODE=${1:---recover}
 
 case "$MODE" in
-  --recover|--pre-start) ;;
-  *) echo "usage: $0 [--recover|--pre-start]" >&2; exit 2 ;;
+  --recover|--recover-under-global|--pre-start) ;;
+  *) echo "usage: $0 [--recover|--recover-under-global|--pre-start]" >&2; exit 2 ;;
 esac
+
+validate_global_lock() {
+  "$PYTHON" - "$GLOBAL_LOCK_FILE" "$LOCK_REQUIRED_UID" "$LOCK_REQUIRED_GID" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+required_uid = int(sys.argv[2])
+required_gid = int(sys.argv[3])
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | nofollow, 0o600)
+except OSError as exc:
+    raise SystemExit(f"cannot safely open global Pearl deployment lock: {exc}") from exc
+try:
+    info = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != required_uid
+        or info.st_gid != required_gid
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+    ):
+        raise SystemExit("unsafe global Pearl deployment lock")
+finally:
+    os.close(descriptor)
+PY
+}
+
+# An active deploy holds LOCK_FILE for its full lifetime. Its deliberate
+# restart may consume the pending files. Any later boot/restart sees the lock
+# free and restores the last committed release before ExecStart runs. Lock
+# ordering is global Pearl mutation lock, deploy lease, operation barrier. This
+# is the same order used by direct deploy and prevents abandoned recovery from
+# racing the signed updater after the controller lease disappears.
+validate_global_lock
+if [ "$MODE" = "--pre-start" ]; then
+  exec 7>"$GLOBAL_LOCK_FILE"
+  if ! $FLOCK -n 7; then
+    exit 0
+  fi
+  exec 9>"$LOCK_FILE"
+  if ! $FLOCK -n 9; then
+    exit 0
+  fi
+  exec 8>"$OPERATION_LOCK_FILE"
+  $FLOCK 8
+elif [ "$MODE" = "--recover" ]; then
+  exec 7>"$GLOBAL_LOCK_FILE"
+  $FLOCK 7
+  exec 9>"$LOCK_FILE"
+  $FLOCK 9
+  exec 8>"$OPERATION_LOCK_FILE"
+  $FLOCK 8
+fi
 
 [ -d "$ROLLBACK" ] || exit 0
 [ ! -L "$ROLLBACK" ] || { echo "unsafe coordinator rollback symlink" >&2; exit 1; }
@@ -38,18 +98,6 @@ esac
 if [ -f "$ROLLBACK/committed" ]; then
   rm -rf "$ROLLBACK"
   exit 0
-fi
-
-# An active deploy holds LOCK_FILE for its full lifetime. Its deliberate
-# restart may consume the pending files. Any later boot/restart sees the lock
-# free and restores the last committed release before ExecStart runs.
-if [ "$MODE" = "--pre-start" ]; then
-  exec 9>"$LOCK_FILE"
-  if ! $FLOCK -n 9; then
-    exit 0
-  fi
-  exec 8>"$OPERATION_LOCK_FILE"
-  $FLOCK 8
 fi
 
 restore_regular() {

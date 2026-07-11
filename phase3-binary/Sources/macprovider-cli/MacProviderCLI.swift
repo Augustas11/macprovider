@@ -286,6 +286,7 @@ struct ServeCommand: AsyncParsableCommand {
         let source: String
         let policyVersion: String?
         let rowIdentity: String?
+        let modelSHA256: String?
 
         init(
             state: String,
@@ -294,7 +295,8 @@ struct ServeCommand: AsyncParsableCommand {
             signerKeyID: String?,
             source: String,
             policyVersion: String? = nil,
-            rowIdentity: String? = nil
+            rowIdentity: String? = nil,
+            modelSHA256: String? = nil
         ) {
             self.state = state
             self.releaseID = releaseID
@@ -303,6 +305,7 @@ struct ServeCommand: AsyncParsableCommand {
             self.source = source
             self.policyVersion = policyVersion
             self.rowIdentity = rowIdentity
+            self.modelSHA256 = modelSHA256
         }
     }
 
@@ -467,7 +470,8 @@ struct ServeCommand: AsyncParsableCommand {
             signerKeyID: catalog.signerKeyID,
             source: catalog.usedFallback ? "baked" : "coordinator",
             policyVersion: catalog.value.policyVersion,
-            rowIdentity: catalog.value.rowIdentity(for: key)
+            rowIdentity: catalog.value.rowIdentity(for: key),
+            modelSHA256: row.modelSHA256
         )
     }
 
@@ -665,6 +669,7 @@ struct ServeCommand: AsyncParsableCommand {
                 catalogCandidateSHA256: startupPreflight.catalogTrust?.digest,
                 catalogSignerKeyID: startupPreflight.catalogTrust?.signerKeyID,
                 catalogRowIdentity: startupPreflight.catalogTrust?.rowIdentity,
+                catalogModelSHA256: startupPreflight.catalogTrust?.modelSHA256,
                 receiptIdentitySigningKeyCandidates: receiptIdentitySigningKeyCandidates,
                 persistReceiptIdentitySigningKey: persistReceiptIdentitySigningKey
             )

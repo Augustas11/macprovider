@@ -1348,7 +1348,7 @@ func TestPoolCheckReadinessEvidenceIsPublicAndLegacyIsNotBuyerServing(t *testing
 			}
 			registry.Register(provider, nil)
 			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithInternalAuthKey("operator-secret"))
-			req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=readiness-provider&details=readiness", nil)
+			req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=readiness-provider&assigned_id=session-1&details=readiness", nil)
 			req.RemoteAddr = "198.51.100.1:12345"
 			rr := httptest.NewRecorder()
 			server.Handler().ServeHTTP(rr, req)
@@ -1359,11 +1359,46 @@ func TestPoolCheckReadinessEvidenceIsPublicAndLegacyIsNotBuyerServing(t *testing
 			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if response["buyer_serving"] != tc.buyerServing || response["catalog_admission_mode"] != tc.admissionMode || response["catalog_evidence_source"] != "provider_reported" {
+			if response["provider_id"] != "readiness-provider" || response["assigned_id"] != "session-1" || response["buyer_serving"] != tc.buyerServing || response["catalog_admission_mode"] != tc.admissionMode || response["catalog_evidence_source"] != "provider_reported" {
 				t.Fatalf("response = %+v", response)
 			}
 			if tc.withEnvelope && (response["catalog_release_id"] != "release-current" || response["catalog_policy_version"] != "autotune-policy-v1" || response["catalog_candidate_sha256"] != strings.Repeat("a", 64) || response["catalog_signer_key_id"] != "signer-v4" || response["catalog_row_identity"] != strings.Repeat("b", 64)) {
 				t.Fatalf("readiness envelope = %+v", response)
+			}
+		})
+	}
+}
+
+func TestPoolCheckReadinessRequiresExactAssignedSession(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	for _, tc := range []struct {
+		name string
+		url  string
+		want int
+	}{
+		{name: "missing assigned session", url: "/v1/pool/check?provider_id=p1&details=readiness", want: http.StatusBadRequest},
+		{name: "stale assigned session", url: "/v1/pool/check?provider_id=p1&assigned_id=session-old&details=readiness", want: http.StatusNotFound},
+		{name: "exact assigned session", url: "/v1/pool/check?provider_id=p1&assigned_id=session-1&details=readiness", want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+			req.RemoteAddr = "198.51.100.50:12345"
+			rr := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("status = %d, want %d body=%s", rr.Code, tc.want, rr.Body.String())
+			}
+			if tc.want == http.StatusOK {
+				var response map[string]any
+				if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+					t.Fatalf("decode response: %v", err)
+				}
+				if response["provider_id"] != "p1" || response["assigned_id"] != "session-1" {
+					t.Fatalf("response identity = %+v", response)
+				}
 			}
 		})
 	}
@@ -1405,7 +1440,7 @@ func TestPoolCheckReadinessUsesProviderScopedBurstBehindNAT(t *testing.T) {
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
 
 	for i := 0; i < 70; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1&details=readiness", nil)
+		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1&assigned_id=session-1&details=readiness", nil)
 		req.RemoteAddr = "198.51.100.10:12345"
 		rr := httptest.NewRecorder()
 		server.Handler().ServeHTTP(rr, req)
@@ -1421,7 +1456,7 @@ func TestPoolCheckReadinessUsesProviderScopedBurstBehindNAT(t *testing.T) {
 		}
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p2&details=readiness", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p2&assigned_id=session-2&details=readiness", nil)
 	req.RemoteAddr = "198.51.100.10:54321"
 	rr := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rr, req)
@@ -1435,7 +1470,7 @@ func TestPoolCheckReadinessBoundsRotatingProviderIDsPerSource(t *testing.T) {
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
 
 	for i := 0; i < 61; i++ {
-		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/pool/check?provider_id=rotating-%d&details=readiness", i), nil)
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/pool/check?provider_id=rotating-%d&assigned_id=session-%d&details=readiness", i, i), nil)
 		req.RemoteAddr = "198.51.100.10:12345"
 		rr := httptest.NewRecorder()
 		server.Handler().ServeHTTP(rr, req)
@@ -1447,7 +1482,7 @@ func TestPoolCheckReadinessBoundsRotatingProviderIDsPerSource(t *testing.T) {
 		}
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=independent&details=readiness", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=independent&assigned_id=session-independent&details=readiness", nil)
 	req.RemoteAddr = "198.51.100.11:12345"
 	rr := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rr, req)

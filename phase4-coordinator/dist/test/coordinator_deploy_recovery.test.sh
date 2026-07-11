@@ -89,8 +89,11 @@ run_recover() {
   MACPROVIDER_NGINX="$TMP/bin/nginx" \
   MACPROVIDER_NGINX_FAIL="${MACPROVIDER_NGINX_FAIL:-0}" \
   MACPROVIDER_OPERATION_BLOCK_SENTINEL="${MACPROVIDER_OPERATION_BLOCK_SENTINEL:-}" \
+  MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE="$TMP/global-deploy.lock" \
   MACPROVIDER_DEPLOY_LOCK_FILE="$TMP/deploy.lock" \
   MACPROVIDER_DEPLOY_OPERATION_LOCK_FILE="$TMP/deploy-operation.lock" \
+  MACPROVIDER_DEPLOY_LOCK_REQUIRED_UID="$(id -u)" \
+  MACPROVIDER_DEPLOY_LOCK_REQUIRED_GID="$(id -g)" \
     "$RECOVER" "${1:---recover}"
 }
 
@@ -287,8 +290,11 @@ MACPROVIDER_FLOCK="$TMP/bin/flock-busy" \
 MACPROVIDER_SETFACL="$TMP/bin/setfacl" \
 MACPROVIDER_SETFACL_LOG="$SETFACL_LOG" \
 MACPROVIDER_NGINX="$TMP/bin/nginx" \
+MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE="$TMP/global-deploy.lock" \
 MACPROVIDER_DEPLOY_LOCK_FILE="$TMP/deploy.lock" \
 MACPROVIDER_DEPLOY_OPERATION_LOCK_FILE="$TMP/deploy-operation.lock" \
+MACPROVIDER_DEPLOY_LOCK_REQUIRED_UID="$(id -u)" \
+MACPROVIDER_DEPLOY_LOCK_REQUIRED_GID="$(id -g)" \
   "$RECOVER" --pre-start
 [ "$(cat "$ROOT/coordinator")" = new-binary ] || fail "active deploy pre-start was rolled back"
 [ -d "$ROLLBACK" ] || fail "active deploy snapshot was consumed"
@@ -312,5 +318,28 @@ kill -0 "$blocked_recover_pid" 2>/dev/null || fail "pre-start recovery did not w
 rm -f "$OPERATION_BLOCK_SENTINEL"
 wait "$blocked_recover_pid"
 [ "$(cat "$ROOT/coordinator")" = old-binary ] || fail "pre-start recovery did not run after the operation barrier cleared"
+
+seed_transaction
+MACPROVIDER_FLOCK_OVERRIDE="$TMP/bin/flock-busy" run_recover --recover-under-global
+[ "$(cat "$ROOT/coordinator")" = old-binary ] || fail "caller-held global recovery did not restore the transaction"
+[ ! -e "$ROLLBACK" ] || fail "caller-held global recovery did not remove the snapshot"
+
+# The watchdog starts before direct deploy publishes its rollback snapshot. It
+# must wait behind the global lease, then observe and restore the snapshot that
+# appears while the controller still owns that lease.
+rm -rf "$ROLLBACK"
+GLOBAL_BLOCK_SENTINEL="$TMP/global-blocked"
+touch "$GLOBAL_BLOCK_SENTINEL"
+MACPROVIDER_FLOCK_OVERRIDE="$TMP/bin/flock-operation-blocked" \
+MACPROVIDER_OPERATION_BLOCK_SENTINEL="$GLOBAL_BLOCK_SENTINEL" \
+  run_recover --recover &
+watchdog_pid=$!
+sleep 0.15
+kill -0 "$watchdog_pid" 2>/dev/null || fail "watchdog exited before the controller published rollback state"
+seed_transaction
+rm -f "$GLOBAL_BLOCK_SENTINEL"
+wait "$watchdog_pid"
+[ "$(cat "$ROOT/coordinator")" = old-binary ] || fail "watchdog did not restore the snapshot published behind its lease"
+[ ! -e "$ROLLBACK" ] || fail "watchdog did not consume the restored snapshot"
 
 echo "PASS: coordinator deploy recovery is durable and state-exact"

@@ -20,6 +20,7 @@ from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("macprovider-pearl-update")
+REPO_ROOT = SCRIPT.parents[2]
 loader = importlib.machinery.SourceFileLoader("pearl_updater", str(SCRIPT))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 assert spec is not None
@@ -40,7 +41,7 @@ class FixtureUpdater(updater_module.Updater):
     def audit(self, event, outcome, **fields):
         pass
 
-    def run_command(self, argv, *, check=True, timeout, env=None):
+    def run_command(self, argv, *, check=True, timeout, env=None, input_text=None):
         if Path(argv[0]).name in (updater_module.COORDINATOR_ASSET, updater_module.GATEWAY_ASSET):
             if "--validate-config" in argv:
                 return subprocess.CompletedProcess(argv, 0, stdout="config: ok\n", stderr="")
@@ -54,7 +55,13 @@ class FixtureUpdater(updater_module.Updater):
             version = versions.get(Path(argv[0]).name)
             if version is not None:
                 return subprocess.CompletedProcess(argv, 0, stdout=version + "\n", stderr="")
-        return super().run_command(argv, check=check, timeout=timeout, env=env)
+        return super().run_command(
+            argv,
+            check=check,
+            timeout=timeout,
+            env=env,
+            input_text=input_text,
+        )
 
     def run_candidate_command(self, argv, *, timeout, cwd, environment=None):
         executions = getattr(self, "candidate_executions", None)
@@ -115,6 +122,9 @@ class PearlUpdaterTests(unittest.TestCase):
             minimum_version=updater_module.SemVer.parse("1.8.26"),
             retry_backoff_s=0,
             revoked_versions_file=self.root / "revoked",
+            provider_admission_policy="bridge_required",
+            minimum_pool_ready_after_rollout=2,
+            minimum_bridge_remaining_s=360,
         )
         (self.root / "revoked").write_text("# required fail-closed policy; intentionally empty\n")
         (self.root / "revoked").chmod(0o600)
@@ -132,6 +142,8 @@ class PearlUpdaterTests(unittest.TestCase):
             trusted_uid=os.geteuid(),
             candidate_uid=os.geteuid(),
             candidate_gid=os.getegid(),
+            catalog_verifier=REPO_ROOT / "scripts/catalog-release.py",
+            catalog_canary_proof=SCRIPT.with_name("catalog-canary-proof.py"),
             sleep=lambda _: None,
         )
         self.updater.candidate_executions = []
@@ -147,13 +159,29 @@ class PearlUpdaterTests(unittest.TestCase):
             capture_output=True,
         )
 
-    def make_bundle(self, version: str = "1.8.27", advertised_version: str | None = None):
+    def make_bundle(
+        self,
+        version: str = "1.8.27",
+        advertised_version: str | None = None,
+        rollout_mode: str = "bridge_required",
+    ):
         tag = "v" + version
         advertised_version = advertised_version or version
         coordinator = self.bundle / updater_module.COORDINATOR_ASSET
         gateway = self.bundle / updater_module.GATEWAY_ASSET
         coordinator.write_bytes(fake_elf("coordinator"))
         gateway.write_bytes(fake_elf("gateway"))
+        catalog_sources = {
+            "release.json": REPO_ROOT / "phase3-binary/catalog/autotune/release.json",
+            "trusted-keys.json": REPO_ROOT / "phase3-binary/catalog/autotune/trusted-keys.json",
+            "autotune-candidates.json": REPO_ROOT / "phase3-binary/dist/static/autotune-candidates.json",
+            "autotune-candidates.json.sig": REPO_ROOT / "phase3-binary/dist/static/autotune-candidates.json.sig",
+            "demand-rank.json": REPO_ROOT / "phase3-binary/dist/static/demand-rank.json",
+            "demand-rank.json.sig": REPO_ROOT / "phase3-binary/dist/static/demand-rank.json.sig",
+        }
+        for name, source in catalog_sources.items():
+            shutil.copyfile(source, self.bundle / name)
+        catalog_manifest = json.loads((self.bundle / "release.json").read_text(encoding="utf-8"))
         metadata = {
             "schema_version": 1,
             "repository": updater_module.PINNED_REPOSITORY,
@@ -162,6 +190,11 @@ class PearlUpdaterTests(unittest.TestCase):
             "commit": "a" * 40,
             "architecture": "linux-amd64",
             "provider_advertised_version": advertised_version,
+            "provider_admission_rollout": {
+                "mode": rollout_mode,
+                "enforce_provider_admission": rollout_mode == "strict_post_migration",
+                "bridge_duration_s": 0 if rollout_mode == "strict_post_migration" else 86400,
+            },
             "components": {
                 "coordinator": {
                     "asset": coordinator.name,
@@ -174,11 +207,25 @@ class PearlUpdaterTests(unittest.TestCase):
                     "embedded_version": tag,
                 },
             },
+            "catalog": {
+                "release_id": catalog_manifest["release_id"],
+                "policy_version": catalog_manifest["policy_version"],
+                "files": {
+                    name: updater_module.sha256_file(self.bundle / name)
+                    for name in updater_module.CATALOG_ASSETS
+                },
+            },
         }
         metadata_path = self.bundle / "pearl-release.json"
         metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n")
         self.sign(metadata_path, self.bundle / "pearl-release.json.sig")
-        assets = [metadata_path, self.bundle / "pearl-release.json.sig", coordinator, gateway]
+        assets = [
+            metadata_path,
+            self.bundle / "pearl-release.json.sig",
+            coordinator,
+            gateway,
+            *(self.bundle / name for name in updater_module.CATALOG_ASSETS),
+        ]
         checksums = self.bundle / "checksums.txt"
         checksums.write_text("".join(f"{updater_module.sha256_file(path)}  {path.name}\n" for path in assets))
         self.sign(checksums, self.bundle / "checksums.txt.sig")
@@ -212,6 +259,17 @@ class PearlUpdaterTests(unittest.TestCase):
             "coordinator": str(release.version),
             "gateway": str(release.version),
         }
+        catalog_release = install / "autotune" / "releases" / release.catalog.release_id
+        catalog_release.mkdir(parents=True, mode=0o750, exist_ok=True)
+        (install / "autotune").chmod(0o750)
+        (install / "autotune" / "releases").chmod(0o750)
+        for name in updater_module.CATALOG_ASSETS:
+            shutil.copy2(release.directory / name, catalog_release / name)
+            (catalog_release / name).chmod(0o640)
+        (install / "autotune" / "current").unlink(missing_ok=True)
+        (install / "autotune" / "current").symlink_to(
+            f"releases/{release.catalog.release_id}"
+        )
         self.updater.state_root.mkdir(parents=True, exist_ok=True)
         state = self.updater.state_root / "current-release.json"
         state.write_text(
@@ -223,6 +281,8 @@ class PearlUpdaterTests(unittest.TestCase):
                     "commit": release.commit,
                     "coordinator_sha256": release.coordinator.sha256,
                     "gateway_sha256": release.gateway.sha256,
+                    "catalog_release_id": release.catalog.release_id,
+                    "catalog_policy_version": release.catalog.policy_version,
                 }
             )
             + "\n"
@@ -258,6 +318,97 @@ class PearlUpdaterTests(unittest.TestCase):
             handle.write(b"tampered")
         with self.assertRaisesRegex(updater_module.UpdateError, "checksum mismatch"):
             self.verify()
+
+    def test_signed_checksums_cannot_override_catalog_manifest_binding(self):
+        catalog = self.bundle / "autotune-candidates.json"
+        catalog.write_bytes(catalog.read_bytes() + b"\n")
+        assets = [
+            self.bundle / "pearl-release.json",
+            self.bundle / "pearl-release.json.sig",
+            self.bundle / updater_module.COORDINATOR_ASSET,
+            self.bundle / updater_module.GATEWAY_ASSET,
+            *(self.bundle / name for name in updater_module.CATALOG_ASSETS),
+        ]
+        checksums = self.bundle / "checksums.txt"
+        checksums.write_text(
+            "".join(f"{updater_module.sha256_file(path)}  {path.name}\n" for path in assets)
+        )
+        self.sign(checksums, self.bundle / "checksums.txt.sig")
+        with self.assertRaisesRegex(updater_module.UpdateError, "catalog metadata checksum mismatch"):
+            self.verify()
+
+    def test_catalog_inner_ed25519_verifier_rejects_resigned_outer_bundle(self):
+        sidecar = self.bundle / "autotune-candidates.json.sig"
+        signature = json.loads(sidecar.read_text(encoding="utf-8"))
+        signature["signature"] = "A" * len(signature["signature"])
+        sidecar.write_text(json.dumps(signature, sort_keys=True, separators=(",", ":")) + "\n")
+
+        metadata_path = self.bundle / "pearl-release.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["catalog"]["files"][sidecar.name] = updater_module.sha256_file(sidecar)
+        metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n")
+        self.sign(metadata_path, self.bundle / "pearl-release.json.sig")
+        assets = [
+            metadata_path,
+            self.bundle / "pearl-release.json.sig",
+            self.bundle / updater_module.COORDINATOR_ASSET,
+            self.bundle / updater_module.GATEWAY_ASSET,
+            *(self.bundle / name for name in updater_module.CATALOG_ASSETS),
+        ]
+        checksums = self.bundle / "checksums.txt"
+        checksums.write_text(
+            "".join(f"{updater_module.sha256_file(path)}  {path.name}\n" for path in assets)
+        )
+        self.sign(checksums, self.bundle / "checksums.txt.sig")
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "inner Ed25519 verification failed"):
+            self.verify()
+
+    def test_catalog_install_and_rollback_restore_exact_pointers(self):
+        release = self.stage(self.verify())
+        install = self.updater.install_root
+        releases = install / "autotune" / "releases"
+        releases.mkdir(parents=True, mode=0o750)
+        (install / "autotune").chmod(0o750)
+        releases.chmod(0o750)
+        (releases / "old-catalog").mkdir(mode=0o750)
+        (releases / "older-catalog").mkdir(mode=0o750)
+        (install / "autotune" / "current").symlink_to("releases/old-catalog")
+        previous = install / "autotune" / ".previous-target"
+        previous.write_text("releases/older-catalog\n")
+        previous.chmod(0o600)
+
+        self.updater.install_catalog(release)
+
+        self.assertEqual(
+            os.readlink(install / "autotune" / "current"),
+            f"releases/{release.catalog.release_id}",
+        )
+        self.assertEqual(previous.read_text().strip(), "releases/old-catalog")
+        for name in updater_module.CATALOG_ASSETS:
+            self.assertEqual(
+                updater_module.sha256_file(releases / release.catalog.release_id / name),
+                release.catalog.files[name],
+            )
+
+        tx = self.root / "catalog-rollback"
+        tx.mkdir(mode=0o700)
+        (tx / "catalog-manifest.json").write_text(
+            json.dumps(
+                {
+                    "current_target": "releases/old-catalog",
+                    "previous_target": "releases/older-catalog",
+                    "candidate_existed": False,
+                    "candidate_release_id": release.catalog.release_id,
+                }
+            )
+            + "\n"
+        )
+        (tx / "catalog-manifest.json").chmod(0o600)
+        self.updater._restore_catalog(tx)
+        self.assertEqual(os.readlink(install / "autotune" / "current"), "releases/old-catalog")
+        self.assertEqual(previous.read_text().strip(), "releases/older-catalog")
+        self.assertFalse((releases / release.catalog.release_id).exists())
 
     def test_partial_download_rejected_and_removed(self):
         class PartialResponse(io.BytesIO):
@@ -400,11 +551,11 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(update.previous_version, "1.8.26")
         self.assertEqual(update.next_version, "1.8.27")
         self.assertEqual(base.read_text(), original)
-        self.assertEqual(
-            update.staged.read_text(),
-            original.replace('latest_binary_version: "1.8.26"', 'latest_binary_version: "1.8.27"'),
-        )
-        self.assertIn('operator_key: "env:OPERATOR_KEY"', update.staged.read_text())
+        staged_text = update.staged.read_text()
+        self.assertIn('latest_binary_version: "1.8.27"', staged_text)
+        self.assertIn('operator_key: "env:OPERATOR_KEY"', staged_text)
+        self.assertIn("enforce_provider_admission: false", staged_text)
+        self.assertRegex(staged_text, r'provider_admission_bridge_deadline: "[^"]+Z"')
 
         self.install_pair("1.8.26", "1.8.26")
         self.updater.atomic_install = mock.Mock()
@@ -420,6 +571,35 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertTrue(self.updater.local_coordinator_ready(release, False))
         self.updater.get_json.return_value["recommended_binary_version"] = "1.8.26"
         self.assertFalse(self.updater.local_coordinator_ready(release, False))
+
+    def test_strict_signed_release_enforces_admission_and_removes_bridge_deadline(self):
+        self.make_bundle(rollout_mode="strict_post_migration")
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        base = install / "coordinator.yaml"
+        base.write_text(
+            "autotune:\n"
+            "  enforce_provider_admission: false\n"
+            '  provider_admission_bridge_deadline: "2026-07-12T00:00:00Z"\n'
+            "coordinator_advertised_version:\n"
+            '  latest_binary_version: "1.8.26"\n'
+        )
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            provider_admission_policy="strict_post_migration",
+            minimum_bridge_remaining_s=0,
+        )
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(base, None, {})
+        )
+        release = self.stage(self.verify())
+        self.updater.verify_candidate_versions(release)
+
+        update = self.updater.prepare_config_update(release)
+
+        staged = update.staged.read_text()
+        self.assertIn("enforce_provider_admission: true", staged)
+        self.assertNotIn("provider_admission_bridge_deadline", staged)
 
     def test_legacy_rollback_accepts_only_an_absent_advertised_version_field(self):
         legacy = updater_module.RuntimeIdentity(
@@ -553,12 +733,71 @@ class PearlUpdaterTests(unittest.TestCase):
             with updater_module.FileLock(lock, required_uid=os.geteuid()):
                 pass
 
+    def test_global_lock_is_released_after_holder_is_interrupted(self):
+        lock = self.root / "global-deployment.lock"
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import fcntl,sys,time; "
+                    "f=open(sys.argv[1],'w'); fcntl.flock(f,fcntl.LOCK_EX); "
+                    "print('LOCKED',flush=True); time.sleep(60)"
+                ),
+                str(lock),
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(child.stdout.readline().strip(), "LOCKED")
+        with self.assertRaises(updater_module.LockBusy):
+            with updater_module.FileLock(lock, required_uid=os.geteuid()):
+                pass
+        child.kill()
+        child.wait(timeout=5)
+        child.stdout.close()
+        with updater_module.FileLock(lock, required_uid=os.geteuid()):
+            pass
+
     def test_provider_connected_guard_fails_before_mutation(self):
-        self.updater.get_json = mock.Mock(return_value={"pool_size": 1})
+        self.updater.get_json = mock.Mock(return_value={"pool_size": 1, "pool_ready": 1})
         self.updater.systemctl = mock.Mock()
         with self.assertRaisesRegex(updater_module.UpdateError, "provider drain protection"):
             self.updater.stop_for_rollout()
         self.updater.systemctl.assert_not_called()
+
+    def test_capture_rollout_state_records_ready_provider_baseline(self):
+        self.updater.capture_database_paths = mock.Mock()
+        self.updater.get_json = mock.Mock(
+            return_value={"pool_size": 4, "pool_ready": 3}
+        )
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        self.updater.get_authorized_json = mock.Mock(return_value={
+            "pool": [
+                {"provider_id": f"provider-{index}", "state": "ready", "routing_eligible": True}
+                for index in range(3)
+            ] + [{"provider_id": "degraded", "state": "degraded", "routing_eligible": False}]
+        })
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config, allow_provider_drain=True
+        )
+        self.updater.service_active = mock.Mock(return_value=True)
+        self.updater.read_installed_versions = mock.Mock(
+            return_value={"coordinator": "v1.8.26", "gateway": "v1.8.26"}
+        )
+        self.updater._journal_transition = mock.Mock()
+
+        self.updater.capture_rollout_state()
+
+        self.assertEqual(self.updater.previous_pool_ready, 3)
+        self.assertEqual(
+            self.updater.previous_protected_providers,
+            ["provider-0", "provider-1", "provider-2"],
+        )
+        self.assertEqual(
+            self.updater._journal_transition.call_args.kwargs["previous_pool_ready"],
+            3,
+        )
 
     def test_restart_failure_invokes_rollback(self):
         release = self.verify()
@@ -588,6 +827,9 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.gateway_serving_ready = mock.Mock(return_value=True)
         self.updater.public_ready = mock.Mock(return_value=True)
         self.updater.prove_serving_recovery = mock.Mock()
+        self.updater.verify_provider_admission_rollout_policy = mock.Mock()
+        self.updater.verify_exact_catalog_admission = mock.Mock()
+        self.updater.verify_exact_provider_canary = mock.Mock()
         self.updater.restore_auxiliary_services = mock.Mock()
         self.updater.restore_auxiliary_timers = mock.Mock()
         self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
@@ -602,6 +844,354 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         self.updater.prove_serving_recovery.assert_called_once_with(
             self.updater.release_identity(release)
+        )
+        self.updater.verify_provider_admission_rollout_policy.assert_called_once_with()
+        self.updater.verify_exact_catalog_admission.assert_called_once_with(release)
+        self.updater.verify_exact_provider_canary.assert_called_once_with(release)
+
+    def test_bridge_rollout_requires_capacity_and_safe_active_deadline(self):
+        deadline = (
+            updater_module.datetime.datetime.now(updater_module.datetime.timezone.utc)
+            + updater_module.datetime.timedelta(hours=1)
+        ).isoformat().replace("+00:00", "Z")
+        coordinator = self.root / "coordinator.yaml"
+        coordinator.write_text(
+            "autotune:\n"
+            "  enforce_provider_admission: false\n"
+            f"  provider_admission_bridge_deadline: {deadline}\n"
+        )
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            coordinator, None, {}
+        )
+        self.updater.previous_pool_ready = 3
+        self.updater.previous_protected_providers = ["provider-0", "provider-1", "provider-2"]
+        self.updater.get_json = mock.Mock(
+            return_value={"pool_size": 3, "pool_ready": 3}
+        )
+        admitted_rows = [
+            {
+                "provider_id": f"provider-{index}",
+                "state": "ready",
+                "routing_eligible": True,
+                "catalog_admission_mode": "legacy_bridge",
+            }
+            for index in range(3)
+        ]
+        self.updater.coordinator_operator_token = mock.Mock(return_value="operator-token")
+        self.updater.get_authorized_json = mock.Mock(return_value={"pool": admitted_rows})
+        self.updater.audit = mock.Mock()
+
+        self.updater.verify_provider_admission_rollout_policy()
+
+        self.updater.audit.assert_called_once()
+        _, outcome = self.updater.audit.call_args.args[:2]
+        self.assertEqual(outcome, "success")
+        self.assertEqual(self.updater.audit.call_args.kwargs["pool_ready"], 3)
+
+        self.updater.get_authorized_json.return_value = {"pool": admitted_rows[:-1]}
+        with self.assertRaisesRegex(updater_module.UpdateError, "protected provider lost"):
+            self.updater.verify_provider_admission_rollout_policy()
+        self.updater.get_authorized_json.return_value = {"pool": admitted_rows}
+
+        self.updater.get_json.return_value = {"pool_size": 3, "pool_ready": 1}
+        with self.assertRaisesRegex(updater_module.UpdateError, "fleet floor"):
+            self.updater.verify_provider_admission_rollout_policy()
+
+    def test_bridge_rollout_rejects_strict_enforcement_or_expiring_window(self):
+        coordinator = self.root / "coordinator.yaml"
+        coordinator.write_text(
+            "autotune:\n"
+            "  enforce_provider_admission: true\n"
+            "  provider_admission_bridge_deadline: 2099-01-01T00:00:00Z\n"
+        )
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            coordinator, None, {}
+        )
+        self.updater.get_json = mock.Mock(
+            return_value={"pool_size": 3, "pool_ready": 3}
+        )
+        with self.assertRaisesRegex(updater_module.UpdateError, "strict catalog admission"):
+            self.updater.verify_provider_admission_rollout_policy()
+
+        deadline = (
+            updater_module.datetime.datetime.now(updater_module.datetime.timezone.utc)
+            + updater_module.datetime.timedelta(hours=25)
+        ).isoformat().replace("+00:00", "Z")
+        coordinator.write_text(
+            "autotune:\n"
+            "  enforce_provider_admission: false\n"
+            f"  provider_admission_bridge_deadline: {deadline}\n"
+        )
+        with self.assertRaisesRegex(updater_module.UpdateError, "24-hour"):
+            self.updater.verify_provider_admission_rollout_policy()
+
+        deadline = (
+            updater_module.datetime.datetime.now(updater_module.datetime.timezone.utc)
+            + updater_module.datetime.timedelta(seconds=330)
+        ).isoformat().replace("+00:00", "Z")
+        coordinator.write_text(
+            "autotune:\n"
+            "  enforce_provider_admission: false\n"
+            f"  provider_admission_bridge_deadline: {deadline}\n"
+        )
+        with self.assertRaisesRegex(updater_module.UpdateError, "safe remaining window"):
+            self.updater.verify_provider_admission_rollout_policy()
+
+    def test_strict_post_migration_is_the_only_policy_that_accepts_enforcement(self):
+        coordinator = self.root / "coordinator.yaml"
+        coordinator.write_text("autotune:\n  enforce_provider_admission: true\n")
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(
+            coordinator, None, {}
+        )
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            provider_admission_policy="strict_post_migration",
+            minimum_bridge_remaining_s=0,
+        )
+        self.updater.get_json = mock.Mock(
+            return_value={"pool_size": 2, "pool_ready": 2}
+        )
+        self.updater.audit = mock.Mock()
+
+        self.updater.verify_provider_admission_rollout_policy()
+
+        coordinator.write_text("autotune:\n  enforce_provider_admission: false\n")
+        with self.assertRaisesRegex(updater_module.UpdateError, "bridge is enabled"):
+            self.updater.verify_provider_admission_rollout_policy()
+
+    def test_bridge_configuration_window_exceeds_full_recovery_budget(self):
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            minimum_bridge_remaining_s=(
+                self.updater.config.provider_recovery_timeout_s
+                + self.updater.config.service_health_timeout_s
+            ),
+        )
+        with self.assertRaisesRegex(updater_module.UpdateError, "service-health windows"):
+            self.updater.validate_provider_admission_policy_config()
+
+    def test_catalog_admission_requires_exact_release_policy_and_feed_evidence(self):
+        release = self.verify()
+        manifest = json.loads((release.directory / "release.json").read_text(encoding="utf-8"))
+        response = {
+            "status": "live_verified",
+            "release_id": release.catalog.release_id,
+            "policy_version": release.catalog.policy_version,
+            "feeds": {
+                "autotune_candidates": {
+                    "sha256": manifest["feeds"]["autotune-candidates.json"]["sha256"],
+                    "signer_key_id": manifest["feeds"]["autotune-candidates.json"]["signer_key_id"],
+                },
+                "demand_rank": {
+                    "sha256": manifest["feeds"]["demand-rank.json"]["sha256"],
+                    "signer_key_id": manifest["feeds"]["demand-rank.json"]["signer_key_id"],
+                },
+            },
+        }
+        self.updater.get_json = mock.Mock(return_value=response)
+
+        self.assertTrue(self.updater.catalog_admission_ready(release, "https://example.invalid/v1/autotune-release"))
+        response["policy_version"] = "wrong-policy"
+        self.assertFalse(self.updater.catalog_admission_ready(release, "https://example.invalid/v1/autotune-release"))
+
+    def test_exact_provider_canary_matches_pool_envelope_to_independent_mac_row(self):
+        release = self.verify()
+        digest, signer = self.updater.catalog_candidate_identity(release)
+        row_identity = "b" * 64
+        response = {
+            "provider_id": "catalog-canary",
+            "assigned_id": "session-canary",
+            "buyer_serving": True,
+            "catalog_evidence_source": "provider_reported",
+            "catalog_admission_mode": "current",
+            "catalog_release_id": release.catalog.release_id,
+            "catalog_policy_version": release.catalog.policy_version,
+            "catalog_candidate_sha256": digest,
+            "catalog_signer_key_id": signer,
+            "catalog_row_identity": row_identity,
+        }
+        self.updater.get_authorized_json = mock.Mock(return_value=response)
+
+        self.assertTrue(self.updater.catalog_provider_admission_ready(
+            release,
+            "catalog-canary",
+            "t" * 32,
+            digest,
+            signer,
+            row_identity,
+            "session-canary",
+        ))
+        self.assertIn("assigned_id=session-canary", self.updater.get_authorized_json.call_args.args[0])
+        response["assigned_id"] = "wrong-session"
+        self.assertFalse(self.updater.catalog_provider_admission_ready(
+            release,
+            "catalog-canary",
+            "t" * 32,
+            digest,
+            signer,
+            row_identity,
+            "session-canary",
+        ))
+        response["assigned_id"] = "session-canary"
+        response["catalog_row_identity"] = "c" * 64
+        self.assertFalse(self.updater.catalog_provider_admission_ready(
+            release,
+            "catalog-canary",
+            "t" * 32,
+            digest,
+            signer,
+            row_identity,
+            "session-canary",
+        ))
+
+    def test_exact_provider_canary_mac_proof_is_pinned_and_matches_catalog_files(self):
+        release = self.verify()
+        digest, signer = self.updater.catalog_candidate_identity(release)
+        row_identity = "b" * 64
+        proof = {
+            "provider_id": "catalog-canary",
+            "assigned_id": "session-canary",
+            "launchd_pid": 123,
+            "local_status": {
+                "provider_id": "catalog-canary",
+                "network_state": "buyer_serving",
+                "coordinator": {"connected": True, "session": "session-canary"},
+                "catalog": {
+                    "release_id": release.catalog.release_id,
+                    "policy_version": release.catalog.policy_version,
+                    "digest": digest,
+                    "signer_key_id": signer,
+                    "row_identity": row_identity,
+                },
+            },
+            "files": dict(release.catalog.files),
+        }
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            catalog_canary_ssh_target="operator@canary.example",
+            catalog_canary_ssh_key_file=Path("/run/secrets/catalog-canary-ssh-key"),
+            catalog_canary_known_hosts_file=Path("/etc/macprovider/catalog-canary-known-hosts"),
+        )
+        self.updater.run_command = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["ssh"], 0, stdout=json.dumps(proof), stderr=""
+            )
+        )
+
+        self.assertEqual(
+            self.updater.prove_catalog_canary_mac(
+                release, "catalog-canary", digest, signer
+            ),
+            (row_identity, "session-canary"),
+        )
+        args, kwargs = self.updater.run_command.call_args
+        self.assertIn(
+            "UserKnownHostsFile=/etc/macprovider/catalog-canary-known-hosts",
+            args[0],
+        )
+        self.assertEqual(args[0][-2], "operator@canary.example")
+        self.assertIn("catalog-canary", args[0][-1])
+        self.assertIn("running_text_vnode", kwargs["input_text"])
+
+        proof["files"]["release.json"] = "0" * 64
+        self.updater.run_command.return_value = subprocess.CompletedProcess(
+            ["ssh"], 0, stdout=json.dumps(proof), stderr=""
+        )
+        with self.assertRaisesRegex(
+            updater_module.UpdateError,
+            "does not match the candidate release",
+        ):
+            self.updater.prove_catalog_canary_mac(
+                release, "catalog-canary", digest, signer
+            )
+
+    def test_exact_provider_canary_runs_mac_proof_before_authoritative_pool_gate(self):
+        release = self.verify()
+        token = self.root / "catalog-token"
+        key = self.root / "catalog-ssh-key"
+        known_hosts = self.root / "catalog-known-hosts"
+        token.write_text("t" * 32 + "\n")
+        key.write_text("private-key\n")
+        known_hosts.write_text("canary.example ssh-ed25519 AAAATEST\n")
+        token.chmod(0o600)
+        key.chmod(0o600)
+        known_hosts.chmod(0o600)
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            catalog_canary_provider_id="catalog-canary",
+            catalog_canary_auth_token_file=token,
+            catalog_canary_ssh_target="operator@canary.example",
+            catalog_canary_ssh_key_file=key,
+            catalog_canary_known_hosts_file=known_hosts,
+        )
+        order = []
+        self.updater.prove_catalog_canary_mac = mock.Mock(
+            side_effect=lambda *_args: order.append("mac") or ("b" * 64, "session-canary")
+        )
+        self.updater.catalog_provider_admission_ready = mock.Mock(
+            side_effect=lambda *_args: order.append("pool") or True
+        )
+        self.updater.wait_for = lambda _description, _timeout, check: self.assertTrue(check())
+
+        self.updater.verify_exact_provider_canary(release)
+
+        self.assertEqual(order, ["mac", "pool"])
+
+    def test_exact_provider_canary_retries_full_proof_and_session_bound_admission(self):
+        release = self.verify()
+        token = self.root / "catalog-token"
+        key = self.root / "catalog-ssh-key"
+        known_hosts = self.root / "catalog-known-hosts"
+        token.write_text("t" * 32 + "\n")
+        key.write_text("private-key\n")
+        known_hosts.write_text("canary.example ssh-ed25519 AAAATEST\n")
+        token.chmod(0o600)
+        key.chmod(0o600)
+        known_hosts.chmod(0o600)
+        self.updater.config = updater_module.dataclasses.replace(
+            self.updater.config,
+            provider_recovery_timeout_s=10,
+            catalog_canary_provider_id="catalog-canary",
+            catalog_canary_auth_token_file=token,
+            catalog_canary_ssh_target="operator@canary.example",
+            catalog_canary_ssh_key_file=key,
+            catalog_canary_known_hosts_file=known_hosts,
+        )
+        row_identity = "b" * 64
+        self.updater.prove_catalog_canary_mac = mock.Mock(
+            side_effect=[
+                updater_module.UpdateError("provider not installed yet"),
+                (row_identity, "session-before-reconnect"),
+                (row_identity, "session-after-reconnect"),
+            ]
+        )
+        self.updater.catalog_provider_admission_ready = mock.Mock(
+            side_effect=[False, True]
+        )
+        self.updater.sleep = mock.Mock()
+        self.updater.audit = mock.Mock()
+
+        self.updater.verify_exact_provider_canary(release)
+
+        self.assertEqual(self.updater.prove_catalog_canary_mac.call_count, 3)
+        assigned_ids = [
+            call.args[-1]
+            for call in self.updater.catalog_provider_admission_ready.call_args_list
+        ]
+        self.assertEqual(
+            assigned_ids,
+            ["session-before-reconnect", "session-after-reconnect"],
+        )
+        self.updater.audit.assert_any_call(
+            "exact_catalog_provider_canary",
+            "success",
+            provider_id="catalog-canary",
+            catalog_release_id=release.catalog.release_id,
+            catalog_policy_version=release.catalog.policy_version,
+            catalog_candidate_sha256=self.updater.catalog_candidate_identity(release)[0],
+            catalog_signer_key_id=self.updater.catalog_candidate_identity(release)[1],
+            catalog_row_identity=row_identity,
+            assigned_id="session-after-reconnect",
         )
 
     def test_rollback_stops_gateway_until_exact_coordinator_health_is_restored(self):
@@ -723,7 +1313,7 @@ class PearlUpdaterTests(unittest.TestCase):
         )
 
     def test_rollout_stops_timer_and_inflight_canary_before_drain(self):
-        self.updater.get_json = mock.Mock(return_value={"pool_size": 0})
+        self.updater.get_json = mock.Mock(return_value={"pool_size": 0, "pool_ready": 0})
         self.updater.previous_services = {
             "macprovider-coordinator.service": True,
             "macprovider-gateway.service": True,
@@ -902,6 +1492,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.updater.service_active = mock.Mock(return_value=False)
         self.updater.assert_unit_quiescent = mock.Mock()
         self.updater.validate_transaction = mock.Mock()
+        self.updater._restore_catalog = mock.Mock()
         self.updater._prove_rollback_serving = mock.Mock()
         for path in tx.rglob("*"):
             if path.is_file():
@@ -1378,8 +1969,19 @@ class PearlUpdaterTests(unittest.TestCase):
             "1.8.27",
             components[0],
             components[1],
+            updater_module.CatalogRelease(
+                "test-catalog",
+                "autotune-policy-v1",
+                {
+                    name: updater_module.sha256_file(self.bundle / name)
+                    for name in updater_module.CATALOG_ASSETS
+                },
+            ),
+            updater_module.ProviderAdmissionRollout("bridge_required", False, 86400),
             work,
         )
+        for name in updater_module.CATALOG_ASSETS:
+            shutil.copyfile(self.bundle / name, work / name)
         runner = updater_module.Updater(
             self.config,
             public_key=self.public,
@@ -1780,6 +2382,8 @@ class PearlUpdaterTests(unittest.TestCase):
     def test_reconcile_committed_success_moves_forward_to_candidate(self):
         release = self.stage(self.verify())
         self.install_coherent_pair(release)
+        expected_digest, expected_signer = self.updater.catalog_candidate_identity(release)
+        expected_row_identity = "b" * 64
         self.updater.state_root.chmod(0o700)
         self.updater.config_update = updater_module.ConfigUpdate(
             self.root / "config", self.root / "staged", "a" * 64, "1.8.26", "1.8.27"
@@ -1805,7 +2409,38 @@ class PearlUpdaterTests(unittest.TestCase):
             }
         )
         self.updater._journal_transition("success_state_persisted")
-        self.updater.verify_rollout = mock.Mock()
+        self.updater.systemctl = mock.Mock()
+        self.updater.service_active = mock.Mock(return_value=True)
+        self.updater.local_coordinator_ready = mock.Mock(return_value=True)
+        self.updater.local_gateway_ready = mock.Mock(return_value=True)
+        self.updater.restore_auxiliary_services = mock.Mock()
+        self.updater.prove_serving_recovery = mock.Mock()
+        self.updater.verify_provider_admission_rollout_policy = mock.Mock()
+        self.updater.verify_exact_catalog_admission = mock.Mock()
+        self.updater.restore_auxiliary_timers = mock.Mock()
+        self.updater.validate_catalog_canary_configuration = mock.Mock(
+            return_value=("catalog-canary", "t" * 32)
+        )
+        self.updater.prove_catalog_canary_mac = mock.Mock(
+            return_value=(expected_row_identity, "session-canary")
+        )
+        self.updater.get_authorized_json = mock.Mock(
+            return_value={
+                "provider_id": "catalog-canary",
+                "assigned_id": "session-canary",
+                "buyer_serving": True,
+                "catalog_evidence_source": "provider_reported",
+                "catalog_admission_mode": "current",
+                "catalog_release_id": release.catalog.release_id,
+                "catalog_policy_version": release.catalog.policy_version,
+                "catalog_candidate_sha256": expected_digest,
+                "catalog_signer_key_id": expected_signer,
+                "catalog_row_identity": expected_row_identity,
+            }
+        )
+        self.updater.wait_for = (
+            lambda _description, _timeout, check: self.assertTrue(check())
+        )
         self.updater.restore_transaction = mock.Mock()
         self.updater.restore_previous_services = mock.Mock()
         self.updater.restore_deadman_monitoring = mock.Mock(
@@ -1814,7 +2449,14 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.assertTrue(self.updater.reconcile())
 
-        self.updater.verify_rollout.assert_called_once()
+        self.updater.prove_catalog_canary_mac.assert_called_once()
+        canary_release = self.updater.prove_catalog_canary_mac.call_args.args[0]
+        self.assertEqual(canary_release.directory, Path("/committed-release"))
+        self.assertEqual(
+            self.updater.prove_catalog_canary_mac.call_args.args[2:],
+            (expected_digest, expected_signer),
+        )
+        self.updater.get_authorized_json.assert_called_once()
         self.updater.restore_transaction.assert_not_called()
         self.updater.restore_previous_services.assert_not_called()
         self.updater.restore_deadman_monitoring.assert_called_once_with()
@@ -1849,6 +2491,7 @@ class PearlUpdaterTests(unittest.TestCase):
             "quiescence": "quiesce_for_restore",
             "binaries": "_restore_binaries",
             "configurations": "_restore_configurations",
+            "catalog": "_restore_catalog",
             "databases": "_restore_databases",
             "success_state": "_restore_success_state",
             "backend_services": "_restore_backend_services",
@@ -1925,6 +2568,9 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertFalse(config.enabled)
         self.assertFalse(config.allow_provider_drain)
         self.assertEqual(config.canary_timeout_s, 720)
+        self.assertEqual(config.provider_admission_policy, "")
+        self.assertEqual(config.minimum_pool_ready_after_rollout, 0)
+        self.assertEqual(config.minimum_bridge_remaining_s, 0)
 
     def test_no_sanction_recovery_or_internal_canary_enablement(self):
         source = SCRIPT.read_text(encoding="utf-8")
@@ -1942,6 +2588,16 @@ class PearlUpdaterTests(unittest.TestCase):
             text,
         )
         self.assertNotIn("test -s /etc/macprovider/canary-buyer.env", text)
+
+    def test_catalog_runbook_splits_deploy_authority_and_has_executable_bridge_rollback(self):
+        runbook = SCRIPT.parent.parent / "runbooks" / "catalog-release-provider-upgrade.md"
+        text = runbook.read_text(encoding="utf-8")
+        self.assertIn("### 6.2 Signed updater: backend pair plus catalog", text)
+        self.assertIn("### 6.3 Direct deploy: catalog/config validation only", text)
+        self.assertIn('MACPROVIDER_VERSION="$PRIOR_PROVIDER_TAG"', text)
+        self.assertIn("root-owned inventory", text)
+        self.assertIn("Coordinator autoupdate remains upgrade-only", text)
+        self.assertEqual(text.count("## 6. Pearl deployment"), 1)
 
     def test_every_subprocess_invocation_has_an_explicit_timeout(self):
         tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
@@ -2025,6 +2681,8 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(monitor.read_text(), "GMAIL_APP_PASSWORD=preserve-me\n")
         self.assertEqual(stat.S_IMODE(monitor.stat().st_mode), 0o640)
         self.assertTrue((prefix / "usr/local/sbin/macprovider-pearl-update-gate").is_file())
+        self.assertTrue((prefix / "usr/local/share/macprovider/catalog-release.py").is_file())
+        self.assertTrue((prefix / "usr/local/share/macprovider/catalog-canary-proof.py").is_file())
         installer = SCRIPT.with_name("install-pearl-updater.sh").read_text(encoding="utf-8")
         self.assertIn("useradd --system --gid macprovider-updater-validate", installer)
         for unit in updater_module.GATED_SERVICE_UNITS:

@@ -13,7 +13,9 @@ Every ordinary `vMAJOR.MINOR.PATCH` GitHub release now contains:
   `gateway-linux-amd64`;
 - `pearl-release.json` with the exact repository, tag, commit, component
   hashes, embedded versions, architecture, and provider version advertised by
-  the coordinator configuration;
+  the coordinator configuration, plus the operator-selected signed provider
+  admission policy (`bridge_required` during migration or
+  `strict_post_migration` after closure);
 - detached signatures for `pearl-release.json` and `checksums.txt`.
 
 The protected release workflow first builds a complete unsigned candidate from
@@ -84,6 +86,28 @@ printf '%s\n' "$BETTERSTACK_UPTIME_API_TOKEN" | \
   sudo tee /etc/macprovider/pearl-updater.betterstack-token >/dev/null
 ```
 
+Provision one enrolled catalog-aware canary Mac as the release commit witness.
+Create a coordinator bearer token authorized for `details=deployment` and a
+dedicated read-only SSH key as root-owned `0600` files on Pearl. Store the
+canary Mac host key in a dedicated root-owned `0600` known-hosts file; the
+hardened service cannot read root's home directory and always uses
+`StrictHostKeyChecking=yes`. Configure these values in
+`/etc/macprovider/pearl-updater.conf`:
+
+```text
+PEARL_UPDATER_CATALOG_CANARY_PROVIDER_ID=<exact-provider-id>
+PEARL_UPDATER_CATALOG_CANARY_AUTH_TOKEN_FILE=/etc/macprovider/pearl-updater.catalog-canary-token
+PEARL_UPDATER_CATALOG_CANARY_SSH_TARGET=<operator-user>@<canary-host>
+PEARL_UPDATER_CATALOG_CANARY_SSH_KEY_FILE=/etc/macprovider/pearl-updater.catalog-canary-ssh-key
+PEARL_UPDATER_CATALOG_CANARY_KNOWN_HOSTS_FILE=/etc/macprovider/pearl-updater.catalog-canary-known-hosts
+PEARL_UPDATER_CATALOG_CANARY_INSTALL_DIR=macprovider/catalog-release
+```
+
+The SSH account needs only local read/inspection access to its own provider
+installation, LaunchAgent, local status port, and `lsof`. It does
+not receive the coordinator bearer token. `--plan` fails closed when either
+identity or secret file is missing, unsafe, or malformed.
+
 From a reviewed repository checkout on Pearl, install the updater, set
 `PEARL_UPDATER_DEADMAN_HEARTBEAT_ID` to the Better Stack API resource ID, then
 plan:
@@ -127,7 +151,18 @@ later lost.
 
 ## First production rollout
 
-1. Confirm the candidate release workflow and tests succeeded.
+1. Confirm the candidate release workflow and tests succeeded. Capture the
+   canary Mac's prior signed provider tag, then prefetch and verify the candidate
+   provider payload without mutating the live provider:
+
+```bash
+~/macprovider/macprovider-cli --version | tee canary-prior-provider-tag.txt
+KEEP_DOWNLOADS=1 scripts/verify-tier2-provider-release.sh --tag v1.8.31
+```
+
+   Keep the prior provider live. The verifier proves the signed checksum
+   manifest, artifact hash, and complete provider payload; it does not authorize
+   a provider-first install against the legacy coordinator.
 2. Confirm #524's canary units and heartbeat configuration are operational:
 
 ```bash
@@ -141,17 +176,67 @@ systemctl show --property=LoadCredential canary-buyer.service
 
    The result must be `success`; heartbeat delivery failure (exit 3) is a
    rollout failure, not a warning.
-3. Confirm every connected provider supports graceful drain/reconnect. Only
-   then set `PEARL_UPDATER_ALLOW_PROVIDER_DRAIN=1`.
-4. Set `PEARL_UPDATER_ENABLED=1` and keep the config, revocation list, and API
-   token `root:root 0600`.
-5. Run a plan, then the manual apply:
+3. Before apply, preserve a protected `/poolz` snapshot containing every exact
+   provider ID and admission/routing state plus `summary.ready` and
+   `summary.free_slots`. Record an operator-approved ready-provider floor of at
+   least two. Signed `pearl-release.json` must contain the reviewed
+   `provider_admission_rollout` bridge policy. The updater computes its bounded
+   RFC3339 deadline at apply time, transactionally stages
+   `autotune.provider_admission_bridge_deadline` plus
+   `autotune.enforce_provider_admission: false`, validates the complete
+   candidate config, and restores the prior config on rollback.
+4. Confirm every connected provider supports graceful drain/reconnect. Only
+   then set `PEARL_UPDATER_ALLOW_PROVIDER_DRAIN=1`. Configure the updater's
+   commit policy to match this bridge rollout:
+
+```text
+PEARL_UPDATER_PROVIDER_ADMISSION_POLICY=bridge_required
+PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT=<operator-approved-floor-at-least-2>
+PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=<seconds-greater-than-provider-recovery-plus-service-health-timeouts>
+```
+
+   The updater rejects a post-rollout local `/healthz.pool_ready` below that
+   floor, strict admission during this bridge rollout, or a bridge without the
+   configured safe remaining window.
+5. Set `PEARL_UPDATER_ENABLED=1` and keep the config, revocation list, Better
+   Stack token, catalog-canary bearer token, and catalog-canary SSH key
+   `root:root 0600`.
+6. Run a plan, then start the manual apply in operator terminal A:
 
 ```bash
 sudo /usr/local/sbin/macprovider-pearl-update --plan
 sudo /usr/local/sbin/macprovider-pearl-update --apply
-journalctl -u macprovider-pearl-updater --since -4h --no-pager
 ```
+
+   Leave terminal A attached: `--apply` remains synchronous and rollback-armed.
+   In a separate read-only terminal, wait for the durable handoff emitted only
+   after backend health, buyer serving, capacity preservation, signed bridge
+   policy, and exact catalog admission have passed:
+
+```bash
+sudo tail -Fn0 /var/lib/macprovider-pearl-updater/audit.jsonl | \
+  jq -e --unbuffered 'select(.event == "provider_install_ready" and .outcome == "waiting")'
+```
+
+   Only after that exact JSON event appears, run the already pinned provider
+   installer on the single canary Mac from operator terminal B. Complete it
+   inside `PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S`; otherwise terminal A
+   rolls the backend transaction back:
+
+```bash
+curl -fsSL https://get.streamvc.live/install.sh | \
+  MACPROVIDER_VERSION=v1.8.31 MACPROVIDER_NO_PROMPT=1 bash
+```
+
+   The installer commits only after the bridge coordinator reports that exact
+   provider buyer-serving on the `current` envelope. The updater independently
+   binds the same provider ID, release, policy, digest, signer, and row identity
+   to the six on-Mac catalog files and the live text vnode before disarming
+   rollback. If the provider install fails, its transaction restores the prior
+   provider while the still-armed updater rolls back the backend. Follow the
+   explicit emergency prior-tag rollback contract in
+   `catalog-release-provider-upgrade.md`; never use an unpinned downgrade or an
+   expired bridge.
 
 Before any snapshot read, the updater creates and fsyncs a root-only phase
 journal, reads Better Stack's documented heartbeat
@@ -173,11 +258,17 @@ canary timer/service, and heartbeat state without touching a live binary,
 configuration file, or database. The updater then installs both binaries
 with same-filesystem atomic renames. It
 starts the coordinator first, verifies local version and advertised provider
-version, starts the gateway, waits for a routing-eligible provider to reconnect
-and pass warmup, verifies local and public semantic health, and finally runs
+version, starts the gateway, verifies the signed coordinator bridge settings and
+the configured `pool_ready` floor, waits for a routing-eligible provider to
+reconnect and pass warmup, verifies local and public semantic health, and finally runs
 `canary-buyer.service` with a 12-minute updater deadline around its verified
-11-minute unit budget. The #524 canary's complete SLO and heartbeat result is
-the final rollout gate. A client-side timeout explicitly stops and verifies
+11-minute unit budget. It then requires the configured provider to be
+buyer-serving on the exact current release/policy/digest/signer/row envelope
+and independently proves that the trusted canary Mac has all six exact catalog
+files and that its live launchd PID uses the inspected binary text vnode and
+listener. The generic #524 buyer canary alone cannot commit a catalog release.
+Only after both canaries succeed does the updater persist success and disarm
+rollback. A client-side timeout explicitly stops and verifies
 cancellation of the canary systemd job. The prior timer/service work is
 restored after success or rollback, and the heartbeat's exact prior paused
 state is restored and verified with a fresh GET before the updater exits.

@@ -122,6 +122,12 @@ admission:
   provisional_tier_weight: 0.3
   provisional_retention_days: 30
 
+autotune:
+  # Strict is the durable default. A migration bridge requires false plus an
+  # RFC3339 provider_admission_bridge_deadline no more than 24 hours away.
+  enforce_provider_admission: true
+  # provider_admission_bridge_deadline: "2026-07-11T18:00:00Z"
+
 # tier2:
 #   # SPEC-008 §4.3 — observation gate; default false preserves Tier-1.
 #   observe_enabled: false
@@ -164,7 +170,7 @@ admission:
 #   response_time_anomaly_min_ms: 10000
 
 coordinator_advertised_version:
-  latest_binary_version: "1.8.30"
+  latest_binary_version: "1.8.31"
   required_binary_version: ""
 
 auth:

@@ -6,6 +6,7 @@ INSTALL_SH="$REPO_ROOT/phase3-binary/dist/install.sh"
 TMP="$(mktemp -d)"
 holder_pid=""
 recovery_owner_pid=""
+mutation_holder_pid=""
 cleanup() {
   if [ -s "$TMP/home/holder-shell.pid" ]; then
     kill "$(cat "$TMP/home/holder-shell.pid")" >/dev/null 2>&1 || true
@@ -17,6 +18,10 @@ cleanup() {
   if [ -n "$recovery_owner_pid" ]; then
     kill "$recovery_owner_pid" >/dev/null 2>&1 || true
     wait "$recovery_owner_pid" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$mutation_holder_pid" ]; then
+    kill "$mutation_holder_pid" >/dev/null 2>&1 || true
+    wait "$mutation_holder_pid" >/dev/null 2>&1 || true
   fi
   rm -rf "$TMP"
 }
@@ -54,6 +59,9 @@ run_lock_shell() {
     set -euo pipefail
     CONFIG_DIR="$HOME/.config/macprovider"
     INSTALL_LOCK_PATH="$CONFIG_DIR/install.lock"
+    PROVIDER_MUTATION_ROOT="$HOME/.local/share/macprovider/autoupdate"
+    PROVIDER_MUTATION_LOCK_PATH="$PROVIDER_MUTATION_ROOT/update.lock"
+    PROVIDER_MUTATION_PENDING_PATH="$PROVIDER_MUTATION_ROOT/pending.json"
     INSTALL_LOCK_HELD=0
     INSTALL_LOCK_TOKEN=""
     INSTALL_LOCK_HOLDER_PID=""
@@ -127,6 +135,49 @@ holder_pid=""
 grep -F 'installer lock ownership was lost' "$TMP/orphan-holder.err" >/dev/null
 
 # Once the exact recorded owner exits, the stale record may be replaced.
+run_lock_shell once
+
+# Swift self-update/autoupdate and the shell installer share a fixed lock order:
+# install.lock first, then update.lock. A live Swift mutation holder fences the
+# installer before any transaction snapshot or recovery mutation begins.
+mkdir -p "$TMP/home/.local/share/macprovider/autoupdate"
+chmod 700 "$TMP/home/.local" "$TMP/home/.local/share" "$TMP/home/.local/share/macprovider" "$TMP/home/.local/share/macprovider/autoupdate"
+python3 - "$TMP/home/.local/share/macprovider/autoupdate/update.lock" "$TMP/home/mutation-held" <<'PY' &
+import fcntl, os, signal, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
+while True:
+    time.sleep(0.1)
+PY
+mutation_holder_pid=$!
+for _ in $(seq 1 100); do
+  [ -f "$TMP/home/mutation-held" ] && break
+  sleep 0.05
+done
+set +e
+run_lock_shell once > "$TMP/mutation-busy.out" 2> "$TMP/mutation-busy.err"
+mutation_busy_rc=$?
+set -e
+[ "$mutation_busy_rc" -eq 73 ]
+grep -F 'another provider update is active' "$TMP/mutation-busy.err" >/dev/null
+kill "$mutation_holder_pid"
+wait "$mutation_holder_pid" >/dev/null 2>&1 || true
+mutation_holder_pid=""
+
+# A durable pending updater marker remains an active transaction even after the
+# updater process restarted and released its kernel locks. Installer must wait
+# for coordinator admission or rollback recovery instead of overwriting it.
+printf '{}\n' > "$TMP/home/.local/share/macprovider/autoupdate/pending.json"
+chmod 600 "$TMP/home/.local/share/macprovider/autoupdate/pending.json"
+set +e
+run_lock_shell once > "$TMP/mutation-pending.out" 2> "$TMP/mutation-pending.err"
+mutation_pending_rc=$?
+set -e
+[ "$mutation_pending_rc" -eq 73 ]
+grep -F 'awaiting coordinator admission or recovery' "$TMP/mutation-pending.err" >/dev/null
+rm -f "$TMP/home/.local/share/macprovider/autoupdate/pending.json"
 run_lock_shell once
 
 # The per-transaction recovery claim uses the same durable-owner fence. Killing
