@@ -1,5 +1,14 @@
 # Proof of Weights — Session B implementation runbook
 
+> **⚠️ SUPERSEDED (2026-07-11) by `specs/SPEC-032-proof-of-weights-hello-gate.md`.**
+> SPEC-032 is the normative source. Where this runbook disagrees, SPEC-032 governs —
+> notably the **shipped close-reason names** (`autotune_gate_unavailable`,
+> `autotune_evidence_required`, `autotune_evidence_invalid`, `autotune_model_uncatalogued`,
+> `autotune_model_cap_exceeded`; SPEC-032 FR-HG4) supersede any stale reason strings
+> listed here (e.g. `autotune_evidence_missing`/`_stale`/`_thermal_throttle`), and per
+> FR-PW1 the plaintext-nonce OPoI check is liveness-only, **not** an anti-downgrade or
+> weight-identity proof.
+
 **Track:** Session B (Proof of Weights)  
 **Out of scope:** Session A OPoI explicit WS frames, Session C MALIBU emission, Session D mining policy  
 **Pearl overlay:** `/etc/macprovider/coordinator.pearl-overlays.yaml` (merged with `/opt/macprovider/coordinator.yaml`)

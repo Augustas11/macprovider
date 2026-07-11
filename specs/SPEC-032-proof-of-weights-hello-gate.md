@@ -160,7 +160,7 @@ response and the *deferred* future probation, which — if ever built — could 
 |--------------|-------|---------|------|
 | `autotune_gate_unavailable` | **coordinator-fault** | catalog/evidence store not wired, **or any evidence lookup/decode/binding error** (DB/query failure, malformed envelope, immutable-binding mismatch) | rejects (operator must fix) |
 | `autotune_evidence_required` | **evidence-absent** | no verified evidence in-window (never submitted, or **expired**) | rejects |
-| `autotune_evidence_invalid` | **no-passing-benchmark** (affirmative shortfall **or** catalog staleness) | evidence present but **no benchmark passes the *current* gate** — a genuine hardware shortfall (thermal throttle, TPS below gate, TTFT above gate) **or** a policy-staleness case (catalog-SHA / model-id / artifact-SHA mismatch after a catalog rotation) | rejects |
+| `autotune_evidence_invalid` | **no-passing-benchmark** (affirmative shortfall, catalog staleness, **or** provider semantic misbinding) | evidence present but **no benchmark passes the *current* gate** — a genuine hardware shortfall (thermal throttle, TPS below gate, TTFT above gate); a policy-staleness case (catalog-SHA / model-id / artifact-SHA mismatch after a catalog rotation); **or** a provider-submitted **semantic misbinding** — the verifier accepts evidence on syntactic/trust bindings but does **not** check model-id/artifact *values* against the signed catalog, so the *gate* is where a mismatched model-id/artifact is caught | rejects |
 | `autotune_model_uncatalogued` | **policy-unverifiable** | claimed model not in the catalog — the coordinator cannot *evaluate* the claim (not proof of shortfall) | rejects |
 | `autotune_model_cap_exceeded` | **affirmative shortfall** | claimed model's `MinRAMGB` > verified capacity ceiling | rejects |
 
@@ -173,12 +173,15 @@ cannot evaluate the claim; `gate_unavailable` = the coordinator is not wired or 
 erroring — an operator fault, not the provider's). One nuance for operator response:
 `evidence_invalid` is **not uniformly** a hardware shortfall — a **catalog rotation**
 can flip a previously-good provider into `evidence_invalid` via a catalog-SHA/artifact
-mismatch, which is policy staleness, not incapability; the hard-close remains correct
-(the coordinator cannot currently verify capability), but the operator should check
-catalog freshness, not assume bad hardware. Regardless of sub-case, `evidence_invalid`
-never becomes probation-eligible — only the evidence-absent-from-expiry case could (and
-even that is deferred, FR-HG5). Conflating "no evidence" with "no passing benchmark" was
-the draft's original error.
+mismatch, which is policy staleness, not incapability; or the provider may have
+submitted evidence whose model-id/artifact **values** are misbound (the verifier trusts
+syntactic/hardware bindings but does not value-check them against the signed catalog —
+that check is the gate's). The hard-close remains correct in every sub-case (the
+coordinator cannot currently verify capability); the operator's diagnosis differs
+(check hardware vs. catalog freshness vs. the provider's submitted model/artifact ids).
+Regardless of sub-case, `evidence_invalid` never becomes probation-eligible — only the
+evidence-absent-from-expiry case could (and even that is deferred, FR-HG5). Conflating
+"no evidence" with "no passing benchmark" was the draft's original error.
 
 **FR-HG5 — Redundancy alert and operator levers (NO automatic probationary admission
 in v0.1).** The hello-gate as shipped is **pool-size-blind**: it hard-closes any
@@ -396,7 +399,7 @@ is the only live element of this spec.
 | `telemetry_drift.tps_min_requests_window` | int | `2` | min requests before TPS drift evaluated. |
 | `telemetry_drift.hash_alert_on_status` | []string | `[hash_mismatch, hash_invalid]` | model-hash statuses that alert. |
 | `telemetry_drift.hash_alert_on_artifact_drift` | bool | `true` | alert on artifact drift. |
-| `telemetry_drift.opoi_pass_rate_window` | int | `10` | OPoI rolling window; `>0` requires `canary_enabled`. |
+| `telemetry_drift.opoi_pass_rate_window` | int | `10` | OPoI rolling window; `>0` requires `canary_enabled` **when `telemetry_drift.enabled`** (the coupling is validated only then — the shipped default of drift-disabled + window 10 + canary-disabled is valid). |
 | `telemetry_drift.opoi_pass_rate_threshold` | float | `0.80` | OPoI pass-rate alert threshold. |
 | `telemetry_drift.alert_cooldown_s` | int | `900` | per-signal alert cooldown. |
 
@@ -468,13 +471,22 @@ Testable against the current build:
 
 - **AC-1.** With `require_autotune_hello_gate: true` and no verified in-window
   evidence, a connecting provider is closed `4001 autotune_evidence_required`.
+- **AC-1a (gate no-op).** With `require_autotune_hello_gate: false`, a provider with no
+  evidence is admitted (the gate is a no-op).
+- **AC-1b (both paths).** The gate is enforced on **both** the composed-auth (v2) and
+  legacy admission paths, for provisional and pinned tiers.
+- **AC-1c (v2 TOCTOU).** On the composed-auth path, evidence that is valid at the
+  pre-challenge check but disappears/expires before the post-proof check causes the
+  provider to be rejected (not admitted) — both checks are enforced.
 - **AC-2.** With verified evidence whose capacity ceiling is below the claimed model's
   `MinRAMGB`, the provider is closed `autotune_model_cap_exceeded`.
 - **AC-3.** A claimed model absent from the catalog closes `autotune_model_uncatalogued`.
-- **AC-3b.** Evidence that is present but fails a gate predicate — a benchmark below
-  the TPS gate / above the TTFT gate / thermally throttled, **or** a catalog/model/
-  artifact-SHA mismatch under the current catalog — closes `autotune_evidence_invalid`
-  (both the hardware-shortfall and catalog-staleness sub-cases map to this reason).
+- **AC-3b.** Evidence that is present but for which **no benchmark passes** the current
+  gate — every benchmark below the TPS gate / above the TTFT gate / thermally throttled,
+  **or** a catalog/model/artifact-SHA mismatch under the current catalog — closes
+  `autotune_evidence_invalid` (hardware-shortfall, catalog-staleness, and semantic-
+  misbinding sub-cases all map to this reason). A single *passing* benchmark still
+  establishes a ceiling and admits (it is not `evidence_invalid`).
 - **AC-4.** With the catalog/evidence store unwired **or any evidence lookup/decode
   error**, the gate closes `autotune_gate_unavailable` (fails closed).
 - **AC-5.** A low OPoI pass-rate emits a `pow_telemetry_drift_detected` WARN (via
@@ -680,3 +692,22 @@ smaller box), which is why v0.1 ships no automatic probation.
     - **MEDIUM (security):** the runbook's "30B-claim/8B-serve downgrade smoke via the
       nonce gate" overclaim corrected — the nonce gate cannot detect a downgrade
       (docs-only).
+  - **R5 codex three-lane audit** — **security PASS (0 C/H/M)**; code 0C/0H/3M,
+    architect 0C/1H/3M (all docs/consistency, no design change). Absorbed:
+    - **HIGH (architect) — money-path:** the `opoi-challenge-implementation.md` runbook
+      still called itself the "interim normative source" and directed a **credit/payout
+      multiplier** off OPoI pass-streaks — a direct violation of FR-PW2 (OPoI must never
+      gate payout). Marked the runbook **superseded by SPEC-032** and the multiplier
+      phase **deferred/void** until an FR-PW3 weight-bound signal exists. Also superseded
+      `proof-of-weights-implementation.md` (stale close-reason names) with a banner.
+    - **MEDIUM (code):** FR-HG4 gained a **third** `evidence_invalid` cause — provider
+      **semantic misbinding** (the verifier trusts syntactic/hardware bindings but does
+      not value-check model-id/artifact against the signed catalog; the gate does).
+    - **MEDIUM (code):** AC-3b corrected — `evidence_invalid` requires **no** benchmark
+      to pass (a single passing benchmark still establishes a ceiling and admits).
+    - **MEDIUM (code):** FR-PW1 repo-wide honesty — fixed the staging overlay comment
+      (`coordinator.opoi-v0-staging.yaml`) that claimed nonce challenges "prove the
+      provider is running the declared model".
+    - **MEDIUM (architect):** FR-CFG1 opoi/canary coupling cell qualified with "when
+      `telemetry_drift.enabled`"; FR-HG1 gained acceptance locks (AC-1a no-op, AC-1b
+      both paths, AC-1c v2 two-phase TOCTOU).
