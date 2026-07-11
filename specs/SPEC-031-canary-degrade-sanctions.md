@@ -3,7 +3,7 @@
 **Status:** v0.1-draft
 **Date:** 2026-07-11
 **Depends on:** SPEC-002 (coordinator provider state machine: FR-P5 routing eligibility, FR-P8a admission warm-up, FR-P11a circuit-breaker; F-2 amendment defines provisional/pinned admission), SPEC-003 (open provider onboarding, tier semantics), SPEC-006 §5.2 / §17.2 (buyer error contract, 404/503), SPEC-008 (attestation — owns model/weight identity claims), SPEC-018/019 (buyer error envelope + `retryable`)
-**Related infrastructure:** SPEC-030 (losslessness probe) reuses the canary *scheduling/jitter/persistence* infrastructure but owns its own dedicated authenticated carrier and state (see §17).
+**Related infrastructure:** SPEC-030 (losslessness probe) is an *independent* probe subsystem with its own loop, carrier, frames, and state; SPEC-031 does not govern it and shares no code path with it (see §17).
 **Companion baseline (separate spec):** proof-of-weights / OPoI semantics + the autotune hello-gate are runbook item 9's normative baseline; this spec defines only the canary *mechanism* those features build on, and explicitly does **not** make weight-integrity claims (see §1, §2, and the CRITICAL reframing in the changelog).
 
 **Numbering note.** Assigned canonical **SPEC-031** on 2026-07-11 (Wave C of the
@@ -27,7 +27,13 @@ freshness** check. It proves that the provider's inference endpoint is:
 1. **reachable and answering** within a deadline (liveness),
 2. **following a trivial instruction** — echoing a fresh random nonce exactly
    (instruction-following / not returning garbage or a truncated response), and
-3. **producing fresh, non-replayed output** (the nonce is unique per probe).
+3. **producing a fresh per-request response** — each probe carries a newly
+   drawn random nonce, so a passing echo is not a stale cached answer. This is
+   *probabilistic* freshness, not a uniqueness or replay-resistance guarantee:
+   the shipped nonce is a 32-bit random draw with no replay cache (collisions
+   become likely after ~10⁴–10⁵ probes), so the spec does not claim non-replay
+   as a proven property (see FR-CAN2 for the freshness bound and the hardening
+   option).
 
 **What the canary is NOT.** The nonce is transmitted in the clear inside an
 ordinary, fingerprintable inference request; any model — including a cheaper or
@@ -82,9 +88,10 @@ currently disabled on Pearl; see §16).
   anti-downgrade claim — runbook item 9's separate spec, building on SPEC-008.
   The canary carries the model-class probe as a payload and emits a pass/fail
   flag; what that flag *proves* is item 9's to define.
-- SPEC-030 losslessness probe **semantics and transport** — it reuses only the
-  canary scheduling/jitter/persistence infrastructure; its carrier, encryption,
-  and state are its own (SPEC-030 FR-1/3/4).
+- SPEC-030 losslessness probe **in its entirety** — it is a separate subsystem
+  with its own dispatch loop, carrier/frames, and in-memory state (SPEC-030
+  FR-1/3/4). SPEC-031 neither governs it nor shares code with it; the two are
+  independent probe families that happen to sit beside each other.
 - Any buyer-visible `/v1/chat/completions` request or response field. The canary
   is coordinator↔provider only; buyers observe it solely through routing
   eligibility (i.e. whether a 503 is returned).
@@ -133,13 +140,23 @@ ticker at `clamp(canary_interval_s / 10, 1s, 30s)`. Each sweep MUST:
   into **both** the challenge `prompt` and its `expected` value. Configuration
   validation MUST reject any challenge whose `prompt` or `expected` does not
   contain `{nonce}`. The nonce substitution is deterministic given the drawn
-  bytes; the **challenge selection is uniformly random** over the applicable
-  bank (`challenges[randbyte % len(bank)]`) — consecutive probes to the same
-  provider may use different challenges. (An implementer MUST NOT assume stable
-  per-provider challenge selection.)
+  bytes. The nonce is a **32-bit random draw** (shipped: the first 4 of 5 drawn
+  bytes, rendered uppercase-hex); this gives probabilistic freshness only, and an
+  implementation that needs true replay resistance SHOULD widen the nonce to
+  ≥128 bits and add duplicate rejection.
 - select the applicable bank: the per-model `model_class_challenges` bank if the
   provider's admitted model id matches (exact, then case-insensitive), else the
   global `canary_challenges` bank;
+- select the challenge from that bank by **fresh random draw**. The shipped
+  selector is `challenges[randbyte % len(bank)]` — consecutive probes to the same
+  provider may use different challenges, so an implementer MUST NOT assume stable
+  per-provider selection. Note this modulo selection is **biased** unless the bank
+  size divides 256, and — critically — for a bank **larger than 256 entries the
+  entries beyond index 255 are unreachable and never probed**. Validation MUST
+  therefore reject banks larger than 256 entries (or the selector MUST use
+  rejection sampling / `crypto/rand.Int` for unbiased, fully-covering selection);
+  until then, operators MUST keep every bank ≤256 entries. This selection-coverage
+  guard is a conformance gap (§14).
 - issue the request with **`temperature: 0`** and **`stream: false`**, and
   `max_tokens = pool.canary_max_tokens`. **The temperature pin is a normative
   correctness invariant**: without it, low-bit models (measured on 4-bit
@@ -203,8 +220,10 @@ verbatim in the `canary_fail_reason` log field (§12) and any operator surface:
 | *(empty)* | pass | — | echo gate passed; latency gate passed or not enforced |
 | `nonce_mismatch` | correctness (liveness/instruction) | — | `TrimSpace(output) != expected` |
 | `incomplete` | correctness (liveness) | coordinator-attributable when caused by `max_tokens` truncation | WS relay `inference_response_end.status != "complete"` |
-| `relay_error` | infra/liveness | **hard** (transport/session) | WS relay error / session dead; HTTP transport error, non-200, or body-read error |
+| `relay_error` | infra/liveness | **hard** (transport) | WS relay error *after dispatch* (relay dies mid-inference); HTTP transport error or body-read error |
+| `relay_error` | infra/liveness | **status** (endpoint-level) | HTTP non-200 from the provider endpoint — a canary-specific status, which does **not** by itself prove the buyer path is unreachable (§10) |
 | `relay_error` | infra/liveness | **soft** (deadline) | probe exceeded `canary_timeout_s` with no hard transport failure |
+| *(skip — no fail reason)* | neutral | — | WS **pre-dispatch** failure (`DispatchInference` error: session unavailable / closed / dead) — counter-neutral, NOT a `relay_error` (see §4 skip rule) |
 | `ttft_breach` | latency/SLO | — | measured TTFT exceeds `max_ttft_ms` (only when enforcing) |
 | `tps_breach` | latency/SLO | — | sustained TPS below `min_sustained_tps`, or non-finite (only when enforcing) |
 
@@ -215,12 +234,17 @@ operators could not diagnose *why* probes were failing (the field was added by
 PR #513).
 
 > **Sub-class conformance note.** The shipped code emits a single `relay_error`
-> constant for both hard transport failure and soft deadline expiry
-> (`canary_timeout_s`, default 30 s, is far below the buyer request timeout of
-> 280 s). Distinguishing the two — so a merely-slow sole provider that still
-> serves buyers is not evicted by a canary deadline (§10 FR-CAN23) — is a
-> conformance gap (§14). Likewise `incomplete` does not currently carry a
-> coordinator-attribution flag.
+> constant for the hard/status/soft sub-classes above; it does **not**
+> distinguish canary-endpoint deadline expiry (`canary_timeout_s`, default 30 s,
+> far below the buyer request timeout of 280 s) or a canary-specific HTTP non-200
+> from a genuine transport death. Distinguishing them — so a merely-slow sole
+> provider that still serves buyers, or one that returns a canary-only non-200,
+> is not evicted (§10 FR-CAN22/23) — is a conformance gap (§14). One nuance the
+> spec relies on: a WS **pre-dispatch** failure (the session is already dead /
+> unavailable) is a counter-neutral **skip**, not a `relay_error`, so a genuinely
+> dead WS sole provider is never *canary*-sanctioned; it is the FR-P11a
+> buyer-path breaker, not the canary, that removes it. Likewise `incomplete` does
+> not currently carry a coordinator-attribution flag.
 
 ## 6. Latency-gate policy: observe vs enforce
 
@@ -233,10 +257,14 @@ count toward a sanction.
 Per-challenge latency SLO fields (`max_ttft_ms`, `min_sustained_tps`) are
 meaningful **only on model-class banks**. Configuration validation SHOULD reject
 these fields on a **global** `canary_challenges` entry, because the global bank
-is a pure liveness/echo probe. (The shipped code only *logs* observe-mode
-latency breaches for model-class banks; a global-bank latency field is silently
-ignored — a conformance gap, §14. The clean resolution is to reject them at
-validation rather than accept-and-ignore.)
+is a pure liveness/echo probe. **Beware the shipped asymmetry:** in *observe*
+mode the coordinator only *logs* latency breaches for model-class banks, so a
+global-bank latency field is silently un-logged; but in *enforce* mode
+`evaluateCanaryProbe` applies the TTFT/TPS thresholds **regardless of bank type**,
+so a global-bank latency field *can* sanction. Accept-and-partially-honor is
+exactly the trap an operator falls into — the clean resolution is to **reject**
+latency fields on global banks at validation. Both the missing observe-log and
+the un-rejected global latency field are conformance gaps (§14).
 
 **FR-CAN8 — Why `enforce` is gated.** The current probe is `stream: false`, so
 the coordinator has no true first-token boundary and derives TTFT/TPS from
@@ -262,9 +290,19 @@ defined by this spec and does not currently exist** (buyer-path TTFT handling is
 observe-only and default-off; telemetry-drift only alerts and does not change
 routing). Whether such enforcement should penalize scoring, trip the breaker, or
 affect payout is deferred to runbook item 9's baseline / a future SLO spec with a
-named owner. Until then, `observe` remains the normative production posture and a
-correct-but-slow provider is **not** sanctioned by the canary path. This is
-recorded as an open item, not an implemented guarantee (§14).
+named owner. Until then, `observe` remains the normative production posture.
+
+**Precise scope of the observe-mode "no sanction" claim.** Observe mode disables
+only the `ttft_breach`/`tps_breach` **sub-timeout SLO** gates. It does **not**
+disable the `canary_timeout_s` **soft-deadline** failure: a probe that exceeds the
+30 s canary deadline still records a `relay_error` and counts toward a sanction
+even in observe mode. Because last-provider protection (§10) shields only the
+*sole* provider from soft-deadline removal, a correct-but-slow provider in a
+**multi-provider** pool can still be canary-sanctioned by repeated deadline
+expiry. The accurate claim is therefore: *sub-timeout SLO breaches never sanction
+in observe mode, and no non-sole provider is protected from a soft-deadline
+sanction.* Widening `canary_timeout_s` toward the buyer request timeout, or
+treating the soft-deadline as latency for all providers, is the follow-up (§14).
 
 **FR-CAN9 — Cold-start grace.** `pool.canary_cold_start_grace_s` (default 0 =
 disabled) waives **latency** gates for `grace` seconds after a provider's
@@ -298,17 +336,24 @@ FR-P11a circuit-breaker (which recovers after `pool.degraded_backoff_s`), a
 canary degrade has **no time-based auto-clear**. It persists until either (a) a
 subsequent canary probe **passes**, or (b) an operator clears it (§13). The
 coordinator MUST continue probing a canary-degraded provider so recovery is
-attempted; because the next probe is scheduled at the **jittered per-provider
-interval** and then observed on a later sweep, the worst-case time to a recovery
-*attempt* is approximately:
+attempted. Two distinct bounds matter and MUST NOT be conflated:
 
 ```
-recovery-attempt bound  ≤  1.5 × canary_interval_s  +  canary_sweep_cadence  +  dispatch delay
+next-dispatch bound   ≤  1.5 × canary_interval_s  +  canary_sweep_cadence  +  dispatch delay
+recovery-ready bound  =  next-dispatch bound  +  eligibility wait  +  probe-completion time
 ```
 
-With defaults (`canary_interval_s = 300`, sweep cadence 30 s) this is ~480 s, not
-one sweep. `Retry-After` guidance (§9 FR-CAN20) MUST be derived from this same
-bound, never from the raw sweep cadence.
+The **next-dispatch bound** (~480 s with defaults: `canary_interval_s = 300`,
+sweep cadence 30 s) bounds only when the *next probe is scheduled and picked up* —
+and only for a provider that is immediately probe-eligible. Actual **recovery
+readiness** additionally requires the provider to be dispatch-eligible (free slot,
+no warm-up hold) at that moment and the up-to-`canary_timeout_s` probe to complete
+and its passing result to be applied. The eligibility wait has **no finite hard
+bound** (a provider with no free slot may never become probe-eligible), so
+recovery readiness is **not** hard-bounded. Consequently the `Retry-After`
+guidance (FR-CAN20) is exactly that — *guidance* derived from the next-dispatch
+bound — not a guaranteed recovery deadline, and MUST NOT be shorter than the
+minimum sweep interval.
 
 **FR-CAN13 — Automatic recovery, gated on no other degrade cause.** A canary-
 degraded pinned provider that returns a **passing** probe MUST have its canary
@@ -365,29 +410,40 @@ pinned sanction** reconnects, the coordinator MUST reapply the sanction: restore
 the fail count, set `degraded`, and install a fresh canary recovery hold — so a
 provider that failed the echo proof cannot obtain a clean slate merely by
 reconnecting or by riding through a coordinator restart. The reapplied provider
-is non-routable until it passes a canary. Cold-start grace (§9) still applies to
-*latency* gates on the fresh session but never waives the echo gate.
+is non-routable until it passes a canary. Cold-start grace (FR-CAN9) still applies
+to *latency* gates on the fresh session but never waives the echo gate.
 
-**FR-CAN17 — Provisional bans: record runtime-only, admission rejection durable.**
-The canary-sanction *record* (in `provider_canary_sanctions`) is **not** written
-for a provisional trip. However, the provisional trip calls
-`AdmissionManager.Reject`, and that **admission rejection IS durable** — it is
-persisted and reloaded across restart, with its own retention TTL and operator-
-clear path (FR-CAN32). Therefore a banned provisional provider **remains
-admission-rejected across a coordinator restart** until an operator un-ban
-(FR-CAN32) or retention pruning clears it; it does **not** get a clean readmission
-cycle on restart. (Decision-log Entry 125 records exactly this: a provisional
-false positive became a durable admission rejection that only an authenticated
-un-ban could clear.) This asymmetry — pinned degrade persists as a canary
-sanction, provisional ban persists as an admission rejection — is intentional;
-both survive restart, by different mechanisms.
+**FR-CAN17 — Provisional bans: record runtime-only, admission rejection durable
+(best-effort in shipped code).** The canary-sanction *record* (in
+`provider_canary_sanctions`) is **not** written for a provisional trip. Instead
+the provisional trip calls `AdmissionManager.Reject`, and that **admission
+rejection is intended to be durable** — persisted and reloaded across restart,
+with its own retention TTL and operator-clear path (FR-CAN32). So a banned
+provisional provider **is meant to stay admission-rejected across a restart**
+until an operator un-ban (FR-CAN32) or retention pruning clears it, not get a
+clean readmission cycle (Decision-log Entry 125 records exactly this). **However,
+the shipped durability is best-effort, not crash-consistent:** `Reject` returns no
+error and calls best-effort persistence (`persistLocked` only *reports* a save
+failure through a callback), and admission-store **load** failure at startup is
+fail-open. A failed write or a corrupt/absent store followed by a restart can
+therefore silently drop a provisional ban. This asymmetry — pinned degrade
+persists as a canary sanction, provisional ban as an admission rejection — is
+intentional, but both are currently best-effort and MUST be hardened per FR-CAN18.
+(Conformance gap, §14 — marked Partial, not clean.)
 
-**FR-CAN18 — Fail-closed persistence.** Sanction persistence MUST NOT be
-best-effort. The shipped path installs the runtime sanction first and only logs
-an upsert failure (`provider.go`), so a storage failure followed by a restart
-silently drops the sanction. An implementation MUST make persistence failure
-either fail-closed (keep the provider degraded and surface the error) or reliably
-retried via an outbox. (Conformance gap, §14.)
+**FR-CAN18 — Crash-consistent, fail-closed persistence.** Sanction persistence —
+for **both** pinned canary sanctions and provisional admission rejections — MUST
+be crash-consistent, not best-effort. "Keep the provider degraded in memory and
+log the error" is **insufficient**, because that runtime state is exactly what a
+restart discards (the laundering FR-CAN15 identifies). An implementation MUST
+require an **acknowledged durable write** before the sanction is treated as
+applied, or record it in a **durable outbox / quarantine** that is replayed until
+the write is confirmed; a persistence failure MUST propagate (fail closed), not be
+swallowed. Combined operator operations that touch two durable records — e.g.
+`recoverProvider`, which deletes the pinned sanction and then persists the
+admission `Unreject` — MUST be **all-or-nothing or compensating**: today the
+second write can fail after the first has committed, leaving a half-applied clear
+and a 500. (Conformance gap, §14.)
 
 ## 9. Buyer availability contract during degrade
 
@@ -420,52 +476,68 @@ unavailable** → 503, not 404.
 
 ## 10. Last-provider protection (new invariant)
 
-**FR-CAN22 — Sole-provider removal requires independent, non-coordinator-
-attributable evidence.** Whether a sanction may empty a model's eligible pool
-depends on whether the failure is **independent of the coordinator's own
-configuration** and corroborated as a genuine provider fault — *not* on the raw
-reason label:
+**FR-CAN22 — The sole provider is never removed by a canary-only signal.** When a
+provider is the **only** routing-eligible provider for a model, **no canary
+signal alone may remove it** — not `nonce_mismatch`, not `incomplete`, not a
+latency or soft-deadline `relay_error`, and not a canary-specific HTTP non-200
+(`status` sub-class). The reason is the corrected threat model (§1): a canary
+probe is a fingerprintable synthetic request, so a failed echo, a rejected
+synthetic request, or a canary-endpoint status does **not** prove that ordinary
+buyer workloads are failing, and with a fleet of one there is no independent
+sample to distinguish a genuine provider fault from a coordinator-config fault
+(bad challenge, undersized `max_tokens`). Removing the last provider on such a
+signal is exactly the self-inflicted total outage of incidents #1/#2.
 
-- **Coordinator-attributable failures MUST NOT empty the pool.** An `incomplete`
-  caused by an undersized `pool.canary_max_tokens` (FR-CAN3), or any failure
-  attributable to the coordinator's challenge bank or prompt, is a coordinator
-  fault. It MUST be treated as neutral or last-provider-protected for the sole
-  provider.
-- **Latency failures MUST NOT empty the pool** — including the **soft**
-  `relay_error` sub-class (canary deadline expiry, §5), because a provider that
-  exceeds the 30 s canary deadline may still be serving buyers within the 280 s
-  request timeout. The metric is unreliable (§8) and a false sanction on a
-  single-provider pool is a total, self-inflicted outage (incidents #1 and #2).
-- **Hard infra failures** (`relay_error` hard sub-class: WS/session dead, non-200)
-  MAY remove the sole provider — a provider the coordinator genuinely cannot
-  reach is already not serving buyers, and the buyer path returns a clean
-  retryable 503.
-- **Correctness failures** (`nonce_mismatch`, or `incomplete` NOT attributable to
-  `max_tokens`) MAY remove the sole provider **only** when the failure is not
-  part of a correlated fleet-wide pattern (FR-CAN23) — i.e. when it is plausibly
-  a genuine single-provider fault (dead/garbage/instruction-not-followed), not a
-  bad shared challenge. Removal is justified because the provider is not producing
-  usable responses, **not** because the canary proved wrong weights (§1).
+The sole provider may be removed **only** on evidence that is independent of the
+canary's synthetic probe:
 
-**FR-CAN23 — Correlated-fault containment.** If **all** (or a quorum of)
-routing-eligible providers for a model fail the **same** challenge or fail
-concurrently in the same way, the coordinator MUST suspect its own configuration
-(challenge bank, prompt, `max_tokens`) rather than the fleet, and MUST NOT
-sequentially remove every provider. In that case it MUST (a) circuit-break /
-roll back the offending challenge bank, and (b) protect the last known-serving
-provider, until stronger independent evidence (a buyer-path failure, or item 9's
-weight-bound test) corroborates a genuine provider fault. A provisional sole
-provider MUST additionally never be hard-banned/session-closed on a **latency**
-or **soft-deadline** failure.
+- a genuine **buyer-path failure** driving the FR-P11a circuit-breaker (real
+  requests are failing), or
+- a **confirmed transport/session death** that the buyer path would equally hit
+  — note a dead WS session is a counter-neutral *skip* (§5), so this is the
+  breaker's job, not the canary's — or
+- **item 9's weight-bound / attested test** returning a confirmed integrity
+  failure.
 
-> **Conformance gap (§14).** Last-provider protection, coordinator-attribution of
-> `incomplete`, the soft/hard `relay_error` split, and correlated-fault
-> containment are **not yet implemented** — `RecordCanaryResult` receives only a
-> pass/fail boolean with no failure class, no attribution, and no eligible-count
-> guard. Today a sole provider CAN be removed by a coordinator-config fault
-> (incidents #1/#2). Production is safe only because it runs `observe` (latency
-> never sanctions) and canary is disabled entirely; making these guards explicit
-> is the primary pre-re-enable requirement (§16).
+A canary sanction on the sole provider therefore degrades it toward the buyer
+503 + `retryable:true` contract (§9) **only** once one of the above corroborates;
+until then the sole provider stays routing-eligible even while it accrues canary
+failures, and the operator is alerted (§12) to investigate.
+
+**FR-CAN23 — Multi-provider correctness sanctions + correlated-fault
+containment.** With **≥2** routing-eligible providers, a `nonce_mismatch` or a
+non-`max_tokens`-attributable `incomplete` MAY remove a provider (it is not
+producing usable responses — *not* because the canary proved wrong weights, §1),
+**subject to correlated-fault containment**:
+
+- Correlation MUST be evaluated over a **fixed pre-sweep snapshot** of the
+  eligible set (denominator `N ≥ 2`), keyed by a **challenge fingerprint** (the
+  `{prompt, expected}` template identity) and a **challenge-bank generation**, so
+  a bank reload fences stale results.
+- If a **quorum** of that snapshot (implementations MUST define the quorum, e.g.
+  ≥⌈N/2⌉ or a configured fraction) fails the **same** challenge within one
+  **observation window**, the coordinator MUST attribute the fault to its own
+  configuration, MUST NOT sequentially remove providers (which would shrink the
+  denominator mid-evaluation), MUST **circuit-break / roll back** the offending
+  challenge bank, and MUST protect the last known-serving provider until
+  independent evidence (FR-CAN22) corroborates a genuine fault.
+- Sanction decisions across the snapshot MUST be evaluated **atomically** with
+  respect to the eligible-count guard, so two providers cannot each be removed on
+  the belief that the other still covers the model.
+- Coordinator-attributable failures (an `incomplete` from undersized
+  `max_tokens`, FR-CAN3) are **neutral** regardless of fleet size.
+- A **provisional** sole provider MUST additionally never be
+  hard-banned/session-closed on a latency or soft-deadline failure.
+
+> **Conformance gap (§14).** Sole-provider protection, coordinator-attribution of
+> `incomplete`, the status/soft/hard `relay_error` split, the pre-sweep snapshot +
+> challenge-fingerprint + bank-generation fencing, the quorum, and atomic
+> eligible-count evaluation are **not yet implemented** — `RecordCanaryResult`
+> receives only a pass/fail boolean with no failure class, no attribution, no
+> snapshot, and no eligible-count guard. Today a sole provider CAN be removed by a
+> coordinator-config fault (incidents #1/#2). Production is safe only because it
+> runs `observe` and canary is disabled entirely; making these guards explicit is
+> the primary pre-re-enable requirement (§16).
 
 ## 11. Config surface and reload contract
 
@@ -546,9 +618,10 @@ be skip-neutral.
 ## 13. Tier asymmetry and operator recovery
 
 **FR-CAN30 — Documented asymmetry.** The provisional-ban (admission reject,
-durable via the admission store per FR-CAN17) vs pinned-degrade (canary sanction,
-durable via `provider_canary_sanctions`) split is the intended policy; both
-survive restart, by different mechanisms.
+persisted in the admission store per FR-CAN17) vs pinned-degrade (canary sanction,
+persisted in `provider_canary_sanctions`) split is the intended policy; both are
+**intended** to survive restart, by different mechanisms — though both are
+currently best-effort and MUST be hardened to crash-consistent per FR-CAN18.
 
 **FR-CAN31 — Operator clear (pinned).** The coordinator MUST expose an
 authenticated, idempotent operator action to clear a pinned canary sanction. It
@@ -578,11 +651,11 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR | Status | Note |
 |----|--------|------|
 | FR-CAN1 scheduling/jitter/shuffle | Implemented | `runCanaryLoop`, `shuffledProviders`, `jitteredCanaryInterval`. |
-| FR-CAN2 body (temp 0, nonce, random challenge) | Implemented | Temperature pinned (#533); nonce validated; challenge selection is random (spec now says so). |
+| FR-CAN2 body (temp 0, nonce, random challenge) | **Partial** | Temp pinned (#533), nonce validated. Selection is byte-modulo (biased; entries >255 unreachable) not uniform; nonce is 32-bit (probabilistic freshness, no replay cache). Spec recommends ≤256-entry banks + rejection-sampling / ≥128-bit nonce beyond shipped. |
 | FR-CAN3 `max_tokens` sizing + attribution | **Tightens/Gap** | Prod default 16→32 (#531); ≥-expected-length validation and the coordinator-attribution of `incomplete` are new. |
 | FR-CAN4/5 transport, admitted model | Implemented | WS vs HTTP split; `MaxAdmittedModelKey`. FR-CAN5 explicitly not an identity binding. |
 | FR-CAN6 echo-first, skip-neutral | **Partial** | Order + counter skip-neutral implemented; OPoI skip-neutrality is a gap (see FR-CAN29). |
-| FR-CAN7 observe default; global-latency reject | **Partial** | Default `observe` (#513); global-bank latency fields are accept-and-ignored, not rejected (gap). |
+| FR-CAN7 observe default; global-latency reject | **Partial** | Default `observe` (#513). Global-bank latency is un-logged in observe but **applied in enforce** (not rejected at validation) — accept-and-partially-honor (gap). |
 | FR-CAN8 enforce preconditions + buyer-path QoS owner | **Gap** | `enforce` reachable today single-shot/non-streaming/unguarded; no concrete sub-timeout QoS enforcement exists. |
 | FR-CAN9 cold-start grace | Implemented | #512. |
 | FR-CAN10 sub-threshold no-op | Implemented | `RecordCanaryResult` returns below threshold. |
@@ -591,16 +664,16 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR-CAN13/14 composition of degrade causes | **Gap** | Single `recoveryHolds` slot: canary overwrites breaker hold; `MarkRecovered` clears operator-clear hold. Multi-cause set not implemented. |
 | FR-CAN15 durable load independent of `canary_enabled` | **Gap** | `LoadCanarySanctions` gated on `CanaryEnabled` — disable+restart launders sanctions. |
 | FR-CAN16 reapply on reconnect | Implemented | `applyCanarySanctionLocked` (pinned). |
-| FR-CAN17 provisional admission-reject durable | **Tightens** | Behavior shipped (admission store persists); the spec now describes it accurately (was wrongly "runtime-only"). |
-| FR-CAN18 fail-closed persistence | **Gap** | Upsert failure is log-only; runtime sanction installed before persistence. |
+| FR-CAN17 provisional admission-reject durable | **Partial** | Admission store persists, but best-effort: `Reject` swallows save errors and startup load is fail-open, so a failed write + restart drops the ban. |
+| FR-CAN18 crash-consistent fail-closed persistence | **Gap** | Upsert failure log-only; runtime sanction installed before persistence; `recoverProvider` two-step is non-atomic. Applies to pinned + provisional. |
 | FR-CAN19 conjunctive eligibility | Implemented | `RoutingEligible()` enforces auth/publication + state + slots. |
 | FR-CAN20 retryable 503 + cadence Retry-After | **Partial** | `no_provider_available` retryable (#548); ownership is SPEC-006 §5.2; gateway 1 s hint is shorter than the sweep (gap). |
 | FR-CAN21 404/503 boundary | Implemented | Aligns with SPEC-006 §17.2 / SPEC-010 R-3.3.4 (#555). |
-| FR-CAN22/23 last-provider protection + correlated-fault | **Gap** | No failure-class, no attribution, no eligible-count guard, no correlated-fault containment. |
+| FR-CAN22/23 sole-provider protection + correlated-fault | **Gap** | `RecordCanaryResult` gets only a pass/fail bool: no failure-class, no attribution, no eligible-count guard, no pre-sweep snapshot / challenge-fingerprint / bank-generation, no quorum, no atomic evaluation. |
 | FR-CAN24/25 config surface + covering bank | **Partial** | Surface + basic validation shipped (#478, Entry 125); empty per-model lists and duplicate keys pass (gap). |
 | FR-CAN26 reload without restart | **Gap** | Pool block startup-only; direct cause of incident #3. |
 | FR-CAN27 failure logging | **Partial** | `canary_fail_reason` (#513); missing `assigned_id`/outcome and global-bank latency (gap). |
-| FR-CAN28 `/poolz` fields | **Gap** | Only `routing_eligible` + `canary_fail_count`; no nullable timestamps, no trip/hold reason. |
+| FR-CAN28 `/poolz` fields | **Partial** | Exposes `routing_eligible` + `canary_fail_count`; timestamps serialize when present via `omitempty` (not explicit `null` when unset), and there is no stable trip/hold reason. |
 | FR-CAN29 model-class pass flag skip-neutral | **Partial** | Flag emitted (#491); skip records `pass=false` (gap). |
 | FR-CAN30 documented asymmetry | Implemented | Both durable, different stores. |
 | FR-CAN31 operator clear (pinned) | **Partial** | Clear + epoch fencing + hold conversion shipped; `MarkRecovered` still clears the operator hold (gap, ties to FR-CAN14). |
@@ -608,15 +681,16 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 
 **Re-enable bar.** The Gap rows are the implementation backlog this baseline
 authorizes; none is a regression. Re-enabling canary in production SHOULD be
-gated on at least **FR-CAN22/23** (last-provider protection + correlated-fault
-containment), **FR-CAN15** (sanction load decoupled from `canary_enabled`), and
-**FR-CAN26** (no-restart tuning) — the guards whose absence caused the outages —
-plus **FR-CAN14** (degrade-cause composition) before the breaker and canary can
-safely coexist under load.
+gated on at least **FR-CAN22/23** (sole-provider protection + correlated-fault
+containment), **FR-CAN15** (sanction load decoupled from `canary_enabled`),
+**FR-CAN18** (crash-consistent persistence, so sanctions and bans survive a
+restart at all), and **FR-CAN26** (no-restart tuning) — the guards whose absence
+caused the outages — plus **FR-CAN14** (degrade-cause composition) before the
+breaker and canary can safely coexist under load.
 
 ## 15. Acceptance criteria
 
-Testable against the current build:
+Testable against the current build (happy paths against the shipped code):
 
 - **AC-1.** With `canary_enabled` and a valid covering bank, a provider echoing
   the nonce exactly passes; `canary_fail_count` stays 0 and `routing_eligible`
@@ -628,49 +702,69 @@ Testable against the current build:
 - **AC-3 (WS path).** A WS probe truncated before the nonce (undersized
   `max_tokens`) is classified `incomplete`, not `nonce_mismatch`. *(HTTP probes
   do not inspect `finish_reason` and classify a truncated body as
-  `nonce_mismatch`; HTTP truncation classification is a forward gap, AC-13.)*
+  `nonce_mismatch`; HTTP truncation classification is forward AC-F8.)*
 - **AC-4.** In `observe` mode, a nonce-correct probe with an arbitrarily high
-  measured TTFT passes; `canary_fail_count` does not increment.
+  measured *sub-timeout* TTFT passes; `canary_fail_count` does not increment.
+  (A probe exceeding `canary_timeout_s` still fails — that is the soft-deadline
+  `relay_error`, not a sub-timeout SLO breach; see FR-CAN8.)
 - **AC-5.** A canary-degraded pinned provider that later passes one probe (with
   no other degrade cause) is restored to `ready`; the persisted sanction row is
   deleted.
 - **AC-6.** A pinned provider with a persisted sanction, after a coordinator
-  restart (**with `canary_enabled` true**) + reconnect, comes back `degraded` and
-  non-routable until it passes a probe (FR-CAN16).
+  restart (**with `canary_enabled` true**, store intact) + reconnect, comes back
+  `degraded` and non-routable until it passes a probe (FR-CAN16).
 - **AC-7.** While a canary recovery hold is live, a provider heartbeat reporting
   `ready` (or `draining`→`ready`) does **not** clear the hold (FR-CAN14).
-- **AC-8.** When the only provider for a model is canary-sanctioned, a buyer
-  request returns 503 `no_provider_available` with `retryable: true` (FR-CAN20);
-  the model does not 404 (FR-CAN21).
-- **AC-9.** A configuration with an empty per-model bank (`{model-a: []}`) or a
-  global bank containing a latency SLO field fails validation (FR-CAN25/FR-CAN7).
-- **AC-10.** Every failed probe emits a log line with a non-empty
+- **AC-8.** When the only provider for a model is canary-sanctioned *and buyer
+  requests are also failing*, a buyer request returns 503 `no_provider_available`
+  with `retryable: true` (FR-CAN20); the model does not 404 (FR-CAN21).
+- **AC-9.** Every failed probe emits a log line with a non-empty
   `canary_fail_reason` drawn from the §5 taxonomy (FR-CAN27).
-- **AC-11.** A provisional provider banned by canary remains admission-rejected
-  after a coordinator restart until an operator un-ban (FR-CAN17/FR-CAN32).
+- **AC-10.** A provisional provider banned by canary remains admission-rejected
+  after a coordinator restart (store intact) until an operator un-ban
+  (FR-CAN17/FR-CAN32).
 
-Forward criteria (expected to FAIL against the current build; they define the
-follow-up IMPL's done bar and correspond to the §14 Gap rows):
+Forward criteria (expected to FAIL against the current build; each corresponds to
+a §14 Partial/Gap row and defines part of the follow-up IMPL's done bar):
 
 - **AC-F1 (FR-CAN8).** Latency `enforce` is refused unless the probe is
   streaming, the decision is percentile-over-N, and the model has ≥2
   routing-eligible providers.
 - **AC-F2 (FR-CAN14).** A provider concurrently breaker- and canary-degraded is
   restored to `ready` only after **both** causes clear; a passing canary while a
-  breaker hold is live does not restore routing.
+  breaker hold is live does not restore routing; `MarkRecovered` does not release
+  an `operator_clear` hold.
 - **AC-F3 (FR-CAN15).** With `canary_enabled: false`, a durable pinned sanction
   is still loaded and reapplied on restart.
-- **AC-F4 (FR-CAN22/23).** A latency, soft-deadline, or `max_tokens`-attributable
-  `incomplete` failure does not remove the sole provider; a correlated fleet-wide
-  failure circuit-breaks the challenge bank instead of emptying the pool.
-- **AC-F5 (FR-CAN26).** Canary tuning parameters can be changed without a
+- **AC-F4 (FR-CAN22).** The **sole** provider for a model is not removed by any
+  canary-only signal — `nonce_mismatch`, `incomplete`, latency, soft-deadline
+  `relay_error`, or a canary-specific HTTP non-200 — absent an independent
+  buyer-path failure, confirmed transport death, or item-9 weight evidence.
+- **AC-F5 (FR-CAN23).** With ≥2 providers, a quorum failing the **same** challenge
+  (evaluated over a pre-sweep snapshot with a challenge fingerprint + bank
+  generation) circuit-breaks the challenge bank instead of sequentially emptying
+  the pool; a `max_tokens`-attributable `incomplete` is neutral at any fleet size.
+- **AC-F6 (FR-CAN26).** Canary tuning parameters can be changed without a
   coordinator restart.
-- **AC-F6 (FR-CAN20).** The 503 `Retry-After` is derived from the FR-CAN12
-  recovery bound and is never shorter than the minimum sweep interval.
-- **AC-F7 (FR-CAN28).** `/poolz` exposes nullable canary timestamps and a stable
-  trip/hold reason distinguishing canary from breaker/warm-up/operator-clear.
-- **AC-13 (HTTP truncation).** An HTTP probe truncated by `max_tokens` is
+- **AC-F7 (FR-CAN20).** The 503 `Retry-After` is derived from the FR-CAN12
+  next-dispatch bound (guidance) and is never shorter than the minimum sweep
+  interval.
+- **AC-F8 (FR-CAN6, HTTP path).** An HTTP probe truncated by `max_tokens` is
   classified `incomplete` (via `finish_reason:"length"`), not `nonce_mismatch`.
+- **AC-F9 (FR-CAN25).** A config with an empty per-model bank (`{model-a: []}`),
+  a global bank carrying a latency SLO field, a duplicate model key, or a bank of
+  >256 entries fails validation.
+- **AC-F10 (FR-CAN18).** A sanction/ban whose durable write fails does not become
+  effective-then-lost across restart — persistence failure fails closed or is
+  outbox-retried; `recoverProvider`'s two durable writes are all-or-nothing.
+- **AC-F11 (FR-CAN27/28).** Failure logs carry `assigned_id` + outcome and
+  latency metrics for both bank types; `/poolz` exposes explicit-`null` canary
+  timestamps and a stable trip/hold reason.
+- **AC-F12 (FR-CAN29).** A model-class dispatch skip is neutral for the OPoI
+  pass flag (does not record `pass=false`).
+- **AC-F13 (FR-CAN31).** After an operator clear, the session is non-routable
+  until a fresh reconnect + warm-up; a concurrent in-flight probe cannot
+  resurrect the cleared sanction (epoch fencing).
 
 ## 16. Production posture (as of 2026-07-11)
 
@@ -710,11 +804,13 @@ FR-CAN14) is the recommended gate.
   and the `retryable`/`Retry-After` field mechanics.
 - **SPEC-020** — provider autoupdate trust table; *consumes* the provisional/
   pinned tiers (does not define them).
-- **SPEC-030** — losslessness probe. It **reuses only** the canary scheduling/
-  jitter/persistence infrastructure; it owns its own dedicated **authenticated WS
-  provider-control carrier** and separate state (HTTP fallback excluded, Tier-2
-  dedicated carrier). SPEC-031's `inference_request`/HTTP transport (FR-CAN4)
-  MUST NOT be used to tunnel losslessness probes.
+- **SPEC-030** — losslessness probe. It is an **independent** subsystem: its own
+  dispatch loop (a separate fixed-cadence ticker), its own dedicated
+  **authenticated WS provider-control carrier** and frames, and its own in-memory
+  state — it does **not** reuse the canary sweep, jitter/shuffle, or sanction
+  persistence (HTTP fallback excluded, Tier-2 dedicated carrier per SPEC-030
+  FR-1/3/4). SPEC-031's `inference_request`/HTTP transport (FR-CAN4) MUST NOT be
+  used to tunnel losslessness probes, and vice-versa.
 - **Proof-of-weights / OPoI + autotune hello-gate** — runbook item 9's separate
   baseline; owns the *semantics* of `model_class_challenges` (and thus the only
   real anti-downgrade guarantee) and the second-provider admission gate that
@@ -753,3 +849,35 @@ FR-CAN14) is the recommended gate.
   2026-07-09 latency-gate flapping, 2026-07-10 transient-degrade 503s, 2026-07-10
   restart outage. Codifies PRs #478/#491/#512/#513/#524/#528/#531/#533/#538 and
   decision-log Entries 124–126.
+  - **R2 codex three-lane audit absorbed** (0 CRITICAL; code 3H/3M, security
+    2H/3M/1L, architect 1H/3M/1L — all refinements of the R1 corrections):
+    - **Sole-provider protection rewritten (FR-CAN22/23).** The R1 "correctness
+      may empty the pool" rule contradicted the R1 CRITICAL for a singleton. Now:
+      the **sole** provider is *never* removed by a canary-only signal (echo,
+      latency, soft-deadline, or canary HTTP non-200) — removal requires
+      independent corroboration (buyer-path breaker, confirmed transport death,
+      or item-9 weight evidence). Correctness sanctions apply only with ≥2
+      providers, under correlated-fault containment defined over a pre-sweep
+      snapshot with challenge fingerprint + bank generation + quorum + atomic
+      eligible-count evaluation.
+    - **Nonce/selection stated precisely (FR-CAN2, §1).** 32-bit nonce =
+      probabilistic freshness, not uniqueness/replay proof; `randbyte % len`
+      selection is biased and leaves banks >256 entries partly unreachable →
+      require ≤256-entry banks or unbiased sampling. Row demoted to Partial.
+    - **Persistence hardened (FR-CAN17/18).** Provisional durability is
+      best-effort (swallowed save errors, fail-open load) → Partial; FR-CAN18 now
+      requires crash-consistent, fail-closed writes for pinned + provisional and
+      all-or-nothing combined operator clears; added to the re-enable bar.
+    - **FR-CAN7 corrected:** global-bank latency is un-logged in observe but
+      *applied* in enforce (not merely ignored) → reject at validation.
+    - **FR-CAN8/§5:** observe-mode "no sanction" narrowed to sub-timeout SLO
+      breaches (soft-deadline still sanctions non-sole providers); WS pre-dispatch
+      session-death is a neutral *skip*, not a `relay_error`; HTTP non-200 split
+      into a `status` sub-class.
+    - **FR-CAN12/20:** split next-dispatch bound from recovery-ready bound
+      (unbounded eligibility wait) → `Retry-After` is guidance, not a deadline.
+    - **§17:** SPEC-030 is fully independent (own loop/carrier/state), not an
+      infrastructure re-user. **§14/§15:** FR-CAN2/17/28 → Partial; AC set
+      renumbered with validation/HTTP-truncation/persistence/observability/
+      skip-neutral/operator-hold moved to forward AC-F8..F13. Two canary_probe.go
+      comments reframed off "identity/anti-downgrade" (comment-only).

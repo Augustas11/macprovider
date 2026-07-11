@@ -108,7 +108,10 @@ func buildCanaryBodyFromRandomWithChallenge(modelID string, maxTokens int, chall
 		"max_tokens": maxTokens,
 		"stream":     false,
 		// Pin greedy decoding. The canary challenge requires the provider to echo
-		// a random nonce EXACTLY (anti-downgrade identity proof); without this the
+		// a random nonce EXACTLY (a liveness / instruction-following gate — NOT a
+		// model-identity or anti-downgrade proof; a cheaper model can echo a
+		// plaintext nonce, so weight integrity is owned by SPEC-008 + the OPoI
+		// spec, per SPEC-031 §1); without this the
 		// provider samples at its own default temperature and a model that serves
 		// fine otherwise (e.g. a 4-bit qwen3-coder-30b) hallucinates the nonce
 		// ("CANARY-A1B2C3" -> "CANARY-A1By2C3" -> garbage), producing spurious
@@ -145,8 +148,9 @@ func challengeLatencyBreach(challenge config.CanaryChallengeConfig, metrics cana
 }
 
 // evaluateCanaryProbe returns the probe outcome and, on failure, the reason.
-// The nonce-correctness gate (model identity / anti-downgrade) is ALWAYS
-// enforced. The wall-time latency gates (max_ttft_ms / min_sustained_tps)
+// The nonce-echo gate (liveness / instruction-following — NOT model identity or
+// anti-downgrade; see SPEC-031 §1) is ALWAYS enforced. The wall-time latency
+// gates (max_ttft_ms / min_sustained_tps)
 // SANCTION only when enforceLatency is true — canary probes are non-streaming
 // (stream:false), so those metrics are structurally unreliable, and observe
 // mode (the default) never fails a nonce-correct probe on latency. When
