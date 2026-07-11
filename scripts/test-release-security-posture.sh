@@ -21,6 +21,15 @@ if "\n  push:" in text or "refs/tags/" in text:
     raise SystemExit("release workflow must not execute from a tag-push ref")
 if "\n  workflow_dispatch:" not in text:
     raise SystemExit("release workflow must use reviewed manual dispatch")
+candidate_input = re.search(
+    r"\n      candidate:\n"
+    r"(?:        .*\n)*?"
+    r"        default: false\n"
+    r"        type: boolean\n",
+    text,
+)
+if candidate_input is None:
+    raise SystemExit("candidate dispatch input must be a boolean defaulting to false")
 build = text.split("\n  build:\n", 1)[1].split("\n  sign_publish:\n", 1)[0]
 publish = text.split("\n  sign_publish:\n", 1)[1]
 if "secrets." in build or "contents: write" in build:
@@ -29,6 +38,12 @@ if "environment: production-release" not in publish:
     raise SystemExit("secret-bearing publish job lacks the protected environment")
 if "scripts/verify-release-source.sh" not in build or "scripts/verify-release-source.sh" not in publish:
     raise SystemExit("both jobs must verify the fresh reviewed main commit")
+if "RELEASE_CANDIDATE_INPUT" not in build or 'absence_policy="--allow-absent"' not in build:
+    raise SystemExit("unprivileged build job lacks explicit candidate tag-absence handling")
+if "--allow-absent" in publish:
+    raise SystemExit("protected publish job must always require the exact release tag")
+if "unsigned-release-manifest.json" not in build or "unsigned-release-manifest.json" not in publish:
+    raise SystemExit("unsigned candidate inputs lack an end-to-end provenance manifest")
 if "scripts/verify-github-release-posture.sh" not in publish:
     raise SystemExit("publish job must verify external repository posture")
 if publish.find("Verify Malibu release cryptographic bindings") > publish.find("Create verified draft GitHub release"):
@@ -64,6 +79,19 @@ for requirement in (
 if "go build" in publish or publish.find("Setup Go for Pearl binaries") >= 0:
     raise SystemExit("Pearl compilation must remain in the unprivileged build job")
 restore = publish.split("- name: Restore captured unsigned inputs", 1)[1].split("\n      - name:", 1)[0]
+source_gate_position = restore.find("scripts/verify-release-source.sh")
+restore_position = restore.find("cp \"$RUNNER_TEMP/unsigned-release-inputs/")
+manifest_position = restore.find("expected-unsigned-release-manifest.json")
+manifest_cmp_position = restore.find('cmp "$unsigned_dir/unsigned-release-manifest.json"')
+if (
+    source_gate_position < 0
+    or "--require-existing" not in restore[source_gate_position:restore_position]
+    or manifest_position < source_gate_position
+    or manifest_cmp_position < manifest_position
+    or restore_position < manifest_cmp_position
+    or restore_position < source_gate_position
+):
+    raise SystemExit("protected job must verify the exact tag and candidate manifest before restoring inputs")
 for asset in ("coordinator-linux-amd64", "coordinator-cli-linux-amd64", "gateway-linux-amd64"):
     if asset not in restore:
         raise SystemExit(f"Pearl artifact does not cross the reviewed build boundary: {asset}")
@@ -122,6 +150,8 @@ for requirement in (
 ):
     if make_public.find(requirement) < 0 or make_public.find(requirement) > patch_position:
         raise SystemExit(f"final public-transition gate is missing or late: {requirement}")
+if "--require-existing" not in make_public[make_public.find("scripts/verify-release-source.sh"):patch_position]:
+    raise SystemExit("final public-transition source gate must explicitly require the tag")
 if make_public.find("immutable-release-by-id.json", patch_position) < 0 or make_public.find(
     "capture-release-publication.py", patch_position
 ) < 0:
@@ -164,20 +194,24 @@ malicious_versions=(
   $'v1.2.3\n'"touch $marker"
 )
 for value in "${malicious_versions[@]}"; do
-  if bash "$input_guard" "$value" false >"$work/input.out" 2>&1; then
+  if bash "$input_guard" "$value" false false >"$work/input.out" 2>&1; then
     echo "release input guard accepted malicious version bytes" >&2
     exit 1
   fi
 done
-if bash "$input_guard" v1.2.3 "true'; touch $marker; #" >"$work/input.out" 2>&1; then
+if bash "$input_guard" v1.2.3 "true'; touch $marker; #" false >"$work/input.out" 2>&1; then
   echo "release input guard accepted malicious prerelease bytes" >&2
+  exit 1
+fi
+if bash "$input_guard" v1.2.3 false "true'; touch $marker; #" >"$work/input.out" 2>&1; then
+  echo "release input guard accepted malicious candidate bytes" >&2
   exit 1
 fi
 [[ ! -e "$marker" ]] || {
   echo "release input validation executed command-shaped bytes" >&2
   exit 1
 }
-bash "$input_guard" v1.2.3 false | grep -Fxq 'v1.2.3 false'
+bash "$input_guard" v1.2.3 false true | grep -Fxq 'v1.2.3 false true'
 
 mkdir -p "$work/reviewed/scripts" "$work/reviewed/phase3-binary/app"
 cp "$root/scripts/verify-app-build-inputs.sh" "$work/reviewed/scripts/"
@@ -269,7 +303,7 @@ EOF
 chmod +x "$work/bin/gh"
 
 cat > "$work/fixtures/environment.json" <<'EOF'
-{"protection_rules":[{"type":"required_reviewers","prevent_self_review":true,"reviewers":[{"type":"User","id":9}]}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
+{"can_admins_bypass":false,"protection_rules":[{"type":"required_reviewers","prevent_self_review":true,"reviewers":[{"type":"User","reviewer":{"type":"User","id":285575208,"login":"antfleet-ops"}}]}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}
 EOF
 cat > "$work/fixtures/policies.json" <<'EOF'
 {"branch_policies":[{"id":3,"name":"main","type":"branch"}]}
@@ -293,18 +327,18 @@ fi
 grep -q 'immutable releases are not enabled' "$work/immutable.out"
 
 cp "$work/fixtures/environment.json" "$work/fixtures/environment.good"
-printf '%s\n' '{"protection_rules":[],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' \
+printf '%s\n' '{"can_admins_bypass":false,"protection_rules":[],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' \
   > "$work/fixtures/environment.json"
 if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
   bash "$guard" Augustas11/macprovider production-release >"$work/reviewer.out" 2>&1; then
   echo "posture guard accepted an environment without a reviewer" >&2
   exit 1
 fi
-grep -q 'must require an environment reviewer' "$work/reviewer.out"
+grep -q 'must have exactly one required-reviewers rule' "$work/reviewer.out"
 mv "$work/fixtures/environment.good" "$work/fixtures/environment.json"
 
 cp "$work/fixtures/environment.json" "$work/fixtures/environment.good"
-printf '%s\n' '{"protection_rules":[{"type":"required_reviewers","prevent_self_review":false,"reviewers":[{"type":"User","id":9}]}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' \
+printf '%s\n' '{"can_admins_bypass":false,"protection_rules":[{"type":"required_reviewers","prevent_self_review":false,"reviewers":[{"type":"User","reviewer":{"type":"User","id":285575208,"login":"antfleet-ops"}}]}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' \
   > "$work/fixtures/environment.json"
 if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
   bash "$guard" Augustas11/macprovider production-release >"$work/self-review.out" 2>&1; then
@@ -312,6 +346,46 @@ if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
   exit 1
 fi
 grep -q 'must prevent self-review' "$work/self-review.out"
+mv "$work/fixtures/environment.good" "$work/fixtures/environment.json"
+
+cp "$work/fixtures/environment.json" "$work/fixtures/environment.good"
+python3 - "$work/fixtures/environment.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+environment = json.loads(path.read_text())
+environment["can_admins_bypass"] = True
+path.write_text(json.dumps(environment) + "\n")
+PY
+if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
+  bash "$guard" Augustas11/macprovider production-release >"$work/admin-bypass.out" 2>&1; then
+  echo "posture guard accepted environment admin bypass" >&2
+  exit 1
+fi
+grep -q 'must disable admin bypass' "$work/admin-bypass.out"
+mv "$work/fixtures/environment.good" "$work/fixtures/environment.json"
+
+cp "$work/fixtures/environment.json" "$work/fixtures/environment.good"
+python3 - "$work/fixtures/environment.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+environment = json.loads(path.read_text())
+environment["protection_rules"][0]["reviewers"][0]["reviewer"] = {
+    "type": "User", "id": 9, "login": "not-antfleet-ops"
+}
+path.write_text(json.dumps(environment) + "\n")
+PY
+if PATH="$work/bin:$PATH" FIXTURE_DIR="$work/fixtures" GH_TOKEN=test \
+  bash "$guard" Augustas11/macprovider production-release >"$work/wrong-reviewer.out" 2>&1; then
+  echo "posture guard accepted the wrong environment reviewer" >&2
+  exit 1
+fi
+grep -q 'reviewer must be User antfleet-ops' "$work/wrong-reviewer.out"
 mv "$work/fixtures/environment.good" "$work/fixtures/environment.json"
 
 cp "$work/fixtures/ruleset-71.json" "$work/fixtures/ruleset.good"

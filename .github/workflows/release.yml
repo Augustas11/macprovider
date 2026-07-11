@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      candidate:
+        description: "Build unsigned candidate inputs before the release tag exists"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -47,13 +52,20 @@ jobs:
         env:
           RELEASE_VERSION_INPUT: ${{ github.event.inputs.version }}
           RELEASE_PRERELEASE_INPUT: ${{ github.event.inputs.prerelease || 'false' }}
+          RELEASE_CANDIDATE_INPUT: ${{ github.event.inputs.candidate || 'false' }}
         run: |
           set -euo pipefail
           bash scripts/validate-release-inputs.sh \
-            "$RELEASE_VERSION_INPUT" "$RELEASE_PRERELEASE_INPUT"
+            "$RELEASE_VERSION_INPUT" "$RELEASE_PRERELEASE_INPUT" \
+            "$RELEASE_CANDIDATE_INPUT"
           tag="$RELEASE_VERSION_INPUT"
           commit="$(git rev-parse HEAD)"
-          bash scripts/verify-release-source.sh "$tag" "$commit" origin
+          absence_policy="--require-existing"
+          if [[ "$RELEASE_CANDIDATE_INPUT" == "true" ]]; then
+            absence_policy="--allow-absent"
+          fi
+          bash scripts/verify-release-source.sh \
+            "$tag" "$commit" origin "$absence_policy"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "prerelease=$RELEASE_PRERELEASE_INPUT" >> "$GITHUB_OUTPUT"
@@ -170,6 +182,20 @@ jobs:
           cp "$RUNNER_TEMP/coordinator-linux-amd64" \
             "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
             "$RUNNER_TEMP/gateway-linux-amd64" unsigned-release-inputs/
+          unsigned_assets=(
+            "unsigned-release-inputs/phase3-binary-m4-${tag}.tar.gz"
+            unsigned-release-inputs/Malibu.app.tar.gz
+            unsigned-release-inputs/release-toolchain.json
+            unsigned-release-inputs/coordinator-linux-amd64
+            unsigned-release-inputs/coordinator-cli-linux-amd64
+            unsigned-release-inputs/gateway-linux-amd64
+          )
+          python3 scripts/build-release-provenance.py \
+            "$tag" "${{ steps.release_source.outputs.commit }}" \
+            "$GITHUB_REPOSITORY" "${{ steps.release_source.outputs.prerelease }}" \
+            unsigned-release-inputs/release-toolchain.json \
+            unsigned-release-inputs/unsigned-release-manifest.json \
+            "${unsigned_assets[@]}"
 
       - name: Upload unsigned build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -206,7 +232,25 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
-          bash scripts/verify-release-source.sh "$tag" "${{ needs.build.outputs.commit }}" origin
+          bash scripts/verify-release-source.sh \
+            "$tag" "${{ needs.build.outputs.commit }}" origin --require-existing
+          unsigned_dir="$RUNNER_TEMP/unsigned-release-inputs"
+          unsigned_assets=(
+            "$unsigned_dir/phase3-binary-m4-${tag}.tar.gz"
+            "$unsigned_dir/Malibu.app.tar.gz"
+            "$unsigned_dir/release-toolchain.json"
+            "$unsigned_dir/coordinator-linux-amd64"
+            "$unsigned_dir/coordinator-cli-linux-amd64"
+            "$unsigned_dir/gateway-linux-amd64"
+          )
+          python3 scripts/build-release-provenance.py \
+            "$tag" "${{ needs.build.outputs.commit }}" \
+            "$GITHUB_REPOSITORY" "${{ needs.build.outputs.prerelease }}" \
+            "$unsigned_dir/release-toolchain.json" \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json" \
+            "${unsigned_assets[@]}"
+          cmp "$unsigned_dir/unsigned-release-manifest.json" \
+            "$RUNNER_TEMP/expected-unsigned-release-manifest.json"
           cp "$RUNNER_TEMP/unsigned-release-inputs/phase3-binary-m4-${tag}.tar.gz" \
             "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
           cp "$RUNNER_TEMP/unsigned-release-inputs/release-toolchain.json" release-toolchain.json
@@ -929,7 +973,8 @@ jobs:
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
           release_commit="${{ needs.build.outputs.commit }}"
-          bash scripts/verify-release-source.sh "$tag" "$release_commit" origin
+          bash scripts/verify-release-source.sh \
+            "$tag" "$release_commit" origin --require-existing
           GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
             bash scripts/verify-github-release-posture.sh \
               "$GITHUB_REPOSITORY" production-release 28995904
@@ -1035,7 +1080,8 @@ jobs:
           # This is the final public-transition gate: repeat every mutable
           # source, tag, repository-posture, numeric-ID, and asset assertion
           # directly before changing draft=false.
-          bash scripts/verify-release-source.sh "$tag" "$commit" origin
+          bash scripts/verify-release-source.sh \
+            "$tag" "$commit" origin --require-existing
           GH_TOKEN="$RELEASE_POSTURE_TOKEN" \
             bash scripts/verify-github-release-posture.sh \
               "$GITHUB_REPOSITORY" production-release 28995904
