@@ -14,8 +14,14 @@ arguments = sys.argv[1:]
 draft_mode = bool(arguments and arguments[0] == "--draft")
 if draft_mode:
     arguments = arguments[1:]
+notes_path = None
+if arguments[:1] == ["--notes-file"]:
+    if len(arguments) < 2:
+        fail("--notes-file requires a path")
+    notes_path = pathlib.Path(arguments[1])
+    arguments = arguments[2:]
 if len(arguments) < 4:
-    fail("usage: [--draft] RELEASE_JSON PROVENANCE_JSON OUTPUT RELEASE_ASSET...")
+    fail("usage: [--draft] [--notes-file PATH] RELEASE_JSON PROVENANCE_JSON OUTPUT RELEASE_ASSET...")
 
 release_path, provenance_path, output_path, *local_asset_names = arguments
 release = json.loads(pathlib.Path(release_path).read_text(encoding="utf-8"))
@@ -44,6 +50,17 @@ if release.get("tag_name") != tag:
     fail("numeric release tag differs from signed provenance")
 if release.get("target_commitish") != commit:
     fail("numeric release target differs from signed provenance")
+expected_title = f"macprovider-cli {tag}"
+body_sha256 = None
+if notes_path is not None:
+    if not notes_path.is_file() or notes_path.is_symlink():
+        fail(f"release notes are not regular: {notes_path}")
+    expected_body = notes_path.read_text(encoding="utf-8")
+    if release.get("name") != expected_title:
+        fail("numeric release title differs from the reviewed release")
+    if release.get("body") != expected_body:
+        fail("numeric release body differs from the reviewed release notes")
+    body_sha256 = hashlib.sha256(expected_body.encode()).hexdigest()
 if draft_mode:
     if release.get("draft") is not True:
         fail("numeric release is not the expected draft")
@@ -128,6 +145,9 @@ manifest = {
     "publication_id": publication_id,
     "assets": manifest_assets,
 }
+if body_sha256 is not None:
+    manifest["title"] = expected_title
+    manifest["body_sha256"] = body_sha256
 pathlib.Path(output_path).write_text(
     json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
     encoding="utf-8",

@@ -135,8 +135,16 @@ verify_draft = publish.split("- name: Verify draft release assets by numeric ID"
 make_public = publish.split("- name: Publish only the revalidated numeric draft", 1)[1].split("\n      - name:", 1)[0]
 if "--draft" not in create or create.find("scripts/verify-release-checksums.sh") > create.find("gh release create"):
     raise SystemExit("GitHub publication must verify canonical checksums before creating a draft")
-if "capture-release-publication.py --draft" not in verify_draft or "draft-release-id.txt" not in verify_draft:
+if (
+    "gh release view \"$tag\"" not in create
+    or "verify-release-draft-identity.py cli" not in create
+    or "draft-release-id.txt" not in create
+    or "capture-release-publication.py --draft --notes-file release-notes.md" not in verify_draft
+    or "draft-release-id.txt" not in verify_draft
+):
     raise SystemExit("draft assets and numeric release ID must be captured before publication")
+if 'releases/tags/$tag' in verify_draft:
+    raise SystemExit("REST tag lookup cannot discover a draft release")
 patch_position = make_public.find("gh api --method PATCH")
 if patch_position < 0:
     raise SystemExit("verified draft must be made public by numeric-ID PATCH")
@@ -144,18 +152,29 @@ for requirement in (
     "scripts/verify-release-source.sh",
     "scripts/verify-github-release-posture.sh",
     "scripts/verify-release-checksums.sh",
-    "final-draft-by-tag.json",
+    "gh release view \"$tag\"",
+    "final-draft-cli.json",
     "final-draft-by-id.json",
+    "verify-release-draft-identity.py cli",
+    "verify-release-draft-identity.py api",
     "capture-release-publication.py --draft",
 ):
     if make_public.find(requirement) < 0 or make_public.find(requirement) > patch_position:
         raise SystemExit(f"final public-transition gate is missing or late: {requirement}")
+if 'releases/tags/$tag' in make_public[:patch_position]:
+    raise SystemExit("final draft verification cannot use the public-only REST tag lookup")
 if "--require-existing" not in make_public[make_public.find("scripts/verify-release-source.sh"):patch_position]:
     raise SystemExit("final public-transition source gate must explicitly require the tag")
 if make_public.find("immutable-release-by-id.json", patch_position) < 0 or make_public.find(
     "capture-release-publication.py", patch_position
 ) < 0:
     raise SystemExit("published numeric release must be re-fetched and required immutable")
+if "cmp final-draft-manifest.json publication-manifest.json" not in make_public[patch_position:]:
+    raise SystemExit("published release must exactly preserve the verified draft manifest")
+if "capture-release-publication.py --draft --notes-file release-notes.md" not in make_public[:patch_position]:
+    raise SystemExit("final draft capture must bind the reviewed release notes")
+if "capture-release-publication.py --notes-file release-notes.md" not in make_public[patch_position:]:
+    raise SystemExit("published release capture must bind the reviewed release notes")
 for requirement in (
     "verify-published-release.py",
     "stable-latest-release.json",
