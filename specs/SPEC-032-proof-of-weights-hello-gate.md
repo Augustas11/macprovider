@@ -65,8 +65,10 @@ the **hello-gate admission policy** (Part A).
   proves and does not prove; the observability-only status of the
   `ModelClassOPoIPass` flag; and the normative definition of what a future
   weight-binding proof-of-weights test must provide.
-- **Part C — Telemetry-drift:** the TPS-below-baseline and model-hash drift signals
-  and their **alert-only guarantee ceiling**.
+- **Part C — Telemetry-drift:** the heartbeat signals (TPS-below-baseline, model-hash
+  status, benchmark-artifact drift) **and** the canary-completion OPoI pass-rate signal
+  (`RecordModelClassCanary`), across both `pow.Evaluator` entry points, and their
+  **alert-only guarantee ceiling**.
 - The config surface and reload contract for all of the above.
 
 **Out of scope**
@@ -97,9 +99,9 @@ the **hello-gate admission policy** (Part A).
 | **Hardware evidence** | A verified `hardware_evidence.autotune.v1` envelope: autotune benchmark results bound to a chip/RAM tuple, ingested under bearer-token auth and accepted by the item-10 verifier with `decision_reason = hardware-verifier.v2:verified_trusted_hardware` after trust/chip-profile/value-binding checks. **The benchmark result itself is NOT cryptographically signed** — the *catalog* it is checked against is signed, but the provider-submitted benchmark is authenticated + trust-bound, not signature-verified (do not overstate its trust basis). |
 | **Capacity ceiling** | `ResolveMaxAdmission` — the highest-RAM catalog row whose benchmark passes the gate; a provider may be admitted only for a model whose `MinRAMGB` ≤ this ceiling. |
 | **OPoI** | "Overt Proof of Inference" — a model-class canary observation. Per this spec, **liveness-derived and non-binding**; not a weight proof. |
-| **Telemetry-drift** | Heartbeat-time heuristics (TPS below the *verified* benchmark baseline; model-hash status; artifact drift) — alert-only. |
+| **Telemetry-drift** | `pow.Evaluator` heuristics — heartbeat-time (TPS below the *verified* benchmark baseline; model-hash status; artifact drift) **and** the canary-completion OPoI pass-rate (`RecordModelClassCanary`, no evidence lookup) — all alert-only (FR-TD1). |
 | **Evidence-absent close** | A hello-gate rejection curable by submitting evidence (no verified evidence in-window — never submitted or expired). |
-| **No-passing-benchmark close** | `autotune_evidence_invalid` — evidence present but no benchmark passes the *current* gate. Cause is one of: a genuine affirmative shortfall (thermal/TPS/TTFT), policy staleness (catalog/model/artifact-SHA mismatch after a catalog rotation), **or** provider semantic misbinding (submitted model-id/artifact values the gate rejects); see FR-HG4. |
+| **No-passing-benchmark close** | `autotune_evidence_invalid` — evidence present but no benchmark passes the *current* gate. Cause is one of: a genuine affirmative shortfall (thermal/TPS/TTFT), policy staleness (catalog/model/artifact-SHA mismatch after a catalog rotation), **or** provider semantic misbinding (a submitted binding — `model_key`, model-id, artifact-SHA, or catalog-SHA — that the verifier accepts syntactically but the gate value-checks against the current signed catalog and rejects); see FR-HG4. |
 | **Affirmative-shortfall close** | A rejection where the evidence *proves* the provider cannot serve the tier: `cap_exceeded` and the hardware sub-cases of `evidence_invalid`. |
 | **Policy-unverifiable / coordinator-side close** | The coordinator cannot evaluate the claim (`uncatalogued`), or is itself not wired/erroring (`gate_unavailable`, a coordinator fault). |
 
@@ -160,7 +162,7 @@ response and the *deferred* future probation, which — if ever built — could 
 |--------------|-------|---------|------|
 | `autotune_gate_unavailable` | **coordinator-fault** | catalog/evidence store not wired, **or any evidence lookup/decode/binding error** (DB/query failure, malformed envelope, immutable-binding mismatch) | rejects (operator must fix) |
 | `autotune_evidence_required` | **evidence-absent** | no verified evidence in-window (never submitted, or **expired**) | rejects |
-| `autotune_evidence_invalid` | **no-passing-benchmark** (affirmative shortfall, catalog staleness, **or** provider semantic misbinding) | evidence present but **no benchmark passes the *current* gate** — a genuine hardware shortfall (thermal throttle, TPS below gate, TTFT above gate); a policy-staleness case (catalog-SHA / model-id / artifact-SHA mismatch after a catalog rotation); **or** a provider-submitted **semantic misbinding** — the verifier accepts evidence on syntactic/trust bindings but does **not** check model-id/artifact *values* against the signed catalog, so the *gate* is where a mismatched model-id/artifact is caught | rejects |
+| `autotune_evidence_invalid` | **no-passing-benchmark** (affirmative shortfall, catalog staleness, **or** provider semantic misbinding) | evidence present but **no benchmark passes the *current* gate** — a genuine hardware shortfall (thermal throttle, TPS below gate, TTFT above gate); a policy-staleness case (catalog-SHA / model-id / artifact-SHA mismatch after a catalog rotation); **or** a provider-submitted **semantic misbinding** — the verifier accepts evidence on *syntactic*/trust bindings (e.g. `model_key` non-empty/unique, `candidate_catalog_sha256` well-formed) but does **not** value-check those bindings against the signed catalog, so the *gate* is where a mismatched **`model_key`, model-id, artifact-SHA, or a provider-misbound catalog-SHA** (distinct from a genuine catalog rotation) is caught | rejects |
 | `autotune_model_uncatalogued` | **policy-unverifiable** | claimed model not in the catalog — the coordinator cannot *evaluate* the claim (not proof of shortfall) | rejects |
 | `autotune_model_cap_exceeded` | **affirmative shortfall** | claimed model's `MinRAMGB` > verified capacity ceiling | rejects |
 
@@ -174,8 +176,9 @@ erroring — an operator fault, not the provider's). One nuance for operator res
 `evidence_invalid` is **not uniformly** a hardware shortfall — a **catalog rotation**
 can flip a previously-good provider into `evidence_invalid` via a catalog-SHA/artifact
 mismatch, which is policy staleness, not incapability; or the provider may have
-submitted evidence whose model-id/artifact **values** are misbound (the verifier trusts
-syntactic/hardware bindings but does not value-check them against the signed catalog —
+submitted evidence whose **`model_key` / model-id / artifact-SHA / catalog-SHA** values
+are misbound (the verifier trusts syntactic/hardware bindings but does not value-check
+them against the signed catalog —
 that check is the gate's). The hard-close remains correct in every sub-case (the
 coordinator cannot currently verify capability); the operator's diagnosis differs
 (check hardware vs. catalog freshness vs. the provider's submitted model/artifact ids).
@@ -721,3 +724,10 @@ smaller box), which is why v0.1 ships no automatic probation.
     AC-3b — a single passing benchmark prevents `evidence_invalid` but admission can
     **still** be refused as `cap_exceeded`/`uncatalogued` if the *claimed* model exceeds
     the ceiling.
+  - **R7 codex two-lane audit** (code 0C/0H/1M, architect 0C/0H/1M — terminology
+    precision only). Broadened the semantic-misbinding description to any
+    provider-submitted binding the gate value-checks against the signed catalog
+    (`model_key`, model-id, artifact-SHA, catalog-SHA — distinct from a genuine catalog
+    rotation), in §3/FR-HG4/prose; and widened the Part C / telemetry-drift scope
+    summaries (§2/§3) to include the OPoI pass-rate `RecordModelClassCanary` entry point
+    alongside the heartbeat TPS/hash/artifact signals.
