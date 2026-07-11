@@ -100,6 +100,24 @@ cross-repo interop contract the Swift provider CLI byte-matches):
   (`""`) status. **§9.2:** the trust-root prerequisite is MDA/enforcement-only (SE needs
   none). **§13.2 phase-0:** only Pillar A model-hash pool evidence affects phase. **§14:**
   restored the AC-T2-6 heading (accidentally dropped in R3).
+- **§1.1/§13.2/AC-T2-5 (service ownership):** corrected — `tier1_disclosure` (incl.
+  `hardware_attestation`) is a **gateway**-injected field, not coordinator-owned; the
+  coordinator `/v1/models` emits only `object`/`data`/(optional `tier2`). The shipped
+  gateway baseline also carries `model_verification_limit` + `verified_model_settlement`.
+  §1.1 now names **both** default-preservation exceptions (the T2.C diagnostic on a
+  volunteered token + the gateway pool-evidence disclosure).
+- **§3/§4.4/§7.1/§7.5 (MDA verifier fidelity):** the R4 fix over-relocated hardware-trust to
+  the MDA path; corrected — the shipped MDA verifier validates chain-to-root + freshness +
+  the *presence* of a device-property extension + CSR binding, but does **NOT** compare the
+  cert's device-property values or `ram_gb` against the provider's claims, and validates no
+  RAM for any format.
+- **§7.4:** the MDA DER/CBOR/JWS encoding allowlist is a forward expectation — the shipped
+  verifier only checks nonempty unpadded base64url (never parses DER/CBOR); an unallowed
+  `format` returns status `attestation_unsupported` (not `attestation_failed`), before token
+  validation; the per-model `attested`/`ram_tier_attested` shape is deferred (§7.7).
+- **§12.4/§15.3:** `attestation_required_provider_excluded` is **not** emitted (routing
+  exclusion is a silent status predicate); event list reconciled to the shipped `event`
+  values.
 - **§5.7:** clarified the hash-disclosure counting basis is slot-holders
   (`hasAvailableSlot`); `RoutingEligible` has no hash check — the hash routing-exclusion is
   the separate §5.5-5.6 predicate (mismatch/invalid always; uncatalogued only when
@@ -170,16 +188,23 @@ turns the Tier-1 disclosure posture from SPEC-006 into enforceable coordinator
 behavior where the required pillar is enabled.
 
 Tier 1 remains valid. Tier 2 is additive. With every new `tier2.*` key at its
-default value, the coordinator's own responses (`/v1/models` `tier1_disclosure`,
-`/v1/chat/completions`), provider WebSocket protocol, routing selection,
-sticky-affinity behavior, and audit logs MUST preserve current Tier-1 behavior.
-**One shipped exception (v0.4):** the coordinator's `/internal/routing` metadata always
-computes the attestation aggregate (not `ConfigActive`-gated), and the **gateway**
-surfaces it whenever any `StateReady` provider exists — so the buyer-visible
-`hardware_attestation` disclosure is **not** byte-identical to Tier-1 once a SPEC-008
-gateway fronts the pool (a tokenless pool discloses `hardware_attestation: "unsupported"`;
-§4.3, §13.2, §13.3). This is a known cross-service gap, documented rather than a
-guarantee.
+default value, the coordinator's own responses (coordinator `/v1/models`, which emits only
+`object`/`data`/(optional `tier2`); `/v1/chat/completions`), provider WebSocket protocol,
+routing selection, and sticky-affinity behavior MUST preserve current Tier-1 behavior.
+**Two shipped exceptions (v0.4):**
+
+1. *Audit logs.* `attestation_formats` is advertised by default, so when a v2 provider
+   **volunteers** an `attestation_token` the coordinator verifies it and emits a `T2.C`
+   diagnostic (INFO/WARN) even at default config, independent of `ConfigActive` (§4.3). No
+   T2.* event fires for a legacy/Tier-1 provider that presents no token.
+2. *Buyer-visible disclosure (gateway).* The buyer-facing `tier1_disclosure` block —
+   including `hardware_attestation` — is **owned by the gateway**, not the coordinator: the
+   gateway fetches coordinator `/v1/models` and injects `tier1_disclosure` from the
+   coordinator's `/internal/routing` metadata, which always computes the attestation
+   aggregate (not `ConfigActive`-gated). Because that aggregate is non-`none` whenever any
+   `StateReady` provider exists (§13.3), the buyer-visible `hardware_attestation` is **not**
+   byte-identical to Tier-1 once a SPEC-008 gateway fronts the pool (a tokenless pool
+   discloses `hardware_attestation: "unsupported"`; §4.3, §13.2, §13.3).
 
 Tier 2 exists to close the expectation-drift gap recorded in the 2026-05-29
 independent security audit:
@@ -491,9 +516,11 @@ buyer-to-provider end-to-end encryption.
 cryptographically verified an attestation token and bound it to the session.
 **Two formats yield this status, at different trust strengths (§7.3):**
 (a) an Apple **Managed-Device-Attestation** token validated against an
-operator-configured trust root, with attested device properties matched to the
-provider's claims (the `hardware`-rooted path, §7.4 — aspirational/configured,
-not the shipped default); and (b) the shipped **default self-signed
+operator-configured trust root — certificate chain + freshness binding + presence of a
+device-property extension + CSR key binding (the `hardware`-rooted path, §7.4 —
+aspirational/configured, not the shipped default; note the shipped MDA verifier does **not**
+cross-check the certificate's device-property values or `ram_gb` against the provider's
+claims, §7.5); and (b) the shipped **default self-signed
 Secure-Enclave** format (`macprovider-se-p256-v1`, §7.4a), which the coordinator
 verifies against the provider's *own* submitted key — proving P-256 key custody
 + session binding only (tier `self_signed`), **not** hardware provenance,
@@ -672,11 +699,14 @@ Tier 2 reduces specific risks:
 
 - Pillar A reduces honest-misconfiguration risk for model identity.
 - Pillar B reduces passive network-observer risk on the provider leg.
-- Pillar C reduces false-hardware and unsupported-platform claims **only via its
-  hardware-rooted MDA path** (§7.4, aspirational/configured); the shipped default
-  `self_signed` Secure-Enclave path reduces only key-substitution and stale/replayed-token
-  risk (key custody + freshness + session binding), **not** false-hardware claims — the
-  `hardware_family` value is an unauthenticated self-assertion (§7.3, §7.4a).
+- Pillar C's **hardware-rooted MDA path** (§7.4, aspirational/configured) anchors a token
+  to a trusted attestation authority (certificate chain to an operator root + freshness),
+  but the **shipped MDA verifier does not cross-check the certificate's device-property
+  values or `ram_gb` against the provider's claims** (§7.5), so it only partially reduces
+  false-hardware/platform claims. The shipped default `self_signed` Secure-Enclave path
+  reduces only key-substitution and stale/replayed-token risk (key custody + freshness +
+  session binding), **not** false-hardware claims at all — the `hardware_family` value is an
+  unauthenticated self-assertion (§7.3, §7.4a).
 - Pillar D reduces common malicious-output and exfiltration patterns visible
   in the coordinator relay.
 
@@ -1442,16 +1472,22 @@ aspirational path, not a description of the shipped default.
 
 ### 7.1 Threat model
 
-Pillar C's **hardware-rooted MDA path** (§7.4, aspirational/configured) targets providers
-lying about platform properties:
+Pillar C's **hardware-rooted MDA path** (§7.4, aspirational/configured) is *intended* to
+target providers lying about platform properties:
 
 - a non-Apple-Silicon host claims to be Apple Silicon,
 - a provider claims a RAM tier inconsistent with the attested hardware class,
 - a provider sends a token from a different device.
 
-**The shipped default `self_signed` path does NOT address the hardware/device items
-above** — it verifies only key custody + session binding, and treats `hardware_family` /
-`ram_gb` as unauthenticated self-asserted claims (§7.3, §7.4a). Both formats do address:
+**Shipped-verifier caveat (v0.4):** even the MDA path only validates a certificate chain to
+a trusted root, freshness, the *presence* of a non-blank device-property extension, and CSR
+key binding — it does **NOT** compare the certificate's device-property values or `ram_gb`
+against the provider's claimed `hardware_family` / `ram_gb` (`pillar_c.go`
+`verifyMDADeviceProperties` / `verifyProductionMDAChainShape`). So the three false-claim
+items above are only partially closed on the MDA path and are **not** closed at all on the
+shipped default `self_signed` path (which verifies only key custody + session binding and
+treats `hardware_family` / `ram_gb` as unauthenticated self-assertions, §7.3, §7.4a). Both
+formats do address:
 
 - a provider replays old attestation evidence (freshness + challenge binding, §7.5).
 
@@ -1594,16 +1630,24 @@ The provider MUST bind the token to:
 
 If the selected Apple attestation format cannot directly attest RAM size, the
 coordinator MUST treat `ram_gb` as provider-reported and MUST NOT expose it as
-attested. In that case `/v1/models` MAY still report `attested: true` for
-Apple-Silicon device identity while separately reporting
-`ram_tier_attested: false`.
+attested. The **per-model** `attested: true` / `ram_tier_attested: false` shape referenced
+here belongs to the **deferred per-model attestation disclosure** (§7.7) — the shipped
+network-level `/v1/models` `tier2.attestation` object carries neither a per-model `attested`
+field nor `ram_tier_attested` (§7.7, AC-T2-18). It is retained as a forward requirement, not
+a shipped field.
 
 Accepted `attestation_token.token` encodings are, **per format**:
 
-- for `apple-managed-device-attestation-acme-v1` (§7.4): base64url-encoded raw DER
-  or CBOR bytes, or compact JWS with exactly three dot-separated base64url segments;
+- for `apple-managed-device-attestation-acme-v1` (§7.4): the token is base64url-encoded raw
+  DER or CBOR bytes, or compact JWS with three dot-separated base64url segments. **Shipped
+  caveat (v0.4):** the shipped coordinator does **not** actually parse the MDA token as
+  DER/CBOR — `validAttestationTokenEncoding` only checks the string is nonempty unpadded
+  base64url (or a 3-segment JWS), and the MDA path hashes the *encoded token string* into
+  the cert freshness binding (§7.5) rather than decoding its content. So the DER/CBOR
+  structure is a forward/interop expectation, not a shipped validation; a conforming signer
+  should still emit DER/CBOR, but the shipped verifier accepts any nonempty base64url bytes.
 - for `macprovider-se-p256-v1` (§7.4a): a **base64url-encoded JSON envelope**
-  `{"attestation": {…}, "signature": "…"}` (the shipped SE encoding).
+  `{"attestation": {…}, "signature": "…"}` (the shipped SE encoding, actually decoded).
 
 No other encodings are accepted **for a given format**. (v0.4 correction: v0.3 listed
 only the DER/CBOR/JWS set and declared "no other encodings are accepted," which the
@@ -1619,10 +1663,14 @@ the **entire decoded attestation-token envelope** (the outer JSON object with `f
 
 **Rejection transport (shipped, v0.4).** Attestation tokens are presented and verified on
 the **provider WebSocket auth handshake**, not on a buyer HTTP request. In the shipped
-verifier every rejection cause — over-limit (token or envelope), invalid base64url,
-unparseable/invalid format, or signature/binding failure — collapses to attestation
+verifier most rejection causes — over-limit (token or envelope), invalid base64url,
+unparseable JSON, or signature/binding/freshness failure — collapse to attestation
 **status `attestation_failed`** (`pillar_c.go`; the too-large case logs `T2.C
-attestation_token_too_large`, others `attestation_failed`). Under
+attestation_token_too_large`, others `attestation_failed`). **One exception:** a token
+whose `format` is not in `tier2.attestation_formats` returns status
+**`attestation_unsupported`** (not `attestation_failed`), before any token validation, and
+is excluded from routing only when `require_attestation: true` (regression-locked). All
+of these still close the session with code **4012** when `require_attestation: true`. Under
 `require_attestation: true`, the coordinator sends a WS `auth_response` carrying that
 failed status and closes the provider session with close code **4012**
 (`CloseTier2AttestationFailed`); under optional attestation the session continues with
@@ -1805,8 +1853,16 @@ its signature ever being checked** (§7.3):
      `tier2.attestation_roots` entry is consulted (the SE path is dispatched *before* the
      root check and is accepted with an empty root set);
    - for `apple-managed-device-attestation-acme-v1` (§7.4) and the mock format: validate
-     the certificate chain / token against `tier2.attestation_roots`.
-7. Validate RAM tier only when the attestation format supplies a trustworthy RAM property.
+     the certificate chain against `tier2.attestation_roots`, the leaf key curve, the
+     freshness extension (a SHA-256 of the encoded token bound in the cert), the *presence*
+     of a non-blank recognized device-property extension, and the CSR key binding. **The
+     shipped MDA verifier does NOT compare the certificate's device-property values or
+     `ram_gb` against `token.Claimed`** (`verifyMDADeviceProperties`) — it checks only that
+     such an extension exists.
+7. RAM tier: the shipped verifier does **not** validate `ram_gb` for either format — it is
+   treated as provider-reported and MUST NOT be exposed as attested (§7.4). "Validate RAM
+   only when the format supplies a trustworthy RAM property" is a forward requirement for a
+   format that actually attests RAM; no shipped format does.
 8. Store the attestation status (and, on the SE path, the `self_signed` tier) in the
    provider pool entry.
 9. Emit `T2.C` audit events for failures, unsupported formats, and successful
@@ -2854,14 +2910,21 @@ Pillar B MUST log:
 
 ### 12.4 Pillar C events
 
-Pillar C MUST log:
+Pillar C logs (shipped `event` values, `logAttestationEvent`):
 
 - `attestation_valid`
 - `attestation_failed`
 - `attestation_stale`
-- `attestation_unsupported`
-- `attestation_required_provider_excluded`
-- `attestation_root_missing`
+- `attestation_unsupported` (event name is emitted as `attestation_unsupported` for the
+  MDA/root paths; the unsupported-*format* early return logs `attestation_failed` with
+  reason `unsupported_format`)
+- `attestation_replay`, `provider_binding_mismatch`, `attestation_token_too_large`,
+  `attestation_root_missing`
+
+**Deferred (not shipped):** `attestation_required_provider_excluded` is **not** emitted —
+`require_attestation: true` routing exclusion is a silent status predicate in the routing
+path (`internal/buyer/server.go`), with no dedicated T2.C event. Adding it is a forward
+change (see §15.3).
 
 ### 12.5 Pillar D events
 
@@ -2906,20 +2969,26 @@ Operators MUST NOT suppress partial-pool state.
 
 ### 13.2 Required additive fields
 
-The disclosure block MUST preserve existing SPEC-006 fields and add Tier-2
-detail.
+**Service ownership (shipped, v0.4).** The buyer-facing `tier1_disclosure` block (SPEC-006
+§5.3.1) is emitted by the **gateway**, not the coordinator: the gateway fetches coordinator
+`/v1/models` and injects/overwrites `tier1_disclosure` from the coordinator's
+`/internal/routing` metadata (`phase5-gateway/internal/router`). The **coordinator's own**
+`/v1/models` response contains only `object`, `data`, and an optional `tier2` block (the
+network-level attestation/hash disclosure, §7.7) — it has **no** `tier1_disclosure` field.
+The shipped gateway baseline additionally carries `model_verification_limit` and
+`verified_model_settlement` beyond the SPEC-006 v0.8.1 key set listed in AC-T2-5. SPEC-008
+extends the gateway's `tier1_disclosure` to reflect actual Tier-2 enforcement state.
 
-These additive fields appear only when §4.3 permits Tier-2 response changes.
-With default config, the **coordinator's own** `/v1/models` disclosure block MUST remain
-byte-identical to the SPEC-006 Tier-1 baseline. **This byte-identity is a coordinator-surface
-property only** — the buyer-visible **gateway** disclosure activates on `/internal/routing`
-pool evidence (any `StateReady` provider → non-`none` attestation state) independent of
-coordinator `ConfigActive`, so it is **not** byte-identical at defaults (§4.3, §13.3). A
-reimplementer MUST NOT treat "default config" as guaranteeing an unchanged buyer-visible
-attestation surface through the gateway.
+These additive Tier-2 fields appear only when §4.3 permits Tier-2 response changes.
+Two distinct byte-identity properties hold at default config:
 
-Default-config **coordinator** render - byte-identical to SPEC-006 v0.8.1 baseline. No
-Tier-2 keys present. `version` string unchanged.
+- **Coordinator `/v1/models`** render is byte-identical to its Tier-1 baseline
+  (`object`/`data` only; no `tier2` block because `ConfigActive` is false). `version` n/a.
+- The **gateway `tier1_disclosure`** is **NOT** byte-identical at defaults: its
+  `hardware_attestation` (and the other pool-evidence-driven states) activate on
+  `/internal/routing` metadata whenever any `StateReady` provider exists (§13.3),
+  independent of coordinator `ConfigActive`. A reimplementer MUST NOT treat "default config"
+  as guaranteeing an unchanged buyer-visible attestation surface through the gateway.
 
 ```json
 {
@@ -3195,12 +3264,15 @@ With every `tier2.*` key at its default value and no provider Tier-2 evidence,
 no `catalog_path`, and a Tier-1 provider pool:
 
 - provider selection is unchanged from Tier-1 behavior,
-- the `tier1_disclosure` block in `/v1/models` contains exactly the SPEC-006
-  v0.8.1 baseline keys - `version: "v0.8"`, `plaintext_to_provider`,
-  `model_identity`, `hardware_attestation`, `tier2_milestone`,
-  `sticky_affinity` - and none of the additive Tier-2 keys
-  (`model_hash_verified`, `provider_leg_encryption`,
-  `untrusted_provider_safety`, `tier2`),
+- the **coordinator's own** `/v1/models` emits only `object`/`data` and **no** `tier2`
+  block (it never emits `tier1_disclosure` — that is a gateway-owned field, §13.2),
+- the buyer-facing `tier1_disclosure` block (emitted by the **gateway**) carries its
+  shipped baseline — the SPEC-006 v0.8.1 keys `version: "v0.8"`, `plaintext_to_provider`,
+  `model_identity`, `hardware_attestation`, `tier2_milestone`, `sticky_affinity`, **plus**
+  the shipped `model_verification_limit` and `verified_model_settlement` — and none of the
+  additive Tier-2 keys (`model_hash_verified`, `provider_leg_encryption`,
+  `untrusted_provider_safety`, `tier2`) **except** as forced by the pool-evidence gateway
+  activation in the Scope note below,
 - the `version` string is unchanged from `"v0.8"` unless §4.3 permits Tier-2
   response changes,
 - no `hash_verified`, `hash_verification`, `attested`, `attestation`, or
@@ -3411,8 +3483,10 @@ or per-frame nonce.
 
 Condition:
 
-- attestation validation, unsupported format, stale token, failed token, or
-  required-attestation exclusion.
+- attestation validation, unsupported format, stale token, or failed token. (Note:
+  **required-attestation routing exclusion does NOT emit a T2.C event** in shipped code —
+  it is a silent status predicate; see §12.4. The event is logged at verification time, not
+  at routing-exclusion time.)
 
 **Shipped (v0.4).** The emitter is `logAttestationEvent` (`internal/tier2/pillar_c.go`).
 
