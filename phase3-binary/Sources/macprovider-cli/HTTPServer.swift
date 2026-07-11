@@ -1273,11 +1273,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 || (trustState == "safe_offline_fallback" && snapshot.catalogCompatibilityConfirmed))
                 && localReady && snapshot.coordinatorConnected {
                 switch coordinatorBuyerServing {
-                case true:
+                case .some(true):
                     networkState = "buyer_serving"
-                case false:
+                case .some(false):
                     networkState = "not_buyer_serving"
-                case nil:
+                case .none:
                     networkState = "buyer_serving_unknown"
                 }
             } else {
