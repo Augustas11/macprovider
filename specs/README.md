@@ -40,6 +40,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-029 | Sweep Workload-Class Stratification | 0.1-draft | [SPEC-029-sweep-workload-class-stratification.md](SPEC-029-sweep-workload-class-stratification.md) |
 | SPEC-030 | Losslessness Probe | v0.1 | [SPEC-030-losslessness-probe.md](SPEC-030-losslessness-probe.md) |
 | SPEC-031 | Canary Probe, Degrade & Sanction Lifecycle | v0.1 | [SPEC-031-canary-degrade-sanctions.md](SPEC-031-canary-degrade-sanctions.md) |
+| SPEC-032 | Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary | v0.1 | [SPEC-032-proof-of-weights-hello-gate.md](SPEC-032-proof-of-weights-hello-gate.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**
