@@ -20,13 +20,14 @@ developer_dir="$(xcode-select -p)"
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/release-toolchain.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 xcodebuild -version >"$work/xcode-version.txt"
-swiftc --version >"$work/swiftc-version.txt"
+swiftc --version >"$work/swiftc-version.txt" 2>"$work/swift-driver-version.txt"
 xcrun --sdk macosx --show-sdk-version >"$work/sdk-version.txt"
 xcrun --sdk macosx --show-sdk-path >"$work/sdk-path.txt"
 
 python3 "$script_dir/validate-release-toolchain.py" \
   "$developer_dir" \
   "$work/xcode-version.txt" \
+  "$work/swift-driver-version.txt" \
   "$work/swiftc-version.txt" \
   "$work/sdk-version.txt" \
   "$work/sdk-path.txt" \

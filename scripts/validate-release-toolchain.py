@@ -7,9 +7,10 @@ import sys
 EXPECTED_DEVELOPER_DIR = "/Applications/Xcode_16.4.app/Contents/Developer"
 EXPECTED_XCODE = "Xcode 16.4\nBuild version 16F6"
 EXPECTED_SWIFT = (
-    "swift-driver version: 1.120.5 Apple Swift version 6.1.2 "
+    "Apple Swift version 6.1.2 "
     "(swiftlang-6.1.2.1.2 clang-1700.0.13.5)"
 )
+EXPECTED_SWIFT_DRIVER = "swift-driver version: 1.120.5"
 EXPECTED_SDK_VERSION = "15.5"
 EXPECTED_SDK_PATH = (
     f"{EXPECTED_DEVELOPER_DIR}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk"
@@ -20,16 +21,31 @@ def fail(message: str) -> None:
     raise SystemExit(f"validate-release-toolchain: {message}")
 
 
-if len(sys.argv) != 7:
-    fail("usage: DEVELOPER_DIR XCODE_VERSION SWIFTC_VERSION SDK_VERSION SDK_PATH OUTPUT")
+if len(sys.argv) != 8:
+    fail(
+        "usage: DEVELOPER_DIR XCODE_VERSION SWIFT_DRIVER_VERSION "
+        "SWIFTC_VERSION SDK_VERSION SDK_PATH OUTPUT"
+    )
 
-developer_dir, xcode_file, swiftc_file, sdk_version_file, sdk_path_file, output = sys.argv[1:]
+(
+    developer_dir,
+    xcode_file,
+    swift_driver_file,
+    swiftc_file,
+    sdk_version_file,
+    sdk_path_file,
+    output,
+) = sys.argv[1:]
 if developer_dir != EXPECTED_DEVELOPER_DIR:
     fail(f"Xcode developer directory drifted: {developer_dir}")
 
 xcode = pathlib.Path(xcode_file).read_text(encoding="utf-8").strip()
 if xcode != EXPECTED_XCODE:
     fail(f"Xcode version/build drifted: {xcode!r}")
+
+swift_driver = pathlib.Path(swift_driver_file).read_text(encoding="utf-8").strip()
+if swift_driver != EXPECTED_SWIFT_DRIVER:
+    fail(f"Swift driver drifted: {swift_driver!r}")
 
 swiftc_lines = pathlib.Path(swiftc_file).read_text(encoding="utf-8").splitlines()
 if not swiftc_lines or swiftc_lines[0] != EXPECTED_SWIFT:
@@ -45,8 +61,8 @@ if sdk_path != EXPECTED_SDK_PATH:
 payload = {
     "macos_sdk": {"path": sdk_path, "version": sdk_version},
     "swift": {
-        "driver_version": "1.120.5",
-        "version": EXPECTED_SWIFT.removeprefix("swift-driver version: 1.120.5 "),
+        "driver_version": EXPECTED_SWIFT_DRIVER.removeprefix("swift-driver version: "),
+        "version": EXPECTED_SWIFT,
     },
     "xcode": {
         "build": "16F6",
