@@ -545,15 +545,21 @@ always **subject to the FR-CAN22 last-provider floor** (the pool never drops bel
 one routing-eligible provider on a canary-only signal) and to correlated-fault
 containment:
 
-- **Provider correlation produces only ephemeral, self-limiting effects — it
-  never creates persistent automatic state a malicious set of providers could
-  weaponize.** This is the load-bearing Sybil-safety invariant, and it is
-  absolute: no provider behavior (of any trust level — SPEC-008 `attested` proves
-  device identity, not independent ownership, and one operator can hold several
-  attested/pinned IDs) may trigger a bank rollback, a config-fault attribution, a
-  **persistent** fingerprint suspension, or any other durable state change. The
-  only automatic responses to correlation are *within* the current epoch (discard
-  its results) plus a fire-and-forget operator alert.
+- **A correlated-majority verdict produces only ephemeral, self-limiting effects —
+  it never creates persistent containment state a malicious set of providers could
+  weaponize.** This is the load-bearing Sybil-safety invariant, scoped precisely:
+  no *correlated-majority verdict* (and no provider behavior of any trust level —
+  SPEC-008 `attested` proves device identity, not independent ownership, and one
+  operator can hold several attested/pinned IDs) may automatically trigger a bank
+  rollback, a config-fault attribution, a **persistent** fingerprint suspension, or
+  any other durable *containment* state. The only automatic responses to
+  correlation are *within* the current epoch (discard its results) plus a
+  fire-and-forget operator alert. (This invariant governs the *correlated-fault*
+  path only; it does **not** override ordinary per-provider sanctioning — a
+  non-correlated committed failure still updates that provider's counter and, at
+  the FR-CAN11 threshold, produces the normal durable FR-CAN11/15 sanction. The
+  Sybil concern is exclusively the fleet-wide *containment* actions a majority
+  could weaponize, not the per-provider sanction of a genuinely-broken provider.)
 - **Detection with staged results.** The coordinator **MUST**, whenever canary
   sanctioning is enabled for a multi-provider model, run a **correlation epoch**
   over a **fixed pre-sweep snapshot** (denominator `N ≥ 2`, atomic): it actively
@@ -569,8 +575,10 @@ containment:
   entirely** (no sanction, no counter increment — honest providers are unharmed),
   preserve the FR-CAN22 last-provider floor, and **alert the operator** (§12), and
   do **nothing else**. Otherwise → **commit** the staged results **atomically**
-  with respect to the last-provider guard (individual failures sanction their
-  providers; two providers can't both be removed below the floor).
+  with respect to the last-provider guard: committed failures update their
+  providers' counters and produce a sanction only at the FR-CAN11 threshold (the
+  ordinary per-provider path, FR-CAN11/15); two providers can't both be removed
+  below the floor.
 - **All persistent containment is an authenticated operator action, never
   automatic.** Benching a suspect fingerprint from sanctioning, rolling back a
   challenge bank, or attributing a coordinator-config fault are operator decisions
@@ -589,8 +597,6 @@ containment:
   generation-fenced control whose **deterministic challenge-semantic** failure
   (never a transport/timeout/status failure) is the sole authorization — deferred,
   not specified here.
-- Coordinator-attributable failures (an `incomplete` from undersized
-  `max_tokens`, FR-CAN3) are **neutral** regardless of fleet size.
 - Coordinator-attributable failures (an `incomplete` from undersized
   `max_tokens`, FR-CAN3) are **neutral** regardless of fleet size.
 - A **provisional** sole provider MUST additionally never be
@@ -702,6 +708,17 @@ this flag (the current code records `pass=false` on a model-class dispatch skip
 before the skip-neutral return — a conformance gap). The *meaning* of the flag is
 item 9's spec; SPEC-031 requires only that the mechanism fire, be observable, and
 be skip-neutral.
+
+**FR-CAN29a — Correlated-fault operator alert.** The FR-CAN23 suspicion alert MUST
+be emitted as a distinct, operator-visible event (page/log) carrying at minimum:
+the `model_id`, the suspected challenge **fingerprint** and **bank generation**,
+the snapshot denominator `N` and the failing count, and the fact that the epoch's
+results were **discarded** (no sanction taken). This is the signal the operator
+acts on to bench the fingerprint or roll back the bank (FR-CAN23 permits no
+automatic persistent containment, so the alert is the sole trigger for the
+operator's authenticated response). Absence of this event on a correlated
+suspicion is a conformance gap (§14). *(Numbered `29a` to avoid renumbering the
+§13 recovery FRs CAN30–32; it belongs to the §12 observability contract.)*
 
 ## 13. Tier asymmetry and operator recovery
 
@@ -1113,3 +1130,15 @@ FR-CAN14 is required before the breaker and canary coexist under load.
       `SupportedModels` + seen history; declared-but-cold → 503. The SPEC-002
       `MAY` / SPEC-006 wording is the carried item-22 inconsistency (§14 no longer
       claims full three-way alignment).
+  - **R7 codex two-lane audit** — **architect PASS (0 C/H/M, 2 LOW)**; security
+    0C/0H/1M/1L with both R6 items confirmed closed. Absorbed:
+    - **Sybil-safety invariant narrowed** (security MED): the R6 wording ("no
+      provider behavior may cause any durable state change") was too absolute — it
+      also forbade the *legitimate* per-provider FR-CAN11/15 sanction. Re-scoped to
+      "no **correlated-majority verdict** may automatically create persistent
+      **containment** state"; a non-correlated committed failure still updates its
+      counter and sanctions at the FR-CAN11 threshold. No design change — the
+      ephemeral correlated-fault path is unchanged.
+    - **LOW hygiene:** deleted a duplicated `incomplete`-neutrality bullet; added
+      **FR-CAN29a** defining the correlated-fault operator-alert event in §12 (the
+      §12 cross-reference now has a concrete home).
