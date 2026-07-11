@@ -149,8 +149,8 @@ cross-repo interop contract the Swift provider CLI byte-matches):
   16-KiB/20-KiB Pillar C caps are unreachable defense-in-depth; a re-implementer MUST enforce
   the 1024-byte cap. Added the shipped **MDA acceptance grammar** (P-256/P-384 leaf curve;
   freshness = SHA-256(encoded token) at Apple OID …8.11.1; recognized Apple MDA property OID
-  present+non-blank; CSR as PEM or base64 DER via `certificate_csr`/`csr`). Corrected §10.4's
-  now-stale "omits key_binding/signature" wording.
+  present+non-blank; CSR as PEM or base64 DER via `certificate_signing_request`/`csr`).
+  Corrected §10.4's now-stale "omits key_binding/signature" wording.
 - **§5.7:** clarified the hash-disclosure counting basis is slot-holders
   (`hasAvailableSlot`); `RoutingEligible` has no hash check — the hash routing-exclusion is
   the separate §5.5-5.6 predicate (mismatch/invalid always; uncatalogued only when
@@ -804,11 +804,13 @@ behavior are:
 | `tier2_attestation_token_invalid` | 400 | `invalid_request` | Attestation token encoding or format is invalid. | N/A - auth |
 
 **Note (shipped, v0.4).** The two `tier2_attestation_token_*` rows are a **forward
-HTTP catalog**: attestation tokens are presented on the provider WebSocket auth handshake,
-where the shipped verifier collapses over-limit/malformed/invalid to attestation status
-`attestation_failed` and (when `require_attestation: true`) closes the session with WS code
-`4012`, rather than returning an HTTP 400 with these codes (§7.4, §10.4). They are retained
-for a future HTTP attestation-submission path.
+HTTP catalog** and do **not** describe the shipped path. Attestation tokens are presented on
+the provider WebSocket auth handshake: an over-1024-byte `attestation_token` object is
+rejected at the WS parse layer with `invalid_auth_request` / close **4001** *before* Pillar C
+(so the `tier2_attestation_token_too_large` code is never emitted for the whole-object case);
+malformed/invalid tokens that reach Pillar C become status `attestation_failed`/`unsupported`
+and (when `require_attestation: true`) close with WS code **4012** — not an HTTP 400 (§7.4,
+§10.4). These rows are retained for a future HTTP attestation-submission path.
 
 Messages MUST NOT reveal raw hashes, keys, attestation tokens, or trust-root
 details. Placeholders like `{model_id}` are literal substitution variables;
@@ -1725,9 +1727,13 @@ which is a further reason the shipped default is the compact SE path.
 the **provider WebSocket auth handshake**, not on a buyer HTTP request. The rejection
 **status** is cause-specific — it does **not** all collapse to `attestation_failed`:
 
-- **`attestation_failed`** — over-limit, invalid base64url, unparseable JSON, body/binding
+- **`invalid_auth_request` (WS close 4001), *before* Pillar C** — an `attestation_token`
+  JSON object over the 1024-byte cap (`maxHandshakeMetadataBytes`, §7.4 Size limits). This
+  never reaches Pillar C, so the Pillar C `attestation_token_too_large` event / 16-KiB check
+  is unreachable for the whole-object case.
+- **`attestation_failed`** — invalid base64url, unparseable JSON, body/binding
   signature failure, or the **MDA certificate freshness-extension** mismatch
-  (`mda_freshness_mismatch`). (The too-large case logs `T2.C attestation_token_too_large`.)
+  (`mda_freshness_mismatch`).
 - **`attestation_stale`** — **envelope freshness**: challenge/nonce mismatch, or
   `issued_at`/`expires_at`/`attestation_max_age_s` failure. These are classified *before*
   signature verification (§7.5), so `stale` does not imply a valid signature (§7.3). Do not
@@ -1941,10 +1947,12 @@ its signature ever being checked** (§7.3):
      freshness extension is Apple OID `1.2.840.113635.100.8.11.1` and its value MUST equal
      `SHA-256(encoded token string)` (matched against several candidate byte
      representations); the "device-property extension" is any one of the recognized Apple
-     MDA property OIDs (arc `1.2.840.113635.100.8.{9.1,9.2,9.4,10.1,10.2,10.3,13.1,13.2}`),
-     required present and non-blank; the CSR is taken from `certificate_csr` (alias `csr`)
-     and parsed as **PEM** (`CERTIFICATE REQUEST` / `NEW CERTIFICATE REQUEST`) **or** base64
-     (standard/raw, URL/raw-URL) DER (`parseEncodedCSR`).
+     MDA property OIDs (arc `1.2.840.113635.100.8.{9.1,9.2,9.4,10.1,10.2,10.3,13.1,13.2,13.3}`
+     — note the freshness OID `…8.11.1` is separate and used for the freshness check, not the
+     device-property presence check), required present and non-blank; the CSR is taken from
+     the **`certificate_signing_request`** field (fallback alias **`csr`**) and parsed as
+     **PEM** (`CERTIFICATE REQUEST` / `NEW CERTIFICATE REQUEST`) **or** base64 (standard/raw,
+     URL/raw-URL) DER (`parseEncodedCSR`).
 7. RAM tier: the shipped verifier does **not** validate `ram_gb` for either format — it is
    treated as provider-reported and MUST NOT be exposed as attested (§7.4). "Validate RAM
    only when the format supplies a trustworthy RAM property" is a forward requirement for a
@@ -2632,8 +2640,9 @@ with an empty/absent `binary_version` is accepted.
   Pillar C; the 16-KiB `token` / 20-KiB envelope Pillar C caps are unreachable
   defense-in-depth (§7.4). A re-implementer MUST enforce the 1024-byte object cap.
 - Rejection status is cause- and policy-dependent on the **WS auth path** (not an HTTP 400):
-  - *Invalid base64url, over-limit, or invalid JSON envelope* → status `attestation_failed`
-    (over-limit logs `T2.C attestation_token_too_large`).
+  - *Over the 1024-byte object cap* → `invalid_auth_request` / close **4001**, at the WS parse
+    layer **before** Pillar C (the Pillar C `attestation_token_too_large` path is unreachable).
+  - *Invalid base64url or invalid JSON envelope* → status `attestation_failed`.
   - *A valid-base64url **bare** MDA token that is not parseable as X.509 DER* (no
     `certificate_chain`/`x5c`) → cert-chain extraction yields no chain, so the MDA path
     returns status **`unsupported`** (event `attestation_unsupported`) under optional
