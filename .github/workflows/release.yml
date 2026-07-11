@@ -17,6 +17,14 @@ on:
         required: false
         default: false
         type: boolean
+      provider_admission_policy:
+        description: "Signed provider admission rollout policy"
+        required: true
+        default: bridge_required
+        type: choice
+        options:
+          - bridge_required
+          - strict_post_migration
 
 permissions:
   contents: read
@@ -53,11 +61,16 @@ jobs:
           RELEASE_VERSION_INPUT: ${{ github.event.inputs.version }}
           RELEASE_PRERELEASE_INPUT: ${{ github.event.inputs.prerelease || 'false' }}
           RELEASE_CANDIDATE_INPUT: ${{ github.event.inputs.candidate || 'false' }}
+          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy }}
         run: |
           set -euo pipefail
           bash scripts/validate-release-inputs.sh \
             "$RELEASE_VERSION_INPUT" "$RELEASE_PRERELEASE_INPUT" \
             "$RELEASE_CANDIDATE_INPUT"
+          case "$PROVIDER_ADMISSION_POLICY_INPUT" in
+            bridge_required|strict_post_migration) ;;
+            *) echo "::error::invalid provider admission rollout policy" >&2; exit 1 ;;
+          esac
           tag="$RELEASE_VERSION_INPUT"
           commit="$(git rev-parse HEAD)"
           absence_policy="--require-existing"
@@ -451,6 +464,9 @@ jobs:
             if [ -f "$WORK/THIRD-PARTY-NOTICES.txt" ]; then
               cp "$WORK/THIRD-PARTY-NOTICES.txt" "$PKG_ROOT/THIRD-PARTY-NOTICES.txt"
             fi
+            if [ -d "$WORK/catalog-release" ]; then
+              cp -R "$WORK/catalog-release" "$PKG_ROOT/catalog-release"
+            fi
             printf '%s\n' \
               '#!/bin/sh' \
               'echo "macprovider-cli.pkg is a signed delivery container for install.sh." >&2' \
@@ -712,6 +728,12 @@ jobs:
               exit 1
             }
             has_binary=0
+            has_catalog_manifest=0
+            has_catalog_keyring=0
+            has_catalog_candidates=0
+            has_catalog_candidates_signature=0
+            has_catalog_demand=0
+            has_catalog_demand_signature=0
             while IFS= read -r entry; do
               normalized_entry="$entry"
               while :; do
@@ -735,6 +757,26 @@ jobs:
                   ;;
                 THIRD-PARTY-NOTICES.txt)
                   ;;
+                catalog-release)
+                  ;;
+                catalog-release/release.json)
+                  has_catalog_manifest=$((has_catalog_manifest + 1))
+                  ;;
+                catalog-release/trusted-keys.json)
+                  has_catalog_keyring=$((has_catalog_keyring + 1))
+                  ;;
+                catalog-release/autotune-candidates.json)
+                  has_catalog_candidates=$((has_catalog_candidates + 1))
+                  ;;
+                catalog-release/autotune-candidates.json.sig)
+                  has_catalog_candidates_signature=$((has_catalog_candidates_signature + 1))
+                  ;;
+                catalog-release/demand-rank.json)
+                  has_catalog_demand=$((has_catalog_demand + 1))
+                  ;;
+                catalog-release/demand-rank.json.sig)
+                  has_catalog_demand_signature=$((has_catalog_demand_signature + 1))
+                  ;;
                 *.bundle|*.bundle/*)
                   ;;
                 *)
@@ -749,6 +791,12 @@ jobs:
               echo "::error::$label does not contain macprovider-cli" >&2
               exit 1
             }
+            [ "$has_catalog_manifest" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/release.json" >&2; exit 1; }
+            [ "$has_catalog_keyring" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/trusted-keys.json" >&2; exit 1; }
+            [ "$has_catalog_candidates" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/autotune-candidates.json" >&2; exit 1; }
+            [ "$has_catalog_candidates_signature" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/autotune-candidates.json.sig" >&2; exit 1; }
+            [ "$has_catalog_demand" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/demand-rank.json" >&2; exit 1; }
+            [ "$has_catalog_demand_signature" -eq 1 ] || { echo "::error::$label must contain exactly one catalog-release/demand-rank.json.sig" >&2; exit 1; }
             if find "$payload_dir" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
               echo "::error::$label contains unsafe link or device members" >&2
               exit 1
@@ -811,6 +859,7 @@ jobs:
         shell: bash
         env:
           MACPROVIDER_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MACPROVIDER_RELEASE_SIGNING_KEY_PEM }}
+          PROVIDER_ADMISSION_POLICY_INPUT: ${{ github.event.inputs.provider_admission_policy }}
         run: |
           set -euo pipefail
           tag="${{ needs.build.outputs.tag }}"
@@ -829,6 +878,12 @@ jobs:
           gateway_asset="gateway-linux-amd64"
           pearl_metadata="pearl-release.json"
           pearl_metadata_sig="pearl-release.json.sig"
+          catalog_manifest_src="phase3-binary/catalog/autotune/release.json"
+          catalog_keys_src="phase3-binary/catalog/autotune/trusted-keys.json"
+          catalog_candidates_src="phase3-binary/dist/static/autotune-candidates.json"
+          catalog_candidates_sig_src="phase3-binary/dist/static/autotune-candidates.json.sig"
+          catalog_demand_src="phase3-binary/dist/static/demand-rank.json"
+          catalog_demand_sig_src="phase3-binary/dist/static/demand-rank.json.sig"
           test -f "$src"
           test -f "$coordinator_asset"
           test -f "$coordinator_cli_asset"
@@ -844,6 +899,21 @@ jobs:
           trap cleanup_release_signing_key EXIT
           cp "$src" "$tar_asset"
           release_assets=("$tar_asset" "$coordinator_asset" "$coordinator_cli_asset" "$gateway_asset")
+          cp "$catalog_manifest_src" release.json
+          cp "$catalog_keys_src" trusted-keys.json
+          cp "$catalog_candidates_src" autotune-candidates.json
+          cp "$catalog_candidates_sig_src" autotune-candidates.json.sig
+          cp "$catalog_demand_src" demand-rank.json
+          cp "$catalog_demand_sig_src" demand-rank.json.sig
+          catalog_assets=(
+            release.json
+            trusted-keys.json
+            autotune-candidates.json
+            autotune-candidates.json.sig
+            demand-rank.json
+            demand-rank.json.sig
+          )
+          release_assets+=("${catalog_assets[@]}")
           if [ -f "$pkg_src" ]; then
             cp "$pkg_src" "$pkg_asset"
             release_assets+=("$pkg_asset")
@@ -868,9 +938,38 @@ jobs:
           GATEWAY_SHA="$gateway_sha" \
           python3 - <<'PY'
           import json
+          import hashlib
           import os
 
           tag = os.environ["RELEASE_TAG"]
+          catalog_manifest = json.load(open("release.json", encoding="utf-8"))
+          catalog_names = (
+              "release.json",
+              "trusted-keys.json",
+              "autotune-candidates.json",
+              "autotune-candidates.json.sig",
+              "demand-rank.json",
+              "demand-rank.json.sig",
+          )
+          catalog_files = {
+              name: hashlib.sha256(open(name, "rb").read()).hexdigest()
+              for name in catalog_names
+          }
+          rollout_mode = os.environ["PROVIDER_ADMISSION_POLICY_INPUT"]
+          if rollout_mode == "bridge_required":
+              rollout = {
+                  "mode": rollout_mode,
+                  "enforce_provider_admission": False,
+                  "bridge_duration_s": 86400,
+              }
+          elif rollout_mode == "strict_post_migration":
+              rollout = {
+                  "mode": rollout_mode,
+                  "enforce_provider_admission": True,
+                  "bridge_duration_s": 0,
+              }
+          else:
+              raise SystemExit("unsupported provider admission rollout policy")
           metadata = {
               "schema_version": 1,
               "repository": "Augustas11/macprovider",
@@ -879,6 +978,7 @@ jobs:
               "commit": os.environ["RELEASE_COMMIT"],
               "architecture": "linux-amd64",
               "provider_advertised_version": tag.removeprefix("v"),
+              "provider_admission_rollout": rollout,
               "components": {
                   "coordinator": {
                       "asset": "coordinator-linux-amd64",
@@ -890,6 +990,11 @@ jobs:
                       "sha256": os.environ["GATEWAY_SHA"],
                       "embedded_version": tag,
                   },
+              },
+              "catalog": {
+                  "release_id": catalog_manifest["release_id"],
+                  "policy_version": catalog_manifest["policy_version"],
+                  "files": catalog_files,
               },
               "operator_artifacts": {
                   "coordinator_cli": {

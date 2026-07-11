@@ -56,6 +56,13 @@ validate_artifact_entries() {
   local entries="$1"
   local has_binary=0
   local has_metal=0
+  local has_catalog_manifest=0
+  local has_catalog_keyring=0
+  local has_catalog_candidates=0
+  local has_catalog_candidates_signature=0
+  local has_catalog_demand=0
+  local has_catalog_demand_signature=0
+  local version_major version_minor version_patch
   local entry normalized_entry
   while IFS= read -r entry; do
     normalized_entry="$entry"
@@ -80,6 +87,26 @@ validate_artifact_entries() {
         ;;
       THIRD-PARTY-NOTICES.txt)
         ;;
+      catalog-release|catalog-release/)
+        ;;
+      catalog-release/release.json)
+        has_catalog_manifest=$((has_catalog_manifest + 1))
+        ;;
+      catalog-release/trusted-keys.json)
+        has_catalog_keyring=$((has_catalog_keyring + 1))
+        ;;
+      catalog-release/autotune-candidates.json)
+        has_catalog_candidates=$((has_catalog_candidates + 1))
+        ;;
+      catalog-release/autotune-candidates.json.sig)
+        has_catalog_candidates_signature=$((has_catalog_candidates_signature + 1))
+        ;;
+      catalog-release/demand-rank.json)
+        has_catalog_demand=$((has_catalog_demand + 1))
+        ;;
+      catalog-release/demand-rank.json.sig)
+        has_catalog_demand_signature=$((has_catalog_demand_signature + 1))
+        ;;
       *.bundle|*.bundle/*)
         ;;
       *)
@@ -92,6 +119,22 @@ EOF
 
   [ "$has_binary" -eq 1 ] || die "provider artifact does not contain macprovider-cli"
   [ "$has_metal" -eq 1 ] || die "provider artifact lacks MLX Metal kernels (mlx.metallib or mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib)"
+  if [[ ! "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    die "PROVIDER_VERSION must be a stable semantic version: $PROVIDER_VERSION"
+  fi
+  version_major="${BASH_REMATCH[1]}"
+  version_minor="${BASH_REMATCH[2]}"
+  version_patch="${BASH_REMATCH[3]}"
+  if [ "$version_major" -gt 1 ] || \
+     { [ "$version_major" -eq 1 ] && [ "$version_minor" -gt 8 ]; } || \
+     { [ "$version_major" -eq 1 ] && [ "$version_minor" -eq 8 ] && [ "$version_patch" -ge 31 ]; }; then
+    [ "$has_catalog_manifest" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/release.json"
+    [ "$has_catalog_keyring" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/trusted-keys.json"
+    [ "$has_catalog_candidates" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/autotune-candidates.json"
+    [ "$has_catalog_candidates_signature" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/autotune-candidates.json.sig"
+    [ "$has_catalog_demand" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/demand-rank.json"
+    [ "$has_catalog_demand_signature" -eq 1 ] || die "provider artifact must contain exactly one catalog-release/demand-rank.json.sig"
+  fi
 }
 
 validate_artifact_member_types() {

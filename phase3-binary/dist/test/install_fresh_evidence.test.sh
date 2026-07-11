@@ -120,12 +120,12 @@ awk '
   in_main && /write_install_manifest / && NR > watchdog { manifest=NR }
   in_main && /start_manual_service / { start=NR }
   in_main && /if ! wait_for_local_model / { self_test=NR }
-  in_main && /commit_install_transaction/ && NR > self_test { commit=NR }
   in_main && /if ! wait_for_coordinator / { coordinator=NR }
+  in_main && /commit_install_transaction/ && NR > coordinator { commit=NR }
   END {
     exit !(begin < plist && plist < watchdog && watchdog < manifest &&
-           manifest < start && start < self_test && self_test < commit &&
-           commit < coordinator)
+           manifest < start && start < self_test && self_test < coordinator &&
+           coordinator < commit)
   }
 ' "$INSTALL_SH"
 echo "fresh install evidence ordering ok"

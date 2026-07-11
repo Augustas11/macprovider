@@ -1,0 +1,7 @@
+[Unit]
+Description=Recover an abandoned Mac Provider coordinator deploy
+
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+ExecStart=/opt/macprovider/coordinator-deploy-recover --recover

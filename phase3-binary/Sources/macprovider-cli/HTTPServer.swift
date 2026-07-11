@@ -3,6 +3,17 @@ import MacProviderCore
 @preconcurrency import NIO
 @preconcurrency import NIOHTTP1
 
+struct ProviderCatalogStatusContext: Sendable {
+    let trust: ServeCommand.CatalogRuntimeTrust?
+    let donorMode: Bool
+    let catalogKey: String?
+    let catalogModelID: String?
+    let modelRevision: String?
+    let artifactSHA256: String?
+    let configuredReleaseID: String?
+    let configuredCatalogDigest: String?
+}
+
 struct HTTPServer: Sendable {
     let config: AppConfig
     let modelRuntime: ModelRuntime
@@ -10,6 +21,7 @@ struct HTTPServer: Sendable {
     let receiptBuilder: ReceiptBuilder?
     let idlePrewarmer: IdlePrewarmer?
     let catalogModelIDAlias: String?
+    let catalogStatus: ProviderCatalogStatusContext
 
     init(
         config: AppConfig,
@@ -17,7 +29,8 @@ struct HTTPServer: Sendable {
         providerStatus: ProviderStatus,
         receiptBuilder: ReceiptBuilder?,
         idlePrewarmer: IdlePrewarmer? = nil,
-        catalogModelIDAlias: String? = nil
+        catalogModelIDAlias: String? = nil,
+        catalogTrust: ServeCommand.CatalogRuntimeTrust? = nil
     ) {
         self.config = config
         self.modelRuntime = modelRuntime
@@ -25,6 +38,16 @@ struct HTTPServer: Sendable {
         self.receiptBuilder = receiptBuilder
         self.idlePrewarmer = idlePrewarmer
         self.catalogModelIDAlias = catalogModelIDAlias
+        self.catalogStatus = ProviderCatalogStatusContext(
+            trust: catalogTrust,
+            donorMode: config.donorMode,
+            catalogKey: config.modelCatalogKey,
+            catalogModelID: config.modelCatalogModelID,
+            modelRevision: config.modelCatalogRevision,
+            artifactSHA256: config.modelCatalogSHA256,
+            configuredReleaseID: config.modelCatalogVersion,
+            configuredCatalogDigest: config.modelCatalogHash
+        )
     }
 
     func run() throws {
@@ -49,7 +72,8 @@ struct HTTPServer: Sendable {
                             maxBodyBytes: config.maxRequestBodyBytes,
                             receiptBuilder: receiptBuilder,
                             idlePrewarmer: idlePrewarmer,
-                            catalogModelIDAlias: catalogModelIDAlias
+                            catalogModelIDAlias: catalogModelIDAlias,
+                            catalogStatus: catalogStatus
                         )
                     )
                 }
@@ -76,6 +100,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private let receiptBuilder: ReceiptBuilder?
     private let idlePrewarmer: IdlePrewarmer?
     private let catalogModelIDAlias: String?
+    private let catalogStatus: ProviderCatalogStatusContext?
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
     private var bodyTooLarge = false
@@ -90,7 +115,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         maxBodyBytes: Int,
         receiptBuilder: ReceiptBuilder? = nil,
         idlePrewarmer: IdlePrewarmer? = nil,
-        catalogModelIDAlias: String? = nil
+        catalogModelIDAlias: String? = nil,
+        catalogStatus: ProviderCatalogStatusContext? = nil
     ) {
         self.modelID = modelID
         self.providerID = providerID
@@ -102,6 +128,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         self.receiptBuilder = receiptBuilder
         self.idlePrewarmer = idlePrewarmer
         self.catalogModelIDAlias = catalogModelIDAlias
+        self.catalogStatus = catalogStatus
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -219,8 +246,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let warmSwapEnabled = warmSwapEnabled
         let providerID = providerID
         let coordinatorURL = coordinatorURL
-        Task.detached { @Sendable [providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL] in
+        let catalogStatus = catalogStatus
+        Task.detached { @Sendable [providerStatus, modelRuntime, warmSwapEnabled, writer, providerID, coordinatorURL, catalogStatus] in
             let snapshot = await providerStatus.snapshot()
+            async let coordinatorBuyerServing = CoordinatorReadinessClient.fetch(
+                coordinatorURL: coordinatorURL,
+                providerID: providerID,
+                assignedID: snapshot.coordinatorAssignedID
+            )
             let runtimeSnapshot = warmSwapEnabled ? await modelRuntime.currentSnapshot() : nil
             let telemetryMatchesRuntime = runtimeSnapshot.map { $0.specDecodeGeneration == snapshot.specDecodeGeneration } ?? true
             let telemetryRuntimeEligible = runtimeSnapshot.map { $0.state == .ready && $0.hasTargetCompatibleDraft } ?? true
@@ -232,7 +265,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    coordinatorURL: coordinatorURL,
 	                    runtimeSnapshot: runtimeSnapshot,
 	                    specDecodeTelemetryMatchesRuntime: telemetryMatchesRuntime,
-	                    specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible
+	                    specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible,
+	                    catalogStatus: catalogStatus,
+	                    coordinatorBuyerServing: await coordinatorBuyerServing
 	                )
             )
         }
@@ -1184,7 +1219,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         coordinatorURL: String?,
         runtimeSnapshot: RuntimeSnapshot? = nil,
         specDecodeTelemetryMatchesRuntime: Bool = true,
-        specDecodeTelemetryRuntimeEligible: Bool = true
+        specDecodeTelemetryRuntimeEligible: Bool = true,
+        catalogStatus: ProviderCatalogStatusContext? = nil,
+        coordinatorBuyerServing: Bool? = nil
     ) -> [String: Any] {
         let effectiveModelID = runtimeSnapshot?.modelID ?? snapshot.modelID
         let effectiveModelLoaded = runtimeSnapshot.map { $0.container != nil || $0.modelID != nil } ?? snapshot.modelLoaded
@@ -1226,6 +1263,42 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             matchesRuntime: specDecodeTelemetryMatchesRuntime,
             runtimeEligible: specDecodeTelemetryRuntimeEligible
         )) { _, new in new }
+        if let catalogStatus {
+            let trustState = catalogStatus.trust?.state ?? (catalogStatus.donorMode ? "local_donor" : "catalog_update_required")
+            let localReady = effectiveModelLoaded && (snapshot.status == .ready || snapshot.status == .busy)
+            let networkState: String
+            if catalogStatus.donorMode {
+                networkState = "local_donor"
+            } else if (trustState == "live_verified"
+                || (trustState == "safe_offline_fallback" && snapshot.catalogCompatibilityConfirmed))
+                && localReady && snapshot.coordinatorConnected {
+                switch coordinatorBuyerServing {
+                case .some(true):
+                    networkState = "buyer_serving"
+                case .some(false):
+                    networkState = "not_buyer_serving"
+                case .none:
+                    networkState = "buyer_serving_unknown"
+                }
+            } else {
+                networkState = trustState
+            }
+            body["network_state"] = networkState
+            body["buyer_serving_authority"] = coordinatorBuyerServing == nil ? "unknown" : "coordinator"
+            body["catalog"] = [
+                "state": trustState,
+                "release_id": jsonNullable(catalogStatus.trust?.releaseID ?? catalogStatus.configuredReleaseID),
+                "digest": jsonNullable(catalogStatus.trust?.digest ?? catalogStatus.configuredCatalogDigest),
+                "signer_key_id": jsonNullable(catalogStatus.trust?.signerKeyID),
+                "policy_version": jsonNullable(catalogStatus.trust?.policyVersion),
+                "row_identity": jsonNullable(catalogStatus.trust?.rowIdentity),
+                "source": jsonNullable(catalogStatus.trust?.source),
+                "catalog_key": jsonNullable(catalogStatus.catalogKey),
+                "model_id": jsonNullable(catalogStatus.catalogModelID),
+                "model_revision": jsonNullable(catalogStatus.modelRevision),
+                "artifact_sha256": jsonNullable(catalogStatus.artifactSHA256),
+            ]
+        }
         return body
     }
 

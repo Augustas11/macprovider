@@ -19,7 +19,7 @@ workdir="$(mktemp -d "${TMPDIR:-/tmp}/macprovider-install-config.XXXXXX")"
 trap 'rm -f "$lib"; rm -rf "$workdir"' EXIT
 
 awk '
-  /^write_config\(\)/ { emit = 1 }
+  /^semantic_merge_config\(\)/ { emit = 1 }
   /^read_config_model\(\)/ { emit = 0 }
   emit { print }
 ' "$INSTALL_SH" > "$lib"
@@ -62,12 +62,10 @@ grep -Fq 'provider_token: 1666f693c3fa-redacted-token-body' "$CONFIG_PATH" || di
 top_level_count="$(grep -Ec '^provider_token[[:space:]]*:' "$CONFIG_PATH")"
 [ "$top_level_count" -eq 1 ] || die "expected one top-level provider_token, got $top_level_count"
 
-if grep -Fq 'nested-value' "$CONFIG_PATH"; then
-  die "indented nested provider_token should not be promoted into rewritten config"
-fi
-if grep -Fq 'historical note' "$CONFIG_PATH"; then
-  die "commented provider_token note should not be promoted into rewritten config"
-fi
+grep -Fq '  provider_token: nested-value' "$CONFIG_PATH" \
+  || die "semantic merge did not preserve unrelated nested config"
+grep -Fq '# provider_token: historical note' "$CONFIG_PATH" \
+  || die "semantic merge did not preserve config comments"
 
 case "$(uname -s)" in
   Darwin*) mode="$(stat -f '%Lp' "$CONFIG_PATH")" ;;

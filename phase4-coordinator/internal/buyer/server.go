@@ -217,6 +217,8 @@ type Server struct {
 	recovering            sync.Map
 	poolCheckMu           sync.Mutex
 	poolCheckLast         map[string]time.Time
+	poolReadinessSources  map[string]receiptKeysBucket
+	poolReadinessLimiters map[string]receiptKeysBucket
 	poolCheckMaxEntries   int
 	poolCheckTTL          time.Duration
 	receiptKeysMu         sync.Mutex
@@ -613,6 +615,8 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		provisionalWeight:      0.3,
 		maxChatBodyBytes:       config.Default().Limits.MaxChatRequestBodyBytes,
 		poolCheckLast:          map[string]time.Time{},
+		poolReadinessSources:   map[string]receiptKeysBucket{},
+		poolReadinessLimiters:  map[string]receiptKeysBucket{},
 		poolCheckMaxEntries:    4096,
 		poolCheckTTL:           time.Minute,
 		receiptKeysLimiters:    map[string]receiptKeysBucket{},
@@ -668,6 +672,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/v1/demand-rank.sig", s.handleDemandRankSig)
 	r.Get("/v1/autotune-candidates", s.handleAutotuneCandidates)
 	r.Get("/v1/autotune-candidates.sig", s.handleAutotuneCandidatesSig)
+	r.Get("/v1/autotune-release", s.handleAutotuneRelease)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
 	r.Get("/v1/receipt-keys/{provider_id}", s.handleReceiptKeys)
 	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotations.
@@ -1000,9 +1005,18 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 type poolCheckResponse struct {
-	ProviderID string     `json:"provider_id"`
-	Tier       pool.Tier  `json:"tier"`
-	State      pool.State `json:"state"`
+	ProviderID             string     `json:"provider_id"`
+	AssignedID             string     `json:"assigned_id,omitempty"`
+	Tier                   pool.Tier  `json:"tier"`
+	State                  pool.State `json:"state"`
+	BuyerServing           *bool      `json:"buyer_serving,omitempty"`
+	CatalogAdmissionMode   string     `json:"catalog_admission_mode,omitempty"`
+	CatalogReleaseID       string     `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion   string     `json:"catalog_policy_version,omitempty"`
+	CandidateCatalogSHA256 string     `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID     string     `json:"catalog_signer_key_id,omitempty"`
+	CandidateRowIdentity   string     `json:"catalog_row_identity,omitempty"`
+	CatalogEvidenceSource  string     `json:"catalog_evidence_source,omitempty"`
 }
 
 type receiptKeysResponse struct {
@@ -1020,6 +1034,7 @@ type receiptKeysPreviousPubkey struct {
 
 func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 	if !s.allowPoolCheck(r) {
+		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Pool check rate limit exceeded")
 		return
 	}
@@ -1028,8 +1043,23 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "Missing provider_id")
 		return
 	}
+	details := r.URL.Query().Get("details")
+	includeDeploymentEvidence := details == "deployment"
+	includeReadinessEvidence := details == "readiness"
+	assignedID := sanitizeRequestLogText(r.URL.Query().Get("assigned_id"))
+	if includeReadinessEvidence && assignedID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Missing assigned_id for readiness evidence")
+		return
+	}
+	if includeDeploymentEvidence && !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Deployment pool evidence requires coordinator authorization")
+		return
+	}
 	for _, p := range s.pool.Snapshot() {
 		if p.ProviderID != providerID {
+			continue
+		}
+		if assignedID != "" && p.AssignedID != assignedID {
 			continue
 		}
 		state := p.State
@@ -1038,7 +1068,28 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		}
 		s.log.Info().Str("provider_id", providerID).Str("state", string(state)).Msg("pool check hit")
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(poolCheckResponse{ProviderID: p.ProviderID, Tier: p.Tier, State: state}); err != nil {
+		response := poolCheckResponse{
+			ProviderID: p.ProviderID,
+			AssignedID: p.AssignedID,
+			Tier:       p.Tier,
+			State:      state,
+		}
+		if includeDeploymentEvidence || includeReadinessEvidence {
+			buyerServing := s.providerBuyerServing(p)
+			response.BuyerServing = &buyerServing
+			response.CatalogAdmissionMode = p.CatalogAdmissionMode
+			response.CatalogReleaseID = p.CatalogReleaseID
+			response.CatalogPolicyVersion = p.CatalogPolicyVersion
+			response.CandidateCatalogSHA256 = p.CandidateCatalogSHA256
+			response.CatalogSignerKeyID = p.CatalogSignerKeyID
+			response.CandidateRowIdentity = p.CandidateRowIdentity
+			// Catalog values are the exact envelope admitted from the provider
+			// session. The coordinator validates them against its verified
+			// catalog, but they are still provider-reported evidence rather than
+			// an independent observation of files installed on that Mac.
+			response.CatalogEvidenceSource = "provider_reported"
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("write pool check response failed")
 		}
 		return
@@ -1050,6 +1101,10 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		"error":       "provider_not_found",
 		"provider_id": providerID,
 	})
+}
+
+func (s *Server) providerBuyerServing(p pool.Provider) bool {
+	return p.ServingCapable() && !s.tier2ProviderExcluded(p) && s.checkQuota(p)
 }
 
 func (s *Server) handleReceiptKeys(w http.ResponseWriter, r *http.Request) {
@@ -1165,6 +1220,62 @@ func (s *Server) allowPoolCheck(r *http.Request) bool {
 	s.poolCheckMu.Lock()
 	defer s.poolCheckMu.Unlock()
 	s.evictPoolCheckEntries(now)
+	if r.URL.Query().Get("details") == "readiness" {
+		const (
+			readinessSourceRatePerSecond = 20.0
+			readinessSourceBurst         = 60.0
+			readinessRatePerSecond       = 2.0
+			readinessBurst               = 6.0
+		)
+		providerID := strings.TrimSpace(r.URL.Query().Get("provider_id"))
+		if len(providerID) > 128 {
+			providerID = "invalid"
+		}
+		// Readiness is provider-scoped so independent providers behind the
+		// same NAT do not suppress each other's serving verdicts. The client
+		// IP remains part of the key to bound arbitrary cross-source probing.
+		providerKey := key + "\x00readiness\x00" + providerID
+		bucket, ok := s.poolReadinessLimiters[providerKey]
+		if !ok {
+			bucket = receiptKeysBucket{tokens: readinessBurst, last: now}
+		}
+		if elapsed := now.Sub(bucket.last).Seconds(); elapsed > 0 {
+			bucket.tokens = math.Min(readinessBurst, bucket.tokens+elapsed*readinessRatePerSecond)
+			bucket.last = now
+		}
+		if bucket.tokens < 1 {
+			// A noisy provider cannot consume the shared NAT allowance once its
+			// own fair-share bucket is exhausted.
+			s.poolReadinessLimiters[providerKey] = bucket
+			return false
+		}
+
+		// Bound the aggregate work and provider-bucket cardinality that one
+		// source can create by rotating attacker-controlled provider IDs. Keep
+		// both debits transactional: a source rejection does not create or
+		// consume a new provider bucket.
+		sourceKey := key + "\x00readiness-source"
+		sourceBucket, ok := s.poolReadinessSources[sourceKey]
+		if !ok {
+			sourceBucket = receiptKeysBucket{tokens: readinessSourceBurst, last: now}
+		}
+		if elapsed := now.Sub(sourceBucket.last).Seconds(); elapsed > 0 {
+			sourceBucket.tokens = math.Min(readinessSourceBurst, sourceBucket.tokens+elapsed*readinessSourceRatePerSecond)
+			sourceBucket.last = now
+		}
+		if sourceBucket.tokens < 1 {
+			s.poolReadinessSources[sourceKey] = sourceBucket
+			return false
+		}
+		sourceBucket.tokens--
+		sourceBucket.last = now
+		s.poolReadinessSources[sourceKey] = sourceBucket
+		bucket.tokens--
+		bucket.last = now
+		s.poolReadinessLimiters[providerKey] = bucket
+		s.evictPoolCheckEntries(now)
+		return true
+	}
 	if prev, ok := s.poolCheckLast[key]; ok {
 		if now.Sub(prev) < time.Second {
 			return false
@@ -1228,6 +1339,44 @@ func (s *Server) evictPoolCheckEntries(now time.Time) {
 			return
 		}
 		delete(s.poolCheckLast, oldestKey)
+	}
+	for key, bucket := range s.poolReadinessSources {
+		if bucket.last.Before(cutoff) {
+			delete(s.poolReadinessSources, key)
+		}
+	}
+	for len(s.poolReadinessSources) > s.poolCheckMaxEntries {
+		var oldestKey string
+		var oldest time.Time
+		for key, bucket := range s.poolReadinessSources {
+			if oldestKey == "" || bucket.last.Before(oldest) {
+				oldestKey = key
+				oldest = bucket.last
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(s.poolReadinessSources, oldestKey)
+	}
+	for key, bucket := range s.poolReadinessLimiters {
+		if bucket.last.Before(cutoff) {
+			delete(s.poolReadinessLimiters, key)
+		}
+	}
+	for len(s.poolReadinessLimiters) > s.poolCheckMaxEntries {
+		var oldestKey string
+		var oldest time.Time
+		for key, bucket := range s.poolReadinessLimiters {
+			if oldestKey == "" || bucket.last.Before(oldest) {
+				oldestKey = key
+				oldest = bucket.last
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(s.poolReadinessLimiters, oldestKey)
 	}
 }
 

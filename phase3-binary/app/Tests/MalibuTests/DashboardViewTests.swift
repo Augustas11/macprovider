@@ -6,6 +6,7 @@ final class DashboardViewTests: XCTestCase {
         var snapshot = AgentSnapshot.empty
         snapshot.state = .serving
         snapshot.coordinatorConnected = true
+        snapshot.networkState = "buyer_serving"
 
         XCTAssertEqual(AgentSnapshotPresenter.modelLine(snapshot), "Connected")
         XCTAssertTrue(AgentSnapshotPresenter.requestsLine(snapshot).contains("0 today"))

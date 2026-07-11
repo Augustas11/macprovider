@@ -26,6 +26,17 @@
 #                                 primary deploy — issue #244 root cause).
 #   FORCE_RESTART    default: 0   bypass connected-provider guard at step 1c/6c
 #   STRICT_PROVENANCE default: 0  fail if /healthz lacks `version` field
+#   CATALOG_CANARY_PROVIDER_ID required for production deploys. The provider
+#                    must reconnect after restart and pass authenticated
+#                    compatibility admission through /v1/pool/check before commit.
+#   CATALOG_CANARY_AUTH_TOKEN required for production deploys. Use the
+#                    coordinator operator key or gateway service token.
+#   CATALOG_CANARY_SSH_TARGET required for production deploys. SSH target for
+#                    the operator-controlled canary Mac (for example user@host).
+#   CATALOG_CANARY_SSH_KEY default: ~/.ssh/macprovider_canary_ed25519
+#                    Key used only to read exact installed catalog bytes.
+#   CATALOG_CANARY_INSTALL_DIR default: macprovider/catalog-release
+#                    Catalog path relative to the canary user's home.
 #   --dry-run-local  developer-only: run the old local-config C2 check using
 #                    GATEWAY_CONFIG and exit before any SSH mutation.
 #   GATEWAY_CONFIG   used only with --dry-run-local. Production deploys validate
@@ -91,7 +102,13 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
 VPS_HOST="${VPS_HOST:-159.223.165.194}"
 VPS_USER="${VPS_USER:-root}"
 DOMAIN="${DOMAIN:-coordinator.streamvc.live}"
+STATS_DOMAIN="${STATS_DOMAIN:-stats.streamvc.live}"
 EMAIL="${EMAIL:-augstar@gmail.com}"
+CATALOG_CANARY_PROVIDER_ID="${CATALOG_CANARY_PROVIDER_ID:-}"
+CATALOG_CANARY_AUTH_TOKEN="${CATALOG_CANARY_AUTH_TOKEN:-}"
+CATALOG_CANARY_SSH_TARGET="${CATALOG_CANARY_SSH_TARGET:-}"
+CATALOG_CANARY_SSH_KEY="${CATALOG_CANARY_SSH_KEY:-$HOME/.ssh/macprovider_canary_ed25519}"
+CATALOG_CANARY_INSTALL_DIR="${CATALOG_CANARY_INSTALL_DIR:-macprovider/catalog-release}"
 
 # Issue #244 R1 SEC HIGH-1 / CODE MED-2 / ARCH HIGH-2 — validate operator-
 # overridable values up front so they cannot inject shell metacharacters
@@ -114,6 +131,30 @@ _validate_dns_name "${STATS_DOMAIN:-stats.streamvc.live}" STATS_DOMAIN
 if ! printf '%s' "$EMAIL" | grep -Eq '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
   echo "aborting deploy: EMAIL is not a valid address: '$EMAIL'" >&2
   exit 1
+fi
+if [ "$DRY_RUN_LOCAL" != "1" ]; then
+  if ! printf '%s' "$CATALOG_CANARY_PROVIDER_ID" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
+    echo "aborting deploy: CATALOG_CANARY_PROVIDER_ID is required and must be a safe provider ID" >&2
+    echo "  Select a provider expected to reconnect after restart; deployment commits only after pool admission." >&2
+    exit 1
+  fi
+  if ! printf '%s' "$CATALOG_CANARY_AUTH_TOKEN" | grep -Eq '^[A-Za-z0-9._~-]{32,512}$'; then
+    echo "aborting deploy: CATALOG_CANARY_AUTH_TOKEN is required and must be a safe 32-512 character bearer token" >&2
+    exit 1
+  fi
+  if ! printf '%s' "$CATALOG_CANARY_SSH_TARGET" | grep -Eq '^([A-Za-z_][A-Za-z0-9._-]*@)?[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$'; then
+    echo "aborting deploy: CATALOG_CANARY_SSH_TARGET is required and must be a safe SSH target" >&2
+    exit 1
+  fi
+  if [ ! -f "$CATALOG_CANARY_SSH_KEY" ] || [ ! -r "$CATALOG_CANARY_SSH_KEY" ]; then
+    echo "aborting deploy: CATALOG_CANARY_SSH_KEY is not a readable regular file: $CATALOG_CANARY_SSH_KEY" >&2
+    exit 1
+  fi
+  if ! printf '%s' "$CATALOG_CANARY_INSTALL_DIR" | grep -Eq '^[A-Za-z0-9._/-]+$' ||
+     printf '%s' "/$CATALOG_CANARY_INSTALL_DIR/" | grep -Eq '/\.\.?/'; then
+    echo "aborting deploy: CATALOG_CANARY_INSTALL_DIR must be a safe path without parent traversal" >&2
+    exit 1
+  fi
 fi
 
 # R1 ARCH HIGH-2 — the baked-in vhost templates hardcode
@@ -146,6 +187,10 @@ STATS_BILLING_MIRROR_BINARY="$DIST_DIR/stats-billing-mirror-linux-amd64"
 STATS_HARDWARE_VERIFIER_BINARY="$DIST_DIR/stats-hardware-verifier-linux-amd64"
 CONFIG="$DIST_DIR/coordinator.yaml"
 SERVICE="$DIST_DIR/macprovider-coordinator.service"
+DEPLOY_RECOVER="$DIST_DIR/coordinator-deploy-recover.sh"
+DEPLOY_GUARD="$DIST_DIR/systemd/macprovider-coordinator-deploy-guard.conf"
+DEPLOY_RECOVERY_SERVICE="$DIST_DIR/systemd/macprovider-coordinator-deploy-recovery.service"
+DEPLOY_WATCHDOG_SERVICE="$DIST_DIR/systemd/macprovider-coordinator-deploy-watchdog.service"
 STATS_INVENTORY_SERVICE="$DIST_DIR/stats-inventory-sync.service"
 STATS_INVENTORY_TIMER="$DIST_DIR/stats-inventory-sync.timer"
 STATS_BILLING_MIRROR_SERVICE="$DIST_DIR/stats-billing-mirror.service"
@@ -184,6 +229,35 @@ STATIC_DEMAND_JSON="$STATIC_FEEDS_DIR/demand-rank.json"
 STATIC_DEMAND_SIG="$STATIC_FEEDS_DIR/demand-rank.json.sig"
 STATIC_AUTOTUNE_JSON="$STATIC_FEEDS_DIR/autotune-candidates.json"
 STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
+AUTOTUNE_RELEASE_MANIFEST="$DIST_DIR/../../phase3-binary/catalog/autotune/release.json"
+AUTOTUNE_TRUSTED_KEYS="$DIST_DIR/../../phase3-binary/catalog/autotune/trusted-keys.json"
+AUTOTUNE_RELEASE_VERIFY="$DIST_DIR/../../scripts/catalog-release.py"
+
+python3 "$AUTOTUNE_RELEASE_VERIFY" verify
+AUTOTUNE_RELEASE_ID="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["release_id"])
+PY
+)"
+AUTOTUNE_POLICY_VERSION="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["policy_version"])
+PY
+)"
+AUTOTUNE_CANDIDATE_SHA256="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]["autotune-candidates.json"]["sha256"])
+PY
+)"
+AUTOTUNE_CANDIDATE_SIGNER_KEY_ID="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" <<'PY'
+import json, pathlib, sys
+print(json.loads(pathlib.Path(sys.argv[1]).read_text())["feeds"]["autotune-candidates.json"]["signer_key_id"])
+PY
+)"
+if ! printf '%s' "$AUTOTUNE_RELEASE_ID" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
+  echo "invalid autotune release_id: $AUTOTUNE_RELEASE_ID" >&2
+  exit 1
+fi
 
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
 # FR-C9.4 strict-reject path still requires `coordinator-cli
@@ -192,12 +266,13 @@ STATIC_AUTOTUNE_SIG="$STATIC_FEEDS_DIR/autotune-candidates.json.sig"
 # operator forgot to run build-linux.sh after the M2 update that
 # extended it. Fail closed — do NOT silently deploy with a stale CLI.
 for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRROR_BINARY" "$STATS_HARDWARE_VERIFIER_BINARY" \
-         "$CONFIG" "$SERVICE" "$STATS_INVENTORY_SERVICE" "$STATS_INVENTORY_TIMER" \
+         "$CONFIG" "$SERVICE" "$DEPLOY_RECOVER" "$DEPLOY_GUARD" "$DEPLOY_RECOVERY_SERVICE" "$DEPLOY_WATCHDOG_SERVICE" "$STATS_INVENTORY_SERVICE" "$STATS_INVENTORY_TIMER" \
          "$STATS_BILLING_MIRROR_SERVICE" "$STATS_BILLING_MIRROR_TIMER" \
          "$STATS_HARDWARE_VERIFIER_SERVICE" "$STATS_HARDWARE_VERIFIER_TIMER" "$NGINX_SITE" \
          "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE" \
          "$STATIC_DEMAND_JSON" "$STATIC_DEMAND_SIG" \
-         "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG"; do
+         "$STATIC_AUTOTUNE_JSON" "$STATIC_AUTOTUNE_SIG" \
+         "$AUTOTUNE_RELEASE_MANIFEST" "$AUTOTUNE_TRUSTED_KEYS" "$AUTOTUNE_RELEASE_VERIFY"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
 
@@ -236,8 +311,8 @@ _assert_vhost_template() {
 _assert_vhost_template "$NGINX_SITE"       "$DOMAIN"
 _assert_vhost_template "$NGINX_STATS_SITE" "${STATS_DOMAIN:-stats.streamvc.live}"
 
-SSH="ssh -i $SSH_KEY -o ConnectTimeout=10 -p 22 $VPS_USER@$VPS_HOST"
-SCP="scp -i $SSH_KEY -P 22"
+SSH="ssh -i $SSH_KEY -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -p 22 $VPS_USER@$VPS_HOST"
+SCP="scp -i $SSH_KEY -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -P 22"
 
 log() { printf "\n[deploy] %s\n" "$*"; }
 
@@ -304,6 +379,8 @@ fi
 # behind. Both variables are guarded with `:-` so the trap is a
 # no-op when they are unset.
 trap '
+  _deploy_rc=$?
+  _final_rc=$_deploy_rc
   rm -f "${TMP_CATALOG_PUBKEY:-}"
   rm -f "${CATALOG_SMOKE_TMP:-}"
   rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
@@ -311,7 +388,159 @@ trap '
   if [ -n "${DEPLOY_TMP:-}" ]; then
     $SSH "rm -rf $DEPLOY_TMP" 2>/dev/null || true
   fi
+  if [ -n "${RECOVERY_DEPLOY_TMP:-}" ]; then
+    $SSH "rm -rf $RECOVERY_DEPLOY_TMP" 2>/dev/null || true
+  fi
+  if [ "${DEPLOY_LOCK_HELD:-0}" = "1" ]; then
+    touch "${DEPLOY_LOCK_RELEASE_SENTINEL:-}"
+    exec 9>&-
+    _lock_rc=0
+    wait "${DEPLOY_LOCK_PID:-}" || _lock_rc=$?
+    if [ "$_deploy_rc" -ne 0 ] && [ "${COORDINATOR_DEPLOY_ARMED:-0}" = "1" ]; then
+      _recovery_rc=0
+      $SSH '\''
+        _wait=0
+        while [ "$(systemctl show -p ActiveState --value macprovider-coordinator-deploy-watchdog.service 2>/dev/null || true)" = activating ]; do
+          _wait=$((_wait + 1))
+          [ "$_wait" -lt 600 ] || exit 1
+          sleep 0.25
+        done
+        ! systemctl is-failed --quiet macprovider-coordinator-deploy-watchdog.service
+        test ! -d /opt/macprovider/.coordinator-deploy-rollback
+      '\'' || _recovery_rc=$?
+      if [ "$_lock_rc" -eq 0 ] && [ "$_recovery_rc" -eq 0 ]; then
+        echo "coordinator deploy rollback completed" >&2
+      else
+        cat "${DEPLOY_LOCK_STATUS:-/dev/null}" >&2 2>/dev/null || true
+        echo "CRITICAL: coordinator deploy rollback failed; snapshot preserved at /opt/macprovider/.coordinator-deploy-rollback" >&2
+        _final_rc=70
+      fi
+    fi
+  fi
+  rm -rf "${DEPLOY_LOCK_DIR:-}"
+  exit "$_final_rc"
 ' EXIT
+trap 'exit 71' HUP INT TERM
+
+if [ "$DRY_RUN_LOCAL" != "1" ]; then
+# Acquire the Pearl lease before any live config read. The remote holder owns
+# flock until the controller closes its FIFO. A remote systemd watchdog waits
+# behind this lease and a per-command operation lock, so controller loss cannot
+# race rollback against a still-running mutation SSH session.
+DEPLOY_LOCK_DIR=$(umask 077 && mktemp -d -t macprovider-deploy-lock.XXXXXXXX)
+DEPLOY_LOCK_FIFO="$DEPLOY_LOCK_DIR/stdin"
+DEPLOY_LOCK_STATUS="$DEPLOY_LOCK_DIR/status"
+DEPLOY_LOCK_WATCHDOG_ARMED="$DEPLOY_LOCK_DIR/watchdog-armed"
+DEPLOY_LOCK_RELEASE_SENTINEL="$DEPLOY_LOCK_DIR/release-requested"
+DEPLOY_CONTROLLER_PID=$$
+mkfifo -m 600 "$DEPLOY_LOCK_FIFO"
+touch "$DEPLOY_LOCK_WATCHDOG_ARMED"
+(
+  set +e
+  $SSH "command -v flock >/dev/null 2>&1 || { echo 'Pearl is missing flock' >&2; exit 127; }
+python3 -c '
+import os, stat
+
+nofollow = getattr(os, \"O_NOFOLLOW\", 0)
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | nofollow
+opt_fd = os.open(\"/opt\", directory_flags)
+root_fd = None
+global_lock_fd = None
+try:
+    opt_info = os.fstat(opt_fd)
+    if opt_info.st_uid != 0 or opt_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit(\"unsafe /opt ownership or permissions\")
+    try:
+        os.mkdir(\"macprovider\", 0o700, dir_fd=opt_fd)
+    except FileExistsError:
+        pass
+    root_fd = os.open(\"macprovider\", directory_flags, dir_fd=opt_fd)
+    root_info = os.fstat(root_fd)
+    if root_info.st_uid != 0 or root_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit(\"unsafe /opt/macprovider ownership or permissions\")
+    for name in (\".coordinator-deploy.lock\", \".coordinator-deploy-operation.lock\"):
+        try:
+            fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | nofollow, 0o600, dir_fd=root_fd)
+        except FileExistsError:
+            fd = os.open(name, os.O_RDWR | nofollow, dir_fd=root_fd)
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0
+                or info.st_gid != 0
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_nlink != 1
+            ):
+                raise SystemExit(\"unsafe coordinator deploy lock: \" + name)
+        finally:
+            os.close(fd)
+    global_lock_fd = os.open(
+        \"/run/lock/macprovider-pearl-updater.lock\",
+        os.O_RDWR | os.O_CREAT | nofollow,
+        0o600,
+    )
+    global_info = os.fstat(global_lock_fd)
+    if (
+        not stat.S_ISREG(global_info.st_mode)
+        or global_info.st_uid != 0
+        or global_info.st_gid != 0
+        or stat.S_IMODE(global_info.st_mode) != 0o600
+        or global_info.st_nlink != 1
+    ):
+        raise SystemExit(\"unsafe global Pearl deployment lock\")
+finally:
+    if global_lock_fd is not None:
+        os.close(global_lock_fd)
+    if root_fd is not None:
+        os.close(root_fd)
+    os.close(opt_fd)
+' || exit \$?
+flock -n /run/lock/macprovider-pearl-updater.lock flock -n /opt/macprovider/.coordinator-deploy.lock sh -c 'printf \"%s\\n\" LOCKED; cat >/dev/null'"
+  _holder_rc=$?
+  if [ -f "$DEPLOY_LOCK_WATCHDOG_ARMED" ] && [ ! -f "$DEPLOY_LOCK_RELEASE_SENTINEL" ]; then
+    kill -TERM "$DEPLOY_CONTROLLER_PID" 2>/dev/null || true
+  fi
+  exit "$_holder_rc"
+) <"$DEPLOY_LOCK_FIFO" >"$DEPLOY_LOCK_STATUS" 2>&1 &
+DEPLOY_LOCK_PID=$!
+exec 9>"$DEPLOY_LOCK_FIFO"
+DEPLOY_LOCK_HELD=1
+_lock_wait=0
+while ! grep -qx LOCKED "$DEPLOY_LOCK_STATUS" 2>/dev/null; do
+  if ! kill -0 "$DEPLOY_LOCK_PID" 2>/dev/null; then
+    cat "$DEPLOY_LOCK_STATUS" >&2 || true
+    echo "aborting deploy: another coordinator deploy holds the Pearl lock" >&2
+    exit 11
+  fi
+  _lock_wait=$((_lock_wait + 1))
+  if [ "$_lock_wait" -ge 100 ]; then
+    echo "aborting deploy: timed out acquiring the Pearl deploy lock" >&2
+    exit 11
+  fi
+  sleep 0.1
+done
+if ! kill -0 "$DEPLOY_LOCK_PID" 2>/dev/null; then
+  cat "$DEPLOY_LOCK_STATUS" >&2 || true
+  echo "aborting deploy: Pearl deploy lock was lost after acquisition" >&2
+  exit 11
+fi
+
+# Recover the prior complete snapshot before using any live state as input to
+# config drift checks or a new rollback baseline.
+if $SSH 'test -d /opt/macprovider/.coordinator-deploy-rollback'; then
+  log "step 0a/9: recover interrupted coordinator deploy"
+  if ! $SSH 'test -x /opt/macprovider/coordinator-deploy-recover'; then
+    echo "aborting deploy: rollback snapshot exists but recovery helper is missing" >&2
+    echo "  Preserve /opt/macprovider/.coordinator-deploy-rollback and recover it manually." >&2
+    exit 70
+  fi
+  $SSH /opt/macprovider/coordinator-deploy-recover --recover-under-global || {
+    echo "aborting deploy: interrupted coordinator release could not be recovered; snapshot preserved" >&2
+    exit 70
+  }
+fi
+fi
 
 log "step 0/9: pre-deploy config-drift + C2 cross-check"
 # Fail closed before touching the VPS if the config to be deployed has a
@@ -425,6 +654,45 @@ fi
 log "step 1/9: confirm SSH + DNS"
 $SSH 'hostname && uptime' >/dev/null
 dig +short "$DOMAIN" | grep -q "$VPS_HOST" || { echo "DNS for $DOMAIN does not resolve to $VPS_HOST yet" >&2; exit 1; }
+
+# Install the durable pre-start recovery guard before any release file can be
+# replaced. It rolls back an armed transaction on boot/restart whenever the
+# controller-held deploy lock is no longer present.
+RECOVERY_DEPLOY_TMP=$($SSH 'umask 077 && mktemp -d -t macprovider-recovery.XXXXXXXX')
+case "$RECOVERY_DEPLOY_TMP" in
+  /tmp/macprovider-recovery.*) ;;
+  *) echo "aborting deploy: unexpected recovery staging path: $RECOVERY_DEPLOY_TMP" >&2; exit 1 ;;
+esac
+$SCP "$DEPLOY_RECOVER" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/coordinator-deploy-recover"
+$SCP "$DEPLOY_GUARD" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/10-deploy-transaction-guard.conf"
+$SCP "$DEPLOY_RECOVERY_SERVICE" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-recovery.service"
+$SCP "$DEPLOY_WATCHDOG_SERVICE" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-watchdog.service"
+$SSH "set -e
+  _helper_next=/opt/macprovider/coordinator-deploy-recover.next.\$\$
+  _unit_next=/etc/systemd/system/macprovider-coordinator-deploy-recovery.service.next.\$\$
+  _watchdog_next=/etc/systemd/system/macprovider-coordinator-deploy-watchdog.service.next.\$\$
+  install -d -o root -g root -m 0755 /etc/systemd/system/macprovider-coordinator.service.d
+  _guard_next=/etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf.next.\$\$
+  trap 'rm -f \"\$_helper_next\" \"\$_unit_next\" \"\$_watchdog_next\" \"\$_guard_next\"' EXIT HUP INT TERM
+  install -o root -g root -m 0750 $RECOVERY_DEPLOY_TMP/coordinator-deploy-recover \"\$_helper_next\"
+  mv -Tf \"\$_helper_next\" /opt/macprovider/coordinator-deploy-recover
+  install -o root -g root -m 0644 $RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-recovery.service \"\$_unit_next\"
+  mv -Tf \"\$_unit_next\" /etc/systemd/system/macprovider-coordinator-deploy-recovery.service
+  install -o root -g root -m 0644 $RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-watchdog.service \"\$_watchdog_next\"
+  mv -Tf \"\$_watchdog_next\" /etc/systemd/system/macprovider-coordinator-deploy-watchdog.service
+  install -o root -g root -m 0644 $RECOVERY_DEPLOY_TMP/10-deploy-transaction-guard.conf \"\$_guard_next\"
+  mv -Tf \"\$_guard_next\" /etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf
+  systemctl daemon-reload
+  systemctl reset-failed macprovider-coordinator-deploy-watchdog.service 2>/dev/null || true
+  systemctl start --no-block macprovider-coordinator-deploy-watchdog.service
+  _watchdog_state=\$(systemctl show -p ActiveState --value macprovider-coordinator-deploy-watchdog.service)
+  case \"\$_watchdog_state\" in
+    active|activating) ;;
+    *) echo \"coordinator deploy watchdog failed to arm: \$_watchdog_state\" >&2; exit 1 ;;
+  esac
+  rm -rf $RECOVERY_DEPLOY_TMP
+  trap - EXIT HUP INT TERM"
+RECOVERY_DEPLOY_TMP=""
 
 # Previous-deploy bypass tombstone — if the last deploy used
 # FORCE_RESTART=1 (or got manually bypassed past the connected-provider
@@ -1018,20 +1286,175 @@ REMOTE_TCP_SYSCTL
   esac
 fi
 
+BACKUP_TS=$(date -u +%Y%m%dT%H%M%SZ)
 log "step 4/9: upload binary + config + nginx site (with rollback snapshot)"
-# Backup the live binary BEFORE the install so a rollback is one mv away.
-# Use install(1) instead of cp -p so ownership (#244 R4+R5: root:macprovider
-# 0750) is set explicitly per-invocation rather than inherited from the
-# source — protects against drift if the .prev was ever rebuilt from a
-# snapshot under different rules.
-# See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the swap-back steps.
-$SSH 'if [ -x /opt/macprovider/coordinator ]; then
-        # R5 SEC MED: ownership matches the deploy artifacts — root:macprovider 0750.
-        install -o root -g macprovider -m 0750 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
-        echo "  snapshot saved at /opt/macprovider/coordinator.prev"
-      else
-        echo "  no live binary at /opt/macprovider/coordinator — first deploy"
-      fi'
+# Arm one coordinator release transaction before replacing any live file. The
+# late connected-provider safeguard can still refuse the restart after upload;
+# in that case the EXIT trap restores every release artifact touched after this
+# boundary: coordinator/CLI/sidecar binaries, unit files and enablement links,
+# nginx files, request-log ACLs, config, and catalog pointers.
+$SSH "set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
+  _rollback=/opt/macprovider/.coordinator-deploy-rollback
+  _rollback_stage=\$_rollback.stage.\$\$
+  umask 077
+  if [ -e \"\$_rollback\" ] || [ -L \"\$_rollback\" ]; then
+    echo 'coordinator deploy transaction already exists; refusing to overwrite it' >&2
+    exit 1
+  fi
+  rm -rf \"\$_rollback_stage\"
+  mkdir \"\$_rollback_stage\"
+  trap 'rm -rf \"\$_rollback_stage\"' EXIT HUP INT TERM
+  chown root:root \"\$_rollback_stage\"
+  chmod 0700 \"\$_rollback_stage\"
+  snapshot_node() {
+    _source=\"\$1\"
+    _snapshot=\"\$2\"
+    _marker=\"\$3\"
+    if [ -e \"\$_source\" ] || [ -L \"\$_source\" ]; then
+      if [ ! -f \"\$_source\" ] && [ ! -L \"\$_source\" ]; then
+        echo \"unsafe rollback source: \$_source\" >&2
+        exit 1
+      fi
+      cp -a \"\$_source\" \"\$_rollback_stage/\$_snapshot\"
+      touch \"\$_rollback_stage/\$_marker\"
+    fi
+  }
+  snapshot_active() {
+    if systemctl is-active --quiet \"\$1\"; then
+      touch \"\$_rollback_stage/\$2\"
+    fi
+  }
+  snapshot_acl() {
+    _source=\"\$1\"
+    _snapshot=\"\$2\"
+    _marker=\"\$3\"
+    if [ -e \"\$_source\" ]; then
+      getfacl -p \"\$_source\" > \"\$_rollback_stage/\$_snapshot\"
+      touch \"\$_rollback_stage/\$_marker\"
+    fi
+  }
+  snapshot_node /opt/macprovider/coordinator.prev coordinator.prev had-coordinator-prev
+  if [ -x /opt/macprovider/coordinator ]; then
+    cp -p /opt/macprovider/coordinator \"\$_rollback_stage/coordinator\"
+    touch \"\$_rollback_stage/had-coordinator\"
+  fi
+  snapshot_node /opt/macprovider/coordinator-cli coordinator-cli had-coordinator-cli
+  snapshot_node /opt/macprovider/coordinator.yaml.prev coordinator.yaml.prev had-config-prev
+  printf '%s' 'coordinator.yaml.bak-$BACKUP_TS' > \"\$_rollback_stage/config-backup-name\"
+  snapshot_node /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS coordinator-dated-backup had-config-dated-backup
+  snapshot_node /opt/macprovider-stats/stats-inventory-sync stats-inventory-sync had-stats-inventory-binary
+  snapshot_node /opt/macprovider-stats/stats-billing-mirror stats-billing-mirror had-stats-billing-binary
+  snapshot_node /opt/macprovider-stats/stats-hardware-verifier stats-hardware-verifier had-stats-hardware-binary
+  if [ -f /opt/macprovider/coordinator.yaml ]; then
+    cp -p /opt/macprovider/coordinator.yaml \"\$_rollback_stage/coordinator.yaml\"
+    touch \"\$_rollback_stage/had-config\"
+  fi
+  if [ -L /opt/macprovider/tier2-catalog.json ] || { [ -e /opt/macprovider/tier2-catalog.json ] && [ ! -f /opt/macprovider/tier2-catalog.json ]; }; then
+    echo 'unsafe existing Tier-2 catalog path' >&2
+    exit 1
+  fi
+  if [ -f /opt/macprovider/tier2-catalog.json ]; then
+    cp -p /opt/macprovider/tier2-catalog.json \"\$_rollback_stage/tier2-catalog.json\"
+    touch \"\$_rollback_stage/had-tier2-catalog\"
+  fi
+  if [ -e /etc/systemd/system/macprovider-coordinator.service ] || [ -L /etc/systemd/system/macprovider-coordinator.service ]; then
+    cp -a /etc/systemd/system/macprovider-coordinator.service \"\$_rollback_stage/macprovider-coordinator.service\"
+    touch \"\$_rollback_stage/had-service-unit\"
+  fi
+  snapshot_node /etc/systemd/system/stats-inventory-sync.service stats-inventory-sync.service had-stats-inventory-service
+  snapshot_node /etc/systemd/system/stats-inventory-sync.timer stats-inventory-sync.timer had-stats-inventory-timer
+  snapshot_node /etc/systemd/system/stats-billing-mirror.service stats-billing-mirror.service had-stats-billing-service
+  snapshot_node /etc/systemd/system/stats-billing-mirror.timer stats-billing-mirror.timer had-stats-billing-timer
+  snapshot_node /etc/systemd/system/stats-hardware-verifier.service stats-hardware-verifier.service had-stats-hardware-service
+  snapshot_node /etc/systemd/system/stats-hardware-verifier.timer stats-hardware-verifier.timer had-stats-hardware-timer
+  snapshot_node /etc/systemd/system/timers.target.wants/stats-inventory-sync.timer stats-inventory-sync.wants had-stats-inventory-wants
+  snapshot_node /etc/systemd/system/timers.target.wants/stats-billing-mirror.timer stats-billing-mirror.wants had-stats-billing-wants
+  snapshot_node /etc/systemd/system/timers.target.wants/stats-hardware-verifier.timer stats-hardware-verifier.wants had-stats-hardware-wants
+  snapshot_active stats-inventory-sync.timer stats-inventory-timer-was-active
+  snapshot_active stats-inventory-sync.service stats-inventory-service-was-active
+  snapshot_active stats-billing-mirror.timer stats-billing-timer-was-active
+  snapshot_active stats-billing-mirror.service stats-billing-service-was-active
+  snapshot_active stats-hardware-verifier.timer stats-hardware-timer-was-active
+  snapshot_active stats-hardware-verifier.service stats-hardware-service-was-active
+
+  snapshot_node /etc/nginx/conf.d/stats-shared.conf stats-shared.conf had-nginx-stats-shared
+  snapshot_node /etc/nginx/conf.d/stats-security-headers.conf stats-security-headers.conf had-nginx-stats-security-headers
+  snapshot_node /etc/nginx/conf.d/cors-429.conf cors-429.conf had-nginx-stats-cors-429
+  snapshot_node /etc/nginx/conf.d/stats-proxy-public.conf stats-proxy-public.conf had-nginx-stats-proxy-public
+  snapshot_node /etc/nginx/conf.d/stats-proxy-partner.conf stats-proxy-partner.conf had-nginx-stats-proxy-partner
+  snapshot_node /etc/nginx/sites-available/$DOMAIN nginx-coordinator.site had-nginx-coordinator-site
+  snapshot_node /etc/nginx/sites-available/$STATS_DOMAIN nginx-stats.site had-nginx-stats-site
+  snapshot_node /etc/nginx/sites-enabled/$DOMAIN nginx-coordinator.enabled had-nginx-coordinator-enabled
+  snapshot_node /etc/nginx/sites-enabled/$STATS_DOMAIN nginx-stats.enabled had-nginx-stats-enabled
+  snapshot_node /etc/nginx/sites-available/$DOMAIN.full nginx-coordinator.full had-nginx-coordinator-full
+
+  if command -v setfacl >/dev/null 2>&1 && command -v getfacl >/dev/null 2>&1; then
+    snapshot_acl /var/lib/macprovider request-log-dir.acl had-request-log-dir-acl
+    snapshot_acl /var/lib/macprovider/request-log.sqlite request-log-db.acl had-request-log-db-acl
+    snapshot_acl /var/lib/macprovider/request-log.sqlite-wal request-log-wal.acl had-request-log-wal-acl
+    snapshot_acl /var/lib/macprovider/request-log.sqlite-shm request-log-shm.acl had-request-log-shm-acl
+  fi
+  if [ -e /etc/systemd/system/multi-user.target.wants/macprovider-coordinator.service ] || [ -L /etc/systemd/system/multi-user.target.wants/macprovider-coordinator.service ]; then
+    cp -a /etc/systemd/system/multi-user.target.wants/macprovider-coordinator.service \"\$_rollback_stage/macprovider-coordinator.wants\"
+    touch \"\$_rollback_stage/had-wants-link\"
+  fi
+  if [ -e /opt/macprovider/coordinator-deploy-recover ] || [ -L /opt/macprovider/coordinator-deploy-recover ]; then
+    cp -a /opt/macprovider/coordinator-deploy-recover \"\$_rollback_stage/coordinator-deploy-recover\"
+    touch \"\$_rollback_stage/had-recovery-helper\"
+  fi
+  if [ -e /etc/systemd/system/macprovider-coordinator-deploy-recovery.service ] || [ -L /etc/systemd/system/macprovider-coordinator-deploy-recovery.service ]; then
+    cp -a /etc/systemd/system/macprovider-coordinator-deploy-recovery.service \"\$_rollback_stage/macprovider-coordinator-deploy-recovery.service\"
+    touch \"\$_rollback_stage/had-recovery-unit\"
+  fi
+  if [ -e /etc/systemd/system/macprovider-coordinator-deploy-watchdog.service ] || [ -L /etc/systemd/system/macprovider-coordinator-deploy-watchdog.service ]; then
+    cp -a /etc/systemd/system/macprovider-coordinator-deploy-watchdog.service \"\$_rollback_stage/macprovider-coordinator-deploy-watchdog.service\"
+    touch \"\$_rollback_stage/had-watchdog-unit\"
+  fi
+  if [ -e /etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf ] || [ -L /etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf ]; then
+    cp -a /etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf \"\$_rollback_stage/10-deploy-transaction-guard.conf\"
+    touch \"\$_rollback_stage/had-guard-dropin\"
+  fi
+  _catalog_target=\$(readlink /opt/macprovider/autotune/current 2>/dev/null || true)
+  case \"\$_catalog_target\" in
+    ''|releases/*) ;;
+    *) echo \"invalid existing autotune current target: \$_catalog_target\" >&2; exit 1 ;;
+  esac
+  printf '%s' \"\$_catalog_target\" > \"\$_rollback_stage/catalog-current-target\"
+  if [ -f /opt/macprovider/autotune/.previous-target ]; then
+    cp -p /opt/macprovider/autotune/.previous-target \"\$_rollback_stage/catalog-previous-target\"
+    touch \"\$_rollback_stage/had-previous-target\"
+  fi
+  if [ ! -d /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_ID ]; then
+    touch \"\$_rollback_stage/release-was-absent\"
+  fi
+  printf '%s' '$AUTOTUNE_RELEASE_ID' > \"\$_rollback_stage/release-id\"
+  if systemctl is-active --quiet macprovider-coordinator; then
+    touch \"\$_rollback_stage/service-was-active\"
+  fi
+  touch \"\$_rollback_stage/complete\"
+  mv \"\$_rollback_stage\" \"\$_rollback\"
+  trap - EXIT HUP INT TERM"
+COORDINATOR_DEPLOY_ARMED=1
+
+# Freeze sidecar execution for the release window. Their binaries and units are
+# transaction-owned, so allowing an old timer to fire after replacement could
+# create non-rollbackable database effects before the catalog canary passes.
+$SSH 'set -eu
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
+  for unit in stats-inventory-sync.timer stats-inventory-sync.service stats-billing-mirror.timer stats-billing-mirror.service stats-hardware-verifier.timer stats-hardware-verifier.service; do
+    load_state=$(systemctl show -p LoadState --value "$unit")
+    [ "$load_state" = not-found ] && continue
+    systemctl stop "$unit"
+    active_state=$(systemctl show -p ActiveState --value "$unit")
+    case "$active_state" in
+      inactive|failed) ;;
+      *) echo "sidecar unit did not stop: $unit state=$active_state" >&2; exit 1 ;;
+    esac
+  done
+'
 
 # Issue #244 R5 SEC CRITICAL — stage uploaded artifacts into a fresh
 # per-deploy root-owned 0700 directory instead of predictable /tmp/X
@@ -1084,6 +1507,9 @@ $SCP "$STATIC_DEMAND_JSON"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/demand-rank.json
 $SCP "$STATIC_DEMAND_SIG"      "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/demand-rank.json.sig"
 $SCP "$STATIC_AUTOTUNE_JSON"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json"
 $SCP "$STATIC_AUTOTUNE_SIG"    "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/autotune-candidates.json.sig"
+$SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
+$SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
+$SCP "$AUTOTUNE_RELEASE_VERIFY"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/catalog-release.py"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   $SCP "$CATALOG_SOURCE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
 fi
@@ -1094,8 +1520,10 @@ fi
 # remote-side backup so a bad deploy can be inspected/reverted without
 # trusting the operator's local copy. Backups live next to the live config
 # at /opt/macprovider/coordinator.yaml.bak-<UTC>.
-BACKUP_TS=$(date -u +%Y%m%dT%H%M%SZ)
-$SSH "if [ -f /opt/macprovider/coordinator.yaml ]; then
+$SSH "exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+      flock -s 8
+      if [ -f /opt/macprovider/coordinator.yaml ]; then
+        install -o root -g macprovider -m 0640 /opt/macprovider/coordinator.yaml /opt/macprovider/coordinator.yaml.prev
         install -o root -g macprovider -m 0640 /opt/macprovider/coordinator.yaml /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS
         echo '  remote-config backup saved at /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS'
       else
@@ -1103,16 +1531,23 @@ $SSH "if [ -f /opt/macprovider/coordinator.yaml ]; then
       fi"
 
 $SSH "set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
   # R5 SEC MED — deploy artifacts owned root:macprovider with group-read
   # rather than macprovider:macprovider. This prevents a compromised
   # macprovider UID from persistently rewriting its own executable /
   # config / cli. The daemon runs as macprovider; group=macprovider +
   # mode 0750 (binary/cli) and 0640 (config) give it the needed
   # read/execute access.
-  install -o root -g macprovider -m 0750 $DEPLOY_TMP/coordinator-linux-amd64 /opt/macprovider/coordinator
-  # coordinator-cli is the operator-facing token-management tool. It's
-  # invoked manually via 'sudo -u macprovider' so it does NOT get a
-  # .prev snapshot — re-deploy is the rollback.
+  # The signed Pearl updater is the sole authority for the coordinator/gateway
+  # runtime pair. This catalog/config deployment may restart that installed
+  # pair, but must not create a mixed release by replacing only coordinator.
+  if [ ! -x /opt/macprovider/coordinator ] || ! cmp -s $DEPLOY_TMP/coordinator-linux-amd64 /opt/macprovider/coordinator; then
+    echo 'refusing coordinator-only replacement: install the signed coordinator/gateway pair with macprovider-pearl-update first' >&2
+    exit 1
+  fi
+  # coordinator-cli is operator-facing, but remains part of the same release
+  # and therefore has an exact durable snapshot like the daemon binary.
   install -o root -g macprovider -m 0750 $DEPLOY_TMP/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli
   # stats-inventory-sync is an operator sidecar, not a coordinator child.
   # It runs under its own Unix identity and only receives execute access
@@ -1133,22 +1568,60 @@ $SSH "set -e
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-billing-mirror.timer /etc/systemd/system/stats-billing-mirror.timer
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-hardware-verifier.service /etc/systemd/system/stats-hardware-verifier.service
   install -o root -g root       -m 0644 $DEPLOY_TMP/stats-hardware-verifier.timer /etc/systemd/system/stats-hardware-verifier.timer
-  if command -v setfacl >/dev/null 2>&1 && [ -f /var/lib/macprovider/request-log.sqlite ]; then
-    setfacl -m u:macprovider-stats:--x /var/lib/macprovider
+  if command -v setfacl >/dev/null 2>&1 && command -v getfacl >/dev/null 2>&1 && [ -f /opt/macprovider/.coordinator-deploy-rollback/had-request-log-db-acl ]; then
+    # Mutate only objects captured at the transaction boundary. WAL/SHM files
+    # can appear while the old coordinator is still running; granting an ACL
+    # to a newly appeared, unsnapshotted file would make exact rollback
+    # impossible.
+    [ -f /opt/macprovider/.coordinator-deploy-rollback/had-request-log-dir-acl ] && setfacl -m u:macprovider-stats:--x /var/lib/macprovider
     setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite
-    [ -f /var/lib/macprovider/request-log.sqlite-wal ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite-wal
-    [ -f /var/lib/macprovider/request-log.sqlite-shm ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite-shm
+    [ -f /opt/macprovider/.coordinator-deploy-rollback/had-request-log-wal-acl ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite-wal
+    [ -f /opt/macprovider/.coordinator-deploy-rollback/had-request-log-shm-acl ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite-shm
   elif [ -f /var/lib/macprovider/request-log.sqlite ]; then
-    echo '  warning: setfacl not available; stats billing mirror will remain disabled until macprovider-stats can read request-log.sqlite'
+    echo '  warning: setfacl/getfacl not available; stats billing mirror will remain disabled until rollback-safe ACL management is available'
   fi
-  # SPEC-023 signed recommendation feeds — loaded by coordinator at startup
-  # and served on the buyer mux (/v1/demand-rank, /v1/autotune-candidates).
-  # root:macprovider 0640 so the macprovider daemon can read them.
-  install -d -o root -g macprovider -m 0750 /opt/macprovider/autotune
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json            /opt/macprovider/autotune/demand-rank.json
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json.sig        /opt/macprovider/autotune/demand-rank.json.sig
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json   /opt/macprovider/autotune/autotune-candidates.json
-  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json.sig /opt/macprovider/autotune/autotune-candidates.json.sig
+  # Stage the complete immutable catalog release. Activation happens only
+  # after the late connected-provider safeguard immediately before restart.
+  _autotune_root=/opt/macprovider/autotune
+  _autotune_release=\$_autotune_root/releases/$AUTOTUNE_RELEASE_ID
+  _autotune_lock=\$_autotune_release.lock
+  _autotune_stage=\$_autotune_root/releases/.stage-$AUTOTUNE_RELEASE_ID-\$\$
+  install -d -o root -g macprovider -m 0750 \$_autotune_root \$_autotune_root/releases
+  if ! mkdir \$_autotune_lock; then
+    echo 'catalog release staging is already in progress for $AUTOTUNE_RELEASE_ID' >&2
+    exit 1
+  fi
+  trap 'rm -rf \"\$_autotune_stage\"; rmdir \"\$_autotune_lock\" 2>/dev/null || true' EXIT
+  rm -rf \$_autotune_stage
+  install -d -o root -g macprovider -m 0750 \$_autotune_stage
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json \$_autotune_stage/demand-rank.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/demand-rank.json.sig \$_autotune_stage/demand-rank.json.sig
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json \$_autotune_stage/autotune-candidates.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/autotune-candidates.json.sig \$_autotune_stage/autotune-candidates.json.sig
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/release.json \$_autotune_stage/release.json
+  install -o root -g macprovider -m 0640 $DEPLOY_TMP/trusted-keys.json \$_autotune_stage/trusted-keys.json
+  python3 $DEPLOY_TMP/catalog-release.py verify-directory --directory \$_autotune_stage
+  sync
+  if [ -e \$_autotune_release ]; then
+    if ! diff -qr \$_autotune_stage \$_autotune_release >/dev/null; then
+      echo 'catalog release ID $AUTOTUNE_RELEASE_ID already exists with different bytes' >&2
+      exit 1
+    fi
+    rm -rf \$_autotune_stage
+  else
+    mv \$_autotune_stage \$_autotune_release
+  fi
+  python3 $DEPLOY_TMP/catalog-release.py verify-directory --directory \$_autotune_release
+  # First rollout: the new on-disk coordinator config already points at
+  # autotune/current. Establish that path as soon as the immutable release is
+  # staged so an abort before the late restart gate cannot leave the next
+  # service restart without feeds. Existing rollouts remain untouched here.
+  if [ ! -e \$_autotune_root/current ] && [ ! -L \$_autotune_root/current ]; then
+    ln -sfn releases/$AUTOTUNE_RELEASE_ID \$_autotune_root/current.bootstrap
+    mv -Tf \$_autotune_root/current.bootstrap \$_autotune_root/current
+  fi
+  rmdir \$_autotune_lock
+  trap - EXIT
 "
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   # R4: no more `install -d` on a dynamic dirname. /opt/macprovider is
@@ -1156,6 +1629,8 @@ if [ -n "$CATALOG_REMOTE_PATH" ]; then
   # into it. The destination is the hardcoded canonical path validated
   # at startup; no operator-controlled value reaches the SSH command.
   $SSH "set -e
+    exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+    flock -s 8
     install -o root -g macprovider -m 0640 $DEPLOY_TMP/tier2-catalog.json $CATALOG_REMOTE_PATH_CANONICAL
   "
 fi
@@ -1270,6 +1745,8 @@ if [ ${#DOMAINS_NEED_STUB[@]} -eq 0 ]; then
   log "  no first-time-issuance domains — skipping stub install (preserves existing vhosts)"
 else
   $SSH "set -e
+    exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+    flock -s 8
     install -d -o www-data -g www-data -m 0755 /var/www/html
     for d in ${DOMAINS_NEED_STUB[*]}; do
       cat > /etc/nginx/sites-available/\$d <<NGINX_STUB
@@ -1308,7 +1785,7 @@ if [ ${#DOMAINS_NEED_CERT[@]} -eq 0 ]; then
 else
   for d in ${DOMAINS_NEED_CERT[@]+"${DOMAINS_NEED_CERT[@]}"}; do
     log "  certbot certonly --webroot -d $d"
-    if $SSH "certbot certonly --webroot -w /var/www/html -d $d --non-interactive --agree-tos --email $EMAIL"; then
+    if $SSH "exec 8>/opt/macprovider/.coordinator-deploy-operation.lock; flock -s 8; certbot certonly --webroot -w /var/www/html -d $d --non-interactive --agree-tos --email $EMAIL"; then
       DOMAINS_ISSUED_OK+=("$d")
       log "    ok: cert issued for $d"
     else
@@ -1325,6 +1802,8 @@ pearl_tls_plan_full_tls
 log "step 6b/9: install nginx artifacts + full TLS vhost for [${DOMAINS_FULL_TLS[*]:-none}]"
 # Shared http-context snippets always go in — no cert dependency.
 $SSH "set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
   install -o root -g root -m 0644 $DEPLOY_TMP/nginx-stats-shared.conf /etc/nginx/conf.d/stats-shared.conf
   install -o root -g root -m 0644 $DEPLOY_TMP/nginx-stats-security-headers.conf /etc/nginx/conf.d/stats-security-headers.conf
   install -o root -g root -m 0644 $DEPLOY_TMP/nginx-stats-cors-429.conf /etc/nginx/conf.d/cors-429.conf
@@ -1345,6 +1824,8 @@ for d in ${DOMAINS_FULL_TLS[@]+"${DOMAINS_FULL_TLS[@]}"}; do
     *) echo "  unknown domain in DOMAINS_FULL_TLS: $d (skipping)" >&2; continue ;;
   esac
   $SSH "set -e
+    exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+    flock -s 8
     install -o root -g root -m 0644 $src /etc/nginx/sites-available/$d
     ln -sf /etc/nginx/sites-available/$d /etc/nginx/sites-enabled/$d
   "
@@ -1354,6 +1835,8 @@ done
 # from the broken-v1 deploy if present. validate + reload exactly once
 # so a single bad file aborts the batch atomically.
 $SSH "set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
   rm -rf $DEPLOY_TMP
   rm -f /etc/nginx/sites-available/$DOMAIN.full
   nginx -t
@@ -1437,41 +1920,30 @@ EOF
 fi
 log "  ok: $CONNECTED_COUNT connected providers (or FORCE_RESTART=1 set)"
 
+log "  activating verified autotune release $AUTOTUNE_RELEASE_ID"
+$SSH "set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
+  _catalog_root=/opt/macprovider/autotune
+  _previous=\$(readlink \"\$_catalog_root/current\" 2>/dev/null || true)
+  case \"\$_previous\" in
+    ''|releases/*) ;;
+    *) echo \"invalid existing autotune current target: \$_previous\" >&2; exit 1 ;;
+  esac
+  printf '%s' \"\$_previous\" > \"\$_catalog_root/.previous-target\"
+  chown root:macprovider \"\$_catalog_root/.previous-target\"
+  chmod 0640 \"\$_catalog_root/.previous-target\"
+  ln -sfn releases/$AUTOTUNE_RELEASE_ID \"\$_catalog_root/current.next\"
+  mv -Tf \"\$_catalog_root/current.next\" \"\$_catalog_root/current\"
+"
 log "step 7/9: enable + start coordinator service"
 $SSH 'set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
+  touch /opt/macprovider/.coordinator-deploy-rollback/restart-attempted
   systemctl daemon-reload
   systemctl enable macprovider-coordinator
   systemctl restart macprovider-coordinator
-  if [ -f /etc/macprovider-stats/stats-hardware-inventory.yaml ] && [ -f /etc/macprovider-stats/stats-inventory-sync.env ]; then
-    systemctl enable --now stats-inventory-sync.timer
-    if ! systemctl start stats-inventory-sync.service; then
-      echo "warning: stats-inventory-sync.service failed; leaving coordinator deploy running"
-      journalctl -u stats-inventory-sync.service -n 30 --no-pager || true
-    fi
-    systemctl is-active stats-inventory-sync.timer
-  else
-    echo "stats inventory timer not enabled: missing /etc/macprovider-stats/stats-hardware-inventory.yaml or stats-inventory-sync.env"
-  fi
-  if [ -f /etc/macprovider-stats/stats-billing-mirror.env ] && [ -f /var/lib/macprovider/request-log.sqlite ] && su -s /bin/sh -c "test -r /var/lib/macprovider/request-log.sqlite" macprovider-stats; then
-    systemctl enable --now stats-billing-mirror.timer
-    if ! systemctl start stats-billing-mirror.service; then
-      echo "warning: stats-billing-mirror.service failed; leaving coordinator deploy running"
-      journalctl -u stats-billing-mirror.service -n 30 --no-pager || true
-    fi
-    systemctl is-active stats-billing-mirror.timer
-  else
-    echo "stats billing mirror timer not enabled: missing env/sqlite source or macprovider-stats read ACL"
-  fi
-  if [ -f /etc/macprovider-stats/stats-hardware-verifier.env ]; then
-    systemctl enable --now stats-hardware-verifier.timer
-    if ! systemctl start stats-hardware-verifier.service; then
-      echo "warning: stats-hardware-verifier.service failed; leaving coordinator deploy running"
-      journalctl -u stats-hardware-verifier.service -n 30 --no-pager || true
-    fi
-    systemctl is-active stats-hardware-verifier.timer
-  else
-    echo "stats hardware verifier timer not enabled: missing /etc/macprovider-stats/stats-hardware-verifier.env"
-  fi
   sleep 3
   systemctl is-active macprovider-coordinator
   ss -tlnp | grep -E ":8443|:8444"
@@ -1558,8 +2030,8 @@ fi
 # SPEC-023 signed recommendation feeds smoke (buyer mux via nginx).
 log "  verifying coordinator can read autotune feeds as macprovider"
 $SSH "set -e
-  sudo -u macprovider test -r /opt/macprovider/autotune/autotune-candidates.json
-  sudo -u macprovider test -r /opt/macprovider/autotune/demand-rank.json
+  sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-candidates.json
+  sudo -u macprovider test -r /opt/macprovider/autotune/current/demand-rank.json
 " || {
   echo "aborting smoke: macprovider cannot read /opt/macprovider/autotune/*" >&2
   exit 1
@@ -1568,21 +2040,415 @@ STATIC_SMOKE_DIR=$(umask 077 && mktemp -d -t macprovider-autotune-probe.XXXXXXXX
   echo "aborting smoke: mktemp -d failed for autotune feed probe" >&2
   exit 1
 }
-STATIC_SMOKE_BODY="$STATIC_SMOKE_DIR/body"
-for STATIC_PATH in \
-    /v1/demand-rank \
-    /v1/demand-rank.sig \
-    /v1/autotune-candidates \
-    /v1/autotune-candidates.sig; do
+for STATIC_SPEC in \
+    "/v1/demand-rank|demand-rank.json|$STATIC_DEMAND_JSON" \
+    "/v1/demand-rank.sig|demand-rank.json.sig|$STATIC_DEMAND_SIG" \
+    "/v1/autotune-candidates|autotune-candidates.json|$STATIC_AUTOTUNE_JSON" \
+    "/v1/autotune-candidates.sig|autotune-candidates.json.sig|$STATIC_AUTOTUNE_SIG"; do
+  STATIC_PATH="${STATIC_SPEC%%|*}"
+  STATIC_REST="${STATIC_SPEC#*|}"
+  STATIC_NAME="${STATIC_REST%%|*}"
+  STATIC_EXPECTED="${STATIC_REST#*|}"
+  STATIC_SMOKE_BODY="$STATIC_SMOKE_DIR/$STATIC_NAME"
   echo "  GET https://$DOMAIN$STATIC_PATH -> expect 200"
-  : > "$STATIC_SMOKE_BODY"
   STATUS=$(curl -sS -o "$STATIC_SMOKE_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN$STATIC_PATH")
   if [ "$STATUS" != "200" ]; then
     echo "SPEC-023 autotune feed smoke failed: $STATIC_PATH status=$STATUS body=$(head -c 200 "$STATIC_SMOKE_BODY")" >&2
     exit 1
   fi
+  if ! cmp -s "$STATIC_EXPECTED" "$STATIC_SMOKE_BODY"; then
+    echo "SPEC-023 autotune feed smoke failed: $STATIC_PATH bytes differ from staged release" >&2
+    exit 1
+  fi
 done
-echo "  SPEC-023 autotune feeds OK"
+cp "$AUTOTUNE_RELEASE_MANIFEST" "$STATIC_SMOKE_DIR/release.json"
+cp "$AUTOTUNE_TRUSTED_KEYS" "$STATIC_SMOKE_DIR/trusted-keys.json"
+python3 "$AUTOTUNE_RELEASE_VERIFY" verify-directory --directory "$STATIC_SMOKE_DIR"
+AUTOTUNE_STATUS_BODY="$STATIC_SMOKE_DIR/autotune-release-status.json"
+STATUS=$(curl -sS -o "$AUTOTUNE_STATUS_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 "https://$DOMAIN/v1/autotune-release")
+if [ "$STATUS" != "200" ]; then
+  echo "SPEC-023 autotune release status failed: status=$STATUS body=$(head -c 200 "$AUTOTUNE_STATUS_BODY")" >&2
+  exit 1
+fi
+python3 - "$AUTOTUNE_STATUS_BODY" "$AUTOTUNE_RELEASE_ID" <<'PY'
+import json, sys
+status = json.load(open(sys.argv[1], encoding="utf-8"))
+if status.get("status") != "live_verified" or status.get("release_id") != sys.argv[2]:
+    raise SystemExit("coordinator autotune release metadata does not match activated release")
+for name in ("autotune_candidates", "demand_rank"):
+    feed = status.get("feeds", {}).get(name, {})
+    if len(feed.get("sha256", "")) != 64 or not feed.get("signer_key_id"):
+        raise SystemExit(f"coordinator autotune release metadata is incomplete for {name}")
+PY
+echo "  SPEC-023 autotune feeds exact-byte and signature verification OK"
+
+# A perfect catalog endpoint does not prove the exact canary process completed
+# the hello compatibility gate. First prove the live Mac process and capture its
+# assigned coordinator session; then query authenticated coordinator evidence
+# for that exact session below.
+CANARY_POOL_BODY="$STATIC_SMOKE_DIR/catalog-canary-pool.json"
+CANARY_CURL_CONFIG="$STATIC_SMOKE_DIR/catalog-canary-curl.conf"
+
+# Provider hello fields are authenticated self-report, so they are not exact
+# installation proof. Read the release bundle from the operator-controlled
+# canary Mac over host-key-checked SSH and compare every shipped catalog file
+# with the locally verified release. This makes the deployment commit depend on
+# independent canary-host custody of the exact bytes, not on replayable public
+# catalog identifiers in a provider hello.
+CANARY_INSTALLED_BODY="$STATIC_SMOKE_DIR/catalog-canary-installed.json"
+CANARY_SSH=(
+  ssh
+  -i "$CATALOG_CANARY_SSH_KEY"
+  -o BatchMode=yes
+  -o IdentitiesOnly=yes
+  -o StrictHostKeyChecking=yes
+  -o ConnectTimeout=10
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=3
+  "$CATALOG_CANARY_SSH_TARGET"
+)
+if ! "${CANARY_SSH[@]}" python3 - \
+  "$CATALOG_CANARY_INSTALL_DIR" \
+  "$CATALOG_CANARY_PROVIDER_ID" \
+  "$AUTOTUNE_RELEASE_ID" \
+  "$AUTOTUNE_POLICY_VERSION" \
+  "$AUTOTUNE_CANDIDATE_SHA256" \
+  "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" > "$CANARY_INSTALLED_BODY" <<'PY'
+import hashlib, json, os, plistlib, re, stat, subprocess, sys, urllib.request
+
+(
+    catalog_path,
+    expected_provider_id,
+    expected_release_id,
+    expected_policy_version,
+    expected_digest,
+    expected_signer,
+) = sys.argv[1:]
+home = os.path.expanduser("~")
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | nofollow
+
+def open_dir(path):
+    if os.path.isabs(path):
+        current = os.open("/", directory_flags)
+        parts = [part for part in path.split("/") if part]
+    else:
+        current = os.open(home, directory_flags)
+        parts = [part for part in path.split("/") if part]
+    try:
+        for part in parts:
+            if part in {".", ".."}:
+                raise SystemExit(f"unsafe canary path component: {part}")
+            next_fd = os.open(part, directory_flags, dir_fd=current)
+            os.close(current)
+            current = next_fd
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+def read_regular_at(directory_fd, name, limit, require_owner=True):
+    fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit(f"canary path is not a regular file: {name}")
+        if require_owner and info.st_uid != os.getuid():
+            raise SystemExit(f"canary file has unexpected owner: {name}")
+        if info.st_size > limit:
+            raise SystemExit(f"oversized canary file: {name}")
+        chunks = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        value = b"".join(chunks)
+        if len(value) > limit:
+            raise SystemExit(f"oversized canary file: {name}")
+        return value, info
+    finally:
+        os.close(fd)
+
+def open_parent_and_name(path):
+    normalized = os.path.normpath(path)
+    parent, name = os.path.split(normalized)
+    if not name or name in {".", ".."}:
+        raise SystemExit(f"unsafe canary file path: {path}")
+    return open_dir(parent or "."), name
+
+def running_text_vnode_path(pid, binary_info, expected_binary, runner=subprocess.run):
+    fields = runner(
+        ["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), "-d", "txt", "-F", "Dfin"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    ).stdout.splitlines()
+    text_device = text_inode = text_path = None
+    for field in fields:
+        if field.startswith("f"):
+            text_device = text_inode = text_path = None
+        elif field.startswith("D"):
+            try:
+                text_device = int(field[1:], 0)
+            except ValueError:
+                raise SystemExit("lsof returned an invalid text-vnode device")
+        elif field.startswith("i"):
+            try:
+                text_inode = int(field[1:])
+            except ValueError:
+                raise SystemExit("lsof returned an invalid text-vnode inode")
+        elif field.startswith("n"):
+            text_path = field[1:]
+        normalized_text_path = (
+            os.path.normpath(text_path.removesuffix(" (deleted)"))
+            if text_path is not None
+            else None
+        )
+        if (
+            text_device == binary_info.st_dev
+            and text_inode == binary_info.st_ino
+            and normalized_text_path == expected_binary
+        ):
+            return normalized_text_path
+    return None
+
+catalog_fd = open_dir(catalog_path)
+install_path = os.path.dirname(os.path.normpath(catalog_path)) or "."
+install_fd = open_dir(install_path)
+config_fd = provider_config_fd = binary_fd = None
+try:
+    provider_config_fd = open_dir(".config/macprovider")
+    provider_bytes, _ = read_regular_at(provider_config_fd, "provider_id", 1024)
+    provider_id = provider_bytes.decode("utf-8").strip()
+    if provider_id != expected_provider_id:
+        raise SystemExit(
+            f"canary provider identity mismatch: expected={expected_provider_id} actual={provider_id}"
+        )
+
+    plist_dir_fd = open_dir("Library/LaunchAgents")
+    try:
+        plist_bytes, _ = read_regular_at(
+            plist_dir_fd, "live.streamvc.macprovider.plist", 1024 * 1024
+        )
+    finally:
+        os.close(plist_dir_fd)
+    plist = plistlib.loads(plist_bytes)
+    arguments = plist.get("ProgramArguments")
+    if not isinstance(arguments, list) or len(arguments) < 4 or arguments[1:3] != ["serve", "--config"]:
+        raise SystemExit("canary provider LaunchAgent has unexpected ProgramArguments")
+
+    binary_fd = os.open("macprovider-cli", os.O_RDONLY | nofollow, dir_fd=install_fd)
+    binary_info = os.fstat(binary_fd)
+    if not stat.S_ISREG(binary_info.st_mode) or binary_info.st_uid != os.getuid() or binary_info.st_mode & 0o111 == 0:
+        raise SystemExit("canary installation binary is not a safe executable")
+    install_absolute = install_path if os.path.isabs(install_path) else os.path.join(home, install_path)
+    expected_binary = os.path.normpath(os.path.join(install_absolute, "macprovider-cli"))
+    if os.path.normpath(arguments[0]) != expected_binary:
+        raise SystemExit("canary LaunchAgent does not use the catalog installation root")
+
+    launchd = subprocess.run(
+        ["launchctl", "print", f"gui/{os.getuid()}/live.streamvc.macprovider"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    ).stdout
+    match = re.search(r"(?m)^\s*pid = ([0-9]+)\s*$", launchd)
+    if match is None:
+        raise SystemExit("canary provider LaunchAgent has no live PID")
+    pid = int(match.group(1))
+    process_path = running_text_vnode_path(pid, binary_info, expected_binary)
+    if process_path is None:
+        raise SystemExit("live canary provider text vnode is stale or not the verified installation binary")
+
+    config_fd, config_name = open_parent_and_name(arguments[3])
+    config_bytes, _ = read_regular_at(config_fd, config_name, 1024 * 1024)
+    config_text = config_bytes.decode("utf-8")
+    port_match = re.search(r'(?m)^\s*port:\s*"?([0-9]+)"?\s*(?:#.*)?$', config_text)
+    if port_match is None or not (1 <= int(port_match.group(1)) <= 65535):
+        raise SystemExit("canary provider config has no valid local status port")
+    port = int(port_match.group(1))
+    listener = subprocess.run(
+        ["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid), f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+    if str(pid) not in listener.stdout.split():
+        raise SystemExit("live canary provider PID does not own its configured status port")
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, _request, _fp, _code, _message, _headers, _new_url):
+            raise RuntimeError("canary local status redirect refused")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    with opener.open(f"http://127.0.0.1:{port}/v1/status", timeout=10) as response:
+        if response.status != 200:
+            raise SystemExit(f"canary local status returned HTTP {response.status}")
+        local_status = json.loads(response.read(1024 * 1024))
+    catalog = local_status.get("catalog")
+    coordinator = local_status.get("coordinator")
+    assigned_id = coordinator.get("session") if isinstance(coordinator, dict) else None
+    if (
+        local_status.get("provider_id") != expected_provider_id
+        or local_status.get("network_state") != "buyer_serving"
+        or not isinstance(coordinator, dict)
+        or coordinator.get("connected") is not True
+        or not isinstance(assigned_id, str)
+        or not assigned_id
+        or not isinstance(catalog, dict)
+        or catalog.get("release_id") != expected_release_id
+        or catalog.get("policy_version") != expected_policy_version
+        or catalog.get("digest") != expected_digest
+        or catalog.get("signer_key_id") != expected_signer
+        or re.fullmatch(r"[0-9a-f]{64}", str(catalog.get("row_identity", "")).lower()) is None
+    ):
+        raise SystemExit("live canary provider status does not match the expected identity and catalog")
+
+    names = (
+        "release.json",
+        "trusted-keys.json",
+        "autotune-candidates.json",
+        "autotune-candidates.json.sig",
+        "demand-rank.json",
+        "demand-rank.json.sig",
+    )
+    hashes = {}
+    for name in names:
+        payload, _ = read_regular_at(catalog_fd, name, 2 * 1024 * 1024)
+        hashes[name] = hashlib.sha256(payload).hexdigest()
+    print(json.dumps({
+        "provider_id": provider_id,
+        "assigned_id": assigned_id,
+        "launchd_pid": pid,
+        "executable_path": process_path,
+        "local_status": local_status,
+        "files": hashes,
+    }, sort_keys=True))
+finally:
+    for fd in (config_fd, provider_config_fd, binary_fd, install_fd, catalog_fd):
+        if fd is not None:
+            os.close(fd)
+PY
+then
+  echo "SPEC-023 canary failed: could not read exact installed catalog bytes from $CATALOG_CANARY_SSH_TARGET" >&2
+  exit 1
+fi
+
+# Bind coordinator admission to the exact session observed on the proved Mac.
+read -r CANARY_ASSIGNED_ID CANARY_CATALOG_ROW_IDENTITY < <(python3 - "$CANARY_INSTALLED_BODY" <<'PY'
+import json, pathlib, re, sys
+proof = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assigned_id = proof.get("assigned_id")
+row_identity = proof.get("local_status", {}).get("catalog", {}).get("row_identity")
+if not isinstance(assigned_id, str) or not assigned_id or any(ch.isspace() for ch in assigned_id):
+    raise SystemExit("canary proof has no safe assigned coordinator session")
+if re.fullmatch(r"[0-9a-f]{64}", str(row_identity).lower()) is None:
+    raise SystemExit("canary proof has no exact catalog row identity")
+print(assigned_id, str(row_identity).lower())
+PY
+) || {
+  echo "SPEC-023 canary failed: could not bind the live Mac session and catalog row" >&2
+  exit 1
+}
+CANARY_PROVIDER_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CATALOG_CANARY_PROVIDER_ID")
+CANARY_ASSIGNED_QUERY=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CANARY_ASSIGNED_ID")
+(umask 077 && printf 'header = "Authorization: Bearer %s"\n' "$CATALOG_CANARY_AUTH_TOKEN" > "$CANARY_CURL_CONFIG")
+CANARY_OK=0
+for CANARY_ATTEMPT in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  STATUS=$(curl --config "$CANARY_CURL_CONFIG" -sS -o "$CANARY_POOL_BODY" -w '%{http_code}' --max-time 10 --max-filesize 65536 \
+    "https://$DOMAIN/v1/pool/check?provider_id=$CANARY_PROVIDER_QUERY&assigned_id=$CANARY_ASSIGNED_QUERY&details=deployment" || true)
+  if [ "$STATUS" = "200" ] && python3 - \
+    "$CANARY_POOL_BODY" "$CATALOG_CANARY_PROVIDER_ID" "$CANARY_ASSIGNED_ID" \
+    "$AUTOTUNE_RELEASE_ID" "$AUTOTUNE_POLICY_VERSION" "$AUTOTUNE_CANDIDATE_SHA256" \
+    "$AUTOTUNE_CANDIDATE_SIGNER_KEY_ID" "$CANARY_CATALOG_ROW_IDENTITY" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+if (
+    value.get("provider_id") != sys.argv[2]
+    or value.get("assigned_id") != sys.argv[3]
+    or value.get("buyer_serving") is not True
+    or value.get("catalog_evidence_source") != "provider_reported"
+    or value.get("catalog_admission_mode") != "current"
+    or value.get("catalog_release_id") != sys.argv[4]
+    or value.get("catalog_policy_version") != sys.argv[5]
+    or value.get("catalog_candidate_sha256") != sys.argv[6]
+    or value.get("catalog_signer_key_id") != sys.argv[7]
+    or str(value.get("catalog_row_identity", "")).lower() != sys.argv[8]
+):
+    raise SystemExit(1)
+PY
+  then
+    CANARY_OK=1
+    break
+  fi
+  sleep 5
+done
+rm -f "$CANARY_CURL_CONFIG"
+if [ "$CANARY_OK" != "1" ]; then
+  echo "SPEC-023 canary failed: exact session $CANARY_ASSIGNED_ID did not return buyer-serving admission" >&2
+  echo "  last status=$STATUS body=$(head -c 300 "$CANARY_POOL_BODY" 2>/dev/null || true)" >&2
+  exit 1
+fi
+
+if ! python3 - \
+  "$CANARY_INSTALLED_BODY" \
+  "$CANARY_POOL_BODY" \
+  "$CATALOG_CANARY_PROVIDER_ID" \
+  "$AUTOTUNE_RELEASE_MANIFEST" \
+  "$AUTOTUNE_TRUSTED_KEYS" \
+  "$STATIC_AUTOTUNE_JSON" \
+  "$STATIC_AUTOTUNE_SIG" \
+  "$STATIC_DEMAND_JSON" \
+  "$STATIC_DEMAND_SIG" <<'PY'
+import hashlib, json, pathlib, re, sys
+
+proof = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+pool = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+if proof.get("provider_id") != sys.argv[3] or not isinstance(proof.get("launchd_pid"), int):
+    raise SystemExit("canary proof is not bound to the selected provider and live process")
+local_status = proof.get("local_status", {})
+local_catalog = local_status.get("catalog", {})
+local_coordinator = local_status.get("coordinator", {})
+pool_row = str(pool.get("catalog_row_identity", "")).lower()
+if (
+    pool.get("provider_id") != sys.argv[3]
+    or pool.get("assigned_id") != proof.get("assigned_id")
+    or local_status.get("network_state") != "buyer_serving"
+    or local_coordinator.get("connected") is not True
+    or local_coordinator.get("session") != proof.get("assigned_id")
+    or re.fullmatch(r"[0-9a-f]{64}", pool_row) is None
+    or local_catalog.get("release_id") != pool.get("catalog_release_id")
+    or local_catalog.get("policy_version") != pool.get("catalog_policy_version")
+    or str(local_catalog.get("digest", "")).lower() != str(pool.get("catalog_candidate_sha256", "")).lower()
+    or local_catalog.get("signer_key_id") != pool.get("catalog_signer_key_id")
+    or str(local_catalog.get("row_identity", "")).lower() != pool_row
+):
+    raise SystemExit("canary local catalog proof is not bound to the coordinator-admitted envelope")
+actual = proof.get("files")
+if not isinstance(actual, dict):
+    raise SystemExit("canary proof is missing installed file hashes")
+expected = {}
+for raw_path in sys.argv[4:]:
+    path = pathlib.Path(raw_path)
+    expected[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+if actual != expected:
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    changed = sorted(name for name in set(actual) & set(expected) if actual[name] != expected[name])
+    raise SystemExit(f"canary catalog byte mismatch: missing={missing} extra={extra} changed={changed}")
+PY
+then
+  echo "SPEC-023 canary failed: installed catalog bytes do not match the verified deployment release" >&2
+  exit 1
+fi
+echo "  SPEC-023 exact-byte canary OK: selected provider's live process uses the verified catalog release"
 
 # R3+R4+R5 stats smoke check on STATS_DOMAIN.
 #
@@ -1658,6 +2524,55 @@ fi
 log "step 9/9: tail the coordinator journal for sanity"
 $SSH 'journalctl -u macprovider-coordinator --no-pager -n 20'
 
+$SSH 'set -e
+  exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+  flock -s 8
+  # Sidecars remain frozen until every coordinator/catalog/canary check has
+  # passed. Activate them as the final transaction mutation, immediately
+  # before the commit marker.
+  if [ -f /etc/macprovider-stats/stats-hardware-inventory.yaml ] && [ -f /etc/macprovider-stats/stats-inventory-sync.env ]; then
+    systemctl enable --now stats-inventory-sync.timer
+    if ! systemctl start stats-inventory-sync.service; then
+      echo "warning: stats-inventory-sync.service failed; leaving coordinator deploy running"
+      journalctl -u stats-inventory-sync.service -n 30 --no-pager || true
+    fi
+    systemctl is-active stats-inventory-sync.timer
+  elif [ -f /opt/macprovider/.coordinator-deploy-rollback/stats-inventory-timer-was-active ]; then
+    systemctl start stats-inventory-sync.timer
+    [ ! -f /opt/macprovider/.coordinator-deploy-rollback/stats-inventory-service-was-active ] || systemctl start stats-inventory-sync.service
+  else
+    echo "stats inventory timer not enabled: missing /etc/macprovider-stats/stats-hardware-inventory.yaml or stats-inventory-sync.env"
+  fi
+  if [ -f /etc/macprovider-stats/stats-billing-mirror.env ] && [ -f /var/lib/macprovider/request-log.sqlite ] && su -s /bin/sh -c "test -r /var/lib/macprovider/request-log.sqlite" macprovider-stats; then
+    systemctl enable --now stats-billing-mirror.timer
+    if ! systemctl start stats-billing-mirror.service; then
+      echo "warning: stats-billing-mirror.service failed; leaving coordinator deploy running"
+      journalctl -u stats-billing-mirror.service -n 30 --no-pager || true
+    fi
+    systemctl is-active stats-billing-mirror.timer
+  elif [ -f /opt/macprovider/.coordinator-deploy-rollback/stats-billing-timer-was-active ]; then
+    systemctl start stats-billing-mirror.timer
+    [ ! -f /opt/macprovider/.coordinator-deploy-rollback/stats-billing-service-was-active ] || systemctl start stats-billing-mirror.service
+  else
+    echo "stats billing mirror timer not enabled: missing env/sqlite source or macprovider-stats read ACL"
+  fi
+  if [ -f /etc/macprovider-stats/stats-hardware-verifier.env ]; then
+    systemctl enable --now stats-hardware-verifier.timer
+    if ! systemctl start stats-hardware-verifier.service; then
+      echo "warning: stats-hardware-verifier.service failed; leaving coordinator deploy running"
+      journalctl -u stats-hardware-verifier.service -n 30 --no-pager || true
+    fi
+    systemctl is-active stats-hardware-verifier.timer
+  elif [ -f /opt/macprovider/.coordinator-deploy-rollback/stats-hardware-timer-was-active ]; then
+    systemctl start stats-hardware-verifier.timer
+    [ ! -f /opt/macprovider/.coordinator-deploy-rollback/stats-hardware-service-was-active ] || systemctl start stats-hardware-verifier.service
+  else
+    echo "stats hardware verifier timer not enabled: missing /etc/macprovider-stats/stats-hardware-verifier.env"
+  fi
+  touch /opt/macprovider/.coordinator-deploy-rollback/committed
+  /opt/macprovider/coordinator-deploy-recover --recover-under-global
+'
+COORDINATOR_DEPLOY_ARMED=0
 log "DONE. coordinator is live at https://$DOMAIN"
 echo
 echo "Next steps:"

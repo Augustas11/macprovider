@@ -187,6 +187,7 @@ struct AutotuneHardwareEvidenceSnapshot: Codable, Equatable {
                 thermalThrottleDetected: benchmark.thermalThrottleDetected,
                 artifactSHA256: benchmark.artifactSHA256,
                 candidateCatalogSHA256: benchmark.candidateCatalogSHA256,
+                candidateRowIdentity: benchmark.candidateRowIdentity.isEmpty ? nil : benchmark.candidateRowIdentity,
                 benchmarkID: benchmark.benchmarkID,
                 generatedAt: ISO8601DateFormatter.autotuneInternet.string(from: benchmark.generatedAt),
                 binaryVersion: benchmark.binaryVersion,
@@ -276,6 +277,9 @@ private extension BenchmarkPayload {
         if let benchmarkID {
             object["benchmark_id"] = .string(benchmarkID)
         }
+        if let candidateRowIdentity, !candidateRowIdentity.isEmpty {
+            object["candidate_row_identity"] = .string(candidateRowIdentity)
+        }
         return .object(object)
     }
 }
@@ -309,6 +313,7 @@ struct BenchmarkPayload: Codable, Equatable {
     var thermalThrottleDetected: Bool
     var artifactSHA256: String
     var candidateCatalogSHA256: String
+    var candidateRowIdentity: String?
     var benchmarkID: String?
     var generatedAt: String
     var binaryVersion: String
@@ -323,6 +328,7 @@ struct BenchmarkPayload: Codable, Equatable {
         case thermalThrottleDetected = "thermal_throttle_detected"
         case artifactSHA256 = "artifact_sha256"
         case candidateCatalogSHA256 = "candidate_catalog_sha256"
+        case candidateRowIdentity = "candidate_row_identity"
         case benchmarkID = "benchmark_id"
         case generatedAt = "generated_at"
         case binaryVersion = "binary_version"

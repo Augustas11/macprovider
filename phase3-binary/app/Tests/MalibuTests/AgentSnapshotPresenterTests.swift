@@ -16,7 +16,35 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         var s = AgentSnapshot.empty
         s.state = .serving
         s.coordinatorConnected = true
+        s.networkState = "buyer_serving"
         XCTAssertEqual(AgentSnapshotPresenter.short(s), "Serving")
+    }
+
+    func testCoordinatorConnectionWithoutNetworkStateIsNotBuyerServing() {
+        var s = AgentSnapshot.empty
+        s.state = .serving
+        s.coordinatorConnected = true
+        s.networkState = nil
+
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(s))
+        XCTAssertEqual(AgentSnapshotPresenter.short(s), "Connected")
+        XCTAssertEqual(AgentSnapshotPresenter.dashboardHeadline(s), "Connected")
+        XCTAssertEqual(
+            AgentSnapshotPresenter.dashboardSubtitle(s),
+            "Coordinator connected · buyer-serving status unknown"
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.stateLine(s), "Connected · buyer-serving status unknown")
+    }
+
+    func testFailedReadinessRefreshInvalidatesPriorServingVerdict() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .serving
+        snapshot.networkState = "buyer_serving"
+
+        snapshot.markCoordinatorReadinessUnknown()
+
+        XCTAssertEqual(snapshot.networkState, "buyer_serving_unknown")
+        XCTAssertFalse(AgentSnapshotPresenter.isNetworkReady(snapshot))
     }
 
     func testShortShowsSyncWhenLocalOnly() {
@@ -36,6 +64,7 @@ final class AgentSnapshotPresenterTests: XCTestCase {
     func testShortShowsFormattedDollarsWhenPopulated() {
         var s = AgentSnapshot.empty
         s.state = .serving
+        s.networkState = "buyer_serving"
         s.earningsUsdcToday = 12.34
         XCTAssertEqual(AgentSnapshotPresenter.short(s), "$12.34")
     }

@@ -132,7 +132,6 @@ final class MalibuAgent: ObservableObject {
         guard AgentSnapshotPresenter.updateAvailable(snapshot) else { return }
         cliUpdateTask?.cancel()
         snapshot.cliUpdateInProgress = true
-        snapshot.cliUpdateLastError = nil
         cliUpdateTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -249,12 +248,22 @@ final class MalibuAgent: ObservableObject {
         let localReady = await applyHealthSnapshot(port: port)
         if let status = await InstalledProviderMonitor.fetchStatus(port: port) {
             snapshot.coordinatorConnected = status.coordinatorConnected
+            snapshot.networkState = status.networkState
+            snapshot.catalogState = status.catalogState
+            snapshot.catalogReleaseID = status.catalogReleaseID
+            snapshot.catalogDigest = status.catalogDigest
+            snapshot.catalogSignerKeyID = status.catalogSignerKeyID
+            snapshot.catalogSource = status.catalogSource
             if let version = status.binaryVersion {
                 snapshot.cliVersion = ProviderCLIVersion.normalize(version)
             }
             if let recommended = status.recommendedVersion {
                 snapshot.coordinatorRecommendedVersion = ProviderCLIVersion.normalize(recommended)
             }
+        } else {
+            // Never carry a prior authoritative serving verdict across a
+            // failed status/readiness refresh.
+            snapshot.markCoordinatorReadinessUnknown()
         }
         reconcileNetworkState(localReady: localReady)
         await refreshLatestReleaseIfNeeded()
@@ -295,10 +304,12 @@ final class MalibuAgent: ObservableObject {
         return health.ready
     }
 
-    /// Serving requires both local model readiness and an active coordinator session.
+    /// Serving requires the CLI's coordinator-authoritative buyer-serving
+    /// state. A WebSocket connection proves transport only, not admission.
     private func reconcileNetworkState(localReady: Bool) {
         guard snapshot.state != .paused else { return }
-        if localReady && snapshot.coordinatorConnected == true {
+        let buyerServing = snapshot.networkState == "buyer_serving"
+        if localReady && buyerServing {
             snapshot.state = .serving
             snapshot.lastError = nil
             return
@@ -311,13 +322,35 @@ final class MalibuAgent: ObservableObject {
     }
 
     private func coordinatorDisconnectMessage() -> String {
+        switch snapshot.networkState {
+        case "safe_offline_fallback":
+            return "Model loaded locally · signed catalog is offline fallback; not serving buyers"
+        case "catalog_update_required":
+            return "Model loaded locally · provider update required for the current catalog"
+        case "catalog_integrity_failure":
+            return "Model loaded locally · catalog integrity check failed; not serving buyers"
+        case "local_donor":
+            return "Model loaded locally · local donor mode does not serve buyer traffic"
+        case "not_buyer_serving":
+            return "Model loaded locally · coordinator has not admitted this provider for buyer traffic"
+        case "buyer_serving_unknown":
+            return "Model loaded locally · coordinator buyer-serving status is temporarily unknown"
+        case "live_verified":
+            return snapshot.coordinatorConnected == true
+                ? "Model loaded locally · waiting for buyer-serving admission"
+                : "Model loaded locally · catalog verified; reconnecting to coordinator"
+        default:
+            break
+        }
         switch snapshot.coordinatorConnected {
         case .some(false):
             return "Model loaded locally · not connected to coordinator"
         case .none:
             return "Model loaded locally · checking coordinator connection…"
         case .some(true):
-            return "Checking background provider…"
+            return snapshot.networkState == nil
+                ? "Model loaded locally · coordinator connected; buyer-serving status unknown"
+                : "Checking background provider…"
         }
     }
 

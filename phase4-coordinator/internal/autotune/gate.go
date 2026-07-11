@@ -23,7 +23,15 @@ func ResolveMaxAdmission(catalog *Catalog, evidence VerifiedEvidence) (Admission
 	if strings.TrimSpace(evidence.CandidateCatalogSHA256) == "" {
 		return AdmissionCap{}, fmt.Errorf("verified evidence missing candidate_catalog_sha256")
 	}
-	if !strings.EqualFold(strings.TrimSpace(evidence.CandidateCatalogSHA256), catalog.SHA256) {
+	catalogDigestMatches := strings.EqualFold(strings.TrimSpace(evidence.CandidateCatalogSHA256), catalog.SHA256)
+	hasRowIdentity := false
+	for _, benchmark := range evidence.Benchmarks {
+		if strings.TrimSpace(benchmark.CandidateRowIdentity) != "" {
+			hasRowIdentity = true
+			break
+		}
+	}
+	if !catalogDigestMatches && !hasRowIdentity {
 		return AdmissionCap{}, fmt.Errorf("verified evidence candidate_catalog_sha256 mismatch")
 	}
 	var cap AdmissionCap
@@ -32,7 +40,8 @@ func ResolveMaxAdmission(catalog *Catalog, evidence VerifiedEvidence) (Admission
 		if !ok {
 			continue
 		}
-		if !benchmarkPassesGate(benchmark, row, evidence.CandidateCatalogSHA256) {
+		rowIdentity, _ := catalog.RowIdentity(benchmark.ModelKey)
+		if !benchmarkPassesGate(benchmark, row, catalog.SHA256, rowIdentity) {
 			continue
 		}
 		if row.MinRAMGB >= cap.MinRAMGB {
@@ -76,11 +85,15 @@ func EvaluateHelloGate(catalog *Catalog, evidence VerifiedEvidence, helloModelID
 	return decision
 }
 
-func benchmarkPassesGate(benchmark VerifiedBenchmark, row Row, catalogSHA256 string) bool {
+func benchmarkPassesGate(benchmark VerifiedBenchmark, row Row, catalogSHA256, rowIdentity string) bool {
 	if benchmark.ThermalThrottleDetected {
 		return false
 	}
-	if !strings.EqualFold(strings.TrimSpace(benchmark.CandidateCatalogSHA256), strings.TrimSpace(catalogSHA256)) {
+	if strings.TrimSpace(benchmark.CandidateRowIdentity) != "" {
+		if !strings.EqualFold(strings.TrimSpace(benchmark.CandidateRowIdentity), strings.TrimSpace(rowIdentity)) {
+			return false
+		}
+	} else if !strings.EqualFold(strings.TrimSpace(benchmark.CandidateCatalogSHA256), strings.TrimSpace(catalogSHA256)) {
 		return false
 	}
 	if strings.TrimSpace(benchmark.ModelID) == "" || !strings.EqualFold(strings.TrimSpace(benchmark.ModelID), strings.TrimSpace(row.ModelID)) {

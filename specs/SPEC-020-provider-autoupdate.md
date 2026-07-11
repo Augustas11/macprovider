@@ -1,11 +1,15 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.5
-Status: Implemented & shipped — live in production (this path ran the 2026-07-10 incident-recovery autoupdate to CLI 1.8.21). Trust-table drift RESOLVED for the client-enforceable cases in v0.1.5 (G2 disposition (c)): the normative trust table now matches shipped behavior — a provisional provider that passes the encrypted-leg, attestation, and token guards is autoupdate-eligible when `accept_provisional` is set (default true; `AutoUpdateTrustState.swift`), whether or not it holds a validated token (see "Eligible does not always mean bearer-validated"), while explicitly opted-out, self-minted, and bearerless-duplicate provisional sessions remain notify-only. Flipping the default was rejected: the whole fleet is provisional by design, so it would break prod auto-update; the code was correct and the spec was stale. Known residual, carried and not fixed here: a tokenless race-loser session is marked `AuthBearerlessDuplicate` by the coordinator internally but is not currently distinguishable by the client (see "Known residual: tokenless race-loser corner" below); the production `mac` provider holds a validated token and reaches eligibility via the bearer-validated path. See the "Cross-spec amendment and trust state" section and the v0.1.5 change-log entry.
+Version: v0.1.6
+Status: Implemented on branch; v1.8.31 rollout pending. The production path ran
+the 2026-07-10 incident-recovery
+autoupdate to CLI 1.8.21. Trust-table drift remains resolved as documented in
+v0.1.5. v0.1.6 adds the complete-payload, shared-mutation-ownership, and
+coordinator-authoritative buyer-serving commit gates required by Entry 133.
 
 ## Goal
 
-SPEC-020 v0.1.5 defines provider-side autoupdate for `macprovider-cli`.
+SPEC-020 v0.1.6 defines provider-side autoupdate for `macprovider-cli`.
 When the coordinator advertises a newer `recommended_binary_version`, the
 provider auto-invokes the existing `SelfUpdate` validation and replacement
 flow, subject to explicit throttling, opt-out, drain, rollback, and
@@ -145,13 +149,15 @@ table) between these phases MUST:
   naming the trigger (e.g., `encrypted_leg_invalidated`, `tier_demoted`,
   `token_revoked`, `coordinator_disconnected`,
   `attestation_state_degraded`).
-- Clean up partial state: release `update.lock`, delete any temp downloads,
+- Clean up partial state: release the inner `update.lock` and then the outer
+  provider mutation lock, delete any temp downloads,
   delete any partial `pending.json` and rollback backup that have not yet been
   atomically committed.
 - If `pending.json`, the rollback backup, or the live binary swap has already
   been atomically committed, restore the prior binary through the rollback path
-  before deleting the committed marker/backup and releasing `update.lock`; the
-  provider MUST NOT start the newly swapped binary after trust is lost.
+  before deleting the committed marker/backup and releasing both locks in
+  reverse acquisition order; the provider MUST NOT start the newly swapped
+  binary after trust is lost.
 - Refuse to retry autoupdate for the remainder of the session; cooldown
   re-evaluation is performed on the next coordinator session start.
 
@@ -328,17 +334,32 @@ R-2.10. The provider MUST NOT replace the running binary while buyer inference
 is in-flight. Autoupdate MUST enter the drain protocol in R-3 and may replace
 the binary only after the provider has no in-flight requests.
 
-R-2.11. The provider MUST preserve a rollback target before replacing the live
-binary. The rollback target MUST be the exact current executable bytes, stored
-on the same filesystem as the live binary, owned and executable with the same
-effective trust boundary as the live binary, and recorded in an atomic pending
-autoupdate marker before launchd restart.
+R-2.11. The provider MUST preserve a complete rollback target before replacing
+the live release. It contains the exact current executable bytes plus every
+owned adjacent release resource, stored on the same filesystem as the live
+release under the same effective trust boundary, and recorded by path and
+digest in an atomic pending autoupdate marker before launchd restart. Legacy
+binary-only pending markers remain recoverable, but a v0.1.6 writer MUST create
+the complete release snapshot.
 
 R-2.12. The atomic replacement operation MUST remain all-or-nothing for the
 live binary path. If staging, backup preservation, rename, launchd restart, or
 marker write fails, the provider MUST leave either the old live binary or a
 rollback-complete old live binary at the executable path; it MUST NOT leave a
 missing or partially written executable.
+
+R-2.13. The installable release is a complete payload, not a standalone
+executable. Before drain or live mutation, the updater MUST stage and verify the
+exact versioned provider executable plus every adjacent runtime resource that
+the executable expects, including the signed autotune candidate and demand
+feeds, their detached sidecars, the release manifest, and the trusted verifier
+keyring. The manifest MUST bind the payload filenames and SHA-256 values to the
+same release identity as the selected binary. Missing, extra security-critical,
+unmanifested, wrong-version, signature-invalid, or hash-mismatched payload
+members MUST fail with `failure_class:"release_payload_incomplete"` before
+drain. The updater MUST activate and roll back the executable and its payload as
+one transaction; mixing a new executable with old catalog resources, or the
+reverse, is forbidden.
 
 ### R-3. Drain semantics
 
@@ -414,24 +435,41 @@ version and failure class. The target-version component of the key MUST be
 until cooldown expires, even if a reconnect repeats the coordinator
 recommendation.
 
-R-4.3. The provider MUST preserve exactly one prior-binary rollback target for
+R-4.3. The provider MUST preserve exactly one prior-release rollback target for
 the currently pending autoupdate. The existing manual update behavior that
-overwrites the old binary by POSIX rename is insufficient for autoupdate until a
-rollback target is staged.
+overwrites only the old binary by POSIX rename is insufficient until the
+complete executable-plus-resources rollback target is staged.
 
 R-4.4. Autoupdate eligibility MUST fail closed if the watchdog or an equivalent
 rollback observer is absent, disabled, or unavailable, with
 `failure_class:"rollback_observer_unavailable"`. Missing rollback observation
 MUST prevent download, drain, swap, and marker creation for the target.
 
-R-4.5. The provider MUST serialize concurrent autoupdate attempts with an
-exclusive lock at `$HOME/.local/share/macprovider/autoupdate/update.lock`.
-`update.lock` MUST be opened with `O_CREAT|O_NOFOLLOW` mode 0600, and the
+R-4.5. Every provider release mutator and recovery observer MUST share one
+kernel-held ownership boundary. The outer lock is
+`$HOME/.config/macprovider/install.lock`; installer, manual CLI update,
+coordinator autoupdate, Malibu update, watchdog, and install/autoupdate recovery
+MUST acquire it before inspecting or mutating live binary, resource, config,
+plist, recommendation, service, or recovery state. Autoupdate and its observers
+MUST then acquire the inner
+`$HOME/.local/share/macprovider/autoupdate/update.lock`. Acquisition order is
+always outer `install.lock`, then inner `update.lock`; release order is the
+reverse. No path may wait for the outer lock while holding the inner lock.
+
+Both files MUST be opened with `O_CREAT|O_NOFOLLOW` mode 0600, and the
 implementation MUST take an advisory `flock(LOCK_EX|LOCK_NB)` or
-`fcntl(F_SETLK)` before doing any state mutation. A stale lockfile without a
-live process holding the lock is NOT contention. On lock contention, the
-provider MUST emit `failure_class:"autoupdate_already_pending"` and MUST NOT
-create or mutate a pending marker or rollback backup.
+`fcntl(F_SETLK)` before state mutation. A stale lockfile without a live process
+holding the lock is NOT contention. The installer/recovery owner record MUST
+durably bind its PID, process-start identity, boot identity, operation, and
+transaction ID; Swift mutators and recovery observers MUST validate any such
+record rather than trusting PID reuse. All other owners remain authoritative
+through the kernel-held outer lock and their durable pending marker. An
+installer or updater MUST treat a durable pending transaction as owned until
+the exact admission commit or its recovery completes, even if the original
+writer exited. On contention, an autoupdate path MUST emit
+`failure_class:"autoupdate_already_pending"`; other writers MUST report
+`failure_class:"provider_mutation_pending"`. No contender may create or mutate
+a pending marker, rollback backup, or live release graph.
 
 R-4.6. The pending autoupdate marker path MUST be
 `$HOME/.local/share/macprovider/autoupdate/pending.json`. The marker MUST be
@@ -451,6 +489,9 @@ MUST include:
 | `mode` | integer; decimal int of the octal mode value; e.g., `0o755` is serialized as `493` |
 | `sha256` | string; lowercase 64-hex |
 | `marker_deadline` | string; RFC 3339 UTC string, e.g., `2026-06-29T15:00:00Z`; see semantics below |
+| `release_backup_path` | string; required for v0.1.6 writers; absolute path to the complete release snapshot, no trailing slash |
+| `release_backup_sha256` | string; required with `release_backup_path`; lowercase 64-hex deterministic release-tree digest |
+| `commit_owner` | string; required for v0.1.6 writers; stable enum identifying the updater/recovery authority |
 
 **`marker_deadline` semantics.** Writer: the autoupdate process at marker-write
 time. Basis: `marker_write_time + post_start_window + 5 min safety margin`.
@@ -478,21 +519,23 @@ Behavior:
   - Emit `failure_class:"orphaned_pending_marker"` with structured reason
     `marker_deadline_future_beyond_tolerance` for forensic correlation.
 
-R-4.7. The rollback backup path MUST be
+R-4.7. The binary rollback backup path MUST be
 `<binary-dir>/.macprovider-cli.rollback-<update_id>`. Directory ancestry for
 the backup MUST have mode 0700 and MUST be owned by the provider UID. The
 backup MUST be the exact current executable bytes, stored on the same
 filesystem as the live binary, and its SHA-256 MUST match the `sha256` recorded
 in the pending marker. Rollback-backup temp files MUST use
 `O_CREAT|O_EXCL|O_NOFOLLOW` on create, `fsync()` file plus parent directory,
-then atomic rename.
+then atomic rename. The adjacent-resource snapshot MUST use
+`<binary-dir>/.macprovider-cli.release-rollback-<update_id>` and its
+deterministic tree digest MUST match `release_backup_sha256` before restore.
 
-R-4.8. Both marker and backup MUST be opened with symlink-following disabled.
-The watchdog or equivalent rollback observer MUST `lstat` the marker and backup
-paths, reject symlinks, reject unexpected hard links, reject malformed JSON, and
-reject any path outside the trusted state and binary directories before
-copying, renaming, or restoring. The watchdog MUST verify the backup SHA-256
-before restore.
+R-4.8. Marker, binary backup, and release snapshot entries MUST be opened with
+symlink-following disabled. The watchdog or equivalent rollback observer MUST
+`lstat` every path, reject symlinks, reject unexpected hard links, reject
+malformed JSON, and reject any path outside the trusted state and binary
+directories before copying, renaming, or restoring. The watchdog MUST verify
+the binary SHA-256 and release-tree SHA-256 before restore.
 
 R-4.9. Trusted state root. `$HOME/.local/share/macprovider` and
 `$HOME/.local/share/macprovider/autoupdate` MUST be created or repaired as
@@ -502,8 +545,9 @@ write, has non-owner-write ACLs, or crosses an unexpected device/mount
 boundary.
 
 R-4.10. Startup and watchdog recovery MUST handle invalid pending markers as a
-state machine. If `pending.json` exists but `update.lock` is unheld and no
-observer process is running, the marker is orphaned. The provider or watchdog
+state machine. If `pending.json` exists but neither the outer provider mutation
+lock nor `update.lock` has a live holder and no observer process is running,
+the marker is orphaned. The provider or watchdog
 MUST emit `failure_class:"orphaned_pending_marker"` and delete the marker after
 restoring from backup if the backup is valid by size and hash. If the backup is
 not valid, it MUST quarantine the marker by renaming it to
@@ -518,11 +562,19 @@ R-4.10a. Success-state cleanup.
 
 **Success-state cleanup sequence and crash recovery.**
 
-**Success-state cleanup sequence.** When the post-start observation succeeds
-(new binary passes local health AND rejoins coordinator with
-`binary_version == NORMALIZED_TARGET` within the post-start window), the
-observer MUST execute the following ordered sequence. Each step MUST complete
-(or its absence MUST be safely recoverable) before proceeding to the next:
+**Success-state cleanup sequence.** Post-start observation succeeds only when
+the new binary passes local health, reports
+`binary_version == NORMALIZED_TARGET`, and the coordinator's authenticated,
+non-redirected exact-provider readiness response reports
+`buyer_serving:true` with `catalog_admission_mode` equal to `current` or
+`previous` within the post-start window. The returned catalog release, digest,
+signer, and selected-row identity MUST equal the activated local payload. A
+WebSocket rejoin, process liveness, or local health alone is insufficient. A
+busy provider with no free inference slot MAY satisfy `buyer_serving:true`:
+serving-capable network membership, not instantaneous `RoutingEligible`, is the
+commit authority. Only then may the observer execute the following ordered
+sequence. Each step MUST complete (or its absence MUST be safely recoverable)
+before proceeding to the next:
 
 1. **Write success sentinel.** Atomically create
    `<binary-dir>/.macprovider-cli.success-<update_id>` with
@@ -532,8 +584,9 @@ observer MUST execute the following ordered sequence. Each step MUST complete
 2. **Unlink `pending.json`** via `unlink()`.
 3. **Delete rollback backup** at
    `<binary-dir>/.macprovider-cli.rollback-<update_id>` via `unlink()`.
-4. **Release `update.lock`** by closing the flock fd and unlinking the
-   lockfile.
+4. **Release mutation ownership** by closing the inner `update.lock` fd, then
+   closing the outer `install.lock` fd. Lockfile cleanup MUST NOT create an
+   unlocked-inode race; implementations MAY retain stable lock inodes.
 5. **Emit `outcome:"success"` event** with `phase:"post_start"`.
 
 **Crash recovery semantics.** On every provider startup (before coordinator
@@ -544,7 +597,8 @@ handshake), the observer MUST scan for a success sentinel:
   `CoordinatorClient.binaryVersion`: this is a delayed success cleanup path.
   The observer MUST unlink any matching `pending.json` (without triggering
   orphan recovery), delete any matching rollback backup, release any held
-  `update.lock`, then delete the success sentinel. Treat as
+  inner `update.lock` and outer `install.lock`, then delete the success sentinel.
+  Treat as
   `outcome:"success"`, NOT as orphan recovery.
 - If a success sentinel exists but its `binary_version` does NOT match the
   current binary: emit `failure_class:"orphaned_success_sentinel"`, delete the
@@ -557,16 +611,20 @@ v0.1.0 deletes the rollback backup on success. Multi-version rollback
 retention is deferred to v0.3.0.
 
 R-4.11. If the new binary crashes, fails to start, fails local health, or fails
-to rejoin the coordinator pool within 60 seconds of the new process start, the
-watchdog MUST roll back by restoring the preserved prior binary and restarting
-the LaunchAgent. Each trigger maps to exactly one failure class:
+to obtain the R-4.10a coordinator-authoritative buyer-serving verdict within
+60 seconds of the new process start, the watchdog MUST roll back the complete
+payload by restoring the preserved prior release and restarting the
+LaunchAgent. Each trigger maps to exactly one failure class:
 
 - `post_start_crash`: the new binary fails to start or exits within the
   post-start window.
 - `post_start_health_failed`: the new binary started but local health check
   (e.g., `/healthz` probe) failed within the post-start window.
-- `post_start_rejoin_timeout`: the new binary did not rejoin the coordinator
-  with `binary_version == target_version` within the post-start window.
+- `post_start_rejoin_timeout`: the new binary did not obtain an authoritative
+  readiness response for the exact provider within the post-start window.
+- `post_start_not_buyer_serving`: the coordinator answered authoritatively but
+  did not report `buyer_serving:true`, did not admit `current|previous`, or
+  returned catalog identity fields different from the activated payload.
 
 R-4.12. After watchdog rollback, autoupdate MUST be disabled for the rest of the
 provider session and the provider MUST emit a structured rollback failure event.
@@ -634,12 +692,15 @@ R-6.5. `failure_class` MUST be one of:
 `rollback_observer_unavailable`, `target_release_not_found`,
 `release_asset_missing`, `recommended_version_invalid`, `version_too_long`,
 `version_component_too_long`, `autoupdate_already_pending`,
+`provider_mutation_pending`,
 `orphaned_pending_marker`, `orphaned_success_sentinel`,
 `rollback_backup_corrupt`,
 `target_revoked_or_below_minimum`, `signature_invalid`, `checksum_mismatch`,
-`self_test_failed`, `drain_timeout`, `trust_state_lost`,
+`release_payload_incomplete`, `self_test_failed`, `drain_timeout`,
+`trust_state_lost`,
 `post_start_crash`, `post_start_health_failed`,
-`post_start_rejoin_timeout`, `insufficient_disk_space`,
+`post_start_rejoin_timeout`, `post_start_not_buyer_serving`,
+`insufficient_disk_space`,
 `event_payload_too_large`, `other`.
 
 R-6.6. Coordinator-visible payloads MUST NOT include provider tokens,
@@ -658,10 +719,11 @@ AC-V0.1-1. End-to-end autoupdate: given a running provider at version `N` and a
 trusted coordinator auth payload advertising `recommended_binary_version: N+1`,
 the provider detects the target, resolves the matching GitHub release by tag,
 downloads the `darwin-arm64` tarball plus checksum assets, verifies signature
-and checksum, validates the archive, runs `self-test`, drains to zero in-flight
-requests, preserves the prior binary, atomically writes the pending marker,
-atomically swaps, restarts through launchd, rejoins the coordinator pool, and
-reports `binary_version: N+1`.
+and checksum, validates the complete manifest-bound binary-plus-catalog payload,
+runs `self-test`, drains to zero in-flight requests, preserves the prior release,
+atomically writes the pending marker, atomically swaps, restarts through
+launchd, and receives the exact coordinator-authoritative current-or-previous
+buyer-serving verdict before reporting success at `binary_version: N+1`.
 
 AC-V0.1-2. Downgrade rejected: given current version `N` and coordinator
 recommendation `< N`, the provider emits a no-op event, does not download
@@ -702,16 +764,17 @@ opt-out event and optional notify-only message, but no download, drain, swap,
 or restart occurs.
 
 AC-V0.1-10. Post-swap rollback classification: given a new binary that fails to
-start or exits within 60 seconds, the watchdog restores the prior binary and
+start or exits within 60 seconds, the watchdog restores the prior release and
 emits `failure_class:"post_start_crash"`. Given a new binary that starts but
 fails local health within the post-start window, the watchdog restores and
-emits `failure_class:"post_start_health_failed"`. Given a new binary that does
-not rejoin the coordinator with `binary_version == target_version` within the
-post-start window, the watchdog restores and emits
-`failure_class:"post_start_rejoin_timeout"`. In all three cases rollback uses
-the pending marker only after `lstat` checks and backup SHA-256 verification,
-restarts the LaunchAgent, disables autoupdate for the rest of the session, and
-surfaces a structured rollback event.
+emits `failure_class:"post_start_health_failed"`. Given no authoritative
+readiness answer within the post-start window, the watchdog restores and emits
+`failure_class:"post_start_rejoin_timeout"`; given an authoritative answer that
+is not exact current-or-previous buyer serving, it restores and emits
+`failure_class:"post_start_not_buyer_serving"`. In all cases rollback uses the
+pending marker only after `lstat` checks and binary plus release-tree SHA-256
+verification, restarts the LaunchAgent, disables autoupdate for the rest of the
+session, and surfaces a structured rollback event.
 
 AC-V0.1-11. Coordinator-visible observability: after each major decision point,
 the next heartbeat or state update includes `last_autoupdate_event` with a
@@ -775,8 +838,9 @@ required tarball, checksum, or signature asset, the provider emits
 for that target.
 
 AC-V0.1-19. Orphaned pending marker recovered: given `pending.json` exists,
-`update.lock` is unheld, no observer process is running, and the referenced
-backup is valid by size and hash, startup or watchdog recovery emits
+both the outer `install.lock` and inner `update.lock` are unheld, no observer
+process is running, and the referenced binary plus release backups are valid by
+size and hash, startup or watchdog recovery emits
 `failure_class:"orphaned_pending_marker"`, restores from backup, deletes the
 marker, and surfaces a structured event. If the backup is not valid, recovery
 quarantines the marker as `pending-quarantined-<timestamp>.json` and disables
@@ -793,9 +857,10 @@ AC-V0.1-21. Trusted state root hardened: startup creates or repairs
 `$HOME/.local/share/macprovider/autoupdate` as provider-UID-owned mode 0700,
 rejects symlinked, non-provider-owned, group/world-writable,
 non-owner-write-ACL, or unexpected-mount path components, opens `update.lock`
-with `O_CREAT|O_NOFOLLOW` mode 0600, treats only a live advisory lock holder as
-contention, and creates marker and backup temp files with
-`O_CREAT|O_EXCL|O_NOFOLLOW`.
+and the outer `install.lock` with `O_CREAT|O_NOFOLLOW` mode 0600, validates the
+outer durable owner record, treats only a live advisory lock holder or a
+durable pending transaction as contention, and creates marker and backup temp
+files with `O_CREAT|O_EXCL|O_NOFOLLOW`.
 
 AC-V0.1-22. Live trust-state loss aborts autoupdate: provider becomes eligible
 at v2 `auth_response`, begins download, and then the encrypted leg is
@@ -809,6 +874,36 @@ cleanup sequence. Subsequent provider startup finds no orphan state, emits no
 rollback events, and reports `outcome:"success"` (or `outcome:"noop"` if
 cleanup completed during the prior session). Crash between any pair of steps
 1–5 is recoverable on next startup without rollback of the successful update.
+
+AC-V0.1-24. Complete release payload: a candidate archive whose executable is
+correctly signed but whose manifest-bound catalog sidecar is absent or whose
+catalog digest belongs to the previous release fails before drain with
+`failure_class:"release_payload_incomplete"`; no live executable or resource is
+changed. Activation and forced rollback tests prove executable, manifest,
+catalog bytes, sidecars, and keyring move together.
+
+AC-V0.1-25. Coordinator-authoritative commit: local health and WebSocket rejoin
+alone do not clear `pending.json`. Success is committed only after the exact
+provider's authenticated `details=readiness` response reports
+`buyer_serving:true`, `catalog_admission_mode:current|previous`, and the exact
+activated release/digest/signer/row identity. An authoritative mismatch rolls
+back with `post_start_not_buyer_serving`; timeout remains
+`post_start_rejoin_timeout`.
+
+AC-V0.1-26. Busy capacity is serving capacity: an admitted exact provider in
+the coordinator's busy state with zero free slots reports
+`buyer_serving:true` and can commit an update even though it is not immediately
+`RoutingEligible`. A degraded, draining, legacy, incompatible, or sanctioned
+provider reports `buyer_serving:false` and cannot commit.
+
+AC-V0.1-27. Shared mutation ownership: installer, manual update, coordinator
+autoupdate, Malibu, watchdog, and both recovery paths contend on the same outer
+`~/.config/macprovider/install.lock`; autoupdate owners then take
+`~/.local/share/macprovider/autoupdate/update.lock`. Cross-writer tests prove
+the fixed outer-then-inner order, live-owner refusal, stale-file recovery,
+installer-record PID-reuse/start-identity rejection, boot-change recovery,
+pending-transaction fencing, reverse-order release, and SIGKILL recovery
+without mixed release components or deadlock.
 
 ## Threat model
 
@@ -857,13 +952,16 @@ with write authority to the trusted binary directory. Residual risk: local
 write access to provider-owned executable or state paths is inside the trust
 boundary and must be controlled by filesystem permissions.
 
-T-7. Provider update process races with launchctl or the watchdog, making the
-rollback observer an attack surface. Atomic pending markers, same-directory
-rollback targets, trusted-path validation, executable-file validation, and a
-single pending update ID defend against stale-marker rollback, path injection,
-and rollback to attacker-chosen files. Residual risk: launchd/watchdog logic
-bugs can still create availability failures; v0.1.0 limits rollback to one
-prior binary and disables autoupdate for the session after rollback.
+T-7. Provider installer/update processes race with each other, launchctl, or
+the watchdog, making mutation ownership and rollback observation an attack
+surface. The shared outer lock, fixed outer-then-inner ordering, durable
+PID/start/boot ownership, pending-transaction fencing, atomic markers,
+same-directory rollback targets, trusted-path validation, executable-file
+validation, and a single pending update ID defend against mixed releases,
+deadlock, stale-marker rollback, path injection, and rollback to
+attacker-chosen files. Residual risk: launchd/watchdog logic bugs can still
+create availability failures; v0.1.0 limits rollback to one prior release and
+disables autoupdate for the session after rollback.
 
 T-8. Attacker replays a signed historical release that is higher than the
 provider's current version but below the operator's current safe floor, or
@@ -884,9 +982,9 @@ minimums.
 Q-1. Should autoupdate respect a quiet window, such as avoiding local
 09:00-18:00, or should it always update immediately on detection after drain?
 
-Q-2. Should the prior-binary backup be kept across reboots and arbitrary
-process restarts, or is the v0.1.0 single pending-update observation window
-enough?
+Q-2. Should the complete prior-release backup be retained after a successful
+admission commit across reboots and arbitrary process restarts, or is the
+single pending-update observation window enough?
 
 Q-3. When the coordinator advertises a version and GitHub does not yet have a
 matching release, should the provider silently retry with backoff, or should it
@@ -908,14 +1006,21 @@ Deferred to v0.2.0:
 
 Deferred to v0.3.0 or later:
 
-- Rollback retention beyond one prior binary.
+- Rollback retention beyond one prior complete release.
 - Multi-architecture update selection.
 - Quiet-window policy, if Q-1 resolves in favor of time-windowed updates.
-- Stronger post-start health proof than "process alive, local health, and
-  coordinator rejoin within 60 seconds."
+- An authenticated synthetic buyer request as a stronger proof beyond local
+  health plus coordinator-authoritative current-or-previous buyer serving.
 
 ## Change log
 
+- v0.1.6 (2026-07-11): Bound autoupdate to the complete manifest-backed binary
+  plus catalog payload; replaced local-health/WebSocket-rejoin success with the
+  coordinator-authoritative exact-provider `buyer_serving:true` and
+  `catalog_admission_mode:current|previous` verdict; separated busy serving
+  capacity from instantaneous `RoutingEligible`; and required complete-payload
+  rollback on readiness failure. Shared mutation-lock ownership is normative
+  in R-4.5 and AC-V0.1-27.
 - v0.1.5 (2026-07-11): Reconciled the normative trust-state table with shipped
   behavior (Wave B decision gate G2, disposition (c)). Split the single
   `provisional → notify-only` row by auth sub-state: a provisional provider

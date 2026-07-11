@@ -20,6 +20,12 @@ enum InstalledProviderMonitor {
         let recommendedVersion: String?
         let coordinatorConnected: Bool
         let coordinatorTier: String?
+        let networkState: String?
+        let catalogState: String?
+        let catalogReleaseID: String?
+        let catalogDigest: String?
+        let catalogSignerKeyID: String?
+        let catalogSource: String?
     }
 
     static func readHTTPPort(paths: ProviderPaths = .current) -> Int? {
@@ -55,7 +61,7 @@ enum InstalledProviderMonitor {
             let uptimeSeconds = object["uptime_s"] as? Int
             let restartCount = object["restart_count"] as? Int
             return HealthSnapshot(
-                ready: status == "ready",
+                ready: isHealthyStatus(status),
                 model: model,
                 requestsTotal: requestsTotal,
                 requestsToday: requestsToday,
@@ -71,7 +77,9 @@ enum InstalledProviderMonitor {
         }
     }
 
-    static func fetchStatus(port: Int, timeout: TimeInterval = 2) async -> StatusSnapshot? {
+    // /v1/status includes an authoritative coordinator readiness lookup and may
+    // wait through one 1-second rate-limit window before answering.
+    static func fetchStatus(port: Int, timeout: TimeInterval = 5) async -> StatusSnapshot? {
         let url = URL(string: "http://127.0.0.1:\(port)/v1/status")!
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -82,20 +90,30 @@ enum InstalledProviderMonitor {
                   (200..<300).contains(http.statusCode) else {
                 return nil
             }
-            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return nil
-            }
-            let coordinator = object["coordinator"] as? [String: Any] ?? [:]
-            let recommended = stringValue(coordinator["recommended_binary_version"])
-            return StatusSnapshot(
-                binaryVersion: stringValue(object["binary_version"]),
-                recommendedVersion: recommended,
-                coordinatorConnected: (coordinator["connected"] as? Bool) == true,
-                coordinatorTier: stringValue(coordinator["tier"])
-            )
+            return decodeStatus(data)
         } catch {
             return nil
         }
+    }
+
+    static func decodeStatus(_ data: Data) -> StatusSnapshot? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let coordinator = object["coordinator"] as? [String: Any] ?? [:]
+        let catalog = object["catalog"] as? [String: Any] ?? [:]
+        return StatusSnapshot(
+            binaryVersion: stringValue(object["binary_version"]),
+            recommendedVersion: stringValue(coordinator["recommended_binary_version"]),
+            coordinatorConnected: (coordinator["connected"] as? Bool) == true,
+            coordinatorTier: stringValue(coordinator["tier"]),
+            networkState: stringValue(object["network_state"]),
+            catalogState: stringValue(catalog["state"]),
+            catalogReleaseID: stringValue(catalog["release_id"]),
+            catalogDigest: stringValue(catalog["digest"]),
+            catalogSignerKeyID: stringValue(catalog["signer_key_id"]),
+            catalogSource: stringValue(catalog["source"])
+        )
     }
 
     private static func stringValue(_ value: Any?) -> String? {
@@ -103,6 +121,10 @@ enum InstalledProviderMonitor {
         let text = String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text != "<null>" else { return nil }
         return text
+    }
+
+    static func isHealthyStatus(_ status: String?) -> Bool {
+        status == "ready" || status == "busy"
     }
 
     /// Poll until health responds or deadline elapses.

@@ -137,6 +137,16 @@ type Provider struct {
 	ModelHash      string     `json:"model_hash,omitempty"`
 	HashStatus     HashStatus `json:"hash_status,omitempty"`
 	EncryptedLeg   bool       `json:"encrypted_leg,omitempty"`
+	// Catalog admission captures the exact signed recommendation envelope that
+	// was accepted for this live session. Deployment canaries use these fields
+	// to distinguish a current catalog-aware provider from a legacy bridge
+	// connection or a bounded previous-release admission.
+	CatalogAdmissionMode   string `json:"catalog_admission_mode,omitempty"`
+	CatalogReleaseID       string `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion   string `json:"catalog_policy_version,omitempty"`
+	CandidateCatalogSHA256 string `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID     string `json:"catalog_signer_key_id,omitempty"`
+	CandidateRowIdentity   string `json:"catalog_row_identity,omitempty"`
 	// SPEC-015 v0.1.3 / SPEC-001 v1.6 — raw ed25519 public key bytes
 	// populated from auth_request.provider_receipt_public_key when present.
 	ReceiptPubkey []byte `json:"-"`
@@ -321,11 +331,18 @@ type ReceiptPubkeyPrevious struct {
 // removed it: when Tier-2 hash enforcement is disabled, hash-mismatched
 // providers must still route, and a non-config-aware predicate cannot model
 // that. Buyer routing (chat completions, hard-pin) calls RoutingEligible()
-// alongside tier2ProviderExcludedStatus to enforce hash policy. Catalog and
-// health surfaces separately exclude pending receipt-key publication while
-// preserving ready providers that are temporarily out of free slots.
+// alongside tier2ProviderExcludedStatus to enforce hash policy. Catalog-aware
+// deployments also keep metadata-free legacy bridge sessions operator-visible
+// and temporarily routable only during the explicitly bounded migration
+// window. Once strict admission is enabled or that deadline expires, those
+// sessions become legacy and are excluded here. Catalog and health surfaces
+// separately exclude pending receipt-key publication while preserving ready
+// providers that are temporarily out of free slots.
 func (p Provider) RoutingEligible() bool {
 	if p.AuthState == AuthBearerlessDuplicate || p.AuthState == AuthSelfMinted {
+		return false
+	}
+	if p.CatalogAdmissionMode == "legacy" {
 		return false
 	}
 	if len(p.PendingReceiptPubkey) > 0 {
@@ -334,18 +351,30 @@ func (p Provider) RoutingEligible() bool {
 	return p.State == StateReady && p.SlotsFree > 0
 }
 
-// CapacityEligible reports whether a provider may be counted on serving and
-// capacity surfaces. It deliberately omits SlotsFree so busy providers still
-// count as online capacity while tokenless, duplicate, and receipt-key-rotation
-// sessions stay visible but not advertised as usable serving capacity.
-func (p Provider) CapacityEligible() bool {
+// ServingCapable reports whether an admitted provider is still part of the
+// network's buyer-serving capacity. Unlike RoutingEligible it deliberately
+// ignores transient free-slot availability: a busy provider remains serving
+// capable while finishing buyer work, but cannot receive another route until
+// a slot becomes free. Trust, catalog admission, rotation, health, Tier-2, and
+// quota gates still apply at their respective call sites.
+func (p Provider) ServingCapable() bool {
 	if p.AuthState == AuthBearerlessDuplicate || p.AuthState == AuthSelfMinted {
+		return false
+	}
+	if p.CatalogAdmissionMode == "legacy" {
 		return false
 	}
 	if len(p.PendingReceiptPubkey) > 0 {
 		return false
 	}
 	return p.State == StateReady || p.State == StateBusy
+}
+
+// CapacityEligible is retained for existing capacity/statistics call sites.
+// New buyer-serving verdicts should use ServingCapable so they do not imply
+// that a currently busy provider is immediately RoutingEligible.
+func (p Provider) CapacityEligible() bool {
+	return p.ServingCapable()
 }
 
 func (p Provider) IsWSTunneled() bool {
@@ -975,6 +1004,22 @@ func (r *Registry) UpdateHashStatuses(statusFor func(Provider) HashStatus) int {
 			updated++
 		}
 		p.HashStatus = next
+	}
+	return updated
+}
+
+// ExpireLegacyBridgeAdmissions atomically removes every metadata-free bridge
+// session from buyer routing/capacity without disconnecting it from operator
+// visibility. The WS server calls this at the configured absolute deadline.
+func (r *Registry) ExpireLegacyBridgeAdmissions() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	updated := 0
+	for _, p := range r.providers {
+		if p.CatalogAdmissionMode == "legacy_bridge" {
+			p.CatalogAdmissionMode = "legacy"
+			updated++
+		}
 	}
 	return updated
 }

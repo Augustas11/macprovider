@@ -2369,10 +2369,236 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.30")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.30")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.8.30")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.8.30")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.8.31")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.8.31")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.8.31")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.8.31")
+    }
+
+    func testCatalogProviderRejectsCoordinatorWithoutAdmissionAcknowledgement() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            catalogModelSHA256: "old-hash"
+        )
+
+        do {
+            try await client.handleCoordinatorPayloadForTest([
+                "type": "hello_ack",
+                "assigned_id": "assigned-a",
+                "heartbeat_interval_s": 30,
+            ])
+            XCTFail("catalog-aware provider must fail closed against a coordinator without catalog admission")
+        } catch let CoordinatorAuthError.invalidMessage(message) {
+            XCTAssertTrue(message.contains("catalog"), message)
+        }
+    }
+
+    func testCoordinatorAutoupdateKeepsRollbackArmedWithoutServingCapability() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(targetVersion: CoordinatorClient.binaryVersion)
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            coordinatorReadiness: { _, _, _ in false },
+            autoupdateMarkerStore: fixture.store
+        )
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.backup.path))
+    }
+
+    func testCoordinatorAutoupdateCommitsAfterAuthoritativeServingCapability() async throws {
+        let fixture = try Self.makeAutoupdateRecoveryFixture(targetVersion: CoordinatorClient.binaryVersion)
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            coordinatorReadiness: { providerID, assignedID, envelope in
+                providerID == "provider-test"
+                    && assignedID == "assigned-a"
+                    && envelope.releaseID == "release-a"
+                    && envelope.policyVersion == "policy-a"
+                    && envelope.candidateSHA256 == String(repeating: "a", count: 64)
+                    && envelope.signerKeyID == "operator-2026-01"
+                    && envelope.rowIdentity == String(repeating: "b", count: 64)
+            },
+            autoupdateMarkerStore: fixture.store
+        )
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.store.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.backup.path))
+    }
+
+    func testCatalogWarmSwapNeverPublishesNewModelUnderBootRowIdentity() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let runtime = makeRuntime(modelID: "model-a", modelHash: "old-hash", warmSwapEnabled: true) { target in
+            (target, "new-hash")
+        }
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: "old-hash"
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            enableWarmSwap: true,
+            modelRuntime: runtime,
+            connectAndRunOverride: { XCTFail("catalog-invalidated client must not reconnect") },
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64)
+        )
+        let swap = try await runtime.beginSwap(targetModelID: "model-b")
+        try await swap.value
+
+        let hello = await client.helloMessage()
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+        XCTAssertEqual(hello["model_id"] as? String, "model-b")
+        XCTAssertNil(hello["catalog_row_identity"])
+        XCTAssertNil(auth["catalog_row_identity"])
+        do {
+            try await client.sendHeartbeatForTest()
+            XCTFail("catalog-invalidated warm swap must not send a heartbeat")
+        } catch {}
+        do {
+            try await client.connectAndRunOnceForTest()
+            XCTFail("catalog-invalidated warm swap must not reconnect")
+        } catch {}
+        let frames = await recorder.frames
+        XCTAssertTrue(frames.isEmpty)
+    }
+
+    func testCatalogWarmSwapInvalidatesSameModelIDWhenArtifactHashChanges() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let runtime = makeRuntime(modelID: "model-a", modelHash: "old-hash", warmSwapEnabled: true) { target in
+            (target, "new-hash")
+        }
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: "old-hash"
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            enableWarmSwap: true,
+            modelRuntime: runtime,
+            connectAndRunOverride: { XCTFail("artifact-invalidated client must not reconnect") },
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            catalogModelSHA256: "canonical-old-hash",
+            catalogArtifactIdentity: { _ in "canonical-new-hash" }
+        )
+        let swap = try await runtime.beginSwap(targetModelID: "model-a")
+        try await swap.value
+
+        let hello = await client.helloMessage()
+        XCTAssertNil(hello["catalog_row_identity"])
+        do {
+            try await client.sendHeartbeatForTest()
+            XCTFail("same-ID different-hash warm swap must fail closed")
+        } catch {}
+        do {
+            try await client.connectAndRunOnceForTest()
+            XCTFail("same-ID different-hash warm swap must not reconnect")
+        } catch {}
+        let frames = await recorder.frames
+        XCTAssertTrue(frames.isEmpty)
+    }
+
+    func testCatalogWarmSwapBootTrustDoesNotCompareWeightManifestToCanonicalArtifactHash() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let runtime = makeRuntime(
+            modelID: "model-a",
+            modelHash: "runtime-safetensors-json-hash",
+            warmSwapEnabled: true
+        ) { target in
+            (target, "runtime-safetensors-json-hash")
+        }
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: "runtime-safetensors-json-hash"
+        )
+        let connected = LockedBox(false)
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            enableWarmSwap: true,
+            modelRuntime: runtime,
+            connectAndRunOverride: { connected.set(true) },
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            catalogModelSHA256: "canonical-all-files-hash",
+            catalogArtifactIdentity: { _ in
+                XCTFail("generation-zero boot trust must use completed startup preflight")
+                return nil
+            }
+        )
+
+        try await client.connectAndRunOnceForTest()
+
+        XCTAssertTrue(connected.get())
     }
 
     func testAuthInitialDefaultsToSingleEntryCatalog() async throws {
@@ -2793,6 +3019,10 @@ final class CoordinatorClientTests: XCTestCase {
         let store = AutoUpdateMarkerStore(homeDirectory: home)
         try store.ensureTrustedRoot()
         try Data().write(to: store.lockURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: store.lockURL.path
+        )
         let binaryDir = home.appendingPathComponent("bin", isDirectory: true)
         try FileManager.default.createDirectory(at: binaryDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let updateID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -2847,7 +3077,17 @@ final class CoordinatorClientTests: XCTestCase {
         credentialBootstrap: Bool = false,
         bootstrapReceiptSigningKey: Curve25519.Signing.PrivateKey? = nil,
         receiptIdentitySigningKey: Curve25519.Signing.PrivateKey? = nil,
-        receiptIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey] = []
+        receiptIdentitySigningKeyCandidates: [Curve25519.Signing.PrivateKey] = [],
+        catalogReleaseID: String? = nil,
+        catalogPolicyVersion: String? = nil,
+        catalogCandidateSHA256: String? = nil,
+        catalogSignerKeyID: String? = nil,
+        catalogRowIdentity: String? = nil,
+        catalogModelSHA256: String? = nil,
+        catalogArtifactIdentity: CoordinatorClient.CatalogArtifactIdentity? = nil,
+        coordinatorReadiness: CoordinatorClient.CoordinatorReadiness? = nil,
+        coordinatorReadinessAttempts: Int = 1,
+        autoupdateMarkerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore()
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
@@ -2883,6 +3123,17 @@ final class CoordinatorClientTests: XCTestCase {
             pairingController: pairingController,
             connectAndRunOverride: connectAndRunOverride,
             providerReceiptPublicKey: providerReceiptPublicKey,
+            catalogReleaseID: catalogReleaseID,
+            catalogPolicyVersion: catalogPolicyVersion,
+            catalogCandidateSHA256: catalogCandidateSHA256,
+            catalogSignerKeyID: catalogSignerKeyID,
+            catalogRowIdentity: catalogRowIdentity,
+            catalogModelSHA256: catalogModelSHA256,
+            catalogArtifactIdentity: catalogArtifactIdentity,
+            coordinatorReadiness: coordinatorReadiness,
+            coordinatorReadinessAttempts: coordinatorReadinessAttempts,
+            coordinatorReadinessRetryNanoseconds: 0,
+            autoupdateMarkerStore: autoupdateMarkerStore,
             credentialBootstrap: credentialBootstrap,
             bootstrapReceiptSigningKey: bootstrapReceiptSigningKey,
             receiptIdentitySigningKey: receiptIdentitySigningKey,

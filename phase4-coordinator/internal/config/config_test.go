@@ -1,14 +1,120 @@
 package config
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+const testAutotunePublicKeyBase64 = "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
+
+func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.AutotuneFeeds.AutotuneCandidatesPath = "/tmp/autotune-candidates.json"
+	cfg.AutotuneFeeds.AutotuneCandidatesSigPath = "/tmp/autotune-candidates.json.sig"
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "autotune.public_keys") {
+		t.Fatalf("Validate error=%v, want public keyring requirement", err)
+	}
+
+	cfg.AutotuneFeeds.PublicKeys = map[string]string{
+		"streamvc-autotune-static-v4": testAutotunePublicKeyBase64,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate configured signed feed: %v", err)
+	}
+}
+
+func TestAutotuneFeedsRejectInvalidPublicKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		keyID   string
+		encoded string
+		want    string
+	}{
+		{name: "invalid base64", keyID: "test-key", encoded: "not-base64", want: "canonical padded base64"},
+		{name: "wrong key length", keyID: "test-key", encoded: base64.StdEncoding.EncodeToString(make([]byte, 31)), want: "decode to 32 bytes"},
+		{name: "noncanonical base64", keyID: "test-key", encoded: strings.TrimSuffix(testAutotunePublicKeyBase64, "="), want: "canonical padded base64"},
+		{name: "whitespace key ID", keyID: " test-key", encoded: testAutotunePublicKeyBase64, want: "invalid key ID"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Auth.OperatorKey = "operator-key"
+			cfg.AutotuneFeeds.PublicKeys = map[string]string{tc.keyID: tc.encoded}
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestAutotuneProviderAdmissionEnforcementDefaultsStrictAndParsesExplicitly(t *testing.T) {
+	cfg := Default()
+	if !cfg.AutotuneFeeds.EnforceProviderAdmission {
+		t.Fatal("autotune.enforce_provider_admission should default to true")
+	}
+
+	var parsed Config
+	if err := yaml.Unmarshal([]byte("autotune:\n  enforce_provider_admission: false\n  provider_admission_bridge_deadline: \"2026-07-12T00:00:00Z\"\n"), &parsed); err != nil {
+		t.Fatalf("unmarshal enforcement flag: %v", err)
+	}
+	if parsed.AutotuneFeeds.EnforceProviderAdmission {
+		t.Fatal("autotune.enforce_provider_admission=false was not parsed")
+	}
+	if parsed.AutotuneFeeds.ProviderAdmissionBridgeDeadline != "2026-07-12T00:00:00Z" {
+		t.Fatalf("bridge deadline = %q", parsed.AutotuneFeeds.ProviderAdmissionBridgeDeadline)
+	}
+}
+
+func TestAutotuneProviderAdmissionBridgeDeadlineValidation(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name     string
+		deadline string
+		want     string
+	}{
+		{name: "missing", want: "is required"},
+		{name: "malformed", deadline: "tomorrow", want: "must be RFC3339"},
+		{name: "past", deadline: now.Add(-time.Minute).Format(time.RFC3339), want: "must be in the future"},
+		{name: "over 24 hours", deadline: now.Add(25 * time.Hour).Format(time.RFC3339), want: "no more than 24 hours"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Auth.OperatorKey = "operator-key"
+			cfg.AutotuneFeeds.EnforceProviderAdmission = false
+			cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadline = tc.deadline
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.AutotuneFeeds.EnforceProviderAdmission = false
+	cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadline = now.Add(time.Hour).Format(time.RFC3339)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate bounded bridge: %v", err)
+	}
+	deadline, err := cfg.AutotuneFeeds.ProviderAdmissionBridgeDeadlineTime()
+	if err != nil {
+		t.Fatalf("parse bridge deadline: %v", err)
+	}
+	if deadline.IsZero() || !deadline.After(now) {
+		t.Fatalf("parsed bridge deadline = %v", deadline)
+	}
+}
 
 func TestModelClassRejectsMembersAndModelsTogether(t *testing.T) {
 	cfg := Default()

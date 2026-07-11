@@ -31,11 +31,18 @@ require_line 'launchctl bootstrap "gui/$UID" "$PLIST_PATH"' "launchd bootstrap"
 require_line 'Would enable launchd service: launchctl enable gui/$UID/live.streamvc.macprovider' "dry-run enable hint"
 require_line 'Installing as a background launchd service.' "automatic launchd install message"
 require_line 'MACPROVIDER_NO_LAUNCHD=1 expert/debug override' "explicit no-launchd escape hatch"
+require_line 'holding_executable="$(lsof -a -p "$holding_pid" -d txt -Fn' "listener executable identity lookup"
+require_line 'if [ "$holding_executable" = "$INSTALL_DIR/macprovider-cli" ]; then' "exact installed provider process recognition"
 require_line '<key>MACPROVIDER_CONFIG</key>' "launchd absolute config env key"
 require_line '<string>$config_path</string>' "launchd absolute config env value"
 require_line 'Model download ${bar}' "model download progress bar"
 require_line 'known_weight_gb_for_model()' "built-in model download size estimates"
 require_line 'partial model cache detected' "partial cache cold-timeout path"
+require_line 'macprovider-cli autotune --config' "valid autotune operator handoff"
+
+if grep -Fq 'autotune --provider-id' "$INSTALL_SH"; then
+  die "installer must not print the unsupported autotune --provider-id option"
+fi
 
 if grep -Fq 'Install as a background service?' "$INSTALL_SH"; then
   die "installer should not ask whether to install the required background service"

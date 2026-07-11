@@ -8,9 +8,12 @@
 .PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist \
         vet vet-coordinator vet-gateway \
         lint-coordinator \
-        build-linux check fmt
+        build-linux check fmt verify-autotune-catalog
 
 test: test-coordinator test-gateway test-integration test-dist
+
+verify-autotune-catalog:
+	python3 scripts/catalog-release.py verify
 
 test-coordinator:
 	cd phase4-coordinator && go test ./...
@@ -55,6 +58,8 @@ test-dist:
 	bash scripts/test-release-publication-provenance.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
 	bash ops/pearl-updater/test_transaction_gate_systemd.sh
+	bash phase3-binary/dist/test/check_baked_static_feed_sync.test.sh
+	bash scripts/test-catalog-release.sh
 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
 	bash -n phase5-gateway/dist/deploy-pearl-vps.sh
 	bash phase4-coordinator/dist/test/check_deploy_config_test.sh
@@ -64,6 +69,9 @@ test-dist:
 	bash phase4-coordinator/dist/test/check_nginx_stats_test.sh
 	bash phase4-coordinator/dist/test/check_stats_inventory_deploy_test.sh
 	bash phase4-coordinator/dist/test/check_stats_billing_mirror_deploy_test.sh
+	bash phase4-coordinator/dist/test/check_deploy_static_feed_access.test.sh
+	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
+	bash phase4-coordinator/dist/test/coord_deploy_smoke_probe.test.sh
 	bash phase4-coordinator/dist/test/check_pearl_tls_test.sh
 	bash phase4-coordinator/dist/test/check_pearl_tcp_test.sh
 	SPEC015_NGINX_LIVE_OPTIONAL=$${SPEC015_NGINX_LIVE_OPTIONAL:-1} bash phase4-coordinator/dist/test/check_nginx_receipt_header_live_test.sh
@@ -71,7 +79,15 @@ test-dist:
 	bash scripts/test-install-config-token-preserve.sh
 	bash scripts/test-install-provider-id-preserve.sh
 	bash scripts/test-install-launchd-enable.sh
+	bash scripts/test-install-version-pin.sh
+	bash phase3-binary/dist/test/install_fresh_evidence.test.sh
+	bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
+	bash phase3-binary/dist/test/install_transaction_lock.test.sh
+	bash phase3-binary/dist/test/install_coordinator_admission.test.sh
+	bash phase3-binary/dist/test/provider_upgrade_transaction.test.sh
 	bash scripts/test-watchdog-inline-drift.sh
+	bash phase3-binary/dist/test/watchdog_rollback_paths.test.sh
+	bash ops/macprovider-watchdog/Scripts/test-ac-19-20-watchdog-recovery.sh
 	bash scripts/test-malibu-download-publish.sh
 	node --test test/e2e/canary-buyer/probe.test.mjs
 	bash test/e2e/canary-buyer/run-canary.test.sh

@@ -84,6 +84,19 @@ require_file() {
   [ -f "$path" ] || die "missing file: $path"
 }
 
+provider_version_requires_catalog() {
+  local major minor patch
+  if [[ ! "$PROVIDER_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    die "PROVIDER_VERSION must be a stable semantic version: $PROVIDER_VERSION"
+  fi
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  patch="${BASH_REMATCH[3]}"
+  [ "$major" -gt 1 ] || \
+    { [ "$major" -eq 1 ] && [ "$minor" -gt 8 ]; } || \
+    { [ "$major" -eq 1 ] && [ "$minor" -eq 8 ] && [ "$patch" -ge 31 ]; }
+}
+
 sha256_file() {
   local path="$1"
   if command -v shasum >/dev/null 2>&1; then
@@ -120,6 +133,12 @@ validate_payload_entries() {
   local label="$2"
   local entries
   local entry normalized_entry has_binary=0
+  local has_catalog_manifest=0
+  local has_catalog_keyring=0
+  local has_catalog_candidates=0
+  local has_catalog_candidates_signature=0
+  local has_catalog_demand=0
+  local has_catalog_demand_signature=0
 
   entries="$(cd "$payload_dir" && find . -mindepth 1 -print)" || die "failed to list $label"
   [ -n "$entries" ] || die "$label is empty"
@@ -145,6 +164,26 @@ validate_payload_entries() {
         ;;
       THIRD-PARTY-NOTICES.txt)
         ;;
+      catalog-release)
+        ;;
+      catalog-release/release.json)
+        has_catalog_manifest=$((has_catalog_manifest + 1))
+        ;;
+      catalog-release/trusted-keys.json)
+        has_catalog_keyring=$((has_catalog_keyring + 1))
+        ;;
+      catalog-release/autotune-candidates.json)
+        has_catalog_candidates=$((has_catalog_candidates + 1))
+        ;;
+      catalog-release/autotune-candidates.json.sig)
+        has_catalog_candidates_signature=$((has_catalog_candidates_signature + 1))
+        ;;
+      catalog-release/demand-rank.json)
+        has_catalog_demand=$((has_catalog_demand + 1))
+        ;;
+      catalog-release/demand-rank.json.sig)
+        has_catalog_demand_signature=$((has_catalog_demand_signature + 1))
+        ;;
       *.bundle|*.bundle/*)
         ;;
       *)
@@ -156,6 +195,14 @@ $entries
 EOF
 
   [ "$has_binary" -eq 1 ] || die "$label does not contain macprovider-cli"
+  if provider_version_requires_catalog; then
+    [ "$has_catalog_manifest" -eq 1 ] || die "$label must contain exactly one catalog-release/release.json"
+    [ "$has_catalog_keyring" -eq 1 ] || die "$label must contain exactly one catalog-release/trusted-keys.json"
+    [ "$has_catalog_candidates" -eq 1 ] || die "$label must contain exactly one catalog-release/autotune-candidates.json"
+    [ "$has_catalog_candidates_signature" -eq 1 ] || die "$label must contain exactly one catalog-release/autotune-candidates.json.sig"
+    [ "$has_catalog_demand" -eq 1 ] || die "$label must contain exactly one catalog-release/demand-rank.json"
+    [ "$has_catalog_demand_signature" -eq 1 ] || die "$label must contain exactly one catalog-release/demand-rank.json.sig"
+  fi
   if find "$payload_dir" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
     die "$label contains unsafe link or device members"
   fi

@@ -122,6 +122,7 @@ struct ProviderSnapshot: Sendable {
     let coordinatorAssignedID: String?
     let coordinatorTier: String?
     let recommendedBinaryVersion: String?
+    let catalogCompatibilityConfirmed: Bool
     let activeRequestIDCount: Int
     let thermallyThrottled: Bool
     let lastActivityAt: Date
@@ -172,6 +173,7 @@ actor ProviderStatus {
     private var coordinatorAssignedID: String?
     private var coordinatorTier: String?
     private var recommendedBinaryVersion: String?
+    private var catalogCompatibilityConfirmed = false
     private var activeRequestIDs = Set<String>()
     private let thermalGate: ThermalGate?
     private var lastActivityAt = Date()
@@ -326,6 +328,9 @@ actor ProviderStatus {
 
     func setCoordinatorSession(connected: Bool, assignedID: String? = nil, tier: String? = nil, recommendedBinaryVersion: String? = nil) {
         coordinatorConnected = connected
+        if !connected {
+            catalogCompatibilityConfirmed = false
+        }
         if let assignedID {
             coordinatorAssignedID = assignedID
         }
@@ -335,6 +340,10 @@ actor ProviderStatus {
         if let recommendedBinaryVersion {
             self.recommendedBinaryVersion = recommendedBinaryVersion
         }
+    }
+
+    func setCatalogCompatibilityConfirmed(_ confirmed: Bool) {
+        catalogCompatibilityConfirmed = confirmed
     }
 
     func snapshot(resetWindow: Bool = false) async -> ProviderSnapshot {
@@ -375,6 +384,7 @@ actor ProviderStatus {
             coordinatorAssignedID: coordinatorAssignedID,
             coordinatorTier: coordinatorTier,
             recommendedBinaryVersion: recommendedBinaryVersion,
+            catalogCompatibilityConfirmed: catalogCompatibilityConfirmed,
             activeRequestIDCount: activeRequestIDs.count,
             thermallyThrottled: throttled,
             lastActivityAt: lastActivityAt,

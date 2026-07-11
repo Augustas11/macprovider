@@ -23,9 +23,29 @@ PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60
 PEARL_UPDATER_CANARY_TIMEOUT_S=720
 PEARL_UPDATER_REVOKED_VERSIONS_FILE=/etc/macprovider/pearl-updater.revoked
 
+# Required rollout admission contract. Use bridge_required while migrating the
+# fleet; strict_post_migration is only for releases after the 15-minute
+# zero-legacy evidence gate has closed the bridge. The ready-provider floor is
+# operator-approved from the protected preflight inventory and must be at least
+# 2 for bridge_required. Its remaining window must exceed provider recovery +
+# service-health timeouts so rollback can complete before the deadline.
+PEARL_UPDATER_PROVIDER_ADMISSION_POLICY=bridge_required
+PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT=2
+PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=600
+
 # Required for plan/apply. This is the Better Stack heartbeat API resource ID,
 # not the secret ping URL used by canary-buyer.service.
 PEARL_UPDATER_DEADMAN_HEARTBEAT_ID=
 # Root-owned 0600 file containing a Better Stack Uptime API bearer token with
 # permission to read/update the heartbeat resource above.
 PEARL_UPDATER_DEADMAN_API_TOKEN_FILE=/etc/macprovider/pearl-updater.betterstack-token
+
+# Required exact provider admission and independent on-Mac proof. The bearer
+# token must authorize details=deployment. Both secret files are root-owned 0600;
+# the SSH host key must already be present in root's known_hosts.
+PEARL_UPDATER_CATALOG_CANARY_PROVIDER_ID=
+PEARL_UPDATER_CATALOG_CANARY_AUTH_TOKEN_FILE=/etc/macprovider/pearl-updater.catalog-canary-token
+PEARL_UPDATER_CATALOG_CANARY_SSH_TARGET=
+PEARL_UPDATER_CATALOG_CANARY_SSH_KEY_FILE=/etc/macprovider/pearl-updater.catalog-canary-ssh-key
+PEARL_UPDATER_CATALOG_CANARY_KNOWN_HOSTS_FILE=/etc/macprovider/pearl-updater.catalog-canary-known-hosts
+PEARL_UPDATER_CATALOG_CANARY_INSTALL_DIR=macprovider/catalog-release

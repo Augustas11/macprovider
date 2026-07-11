@@ -46,7 +46,7 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
 
         XCTAssertEqual(
             payload.evidenceSHA,
-            "017420974f7c52fe16595f28a347e6368e93dfc3c0b57d3eefeb5b655c18335c"
+            "47e9892f2f2c986d4d58389bdf209a9e56b2bd92095720845331bc09758065bf"
         )
         XCTAssertEqual(
             payload.data,
@@ -332,7 +332,8 @@ final class AutotuneHardwareEvidenceTests: XCTestCase {
             candidateCatalogSHA256: String(repeating: "a", count: 64),
             binaryVersion: "1.7.9",
             modelID: "mlx-community/model-a",
-            hardwareIdentityHash: "hash"
+            hardwareIdentityHash: "hash",
+            candidateRowIdentity: String(repeating: "c", count: 64)
         )
         let benchmarks = ["model-a": benchmark]
         return (

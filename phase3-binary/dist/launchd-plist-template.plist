@@ -9,14 +9,9 @@
   <key>ProgramArguments</key>
   <array>
     <string>__BINARY_PATH__</string>
-    <string>--port</string>
-    <string>8080</string>
-    <string>--model</string>
-    <string>__MODEL_ID__</string>
-    <string>--provider-id</string>
-    <string>__PROVIDER_ID__</string>
-    <string>--coordinator</string>
-    <string>__COORDINATOR_URL__</string>
+    <string>serve</string>
+    <string>--config</string>
+    <string>__CONFIG_PATH__</string>
   </array>
 
   <key>RunAtLoad</key>
@@ -43,6 +38,8 @@
     <string>__USER_HOME__</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__USER_HOME__/.local/bin</string>
+    <key>MACPROVIDER_CONFIG</key>
+    <string>__CONFIG_PATH__</string>
   </dict>
 
   <key>ThrottleInterval</key>

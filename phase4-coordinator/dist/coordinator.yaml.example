@@ -165,6 +165,10 @@ logging:
 # /v1/rate-card). Empty paths disable that feed (404). Deploy installs
 # fresh files from phase3-binary/dist/static/ into /opt/macprovider/autotune/.
 autotune:
+  # Strict is the durable default. To open the migration bridge, set false and
+  # set provider_admission_bridge_deadline to an RFC3339 timestamp <=24h away.
+  enforce_provider_admission: true
+  # provider_admission_bridge_deadline: "2026-07-11T18:00:00Z"
   demand_rank_path: "/opt/macprovider/autotune/demand-rank.json"
   demand_rank_sig_path: "/opt/macprovider/autotune/demand-rank.json.sig"
   autotune_candidates_path: "/opt/macprovider/autotune/autotune-candidates.json"
@@ -337,7 +341,7 @@ malibu_emission:
 # version, closing WS with CloseVersionTooOld. Use for security fixes
 # that must not be optional. Leave unset for advisory releases.
 coordinator_advertised_version:
-  latest_binary_version: "1.8.30"
+  latest_binary_version: "1.8.31"
   # required_binary_version: "1.7.0"
 
 # Enumerated providers (SPEC-002 v1.0.4 Finding F-2: every provider_id that
