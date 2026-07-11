@@ -718,7 +718,9 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 	}
 	r.providers[p.ProviderID] = p
 	r.sessions[p.AssignedID] = p
-	r.recordSeenModelLocked(p.ProviderID, p.ModelID)
+	// SPEC-010 v1.5 R-3.3.4: seed the seen-model index with the union of
+	// the served model_id AND every declared supported_models entry.
+	r.recordSeenModelsUnionLocked(p.ProviderID, p.ModelID, p.SupportedModels)
 	delete(r.breakerFaults, p.ProviderID)
 	delete(r.recoveryHolds, p.ProviderID)
 	delete(r.lastBreakerRecoveries, p.ProviderID)
@@ -901,6 +903,37 @@ func (r *Registry) recordSeenModelLocked(providerID, modelID string) {
 	}
 	r.seenModelsLifetime[canonical] = struct{}{}
 	r.lifetimeContribByProvider[providerID]++
+}
+
+// recordSeenModelsUnionLocked records the SPEC-010 v1.5 R-3.3.4 union of
+// the currently-served modelID and every entry the provider declared in
+// supportedModels into the seen-model indexes. It makes ModelKnown()
+// return true for a model that some provider DECLARES supporting but is
+// not currently serving (cold), so a buyer request for such a model falls
+// through to the existing 503 no_provider_available (transient/retryable)
+// path instead of 404 model_not_found (see buyer/server.go's ModelKnown
+// gate).
+//
+// Each entry flows through recordSeenModelLocked, so:
+//   - supported-model entries share EXACTLY the same normalization
+//     (strings.ToLower canonical key for the lifetime accumulator, raw
+//     id for the per-session attribution set) as the served model_id;
+//   - they share the same lifecycle: dropped from seenModelsByProvider
+//     on disconnect / session-replacement (M2-5 / PERF-5), and retained
+//     append-only in seenModelsLifetime for the coordinator process
+//     lifetime (SPEC-002 § 7.2 cold-start-race survival). No separate
+//     removal path is introduced — a declared-cold model ages exactly as
+//     the served model_id does.
+//
+// Per R-3.1.5 a legacy provider carries supportedModels == [modelID]
+// (synthesized in ws/server.go), so the union collapses to {modelID} and
+// this is byte-identical to pre-SPEC-010 for any provider that did not
+// declare models beyond its served one (R-4.1 / R-3.5.1 guarantee).
+func (r *Registry) recordSeenModelsUnionLocked(providerID, modelID string, supportedModels []string) {
+	r.recordSeenModelLocked(providerID, modelID)
+	for _, supported := range supportedModels {
+		r.recordSeenModelLocked(providerID, supported)
+	}
 }
 
 // LifetimeCapStats returns the current size of the pool-lifetime
@@ -1461,7 +1494,11 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	if hb.HardwareCapacity != nil {
 		p.HardwareCapacity = sanitizeProviderHardwareCapacity(hb.HardwareCapacity)
 	}
-	r.recordSeenModelLocked(p.ProviderID, hb.ModelID)
+	// SPEC-010 v1.5 R-3.3.4: union the heartbeat's served model_id with
+	// the provider's declared supported_models. Heartbeat frames do not
+	// carry supported_models, so p.SupportedModels (populated at
+	// registration) is the authoritative declared set.
+	r.recordSeenModelsUnionLocked(p.ProviderID, hb.ModelID, p.SupportedModels)
 	if hb.Status != "" && hb.Status != p.State {
 		if r.canApplyProviderStateLocked(p, hb.Status) {
 			r.setStateLocked(p, hb.Status)
@@ -1578,6 +1615,25 @@ func (r *Registry) ModelKnown(modelID string) bool {
 	for _, p := range r.providers {
 		if strings.EqualFold(p.ModelID, modelID) {
 			return true
+		}
+	}
+	// 1b. SPEC-010 v1.5 R-3.3.4 correctness core: live providers'
+	// declared SupportedModels. recordSeenModelsUnionLocked's seen-index
+	// union (per-session cap maxSeenModelsPerProvider=32, per-provider
+	// lifetime cap maxLifetimeContribPerProvider=128, global lifetime
+	// cap maxSeenModelsLifetime=4096) is a best-effort accumulator that
+	// can silently drop a declared model under cap pressure — e.g. a
+	// provider with a catalog wider than 32 entries. Without this scan,
+	// a model beyond those caps would 404 forever even though a
+	// CURRENTLY-CONNECTED provider is declaring it right now. A served
+	// ModelID never has this gap (step 1 above always covers it
+	// regardless of cap state); declared-but-cold models need the same
+	// unconditional guarantee while the declaring provider is live.
+	for _, p := range r.providers {
+		for _, supported := range p.SupportedModels {
+			if strings.EqualFold(supported, modelID) {
+				return true
+			}
 		}
 	}
 	// 2. Per-session attribution map. ISS-185 R2 code-lane MAJOR: a
