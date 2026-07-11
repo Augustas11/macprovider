@@ -111,13 +111,25 @@ cross-repo interop contract the Swift provider CLI byte-matches):
   the *presence* of a device-property extension + CSR binding, but does **NOT** compare the
   cert's device-property values or `ram_gb` against the provider's claims, and validates no
   RAM for any format.
-- **§7.4:** the MDA DER/CBOR/JWS encoding allowlist is a forward expectation — the shipped
-  verifier only checks nonempty unpadded base64url (never parses DER/CBOR); an unallowed
-  `format` returns status `attestation_unsupported` (not `attestation_failed`), before token
-  validation; the per-model `attested`/`ram_tier_attested` shape is deferred (§7.7).
+- **§7.4/§10.4 (MDA token parsing, corrected in R6):** the encoding *gate* is permissive
+  (nonempty base64url / 3-segment JWS), but cert-chain extraction is **path-dependent** —
+  with an explicit `certificate_chain`/`x5c` the token payload is not format-parsed; for a
+  compact JWS the header is parsed for `x5c`; otherwise the bare token **is**
+  `x509.ParseCertificate`'d as DER. **No CBOR parser** is shipped. An unallowed `format`
+  returns status value `unsupported` (logged as event `attestation_failed`/`unsupported_format`),
+  before token validation; the per-model `attested`/`ram_tier_attested` shape is deferred (§7.7).
+- **§7 intro / §12.1 / §13.2 examples / AC-T2-5 / AC-T2-22 (R6):** removed the residual §7
+  "device-property matching" claim; noted §12.1's full common-field set is a target (T2.C
+  emits the smaller §15.3 set); the §13.2 `tier1_disclosure` examples note the always-present
+  gateway `model_verification_limit`/`verified_model_settlement`; AC-T2-5/AC-T2-22 attribute
+  `tier1_disclosure` to the gateway, and the "no attestation in any response" clause is scoped
+  to coordinator responses.
 - **§12.4/§15.3:** `attestation_required_provider_excluded` is **not** emitted (routing
-  exclusion is a silent status predicate); event list reconciled to the shipped `event`
-  values.
+  exclusion is a silent status predicate); the §15.3 WARN severity list no longer lists it;
+  Pillar C event list reconciled to the shipped `event` values.
+- **Cross-spec (SPEC-031):** corrected FR-CAN23's two "SPEC-008 `attested` proves device
+  identity" phrasings — `attested`/`self_signed` proves neither device identity nor
+  independent ownership (§7.3), which strengthens SPEC-031's own Sybil-safety argument.
 - **§5.7:** clarified the hash-disclosure counting basis is slot-holders
   (`hasAvailableSlot`); `RoutingEligible` has no hash check — the hash routing-exclusion is
   the separate §5.5-5.6 predicate (mismatch/invalid always; uncatalogued only when
@@ -1461,8 +1473,10 @@ key-custody + session binding, **not** hardware. Two formats reach positive
   against the provider's own submitted P-256 key, **no trust root**. Tier
   `self_signed`.
 - **`apple-managed-device-attestation-acme-v1`** (aspirational/configured):
-  validated against an operator-configured trust root with device-property
-  matching. Would be the `hardware` tier — **not emitted by the shipped code**.
+  validated against an operator-configured trust root (chain + freshness + the
+  *presence* of a device-property extension + CSR binding; the shipped verifier does
+  **not** match the cert's device-property values or `ram_gb` to the provider's claims,
+  §7.5). Would be the `hardware` tier — **not emitted by the shipped code**.
 
 Sections §7.1–§7.3 describe the model and status; §7.4 the MDA data model; §7.4a
 the shipped SE format; §7.4b the SE liveness re-challenge; §7.5–§7.8 the
@@ -1639,13 +1653,17 @@ a shipped field.
 Accepted `attestation_token.token` encodings are, **per format**:
 
 - for `apple-managed-device-attestation-acme-v1` (§7.4): the token is base64url-encoded raw
-  DER or CBOR bytes, or compact JWS with three dot-separated base64url segments. **Shipped
-  caveat (v0.4):** the shipped coordinator does **not** actually parse the MDA token as
-  DER/CBOR — `validAttestationTokenEncoding` only checks the string is nonempty unpadded
-  base64url (or a 3-segment JWS), and the MDA path hashes the *encoded token string* into
-  the cert freshness binding (§7.5) rather than decoding its content. So the DER/CBOR
-  structure is a forward/interop expectation, not a shipped validation; a conforming signer
-  should still emit DER/CBOR, but the shipped verifier accepts any nonempty base64url bytes.
+  DER, or compact JWS with three dot-separated base64url segments. **Shipped parsing is
+  path-dependent (v0.4):** the encoding *gate* (`validAttestationTokenEncoding`) is
+  permissive — it only requires nonempty unpadded base64url, or (if the token contains `.`)
+  a 3-segment JWS with nonempty parts. Cert-chain extraction (`extractAttestationCertificateChain`)
+  then: (a) if `certificate_chain`/`x5c` fields are supplied, parses **those** as certs and
+  does **not** format-parse the token payload (the token string is only hashed into the cert
+  freshness binding, §7.5); (b) else for a compact JWS, parses the **JWS header** for `x5c`;
+  (c) else base64url-decodes the bare token and parses it as a **single X.509 DER
+  certificate** (`x509.ParseCertificate`). **There is no CBOR parser** — a CBOR token with no
+  external chain fails DER parsing and is treated as unsupported. So "raw CBOR" is not
+  shipped, and "raw DER" is validated only on the bare-token path.
 - for `macprovider-se-p256-v1` (§7.4a): a **base64url-encoded JSON envelope**
   `{"attestation": {…}, "signature": "…"}` (the shipped SE encoding, actually decoded).
 
@@ -1667,10 +1685,13 @@ verifier most rejection causes — over-limit (token or envelope), invalid base6
 unparseable JSON, or signature/binding/freshness failure — collapse to attestation
 **status `attestation_failed`** (`pillar_c.go`; the too-large case logs `T2.C
 attestation_token_too_large`, others `attestation_failed`). **One exception:** a token
-whose `format` is not in `tier2.attestation_formats` returns status
-**`attestation_unsupported`** (not `attestation_failed`), before any token validation, and
-is excluded from routing only when `require_attestation: true` (regression-locked). All
-of these still close the session with code **4012** when `require_attestation: true`. Under
+whose `format` is not in `tier2.attestation_formats` returns status value **`unsupported`**
+(the `pool.AttestationStatus` enum value, not `attestation_failed`), before any token
+validation — though it is *logged* as event `attestation_failed` with reason
+`unsupported_format`. Optional auth serializes `"unsupported"` in
+`tier2_session.attestation.status`; under `require_attestation: true` the auth response
+carries error code/message `"unsupported"` and the session closes with code **4012**. The
+other `attestation_failed` causes above likewise close with **4012** when required. Under
 `require_attestation: true`, the coordinator sends a WS `auth_response` carrying that
 failed status and closes the provider session with close code **4012**
 (`CloseTier2AttestationFailed`); under optional attestation the session continues with
@@ -2535,10 +2556,10 @@ with an empty/absent `binary_version` is accepted.
 - MUST include `format`, `token`, `challenge`, freshness fields, and the binding fields
   named above per §7.4/§7.4a.
 - Accepted `token` encodings are **per format** (§7.4): for
-  `apple-managed-device-attestation-acme-v1`, base64url-encoded raw DER/CBOR bytes or
-  compact JWS with exactly three dot-separated base64url segments; for
-  `macprovider-se-p256-v1`, the unpadded-base64url JSON envelope `{"attestation":…,
-  "signature":…}` of §7.4a.
+  `apple-managed-device-attestation-acme-v1`, base64url-encoded raw DER or compact JWS with
+  three dot-separated base64url segments (no CBOR parser is shipped; MDA token parsing is
+  path-dependent — see §7.4); for `macprovider-se-p256-v1`, the unpadded-base64url JSON
+  envelope `{"attestation":…, "signature":…}` of §7.4a.
 - Maximum encoded `token` length is 16384 bytes (16 KiB); the full decoded
   attestation-token envelope is separately capped at 20480 bytes (20 KiB) (§7.4).
 - Oversized or malformed tokens (invalid base64url, invalid compact JWS, or decoded bytes
@@ -2848,7 +2869,12 @@ decision.
 
 ### 12.1 Common fields
 
-Every Tier-2 audit event MUST include:
+This is the **target** common-field set for Tier-2 audit events. **Shipped caveat (v0.4):**
+the Pillar C attestation emitter (`logAttestationEvent`) emits only the smaller set
+documented in §15.3 — `event`, `category`, `severity`, `provider_id`, `pillar`, `decision`,
+`reason`, `config_flag`. The `request_id`/`assigned_id`/`model_id`/`tier2_phase` fields below
+are **not** emitted on T2.C events; extending the T2.C emitter to the full set is a forward
+enhancement (§15.3).
 
 - `event`
 - `category`
@@ -2990,6 +3016,10 @@ Two distinct byte-identity properties hold at default config:
   independent of coordinator `ConfigActive`. A reimplementer MUST NOT treat "default config"
   as guaranteeing an unchanged buyer-visible attestation surface through the gateway.
 
+The examples below elide two **always-present** gateway `tier1_disclosure` fields —
+`model_verification_limit` (a string) and `verified_model_settlement` (an object) — whose
+shape is normative in SPEC-006, not SPEC-008; a real `tier1_disclosure` always carries them.
+
 ```json
 {
   "tier1_disclosure": {
@@ -3003,14 +3033,17 @@ Two distinct byte-identity properties hold at default config:
       "ttl_seconds": 0,
       "description": "Sticky affinity is disabled; related requests are not preferentially routed to the same provider."
     }
+    // + model_verification_limit, verified_model_settlement (SPEC-006, always present)
   }
 }
 ```
 
-Active-state render - only when §4.3 permits Tier-2 response changes:
-`catalog_path` is non-empty, any `require_*` key is true,
-`behavioral_safety_enabled: true`, or `observe_enabled: true`. `version`
-string bumps to reflect active Tier-2 state.
+Active-state render - when §4.3 permits Tier-2 response changes on the coordinator surface
+(`catalog_path` non-empty, any `require_*` key true, `behavioral_safety_enabled: true`, or
+`observe_enabled: true`) **or** — for the gateway `hardware_attestation`/encryption/hash
+states — when the `/internal/routing` pool evidence is non-`none` (any `StateReady`
+provider; §13.3), independent of coordinator `ConfigActive`. `version` string bumps to
+reflect active Tier-2 state.
 
 ```json
 {
@@ -3276,14 +3309,18 @@ no `catalog_path`, and a Tier-1 provider pool:
 - the `version` string is unchanged from `"v0.8"` unless §4.3 permits Tier-2
   response changes,
 - no `hash_verified`, `hash_verification`, `attested`, `attestation`, or
-  `tier2_session` fields appear in any response,
+  `tier2_session` fields appear in any **coordinator** response (the gateway
+  `tier1_disclosure` still carries `hardware_attestation`, forced to `"unsupported"` by
+  pool evidence per the Scope note below — that is the documented exception, not a
+  violation),
 - no `T2.*` audit or log events are emitted (except the provider-triggered `T2.C`
   attestation diagnostic if a v2.0 provider volunteers a token, §4.3),
 - `/v1/chat/completions` response bytes are identical to the Tier-1 baseline.
 
-**Scope (v0.4).** This AC constrains the **coordinator's own** responses (`/v1/models`
-`tier1_disclosure`, `/v1/chat/completions`), which are `ConfigActive`-gated and are
-baseline-preserved at defaults. It does **not** cover the separate **gateway** buyer
+**Scope (v0.4).** This AC constrains the **coordinator's own** responses (coordinator
+`/v1/models`, which emits only `object`/`data`/optional `tier2` and never `tier1_disclosure`;
+and `/v1/chat/completions`), which are `ConfigActive`-gated and are baseline-preserved at
+defaults. It does **not** cover the separate **gateway** buyer
 disclosure, which is driven by the coordinator's `/internal/routing` metadata and — because
 that metadata reports `hardware_attestation: "unsupported"` whenever any `StateReady`
 provider exists (§13.3) — **does** change when a SPEC-008 gateway fronts even a Tier-1-only
@@ -3393,8 +3430,9 @@ floor to reduce noise.
 ### AC-T2-22: Disclosure Phase 1 transition
 
 After one provider/model pair becomes hash verified and one remains
-uncatalogued, `/v1/models tier1_disclosure.model_hash_verified` is `"partial"`
-and model entry counts show both states.
+uncatalogued, the **gateway-served buyer** `/v1/models` `tier1_disclosure.model_hash_verified`
+is `"partial"` (the gateway injects `tier1_disclosure`, §13.2) and the coordinator model
+entry counts show both states.
 
 ### AC-T2-23: Disclosure non-override
 
@@ -3493,10 +3531,11 @@ Condition:
 Shipped severity:
 
 - **INFO** for valid attestation (`decision: allow`).
-- **WARN** for every non-valid case — unsupported format, stale/expired, replayed
-  (challenge mismatch), failed/invalid, provider-binding mismatch, and
-  required-attestation exclusion. (The code does **not** emit a `MAJOR` level for these;
-  the richer severity mapping below is a forward enhancement.)
+- **WARN** for every non-valid **verification-path** case — unsupported format, stale/
+  expired, replayed (challenge mismatch), failed/invalid, provider-binding mismatch. (The
+  code does **not** emit a `MAJOR` level for these; the richer severity mapping below is a
+  forward enhancement.) **Required-attestation routing exclusion is NOT in this list** — it
+  emits no T2.C event at all (silent status predicate, §12.4).
 
 Shipped T2.C-specific fields (the attestation event's own keys — the serialized log line
 also carries zerolog's envelope: `level`, `message` = `"tier2 attestation event"`, and the
