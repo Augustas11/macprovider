@@ -439,12 +439,18 @@ be crash-consistent, not best-effort. "Keep the provider degraded in memory and
 log the error" is **insufficient**, because that runtime state is exactly what a
 restart discards (the laundering FR-CAN15 identifies). Precisely:
 
-- **Fail-closed on write.** Until the durable write is **acknowledged**, the
-  provider MUST be held in a **non-routable** persistence-quarantine / fail-stop
-  state (not routable-with-a-logged-error). An implementation MUST require the
-  acknowledged durable write before the sanction is treated as applied, or record
-  it in a **durable outbox / quarantine** replayed until the write confirms; the
-  failure MUST propagate, not be swallowed by the asynchronous canary loop.
+- **Fail-closed on write, backed by a durable record.** A **durable** write-ahead
+  pending-sanction record (or outbox entry) MUST exist before the sanction is
+  relied upon; an in-memory-only non-routable quarantine is **insufficient**,
+  because a crash before the primary write's acknowledgement would discard the
+  RAM quarantine and let a clean store load on restart (laundering the sanction —
+  the exact case AC-F10(c) forbids). Concretely: the coordinator MUST durably
+  record the pending sanction *before or atomically with* making it effective,
+  hold the provider **non-routable** until the durable record is confirmed, and
+  replay the outbox until the canonical sanction write succeeds; the failure MUST
+  propagate, never be swallowed by the asynchronous canary loop. A bare
+  "wait for the primary write to be acknowledged, quarantine in RAM meanwhile"
+  path is NOT conformant on its own.
 - **Fail-loud on load.** A sanction-store (or admission-store) **load failure or
   corruption at startup** MUST fail coordinator startup / readiness rather than
   boot fail-open with no sanctions (today provisional admission load is fail-open,
@@ -521,51 +527,52 @@ failures, and the operator is alerted (§12) to investigate.
 containment.** With **≥2** routing-eligible providers, a `nonce_mismatch` or a
 non-`max_tokens`-attributable `incomplete` MAY remove a provider (it is not
 producing usable responses — *not* because the canary proved wrong weights, §1),
-**subject to correlated-fault containment**:
+always **subject to the FR-CAN22 last-provider floor** (the pool never drops below
+one routing-eligible provider on a canary-only signal) and to correlated-fault
+containment:
 
-- Correlation MUST be evaluated over a **fixed pre-sweep snapshot** of the
-  eligible set (denominator `N ≥ 2`), keyed by a **challenge fingerprint** (the
-  `{prompt, expected}` template identity) and a **challenge-bank generation**, so
-  a bank reload fences stale results.
-- **Quorum and window are exact, not implementation-defined.** A correlated-fault
-  verdict requires a **strict majority** of the snapshot (`> N/2`) **AND at least
-  2** providers to fail the **same** challenge (identified by fingerprint) within
-  one **observation window** of `canary_interval_s` (so every snapshot member has
-  had ≥1 scheduled probe). For `N = 2` this means **both** must fail — one
-  provider can never establish a correlated fault. A single failing provider in a
-  larger snapshot is a per-provider fault, sanctioned per the first bullet, not a
-  bank fault.
-- **Sybil resistance (open-pool hazard).** In the open/provisional pool a set of
-  Sybil providers could deliberately fail one challenge to force a bank rollback
-  and grief the fleet. Therefore a correlated-fault verdict that triggers
-  **automatic** bank circuit-break/rollback MUST be corroborated by evidence the
-  attacker cannot manufacture: either the quorum includes **≥2 independent
-  operator-trusted (pinned/attested) identities**, or an independent **known-good
-  control** (a coordinator self-test of the challenge, or a reference provider
-  known to have recently passed it) confirms the challenge is faulty. Absent that
-  corroboration, correlation is **suspicion only** — the coordinator MUST alert
-  the operator and fall back to the FR-CAN22 sole-provider floor (which already
-  prevents a total outage), but MUST NOT auto-attribute the fault to its own
-  config on provider failures alone. Provisional providers MUST NOT, by
-  themselves, establish a coordinator-configuration fault.
-- On a corroborated verdict the coordinator MUST NOT sequentially remove providers
-  (which would shrink the denominator mid-evaluation), MUST **circuit-break / roll
-  back** the offending challenge bank, and MUST protect the last known-serving
-  provider until independent evidence (FR-CAN22) corroborates a genuine fault.
-- Sanction decisions across the snapshot MUST be evaluated **atomically** with
-  respect to the eligible-count guard, so two providers cannot each be removed on
-  the belief that the other still covers the model.
+- **Provider correlation is a suspicion signal only — it never, by itself,
+  authorizes an automatic coordinator action.** This is the deliberate
+  Sybil-resistant design: in an open/provisional pool, providers (including
+  hardware-attested ones — SPEC-008 `attested` proves device identity, not
+  independent ownership, and one operator can hold several attested or pinned IDs)
+  cannot be treated as independent votes. **No quorum of providers, of any trust
+  level, authorizes a challenge-bank rollback or a config-fault attribution.**
+- **Detection (suspicion).** The coordinator SHOULD detect correlation over a
+  **fixed pre-sweep snapshot** (denominator `N ≥ 2`, atomic) via a **correlation
+  epoch**: it actively re-dispatches the **same** challenge fingerprint to every
+  snapshot member (rather than relying on random per-probe selection, which would
+  never guarantee shared exposure), keyed by challenge fingerprint + bank
+  generation, bounded by the FR-CAN12 next-dispatch window
+  (`1.5 × canary_interval_s + sweep cadence`). A strict majority (`> N/2`, and
+  ≥ 2) failing that shared fingerprint raises **suspicion**.
+- **On suspicion the coordinator MUST**: (a) preserve the FR-CAN22 last-provider
+  floor and MUST NOT let per-provider sanctions drain the model below it; (b) if a
+  **coordinator-controlled known-good control** for that challenge is configured
+  (a coordinator self-test, or a reference the coordinator itself fully trusts and
+  the pool cannot influence), run it; and (c) alert the operator (§12).
+- **Automatic challenge-bank circuit-break / rollback is authorized ONLY by the
+  coordinator-controlled known-good control failing** — never by provider failures
+  alone. If no control is configured, suspicion yields **operator alert + the
+  FR-CAN22 floor only**, with no automatic config-fault attribution and no
+  rollback. (Worst case — a genuinely bad bank in an all-provisional pool with no
+  control — degrades to one provider still serving under the FR-CAN22 floor plus
+  an operator alert, never a total outage and never a Sybil-forced action.)
+- Per-provider sanction decisions across the snapshot MUST be evaluated
+  **atomically** with respect to the last-provider guard, so two providers cannot
+  each be removed on the belief that the other still covers the model.
 - Coordinator-attributable failures (an `incomplete` from undersized
   `max_tokens`, FR-CAN3) are **neutral** regardless of fleet size.
 - A **provisional** sole provider MUST additionally never be
   hard-banned/session-closed on a latency or soft-deadline failure.
 
 > **Conformance gap (§14).** Sole-provider protection, coordinator-attribution of
-> `incomplete`, the status/soft/hard `relay_error` split, the pre-sweep snapshot +
-> challenge-fingerprint + bank-generation fencing, the quorum, and atomic
-> eligible-count evaluation are **not yet implemented** — `RecordCanaryResult`
-> receives only a pass/fail boolean with no failure class, no attribution, no
-> snapshot, and no eligible-count guard. Today a sole provider CAN be removed by a
+> `incomplete`, the status/soft/hard `relay_error` split, the correlation epoch
+> (pre-sweep snapshot + shared-fingerprint re-dispatch + bank-generation fencing),
+> the coordinator-controlled known-good control, and atomic last-provider
+> evaluation are **not yet implemented** — `RecordCanaryResult` receives only a
+> pass/fail boolean with no failure class, no attribution, no snapshot, no control,
+> and no eligible-count guard. Today a sole provider CAN be removed by a
 > coordinator-config fault (incidents #1/#2). Production is safe only because it
 > runs `observe` and canary is disabled entirely; making these guards explicit is
 > the primary pre-re-enable requirement (§16).
@@ -616,14 +623,20 @@ only safe once sanction load is decoupled from it.)
 *built* under one configuration and *evaluated or sanctioned* under another. The
 reload MUST: (a) **validate the complete candidate configuration** before it takes
 effect (a partial/invalid reload is rejected wholesale, not partially applied);
-(b) publish it as **one monotonically-versioned immutable snapshot** covering the
-challenge banks, `max_tokens`, `canary_latency_enforcement`,
-`canary_failure_threshold`, and the FR-CAN22/23 attribution rules together; and
-(c) bind each in-flight probe to the generation it was **dispatched** under, so it
-is evaluated entirely against that captured snapshot or **discarded** if the
-generation changed (the same fencing FR-CAN23 requires for challenge-bank
-generation). Conformance gap, §14; reload-during-probe behavior is covered by
-AC-F14.
+(b) publish it as **one monotonically-versioned immutable snapshot** covering
+**every FR-CAN24 key** — the challenge banks, `canary_max_tokens`,
+`canary_timeout_s`, `canary_interval_s`, `canary_cold_start_grace_s`,
+`canary_latency_enforcement`, `canary_failure_threshold`, `canary_enabled`, and
+the FR-CAN22/23 attribution rules together (each affects deadline classification,
+grace neutrality, the correlation window, or whether a probe should run at all, so
+none may drift mid-probe); the generation counter MUST increment on **any** canary
+change; and (c) bind each in-flight probe to the generation it was **dispatched**
+under, so it is evaluated entirely against that captured snapshot or **discarded**
+if the generation changed (the same fencing FR-CAN23 requires for the correlation
+epoch). Disabling canary mid-flight (`canary_enabled: false`) MUST discard
+already-dispatched results — a stale in-flight probe MUST NOT sanction after
+canary is turned off. Conformance gap, §14; reload-during-probe behavior is
+covered by AC-F14.
 
 ## 12. Observability contract
 
@@ -714,7 +727,7 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR-CAN19 conjunctive eligibility | Implemented | `RoutingEligible()` enforces auth/publication + state + slots. |
 | FR-CAN20 retryable 503 + cadence Retry-After | **Partial** | `no_provider_available` retryable (#548); ownership is SPEC-006 §5.2; gateway 1 s hint is shorter than the sweep (gap). |
 | FR-CAN21 404/503 boundary | Implemented | Aligns with SPEC-006 §17.2 / SPEC-010 R-3.3.4 (#555). |
-| FR-CAN22/23 sole-provider protection + Sybil-resistant correlated-fault | **Gap** | `RecordCanaryResult` gets only a pass/fail bool: no failure-class, no attribution, no eligible-count guard, no pre-sweep snapshot / challenge-fingerprint / bank-generation, no strict-majority quorum, no Sybil-resistant corroboration (operator-trusted quorum / known-good control), no atomic evaluation. |
+| FR-CAN22/23 sole-provider protection + Sybil-proof correlated-fault | **Gap** | `RecordCanaryResult` gets only a pass/fail bool: no failure-class, no attribution, no last-provider floor, no correlation epoch (snapshot + shared-fingerprint re-dispatch + bank-generation), no coordinator-controlled known-good control (the only thing that may authorize bank rollback), no atomic evaluation. |
 | FR-CAN24/25 config surface + covering bank | **Partial** | Surface + basic validation shipped (#478, Entry 125); empty per-model lists and duplicate keys pass (gap). |
 | FR-CAN26 reload without restart + generation contract | **Gap** | Pool block startup-only (direct cause of incident #3); no validated-candidate, atomically-versioned config-generation snapshot for in-flight probes. |
 | FR-CAN27 failure logging | **Partial** | `canary_fail_reason` (#513); missing `assigned_id`/outcome and global-bank latency (gap). |
@@ -725,13 +738,11 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR-CAN32 operator un-ban (provisional) | Implemented | `DELETE /admin/reject/{id}` (Entry 125). |
 
 **Re-enable bar.** The Gap rows are the implementation backlog this baseline
-authorizes; none is a regression. Re-enabling canary in production SHOULD be
-gated on at least **FR-CAN22/23** (sole-provider protection + correlated-fault
-containment), **FR-CAN15** (sanction load decoupled from `canary_enabled`),
-**FR-CAN18** (crash-consistent persistence, so sanctions and bans survive a
-restart at all), and **FR-CAN26** (no-restart tuning) — the guards whose absence
-caused the outages — plus **FR-CAN14** (degrade-cause composition) before the
-breaker and canary can safely coexist under load.
+authorizes; none is a regression. The **single normative re-enable requirement**
+is the `MUST NOT re-enable until` list in **§16** — that list (not this paragraph)
+is authoritative; it enumerates FR-CAN22/23, FR-CAN15, FR-CAN18, FR-CAN14,
+FR-CAN26, and the `observe`-until-FR-CAN8 condition. This section only classifies
+each FR's shipped status; §16 states the gate.
 
 ## 15. Acceptance criteria
 
@@ -785,15 +796,19 @@ a §14 Partial/Gap row and defines part of the follow-up IMPL's done bar):
   canary-only signal — `nonce_mismatch`, `incomplete`, latency, soft-deadline
   `relay_error`, or a canary-specific HTTP non-200 — absent an independent
   buyer-path failure, confirmed transport death, or item-9 weight evidence.
-- **AC-F5 (FR-CAN23).** Correlated-fault containment is exact and Sybil-resistant:
-  (a) with `N=2`, one provider failing does **not** trigger a bank rollback (the
-  other is sanctioned per-provider); (b) a strict majority (≥2) failing the same
-  challenge triggers rollback **only** when corroborated by ≥2 operator-trusted
-  identities or a known-good control — a provisional/Sybil-only majority yields
-  *suspicion + operator alert*, not automatic attribution; (c) a
-  `max_tokens`-attributable `incomplete` is neutral at any fleet size; (d) a
-  hostile single provider and a provisional-Sybil set cannot force a bank rollback
-  or suppress a legitimate per-provider sanction.
+- **AC-F5 (FR-CAN23).** Correlated-fault containment is suspicion-only and
+  Sybil-proof: (a) **no** set of providers — one, a strict majority, an
+  all-attested set, or multiple IDs under one operator — can force a challenge-bank
+  rollback or a config-fault attribution; only a coordinator-controlled known-good
+  control failing does; (b) with no control configured, a correlated majority
+  yields *operator alert + the FR-CAN22 last-provider floor* only; (c) the
+  correlation epoch actively re-dispatches the **same** fingerprint to the pre-sweep
+  snapshot (a partial/jittered exposure or a multi-entry bank with random selection
+  does not silently drain the pool — the FR-CAN22 floor holds and per-provider
+  sanctions never cross it); (d) a stale-generation probe result (bank reloaded
+  mid-epoch) is discarded; (e) concurrent per-provider sanctions are atomic w.r.t.
+  the last-provider guard (two providers can't both be removed); (f) a
+  `max_tokens`-attributable `incomplete` is neutral at any fleet size.
 - **AC-F6 (FR-CAN26).** Canary tuning parameters can be changed without a
   coordinator restart.
 - **AC-F7 (FR-CAN20).** The 503 `Retry-After` is derived from the FR-CAN12
@@ -822,8 +837,12 @@ a §14 Partial/Gap row and defines part of the follow-up IMPL's done bar):
 - **AC-F14 (FR-CAN26).** A config reload during an in-flight probe does not let the
   probe be dispatched under one generation and evaluated/sanctioned under another:
   an invalid candidate config is rejected wholesale; a valid one swaps atomically
-  as one versioned snapshot; and a probe whose generation changed mid-flight is
-  evaluated against its captured snapshot or discarded.
+  as one versioned snapshot covering **every** FR-CAN24 key; a probe whose
+  generation changed mid-flight is evaluated against its captured snapshot or
+  discarded. Specifically exercised: reloads of `canary_timeout_s`,
+  `canary_cold_start_grace_s`, `canary_interval_s`, `canary_max_tokens`,
+  `canary_latency_enforcement`, and **`canary_enabled: false` mid-flight discards
+  the already-dispatched result** (no post-disable sanction).
 
 ## 16. Production posture (as of 2026-07-11)
 
@@ -842,9 +861,9 @@ a specific false sanction (FR-CAN31/32) over a broad disable+restart when the
 intent is to keep other sanctions in force.
 
 This spec's purpose is to define the contract under which internal canary can be
-**safely re-enabled**. The **canonical re-enable bar** (identical to §14; this is
-the single authoritative list — operators MUST NOT re-enable canary
-sanctioning until every item holds):
+**safely re-enabled**. This is the **single authoritative re-enable requirement**
+(§14 classifies per-FR status but defers the gate to this list) — operators
+**MUST NOT** re-enable canary sanctioning until every item holds:
 
 1. **FR-CAN22/23** — sole-provider protection + Sybil-resistant correlated-fault
    containment (a canary-only signal never empties the pool for the last
@@ -882,13 +901,16 @@ FR-CAN14 is required before the breaker and canary coexist under load.
   and the `retryable`/`Retry-After` field mechanics.
 - **SPEC-020** — provider autoupdate trust table; *consumes* the provisional/
   pinned tiers (does not define them).
-- **SPEC-030** — losslessness probe. It is an **independent** subsystem: its own
-  dispatch loop (a separate fixed-cadence ticker), its own dedicated
-  **authenticated WS provider-control carrier** and frames, and its own in-memory
-  state — it does **not** reuse the canary sweep, jitter/shuffle, or sanction
-  persistence (HTTP fallback excluded, Tier-2 dedicated carrier per SPEC-030
-  FR-1/3/4). SPEC-031's `inference_request`/HTTP transport (FR-CAN4) MUST NOT be
-  used to tunnel losslessness probes, and vice-versa.
+- **SPEC-030** — losslessness probe. The two are distinct probe families. To stay
+  consistent with SPEC-030 FR-1 (which *permits* SPEC-030 to reuse the canary
+  scheduling / jitter / persistence infrastructure), SPEC-031 states the boundary
+  as a permission plus a hard separation: SPEC-030 **MAY** share the generic
+  scheduling/jitter/persistence infrastructure, but **MUST** keep its own
+  **authenticated carrier, frames, verdict, state, and sanction path** separate
+  from the canary's (HTTP fallback excluded, Tier-2 dedicated carrier per SPEC-030
+  FR-1/3/4). SPEC-031 does not require SPEC-030 to run a separate scheduler (the
+  current implementation happens to), and SPEC-031's `inference_request`/HTTP
+  transport (FR-CAN4) MUST NOT carry losslessness probes, and vice-versa.
 - **Proof-of-weights / OPoI + autotune hello-gate** — runbook item 9's separate
   baseline; owns the *semantics* of `model_class_challenges` (and thus the only
   real anti-downgrade guarantee) and the second-provider admission gate that
@@ -983,3 +1005,31 @@ FR-CAN14 is required before the breaker and canary coexist under load.
       recovery guarantee) (arch + code LOW). **SPEC-030** header/§2 softened from
       "shares no code path" to "no shared canary-specific dispatch/verdict/sanction
       path" — they do share the generic `Server`/pool/session infrastructure (arch).
+  - **R4 codex two-lane audit absorbed** (0 CRITICAL; security 3H/2M, architect
+    1H/4M — both lanes converged on one redesign, and the code lane was not
+    re-fired as it had already PASSED at R3):
+    - **FR-CAN23 correlated-fault redesigned to be Sybil-proof by construction**
+      (both lanes HIGH). The R3 "≥2 operator-trusted (pinned/attested) identities
+      corroborate" rule was still exploitable — SPEC-008 `attested` proves device
+      identity, not independent ownership, so one operator with two attested/pinned
+      IDs met the bar and could force a bank rollback. Replaced the trusted-provider
+      quorum entirely: **provider correlation is now a suspicion signal only, and
+      the sole thing that authorizes an automatic challenge-bank rollback is a
+      coordinator-controlled known-good control failing** — no set of providers, of
+      any trust level, can force it. Absent a control, suspicion = operator alert +
+      the FR-CAN22 last-provider floor. Also fixed the window/scheduling
+      contradiction: an explicit **correlation epoch** actively re-dispatches the
+      same fingerprint to the snapshot (random per-probe selection never guaranteed
+      shared exposure), bounded by the FR-CAN12 next-dispatch window.
+    - **FR-CAN18 crash-launderable path closed** (security HIGH): the bare
+      "wait-for-ack + RAM quarantine" alternative loses the sanction on a crash
+      before ack; now a **durable write-ahead/outbox record MUST exist before the
+      sanction is relied upon**.
+    - **§14/§16 de-duplicated** (both lanes HIGH): §16 is now the single normative
+      `MUST NOT re-enable` list; §14 defers to it (was a contradictory `SHOULD`/
+      five-item list omitting observe-until-FR-CAN8).
+    - **FR-CAN26 generation snapshot** now covers **every** FR-CAN24 key
+      (added `canary_timeout_s`/`_interval_s`/`_cold_start_grace_s`/`_enabled`) and
+      defines disable-mid-flight = discard (security MED). **SPEC-030** §17 aligned
+      with SPEC-030 FR-1: MAY share generic scheduling/persistence infra, MUST keep
+      carrier/verdict/state/sanction separate (arch MED). AC-F5/F14 extended.
