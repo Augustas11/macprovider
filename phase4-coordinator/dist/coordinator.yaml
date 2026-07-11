@@ -253,4 +253,4 @@ providers: []
 
 # Auto-update recommendation surface (2026-07-03 — added post-#332 to unblock air5 v1.7.0 -> v1.7.9)
 coordinator_advertised_version:
-  latest_binary_version: "1.8.29"
+  latest_binary_version: "1.8.30"

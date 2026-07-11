@@ -110,7 +110,7 @@ Resolve the reviewer and repository IDs, then create/update the environment:
 
 ```bash
 export REPO=Augustas11/macprovider
-export RELEASE_REVIEWER='<different trusted GitHub login>'
+export RELEASE_REVIEWER=antfleet-ops
 export REVIEWER_ID="$(gh api "users/$RELEASE_REVIEWER" --jq .id)"
 
 gh api --method PUT "repos/$REPO/environments/production-release" \
@@ -119,6 +119,7 @@ gh api --method PUT "repos/$REPO/environments/production-release" \
 {
   "wait_timer": 0,
   "prevent_self_review": true,
+  "can_admins_bypass": false,
   "reviewers": [{"type": "User", "id": $REVIEWER_ID}],
   "deployment_branch_policy": {
     "protected_branches": false,
@@ -164,7 +165,8 @@ gh api --method POST "repos/$REPO/rulesets" \
 JSON
 ```
 
-The workflow checks all three controls through
+The workflow requires the sole reviewer to be `antfleet-ops` (GitHub user ID
+`285575208`), disables both self-review and admin bypass, and checks all three controls through
 `scripts/verify-github-release-posture.sh` before it publishes. GitHub API
 references:
 
@@ -205,30 +207,50 @@ release archive after SHA-256 verification. The signing job likewise verifies
 the fixed Sparkle 2.6.4 tools archive before extraction and deletes the Apple
 keychain and imported signing material before invoking `generate_appcast`.
 
-### 8. Cut a release and verify
+### 8. Build the candidate, cut the release tag, and verify
 
-Merge the release commit to `main`, create the tag from the freshly fetched
-`origin/main` tip, and dispatch the workflow from `main`. A tag push does not
-trigger the workflow and Actions cannot create the tag.
+Merge the release commit to `main`, then dispatch a candidate from the freshly
+fetched `origin/main` tip **before** creating the immutable release tag. The
+secret-free build job validates, compiles, and uploads the complete unsigned
+artifact set. It is the only job allowed to accept an absent tag, and only when
+the explicit `candidate` input is true. The one-day artifact retention bounds
+the time available to finish the protected release.
 
 ```bash
 export TAG=vX.Y.Z
-git fetch origin main --tags
+git fetch origin main
 export RELEASE_COMMIT="$(git rev-parse origin/main)"
-git tag -s "$TAG" "$RELEASE_COMMIT" -m "macprovider-cli $TAG"
-git push origin "refs/tags/$TAG"
-
 test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$RELEASE_COMMIT"
-test "$(git ls-remote origin "refs/tags/$TAG^{}" | awk '{print $1}')" = "$RELEASE_COMMIT"
 gh workflow run release.yml --repo Augustas11/macprovider --ref main \
-  -f version="$TAG" -f prerelease=false
+  -f version="$TAG" -f prerelease=false -f candidate=true
 ```
 
-The protected job pauses for the independent environment review. Expected
-duration after approval is 1-15 minutes for notarization, on top of the
-existing build. The workflow:
+Wait until the unsigned `build` job succeeds and `sign_publish` is waiting for
+the independent `production-release` environment review. Do not approve yet.
+Recheck that `origin/main` is still the captured commit, create the signed
+annotated tag at that exact commit, push it, and verify the peeled remote target:
 
-1. Validates the dispatch version and prerelease flag before using either
+```bash
+git fetch origin main
+test "$(git rev-parse origin/main)" = "$RELEASE_COMMIT"
+git tag -s "$TAG" "$RELEASE_COMMIT" -m "macprovider-cli $TAG"
+git push origin "refs/tags/$TAG"
+test "$(git ls-remote origin "refs/tags/$TAG^{}" | awk '{print $1}')" = "$RELEASE_COMMIT"
+```
+
+Only then approve `sign_publish` as the required environment reviewer. If
+`origin/main` advanced **before the tag was created**, the build failed, the tag
+already targets different bytes, or the artifact expired, leave the protected
+job unapproved and start a new candidate from the new reviewed tip. After the
+exact tag is created, unrelated commits may land on `main`: protected gates
+require the captured tagged commit to remain an ancestor of freshly fetched
+`origin/main`, so review, signing, and notarization cannot burn an immutable tag
+merely because development continued. The protected job explicitly requires
+the exact tag before it restores any unsigned inputs, and repeats that check
+before draft creation and public transition. Expected duration after approval
+is 1-15 minutes for notarization. The workflow:
+
+1. Validates the dispatch version, prerelease flag, and candidate flag before using them
 2. Imports the `.p12` into a transient keychain
 3. Codesigns the binary with `--options runtime --timestamp`
 4. Notarizes via `xcrun notarytool submit --wait`

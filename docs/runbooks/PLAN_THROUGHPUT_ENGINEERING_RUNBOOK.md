@@ -204,7 +204,7 @@ Executor writes `beta/throughput-engineering/T0_SUMMARY.md` with TG0 recommendat
 # T1 — MLX engine foundation (bucket A)
 
 > **Goal:** Bump to MLX **0.32.0** / latest compatible **`mlx-swift-lm`** without correctness regression.  
-> **Current pins:** `mlx-swift` 0.31.6, `mlx-swift-lm` 3.31.4 (`Package.resolved`).  
+> **Current pins:** `mlx-swift` 0.31.4, `mlx-swift-lm` 3.31.4 (`Package.resolved`). The 0.31.4 compatibility pin is required by the production Xcode 16.4 / Swift 6.1 release toolchain; performance evidence recorded against 0.31.6 remains historical and must not be silently attributed to this release.
 > **Target reference (Darkbloom):** `libs/mlx` @ `d5a24040…`, `mlx-swift-lm` @ `bc1c0ee6…` — adopt via **ml-explore releases**, not Layr-Labs fork submodule, unless ml-explore lacks equivalent commits.
 
 ---

@@ -6,14 +6,19 @@ die() {
   exit 1
 }
 
-[[ "$#" == 2 ]] || die "usage: VERSION PRERELEASE"
+[[ "$#" == 3 ]] || die "usage: VERSION PRERELEASE CANDIDATE"
 version="$1"
 prerelease="$2"
+candidate="$3"
 
 [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must be vX.Y.Z"
 case "$prerelease" in
   true|false) ;;
   *) die "prerelease must be exactly true or false" ;;
 esac
+case "$candidate" in
+  true|false) ;;
+  *) die "candidate must be exactly true or false" ;;
+esac
 
-printf '%s %s\n' "$version" "$prerelease"
+printf '%s %s %s\n' "$version" "$prerelease" "$candidate"

@@ -16,12 +16,17 @@ Every ordinary `vMAJOR.MINOR.PATCH` GitHub release now contains:
   the coordinator configuration;
 - detached signatures for `pearl-release.json` and `checksums.txt`.
 
-The protected release workflow requires the requested tag to exist on the
-reviewed `origin/main` commit before building. It revalidates the source, tag,
-protected environment, signed asset set, draft release ID, and immutable
-publication before making the release public. A missing tag or a tag on any
-other commit fails closed; it is never created, moved, or silently reused by
-the workflow.
+The protected release workflow first builds a complete unsigned candidate from
+the exact fresh `origin/main` tip while the requested tag is absent. After that
+unprivileged build succeeds, the operator creates the immutable tag at the
+captured commit and the independent `antfleet-ops` reviewer admits the protected
+signing job. That job revalidates the source, exact tag, protected environment,
+candidate manifest, signed asset set, draft release ID, and immutable
+publication before making the release public. A missing tag in the protected
+job or a tag on any other commit fails closed; the workflow never creates,
+moves, or silently reuses the tag. Once tagged, the captured commit may remain
+an ancestor of a newer `origin/main` so unrelated merges during review or
+notarization do not burn the immutable release identity.
 
 The updater pins `Augustas11/macprovider` and the existing release-signing
 P-256 public key in root-owned files. Neither trust anchor can be selected by

@@ -9,10 +9,14 @@ die() {
 repo="${1:-}"
 environment_name="${2:-production-release}"
 release_tagger_id="${3:-28995904}"
+release_reviewer_id="${4:-285575208}"
+release_reviewer_login="${5:-antfleet-ops}"
 
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "repository must be OWNER/REPO"
 [[ "$environment_name" =~ ^[A-Za-z0-9_.-]+$ ]] || die "invalid environment name"
 [[ "$release_tagger_id" =~ ^[1-9][0-9]*$ ]] || die "release tagger id must be numeric"
+[[ "$release_reviewer_id" =~ ^[1-9][0-9]*$ ]] || die "release reviewer id must be numeric"
+[[ "$release_reviewer_login" =~ ^[A-Za-z0-9-]+$ ]] || die "release reviewer login is invalid"
 [[ -n "${GH_TOKEN:-}" ]] || die "GH_TOKEN with Administration:read and Actions:read is required"
 
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/release-posture.XXXXXX")"
@@ -32,29 +36,48 @@ gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
   "repos/$repo/rulesets?targets=tag&per_page=100" >"$work/rulesets.json" ||
   die "tag rulesets are unavailable"
 
-python3 - "$work" "$environment_name" <<'PY'
+python3 - "$work" "$environment_name" "$release_reviewer_id" "$release_reviewer_login" <<'PY'
 import json
 import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
 environment_name = sys.argv[2]
+release_reviewer_id = int(sys.argv[3])
+release_reviewer_login = sys.argv[4]
 
 immutable = json.loads((root / "immutable.json").read_text())
 if immutable.get("enabled") is not True:
     raise SystemExit("repository immutable releases are not enabled")
 
 environment = json.loads((root / "environment.json").read_text())
+if environment.get("can_admins_bypass") is not False:
+    raise SystemExit(f"{environment_name} must disable admin bypass")
 rules = environment.get("protection_rules")
 review_rules = [
     rule for rule in rules or []
     if isinstance(rule, dict) and rule.get("type") == "required_reviewers"
 ]
-if not review_rules or not any(
-    isinstance(rule.get("reviewers"), list) and rule["reviewers"] for rule in review_rules
+if len(review_rules) != 1:
+    raise SystemExit(f"{environment_name} must have exactly one required-reviewers rule")
+reviewers = review_rules[0].get("reviewers")
+if not isinstance(reviewers, list) or len(reviewers) != 1:
+    raise SystemExit(f"{environment_name} must require exactly one environment reviewer")
+reviewer_entry = reviewers[0]
+reviewer = reviewer_entry.get("reviewer") if isinstance(reviewer_entry, dict) else None
+if not isinstance(reviewer, dict):
+    reviewer = reviewer_entry
+if (
+    not isinstance(reviewer_entry, dict)
+    or reviewer_entry.get("type") != "User"
+    or not isinstance(reviewer, dict)
+    or reviewer.get("id") != release_reviewer_id
+    or reviewer.get("login") != release_reviewer_login
 ):
-    raise SystemExit(f"{environment_name} must require an environment reviewer")
-if not all(rule.get("prevent_self_review") is True for rule in review_rules):
+    raise SystemExit(
+        f"{environment_name} reviewer must be User {release_reviewer_login} ({release_reviewer_id})"
+    )
+if review_rules[0].get("prevent_self_review") is not True:
     raise SystemExit(f"{environment_name} must prevent self-review")
 branch_policy = environment.get("deployment_branch_policy")
 if (
@@ -65,7 +88,7 @@ if (
     raise SystemExit(f"{environment_name} must use custom deployment branch policies")
 
 policies = json.loads((root / "environment-policies.json").read_text()).get("branch_policies")
-if not isinstance(policies, list) or not policies or not all(
+if not isinstance(policies, list) or len(policies) != 1 or not all(
     isinstance(policy, dict)
     and policy.get("name") == "main"
     and policy.get("type") in (None, "branch")
