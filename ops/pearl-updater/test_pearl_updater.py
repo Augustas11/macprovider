@@ -1272,6 +1272,76 @@ class PearlUpdaterTests(unittest.TestCase):
             with self.assertRaisesRegex(updater_module.UpdateError, "mode 0640"):
                 self.updater.validate_independent_alert_configuration()
 
+    def test_independent_alert_policy_uses_alert_group_not_candidate_sandbox_group(self):
+        alert_directory = self.root / "alert-group-policy"
+        alert_directory.mkdir(mode=0o750)
+        alert_env = alert_directory / "monitor.env"
+        alert_env.write_text(
+            "ALERT_EMAIL=operator@example.invalid\n"
+            "GMAIL_USER=sender@example.invalid\n"
+            "GMAIL_APP_PASSWORD=app-password\n"
+        )
+        alert_env.chmod(0o640)
+
+        self.updater.candidate_gid = os.getegid() + 10000
+        self.updater.independent_alert_gid = os.getegid()
+        with mock.patch.object(updater_module, "INDEPENDENT_ALERT_ENV_PATH", alert_env):
+            self.updater.validate_independent_alert_configuration()
+
+            self.updater.independent_alert_gid = self.updater.candidate_gid
+            with self.assertRaisesRegex(updater_module.UpdateError, "config directory"):
+                self.updater.validate_independent_alert_configuration()
+
+    def test_independent_alert_group_resolution_uses_named_group(self):
+        account = mock.Mock(pw_uid=1234, pw_gid=2345)
+        group = mock.Mock(gr_gid=3456)
+        with (
+            mock.patch.object(updater_module.pwd, "getpwnam", return_value=account) as account_lookup,
+            mock.patch.object(updater_module.grp, "getgrnam", return_value=group) as group_lookup,
+        ):
+            self.assertEqual(
+                updater_module.resolve_service_group_gid("macprovider", "macprovider"),
+                group.gr_gid,
+            )
+        account_lookup.assert_called_once_with("macprovider")
+        group_lookup.assert_called_once_with("macprovider")
+        self.assertNotEqual(account.pw_gid, group.gr_gid)
+
+    def test_independent_alert_group_resolution_rejects_missing_or_root_identity(self):
+        with mock.patch.object(updater_module.pwd, "getpwnam", side_effect=KeyError):
+            with self.assertRaisesRegex(updater_module.UpdateError, "service account is missing"):
+                updater_module.resolve_service_group_gid("macprovider", "macprovider")
+
+        with mock.patch.object(
+            updater_module.pwd,
+            "getpwnam",
+            return_value=mock.Mock(pw_uid=0, pw_gid=1234),
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "must not use the root uid"):
+                updater_module.resolve_service_group_gid("macprovider", "macprovider")
+
+        with (
+            mock.patch.object(
+                updater_module.pwd,
+                "getpwnam",
+                return_value=mock.Mock(pw_uid=1234, pw_gid=2345),
+            ),
+            mock.patch.object(updater_module.grp, "getgrnam", side_effect=KeyError),
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "service group is missing"):
+                updater_module.resolve_service_group_gid("macprovider", "macprovider")
+
+        with (
+            mock.patch.object(
+                updater_module.pwd,
+                "getpwnam",
+                return_value=mock.Mock(pw_uid=1234, pw_gid=2345),
+            ),
+            mock.patch.object(updater_module.grp, "getgrnam", return_value=mock.Mock(gr_gid=0)),
+        ):
+            with self.assertRaisesRegex(updater_module.UpdateError, "must not use the root gid"):
+                updater_module.resolve_service_group_gid("macprovider", "macprovider")
+
     def test_independent_alert_sender_checks_monitor_gmail_configuration(self):
         sender = SCRIPT.with_name("macprovider-pearl-updater-alert")
         alert_directory = self.root / "alert-config"
@@ -1703,6 +1773,7 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertIn("WantedBy=multi-user.target", boot)
         alert = SCRIPT.with_name("macprovider-pearl-updater-alert@.service").read_text(encoding="utf-8")
         self.assertIn("User=macprovider", alert)
+        self.assertIn("Group=macprovider", alert)
         self.assertIn("ExecStart=/usr/local/sbin/macprovider-pearl-updater-alert %i", alert)
         for hardened in (unit, boot):
             self.assertIn("NoNewPrivileges=true", hardened)
