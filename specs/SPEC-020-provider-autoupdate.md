@@ -1,7 +1,7 @@
 # SPEC-020 - Provider autoupdate
 
 Version: v0.1.5
-Status: Implemented & shipped — live in production (this path ran the 2026-07-10 incident-recovery autoupdate to CLI 1.8.21). Trust-table drift RESOLVED for the client-enforceable cases in v0.1.5 (G2 disposition (c)): the normative trust table now matches shipped behavior — a bearer-validated provisional provider (holds a validated `provider_token`) is autoupdate-eligible when `accept_provisional` is set (default true; `AutoUpdateTrustState.swift`), while explicitly opted-out and self-minted bearerless-duplicate provisional sessions remain notify-only. Flipping the default was rejected: the whole fleet is provisional by design, so it would break prod auto-update; the code was correct and the spec was stale. Known residual, carried and not fixed here: a tokenless race-loser session is marked `AuthBearerlessDuplicate` by the coordinator internally but is not currently distinguishable by the client (see "Known residual: tokenless race-loser corner" below); the production `mac` provider holds a validated token and is unaffected. See the "Cross-spec amendment and trust state" section and the v0.1.5 change-log entry.
+Status: Implemented & shipped — live in production (this path ran the 2026-07-10 incident-recovery autoupdate to CLI 1.8.21). Trust-table drift RESOLVED for the client-enforceable cases in v0.1.5 (G2 disposition (c)): the normative trust table now matches shipped behavior — a provisional provider that passes the encrypted-leg, attestation, and token guards is autoupdate-eligible when `accept_provisional` is set (default true; `AutoUpdateTrustState.swift`), whether or not it holds a validated token (see "Eligible does not always mean bearer-validated"), while explicitly opted-out, self-minted, and bearerless-duplicate provisional sessions remain notify-only. Flipping the default was rejected: the whole fleet is provisional by design, so it would break prod auto-update; the code was correct and the spec was stale. Known residual, carried and not fixed here: a tokenless race-loser session is marked `AuthBearerlessDuplicate` by the coordinator internally but is not currently distinguishable by the client (see "Known residual: tokenless race-loser corner" below); the production `mac` provider holds a validated token and reaches eligibility via the bearer-validated path. See the "Cross-spec amendment and trust state" section and the v0.1.5 change-log entry.
 
 ## Goal
 
@@ -50,12 +50,13 @@ The following trust-state table is normative for autoupdate eligibility:
 | Legacy `hello_ack` | — | — | — | — | notify-only |
 | Unauthenticated / token-rejected | — | — | — | — | notify-only |
 | v2 `auth_response` rejected | — | — | — | — | notify-only |
-| v2 accepted | provisional (bearer-validated, `accept_provisional` set — default true) | failed | * | * | notify-only |
-| v2 accepted | provisional (bearer-validated, `accept_provisional` set — default true) | succeeded with matching AEAD/KID | failed | * | notify-only |
-| v2 accepted | provisional (bearer-validated, `accept_provisional` set — default true) | succeeded with matching AEAD/KID | satisfied or not-required | rejected | notify-only |
-| v2 accepted | provisional (bearer-validated, `accept_provisional` set — default true) | succeeded with matching AEAD/KID | satisfied or not-required | validated or not-configured | **eligible** |
+| v2 accepted | provisional (`accept_provisional` set — default true) | failed | * | * | notify-only |
+| v2 accepted | provisional (`accept_provisional` set — default true) | succeeded with matching AEAD/KID | failed | * | notify-only |
+| v2 accepted | provisional (`accept_provisional` set — default true) | succeeded with matching AEAD/KID | satisfied or not-required | rejected | notify-only |
+| v2 accepted | provisional (`accept_provisional` set — default true; bearer-validated OR no token configured — see "Eligible does not always mean bearer-validated" below) | succeeded with matching AEAD/KID | satisfied or not-required | validated or not-configured | **eligible** |
 | v2 accepted | provisional (`accept_provisional` opted out via `auto_update_accept_provisional: false`) | * | * | * | notify-only |
-| v2 accepted | provisional (self-minted, bearerless-duplicate) | * | * | * | notify-only |
+| v2 accepted | provisional (self-minted; first-time token issuance pending validation — `server.go:834,866`) | * | * | * | notify-only |
+| v2 accepted | provisional (bearerless-duplicate; race-loser, no token issued — `server.go:838,851`) | * | * | * | notify-only |
 | v2 accepted | pinned | failed | * | * | notify-only |
 | v2 accepted | pinned | succeeded with matching AEAD/KID | failed | * | notify-only |
 | v2 accepted | pinned | succeeded with matching AEAD/KID | satisfied or not-required | rejected | notify-only |
@@ -83,23 +84,44 @@ an individual provider OUT of provisional autoupdate with
 `auto_update_accept_provisional: false`; opted-out and bearerless-duplicate
 provisional sessions remain notify-only.
 
+**Eligible does not always mean bearer-validated.** The eligible row's own
+Token-validation column reads "validated or not-configured," so a provisional
+session with no token configured at all can also reach `.eligible` once tier,
+encrypted-leg, and attestation otherwise qualify; bearer-validation is not an
+inherent requirement of the tier gate itself. Two distinct coordinator-side
+paths produce a provisional session with `tokenConfigured=false`: (a) an
+issuer-less coordinator deployment, where `s.issuer == nil` and
+`resolveProvisionalToken` returns `provisionalTokenSkip` with an empty auth
+state before any token logic runs
+(`phase4-coordinator/internal/ws/server.go:810-811`) — an explicit operator
+deployment choice, not an attack corner; and (b) the tokenless race-loser
+corner described immediately below, which is a residual gap. The production
+`mac` provider holds a validated `provider_token` and reaches `.eligible` via
+the bearer-validated path.
+
 **Known residual: tokenless race-loser corner.** The bearerless-duplicate
 notify-only row is coordinator-side intent, not currently a client-enforceable
 guarantee in every case. When two tokenless connects race for the same
-`provider_id`, the coordinator admits the loser and marks it internally as
-`pool.AuthBearerlessDuplicate` (`phase4-coordinator/internal/ws/server.go:838`
-and `:851`), but the `provisionalTokenSkip` outcome that produces this admit
-sends the CLI neither `assigned_provider_token` nor any `auth_state` field for
-that session. Client-side, `AutoUpdateTrustState.fromCoordinatorPayload`
-therefore computes `tokenConfigured=false` and `bearerlessDuplicate=false` for
-that connection, and — if tier, encrypted-leg, and attestation otherwise
-qualify — it can reach `.eligible` rather than the table's intended
-notify-only verdict. This corner does not affect the production `mac`
-provider, which holds a validated `provider_token` and is genuinely
-bearer-validated. Closing this gap requires the coordinator to propagate an
-explicit `auth_state` (or equivalent signal) to the client for the race-loss
-outcome; that is a coordinator-side change and is out of scope for this v0.1.5
-spec amendment. Carried as a follow-up.
+`provider_id`, `resolveProvisionalToken` marks the loser
+`pool.AuthBearerlessDuplicate` at the auth layer
+(`phase4-coordinator/internal/ws/server.go:838` and `:851`); the registry then
+admits that session into the pool only if it registers before any existing
+session for the same `provider_id` is already registered —
+`RegisterAtDetailed` refuses registration for an `AuthBearerlessDuplicate`
+connection when an existing session for that `provider_id` is present
+(`phase4-coordinator/internal/pool/provider.go:658-668`), closing the
+pool-slot-capture vector. In the admitted (registers-first) case, the
+`provisionalTokenSkip` outcome sends the CLI neither `assigned_provider_token`
+nor any `auth_state` field for that session. Client-side,
+`AutoUpdateTrustState.fromCoordinatorPayload` therefore computes
+`tokenConfigured=false` and `bearerlessDuplicate=false` for that connection,
+and — if tier, encrypted-leg, and attestation otherwise qualify — it can reach
+`.eligible` rather than the table's intended notify-only verdict. This corner
+does not affect the production `mac` provider, which holds a validated
+`provider_token` and is genuinely bearer-validated. Closing this gap requires
+the coordinator to propagate an explicit `auth_state` (or equivalent signal)
+to the client for the race-loss outcome; that is a coordinator-side change and
+is out of scope for this v0.1.5 spec amendment. Carried as a follow-up.
 
 Implementations MUST store an explicit current `autoupdate_trust_state` field
 per coordinator session and MUST NOT derive eligibility from
@@ -702,9 +724,11 @@ configuration does not prevent a manual operator update.
 AC-V0.1-13. Untrusted recommendation remains notify-only: given legacy
 hello_ack-only, unauthenticated, a notify-only provisional sub-state
 (self-minted/bearerless-duplicate, or explicitly opted out via
-`auto_update_accept_provisional: false` — a bearer-validated provisional
-session with `accept_provisional` set is eligible per the normative
-trust-state table, not notify-only), failed encrypted-leg, failed
+`auto_update_accept_provisional: false` — a provisional session with
+`accept_provisional` set that also passes the encrypted-leg, attestation, and
+token guards is eligible per the normative trust-state table, not
+notify-only, whether or not it holds a validated token), failed
+encrypted-leg, failed
 attestation, rejected token, or otherwise notify-only coordinator state from
 the normative trust-state table, a newer `recommended_binary_version` does not
 trigger download, drain, swap, marker creation, or cooldown. The provider
@@ -894,30 +918,38 @@ Deferred to v0.3.0 or later:
 
 - v0.1.5 (2026-07-11): Reconciled the normative trust-state table with shipped
   behavior (Wave B decision gate G2, disposition (c)). Split the single
-  `provisional → notify-only` row by auth sub-state: a bearer-validated
-  provisional provider (validated `provider_token`, successful encrypted leg,
-  and satisfied Tier2 attestation where required) is autoupdate-**eligible**
-  when `accept_provisional` is set (default true; `AutoUpdateTrustState.swift`
-  tier gate), while bearerless-duplicate and explicitly opted-out
-  (`auto_update_accept_provisional: false`) provisional sessions remain
-  notify-only; added explicit failed-guard rows (encrypted-leg failed,
-  attestation failed, token rejected) so every provisional sub-state has a
-  defined verdict, mirroring the pre-existing pinned rows. Added a
-  provisional-eligibility rationale (the fleet is 100% provisional by design;
-  binary replacement is independently crypto-gated, so per T-3 a coordinator
-  can at most accelerate a legitimately signed newer release). Qualified
-  AC-V0.1-13 so its notify-only enumeration no longer contradicts the new
-  eligible row. Documented a known residual limitation: a tokenless race-loser
-  session (coordinator-internal `AuthBearerlessDuplicate`,
-  `internal/ws/server.go:838,851`) is not currently distinguishable by the
-  client because the coordinator does not propagate `auth_state` for that
-  outcome, so that corner's notify-only verdict is coordinator-side intent
-  only, not yet client-enforceable; the production `mac` provider is
-  unaffected (holds a validated token). Closing that gap needs a
-  coordinator-side `auth_state` propagation change, carried as a follow-up and
-  out of scope here. Spec-and-comments only: no behavior change — the shipped
-  code was already correct and flipping the default was rejected because it
-  would break prod auto-update.
+  `provisional → notify-only` row by auth sub-state: a provisional provider
+  that passes encrypted-leg, attestation (where required), and token guards is
+  autoupdate-**eligible** when `accept_provisional` is set (default true;
+  `AutoUpdateTrustState.swift` tier gate) — whether or not it holds a
+  validated token, since the eligible row's token column allows "validated or
+  not-configured" — while explicitly opted-out, self-minted, and
+  bearerless-duplicate provisional sessions remain notify-only; added explicit
+  failed-guard rows (encrypted-leg failed, attestation failed, token rejected)
+  so every provisional sub-state has a defined verdict, mirroring the
+  pre-existing pinned rows. Added a provisional-eligibility rationale (the
+  fleet is 100% provisional by design; binary replacement is independently
+  crypto-gated, so per T-3 a coordinator can at most accelerate a legitimately
+  signed newer release). Qualified AC-V0.1-13 so its notify-only enumeration
+  no longer contradicts the new eligible row. Added an "Eligible does not
+  always mean bearer-validated" note distinguishing the issuer-less-deployment
+  path (`internal/ws/server.go:810-811`, operator-chosen, not a gap) from the
+  tokenless race-loser corner (a residual gap). Documented that residual: a
+  tokenless race-loser session (coordinator-internal `AuthBearerlessDuplicate`,
+  `internal/ws/server.go:838,851`) is admitted into the pool only if it
+  registers before an existing session for the same `provider_id`
+  (`internal/pool/provider.go:658-668` refuses registration otherwise), and in
+  the admitted case is not currently distinguishable by the client because the
+  coordinator does not propagate `auth_state` for that outcome, so that
+  corner's notify-only verdict is coordinator-side intent only, not yet
+  client-enforceable; the production `mac` provider is unaffected (holds a
+  validated token). Closing that gap needs a coordinator-side `auth_state`
+  propagation change, carried as a follow-up and out of scope here. Split the
+  single "self-minted, bearerless-duplicate" row into two rows to distinguish
+  first-time token issuance (pending validation) from the race-loser
+  (never-validated) case; both remain notify-only. Spec-and-comments only: no
+  behavior change — the shipped code was already correct and flipping the
+  default was rejected because it would break prod auto-update.
 - v0.1.4 (2026-06-29): Absorbed r4 audit findings:
   - B-r4-M-1: success-state cleanup ordered sequence, success sentinel crash
     recovery, `orphaned_success_sentinel` failure class, and acceptance

@@ -65,8 +65,12 @@ struct AutoUpdateTrustState: Sendable {
         // acceptProvisional is true (the default; config opts out via
         // `auto_update_accept_provisional: false`). Passing this gate is
         // necessary but not sufficient — the encrypted-leg, attestation, and
-        // token-validation guards below still apply, so only a bearer-validated
-        // provisional session reaches `.eligible` (SPEC-020 v0.1.5 trust table).
+        // token-validation guards below still apply. A provisional session
+        // reaches `.eligible` whether or not it holds a validated token: the
+        // token guard (`!tokenConfigured || tokenValidated`) only blocks a
+        // session with a configured-but-invalid token, and passes trivially
+        // when no token is configured at all (SPEC-020 v0.1.5 trust table;
+        // see "Eligible does not always mean bearer-validated").
         if tier != "pinned" {
             guard tier == "provisional" && acceptProvisional else { return .provisional }
         }
