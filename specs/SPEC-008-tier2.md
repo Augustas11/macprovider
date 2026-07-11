@@ -151,6 +151,12 @@ cross-repo interop contract the Swift provider CLI byte-matches):
   freshness = SHA-256(encoded token) at Apple OID …8.11.1; recognized Apple MDA property OID
   present+non-blank; CSR as PEM or base64 DER via `certificate_signing_request`/`csr`).
   Corrected §10.4's now-stale "omits key_binding/signature" wording.
+- **§7.3/§7.5/§10.4 (R12):** documented the fixed **±60s future-clock tolerance** on
+  `issued_at` (both formats; issued >60s ahead → `attestation_stale`); the MDA freshness
+  extension is matched against the raw bytes **or** its ASN.1-unwrapped OCTET STRING; and the
+  device-property check scans the recognized OIDs in **fixed order** and requires the **first
+  present** one to be non-blank (a blank first-present extension rejects even if a later OID
+  is non-blank) — correcting the earlier "any one present + non-blank" wording.
 - **§5.7:** clarified the hash-disclosure counting basis is slot-holders
   (`hasAvailableSlot`); `RoutingEligible` has no hash check — the hash routing-exclusion is
   the separate §5.5-5.6 predicate (mismatch/invalid always; uncatalogued only when
@@ -1571,8 +1577,10 @@ For every provider session, the coordinator MUST compute one of:
 - `attested`: token valid, fresh, bound to provider identity, and properties
   satisfy policy.
 - `attestation_failed`: token present but invalid.
-- `attestation_stale`: the token's **challenge (nonce) or freshness (`issued_at`/
-  `expires_at`/`attestation_max_age_s`) check failed**. Note (v0.4, shipped): these checks
+- `attestation_stale`: the token's **challenge (nonce) or envelope-freshness check
+  failed** — freshness covers `issued_at`/`expires_at`/`attestation_max_age_s` with a fixed
+  **±60-second future-clock tolerance** on `issued_at` (issued more than 60s ahead → stale;
+  see §7.5). Note (v0.4, shipped): these checks
   run **before** format-specific signature verification (§7.5), so `attestation_stale`
   does **not** imply the token was cryptographically valid — a badly-signed token with a
   stale/mismatched challenge is classified stale, not failed. It is non-positive and is
@@ -1921,8 +1929,11 @@ its signature ever being checked** (§7.3):
    (mismatch → `attestation_failed`).
 4. Validate the claimed hardware family against configured policy — a string-equality check
    on the self-asserted `hardware_family` (§7.3 — **not** a hardware proof).
-5. Validate freshness against `issued_at`, `expires_at`, and `tier2.attestation_max_age_s`
-   (expired/too-old → `attestation_stale`).
+5. Validate envelope freshness (both formats) → `attestation_stale` on any of: `issued_at`
+   or `expires_at` zero; **`issued_at` more than 60 seconds in the future** (`now <
+   issued_at − 60s` — a fixed ±60s future-clock tolerance, not configurable); **expired**
+   (`now ≥ expires_at`); or age exceeding `tier2.attestation_max_age_s` (`now − issued_at >
+   attestation_max_age_s`, when that key is > 0).
 6. **Then** validate the token's cryptographic signature(s) **per format**:
    - for `macprovider-se-p256-v1` (§7.4a): verify the body signature and the required
      session-binding signature against the **submitted, self-signed** P-256 key — **no**
@@ -1944,12 +1955,16 @@ its signature ever being checked** (§7.3):
      against `token.Claimed`** (`verifyMDADeviceProperties`) — it checks only that such an
      extension exists. **Shipped MDA acceptance grammar** (for a clean-room verifier): the
      leaf public key MUST be **ECDSA on P-256 or P-384** (`verifyMDALeafPublicKey`); the
-     freshness extension is Apple OID `1.2.840.113635.100.8.11.1` and its value MUST equal
-     `SHA-256(encoded token string)` (matched against several candidate byte
-     representations); the "device-property extension" is any one of the recognized Apple
-     MDA property OIDs (arc `1.2.840.113635.100.8.{9.1,9.2,9.4,10.1,10.2,10.3,13.1,13.2,13.3}`
-     — note the freshness OID `…8.11.1` is separate and used for the freshness check, not the
-     device-property presence check), required present and non-blank; the CSR is taken from
+     freshness extension is Apple OID `1.2.840.113635.100.8.11.1` and MUST equal
+     `SHA-256(encoded token string)`, matched against **two** representations — the raw
+     extension bytes, and (if the value ASN.1-unmarshals as an OCTET STRING with no trailing
+     bytes) its unwrapped octets (`mdaFreshnessValueCandidates`); the device-property check
+     scans the recognized Apple MDA property OIDs
+     (`1.2.840.113635.100.8.{9.1,9.2,9.4,10.1,10.2,10.3,13.1,13.2,13.3}`; the freshness OID
+     `1.2.840.113635.100.8.11.1` is separate) **in that fixed order and inspects the *first
+     present* one only — it MUST be non-blank; a blank first-present extension rejects even if
+     a later recognized OID is non-blank** (`verifyMDADeviceProperties`); none present →
+     rejected. The CSR is taken from
      the **`certificate_signing_request`** field (fallback alias **`csr`**) and parsed as
      **PEM** (`CERTIFICATE REQUEST` / `NEW CERTIFICATE REQUEST`) **or** base64 (standard/raw,
      URL/raw-URL) DER (`parseEncodedCSR`).
@@ -2647,9 +2662,10 @@ with an empty/absent `binary_version` is accepted.
     `certificate_chain`/`x5c`) → cert-chain extraction yields no chain, so the MDA path
     returns status **`unsupported`** (event `attestation_unsupported`) under optional
     attestation, and **`attestation_failed`** only under `require_attestation: true`.
-  - *Envelope freshness* — challenge/nonce mismatch or `issued_at`/`expires_at`/
-    `attestation_max_age_s` failure → **`attestation_stale`** (classified before signature
-    verification, §7.5).
+  - *Envelope freshness* — challenge/nonce mismatch, `issued_at` >60s in the future,
+    expiry, or `attestation_max_age_s` age failure → **`attestation_stale`** (the ±60s
+    future-clock tolerance and exact bounds are in §7.5; classified before signature
+    verification).
   - Body/binding signature failure, or the MDA **certificate freshness-extension** mismatch
     → **`attestation_failed`** (distinct from envelope freshness above).
   Any non-`attested` status closes the session with code `4012` (`CloseTier2AttestationFailed`)
