@@ -5565,13 +5565,16 @@ func TestChatCompletionsColdStartRaceReturnsNoProviderAvailable(t *testing.T) {
 func TestChatCompletionsDeclaredButColdModelReturns503(t *testing.T) {
 	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "http://p1.example"}})
 	// Provider serves model-served but declares support for
-	// model-declared-cold (it is warm-capable but not currently loaded).
+	// model-declared-cold (it is warm-capable but not currently
+	// loaded). R-3.1.4: the served model_id MUST appear in
+	// supported_models, so model-served is listed too (codex code-lane
+	// audit of PR #555).
 	registry.Register(&pool.Provider{
 		ProviderID:            "p1",
 		AssignedID:            "s1",
 		Hostname:              "p1.local",
 		ModelID:               "model-served",
-		SupportedModels:       []string{"model-declared-cold"},
+		SupportedModels:       []string{"model-served", "model-declared-cold"},
 		ModelParamsB:          7,
 		RAMGB:                 16,
 		MaxContextTokens:      20000,
@@ -5596,6 +5599,7 @@ func TestChatCompletionsDeclaredButColdModelReturns503(t *testing.T) {
 		t.Fatalf("declared-but-cold model status = %d, want 503; body=%s", cold.Code, cold.Body.String())
 	}
 	assertOpenAIErrorEnvelope(t, cold, "no_provider_available", "service_unavailable")
+	assertRetryableAndNoProviderBodyForwarded(t, cold, true)
 
 	// (c) A model no provider declares stays 404 model_not_found — the
 	// union must not turn genuinely-unknown models into 503.
@@ -5604,6 +5608,93 @@ func TestChatCompletionsDeclaredButColdModelReturns503(t *testing.T) {
 		t.Fatalf("undeclared model status = %d, want 404; body=%s", unknown.Code, unknown.Body.String())
 	}
 	assertOpenAIErrorEnvelope(t, unknown, "model_not_found", "invalid_request_error")
+	assertRetryableAndNoProviderBodyForwarded(t, unknown, false)
+}
+
+// TestChatCompletionsDeclaredModelBeyondSeenIndexCapsReturns503 pins
+// the buyer-visible half of the codex code-lane HIGH finding on PR
+// #555: a provider whose declared catalog is wider than the seen-index
+// caps (maxSeenModelsPerProvider=32 per-session,
+// maxLifetimeContribPerProvider=128 per-provider lifetime) still gets
+// 503 no_provider_available for a declared-but-cold model beyond those
+// caps, because ModelKnown falls back to scanning the live, currently-
+// connected provider's SupportedModels directly.
+func TestChatCompletionsDeclaredModelBeyondSeenIndexCapsReturns503(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "http://p1.example"}})
+
+	const totalSupported = 200
+	supported := make([]string, totalSupported)
+	// R-3.1.4: served model_id must appear in supported_models; this
+	// duplicate entry consumes no extra seen-index budget.
+	supported[0] = "model-served"
+	for i := 1; i < totalSupported; i++ {
+		supported[i] = fmt.Sprintf("declared-model-%03d", i)
+	}
+	// supported[150] is well past both the 32-entry per-session cap
+	// and the 128-entry per-provider lifetime cap (see the pool-level
+	// TestModelKnownFindsDeclaredModelBeyondSeenIndexCaps for the exact
+	// slot accounting).
+	beyondCapsModel := supported[150]
+
+	registry.Register(&pool.Provider{
+		ProviderID:            "p1",
+		AssignedID:            "s1",
+		Hostname:              "p1.local",
+		ModelID:               "model-served",
+		SupportedModels:       supported,
+		ModelParamsB:          7,
+		RAMGB:                 16,
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 20,
+		EndpointURL:           "http://p1.example",
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       time.Now().UTC(),
+		ConnectedAt:           time.Now().UTC(),
+		BinaryVersion:         "0.1.0",
+	}, nil)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"`+beyondCapsModel+`","messages":[{"role":"user","content":"hello"}]}`), nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("declared model beyond seen-index caps status = %d, want 503; body=%s", rr.Code, rr.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
+	assertRetryableAndNoProviderBodyForwarded(t, rr, true)
+}
+
+// assertRetryableAndNoProviderBodyForwarded asserts error.retryable
+// matches wantRetryable and that the response body is EXACTLY the
+// OpenAI error envelope shape — a single top-level "error" key — so a
+// provider's partial/forwarded completion payload cannot have leaked
+// into the 503/404 response. Codex code-lane audit of PR #555.
+func assertRetryableAndNoProviderBodyForwarded(t *testing.T, rr *httptest.ResponseRecorder, wantRetryable bool) {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Retryable bool `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v; body=%s", err, rr.Body.String())
+	}
+	if body.Error.Retryable != wantRetryable {
+		t.Fatalf("error.retryable = %v, want %v; body=%s", body.Error.Retryable, wantRetryable, rr.Body.String())
+	}
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &topLevel); err != nil {
+		t.Fatalf("decode top-level body: %v; body=%s", err, rr.Body.String())
+	}
+	if len(topLevel) != 1 {
+		t.Fatalf("response body has %d top-level keys, want exactly 1 (\"error\"); a provider body may have been forwarded: %s", len(topLevel), rr.Body.String())
+	}
+	if _, ok := topLevel["error"]; !ok {
+		t.Fatalf("response body missing top-level \"error\" key: %s", rr.Body.String())
+	}
 }
 
 // assertOpenAIErrorEnvelope decodes the response body and verifies

@@ -1617,6 +1617,25 @@ func (r *Registry) ModelKnown(modelID string) bool {
 			return true
 		}
 	}
+	// 1b. SPEC-010 v1.5 R-3.3.4 correctness core: live providers'
+	// declared SupportedModels. recordSeenModelsUnionLocked's seen-index
+	// union (per-session cap maxSeenModelsPerProvider=32, per-provider
+	// lifetime cap maxLifetimeContribPerProvider=128, global lifetime
+	// cap maxSeenModelsLifetime=4096) is a best-effort accumulator that
+	// can silently drop a declared model under cap pressure — e.g. a
+	// provider with a catalog wider than 32 entries. Without this scan,
+	// a model beyond those caps would 404 forever even though a
+	// CURRENTLY-CONNECTED provider is declaring it right now. A served
+	// ModelID never has this gap (step 1 above always covers it
+	// regardless of cap state); declared-but-cold models need the same
+	// unconditional guarantee while the declaring provider is live.
+	for _, p := range r.providers {
+		for _, supported := range p.SupportedModels {
+			if strings.EqualFold(supported, modelID) {
+				return true
+			}
+		}
+	}
 	// 2. Per-session attribution map. ISS-185 R2 code-lane MAJOR: a
 	// provider may have previously advertised this model id via
 	// heartbeat (it's in their per-session set) while their CURRENT

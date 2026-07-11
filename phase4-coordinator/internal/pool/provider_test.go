@@ -1275,12 +1275,15 @@ func TestModelKnownUnionsDeclaredSupportedModels(t *testing.T) {
 
 	// Provider serves model-y but declares support for model-x (cold)
 	// and Model-X-CASE (mixed case, to exercise the case-folding the
-	// registration path already applies to model ids).
+	// registration path already applies to model ids). R-3.1.4: the
+	// served model_id MUST appear in supported_models, so model-y is
+	// listed too (a duplicate of the modelID argument; it's a no-op
+	// on the seen-index, already recorded via modelID).
 	registry.Register(&Provider{
 		ProviderID:       "p1",
 		AssignedID:       "s1",
 		ModelID:          "model-y",
-		SupportedModels:  []string{"model-x", "Model-X-CASE"},
+		SupportedModels:  []string{"model-y", "model-x", "Model-X-CASE"},
 		State:            StateReady,
 		SlotsFree:        1,
 		SlotsTotal:       1,
@@ -1344,9 +1347,26 @@ func TestModelKnownUnionsDeclaredSupportedModels(t *testing.T) {
 
 // TestModelKnownUnionsSupportedModelsOnHeartbeat pins that the R-3.3.4
 // union is re-applied on the heartbeat path too (provider.go heartbeat
-// site), not only at registration. Heartbeat frames do not carry
-// supported_models, so the stored Provider.SupportedModels remains the
-// authoritative declared set across heartbeats.
+// site), not only at registration.
+//
+// Codex code-lane audit of PR #555 flagged the original version of this
+// test as ineffective: it declared model-x at REGISTRATION time, so the
+// registration-time union alone (not the heartbeat call) already made
+// ModelKnown(model-x) true -- the assertion stayed green even if the
+// heartbeat call were reverted to recordSeenModelLocked(p.ProviderID,
+// hb.ModelID) (dropping SupportedModels).
+//
+// This version exercises a supported-model entry the registration-time
+// union never saw: model-x is appended to the live Provider's
+// SupportedModels (white-box mutation, same package -- the real wire
+// has no post-registration supported_models update path; heartbeat
+// frames don't carry the field) strictly BETWEEN registration and the
+// heartbeat call. The assertion runs AFTER RemoveIfSession disconnects
+// the provider, so ModelKnown's live-provider SupportedModels scan
+// (fallback 1b, the HIGH-severity fix for cap-exhausted entries) no
+// longer applies either -- the only way model-x can still be known is
+// if the heartbeat's recordSeenModelsUnionLocked call recorded it into
+// the seen index while the provider was live.
 func TestModelKnownUnionsSupportedModelsOnHeartbeat(t *testing.T) {
 	registry := NewRegistry(nil)
 	start := time.Unix(1716768000, 0).UTC()
@@ -1355,7 +1375,7 @@ func TestModelKnownUnionsSupportedModelsOnHeartbeat(t *testing.T) {
 		ProviderID:       "p1",
 		AssignedID:       "s1",
 		ModelID:          "model-y",
-		SupportedModels:  []string{"model-x"},
+		SupportedModels:  []string{"model-y"},
 		State:            StateReady,
 		SlotsFree:        1,
 		SlotsTotal:       1,
@@ -1365,11 +1385,94 @@ func TestModelKnownUnionsSupportedModelsOnHeartbeat(t *testing.T) {
 		MaxContextTokens: 20000,
 	}, nil)
 
-	// A heartbeat still serving model-y must keep the declared-cold
-	// model-x known (union re-applied from p.SupportedModels).
+	if registry.ModelKnown("model-x") {
+		t.Fatal("ModelKnown(model-x) = true before it was ever declared; fixture bug")
+	}
+
+	// Simulate the provider's declared catalog gaining model-x between
+	// registration and the next heartbeat.
+	registry.mu.Lock()
+	registry.providers["p1"].SupportedModels = append(registry.providers["p1"].SupportedModels, "model-x")
+	registry.mu.Unlock()
+
 	registry.ApplyHeartbeat("p1", "s1", heartbeatUpdateAt("model-y", start.Add(time.Minute)))
+
+	if !registry.RemoveIfSession("p1", "s1") {
+		t.Fatal("RemoveIfSession returned false")
+	}
+	// Provider is disconnected: ModelKnown's live-provider scans no
+	// longer see it. model-x can only still be known via the seen
+	// index the heartbeat call populated.
 	if !registry.ModelKnown("model-x") {
-		t.Fatal("ModelKnown(model-x) = false after heartbeat; heartbeat path did not union declared supported_models (SPEC-010 R-3.3.4)")
+		t.Fatal("ModelKnown(model-x) = false after disconnect; heartbeat path did not union declared supported_models into the seen index (SPEC-010 R-3.3.4)")
+	}
+}
+
+// TestModelKnownFindsDeclaredModelBeyondSeenIndexCaps pins the HIGH-
+// severity fix from the codex code-lane audit of PR #555: the seen-
+// index union (recordSeenModelsUnionLocked) is a best-effort
+// accumulator bounded by maxSeenModelsPerProvider (per-session, 32),
+// maxLifetimeContribPerProvider (per-provider lifetime, 128), and
+// maxSeenModelsLifetime (global lifetime, 4096). A provider with a
+// declared catalog wider than those caps has entries silently dropped
+// from the seen index -- but ModelKnown's live-provider SupportedModels
+// scan (fallback 1b) must still find them while the declaring provider
+// is CURRENTLY CONNECTED, regardless of cap state. A served model_id
+// never had this gap (the live ModelID scan always covers it); this
+// test pins the equivalent unconditional guarantee for declared models.
+func TestModelKnownFindsDeclaredModelBeyondSeenIndexCaps(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	const totalSupported = 200
+	supported := make([]string, totalSupported)
+	// R-3.1.4: the served model_id MUST appear in supported_models.
+	// This first entry duplicates the modelID argument, so it consumes
+	// no additional seen-index budget (already recorded via modelID).
+	supported[0] = "model-served"
+	for i := 1; i < totalSupported; i++ {
+		supported[i] = fmt.Sprintf("declared-model-%03d", i)
+	}
+	// supported[150] is the 151st DISTINCT entry attempted for this
+	// provider (model-served consumes slot 1; supported[0] is a
+	// no-op duplicate; supported[1..150] consume slots 2..151) --
+	// well past both the 32-entry per-session cap and the 128-entry
+	// per-provider lifetime cap.
+	beyondCapsModel := supported[150]
+
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-served",
+		SupportedModels:  supported,
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+
+	// Confirm the fixture actually exhausts both seen-index caps for
+	// this entry -- guards the test itself against a future cap bump
+	// silently un-testing this scenario.
+	registry.mu.RLock()
+	_, inSession := registry.seenModelsByProvider["p1"][beyondCapsModel]
+	_, inLifetime := registry.seenModelsLifetime[strings.ToLower(beyondCapsModel)]
+	registry.mu.RUnlock()
+	if inSession {
+		t.Fatalf("fixture bug: %q unexpectedly fit within the %d-entry per-session cap; adjust the index", beyondCapsModel, maxSeenModelsPerProvider)
+	}
+	if inLifetime {
+		t.Fatalf("fixture bug: %q unexpectedly fit within the %d-entry per-provider lifetime cap; adjust the index", beyondCapsModel, maxLifetimeContribPerProvider)
+	}
+
+	// The seen-index caps dropped it, but the provider is still
+	// connected and declares it right now -- ModelKnown must catch it
+	// via the live-provider SupportedModels scan.
+	if !registry.ModelKnown(beyondCapsModel) {
+		t.Fatalf("ModelKnown(%q) = false; live provider declares it in SupportedModels but seen-index caps dropped it (SPEC-010 R-3.3.4 correctness core, codex HIGH fix)", beyondCapsModel)
 	}
 }
 

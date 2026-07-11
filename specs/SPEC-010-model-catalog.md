@@ -842,6 +842,41 @@ default serializations. §3.3 specifies the one place
 > (`internal/pool/provider_test.go`) and
 > `TestChatCompletionsDeclaredButColdModelReturns503`
 > (`internal/buyer/server_test.go`).
+>
+> **Follow-up (2026-07-11, codex code-lane audit of PR #555, no
+> normative change):** the seen-index union above
+> (`recordSeenModelsUnionLocked`) is a best-effort accumulator bounded
+> by `maxSeenModelsPerProvider` (32, per-session),
+> `maxLifetimeContribPerProvider` (128, per-provider lifetime), and
+> `maxSeenModelsLifetime` (4096, global lifetime) — a provider whose
+> declared catalog exceeds those caps could have entries silently
+> dropped from the seen index, 404ing a declared model even though a
+> currently-connected provider declares it. Fixed by adding a live-
+> provider `SupportedModels` scan to `ModelKnown()` (alongside the
+> pre-existing live `ModelID` scan), so a declared model on a
+> CURRENTLY-CONNECTED provider is always known regardless of seen-
+> index cap state — this is the correctness core of R-3.3.4, not an
+> optional hardening. Covered by
+> `TestModelKnownFindsDeclaredModelBeyondSeenIndexCaps`
+> (`internal/pool/provider_test.go`) and
+> `TestChatCompletionsDeclaredModelBeyondSeenIndexCapsReturns503`
+> (`internal/buyer/server_test.go`).
+>
+> **Cross-spec inconsistency, carried (not resolved here):** R-3.3.4
+> above is `MUST`; SPEC-002 v1.3.5 R-3.X.6 (`specs/SPEC-002-coordinator.md:819`)
+> calls the identical `seenModels` union `MAY` (optional); SPEC-006
+> §17.2 (`specs/SPEC-006-buyer-api.md:2807`) defines the 404 condition
+> as "not in any provider's served or recently seen model list"
+> without an explicit reference to declared-but-cold models. This
+> implementation follows SPEC-010 v1.5 R-3.3.4's `MUST` (the more
+> specific, later-locked rule on this exact question), and does not
+> change any dispatch outcome — R-3.4.1 and SPEC-002 R-3.X.6's "MUST
+> NOT change dispatch outcomes" both still hold; only the buyer error
+> code for declared-but-cold requests changes (404→503). SPEC-002 and
+> SPEC-006 are both large LOCKED specs and are intentionally NOT
+> amended by this change; a future pass should reconcile SPEC-002
+> R-3.X.6's `MAY` and SPEC-006 §17.2's "served or recently seen"
+> wording to cross-reference SPEC-010 R-3.3.4 explicitly.
 
 ### 3.4 Router: candidate filter (semantically unchanged in v1.0)
 
