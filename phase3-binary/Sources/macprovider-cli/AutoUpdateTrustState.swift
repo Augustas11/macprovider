@@ -25,8 +25,10 @@ struct AutoUpdateTrustState: Sendable {
     let bearerlessDuplicate: Bool
     let connected: Bool
     let stableReason: String?
-    // Provisional-tier autoupdate: enabled by default; set
-    // `auto_update_accept_provisional: false` in provider config to opt out.
+    // Provisional-tier autoupdate is enabled by DEFAULT (accept = true). When
+    // true, a bearer-validated provisional session becomes autoupdate-eligible;
+    // set `auto_update_accept_provisional: false` in provider config to opt out
+    // and stay notify-only. See SPEC-020 v0.1.5 trust table.
     let acceptProvisional: Bool
 
     init(
@@ -60,7 +62,15 @@ struct AutoUpdateTrustState: Sendable {
         guard v2Accepted else { return .legacyHelloAck }
         if bearerlessDuplicate { return .bearerlessDuplicate }
         // Tier gate: pinned always passes. Provisional passes when
-        // acceptProvisional is true (default unless config opts out).
+        // acceptProvisional is true (the default; config opts out via
+        // `auto_update_accept_provisional: false`). Passing this gate is
+        // necessary but not sufficient — the encrypted-leg, attestation, and
+        // token-validation guards below still apply. A provisional session
+        // reaches `.eligible` whether or not it holds a validated token: the
+        // token guard (`!tokenConfigured || tokenValidated`) only blocks a
+        // session with a configured-but-invalid token, and passes trivially
+        // when no token is configured at all (SPEC-020 v0.1.5 trust table;
+        // see "Eligible does not always mean bearer-validated").
         if tier != "pinned" {
             guard tier == "provisional" && acceptProvisional else { return .provisional }
         }
@@ -142,8 +152,10 @@ enum AutoUpdateConfig {
         return true
     }
 
-    /// Provisional-tier providers receive coordinator-driven autoupdate unless
-    /// explicitly opted out via `auto_update_accept_provisional: false`.
+    /// Effective accept-provisional default is TRUE: `!= false` maps both unset
+    /// (nil) and true to true, so provisional providers receive coordinator-
+    /// driven autoupdate unless explicitly opted out via
+    /// `auto_update_accept_provisional: false`. See SPEC-020 v0.1.5 trust table.
     static func acceptProvisional(_ config: AppConfig) -> Bool {
         config.autoUpdateAcceptProvisional != false
     }
