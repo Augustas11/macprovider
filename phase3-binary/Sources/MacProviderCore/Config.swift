@@ -37,14 +37,18 @@ public struct AppConfig: Equatable, Sendable {
     public var wsTunneledMode: Bool?
     public var autoUpdateEnabled: Bool?
     public var autoupdateEnabled: Bool?
-    // Operator opt-in: when true, provisional-tier providers apply
-    // coordinator-recommended auto-updates. Default nil (== false) preserves
-    // the pinned-only trust posture. Landed to unblock the trust-orphan
-    // pattern where self-service (curl|bash) providers, which are always
-    // provisional at admission, would otherwise never receive fixes without
-    // manual operator SSH intervention. Flipping this to true is an explicit
-    // operator statement of trust in the connected coordinator's version
-    // recommendation surface.
+    // Operator opt-OUT knob for provisional-tier autoupdate. The effective
+    // default is accept = TRUE: when this is nil (unset) or true, a
+    // bearer-validated provisional provider is autoupdate-eligible — see
+    // `AutoUpdateConfig.acceptProvisional`, which reads `!= false`, so unset
+    // resolves to true. Set `auto_update_accept_provisional: false` to opt a
+    // provider out and keep it notify-only. Accept-by-default is deliberate:
+    // self-service (curl|bash) providers are always admitted at
+    // `tier: provisional`, so the whole fleet is provisional and a pinned-only
+    // posture would leave every provider unable to receive signed fixes without
+    // manual operator SSH. Binary replacement stays independently crypto-gated
+    // (SPEC-020 threat model T-3), so a coordinator can at most accelerate a
+    // legitimately signed newer release. Matches SPEC-020 v0.1.5 trust table.
     public var autoUpdateAcceptProvisional: Bool?
     public var configPath: String
     public var logLevel: LogLevel

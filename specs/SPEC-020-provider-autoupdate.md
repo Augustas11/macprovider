@@ -1,11 +1,11 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.4
-Status: Implemented & shipped — live in production (this path ran the 2026-07-10 incident-recovery autoupdate to CLI 1.8.21). The "Draft" status was never updated. Known open drift: code defaults `accept_provisional: true` (`AutoUpdateTrustState.swift`), which contradicts this spec's normative trust table (provisional → notify-only); reconcile by flipping the default or amending the table in a v0.1.5 pass.
+Version: v0.1.5
+Status: Implemented & shipped — live in production (this path ran the 2026-07-10 incident-recovery autoupdate to CLI 1.8.21). Trust-table drift RESOLVED in v0.1.5 (G2 disposition (c)): the normative trust table now matches shipped behavior — a bearer-validated provisional provider is autoupdate-eligible when `accept_provisional` is set (default true; `AutoUpdateTrustState.swift`), while bearerless-duplicate and explicitly opted-out provisional sessions remain notify-only. Flipping the default was rejected: the whole fleet is provisional by design, so it would break prod auto-update; the code was correct and the spec was stale. See the "Cross-spec amendment and trust state" section and the v0.1.5 change-log entry.
 
 ## Goal
 
-SPEC-020 v0.1.4 defines provider-side autoupdate for `macprovider-cli`.
+SPEC-020 v0.1.5 defines provider-side autoupdate for `macprovider-cli`.
 When the coordinator advertises a newer `recommended_binary_version`, the
 provider auto-invokes the existing `SelfUpdate` validation and replacement
 flow, subject to explicit throttling, opt-out, drain, rollback, and
@@ -50,12 +50,35 @@ The following trust-state table is normative for autoupdate eligibility:
 | Legacy `hello_ack` | — | — | — | — | notify-only |
 | Unauthenticated / token-rejected | — | — | — | — | notify-only |
 | v2 `auth_response` rejected | — | — | — | — | notify-only |
-| v2 accepted | provisional | * | * | * | notify-only |
+| v2 accepted | provisional (bearer-validated, `accept_provisional` set — default true) | succeeded with matching AEAD/KID | satisfied or not-required | validated or not-configured | **eligible** |
+| v2 accepted | provisional (`accept_provisional` opted out via `auto_update_accept_provisional: false`) | * | * | * | notify-only |
 | v2 accepted | provisional (self-minted, bearerless-duplicate) | * | * | * | notify-only |
 | v2 accepted | pinned | failed | * | * | notify-only |
 | v2 accepted | pinned | succeeded with matching AEAD/KID | failed | * | notify-only |
 | v2 accepted | pinned | succeeded with matching AEAD/KID | satisfied or not-required | rejected | notify-only |
 | v2 accepted | pinned | succeeded with matching AEAD/KID | satisfied or not-required | validated or not-configured | **eligible** |
+
+**Rationale for provisional eligibility.** 100% of the production fleet is
+provisional by design: the coordinator ships with an empty `providers: []`
+pin list, so every self-service `curl | bash` install is admitted at
+`tier: provisional`, including the production `mac` provider (bearer-validated
+via `provider_token`, with no operator opt-in). Restricting autoupdate to the
+`pinned` tier would therefore exclude the entire fleet and defeat this SPEC's
+purpose of delivering signed fixes to self-service providers without operator
+SSH. Binary replacement is independently crypto-gated by the pre-existing
+`SelfUpdate` path (GitHub-host URL validation, ECDSA P-256 signature
+verification of `checksums.txt`, SHA-256 tarball verification, tar
+path-traversal rejection, new-binary `self-test`, drain, and single-step
+rollback — see Goal). Per threat model T-3, a hostile or compromised
+coordinator can therefore at most *accelerate* delivery of a legitimately
+signed, newer GitHub release, subject to opt-out, drain, and cooldown; it
+cannot substitute unsigned, non-GitHub, downgrade, or arbitrary code. A
+bearer-validated provisional session (validated `provider_token` plus a
+successful encrypted leg and, where required, satisfied Tier2 attestation) is
+a materially stronger trust signal than raw first-contact TOFU. Operators opt
+an individual provider OUT of provisional autoupdate with
+`auto_update_accept_provisional: false`; opted-out and bearerless-duplicate
+provisional sessions remain notify-only.
 
 Implementations MUST store an explicit current `autoupdate_trust_state` field
 per coordinator session and MUST NOT derive eligibility from
@@ -844,6 +867,20 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.5 (2026-07-11): Reconciled the normative trust-state table with shipped
+  behavior (Wave B decision gate G2, disposition (c)). Split the single
+  `provisional → notify-only` row by auth sub-state: a bearer-validated
+  provisional provider (validated `provider_token`, successful encrypted leg,
+  and satisfied Tier2 attestation where required) is autoupdate-**eligible**
+  when `accept_provisional` is set (default true; `AutoUpdateTrustState.swift`
+  tier gate), while bearerless-duplicate and explicitly opted-out
+  (`auto_update_accept_provisional: false`) provisional sessions remain
+  notify-only. Added a provisional-eligibility rationale (the fleet is 100%
+  provisional by design; binary replacement is independently crypto-gated, so
+  per T-3 a coordinator can at most accelerate a legitimately signed newer
+  release). Spec-and-comments only: no behavior change — the shipped code was
+  already correct and flipping the default was rejected because it would break
+  prod auto-update.
 - v0.1.4 (2026-06-29): Absorbed r4 audit findings:
   - B-r4-M-1: success-state cleanup ordered sequence, success sentinel crash
     recovery, `orphaned_success_sentinel` failure class, and acceptance
