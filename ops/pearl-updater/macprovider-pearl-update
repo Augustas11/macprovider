@@ -1620,8 +1620,12 @@ class Updater:
 
     def capture_database_paths(self) -> None:
         if self.gateway_db is not None:
-            paths = (self.gateway_db, *self.databases)
-            config_hashes: dict[Path, str] = {}
+            paths = (
+                self.databases
+                if self.databases and self.databases[0] == self.gateway_db
+                else (self.gateway_db, *self.databases)
+            )
+            config_hashes = dict(self.runtime_config_hashes)
         else:
             runtime = self.coordinator_runtime_state or self.coordinator_runtime()
             coordinator_paths = [runtime.base_config]
