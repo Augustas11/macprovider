@@ -53,6 +53,8 @@ test-dist:
 	bash scripts/test-release-security-posture.sh
 	bash scripts/test-release-toolchain.sh
 	bash scripts/test-release-publication-provenance.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v ops/pearl-updater/test_pearl_updater.py
+	bash ops/pearl-updater/test_transaction_gate_systemd.sh
 	bash -n phase4-coordinator/dist/deploy-pearl-vps.sh
 	bash -n phase5-gateway/dist/deploy-pearl-vps.sh
 	bash phase4-coordinator/dist/test/check_deploy_config_test.sh

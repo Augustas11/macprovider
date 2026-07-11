@@ -15,17 +15,26 @@ commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 printf 'cli archive\n' > "$work/phase3-binary-m4-${tag}.tar.gz"
 printf 'dmg payload\n' > "$work/Malibu-${tag}.dmg"
 printf 'appcast payload\n' > "$work/appcast.xml"
+printf 'coordinator payload\n' > "$work/coordinator-linux-amd64"
+printf 'coordinator cli payload\n' > "$work/coordinator-cli-linux-amd64"
+printf 'gateway payload\n' > "$work/gateway-linux-amd64"
+printf 'pearl metadata\n' > "$work/pearl-release.json"
+printf 'pearl metadata signature\n' > "$work/pearl-release.json.sig"
 cat >"$work/release-toolchain.json" <<'EOF'
 {"macos_sdk":{"path":"/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk","version":"15.5"},"swift":{"driver_version":"1.120.5","version":"Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)"},"xcode":{"build":"16F6","developer_dir":"/Applications/Xcode_16.4.app/Contents/Developer","version":"16.4"}}
 EOF
 
 python3 "$build" "$tag" "$commit" Augustas11/macprovider false \
   "$work/release-toolchain.json" "$work/release-provenance.json" \
-  "$work/phase3-binary-m4-${tag}.tar.gz" "$work/Malibu-${tag}.dmg" "$work/appcast.xml"
+  "$work/phase3-binary-m4-${tag}.tar.gz" "$work/Malibu-${tag}.dmg" "$work/appcast.xml" \
+  "$work/coordinator-linux-amd64" "$work/coordinator-cli-linux-amd64" \
+  "$work/gateway-linux-amd64" "$work/pearl-release.json" "$work/pearl-release.json.sig"
 (
   cd "$work"
   shasum -a 256 \
-    "phase3-binary-m4-${tag}.tar.gz" "Malibu-${tag}.dmg" appcast.xml release-provenance.json \
+    "phase3-binary-m4-${tag}.tar.gz" "Malibu-${tag}.dmg" appcast.xml \
+    coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64 \
+    pearl-release.json pearl-release.json.sig release-provenance.json \
     > checksums.txt
 )
 printf 'captured signature bytes\n' > "$work/checksums.txt.sig"
@@ -41,6 +50,11 @@ names = [
     f"phase3-binary-m4-{tag}.tar.gz",
     f"Malibu-{tag}.dmg",
     "appcast.xml",
+    "coordinator-linux-amd64",
+    "coordinator-cli-linux-amd64",
+    "gateway-linux-amd64",
+    "pearl-release.json",
+    "pearl-release.json.sig",
     "release-provenance.json",
     "checksums.txt",
     "checksums.txt.sig",
@@ -65,6 +79,11 @@ local_assets=(
   "$work/phase3-binary-m4-${tag}.tar.gz"
   "$work/Malibu-${tag}.dmg"
   "$work/appcast.xml"
+  "$work/coordinator-linux-amd64"
+  "$work/coordinator-cli-linux-amd64"
+  "$work/gateway-linux-amd64"
+  "$work/pearl-release.json"
+  "$work/pearl-release.json.sig"
   "$work/release-provenance.json"
   "$work/checksums.txt"
   "$work/checksums.txt.sig"
@@ -100,6 +119,8 @@ assert manifest["prerelease"] is False
 assert re.fullmatch(r"[0-9a-f]{64}", manifest["publication_id"])
 assert manifest["assets"]["Malibu-v1.2.3.dmg"]["id"] == 502
 assert manifest["assets"]["appcast.xml"]["id"] == 503
+assert manifest["assets"]["coordinator-linux-amd64"]["id"] == 504
+assert manifest["assets"]["pearl-release.json.sig"]["id"] == 508
 PY
 
 python3 - "$work/release.json" "$work/release-mutable.json" <<'PY'

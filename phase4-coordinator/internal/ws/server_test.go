@@ -2882,6 +2882,8 @@ func TestPoolzDeniesWhenOperatorKeyEmpty(t *testing.T) {
 func TestProviderHealthzReportsInjectedVersion(t *testing.T) {
 	harness := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
 		providerws.WithVersion("v1.3.0-7-gabcdef0"),
+	}, func(cfg *config.Config) {
+		cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.26"
 	})
 	defer harness.HTTP.Close()
 
@@ -2894,8 +2896,9 @@ func TestProviderHealthzReportsInjectedVersion(t *testing.T) {
 		t.Fatalf("healthz status = %d", resp.StatusCode)
 	}
 	var body struct {
-		Status  string `json:"status"`
-		Version string `json:"version"`
+		Status                   string `json:"status"`
+		Version                  string `json:"version"`
+		RecommendedBinaryVersion string `json:"recommended_binary_version"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -2905,6 +2908,9 @@ func TestProviderHealthzReportsInjectedVersion(t *testing.T) {
 	}
 	if body.Version != "v1.3.0-7-gabcdef0" {
 		t.Fatalf("version = %q, want %q", body.Version, "v1.3.0-7-gabcdef0")
+	}
+	if body.RecommendedBinaryVersion != "1.8.26" {
+		t.Fatalf("recommended_binary_version = %q, want %q", body.RecommendedBinaryVersion, "1.8.26")
 	}
 }
 

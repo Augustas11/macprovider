@@ -3474,22 +3474,24 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	}
 	providers := s.pool.Snapshot()
 	resp := struct {
-		Status          string `json:"status"`
-		UptimeS         int64  `json:"uptime_s"`
-		PoolSize        int    `json:"pool_size"`
-		PoolReady       int    `json:"pool_ready"`
-		PoolDegraded    int    `json:"pool_degraded"`
-		PoolDraining    int    `json:"pool_draining"`
-		PoolUnavailable int    `json:"pool_unavailable"`
-		PoolPolicyReady int    `json:"pool_policy_ready"`
-		RequestsTotal   int    `json:"requests_total"`
-		RequestsActive  int    `json:"requests_active"`
-		Version         string `json:"version"`
+		Status                   string `json:"status"`
+		UptimeS                  int64  `json:"uptime_s"`
+		PoolSize                 int    `json:"pool_size"`
+		PoolReady                int    `json:"pool_ready"`
+		PoolDegraded             int    `json:"pool_degraded"`
+		PoolDraining             int    `json:"pool_draining"`
+		PoolUnavailable          int    `json:"pool_unavailable"`
+		PoolPolicyReady          int    `json:"pool_policy_ready"`
+		RequestsTotal            int    `json:"requests_total"`
+		RequestsActive           int    `json:"requests_active"`
+		Version                  string `json:"version"`
+		RecommendedBinaryVersion string `json:"recommended_binary_version"`
 	}{
-		Status:   "ok",
-		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
-		PoolSize: len(providers),
-		Version:  s.version,
+		Status:                   "ok",
+		UptimeS:                  int64(s.now().Sub(s.started).Seconds()),
+		PoolSize:                 len(providers),
+		Version:                  s.version,
+		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 	}
 	for _, p := range providers {
 		switch p.State {
