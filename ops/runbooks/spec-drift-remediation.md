@@ -102,9 +102,14 @@ carried documented rather than blocking the PR that found them:
   clamped → revert divisor to content-bytes `/4` (protect provider credit); else
   → bump SPEC-005 to document the `/16` observed-bytes clamp. **Default: measure,
   then protect provider credit.**
-- **G2 (item 4):** flip `accept_provisional` default to `false` (+ opt-in) vs
-  amend the SPEC-020 trust table. **Default: flip to false** (trust boundary; beta
-  pool is small).
+- **G2 (item 4): RESOLVED → (c) amend SPEC-020, do NOT flip the code default.**
+  Runtime check (2026-07-11): the prod `mac` provider is `tier: provisional`
+  (bearer-validated), with no `accept_provisional` opt-in — flipping the default
+  to false would immediately break prod auto-update, and the whole fleet is
+  provisional by design (`providers: []`), so "provisional→notify-only" defeats
+  SPEC-020's purpose. Binary replacement is crypto-gated (ECDSA + host + self-test
+  + drain + rollback); threat model T-3 accepts the residual. Fix = document
+  bearer-validated-provisional as auto-update-eligible in the trust table.
 - **G3 (item 5):** implement the `seenModels` union (503) vs strike R-3.3.4.
   **Default: implement** (the spec's one buyer-visible promise; aligns with the
   model-id incident fixes).
