@@ -1171,6 +1171,34 @@ func TestHealthzExcludesAuthSelfMintedFromReadyCapacity(t *testing.T) {
 	}
 }
 
+func TestHealthzAcceptsHEAD(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	// Drive a real server so the net/http transport strips the HEAD body,
+	// matching production (a plain ResponseRecorder does not strip it).
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodHead, ts.URL+"/healthz", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("healthz HEAD: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD /healthz status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 0 {
+		t.Fatalf("HEAD /healthz must return no body; got %q", body)
+	}
+}
+
 func TestHealthzReportsInjectedVersion(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithVersion("v1.3.0-7-gabcdef0"))

@@ -1022,6 +1022,13 @@ Streaming errors after headers are sent MUST be emitted as SSE data frames with 
 
 The gateway MUST install panic recovery middleware that converts unexpected panics into HTTP 500 responses in this OpenAI-shaped error envelope.
 
+**Retryability (`retryable`).** Every buyer error envelope (non-streaming JSON body and streaming SSE `error` frame alike) MUST carry a boolean `retryable` field alongside `code`. Its value is a deterministic function of `code`:
+
+- **`retryable: true`** for transient availability/timeout codes, where the same request may succeed on retry: `no_provider_available`, `provider_timeout`, `provider_error`, `provider_disconnected`, `provider_failed`.
+- **`retryable: false`** for permanent/client codes, where retrying the identical request cannot succeed: validation errors (e.g. `invalid_request`, `invalid_json`), `model_not_found`, `context_exceeds_capacity`, `unsupported_content_shape`, and byte/schema-cap violations (e.g. `byte_cap_exceeded`, `response_byte_cap_exceeded`, `request_body_too_large`, the `json_schema_*` cap/shape codes).
+
+Any code not explicitly classified defaults to `retryable: false`; a newly introduced transient availability/upstream code MUST be added to the retryable set. Buyers SHOULD honor `retryable` when deciding whether to re-issue a failed request.
+
 ### 5.3 `GET /v1/models`
 
 `GET /v1/models` returns public model availability.

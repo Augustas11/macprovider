@@ -3,6 +3,8 @@ package buyer
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -500,5 +502,63 @@ func TestEstimatedCompletionTokensFromBytes(t *testing.T) {
 	got = estimatedCompletionTokensFromBytes(5, 16)
 	if got == nil || *got != 1 {
 		t.Fatalf("five-byte estimate with configured ceiling = %v, want 1", got)
+	}
+}
+
+// TestRetryableByCodeClassification asserts that transient availability/timeout
+// codes report retryable=true and permanent/client codes report false, closing
+// audit finding H2 (every buyer error envelope stamped retryable=false because
+// transient codes were absent from the lookup table).
+func TestRetryableByCodeClassification(t *testing.T) {
+	retryable := []string{
+		"no_provider_available", "provider_timeout", "provider_error",
+		"provider_disconnected", "provider_failed",
+	}
+	for _, code := range retryable {
+		if !spec018Retryable(code) {
+			t.Errorf("code %q must be retryable=true", code)
+		}
+	}
+	permanent := []string{
+		"model_not_found", "context_exceeds_capacity", "unsupported_content_shape",
+		"invalid_request", "invalid_json", "byte_cap_exceeded",
+	}
+	for _, code := range permanent {
+		if spec018Retryable(code) {
+			t.Errorf("code %q must be retryable=false", code)
+		}
+	}
+}
+
+// TestWriteErrorEnvelopeRetryableField exercises the generic error writer end
+// to end and asserts the emitted envelope carries the correct retryable flag
+// for a transient code (no_provider_available => true) and a permanent code
+// (model_not_found => false).
+func TestWriteErrorEnvelopeRetryableField(t *testing.T) {
+	cases := []struct {
+		code string
+		want bool
+	}{
+		{"no_provider_available", true},
+		{"provider_timeout", true},
+		{"provider_disconnected", true},
+		{"provider_failed", true},
+		{"model_not_found", false},
+	}
+	for _, tc := range cases {
+		rr := httptest.NewRecorder()
+		writeError(rr, http.StatusServiceUnavailable, tc.code, "x")
+		var env struct {
+			Error struct {
+				Code      string `json:"code"`
+				Retryable bool   `json:"retryable"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+			t.Fatalf("code %q: bad envelope: %v", tc.code, err)
+		}
+		if env.Error.Retryable != tc.want {
+			t.Errorf("code %q: retryable=%v, want %v", tc.code, env.Error.Retryable, tc.want)
+		}
 	}
 }

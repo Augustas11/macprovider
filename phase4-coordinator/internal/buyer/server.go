@@ -57,7 +57,25 @@ const (
 	receiptTerminalStateTSHeaderName   = "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS"
 )
 
+// spec018RetryableByCode enumerates the explicit retryability of every
+// buyer-visible error code. A code absent from this table falls through to
+// Go's zero value (false) via spec018Retryable, so transient availability
+// codes MUST be listed here explicitly or they wrongly report non-retryable.
+// See SPEC-006 §5.2: transient availability/timeout codes are retryable=true;
+// permanent/client (validation, capacity, shape) codes are retryable=false.
 var spec018RetryableByCode = map[string]bool{
+	// Transient availability/timeout — the buyer should retry (SPEC-006 §5.2).
+	"no_provider_available": true,
+	"provider_error":        true,
+	"provider_timeout":      true,
+	"provider_disconnected": true,
+	"provider_failed":       true,
+	// Permanent/client errors — retrying will not help (SPEC-006 §5.2).
+	"model_not_found":                                         false,
+	"context_exceeds_capacity":                                false,
+	"unsupported_content_shape":                               false,
+	"invalid_request":                                         false,
+	"invalid_json":                                            false,
 	"byte_cap_exceeded":                                       false,
 	"response_byte_cap_exceeded":                              false,
 	"malformed_tool_call_final_json":                          true,
@@ -75,7 +93,6 @@ var spec018RetryableByCode = map[string]bool{
 	"json_schema_too_deep":                                    false,
 	"json_schema_too_large":                                   false,
 	"request_content_encoding_unsupported":                    false,
-	"provider_timeout":                                        false,
 	"malformed_json_response":                                 true,
 	"json_schema_validation_failed":                           true,
 	"request_body_too_large":                                  false,
@@ -588,6 +605,10 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/healthz", s.handleHealthz)
+	// HEAD returns the same status/headers as GET with no body (Go's server
+	// discards the body for HEAD), so probes using curl -I / k8s / UptimeRobot
+	// are not rejected with 405.
+	r.Head("/healthz", s.handleHealthz)
 	r.Get("/v1/models", s.handleModels)
 	r.Get("/v1/rate-card", s.handleRateCard)
 	r.Get("/v1/demand-rank", s.handleDemandRank)

@@ -315,7 +315,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	// HEAD returns the same status/headers as GET with no body (Go's server
+	// discards the body for HEAD), so probes using curl -I / k8s / UptimeRobot
+	// are not rejected with 405.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
 	}
