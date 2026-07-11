@@ -55,6 +55,15 @@ and the durable signed tag, commit, version, and component hashes match the
 candidate. A same-version binary or state-file mismatch triggers transactional
 pair repair instead of a skip.
 
+The first adoption may start from older deployment-script binaries whose
+embedded versions are clean `git describe` identities such as
+`v1.8.26-4-g64083ef`. The updater accepts that exact, non-dirty shape only when
+no durable updater release state exists, derives the downgrade floor from the
+base tag, and requires the signed candidate to be strictly newer than that
+floor. Commit-only, dirty, ambiguous, same-base, and downgrade identities fail
+closed. After the first successful transaction persists signed release state,
+legacy git-describe bootstrap is no longer accepted.
+
 ## One-time installation
 
 First deploy #524's canary buyer exactly as reviewed, including its root-only
@@ -103,9 +112,9 @@ non-symlink directory and upgrades SMTP with Python's verified default TLS
 context:
 
 ```bash
-sudo /usr/local/sbin/macprovider-pearl-updater-alert \
+sudo -u macprovider -g macprovider /usr/local/sbin/macprovider-pearl-updater-alert \
   --check-config macprovider-pearl-updater.service
-sudo -u macprovider /usr/local/sbin/macprovider-pearl-updater-alert \
+sudo -u macprovider -g macprovider /usr/local/sbin/macprovider-pearl-updater-alert \
   macprovider-pearl-updater-preflight.service
 ```
 
