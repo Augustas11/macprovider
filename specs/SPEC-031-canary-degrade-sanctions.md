@@ -774,7 +774,7 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR-CAN19 conjunctive eligibility | Implemented | `RoutingEligible()` enforces auth/publication + state + slots. |
 | FR-CAN20 retryable 503 + cadence Retry-After | **Partial** | `no_provider_available` retryable (#548); ownership is SPEC-006 §5.2; gateway 1 s hint is shorter than the sweep (gap). |
 | FR-CAN21 404/503 boundary | Implemented | Follows SPEC-010 R-3.3.4 `ModelKnown()` union (#555, authoritative); SPEC-002 R-3.X.6 `MAY` / SPEC-006 §17.2 wording is the carried item-22 cross-spec inconsistency, not claimed as fully aligned. |
-| FR-CAN22/23 sole-provider protection + Sybil-proof correlated-fault | **Gap** | `RecordCanaryResult` gets only a pass/fail bool: no failure-class, no attribution, no last-provider floor, no correlation epoch with staged results (snapshot + shared-fingerprint re-dispatch + bank-generation + discard-on-suspicion), no atomic evaluation. (v0.1 correlation produces only ephemeral discard + alert — no persistent automatic state; all persistent containment is operator-only — see FR-CAN23.) |
+| FR-CAN22/23 sole-provider protection + Sybil-proof correlated-fault | **Gap** | `RecordCanaryResult` gets only a pass/fail bool: no failure-class, no attribution, no last-provider floor, no correlation epoch with staged results (snapshot + shared-fingerprint re-dispatch + bank-generation + discard-on-suspicion), no atomic evaluation. (v0.1 correlation produces only ephemeral discard + alert — no correlated-majority verdict creates persistent containment state; ordinary per-provider FR-CAN11/15 sanctions still apply; all persistent containment is operator-only — see FR-CAN23.) |
 | FR-CAN24/25 config surface + covering bank | **Partial** | Surface + basic validation shipped (#478, Entry 125); empty per-model lists and duplicate keys pass (gap). |
 | FR-CAN26 reload without restart + generation contract | **Gap** | Pool block startup-only (direct cause of incident #3); no validated-candidate, atomically-versioned config-generation snapshot for in-flight probes. |
 | FR-CAN27 failure logging | **Partial** | `canary_fail_reason` (#513); missing `assigned_id`/outcome and global-bank latency (gap). |
@@ -844,11 +844,13 @@ a §14 Partial/Gap row and defines part of the follow-up IMPL's done bar):
   `relay_error`, or a canary-specific HTTP non-200 — absent an independent
   buyer-path failure, confirmed transport death, or item-9 weight evidence.
 - **AC-F5 (FR-CAN23).** Correlated-fault containment is ephemeral and Sybil-proof:
-  (a) **no** provider behavior — one provider, a strict majority, an all-attested
-  set, multiple IDs under one operator, or a set that fails **successive** epochs
-  on **different** fingerprints — creates any persistent automatic state (no
-  rollback, no config-fault attribution, no persistent fingerprint suspension);
-  the only automatic effects are per-epoch. (b) A correlation epoch **stages** all
+  (a) **no correlated-majority verdict** — from one provider, a strict majority,
+  an all-attested set, multiple IDs under one operator, or a set that fails
+  **successive** epochs on **different** fingerprints — automatically creates any
+  persistent **containment** state (no rollback, no config-fault attribution, no
+  persistent fingerprint suspension); the only automatic correlated-fault effects
+  are per-epoch. (Ordinary per-provider FR-CAN11/15 sanctioning of a
+  non-correlated failure is unaffected — see (d).) (b) A correlation epoch **stages** all
   its results; on a strict-majority (>N/2, ≥2) shared-fingerprint failure the
   staged results are **discarded** (no sanction, no counter increment) + operator
   alert + FR-CAN22 floor, and nothing persists; a sequential multi-fingerprint
@@ -919,7 +921,8 @@ This spec's purpose is to define the contract under which internal canary can be
 1. **FR-CAN22/23** — sole-provider protection + Sybil-proof correlated-fault
    containment (a canary-only signal never empties the pool for the last provider;
    a shared bad challenge is contained by ephemeral discard + operator alert, with
-   no persistent provider-triggerable state).
+   no correlated-majority verdict creating persistent containment state — ordinary
+   per-provider FR-CAN11/15 sanctions still apply).
 2. **FR-CAN15** — durable sanction load decoupled from `canary_enabled` (disabling
    canary does not launder sanctions).
 3. **FR-CAN18** — crash-consistent, fail-closed persistence for pinned sanctions
