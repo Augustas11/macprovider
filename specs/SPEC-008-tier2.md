@@ -83,6 +83,23 @@ cross-repo interop contract the Swift provider CLI byte-matches):
   any ready provider).
 - **§10.4/§10.5:** `binary_version` is signed-if-present but not required non-empty; the
   accepted `auth_response` omits the `attestation.format` field (`omitempty`).
+- **§1.1/§3/§4.4/§7.1 (definitional sweep, completing the R3 fix):** the remaining
+  load-bearing "Pillar C = hardware attestation" definitions and threat-model claims were
+  scoped to the two-format reality — the shipped default `self_signed` SE path reduces only
+  key-substitution/stale-token risk (key custody + freshness + session binding), while
+  false-hardware/device claims are addressed only by the aspirational MDA path.
+- **§1.1/§11/§13.2 (default-preservation scope):** the "every default preserves Tier-1
+  behavior" invariant was scoped to the **coordinator's own** surfaces; the buyer-visible
+  **gateway** disclosure activates on `/internal/routing` pool evidence (any `StateReady`
+  provider → `hardware_attestation: "unsupported"`) and is a documented cross-service
+  exception, not byte-identical at defaults.
+- **§7.6/§13.3 (`ConfigActive`):** the definition now includes `behavioral_safety_enabled`
+  (enabling Pillar D alone attaches the whole `/v1/models` `tier2` block, incl. attestation).
+- **§7.3:** `attestation_stale` is excluded from routing **only** when
+  `require_attestation: true` (was wrongly stated unconditional); added the legacy empty
+  (`""`) status. **§9.2:** the trust-root prerequisite is MDA/enforcement-only (SE needs
+  none). **§13.2 phase-0:** only Pillar A model-hash pool evidence affects phase. **§14:**
+  restored the AC-T2-6 heading (accidentally dropped in R3).
 - **§5.7:** clarified the hash-disclosure counting basis is slot-holders
   (`hasAvailableSlot`); `RoutingEligible` has no hash check — the hash routing-exclusion is
   the separate §5.5-5.6 predicate (mismatch/invalid always; uncatalogued only when
@@ -153,9 +170,16 @@ turns the Tier-1 disclosure posture from SPEC-006 into enforceable coordinator
 behavior where the required pillar is enabled.
 
 Tier 1 remains valid. Tier 2 is additive. With every new `tier2.*` key at its
-default value, the coordinator, gateway, provider WebSocket protocol, routing
-selection, sticky-affinity behavior, audit logs, and buyer-visible responses
-MUST preserve current Tier-1 behavior.
+default value, the coordinator's own responses (`/v1/models` `tier1_disclosure`,
+`/v1/chat/completions`), provider WebSocket protocol, routing selection,
+sticky-affinity behavior, and audit logs MUST preserve current Tier-1 behavior.
+**One shipped exception (v0.4):** the coordinator's `/internal/routing` metadata always
+computes the attestation aggregate (not `ConfigActive`-gated), and the **gateway**
+surfaces it whenever any `StateReady` provider exists — so the buyer-visible
+`hardware_attestation` disclosure is **not** byte-identical to Tier-1 once a SPEC-008
+gateway fronts the pool (a tokenless pool discloses `hardware_attestation: "unsupported"`;
+§4.3, §13.2, §13.3). This is a known cross-service gap, documented rather than a
+guarantee.
 
 Tier 2 exists to close the expectation-drift gap recorded in the 2026-05-29
 independent security audit:
@@ -175,7 +199,9 @@ SPEC-008 covers:
 
 - Pillar A: model catalog plus cryptographic model-hash verification.
 - Pillar B: provider-leg application-layer encryption.
-- Pillar C: hardware attestation data model and coordinator verification flow.
+- Pillar C: provider attestation data model and coordinator verification flow —
+  a self-signed Secure-Enclave key-custody format (shipped default, tier
+  `self_signed`) and an aspirational hardware-rooted Apple-MDA path (§7).
 - Pillar D: untrusted-provider behavioral safety controls in the coordinator
   relay loop.
 - Three implementation phases:
@@ -429,7 +455,8 @@ updates per pillar.
 
 - Pillar A: model catalog plus hash verification.
 - Pillar B: provider-leg encryption.
-- Pillar C: hardware attestation.
+- Pillar C: provider attestation (shipped default: self-signed Secure-Enclave
+  key-custody, tier `self_signed`; aspirational: hardware-rooted Apple-MDA, §7).
 - Pillar D: untrusted-provider behavioral safety.
 
 **Phase.** A rollout group. Phase 1 ships Pillar A. Phase 2 ships Pillars B
@@ -645,8 +672,11 @@ Tier 2 reduces specific risks:
 
 - Pillar A reduces honest-misconfiguration risk for model identity.
 - Pillar B reduces passive network-observer risk on the provider leg.
-- Pillar C reduces false-hardware and unsupported-platform claims when a
-  verifiable attestation source is available.
+- Pillar C reduces false-hardware and unsupported-platform claims **only via its
+  hardware-rooted MDA path** (§7.4, aspirational/configured); the shipped default
+  `self_signed` Secure-Enclave path reduces only key-substitution and stale/replayed-token
+  risk (key custody + freshness + session binding), **not** false-hardware claims — the
+  `hardware_family` value is an unauthenticated self-assertion (§7.3, §7.4a).
 - Pillar D reduces common malicious-output and exfiltration patterns visible
   in the coordinator relay.
 
@@ -1412,12 +1442,18 @@ aspirational path, not a description of the shipped default.
 
 ### 7.1 Threat model
 
-Pillar C reduces risk from providers lying about platform properties:
+Pillar C's **hardware-rooted MDA path** (§7.4, aspirational/configured) targets providers
+lying about platform properties:
 
 - a non-Apple-Silicon host claims to be Apple Silicon,
 - a provider claims a RAM tier inconsistent with the attested hardware class,
-- a provider replays old attestation evidence,
 - a provider sends a token from a different device.
+
+**The shipped default `self_signed` path does NOT address the hardware/device items
+above** — it verifies only key custody + session binding, and treats `hardware_family` /
+`ram_gb` as unauthenticated self-asserted claims (§7.3, §7.4a). Both formats do address:
+
+- a provider replays old attestation evidence (freshness + challenge binding, §7.5).
 
 Pillar C does not prove:
 
@@ -1466,12 +1502,17 @@ For every provider session, the coordinator MUST compute one of:
   `expires_at`/`attestation_max_age_s`) check failed**. Note (v0.4, shipped): these checks
   run **before** format-specific signature verification (§7.5), so `attestation_stale`
   does **not** imply the token was cryptographically valid — a badly-signed token with a
-  stale/mismatched challenge is classified stale, not failed. It is still non-positive and
-  non-routable.
+  stale/mismatched challenge is classified stale, not failed. It is non-positive and is
+  **excluded from routing only when `require_attestation: true`** (§7.6); under the default
+  `require_attestation: false` a stale provider stays routable under Tier-1 behavior.
 - `unsupported`: provider or platform does not support the configured
   attestation format.
 - `not_required`: no attestation token present and
   `tier2.require_attestation: false`.
+- `""` (empty, legacy): a pre-v2 / pre-attestation session that never carried an
+  attestation status carries the empty zero value (`internal/pool/provider.go`). It is
+  non-positive and, for the network-level aggregate (§7.7) and buyer disclosure (§13.3),
+  counted the same as `unsupported`.
 
 Only `attested` is a positive trust signal.
 
@@ -1796,8 +1837,10 @@ When `tier2.require_attestation: false`:
 
 - unsupported providers remain routable under Tier-1 behavior,
 - when Pillar C disclosure is active on the coordinator `/v1/models` surface
-  (`tier2.ConfigActive`, i.e. some `require_*` key, a catalog, or `observe_enabled` is set
-  — a volunteered token or a merely-configured trust root does **not** activate it, §7.7),
+  (`tier2.ConfigActive`, i.e. some `require_*` key, a catalog, `observe_enabled`, **or
+  `behavioral_safety_enabled`** is set — so enabling Pillar D alone attaches the whole
+  `tier2` block including attestation; a volunteered token or a merely-configured trust
+  root does **not** activate it, §7.7),
   `/v1/models` MUST report attestation state accurately; at fully-default config the
   coordinator `/v1/models` omits the block entirely (the gateway surface still discloses
   per §13.3),
@@ -2190,7 +2233,10 @@ Prerequisites:
 - provider binary supports X25519 and AEAD envelope,
 - coordinator supports X25519, HKDF, AEAD, and encrypted relay,
 - attestation token format selected for first prototype,
-- coordinator trust roots configured,
+- coordinator trust roots configured **for the MDA path only** — the shipped default
+  `self_signed` SE path needs **no** trust root (SE verification precedes the root check,
+  §7.4a/§7.5); roots become a startup-validation requirement only when
+  `require_attestation: true` (§7.5, §11.2), not a universal Phase-2 prerequisite,
 - `/v1/models` exposes encrypted-leg and attestation counts,
 - audit categories `T2.B` and `T2.C` implemented.
 
@@ -2597,7 +2643,8 @@ trust-root details.
 
 All new configuration keys live under `tier2` in `coordinator.yaml`.
 
-Every default preserves Tier-1 behavior.
+Every default preserves Tier-1 behavior on the coordinator's own surfaces (subject to the
+one shipped gateway-disclosure exception noted in §1.1 / §4.3 / §13.2).
 
 ### 11.1 Required shape
 
@@ -2863,10 +2910,15 @@ The disclosure block MUST preserve existing SPEC-006 fields and add Tier-2
 detail.
 
 These additive fields appear only when §4.3 permits Tier-2 response changes.
-With default config, the disclosure block MUST remain byte-identical to the
-SPEC-006 Tier-1 baseline.
+With default config, the **coordinator's own** `/v1/models` disclosure block MUST remain
+byte-identical to the SPEC-006 Tier-1 baseline. **This byte-identity is a coordinator-surface
+property only** — the buyer-visible **gateway** disclosure activates on `/internal/routing`
+pool evidence (any `StateReady` provider → non-`none` attestation state) independent of
+coordinator `ConfigActive`, so it is **not** byte-identical at defaults (§4.3, §13.3). A
+reimplementer MUST NOT treat "default config" as guaranteeing an unchanged buyer-visible
+attestation surface through the gateway.
 
-Default-config render - byte-identical to SPEC-006 v0.8.1 baseline. No
+Default-config **coordinator** render - byte-identical to SPEC-006 v0.8.1 baseline. No
 Tier-2 keys present. `version` string unchanged.
 
 ```json
@@ -2946,10 +2998,13 @@ It is not operator-settable and does not appear in `coordinator.yaml`.
 
 Allowed computed values are:
 
-- `0`: no Tier-2 pillar is active (`catalog_path` empty, no observed Tier-2
-  provider evidence, all `require_*` false, and
-  `behavioral_safety_enabled: false`). A default-config deployment also has
-  `observe_enabled: false`.
+- `0`: no Tier-2 pillar is active (`catalog_path` empty, no observed **Pillar A
+  model-hash** provider evidence, all `require_*` false, and
+  `behavioral_safety_enabled: false`). Only Pillar A model-hash pool evidence can lift
+  phase off `0` under `observe_enabled`; encrypted-leg and attestation pool evidence do
+  **not** (see the pool-evidence-scope note below), so a default-config pool with ready
+  encrypted/SE-attested providers still computes phase `0`. A default-config deployment
+  also has `observe_enabled: false`.
 - `1`: Pillar A is active (`catalog_path` non-empty or
   `require_hash_verified: true`, or provider `model_hash` evidence exists
   while `observe_enabled: true`), and Pillars B/C are not active.
@@ -3029,7 +3084,9 @@ Derivation (columns count `StateReady` providers):
 
 **Activation differs by surface (v0.4).** The **coordinator's own `/v1/models`** attaches
 the `tier2` block only when `tier2.ConfigActive` is true (config-driven: a `require_*`
-key, a catalog, or `observe_enabled`; §7.7) — so at default config it shows nothing. The
+key, a catalog, `observe_enabled`, or `behavioral_safety_enabled` — so enabling Pillar D
+alone attaches the whole block including attestation; §7.7) — so at default config it shows
+nothing. The
 **buyer-visible gateway disclosure**, however, is driven by the coordinator's
 `/internal/routing` metadata, which computes the attestation aggregate from pool evidence
 **regardless of config**, and the gateway treats **any non-`none` state — including
@@ -3160,6 +3217,8 @@ that metadata reports `hardware_attestation: "unsupported"` whenever any `StateR
 provider exists (§13.3) — **does** change when a SPEC-008 gateway fronts even a Tier-1-only
 pool. "Baseline preservation" here is a coordinator-surface property, not a whole-buyer-path
 guarantee.
+
+### AC-T2-6: Catalog signature rejection
 
 Corrupting one byte in the active catalog body causes signature verification
 failure and no corrupted catalog entry becomes active.
