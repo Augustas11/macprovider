@@ -173,6 +173,19 @@ cross-repo interop contract the Swift provider CLI byte-matches):
 - Confirmed **no drift** on the §5.5–5.6 hash routing-exclusion predicate that SPEC-032
   FR-TD1 cites as authoritative.
 
+**Scope of the v0.4 reconciliation.** v0.4 reconciles the **attestation (Pillar C) surface**:
+the shipped SE + MDA verification, the attestation status/tier model, the attestation-carrying
+handshake fields (`auth_challenge.attestation_formats`, the `attestation_token` proof, sizes,
+and rejection transport), and attestation disclosure (network-level `/v1/models`, the gateway
+`hardware_attestation`). A 13-round three-lane codex audit drove this to 0 C/H/M
+(security/architect complete; code-fidelity attestation surface clean). **Carried pre-existing
+residuals (out of scope — a follow-up "SPEC-008 Pillar-B/D reconciliation"):** the final
+full-spec code-fidelity pass surfaced drifts in **pre-existing v0.3 text this pass did not
+touch** — Pillar B encrypted-leg field-optionality (§10.2/§10.3) and `require_encrypted_leg`
+reload semantics (§11.5); Pillar D UTF-8 enforcement (AC-D-3) and negative-output-cap
+validation (§11.2); and exact buyer error-template wording (§4.6). These are attribution-verified
+pre-existing (absent from the v0.4 diff) and not worsened here; they warrant a separate pass.
+
 **Change log v0.3:**
 - Resolves Round 2 findings C1, M1, M2, M3, M4, m1, m2, m3, m4.
 - Restates AC-T2-5 around the SPEC-006 v0.8.1 disclosure allowlist, splits
@@ -2580,8 +2593,11 @@ and coordinator ECDH public key.
   "auth_attempt_id": "auth-550e8400-e29b-41d4-a716-446655440000",
   "assigned_id": "provider-pool-id",
   "attestation_challenge": "base64url-32-byte-random",
+  "attestation_formats": ["macprovider-se-p256-v1", "apple-managed-device-attestation-acme-v1"],
   "coordinator_ecdh_public_key": "base64url-32-byte-x25519-public-key",
   "selected_aead_suite": "A256GCM",
+  "selected_aead": "A256GCM",
+  "key_id": "base64url-key-id",
   "expires_at": "2026-05-31T00:10:00Z"
 }
 ```
@@ -2593,9 +2609,14 @@ Required fields:
 - `auth_attempt_id`: string.
 - `assigned_id`: string.
 - `attestation_challenge`: string, base64url 32 bytes.
+- `attestation_formats`: array of strings — the coordinator's accepted attestation formats
+  (always emitted; `tier2.attestation_formats`, §11.1). This is how the provider learns
+  which format to present (default includes `macprovider-se-p256-v1`, §7.4a).
 - `coordinator_ecdh_public_key`: string, base64url 32 bytes when encrypted leg
   is negotiated.
-- `selected_aead_suite`: string, one supported suite or `null` when disabled.
+- `selected_aead_suite`: string, one supported suite or `null` when disabled. The shipped
+  challenge **also** emits a `selected_aead` alias (same value) and a `key_id` (the Pillar B
+  key-material id), both always present.
 - `expires_at`: RFC 3339 timestamp.
 
 ### 10.4 Candidate `auth_request` proof message
