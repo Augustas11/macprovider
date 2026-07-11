@@ -1073,6 +1073,79 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(self.updater.gateway_reservations(), 0)
         self.assertEqual(self.updater.run_command.call_args.args[0][2], "/srv/macprovider/gateway.sqlite")
 
+    def test_stats_mirror_may_share_coordinator_database_once(self):
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        coordinator = install / "coordinator.yaml"
+        gateway = install / "gateway.yaml"
+        stats_fragment = self.root / "stats-billing-mirror.service"
+        stats_dropin = self.root / updater_module.TRANSACTION_GATE_DROPIN_NAME
+        coordinator_database = Path("/srv/macprovider/coordinator.sqlite")
+        coordinator.write_text(f"storage:\n  db_path: {coordinator_database}\n")
+        gateway.write_text("storage:\n  db_path: /srv/macprovider/gateway.sqlite\n")
+        stats_fragment.write_text(
+            "[Service]\nExecStart=/opt/macprovider-stats/stats-billing-mirror "
+            f"--sqlite {coordinator_database}\n"
+        )
+        stats_dropin.write_text(updater_module.TRANSACTION_GATE_DROPIN_TEXT)
+        self.updater.gateway_db = None
+        self.updater.databases = ()
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(coordinator, None, {})
+        self.updater.gateway_config_path = mock.Mock(return_value=gateway)
+        self.updater.stats_mirror_runtime = mock.Mock(
+            return_value=((stats_fragment, stats_dropin), coordinator_database)
+        )
+
+        self.updater.capture_database_paths()
+
+        self.assertEqual(
+            self.updater.databases,
+            (Path("/srv/macprovider/gateway.sqlite"), coordinator_database),
+        )
+        self.assertEqual(self.updater.gateway_db, Path("/srv/macprovider/gateway.sqlite"))
+        self.assertEqual(
+            set(self.updater.runtime_config_hashes),
+            {coordinator, gateway, stats_fragment, stats_dropin},
+        )
+
+    def test_stats_mirror_cannot_share_gateway_database(self):
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        coordinator = install / "coordinator.yaml"
+        gateway = install / "gateway.yaml"
+        gateway_database = Path("/srv/macprovider/gateway.sqlite")
+        coordinator.write_text("storage:\n  db_path: /srv/macprovider/coordinator.sqlite\n")
+        gateway.write_text(f"storage:\n  db_path: {gateway_database}\n")
+        self.updater.gateway_db = None
+        self.updater.databases = ()
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(coordinator, None, {})
+        self.updater.gateway_config_path = mock.Mock(return_value=gateway)
+        self.updater.stats_mirror_runtime = mock.Mock(
+            return_value=((self.root / "stats.service", self.root / "gate.conf"), gateway_database)
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "cannot read the gateway database"):
+            self.updater.capture_database_paths()
+
+    def test_gateway_and_coordinator_databases_must_remain_distinct(self):
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        coordinator = install / "coordinator.yaml"
+        gateway = install / "gateway.yaml"
+        shared_database = Path("/srv/macprovider/shared.sqlite")
+        coordinator.write_text(f"storage:\n  db_path: {shared_database}\n")
+        gateway.write_text(f"storage:\n  db_path: {shared_database}\n")
+        self.updater.gateway_db = None
+        self.updater.databases = ()
+        self.updater.coordinator_runtime_state = updater_module.CoordinatorRuntime(coordinator, None, {})
+        self.updater.gateway_config_path = mock.Mock(return_value=gateway)
+        self.updater.stats_mirror_runtime = mock.Mock(
+            return_value=((self.root / "stats.service", self.root / "gate.conf"), Path("/srv/macprovider/stats.sqlite"))
+        )
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "gateway and coordinator"):
+            self.updater.capture_database_paths()
+
     def test_runtime_database_parser_rejects_relative_or_duplicate_paths(self):
         with self.assertRaisesRegex(updater_module.UpdateError, "absolute path"):
             self.updater._database_path("gateway.db", "gateway storage.db_path")

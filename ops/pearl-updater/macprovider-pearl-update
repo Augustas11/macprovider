@@ -1642,11 +1642,15 @@ class Updater:
             gateway = self._yaml_section_scalar(gateway_text, gateway_config, "storage", "db_path", required=True)
             assert gateway is not None
             stats_unit_inputs, stats_database = self.stats_mirror_runtime()
-            resolved = [
-                self._database_path(gateway, "gateway storage.db_path"),
-                self._database_path(storage, "coordinator storage.db_path"),
-                stats_database,
-            ]
+            gateway_database = self._database_path(gateway, "gateway storage.db_path")
+            coordinator_database = self._database_path(storage, "coordinator storage.db_path")
+            if gateway_database == coordinator_database:
+                raise UpdateError("gateway and coordinator database paths must be distinct")
+            if stats_database == gateway_database:
+                raise UpdateError("stats billing mirror cannot read the gateway database")
+            resolved = [gateway_database, coordinator_database]
+            if stats_database != coordinator_database:
+                resolved.append(stats_database)
             payout = effective.get(("malibu_emission", "sqlite_payout_db_path"))
             if payout:
                 resolved.append(self._database_path(payout, "coordinator malibu_emission.sqlite_payout_db_path"))
