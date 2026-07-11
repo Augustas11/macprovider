@@ -58,7 +58,7 @@ printf '%s\n' '    CURRENT_PROJECT_VERSION: "999"' >> "$fixture/phase3-binary/ap
 expect_fixture_failure duplicate-build 'exactly one numeric CURRENT_PROJECT_VERSION definition (found 2)'
 
 # A future release must append a new, strictly larger build to the committed
-# ledger. Updating every SemVer source while retaining build 26 must fail.
+# ledger. Updating every SemVer source while retaining build 27 must fail.
 reset_fixture
 for path in \
   "$fixture/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift" \
@@ -66,25 +66,25 @@ for path in \
   "$fixture/phase4-coordinator/dist/coordinator.yaml" \
   "$fixture/phase4-coordinator/coordinator.yaml.example" \
   "$fixture/phase4-coordinator/dist/coordinator.yaml.example"; do
-  sed 's/1\.8\.26/1.8.27/g' "$path" > "$path.next"
+  sed 's/1\.8\.27/1.8.28/g' "$path" > "$path.next"
   mv "$path.next" "$path"
 done
-if bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.27 >"$work/future-missing-build.out" 2>&1; then
+if bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.28 >"$work/future-missing-build.out" 2>&1; then
   echo "version guard accepted a future release without a release-build ledger entry" >&2
   exit 1
 fi
-grep -q 'exactly one entry for 1.8.27' "$work/future-missing-build.out"
-printf '%s\t%s\n' '1.8.27' '26' >> "$fixture/phase3-binary/app/release-builds.tsv"
-if bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.27 >"$work/future-reused-build.out" 2>&1; then
-  echo "version guard accepted a future release that reused build 26" >&2
+grep -q 'exactly one entry for 1.8.28' "$work/future-missing-build.out"
+printf '%s\t%s\n' '1.8.28' '27' >> "$fixture/phase3-binary/app/release-builds.tsv"
+if bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.28 >"$work/future-reused-build.out" 2>&1; then
+  echo "version guard accepted a future release that reused build 27" >&2
   exit 1
 fi
 grep -q 'duplicate build' "$work/future-reused-build.out"
-sed 's/1\.8\.27[[:space:]]*26/1.8.27 27/' "$fixture/phase3-binary/app/release-builds.tsv" > "$fixture/phase3-binary/app/release-builds.tsv.next"
+sed 's/1\.8\.28[[:space:]]*27/1.8.28 28/' "$fixture/phase3-binary/app/release-builds.tsv" > "$fixture/phase3-binary/app/release-builds.tsv.next"
 mv "$fixture/phase3-binary/app/release-builds.tsv.next" "$fixture/phase3-binary/app/release-builds.tsv"
-sed 's/CURRENT_PROJECT_VERSION: "26"/CURRENT_PROJECT_VERSION: "27"/' "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
+sed 's/CURRENT_PROJECT_VERSION: "27"/CURRENT_PROJECT_VERSION: "28"/' "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
 mv "$fixture/phase3-binary/app/project.yml.next" "$fixture/phase3-binary/app/project.yml"
-bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.27
+bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.28
 
 cat >"$work/current-appcast.xml" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
