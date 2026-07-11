@@ -5,10 +5,13 @@
 codex round-6 returned 0 CRITICAL / 0 MAJOR / 0 MINOR). Implemented on
 both sides (provider `supported_models[]` advertisement, coordinator
 `Provider` extension, opt-in `/v1/status` echo). The former "pre round-6"
-status predated the lock and was never flipped. (Known open gap: the
-R-3.3.4 `seenModels` union of `supported_models` is not implemented, so
-declared-but-cold models 404 instead of the spec'd 503 — implement or
-strike in a v1.6 pass.)
+status predated the lock and was never flipped. (Former open gap NOW
+CLOSED, 2026-07-11: the R-3.3.4 `seenModels` union of `supported_models`
+is implemented — the seen-model index is seeded with the union of
+`ModelID` and every `SupportedModels[]` entry at BOTH the registration
+and heartbeat sites, so a declared-but-cold model now returns 503
+`no_provider_available` (retryable) instead of 404 `model_not_found`. No
+normative text changed; see the R-3.3.4 implementation note in §3.3.)
 **Date drafted:** 2026-06-06
 **Companion to (LOCKED):** SPEC-001 v1.2.4, SPEC-002 v1.3.4,
 SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.
@@ -816,6 +819,29 @@ default serializations. §3.3 specifies the one place
   providers on the legacy auth shape (single `model_id`, no
   `supported_models`) until SPEC-012 ships a complete
   cold-supported handling story.
+
+> **Implementation note (2026-07-11, no normative change):** R-3.3.4
+> is implemented in `phase4-coordinator/internal/pool/provider.go` via
+> `recordSeenModelsUnionLocked`, called at BOTH the registration site
+> (`RegisterAtDetailed`) and the heartbeat site (`ApplyHeartbeat`).
+> Each `SupportedModels[]` entry flows through the same
+> `recordSeenModelLocked` path as `ModelID`, so it shares the served
+> model_id's normalization (lowercase canonical key for the
+> pool-lifetime accumulator, raw id for the per-session attribution
+> set) and its lifecycle: dropped from the per-session index on
+> disconnect / session-replacement (M2-5 / PERF-5) and retained
+> append-only in the SPEC-002 § 7.2 lifetime accumulator for the
+> coordinator process lifetime. Legacy providers carry
+> `SupportedModels == [model_id]` (R-3.1.5 synthesis), so the union
+> collapses to `{model_id}` and the L-1 / R-3.5.1 byte-identical
+> default path is preserved. The buyer-side 404→503 flip is driven
+> entirely by the existing `ModelKnown()` gate in
+> `internal/buyer/server.go`. Covered by
+> `TestModelKnownUnionsDeclaredSupportedModels`,
+> `TestModelKnownUnionsSupportedModelsOnHeartbeat`
+> (`internal/pool/provider_test.go`) and
+> `TestChatCompletionsDeclaredButColdModelReturns503`
+> (`internal/buyer/server_test.go`).
 
 ### 3.4 Router: candidate filter (semantically unchanged in v1.0)
 

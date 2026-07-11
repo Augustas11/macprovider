@@ -1262,6 +1262,117 @@ func TestModelKnownPersistsInLifetimeAccumulator(t *testing.T) {
 	}
 }
 
+// TestModelKnownUnionsDeclaredSupportedModels pins SPEC-010 v1.5
+// R-3.3.4: the seen-model index is the UNION of a provider's served
+// ModelID and every entry in its SupportedModels, so ModelKnown()
+// returns true for a model that a provider DECLARES supporting but is
+// not currently serving (cold). This is what makes a buyer request for
+// such a model fall through to 503 no_provider_available (retryable)
+// instead of 404 model_not_found.
+func TestModelKnownUnionsDeclaredSupportedModels(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	// Provider serves model-y but declares support for model-x (cold)
+	// and Model-X-CASE (mixed case, to exercise the case-folding the
+	// registration path already applies to model ids).
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-y",
+		SupportedModels:  []string{"model-x", "Model-X-CASE"},
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+
+	// (a) The served model is known.
+	if !registry.ModelKnown("model-y") {
+		t.Fatal("ModelKnown(model-y) = false; served model_id not in seen index")
+	}
+	// (a) A declared-but-cold model is known via the R-3.3.4 union.
+	if !registry.ModelKnown("model-x") {
+		t.Fatal("ModelKnown(model-x) = false; declared supported_models entry not unioned into seen index (SPEC-010 R-3.3.4)")
+	}
+	// Case-folding: the union entry is matched regardless of case, the
+	// same as the served model_id path (ModelKnown lowercases + EqualFold).
+	if !registry.ModelKnown("model-x-case") {
+		t.Fatal("ModelKnown(model-x-case) = false; declared supported model not case-folded like model_id")
+	}
+	// (c) A model no provider declares is NOT known — union must not
+	// turn unknown models into false positives (would wrongly 503).
+	if registry.ModelKnown("model-z-undeclared") {
+		t.Fatal("ModelKnown(model-z-undeclared) = true; undeclared model must stay unknown (404), not 503")
+	}
+
+	// (d) Lifecycle: the per-session attribution index carries the
+	// declared supported models while connected, and is dropped on
+	// disconnect EXACTLY as the served model_id is (M2-5 / PERF-5). The
+	// pool-lifetime accumulator (SPEC-002 § 7.2) retains them append-only
+	// so the cold-start race still answers 503 — identical to model_id.
+	registry.mu.RLock()
+	sessionSet := registry.seenModelsByProvider["p1"]
+	_, xInSession := sessionSet["model-x"]
+	_, yInSession := sessionSet["model-y"]
+	registry.mu.RUnlock()
+	if !xInSession || !yInSession {
+		t.Fatalf("seenModelsByProvider[p1] = %v; want served model_id AND declared supported models while connected", sessionSet)
+	}
+
+	if !registry.RemoveIfSession("p1", "s1") {
+		t.Fatal("RemoveIfSession returned false")
+	}
+	// Per-session attribution for the declared model is gone on
+	// disconnect — no leak, same lifecycle as model_id.
+	registry.mu.RLock()
+	_, sessionStillPresent := registry.seenModelsByProvider["p1"]
+	registry.mu.RUnlock()
+	if sessionStillPresent {
+		t.Fatal("seenModelsByProvider[p1] still present after RemoveIfSession; supported-model union leaked into per-session index")
+	}
+	// Lifetime survival (intended, matches model_id / issue #185): a
+	// declared-cold model stays known across a disconnect so the buyer
+	// port keeps answering 503 for the cold-start race window.
+	if !registry.ModelKnown("model-x") {
+		t.Fatal("ModelKnown(model-x) = false after disconnect; declared-cold model should survive in lifetime accumulator like model_id (SPEC-002 § 7.2)")
+	}
+}
+
+// TestModelKnownUnionsSupportedModelsOnHeartbeat pins that the R-3.3.4
+// union is re-applied on the heartbeat path too (provider.go heartbeat
+// site), not only at registration. Heartbeat frames do not carry
+// supported_models, so the stored Provider.SupportedModels remains the
+// authoritative declared set across heartbeats.
+func TestModelKnownUnionsSupportedModelsOnHeartbeat(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-y",
+		SupportedModels:  []string{"model-x"},
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+
+	// A heartbeat still serving model-y must keep the declared-cold
+	// model-x known (union re-applied from p.SupportedModels).
+	registry.ApplyHeartbeat("p1", "s1", heartbeatUpdateAt("model-y", start.Add(time.Minute)))
+	if !registry.ModelKnown("model-x") {
+		t.Fatal("ModelKnown(model-x) = false after heartbeat; heartbeat path did not union declared supported_models (SPEC-010 R-3.3.4)")
+	}
+}
+
 // TestSeenModelsLifetimeCap pins the PERF-5 reconciliation in issue
 // #185: the lifetime accumulator is bounded at maxSeenModelsLifetime.
 // Beyond the cap, further inserts drop (with a warn-once log + a

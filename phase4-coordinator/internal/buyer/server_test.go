@@ -5556,6 +5556,56 @@ func TestChatCompletionsColdStartRaceReturnsNoProviderAvailable(t *testing.T) {
 	assertOpenAIErrorEnvelope(t, unseen, "model_not_found", "invalid_request_error")
 }
 
+// TestChatCompletionsDeclaredButColdModelReturns503 pins the buyer-
+// visible half of SPEC-010 v1.5 R-3.3.4: a request for a model that a
+// connected provider DECLARES supporting (supported_models) but is not
+// currently serving (cold) must return 503 no_provider_available
+// (transient/retryable — the provider may warm it), NOT 404
+// model_not_found. A model that no provider declares still returns 404.
+func TestChatCompletionsDeclaredButColdModelReturns503(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "http://p1.example"}})
+	// Provider serves model-served but declares support for
+	// model-declared-cold (it is warm-capable but not currently loaded).
+	registry.Register(&pool.Provider{
+		ProviderID:            "p1",
+		AssignedID:            "s1",
+		Hostname:              "p1.local",
+		ModelID:               "model-served",
+		SupportedModels:       []string{"model-declared-cold"},
+		ModelParamsB:          7,
+		RAMGB:                 16,
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 20,
+		EndpointURL:           "http://p1.example",
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       time.Now().UTC(),
+		ConnectedAt:           time.Now().UTC(),
+		BinaryVersion:         "0.1.0",
+	}, nil)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	// (b) Declared-but-cold model: no provider currently serves it, but
+	// it is in the seen-model union (R-3.3.4) → 503, not 404.
+	cold := postChat(t, server, []byte(`{"model":"model-declared-cold","messages":[{"role":"user","content":"hello"}]}`), nil)
+	if cold.Code != http.StatusServiceUnavailable {
+		t.Fatalf("declared-but-cold model status = %d, want 503; body=%s", cold.Code, cold.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, cold, "no_provider_available", "service_unavailable")
+
+	// (c) A model no provider declares stays 404 model_not_found — the
+	// union must not turn genuinely-unknown models into 503.
+	unknown := postChat(t, server, []byte(`{"model":"model-nobody-declares-9000","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("undeclared model status = %d, want 404; body=%s", unknown.Code, unknown.Body.String())
+	}
+	assertOpenAIErrorEnvelope(t, unknown, "model_not_found", "invalid_request_error")
+}
+
 // assertOpenAIErrorEnvelope decodes the response body and verifies
 // the full OpenAI error envelope shape (error.code, error.type,
 // error.message non-empty, error.param is null). Used by the cold-
