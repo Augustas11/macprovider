@@ -1,8 +1,33 @@
 # SPEC-008 — Tier-2 Trust Layer
 
-**Version:** 0.3 (2026-05-31, round-2 audit fix pass)
+**Version:** 0.4 (2026-07-11, attestation-reconciliation pass)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.3, SPEC-004 v0.3.1,
                SPEC-006 v0.8.1
+
+**Change log v0.4 (runbook item 7 — spec-only reconciliation of shipped attestation):**
+The shipped, default-enabled self-signed Secure-Enclave attestation path
+(`macprovider-se-p256-v1`) was entirely absent from v0.3, which documented only the
+aspirational Apple-MDA path (which never becomes a positive production trust signal in
+code). SPEC-032 (proof-of-weights) now names SPEC-008 authoritative on attestation, so
+v0.4 documents the shipped reality (no code change — the code is the live cross-repo
+interop contract the Swift provider CLI byte-matches):
+- **§7.3:** added the `attestation_tier` taxonomy (`""` / `self_signed` / `hardware`),
+  anchoring `self_signed` for SPEC-032's reliance.
+- **§7.4a (new):** documents `macprovider-se-p256-v1` — the base64url-JSON token
+  envelope, DER/ES256 body signature, raw 64-byte `x‖y` key format, the
+  interop-critical **Go `encoding/json` (sorted-keys, HTML-escape ON — NOT RFC-8785
+  JCS)** canonicalization, and the required `macprovider/spec008/attestation-binding/v1`
+  session-binding signature.
+- **§7.4:** scoped "accepted encodings" per format (v0.3's "no other encodings" clause
+  wrongly forbade the shipped SE JSON envelope).
+- **§7.7:** reconciled to the shipped **network-level** `tier2.attestation{state,…}`
+  disclosure; the v0.3 per-model block is retained as a **deferred** forward
+  enhancement.
+- **§6.4/§6.5, §11.1/§11.5, §15.3:** documented the shipped Pillar B transcript
+  length-prefix framing + binary canonical AAD, the `attestation_formats` default incl.
+  SE, the `se_liveness_*` config lifecycle rows, and the T2.C event field set.
+- Confirmed **no drift** on the §5.5–5.6 hash routing-exclusion predicate that SPEC-032
+  FR-TD1 cites as authoritative.
 
 **Change log v0.3:**
 - Resolves Round 2 findings C1, M1, M2, M3, M4, m1, m2, m3, m4.
@@ -927,7 +952,7 @@ The shared secret is:
 shared_secret = X25519(coordinator_private, provider_public)
 ```
 
-The session transcript is:
+The session transcript is (field order as below):
 
 ```
 transcript = SHA256(
@@ -939,6 +964,14 @@ transcript = SHA256(
   selected_aead_suite
 )
 ```
+
+**Framing (normative, v0.4 — interop-critical).** The `||` above is **not** bare
+concatenation. The shipped code (`internal/tier2/pillar_b.go`) hashes the fixed prefix
+string, then appends each subsequent field via a **length-prefixed, labeled** framing:
+`uint32-BE(len(label)) ‖ label ‖ uint32-BE(len(value)) ‖ value`, where `label` is the
+field's name. This framing (not plain concatenation) is what the provider-side signer
+MUST reproduce byte-for-byte; v0.3's `||` notation was under-specified and not
+reproducible as written.
 
 The AEAD keys are derived with HKDF-SHA256:
 
@@ -982,7 +1015,15 @@ Encrypted provider-leg messages use:
 
 #### 6.5.1 Request AAD (c2p)
 
-`aad` MUST be deterministic JSON with:
+**v0.4 correction — the on-wire canonical AAD is a binary length-prefixed blob, not
+JSON.** The shipped `MarshalAEADAAD` (`internal/tier2/pillar_b.go`) produces:
+`"macprovider/spec008/pillar-b/aad/v1\x00"` ‖ length-prefixed `type` ‖ length-prefixed
+`direction` ‖ length-prefixed `request_id` ‖ one `stream` byte ‖ length-prefixed
+`provider_id` ‖ length-prefixed `assigned_id` ‖ `uint64-BE(seq)`. (A deterministic-JSON
+form is accepted only as a decode-time compatibility fallback, never emitted on the
+wire.) The provider-side signer/verifier MUST reproduce this binary framing. The JSON
+below is retained only as a **field inventory** (which fields, and their values), NOT
+the canonical byte encoding:
 
 ```json
 {
@@ -1007,8 +1048,9 @@ The AAD MUST NOT include:
 
 #### 6.5.2 Response AAD (p2c)
 
-Response `aad` for `inference_response_chunk` MUST be deterministic JSON
-with:
+Response `aad` for `inference_response_chunk` uses the **same binary
+length-prefixed canonical framing** as §6.5.1 (`direction: "p2c"`); the JSON below is
+a field inventory, not the canonical byte encoding:
 
 ```json
 {
@@ -1261,7 +1303,26 @@ For every provider session, the coordinator MUST compute one of:
 - `not_required`: no attestation token present and
   `tier2.require_attestation: false`.
 
-Only `attested` is a positive hardware-trust signal.
+Only `attested` is a positive trust signal.
+
+**Attestation tier (v0.4).** Orthogonal to the status above, the coordinator MUST
+also record an **attestation tier** capturing *how strong* an `attested` result is,
+serialized as `attestation_tier` on the provider (JSON `attestation_tier`,
+`internal/pool/provider.go`):
+
+- `""` (empty): not attested / no tier established.
+- `self_signed`: the provider proved possession of a Secure-Enclave-held P-256 key
+  and bound it to the session, via the shipped **`macprovider-se-p256-v1`** format
+  (§7.4a). This proves *key custody + session binding on Apple Silicon*, **not** an
+  Apple-rooted device-identity chain — it is a self-signed attestation, trusted at
+  the tier the operator configures (`attestation_formats` includes it by default).
+- `hardware`: a future/aspirational hardware-rooted tier (e.g. an Apple-Managed
+  Device Attestation chain to a trusted root, §7.4). Not a positive production trust
+  signal in the shipped code outside the mock root; reserved.
+
+This tier is the "attestation" half of the authority SPEC-032 relies on when it
+names SPEC-008 authoritative on attestation: SPEC-032 consumes the *fact* of an
+attested/`self_signed` provider, not its cryptographic internals.
 
 ### 7.4 Attestation data model
 
@@ -1304,12 +1365,17 @@ attested. In that case `/v1/models` MAY still report `attested: true` for
 Apple-Silicon device identity while separately reporting
 `ram_tier_attested: false`.
 
-Accepted `attestation_token.token` encodings are:
+Accepted `attestation_token.token` encodings are, **per format**:
 
-- base64url-encoded raw DER or CBOR bytes,
-- compact JWS with exactly three dot-separated base64url segments.
+- for `apple-managed-device-attestation-acme-v1` (§7.4): base64url-encoded raw DER
+  or CBOR bytes, or compact JWS with exactly three dot-separated base64url segments;
+- for `macprovider-se-p256-v1` (§7.4a): a **base64url-encoded JSON envelope**
+  `{"attestation": {…}, "signature": "…"}` (the shipped SE encoding).
 
-No other encodings are accepted. The maximum encoded token length is 16384
+No other encodings are accepted **for a given format**. (v0.4 correction: v0.3 listed
+only the DER/CBOR/JWS set and declared "no other encodings are accepted," which the
+shipped, default-enabled `macprovider-se-p256-v1` path violates — see §7.4a. The
+encoding rule is now scoped per format.) The maximum encoded token length is 16384
 bytes (16 KiB). Coordinators MUST reject tokens exceeding this length with
 error code `tier2_attestation_token_too_large` (HTTP 400, type
 `invalid_request`) and log `T2.C attestation_failed`.
@@ -1317,6 +1383,63 @@ error code `tier2_attestation_token_too_large` (HTTP 400, type
 Malformed tokens, including invalid base64url, invalid compact JWS, or decoded
 bytes that are not parseable as the declared format, MUST be rejected with
 `tier2_attestation_token_invalid` (HTTP 400, type `invalid_request`).
+
+### 7.4a Self-signed Secure-Enclave format (`macprovider-se-p256-v1`) — shipped (v0.4)
+
+This is the **default-enabled, production attestation format** (in
+`attestation_formats` by default; `internal/tier2/pillar_c_se.go`,
+`internal/tier2/pillar_c.go`). It was absent from v0.3; v0.4 documents the shipped
+reality. It yields `attestation_tier: self_signed` (§7.3).
+
+**Token envelope.** `attestation_token.format = "macprovider-se-p256-v1"` and
+`attestation_token.token` is the base64url encoding of the JSON object:
+
+```json
+{
+  "attestation": {
+    "publicKey": "base64(raw 64-byte P-256 x‖y, NO 0x04 prefix)",
+    "encryptionPublicKey": "base64(32-byte X25519 pubkey)",
+    "challenge": "…", "provider_id": "…", "ram_gb": 16, "...": "claims"
+  },
+  "signature": "base64(DER/ASN.1 ECDSA-P256 (ES256) signature)"
+}
+```
+
+**Signature (body).** `signature` is a **DER/ASN.1 ECDSA (ES256)** signature (NOT raw
+`r‖s`) over `SHA-256(canonical(attestation))`, verified with `ecdsa.VerifyASN1`
+against the P-256 key in `attestation.publicKey`.
+
+**Key format.** The SE public key is the **raw 64-byte uncompressed P-256 point
+`x‖y` WITHOUT the `0x04` prefix**, base64 (standard, flexible-padding) inside
+`attestation.publicKey`. (This differs from the SEC1 `0x04`-prefixed form; the
+coordinator prepends `0x04` internally before parsing.)
+
+**Canonicalization (normative — interop-critical).** `canonical(attestation)` is the
+output of **Go `encoding/json` marshalling of the parsed object** — i.e. **sorted
+object keys**, Go's default **HTML-escaping ON** (`<`,`>`,`&` → `<`/`>`/
+`&`), and Go's default number formatting for any JSON number (e.g. `ram_gb`).
+This is **NOT RFC-8785 (JCS)**: it is the byte-for-byte output of Go's standard
+library, and the provider-side (Swift) signer MUST reproduce exactly these bytes.
+Pinning this precisely is required because the signature is verified over these exact
+bytes; a future migration to JCS is a **coordinated cross-repo (coordinator + Swift
+CLI) change**, out of scope for v0.4.
+
+**Session-binding signature (required).** In addition to the body signature, an SE
+token MUST carry a second signature at `attestation_token.signature = {alg, signature}`
+(ES256, DER/ASN.1) over the canonical **attestation-binding payload** — a fixed
+struct tagged `version: "macprovider/spec008/attestation-binding/v1"` binding
+`token_sha256`, `claimed_sha256`, the challenge, and `provider_id`. A token whose
+body verifies but which lacks a valid binding signature MUST be rejected (the shipped
+code requires it — `pillar_c_se.go`, `pillar_c.go`). The token's
+`encryptionPublicKey` MUST equal the session's `key_binding.provider_ecdh_public_key`
+when Pillar B is negotiated.
+
+**What `self_signed` proves and does not.** It proves the provider holds an SE-backed
+P-256 key and bound it to *this* session and challenge on Apple Silicon. It does
+**not** chain to an Apple-attested device root, so it is not proof of un-tampered
+hardware — it is a self-signed key-custody + liveness-of-session attestation, trusted
+at the operator-configured tier. (The stronger `hardware` tier via
+`apple-managed-device-attestation-acme-v1` remains §7.4's reserved path.)
 
 ### 7.5 Coordinator verification flow
 
@@ -1365,8 +1488,43 @@ All buyer-visible attestation errors MUST follow §4.6 and §4.7.
 
 ### 7.7 `/v1/models` fields
 
-When Pillar C observation or enforcement is active, the aggregated
-`/v1/models` entry for each model MUST include:
+**Shipped (v0.4): network-level attestation disclosure.** The shipped `/v1/models`
+response exposes attestation **once at the top level** — `tier2.attestation` — not
+per-model. The shipped object (`internal/buyer/server.go`, `attestationStateForProviders`)
+is:
+
+```json
+"tier2": {
+  "attestation": {
+    "state": "attested",            // "attested" | "unsupported" | "mixed"
+    "attested_provider_count": 2,
+    "unsupported_provider_count": 0,
+    "mixed": false
+  }
+}
+```
+
+Field notes vs the v0.3 per-model block below: the shipped key is **`state`** (not
+`status`); it emits `attested_provider_count`/`unsupported_provider_count`/`mixed` and
+**does not** emit `failed_provider_count`, `ram_tier_attested_provider_count`, or
+`format`; and it **collapses** `attestation_failed`/`attestation_stale`/`unsupported`/
+`not_required` into the single non-positive `unsupported`/`mixed` bucket (so the
+failed-vs-unsupported split cannot be reconstructed from this surface). The Pillar A
+hash disclosure (§5.7) IS emitted **per-model** and matches §5.7 field-for-field —
+attestation and hash disclosure have different shapes on purpose.
+
+With all `tier2.*` keys at defaults and no provider attestation evidence,
+`/v1/models` MUST preserve Tier-1 buyer-visible behavior (no `tier2.attestation`
+positive claims).
+
+**Deferred (forward requirement): per-model attestation disclosure.** The v0.3
+per-model `attestation{status, attested/unsupported/failed/ram_tier counts, format}`
+block below is **not shipped** and is retained as a **forward enhancement**, not a
+current requirement. It has product value (buyers seeing which specific models are
+attested and at what tier) and SHOULD be implemented when attestation disclosure is
+promoted to a buyer-facing product surface — at which point it MUST also carry
+`attestation_tier` (§7.3) and the failed-vs-unsupported split. Until then the
+network-level shape above is normative. *(Deferred v0.3 shape, for reference:)*
 
 ```json
 {
@@ -1381,17 +1539,6 @@ When Pillar C observation or enforcement is active, the aggregated
   }
 }
 ```
-
-When Phase 2 is active, `attested` MUST be:
-
-- `true` when every currently routable provider for that model is attested,
-- `"unsupported"` when every currently routable provider is unsupported or
-  not required,
-- `false` when the routable set is mixed, failed, stale, or unavailable.
-
-The `attestation` object MUST expose counts so partial-pool state is visible.
-With all `tier2.*` keys at defaults and no provider attestation evidence,
-`/v1/models` MUST preserve Tier-1 buyer-visible behavior.
 
 ### 7.8 Pillar C acceptance criteria
 
@@ -2065,8 +2212,13 @@ tier2:
   require_attestation: false       # default false: unsupported providers route
   attestation_roots: []            # empty: no required attestation trust roots
   attestation_max_age_s: 600
-  attestation_formats:
+  attestation_formats:             # v0.4: shipped default includes the SE format
     - "apple-managed-device-attestation-acme-v1"
+    - "macprovider-se-p256-v1"     # self-signed SE P-256 (§7.4a); default-enabled
+  # SE liveness re-challenge (Phase 1, Track P1-C):
+  se_liveness_interval_s: 300      # hot-reloadable
+  se_liveness_timeout_s: 30        # hot-reloadable
+  se_liveness_max_failures: 3      # hot-reloadable
 
   # Phase 3 / Pillar D
   behavioral_safety_enabled: false # default false: no relay behavior change
@@ -2162,6 +2314,8 @@ unsupported Tier-2 state.
 | `require_attestation` | Hot-reloadable. | Existing sessions are re-evaluated at next request. |
 | `attestation_roots` / `attestation_formats` | Startup only. | N/A |
 | `attestation_max_age_s` | Hot-reloadable. | Applies to next attestation validation. |
+| `se_liveness_interval_s` / `se_liveness_timeout_s` / `se_liveness_max_failures` | Hot-reloadable (v0.4). | Applies to the next SE liveness re-challenge cycle. |
+| `allow_mock_attestation` | Startup only (v0.4). | N/A — test/mock-root only. |
 | `behavioral_safety_enabled` / Pillar D flags | Hot-reloadable. | Applied to next response chunk after reload completes. |
 | `observe_enabled` | Hot-reloadable. | Applies to next provider registration or request. |
 | `phase` | Computed/read-only; not operator-settable. | N/A |
