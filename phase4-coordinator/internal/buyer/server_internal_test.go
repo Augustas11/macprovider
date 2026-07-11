@@ -3,6 +3,8 @@ package buyer
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -500,5 +502,152 @@ func TestEstimatedCompletionTokensFromBytes(t *testing.T) {
 	got = estimatedCompletionTokensFromBytes(5, 16)
 	if got == nil || *got != 1 {
 		t.Fatalf("five-byte estimate with configured ceiling = %v, want 1", got)
+	}
+}
+
+// TestRetryableByCodeClassification asserts that transient availability/timeout
+// codes report retryable=true and permanent/client codes report false, closing
+// audit finding H2 (every buyer error envelope stamped retryable=false because
+// transient codes were absent from the lookup table).
+func TestRetryableByCodeClassification(t *testing.T) {
+	retryable := []string{
+		"no_provider_available", "provider_timeout", "provider_error",
+		"provider_disconnected", "provider_failed",
+		"provisional_quota_exceeded", "preflight_rejected",
+		"idempotency_unavailable", "rate_limited",
+		// Round-3 sweep addition: pre-dispatch route-snapshot store
+		// failure — a retry can succeed once storage recovers.
+		"route_snapshot_failed",
+	}
+	for _, code := range retryable {
+		if !spec018Retryable(code) {
+			t.Errorf("code %q must be retryable=true", code)
+		}
+	}
+	permanent := []string{
+		"model_not_found", "context_exceeds_capacity", "unsupported_content_shape",
+		"invalid_request", "invalid_json", "byte_cap_exceeded",
+		// Round-2 sweep additions: reviewed and confirmed permanent.
+		"catalog_not_found", "provider_not_found", "provider_response_too_large",
+		"not_found", "unauthorized", "request_log_failed", "settlement_finality_failed",
+		"idempotency_key_body_mismatch", "idempotency_key_replayed",
+		"idempotency_reservation_failed", "malformed_settlement_stream",
+		"tool_call_final_close_failed", "malformed_tool_call", "stream_output_exceeded",
+		"session_ended", "tier2_hash_verified_required", "tier2_encrypted_leg_required",
+		"tier2_attestation_required", "tier2_hard_pin_predicate_failed",
+		"tier2_hash_mismatch", "tier2_aead_decrypt_failed", "tier2_output_encoding_invalid",
+		// Round-3 sweep additions: reviewed and confirmed permanent.
+		"autotune_feed_not_found", "invalid_tools",
+	}
+	for _, code := range permanent {
+		if spec018Retryable(code) {
+			t.Errorf("code %q must be retryable=false", code)
+		}
+	}
+}
+
+// coordinatorEmittedErrorCodes is every literal code string reachable by a
+// buyer-facing error envelope in internal/buyer/*.go, as of the round-3
+// 3-lane re-audit sweep of PR #548: writeError, writeErrorWithParam, a
+// routeError{} literal, the coordinator's own writeSSEError, AND the
+// codes returned by the request-validation helpers (validateChatRequest /
+// validateOptionalFields / validateResponseFormatSchema / validateMessages /
+// validateTools / validateJSONSchemaRaw / validateJSONSchemaNumericBounds)
+// via a status/code/message tuple or *schemaValidationError, which
+// ultimately reach writeError(w, status, code, msg) through a variable.
+//
+// The round-2 version of this list deliberately excluded the
+// validation-helper codes as "out of proportion" — that was the bug: it
+// let 3 genuinely-emitted codes (autotune_feed_not_found, invalid_tools,
+// route_snapshot_failed) ship with NO entry in either this list or
+// spec018RetryableByCode while the completeness test still passed, because
+// the list wasn't actually exhaustive. This list is now the full 70-entry
+// write-site sweep (autotune_feeds.go, route_snapshot.go, and every code
+// path in server.go), matching spec018RetryableByCode key-for-key.
+var coordinatorEmittedErrorCodes = []string{
+	"autotune_feed_not_found", "byte_cap_exceeded", "catalog_not_found",
+	"context_exceeds_capacity", "duplicate_tool_call_id", "idempotency_key_body_mismatch",
+	"idempotency_key_replayed", "idempotency_reservation_failed", "idempotency_unavailable",
+	"invalid_json", "invalid_request", "invalid_tool_call_id",
+	"invalid_tools", "json_schema_invalid_const_or_enum_type", "json_schema_invalid_name",
+	"json_schema_missing_name", "json_schema_missing_schema", "json_schema_non_strict_unsupported",
+	"json_schema_strict_requires_additional_properties_false", "json_schema_strict_requires_all_properties_required", "json_schema_too_deep",
+	"json_schema_too_large", "json_schema_unsupported_keyword", "json_schema_validation_failed",
+	"malformed_json_response", "malformed_settlement_stream", "malformed_tool_call",
+	"malformed_tool_call_final_json", "messages_too_long", "model_not_found",
+	"no_provider_available", "not_found", "preflight_rejected",
+	"provider_disconnected", "provider_error", "provider_failed",
+	"provider_not_found", "provider_response_too_large", "provider_stream_downgraded",
+	"provider_timeout", "provisional_quota_exceeded", "rate_limited",
+	"request_body_too_large", "request_content_encoding_unsupported", "request_log_failed",
+	"response_byte_cap_exceeded", "route_snapshot_failed", "session_ended",
+	"settlement_finality_failed", "stream_output_exceeded", "streaming_json_object_unsupported",
+	"streaming_json_schema_unsupported", "tier2_aead_decrypt_failed", "tier2_attestation_required",
+	"tier2_encrypted_leg_required", "tier2_hard_pin_predicate_failed", "tier2_hash_mismatch",
+	"tier2_hash_verified_required", "tier2_output_encoding_invalid", "too_many_tool_calls",
+	"tool_call_arguments_aggregate_too_large", "tool_call_arguments_too_large", "tool_call_final_close_failed",
+	"tool_call_id_not_found", "tool_call_result_out_of_order", "tool_result_too_large",
+	"tool_results_aggregate_too_large", "unauthorized", "unsupported_content_shape",
+	"unsupported_modelID_for_multi_turn",
+}
+
+// TestCoordinatorErrorCodeCompleteness closes L-R2-2 coordinator-side: every
+// emitted code must have an EXPLICIT entry in spec018RetryableByCode (true
+// or false) — a code present in coordinatorEmittedErrorCodes but absent
+// from the map is indistinguishable, at runtime, from an explicit false via
+// Go's map zero-value, which is exactly how H2 happened in the first
+// place. This does not check the boolean VALUE (TestRetryableByCodeClassification
+// does that for the specific codes it names) — only that nobody forgot to
+// decide.
+//
+// Limitation (carried, round-3 finding #4, also in SPEC-006 §5.2): this
+// guards the CURRENT hand-curated inventory above, not future ones. A
+// brand-new write site with a brand-new code will not fail this test
+// merely by existing — it fails only once someone adds it to
+// coordinatorEmittedErrorCodes without a matching map entry. Nothing here
+// parses server.go at test time to catch a new call site automatically; a
+// proper AST/registration-based guard is a separate follow-up.
+func TestCoordinatorErrorCodeCompleteness(t *testing.T) {
+	for _, code := range coordinatorEmittedErrorCodes {
+		if _, ok := spec018RetryableByCode[code]; !ok {
+			t.Errorf("code %q is emitted but has no explicit entry in spec018RetryableByCode", code)
+		}
+	}
+}
+
+// TestWriteErrorEnvelopeRetryableField exercises the generic error writer end
+// to end and asserts the emitted envelope carries the correct retryable flag
+// for a transient code (no_provider_available => true) and a permanent code
+// (model_not_found => false).
+func TestWriteErrorEnvelopeRetryableField(t *testing.T) {
+	cases := []struct {
+		code string
+		want bool
+	}{
+		{"no_provider_available", true},
+		{"provider_timeout", true},
+		{"provider_disconnected", true},
+		{"provider_failed", true},
+		{"provisional_quota_exceeded", true},
+		{"preflight_rejected", true},
+		{"idempotency_unavailable", true},
+		{"rate_limited", true},
+		{"model_not_found", false},
+	}
+	for _, tc := range cases {
+		rr := httptest.NewRecorder()
+		writeError(rr, http.StatusServiceUnavailable, tc.code, "x")
+		var env struct {
+			Error struct {
+				Code      string `json:"code"`
+				Retryable bool   `json:"retryable"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+			t.Fatalf("code %q: bad envelope: %v", tc.code, err)
+		}
+		if env.Error.Retryable != tc.want {
+			t.Errorf("code %q: retryable=%v, want %v", tc.code, env.Error.Retryable, tc.want)
+		}
 	}
 }

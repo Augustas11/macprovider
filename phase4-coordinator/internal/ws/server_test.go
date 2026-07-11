@@ -2914,6 +2914,28 @@ func TestProviderHealthzReportsInjectedVersion(t *testing.T) {
 	}
 }
 
+func TestProviderHealthzAcceptsHEAD(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodHead, ts.URL+"/healthz", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("healthz HEAD: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD /healthz status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 0 {
+		t.Fatalf("HEAD /healthz must return no body; got %q", body)
+	}
+}
+
 func TestProviderHealthzDefaultVersion(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()

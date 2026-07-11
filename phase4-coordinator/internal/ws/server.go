@@ -3467,8 +3467,11 @@ func (s *Server) canaryFailureThreshold() int {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
+	// HEAD returns the same status/headers as GET with no body (Go's server
+	// discards the body for HEAD), so probes using curl -I / k8s / UptimeRobot
+	// are not rejected with 405.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}

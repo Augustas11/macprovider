@@ -57,7 +57,29 @@ const (
 	receiptTerminalStateTSHeaderName   = "X-MacProvider-Receipt-Terminal-State-TS-Unix-MS"
 )
 
+// spec018RetryableByCode enumerates the explicit retryability of every
+// buyer-visible error code. A code absent from this table falls through to
+// Go's zero value (false) via spec018Retryable, so transient availability
+// codes MUST be listed here explicitly or they wrongly report non-retryable.
+// See SPEC-006 §5.2: transient availability/timeout codes are retryable=true;
+// permanent/client (validation, capacity, shape) codes are retryable=false.
 var spec018RetryableByCode = map[string]bool{
+	// Transient availability/timeout — the buyer should retry (SPEC-006 §5.2).
+	"no_provider_available":      true,
+	"provider_error":             true,
+	"provider_timeout":           true,
+	"provider_disconnected":      true,
+	"provider_failed":            true,
+	"provisional_quota_exceeded": true, // 429, ships Retry-After: 3600 (writeErrorTypedParam)
+	"preflight_rejected":         true, // 503, all providers rejected/timed out during preflight
+	"idempotency_unavailable":    true, // 503, durable request logging unavailable
+	"rate_limited":               true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
+	// Permanent/client errors — retrying will not help (SPEC-006 §5.2).
+	"model_not_found":                                         false,
+	"context_exceeds_capacity":                                false,
+	"unsupported_content_shape":                               false,
+	"invalid_request":                                         false,
+	"invalid_json":                                            false,
 	"byte_cap_exceeded":                                       false,
 	"response_byte_cap_exceeded":                              false,
 	"malformed_tool_call_final_json":                          true,
@@ -75,7 +97,6 @@ var spec018RetryableByCode = map[string]bool{
 	"json_schema_too_deep":                                    false,
 	"json_schema_too_large":                                   false,
 	"request_content_encoding_unsupported":                    false,
-	"provider_timeout":                                        false,
 	"malformed_json_response":                                 true,
 	"json_schema_validation_failed":                           true,
 	"request_body_too_large":                                  false,
@@ -90,6 +111,55 @@ var spec018RetryableByCode = map[string]bool{
 	"duplicate_tool_call_id":                                  false,
 	"tool_call_result_out_of_order":                           false,
 	"unsupported_modelID_for_multi_turn":                      false,
+	// Round-2 3-lane re-audit sweep of PR #548: the codes below were
+	// emitted (writeError/writeErrorWithParam/routeError literal call
+	// sites) but had no explicit entry, relying on Go's map zero-value
+	// (false) — the exact shape H1/H-R2 warned about. Each was reviewed
+	// against the sweep's rule (does the path set a Retry-After/reset
+	// header, or does the message promise "retry"/"temporarily"?); none
+	// do, so false is confirmed correct and now explicit rather than
+	// implicit. TestCoordinatorErrorCodeCompleteness enforces every
+	// emitted code has an explicit entry going forward.
+	"catalog_not_found":              false, // resource lookup, permanent
+	"provider_not_found":             false, // config/admin lookup, permanent
+	"provider_response_too_large":    false, // cap-violation family (response_byte_cap_exceeded sibling)
+	"not_found":                      false, // internal settlement-finality lookup, coordinator-authorization gated
+	"unauthorized":                   false, // internal/coordinator-authorization errors, not a buyer retry signal
+	"request_log_failed":             false, // internal durable-logging fault, ambiguous — not an availability signal
+	"settlement_finality_failed":     false, // internal settlement-finality fault, coordinator-authorization gated
+	"idempotency_key_body_mismatch":  false, // client reused Idempotency-Key with a different body
+	"idempotency_key_replayed":       false, // request already recorded, not an error to retry
+	"idempotency_reservation_failed": false, // internal store-contention fault, ambiguous
+	"malformed_settlement_stream":    false, // internal settlement-protocol fault
+	"tool_call_final_close_failed":   false, // validation-shape error, permanent
+	"malformed_tool_call":            false, // validation-shape error, permanent
+	"stream_output_exceeded":         false, // cap-violation family, same bucket as response_byte_cap_exceeded
+	"session_ended":                  false, // pinned session no longer exists, permanent
+	// Tier-2 attestation/security-policy codes: conservatively false.
+	// tier2_hash_verified_required / tier2_encrypted_leg_required /
+	// tier2_attestation_required ("no attested/encrypted/hash-verified
+	// provider available") are structurally availability-shaped, but
+	// reclassifying a security-policy code requires SPEC-015 context this
+	// sweep does not have — a wrong call here has different risk
+	// characteristics than an availability code, so left false pending a
+	// dedicated SPEC-015 review rather than guessed at here.
+	"tier2_hash_verified_required":    false,
+	"tier2_encrypted_leg_required":    false,
+	"tier2_attestation_required":      false,
+	"tier2_hard_pin_predicate_failed": false,
+	"tier2_hash_mismatch":             false,
+	"tier2_aead_decrypt_failed":       false,
+	"tier2_output_encoding_invalid":   false,
+	// Round-3 codex re-audit: an independent write-site sweep found these
+	// three emitted but present in neither this map nor the round-2
+	// completeness test's inventory (autotune_feeds.go:120's sibling
+	// rate_limited entry above was already covered; :124 was not).
+	"autotune_feed_not_found": false, // Tier-2 feed disabled/unconfigured, permanent
+	"invalid_tools":           false, // client request-shape validation, permanent
+	// route_snapshot_failed is a pre-dispatch durable-store write failure
+	// (route_snapshot.go:149) — a retry can succeed once storage recovers,
+	// unlike the other internal-fault codes above which are left false.
+	"route_snapshot_failed": true,
 }
 
 func spec018Retryable(code string) bool {
@@ -588,6 +658,10 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/healthz", s.handleHealthz)
+	// HEAD returns the same status/headers as GET with no body (Go's server
+	// discards the body for HEAD), so probes using curl -I / k8s / UptimeRobot
+	// are not rejected with 405.
+	r.Head("/healthz", s.handleHealthz)
 	r.Get("/v1/models", s.handleModels)
 	r.Get("/v1/rate-card", s.handleRateCard)
 	r.Get("/v1/demand-rank", s.handleDemandRank)
