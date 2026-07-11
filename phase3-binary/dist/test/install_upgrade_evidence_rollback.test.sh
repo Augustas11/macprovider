@@ -645,6 +645,7 @@ assert_old_install "$root"
 [ -f "$root/watchdog-service-disabled" ]
 [ -z "$(recovery_dir "$root")" ]
 
+run_darwin_manual_recovery_cases() {
 # A non-launchd provider holding the configured port is a real protected
 # process state: capture it before stop, restore the exact prior binary and
 # argv on self-test failure, and never evaluate shell metacharacters stored in
@@ -763,5 +764,15 @@ if kill -0 "$failed_restored_pid" >/dev/null 2>&1; then
   exit 1
 fi
 kill "$retry_pid"
+}
+
+# Exact capture and byte-for-byte replay of an existing process uses Darwin's
+# KERN_PROCARGS2 contract. Portable CI still exercises every other rollback
+# case above; the macOS lane runs these two process-preservation cases.
+if [ "$(uname -s)" = "Darwin" ]; then
+  run_darwin_manual_recovery_cases
+else
+  echo "skipping Darwin-only manual provider argv recovery cases"
+fi
 
 echo "upgrade evidence rollback fault matrix ok"
