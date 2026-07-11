@@ -247,7 +247,9 @@ class PearlUpdaterTests(unittest.TestCase):
 
     def test_signature_failure_rejected_before_artifact_execution(self):
         signature = self.bundle / "pearl-release.json.sig"
-        signature.write_bytes(signature.read_bytes()[:-1] + b"x")
+        corrupted = bytearray(signature.read_bytes())
+        corrupted[-1] ^= 0x01
+        signature.write_bytes(corrupted)
         with self.assertRaisesRegex(updater_module.UpdateError, "signature verification failed"):
             self.verify()
 
@@ -326,6 +328,44 @@ class PearlUpdaterTests(unittest.TestCase):
 
         self.assertEqual(str(current), "1.8.25")
         self.assertEqual(decision, "upgrade")
+
+    def test_clean_legacy_git_describe_pair_can_bootstrap_to_newer_signed_release(self):
+        self.install_pair("v1.8.26-4-g64083ef", "v1.8.20-4-ga5e12c2")
+        self.make_bundle("1.8.30")
+        self.updater.candidate_version = "v1.8.30"
+        release = self.stage(self.updater.verify_release(self.bundle, "v1.8.30"))
+
+        current, decision = self.updater.assess_candidate(release)
+
+        self.assertEqual(str(current), "1.8.26")
+        self.assertEqual(decision, "upgrade")
+
+    def test_legacy_git_describe_bootstrap_requires_strictly_newer_release(self):
+        self.install_pair("v1.8.26-4-g64083ef", "v1.8.20-4-ga5e12c2")
+        self.make_bundle("1.8.26")
+        release = self.updater.verify_release(self.bundle, "v1.8.26")
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "requires a signed release newer"):
+            self.updater.eligibility(release)
+
+    def test_legacy_bootstrap_rejects_dirty_or_ambiguous_build_versions(self):
+        for value in (
+            "v1.8.26-4-g64083ef-dirty",
+            "v1.8.26-4-g64083ef-dirty-forced",
+            "64083ef",
+            "v1.8.26-0-g64083ef",
+            "v1.8.26-4-gNOTHEX",
+        ):
+            with self.subTest(value=value):
+                self.install_pair(value, "v1.8.20-4-ga5e12c2")
+                with self.assertRaisesRegex(updater_module.UpdateError, "does not report a semantic version"):
+                    self.updater.installed_release()
+
+    def test_legacy_bootstrap_rejects_conflicting_durable_release_state(self):
+        self.install_pair("v1.8.26-4-g64083ef", "v1.8.20-4-ga5e12c2", "1.8.26")
+
+        with self.assertRaisesRegex(updater_module.UpdateError, "cannot coexist"):
+            self.updater.installed_release()
 
     def test_mismatched_installed_pair_is_repaired_not_skipped(self):
         self.install_pair("1.8.27", "1.8.26", "1.8.27")
@@ -1732,6 +1772,10 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertIn("/etc/macprovider/canary-buyer.token", text)
         self.assertIn("/etc/macprovider/canary-buyer.heartbeat", text)
         self.assertIn("test ! -e /etc/macprovider/canary-buyer.env", text)
+        self.assertIn(
+            "sudo -u macprovider -g macprovider /usr/local/sbin/macprovider-pearl-updater-alert",
+            text,
+        )
         self.assertNotIn("test -s /etc/macprovider/canary-buyer.env", text)
 
     def test_every_subprocess_invocation_has_an_explicit_timeout(self):

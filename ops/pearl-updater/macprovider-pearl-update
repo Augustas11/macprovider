@@ -73,6 +73,9 @@ CONTROL_ASSETS = (
     "checksums.txt.sig",
 )
 SEMVER_RE = re.compile(r"^(?:v)?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+LEGACY_GIT_DESCRIBE_RE = re.compile(
+    r"^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-([1-9][0-9]*)-g([0-9a-f]{7,40})$"
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -200,6 +203,12 @@ class InstalledRelease:
     coordinator_sha256: str
     gateway_sha256: str
     durable: dict[str, Any] | None
+    coordinator_legacy: bool = False
+    gateway_legacy: bool = False
+
+    @property
+    def requires_legacy_bootstrap(self) -> bool:
+        return self.coordinator_legacy or self.gateway_legacy
 
     @property
     def downgrade_floor(self) -> SemVer:
@@ -209,6 +218,8 @@ class InstalledRelease:
         return max(versions)
 
     def is_coherent_with(self, release: Release) -> bool:
+        if self.requires_legacy_bootstrap:
+            return False
         if self.coordinator != release.version or self.gateway != release.version:
             return False
         if self.coordinator_sha256 != release.coordinator.sha256 or self.gateway_sha256 != release.gateway.sha256:
@@ -1203,21 +1214,35 @@ class Updater:
             except (KeyError, TypeError, ValueError, OSError, UpdateError) as exc:
                 raise UpdateError(f"installed release state is invalid: {state}") from exc
         binaries: dict[str, SemVer] = {}
+        legacy: dict[str, bool] = {}
         hashes: dict[str, str] = {}
         for name in ("coordinator", "gateway"):
             binary = self.install_root / name
             self._trusted_regular_file(binary, f"installed {name} binary")
             result = self.run_command([str(binary), "--version"], check=False, timeout=10)
-            if result.returncode != 0 or not SEMVER_RE.fullmatch(result.stdout.strip()):
+            value = result.stdout.strip()
+            if result.returncode != 0:
                 raise UpdateError(f"installed {name} does not report a semantic version")
-            binaries[name] = SemVer.parse(result.stdout.strip())
+            if SEMVER_RE.fullmatch(value):
+                binaries[name] = SemVer.parse(value)
+                legacy[name] = False
+            else:
+                match = LEGACY_GIT_DESCRIBE_RE.fullmatch(value)
+                if match is None:
+                    raise UpdateError(f"installed {name} does not report a semantic version")
+                binaries[name] = SemVer(*(int(part) for part in match.groups()[:3]))
+                legacy[name] = True
             hashes[name] = sha256_file(binary)
+        if durable is not None and any(legacy.values()):
+            raise UpdateError("durable release state cannot coexist with legacy git-describe binaries")
         return InstalledRelease(
             binaries["coordinator"],
             binaries["gateway"],
             hashes["coordinator"],
             hashes["gateway"],
             durable,
+            legacy["coordinator"],
+            legacy["gateway"],
         )
 
     def eligibility(self, release: Release) -> tuple[SemVer, str]:
@@ -1232,6 +1257,20 @@ class Updater:
         if release.version < current:
             self.audit("release_eligibility", "rejected_downgrade", candidate=release.tag, current=str(current))
             raise UpdateError(f"downgrade rejected: installed={current} candidate={release.version}")
+        if installed.requires_legacy_bootstrap:
+            if release.version == current:
+                raise UpdateError(
+                    f"legacy bootstrap requires a signed release newer than the installed base: installed={current} candidate={release.version}"
+                )
+            self.audit(
+                "release_eligibility",
+                "legacy_bootstrap",
+                candidate=release.tag,
+                current=str(current),
+                coordinator=str(installed.coordinator),
+                gateway=str(installed.gateway),
+            )
+            return current, "upgrade"
         if release.version == current:
             if installed.is_coherent_with(release):
                 self.audit("release_eligibility", "already_current", candidate=release.tag, current=str(current))
