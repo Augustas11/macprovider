@@ -515,6 +515,9 @@ func TestRetryableByCodeClassification(t *testing.T) {
 		"provider_disconnected", "provider_failed",
 		"provisional_quota_exceeded", "preflight_rejected",
 		"idempotency_unavailable", "rate_limited",
+		// Round-3 sweep addition: pre-dispatch route-snapshot store
+		// failure — a retry can succeed once storage recovers.
+		"route_snapshot_failed",
 	}
 	for _, code := range retryable {
 		if !spec018Retryable(code) {
@@ -533,6 +536,8 @@ func TestRetryableByCodeClassification(t *testing.T) {
 		"session_ended", "tier2_hash_verified_required", "tier2_encrypted_leg_required",
 		"tier2_attestation_required", "tier2_hard_pin_predicate_failed",
 		"tier2_hash_mismatch", "tier2_aead_decrypt_failed", "tier2_output_encoding_invalid",
+		// Round-3 sweep additions: reviewed and confirmed permanent.
+		"autotune_feed_not_found", "invalid_tools",
 	}
 	for _, code := range permanent {
 		if spec018Retryable(code) {
@@ -541,29 +546,49 @@ func TestRetryableByCodeClassification(t *testing.T) {
 	}
 }
 
-// coordinatorEmittedErrorCodes is every literal code string passed to
-// writeError, writeErrorWithParam, a routeError{} literal, or the
-// coordinator's own writeSSEError in internal/buyer/server.go, as of the
-// round-2 3-lane re-audit sweep of PR #548. Codes reachable only via a
-// variable/tuple-returning validation helper (the JSON-schema and
-// tool-call family) are not included here — those were reviewed manually
-// earlier in the same sweep and every one already has an explicit entry in
-// spec018RetryableByCode; enumerating them would require tracing return
-// values through shared validation functions, out of proportion for this
-// completeness guard.
+// coordinatorEmittedErrorCodes is every literal code string reachable by a
+// buyer-facing error envelope in internal/buyer/*.go, as of the round-3
+// 3-lane re-audit sweep of PR #548: writeError, writeErrorWithParam, a
+// routeError{} literal, the coordinator's own writeSSEError, AND the
+// codes returned by the request-validation helpers (validateChatRequest /
+// validateOptionalFields / validateResponseFormatSchema / validateMessages /
+// validateTools / validateJSONSchemaRaw / validateJSONSchemaNumericBounds)
+// via a status/code/message tuple or *schemaValidationError, which
+// ultimately reach writeError(w, status, code, msg) through a variable.
+//
+// The round-2 version of this list deliberately excluded the
+// validation-helper codes as "out of proportion" — that was the bug: it
+// let 3 genuinely-emitted codes (autotune_feed_not_found, invalid_tools,
+// route_snapshot_failed) ship with NO entry in either this list or
+// spec018RetryableByCode while the completeness test still passed, because
+// the list wasn't actually exhaustive. This list is now the full 70-entry
+// write-site sweep (autotune_feeds.go, route_snapshot.go, and every code
+// path in server.go), matching spec018RetryableByCode key-for-key.
 var coordinatorEmittedErrorCodes = []string{
-	"catalog_not_found", "context_exceeds_capacity", "idempotency_key_body_mismatch",
+	"autotune_feed_not_found", "byte_cap_exceeded", "catalog_not_found",
+	"context_exceeds_capacity", "duplicate_tool_call_id", "idempotency_key_body_mismatch",
 	"idempotency_key_replayed", "idempotency_reservation_failed", "idempotency_unavailable",
-	"invalid_request", "malformed_settlement_stream", "malformed_tool_call",
-	"model_not_found", "no_provider_available", "not_found", "preflight_rejected",
-	"provider_disconnected", "provider_error", "provider_failed", "provider_not_found",
-	"provider_response_too_large", "provider_timeout", "provisional_quota_exceeded",
-	"rate_limited", "request_body_too_large", "request_content_encoding_unsupported",
-	"request_log_failed", "session_ended", "settlement_finality_failed",
-	"stream_output_exceeded", "tier2_aead_decrypt_failed", "tier2_attestation_required",
+	"invalid_json", "invalid_request", "invalid_tool_call_id",
+	"invalid_tools", "json_schema_invalid_const_or_enum_type", "json_schema_invalid_name",
+	"json_schema_missing_name", "json_schema_missing_schema", "json_schema_non_strict_unsupported",
+	"json_schema_strict_requires_additional_properties_false", "json_schema_strict_requires_all_properties_required", "json_schema_too_deep",
+	"json_schema_too_large", "json_schema_unsupported_keyword", "json_schema_validation_failed",
+	"malformed_json_response", "malformed_settlement_stream", "malformed_tool_call",
+	"malformed_tool_call_final_json", "messages_too_long", "model_not_found",
+	"no_provider_available", "not_found", "preflight_rejected",
+	"provider_disconnected", "provider_error", "provider_failed",
+	"provider_not_found", "provider_response_too_large", "provider_stream_downgraded",
+	"provider_timeout", "provisional_quota_exceeded", "rate_limited",
+	"request_body_too_large", "request_content_encoding_unsupported", "request_log_failed",
+	"response_byte_cap_exceeded", "route_snapshot_failed", "session_ended",
+	"settlement_finality_failed", "stream_output_exceeded", "streaming_json_object_unsupported",
+	"streaming_json_schema_unsupported", "tier2_aead_decrypt_failed", "tier2_attestation_required",
 	"tier2_encrypted_leg_required", "tier2_hard_pin_predicate_failed", "tier2_hash_mismatch",
-	"tier2_hash_verified_required", "tier2_output_encoding_invalid",
-	"tool_call_final_close_failed", "unauthorized",
+	"tier2_hash_verified_required", "tier2_output_encoding_invalid", "too_many_tool_calls",
+	"tool_call_arguments_aggregate_too_large", "tool_call_arguments_too_large", "tool_call_final_close_failed",
+	"tool_call_id_not_found", "tool_call_result_out_of_order", "tool_result_too_large",
+	"tool_results_aggregate_too_large", "unauthorized", "unsupported_content_shape",
+	"unsupported_modelID_for_multi_turn",
 }
 
 // TestCoordinatorErrorCodeCompleteness closes L-R2-2 coordinator-side: every
@@ -574,6 +599,14 @@ var coordinatorEmittedErrorCodes = []string{
 // place. This does not check the boolean VALUE (TestRetryableByCodeClassification
 // does that for the specific codes it names) — only that nobody forgot to
 // decide.
+//
+// Limitation (carried, round-3 finding #4, also in SPEC-006 §5.2): this
+// guards the CURRENT hand-curated inventory above, not future ones. A
+// brand-new write site with a brand-new code will not fail this test
+// merely by existing — it fails only once someone adds it to
+// coordinatorEmittedErrorCodes without a matching map entry. Nothing here
+// parses server.go at test time to catch a new call site automatically; a
+// proper AST/registration-based guard is a separate follow-up.
 func TestCoordinatorErrorCodeCompleteness(t *testing.T) {
 	for _, code := range coordinatorEmittedErrorCodes {
 		if _, ok := spec018RetryableByCode[code]; !ok {

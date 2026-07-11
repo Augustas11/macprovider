@@ -903,21 +903,17 @@ var gatewayRetryableByCode = map[string]bool{
 	"coordinator_unavailable": true,
 	"upstream_provider_error": true,
 	"invalid_provider_usage":  true,
-	// rate_limit_exceeded-typed 429s (H-R2 + sweep): every one of these is,
-	// by construction, a time-window condition that resolves on its own —
-	// the four named by H-R2 already ship a Retry-After or X-RateLimit-Reset
-	// header (setConcurrencyRateLimitHeaders / setRateLimitHeaders); the
-	// other four in this same family (no header today) are classified true
-	// for the identical reason so a future audit round doesn't find the same
-	// gap on a sibling code.
+	// rate_limit_exceeded-typed 429s that actually ship a backoff signal
+	// (Retry-After via setConcurrencyRateLimitHeaders, or X-RateLimit-Reset
+	// via setRateLimitHeaders) — H-R2. signup_rate_limited ships no header
+	// either but is left true pending a dedicated review; it was not named
+	// in the round-3 revert (see gatewayPermanentCodes for the three that
+	// were reverted, and why).
 	"account_request_rate_exceeded": true,
 	"account_concurrency_exceeded":  true,
 	"demo_concurrency_exceeded":     true,
 	"quota_exhausted":               true,
-	"feedback_rate_limited":         true,
-	"oauth_state_rate_limited":      true,
 	"signup_rate_limited":           true,
-	"demo_session_rate_limited":     true,
 	// Operator-controlled capacity pauses (M-R2-3 + sweep): the wording on
 	// all three ("paused"/"closed ... while capacity catches up") already
 	// promises the buyer this resolves with time; the code must agree.
@@ -950,6 +946,17 @@ var gatewayPermanentCodes = map[string]bool{
 	"comment_too_long": true, "invalid_request_id": true, "invalid_feedback_scope": true,
 	"invalid_limit": true, "api_key_lookup_failed": true,
 	"request_content_encoding_unsupported": true,
+	// Round-3 SECURITY MEDIUM revert: round-2 classified these three true
+	// as part of the rate_limit_exceeded family, but unlike
+	// account_request_rate_exceeded/account_concurrency_exceeded/
+	// demo_concurrency_exceeded/quota_exhausted, none of these three ships
+	// a Retry-After or reset header, AND none sits behind the 30-RPS
+	// account-level rate clamp (chatStartLimits) the way /v1/chat/completions
+	// does — so retryable:true here would tell a conforming SDK to
+	// auto-retry a 429 with zero backoff against an endpoint with no other
+	// throttle, a DoS-amplification risk. Reverted to false.
+	"feedback_rate_limited": true, "oauth_state_rate_limited": true,
+	"demo_session_rate_limited": true,
 	// Internal-fault codes: absent Retry-After/reset header and no
 	// "retry later" wording, so the sweep's rule doesn't require true —
 	// these are ambiguous store/settlement faults, not availability

@@ -150,6 +150,16 @@ var spec018RetryableByCode = map[string]bool{
 	"tier2_hash_mismatch":             false,
 	"tier2_aead_decrypt_failed":       false,
 	"tier2_output_encoding_invalid":   false,
+	// Round-3 codex re-audit: an independent write-site sweep found these
+	// three emitted but present in neither this map nor the round-2
+	// completeness test's inventory (autotune_feeds.go:120's sibling
+	// rate_limited entry above was already covered; :124 was not).
+	"autotune_feed_not_found": false, // Tier-2 feed disabled/unconfigured, permanent
+	"invalid_tools":           false, // client request-shape validation, permanent
+	// route_snapshot_failed is a pre-dispatch durable-store write failure
+	// (route_snapshot.go:149) — a retry can succeed once storage recovers,
+	// unlike the other internal-fault codes above which are left false.
+	"route_snapshot_failed": true,
 }
 
 func spec018Retryable(code string) bool {

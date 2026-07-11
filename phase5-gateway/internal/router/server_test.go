@@ -1560,9 +1560,10 @@ func TestFeedbackRateLimitPerIP(t *testing.T) {
 		t.Fatalf("11th feedback status=%d want 429 body=%s", resp.Code, resp.Body.String())
 	}
 	assertErrorCode(t, resp.Body.String(), "feedback_rate_limited")
-	// Round-2 sweep (H-R2): an hourly per-IP rate limit is inherently
-	// temporal even though this path doesn't (yet) ship a Retry-After.
-	assertBodyRetryable(t, resp.Body.String(), true)
+	// Round-3 SECURITY MEDIUM revert: no Retry-After ships on this path and
+	// it sits outside the 30-RPS account clamp, so retryable:true would
+	// invite SDK auto-retry hot-looping against an unthrottled endpoint.
+	assertBodyRetryable(t, resp.Body.String(), false)
 }
 
 func TestFeedbackSummaryLimitsRawScan(t *testing.T) {
@@ -5999,11 +6000,12 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		"provider_disconnected", "provider_failed", "provisional_quota_exceeded",
 		"preflight_rejected", "idempotency_unavailable", "rate_limited",
 		"coordinator_unavailable", "upstream_provider_error", "invalid_provider_usage",
-		// Round-2 sweep (H-R2 + rate_limit_exceeded-family extension):
-		// every temporal 429 in this family resolves on its own.
+		// Round-2 sweep (H-R2 + rate_limit_exceeded-family extension), as
+		// narrowed by round-3's SECURITY MEDIUM revert: only the codes that
+		// actually ship a Retry-After/reset header (or, for
+		// signup_rate_limited, weren't named in the revert) stay true.
 		"account_request_rate_exceeded", "account_concurrency_exceeded",
-		"demo_concurrency_exceeded", "quota_exhausted", "feedback_rate_limited",
-		"oauth_state_rate_limited", "signup_rate_limited", "demo_session_rate_limited",
+		"demo_concurrency_exceeded", "quota_exhausted", "signup_rate_limited",
 		// Round-2 sweep (M-R2-3 + capacity-pause extension): wording on all
 		// three already promises the buyer this resolves with time.
 		"public_api_paused", "demo_paused", "capacity_signup_closed",
@@ -6017,6 +6019,10 @@ func TestGatewayRetryableByCodeClassification(t *testing.T) {
 		"model_not_found", "invalid_request", "method_not_allowed",
 		"invalid_api_key", "not_found", "request_content_encoding_unsupported",
 		"api_key_lookup_failed", "feedback_limit_check_failed", "settlement_failed",
+		// Round-3 SECURITY MEDIUM revert: no Retry-After/reset header and
+		// no account-level rate clamp on these paths — retryable:true would
+		// invite SDK auto-retry hot-looping (DoS amplifier).
+		"feedback_rate_limited", "oauth_state_rate_limited", "demo_session_rate_limited",
 	}
 	for _, code := range permanent {
 		if gatewayRetryable(code) {
@@ -6077,6 +6083,17 @@ var gatewayEmittedErrorCodes = []string{
 // would mean the two maps disagree) and never neither (that's exactly how
 // H1/H-R2 happened: an emitted code silently fell through Go's map
 // zero-value to false with nobody having decided it should).
+//
+// Limitation (carried, round-3 finding #4, also in SPEC-006 §5.2): this
+// guards the CURRENT hand-curated inventory in gatewayEmittedErrorCodes,
+// not future ones. Adding a new writeError/writeSSEError call site with a
+// new code does not fail this test by itself — it only fails once someone
+// adds that code to gatewayEmittedErrorCodes without a matching map entry.
+// Nothing here parses the .go source at test time to discover a new call
+// site automatically; a proper AST/registration-based guard (the round-3
+// coordinator-side finding that a hand-curated list can itself silently
+// go stale, as gatewayEmittedErrorCodes almost did) is a separate
+// follow-up, not implemented here.
 func TestGatewayErrorCodeCompleteness(t *testing.T) {
 	for _, code := range gatewayEmittedErrorCodes {
 		_, inRetryable := gatewayRetryableByCode[code]
