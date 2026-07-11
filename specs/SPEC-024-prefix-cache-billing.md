@@ -215,9 +215,15 @@ namespace and nothing else** — entries are held in a dictionary keyed by the t
 
 **FR-CI1 (partition).** A provider MUST partition cached prefixes strictly by
 `conversation_key`. A lookup for key K MUST NOT return, reuse, or measure any prefix stored
-under a different key K′. `conversation_key` MUST satisfy the SPEC-004 shape (`conv:` prefix,
-≤ 256 UTF-8 bytes, printable ASCII); the provider treats it as an opaque, already-scoped
-token (§12) — it MUST NOT parse or attribute it.
+under a different key K′. `conversation_key` uses the SPEC-004 `conv:<opaque-id>` namespace; the shipped provider
+validator (`ChatCompletionRequest.validConversationKey`) additionally requires the `conv:`
+prefix, length > 5, ≤ 256 UTF-8 bytes, and every Unicode scalar ≥ U+0020 **except U+007F**
+(i.e. it rejects C0 controls and DEL but **does not** restrict to printable ASCII — non-ASCII
+Unicode ≥ U+0020 is accepted). Note the provider dictionary compares keys by Swift **string
+canonical equivalence**, so canonically-equivalent Unicode (e.g. composed vs decomposed `é`)
+collapses to one entry despite differing UTF-8 bytes — irrelevant under the ASCII gateway-HMAC
+keys, but load-bearing on non-FR-CI5 ingest (§15). The provider treats the key as an opaque,
+already-scoped token (§12) — it MUST NOT parse or attribute it.
 
 **FR-CI2 (reuse predicate).** Even on a key hit, a provider MUST reuse cached KV only for the
 **exact token-level longest common prefix** of the stored canonical prompt tokens and the
@@ -234,16 +240,27 @@ bit-for-bit identical *sampled output*: the shipped default is stochastic sampli
 runs of a stochastic request will differ. Reuse is a performance optimization with no effect
 on the *distribution* of output, not a determinism guarantee.
 
-**FR-CI3 (canonical prefix).** The stored canonical prefix is the provider's canonicalized
-prompt token IDs (system/user/assistant content per §2), optionally extended by the
-generated token IDs of the served turn. `cached_prompt_tokens` reported per §3 MUST equal
-`min(LCP, incoming_prompt_tokens)` for the reused turn (see §5–§6 for pricing); it is a
-**token count**, never a byte count.
+**FR-CI3 (canonical prefix).** On a served turn the provider commits the canonical prefix as
+`prompt_token_ids ‖ generated_token_ids` (shipped: always both, not an optional extension).
+The prompt token IDs are the provider's rendered prompt **including any tool messages and
+assistant tool-call content** — the shipped tokenizer renders tool history into the prompt and
+caches it (**a drift from v0.1 §2's "tool-call replies out of scope"; v0.2 records the shipped
+reality**). `cached_prompt_tokens` reported per §3 MUST equal `min(LCP, incoming_prompt_tokens)`
+for the reused turn (see §5–§6 for pricing); it is a **token count**, never a byte count.
 
-**FR-CI4 (lifecycle bounds).** The cache MUST bound retention (shipped: a TTL sweep, default
-900 s, and LRU eviction on a per-provider conversation-count cap and total-token cap). These
-bounds are IMPL-tunable; the *invariant* is that no prefix outlives its `conversation_key`
-entry, and eviction never moves a prefix across keys.
+**FR-CI4 (lifecycle bounds).** The cache MUST bound reuse-**eligibility** (shipped: a TTL,
+default 900 s, and LRU eviction on a per-provider conversation-count cap and total-token cap).
+The shipped TTL sweep is **lazy** — it runs only on the next `begin()`, so an idle process MAY
+physically retain expired KV in memory beyond the TTL until the next request; *eligibility* is
+TTL-bounded even though *physical retention* is not. These bounds are IMPL-tunable; the
+*invariant* is that no prefix is reused past its `conversation_key` entry's eligibility, and
+eviction never moves a prefix across keys.
+
+**FR-CI4a (same-key serialization).** Overlapping operations on a single `conversation_key`
+MUST be serialized — a provider MUST NOT concurrently mutate or reuse one key's cache entry
+(shipped: an exclusive per-key lease held from `begin()` until `commit`/`abort`,
+`ConversationCache.swift`). This pins the observable ordering rule; it does not prescribe the
+Swift `actor`/lease mechanism (§2).
 
 This section pins observable behavior, not the mlx mechanism (§2).
 
@@ -372,9 +389,12 @@ redundant but MUST NOT be relied upon as the *primary* isolation control.
 ## 15. Ingest paths without a fronting gateway (v0.2)
 
 The provider accepts `conversation_key` on multiple ingest paths — the cleartext HTTP/relay
-path and the Tier-2 encrypted-envelope path — and trusts the value **verbatim**, with no
-provider-side account binding (`InferenceRelay.swift`, `Tier2ProviderSession.swift`). This is
-safe **only** while every buyer request passes through the FR-CI5 deriving gateway first.
+path and the Tier-2 encrypted-envelope path — with **no provider-side account binding**
+(`InferenceRelay.swift`, `Tier2ProviderSession.swift`). (The value is trimmed and passed
+through the FR-CI1 prefix/length/scalar validation — an invalid key becomes *absent* and
+disables caching — so it is not blindly *verbatim*, but no **account** dimension is added.)
+This is safe **only** while every buyer request passes through the FR-CI5 deriving gateway
+first.
 
 **FR-CI14 (deployment invariant).** Any deployment topology in which buyers can reach the
 coordinator or provider **without** the gateway HMAC derivation (direct coordinator access, a
