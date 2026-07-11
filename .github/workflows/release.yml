@@ -110,9 +110,9 @@ jobs:
             "$RUNNER_TEMP/coordinator-cli-linux-amd64" \
             "$RUNNER_TEMP/gateway-linux-amd64" \
             | tee pearl-file.txt
-          grep -q "coordinator-linux-amd64: ELF 64-bit.*x86-64" pearl-file.txt
-          grep -q "coordinator-cli-linux-amd64: ELF 64-bit.*x86-64" pearl-file.txt
-          grep -q "gateway-linux-amd64: ELF 64-bit.*x86-64" pearl-file.txt
+          grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
+          grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
+          grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" pearl-file.txt
           for binary in coordinator-linux-amd64 coordinator-cli-linux-amd64 gateway-linux-amd64; do
             go version -m "$RUNNER_TEMP/$binary" > "$RUNNER_TEMP/$binary.buildinfo"
             grep -Fq 'GOOS=linux' "$RUNNER_TEMP/$binary.buildinfo"
