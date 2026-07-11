@@ -114,4 +114,6 @@ carried documented rather than blocking the PR that found them:
 | Date | Item | State |
 |------|------|-------|
 | 2026-07-10 | Runbook created; Wave A kicked off (1a+16, 2-probe, 3) | in progress |
-| 2026-07-10 | Item 3 (SPEC-022 deadline, #546) — 3 codex rounds + attribution lane to 0 C/H/M; 2 pre-existing MEDIUMs carried as items 18/19 | approved, merging |
+| 2026-07-10 | Item 3 (SPEC-022 deadline, #546) — 3 codex rounds + attribution lane to 0 C/H/M; 2 pre-existing MEDIUMs carried as items 18/19 | MERGED (f7e1505) |
+| 2026-07-11 | Item 2 (billing under-credit probe) — diagnostic ready: clamp binds when reported ≳21 tok → ~75% completion under-credit on most 200s IF providers report usage. Query/script at `scripts/h1-undercredit-probe.sh`. **G1 leans REVERT to content-bytes /4.** | BLOCKED on operator running the probe (needs Pearl SSH) |
+| 2026-07-11 | Item 1a+16 (retryable + healthz, #548) — WS1 also flipped `provider_disconnected`/`provider_failed`; SPEC-006 §5.2 note added | codex audit pending |
