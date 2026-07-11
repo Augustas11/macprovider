@@ -12,6 +12,7 @@ import contextlib
 import dataclasses
 import errno
 import fcntl
+import grp
 import hashlib
 import http.client
 import json
@@ -46,6 +47,8 @@ BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 SYSTEMD_ROOT = Path("/etc/systemd/system")
 INDEPENDENT_ALERT_ENV_PATH = Path("/etc/macprovider/monitor.env")
 VALIDATOR_ACCOUNT = "macprovider-updater-validate"
+INDEPENDENT_ALERT_ACCOUNT = "macprovider"
+INDEPENDENT_ALERT_GROUP = "macprovider"
 GATED_SERVICE_UNITS = (
     "macprovider-coordinator.service",
     "macprovider-gateway.service",
@@ -70,6 +73,9 @@ CONTROL_ASSETS = (
     "checksums.txt.sig",
 )
 SEMVER_RE = re.compile(r"^(?:v)?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+LEGACY_GIT_DESCRIBE_RE = re.compile(
+    r"^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-([1-9][0-9]*)-g([0-9a-f]{7,40})$"
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -118,6 +124,22 @@ class CommandTimeout(UpdateError):
 
 class AssetNotFound(UpdateError):
     pass
+
+
+def resolve_service_group_gid(account_name: str, group_name: str) -> int:
+    try:
+        account = pwd.getpwnam(account_name)
+    except KeyError as exc:
+        raise UpdateError(f"{account_name} service account is missing") from exc
+    if account.pw_uid == 0:
+        raise UpdateError(f"{account_name} service account must not use the root uid")
+    try:
+        group = grp.getgrnam(group_name)
+    except KeyError as exc:
+        raise UpdateError(f"{group_name} service group is missing") from exc
+    if group.gr_gid == 0:
+        raise UpdateError(f"{group_name} service group must not use the root gid")
+    return group.gr_gid
 
 
 @dataclasses.dataclass(frozen=True, order=True)
@@ -181,6 +203,12 @@ class InstalledRelease:
     coordinator_sha256: str
     gateway_sha256: str
     durable: dict[str, Any] | None
+    coordinator_legacy: bool = False
+    gateway_legacy: bool = False
+
+    @property
+    def requires_legacy_bootstrap(self) -> bool:
+        return self.coordinator_legacy or self.gateway_legacy
 
     @property
     def downgrade_floor(self) -> SemVer:
@@ -190,6 +218,8 @@ class InstalledRelease:
         return max(versions)
 
     def is_coherent_with(self, release: Release) -> bool:
+        if self.requires_legacy_bootstrap:
+            return False
         if self.coordinator != release.version or self.gateway != release.version:
             return False
         if self.coordinator_sha256 != release.coordinator.sha256 or self.gateway_sha256 != release.gateway.sha256:
@@ -561,6 +591,7 @@ class Updater:
         trusted_uid: int = 0,
         candidate_uid: int | None = None,
         candidate_gid: int | None = None,
+        independent_alert_gid: int | None = None,
         isolate_candidate_network: bool = False,
         sleep: Callable[[float], None] = time.sleep,
     ):
@@ -577,6 +608,9 @@ class Updater:
         self.trusted_uid = trusted_uid
         self.candidate_uid = trusted_uid if candidate_uid is None else candidate_uid
         self.candidate_gid = trusted_uid if candidate_gid is None else candidate_gid
+        self.independent_alert_gid = (
+            self.candidate_gid if independent_alert_gid is None else independent_alert_gid
+        )
         self.isolate_candidate_network = isolate_candidate_network
         self.sleep = sleep
         self.transaction: Path | None = None
@@ -1180,21 +1214,35 @@ class Updater:
             except (KeyError, TypeError, ValueError, OSError, UpdateError) as exc:
                 raise UpdateError(f"installed release state is invalid: {state}") from exc
         binaries: dict[str, SemVer] = {}
+        legacy: dict[str, bool] = {}
         hashes: dict[str, str] = {}
         for name in ("coordinator", "gateway"):
             binary = self.install_root / name
             self._trusted_regular_file(binary, f"installed {name} binary")
             result = self.run_command([str(binary), "--version"], check=False, timeout=10)
-            if result.returncode != 0 or not SEMVER_RE.fullmatch(result.stdout.strip()):
+            value = result.stdout.strip()
+            if result.returncode != 0:
                 raise UpdateError(f"installed {name} does not report a semantic version")
-            binaries[name] = SemVer.parse(result.stdout.strip())
+            if SEMVER_RE.fullmatch(value):
+                binaries[name] = SemVer.parse(value)
+                legacy[name] = False
+            else:
+                match = LEGACY_GIT_DESCRIBE_RE.fullmatch(value)
+                if match is None:
+                    raise UpdateError(f"installed {name} does not report a semantic version")
+                binaries[name] = SemVer(*(int(part) for part in match.groups()[:3]))
+                legacy[name] = True
             hashes[name] = sha256_file(binary)
+        if durable is not None and any(legacy.values()):
+            raise UpdateError("durable release state cannot coexist with legacy git-describe binaries")
         return InstalledRelease(
             binaries["coordinator"],
             binaries["gateway"],
             hashes["coordinator"],
             hashes["gateway"],
             durable,
+            legacy["coordinator"],
+            legacy["gateway"],
         )
 
     def eligibility(self, release: Release) -> tuple[SemVer, str]:
@@ -1209,6 +1257,20 @@ class Updater:
         if release.version < current:
             self.audit("release_eligibility", "rejected_downgrade", candidate=release.tag, current=str(current))
             raise UpdateError(f"downgrade rejected: installed={current} candidate={release.version}")
+        if installed.requires_legacy_bootstrap:
+            if release.version == current:
+                raise UpdateError(
+                    f"legacy bootstrap requires a signed release newer than the installed base: installed={current} candidate={release.version}"
+                )
+            self.audit(
+                "release_eligibility",
+                "legacy_bootstrap",
+                candidate=release.tag,
+                current=str(current),
+                coordinator=str(installed.coordinator),
+                gateway=str(installed.gateway),
+            )
+            return current, "upgrade"
         if release.version == current:
             if installed.is_coherent_with(release):
                 self.audit("release_eligibility", "already_current", candidate=release.tag, current=str(current))
@@ -1280,7 +1342,7 @@ class Updater:
         if (
             not stat.S_ISDIR(parent_stat.st_mode)
             or parent_stat.st_uid != self.trusted_uid
-            or parent_stat.st_gid != self.candidate_gid
+            or parent_stat.st_gid != self.independent_alert_gid
             or stat.S_IMODE(parent_stat.st_mode) != 0o750
         ):
             raise UpdateError("independent-alert config directory must have exact trusted ownership and mode 0750")
@@ -1301,7 +1363,7 @@ class Updater:
         if (
             not stat.S_ISREG(env_stat.st_mode)
             or env_stat.st_uid != self.trusted_uid
-            or env_stat.st_gid != self.candidate_gid
+            or env_stat.st_gid != self.independent_alert_gid
             or env_stat.st_nlink != 1
             or stat.S_IMODE(env_stat.st_mode) != 0o640
         ):
@@ -3148,6 +3210,7 @@ def main(argv: list[str]) -> int:
     if testing:
         candidate_uid = os.geteuid()
         candidate_gid = os.getegid()
+        independent_alert_gid = candidate_gid
     else:
         try:
             account = pwd.getpwnam(VALIDATOR_ACCOUNT)
@@ -3157,6 +3220,10 @@ def main(argv: list[str]) -> int:
             raise UpdateError(f"{VALIDATOR_ACCOUNT} service account must not use the root uid or gid")
         candidate_uid = account.pw_uid
         candidate_gid = account.pw_gid
+        independent_alert_gid = resolve_service_group_gid(
+            INDEPENDENT_ALERT_ACCOUNT,
+            INDEPENDENT_ALERT_GROUP,
+        )
     updater = Updater(
         config,
         public_key=test_path(PINNED_PUBLIC_KEY, "PEARL_UPDATER_TEST_PUBLIC_KEY", testing),
@@ -3172,6 +3239,7 @@ def main(argv: list[str]) -> int:
         trusted_uid=trusted_uid,
         candidate_uid=candidate_uid,
         candidate_gid=candidate_gid,
+        independent_alert_gid=independent_alert_gid,
         isolate_candidate_network=not testing,
     )
     lock_uid = trusted_uid
