@@ -143,6 +143,14 @@ cross-repo interop contract the Swift provider CLI byte-matches):
   freshness (challenge/timestamps/expiry/max-age) → `attestation_stale`; body/binding
   signature or MDA cert-freshness-extension → `attestation_failed`; unsupported format →
   `unsupported` (removing the earlier blanket "freshness → attestation_failed").
+- **§7.4/§10.4/§7.5 (R10 CRITICAL):** the **effective** attestation-token size cap is
+  **1024 bytes on the whole `attestation_token` JSON object**, enforced at the WS
+  `auth_request` parse layer (`invalid_auth_request` / close 4001) **before** Pillar C — the
+  16-KiB/20-KiB Pillar C caps are unreachable defense-in-depth; a re-implementer MUST enforce
+  the 1024-byte cap. Added the shipped **MDA acceptance grammar** (P-256/P-384 leaf curve;
+  freshness = SHA-256(encoded token) at Apple OID …8.11.1; recognized Apple MDA property OID
+  present+non-blank; CSR as PEM or base64 DER via `certificate_csr`/`csr`). Corrected §10.4's
+  now-stale "omits key_binding/signature" wording.
 - **§5.7:** clarified the hash-disclosure counting basis is slot-holders
   (`hasAvailableSlot`); `RoutingEligible` has no hash check — the hash routing-exclusion is
   the separate §5.5-5.6 predicate (mismatch/invalid always; uncatalogued only when
@@ -1697,12 +1705,21 @@ encoding is **not** checked (any nonempty base64url passes the gate and the cert
 from the chain fields), and no format supplies a CBOR parser (§7.4 parsing note). A
 conforming signer SHOULD still emit the per-format encoding above.
 
-**Size limits (shipped, two caps).** The maximum encoded `attestation_token.token` length
-is 16384 bytes (16 KiB; `MaxAttestationTokenBytes`). Separately, the coordinator rejects
-the **entire decoded attestation-token envelope** (the outer JSON object with `format`,
-`token`, `challenge`, `claimed`, `key_binding`, signatures, …) when it exceeds 20480 bytes
-(20 KiB; `MaxAttestationEnvelopeBytes = MaxAttestationTokenBytes + 4·1024`,
-`internal/tier2/pillar_c.go`).
+**Size limits (shipped — the effective cap is 1024 bytes, applied first).** The **binding**
+limit is enforced at the **WS `auth_request` parse layer, before Pillar C**: the entire raw
+`attestation_token` JSON object (`format` + `token` + `challenge` + `claimed` +
+`key_binding` + `signature` + …) MUST be ≤ **1024 bytes** (`maxHandshakeMetadataBytes`,
+`internal/ws/messages.go` `ParseAuthRequest`). An over-1024 object is rejected with
+`invalid_auth_request` and WS close code **4001** (`CloseInvalidHello`) — it never reaches
+Pillar C. The two Pillar C caps below are therefore **defense-in-depth that this 1024-byte
+object cap makes unreachable for the whole-object case**: the encoded `attestation_token.token`
+field is separately capped at 16384 bytes (16 KiB; `MaxAttestationTokenBytes`) and the
+decoded envelope at 20480 bytes (20 KiB; `MaxAttestationEnvelopeBytes =
+MaxAttestationTokenBytes + 4·1024`, `internal/tier2/pillar_c.go`), but a token object that
+large is already rejected at the WS layer. **A re-implementer MUST enforce the 1024-byte
+object cap** (with `invalid_auth_request`/4001), not the 16 KiB/20 KiB caps — an SE token
+must fit its whole JSON envelope in 1024 bytes, and an inline MDA cert chain generally cannot,
+which is a further reason the shipped default is the compact SE path.
 
 **Rejection transport (shipped, v0.4).** Attestation tokens are presented and verified on
 the **provider WebSocket auth handshake**, not on a buyer HTTP request. The rejection
@@ -1919,7 +1936,15 @@ its signature ever being checked** (§7.3):
      binding signature → `attestation_failed`. **The shipped
      MDA verifier does NOT compare the certificate's device-property values or `ram_gb`
      against `token.Claimed`** (`verifyMDADeviceProperties`) — it checks only that such an
-     extension exists.
+     extension exists. **Shipped MDA acceptance grammar** (for a clean-room verifier): the
+     leaf public key MUST be **ECDSA on P-256 or P-384** (`verifyMDALeafPublicKey`); the
+     freshness extension is Apple OID `1.2.840.113635.100.8.11.1` and its value MUST equal
+     `SHA-256(encoded token string)` (matched against several candidate byte
+     representations); the "device-property extension" is any one of the recognized Apple
+     MDA property OIDs (arc `1.2.840.113635.100.8.{9.1,9.2,9.4,10.1,10.2,10.3,13.1,13.2}`),
+     required present and non-blank; the CSR is taken from `certificate_csr` (alias `csr`)
+     and parsed as **PEM** (`CERTIFICATE REQUEST` / `NEW CERTIFICATE REQUEST`) **or** base64
+     (standard/raw, URL/raw-URL) DER (`parseEncodedCSR`).
 7. RAM tier: the shipped verifier does **not** validate `ram_gb` for either format — it is
    treated as provider-reported and MUST NOT be exposed as attested (§7.4). "Validate RAM
    only when the format supplies a trustworthy RAM property" is a forward requirement for a
@@ -2582,11 +2607,10 @@ Purpose: provider returns attestation over the challenge.
 The example above shows the **MDA format** and is illustrative only — it is **not** a
 complete accepted token. The normative `attestation_token` data model (all required
 nested fields) is §7.4, and the shipped default-enabled **SE format** shape is §7.4a. In
-particular the shipped coordinator parses and **binds** more than the example shows: a
-token also carries `provider_id`, `key_binding.provider_ecdh_public_key`, and the top-level
-`signature` session-binding block — the last is required for **both** formats (SE verifies
-it against the submitted SE key, production MDA against the leaf certificate key; §7.4a,
-§7.5); a token missing **those** is rejected even though the illustrative JSON omits them.
+particular the required `key_binding.provider_ecdh_public_key` and the top-level `signature`
+session-binding block (shown above) are **mandatory** — the `signature` for **both** formats
+(SE verifies it against the submitted SE key, production MDA against the leaf certificate
+key; §7.4a, §7.5); a token missing either is rejected.
 `binary_version` is also carried and is folded into the signed binding payload (§7.4a),
 but the shipped verifier does **not** require it to be non-empty — a correctly-signed token
 with an empty/absent `binary_version` is accepted.
@@ -2603,8 +2627,10 @@ with an empty/absent `binary_version` is accepted.
   three dot-separated base64url segments (no CBOR parser is shipped; MDA token parsing is
   path-dependent — see §7.4); for `macprovider-se-p256-v1`, the unpadded-base64url JSON
   envelope `{"attestation":…, "signature":…}` of §7.4a.
-- Maximum encoded `token` length is 16384 bytes (16 KiB); the full decoded
-  attestation-token envelope is separately capped at 20480 bytes (20 KiB) (§7.4).
+- The **effective** size cap is **1024 bytes on the whole `attestation_token` JSON object**,
+  enforced at the WS `auth_request` parse layer (`invalid_auth_request` / close 4001) before
+  Pillar C; the 16-KiB `token` / 20-KiB envelope Pillar C caps are unreachable
+  defense-in-depth (§7.4). A re-implementer MUST enforce the 1024-byte object cap.
 - Rejection status is cause- and policy-dependent on the **WS auth path** (not an HTTP 400):
   - *Invalid base64url, over-limit, or invalid JSON envelope* → status `attestation_failed`
     (over-limit logs `T2.C attestation_token_too_large`).
