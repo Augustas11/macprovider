@@ -5912,6 +5912,235 @@ func TestHealthzReturns503WhenDBUnreachable(t *testing.T) {
 	}
 }
 
+// TestHealthzAcceptsHEAD is L1 (finding, 3-lane re-audit of PR #548): a plain
+// httptest.ResponseRecorder does not strip the HEAD response body the way
+// the real net/http transport does, so this drives an actual
+// httptest.NewServer to catch a regression a recorder-based test would miss
+// (mirrors the fix already applied to the coordinator's equivalent test).
+func TestHealthzAcceptsHEAD(t *testing.T) {
+	_, store, _, cfg := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
+	h := New(cfg, store, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(noopClient())).Handler()
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	headResp := doHealthzHEAD(t, ts.URL)
+	defer headResp.Body.Close()
+	if headResp.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD /healthz status = %d, want 200", headResp.StatusCode)
+	}
+	headBody, _ := io.ReadAll(headResp.Body)
+	if len(headBody) != 0 {
+		t.Fatalf("HEAD /healthz must return no body; got %q", headBody)
+	}
+
+	// GET/HEAD header parity: HEAD must not diverge from GET on the headers
+	// that matter (status code path), confirming HEAD isn't quietly routed
+	// through a different, unmaintained code path.
+	getResp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz GET: %v", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != headResp.StatusCode {
+		t.Fatalf("GET status = %d, HEAD status = %d, want parity", getResp.StatusCode, headResp.StatusCode)
+	}
+}
+
+// TestHealthzHEADReturns503WhenDBUnreachable is L1's "503 db-unavailable HEAD
+// path": HEAD must surface the same 503 GET does when the DB ping fails, and
+// still carry no body.
+func TestHealthzHEADReturns503WhenDBUnreachable(t *testing.T) {
+	_, store, _, cfg := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
+	h := New(cfg, failingPingStore{Store: store}, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(noopClient())).Handler()
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	resp := doHealthzHEAD(t, ts.URL)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("HEAD /healthz status = %d, want 503", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 0 {
+		t.Fatalf("HEAD /healthz must return no body even on 503; got %q", body)
+	}
+}
+
+func doHealthzHEAD(t *testing.T, baseURL string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodHead, baseURL+"/healthz", nil)
+	if err != nil {
+		t.Fatalf("new HEAD request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("healthz HEAD: %v", err)
+	}
+	return resp
+}
+
+// TestGatewayRetryableByCodeClassification asserts the gateway's own
+// transient/permanent split (finding H1, mirrors the coordinator's
+// spec018RetryableByCode / TestRetryableByCodeClassification).
+func TestGatewayRetryableByCodeClassification(t *testing.T) {
+	retryable := []string{
+		"no_provider_available", "provider_error", "provider_timeout",
+		"provider_disconnected", "provider_failed", "provisional_quota_exceeded",
+		"preflight_rejected", "idempotency_unavailable", "rate_limited",
+		"coordinator_unavailable", "upstream_provider_error", "invalid_provider_usage",
+	}
+	for _, code := range retryable {
+		if !gatewayRetryable(code) {
+			t.Errorf("code %q must be retryable=true", code)
+		}
+	}
+	permanent := []string{
+		"model_not_found", "invalid_request", "method_not_allowed",
+		"invalid_api_key", "quota_exhausted", "not_found",
+	}
+	for _, code := range permanent {
+		if gatewayRetryable(code) {
+			t.Errorf("code %q must be retryable=false", code)
+		}
+	}
+}
+
+// TestWriteErrorEnvelopeCarriesRetryable is H1: writeError (the gateway's
+// generic JSON error writer) must stamp retryable on every envelope, not
+// just the ones the coordinator forwards verbatim.
+func TestWriteErrorEnvelopeCarriesRetryable(t *testing.T) {
+	cases := []struct {
+		code string
+		want bool
+	}{
+		{"coordinator_unavailable", true},
+		{"provider_timeout", true},
+		{"upstream_provider_error", true},
+		{"invalid_provider_usage", true},
+		{"model_not_found", false},
+		{"method_not_allowed", false},
+	}
+	for _, tc := range cases {
+		rr := httptest.NewRecorder()
+		writeError(rr, http.StatusServiceUnavailable, "service_unavailable", tc.code, "x")
+		var env struct {
+			Error struct {
+				Code      string `json:"code"`
+				Retryable bool   `json:"retryable"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &env); err != nil {
+			t.Fatalf("code %q: bad envelope: %v", tc.code, err)
+		}
+		if env.Error.Retryable != tc.want {
+			t.Errorf("code %q: retryable=%v, want %v", tc.code, env.Error.Retryable, tc.want)
+		}
+	}
+}
+
+// TestWriteErrorSetsRetryAfterOnlyForRetryableAvailability is M4: a modest,
+// bounded Retry-After hint accompanies 503/504 responses that are
+// retryable, but not permanent-error statuses (400/404/etc.) and not
+// retryable=false 503s.
+func TestWriteErrorSetsRetryAfterOnlyForRetryableAvailability(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		code       string
+		wantHeader string
+	}{
+		{"503_transient", http.StatusServiceUnavailable, "coordinator_unavailable", "1"},
+		{"504_transient", http.StatusGatewayTimeout, "provider_timeout", "1"},
+		{"503_permanent_code_absent_from_map", http.StatusServiceUnavailable, "public_api_paused", ""},
+		{"400_not_availability_status", http.StatusBadRequest, "invalid_request", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			writeError(rr, tc.status, "api_error", tc.code, "x")
+			if got := rr.Header().Get("Retry-After"); got != tc.wantHeader {
+				t.Fatalf("Retry-After = %q, want %q", got, tc.wantHeader)
+			}
+		})
+	}
+}
+
+// TestWriteSSEErrorCarriesRetryable is H1's SSE-writer half: mid-stream
+// error frames must also carry retryable, classified the same way as the
+// JSON writer.
+func TestWriteSSEErrorCarriesRetryable(t *testing.T) {
+	cases := []struct {
+		code string
+		want bool
+	}{
+		{"provider_disconnected", true},
+		{"provider_timeout", true},
+		{"stream_malformed", false},
+	}
+	for _, tc := range cases {
+		rr := httptest.NewRecorder()
+		writeSSEError(rr, "x", "api_error", tc.code)
+		if !bytes.Contains(rr.Body.Bytes(), []byte(`"retryable":`+boolString(tc.want))) {
+			t.Errorf("code %q: body = %s, want retryable=%v", tc.code, rr.Body.String(), tc.want)
+		}
+	}
+}
+
+// TestWriteStructuredOutputTimeoutSSERetryable is H2: the gateway's
+// SPEC-019 wall-clock structured-output timeout emits the same
+// provider_timeout code the coordinator uses, and must agree with the
+// coordinator's retryable=true classification for that code — previously
+// hardcoded to false, contradicting it.
+func TestWriteStructuredOutputTimeoutSSERetryable(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeStructuredOutputTimeoutSSE(rr, "req-1")
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_timeout"`)) {
+		t.Fatalf("body missing provider_timeout code: %s", rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"retryable":true`)) {
+		t.Fatalf("provider_timeout structured-output timeout must be retryable=true: %s", rr.Body.String())
+	}
+}
+
+// TestCoordinatorErrorRetryablePreservesForwardedBody is H1's "preserve the
+// coordinator's retryable" half: when the coordinator's own body carries a
+// retryable verdict, the gateway must surface that exact value rather than
+// recompute one — this matters because the coordinator can override a
+// code's default classification per-response (SPEC-019 end.Retryable).
+func TestCoordinatorErrorRetryablePreservesForwardedBody(t *testing.T) {
+	// Coordinator explicitly overrode a normally-transient code to false.
+	overridden := []byte(`{"error":{"code":"provider_error","retryable":false}}`)
+	if got := coordinatorErrorRetryable(http.StatusBadGateway, overridden); got != false {
+		t.Fatalf("coordinatorErrorRetryable with explicit false override = %v, want false", got)
+	}
+	// Coordinator body present but omits retryable entirely: fall back to
+	// classifying by code using the gateway's own table.
+	noField := []byte(`{"error":{"code":"provider_timeout"}}`)
+	if got := coordinatorErrorRetryable(http.StatusGatewayTimeout, noField); got != true {
+		t.Fatalf("coordinatorErrorRetryable fallback for provider_timeout = %v, want true", got)
+	}
+	// Same fallback for a coordinator-only code the gateway never
+	// constructs itself (provisional_quota_exceeded) — proves the
+	// gatewayRetryableByCode mirror is complete enough that the fallback
+	// path doesn't silently reintroduce H2 for codes the gateway only
+	// ever sees via a malformed/legacy forwarded body.
+	noFieldQuota := []byte(`{"error":{"code":"provisional_quota_exceeded"}}`)
+	if got := coordinatorErrorRetryable(http.StatusTooManyRequests, noFieldQuota); got != true {
+		t.Fatalf("coordinatorErrorRetryable fallback for provisional_quota_exceeded = %v, want true", got)
+	}
+	// Empty body 503 (the synthetic no_provider_available fallback case).
+	if got := coordinatorErrorRetryable(http.StatusServiceUnavailable, nil); got != true {
+		t.Fatalf("coordinatorErrorRetryable empty-body 503 = %v, want true (no_provider_available)", got)
+	}
+}
+
+func boolString(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
 func startOAuth(t *testing.T, h http.Handler, redirectURI string) (string, *http.Cookie) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/auth/github/start?redirect_uri="+url.QueryEscape(redirectURI), nil)
@@ -6290,7 +6519,12 @@ func findCookie(resp *httptest.ResponseRecorder, name string) string {
 }
 
 // TestWriteErrorEnvelopeShape verifies the gateway writeError emits the
-// canonical 4-field OpenAI-compatible error envelope: message, type, param, code.
+// canonical OpenAI-compatible error envelope: message, type, param, code,
+// plus retryable (SPEC-006 §5.2 amendment, finding H1 3-lane re-audit of
+// PR #548: every buyer error envelope MUST carry retryable, not just the
+// ones the coordinator forwards verbatim). The 4-field shape predates that
+// amendment; this test's allowed-key set was widened by one, deliberately,
+// not loosened to paper over a bug.
 func TestWriteErrorEnvelopeShape(t *testing.T) {
 	w := httptest.NewRecorder()
 	writeError(w, http.StatusBadRequest, "invalid_request_error", "test_code", "test message")
@@ -6303,7 +6537,7 @@ func TestWriteErrorEnvelopeShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing 'error' key or wrong type; body=%s", w.Body.String())
 	}
-	for _, required := range []string{"message", "type", "code"} {
+	for _, required := range []string{"message", "type", "code", "retryable"} {
 		if _, present := errObj[required]; !present {
 			t.Errorf("missing required key %q in error envelope; body=%s", required, w.Body.String())
 		}
@@ -6312,8 +6546,8 @@ func TestWriteErrorEnvelopeShape(t *testing.T) {
 	if _, present := errObj["param"]; !present {
 		t.Errorf("missing 'param' key in error envelope; body=%s", w.Body.String())
 	}
-	// no extra keys beyond the 4-field set
-	allowed := map[string]bool{"message": true, "type": true, "param": true, "code": true}
+	// no extra keys beyond the 5-field set
+	allowed := map[string]bool{"message": true, "type": true, "param": true, "code": true, "retryable": true}
 	for k := range errObj {
 		if !allowed[k] {
 			t.Errorf("unexpected extra key %q in error envelope", k)

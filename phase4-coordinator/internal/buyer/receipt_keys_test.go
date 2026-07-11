@@ -242,6 +242,11 @@ func TestReceiptKeysRateLimitsAfterTenRequestsPerSecond(t *testing.T) {
 			if rr.Header().Get("Cache-Control") != "" {
 				t.Fatalf("Cache-Control = %q, want absent", rr.Header().Get("Cache-Control"))
 			}
+			// M3 (finding H2 3-lane re-audit): the Retry-After:1 hint and the
+			// envelope's retryable field must agree for rate_limited too.
+			if !bytes.Contains(rr.Body.Bytes(), []byte(`"retryable":true`)) {
+				t.Fatalf("rate_limited must be retryable=true; body = %s", rr.Body.String())
+			}
 		}
 	}
 }

@@ -5034,6 +5034,12 @@ func TestChatCompletionsProvisionalQuotaReturns429(t *testing.T) {
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provisional_quota_exceeded"`)) {
 		t.Fatalf("body = %s", rr.Body.String())
 	}
+	// M3 (finding H2 3-lane re-audit): the Retry-After:3600 hint and the
+	// envelope's retryable field must agree — a buyer honoring either
+	// signal reaches the same conclusion.
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"retryable":true`)) {
+		t.Fatalf("provisional_quota_exceeded must be retryable=true; body = %s", rr.Body.String())
+	}
 	if rr.Header().Get("Retry-After") != "3600" {
 		t.Fatalf("Retry-After = %q, want 3600", rr.Header().Get("Retry-After"))
 	}

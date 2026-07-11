@@ -862,8 +862,64 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+// gatewayRetryableByCode mirrors phase4-coordinator/internal/buyer/server.go's
+// spec018RetryableByCode (SPEC-006 §5.2). The coordinator and gateway are
+// separate Go modules with no shared package, so this table is intentionally
+// duplicated rather than imported — keep both in sync when a new buyer-
+// visible transient/availability code is introduced on either service. A
+// code absent from this table defaults to Go's zero value (false) via
+// gatewayRetryable, which is the correct default for the gateway's many
+// permanent/client codes (auth, validation, admin, oauth, quota-shape).
+//
+// The coordinator-owned codes below (no_provider_available through
+// rate_limited) are included even though the gateway only ever reaches them
+// via coordinatorErrorRetryable's fallback (openAIErrorRetryable already
+// preserves the coordinator's own verdict when the forwarded body carries
+// one) — that fallback only fires on a malformed/legacy body, and it must
+// not silently reintroduce finding H2 by defaulting a transient code to
+// false just because it took the fallback path.
+var gatewayRetryableByCode = map[string]bool{
+	// Transient availability/timeout — the buyer should retry (SPEC-006 §5.2).
+	"no_provider_available":      true,
+	"provider_error":             true,
+	"provider_timeout":           true,
+	"provider_disconnected":      true,
+	"provider_failed":            true,
+	"provisional_quota_exceeded": true,
+	"preflight_rejected":         true,
+	"idempotency_unavailable":    true,
+	"rate_limited":               true,
+	// Gateway-generated transient/availability codes (no coordinator-body
+	// equivalent — the gateway itself constructs these envelopes).
+	"coordinator_unavailable": true,
+	"upstream_provider_error": true,
+	"invalid_provider_usage":  true,
+}
+
+func gatewayRetryable(code string) bool {
+	return gatewayRetryableByCode[code]
+}
+
+// gatewayTransientRetryAfterSeconds is a modest, bounded backoff hint the
+// gateway attaches to its own retryable 503/504 responses so conforming
+// buyer SDKs back off instead of hot-looping a degraded coordinator (see
+// the 2026-07-10 single-provider-pool empty-pool outage). This mirrors the
+// "Retry-After: 1" convention the coordinator already uses on its own
+// rate-limited Tier-2 disclosure endpoints. copyCleanHeadersWithReceipt
+// already strips any upstream Retry-After as gateway-owned (issue #190);
+// this supplies the gateway's own value rather than leaving it absent.
+const gatewayTransientRetryAfterSeconds = "1"
+
+func setGatewayRetryAfter(w http.ResponseWriter, status int, retryable bool) {
+	if retryable && (status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout) {
+		w.Header().Set("Retry-After", gatewayTransientRetryAfterSeconds)
+	}
+}
+
 func writeError(w http.ResponseWriter, status int, typ, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "param": nil, "code": code}})
+	retryable := gatewayRetryable(code)
+	setGatewayRetryAfter(w, status, retryable)
+	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "param": nil, "code": code, "retryable": retryable}})
 }
 
 func writeSpec019PreflightError(w http.ResponseWriter, status int, code, message, param string) {

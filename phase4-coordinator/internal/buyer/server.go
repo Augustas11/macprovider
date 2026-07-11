@@ -65,11 +65,15 @@ const (
 // permanent/client (validation, capacity, shape) codes are retryable=false.
 var spec018RetryableByCode = map[string]bool{
 	// Transient availability/timeout — the buyer should retry (SPEC-006 §5.2).
-	"no_provider_available": true,
-	"provider_error":        true,
-	"provider_timeout":      true,
-	"provider_disconnected": true,
-	"provider_failed":       true,
+	"no_provider_available":      true,
+	"provider_error":             true,
+	"provider_timeout":           true,
+	"provider_disconnected":      true,
+	"provider_failed":            true,
+	"provisional_quota_exceeded": true, // 429, ships Retry-After: 3600 (writeErrorTypedParam)
+	"preflight_rejected":         true, // 503, all providers rejected/timed out during preflight
+	"idempotency_unavailable":    true, // 503, durable request logging unavailable
+	"rate_limited":               true, // 429, Tier-2 disclosure endpoints already ship Retry-After: 1
 	// Permanent/client errors — retrying will not help (SPEC-006 §5.2).
 	"model_not_found":                                         false,
 	"context_exceeds_capacity":                                false,

@@ -1152,6 +1152,12 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 	copyCleanHeaders(w.Header(), resp.Header)
 	w.Header().Set("X-Request-ID", requestID(r))
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
+	// H1/M4: this forwards the coordinator's body verbatim, so its own
+	// retryable field (if present) is already preserved byte-for-byte in
+	// the JSON below. setGatewayRetryAfter reads that same verdict to
+	// decide whether to attach the gateway-owned Retry-After hint —
+	// copyCleanHeaders above already stripped any upstream Retry-After.
+	setGatewayRetryAfter(w, resp.StatusCode, coordinatorErrorRetryable(resp.StatusCode, body))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 }
@@ -1284,6 +1290,10 @@ func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, 
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("X-Request-ID", requestID(r))
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
+	// H1/M4: preserve the coordinator's own retryable verdict from body and
+	// attach the gateway-owned Retry-After hint accordingly (see
+	// passThroughNoProviderCoordinatorError for the same pattern).
+	setGatewayRetryAfter(w, resp.StatusCode, coordinatorErrorRetryable(resp.StatusCode, body))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 }
@@ -1430,6 +1440,38 @@ func openAIErrorCode(body []byte) string {
 		return ""
 	}
 	return strings.TrimSpace(envelope.Error.Code)
+}
+
+// openAIErrorRetryable extracts the coordinator's own retryable verdict from
+// a forwarded error body (finding H1: when the gateway passes a coordinator
+// error body through verbatim, it must preserve the coordinator's retryable
+// value rather than drop it or recompute a possibly-stale one). ok is false
+// when the body does not parse or omits the field, in which case callers
+// should fall back to gatewayRetryable(openAIErrorCode(body)).
+func openAIErrorRetryable(body []byte) (value bool, ok bool) {
+	var envelope struct {
+		Error struct {
+			Retryable *bool `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Error.Retryable == nil {
+		return false, false
+	}
+	return *envelope.Error.Retryable, true
+}
+
+// coordinatorErrorRetryable resolves the retryable value for a forwarded
+// coordinator error body: preserve the coordinator's own verdict when the
+// body carries one, else classify by code using the same rule the gateway
+// applies to its own generated errors.
+func coordinatorErrorRetryable(status int, body []byte) bool {
+	if v, ok := openAIErrorRetryable(body); ok {
+		return v
+	}
+	if len(bytes.TrimSpace(body)) == 0 && status == http.StatusServiceUnavailable {
+		return gatewayRetryable("no_provider_available")
+	}
+	return gatewayRetryable(openAIErrorCode(body))
 }
 
 func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens, maxTokens int64, cancelCoordinator func(), reservationWindow string) {
@@ -2300,7 +2342,12 @@ func (sw *statusWriter) Flush() {
 // dedicated writeProviderDisconnectedSSE wrapper so its strings
 // are centralized and resistant to drift.
 func writeSSEError(w http.ResponseWriter, message, errType, code string) {
-	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": errType, "code": code}})
+	// H1: SSE error frames carry retryable too, classified by the same
+	// gatewayRetryableByCode table writeError uses. Headers are already
+	// flushed by the time an SSE frame is emitted (the stream started as
+	// 200), so there's no Retry-After to set here — only writeError's
+	// pre-header-flush 503/504 JSON path can attach that hint.
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": errType, "code": code, "retryable": gatewayRetryable(code)}})
 	_, _ = w.Write([]byte("data: "))
 	_, _ = w.Write(payload)
 	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
@@ -2309,6 +2356,11 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
 func writeStructuredOutputTimeoutSSE(w http.ResponseWriter, requestID string) {
 	// AC-V2-9 (SPEC-019 v0.2.4 §10): gateway wall-clock timeout emits
 	// provider_timeout with refund-only settlement semantics.
+	// H2 (finding, 3-lane re-audit): retryable is derived from the same
+	// gatewayRetryable classifier used everywhere else provider_timeout is
+	// emitted, rather than a hardcoded false — a provider timeout IS
+	// retryable, and hardcoding false here contradicted the coordinator's
+	// own provider_timeout:true classification for the identical code.
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	payload, _ := json.Marshal(map[string]any{
 		"error": map[string]any{
@@ -2316,7 +2368,7 @@ func writeStructuredOutputTimeoutSSE(w http.ResponseWriter, requestID string) {
 			"type":           "api_error",
 			"param":          nil,
 			"code":           "provider_timeout",
-			"retryable":      false,
+			"retryable":      gatewayRetryable("provider_timeout"),
 			"request_id":     requestID,
 			"inference_ran":  true,
 			"settlement_ran": true,

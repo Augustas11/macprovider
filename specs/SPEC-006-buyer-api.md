@@ -1022,12 +1022,16 @@ Streaming errors after headers are sent MUST be emitted as SSE data frames with 
 
 The gateway MUST install panic recovery middleware that converts unexpected panics into HTTP 500 responses in this OpenAI-shaped error envelope.
 
-**Retryability (`retryable`).** Every buyer error envelope (non-streaming JSON body and streaming SSE `error` frame alike) MUST carry a boolean `retryable` field alongside `code`. Its value is a deterministic function of `code`:
+**Retryability (`retryable`).** Every buyer error envelope (non-streaming JSON body and streaming SSE `error` frame alike) MUST carry a boolean `retryable` field alongside `code`. `retryable` is envelope metadata, not a pure function of `code` alone: for most codes it equals the fixed per-code default classification below, but specific codes carry documented contextual overrides — e.g. SPEC-019's structured-output terminal error may carry a provider-reported `retryable` value that overrides the code's default for that response.
 
-- **`retryable: true`** for transient availability/timeout codes, where the same request may succeed on retry: `no_provider_available`, `provider_timeout`, `provider_error`, `provider_disconnected`, `provider_failed`.
-- **`retryable: false`** for permanent/client codes, where retrying the identical request cannot succeed: validation errors (e.g. `invalid_request`, `invalid_json`), `model_not_found`, `context_exceeds_capacity`, `unsupported_content_shape`, and byte/schema-cap violations (e.g. `byte_cap_exceeded`, `response_byte_cap_exceeded`, `request_body_too_large`, the `json_schema_*` cap/shape codes).
+Per-code defaults:
 
-Any code not explicitly classified defaults to `retryable: false`; a newly introduced transient availability/upstream code MUST be added to the retryable set. Buyers SHOULD honor `retryable` when deciding whether to re-issue a failed request.
+- **`retryable: true`** for transient availability/timeout codes, where the same request may succeed on retry: `no_provider_available`, `provider_timeout`, `provider_error`, `provider_disconnected`, `provider_failed`, `provisional_quota_exceeded`, `preflight_rejected`, `idempotency_unavailable`, `rate_limited`.
+- **`retryable: false`** for permanent/client codes, where retrying the identical request cannot succeed: validation errors (e.g. `invalid_request`, `invalid_json`), `model_not_found`, `context_exceeds_capacity`, `unsupported_content_shape`, and byte/schema-cap violations (e.g. `byte_cap_exceeded`, `request_body_too_large`, the `json_schema_*` cap/shape codes).
+
+Any code not explicitly classified defaults to `retryable: false`; a newly introduced transient availability/upstream code MUST be added to the retryable set on every service that emits it (the coordinator and gateway are separate Go modules and each maintain their own mirrored classification table — there is no shared package). Buyers SHOULD honor `retryable` when deciding whether to re-issue a failed request.
+
+Known carried items, not resolved by this note: (1) `response_byte_cap_exceeded` has a locked cross-spec disagreement — SPEC-019's error-code table documents it as retryable, while this table and SPEC-018 document it as `false` (SPEC-019 §11 Open questions / audit hooks already tracks this as a v0.1.5 LOCKED drift); this note does not assert a value for it. (2) The coordinator's streaming SSE terminal-error writer does not yet honor a per-response `retryable` override the way the non-streaming path does (the non-streaming writer honors a provider-reported override; the streaming writer always recomputes from the per-code default) — carried as a follow-up, not fixed here.
 
 ### 5.3 `GET /v1/models`
 

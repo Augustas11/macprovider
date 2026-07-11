@@ -513,6 +513,8 @@ func TestRetryableByCodeClassification(t *testing.T) {
 	retryable := []string{
 		"no_provider_available", "provider_timeout", "provider_error",
 		"provider_disconnected", "provider_failed",
+		"provisional_quota_exceeded", "preflight_rejected",
+		"idempotency_unavailable", "rate_limited",
 	}
 	for _, code := range retryable {
 		if !spec018Retryable(code) {
@@ -543,6 +545,10 @@ func TestWriteErrorEnvelopeRetryableField(t *testing.T) {
 		{"provider_timeout", true},
 		{"provider_disconnected", true},
 		{"provider_failed", true},
+		{"provisional_quota_exceeded", true},
+		{"preflight_rejected", true},
+		{"idempotency_unavailable", true},
+		{"rate_limited", true},
 		{"model_not_found", false},
 	}
 	for _, tc := range cases {
