@@ -115,5 +115,5 @@ carried documented rather than blocking the PR that found them:
 |------|------|-------|
 | 2026-07-10 | Runbook created; Wave A kicked off (1a+16, 2-probe, 3) | in progress |
 | 2026-07-10 | Item 3 (SPEC-022 deadline, #546) — 3 codex rounds + attribution lane to 0 C/H/M; 2 pre-existing MEDIUMs carried as items 18/19 | MERGED (f7e1505) |
-| 2026-07-11 | Item 2 (billing under-credit probe) — diagnostic ready: clamp binds when reported ≳21 tok → ~75% completion under-credit on most 200s IF providers report usage. Query/script at `scripts/h1-undercredit-probe.sh`. **G1 leans REVERT to content-bytes /4.** | BLOCKED on operator running the probe (needs Pearl SSH) |
+| 2026-07-11 | Item 2 (billing under-credit) — probe RAN on Pearl ledger (35d, 3428× 200s). Reality overturns the ~75% theory: clamp bound on only **4.66%** of honest reported rows, median loss **1 tok**, total under-credit **$0.0009** over 35 days. `pct_reported_present`=81.9%. Negligible $ impact; not an emergency. **G1 verdict: do NOT emergency-revert; reclassify to SPEC-005 conformance (fold into item 11 v0.6).** | resolved (reclassified P0→P3) |
 | 2026-07-11 | Item 1a+16 (retryable + healthz, #548) — WS1 also flipped `provider_disconnected`/`provider_failed`; SPEC-006 §5.2 note added | codex audit pending |
