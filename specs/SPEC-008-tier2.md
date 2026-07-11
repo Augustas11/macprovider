@@ -130,6 +130,12 @@ cross-repo interop contract the Swift provider CLI byte-matches):
 - **Cross-spec (SPEC-031):** corrected FR-CAN23's two "SPEC-008 `attested` proves device
   identity" phrasings — `attested`/`self_signed` proves neither device identity nor
   independent ownership (§7.3), which strengthens SPEC-031's own Sybil-safety argument.
+- **§7.4/§10.4/§7.5/§12 (R7):** dropped the stale `der-cbor` token-example strings and scoped
+  the "no other encodings" rule (the MDA explicit-chain path does not check the token
+  payload's encoding); split the mock-root shortcut from production-MDA validation in §7.5
+  (mock validates only the fixed token, bypassing cert checks); classified a valid-base64url
+  bare-non-DER MDA token as status `unsupported` (optional) / `attestation_failed` (required);
+  qualified the §12 observability MUST with the shipped T2.C field set.
 - **§5.7:** clarified the hash-disclosure counting basis is slot-holders
   (`hasAvailableSlot`); `RoutingEligible` has no hash check — the hash routing-exclusion is
   the separate §5.5-5.6 predicate (mismatch/invalid always; uncatalogued only when
@@ -1615,7 +1621,7 @@ MUST represent:
 ```json
 {
   "format": "apple-managed-device-attestation-acme-v1",
-  "token": "base64url-der-cbor-or-compact-jws-token",
+  "token": "base64url-der-or-compact-jws-token (no CBOR parser; see §7.4)",
   "challenge": "base64url-32-byte-coordinator-challenge",
   "issued_at": "2026-05-31T00:00:00Z",
   "expires_at": "2026-05-31T00:10:00Z",
@@ -1667,10 +1673,14 @@ Accepted `attestation_token.token` encodings are, **per format**:
 - for `macprovider-se-p256-v1` (§7.4a): a **base64url-encoded JSON envelope**
   `{"attestation": {…}, "signature": "…"}` (the shipped SE encoding, actually decoded).
 
-No other encodings are accepted **for a given format**. (v0.4 correction: v0.3 listed
-only the DER/CBOR/JWS set and declared "no other encodings are accepted," which the
-shipped, default-enabled `macprovider-se-p256-v1` path violates — see §7.4a. The
-encoding rule is now scoped per format.)
+This encoding allowlist is a **conformance target**, not a strict shipped gate. (v0.4
+correction: v0.3 listed only the DER/CBOR/JWS set and declared "no other encodings are
+accepted," which the shipped, default-enabled `macprovider-se-p256-v1` path violates — see
+§7.4a. The rule is now scoped per format.) For the **MDA path** the shipped verifier does
+not enforce it: with an explicit `certificate_chain`/`x5c` the `token` payload's own
+encoding is **not** checked (any nonempty base64url passes the gate and the cert(s) come
+from the chain fields), and no format supplies a CBOR parser (§7.4 parsing note). A
+conforming signer SHOULD still emit the per-format encoding above.
 
 **Size limits (shipped, two caps).** The maximum encoded `attestation_token.token` length
 is 16384 bytes (16 KiB; `MaxAttestationTokenBytes`). Separately, the coordinator rejects
@@ -1873,13 +1883,17 @@ its signature ever being checked** (§7.3):
      session-binding signature against the **submitted, self-signed** P-256 key — **no**
      `tier2.attestation_roots` entry is consulted (the SE path is dispatched *before* the
      root check and is accepted with an empty root set);
-   - for `apple-managed-device-attestation-acme-v1` (§7.4) and the mock format: validate
-     the certificate chain against `tier2.attestation_roots`, the leaf key curve, the
-     freshness extension (a SHA-256 of the encoded token bound in the cert), the *presence*
-     of a non-blank recognized device-property extension, and the CSR key binding. **The
-     shipped MDA verifier does NOT compare the certificate's device-property values or
-     `ram_gb` against `token.Claimed`** (`verifyMDADeviceProperties`) — it checks only that
-     such an extension exists.
+   - for the **mock format** (`mock-root` in `tier2.attestation_roots`, gated by
+     `allow_mock_attestation`): the coordinator validates only the fixed mock token string
+     and returns `attested` — it **bypasses** all production-MDA certificate and binding
+     checks. This path is test-only.
+   - for **production** `apple-managed-device-attestation-acme-v1` (§7.4): validate the
+     certificate chain against `tier2.attestation_roots`, the leaf key curve, the freshness
+     extension (a SHA-256 of the encoded token bound in the cert), the *presence* of a
+     non-blank recognized device-property extension, and the CSR key binding. **The shipped
+     MDA verifier does NOT compare the certificate's device-property values or `ram_gb`
+     against `token.Claimed`** (`verifyMDADeviceProperties`) — it checks only that such an
+     extension exists.
 7. RAM tier: the shipped verifier does **not** validate `ram_gb` for either format — it is
    treated as provider-reported and MUST NOT be exposed as attested (§7.4). "Validate RAM
    only when the format supplies a trustworthy RAM property" is a forward requirement for a
@@ -2525,7 +2539,7 @@ Purpose: provider returns attestation over the challenge.
   "provider_id": "m4-anon",
   "attestation_token": {
     "format": "apple-managed-device-attestation-acme-v1",
-    "token": "base64url-der-cbor-or-compact-jws-token",
+    "token": "base64url-der-or-compact-jws-token (no CBOR parser; see §7.4)",
     "challenge": "base64url-32-byte-random",
     "issued_at": "2026-05-31T00:00:00Z",
     "expires_at": "2026-05-31T00:10:00Z",
@@ -2562,14 +2576,18 @@ with an empty/absent `binary_version` is accepted.
   envelope `{"attestation":…, "signature":…}` of §7.4a.
 - Maximum encoded `token` length is 16384 bytes (16 KiB); the full decoded
   attestation-token envelope is separately capped at 20480 bytes (20 KiB) (§7.4).
-- Oversized or malformed tokens (invalid base64url, invalid compact JWS, or decoded bytes
-  not parseable as the declared format) are rejected on the **WS auth path**: the verifier
-  returns attestation status `attestation_failed` (over-limit logs `T2.C
-  attestation_token_too_large`), which under `require_attestation: true` yields a WS
-  `auth_response` with the failed status and a close code `4012`
-  (`CloseTier2AttestationFailed`). The HTTP-400 `tier2_attestation_token_too_large` /
-  `tier2_attestation_token_invalid` codes in §4.6 are the buyer-facing catalog and are not
-  emitted by the shipped WS verifier (see §7.4).
+- Rejection status is cause- and policy-dependent on the **WS auth path** (not an HTTP 400):
+  - *Invalid base64url, over-limit, or invalid JSON envelope* → status `attestation_failed`
+    (over-limit logs `T2.C attestation_token_too_large`).
+  - *A valid-base64url **bare** MDA token that is not parseable as X.509 DER* (no
+    `certificate_chain`/`x5c`) → cert-chain extraction yields no chain, so the MDA path
+    returns status **`unsupported`** (event `attestation_unsupported`) under optional
+    attestation, and **`attestation_failed`** only under `require_attestation: true`.
+  - Signature/binding/freshness failures → `attestation_failed`.
+  Any non-`attested` status closes the session with code `4012` (`CloseTier2AttestationFailed`)
+  when `require_attestation: true`; otherwise the session continues with that status. The
+  HTTP-400 `tier2_attestation_token_too_large` / `tier2_attestation_token_invalid` codes in
+  §4.6 are the buyer-facing catalog and are not emitted by the shipped WS verifier (see §7.4).
 
 ### 10.5 Candidate `auth_response`
 
@@ -2862,10 +2880,14 @@ Hot-reloadable keys log a reload event at INFO when changed.
 
 ## 12. Observability
 
-Tier-2 enforcement events MUST emit structured audit logs. Logs MUST contain
-enough context to reconstruct provider identity, request identity when
-applicable, model identity, configured predicate, observed evidence, and final
-decision.
+Tier-2 enforcement events MUST emit structured audit logs. This section states the
+**target** context. Logs SHOULD contain enough context to reconstruct provider identity,
+request identity when applicable, model identity, configured predicate, observed evidence,
+and final decision. **Shipped caveat (v0.4):** the Pillar C attestation event
+(`logAttestationEvent`) currently emits only the smaller field set normative in §15.3/§12.1
+(`event`/`category`/`severity`/`provider_id`/`pillar`/`decision`/`reason`/`config_flag`) —
+it does not carry `assigned_id`/`request_id`/`model_id`/`tier2_phase`. Extending T2.C to the
+full target set is a forward enhancement.
 
 ### 12.1 Common fields
 
