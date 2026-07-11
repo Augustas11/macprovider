@@ -136,6 +136,13 @@ cross-repo interop contract the Swift provider CLI byte-matches):
   (mock validates only the fixed token, bypassing cert checks); classified a valid-base64url
   bare-non-DER MDA token as status `unsupported` (optional) / `attestation_failed` (required);
   qualified the §12 observability MUST with the shipped T2.C field set.
+- **§7.4a/§7.5/§10.4 (R8 CRITICAL):** the required `attestation_token.signature`
+  session-binding (10-field `attestation-binding/v1` payload) applies to **both** formats —
+  the **MDA** path also verifies it (against the leaf certificate's key), not just SE; an MDA
+  implementation omitting it fails. Also split rejection-status classification: envelope
+  freshness (challenge/timestamps/expiry/max-age) → `attestation_stale`; body/binding
+  signature or MDA cert-freshness-extension → `attestation_failed`; unsupported format →
+  `unsupported` (removing the earlier blanket "freshness → attestation_failed").
 - **§5.7:** clarified the hash-disclosure counting basis is slot-holders
   (`hasAvailableSlot`); `RoutingEligible` has no hash check — the hash routing-exclusion is
   the separate §5.5-5.6 predicate (mismatch/invalid always; uncatalogued only when
@@ -1690,22 +1697,25 @@ the **entire decoded attestation-token envelope** (the outer JSON object with `f
 `internal/tier2/pillar_c.go`).
 
 **Rejection transport (shipped, v0.4).** Attestation tokens are presented and verified on
-the **provider WebSocket auth handshake**, not on a buyer HTTP request. In the shipped
-verifier most rejection causes — over-limit (token or envelope), invalid base64url,
-unparseable JSON, or signature/binding/freshness failure — collapse to attestation
-**status `attestation_failed`** (`pillar_c.go`; the too-large case logs `T2.C
-attestation_token_too_large`, others `attestation_failed`). **One exception:** a token
-whose `format` is not in `tier2.attestation_formats` returns status value **`unsupported`**
-(the `pool.AttestationStatus` enum value, not `attestation_failed`), before any token
-validation — though it is *logged* as event `attestation_failed` with reason
-`unsupported_format`. Optional auth serializes `"unsupported"` in
-`tier2_session.attestation.status`; under `require_attestation: true` the auth response
-carries error code/message `"unsupported"` and the session closes with code **4012**. The
-other `attestation_failed` causes above likewise close with **4012** when required. Under
-`require_attestation: true`, the coordinator sends a WS `auth_response` carrying that
-failed status and closes the provider session with close code **4012**
-(`CloseTier2AttestationFailed`); under optional attestation the session continues with
-`attestation_failed` status. The `tier2_attestation_token_too_large` /
+the **provider WebSocket auth handshake**, not on a buyer HTTP request. The rejection
+**status** is cause-specific — it does **not** all collapse to `attestation_failed`:
+
+- **`attestation_failed`** — over-limit, invalid base64url, unparseable JSON, body/binding
+  signature failure, or the **MDA certificate freshness-extension** mismatch
+  (`mda_freshness_mismatch`). (The too-large case logs `T2.C attestation_token_too_large`.)
+- **`attestation_stale`** — **envelope freshness**: challenge/nonce mismatch, or
+  `issued_at`/`expires_at`/`attestation_max_age_s` failure. These are classified *before*
+  signature verification (§7.5), so `stale` does not imply a valid signature (§7.3). Do not
+  conflate this envelope freshness with the MDA cert freshness-extension check above.
+- **`unsupported`** — a `format` not in `tier2.attestation_formats` (before any token
+  validation; the `pool.AttestationStatus` enum value, not `attestation_failed`, though it
+  is *logged* as event `attestation_failed` with reason `unsupported_format`).
+
+Under `require_attestation: true`, any non-`attested` status above (`attestation_failed`,
+`attestation_stale`, or `unsupported`) causes a WS `auth_response` carrying that status and
+a close with code **4012** (`CloseTier2AttestationFailed`); under optional attestation the
+session continues with that status and is excluded from routing only if the status is
+non-positive and `require_attestation` is set (§7.6). The `tier2_attestation_token_too_large` /
 `tier2_attestation_token_invalid` **HTTP 400** codes catalogued in §4.6 are the
 buyer-facing HTTP error catalog and are **not** emitted by the shipped WS verifier for a
 provider-presented token — aligning that catalog with the WS `4012`/status path (or adding
@@ -1773,10 +1783,14 @@ Go-canonical re-marshalling, not over its own on-wire serialization). A future m
 to JCS is a **coordinated cross-repo (coordinator + Swift CLI) change**, out of scope for
 v0.4.
 
-**Session-binding signature (required).** In addition to the body signature, an SE token
-MUST carry a second signature at `attestation_token.signature = {alg, signature}` (`alg`
-= `"ES256"`, DER/ASN.1; `signature` = **unpadded base64url**) over
-`SHA-256(binding_payload)`, verified with the same SE P-256 key. `binding_payload` is
+**Session-binding signature (required — BOTH formats).** This `attestation_token.signature`
+binding is **not** SE-specific: the shipped verifier requires it for the **production MDA
+path too** (`verifyProductionMDAChainShape` → `verifyAttestationBindingSignature`, §7.5),
+with the identical `binding_payload` below; the only difference is the verifying key — the
+**SE** path verifies it with the submitted SE P-256 key, the **MDA** path with the **leaf
+certificate's** public key. In addition to the body signature, a token MUST carry a second
+signature at `attestation_token.signature = {alg, signature}` (`alg` = `"ES256"`, DER/ASN.1;
+`signature` = **unpadded base64url**) over `SHA-256(binding_payload)`. `binding_payload` is
 `json.Marshal` of a **fixed-order 10-field struct** (`pillar_c.go`
 `attestationBindingPayload`) — a signer MUST reproduce this struct, in this order, with
 these exact JSON keys and value encodings:
@@ -1890,7 +1904,11 @@ its signature ever being checked** (§7.3):
    - for **production** `apple-managed-device-attestation-acme-v1` (§7.4): validate the
      certificate chain against `tier2.attestation_roots`, the leaf key curve, the freshness
      extension (a SHA-256 of the encoded token bound in the cert), the *presence* of a
-     non-blank recognized device-property extension, and the CSR key binding. **The shipped
+     non-blank recognized device-property extension, the CSR key binding, **and the required
+     session-binding signature** — the **same** `attestation_token.signature` / 10-field
+     `attestation-binding/v1` payload as the SE path (§7.4a), but verified against the **leaf
+     certificate's public key** (`verifyAttestationBindingSignature`); a missing or invalid
+     binding signature → `attestation_failed`. **The shipped
      MDA verifier does NOT compare the certificate's device-property values or `ram_gb`
      against `token.Claimed`** (`verifyMDADeviceProperties`) — it checks only that such an
      extension exists.
@@ -2583,7 +2601,11 @@ with an empty/absent `binary_version` is accepted.
     `certificate_chain`/`x5c`) → cert-chain extraction yields no chain, so the MDA path
     returns status **`unsupported`** (event `attestation_unsupported`) under optional
     attestation, and **`attestation_failed`** only under `require_attestation: true`.
-  - Signature/binding/freshness failures → `attestation_failed`.
+  - *Envelope freshness* — challenge/nonce mismatch or `issued_at`/`expires_at`/
+    `attestation_max_age_s` failure → **`attestation_stale`** (classified before signature
+    verification, §7.5).
+  - Body/binding signature failure, or the MDA **certificate freshness-extension** mismatch
+    → **`attestation_failed`** (distinct from envelope freshness above).
   Any non-`attested` status closes the session with code `4012` (`CloseTier2AttestationFailed`)
   when `require_attestation: true`; otherwise the session continues with that status. The
   HTTP-400 `tier2_attestation_token_too_large` / `tier2_attestation_token_invalid` codes in
