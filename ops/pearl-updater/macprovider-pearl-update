@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import datetime
 import errno
 import fcntl
 import grp
@@ -30,6 +31,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
@@ -37,6 +39,8 @@ from typing import Any, Callable
 
 PINNED_REPOSITORY = "Augustas11/macprovider"
 PINNED_PUBLIC_KEY = Path("/usr/local/share/macprovider/release-signing-public.pem")
+CATALOG_RELEASE_VERIFIER = Path("/usr/local/share/macprovider/catalog-release.py")
+CATALOG_CANARY_PROOF = Path("/usr/local/share/macprovider/catalog-canary-proof.py")
 CONFIG_PATH = Path("/etc/macprovider/pearl-updater.conf")
 INSTALL_ROOT = Path("/opt/macprovider")
 STATE_ROOT = Path("/var/lib/macprovider-pearl-updater")
@@ -66,6 +70,14 @@ AUXILIARY_UNITS = (
 )
 COORDINATOR_ASSET = "coordinator-linux-amd64"
 GATEWAY_ASSET = "gateway-linux-amd64"
+CATALOG_ASSETS = (
+    "release.json",
+    "trusted-keys.json",
+    "autotune-candidates.json",
+    "autotune-candidates.json.sig",
+    "demand-rank.json",
+    "demand-rank.json.sig",
+)
 CONTROL_ASSETS = (
     "pearl-release.json",
     "pearl-release.json.sig",
@@ -90,6 +102,7 @@ ROLLBACK_STEPS = (
     "quiescence",
     "binaries",
     "configurations",
+    "catalog",
     "databases",
     "success_state",
     "backend_services",
@@ -176,6 +189,15 @@ class Config:
     revoked_versions_file: Path = Path("/etc/macprovider/pearl-updater.revoked")
     deadman_heartbeat_id: str = ""
     deadman_api_token_file: Path = Path("/etc/macprovider/pearl-updater.betterstack-token")
+    catalog_canary_provider_id: str = ""
+    catalog_canary_auth_token_file: Path = Path("/etc/macprovider/pearl-updater.catalog-canary-token")
+    catalog_canary_ssh_target: str = ""
+    catalog_canary_ssh_key_file: Path = Path("/etc/macprovider/pearl-updater.catalog-canary-ssh-key")
+    catalog_canary_known_hosts_file: Path = Path("/etc/macprovider/pearl-updater.catalog-canary-known-hosts")
+    catalog_canary_install_dir: str = "macprovider/catalog-release"
+    provider_admission_policy: str = ""
+    minimum_pool_ready_after_rollout: int = 0
+    minimum_bridge_remaining_s: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -186,6 +208,20 @@ class Component:
 
 
 @dataclasses.dataclass(frozen=True)
+class CatalogRelease:
+    release_id: str
+    policy_version: str
+    files: dict[str, str]
+
+
+@dataclasses.dataclass(frozen=True)
+class ProviderAdmissionRollout:
+    mode: str
+    enforce_provider_admission: bool
+    bridge_duration_s: int
+
+
+@dataclasses.dataclass(frozen=True)
 class Release:
     tag: str
     version: SemVer
@@ -193,6 +229,8 @@ class Release:
     provider_advertised_version: str
     coordinator: Component
     gateway: Component
+    catalog: CatalogRelease
+    provider_admission_rollout: ProviderAdmissionRollout
     directory: Path
 
 
@@ -233,6 +271,8 @@ class InstalledRelease:
             "commit": release.commit,
             "coordinator_sha256": release.coordinator.sha256,
             "gateway_sha256": release.gateway.sha256,
+            "catalog_release_id": release.catalog.release_id,
+            "catalog_policy_version": release.catalog.policy_version,
         }
         return all(self.durable.get(key) == value for key, value in expected.items())
 
@@ -462,6 +502,15 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         "PEARL_UPDATER_REVOKED_VERSIONS_FILE",
         "PEARL_UPDATER_DEADMAN_HEARTBEAT_ID",
         "PEARL_UPDATER_DEADMAN_API_TOKEN_FILE",
+        "PEARL_UPDATER_CATALOG_CANARY_PROVIDER_ID",
+        "PEARL_UPDATER_CATALOG_CANARY_AUTH_TOKEN_FILE",
+        "PEARL_UPDATER_CATALOG_CANARY_SSH_TARGET",
+        "PEARL_UPDATER_CATALOG_CANARY_SSH_KEY_FILE",
+        "PEARL_UPDATER_CATALOG_CANARY_KNOWN_HOSTS_FILE",
+        "PEARL_UPDATER_CATALOG_CANARY_INSTALL_DIR",
+        "PEARL_UPDATER_PROVIDER_ADMISSION_POLICY",
+        "PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT",
+        "PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S",
     }
     unknown = sorted(set(values) - known)
     if unknown:
@@ -489,6 +538,43 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
                 "PEARL_UPDATER_DEADMAN_API_TOKEN_FILE",
                 "/etc/macprovider/pearl-updater.betterstack-token",
             )
+        ),
+        catalog_canary_provider_id=values.get("PEARL_UPDATER_CATALOG_CANARY_PROVIDER_ID", ""),
+        catalog_canary_auth_token_file=Path(
+            values.get(
+                "PEARL_UPDATER_CATALOG_CANARY_AUTH_TOKEN_FILE",
+                "/etc/macprovider/pearl-updater.catalog-canary-token",
+            )
+        ),
+        catalog_canary_ssh_target=values.get("PEARL_UPDATER_CATALOG_CANARY_SSH_TARGET", ""),
+        catalog_canary_ssh_key_file=Path(
+            values.get(
+                "PEARL_UPDATER_CATALOG_CANARY_SSH_KEY_FILE",
+                "/etc/macprovider/pearl-updater.catalog-canary-ssh-key",
+            )
+        ),
+        catalog_canary_known_hosts_file=Path(
+            values.get(
+                "PEARL_UPDATER_CATALOG_CANARY_KNOWN_HOSTS_FILE",
+                "/etc/macprovider/pearl-updater.catalog-canary-known-hosts",
+            )
+        ),
+        catalog_canary_install_dir=values.get(
+            "PEARL_UPDATER_CATALOG_CANARY_INSTALL_DIR",
+            "macprovider/catalog-release",
+        ),
+        provider_admission_policy=values.get("PEARL_UPDATER_PROVIDER_ADMISSION_POLICY", ""),
+        minimum_pool_ready_after_rollout=bounded_int(
+            values.get("PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT", "0"),
+            "minimum pool ready after rollout",
+            0,
+            100_000,
+        ),
+        minimum_bridge_remaining_s=bounded_int(
+            values.get("PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S", "0"),
+            "minimum bridge remaining",
+            0,
+            86_400,
         ),
     )
 
@@ -593,6 +679,8 @@ class Updater:
         candidate_gid: int | None = None,
         independent_alert_gid: int | None = None,
         isolate_candidate_network: bool = False,
+        catalog_verifier: Path = CATALOG_RELEASE_VERIFIER,
+        catalog_canary_proof: Path = CATALOG_CANARY_PROOF,
         sleep: Callable[[float], None] = time.sleep,
     ):
         self.config = config
@@ -612,6 +700,8 @@ class Updater:
             self.candidate_gid if independent_alert_gid is None else independent_alert_gid
         )
         self.isolate_candidate_network = isolate_candidate_network
+        self.catalog_verifier = catalog_verifier
+        self.catalog_canary_proof = catalog_canary_proof
         self.sleep = sleep
         self.transaction: Path | None = None
         self.config_update: ConfigUpdate | None = None
@@ -623,6 +713,8 @@ class Updater:
         self.previous_services: dict[str, bool] = {}
         self.previous_auxiliary_units: dict[str, bool] = {}
         self.previous_versions: dict[str, str] = {}
+        self.previous_pool_ready: int | None = None
+        self.previous_protected_providers: list[str] = []
         self.deadman_previous_paused: bool | None = None
         self.deadman_restore_required = False
         self.journal: dict[str, Any] | None = None
@@ -636,9 +728,18 @@ class Updater:
         check: bool = True,
         timeout: int,
         env: dict[str, str] | None = None,
+        input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         try:
-            return subprocess.run(argv, check=check, text=True, capture_output=True, timeout=timeout, env=env)
+            return subprocess.run(
+                argv,
+                check=check,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                env=env,
+                input=input_text,
+            )
         except subprocess.TimeoutExpired as exc:
             raise CommandTimeout(f"command timed out after {timeout}s: {argv[0]}") from exc
 
@@ -791,6 +892,10 @@ class Updater:
                 "provider_advertised_version": release.provider_advertised_version,
                 "coordinator_sha256": release.coordinator.sha256,
                 "gateway_sha256": release.gateway.sha256,
+                "catalog_release_id": release.catalog.release_id,
+                "catalog_policy_version": release.catalog.policy_version,
+                "catalog_files": dict(release.catalog.files),
+                "provider_admission_rollout": dataclasses.asdict(release.provider_admission_rollout),
             },
             "previous_version": str(previous),
             "previous_advertised_version": previous_advertised,
@@ -805,6 +910,8 @@ class Updater:
             "previous_services": {},
             "previous_auxiliary_units": {},
             "previous_versions": {},
+            "previous_pool_ready": None,
+            "previous_protected_providers": [],
             "database_paths": [],
             "database_config_hashes": {},
             "canary_timer_was_active": None,
@@ -970,7 +1077,7 @@ class Updater:
 
     def acquire_release(self, work: Path, source_dir: Path | None, requested_tag: str | None) -> Release:
         if source_dir is not None:
-            for asset in (*CONTROL_ASSETS, COORDINATOR_ASSET, GATEWAY_ASSET):
+            for asset in (*CONTROL_ASSETS, COORDINATOR_ASSET, GATEWAY_ASSET, *CATALOG_ASSETS):
                 source = source_dir / asset
                 if not source.is_file():
                     raise UpdateError(f"test source missing asset: {asset}")
@@ -994,7 +1101,7 @@ class Updater:
                 continue
             for asset in CONTROL_ASSETS[1:]:
                 self.download(f"{base}/{asset}", candidate / asset)
-            for asset in (COORDINATOR_ASSET, GATEWAY_ASSET):
+            for asset in (COORDINATOR_ASSET, GATEWAY_ASSET, *CATALOG_ASSETS):
                 self.download(f"{base}/{asset}", candidate / asset)
             return self.verify_release(candidate, tag)
         self.audit("release_selection", "no_eligible_release")
@@ -1006,7 +1113,13 @@ class Updater:
         self.verify_signature(checksums_path, directory / "checksums.txt.sig")
         self.verify_signature(metadata_path, directory / "pearl-release.json.sig")
         checksums = parse_checksums(checksums_path)
-        for name in ("pearl-release.json", "pearl-release.json.sig", COORDINATOR_ASSET, GATEWAY_ASSET):
+        for name in (
+            "pearl-release.json",
+            "pearl-release.json.sig",
+            COORDINATOR_ASSET,
+            GATEWAY_ASSET,
+            *CATALOG_ASSETS,
+        ):
             if name not in checksums:
                 raise UpdateError(f"signed checksums omit required asset: {name}")
             if sha256_file(directory / name) != checksums[name]:
@@ -1030,6 +1143,7 @@ class Updater:
                 asset=component.asset,
                 sha256=component.sha256,
             )
+        self.verify_catalog_release(release)
         self.audit(
             "release_control_set_verified",
             "success",
@@ -1038,6 +1152,70 @@ class Updater:
             provider_advertised_version=release.provider_advertised_version,
         )
         return release
+
+    def verify_catalog_release(self, release: Release) -> None:
+        catalog = release.catalog
+        manifest_path = release.directory / "release.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise UpdateError("catalog release manifest is invalid JSON") from exc
+        if not isinstance(manifest, dict) or manifest.get("schema_version") != "macprovider.autotune-release.v1":
+            raise UpdateError("catalog release manifest schema is invalid")
+        if manifest.get("release_id") != catalog.release_id or manifest.get("policy_version") != catalog.policy_version:
+            raise UpdateError("catalog metadata/release identity mismatch")
+        feeds = manifest.get("feeds")
+        if not isinstance(feeds, dict) or set(feeds) != {"autotune-candidates.json", "demand-rank.json"}:
+            raise UpdateError("catalog release manifest feed set is invalid")
+        try:
+            trusted_keys = json.loads((release.directory / "trusted-keys.json").read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise UpdateError("catalog trusted keys are invalid JSON") from exc
+        keys = trusted_keys.get("keys") if isinstance(trusted_keys, dict) else None
+        if not isinstance(trusted_keys, dict) or trusted_keys.get("schema_version") != "macprovider.autotune-keys.v1" or not isinstance(keys, dict):
+            raise UpdateError("catalog trusted keys schema is invalid")
+        for name in CATALOG_ASSETS:
+            path = release.directory / name
+            self._trusted_regular_file(path, f"verified catalog asset {name}")
+            if sha256_file(path) != catalog.files[name]:
+                raise UpdateError(f"catalog metadata checksum mismatch for {name}")
+        for feed_name in ("autotune-candidates.json", "demand-rank.json"):
+            row = feeds[feed_name]
+            feed_path = release.directory / feed_name
+            if not isinstance(row, dict) or row.get("sha256") != sha256_file(feed_path) or row.get("bytes") != feed_path.stat().st_size:
+                raise UpdateError(f"catalog release manifest binding mismatch for {feed_name}")
+            if row.get("version") != catalog.release_id or row.get("signer_key_id") not in keys:
+                raise UpdateError(f"catalog release feed identity mismatch for {feed_name}")
+            try:
+                feed = json.loads(feed_path.read_text(encoding="utf-8"))
+                signature = json.loads((release.directory / f"{feed_name}.sig").read_text(encoding="utf-8"))
+            except (ValueError, OSError) as exc:
+                raise UpdateError(f"catalog feed/signature JSON is invalid for {feed_name}") from exc
+            if not isinstance(feed, dict) or feed.get("version") != catalog.release_id:
+                raise UpdateError(f"catalog feed version mismatch for {feed_name}")
+            if not isinstance(signature, dict) or signature.get("alg") != "ed25519" or signature.get("key_id") != row.get("signer_key_id"):
+                raise UpdateError(f"catalog signature identity mismatch for {feed_name}")
+        self._trusted_regular_file(self.catalog_verifier, "catalog release verifier")
+        result = self.run_command(
+            [
+                "python3",
+                str(self.catalog_verifier),
+                "verify-directory",
+                "--directory",
+                str(release.directory),
+            ],
+            check=False,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise UpdateError("catalog inner Ed25519 verification failed")
+        self.audit(
+            "release_catalog_verified",
+            "success",
+            candidate=release.tag,
+            catalog_release_id=catalog.release_id,
+            catalog_policy_version=catalog.policy_version,
+        )
 
     def verify_candidate_versions(self, release: Release) -> None:
         self._assert_candidate_validation_directory(release.directory)
@@ -1117,6 +1295,20 @@ class Updater:
             self._assert_candidate_validation_file(destination, executable=True)
             if sha256_file(destination) != component.sha256:
                 raise UpdateError(f"candidate staging checksum mismatch: {component.asset}")
+        for name in CATALOG_ASSETS:
+            source = release.directory / name
+            self._trusted_regular_file(source, f"verified catalog asset {name}")
+            if sha256_file(source) != release.catalog.files[name]:
+                raise UpdateError(f"verified catalog asset changed before staging: {name}")
+            destination = validation / name
+            self.atomic_replace(
+                source,
+                destination,
+                uid=self.trusted_uid,
+                gid=self.candidate_gid,
+                mode=0o640,
+            )
+            self._assert_candidate_validation_file(destination, executable=False)
         _fsync_directory(validation)
         self._assert_candidate_validation_directory(validation)
         return dataclasses.replace(release, directory=validation)
@@ -1171,7 +1363,64 @@ class Updater:
                 raise UpdateError(f"release metadata {name} embedded version invalid")
             return Component(required_asset, digest, str(embedded))
 
-        return Release(tag, version, commit, advertised, component("coordinator", COORDINATOR_ASSET), component("gateway", GATEWAY_ASSET), directory)
+        catalog = metadata.get("catalog")
+        if not isinstance(catalog, dict):
+            raise UpdateError("release metadata catalog is missing")
+        release_id = catalog.get("release_id")
+        policy_version = catalog.get("policy_version")
+        files = catalog.get("files")
+        if (
+            not isinstance(release_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", release_id)
+            or not isinstance(policy_version, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", policy_version)
+            or not isinstance(files, dict)
+            or set(files) != set(CATALOG_ASSETS)
+        ):
+            raise UpdateError("release metadata catalog identity/files are invalid")
+        catalog_files: dict[str, str] = {}
+        for name in CATALOG_ASSETS:
+            digest = files.get(name)
+            if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+                raise UpdateError(f"release metadata catalog checksum invalid for {name}")
+            catalog_files[name] = digest
+
+        rollout = metadata.get("provider_admission_rollout")
+        rollout_shape_valid = (
+            isinstance(rollout, dict)
+            and set(rollout) == {"mode", "enforce_provider_admission", "bridge_duration_s"}
+            and type(rollout.get("bridge_duration_s")) is int
+        )
+        bridge_rollout = (
+            rollout_shape_valid
+            and rollout.get("mode") == "bridge_required"
+            and rollout.get("enforce_provider_admission") is False
+            and 3600 <= rollout["bridge_duration_s"] <= 24 * 60 * 60
+        )
+        strict_rollout = (
+            rollout_shape_valid
+            and rollout.get("mode") == "strict_post_migration"
+            and rollout.get("enforce_provider_admission") is True
+            and rollout.get("bridge_duration_s") == 0
+        )
+        if not bridge_rollout and not strict_rollout:
+            raise UpdateError("release metadata provider-admission rollout policy is invalid")
+
+        return Release(
+            tag,
+            version,
+            commit,
+            advertised,
+            component("coordinator", COORDINATOR_ASSET),
+            component("gateway", GATEWAY_ASSET),
+            CatalogRelease(release_id, policy_version, catalog_files),
+            ProviderAdmissionRollout(
+                rollout["mode"],
+                rollout["enforce_provider_admission"],
+                rollout["bridge_duration_s"],
+            ),
+            directory,
+        )
 
     def revoked_versions(self) -> set[SemVer]:
         result: set[SemVer] = set()
@@ -1272,7 +1521,7 @@ class Updater:
             )
             return current, "upgrade"
         if release.version == current:
-            if installed.is_coherent_with(release):
+            if installed.is_coherent_with(release) and self.installed_catalog_is_coherent(release):
                 self.audit("release_eligibility", "already_current", candidate=release.tag, current=str(current))
                 return current, "already_current"
             self.audit(
@@ -1294,6 +1543,25 @@ class Updater:
         current, decision = self.eligibility(release)
         self.verify_candidate_versions(release)
         return current, decision
+
+    def installed_catalog_is_coherent(self, release: Release) -> bool:
+        catalog_root = self.install_root / "autotune"
+        current = catalog_root / "current"
+        try:
+            if not stat.S_ISLNK(current.lstat().st_mode):
+                return False
+            expected_target = f"releases/{release.catalog.release_id}"
+            if os.readlink(current) != expected_target:
+                return False
+            installed = catalog_root / expected_target
+            _trusted_directory(installed, "installed catalog release", trusted_uid=self.trusted_uid, mode=0o750)
+            for name in CATALOG_ASSETS:
+                self._trusted_regular_file(installed / name, f"installed catalog asset {name}")
+                if sha256_file(installed / name) != release.catalog.files[name]:
+                    return False
+            return True
+        except (OSError, UpdateError):
+            return False
 
     def _trusted_regular_file(self, path: Path, description: str, *, private: bool = False) -> os.stat_result:
         return _trusted_file_stat(
@@ -1391,6 +1659,7 @@ class Updater:
 
     def validate_policy_inputs(self, config_path: Path) -> None:
         self.validate_recovery_inputs(config_path)
+        self.validate_provider_admission_policy_config()
         for path, description in (
             (self.public_key, "pinned release public key"),
             (self.config.revoked_versions_file, "revoked versions policy"),
@@ -1410,6 +1679,30 @@ class Updater:
             private=True,
         )
         self.validate_independent_alert_configuration()
+
+    def validate_provider_admission_policy_config(self) -> None:
+        policy = self.config.provider_admission_policy
+        if policy not in ("bridge_required", "strict_post_migration"):
+            raise UpdateError(
+                "PEARL_UPDATER_PROVIDER_ADMISSION_POLICY must explicitly be bridge_required or strict_post_migration"
+            )
+        if self.config.minimum_pool_ready_after_rollout <= 0:
+            raise UpdateError("PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT must be configured above zero")
+        if policy == "bridge_required":
+            if self.config.minimum_pool_ready_after_rollout < 2:
+                raise UpdateError("bridge_required rollout needs a fleet floor of at least two ready providers")
+            minimum_safe_window = (
+                self.config.provider_recovery_timeout_s
+                + self.config.service_health_timeout_s
+            )
+            if self.config.minimum_bridge_remaining_s <= minimum_safe_window:
+                raise UpdateError(
+                    "PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S must exceed the provider recovery and service-health windows"
+                )
+        elif self.config.minimum_bridge_remaining_s != 0:
+            raise UpdateError(
+                "strict_post_migration must set PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S=0"
+            )
 
     def coordinator_runtime(self) -> CoordinatorRuntime:
         result = self.run_command(
@@ -1609,6 +1902,18 @@ class Updater:
             return None
         return values[0]
 
+    def effective_coordinator_scalar(self, section: str, field: str) -> str | None:
+        runtime = self.coordinator_runtime_state or self.coordinator_runtime()
+        value: str | None = None
+        for path in (runtime.base_config, runtime.overlay_config):
+            if path is None:
+                continue
+            text = _read_trusted_text(path, "coordinator config", trusted_uid=self.trusted_uid)
+            candidate = self._yaml_section_scalar(text, path, section, field, required=False)
+            if candidate is not None:
+                value = candidate
+        return value
+
     @staticmethod
     def _database_path(value: str, description: str) -> Path:
         if not re.fullmatch(r"/[A-Za-z0-9._/-]+", value):
@@ -1700,6 +2005,60 @@ class Updater:
         index, match = matches[0]
         return index, match, lines
 
+    @staticmethod
+    def _set_yaml_section_scalars(
+        text: str,
+        path: Path,
+        section: str,
+        values: dict[str, str | None],
+    ) -> str:
+        """Replace or remove direct scalar children in one top-level YAML section."""
+        lines = text.splitlines(keepends=True)
+        section_re = re.compile(rf"^{re.escape(section)}:\s*(?:#.*)?(?:\r?\n)?$")
+        starts = [index for index, line in enumerate(lines) if section_re.fullmatch(line)]
+        if len(starts) > 1:
+            raise UpdateError(f"ambiguous {section} section in {path}")
+        if not starts:
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                lines[-1] += "\n"
+            if lines and lines[-1].strip():
+                lines.append("\n")
+            lines.append(f"{section}:\n")
+            lines.extend(
+                f"  {key}: {value}\n"
+                for key, value in values.items()
+                if value is not None
+            )
+            return "".join(lines)
+
+        start = starts[0]
+        end = len(lines)
+        top_level_key = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*\s*:")
+        for index in range(start + 1, len(lines)):
+            if top_level_key.match(lines[index]):
+                end = index
+                break
+        found: dict[str, int] = {}
+        field_re = re.compile(r"^([ ]+)([A-Za-z_][A-Za-z0-9_-]*)\s*:")
+        for index in range(start + 1, end):
+            match = field_re.match(lines[index])
+            if match is None or len(match.group(1)) != 2 or match.group(2) not in values:
+                continue
+            key = match.group(2)
+            if key in found:
+                raise UpdateError(f"ambiguous {section}.{key} field in {path}")
+            found[key] = index
+        for key, index in found.items():
+            if values[key] is None:
+                lines[index] = ""
+            else:
+                newline = "\r\n" if lines[index].endswith("\r\n") else "\n"
+                lines[index] = f"  {key}: {values[key]}{newline}"
+        missing = [key for key, value in values.items() if key not in found and value is not None]
+        if missing:
+            lines[start + 1:start + 1] = [f"  {key}: {values[key]}\n" for key in missing]
+        return "".join(lines)
+
     def prepare_config_update(self, release: Release) -> ConfigUpdate:
         self._assert_candidate_validation_directory(release.directory)
         runtime = self.coordinator_runtime()
@@ -1726,9 +2085,37 @@ class Updater:
         target, index, match, lines = located[-1]
         previous = next(value for value in match.groups()[1:4] if value is not None)
         lines[index] = f'{match.group(1)}"{release.provider_advertised_version}"{match.group(5)}{match.group(6) or ""}'
+        if self.config.provider_admission_policy != release.provider_admission_rollout.mode:
+            raise UpdateError("signed provider-admission rollout policy does not match updater policy")
+        rollout = release.provider_admission_rollout
+        bridge_deadline: str | None = None
+        if rollout.mode == "bridge_required":
+            bridge_budget = rollout.bridge_duration_s
+            required_budget = (
+                self.config.provider_recovery_timeout_s
+                + self.config.service_health_timeout_s
+                + self.config.minimum_bridge_remaining_s
+            )
+            if bridge_budget <= required_budget:
+                raise UpdateError("signed provider-admission bridge duration is below the recovery safety budget")
+            bridge_deadline = (
+                datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(seconds=bridge_budget)
+            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        target_payload = self._set_yaml_section_scalars(
+            "".join(lines),
+            target,
+            "autotune",
+            {
+                "enforce_provider_admission": "true" if rollout.enforce_provider_admission else "false",
+                "provider_admission_bridge_deadline": (
+                    json.dumps(bridge_deadline) if bridge_deadline is not None else None
+                ),
+            },
+        )
         staged_configs: dict[Path, Path] = {}
         for config_index, path in enumerate(config_paths):
-            payload = "".join(lines) if path == target else config_texts[path]
+            payload = target_payload if path == target else config_texts[path]
             staged_path = self.stage_candidate_config(
                 release.directory,
                 f"coordinator-validation-{config_index}.yaml",
@@ -1773,6 +2160,8 @@ class Updater:
             target=str(target),
             previous_version=previous,
             next_version=release.provider_advertised_version,
+            provider_admission_policy=release.provider_admission_rollout.mode,
+            provider_admission_bridge_deadline=bridge_deadline,
         )
         return update
 
@@ -2001,6 +2390,34 @@ class Updater:
             raise UpdateError(f"health response is not an object: {url}")
         return payload
 
+    def get_authorized_json(self, url: str, token: str) -> dict[str, Any]:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": "Bearer " + token,
+                "User-Agent": "macprovider-pearl-updater/1",
+            },
+        )
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, _request, _fp, _code, _message, _headers, _new_url):
+                return None
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        with opener.open(request, timeout=self.config.request_timeout_s) as response:
+            if response.status != 200 or response.geturl() != url:
+                raise UpdateError("authorized canary request did not return an exact HTTP 200")
+            data = response.read(1024 * 1024 + 1)
+        if len(data) > 1024 * 1024:
+            raise UpdateError("authorized canary response exceeds the safety limit")
+        try:
+            payload = json.loads(data)
+        except ValueError as exc:
+            raise UpdateError("authorized canary response is invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise UpdateError("authorized canary response is not an object")
+        return payload
+
     def _boot_id(self) -> str:
         value = _read_trusted_text(
             self.boot_id_path,
@@ -2223,10 +2640,38 @@ class Updater:
         pool_size = coord.get("pool_size")
         if type(pool_size) is not int or pool_size < 0:
             raise UpdateError("coordinator health omitted a valid pool_size")
+        pool_ready = coord.get("pool_ready")
+        if type(pool_ready) is not int or pool_ready < 0 or pool_ready > pool_size:
+            raise UpdateError("coordinator health omitted a valid pool_ready")
+        self.previous_pool_ready = pool_ready
         if pool_size > 0 and not self.config.allow_provider_drain:
             raise UpdateError(
                 f"provider drain protection: {pool_size} connected provider(s); set PEARL_UPDATER_ALLOW_PROVIDER_DRAIN=1 only after verifying graceful-drain-capable clients"
             )
+        poolz = self.get_authorized_json(
+            "http://127.0.0.1:8444/poolz",
+            self.coordinator_operator_token(),
+        )
+        rows = poolz.get("pool")
+        if not isinstance(rows, list):
+            raise UpdateError("operator pool snapshot omitted provider rows")
+        protected: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise UpdateError("operator pool snapshot contains an invalid provider row")
+            provider_id = row.get("provider_id")
+            if (
+                row.get("routing_eligible") is True
+                and row.get("state") == "ready"
+            ):
+                if not isinstance(provider_id, str) or not provider_id or len(provider_id) > 256:
+                    raise UpdateError("operator pool snapshot contains an invalid provider identity")
+                protected.append(provider_id)
+        if len(protected) != len(set(protected)):
+            raise UpdateError("operator pool snapshot contains duplicate protected provider identities")
+        if len(protected) != pool_ready:
+            raise UpdateError("operator pool snapshot does not match coordinator ready capacity")
+        self.previous_protected_providers = sorted(protected)
         self.previous_services = {
             "macprovider-coordinator.service": self.service_active("macprovider-coordinator.service"),
             "macprovider-gateway.service": self.service_active("macprovider-gateway.service"),
@@ -2246,7 +2691,23 @@ class Updater:
             canary_service_was_active=self.canary_service_was_active,
             previous_auxiliary_units=dict(self.previous_auxiliary_units),
             previous_versions=dict(self.previous_versions),
+            previous_pool_ready=self.previous_pool_ready,
+            previous_protected_providers=list(self.previous_protected_providers),
         )
+
+    def coordinator_operator_token(self) -> str:
+        raw = self.effective_coordinator_scalar("auth", "operator_key")
+        if raw is None:
+            raise UpdateError("effective coordinator config omits auth.operator_key")
+        if raw.startswith("env:"):
+            name = raw.removeprefix("env:")
+            runtime = self.coordinator_runtime_state or self.coordinator_runtime()
+            token = runtime.environment.get(name, "")
+        else:
+            token = raw
+        if not token or len(token) > 4096 or any(character.isspace() for character in token):
+            raise UpdateError("effective coordinator operator credential is unavailable")
+        return token
 
     def read_installed_versions(self) -> dict[str, str]:
         versions: dict[str, str] = {}
@@ -2369,6 +2830,35 @@ class Updater:
             self._durable_copy(current_state, tx / "previous-current-release.json")
             state_manifest["sha256"] = sha256_file(tx / "previous-current-release.json")
         self._write_json(tx / "state-manifest.json", state_manifest)
+        catalog_root = self.install_root / "autotune"
+        current = catalog_root / "current"
+        previous = catalog_root / ".previous-target"
+        current_target: str | None = None
+        if _path_entry_exists(current):
+            current_info = current.lstat()
+            if not stat.S_ISLNK(current_info.st_mode):
+                raise UpdateError("catalog current pointer is not a symlink")
+            current_target = os.readlink(current)
+            self._validate_catalog_target(current_target)
+        previous_target: str | None = None
+        if _path_entry_exists(previous):
+            previous_target = _read_trusted_text(
+                previous,
+                "catalog previous pointer",
+                trusted_uid=self.trusted_uid,
+            ).strip()
+            if previous_target:
+                self._validate_catalog_target(previous_target)
+        candidate_path = catalog_root / "releases" / release.catalog.release_id
+        self._write_json(
+            tx / "catalog-manifest.json",
+            {
+                "current_target": current_target,
+                "previous_target": previous_target,
+                "candidate_existed": _path_entry_exists(candidate_path),
+                "candidate_release_id": release.catalog.release_id,
+            },
+        )
         db_dir = tx / "databases"
         db_dir.mkdir(mode=0o700)
         manifest = []
@@ -2441,6 +2931,82 @@ class Updater:
             mode=0o750,
         )
 
+    @staticmethod
+    def _validate_catalog_target(target: str) -> None:
+        if not re.fullmatch(r"releases/[A-Za-z0-9][A-Za-z0-9._-]{0,127}", target):
+            raise UpdateError(f"unsafe catalog pointer target: {target!r}")
+
+    def _replace_catalog_pointer(self, name: str, target: str | None) -> None:
+        catalog_root = self.install_root / "autotune"
+        destination = catalog_root / name
+        if target is None:
+            destination.unlink(missing_ok=True)
+            _fsync_directory(catalog_root)
+            return
+        self._validate_catalog_target(target)
+        temporary = catalog_root / f".{name}.pearl-updater-{os.getpid()}-{time.time_ns()}"
+        temporary.unlink(missing_ok=True)
+        os.symlink(target, temporary)
+        os.replace(temporary, destination)
+        _fsync_directory(catalog_root)
+
+    def install_catalog(self, release: Release) -> None:
+        catalog_root = self.install_root / "autotune"
+        releases = catalog_root / "releases"
+        for directory in (catalog_root, releases):
+            if not _path_entry_exists(directory):
+                directory.mkdir(mode=0o750)
+            _trusted_directory(directory, "catalog release directory", trusted_uid=self.trusted_uid, mode=0o750)
+        destination = releases / release.catalog.release_id
+        if _path_entry_exists(destination):
+            _trusted_directory(destination, "immutable catalog release", trusted_uid=self.trusted_uid, mode=0o750)
+            for name in CATALOG_ASSETS:
+                existing = destination / name
+                self._trusted_regular_file(existing, f"installed catalog asset {name}")
+                if sha256_file(existing) != release.catalog.files[name]:
+                    raise UpdateError(f"catalog release ID {release.catalog.release_id} already exists with different bytes")
+        else:
+            stage = releases / f".stage-{release.catalog.release_id}-{os.getpid()}-{time.time_ns()}"
+            stage.mkdir(mode=0o750)
+            try:
+                for name in CATALOG_ASSETS:
+                    self.atomic_replace(
+                        release.directory / name,
+                        stage / name,
+                        uid=self.trusted_uid,
+                        gid=self.install_root.stat().st_gid,
+                        mode=0o640,
+                    )
+                _fsync_directory(stage)
+                os.replace(stage, destination)
+                _fsync_directory(releases)
+            finally:
+                if _path_entry_exists(stage):
+                    shutil.rmtree(stage)
+        current = catalog_root / "current"
+        old_target: str | None = None
+        if _path_entry_exists(current):
+            if not stat.S_ISLNK(current.lstat().st_mode):
+                raise UpdateError("catalog current pointer is not a symlink")
+            old_target = os.readlink(current)
+            self._validate_catalog_target(old_target)
+        previous = catalog_root / ".previous-target"
+        previous_payload = ((old_target or "") + "\n").encode("utf-8")
+        _secure_atomic_write(
+            previous,
+            previous_payload,
+            mode=0o640,
+            uid=self.trusted_uid,
+            gid=self.install_root.stat().st_gid,
+        )
+        self._replace_catalog_pointer("current", f"releases/{release.catalog.release_id}")
+        self.audit(
+            "release_catalog_installed",
+            "success",
+            catalog_release_id=release.catalog.release_id,
+            previous_target=old_target or "",
+        )
+
     def install_release(self, release: Release) -> None:
         if self.config_update is None:
             raise UpdateError("coordinator config update was not prepared")
@@ -2459,6 +3025,7 @@ class Updater:
         self.audit("release_component_installed", "success", candidate=release.tag, component="coordinator")
         self.atomic_install(release.directory / release.gateway.asset, self.install_root / "gateway")
         self.audit("release_component_installed", "success", candidate=release.tag, component="gateway")
+        self.install_catalog(release)
         target_stat = self.config_update.target.stat()
         self.atomic_replace(
             self.config_update.staged,
@@ -2530,6 +3097,279 @@ class Updater:
     def public_ready(self, release: Release) -> bool:
         return self.public_identity_ready(self.release_identity(release))
 
+    def catalog_manifest_path(self, release: Release) -> Path:
+        candidate = release.directory / "release.json"
+        if not candidate.is_file():
+            candidate = self.install_root / "autotune" / "current" / "release.json"
+        self._trusted_regular_file(candidate, "coherence-checked catalog release manifest")
+        expected = release.catalog.files.get("release.json")
+        if expected is None or sha256_file(candidate) != expected:
+            raise UpdateError("catalog release manifest does not match the committed release identity")
+        return candidate
+
+    def catalog_admission_ready(self, release: Release, url: str) -> bool:
+        status = self.get_json(url)
+        feeds = status.get("feeds")
+        if (
+            status.get("status") != "live_verified"
+            or status.get("release_id") != release.catalog.release_id
+            or status.get("policy_version") != release.catalog.policy_version
+            or not isinstance(feeds, dict)
+        ):
+            return False
+        manifest_path = self.catalog_manifest_path(release)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("release_id") != release.catalog.release_id:
+            return False
+        for endpoint_name, asset_name in (
+            ("autotune_candidates", "autotune-candidates.json"),
+            ("demand_rank", "demand-rank.json"),
+        ):
+            expected = manifest["feeds"][asset_name]
+            actual = feeds.get(endpoint_name)
+            if not isinstance(actual, dict) or any(
+                actual.get(key) != expected.get(key) for key in ("sha256", "signer_key_id")
+            ):
+                return False
+        return True
+
+    def verify_exact_catalog_admission(self, release: Release) -> None:
+        self.wait_for(
+            "local exact catalog admission",
+            self.config.service_health_timeout_s,
+            lambda: self.catalog_admission_ready(release, "http://127.0.0.1:8444/v1/autotune-release"),
+        )
+        self.wait_for(
+            "public exact catalog admission",
+            self.config.service_health_timeout_s,
+            lambda: self.catalog_admission_ready(release, "https://coordinator.streamvc.live/v1/autotune-release"),
+        )
+        self.audit(
+            "exact_catalog_admission_canary",
+            "success",
+            catalog_release_id=release.catalog.release_id,
+            catalog_policy_version=release.catalog.policy_version,
+        )
+
+    def catalog_candidate_identity(self, release: Release) -> tuple[str, str]:
+        try:
+            manifest = json.loads(self.catalog_manifest_path(release).read_text(encoding="utf-8"))
+            row = manifest["feeds"]["autotune-candidates.json"]
+            digest = row["sha256"]
+            signer = row["signer_key_id"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise UpdateError("verified catalog manifest omits candidate identity") from exc
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            raise UpdateError("verified catalog candidate digest is invalid")
+        if not isinstance(signer, str) or not signer:
+            raise UpdateError("verified catalog candidate signer is invalid")
+        return digest, signer
+
+    def validate_catalog_canary_configuration(self) -> tuple[str, str]:
+        provider_id = self.config.catalog_canary_provider_id
+        ssh_target = self.config.catalog_canary_ssh_target
+        install_dir = self.config.catalog_canary_install_dir
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", provider_id):
+            raise UpdateError("exact catalog canary provider ID is not configured safely")
+        if not re.fullmatch(
+            r"(?:[A-Za-z_][A-Za-z0-9._-]*@)?[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?",
+            ssh_target,
+        ):
+            raise UpdateError("exact catalog canary SSH target is not configured safely")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9._/-]+", install_dir)
+            or ".." in Path(install_dir).parts
+            or Path(install_dir) == Path(".")
+            or Path(install_dir) == Path("/")
+        ):
+            raise UpdateError("exact catalog canary install directory is unsafe")
+        secret_paths = (
+            (self.config.catalog_canary_auth_token_file, "catalog canary authorization token"),
+            (self.config.catalog_canary_ssh_key_file, "catalog canary SSH key"),
+            (self.config.catalog_canary_known_hosts_file, "catalog canary SSH known-hosts file"),
+        )
+        for path, description in secret_paths:
+            if not path.is_absolute():
+                raise UpdateError(f"{description} path must be absolute")
+            info = self._trusted_regular_file(path, description, private=True)
+            if info.st_size <= 0 or info.st_size > 64 * 1024:
+                raise UpdateError(f"{description} has an invalid size")
+        self._trusted_regular_file(self.catalog_canary_proof, "catalog canary proof program")
+        token = _read_trusted_text(
+            self.config.catalog_canary_auth_token_file,
+            "catalog canary authorization token",
+            trusted_uid=self.trusted_uid,
+            private=True,
+            limit=1024,
+        ).strip()
+        if not re.fullmatch(r"[A-Za-z0-9._~-]{32,512}", token):
+            raise UpdateError("catalog canary authorization token is invalid")
+        return provider_id, token
+
+    def prove_catalog_canary_mac(
+        self,
+        release: Release,
+        provider_id: str,
+        candidate_digest: str,
+        candidate_signer: str,
+    ) -> str:
+        proof_program = _read_trusted_text(
+            self.catalog_canary_proof,
+            "catalog canary proof program",
+            trusted_uid=self.trusted_uid,
+            limit=256 * 1024,
+        )
+        remote_arguments = (
+            self.config.catalog_canary_install_dir,
+            provider_id,
+            release.catalog.release_id,
+            release.catalog.policy_version,
+            candidate_digest,
+            candidate_signer,
+        )
+        remote_command = "python3 - " + " ".join(shlex.quote(value) for value in remote_arguments)
+        command = [
+            "ssh",
+            "-i",
+            str(self.config.catalog_canary_ssh_key_file),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "UserKnownHostsFile=" + str(self.config.catalog_canary_known_hosts_file),
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=3",
+            self.config.catalog_canary_ssh_target,
+            remote_command,
+        ]
+        result = self.run_command(
+            command,
+            check=False,
+            timeout=min(self.config.provider_recovery_timeout_s, 300),
+            input_text=proof_program,
+        )
+        if result.returncode != 0:
+            raise UpdateError("trusted catalog canary Mac proof failed")
+        if len(result.stdout) > 1024 * 1024 or len(result.stderr) > 1024 * 1024:
+            raise UpdateError("trusted catalog canary Mac proof output exceeds the safety limit")
+        try:
+            proof = json.loads(result.stdout)
+            local_status = proof["local_status"]
+            local_catalog = local_status["catalog"]
+            local_coordinator = local_status["coordinator"]
+            files = proof["files"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise UpdateError("trusted catalog canary Mac proof is invalid") from exc
+        row_identity = local_catalog.get("row_identity") if isinstance(local_catalog, dict) else None
+        assigned_id = proof.get("assigned_id") if isinstance(proof, dict) else None
+        if (
+            not isinstance(proof, dict)
+            or proof.get("provider_id") != provider_id
+            or not isinstance(proof.get("launchd_pid"), int)
+            or proof["launchd_pid"] <= 0
+            or not isinstance(local_status, dict)
+            or local_status.get("provider_id") != provider_id
+            or local_status.get("network_state") != "buyer_serving"
+            or not isinstance(local_coordinator, dict)
+            or local_coordinator.get("connected") is not True
+            or local_coordinator.get("session") != assigned_id
+            or not isinstance(assigned_id, str)
+            or not assigned_id
+            or not isinstance(local_catalog, dict)
+            or local_catalog.get("release_id") != release.catalog.release_id
+            or local_catalog.get("policy_version") != release.catalog.policy_version
+            or local_catalog.get("digest") != candidate_digest
+            or local_catalog.get("signer_key_id") != candidate_signer
+            or not isinstance(row_identity, str)
+            or not SHA256_RE.fullmatch(row_identity.lower())
+            or files != release.catalog.files
+        ):
+            raise UpdateError("trusted catalog canary Mac proof does not match the candidate release")
+        return row_identity.lower(), assigned_id
+
+    def catalog_provider_admission_ready(
+        self,
+        release: Release,
+        provider_id: str,
+        token: str,
+        candidate_digest: str,
+        candidate_signer: str,
+        row_identity: str,
+        assigned_id: str,
+    ) -> bool:
+        quoted_id = urllib.parse.quote(provider_id, safe="")
+        quoted_assigned_id = urllib.parse.quote(assigned_id, safe="")
+        url = (
+            "https://coordinator.streamvc.live/v1/pool/check?provider_id="
+            + quoted_id
+            + "&assigned_id="
+            + quoted_assigned_id
+            + "&details=deployment"
+        )
+        status = self.get_authorized_json(url, token)
+        return (
+            status.get("provider_id") == provider_id
+            and status.get("assigned_id") == assigned_id
+            and status.get("buyer_serving") is True
+            and status.get("catalog_evidence_source") == "provider_reported"
+            and status.get("catalog_admission_mode") == "current"
+            and status.get("catalog_release_id") == release.catalog.release_id
+            and status.get("catalog_policy_version") == release.catalog.policy_version
+            and str(status.get("catalog_candidate_sha256", "")).lower() == candidate_digest
+            and status.get("catalog_signer_key_id") == candidate_signer
+            and str(status.get("catalog_row_identity", "")).lower() == row_identity
+        )
+
+    def verify_exact_provider_canary(self, release: Release) -> None:
+        provider_id, token = self.validate_catalog_canary_configuration()
+        candidate_digest, candidate_signer = self.catalog_candidate_identity(release)
+        verified: dict[str, str] = {}
+
+        def exact_canary_ready() -> bool:
+            row_identity, assigned_id = self.prove_catalog_canary_mac(
+                release,
+                provider_id,
+                candidate_digest,
+                candidate_signer,
+            )
+            if not self.catalog_provider_admission_ready(
+                release,
+                provider_id,
+                token,
+                candidate_digest,
+                candidate_signer,
+                row_identity,
+                assigned_id,
+            ):
+                return False
+            verified["row_identity"] = row_identity
+            verified["assigned_id"] = assigned_id
+            return True
+
+        self.wait_for(
+            "exact catalog-aware provider proof and admission",
+            self.config.provider_recovery_timeout_s,
+            exact_canary_ready,
+        )
+        self.audit(
+            "exact_catalog_provider_canary",
+            "success",
+            provider_id=provider_id,
+            catalog_release_id=release.catalog.release_id,
+            catalog_policy_version=release.catalog.policy_version,
+            catalog_candidate_sha256=candidate_digest,
+            catalog_signer_key_id=candidate_signer,
+            catalog_row_identity=verified["row_identity"],
+            assigned_id=verified["assigned_id"],
+        )
+
     def prove_serving_recovery(self, identity: RuntimeIdentity) -> None:
         self.wait_for(
             "provider reconnect and warmup",
@@ -2543,6 +3383,88 @@ class Updater:
             lambda: self.public_identity_ready(identity),
         )
         self.run_canary_gate()
+
+    def verify_provider_admission_rollout_policy(self) -> None:
+        self.validate_provider_admission_policy_config()
+        health = self.get_json("http://127.0.0.1:8444/healthz")
+        pool_ready = health.get("pool_ready")
+        if type(pool_ready) is not int or pool_ready < self.config.minimum_pool_ready_after_rollout:
+            raise UpdateError(
+                "post-rollout ready-provider capacity is below the configured fleet floor"
+            )
+        if self.previous_protected_providers:
+            poolz = self.get_authorized_json(
+                "http://127.0.0.1:8444/poolz",
+                self.coordinator_operator_token(),
+            )
+            rows = poolz.get("pool")
+            if not isinstance(rows, list):
+                raise UpdateError("post-rollout operator pool snapshot omitted provider rows")
+            current = {
+                row.get("provider_id"): row
+                for row in rows
+                if isinstance(row, dict) and isinstance(row.get("provider_id"), str)
+            }
+            for provider_id in self.previous_protected_providers:
+                row = current.get(provider_id)
+                if (
+                    row is None
+                    or row.get("routing_eligible") is not True
+                    or row.get("state") != "ready"
+                    or row.get("catalog_admission_mode") not in ("legacy_bridge", "current", "previous")
+                ):
+                    raise UpdateError(
+                        f"protected provider lost buyer-serving admission during rollout: {provider_id}"
+                    )
+        enforced_raw = self.effective_coordinator_scalar(
+            "autotune", "enforce_provider_admission"
+        )
+        if enforced_raw not in ("true", "false"):
+            raise UpdateError(
+                "effective coordinator config must explicitly set autotune.enforce_provider_admission"
+            )
+        enforced = enforced_raw == "true"
+        policy = self.config.provider_admission_policy
+        remaining_s: int | None = None
+        if policy == "bridge_required":
+            if enforced:
+                raise UpdateError("bridge-required rollout cannot commit with strict catalog admission")
+            raw_deadline = self.effective_coordinator_scalar(
+                "autotune", "provider_admission_bridge_deadline"
+            )
+            if raw_deadline is None:
+                raise UpdateError("bridge-required rollout omits provider admission bridge deadline")
+            try:
+                deadline = datetime.datetime.fromisoformat(raw_deadline.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise UpdateError("provider admission bridge deadline is not RFC3339") from exc
+            if deadline.tzinfo is None:
+                raise UpdateError("provider admission bridge deadline must include a timezone")
+            remaining_s = int(
+                (deadline.astimezone(datetime.timezone.utc) - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+            )
+            if remaining_s > 24 * 60 * 60:
+                raise UpdateError(
+                    "provider admission bridge deadline exceeds the bounded 24-hour rollout window"
+                )
+            if remaining_s < self.config.minimum_bridge_remaining_s:
+                raise UpdateError(
+                    "provider admission bridge does not have the configured safe remaining window"
+                )
+        elif not enforced:
+            raise UpdateError(
+                "strict_post_migration rollout cannot commit while the provider admission bridge is enabled"
+            )
+        self.audit(
+            "provider_admission_rollout_policy",
+            "success",
+            policy=policy,
+            pool_ready=pool_ready,
+            minimum_pool_ready=self.config.minimum_pool_ready_after_rollout,
+            previous_pool_ready=self.previous_pool_ready,
+            protected_provider_count=len(self.previous_protected_providers),
+            bridge_remaining_s=remaining_s,
+        )
 
     def verify_rollout(self, release: Release) -> None:
         self.systemctl("start", "macprovider-coordinator.service")
@@ -2561,6 +3483,21 @@ class Updater:
         self.wait_for("gateway health/version", self.config.service_health_timeout_s, lambda: self.local_gateway_ready(release))
         self.restore_auxiliary_services()
         self.prove_serving_recovery(self.release_identity(release))
+        self.verify_provider_admission_rollout_policy()
+        self.verify_exact_catalog_admission(release)
+        if self.rollback_armed and not self.reconciling:
+            self._journal_transition(
+                "provider_install_ready",
+                rollback_armed=True,
+                live_mutation_started=True,
+            )
+            self.audit(
+                "provider_install_ready",
+                "waiting",
+                candidate=release.tag,
+                provider_recovery_timeout_s=self.config.provider_recovery_timeout_s,
+            )
+        self.verify_exact_provider_canary(release)
         self.restore_auxiliary_timers()
         if self.canary_timer_was_active:
             self.systemctl("start", "canary-buyer.timer")
@@ -2621,6 +3558,25 @@ class Updater:
             self._trusted_regular_file(previous_state, "rollback installed release state", private=True)
             if state_manifest.get("sha256") != sha256_file(previous_state):
                 raise UpdateError("rollback installed release state checksum mismatch")
+        catalog_manifest = self._transaction_json(tx, "catalog-manifest.json")
+        if not isinstance(catalog_manifest, dict) or set(catalog_manifest) != {
+            "current_target",
+            "previous_target",
+            "candidate_existed",
+            "candidate_release_id",
+        }:
+            raise UpdateError("rollback catalog manifest is invalid")
+        for key in ("current_target", "previous_target"):
+            value = catalog_manifest[key]
+            if value is not None:
+                if not isinstance(value, str):
+                    raise UpdateError("rollback catalog pointer is invalid")
+                if value:
+                    self._validate_catalog_target(value)
+        if type(catalog_manifest["candidate_existed"]) is not bool or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", str(catalog_manifest["candidate_release_id"])
+        ):
+            raise UpdateError("rollback catalog release identity is invalid")
         previous_versions = self._transaction_json(tx, "previous-versions.json")
         if not isinstance(previous_versions, dict) or set(previous_versions) != {"coordinator", "gateway"}:
             raise UpdateError("rollback previous versions manifest is invalid")
@@ -2709,6 +3665,30 @@ class Updater:
                 gid=int(row["gid"]),
                 mode=int(row["mode"]),
             )
+
+    def _restore_catalog(self, tx: Path) -> None:
+        manifest = self._transaction_json(tx, "catalog-manifest.json")
+        catalog_root = self.install_root / "autotune"
+        self._replace_catalog_pointer("current", manifest["current_target"])
+        previous = catalog_root / ".previous-target"
+        previous_target = manifest["previous_target"]
+        if previous_target is None:
+            previous.unlink(missing_ok=True)
+            _fsync_directory(catalog_root)
+        else:
+            _secure_atomic_write(
+                previous,
+                (previous_target + "\n").encode("utf-8"),
+                mode=0o640,
+                uid=self.trusted_uid,
+                gid=self.install_root.stat().st_gid,
+            )
+        if not manifest["candidate_existed"]:
+            candidate = catalog_root / "releases" / manifest["candidate_release_id"]
+            if _path_entry_exists(candidate):
+                _trusted_directory(candidate, "rolled back catalog release", trusted_uid=self.trusted_uid, mode=0o750)
+                shutil.rmtree(candidate)
+                _fsync_directory(candidate.parent)
 
     def _restore_databases(self, tx: Path) -> None:
         manifest = self._transaction_json(tx, "database-manifest.json")
@@ -2853,6 +3833,7 @@ class Updater:
         self._rollback_step("quiescence", self.quiesce_for_restore)
         self._rollback_step("binaries", lambda: self._restore_binaries(tx))
         self._rollback_step("configurations", lambda: self._restore_configurations(tx))
+        self._rollback_step("catalog", lambda: self._restore_catalog(tx))
         self._rollback_step("databases", lambda: self._restore_databases(tx))
         self._rollback_step("success_state", lambda: self._restore_success_state(tx))
         self._rollback_step("backend_services", lambda: self._restore_backend_services(tx))
@@ -2907,6 +3888,10 @@ class Updater:
             "provider_advertised_version",
             "coordinator_sha256",
             "gateway_sha256",
+            "catalog_release_id",
+            "catalog_policy_version",
+            "catalog_files",
+            "provider_admission_rollout",
         }
         if set(payload) != required:
             raise UpdateError("phase journal committed release fields are invalid")
@@ -2916,6 +3901,10 @@ class Updater:
         advertised = payload["provider_advertised_version"]
         coordinator_sha = payload["coordinator_sha256"]
         gateway_sha = payload["gateway_sha256"]
+        catalog_release_id = payload["catalog_release_id"]
+        catalog_policy_version = payload["catalog_policy_version"]
+        catalog_files = payload["catalog_files"]
+        rollout = payload["provider_admission_rollout"]
         if not isinstance(tag, str) or not SEMVER_RE.fullmatch(tag):
             raise UpdateError("phase journal committed release tag is invalid")
         version = SemVer.parse(str(version_value))
@@ -2929,6 +3918,35 @@ class Updater:
             raise UpdateError("phase journal committed coordinator hash is invalid")
         if not isinstance(gateway_sha, str) or not SHA256_RE.fullmatch(gateway_sha):
             raise UpdateError("phase journal committed gateway hash is invalid")
+        if (
+            not isinstance(catalog_release_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", catalog_release_id)
+            or not isinstance(catalog_policy_version, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", catalog_policy_version)
+            or not isinstance(catalog_files, dict)
+            or set(catalog_files) != set(CATALOG_ASSETS)
+            or any(not isinstance(value, str) or not SHA256_RE.fullmatch(value) for value in catalog_files.values())
+        ):
+            raise UpdateError("phase journal committed catalog identity is invalid")
+        rollout_shape_valid = (
+            isinstance(rollout, dict)
+            and set(rollout) == {"mode", "enforce_provider_admission", "bridge_duration_s"}
+            and type(rollout.get("bridge_duration_s")) is int
+        )
+        bridge_rollout = (
+            rollout_shape_valid
+            and rollout.get("mode") == "bridge_required"
+            and rollout.get("enforce_provider_admission") is False
+            and 3600 <= rollout["bridge_duration_s"] <= 24 * 60 * 60
+        )
+        strict_rollout = (
+            rollout_shape_valid
+            and rollout.get("mode") == "strict_post_migration"
+            and rollout.get("enforce_provider_admission") is True
+            and rollout.get("bridge_duration_s") == 0
+        )
+        if not bridge_rollout and not strict_rollout:
+            raise UpdateError("phase journal committed provider-admission rollout is invalid")
         return Release(
             tag,
             version,
@@ -2936,12 +3954,18 @@ class Updater:
             advertised,
             Component(COORDINATOR_ASSET, coordinator_sha, tag),
             Component(GATEWAY_ASSET, gateway_sha, tag),
+            CatalogRelease(catalog_release_id, catalog_policy_version, dict(catalog_files)),
+            ProviderAdmissionRollout(
+                rollout["mode"],
+                rollout["enforce_provider_admission"],
+                rollout["bridge_duration_s"],
+            ),
             Path("/committed-release"),
         )
 
     def reconcile_committed_success(self, payload: dict[str, Any]) -> None:
         release = self.committed_release(payload.get("release"))
-        if not self.installed_release().is_coherent_with(release):
+        if not self.installed_release().is_coherent_with(release) or not self.installed_catalog_is_coherent(release):
             raise UpdateError("committed candidate state or installed release pair is incoherent")
         self.verify_rollout(release)
         self._journal_transition("committed_success_reverified")
@@ -2956,6 +3980,9 @@ class Updater:
             "installed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "coordinator_sha256": release.coordinator.sha256,
             "gateway_sha256": release.gateway.sha256,
+            "catalog_release_id": release.catalog.release_id,
+            "catalog_policy_version": release.catalog.policy_version,
+            "catalog_files": dict(release.catalog.files),
             "transaction": str(self.transaction),
         }
         self._ensure_private_directory(self.state_root, "updater state directory")
@@ -3090,6 +4117,20 @@ class Updater:
             ):
                 raise UpdateError("phase journal previous versions are invalid")
             self.previous_versions = dict(previous_versions)
+            previous_pool_ready = payload.get("previous_pool_ready")
+            if previous_pool_ready is not None and (
+                type(previous_pool_ready) is not int or previous_pool_ready < 0
+            ):
+                raise UpdateError("phase journal previous ready-provider capacity is invalid")
+            self.previous_pool_ready = previous_pool_ready
+            protected = payload.get("previous_protected_providers", [])
+            if (
+                not isinstance(protected, list)
+                or any(not isinstance(value, str) or not value or len(value) > 256 for value in protected)
+                or protected != sorted(set(protected))
+            ):
+                raise UpdateError("phase journal protected provider identities are invalid")
+            self.previous_protected_providers = list(protected)
             database_paths = payload.get("database_paths", [])
             if not isinstance(database_paths, list) or any(
                 not isinstance(value, str) or not Path(value).is_absolute() for value in database_paths
@@ -3277,6 +4318,7 @@ def main(argv: list[str]) -> int:
         config_update = updater.prepare_config_update(release)
         updater.verify_canary_authority()
         updater.validate_deadman_configuration()
+        updater.validate_catalog_canary_configuration()
         if decision == "already_current" and config_update.previous_version != config_update.next_version:
             decision = "repair_config"
             updater.audit(

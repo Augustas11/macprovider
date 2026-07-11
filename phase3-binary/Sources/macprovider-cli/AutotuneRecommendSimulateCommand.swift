@@ -305,6 +305,8 @@ extension CandidateBenchmark: Decodable {
         case model_id
         case hardwareIdentityHash
         case hardware_identity_hash
+        case candidateRowIdentity
+        case candidate_row_identity
     }
 
     init(from decoder: Decoder) throws {
@@ -322,7 +324,8 @@ extension CandidateBenchmark: Decodable {
             candidateCatalogSHA256: try c.decodeEither(String.self, .candidateCatalogSHA256, .candidate_catalog_sha256),
             binaryVersion: try c.decodeEither(String.self, .binaryVersion, .binary_version),
             modelID: try c.decodeEither(String.self, .modelID, .model_id),
-            hardwareIdentityHash: try c.decodeEither(String.self, .hardwareIdentityHash, .hardware_identity_hash)
+            hardwareIdentityHash: try c.decodeEither(String.self, .hardwareIdentityHash, .hardware_identity_hash),
+            candidateRowIdentity: try c.decodeEitherIfPresent(String.self, .candidateRowIdentity, .candidate_row_identity) ?? ""
         )
     }
 }

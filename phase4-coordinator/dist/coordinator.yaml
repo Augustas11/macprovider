@@ -165,10 +165,16 @@ logging:
 # /v1/autotune-candidates (+ .sig sidecars). Deploy refreshes from
 # phase3-binary/dist/static/ on each Pearl run.
 autotune:
-  demand_rank_path: "/opt/macprovider/autotune/demand-rank.json"
-  demand_rank_sig_path: "/opt/macprovider/autotune/demand-rank.json.sig"
-  autotune_candidates_path: "/opt/macprovider/autotune/autotune-candidates.json"
-  autotune_candidates_sig_path: "/opt/macprovider/autotune/autotune-candidates.json.sig"
+  # Strict is the durable checked-in posture. For a staged rollout, set false
+  # only together with provider_admission_bridge_deadline no more than 24h in
+  # the future; the coordinator excludes metadata-free sessions at expiry.
+  enforce_provider_admission: true
+  public_keys:
+    streamvc-autotune-static-v4: "zTKDIdMmKKkO1Cgf5OdTzMOytVqW7U8SGsJ9XrzAltU="
+  demand_rank_path: "/opt/macprovider/autotune/current/demand-rank.json"
+  demand_rank_sig_path: "/opt/macprovider/autotune/current/demand-rank.json.sig"
+  autotune_candidates_path: "/opt/macprovider/autotune/current/autotune-candidates.json"
+  autotune_candidates_sig_path: "/opt/macprovider/autotune/current/autotune-candidates.json.sig"
 
 # Wave 1 subset — Entry 92 v2 rate-card rows for canary rollout (2026-07-01).
 # Units: credits_per_mtok; stats_rollup.usd_per_million_credits=1.0 → 1M credits = $1.00.
@@ -257,4 +263,4 @@ providers:
 
 # Auto-update recommendation surface (2026-07-03 — added post-#332 to unblock air5 v1.7.0 -> v1.7.9)
 coordinator_advertised_version:
-  latest_binary_version: "1.8.30"
+  latest_binary_version: "1.8.31"

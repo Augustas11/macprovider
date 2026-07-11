@@ -61,8 +61,16 @@ struct AgentSnapshot: Equatable {
 
     var cliVersion: String?
     /// Whether macprovider-cli reports an active coordinator WebSocket session.
-    /// Distinct from local model readiness (`state == .serving` requires both).
+    /// Distinct from verified buyer-serving readiness.
     var coordinatorConnected: Bool?
+    /// Canonical provider state reported by /v1/status. `buyer_serving` is the
+    /// only state backed by the coordinator's routing-readiness verdict.
+    var networkState: String?
+    var catalogState: String?
+    var catalogReleaseID: String?
+    var catalogDigest: String?
+    var catalogSignerKeyID: String?
+    var catalogSource: String?
     var coordinatorRecommendedVersion: String?
     var latestReleaseVersion: String?
     var cliUpdateInProgress: Bool
@@ -72,6 +80,10 @@ struct AgentSnapshot: Equatable {
     // "we optimistically flipped the UI" — pauseAck accepted:false must NOT
     // leave the UI showing Paused.
     var pauseAcknowledged: Bool
+
+    mutating func markCoordinatorReadinessUnknown() {
+        networkState = "buyer_serving_unknown"
+    }
 
     static let empty = AgentSnapshot(
         state: .idle,
@@ -109,6 +121,12 @@ struct AgentSnapshot: Equatable {
         lastError: nil,
         cliVersion: nil,
         coordinatorConnected: nil,
+        networkState: nil,
+        catalogState: nil,
+        catalogReleaseID: nil,
+        catalogDigest: nil,
+        catalogSignerKeyID: nil,
+        catalogSource: nil,
         coordinatorRecommendedVersion: nil,
         latestReleaseVersion: nil,
         cliUpdateInProgress: false,
@@ -122,8 +140,9 @@ enum AgentSnapshotPresenter {
         s.state == .serving || s.state == .paused || isLocalOnly(s)
     }
 
-    private static func isNetworkReady(_ s: AgentSnapshot) -> Bool {
-        s.state == .serving && s.coordinatorConnected == true
+    static func isNetworkReady(_ s: AgentSnapshot) -> Bool {
+        guard s.state == .serving else { return false }
+        return s.networkState == "buyer_serving"
     }
 
     private static func isLocalOnly(_ s: AgentSnapshot) -> Bool {
@@ -134,6 +153,7 @@ enum AgentSnapshotPresenter {
         switch s.state {
         case .idle, .starting: return "Idle"
         case .serving:
+            guard isNetworkReady(s) else { return "Connected" }
             if let usdc = s.earningsUsdcToday { return String(format: "$%.2f", usdc) }
             return "Serving"
         case .paused:         return "Paused"
@@ -146,7 +166,8 @@ enum AgentSnapshotPresenter {
         switch s.state {
         case .idle:         return "Not running"
         case .starting:     return "Starting…"
-        case .serving:      return "Serving"
+        case .serving:
+            return isNetworkReady(s) ? "Serving" : "Connected"
         case .paused:       return "Paused"
         case .reconnecting:
             return isLocalOnly(s) ? "Local only" : "Reconnecting…"
@@ -156,6 +177,8 @@ enum AgentSnapshotPresenter {
 
     static func dashboardSubtitle(_ s: AgentSnapshot) -> String? {
         switch s.state {
+        case .serving where !isNetworkReady(s):
+            return "Coordinator connected · buyer-serving status unknown"
         case .serving where s.earningsUsdcToday == nil:
             return "Connected to coordinator · waiting for first paid job"
         case .serving:
@@ -177,7 +200,11 @@ enum AgentSnapshotPresenter {
         switch s.state {
         case .idle:         return "Not running"
         case .starting:     return "Starting…"
-        case .serving:      return "Serving " + (s.currentModelID ?? "model")
+        case .serving:
+            if isNetworkReady(s) {
+                return "Serving " + (s.currentModelID ?? "model")
+            }
+            return "Connected · buyer-serving status unknown"
         case .paused:       return "Paused"
         case .reconnecting:
             if isLocalOnly(s) {

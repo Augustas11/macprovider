@@ -175,26 +175,149 @@ final class AutoUpdateTests: XCTestCase {
         try store.writePending(marker)
 
         XCTAssertFalse(store.updateLockIsLive())
-        do {
-            let lock = try store.acquireLock()
-            XCTAssertTrue(store.updateLockIsLive())
-            withExtendedLifetime(lock) {}
+        XCTAssertThrowsError(try store.acquireLock()) { error in
+            XCTAssertEqual(error as? AutoUpdateMarkerError, .transactionPending)
         }
-        XCTAssertFalse(store.updateLockIsLive())
 
         try store.completeSuccessfulUpdate(marker)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.lockURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.successSentinelPath(binaryURL: binary, updateID: marker.updateID).path))
 
         try store.finalizeSuccessfulUpdate(marker)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.lockURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.successSentinelPath(binaryURL: binary, updateID: marker.updateID).path))
+    }
+
+    func testProviderMutationOuterLockSerializesSwiftMutators() throws {
+        let fixture = try TempHome()
+        let first = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let second = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let lock = try first.acquireLock()
+
+        XCTAssertTrue(second.updateLockIsLive())
+        XCTAssertThrowsError(try second.acquireLock()) { error in
+            XCTAssertEqual(error as? AutoUpdateMarkerError, .lockContended)
+        }
+        withExtendedLifetime(lock) {}
+    }
+
+    func testProviderMutationLocksAreNormalizedToExactPrivateMode() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let lock = try store.acquireLock()
+
+        for path in [store.installerLockURL.path, store.lockURL.path] {
+            var info = stat()
+            XCTAssertEqual(lstat(path, &info), 0)
+            XCTAssertEqual(info.st_mode & 0o777, 0o600)
+            XCTAssertEqual(info.st_nlink, 1)
+        }
+        withExtendedLifetime(lock) {}
+    }
+
+    func testInnerProviderMutationLockRejectsHardlinkFIFOAndReadableMode() throws {
+        enum UnsafeLockKind: String, CaseIterable {
+            case hardlink
+            case fifo
+            case readable
+        }
+
+        for kind in UnsafeLockKind.allCases {
+            let fixture = try TempHome()
+            let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+            var initial: AutoUpdateLock? = try store.acquireLock()
+            initial = nil
+            try FileManager.default.removeItem(at: store.lockURL)
+
+            switch kind {
+            case .hardlink:
+                let source = store.root.appendingPathComponent("lock-source")
+                try Data().write(to: source)
+                XCTAssertEqual(link(source.path, store.lockURL.path), 0)
+            case .fifo:
+                XCTAssertEqual(mkfifo(store.lockURL.path, 0o600), 0)
+            case .readable:
+                try Data().write(to: store.lockURL)
+                XCTAssertEqual(chmod(store.lockURL.path, 0o644), 0)
+            }
+
+            XCTAssertTrue(store.updateLockIsLive(), "\(kind.rawValue) lock must fail closed")
+            XCTAssertThrowsError(try store.acquireLock(), "\(kind.rawValue) lock must be rejected") { error in
+                XCTAssertEqual(
+                    error as? AutoUpdateMarkerError,
+                    .trustedRootInvalid("provider_mutation_inner_lock_invalid")
+                )
+            }
+        }
+    }
+
+    func testOuterProviderMutationLockRejectsReadableMode() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        var initial: AutoUpdateLock? = try store.acquireLock()
+        initial = nil
+        XCTAssertEqual(chmod(store.installerLockURL.path, 0o644), 0)
+
+        XCTAssertThrowsError(try store.acquireLock()) { error in
+            XCTAssertEqual(
+                error as? AutoUpdateMarkerError,
+                .trustedRootInvalid("provider_mutation_outer_lock_invalid")
+            )
+        }
+    }
+
+    func testRecoveryCommitHoldsStableOuterAndInnerLockDomain() throws {
+        let fixture = try TempHome()
+        let first = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let second = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, _, backup) = try makePendingMarkerFixture(
+            store: first,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+        var before = stat()
+        XCTAssertEqual(lstat(first.lockURL.path, &before), 0)
+
+        var held: AutoUpdateLock? = try first.acquireRecoveryLock()
+        XCTAssertThrowsError(try second.acquireRecoveryLock()) { error in
+            XCTAssertEqual(error as? AutoUpdateMarkerError, .lockContended)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: first.pendingURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+
+        held = nil
+        let committer = try second.acquireRecoveryLock()
+        let current = try XCTUnwrap(second.readPending())
+        XCTAssertEqual(current, marker)
+        try second.completeSuccessfulUpdate(current)
+        try second.finalizeSuccessfulUpdate(current)
+        withExtendedLifetime(committer) {}
+
+        var after = stat()
+        XCTAssertEqual(lstat(first.lockURL.path, &after), 0)
+        XCTAssertEqual(before.st_ino, after.st_ino)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.pendingURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+    }
+
+    func testLiveInstallerOwnerFencesMutationAndRecoveryAfterHelperSIGKILL() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(
+            homeDirectory: fixture.url,
+            installerOwnerLiveOverride: { true }
+        )
+
+        XCTAssertTrue(store.updateLockIsLive())
+        XCTAssertThrowsError(try store.acquireLock()) { error in
+            XCTAssertEqual(error as? AutoUpdateMarkerError, .lockContended)
+        }
     }
 
     func testOrphanPendingMarkerWithValidBackupRestoresBeforeCleanup() throws {
@@ -208,7 +331,7 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: binary), "old")
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.lockURL.path))
         XCTAssertEqual(store.cooldown(target: marker.targetVersion, failureClass: .orphanedPendingMarker)?.attempt, 1)
     }
 
@@ -233,6 +356,138 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(outcome, .restored(marker))
         XCTAssertEqual(try String(contentsOf: binary), "old")
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+    }
+
+    func testFullReleasePendingMarkerRestoresAllOwnedResourcesAndRemovesNewOnlyBundle() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let binaryDirectory = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: binaryDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let binary = binaryDirectory.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: binary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        try writeOwnedReleaseResources(in: binaryDirectory, prefix: "old")
+
+        let marker = try store.preserveReleaseRollbackBackup(
+            binaryURL: binary,
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            targetVersion: "1.7.0"
+        )
+        try store.writePending(marker)
+        try Data("new-binary".utf8).write(to: binary)
+        try replaceOwnedReleaseResources(in: binaryDirectory, prefix: "new")
+        let newOnlyBundle = binaryDirectory.appendingPathComponent("NewOnly.bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: newOnlyBundle, withIntermediateDirectories: false)
+        try Data("new-only".utf8).write(to: newOnlyBundle.appendingPathComponent("resource"))
+
+        let outcome = store.recoverOrphanedMarker(marker)
+
+        XCTAssertEqual(outcome, .restored(marker))
+        XCTAssertEqual(try String(contentsOf: binary), "old-binary")
+        XCTAssertEqual(try String(contentsOf: binaryDirectory.appendingPathComponent("mlx.metallib")), "old-metal")
+        XCTAssertEqual(try String(contentsOf: binaryDirectory.appendingPathComponent("THIRD-PARTY-NOTICES.txt")), "old-notices")
+        XCTAssertEqual(
+            try String(contentsOf: binaryDirectory.appendingPathComponent("Runtime.bundle/resource")),
+            "old-bundle"
+        )
+        XCTAssertEqual(
+            try String(contentsOf: binaryDirectory.appendingPathComponent("catalog-release/release.json")),
+            "old-catalog"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: newOnlyBundle.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.backupPath))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.releaseBackupPath ?? ""))
+    }
+
+    func testFullReleasePendingMarkerRejectsTamperedResourceSnapshot() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let binaryDirectory = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: binaryDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let binary = binaryDirectory.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: binary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary.path)
+        try writeOwnedReleaseResources(in: binaryDirectory, prefix: "old")
+        let marker = try store.preserveReleaseRollbackBackup(
+            binaryURL: binary,
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            targetVersion: "1.7.0"
+        )
+        try store.writePending(marker)
+        try Data("new-binary".utf8).write(to: binary)
+        try replaceOwnedReleaseResources(in: binaryDirectory, prefix: "new")
+        let releaseBackup = URL(fileURLWithPath: try XCTUnwrap(marker.releaseBackupPath), isDirectory: true)
+            .appendingPathComponent("mlx.metallib")
+        try Data("tampered".utf8).write(to: releaseBackup)
+
+        let outcome = store.recoverOrphanedMarker(marker)
+
+        guard case .backupCorrupt = outcome else {
+            return XCTFail("expected backupCorrupt, got \(outcome)")
+        }
+        XCTAssertEqual(try String(contentsOf: binary), "new-binary")
+        XCTAssertEqual(try String(contentsOf: binaryDirectory.appendingPathComponent("mlx.metallib")), "new-metal")
+    }
+
+    func testReleasePayloadActivationAndRollbackKeepBinaryResourcesAndCatalogTogether() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        try store.ensureTrustedRoot()
+        let live = fixture.url.appendingPathComponent("bin", isDirectory: true)
+        let payload = fixture.url.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: live, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let liveBinary = live.appendingPathComponent("macprovider-cli")
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: liveBinary)
+        try Data("new-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: liveBinary.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try writeOwnedReleaseResources(in: live, prefix: "old")
+        try writeOwnedReleaseResources(in: payload, prefix: "new")
+        let marker = try store.preserveReleaseRollbackBackup(
+            binaryURL: liveBinary,
+            updateID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            targetVersion: "1.7.0"
+        )
+        try store.writePending(marker)
+
+        try store.activateReleasePayload(from: payload, newBinary: newBinary, to: liveBinary)
+        XCTAssertEqual(try String(contentsOf: liveBinary), "new-binary")
+        XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("mlx.metallib")), "new-metal")
+        XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("catalog-release/release.json")), "new-catalog")
+
+        try store.restoreBackup(marker)
+        XCTAssertEqual(try String(contentsOf: liveBinary), "old-binary")
+        XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("mlx.metallib")), "old-metal")
+        XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("catalog-release/release.json")), "old-catalog")
+    }
+
+    func testLegacyBinaryOnlyPendingMarkerEncodingOmitsReleaseSnapshotFields() throws {
+        let fixture = try TempHome()
+        let store = AutoUpdateMarkerStore(homeDirectory: fixture.url)
+        let (marker, _, _) = try makePendingMarkerFixture(
+            store: store,
+            fixture: fixture,
+            backupContents: "old",
+            targetContents: "new"
+        )
+
+        let raw = try Data(contentsOf: store.pendingURL)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+        XCTAssertNil(object["release_backup_path"])
+        XCTAssertNil(object["release_backup_sha256"])
+        XCTAssertEqual(try store.readPending(), marker)
     }
 
     func testOrphanPendingMarkerWithMissingOrCorruptBackupQuarantinesWithoutRestore() throws {
@@ -293,7 +548,7 @@ final class AutoUpdateTests: XCTestCase {
         try store.completeSuccessfulUpdate(marker)
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.lockURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path))
 
         try store.writePending(marker)
@@ -303,7 +558,7 @@ final class AutoUpdateTests: XCTestCase {
         try store.completeSuccessfulUpdate(marker)
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.lockURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path))
 
         try store.finalizeSuccessfulUpdate(marker)
@@ -496,7 +751,7 @@ final class AutoUpdateTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: binary), "old")
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.lockURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.lockURL.path))
     }
 
     func testAutoupdateReasonRedactionUsesStableCodes() {
@@ -589,6 +844,34 @@ final class AutoUpdateTests: XCTestCase {
         )
         try store.writePending(marker)
         return (marker, binary, backup)
+    }
+
+    private func writeOwnedReleaseResources(in directory: URL, prefix: String) throws {
+        try Data("\(prefix)-metal".utf8).write(to: directory.appendingPathComponent("mlx.metallib"))
+        try Data("\(prefix)-notices".utf8).write(to: directory.appendingPathComponent("THIRD-PARTY-NOTICES.txt"))
+        let bundle = directory.appendingPathComponent("Runtime.bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: false)
+        try Data("\(prefix)-bundle".utf8).write(to: bundle.appendingPathComponent("resource"))
+        let catalog = directory.appendingPathComponent("catalog-release", isDirectory: true)
+        try FileManager.default.createDirectory(at: catalog, withIntermediateDirectories: false)
+        for name in [
+            "release.json",
+            "trusted-keys.json",
+            "autotune-candidates.json",
+            "autotune-candidates.json.sig",
+            "demand-rank.json",
+            "demand-rank.json.sig",
+        ] {
+            let contents = name == "release.json" ? "\(prefix)-catalog" : "\(prefix)-\(name)"
+            try Data(contents.utf8).write(to: catalog.appendingPathComponent(name))
+        }
+    }
+
+    private func replaceOwnedReleaseResources(in directory: URL, prefix: String) throws {
+        for name in ["mlx.metallib", "THIRD-PARTY-NOTICES.txt", "Runtime.bundle", "catalog-release"] {
+            try FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
+        try writeOwnedReleaseResources(in: directory, prefix: prefix)
     }
 
     // MARK: — Provisional-tier auto-update graduation (2026-07-03)

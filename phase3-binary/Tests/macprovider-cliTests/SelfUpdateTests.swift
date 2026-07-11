@@ -53,6 +53,24 @@ final class SelfUpdateTests: XCTestCase {
         XCTAssertEqual(SelfUpdate.compareSemver("1.2", "1.2.0"), .orderedSame)
     }
 
+    func testReleaseTagAndStagedBinaryVersionAreStrictlyBound() throws {
+        XCTAssertEqual(try SelfUpdate.validateReleaseTag("v1.2.1"), "1.2.1")
+        XCTAssertThrowsError(try SelfUpdate.validateReleaseTag(" v1.2.1 "))
+        XCTAssertThrowsError(try SelfUpdate.validateReleaseTag("release-1.2.1"))
+        XCTAssertNoThrow(try SelfUpdate.requireStagedBinaryVersion("1.2.1\n", targetVersion: "1.2.1"))
+    }
+
+    func testCopiedOlderSignedPayloadCannotMasqueradeAsNewRelease() {
+        XCTAssertThrowsError(
+            try SelfUpdate.requireStagedBinaryVersion("1.2.0\n", targetVersion: "1.2.1")
+        ) { error in
+            XCTAssertEqual(
+                String(describing: error),
+                UpdateError.stagedVersionMismatch(expected: "1.2.1", actual: "1.2.0").description
+            )
+        }
+    }
+
     func testValidatedUpdateDrainsBeforeReplacingAndRestartingLaunchd() async throws {
         let recorder = UpdateActionRecorder()
         let binary = URL(fileURLWithPath: "/tmp/macprovider-cli-test")
@@ -69,7 +87,8 @@ final class SelfUpdateTests: XCTestCase {
             },
             restartLaunchd: {
                 recorder.append("launchctl_bootstrap")
-            }
+            },
+            postRestartReadiness: { true }
         )
 
         try await update.applyValidatedUpdateForTest(newBinary: binary)
@@ -83,7 +102,7 @@ final class SelfUpdateTests: XCTestCase {
         ])
     }
 
-    func testRestartFailureAfterBinaryReplaceDoesNotFailValidatedUpdate() async throws {
+    func testRestartFailureReturnsFailureAndRollsBackReplacement() async throws {
         let recorder = UpdateActionRecorder()
         let binary = URL(fileURLWithPath: "/tmp/macprovider-cli-test")
         let update = SelfUpdate(
@@ -95,16 +114,141 @@ final class SelfUpdateTests: XCTestCase {
             replaceBinary: { _ in
                 recorder.append("replace")
             },
+            rollbackReplacement: {
+                recorder.append("rollback")
+            },
             restartLaunchd: {
                 recorder.append("restart")
                 throw UpdateError.processFailed("/bin/launchctl", 5)
             }
         )
 
-        let restartError = try await update.applyValidatedUpdateForTest(newBinary: binary)
+        do {
+            try await update.applyValidatedUpdateForTest(newBinary: binary)
+            XCTFail("restart failure unexpectedly returned success")
+        } catch let error as UpdateError {
+            XCTAssertTrue(error.description.contains("rollback_restored"))
+        }
 
-        XCTAssertEqual(recorder.snapshot(), ["drain", "replace", "restart"])
-        XCTAssertEqual(restartError.map { String(describing: $0) }, "/bin/launchctl exited with status 5")
+        XCTAssertEqual(recorder.snapshot(), ["drain", "replace", "restart", "rollback"])
+    }
+
+    func testReadinessFailureRollsBackReplacement() async throws {
+        let recorder = UpdateActionRecorder()
+        let update = SelfUpdate(
+            currentVersion: "1.2.0",
+            releasesAPIURL: nil,
+            replaceBinary: { _ in recorder.append("replace") },
+            rollbackReplacement: { recorder.append("rollback") },
+            restartLaunchd: { recorder.append("restart") },
+            postRestartReadiness: { false }
+        )
+
+        do {
+            try await update.applyValidatedUpdateForTest(newBinary: URL(fileURLWithPath: "/tmp/macprovider-cli-test"))
+            XCTFail("readiness failure unexpectedly returned success")
+        } catch let error as UpdateError {
+            XCTAssertTrue(error.description.contains("rollback_restored"))
+        }
+
+        XCTAssertEqual(recorder.snapshot(), ["replace", "restart", "rollback", "restart"])
+    }
+
+    func testPayloadTransactionRestoresBinaryAndAdjacentResources() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("self-update-payload-\(UUID().uuidString)", isDirectory: true)
+        let current = root.appendingPathComponent("current", isDirectory: true)
+        let payload = root.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: current, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let currentBinary = current.appendingPathComponent("macprovider-cli")
+        try Data("old-binary".utf8).write(to: currentBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: currentBinary.path)
+        try Data("old-metal".utf8).write(to: current.appendingPathComponent("mlx.metallib"))
+        let oldBundle = current.appendingPathComponent("Runtime.bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: oldBundle, withIntermediateDirectories: false)
+        try Data("old-resource".utf8).write(to: oldBundle.appendingPathComponent("resource"))
+        let oldCatalog = current.appendingPathComponent("catalog-release", isDirectory: true)
+        try Self.writeCatalogFixture(to: oldCatalog, marker: "old")
+
+        let newBinary = payload.appendingPathComponent("macprovider-cli")
+        try Data("new-binary".utf8).write(to: newBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: newBinary.path)
+        try Data("new-metal".utf8).write(to: payload.appendingPathComponent("mlx.metallib"))
+        let newBundle = payload.appendingPathComponent("Runtime.bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: newBundle, withIntermediateDirectories: false)
+        try Data("new-resource".utf8).write(to: newBundle.appendingPathComponent("resource"))
+        let newCatalog = payload.appendingPathComponent("catalog-release", isDirectory: true)
+        try Self.writeCatalogFixture(to: newCatalog, marker: "new")
+
+        let transaction = try ProviderReleasePayloadTransaction(
+            currentBinary: currentBinary,
+            markerStore: AutoUpdateMarkerStore(homeDirectory: root)
+        )
+        try transaction.activate(from: payload, newBinary: newBinary)
+        XCTAssertEqual(try String(contentsOf: currentBinary), "new-binary")
+        XCTAssertEqual(try String(contentsOf: current.appendingPathComponent("mlx.metallib")), "new-metal")
+        XCTAssertEqual(try String(contentsOf: oldCatalog.appendingPathComponent("release.json")), "new-release.json")
+
+        try transaction.restore()
+        transaction.cleanup()
+
+        XCTAssertEqual(try String(contentsOf: currentBinary), "old-binary")
+        XCTAssertEqual(try String(contentsOf: current.appendingPathComponent("mlx.metallib")), "old-metal")
+        XCTAssertEqual(try String(contentsOf: oldBundle.appendingPathComponent("resource")), "old-resource")
+        XCTAssertEqual(try String(contentsOf: oldCatalog.appendingPathComponent("release.json")), "old-release.json")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: transaction.backupDirectory.path))
+    }
+
+    func testPayloadValidationRejectsIncompleteReleaseBeforeActivation() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("self-update-incomplete-payload-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let binary = root.appendingPathComponent("macprovider-cli")
+        try Data("new-binary".utf8).write(to: binary)
+
+        XCTAssertThrowsError(
+            try ProviderReleasePayloadTransaction.validateReleasePayload(at: root, newBinary: binary)
+        ) { error in
+            XCTAssertEqual(
+                String(describing: error),
+                UpdateError.missingReleaseResource("mlx.metallib").description
+            )
+        }
+    }
+
+    func testExtractedTreeRejectsNestedSymlink() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("self-update-symlink-\(UUID().uuidString)", isDirectory: true)
+        let bundle = root.appendingPathComponent("Runtime.bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createSymbolicLink(
+            at: bundle.appendingPathComponent("escape"),
+            withDestinationURL: URL(fileURLWithPath: "/tmp")
+        )
+
+        XCTAssertThrowsError(try SelfUpdate.validateExtractedTreeForTest(root)) { error in
+            XCTAssertTrue(String(describing: error).contains("unsafe entry"))
+        }
+    }
+
+    private static func writeCatalogFixture(to directory: URL, marker: String) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        for name in [
+            "release.json",
+            "trusted-keys.json",
+            "autotune-candidates.json",
+            "autotune-candidates.json.sig",
+            "demand-rank.json",
+            "demand-rank.json.sig",
+        ] {
+            try Data("\(marker)-\(name)".utf8).write(to: directory.appendingPathComponent(name))
+        }
     }
 
     func testLaunchdRestartUsesKickstartForLoadedService() {

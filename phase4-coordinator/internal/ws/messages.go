@@ -13,23 +13,28 @@ import (
 )
 
 type Hello struct {
-	Type                  string          `json:"type"`
-	Version               int             `json:"version"`
-	Tier                  int             `json:"tier"`
-	ProviderID            string          `json:"provider_id"`
-	Hostname              string          `json:"hostname"`
-	ModelID               string          `json:"model_id"`
-	ModelHash             string          `json:"model_hash,omitempty"`
-	ModelParamsB          float64         `json:"model_params_b"`
-	RAMGB                 int             `json:"ram_gb"`
-	MaxContextTokens      int             `json:"max_context_tokens"`
-	MaxConcurrency        int             `json:"max_concurrency"`
-	ThroughputTPSEstimate float64         `json:"throughput_tps_estimate"`
-	ModelLoadTimeMs       int64           `json:"model_load_time_ms,omitempty"`
-	BinaryVersion         string          `json:"binary_version"`
-	Attestation           json.RawMessage `json:"attestation"`
-	EndpointURL           *string         `json:"endpoint_url,omitempty"`
-	CredentialBootstrap   bool            `json:"credential_bootstrap,omitempty"`
+	Type                   string          `json:"type"`
+	Version                int             `json:"version"`
+	Tier                   int             `json:"tier"`
+	ProviderID             string          `json:"provider_id"`
+	Hostname               string          `json:"hostname"`
+	ModelID                string          `json:"model_id"`
+	ModelHash              string          `json:"model_hash,omitempty"`
+	ModelParamsB           float64         `json:"model_params_b"`
+	RAMGB                  int             `json:"ram_gb"`
+	MaxContextTokens       int             `json:"max_context_tokens"`
+	MaxConcurrency         int             `json:"max_concurrency"`
+	ThroughputTPSEstimate  float64         `json:"throughput_tps_estimate"`
+	ModelLoadTimeMs        int64           `json:"model_load_time_ms,omitempty"`
+	BinaryVersion          string          `json:"binary_version"`
+	Attestation            json.RawMessage `json:"attestation"`
+	EndpointURL            *string         `json:"endpoint_url,omitempty"`
+	CatalogReleaseID       string          `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion   string          `json:"catalog_policy_version,omitempty"`
+	CandidateCatalogSHA256 string          `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID     string          `json:"catalog_signer_key_id,omitempty"`
+	CandidateRowIdentity   string          `json:"catalog_row_identity,omitempty"`
+	CredentialBootstrap    bool            `json:"credential_bootstrap,omitempty"`
 }
 
 const (
@@ -53,9 +58,14 @@ type HelloAck struct {
 	// the top-level `provider_token` YAML key (FR-C9.3) so the next
 	// reconnect carries Bearer. Note: top-level, NOT nested under
 	// `auth:` — codex audit on PR #44 caught the prior spec/code drift.
-	AssignedProviderToken string `json:"assigned_provider_token,omitempty"`
-	PairOT                string `json:"pair_ot,omitempty"`
-	ClaimURL              string `json:"claim_url,omitempty"`
+	AssignedProviderToken  string `json:"assigned_provider_token,omitempty"`
+	PairOT                 string `json:"pair_ot,omitempty"`
+	ClaimURL               string `json:"claim_url,omitempty"`
+	CatalogCompatible      bool   `json:"catalog_compatible,omitempty"`
+	CatalogReleaseID       string `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion   string `json:"catalog_policy_version,omitempty"`
+	CandidateCatalogSHA256 string `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID     string `json:"catalog_signer_key_id,omitempty"`
 }
 
 type AuthRequest struct {
@@ -84,6 +94,11 @@ type AuthRequest struct {
 	IdentityTranscriptSHA256 string          `json:"identity_signature_transcript_sha256,omitempty"`
 	SupportedModels          []string        `json:"supported_models,omitempty"`
 	PublishesSupportedModels bool            `json:"publishes_supported_models,omitempty"`
+	CatalogReleaseID         string          `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion     string          `json:"catalog_policy_version,omitempty"`
+	CandidateCatalogSHA256   string          `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID       string          `json:"catalog_signer_key_id,omitempty"`
+	CandidateRowIdentity     string          `json:"catalog_row_identity,omitempty"`
 	CredentialBootstrap      bool            `json:"credential_bootstrap,omitempty"`
 }
 
@@ -129,9 +144,14 @@ type AuthResponse struct {
 	// SPEC-003 v0.8 FR-C9.2 — populated only on proof-stage acceptance
 	// when a tokenless provisional provider was just self-minted on this
 	// connect. Never present on rejection-shaped responses.
-	AssignedProviderToken string `json:"assigned_provider_token,omitempty"`
-	PairOT                string `json:"pair_ot,omitempty"`
-	ClaimURL              string `json:"claim_url,omitempty"`
+	AssignedProviderToken  string `json:"assigned_provider_token,omitempty"`
+	PairOT                 string `json:"pair_ot,omitempty"`
+	ClaimURL               string `json:"claim_url,omitempty"`
+	CatalogCompatible      bool   `json:"catalog_compatible,omitempty"`
+	CatalogReleaseID       string `json:"catalog_release_id,omitempty"`
+	CatalogPolicyVersion   string `json:"catalog_policy_version,omitempty"`
+	CandidateCatalogSHA256 string `json:"catalog_candidate_sha256,omitempty"`
+	CatalogSignerKeyID     string `json:"catalog_signer_key_id,omitempty"`
 }
 
 type OwnershipEvent struct {
@@ -440,6 +460,9 @@ func ParseHello(payload []byte) (Hello, string, error) {
 			return Hello{}, "credential_bootstrap", fmt.Errorf("credential_bootstrap must be a bool")
 		}
 	}
+	if field, err := parseCatalogAdmissionMetadata(raw, &h.CatalogReleaseID, &h.CatalogPolicyVersion, &h.CandidateCatalogSHA256, &h.CatalogSignerKeyID, &h.CandidateRowIdentity); err != nil {
+		return Hello{}, field, err
+	}
 	return h, "", nil
 }
 
@@ -641,6 +664,9 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 			return AuthRequest{}, presence, "model_id not in supported_models", fieldError{Field: "model_id not in supported_models"}
 		}
 	}
+	if field, err := parseCatalogAdmissionMetadata(raw, &req.CatalogReleaseID, &req.CatalogPolicyVersion, &req.CandidateCatalogSHA256, &req.CatalogSignerKeyID, &req.CandidateRowIdentity); err != nil {
+		return AuthRequest{}, presence, field, err
+	}
 	return req, presence, "", nil
 }
 
@@ -709,23 +735,54 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 
 func (r AuthRequest) Hello() Hello {
 	return Hello{
-		Type:                  "hello",
-		Version:               1,
-		Tier:                  1,
-		ProviderID:            r.ProviderID,
-		Hostname:              r.Hostname,
-		ModelID:               r.ModelID,
-		ModelHash:             r.ModelHash,
-		ModelParamsB:          r.ModelParamsB,
-		RAMGB:                 r.RAMGB,
-		MaxContextTokens:      r.MaxContextTokens,
-		MaxConcurrency:        r.MaxConcurrency,
-		ThroughputTPSEstimate: r.ThroughputTPSEstimate,
-		ModelLoadTimeMs:       r.ModelLoadTimeMs,
-		BinaryVersion:         r.BinaryVersion,
-		EndpointURL:           r.EndpointURL,
-		CredentialBootstrap:   r.CredentialBootstrap,
+		Type:                   "hello",
+		Version:                1,
+		Tier:                   1,
+		ProviderID:             r.ProviderID,
+		Hostname:               r.Hostname,
+		ModelID:                r.ModelID,
+		ModelHash:              r.ModelHash,
+		ModelParamsB:           r.ModelParamsB,
+		RAMGB:                  r.RAMGB,
+		MaxContextTokens:       r.MaxContextTokens,
+		MaxConcurrency:         r.MaxConcurrency,
+		ThroughputTPSEstimate:  r.ThroughputTPSEstimate,
+		ModelLoadTimeMs:        r.ModelLoadTimeMs,
+		BinaryVersion:          r.BinaryVersion,
+		EndpointURL:            r.EndpointURL,
+		CatalogReleaseID:       r.CatalogReleaseID,
+		CatalogPolicyVersion:   r.CatalogPolicyVersion,
+		CandidateCatalogSHA256: r.CandidateCatalogSHA256,
+		CatalogSignerKeyID:     r.CatalogSignerKeyID,
+		CandidateRowIdentity:   r.CandidateRowIdentity,
+		CredentialBootstrap:    r.CredentialBootstrap,
 	}
+}
+
+func parseCatalogAdmissionMetadata(raw map[string]json.RawMessage, releaseID, policyVersion, digest, signerKeyID, rowIdentity *string) (string, error) {
+	fields := []struct {
+		name string
+		out  *string
+	}{
+		{"catalog_release_id", releaseID},
+		{"catalog_policy_version", policyVersion},
+		{"catalog_candidate_sha256", digest},
+		{"catalog_signer_key_id", signerKeyID},
+		{"catalog_row_identity", rowIdentity},
+	}
+	for _, field := range fields {
+		value, ok := raw[field.name]
+		if !ok {
+			continue
+		}
+		if string(value) == "null" || json.Unmarshal(value, field.out) != nil || strings.TrimSpace(*field.out) == "" || containsControlChar(*field.out) {
+			return field.name, fieldError{Field: field.name}
+		}
+		if len([]byte(*field.out)) > maxHandshakeMetadataBytes {
+			return field.name, fmt.Errorf("%s exceeds %d bytes", field.name, maxHandshakeMetadataBytes)
+		}
+	}
+	return "", nil
 }
 
 type fieldError struct {

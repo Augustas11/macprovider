@@ -198,7 +198,7 @@ var spec015ACs = []acceptanceCriterion{
 		Number:   15,
 		Summary:  "receipt headers stay under 4096 bytes and nginx deploy gates preserve that size",
 		SpecStep: "SPEC-015 §14 AC-15",
-		Commands: []string{"make test-dist", "cd phase3-binary && swift test --parallel"},
+		Commands: []string{"bash phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh", "cd phase3-binary && swift test --parallel"},
 		CIJobs:   []string{"deploy tooling (check-deploy-config gate)", "phase3-binary (swift test)"},
 		Evidence: []evidenceAnchor{
 			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testWorstCaseModelIDHeaderStaysUnder4096Bytes"},

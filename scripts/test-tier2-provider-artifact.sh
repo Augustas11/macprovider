@@ -134,6 +134,11 @@ PY
 good_dir="$WORKDIR/good"
 good_tar="$WORKDIR/good.tar.gz"
 make_fake_binary "$good_dir" "1.2.6" "1"
+mkdir -p "$good_dir/catalog-release"
+for catalog_member in release.json trusted-keys.json autotune-candidates.json \
+  autotune-candidates.json.sig demand-rank.json demand-rank.json.sig; do
+  printf '{}\n' > "$good_dir/catalog-release/$catalog_member"
+done
 make_tarball "$good_dir" "$good_tar"
 good_sha="$(sha256_file "$good_tar")"
 
@@ -142,6 +147,25 @@ PROVIDER_ARTIFACT="$good_tar" \
   PROVIDER_SHA256="$good_sha" \
   "$CHECKER" >"$WORKDIR/good.out" 2>"$WORKDIR/good.err"
 assert_contains "$WORKDIR/good.err" "SPEC-008 Phase 2 B6 provider artifact preflight passed"
+
+missing_catalog_dir="$WORKDIR/missing-catalog"
+missing_catalog_tar="$WORKDIR/missing-catalog.tar.gz"
+make_fake_binary "$missing_catalog_dir" "1.8.31" "1"
+mkdir -p "$missing_catalog_dir/catalog-release"
+for catalog_member in release.json trusted-keys.json autotune-candidates.json \
+  autotune-candidates.json.sig demand-rank.json; do
+  printf '{}\n' > "$missing_catalog_dir/catalog-release/$catalog_member"
+done
+make_tarball "$missing_catalog_dir" "$missing_catalog_tar"
+missing_catalog_sha="$(sha256_file "$missing_catalog_tar")"
+if PROVIDER_ARTIFACT="$missing_catalog_tar" \
+  PROVIDER_VERSION="1.8.31" \
+  PROVIDER_SHA256="$missing_catalog_sha" \
+  "$CHECKER" >"$WORKDIR/missing-catalog.out" 2>"$WORKDIR/missing-catalog.err"; then
+  die "catalog-incomplete v1.8.31 artifact unexpectedly passed"
+fi
+assert_contains "$WORKDIR/missing-catalog.err" \
+  "exactly one catalog-release/demand-rank.json.sig"
 
 PROVIDER_ARTIFACT="$good_tar" \
   PROVIDER_VERSION="1.2.6" \

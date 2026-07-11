@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -8,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -127,10 +130,62 @@ type MalibuEmissionConfig struct {
 // served on the buyer mux (/v1/demand-rank, /v1/autotune-candidates, and
 // their .sig sidecars). Empty paths disable that feed (404).
 type AutotuneFeedsConfig struct {
-	DemandRankPath            string `yaml:"demand_rank_path"`
-	DemandRankSigPath         string `yaml:"demand_rank_sig_path"`
-	AutotuneCandidatesPath    string `yaml:"autotune_candidates_path"`
-	AutotuneCandidatesSigPath string `yaml:"autotune_candidates_sig_path"`
+	DemandRankPath                  string            `yaml:"demand_rank_path"`
+	DemandRankSigPath               string            `yaml:"demand_rank_sig_path"`
+	AutotuneCandidatesPath          string            `yaml:"autotune_candidates_path"`
+	AutotuneCandidatesSigPath       string            `yaml:"autotune_candidates_sig_path"`
+	EnforceProviderAdmission        bool              `yaml:"enforce_provider_admission"`
+	ProviderAdmissionBridgeDeadline string            `yaml:"provider_admission_bridge_deadline"`
+	PublicKeys                      map[string]string `yaml:"public_keys"`
+}
+
+const maxProviderAdmissionBridgeDuration = 24 * time.Hour
+
+// ProviderAdmissionBridgeDeadlineTime parses the absolute deadline that bounds
+// the metadata-free provider migration bridge. Strict admission does not need a
+// deadline; a configured value is still parsed so stale operator typos cannot
+// hide in an otherwise-valid config.
+func (c AutotuneFeedsConfig) ProviderAdmissionBridgeDeadlineTime() (time.Time, error) {
+	raw := c.ProviderAdmissionBridgeDeadline
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	if strings.TrimSpace(raw) != raw {
+		return time.Time{}, fmt.Errorf("autotune.provider_admission_bridge_deadline must be a trimmed RFC3339 timestamp")
+	}
+	deadline, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("autotune.provider_admission_bridge_deadline must be RFC3339: %w", err)
+	}
+	return deadline.UTC(), nil
+}
+
+// DecodePublicKeyring validates and decodes the configured key-ID-to-Ed25519
+// trust map. Keys use canonical padded standard base64 so operator mistakes do
+// not silently select a different decoder or byte representation.
+func (c AutotuneFeedsConfig) DecodePublicKeyring() (map[string]ed25519.PublicKey, error) {
+	keyIDs := make([]string, 0, len(c.PublicKeys))
+	for keyID := range c.PublicKeys {
+		keyIDs = append(keyIDs, keyID)
+	}
+	sort.Strings(keyIDs)
+
+	keyring := make(map[string]ed25519.PublicKey, len(c.PublicKeys))
+	for _, keyID := range keyIDs {
+		if keyID == "" || strings.TrimSpace(keyID) != keyID {
+			return nil, fmt.Errorf("autotune.public_keys contains an invalid key ID %q", keyID)
+		}
+		encoded := c.PublicKeys[keyID]
+		decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
+		if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded {
+			return nil, fmt.Errorf("autotune.public_keys.%s must be canonical padded base64", keyID)
+		}
+		if len(decoded) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("autotune.public_keys.%s must decode to %d bytes", keyID, ed25519.PublicKeySize)
+		}
+		keyring[keyID] = ed25519.PublicKey(append([]byte(nil), decoded...))
+	}
+	return keyring, nil
 }
 
 // StatsConfig is the SPEC-017 Network Stats API config block.
@@ -888,6 +943,11 @@ func Default() Config {
 				OPoIPassRateThreshold:    0.80,
 				AlertCooldownSeconds:     900,
 			},
+		},
+		AutotuneFeeds: AutotuneFeedsConfig{
+			// Strict is the durable safe default. Operators must opt into the
+			// compatibility bridge with an explicit, near-term deadline.
+			EnforceProviderAdmission: true,
 		},
 		Tier2: Tier2Config{
 			SELivenessIntervalS:            300,
@@ -1732,6 +1792,23 @@ func (c Config) requireAutotuneEvidenceFeeds() error {
 
 func (c Config) validateAutotuneFeeds() error {
 	a := c.AutotuneFeeds
+	bridgeDeadline, err := a.ProviderAdmissionBridgeDeadlineTime()
+	if err != nil {
+		return err
+	}
+	if !a.EnforceProviderAdmission {
+		if bridgeDeadline.IsZero() {
+			return fmt.Errorf("autotune.provider_admission_bridge_deadline is required when enforce_provider_admission is false")
+		}
+		now := time.Now().UTC()
+		if !bridgeDeadline.After(now) {
+			return fmt.Errorf("autotune.provider_admission_bridge_deadline must be in the future when enforce_provider_admission is false")
+		}
+		if bridgeDeadline.Sub(now) > maxProviderAdmissionBridgeDuration {
+			return fmt.Errorf("autotune.provider_admission_bridge_deadline must be no more than 24 hours in the future")
+		}
+	}
+	configured := false
 	pairs := []struct {
 		label    string
 		jsonPath string
@@ -1749,6 +1826,14 @@ func (c Config) validateAutotuneFeeds() error {
 		if jsonPath == "" || sigPath == "" {
 			return fmt.Errorf("autotune.%s_path and autotune.%s_sig_path must both be set", p.label, p.label)
 		}
+		configured = true
+	}
+	keyring, err := a.DecodePublicKeyring()
+	if err != nil {
+		return err
+	}
+	if configured && len(keyring) == 0 {
+		return fmt.Errorf("autotune.public_keys must contain at least one Ed25519 public key when a feed is configured")
 	}
 	return nil
 }

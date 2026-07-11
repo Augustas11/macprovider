@@ -119,6 +119,7 @@ func TestCanonicalHardwareEvidenceSHAMatchesSwiftJCS(t *testing.T) {
 			ThermalThrottleDetected: false,
 			ArtifactSHA256:          strings.Repeat("b", 64),
 			CandidateCatalogSHA256:  strings.Repeat("a", 64),
+			CandidateRowIdentity:    strings.Repeat("c", 64),
 			BenchmarkID:             "bench-1",
 			GeneratedAt:             "2026-08-29T10:40:00Z",
 			BinaryVersion:           "1.7.9",
@@ -130,7 +131,7 @@ func TestCanonicalHardwareEvidenceSHAMatchesSwiftJCS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "017420974f7c52fe16595f28a347e6368e93dfc3c0b57d3eefeb5b655c18335c"
+	const want = "47e9892f2f2c986d4d58389bdf209a9e56b2bd92095720845331bc09758065bf"
 	if sha != want {
 		t.Fatalf("evidence SHA=%q want Swift JCS SHA %q", sha, want)
 	}

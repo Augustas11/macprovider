@@ -1,10 +1,17 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
-version: v0.5
+version: v0.6
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-07-06
+last-locked: 2026-07-10
 
 ## Change log
+
+- **v0.6 (2026-07-10)** — Catalog recovery, trust-state separation, and buyer-coverage scoring.
+  1. **One release unit.** Candidate and demand JSON, exact-byte SHA-256 digests, detached signatures, trusted verifier keyring, baked Swift payload, and release manifest are generated and verified from one canonical release directory. Candidate and demand feeds in one release share `version`, `generated_at`, and `policy_version`.
+  2. **Failure classes no longer collapse.** Transport/HTTP unavailability may use the baked release as `safe_offline_fallback`. Invalid signature, unknown key ID, malformed sidecar, or invalid schema emits an integrity warning; a valid but incompatible/older/future/expired feed emits update-required. Integrity and update-required states MUST NOT produce a paid recommendation or coordinator join.
+  3. **Rotation bridge.** Clients and coordinators use a release-pinned verifier keyring and may trust v4 and v5 during the rotation window. Unknown key IDs fail closed. Retirement of v4 requires measured fleet adoption of a v5-capable binary, not merely publication of a v5-signed feed.
+  4. **Buyer-coverage economics.** Ranking estimates operator earning opportunity as provider completion payout × measured TPS × demand floor/weight × bounded supply-deficit multiplier. Demand rows may carry `ready_provider_count` or an operator-computed `supply_deficit_multiplier`; missing supply data is neutral (`1.0`).
+  5. **Buyer-serving state.** Local readiness or coordinator transport alone is insufficient. `buyer_serving` requires a locally ready paid model, a live-verified signed catalog, and an active coordinator admission. Offline fallback and donor modes remain explicitly local/non-buyer-serving.
 
 - **v0.5 (2026-07-06)** — Payout-first scoring for beta supply growth.
   1. **Rank by provider payout, not buyer throughput.** `raw_score` becomes `completion_rate_per_mtok × provider_share` (credits per million completion tokens after the provider split). `demand_weight` and `measured_sustained_tps` are tiebreakers only, in that order, after payout score.
@@ -104,7 +111,7 @@ last-locked: 2026-07-06
 
 ## 1. Mission
 
-`autotune --recommend` scores rate-card-eligible models against the operator's detected Mac hardware, local benchmark results, the current rate card, and an operator-curated static demand signal, then recommends the model with the highest provider payout per completion token among eligible rows. It serves every new provider installer and every operator who runs `macprovider-cli autotune --recommend` after install. Wave 0c lands now because beta launch readiness depends on the 120-provider acquisition cohort reaching a low-friction install path and a correct first-model choice instead of the current donor-default behavior that often selects the largest RAM-fitting dense model rather than the best paid-yield row.
+`autotune --recommend` scores rate-card-eligible models against the operator's detected Mac hardware, local benchmark results, the current rate card, and an operator-curated demand/supply signal, then recommends the eligible model with the strongest expected operator earning opportunity while preferentially filling buyer-facing supply deficits. It serves every new provider installer and every operator who runs `macprovider-cli autotune --recommend` after install. Wave 0c lands now because beta launch readiness depends on a low-friction install path, a trustworthy catalog, and a first-model choice that improves both operator economics and buyer coverage.
 
 ## 2. Non-goals
 
@@ -187,7 +194,7 @@ Fallback source:
 baked autotune-candidates snapshot compiled into the installer/CLI release
 ```
 
-Catalog selection happens before row eligibility. If the fetched catalog is missing, invalid, unsigned, or stale beyond §3.5 limits, the CLI MUST reject the fetched catalog, use the baked catalog snapshot, and emit `candidate_catalog_fallback_used` per AC-6. After selecting either a valid fetched catalog or the baked catalog, a demand/rate-card row missing metadata in the selected catalog is ineligible and MUST NOT be downloaded or benchmarked. The baked catalog is part of the release artifact and is trusted only for that binary version.
+Catalog selection happens before row eligibility. Transport failure, timeout, or unavailable HTTP response MAY select the baked catalog and MUST emit `candidate_catalog_fallback_used`; this state is `safe_offline_fallback` and MUST NOT claim buyer-serving readiness. Invalid signature, unknown signer, malformed sidecar, or invalid schema MUST additionally emit `candidate_catalog_integrity_failure`. A cryptographically valid but older-than-baked, future, expired, or policy-incompatible catalog MUST emit `candidate_catalog_update_required`. Integrity and update-required warnings block paid recommendation and coordinator join. After selecting either a valid fetched catalog or the baked catalog for local diagnostics, a demand/rate-card row missing metadata in the selected catalog is ineligible and MUST NOT be downloaded or benchmarked. The baked catalog is part of the release artifact and is trusted only for that binary version.
 
 The v0.1 candidate catalog schema is:
 
@@ -297,7 +304,10 @@ The v0.1 demand-rank JSON schema is locked as:
       "demand_weight": 0.0,
       "rank": null,
       "recommendable": false,
-      "min_provider_target": 0
+      "min_provider_target": 0,
+      "ready_provider_count": 0,
+      "supply_deficit_multiplier": 1.0,
+      "min_dwell_hours": 0
     }
   }
 }
@@ -313,7 +323,11 @@ Field rules:
 - `rows.<model_key>.demand_weight` is a finite number in `[0.0, 1.0]`.
 - `rows.<model_key>.rank` is either a positive integer OpenRouter completion-token rank or `null` for operator-curated rows without a current rank.
 - `rows.<model_key>.recommendable` is the operator's deployability switch. `true` means runtime support, billing/settlement, and minimum bench gates are green enough for defaults.
-- `rows.<model_key>.min_provider_target` is retained for operator coverage planning and v0.2 migration. v0.1 records it but does not query live provider counts.
+- `rows.<model_key>.min_provider_target` is the desired buyer-ready provider floor for coverage planning.
+- `rows.<model_key>.ready_provider_count` is optional, non-negative, and records the observed buyer-ready supply used for the release. When present and no explicit multiplier is supplied, the effective multiplier is `clamp(min_provider_target / max(ready_provider_count, 1), 0.5, 2.0)`.
+- `rows.<model_key>.supply_deficit_multiplier` is optional and, when present, is authoritative for that release in the inclusive range `[0.5, 2.0]`.
+- `rows.<model_key>.min_dwell_hours` is optional operator policy metadata in `[0, 720]`; v0.6 validates and preserves it but does not auto-switch models.
+- When neither supply field is present, the effective supply-deficit multiplier is neutral (`1.0`).
 
 ### 3.5 Static JSON integrity
 
@@ -331,19 +345,20 @@ Fetched `demand-rank.json` and `autotune-candidates.json` MUST be verified befor
 ```
 
 3. Verify `signature` as base64-encoded Ed25519 over the exact UTF-8 bytes of `{name}.json`.
-4. Use the release-embedded public key `autotune_static_json_ed25519_v4` and release-embedded key ID `streamvc-autotune-static-v4`.
+4. Resolve `key_id` through the release-embedded trusted verifier keyring. The v0.6 rotation bridge contains `streamvc-autotune-static-v4` and the staged v5 verifier; unknown key IDs fail closed.
 5. Parse `{name}.json` only after signature verification succeeds.
-6. Reject the fetched file and fall back to the baked snapshot when the signature sidecar is missing, malformed, uses the wrong `key_id`, uses any `alg` other than `ed25519`, or fails verification.
-7. Reject the fetched file and fall back to the baked snapshot when `generated_at` is older than the baked snapshot's `generated_at`.
+6. Reject the fetched file and use the baked snapshot only for local-safe behavior when the signature sidecar is missing/malformed, uses an unknown `key_id`, uses any `alg` other than `ed25519`, or fails verification; emit the corresponding integrity-failure warning and block paid recommendation/coordinator join.
+7. Reject the fetched file and use the baked snapshot only for local-safe behavior when `generated_at` is older than the baked snapshot's `generated_at`; emit the corresponding update-required warning and block paid recommendation/coordinator join.
 8. Emit `demand_rank_stale` for stale `demand-rank.json` or `candidate_catalog_stale` for stale `autotune-candidates.json`, but allow the fetched file when `generated_at` is 14-30 days old.
-9. Reject the fetched file and fall back to the baked snapshot when `generated_at` is more than 10 minutes in the future relative to the local clock.
-10. Reject the fetched file and fall back to the baked snapshot when `generated_at` is more than 30 days old.
+9. Reject the fetched file and emit update-required when `generated_at` is more than 10 minutes in the future relative to the local clock.
+10. Reject the fetched file and emit update-required when `generated_at` is more than 30 days old.
+11. Candidate and demand feeds selected as one live release MUST share `version`, `generated_at`, and `policy_version`; mixed releases fail closed.
 
-Clients MUST keep the public key and key ID release-pinned. Key rotations require a new binary release that embeds the new verifier key and rejects older sidecar key IDs for the active feed generation.
+Clients MUST keep a release-pinned verifier keyring. Key rotations require a bridge binary that embeds both old and new verifier keys before the feed signer changes. The old key remains trusted until operator telemetry establishes the retirement threshold defined by the release runbook.
 
-## 4. Formula (updated v0.5)
+## 4. Formula (updated v0.6)
 
-The v0.5 recommendation engine ranks eligible rows by provider economics first; buyer QoS signals are tiebreakers only:
+The v0.6 recommendation engine ranks eligible rows by expected operator earning opportunity while filling buyer-facing supply deficits:
 
 ```text
 eligible_rows = rows where:
@@ -355,7 +370,11 @@ eligible_rows = rows where:
 provider_share(row) = provider_share_bps(row) / 10_000
 
 raw_score(row | mac) =
-  completion_rate_per_mtok(row) × provider_share(row)
+  completion_rate_per_mtok(row)
+  × provider_share(row)
+  × measured_sustained_tps(row, mac)
+  × max(demand_weight(row), cold_start_floor)
+  × effective_supply_deficit_multiplier(row)
 
 recommended_model =
   eligible row with highest raw_score, breaking ties by:
@@ -364,13 +383,14 @@ recommended_model =
     3. model key ASC
 ```
 
-**Raw score uses `completion_rate_per_mtok` credits × provider share** (not USD) to rank candidates independent of rate-card USD volatility while reflecting what the provider earns per completion token. `tokens_per_second` and `demand_weight` do not enter the primary score in v0.5; they resolve ties when two rows pay the same per-token rate.
+**Raw score uses provider completion payout credits, measured throughput, buyer-demand weight, and bounded supply deficit.** It remains independent of rate-card USD conversion volatility, while a `0.5...2.0` deficit bound prevents a noisy provider count from overwhelming operator economics.
 
-Constants locked in v0.5:
+Constants locked in v0.6:
 
 | Constant | Value | Rule |
 |---|---:|---|
-| `cold_start_floor` | `0.15` | From demand-rank JSON; schema validation fails if the fetched value differs. Used as tiebreaker floor only in v0.5. |
+| `cold_start_floor` | `0.15` | From demand-rank JSON; schema validation fails if the fetched value differs. Floors the demand factor. |
+| supply-deficit bound | `0.5...2.0` | Applied to explicit or provider-count-derived deficit multipliers. Missing supply data uses `1.0`. |
 | `diversification_band` | `0.85` | Retained in demand-rank JSON schema for forward compatibility; **not used for recommendation pick in v0.5**. Re-enable when supply exceeds demand. |
 | `provider_share` | `0.90` | Represented by rate-card row `provider_share_bps = 9000`; the row value is authoritative, but v0.5 rows are expected to use 0.90. |
 | `tier_weight` | `1.0` | Applies to all rows and tiers in v0.5. Tier-specific calibration is deferred to v0.2 follow-up. |
@@ -478,7 +498,7 @@ Schema rules:
   - `medium` when rate card, demand rank, or candidate catalog used a valid baked fallback, or the benchmark used a valid cache.
   - `low` when both market inputs used baked fallback, hardware tier is unknown, or any non-fatal diagnostic warning affects the recommended row.
 - `why` is a single line under 140 characters, contains no newline, and must not promise realized buyer demand.
-- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.4 warning vocabulary is: `candidate_catalog_fallback_used`, `candidate_catalog_stale`, `demand_rank_fallback_used`, `demand_rank_stale`, `hardware_tier_unknown`, `rate_card_fallback_used`, `no_eligible_model`, `rate_card_default_tier_used`, `tps_below_gate`, `ttft_above_gate`, `swap_observed_under_load`.
+- `warnings[]` is an array of stable machine-readable strings, sorted lexicographically. v0.6 adds `candidate_catalog_integrity_failure`, `candidate_catalog_update_required`, `demand_rank_integrity_failure`, and `demand_rank_update_required` to the existing warning vocabulary. Any integrity/update-required warning blocks a paid recommendation.
 
 ## 7. Per-token payout semantics
 
@@ -617,11 +637,11 @@ AC-2: JSON field order is deterministic and matches §6 exactly for stable diffs
 
 AC-3: When all rows fail eligibility, JSON emits `recommended_model = null`, warnings include `no_eligible_model`, and human output uses the §7.2 donor-tier transcript.
 
-AC-4: When `https://coordinator.streamvc.live/static/demand-rank.json` returns 404, times out, fails schema validation, fails Ed25519 detached-signature validation, is older than the baked snapshot, is more than 10 minutes in the future, or is more than 30 days old, the CLI falls back to the baked demand-rank snapshot and emits `demand_rank_fallback_used`.
+AC-4 **[amended v0.6]**: Transport/HTTP unavailability may use baked demand data with `demand_rank_fallback_used`. Invalid signature/key/sidecar/schema additionally emits `demand_rank_integrity_failure`; valid-but-old/future/expired/policy-incompatible data emits `demand_rank_update_required`. Either blocking warning prevents a paid recommendation.
 
 AC-5: When `/v1/rate-card` cannot be fetched, the CLI falls back to the baked rate-card snapshot and emits `rate_card_fallback_used`.
 
-AC-6: When `https://coordinator.streamvc.live/static/autotune-candidates.json` returns 404, times out, fails schema validation, fails Ed25519 detached-signature validation, is older than the baked snapshot, is more than 10 minutes in the future, or is more than 30 days old, the CLI falls back to the baked candidate catalog and emits `candidate_catalog_fallback_used`.
+AC-6 **[amended v0.6]**: Transport/HTTP unavailability may use the baked candidate catalog with `candidate_catalog_fallback_used`. Invalid signature/key/sidecar/schema additionally emits `candidate_catalog_integrity_failure`; valid-but-old/future/expired/policy-incompatible data emits `candidate_catalog_update_required`. Either blocking warning prevents a paid recommendation and coordinator join.
 
 AC-7 **[amended v0.5]**: Repeated runs with identical hardware, catalog, rate-card, demand-rank, and benchmark inputs produce the same `recommended_model` (strict payout-first argmax + tiebreakers).
 
@@ -662,6 +682,16 @@ AC-27: The recommendation cache at `~/.config/macprovider/last-recommendation.js
 AC-28: Raw hardware fingerprints, serial numbers, MAC addresses, device UUIDs, and the local HMAC secret do not appear in JSON output, logs, warnings, support bundles, or `last-recommendation.json`; only domain-separated HMAC-derived identifiers are persisted.
 
 AC-29 **[amended v0.4]**: Human output uses per-token rate display only; no hourly projections are promised or implied.
+
+AC-34: Static candidate and demand bytes, detached signatures, trusted keyring, baked Swift payload, and manifest are generated from one canonical release input and pass exact-byte parity plus signature verification in CI, packaging, and deploy preflight.
+
+AC-35: A v5-bridge binary accepts both configured v4 and v5 key IDs, rejects every unknown key ID, and requires a canonical 64-byte Ed25519 signature.
+
+AC-36: A candidate and demand pair with different `version`, `generated_at`, or `policy_version` is rejected as a mixed release.
+
+AC-37: Ranking multiplies provider completion payout, measured TPS, demand floor/weight, and bounded supply-deficit multiplier; an unrelated catalog-row edit does not invalidate stable benchmark evidence for an unchanged row.
+
+AC-38: `/v1/status` reports catalog trust and release identity. `buyer_serving` is emitted only when the model is locally ready, the live catalog is verified, and coordinator admission is active; Malibu update success uses that state rather than transport connectivity alone.
 
 AC-30: v0.4 implementation does not add or require a coordinator `/v1/demand-signal` endpoint, provider quota policy, or automatic model switch.
 

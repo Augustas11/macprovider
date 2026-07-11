@@ -28,6 +28,7 @@ die() { printf "ERR:%s\n" "$*" >&2; exit "$1"; }
 log() { printf "LOG:%s\n" "$*" >&2; }
 DRY_RUN=0
 PORT=18080
+INSTALL_DIR="$HOME/macprovider"
 PLIST_PATH="/tmp/provider.plist"
 HARNESS
 cat "$TMP/validate_port.sh" >> "$TMP/harness.sh"
@@ -85,6 +86,7 @@ mkdir -p "$TMP/own/bin"
 cat > "$TMP/own/bin/lsof" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
+  *"-d txt"*) printf 'p4242\nn%s/macprovider/macprovider-cli\n' "$HOME" ;;
   *-t*) echo 4242 ;;
   *) printf "COMMAND PID\nmacprovider-cli 4242\n" ;;
 esac

@@ -21,6 +21,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v6.5.0
@@ -304,6 +305,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: make test-dist
         run: make test-dist
@@ -333,6 +335,9 @@ jobs:
       - name: Run Swift tests
         working-directory: phase3-binary
         run: swift test --parallel
+
+      - name: Verify macOS upgrade rollback and manual process recovery
+        run: bash phase3-binary/dist/test/install_upgrade_evidence_rollback.test.sh
 
 
   spec-015-acceptance:

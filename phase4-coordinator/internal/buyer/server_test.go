@@ -1232,6 +1232,9 @@ func TestPoolCheckReturnsProviderStateAnd404(t *testing.T) {
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"provider_id":"p1"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"state":"ready"`)) {
 		t.Fatalf("body = %s", rr.Body.String())
 	}
+	if bytes.Contains(rr.Body.Bytes(), []byte(`"buyer_serving"`)) || bytes.Contains(rr.Body.Bytes(), []byte(`"catalog_release_id"`)) {
+		t.Fatalf("public pool check leaked deployment evidence: %s", rr.Body.String())
+	}
 
 	missingReq := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=missing", nil)
 	missingReq.RemoteAddr = "198.51.100.2:12345"
@@ -1244,6 +1247,173 @@ func TestPoolCheckReturnsProviderStateAnd404(t *testing.T) {
 	}
 	if !bytes.Contains(missing.Body.Bytes(), []byte(`"error":"provider_not_found"`)) {
 		t.Fatalf("missing body = %s", missing.Body.String())
+	}
+}
+
+func TestPoolCheckReportsExactCatalogAdmissionAndServingEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		state        pool.State
+		buyerServing bool
+		tier2Config  config.Tier2Config
+	}{
+		{name: "busy remains buyer serving", state: pool.StateBusy, buyerServing: true},
+		{name: "degraded is not buyer serving", state: pool.StateDegraded, buyerServing: false},
+		{name: "tier2 excluded is not buyer serving", state: pool.StateReady, buyerServing: false, tier2Config: config.Tier2Config{RequireEncryptedLeg: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := pool.NewRegistry(nil)
+			now := time.Now().UTC()
+			registry.Register(&pool.Provider{
+				ProviderID:             "catalog-canary",
+				AssignedID:             "session-1",
+				Hostname:               "catalog-canary.local",
+				ModelID:                "model-a",
+				MaxContextTokens:       20000,
+				MaxConcurrency:         1,
+				SlotsFree:              1,
+				SlotsTotal:             1,
+				Tier:                   pool.TierPinned,
+				InferencePath:          pool.InferencePathHTTPForwarding,
+				State:                  tc.state,
+				LastHeartbeatAt:        now,
+				LastActivityAt:         now,
+				ConnectedAt:            now,
+				CatalogAdmissionMode:   "current",
+				CatalogReleaseID:       "release-current",
+				CatalogPolicyVersion:   "autotune-policy-v1",
+				CandidateCatalogSHA256: strings.Repeat("a", 64),
+				CatalogSignerKeyID:     "signer-v4",
+				CandidateRowIdentity:   strings.Repeat("b", 64),
+			}, nil)
+			server := buyer.NewServer(
+				registry,
+				zerolog.Nop(),
+				time.Unix(1716768000, 0),
+				buyer.WithInternalAuthKey("operator-secret"),
+				buyer.WithTier2Config(tc.tier2Config),
+			)
+			req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=catalog-canary&details=deployment", nil)
+			req.RemoteAddr = "198.51.100.1:12345"
+			req.Header.Set("Authorization", "Bearer operator-secret")
+			rr := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+			}
+			var response map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response["buyer_serving"] != tc.buyerServing || response["catalog_admission_mode"] != "current" || response["catalog_release_id"] != "release-current" || response["catalog_candidate_sha256"] != strings.Repeat("a", 64) || response["catalog_row_identity"] != strings.Repeat("b", 64) || response["catalog_evidence_source"] != "provider_reported" {
+				t.Fatalf("response = %+v", response)
+			}
+		})
+	}
+}
+
+func TestPoolCheckReadinessEvidenceIsPublicAndLegacyIsNotBuyerServing(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		admissionMode string
+		buyerServing  bool
+		withEnvelope  bool
+	}{
+		{name: "current envelope", admissionMode: "current", buyerServing: true, withEnvelope: true},
+		{name: "legacy remains visible", admissionMode: "legacy", buyerServing: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := pool.NewRegistry(nil)
+			now := time.Now().UTC()
+			provider := &pool.Provider{
+				ProviderID:           "readiness-provider",
+				AssignedID:           "session-1",
+				ModelID:              "model-a",
+				MaxContextTokens:     20000,
+				MaxConcurrency:       1,
+				SlotsFree:            1,
+				SlotsTotal:           1,
+				State:                pool.StateReady,
+				LastHeartbeatAt:      now,
+				LastActivityAt:       now,
+				ConnectedAt:          now,
+				CatalogAdmissionMode: tc.admissionMode,
+			}
+			if tc.withEnvelope {
+				provider.CatalogReleaseID = "release-current"
+				provider.CatalogPolicyVersion = "autotune-policy-v1"
+				provider.CandidateCatalogSHA256 = strings.Repeat("a", 64)
+				provider.CatalogSignerKeyID = "signer-v4"
+				provider.CandidateRowIdentity = strings.Repeat("b", 64)
+			}
+			registry.Register(provider, nil)
+			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithInternalAuthKey("operator-secret"))
+			req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=readiness-provider&assigned_id=session-1&details=readiness", nil)
+			req.RemoteAddr = "198.51.100.1:12345"
+			rr := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+			}
+			var response map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response["provider_id"] != "readiness-provider" || response["assigned_id"] != "session-1" || response["buyer_serving"] != tc.buyerServing || response["catalog_admission_mode"] != tc.admissionMode || response["catalog_evidence_source"] != "provider_reported" {
+				t.Fatalf("response = %+v", response)
+			}
+			if tc.withEnvelope && (response["catalog_release_id"] != "release-current" || response["catalog_policy_version"] != "autotune-policy-v1" || response["catalog_candidate_sha256"] != strings.Repeat("a", 64) || response["catalog_signer_key_id"] != "signer-v4" || response["catalog_row_identity"] != strings.Repeat("b", 64)) {
+				t.Fatalf("readiness envelope = %+v", response)
+			}
+		})
+	}
+}
+
+func TestPoolCheckReadinessRequiresExactAssignedSession(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	for _, tc := range []struct {
+		name string
+		url  string
+		want int
+	}{
+		{name: "missing assigned session", url: "/v1/pool/check?provider_id=p1&details=readiness", want: http.StatusBadRequest},
+		{name: "stale assigned session", url: "/v1/pool/check?provider_id=p1&assigned_id=session-old&details=readiness", want: http.StatusNotFound},
+		{name: "exact assigned session", url: "/v1/pool/check?provider_id=p1&assigned_id=session-1&details=readiness", want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+			req.RemoteAddr = "198.51.100.50:12345"
+			rr := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("status = %d, want %d body=%s", rr.Code, tc.want, rr.Body.String())
+			}
+			if tc.want == http.StatusOK {
+				var response map[string]any
+				if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+					t.Fatalf("decode response: %v", err)
+				}
+				if response["provider_id"] != "p1" || response["assigned_id"] != "session-1" {
+					t.Fatalf("response identity = %+v", response)
+				}
+			}
+		})
+	}
+}
+
+func TestPoolCheckDeploymentEvidenceRequiresAuthorization(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithInternalAuthKey("operator-secret"))
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1&details=deployment", nil)
+	req.RemoteAddr = "198.51.100.1:12345"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -1260,6 +1430,64 @@ func TestPoolCheckRateLimitsPerIP(t *testing.T) {
 		if rr.Code != want {
 			t.Fatalf("request %d status = %d, want %d body=%s", i+1, rr.Code, want, rr.Body.String())
 		}
+	}
+}
+
+func TestPoolCheckReadinessUsesProviderScopedBurstBehindNAT(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	register(registry, "p2", "session-2", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	for i := 0; i < 70; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1&assigned_id=session-1&details=readiness", nil)
+		req.RemoteAddr = "198.51.100.10:12345"
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, req)
+		want := http.StatusOK
+		if i >= 6 {
+			want = http.StatusTooManyRequests
+		}
+		if rr.Code != want {
+			t.Fatalf("p1 request %d status = %d, want %d body=%s", i+1, rr.Code, want, rr.Body.String())
+		}
+		if want == http.StatusTooManyRequests && rr.Header().Get("Retry-After") != "1" {
+			t.Fatalf("Retry-After = %q", rr.Header().Get("Retry-After"))
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p2&assigned_id=session-2&details=readiness", nil)
+	req.RemoteAddr = "198.51.100.10:54321"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("second provider behind same NAT status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPoolCheckReadinessBoundsRotatingProviderIDsPerSource(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	for i := 0; i < 61; i++ {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/pool/check?provider_id=rotating-%d&assigned_id=session-%d&details=readiness", i, i), nil)
+		req.RemoteAddr = "198.51.100.10:12345"
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, req)
+		if i < 60 && rr.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d unexpectedly rate limited", i+1)
+		}
+		if i == 60 && rr.Code != http.StatusTooManyRequests {
+			t.Fatalf("request %d status = %d, want %d body=%s", i+1, rr.Code, http.StatusTooManyRequests, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=independent&assigned_id=session-independent&details=readiness", nil)
+	req.RemoteAddr = "198.51.100.11:12345"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code == http.StatusTooManyRequests {
+		t.Fatalf("independent source unexpectedly rate limited: body=%s", rr.Body.String())
 	}
 }
 

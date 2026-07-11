@@ -1,0 +1,20 @@
+{
+  "feeds": {
+    "autotune-candidates.json": {
+      "bytes": 4837,
+      "sha256": "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda",
+      "signer_key_id": "streamvc-autotune-static-v4",
+      "version": "published-2026-07-10-catalog-recovery-v1"
+    },
+    "demand-rank.json": {
+      "bytes": 1187,
+      "sha256": "27cdfc12a43b78db32710926ee16699aadce0c4ddd9d8282baca2532f780c5e2",
+      "signer_key_id": "streamvc-autotune-static-v4",
+      "version": "published-2026-07-10-catalog-recovery-v1"
+    }
+  },
+  "generated_at": "2026-07-10T19:00:00Z",
+  "policy_version": "autotune-policy-v1",
+  "release_id": "published-2026-07-10-catalog-recovery-v1",
+  "schema_version": "macprovider.autotune-release.v1"
+}

@@ -1,0 +1,1 @@
+{"version":"schema-corpus-v1","generated_at":"2026-07-10T20:00:00Z","source":"operator_curated_autotune_candidate_catalog","policy_version":"autotune-policy-v1","rows":{"fixture":{"model_id":"mlx-community/Fixture-4bit","min_ram_gb":8,"min_bandwidth_tier":"C","bench_gate":{"min_sustained_tps":1,"max_4k_ttft_ms":1000},"runtime_status":"blocked","draft_candidates":42}}}

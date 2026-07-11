@@ -719,8 +719,9 @@ struct AutotuneCommand: AsyncParsableCommand {
         defer { _ = signalSources }
 
         let staticInputs = AutotuneStaticInputs()
-        let demand = await staticInputs.loadDemandRank()
-        let catalog = await staticInputs.loadCandidateCatalog()
+        let release = await staticInputs.loadCatalogRelease()
+        let demand = release.demand
+        let catalog = release.candidate
         let rateCard = await staticInputs.loadRateCard()
 
         let fingerprint = MachineFingerprinter().sample()
@@ -735,6 +736,17 @@ struct AutotuneCommand: AsyncParsableCommand {
         warnings.formUnion(demand.warnings)
         warnings.formUnion(catalog.warnings)
         warnings.formUnion(rateCard.warnings)
+
+        if AutotuneRecommendEngine.paidTrustBlocks(warnings) {
+            let failures = warnings
+                .intersection(AutotuneRecommendEngine.paidTrustBlockingWarnings)
+                .map(\.rawValue)
+                .sorted()
+                .joined(separator: ", ")
+            throw ValidationError(
+                "catalog trust verification failed (\(failures)); upgrade macprovider or retry when the signed catalog is available"
+            )
+        }
 
         var request = AutotuneRecommendRequest(
             hardware: hardware,
