@@ -967,10 +967,12 @@ FR-CAN14 is required before the breaker and canary coexist under load.
   current implementation happens to), and SPEC-031's `inference_request`/HTTP
   transport (FR-CAN4) MUST NOT carry losslessness probes, and vice-versa.
 - **Proof-of-weights / OPoI + autotune hello-gate** — runbook item 9's separate
-  baseline; owns the *semantics* of `model_class_challenges` (and thus the only
-  real anti-downgrade guarantee) and the second-provider admission gate that
-  interacts with canary fragility (incident #2). FR-CAN8/22 consume the resulting
-  live eligible-provider count.
+  baseline (SPEC-032); owns the *semantics* of `model_class_challenges` and the
+  autotune hello-gate. Per SPEC-032 FR-PW1/PW3, OPoI as implemented is **not** a real
+  anti-downgrade guarantee (it is the same plaintext-nonce echo); a genuine
+  weight-integrity test (statistical/attested) is a forward requirement there, not yet
+  a shipped guarantee. FR-CAN8/22 consume the hello-gate's live eligible-provider
+  count (incident #2).
 
 ## 18. Changelog
 

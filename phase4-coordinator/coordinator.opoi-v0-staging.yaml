@@ -16,9 +16,10 @@
 # Rollback: set canary_enabled: false and restart coordinator.
 
 pool:
-  # OPoI v0 liveness — canary challenges prove the provider is running the
-  # declared model by embedding a random nonce in prompt and expected reply.
-  # See ops/runbooks/opoi-challenge-implementation.md §2.
+  # OPoI v0 liveness — canary challenges embed a random nonce in the prompt and
+  # check the provider echoes it exactly. This is a LIVENESS / instruction-following
+  # signal only; it does NOT prove the provider runs the declared model (a cheaper
+  # model can echo the plaintext nonce) — see SPEC-032 FR-PW1. Not a weight proof.
   canary_enabled: true
   canary_interval_s: 300        # 5 min for staging observation
   canary_timeout_s: 120

@@ -2711,7 +2711,8 @@ func (s *Server) runCanaryProbeAtEpoch(provider pool.Provider, epoch uint64) boo
 		// HIGH). It also FORCES the next probe to be enforced, so a
 		// chronically-slow provider cannot arrange (via reconnect / due-timing
 		// churn) to only ever be probed under grace (R3 SECURITY HIGH).
-		// Correctness + model-class OPoI identity were already recorded above.
+		// Correctness + model-class OPoI liveness (NOT a weight-identity proof;
+		// see SPEC-032 FR-PW1) were already recorded above.
 		s.enforceNextCanary.Store(provider.ProviderID, struct{}{})
 		return true
 	}

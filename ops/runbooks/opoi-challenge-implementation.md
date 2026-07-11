@@ -1,9 +1,22 @@
 # Runbook: OPoI Challenge Implementation (MacProvider Mining Program)
 
-**Version:** 0.1  
+> **⚠️ SUPERSEDED (2026-07-11) by `specs/SPEC-032-proof-of-weights-hello-gate.md`.**
+> The canonical proof-of-weights / OPoI + autotune-hello-gate baseline is now
+> **SPEC-032** — it is the normative source, not this runbook. In particular, per
+> **SPEC-032 FR-PW1/PW2**, the plaintext-nonce OPoI check is **liveness /
+> instruction-following only** (a cheaper model can echo the visible nonce) and is
+> **observability-only**: it **MUST NOT** gate routing, tiering, sanctions, **or
+> payout**. The **credit/payout multiplier** described below (Phase C) is a
+> **money-path violation of FR-PW2 and MUST NOT be implemented** until an
+> FR-PW3-compliant weight-bound signal exists — that phase is **deferred/void**.
+> This runbook is retained only as historical planning context; where it disagrees
+> with SPEC-032, SPEC-032 governs (including the shipped close-reason names in
+> SPEC-032 FR-HG4, which supersede any reason strings listed here).
+
+**Version:** 0.1 (superseded)  
 **Date:** 2026-07-08  
 **Audience:** Coordinator + macprovider-cli implementers  
-**Spec:** _not yet written_ — `specs/SPEC-OPOI-CHALLENGE-WS.md` was planned but was never created (confirmed absent 2026-07-10). This runbook plus the coordinator `internal/pow` + `internal/autotune` gate code are the interim normative source; promoting proof-of-weights / OPoI to a canonical SPEC is tracked follow-up work.  
+**Spec:** **SPEC-032** (this runbook is no longer the normative source).  
 **Research:** `research/pouw-apple-silicon-mining-alternatives.md`
 
 ---

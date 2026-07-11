@@ -1,5 +1,14 @@
 # Proof of Weights — Session B implementation runbook
 
+> **⚠️ SUPERSEDED (2026-07-11) by `specs/SPEC-032-proof-of-weights-hello-gate.md`.**
+> SPEC-032 is the normative source. Where this runbook disagrees, SPEC-032 governs —
+> notably the **shipped close-reason names** (`autotune_gate_unavailable`,
+> `autotune_evidence_required`, `autotune_evidence_invalid`, `autotune_model_uncatalogued`,
+> `autotune_model_cap_exceeded`; SPEC-032 FR-HG4) supersede any stale reason strings
+> listed here (e.g. `autotune_evidence_missing`/`_stale`/`_thermal_throttle`), and per
+> FR-PW1 the plaintext-nonce OPoI check is liveness-only, **not** an anti-downgrade or
+> weight-identity proof.
+
 **Track:** Session B (Proof of Weights)  
 **Out of scope:** Session A OPoI explicit WS frames, Session C MALIBU emission, Session D mining policy  
 **Pearl overlay:** `/etc/macprovider/coordinator.pearl-overlays.yaml` (merged with `/opt/macprovider/coordinator.yaml`)
@@ -92,7 +101,7 @@ failure even when the model identity is correct.
   canary setting) is read at startup. SIGHUP reloads tier2 / billing config
   only — flipping observe↔enforce needs a coordinator restart.
 
-Full downgrade cheat smoke (30B claim + 8B serve) requires a dedicated lab provider loading the wrong weights; the NONCE gate (always enforced) exercises the sanction path regardless of latency-enforcement mode.
+A full downgrade-cheat smoke (30B claim + 8B serve) requires a dedicated lab provider loading the wrong weights. **The nonce gate does NOT detect this** (per SPEC-032 FR-PW1): the challenge exposes the nonce in plaintext, so an 8B model can echo it correctly and pass the always-enforced nonce gate. The nonce gate exercises the sanction path only when a provider returns the *wrong text* (dead / garbled / instruction-not-followed), not when a cheaper model returns the *right* echo. A real downgrade smoke must therefore verify against a weight-bound signal (SPEC-032 FR-PW3), not the nonce echo.
 
 **Cold-start grace (2026-07-09):** a cold 30B load produces ~8s TTFT on
 reconnect, which false-fails a static `max_ttft_ms` (the reason the live tune
@@ -100,9 +109,12 @@ had bumped 3500→7000). The fix is `pool.canary_cold_start_grace_s` (default 0)
 for that many seconds after a provider connects, the wall-time latency gates
 (`max_ttft_ms` AND `min_sustained_tps` — canary probes are non-streaming, so
 both are measured over wall time and cold-contaminated) are waived. The
-nonce-correctness gate is NEVER relaxed, so anti-downgrade is unchanged. Staging
-overlay sets `300`, so `max_ttft_ms` can stay at the real production target
-(3500) instead of a padded value.
+nonce-correctness gate is NEVER relaxed, so the liveness / instruction-following
+signal is unchanged. (Note per SPEC-032 FR-PW1: the plaintext-nonce echo is a
+liveness/instruction-following check, NOT an anti-downgrade or weight-integrity
+proof — a cheaper/substituted model can echo the visible nonce.) Staging overlay
+sets `300`, so `max_ttft_ms` can stay at the real production target (3500) instead
+of a padded value.
 
 The grace is sanction-safe (three codex audit rounds hardened it): a graced
 probe is NEUTRAL for the failure counter (it neither counts as a fail nor clears
@@ -131,7 +143,8 @@ latency breach SANCTIONS:
   **not** failed; it logs `provider canary latency breach observed (not enforced)`
   with `canary_latency_reason` + `canary_ttft_ms`/`canary_sustained_tps`. TPS is
   also tracked by `proof_of_weights.telemetry_drift`. The nonce gate still
-  enforces (anti-downgrade unchanged).
+  enforces (the liveness / instruction-following signal is unchanged; it is not an
+  anti-downgrade proof — SPEC-032 FR-PW1).
 - **`enforce`**: latency breaches fail the probe (subject to
   `canary_cold_start_grace_s`). Use ONLY after validating metric stability; keep
   `max_ttft_ms >= 7000` to fit the non-streaming round-trip.
