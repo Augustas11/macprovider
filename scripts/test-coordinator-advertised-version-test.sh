@@ -66,25 +66,25 @@ for path in \
   "$fixture/phase4-coordinator/dist/coordinator.yaml" \
   "$fixture/phase4-coordinator/coordinator.yaml.example" \
   "$fixture/phase4-coordinator/dist/coordinator.yaml.example"; do
-  sed 's/1\.8\.27/1.8.28/g' "$path" > "$path.next"
+  sed 's/1\.8\.28/1.8.29/g' "$path" > "$path.next"
   mv "$path.next" "$path"
 done
-if bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.28 >"$work/future-missing-build.out" 2>&1; then
+if bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.29 >"$work/future-missing-build.out" 2>&1; then
   echo "version guard accepted a future release without a release-build ledger entry" >&2
   exit 1
 fi
-grep -q 'exactly one entry for 1.8.28' "$work/future-missing-build.out"
-printf '%s\t%s\n' '1.8.28' '27' >> "$fixture/phase3-binary/app/release-builds.tsv"
-if bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.28 >"$work/future-reused-build.out" 2>&1; then
-  echo "version guard accepted a future release that reused build 27" >&2
+grep -q 'exactly one entry for 1.8.29' "$work/future-missing-build.out"
+printf '%s\t%s\n' '1.8.29' '28' >> "$fixture/phase3-binary/app/release-builds.tsv"
+if bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.29 >"$work/future-reused-build.out" 2>&1; then
+  echo "version guard accepted a future release that reused build 28" >&2
   exit 1
 fi
 grep -q 'duplicate build' "$work/future-reused-build.out"
-sed 's/1\.8\.28[[:space:]]*27/1.8.28 28/' "$fixture/phase3-binary/app/release-builds.tsv" > "$fixture/phase3-binary/app/release-builds.tsv.next"
+sed 's/1\.8\.29[[:space:]]*28/1.8.29 29/' "$fixture/phase3-binary/app/release-builds.tsv" > "$fixture/phase3-binary/app/release-builds.tsv.next"
 mv "$fixture/phase3-binary/app/release-builds.tsv.next" "$fixture/phase3-binary/app/release-builds.tsv"
-sed 's/CURRENT_PROJECT_VERSION: "27"/CURRENT_PROJECT_VERSION: "28"/' "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
+sed 's/CURRENT_PROJECT_VERSION: "28"/CURRENT_PROJECT_VERSION: "29"/' "$fixture/phase3-binary/app/project.yml" > "$fixture/phase3-binary/app/project.yml.next"
 mv "$fixture/phase3-binary/app/project.yml.next" "$fixture/phase3-binary/app/project.yml"
-bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.28
+bash "$fixture/scripts/test-coordinator-advertised-version.sh" v1.8.29
 
 cat >"$work/current-appcast.xml" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
