@@ -496,10 +496,16 @@ generic 1 s hint to retryable 503/504, which is shorter than the sweep and thus
 nonconformant — a conformance gap, §14.)
 
 **FR-CAN21 — 404 vs 503 boundary.** A canary sanction MUST NOT convert a
-served/known model into a 404. `404 model_not_found` is reserved for models that
-no provider serves or has recently seen (SPEC-006 §17.2, SPEC-010 R-3.3.4). A
-model whose only provider is canary-degraded is **known but temporarily
-unavailable** → 503, not 404.
+known model into a 404. `404 model_not_found` is reserved for models where
+**`ModelKnown(model) == false`** under the **authoritative SPEC-010 R-3.3.4**
+definition — the union of every live provider's `ModelID`, every live provider's
+declared `SupportedModels`, and retained recently-seen history. A model that is
+*declared-but-cold* (in some provider's `SupportedModels` but not currently
+served) is therefore **known**, and a model whose only provider is canary-degraded
+is **known but temporarily unavailable** → both are **503**, not 404. (SPEC-010
+R-3.3.4's `MUST` is authoritative on this exact question; the older SPEC-002
+R-3.X.6 `MAY` and SPEC-006 §17.2 "served or recently seen" wording are a carried
+cross-spec inconsistency — runbook item 22 — not re-litigated here.)
 
 ## 10. Last-provider protection (new invariant)
 
@@ -539,48 +545,52 @@ always **subject to the FR-CAN22 last-provider floor** (the pool never drops bel
 one routing-eligible provider on a canary-only signal) and to correlated-fault
 containment:
 
-- **Provider correlation is a suspicion signal only — it never, by itself,
-  authorizes bank rollback, config-fault attribution, or any action a malicious
-  set of providers could weaponize.** This is the deliberate Sybil-resistant
-  design: in an open/provisional pool, providers (including hardware-attested ones
-  — SPEC-008 `attested` proves device identity, not independent ownership, and one
-  operator can hold several attested or pinned IDs) cannot be treated as
-  independent votes.
-- **Detection (suspicion).** The coordinator **MUST**, whenever canary sanctioning
-  is enabled for a multi-provider model, detect correlation over a **fixed
-  pre-sweep snapshot** (denominator `N ≥ 2`, atomic) via a **correlation epoch**:
-  it actively re-dispatches the **same** challenge fingerprint to every snapshot
-  member (rather than relying on random per-probe selection, which would never
-  guarantee shared exposure), keyed by challenge fingerprint + bank generation,
-  bounded by the FR-CAN12 next-dispatch window (`1.5 × canary_interval_s + sweep
-  cadence`). A strict majority (`> N/2`, and ≥ 2) failing that shared fingerprint
-  raises **suspicion**. (Detection is MUST because §16 gates re-enable on it.)
-- **On suspicion the coordinator MUST — and this is the whole v0.1 response**:
-  (a) **suspend sanctioning on the suspected challenge fingerprint** (that
-  fingerprint stops counting toward any sanction, pool-wide) pending operator
-  review, so a shared bad challenge cannot churn the honest fleet; (b) preserve
-  the FR-CAN22 last-provider floor and MUST NOT let per-provider sanctions drain
-  the model below it; and (c) alert the operator (§12). It **MUST NOT**
-  automatically roll back the challenge bank or attribute a coordinator-config
-  fault.
-- **No automatic bank rollback in v0.1.** Full challenge-bank circuit-break /
-  rollback is an **operator action**, not an automatic one, precisely because any
-  automatic rollback a provider majority can repeatedly trigger — even one gated
-  behind a coordinator "known-good control" — is a **rollback oracle**: Sybils
-  repeatedly trip the control and eventually ride a *transient* control failure
-  (timeout / transport / reference-unavailable) into rolling back a valid bank.
-  v0.1 therefore refuses the automatic path entirely. Suspending the one suspect
-  fingerprint from sanctioning is the bounded, Sybil-safe containment: the worst a
-  malicious majority achieves is getting one challenge benched from sanctioning (a
-  mild coverage DoS the operator resolves), never an outage and never a bank
-  rollback. A future version MAY re-introduce automatic rollback only behind an
-  authenticated, single-flight, cooldown-bounded, generation-fenced control whose
-  **deterministic challenge-semantic** failure (not a transport/timeout/status
-  failure, which MUST be inconclusive-and-alert-only) is the sole authorization —
-  that is deferred, not specified here.
-- Per-provider sanction decisions across the snapshot MUST be evaluated
-  **atomically** with respect to the last-provider guard, so two providers cannot
-  each be removed on the belief that the other still covers the model.
+- **Provider correlation produces only ephemeral, self-limiting effects — it
+  never creates persistent automatic state a malicious set of providers could
+  weaponize.** This is the load-bearing Sybil-safety invariant, and it is
+  absolute: no provider behavior (of any trust level — SPEC-008 `attested` proves
+  device identity, not independent ownership, and one operator can hold several
+  attested/pinned IDs) may trigger a bank rollback, a config-fault attribution, a
+  **persistent** fingerprint suspension, or any other durable state change. The
+  only automatic responses to correlation are *within* the current epoch (discard
+  its results) plus a fire-and-forget operator alert.
+- **Detection with staged results.** The coordinator **MUST**, whenever canary
+  sanctioning is enabled for a multi-provider model, run a **correlation epoch**
+  over a **fixed pre-sweep snapshot** (denominator `N ≥ 2`, atomic): it actively
+  re-dispatches the **same** challenge fingerprint to every snapshot member
+  (random per-probe selection would never guarantee shared exposure), keyed by
+  challenge fingerprint + bank generation, bounded by the FR-CAN12 next-dispatch
+  window (`1.5 × canary_interval_s + sweep cadence`). **All epoch results MUST be
+  staged — unapplied, no counter increment, no sanction — until the epoch
+  resolves**, so a shared bad challenge cannot sanction the first responders
+  before the correlated verdict forms.
+- **Resolve the epoch:** if a strict majority (`> N/2`, and ≥ 2) failed the shared
+  fingerprint → **suspicion**: the coordinator MUST **discard the staged results
+  entirely** (no sanction, no counter increment — honest providers are unharmed),
+  preserve the FR-CAN22 last-provider floor, and **alert the operator** (§12), and
+  do **nothing else**. Otherwise → **commit** the staged results **atomically**
+  with respect to the last-provider guard (individual failures sanction their
+  providers; two providers can't both be removed below the floor).
+- **All persistent containment is an authenticated operator action, never
+  automatic.** Benching a suspect fingerprint from sanctioning, rolling back a
+  challenge bank, or attributing a coordinator-config fault are operator decisions
+  taken after the alert — because any *persistent* automatic response that a
+  provider majority can trigger is itself weaponizable (a Sybil majority failing
+  successive epochs could otherwise suspend every fingerprint one by one and
+  silently disable the canary). The ephemeral discard-and-alert response has no
+  such accumulation: the worst a malicious majority achieves per epoch is
+  discarding its own failures (which cannot harm honest providers) and raising an
+  alert; nothing persists. (A Sybil *majority of the whole pool* is out of the
+  canary's threat model — it is an admission/attestation problem, since such an
+  attacker already owns buyer routing; the canary defends against a *minority* bad
+  provider, which by definition cannot form a correlated majority and so is
+  committed and sanctioned normally.) A future version MAY add automatic bank
+  rollback only behind an authenticated, single-flight, cooldown-bounded,
+  generation-fenced control whose **deterministic challenge-semantic** failure
+  (never a transport/timeout/status failure) is the sole authorization — deferred,
+  not specified here.
+- Coordinator-attributable failures (an `incomplete` from undersized
+  `max_tokens`, FR-CAN3) are **neutral** regardless of fleet size.
 - Coordinator-attributable failures (an `incomplete` from undersized
   `max_tokens`, FR-CAN3) are **neutral** regardless of fleet size.
 - A **provisional** sole provider MUST additionally never be
@@ -588,11 +598,11 @@ containment:
 
 > **Conformance gap (§14).** Sole-provider protection, coordinator-attribution of
 > `incomplete`, the status/soft/hard `relay_error` split, the correlation epoch
-> (pre-sweep snapshot + shared-fingerprint re-dispatch + bank-generation fencing),
-> the suspect-fingerprint sanction-suspend, and atomic last-provider evaluation are
-> **not yet implemented** — `RecordCanaryResult` receives only a pass/fail boolean
-> with no failure class, no attribution, no snapshot, no fingerprint-suspend, and
-> no eligible-count guard. Today a sole provider CAN be removed by a
+> with **staged results** (pre-sweep snapshot + shared-fingerprint re-dispatch +
+> bank-generation fencing + discard-on-suspicion), and atomic last-provider
+> evaluation are **not yet implemented** — `RecordCanaryResult` receives only a
+> pass/fail boolean with no failure class, no attribution, no snapshot, no
+> staging, and no eligible-count guard. Today a sole provider CAN be removed by a
 > coordinator-config fault (incidents #1/#2). Production is safe only because it
 > runs `observe` and canary is disabled entirely; making these guards explicit is
 > the primary pre-re-enable requirement (§16).
@@ -746,8 +756,8 @@ does versus what this spec **requires**. "Implemented" = shipped and conformant;
 | FR-CAN18 crash-consistent fail-closed persistence | **Gap** | Upsert failure log-only; runtime sanction installed before persistence; `recoverProvider` two-step is non-atomic. Applies to pinned + provisional. |
 | FR-CAN19 conjunctive eligibility | Implemented | `RoutingEligible()` enforces auth/publication + state + slots. |
 | FR-CAN20 retryable 503 + cadence Retry-After | **Partial** | `no_provider_available` retryable (#548); ownership is SPEC-006 §5.2; gateway 1 s hint is shorter than the sweep (gap). |
-| FR-CAN21 404/503 boundary | Implemented | Aligns with SPEC-006 §17.2 / SPEC-010 R-3.3.4 (#555). |
-| FR-CAN22/23 sole-provider protection + Sybil-proof correlated-fault | **Gap** | `RecordCanaryResult` gets only a pass/fail bool: no failure-class, no attribution, no last-provider floor, no correlation epoch (snapshot + shared-fingerprint re-dispatch + bank-generation), no suspect-fingerprint sanction-suspend, no atomic evaluation. (v0.1 has no automatic bank rollback by design — see FR-CAN23.) |
+| FR-CAN21 404/503 boundary | Implemented | Follows SPEC-010 R-3.3.4 `ModelKnown()` union (#555, authoritative); SPEC-002 R-3.X.6 `MAY` / SPEC-006 §17.2 wording is the carried item-22 cross-spec inconsistency, not claimed as fully aligned. |
+| FR-CAN22/23 sole-provider protection + Sybil-proof correlated-fault | **Gap** | `RecordCanaryResult` gets only a pass/fail bool: no failure-class, no attribution, no last-provider floor, no correlation epoch with staged results (snapshot + shared-fingerprint re-dispatch + bank-generation + discard-on-suspicion), no atomic evaluation. (v0.1 correlation produces only ephemeral discard + alert — no persistent automatic state; all persistent containment is operator-only — see FR-CAN23.) |
 | FR-CAN24/25 config surface + covering bank | **Partial** | Surface + basic validation shipped (#478, Entry 125); empty per-model lists and duplicate keys pass (gap). |
 | FR-CAN26 reload without restart + generation contract | **Gap** | Pool block startup-only (direct cause of incident #3); no validated-candidate, atomically-versioned config-generation snapshot for in-flight probes. |
 | FR-CAN27 failure logging | **Partial** | `canary_fail_reason` (#513); missing `assigned_id`/outcome and global-bank latency (gap). |
@@ -816,22 +826,23 @@ a §14 Partial/Gap row and defines part of the follow-up IMPL's done bar):
   canary-only signal — `nonce_mismatch`, `incomplete`, latency, soft-deadline
   `relay_error`, or a canary-specific HTTP non-200 — absent an independent
   buyer-path failure, confirmed transport death, or item-9 weight evidence.
-- **AC-F5 (FR-CAN23).** Correlated-fault containment is suspicion-only and
-  Sybil-proof: (a) **no** set of providers — one, a strict majority, an
-  all-attested set, multiple IDs under one operator, or a set that repeatedly
-  re-triggers detection — can cause a challenge-bank rollback or a config-fault
-  attribution; v0.1 has **no** automatic rollback path at all; (b) a correlated
-  majority failing the same fingerprint results in *sanctioning being suspended on
-  that one fingerprint* + operator alert + the FR-CAN22 last-provider floor, and
-  nothing else; the worst a malicious majority achieves is benching one challenge
-  from sanctioning; (c) the correlation epoch actively re-dispatches the **same**
-  fingerprint to the pre-sweep snapshot (a partial/jittered exposure or a
-  multi-entry bank with random selection does not silently drain the pool — the
-  FR-CAN22 floor holds and per-provider sanctions never cross it); (d) a
-  stale-generation probe result (bank reloaded mid-epoch) is discarded;
-  (e) concurrent per-provider sanctions are atomic w.r.t. the last-provider guard
-  (two providers can't both be removed); (f) a `max_tokens`-attributable
-  `incomplete` is neutral at any fleet size.
+- **AC-F5 (FR-CAN23).** Correlated-fault containment is ephemeral and Sybil-proof:
+  (a) **no** provider behavior — one provider, a strict majority, an all-attested
+  set, multiple IDs under one operator, or a set that fails **successive** epochs
+  on **different** fingerprints — creates any persistent automatic state (no
+  rollback, no config-fault attribution, no persistent fingerprint suspension);
+  the only automatic effects are per-epoch. (b) A correlation epoch **stages** all
+  its results; on a strict-majority (>N/2, ≥2) shared-fingerprint failure the
+  staged results are **discarded** (no sanction, no counter increment) + operator
+  alert + FR-CAN22 floor, and nothing persists; a sequential multi-fingerprint
+  Sybil campaign therefore only produces repeated discards + alerts, never a
+  disabled canary. (c) With **honest** providers at threshold−1, a shared bad
+  fingerprint does **not** sanction the first responders before the verdict forms
+  (staged, then discarded). (d) A non-correlated minority failure **commits** and
+  sanctions that provider normally. (e) A stale-generation result (bank reloaded
+  mid-epoch) is discarded; per-provider commits are atomic w.r.t. the
+  last-provider guard (two providers can't both be removed). (f) A
+  `max_tokens`-attributable `incomplete` is neutral at any fleet size.
 - **AC-F6 (FR-CAN26).** Canary tuning parameters can be changed without a
   coordinator restart.
 - **AC-F7 (FR-CAN20).** The 503 `Retry-After` is derived from the FR-CAN12
@@ -888,9 +899,10 @@ This spec's purpose is to define the contract under which internal canary can be
 (§14 classifies per-FR status but defers the gate to this list) — operators
 **MUST NOT** re-enable canary sanctioning until every item holds:
 
-1. **FR-CAN22/23** — sole-provider protection + Sybil-resistant correlated-fault
-   containment (a canary-only signal never empties the pool for the last
-   provider; a bad bank does not let providers grief the fleet).
+1. **FR-CAN22/23** — sole-provider protection + Sybil-proof correlated-fault
+   containment (a canary-only signal never empties the pool for the last provider;
+   a shared bad challenge is contained by ephemeral discard + operator alert, with
+   no persistent provider-triggerable state).
 2. **FR-CAN15** — durable sanction load decoupled from `canary_enabled` (disabling
    canary does not launder sanctions).
 3. **FR-CAN18** — crash-consistent, fail-closed persistence for pinned sanctions
@@ -1079,3 +1091,25 @@ FR-CAN14 is required before the breaker and canary coexist under load.
     - **Correlation detection SHOULD→MUST** (both lanes MED) so it matches the §16
       re-enable gate. **SPEC-030 header/§2** finally aligned with §17 (dropped the
       leftover "own dispatch loop" claim) (arch MED).
+  - **R6 codex two-lane audit absorbed** (0 CRITICAL; security 1H/1M, architect
+    0H/2M — both lanes confirmed R5 closed; the last item was the fixed point of
+    the correlated-fault design):
+    - **Correlated-fault made ephemeral / persistent-state-free (both lanes HIGH+
+      MED — the terminating invariant).** R5's fingerprint-*suspend* was itself
+      persistent provider-triggerable state: a Sybil majority failing successive
+      epochs on different fingerprints could suspend the whole bank and silently
+      disable the canary. Root cause: *any* persistent automatic response a
+      provider majority can trigger is weaponizable. Final design: a correlation
+      epoch **stages** all results; a strict-majority shared-fingerprint failure
+      **discards** them (no sanction, no counter) + operator alert + FR-CAN22 floor
+      and **nothing persists**; otherwise results **commit** atomically. All
+      persistent containment (bench a fingerprint, roll back a bank) is an
+      **authenticated operator action**. Also fixes security MED (staged results
+      never sanction honest providers at threshold−1 before the verdict forms).
+      This is the fixed point — there is no persistent automatic state left to
+      weaponize.
+    - **FR-CAN21 404 rule deferred to SPEC-010 `ModelKnown()`** (arch MED): 404 iff
+      `ModelKnown()==false` over the union of live `ModelID` + live
+      `SupportedModels` + seen history; declared-but-cold → 503. The SPEC-002
+      `MAY` / SPEC-006 wording is the carried item-22 inconsistency (§14 no longer
+      claims full three-way alignment).
