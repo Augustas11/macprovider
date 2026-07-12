@@ -1,6 +1,6 @@
 # SPEC-033 — Hardware-Evidence Verifier (`hardware-verifier.v2`)
 
-**Status:** v0.4-draft
+**Status:** v0.5-draft
 **Date:** 2026-07-12
 **Depends on:** SPEC-023 (autotune — produces the benchmark/recommendation inputs the evidence document carries). **Consumed by:** SPEC-032 (autotune hardware-evidence admission "hello-gate") reads this spec's verdict via an **exact-`hardware-verifier.v2`** lookup and cross-references it as "the item-10 hardware-verifier verdict spec". This spec owns the `hardware-verifier.v2` decision semantics and the job/profile lifecycle; SPEC-032 owns how a `verified` profile gates admission.
 
@@ -21,9 +21,10 @@ deployment/role SQL (`phase4-coordinator/dist/stats-inventory-writer.sql`,
 (`phase3-binary/.../AutotuneHardwareEvidence.swift`), the app-registration profile writer
 (`internal/onboarding/apptrack.go`, `store_pg.go`), the operator inventory writer/demotion
 (`cmd/stats-inventory-sync/main.go`), the runner (`cmd/stats-hardware-verifier/main.go`), and the
-downstream consumers — SPEC-032 admission (`internal/autotune/evidence_pg.go`) and the SPEC-017
-hardware cache (`internal/stats/hardware/cache.go`). **Where §2 summarizes DDL, the migration and
-`dist/*.sql` files are the byte-authoritative shape.**
+downstream consumers — SPEC-032 admission (`internal/autotune/evidence_pg.go`), the SPEC-017
+hardware cache (`internal/stats/hardware/cache.go`), and the config-gated telemetry-drift evaluator
+(`internal/pow/drift.go`, on the same exact-v2 `LatestVerified` lookup). **Where §2 summarizes DDL,
+the migration and `dist/*.sql` files are the byte-authoritative shape.**
 
 ---
 
@@ -43,9 +44,10 @@ ordered gate pipeline over each evidence document, and transitions the job to **
 ### 1.2 What `verified` means and who consumes it
 
 `provider_hardware_profiles.verified` is consumed by **SPEC-032's hardware-evidence admission
-lookup** (`internal/autotune/evidence_pg.go`), which requires a `verified = TRUE` profile joined
-to a `status='verified'` job carrying the **exact** `hardware-verifier.v2:verified_trusted_hardware`
-decision reason. It is **not** itself a SPEC-002 tier/routing input — SPEC-002 tiers derive from
+lookup** (`internal/autotune/evidence_pg.go` `LatestVerified`) — and the same lookup also feeds the
+config-gated **telemetry-drift** evaluator (`internal/pow/drift.go`) — which requires a
+`verified = TRUE` profile joined to a `status='verified'` job carrying the **exact**
+`hardware-verifier.v2:verified_trusted_hardware` decision reason. It is **not** itself a SPEC-002 tier/routing input — SPEC-002 tiers derive from
 pinned config / unknown-id / rejection state, and SPEC-032 explicitly treats the hardware-evidence
 signal as **orthogonal** to the SPEC-002/SPEC-003 tiers. This spec defines the verdict engine and
 lifecycle; it does not define admission or tier weighting.
@@ -161,10 +163,14 @@ DB-level counterpart of the application's terminal-safe `WHERE` (§6).
   `SELECT`** — `id, provider_id, status, submitted_at, evidence_sha256` (008), `decision_reason`
   (015), **`generated_at, evidence`** (013, for the SPEC-032 W2 hello gate — the §10.2 leakage
   boundary), and job `chip_normalized, unified_memory_gb` (017); on profiles, `last_reported_at`
-  (007) and `provider_id, chip_normalized, unified_memory_gb, verified` (017). It has **no
-  `verified` write grant** and trigger A forces `verified=FALSE` regardless: **onboarding can never
-  self-promote.** (A compromised onboarding SQL role could insert a job with a terminal `status`
-  and could *read* all evidence, but cannot set a profile's `verified` bit — §10.1, §10.2.)
+  (007) and `provider_id, chip_normalized, unified_memory_gb, verified` (017). It also has column
+  `INSERT`/`UPDATE` on profiles for `chip, chip_normalized, unified_memory_gb, macos_version,
+  app_version, source, last_reported_at` (007) — **but `verified` is NOT among them**, and trigger
+  A forces `verified=FALSE` on any insert and on any chip/memory change: **onboarding can never
+  self-promote.** (Precisely: trigger A forces FALSE on insert/chip/memory-change but **preserves**
+  `OLD.verified` on a same-tuple update — see §10.1; a compromised onboarding SQL role could insert
+  a terminal-`status` job, *read* all evidence, and flip `source` on already-verified rows to escape
+  demotion, but still cannot *set* the `verified` bit — §10.1, §10.2.)
 - **`stats_inventory_writer`** (operator inventory sync, §7.3; role/grants defined in
   `dist/stats-inventory-writer.sql`, not a migration): full `INSERT/UPDATE` on
   `provider_hardware_profiles` **including `verified`**, and **not** constrained by trigger A. This
@@ -208,9 +214,12 @@ benchmarks []{
 
 A **lowercase hex SHA-256** is exactly 64 chars in `[0-9a-f]` (`isLowerSHA256`). The optional
 `candidate_row_identity` shown above is a field of the **HTTP handler's** request/benchmark struct
-only (validated there — 64 lowercase hex if non-empty); it is **not** a field of the verifier's
-`hardwareverify.Benchmark`, so `Evaluate` discards it during JSON decode. (The `hardware`/`benchmark`
-field names/types above otherwise match `hardwareverify.Evidence`/`Hardware`/`Benchmark` exactly.)
+(validated there — 64 lowercase hex if non-empty). It is **not** a field of the *verifier's*
+`hardwareverify.Benchmark`, so the `Evaluate` gate pipeline (§5) discards it — **but** it is
+persisted in the raw `evidence` JSONB and **is** decoded and used by **downstream** SPEC-032
+admission (`internal/autotune/evidence_pg.go`, `gate.go`). So "not consumed by `Evaluate`" is
+correct; "handler-only" would be wrong. (The `hardware`/`benchmark` field names/types above
+otherwise match `hardwareverify.Evidence`/`Hardware`/`Benchmark` exactly.)
 
 ### 3.1 Submission and replay (enqueue path)
 
@@ -366,15 +375,16 @@ matches **zero rows** — the existing (newer) profile is left intact — yet th
 `verified`. So a `verified` verdict does **not** unconditionally rewrite the profile; it promotes
 **iff** no newer profile blocks it (§12 AC-HV-1).
 
-### 7.3 Post-verdict demotion (operator inventory sync) — best-effort, with known escapes
+### 7.3 Post-verdict demotion (operator inventory sync) — best-effort (one escape R1, one ergonomics gap R2)
 
 `provider_hardware_profiles.verified` is not permanent, but demotion is **best-effort and has
 documented escape paths (§10.4)** — it is NOT a reliable revocation guarantee. The operator
 inventory sync (`cmd/stats-inventory-sync`, role `stats_inventory_writer`) runs
 `applyTrustDemotions`. The exact predicate (`main.go`) sets `verified = FALSE` for every profile
 where `verified = TRUE` **AND** `source = 'cli_hello'` **AND `NOT EXISTS`** a **combined witness** —
-a `status='verified'` job that **both** exactly matches the profile's tuple (provider, chip, memory,
-`os_version→macos_version`, `binary_version→app_version`, `generated_at→last_reported_at`) **and**
+a `status='verified'` job that **both** exactly matches the profile's tuple (provider,
+`chip_normalized`, `unified_memory_gb`, `os_version→macos_version`, `binary_version→app_version`,
+`generated_at→last_reported_at`) **and**
 is joined to an **active** trust row (`expires_at IS NULL OR > now()`). In words: **retention
 requires that one combined (matching-verified-job ∧ active-trust) proof still exist; demotion fires
 when it does not** — so *either* trust loss/expiry *or* profile-tuple drift (no matching job) is
@@ -425,14 +435,21 @@ No provider-reachable path sets `provider_hardware_profiles.verified = TRUE`:
 - The provider-reachable profile-write paths (the enqueue upsert §3.1, **and** signed
   app-registration §10.4 R1) both run as `provider_onboarding` — a role with **no `verified` write
   grant**, and trigger A forces `verified=FALSE` on any insert and on any chip/memory change
-  (§2.5, §2.7). So **no provider path can create an initial `verified=TRUE`**; the worst a
-  compromised onboarding SQL role can do is insert a terminal-status job or read evidence (§10.2).
-  (What a provider *can* do is **retain** an already-granted `verified` bit past trust removal by
-  flipping `source` — that is the R1 revocation gap, §10.4, not an initial-promotion path.)
+  (§2.5, §2.7). So **no provider path can create an initial `verified=TRUE`**. A **compromised**
+  onboarding SQL role can, however, do more than insert terminal-status jobs and read all evidence
+  (§10.2): because it holds column `UPDATE` on profiles including **`source`** (007), and trigger A
+  **preserves** `OLD.verified` on a same-tuple update, it can run
+  `UPDATE provider_hardware_profiles SET source='app_register' WHERE verified=TRUE` to
+  **mass-convert** every verified row and escape demotion — the R1 gap (§10.4) at cross-provider
+  scale. It still **cannot set** the `verified` bit (not in its column grant; trigger forces FALSE
+  on insert). Initial self-certification therefore holds even under role compromise.
 - `verified=TRUE` is writable by exactly **two** roles, **neither provider-reachable**:
-  (1) `stats_hardware_verifier`, only via `promoteJob` **and** only if the trust join passes both
-  in `Evaluate` (§5.5) and in the DB trigger (§2.5); (2) `stats_inventory_writer`, an
-  **operator-authority** path syncing an operator-authored YAML (`source='operator'`), the same
+  (1) `stats_hardware_verifier` — the only shipped **application** writer is `promoteJob`, and the
+  trust join is enforced both in `Evaluate` (§5.5) and in the DB trigger (§2.5); the *role* also
+  has direct `INSERT/UPDATE` on `verified`, but trigger A trust-gates any such write (a direct
+  qualifying insert is possible only *with* a matching fresh job + active trust); (2)
+  `stats_inventory_writer`, an **operator-authority** path syncing an operator-authored YAML
+  (`source='operator'`), the same
   trust level as curating a trust row.
 
 So: **a provider without an operator-curated trust row can reach at best `waiting_trust`, never
@@ -478,17 +495,19 @@ from reopening finalized jobs.
 
 ### 10.4 Revocation gaps (known shipped weaknesses — MUST close, disclosed not papered over)
 
-Initial self-certification is impossible (§10.1, holds). **Revocation of an already-`verified`
-profile, however, has two shipped escape paths.** SPEC-033 documents them as known gaps; closing
-them is code follow-up, not a spec change:
+Initial self-certification is impossible (§10.1, holds). Revocation of an already-`verified`
+profile is weaker: there is **one genuine revocation *escape* (R1)** and, separately, **one
+operator-*ergonomics* gap (R2)** that is not itself an escape. SPEC-033 documents both as known
+issues; closing them is code follow-up, not a spec change:
 
 - **R1 — `app_register` source-flip escape.** A signed provider **app-registration**
   (`internal/onboarding/apptrack.go` → `store_pg.go` `UpsertProviderHardwareProfile`) upserts the
   profile with `source='app_register'`. For an unchanged (chip, memory) tuple, trigger A preserves
   `OLD.verified` but does **not** reset `source`. Demotion (§7.3) only touches `source='cli_hello'`,
-  and both downstream consumers — SPEC-032 admission (`evidence_pg.go`) and the SPEC-017 hardware
-  cache (`internal/stats/hardware/cache.go`, §4) — gate on the `verified` **bit** without
-  rechecking `source` or current trust. So a legitimately-verified provider can re-register the
+  and the downstream consumers — SPEC-032 admission (`evidence_pg.go`), the SPEC-017 hardware cache
+  (`internal/stats/hardware/cache.go`), and the telemetry-drift evaluator (`internal/pow/drift.go`)
+  (§4) — gate on the `verified` **bit** (or the exact-v2 job) without rechecking `source` or current
+  trust. So a legitimately-verified provider can re-register the
   same chip/memory, flip its row to `app_register`, and **retain `verified=TRUE` past a later trust
   removal/expiry** (SPEC-032 admission is then bounded only by the evidence-TTL freshness join, not
   by trust). MUST-close: demotion should not be `source='cli_hello'`-scoped, or admission should
@@ -561,10 +580,10 @@ them is code follow-up, not a spec change:
   any job.
 - **AC-HV-9 (legacy grandfathering + two consumer classes).** A `hardware-verifier.v1:verified` row
   MUST remain terminal and MUST NOT be re-evaluated by the verifier. **Exact-v2 job-reason
-  consumers** (onboarding replay, SPEC-032 admission) MUST accept only the exact
-  `hardware-verifier.v2:verified_trusted_hardware` reason. **Verified-bit consumers** (SPEC-017
-  cache, the §7.3 demotion supporting-job clause) gate on `verified=TRUE` without a reason check
-  (§4) — the spec MUST NOT claim exact-v2 is universal.
+  consumers** (onboarding replay, SPEC-032 admission, the telemetry-drift evaluator) MUST accept
+  only the exact `hardware-verifier.v2:verified_trusted_hardware` reason. **Verified-bit consumers**
+  (SPEC-017 cache, the §7.3 demotion supporting-job clause) gate on `verified=TRUE` without a reason
+  check (§4) — the spec MUST NOT claim exact-v2 is universal.
 - **AC-HV-10 (demotion is best-effort, correct predicate).** On the next sync, a `verified`,
   `source='cli_hello'` profile is demoted to `verified=FALSE` **iff no combined witness exists** —
   i.e. no `status='verified'` job that both exactly matches the profile tuple and is joined to an
@@ -584,6 +603,21 @@ them is code follow-up, not a spec change:
 ---
 
 ## Change log
+
+**v0.5-draft (2026-07-12) — audit reconciliation (SPEC-033 R4, 3-lane codex).**
+R4 verified all R3 fixes against code (0 HIGH on all three lanes); remaining items were
+internal-consistency/precision:
+- **§10.4/§7.3 framing** (shared MEDIUM): revocation has **one escape (R1)** + **one operator
+  ergonomics gap (R2)**, not "two escape paths".
+- **§10.1/§2.7** (security MEDIUM): a *compromised* `provider_onboarding` role holds column
+  `UPDATE` on profiles **including `source`** (007), so with trigger A preserving `OLD.verified` on
+  a same-tuple update it can mass-flip `source='app_register'` to escape demotion at cross-provider
+  scale — still cannot *set* `verified`. Also qualified "only via `promoteJob`" as the only
+  *application* path (the verifier role has trust-gated direct SQL).
+- **§7.3** (LOW): the exact-tuple field is `chip_normalized`, not raw `chip`.
+- **§3** (LOW): `candidate_row_identity` is discarded by `Evaluate` but IS decoded/used downstream
+  (`evidence_pg.go`/`gate.go`) — "handler-only" was wrong.
+- **Telemetry-drift consumer** (LOW): propagated to the header roster, §1.2, §10.4, and AC-HV-9.
 
 **v0.4-draft (2026-07-12) — audit reconciliation (SPEC-033 R3, 3-lane codex).**
 R3 confirmed every v0.3 scope/consumer/grant fix and narrowed to predicate-precision:
