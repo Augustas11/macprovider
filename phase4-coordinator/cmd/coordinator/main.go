@@ -898,7 +898,7 @@ func main() {
 			Str("base_url", cfg.Tier2.MDM.EnrollmentBaseURL).
 			Msg("MDM enrollment profile route mounted on buyer port (/v1/enroll)")
 	}
-	var referralValidate, referralStatus, referralChallenge, referralVerify, referralJoin http.HandlerFunc
+	var referralValidate, referralReserve, referralStatus, referralChallenge, referralVerify, referralJoin http.HandlerFunc
 	if !cfg.Referrals.RequireForRegistration && !cfg.Referrals.EnableSocialInviteBonus {
 		trusted := mustParseTrustedProxies(cfg, logger)
 		referralHandler := &referralapi.Handler{
@@ -912,6 +912,12 @@ func main() {
 			Metrics: metricsHandle,
 		}
 		referralValidate = referralHandler.HandleValidate
+		referralReserve = referralHandler.HandleReserve
+		// FIX-570 A9 (M5): keep /j/<code> permanently routable so invite links
+		// already in circulation resolve to an open-beta landing instead of 404
+		// once the gate is turned off. HandleJoin no-ops gating via the policy.
+		referralHandler.JoinBaseURL = cfg.Referrals.JoinBaseURL
+		referralJoin = referralHandler.HandleJoin
 	}
 	if cfg.Referrals.RequireForRegistration || cfg.Referrals.EnableSocialInviteBonus {
 		trusted := mustParseTrustedProxies(cfg, logger)
@@ -938,6 +944,7 @@ func main() {
 			referralHandler.PostVerifier = referralapi.NewXAPIClient(cfg.Referrals.XAPIBearerToken, cfg.Referrals.JoinBaseURL)
 		}
 		referralValidate = referralHandler.HandleValidate
+		referralReserve = referralHandler.HandleReserve
 		referralStatus = referralHandler.HandleProviderStatus
 		referralChallenge = referralHandler.HandleChallenge
 		referralVerify = referralHandler.HandleVerify
@@ -956,6 +963,7 @@ func main() {
 		enrollHandler,
 		malibuAccrualHandler(cfg, tokenStore, rewardsDB, rewards.NewPoolHeartbeatBridge(wsServer.PoolSnapshot)),
 		referralValidate,
+		referralReserve,
 		referralStatus,
 		referralChallenge,
 		referralVerify,
@@ -1321,7 +1329,7 @@ func operatorMetricsHandler(operatorKey string, registry *prom.Registry) http.Ha
 	})
 }
 
-func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence, enroll http.HandlerFunc, malibuAccrual http.Handler, referralValidate, referralStatus, referralChallenge, referralVerify, referralJoin http.HandlerFunc) http.Handler {
+func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, register, hardwareEvidence, enroll http.HandlerFunc, malibuAccrual http.Handler, referralValidate, referralReserve, referralStatus, referralChallenge, referralVerify, referralJoin http.HandlerFunc) http.Handler {
 	mux := http.NewServeMux()
 	if enabled {
 		mux.HandleFunc("/v1/providers/register", register)
@@ -1336,6 +1344,9 @@ func buyerHandlerWithOptionalProviderEndpoints(base http.Handler, enabled bool, 
 	}
 	if referralValidate != nil {
 		mux.HandleFunc("/v1/referrals/validate", referralValidate)
+	}
+	if referralReserve != nil {
+		mux.HandleFunc("/v1/referrals/reserve", referralReserve)
 	}
 	if referralStatus != nil {
 		mux.HandleFunc("/v1/provider/referrals", referralStatus)

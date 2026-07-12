@@ -40,7 +40,12 @@ type RegisterRequest struct {
 	AppAttestObject *string         `json:"app_attest_object,omitempty"` // base64 CBOR
 	AppAttestKeyID  *string         `json:"app_attest_key_id,omitempty"` // base64 32-byte
 	ReferralCode    string          `json:"referral_code,omitempty"`
-	Nonce           string          `json:"nonce"`     // 64-hex = 32 random bytes
+	// ReferralReservationID is an OPTIONAL, advisory preflight reservation handle
+	// (FIX-570 H1). The register-time reservation is still resolved idempotently by
+	// (provider_id, referral_code), so this field is accepted but not required; when
+	// present it is part of the JCS-signed body like any other populated field.
+	ReferralReservationID string          `json:"referral_reservation_id,omitempty"`
+	Nonce                 string          `json:"nonce"`     // 64-hex = 32 random bytes
 	TSUTC           string          `json:"ts_utc"`    // RFC3339
 	Signature       string          `json:"signature"` // base64 64-byte Ed25519 over JCS(body\signature)
 }

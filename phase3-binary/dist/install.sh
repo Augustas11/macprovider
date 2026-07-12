@@ -49,6 +49,9 @@ WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
 NO_WATCHDOG="${MACPROVIDER_NO_WATCHDOG:-0}"
 DRY_RUN=0
 REFERRAL_CODE="${MACPROVIDER_REFERRAL_CODE:-}"
+# PROD-H1: reservation id claimed at preflight so a cap-limited invite reserves
+# capacity BEFORE the 10-30 min install, not only at final credential mint.
+REFERRAL_RESERVATION_ID="${MACPROVIDER_REFERRAL_RESERVATION_ID:-}"
 NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
 NO_LAUNCHD="${MACPROVIDER_NO_LAUNCHD:-0}"
 EMERGENCY_ROLLBACK="${MACPROVIDER_EMERGENCY_ROLLBACK:-0}"
@@ -2115,6 +2118,48 @@ except Exception: print("unavailable:invalid")')"
   esac
 }
 
+# PROD-H1: claim referral capacity at preflight and carry the reservation id into
+# the owned config so the credential mint consumes the SAME reservation instead
+# of racing a fresh one at the end of a long install. Reservation is idempotent
+# per (campaign, provider_id); the register path reuses it. Network-unavailable
+# is non-fatal (authoritative validation + inline reservation still run at mint).
+reserve_referral_capacity() {
+  local coordinator_base="$1"
+  local provider_id_value="$2"
+  local payload response result
+  [ -n "$REFERRAL_CODE" ] || return 0
+  payload="$(MACPROVIDER_CONFIG_REFERRAL_CODE="$REFERRAL_CODE" \
+    MACPROVIDER_CONFIG_PROVIDER_ID="$provider_id_value" \
+    python3 -c 'import json,os; print(json.dumps({"code": os.environ.pop("MACPROVIDER_CONFIG_REFERRAL_CODE", ""), "provider_id": os.environ.pop("MACPROVIDER_CONFIG_PROVIDER_ID", "")}))')" \
+    || return 0
+  if ! response="$(printf "%s" "$payload" | curl -fsS --max-time 8 \
+      -H 'Content-Type: application/json' -H 'Accept: application/json' \
+      --data-binary @- "$coordinator_base/v1/referrals/reserve" 2>/dev/null)"; then
+    log "Invite reservation unavailable; authoritative validation and capacity claim will run during credential registration."
+    return 0
+  fi
+  result="$(printf "%s" "$response" | python3 -c 'import json,sys
+try:
+ d=json.load(sys.stdin)
+ if d.get("reserved"): print("reserved:"+str(d.get("reservation_id","")))
+ elif not d.get("required", True): print("disabled:")
+ else: print("invalid:"+str(d.get("reason","invalid")))
+except Exception: print("unavailable:")')"
+  case "$result" in
+    reserved:*)
+      REFERRAL_RESERVATION_ID="${result#reserved:}"
+      [ -n "$REFERRAL_RESERVATION_ID" ] && log "Invite reserved for this install (holds your spot for ~30 minutes)."
+      return 0 ;;
+    disabled:*) return 0 ;;
+    invalid:expired) die 7 "referral code has expired; use a different invite" ;;
+    invalid:revoked) die 7 "referral code is no longer available; use a different invite" ;;
+    invalid:exhausted) die 7 "referral code has already been used; use a different invite" ;;
+    invalid:conflict) die 7 "this invite is already reserved for a different install; use a different invite" ;;
+    invalid:*) die 7 "referral code is not valid; check it or use a different invite" ;;
+    *) log "Invite reservation response was unavailable; authoritative validation will run during credential registration." ;;
+  esac
+}
+
 detect_platform() {
   os="$(uname -s)"
   arch="$(uname -m)"
@@ -3020,7 +3065,9 @@ semantic_merge_config() {
   coordinator_url_value="$4"
   port_value="$5"
   referral_code_value="${6:-}"
+  referral_reservation_value="${7:-}"
   MACPROVIDER_CONFIG_REFERRAL_CODE="$referral_code_value" \
+    MACPROVIDER_CONFIG_REFERRAL_RESERVATION_ID="$referral_reservation_value" \
     python3 - "$config_path" "$model_value" "$provider_id_value" "$coordinator_url_value" "$port_value" <<'PY'
 import json
 import os
@@ -3030,6 +3077,7 @@ import tempfile
 
 path, model, provider_id, coordinator_url, port = sys.argv[1:]
 referral_code = os.environ.pop("MACPROVIDER_CONFIG_REFERRAL_CODE", "")
+referral_reservation_id = os.environ.pop("MACPROVIDER_CONFIG_REFERRAL_RESERVATION_ID", "")
 owned = {
     "coordinator_url": json.dumps(coordinator_url),
     "provider_id": json.dumps(provider_id),
@@ -3039,6 +3087,8 @@ if model:
     owned["model"] = json.dumps(model)
 if referral_code:
     owned["referral_code"] = json.dumps(referral_code)
+if referral_reservation_id:
+    owned["referral_reservation_id"] = json.dumps(referral_reservation_id)
 try:
     with open(path, "r", encoding="utf-8") as handle:
         lines = handle.read().splitlines()
@@ -3059,7 +3109,7 @@ for line in lines:
     merged.append(f"{key}: {owned[key]}")
     seen.add(key)
 
-for key in ("model", "coordinator_url", "provider_id", "port", "referral_code"):
+for key in ("model", "coordinator_url", "provider_id", "port", "referral_code", "referral_reservation_id"):
     if key not in owned:
         continue
     if key not in seen:
@@ -3096,7 +3146,7 @@ write_config() {
   printf "%s\n" "$provider_id" > "$provider_id_temp"
   chmod 600 "$provider_id_temp" 2>/dev/null || true
   mv "$provider_id_temp" "$PROVIDER_ID_PATH"
-  semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT" "$REFERRAL_CODE"
+  semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT" "$REFERRAL_CODE" "$REFERRAL_RESERVATION_ID"
   chmod 600 "$CONFIG_PATH" "$PROVIDER_ID_PATH" 2>/dev/null || true
 }
 
@@ -5065,7 +5115,7 @@ main() {
     if existing_provider_credential_configured; then
       log "Existing provider credential found; referral pre-check is not required for repair or upgrade."
     else
-      advisory_validate_referral "$coordinator_base"
+      reserve_referral_capacity "$coordinator_base" "$provider_id"
     fi
   fi
   if [ "$APP_MANAGED_REPAIR" -eq 1 ]; then

@@ -15,10 +15,18 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/config"
 )
+
+// appTrackReferralReserveTTL is the preflight reservation window: long enough
+// to cover a full App-track install (download + setup) so a cap-1 invite does
+// not validate for many concurrent installers before one register wins. It is
+// deliberately larger than the inline register-time reservation TTL.
+const appTrackReferralReserveTTL = 30 * time.Minute
 
 type Store interface {
 	ValidateReferral(context.Context, auth.ReferralPolicy, string, time.Time) (auth.ReferralValidation, error)
+	ReserveReferralCapacity(context.Context, auth.ReferralPolicy, string, string, time.Time, time.Duration) (string, error)
 	ProviderReferralStatus(context.Context, auth.ReferralPolicy, string) (auth.ProviderReferral, error)
 	EnsureProviderReferral(context.Context, auth.ReferralPolicy, string, time.Time) (auth.ProviderReferral, error)
 	CreateSocialChallenge(context.Context, auth.ReferralPolicy, string, time.Time) (auth.SocialChallenge, error)
@@ -118,6 +126,69 @@ func (h *Handler) HandleValidate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"valid": validation.Valid, "required": true, "reason": validation.Reason})
 }
 
+// HandleReserve claims one invite use for a provider at install PREFLIGHT, before
+// the (slow) App-track register transaction runs, so a cap-1 invite cannot be
+// validated-then-wasted by many concurrent installers. The reservation is
+// idempotent by (campaign, provider_id): re-reserving the same code extends the
+// same reservation; a different code for the same provider returns "conflict".
+func (h *Handler) HandleReserve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	if !h.Policy.RequireForRegistration {
+		h.observe("reserve", "disabled")
+		writeJSON(w, http.StatusOK, map[string]any{"reserved": false, "required": false, "reason": "disabled"})
+		return
+	}
+	key := r.RemoteAddr
+	if h.SourceIP != nil {
+		key = h.SourceIP(r)
+	}
+	if h.PublicLimiter == nil || !h.PublicLimiter.Allow("reserve:" + key) {
+		h.observe("reserve", "rate_limited")
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many referral checks")
+		return
+	}
+	if h.ValidateSlots != nil {
+		if !h.acquireValidationSlot(w, "reserve") {
+			return
+		}
+		defer func() { <-h.ValidateSlots }()
+	}
+	var req struct {
+		Code       string `json:"code"`
+		ProviderID string `json:"provider_id"`
+	}
+	if err := decodeBoundedJSON(r, &req, 1024); err != nil || len([]byte(req.Code)) > 256 {
+		h.observe("reserve", "bad_request")
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid request")
+		return
+	}
+	if err := config.ValidateProviderID(req.ProviderID); err != nil {
+		h.observe("reserve", "bad_request")
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid provider_id")
+		return
+	}
+	reservationID, err := h.Store.ReserveReferralCapacity(r.Context(), h.Policy, req.Code, req.ProviderID, h.now(), appTrackReferralReserveTTL)
+	if err != nil {
+		reason := referralReason(err)
+		h.observe("reserve", reason)
+		writeJSON(w, http.StatusOK, map[string]any{"reserved": false, "required": true, "reason": reason})
+		return
+	}
+	h.observe("reserve", "reserved")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"reserved":       true,
+		"reservation_id": reservationID,
+		"expires_at":     h.now().Add(appTrackReferralReserveTTL).UTC().Format(time.RFC3339),
+		"required":       true,
+	})
+}
+
 var joinPage = template.Must(template.New("join").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><title>You're invited to Malibu</title>
@@ -186,6 +257,19 @@ func (h *Handler) HandleJoin(w http.ResponseWriter, r *http.Request) {
 	if code == "" || strings.Contains(code, "/") || len(code) > 256 {
 		h.observe("join", "not_found")
 		http.NotFound(w, r)
+		return
+	}
+	// FIX-570 A9 (M5): when the gate is off the /j route stays mounted but serves
+	// an open-beta landing rather than validating a code that no longer gates
+	// anything. Links already in circulation keep resolving.
+	if !h.Policy.RequireForRegistration {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		h.observe("join", "open_beta")
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_ = joinOpenBetaPage.Execute(w, nil)
 		return
 	}
 	if _, err := h.Store.ValidateReferral(r.Context(), h.Policy, code, h.now()); errors.Is(err, auth.ErrReferralExhausted) {
@@ -476,6 +560,8 @@ func referralReason(err error) string {
 		return "revoked"
 	case errors.Is(err, auth.ErrReferralExhausted):
 		return "exhausted"
+	case errors.Is(err, auth.ErrReferralConflict):
+		return "conflict"
 	default:
 		return "invalid"
 	}
