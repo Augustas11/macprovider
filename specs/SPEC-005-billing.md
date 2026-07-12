@@ -151,6 +151,15 @@ model (§7) and the cache-**isolation** invariant (§11–§16).
   **§10.4**. LOW fixes: **§4.1** now lists `updated_at_utc` among recovery-updatable columns (matches
   §2.7/§4.3); the remaining "monotonic-quarantine **schema** invariant" in normative **§4.10** softened to
   application-enforced.
+- **R11-audit corrections (3-lane codex).** The R10 identity-first fix added correct new paragraphs but
+  left **two stale timestamp-primary sentences** that now self-contradicted them (architect HIGH; code +
+  security MED): §4.7's immutability rationale ("Recovery selects a snapshot by `effective_at_utc`
+  ordering") and §10.2's original "Recovery rows use the latest ... `effective_at_utc`" line — both
+  removed/corrected to the identity-first precedence. LOW: softened §4.7's absolute "never UPDATEs"
+  snapshot-immutability wording to allow the startup `effective_at_utc` **format normalization**
+  (semantic-preserving, never a priced-value change); annotated the two non-normative stale copies
+  (`GOAL_SPEC_005_IMPL.md`, `BUILD_SPEC_005_IMPL_PROMPT.md`) with a v0.6 supersession pointer rather than
+  rewriting the historical stubs.
 
 **Change log v0.5 (2026-07-08, issue #253 — force-credit + pre-payout hold + corrective resolution):**
 
@@ -936,11 +945,14 @@ Indexes and uniqueness constraints:
 specified `UNIQUE(config_hash)`; the **shipped** schema deliberately has **no** uniqueness or
 immutability constraint on `ledger_config_snapshots`, and a migration removes the legacy unique index
 (`store.go`) so that an unchanged config re-inserts an identical-hash snapshot on each startup (this is
-required by the append-on-restart behavior). Insert-only immutability is therefore a **convention** the
-coordinator upholds (it only ever INSERTs snapshots, never UPDATEs/DELETEs them); it is not a database
-guarantee. No remote or API path mutates a snapshot, so the absence of a DB constraint is
-defense-in-depth drift rather than a demonstrated risk. Recovery selects a snapshot by
-`effective_at_utc` ordering (§10.4), which is well-defined even with duplicate hashes.
+required by the append-on-restart behavior). Insert-only immutability of the **priced values**
+(`rate_card_json`, `provider_share_bps`, `global_multiplier_ppm`) is therefore a **convention** the
+coordinator upholds; it is not a database guarantee. The one exception is a startup **normalization**
+that may `UPDATE ledger_config_snapshots.effective_at_utc` to a canonical timestamp format (`store.go`)
+— this preserves the same semantic instant and never changes a priced value. No remote or API path
+mutates a snapshot, so the absence of a DB constraint is defense-in-depth drift rather than a
+demonstrated risk. Recovery snapshot **selection** follows the identity-first precedence below (and
+§10.2/§10.4), not a bare `effective_at_utc` ordering.
 
 The coordinator MUST insert a config snapshot on startup and whenever a valid SPEC-005 config reload is acknowledged.
 Recovery prices historical rows from the **exact `ledger_provider_identity_snapshots.config_snapshot_id`** the row was priced under at insert **when that id is present** (all rows, cache and non-cache); the timestamp-qualified "latest snapshot whose effective_at_utc ≤ request_log.ts_utc" rule is the **fallback used only when that id is absent** (§10.2/§10.4). A positive first-attempt cache row is the exception that does **not** fall back — it quarantines `missing_cache_config_snapshot` when the exact id is absent.
@@ -1654,8 +1666,7 @@ The coordinator SQLite database MUST be operated in WAL mode (`PRAGMA journal_mo
 Startup scans prior 24 hours.
 Creditable request_log rows missing ledger rows get recovery rows.
 Recovery rows set recovery_source=startup_scan.
-Recovery rows use the latest `ledger_config_snapshots` entry whose effective_at_utc is less than or equal to request_log.ts_utc.
-If no such config snapshot exists, the row is quarantined (`missing_config_snapshot`) instead of priced with current config.
+Recovery rows select the config snapshot by the identity-first precedence stated below (exact identity-linked `config_snapshot_id` when present; timestamp-qualified fallback only when absent). If no snapshot can be selected, the row is quarantined (`missing_config_snapshot`, or `missing_cache_config_snapshot` for a positive first-attempt cache row) instead of priced with current config.
 Recovery rows use `ledger_provider_identity_snapshots` to resolve provider_assigned_id to stable provider_id.
 The scan is idempotent.
 
