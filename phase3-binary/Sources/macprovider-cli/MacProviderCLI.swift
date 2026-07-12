@@ -50,6 +50,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Coordinator WebSocket URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")
     var coordinator: String?
 
+    @Option(name: [.customLong("ref"), .customLong("referral-code")], help: "Pre-beta referral code used only to obtain the first provider credential. Overrides MACPROVIDER_REFERRAL_CODE and config key referral_code.")
+    var referralCode: String?
+
     @Option(help: "Stable provider identifier sent in the coordinator hello message. Must match the coordinator's config.providers[] entry. Overrides MACPROVIDER_PROVIDER_ID and config file provider_id. If unset, a per-instance UUID is generated (suitable for dev/test only).")
     var providerID: String?
 
@@ -498,6 +501,7 @@ struct ServeCommand: AsyncParsableCommand {
                 numDraftTokens: numDraftTokens,
                 publishesSpecDecodeTelemetry: publishSpecDecodeTelemetry,
                 coordinatorURL: coordinator,
+                referralCode: referralCode,
                 providerID: providerID,
                 endpointURL: endpointURL,
                 configPath: config,

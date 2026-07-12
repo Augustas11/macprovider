@@ -86,6 +86,29 @@ auth:
     spec026_a: env:OPERATOR_AUTH_POLICY_A
     spec026_b: env:OPERATOR_AUTH_POLICY_B
 
+# SPEC-034 referral-gated pre-beta. Default-off deployment scaffold: enabling
+# either flag requires REFERRAL_HMAC_K1; social bonus additionally requires
+# X_API_BEARER_TOKEN. Access gating is enforced at credential mint, not here at
+# the reverse-proxy/UI seam.
+referrals:
+  require_for_registration: false
+  enable_social_invite_bonus: false
+  campaign: prebeta_2026
+  policy_version: v1
+  # Optional RFC3339 cutoff. Providers first credentialed before it can recover
+  # without a referral even if their old credential has since been revoked.
+  grandfather_before: ""
+  current_key_id: k1
+  # Set before enabling: {k1: env:REFERRAL_HMAC_K1}
+  hmac_keys: {}
+  provider_base_uses: 1
+  social_bonus_uses: 2
+  challenge_ttl_s: 900
+  # The coordinator mounts the invite landing page at /j/<code>.
+  join_base_url: "https://coordinator.streamvc.live/j"
+  # Set before enabling social bonus: env:X_API_BEARER_TOKEN
+  x_api_bearer_token: ""
+
 # SPEC-007 v0.2 — internal read-only operator explorer.
 # Reuses auth.operator_key (D15). Disable by setting enabled: false.
 # Mounted at /admin/explorer/ on provider_port (8444); already proxied by nginx.

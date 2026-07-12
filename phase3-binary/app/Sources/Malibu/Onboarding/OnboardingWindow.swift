@@ -56,6 +56,7 @@ private struct OnboardingRootView: View {
         .padding(28)
         .frame(minWidth: 460, minHeight: 560)
         .task {
+            await controller.refreshReferralPolicy()
             await controller.refreshFromExistingInstall()
         }
     }
@@ -64,9 +65,33 @@ private struct OnboardingRootView: View {
     private var content: some View {
         switch controller.stage {
         case .idle:
-            stageRow(title: "Ready", detail: "Installs the provider CLI, picks a model, and registers a background service.") {
-                VStack(alignment: .leading, spacing: 8) {
+            stageRow(
+                title: controller.referralRequired ? "Invite-only pre-beta" : "Set up Malibu",
+                detail: controller.referralRequired
+                    ? "Enter an invite to install the provider CLI and register this Mac."
+                    : "Install the provider CLI and register this Mac."
+            ) {
+                VStack(alignment: .leading, spacing: 10) {
+                    if controller.referralRequired {
+                        HStack(spacing: 8) {
+                            TextField("MAL1-…", text: $controller.referralCode)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced))
+                                .accessibilityLabel("Malibu invite code")
+                            Button("Paste code") {
+                                if let value = NSPasteboard.general.string(forType: .string) {
+                                    controller.referralCode = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                                }
+                            }
+                        }
+                        if !controller.normalizedReferralCode.isEmpty && !controller.referralCodeIsValid {
+                            Text("That invite code does not match Malibu's expected format.")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    }
                     launchButton(title: "Launch Provider")
+                        .disabled(controller.referralRequired && !controller.referralCodeIsValid)
                     Text("No wallet needed to start — add one anytime after.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -142,10 +167,18 @@ private struct OnboardingRootView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(MalibuBrand.coral)
             }
-        case let .failed(_, retryable, message):
+        case let .failed(stage, retryable, message):
             stageRow(title: retryable ? "Needs retry" : "Setup failed", detail: message) {
                 if retryable {
+                    if stage == "referral" || (stage == "cliInstall" && controller.referralRequired) {
+                        Text(stage == "referral" ? "Use a different invite" : "Change invite code (optional)")
+                            .font(.caption.weight(.semibold))
+                        TextField("MAL1-…", text: $controller.referralCode)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                    }
                     launchButton(title: "Retry")
+                        .disabled(controller.referralRequired && (stage == "referral" || stage == "cliInstall") && !controller.referralCodeIsValid)
                 }
             }
         }

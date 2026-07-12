@@ -90,6 +90,41 @@ func TestAdmissionManagerPendingReservationsEnforcePoolCap(t *testing.T) {
 	}
 }
 
+func TestAdmissionManagerReservationIsNotDurableUntilCommitted(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store, err := NewSQLiteAdmissionStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.AdmissionConfig{ProvisionalAdmissionRatePerHour: 1, ProvisionalPoolMax: 1}
+	adm := NewAdmissionManager(cfg, func() time.Time { return now })
+	adm.SetPersistence(store, func(err error) { t.Fatalf("persist admission: %v", err) })
+	hello := Hello{ProviderID: "reserved-provider", Hostname: "host", ModelID: "model", BinaryVersion: "1.2.0"}
+	if tier, code, reason := adm.ReserveAdmission(hello, false, 0); tier != pool.TierProvisional || code != 0 || reason != "" {
+		t.Fatalf("reserve = tier:%s code:%d reason:%q", tier, code, reason)
+	}
+	if records := adm.Records(nil); len(records) != 0 {
+		t.Fatalf("reservation created durable records: %+v", records)
+	}
+	restarted := NewAdmissionManager(cfg, func() time.Time { return now })
+	restarted.SetPersistence(store, func(err error) { t.Fatalf("reload admission: %v", err) })
+	if records := restarted.Records(nil); len(records) != 0 {
+		t.Fatalf("reservation survived restart: %+v", records)
+	}
+	if tier := adm.CommitReservedAdmission(hello, false); tier != pool.TierProvisional {
+		t.Fatalf("commit tier = %s", tier)
+	}
+	if records := adm.Records(nil); len(records) != 1 || records[0].ProviderID != hello.ProviderID {
+		t.Fatalf("committed records = %+v", records)
+	}
+	adm.ReleasePendingProvisional()
+}
+
 func TestAdmissionManagerPersistenceSurvivesRestart(t *testing.T) {
 	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "coordinator.db"))

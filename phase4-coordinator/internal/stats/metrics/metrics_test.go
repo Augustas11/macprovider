@@ -45,7 +45,15 @@ var (
 	allowCredentialBootstrapOutcome = map[string]bool{
 		"minted": true, "recovered": true, "rejected_v1": true,
 		"rejected_identity": true, "rejected_used": true, "rejected_expired": true,
-		"rejected_rate": true, "rejected_outstanding": true, "store_error": true,
+		"rejected_rate": true, "rejected_outstanding": true,
+		"rejected_referral_required": true, "rejected_referral": true, "store_error": true,
+	}
+	allowReferralEvent   = map[string]bool{"validate": true, "status": true, "challenge": true, "x_verify": true}
+	allowReferralOutcome = map[string]bool{
+		"valid": true, "invalid": true, "missing": true, "expired": true, "revoked": true,
+		"exhausted": true, "rate_limited": true, "bad_request": true, "locked": true,
+		"eligible": true, "verified": true, "error": true, "created": true, "disabled": true,
+		"failed": true, "conflict": true,
 	}
 	// Round-1 ARCH M1 / CODE M1 fix: also scan for an
 	// Origin-fragment to prove no attacker-controlled string
@@ -87,6 +95,10 @@ func TestLabelHygiene(t *testing.T) {
 		m.IncCredentialBootstrap(outcome)
 	}
 	m.IncCredentialBootstrap("raw-attacker-value")
+	m.IncReferralEvent("validate", "valid")
+	m.IncReferralEvent("challenge", "created")
+	m.IncReferralEvent("x_verify", "verified")
+	m.IncReferralEvent("raw-attacker-value", "raw-attacker-value")
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -143,7 +155,11 @@ func TestLabelHygiene(t *testing.T) {
 						t.Errorf("metric %s track=%q not in allowed set", mf.GetName(), val)
 					}
 				case "event":
-					if !allowIdlePrewarmEvent[val] {
+					allowed := allowIdlePrewarmEvent[val]
+					if mf.GetName() == "referral_event_total" {
+						allowed = allowReferralEvent[val]
+					}
+					if !allowed {
 						t.Errorf("metric %s event=%q not in allowed set", mf.GetName(), val)
 					}
 				case "reason":
@@ -151,7 +167,11 @@ func TestLabelHygiene(t *testing.T) {
 						t.Errorf("metric %s reason=%q not in allowed set", mf.GetName(), val)
 					}
 				case "outcome":
-					if !allowCredentialBootstrapOutcome[val] {
+					allowed := allowCredentialBootstrapOutcome[val]
+					if mf.GetName() == "referral_event_total" {
+						allowed = allowReferralOutcome[val]
+					}
+					if !allowed {
 						t.Errorf("metric %s outcome=%q not in allowed set", mf.GetName(), val)
 					}
 				}

@@ -1595,6 +1595,10 @@ actor CoordinatorClient {
                 throw CoordinatorAuthError.invalidMessage("credential bootstrap receipt identity unavailable")
             }
             proof["credential_bootstrap"] = true
+            if let referralCode = appConfig.referralCode?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !referralCode.isEmpty {
+                proof["referral_code"] = referralCode
+            }
             let transcriptSHA256 = try Self.initialAuthTranscriptHashBase64(initialMessage)
             let payload = try Self.credentialBootstrapIdentityPayload(
                 challenge: challenge,
@@ -2950,6 +2954,10 @@ actor CoordinatorClient {
         }
         if credentialBootstrap {
             message["credential_bootstrap"] = true
+            if let referralCode = appConfig.referralCode?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !referralCode.isEmpty {
+                message["referral_code"] = referralCode
+            }
         }
         return message
     }
@@ -3004,6 +3012,11 @@ actor CoordinatorClient {
             message["model_hash"] = hashForHello
         }
         appendCatalogAdmissionMetadata(to: &message, wireModelID: wireModelIDForHello)
+        if providerToken == nil,
+           let referralCode = appConfig.referralCode?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !referralCode.isEmpty {
+            message["referral_code"] = referralCode
+        }
         return message
     }
 

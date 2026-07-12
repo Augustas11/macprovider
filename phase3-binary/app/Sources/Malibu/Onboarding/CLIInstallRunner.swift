@@ -22,10 +22,16 @@ enum CLIInstallRunner {
 
     /// Invokes `install.sh` with `MACPROVIDER_NO_PROMPT=1`. Delivers stdout/stderr
     /// lines to `onLogLine` on the main actor.
-    static func run(onLogLine: @escaping @MainActor (String) -> Void) async throws {
+    static func run(referralCode: String, onLogLine: @escaping @MainActor (String) -> Void) async throws {
         let scriptURL = try resolveInstallScriptURL()
         let runnableURL = try materializeRunnableScript(from: scriptURL)
         let installPort = resolveInstallPort()
+        let existingProviderToken: String?
+        if let providerID = ProviderConfig.readProviderID() {
+            existingProviderToken = await KeychainStore.readProviderToken(providerID: providerID)
+        } else {
+            existingProviderToken = nil
+        }
         if let installPort {
             await onLogLine("[macprovider-install] Using local HTTP port \(installPort) for provider install.")
         }
@@ -39,16 +45,13 @@ enum CLIInstallRunner {
                 process.standardOutput = stdout
                 process.standardError = stderr
 
-                var environment = ProcessInfo.processInfo.environment
-                environment["MACPROVIDER_NO_PROMPT"] = "1"
-                environment["HOME"] = NSHomeDirectory()
-                if let installPort {
-                    environment["MACPROVIDER_PORT"] = String(installPort)
-                }
-                if environment["PATH"]?.isEmpty != false {
-                    environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-                }
-                process.environment = environment
+                process.environment = installerEnvironment(
+                    base: ProcessInfo.processInfo.environment,
+                    referralCode: referralCode,
+                    appManagedRepair: existingProviderToken?.isEmpty == false,
+                    installPort: installPort,
+                    home: NSHomeDirectory()
+                )
 
                 let emit: (Pipe) -> Void = { pipe in
                     pipe.fileHandleForReading.readabilityHandler = { handle in
@@ -84,6 +87,34 @@ enum CLIInstallRunner {
         // uncommitted and triggers rollback. A healthy local process may be
         // the restored previous release, so it cannot prove this install won.
         throw Error.nonZeroExit(exitCode)
+    }
+
+    static func installerEnvironment(
+        base: [String: String],
+        referralCode: String,
+        appManagedRepair: Bool,
+        installPort: Int?,
+        home: String
+    ) -> [String: String] {
+        var environment = base
+        environment["MACPROVIDER_NO_PROMPT"] = "1"
+        environment["MACPROVIDER_REFERRAL_CODE"] = referralCode
+        environment.removeValue(forKey: "MACPROVIDER_PROVIDER_TOKEN")
+        environment.removeValue(forKey: "MACPROVIDER_APP_MANAGED_REPAIR")
+        if appManagedRepair {
+            // Deliberately non-secret: the Keychain bearer is reserved for
+            // Malibu's sanitized serving child and never enters the installer
+            // or any of its subprocesses.
+            environment["MACPROVIDER_APP_MANAGED_REPAIR"] = "1"
+        }
+        environment["HOME"] = home
+        if let installPort {
+            environment["MACPROVIDER_PORT"] = String(installPort)
+        }
+        if environment["PATH"]?.isEmpty != false {
+            environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        }
+        return environment
     }
 
     /// Reports whether an already-installed provider is locally healthy. This

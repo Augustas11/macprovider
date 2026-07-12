@@ -364,6 +364,105 @@ VALUES ($1, $2, $3, $4)`, providerID, sourceIP, nonce, observedAt); err != nil {
 	return nil
 }
 
+// PrepareProviderRegistration commits replay protection and provider identity
+// as one PostgreSQL unit before the SQLite credential authority is entered.
+// A referral is preflighted before this method and authoritatively redeemed
+// afterward, so PostgreSQL latency never runs under SQLite's writer lock.
+func (s *PGStore) PrepareProviderRegistration(ctx context.Context, providerID, sourceIP, nonce string, observedAt time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
+	if s == nil || s.db == nil {
+		return errors.New("onboarding postgres store is nil")
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	observedAt = observedAt.UTC()
+	cutoffStart := observedAt.Add(-registerNonceWindow)
+	cutoffEnd := observedAt.Add(registerNonceWindow)
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM provider_register_nonces
+     WHERE provider_id = $1 AND nonce = $2 AND ts_utc BETWEEN $3 AND $4
+)`, providerID, nonce, cutoffStart, cutoffEnd).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return ErrNonceReplay
+	}
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM provider_register_nonces
+     WHERE source_ip = $1 AND nonce = $2 AND ts_utc BETWEEN $3 AND $4
+)`, sourceIP, nonce, cutoffStart, cutoffEnd).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return ErrNonceReplay
+	}
+
+	var key any
+	if len(appAttestKeyID) > 0 {
+		key = appAttestKeyID
+	}
+	var out string
+	err = tx.QueryRowContext(ctx, `
+INSERT INTO provider_identities (provider_id, identity_pubkey, attested, app_attest_key_id)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (provider_id) DO UPDATE
+   SET attested = provider_identities.attested OR EXCLUDED.attested,
+       app_attest_key_id = COALESCE(provider_identities.app_attest_key_id, EXCLUDED.app_attest_key_id)
+ WHERE provider_identities.identity_pubkey = EXCLUDED.identity_pubkey
+RETURNING provider_id`,
+		providerID, identityPubkey, attested, key,
+	).Scan(&out)
+	if err == sql.ErrNoRows {
+		return ErrTOFUConflict
+	}
+	if err != nil {
+		if isUniqueViolation(err) {
+			return ErrAttestKeyReused
+		}
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO provider_register_nonces (provider_id, source_ip, nonce, ts_utc)
+VALUES ($1, $2, $3, $4)`, providerID, sourceIP, nonce, observedAt); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		if isSerializationFailure(err) {
+			return ErrNonceReplay
+		}
+		return err
+	}
+	return nil
+}
+
+// ProviderRegistrationPrepared proves that the exact PostgreSQL half of a
+// cross-store App-track registration committed. Checking both its nonce row
+// and identity row avoids mistaking an older identity for the current attempt
+// during crash recovery.
+func (s *PGStore) ProviderRegistrationPrepared(ctx context.Context, providerID, sourceIP, nonce string, observedAt time.Time) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, errors.New("onboarding postgres store is nil")
+	}
+	var prepared bool
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1
+      FROM provider_register_nonces n
+      JOIN provider_identities i ON i.provider_id = n.provider_id
+     WHERE n.provider_id = $1
+       AND n.source_ip = $2
+       AND n.nonce = $3
+       AND n.ts_utc = $4
+)`, providerID, sourceIP, nonce, observedAt.UTC()).Scan(&prepared)
+	return prepared, err
+}
+
 func normalizeChip(chip string) string {
 	chip = strings.ToLower(strings.TrimSpace(chip))
 	return strings.Join(strings.Fields(chip), " ")

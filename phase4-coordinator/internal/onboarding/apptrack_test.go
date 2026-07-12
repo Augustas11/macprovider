@@ -7,9 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -59,6 +61,273 @@ func TestHandleAppTrackRegisterSuccess(t *testing.T) {
 	}
 	if resp.CoordinatorWSURL != "wss://coordinator.streamvc.live/v2/provider" {
 		t.Fatalf("coordinator_ws_url=%q", resp.CoordinatorWSURL)
+	}
+}
+
+func TestHandleAppTrackRegisterBogusBearerDoesNotBypassReferralGate(t *testing.T) {
+	body, _ := signedRegisterBody(t, nil)
+	stats := &fakeStatsDB{}
+	authStore := &fakeAuthStore{referralValidateErr: auth.ErrReferralRequired}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	req.Header.Set("Authorization", "Bearer junk")
+	rr := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "referral_required") {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if authStore.referralMintCalled || stats.nonceCalls != 0 || stats.upsertProviderID != "" {
+		t.Fatalf("referral path not authoritative: auth=%+v stats=%+v", authStore, stats)
+	}
+}
+
+func TestHandleAppTrackRegisterValidBearerBypassesReferralPreflight(t *testing.T) {
+	body, providerID := signedRegisterBody(t, nil)
+	stats := &fakeStatsDB{}
+	authStore := &fakeAuthStore{
+		token:               "replacement-token",
+		validateOK:          true,
+		validateProviderID:  providerID,
+		referralValidateErr: auth.ErrReferralRequired,
+	}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	req.Header.Set("Authorization", "Bearer current-token")
+	rr := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusOK || authStore.referralValidateCalled || !authStore.referralMintCalled || stats.nonceCalls != 1 {
+		t.Fatalf("status=%d body=%s auth=%+v stats=%+v", rr.Code, rr.Body.String(), authStore, stats)
+	}
+}
+
+func TestHandleAppTrackRegisterPrepareFailureCompensatesUndisclosedCredential(t *testing.T) {
+	body, _ := signedRegisterBody(t, nil)
+	stats := &fakeStatsDB{nonceErr: ErrNonceReplay}
+	authStore := &fakeAuthStore{token: "provider-token"}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	rr := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusConflict || !authStore.referralMintCalled || !authStore.referralValidateCalled || !authStore.referralRollbackCalled {
+		t.Fatalf("status=%d body=%s auth=%+v", rr.Code, rr.Body.String(), authStore)
+	}
+}
+
+func TestHandleAppTrackRegisterAmbiguousPrepareProvesCommitBeforeDisclosure(t *testing.T) {
+	body, _ := signedRegisterBody(t, nil)
+	stats := &fakeStatsDB{nonceErr: errors.New("commit result lost"), registrationPrepared: true}
+	authStore := &fakeAuthStore{token: "provider-token"}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	rr := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusOK || !authStore.referralAckCalled || authStore.referralRollbackCalled {
+		t.Fatalf("status=%d body=%s auth=%+v stats=%+v", rr.Code, rr.Body.String(), authStore, stats)
+	}
+}
+
+func TestHandleAppTrackRegisterCompensationFailureStaysUndisclosedForReconciliation(t *testing.T) {
+	body, _ := signedRegisterBody(t, nil)
+	stats := &fakeStatsDB{nonceErr: ErrNonceReplay}
+	authStore := &fakeAuthStore{token: "provider-token", referralRollbackErr: errors.New("sqlite unavailable")}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	rr := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusInternalServerError || strings.Contains(rr.Body.String(), "provider-token") || !authStore.referralRollbackCalled {
+		t.Fatalf("status=%d body=%s auth=%+v", rr.Code, rr.Body.String(), authStore)
+	}
+}
+
+func TestReconcilePendingAppTrackReferralMintUsesExactPostgresAttempt(t *testing.T) {
+	pending := auth.PendingAppTrackReferralMint{
+		ProviderID: "pending-provider",
+		TokenHash:  strings.Repeat("a", 64),
+		Attempt: auth.AppTrackRegistrationAttempt{
+			SourceIP:   "198.51.100.10",
+			Nonce:      "pending-nonce",
+			ObservedAt: time.Now().UTC().Add(-time.Hour),
+		},
+	}
+	stats := &fakeStatsDB{registrationPrepared: true}
+	authStore := &fakeAuthStore{pendingReferralMints: []auth.PendingAppTrackReferralMint{pending}}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+
+	if err := handler.ReconcilePendingAppTrackReferralMints(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(authStore.resolvedPending) != 1 || len(authStore.resolvedPrepared) != 1 || !authStore.resolvedPrepared[0] {
+		t.Fatalf("resolved=%+v prepared=%+v", authStore.resolvedPending, authStore.resolvedPrepared)
+	}
+}
+
+func TestReconcilePendingAppTrackReferralMintCompensatesAbsentPostgresAttempt(t *testing.T) {
+	pending := auth.PendingAppTrackReferralMint{
+		ProviderID: "abandoned-provider",
+		TokenHash:  strings.Repeat("b", 64),
+		Attempt: auth.AppTrackRegistrationAttempt{
+			SourceIP:   "198.51.100.11",
+			Nonce:      "abandoned-nonce",
+			ObservedAt: time.Now().UTC().Add(-time.Hour),
+		},
+	}
+	stats := &fakeStatsDB{registrationPrepared: false}
+	authStore := &fakeAuthStore{pendingReferralMints: []auth.PendingAppTrackReferralMint{pending}}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+
+	if err := handler.ReconcilePendingAppTrackReferralMints(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(authStore.resolvedPending) != 1 || len(authStore.resolvedPrepared) != 1 || authStore.resolvedPrepared[0] {
+		t.Fatalf("resolved=%+v prepared=%+v", authStore.resolvedPending, authStore.resolvedPrepared)
+	}
+}
+
+func TestHandleAppTrackRegisterExhaustedReservationLeavesNoIdentityOrCredential(t *testing.T) {
+	body, _ := signedRegisterBody(t, nil)
+	stats := &fakeStatsDB{}
+	authStore := &fakeAuthStore{referralValidateErr: auth.ErrReferralExhausted}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	rr := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusConflict || stats.nonceCalls != 0 || authStore.referralMintCalled {
+		t.Fatalf("status=%d body=%s auth=%+v stats=%+v", rr.Code, rr.Body.String(), authStore, stats)
+	}
+}
+
+func TestHandleAppTrackRegisterFinalReferralFailurePrecedesIdentityPrepare(t *testing.T) {
+	body, _ := signedRegisterBody(t, nil)
+	stats := &fakeStatsDB{}
+	authStore := &fakeAuthStore{referralMintErr: auth.ErrReferralRevoked}
+	handler := testRegisterHandler(stats, authStore, nil)
+	handler.ReferralPolicy = auth.ReferralPolicy{RequireForRegistration: true}
+	handler.ReferralStore = authStore
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+	req.RemoteAddr = "198.51.100.10:4444"
+	rr := httptest.NewRecorder()
+
+	handler.HandleAppTrackRegister(rr, req)
+
+	if rr.Code != http.StatusGone || stats.nonceCalls != 0 || !authStore.referralMintCalled {
+		t.Fatalf("status=%d body=%s auth=%+v stats=%+v", rr.Code, rr.Body.String(), authStore, stats)
+	}
+}
+
+func TestHandleAppTrackRegisterCapOnePreparesExactlyOneIdentity(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := auth.ReferralPolicy{
+		RequireForRegistration: true,
+		Campaign:               "prebeta",
+		PolicyVersion:          "v1",
+		CurrentKeyID:           "K1",
+		HMACKeys:               map[string]string{"K1": strings.Repeat("r", 32)},
+		ProviderBaseUses:       1,
+		SocialBonusUses:        2,
+		ChallengeTTL:           10 * time.Minute,
+	}
+	code, err := store.CreateSeedReferral(context.Background(), policy, "app_cap", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testNow := time.Now().UTC().Truncate(time.Second)
+	stats := &fakeStatsDB{}
+	handler := &Handler{
+		StatsDB:           stats,
+		AuthTokenStore:    store,
+		ReferralStore:     store,
+		ReferralPolicy:    policy,
+		CoordinatorDomain: "coordinator.streamvc.live",
+		CoordinatorWSURL:  "wss://coordinator.streamvc.live/v2/provider",
+		IPRateLimiter:     allowLimiter{},
+		ASNRateLimiter:    allowLimiter{},
+		AppAttestConfig:   AppAttestConfig{BundleID: "live.streamvc.Malibu", TeamID: "MALIBU1234"},
+		Now:               func() time.Time { return testNow },
+	}
+	const attempts = 8
+	bodies := make([][]byte, attempts)
+	for i := range bodies {
+		bodies[i], _ = signedRegisterBody(t, func(m map[string]any) {
+			m["referral_code"] = code
+			m["ts_utc"] = testNow.Format(time.RFC3339)
+		})
+	}
+	statuses := make(chan int, attempts)
+	var wg sync.WaitGroup
+	for i := range bodies {
+		wg.Add(1)
+		go func(body []byte, port int) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", bytes.NewReader(body))
+			req.RemoteAddr = fmt.Sprintf("198.51.100.%d:%d", port+10, 4000+port)
+			rr := httptest.NewRecorder()
+			handler.HandleAppTrackRegister(rr, req)
+			statuses <- rr.Code
+		}(bodies[i], i)
+	}
+	wg.Wait()
+	close(statuses)
+	successes := 0
+	for status := range statuses {
+		if status == http.StatusOK {
+			successes++
+		} else if status != http.StatusConflict {
+			t.Fatalf("unexpected status %d", status)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful registrations=%d, want 1", successes)
+	}
+	stats.mu.Lock()
+	prepareCalls := stats.nonceCalls
+	stats.mu.Unlock()
+	if prepareCalls != 1 {
+		t.Fatalf("PostgreSQL identity prepares=%d, want 1", prepareCalls)
+	}
+	tokens, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 1 || tokens[0].RevokedAt.Valid {
+		t.Fatalf("tokens=%+v, want one active token", tokens)
 	}
 }
 
@@ -996,6 +1265,9 @@ type fakeStatsDB struct {
 	nonceErr                   error
 	upsertErr                  error
 	checkKeyErr                error
+	registrationPrepared       bool
+	registrationPreparedErr    error
+	registrationPreparedCalls  int
 	nonceProviderID            string
 	nonceSourceIP              string
 	nonceObservedAt            time.Time
@@ -1021,6 +1293,29 @@ type fakeStatsDB struct {
 	existingEvidenceRecord     HardwareEvidenceJobRecord
 	existingEvidenceFound      bool
 	existingEvidenceErr        error
+}
+
+func (f *fakeStatsDB) PrepareProviderRegistration(ctx context.Context, providerID, sourceIP, nonce string, tsUTC time.Time, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nonceCalls++
+	f.nonceProviderID = providerID
+	f.nonceSourceIP = sourceIP
+	f.nonceObservedAt = tsUTC
+	if f.nonceErr != nil {
+		return f.nonceErr
+	}
+	f.upsertProviderID = providerID
+	f.upsertAttested = attested
+	f.upsertAppAttestKeyID = append([]byte(nil), appAttestKeyID...)
+	return f.upsertErr
+}
+
+func (f *fakeStatsDB) ProviderRegistrationPrepared(context.Context, string, string, string, time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.registrationPreparedCalls++
+	return f.registrationPrepared, f.registrationPreparedErr
 }
 
 func (f *fakeStatsDB) UpsertProviderIdentity(ctx context.Context, providerID string, identityPubkey []byte, attested bool, appAttestKeyID []byte) error {
@@ -1113,13 +1408,23 @@ func (waitForCancelAppAttestVerifier) Verify(ctx context.Context, evidence AppAt
 }
 
 type fakeAuthStore struct {
-	token              string
-	err                error
-	providerID         string
-	bearer             *string
-	validateProviderID string
-	validateOK         bool
-	validateErr        error
+	token                  string
+	err                    error
+	providerID             string
+	bearer                 *string
+	validateProviderID     string
+	validateOK             bool
+	validateErr            error
+	referralValidateErr    error
+	referralMintErr        error
+	referralValidateCalled bool
+	referralMintCalled     bool
+	referralRollbackCalled bool
+	referralAckCalled      bool
+	referralRollbackErr    error
+	pendingReferralMints   []auth.PendingAppTrackReferralMint
+	resolvedPending        []auth.PendingAppTrackReferralMint
+	resolvedPrepared       []bool
 }
 
 func (f *fakeAuthStore) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (string, error) {
@@ -1142,6 +1447,49 @@ func (f *fakeAuthStore) ValidateToken(ctx context.Context, token string) (string
 		return f.validateProviderID, true, nil
 	}
 	return f.providerID, true, nil
+}
+
+func (f *fakeAuthStore) ValidateReferral(context.Context, auth.ReferralPolicy, string, time.Time) (auth.ReferralValidation, error) {
+	f.referralValidateCalled = true
+	return auth.ReferralValidation{}, f.referralValidateErr
+}
+
+func (f *fakeAuthStore) ReserveReferralCapacity(context.Context, auth.ReferralPolicy, string, string, time.Time, time.Duration) (string, error) {
+	f.referralValidateCalled = true
+	if f.referralValidateErr != nil {
+		return "", f.referralValidateErr
+	}
+	return "reservation", nil
+}
+
+func (f *fakeAuthStore) MintProviderTokenAppTrackWithReferral(context.Context, string, *string, string, auth.ReferralPolicy) (string, error) {
+	f.referralMintCalled = true
+	return f.token, f.referralMintErr
+}
+
+func (f *fakeAuthStore) MintProviderTokenAppTrackWithReferralReservation(context.Context, string, *string, string, auth.ReferralPolicy, string, auth.AppTrackRegistrationAttempt) (string, error) {
+	f.referralMintCalled = true
+	return f.token, f.referralMintErr
+}
+
+func (f *fakeAuthStore) AcknowledgeAppTrackReferralMint(context.Context, string, string) error {
+	f.referralAckCalled = true
+	return nil
+}
+
+func (f *fakeAuthStore) RollbackAppTrackReferralMint(context.Context, string, string) error {
+	f.referralRollbackCalled = true
+	return f.referralRollbackErr
+}
+
+func (f *fakeAuthStore) ListPendingAppTrackReferralMints(context.Context, time.Time) ([]auth.PendingAppTrackReferralMint, error) {
+	return append([]auth.PendingAppTrackReferralMint(nil), f.pendingReferralMints...), nil
+}
+
+func (f *fakeAuthStore) ResolvePendingAppTrackReferralMint(_ context.Context, pending auth.PendingAppTrackReferralMint, prepared bool) error {
+	f.resolvedPending = append(f.resolvedPending, pending)
+	f.resolvedPrepared = append(f.resolvedPrepared, prepared)
+	return nil
 }
 
 type fakeMetrics struct {

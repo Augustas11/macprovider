@@ -5,6 +5,14 @@ import XCTest
 @testable import macprovider_cli
 
 final class ServeCommandTests: XCTestCase {
+    func testReferralCodeAcceptsShortAndLongOptionNames() throws {
+        let short = try ServeCommand.parse(["--ref", "MAL1-S-k1-seed-AAAAAAAAAAAAAAAAAAAAAAAAAA"])
+        XCTAssertEqual(short.referralCode, "MAL1-S-k1-seed-AAAAAAAAAAAAAAAAAAAAAAAAAA")
+
+        let long = try ServeCommand.parse(["--referral-code", "MAL1-P-k1-issuer-BBBBBBBBBBBBBBBBBBBBBBBBBB"])
+        XCTAssertEqual(long.referralCode, "MAL1-P-k1-issuer-BBBBBBBBBBBBBBBBBBBBBBBBBB")
+    }
+
     func testServeCommandRejectsInlineProviderTokenArguments() throws {
         let deprecated = try ServeCommand.parse(["--token", "secret"])
         XCTAssertThrowsError(try ConfigLoader.load(cli: CLIOverrides(providerToken: deprecated.providerToken), environment: [:])) { error in

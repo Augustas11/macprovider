@@ -18,6 +18,7 @@ enum DashboardWindow {
 private struct DashboardView: View {
     @ObservedObject var agent: MalibuAgent
     @ObservedObject var sparkleUpdater: SparkleUpdaterController
+    @StateObject private var referralInvites = ReferralInviteController()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -96,6 +97,10 @@ private struct DashboardView: View {
             }
             .frame(minHeight: 280)
 
+            if referralInvites.isVisible {
+                referralInvitePanel
+            }
+
             if !agent.logLines.isEmpty {
                 LogTailView(lines: agent.logLines)
                     .frame(minHeight: 120, maxHeight: 180)
@@ -103,6 +108,104 @@ private struct DashboardView: View {
             Spacer(minLength: 0)
         }
         .padding(20)
+        .task {
+            await referralInvites.refresh()
+            while !Task.isCancelled,
+                  !referralInvites.dismissed,
+                  referralInvites.status?.advocacyStatus == "locked_until_first_serving" {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                await referralInvites.refresh()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            Task { await referralInvites.refresh() }
+        }
+    }
+
+    @ViewBuilder
+    private var referralInvitePanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Invite someone to Malibu")
+                    .font(.headline)
+                Spacer()
+                Button("Not now") { referralInvites.dismissed = true }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+            }
+            if referralInvites.isLoading && referralInvites.status == nil {
+                ProgressView().controlSize(.small)
+            } else if let status = referralInvites.status {
+                switch status.advocacyStatus {
+                case "locked_until_first_serving":
+                    Text("Your invite unlocks after your first verified serving. Provider access and earnings do not depend on sharing.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button("Refresh eligibility") { Task { await referralInvites.refresh() } }
+                        .buttonStyle(.bordered)
+                case "verified":
+                    Text("X post verified. You have \(status.remaining) invite use\(status.remaining == 1 ? "" : "s") remaining.")
+                        .font(.callout)
+                    Button(status.remaining > 0 ? "Copy private invite" : "Invite used") { referralInvites.copyPrivateInvite() }
+                        .buttonStyle(.bordered)
+                        .disabled(status.remaining == 0)
+                case "revoked":
+                    Text("This invite has been retired. Your provider remains live; contact Malibu if you need a new invite.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                default:
+                    Text(status.remaining == 0
+                        ? (status.socialBonusEnabled
+                            ? "Your private invite has been used. Optionally share on X to unlock two more invite uses."
+                            : "Your private invite has been used.")
+                        : (status.socialBonusEnabled
+                            ? "Your provider is live. Share privately, or optionally post on X to unlock two more invite uses."
+                            : "Your provider is live. You can share this invite privately."))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Button(status.remaining > 0 ? "Copy private invite" : "Invite used") { referralInvites.copyPrivateInvite() }
+                            .buttonStyle(.bordered)
+                            .disabled(status.remaining == 0)
+                        if status.socialBonusEnabled {
+                            Button("Share on X") {
+                                Task { await referralInvites.shareOnX() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(MalibuBrand.coral)
+                        }
+                    }
+                    if referralInvites.pendingChallenge != nil {
+                        Text("After posting, paste the public X post URL to verify the bonus. Your provider remains live and keeps serving if you skip this.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let expiry = referralInvites.pendingExpiryText {
+                            Text(expiry).font(.caption2).foregroundStyle(.secondary)
+                        }
+                        HStack(spacing: 8) {
+                            TextField("https://x.com/…/status/…", text: $referralInvites.postURL)
+                                .textFieldStyle(.roundedBorder)
+                            Button("Verify post") {
+                                Task { await referralInvites.verifyPost() }
+                            }
+                            .disabled(!referralInvites.canVerify || referralInvites.isLoading)
+                        }
+                        HStack(spacing: 8) {
+                            Button("Reopen X post") { referralInvites.reopenXPost() }
+                            Button("Start over") { Task { await referralInvites.startOver() } }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            if let error = referralInvites.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(14)
+        .background(panelBackground)
     }
 
     @ViewBuilder

@@ -22,6 +22,7 @@ extract_function() {
 for function_name in \
   validate_install_dir validate_port_value \
   prepare_staged_config activate_staged_config select_autotune_benchmark_port \
+  read_config_provider_token read_config_provider_id existing_provider_credential_configured \
   semantic_merge_config restore_existing_provider_if_start_skipped \
   validate_staged_entries; do
   extract_function "$function_name" >> "$TMP/helpers.sh"
@@ -55,6 +56,33 @@ install = main.index("install_binary", recommend)
 activate = main.index("activate_staged_config", install)
 if not snapshot < stage < prepare < freshness < recommend_gate < stop < recommend < install < activate:
     raise SystemExit("benchmarks are not isolated from the live provider and staged cutover")
+repair_gate = main.index('if [ "$APP_MANAGED_REPAIR" -eq 1 ]', activate)
+plist = main.index('install_plist "$model" "$provider_id" "$coordinator_url"', repair_gate)
+local_health = main.index('if ! wait_for_local_model "$model"', plist)
+admission = main.index('if ! wait_for_coordinator "$provider_id" "$coordinator_base"', local_health)
+repair_body = main[repair_gate:plist]
+if not activate < repair_gate < plist < local_health < admission:
+    raise SystemExit("app-managed repair is not returned before launchd health/admission gates")
+for required in (
+    'unload_app_managed_launchd_jobs',
+    'rm -f "$PLIST_PATH" "$WATCHDOG_PLIST_PATH"',
+    'write_install_manifest "$tag"',
+    'commit_install_transaction',
+    'exit 0',
+):
+    if required not in repair_body:
+        raise SystemExit(f"app-managed repair is missing: {required}")
+if repair_body.index('unload_app_managed_launchd_jobs') > repair_body.index('rm -f "$PLIST_PATH" "$WATCHDOG_PLIST_PATH"'):
+    raise SystemExit("app-managed repair deletes plists before unloading launchd jobs")
+unload = source[source.index("unload_app_managed_launchd_jobs() {"):source.index("cache_size_kb() {")]
+for required in (
+    'launchctl print "gui/$UID/live.streamvc.macprovider"',
+    'launchctl print "gui/$UID/$WATCHDOG_LABEL"',
+    'lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t',
+    'die 70 "could not confirm launchd ownership release for app-managed repair"',
+):
+    if required not in unload:
+        raise SystemExit(f"app-managed launchd teardown is not verified: {required}")
 helper = source[source.index("run_macprovider_cli_with_amfi_retry() {"):source.index("detect_existing_port() {")]
 if 'local cli_path="$MACPROVIDER_CLI_EXECUTABLE"' not in helper:
     raise SystemExit("recommendation helper is not routed to the staged CLI")
@@ -126,10 +154,36 @@ LIVE_CONFIG_PATH="$CONFIG_PATH"
 PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
 LIVE_PROVIDER_ID_PATH="$PROVIDER_ID_PATH"
 mkdir -p "$CONFIG_DIR"
+APP_MARKER_PATH="$TMP/home/Library/Application Support/Malibu/.installed-by-app"
+
+printf 'provider_id: existing\n' > "$CONFIG_PATH"
+if existing_provider_credential_configured; then
+  echo "tokenless config unexpectedly bypassed referral preflight" >&2
+  exit 1
+fi
+printf 'provider_id: existing\nprovider_token: existing-secret\n' > "$CONFIG_PATH"
+existing_provider_credential_configured || {
+  echo "existing config credential did not bypass referral preflight" >&2
+  exit 1
+}
+printf 'provider_id: existing\n' > "$CONFIG_PATH"
+mkdir -p "$(dirname "$APP_MARKER_PATH")"
+: > "$APP_MARKER_PATH"
+APP_MANAGED_REPAIR=1 existing_provider_credential_configured || {
+  echo "app-owned identity marker did not bypass referral preflight" >&2
+  exit 1
+}
+rm -f "$APP_MARKER_PATH"
+if (APP_MANAGED_REPAIR=1; existing_provider_credential_configured); then
+  echo "unproven app-managed repair unexpectedly bypassed referral preflight" >&2
+  exit 1
+fi
+
 cat > "$CONFIG_PATH" <<'EOF'
 # operator-owned settings must survive installer upgrades
 model: "old/model"
 provider_token: "secret-token"
+referral_code: "MAL1-S-k1-existing-AAAAAAAAAAAAAAAAAAAAAAAAAA"
 receipt_log_path: "/private/receipts.jsonl"
 enable_warm_swap: true
 auto_update: false
@@ -150,6 +204,7 @@ grep -F 'provider_id: "provider-new"' "$CONFIG_PATH" >/dev/null
 grep -F 'coordinator_url: "wss://coordinator.example/ws/provider"' "$CONFIG_PATH" >/dev/null
 grep -F 'port: 19090' "$CONFIG_PATH" >/dev/null
 grep -F 'provider_token: "secret-token"' "$CONFIG_PATH" >/dev/null
+grep -F 'referral_code: "MAL1-S-k1-existing-AAAAAAAAAAAAAAAAAAAAAAAAAA"' "$CONFIG_PATH" >/dev/null
 grep -F 'receipt_log_path: "/private/receipts.jsonl"' "$CONFIG_PATH" >/dev/null
 grep -F 'enable_warm_swap: true' "$CONFIG_PATH" >/dev/null
 grep -F 'auto_update: false' "$CONFIG_PATH" >/dev/null
@@ -160,11 +215,12 @@ mkdir -p "$staging_dir"
 printf 'provider-old\n' > "$LIVE_PROVIDER_ID_PATH"
 prepare_staged_config
 grep -F 'model: "new/model"' "$STAGED_CONFIG_PATH" >/dev/null
-semantic_merge_config "$STAGED_CONFIG_PATH" "staged/model" "provider-staged" "wss://staged.example/ws/provider" "19090"
+semantic_merge_config "$STAGED_CONFIG_PATH" "staged/model" "provider-staged" "wss://staged.example/ws/provider" "19090" "MAL1-P-k1-newissuer-BBBBBBBBBBBBBBBBBBBBBBBBBB"
 printf 'provider-staged\n' > "$STAGED_PROVIDER_ID_PATH"
 grep -F 'model: "new/model"' "$LIVE_CONFIG_PATH" >/dev/null
 activate_staged_config
 grep -F 'model: "staged/model"' "$LIVE_CONFIG_PATH" >/dev/null
+grep -F 'referral_code: "MAL1-P-k1-newissuer-BBBBBBBBBBBBBBBBBBBBBBBBBB"' "$LIVE_CONFIG_PATH" >/dev/null
 grep -F 'provider-staged' "$LIVE_PROVIDER_ID_PATH" >/dev/null
 
 PORT=18080

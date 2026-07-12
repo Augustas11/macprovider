@@ -31,6 +31,7 @@ LIVE_CONFIG_PATH="$CONFIG_PATH"
 LIVE_PROVIDER_ID_PATH="$PROVIDER_ID_PATH"
 MANIFEST_DIR="$HOME/Library/Application Support/macprovider"
 MANIFEST_PATH="$MANIFEST_DIR/install_manifest.json"
+APP_MARKER_PATH="$HOME/Library/Application Support/Malibu/.installed-by-app"
 EXISTING_INSTALL_WAS_PRESENT=0
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
@@ -47,9 +48,11 @@ WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchd
 WATCHDOG_LABEL="live.streamvc.macprovider-watchdog"
 NO_WATCHDOG="${MACPROVIDER_NO_WATCHDOG:-0}"
 DRY_RUN=0
+REFERRAL_CODE="${MACPROVIDER_REFERRAL_CODE:-}"
 NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
 NO_LAUNCHD="${MACPROVIDER_NO_LAUNCHD:-0}"
 EMERGENCY_ROLLBACK="${MACPROVIDER_EMERGENCY_ROLLBACK:-0}"
+APP_MANAGED_REPAIR="${MACPROVIDER_APP_MANAGED_REPAIR:-0}"
 EMERGENCY_CONFIG_BACKUP="${MACPROVIDER_EMERGENCY_CONFIG_BACKUP:-}"
 EMERGENCY_CONFIG_SHA256="${MACPROVIDER_EMERGENCY_CONFIG_SHA256:-}"
 EMERGENCY_STAGED_CONFIG_SHA256=""
@@ -265,13 +268,17 @@ fi
 
 usage() {
   cat <<'USAGE'
-Usage: bash install.sh [--dry-run]
+Usage: bash install.sh [--dry-run] [--ref CODE]
+
+Referral invite:
+  curl -fsSL https://get.streamvc.live/install.sh | bash -s -- --ref CODE
 
 Environment overrides:
   MACPROVIDER_GITHUB_REPO        owner/repo for GitHub Releases
   MACPROVIDER_VERSION            pin installer to vMAJOR.MINOR.PATCH
                                  (pipe-side form: curl ... | MACPROVIDER_VERSION=v1.7.11 bash)
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
+  MACPROVIDER_REFERRAL_CODE      pre-beta referral code (same as --ref)
   MACPROVIDER_PORT               local HTTP port
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
   MACPROVIDER_RELEASE_FORMAT     auto, pkg, or tar (default: auto)
@@ -280,6 +287,9 @@ Environment overrides:
                                  launchd service and its companion watchdog
   MACPROVIDER_NO_WATCHDOG=1      expert/debug only: install the provider
                                  launchd service but skip the watchdog
+  MACPROVIDER_APP_MANAGED_REPAIR=1
+                                 Malibu.app only: update an existing app-owned
+                                 install without starting credential-less launchd
   MACPROVIDER_EMERGENCY_ROLLBACK=1
                                  operator-only signed rollback to an explicit
                                  MACPROVIDER_VERSION; commits only through an
@@ -288,13 +298,24 @@ Environment overrides:
 USAGE
 }
 
-for arg in "$@"; do
-  case "$arg" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --dry-run) DRY_RUN=1 ;;
+    --ref|--referral-code)
+      [ "$#" -ge 2 ] || die 7 "$1 requires a referral code"
+      REFERRAL_CODE="$2"
+      shift
+      ;;
+    --ref=*|--referral-code=*) REFERRAL_CODE="${1#*=}" ;;
     -h|--help) usage; exit 0 ;;
-    *) die 7 "unknown argument: $arg" ;;
+    *) die 7 "unknown argument: $1" ;;
   esac
+  shift
 done
+
+if [ -n "$REFERRAL_CODE" ] && [[ ! "$REFERRAL_CODE" =~ ^MAL1-[SP]-[A-Za-z0-9_]{1,32}-[A-Za-z0-9_]{1,32}-[A-Z2-7]{26}$ ]]; then
+  die 7 "referral code has an invalid format"
+fi
 
 release_install_lock() {
   [ "$INSTALL_LOCK_HELD" -eq 1 ] || return 0
@@ -2054,6 +2075,31 @@ coordinator_http_base() {
   esac
 }
 
+advisory_validate_referral() {
+  local coordinator_base="$1"
+  local payload response result
+  payload="$(MACPROVIDER_CONFIG_REFERRAL_CODE="$REFERRAL_CODE" python3 -c 'import json,os; print(json.dumps({"code": os.environ.pop("MACPROVIDER_CONFIG_REFERRAL_CODE", "")}))')" \
+    || return 0
+  if ! response="$(printf "%s" "$payload" | curl -fsS --max-time 8 \
+      -H 'Content-Type: application/json' -H 'Accept: application/json' \
+      --data-binary @- "$coordinator_base/v1/referrals/validate" 2>/dev/null)"; then
+    log "Invite pre-check unavailable; authoritative validation will run during credential registration."
+    return 0
+  fi
+  result="$(printf "%s" "$response" | python3 -c 'import json,sys
+try:
+ d=json.load(sys.stdin); print(("valid" if d.get("valid") else "invalid") + ":" + str(d.get("reason", "invalid")))
+except Exception: print("unavailable:invalid")')"
+  case "$result" in
+    valid:*) return 0 ;;
+    invalid:expired) die 7 "referral code has expired; use a different invite" ;;
+    invalid:revoked) die 7 "referral code is no longer available; use a different invite" ;;
+    invalid:exhausted) die 7 "referral code has already been used; use a different invite" ;;
+    invalid:*) die 7 "referral code is not valid; check it or use a different invite" ;;
+    *) log "Invite pre-check response was unavailable; authoritative validation will run during credential registration." ;;
+  esac
+}
+
 detect_platform() {
   os="$(uname -s)"
   arch="$(uname -m)"
@@ -2958,7 +3004,9 @@ semantic_merge_config() {
   provider_id_value="$3"
   coordinator_url_value="$4"
   port_value="$5"
-  python3 - "$config_path" "$model_value" "$provider_id_value" "$coordinator_url_value" "$port_value" <<'PY'
+  referral_code_value="${6:-}"
+  MACPROVIDER_CONFIG_REFERRAL_CODE="$referral_code_value" \
+    python3 - "$config_path" "$model_value" "$provider_id_value" "$coordinator_url_value" "$port_value" <<'PY'
 import json
 import os
 import re
@@ -2966,6 +3014,7 @@ import sys
 import tempfile
 
 path, model, provider_id, coordinator_url, port = sys.argv[1:]
+referral_code = os.environ.pop("MACPROVIDER_CONFIG_REFERRAL_CODE", "")
 owned = {
     "coordinator_url": json.dumps(coordinator_url),
     "provider_id": json.dumps(provider_id),
@@ -2973,6 +3022,8 @@ owned = {
 }
 if model:
     owned["model"] = json.dumps(model)
+if referral_code:
+    owned["referral_code"] = json.dumps(referral_code)
 try:
     with open(path, "r", encoding="utf-8") as handle:
         lines = handle.read().splitlines()
@@ -2993,7 +3044,7 @@ for line in lines:
     merged.append(f"{key}: {owned[key]}")
     seen.add(key)
 
-for key in ("model", "coordinator_url", "provider_id", "port"):
+for key in ("model", "coordinator_url", "provider_id", "port", "referral_code"):
     if key not in owned:
         continue
     if key not in seen:
@@ -3030,7 +3081,7 @@ write_config() {
   printf "%s\n" "$provider_id" > "$provider_id_temp"
   chmod 600 "$provider_id_temp" 2>/dev/null || true
   mv "$provider_id_temp" "$PROVIDER_ID_PATH"
-  semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT"
+  semantic_merge_config "$CONFIG_PATH" "$model" "$provider_id" "$coordinator_url" "$PORT" "$REFERRAL_CODE"
   chmod 600 "$CONFIG_PATH" "$PROVIDER_ID_PATH" 2>/dev/null || true
 }
 
@@ -3047,14 +3098,28 @@ read_config_model() {
   ' "$CONFIG_PATH"
 }
 
-read_config_provider_token_line() {
+read_config_provider_token() {
   [ -f "$CONFIG_PATH" ] || return 1
-  awk '
+  awk -F: '
     /^provider_token[[:space:]]*:/ {
-      print
+	  value=$0
+	  sub(/^provider_token[[:space:]]*:[[:space:]]*/, "", value)
+	  gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+	  gsub(/^"|"$/, "", value)
+	  print value
       exit
     }
   ' "$CONFIG_PATH"
+}
+
+existing_provider_credential_configured() {
+  [ -n "$(read_config_provider_token || true)" ] && return 0
+  if [ "${APP_MANAGED_REPAIR:-0}" -eq 1 ] \
+    && [ -r "$APP_MARKER_PATH" ] \
+    && [ -n "$(read_config_provider_id || true)" ]; then
+    return 0
+  fi
+  return 1
 }
 
 read_config_provider_id() {
@@ -3110,7 +3175,7 @@ read_config_donor_mode() {
 }
 
 ensure_provider_credentials() {
-  if [ -n "$(read_config_provider_token_line || true)" ]; then
+  if existing_provider_credential_configured; then
     return 0
   fi
   provider_id="$(read_config_provider_id || true)"
@@ -3121,7 +3186,7 @@ ensure_provider_credentials() {
   log "Acquiring first-install provider credential before evidence admission."
   run_macprovider_cli_with_amfi_retry bootstrap-auth --timeout-seconds 30 --config "$CONFIG_PATH" \
     || die 6 "provider credential bootstrap failed before evidence admission"
-  [ -n "$(read_config_provider_token_line || true)" ] \
+  [ -n "$(read_config_provider_token || true)" ] \
     || die 6 "provider credential bootstrap completed without persisting provider_token"
   if [ -n "${STAGED_CONFIG_PATH:-}" ] && [ "$CONFIG_PATH" = "$STAGED_CONFIG_PATH" ]; then
     # Coordinator bootstrap creates a durable principal. Publish its exact key
@@ -4406,6 +4471,41 @@ start_manual_service() {
   fi
 }
 
+unload_app_managed_launchd_jobs() {
+  [ "${INSTALL_TX_ACTIVE:-0}" -eq 1 ] && assert_install_lock_ownership
+  # Address the launchd domain by label even when a crashing KeepAlive job has
+  # no listener. Port-based cutover detection cannot see that state.
+  launchctl bootout "gui/$UID/live.streamvc.macprovider" >/dev/null 2>&1 || true
+  launchctl bootout "gui/$UID/$WATCHDOG_LABEL" >/dev/null 2>&1 || true
+  # Older launchctl versions are more reliable with the plist form.
+  [ ! -f "$PLIST_PATH" ] \
+    || launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 \
+    || true
+  [ ! -f "$WATCHDOG_PLIST_PATH" ] \
+    || launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 \
+    || true
+  attempts=0
+  while [ "$attempts" -lt 40 ]; do
+    provider_loaded=0
+    watchdog_loaded=0
+    launchctl print "gui/$UID/live.streamvc.macprovider" >/dev/null 2>&1 \
+      && provider_loaded=1
+    launchctl print "gui/$UID/$WATCHDOG_LABEL" >/dev/null 2>&1 \
+      && watchdog_loaded=1
+    listener_present=0
+    lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1 \
+      && listener_present=1
+    if [ "$provider_loaded" -eq 0 ] \
+      && [ "$watchdog_loaded" -eq 0 ] \
+      && [ "$listener_present" -eq 0 ]; then
+      return 0
+    fi
+    sleep 0.25
+    attempts=$((attempts + 1))
+  done
+  die 70 "could not confirm launchd ownership release for app-managed repair"
+}
+
 cache_size_kb() {
   path="$1"
   if [ -d "$path" ]; then
@@ -4917,6 +5017,10 @@ main() {
     require_tool "$tool"
   done
   validate_install_dir
+  case "$APP_MANAGED_REPAIR" in
+    0|1) ;;
+    *) die 7 "MACPROVIDER_APP_MANAGED_REPAIR must be 0 or 1" ;;
+  esac
   acquire_install_lock
   recover_orphaned_install_transactions
 
@@ -4926,6 +5030,19 @@ main() {
   coordinator_url="$(choose_coordinator_url)"
   coordinator_base="$(coordinator_http_base "$coordinator_url")"
   validate_inputs "$model" "$provider_id" "$coordinator_url"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    if existing_provider_credential_configured; then
+      log "Existing provider credential found; referral pre-check is not required for repair or upgrade."
+    else
+      advisory_validate_referral "$coordinator_base"
+    fi
+  fi
+  if [ "$APP_MANAGED_REPAIR" -eq 1 ]; then
+    existing_provider_credential_configured \
+      || die 7 "app-managed repair requires an existing provider credential"
+    [ "$EMERGENCY_ROLLBACK" -eq 0 ] \
+      || die 7 "app-managed repair cannot perform an emergency rollback"
+  fi
   log "Model selection: signed catalog recommendation after release verification"
   log "Provider ID: $provider_id"
   log "Coordinator: $coordinator_url"
@@ -5037,6 +5154,18 @@ main() {
   install_binary
   activate_staged_config
   check_path_hint
+  if [ "$APP_MANAGED_REPAIR" -eq 1 ]; then
+    # The app-owned config intentionally contains no bearer. Do not start or
+    # health-gate a launchd job that cannot authenticate. The caller starts the
+    # verified binary as a Malibu child with its Keychain bearer immediately
+    # after this transaction commits.
+    unload_app_managed_launchd_jobs
+    rm -f "$PLIST_PATH" "$WATCHDOG_PLIST_PATH"
+    write_install_manifest "$tag"
+    commit_install_transaction
+    log "App-managed repair artifacts are ready; Malibu will start and verify the provider."
+    exit 0
+  fi
   install_plist "$model" "$provider_id" "$coordinator_url"
   install_watchdog "$coordinator_url"
   write_install_manifest "$tag"

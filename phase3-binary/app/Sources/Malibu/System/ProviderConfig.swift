@@ -45,6 +45,26 @@ enum ProviderConfig {
         return port
     }
 
+    static func readCoordinatorBaseURL(paths: ProviderPaths = .current) -> URL? {
+        guard let contents = try? String(contentsOf: paths.configFile),
+              let raw = parseTopLevelValue(named: "coordinator_url", from: contents),
+              var components = URLComponents(string: raw) else {
+            return nil
+        }
+        let isLoopback = ["localhost", "127.0.0.1", "::1"].contains(components.host?.lowercased() ?? "")
+        switch components.scheme?.lowercased() {
+        case "wss": components.scheme = "https"
+        case "ws" where isLoopback: components.scheme = "http"
+        case "https": break
+        case "http" where isLoopback: break
+        default: return nil
+        }
+        components.path = ""
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
     static func readLinkState(paths: ProviderPaths = .current) -> LinkState? {
         guard let contents = try? String(contentsOf: paths.configFile),
               let value = parseTopLevelValue(named: "link_state", from: contents)

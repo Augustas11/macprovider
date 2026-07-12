@@ -41,6 +41,10 @@ func main() {
 		err = listPairOTMints(os.Args[2:])
 	case "pre-flip-audit":
 		err = preFlipAudit(os.Args[2:])
+	case "create-seed-referral":
+		err = createSeedReferral(os.Args[2:], os.Getenv, os.Stdout)
+	case "revoke-referral":
+		err = revokeReferral(os.Args[2:], os.Stdout)
 	default:
 		usage()
 		os.Exit(2)
@@ -613,5 +617,83 @@ func preFlipAuditRun(args []string, stdout io.Writer) (stale bool, err error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|revoke-bootstrap-identity|list-bootstrap-identities|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit|create-seed-referral|revoke-referral> [flags]")
+}
+
+func createSeedReferral(args []string, getenv func(string) string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("create-seed-referral", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	campaign := fs.String("campaign", "", "referral campaign identifier")
+	keyID := fs.String("key-id", "", "HMAC key identifier")
+	secretEnv := fs.String("secret-env", "", "environment variable containing the HMAC secret")
+	seedID := fs.String("seed-id", "", "opaque seed issuer identifier")
+	maxUses := fs.Int("max-uses", 1, "maximum successful registrations")
+	expiresAt := fs.String("expires-at", "", "optional RFC3339 expiry")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || strings.TrimSpace(*secretEnv) == "" {
+		return fmt.Errorf("--secret-env is required; referral HMAC secrets are not accepted on argv")
+	}
+	secret := getenv(strings.TrimSpace(*secretEnv))
+	if len(secret) < 32 {
+		return fmt.Errorf("referral HMAC secret from %s must be at least 32 bytes", *secretEnv)
+	}
+	policy := auth.ReferralPolicy{
+		Campaign:         strings.TrimSpace(*campaign),
+		PolicyVersion:    "v1",
+		CurrentKeyID:     strings.TrimSpace(*keyID),
+		HMACKeys:         map[string]string{strings.TrimSpace(*keyID): secret},
+		ProviderBaseUses: 1,
+		SocialBonusUses:  1,
+		ChallengeTTL:     15 * time.Minute,
+	}
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	var expiry *time.Time
+	if strings.TrimSpace(*expiresAt) != "" {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*expiresAt))
+		if err != nil {
+			return fmt.Errorf("--expires-at must be RFC3339: %w", err)
+		}
+		parsed = parsed.UTC()
+		expiry = &parsed
+	}
+	store, err := auth.OpenStore(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	code, err := store.CreateSeedReferral(context.Background(), policy, strings.TrimSpace(*seedID), *maxUses, expiry)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "referral_code=%s\ncampaign=%s\nseed_id=%s\nmax_uses=%d\n", code, policy.Campaign, strings.TrimSpace(*seedID), *maxUses)
+	return err
+}
+
+func revokeReferral(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("revoke-referral", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	campaign := fs.String("campaign", "", "referral campaign identifier")
+	issuerID := fs.String("issuer-id", "", "seed or provider invite issuer identifier")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("unexpected positional arguments")
+	}
+	store, err := auth.OpenStore(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.RevokeReferralIssuer(context.Background(), *campaign, *issuerID, time.Now().UTC()); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "revoked referral campaign=%s issuer_id=%s\n", strings.TrimSpace(*campaign), strings.TrimSpace(*issuerID))
+	return err
 }

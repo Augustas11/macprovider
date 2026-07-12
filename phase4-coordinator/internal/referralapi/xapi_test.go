@@ -1,0 +1,74 @@
+package referralapi
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"testing"
+)
+
+func TestParseXPostIDAcceptsOnlyCanonicalPublicStatusURLs(t *testing.T) {
+	id, err := ParseXPostID("https://x.com/malibu/status/123456789")
+	if err != nil || id != "123456789" {
+		t.Fatalf("id=%q err=%v", id, err)
+	}
+	for _, raw := range []string{
+		"http://x.com/malibu/status/1",
+		"https://twitter.com/malibu/status/1",
+		"https://x.com:443/malibu/status/1",
+		"https://user@x.com/malibu/status/1",
+		"https://x.com/malibu/status/1?next=http://127.0.0.1",
+		"https://x.com/malibu/status/not-numeric",
+		"https://127.0.0.1/malibu/status/1",
+	} {
+		if _, err := ParseXPostID(raw); err == nil {
+			t.Errorf("accepted %q", raw)
+		}
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestXVerifierUsesFixedAPIOriginAndExpandedInviteEntity(t *testing.T) {
+	var requested string
+	client := &XAPIClient{
+		bearer:   "x-token",
+		joinBase: mustURL(t, "https://coordinator.streamvc.live/j"),
+		client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requested = r.URL.String()
+			if r.Header.Get("Authorization") != "Bearer x-token" {
+				t.Fatalf("missing X bearer")
+			}
+			body := `{"data":{"id":"123","entities":{"urls":[{"expanded_url":"https://coordinator.streamvc.live/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc"}]}}}`
+			header := make(http.Header)
+			header.Set("Content-Type", "application/json")
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: header}, nil
+		})},
+	}
+	err := client.VerifyPost(context.Background(), "123", "https://coordinator.streamvc.live/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requested != "https://api.x.com/2/tweets/123?tweet.fields=entities" {
+		t.Fatalf("requested=%q", requested)
+	}
+	if err := client.VerifyPost(context.Background(), "123", "https://malibu.tech/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc"); err == nil {
+		t.Fatal("accepted invite URL outside configured join origin")
+	}
+	if err := client.VerifyPost(context.Background(), "https://127.0.0.1", "https://coordinator.streamvc.live/j/MAL1-P-k1-issuer-AAAAAAAAAAAAAAAAAAAAAAAAAA?c=abc"); err == nil {
+		t.Fatal("accepted non-numeric post ID")
+	}
+}
+
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}

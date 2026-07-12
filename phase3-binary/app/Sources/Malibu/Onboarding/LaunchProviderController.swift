@@ -1,7 +1,28 @@
 import Foundation
 
-// Malibu is a CLI wrapper: onboarding runs install.sh, then Malibu monitors
-// the launchd-managed macprovider-cli. No in-app register/autotune/spawn path.
+struct ReferralPreflightResult: Decodable, Equatable {
+    let valid: Bool
+    let reason: String
+    let required: Bool
+
+    init(valid: Bool, reason: String, required: Bool = true) {
+        self.valid = valid
+        self.reason = reason
+        self.required = required
+    }
+}
+
+private enum ReferralPreflightError: LocalizedError {
+    case unavailable
+
+    var errorDescription: String? {
+        "Malibu could not check this invite. Check your connection and try again."
+    }
+}
+
+// Malibu is a CLI wrapper: onboarding runs install.sh. Fresh installs use the
+// launchd bootstrap long enough to import the issued identity; app-owned
+// identities then run as a Malibu child so their bearer remains in Keychain.
 
 @MainActor
 final class LaunchProviderController: ObservableObject {
@@ -24,14 +45,17 @@ final class LaunchProviderController: ObservableObject {
     @Published private(set) var installLogLines: [String] = []
     @Published private(set) var installProgressHint: String?
     @Published private(set) var installStartedAt: Date?
+    @Published var referralCode = ""
+    @Published private(set) var referralRequired = true
 
     private var installProgressTask: Task<Void, Never>?
     private let dependencies: Dependencies
 
     struct Dependencies {
         var localInstallSucceeded: @MainActor () async -> Bool
+        var validateReferralCode: @MainActor (String) async throws -> ReferralPreflightResult
         var registerLoginItem: @MainActor () async throws -> Void
-        var runCLIInstall: @MainActor (@escaping @MainActor (String) -> Void) async throws -> Void
+        var runCLIInstall: @MainActor (String, @escaping @MainActor (String) -> Void) async throws -> Void
         var importCLIConfigAfterInstall: @MainActor () async throws -> Void
         var waitForInstalledProviderHealth: @MainActor () async -> Bool
         var attachInstalledProviderAfterInstall: @MainActor () async -> Bool
@@ -43,9 +67,30 @@ final class LaunchProviderController: ObservableObject {
         static func live(agent: MalibuAgent?) -> Dependencies {
             Dependencies(
                 localInstallSucceeded: { await CLIInstallRunner.localInstallSucceeded() },
+                validateReferralCode: { code in
+                    guard let baseURL = ProviderConfig.readCoordinatorBaseURL()
+                        ?? URL(string: "https://coordinator.streamvc.live") else {
+                        throw ReferralPreflightError.unavailable
+                    }
+                    var request = URLRequest(url: baseURL.appendingPathComponent("v1/referrals/validate"))
+                    request.httpMethod = "POST"
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("application/json", forHTTPHeaderField: "Accept")
+                    request.httpBody = try JSONEncoder().encode(["code": code])
+                    let configuration = URLSessionConfiguration.ephemeral
+                    configuration.timeoutIntervalForRequest = 6
+                    configuration.timeoutIntervalForResource = 8
+                    let session = URLSession(configuration: configuration)
+                    defer { session.finishTasksAndInvalidate() }
+                    let (data, response) = try await session.data(for: request)
+                    guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                        throw ReferralPreflightError.unavailable
+                    }
+                    return try JSONDecoder().decode(ReferralPreflightResult.self, from: data)
+                },
                 registerLoginItem: { try AppLoginItem.register() },
-                runCLIInstall: { onLogLine in
-                    try await CLIInstallRunner.run(onLogLine: onLogLine)
+                runCLIInstall: { referralCode, onLogLine in
+                    try await CLIInstallRunner.run(referralCode: referralCode, onLogLine: onLogLine)
                 },
                 importCLIConfigAfterInstall: {
                     try await ProviderConfig.importExistingCLIConfig()
@@ -56,7 +101,7 @@ final class LaunchProviderController: ObservableObject {
                     )
                 },
                 attachInstalledProviderAfterInstall: {
-                    await agent?.monitorInstalledProviderIfPresent(
+                    await agent?.startManagedProvider(
                         timeout: MalibuOnboardingTimeouts.firstServingFrameSec
                     ) ?? false
                 },
@@ -76,6 +121,21 @@ final class LaunchProviderController: ObservableObject {
         self.dependencies = dependencies ?? .live(agent: agent)
     }
 
+    var normalizedReferralCode: String {
+        referralCode.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var referralCodeIsValid: Bool {
+        Self.isValidReferralCode(normalizedReferralCode)
+    }
+
+    static func isValidReferralCode(_ raw: String) -> Bool {
+        raw.range(
+            of: #"^MAL1-[SP]-[A-Za-z0-9_]{1,32}-[A-Za-z0-9_]{1,32}-[A-Z2-7]{26}$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
     func launch() async {
         if await dependencies.localInstallSucceeded() {
             await finalizeExistingInstall(
@@ -83,7 +143,23 @@ final class LaunchProviderController: ObservableObject {
             )
             return
         }
-        await launchViaCLIInstall()
+        let existingIdentity = await dependencies.appIdentityConfigured()
+        await launchViaCLIInstall(existingIdentity: existingIdentity)
+    }
+
+    func refreshReferralPolicy() async {
+        if await dependencies.appIdentityConfigured() {
+            referralRequired = false
+            return
+        }
+        do {
+            let result = try await dependencies.validateReferralCode("")
+            referralRequired = result.required
+        } catch {
+            // Fail closed until policy discovery succeeds. Existing installs
+            // bypass this UI and are never re-gated.
+            referralRequired = true
+        }
     }
 
     func retry() async {
@@ -110,13 +186,33 @@ final class LaunchProviderController: ObservableObject {
         await finalizeExistingInstall(logLine: "Background provider is already running locally.")
     }
 
-    private func launchViaCLIInstall() async {
+    private func launchViaCLIInstall(existingIdentity: Bool = false) async {
+        guard existingIdentity || !referralRequired || referralCodeIsValid else {
+            stage = .failed(
+                stage: "referral",
+                retryable: true,
+                message: "Enter a valid Malibu pre-beta invite code."
+            )
+            return
+        }
+        var preflightWarning: String?
+        if referralRequired && !existingIdentity {
+            do {
+                let result = try await dependencies.validateReferralCode(normalizedReferralCode)
+                guard result.valid else {
+                    stage = .failed(stage: "referral", retryable: true, message: Self.referralFailureMessage(result.reason))
+                    return
+                }
+            } catch {
+                preflightWarning = "Invite pre-check unavailable; final validation will happen securely during registration."
+            }
+        }
         beginInstallProgressWatch()
         defer { endInstallProgressWatch() }
         do {
             stage = .runningCLIInstall
-            installLogLines = []
-            try await dependencies.runCLIInstall { [weak self] line in
+            installLogLines = preflightWarning.map { [$0] } ?? []
+            try await dependencies.runCLIInstall(existingIdentity ? "" : normalizedReferralCode) { [weak self] line in
                 guard let self else { return }
                 self.installLogLines.append(line)
                 if self.installLogLines.count > 200 {
@@ -124,20 +220,34 @@ final class LaunchProviderController: ObservableObject {
                 }
             }
             var importError: Error?
-            do {
-                try await dependencies.importCLIConfigAfterInstall()
-            } catch {
-                if isRetriableImportError(error) {
-                    importError = error
-                    installLogLines.append(deferredImportMessage(for: error))
-                } else {
-                    stage = .failed(stage: "identityImport", retryable: true, message: error.localizedDescription)
-                    return
+            if !existingIdentity {
+                do {
+                    try await dependencies.importCLIConfigAfterInstall()
+                } catch {
+                    if isRetriableImportError(error) {
+                        importError = error
+                        installLogLines.append(deferredImportMessage(for: error))
+                    } else {
+                        stage = .failed(stage: "identityImport", retryable: true, message: error.localizedDescription)
+                        return
+                    }
                 }
             }
-            await finalizeInstall(pendingImportError: importError)
+            await finalizeInstall(
+                pendingImportError: importError,
+                startWithAppCredential: existingIdentity
+            )
         } catch {
             stage = .failed(stage: "cliInstall", retryable: true, message: error.localizedDescription)
+        }
+    }
+
+    private static func referralFailureMessage(_ reason: String) -> String {
+        switch reason {
+        case "expired": return "This invite has expired. Use a different invite."
+        case "revoked": return "This invite is no longer available. Use a different invite."
+        case "exhausted": return "This invite has already been used. Use a different invite."
+        default: return "This invite is not valid. Check the code or use a different invite."
         }
     }
 
@@ -145,7 +255,7 @@ final class LaunchProviderController: ObservableObject {
         installLogLines = [logLine]
         guard !Task.isCancelled else { return }
         if await dependencies.appIdentityConfigured() {
-            await finalizeInstall()
+            await finalizeInstall(startWithAppCredential: true)
             return
         }
         var importError: Error?
@@ -162,21 +272,26 @@ final class LaunchProviderController: ObservableObject {
         await finalizeInstall(pendingImportError: importError)
     }
 
-    private func finalizeInstall(pendingImportError: Error? = nil) async {
+    private func finalizeInstall(
+        pendingImportError: Error? = nil,
+        startWithAppCredential: Bool = false
+    ) async {
         do {
             stage = .startingAgent
-            guard await dependencies.waitForInstalledProviderHealth() else {
-                let message = dependencies.providerStartFailure()
-                    ?? ProviderLogDiagnostics.timeoutMessage(logHint: ProviderLogDiagnostics.logHint())
-                throw launchdMonitorUnavailableError(message: message)
-            }
-            if let pendingImportError {
-                stage = .importingProviderIdentity
-                do {
-                    try await retryPendingImportAfterProviderStart(initialError: pendingImportError)
-                } catch {
-                    stage = .failed(stage: "identityImport", retryable: true, message: error.localizedDescription)
-                    return
+            if !startWithAppCredential {
+                guard await dependencies.waitForInstalledProviderHealth() else {
+                    let message = dependencies.providerStartFailure()
+                        ?? ProviderLogDiagnostics.timeoutMessage(logHint: ProviderLogDiagnostics.logHint())
+                    throw launchdMonitorUnavailableError(message: message)
+                }
+                if let pendingImportError {
+                    stage = .importingProviderIdentity
+                    do {
+                        try await retryPendingImportAfterProviderStart(initialError: pendingImportError)
+                    } catch {
+                        stage = .failed(stage: "identityImport", retryable: true, message: error.localizedDescription)
+                        return
+                    }
                 }
             }
             guard await dependencies.appIdentityConfigured() else {

@@ -102,7 +102,7 @@ func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	})
 
-	disabled := buyerHandlerWithOptionalProviderEndpoints(base, false, register, hardwareEvidence, nil, nil)
+	disabled := buyerHandlerWithOptionalProviderEndpoints(base, false, register, hardwareEvidence, nil, nil, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/v1/providers/register", nil)
 	rr := httptest.NewRecorder()
 	disabled.ServeHTTP(rr, req)
@@ -123,7 +123,7 @@ func TestBuyerRegisterRouteFeatureGate(t *testing.T) {
 		t.Fatalf("disabled wallet route status=%d body=%s, want 501 wallet_change_requires_spec_027", rr.Code, rr.Body.String())
 	}
 
-	enabled := buyerHandlerWithOptionalProviderEndpoints(base, true, register, hardwareEvidence, nil, nil)
+	enabled := buyerHandlerWithOptionalProviderEndpoints(base, true, register, hardwareEvidence, nil, nil, nil, nil, nil, nil, nil)
 	rr = httptest.NewRecorder()
 	enabled.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNoContent {
@@ -241,6 +241,57 @@ func TestNginxMalibuAccrualRouteBeforeV1CatchAll(t *testing.T) {
 		if !strings.Contains(cfg[route:catchAll], needle) {
 			t.Fatalf("malibu-accrual route missing %q", needle)
 		}
+	}
+}
+
+func TestNginxReferralRoutesReachBuyerPortBeforeCatchAll(t *testing.T) {
+	body, err := os.ReadFile("../../dist/nginx-coordinator.streamvc.live.conf")
+	if err != nil {
+		t.Fatalf("read nginx config: %v", err)
+	}
+	cfg := string(body)
+	catchAll := strings.Index(cfg, "location /v1/ {\n        return 404;")
+	for _, route := range []string{
+		"location = /v1/referrals/validate",
+		"location ~ ^/v1/provider/referrals",
+		"location ^~ /j/",
+	} {
+		index := strings.Index(cfg, route)
+		if index < 0 {
+			t.Fatalf("missing nginx route %q", route)
+		}
+		if catchAll >= 0 && index > catchAll {
+			t.Fatalf("nginx route %q appears after /v1 catch-all", route)
+		}
+	}
+	referrals := cfg[strings.Index(cfg, "location = /v1/referrals/validate"):catchAll]
+	for _, needle := range []string{
+		"proxy_pass http://127.0.0.1:8443/v1/referrals/validate;",
+		"proxy_set_header Authorization $http_authorization;",
+		"add_header Cache-Control \"no-store\" always;",
+		"proxy_pass http://127.0.0.1:8443;",
+	} {
+		if !strings.Contains(referrals, needle) {
+			t.Fatalf("referral ingress missing %q", needle)
+		}
+	}
+	if got := strings.Count(cfg, "location ^~ /j/ {"); got != 2 {
+		t.Fatalf("expected HTTP redirect and HTTPS proxy invite locations, got %d", got)
+	}
+	for remainder := cfg; ; {
+		start := strings.Index(remainder, "location ^~ /j/ {")
+		if start < 0 {
+			break
+		}
+		blockEnd := strings.Index(remainder[start:], "\n    }")
+		if blockEnd < 0 {
+			t.Fatal("unterminated nginx invite location")
+		}
+		block := remainder[start : start+blockEnd]
+		if !strings.Contains(block, "access_log off;") {
+			t.Fatalf("invite location persists raw request URI: %s", block)
+		}
+		remainder = remainder[start+blockEnd+1:]
 	}
 }
 

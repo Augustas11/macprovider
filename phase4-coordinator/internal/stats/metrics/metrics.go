@@ -69,6 +69,15 @@ type Metrics struct {
 	IdlePrewarmEventTotal    *prometheus.CounterVec
 	ModelHashMismatchTotal   prometheus.Counter
 	CredentialBootstrapTotal *prometheus.CounterVec
+	ReferralEventTotal       *prometheus.CounterVec
+}
+
+var allowedReferralMetricOutcomes = map[string]map[string]bool{
+	"validate":  {"valid": true, "invalid": true, "missing": true, "expired": true, "revoked": true, "exhausted": true, "rate_limited": true, "bad_request": true, "disabled": true, "busy": true},
+	"join":      {"served": true, "full": true, "not_found": true, "rate_limited": true, "busy": true},
+	"status":    {"locked": true, "eligible": true, "verified": true, "error": true},
+	"challenge": {"created": true, "locked": true, "disabled": true, "error": true},
+	"x_verify":  {"verified": true, "failed": true, "conflict": true, "disabled": true, "bad_request": true},
 }
 
 // New registers all five metrics against reg and returns the
@@ -162,6 +171,13 @@ func New(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"outcome"},
 		),
+		ReferralEventTotal: f.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "referral_event_total",
+				Help: "Count of SPEC-034 referral validation and optional advocacy outcomes using closed-set labels.",
+			},
+			[]string{"event", "outcome"},
+		),
 	}
 }
 
@@ -234,9 +250,20 @@ func (m *Metrics) IncCredentialBootstrap(outcome string) {
 	}
 	switch outcome {
 	case "minted", "recovered", "rejected_v1", "rejected_identity", "rejected_used",
-		"rejected_expired", "rejected_rate", "rejected_outstanding", "store_error":
+		"rejected_expired", "rejected_rate", "rejected_outstanding",
+		"rejected_referral_required", "rejected_referral", "store_error":
 	default:
 		return
 	}
 	m.CredentialBootstrapTotal.WithLabelValues(outcome).Inc()
+}
+
+func (m *Metrics) IncReferralEvent(event, outcome string) {
+	if m == nil || m.ReferralEventTotal == nil {
+		return
+	}
+	if !allowedReferralMetricOutcomes[event][outcome] {
+		return
+	}
+	m.ReferralEventTotal.WithLabelValues(event, outcome).Inc()
 }

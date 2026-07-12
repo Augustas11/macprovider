@@ -32,6 +32,7 @@ CONFIG_PATH="$CONFIG_DIR/config.yaml"
 PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
 PORT=18080
 DRY_RUN=0
+REFERRAL_CODE=""
 
 run() {
   "$@"

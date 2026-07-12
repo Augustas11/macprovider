@@ -9,9 +9,9 @@ trap 'rm -rf "$TMP"' EXIT
 python3 - "$INSTALL_SH" > "$TMP/functions.sh" <<'PY'
 import sys
 names = {
-    "read_config_provider_token_line", "read_config_model",
+    "read_config_provider_token_line", "read_config_provider_token", "read_config_model",
     "read_config_provider_id", "read_config_artifact_path", "read_config_artifact_sha",
-    "is_bootstrap_principal",
+    "is_bootstrap_principal", "existing_provider_credential_configured",
     "ensure_provider_credentials", "submit_required_hardware_evidence",
     "run_autotune_recommend_apply",
 }

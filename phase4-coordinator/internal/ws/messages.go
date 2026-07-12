@@ -35,6 +35,7 @@ type Hello struct {
 	CatalogSignerKeyID     string          `json:"catalog_signer_key_id,omitempty"`
 	CandidateRowIdentity   string          `json:"catalog_row_identity,omitempty"`
 	CredentialBootstrap    bool            `json:"credential_bootstrap,omitempty"`
+	ReferralCode           string          `json:"referral_code,omitempty"`
 }
 
 const (
@@ -42,6 +43,7 @@ const (
 	maxHandshakeModelIDBytes       = 256
 	maxHandshakeBinaryVersionBytes = 32
 	maxHandshakeMetadataBytes      = 1024
+	maxReferralCodeBytes           = 256
 )
 
 type HelloAck struct {
@@ -100,6 +102,7 @@ type AuthRequest struct {
 	CatalogSignerKeyID       string          `json:"catalog_signer_key_id,omitempty"`
 	CandidateRowIdentity     string          `json:"catalog_row_identity,omitempty"`
 	CredentialBootstrap      bool            `json:"credential_bootstrap,omitempty"`
+	ReferralCode             string          `json:"referral_code,omitempty"`
 }
 
 type Spec010Presence struct {
@@ -460,6 +463,11 @@ func ParseHello(payload []byte) (Hello, string, error) {
 			return Hello{}, "credential_bootstrap", fmt.Errorf("credential_bootstrap must be a bool")
 		}
 	}
+	if v, ok := raw["referral_code"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &h.ReferralCode); err != nil || len([]byte(h.ReferralCode)) > maxReferralCodeBytes || containsControlChar(h.ReferralCode) {
+			return Hello{}, "referral_code", fmt.Errorf("referral_code must be a string of at most %d bytes", maxReferralCodeBytes)
+		}
+	}
 	if field, err := parseCatalogAdmissionMetadata(raw, &h.CatalogReleaseID, &h.CatalogPolicyVersion, &h.CandidateCatalogSHA256, &h.CatalogSignerKeyID, &h.CandidateRowIdentity); err != nil {
 		return Hello{}, field, err
 	}
@@ -587,6 +595,11 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 			return AuthRequest{}, Spec010Presence{}, "credential_bootstrap", fmt.Errorf("credential_bootstrap must be a bool")
 		}
 	}
+	if v, ok := raw["referral_code"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.ReferralCode); err != nil || len([]byte(req.ReferralCode)) > maxReferralCodeBytes || containsControlChar(req.ReferralCode) {
+			return AuthRequest{}, Spec010Presence{}, "referral_code", fmt.Errorf("referral_code must be a string of at most %d bytes", maxReferralCodeBytes)
+		}
+	}
 	if err := requireString(raw, "provider_ecdh_public_key", &req.ProviderECDHPublicKey); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
@@ -700,6 +713,11 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 	if v, ok := raw["credential_bootstrap"]; ok {
 		if string(v) == "null" || json.Unmarshal(v, &req.CredentialBootstrap) != nil {
 			return AuthRequest{}, Spec010Presence{}, "credential_bootstrap", fmt.Errorf("credential_bootstrap must be a bool")
+		}
+	}
+	if v, ok := raw["referral_code"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.ReferralCode); err != nil || len([]byte(req.ReferralCode)) > maxReferralCodeBytes || containsControlChar(req.ReferralCode) {
+			return AuthRequest{}, Spec010Presence{}, "referral_code", fmt.Errorf("referral_code must be a string of at most %d bytes", maxReferralCodeBytes)
 		}
 	}
 	// Proof-stage MUST keep the bare "supported_models" badField (NOT

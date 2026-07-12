@@ -33,6 +33,32 @@ func TestAutotuneFeedsRequirePublicKeyringWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestReferralLaunchPolicyDefaultsOffAndRejectsUnsafeEnablement(t *testing.T) {
+	cfg := Default()
+	if cfg.Referrals.RequireForRegistration || cfg.Referrals.EnableSocialInviteBonus {
+		t.Fatal("referral launch policy must default off")
+	}
+	cfg.Auth.OperatorKey = "operator-key"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("disabled referral defaults should validate: %v", err)
+	}
+
+	cfg.Referrals.RequireForRegistration = true
+	cfg.Referrals.Campaign = "prebeta_2026"
+	cfg.Referrals.CurrentKeyID = "k1"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "hmac_keys") {
+		t.Fatalf("unsafe enablement error=%v", err)
+	}
+	cfg.Referrals.HMACKeys = map[string]string{"k1": strings.Repeat("s", 32)}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid referral gate: %v", err)
+	}
+	cfg.Referrals.EnableSocialInviteBonus = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "x_api_bearer_token") {
+		t.Fatalf("social bonus without X credential error=%v", err)
+	}
+}
+
 func TestAutotuneFeedsRejectInvalidPublicKeys(t *testing.T) {
 	tests := []struct {
 		name    string

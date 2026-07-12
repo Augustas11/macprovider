@@ -104,12 +104,30 @@ type BootstrapMintRequest struct {
 	UnconfirmedIDMax    int
 	OutstandingTokenMax int
 	IdentityRetention   time.Duration
+	ReferralCode        string
+	ReferralPolicy      ReferralPolicy
 }
 
 type BootstrapMint struct {
 	TokenRecord   TokenRecord
 	ProviderToken string
 	Replaced      bool
+}
+
+// AppTrackRegistrationAttempt identifies the PostgreSQL half of a gated
+// App-track registration. It is persisted with the undisclosed SQLite mint so
+// a reconciler can distinguish "PostgreSQL committed, response was lost" from
+// "PostgreSQL never committed" after a process crash.
+type AppTrackRegistrationAttempt struct {
+	SourceIP   string
+	Nonce      string
+	ObservedAt time.Time
+}
+
+type PendingAppTrackReferralMint struct {
+	ProviderID string
+	TokenHash  string
+	Attempt    AppTrackRegistrationAttempt
 }
 
 type OAuthState struct {
@@ -386,6 +404,80 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_bootstrap_mint_log_provider_ts ON bootstrap_mint_log(provider_id, ts)`,
 		`CREATE INDEX IF NOT EXISTS idx_bootstrap_mint_log_ip_ts ON bootstrap_mint_log(source_ip, ts)`,
+		`CREATE TABLE IF NOT EXISTS referral_issuers (
+			issuer_id TEXT PRIMARY KEY,
+			code_type TEXT NOT NULL CHECK(code_type IN ('S','P')),
+			key_id TEXT NOT NULL,
+			campaign TEXT NOT NULL,
+			provider_id TEXT,
+			base_capacity INTEGER NOT NULL CHECK(base_capacity >= 0),
+			bonus_capacity INTEGER NOT NULL DEFAULT 0 CHECK(bonus_capacity >= 0),
+			expires_at TEXT,
+			revoked_at TEXT,
+			created_at TEXT NOT NULL,
+			first_serving_at TEXT,
+			UNIQUE(provider_id, campaign)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_referral_issuers_provider_campaign ON referral_issuers(provider_id, campaign)`,
+		`CREATE TABLE IF NOT EXISTS referral_redemptions (
+			campaign TEXT NOT NULL,
+			provider_id TEXT NOT NULL,
+			issuer_id TEXT NOT NULL REFERENCES referral_issuers(issuer_id),
+			code_digest TEXT NOT NULL,
+			policy_version TEXT NOT NULL DEFAULT 'v1',
+			redeemed_at TEXT NOT NULL,
+			PRIMARY KEY(campaign, provider_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_referral_redemptions_issuer ON referral_redemptions(issuer_id)`,
+		`CREATE TABLE IF NOT EXISTS referral_reservations (
+			reservation_id TEXT PRIMARY KEY,
+			campaign TEXT NOT NULL,
+			provider_id TEXT NOT NULL,
+			issuer_id TEXT NOT NULL REFERENCES referral_issuers(issuer_id),
+			code_digest TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			UNIQUE(campaign, provider_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_referral_reservations_issuer_expiry ON referral_reservations(issuer_id, expires_at)`,
+		`CREATE TABLE IF NOT EXISTS apptrack_pending_referral_mints (
+			provider_id TEXT PRIMARY KEY,
+			token_hash TEXT NOT NULL UNIQUE,
+			campaign TEXT NOT NULL,
+			registration_source_ip TEXT NOT NULL,
+			registration_nonce TEXT NOT NULL,
+			registration_observed_at TEXT NOT NULL,
+			created_redemption INTEGER NOT NULL CHECK(created_redemption IN (0, 1)),
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_apptrack_pending_referral_mints_created_at ON apptrack_pending_referral_mints(created_at)`,
+		`CREATE TABLE IF NOT EXISTS provider_referral_admissions (
+			provider_id TEXT NOT NULL,
+			campaign TEXT NOT NULL,
+			policy_version TEXT NOT NULL,
+			decision TEXT NOT NULL CHECK(decision IN ('referred','grandfathered')),
+			applied_at TEXT NOT NULL,
+			PRIMARY KEY(provider_id, campaign)
+		)`,
+		`CREATE TABLE IF NOT EXISTS referral_social_challenges (
+			challenge_hash TEXT PRIMARY KEY,
+			provider_id TEXT NOT NULL,
+			campaign TEXT NOT NULL,
+			issuer_id TEXT NOT NULL REFERENCES referral_issuers(issuer_id),
+			created_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			consumed_at TEXT,
+			UNIQUE(provider_id, campaign)
+		)`,
+		`CREATE TABLE IF NOT EXISTS referral_social_verifications (
+			provider_id TEXT NOT NULL,
+			campaign TEXT NOT NULL,
+			issuer_id TEXT NOT NULL REFERENCES referral_issuers(issuer_id),
+			post_id TEXT NOT NULL UNIQUE,
+			verification_method TEXT NOT NULL,
+			verified_at TEXT NOT NULL,
+			PRIMARY KEY(provider_id, campaign)
+		)`,
 		`CREATE TABLE IF NOT EXISTS bootstrap_gc_audit (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			last_run_at TEXT NOT NULL,
@@ -406,6 +498,9 @@ func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_issued", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_issued INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumnTx(ctx, tx, "referral_redemptions", "policy_version", `ALTER TABLE referral_redemptions ADD COLUMN policy_version TEXT NOT NULL DEFAULT 'v1'`); err != nil {
 		return err
 	}
 	if err := ensureColumnTx(ctx, tx, "provider_tokens", "bootstrap_expires_at", `ALTER TABLE provider_tokens ADD COLUMN bootstrap_expires_at TEXT`); err != nil {
@@ -549,6 +644,17 @@ func (s *Store) ensureProviderIDColumn(ctx context.Context) error {
 }
 
 func (s *Store) IssueToken(ctx context.Context, providerID, providerName string) (TokenRecord, string, error) {
+	return s.issueToken(ctx, providerID, providerName, ReferralPolicy{}, "")
+}
+
+// IssueTokenWithReferral is the public tokenless-admission mint path. Unlike
+// operator IssueToken, it redeems the referral in the same transaction as the
+// provider token insert.
+func (s *Store) IssueTokenWithReferral(ctx context.Context, providerID, providerName, referralCode string, policy ReferralPolicy) (TokenRecord, string, error) {
+	return s.issueToken(ctx, providerID, providerName, policy, referralCode)
+}
+
+func (s *Store) issueToken(ctx context.Context, providerID, providerName string, policy ReferralPolicy, referralCode string) (TokenRecord, string, error) {
 	// Issue #274 R1 CODE LOW-1: validate the RAW provider_id before any
 	// normalization so admission paths apply the same gate semantics as WS
 	// paths (which validate as-received). Leading/trailing whitespace is
@@ -568,7 +674,8 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 	token := hex.EncodeToString(raw[:])
 	hash := tokenHash(token)
 	prefix := token[:tokenDisplayPrefixLength]
-	createdAt := nowString()
+	now := time.Now().UTC()
+	createdAt := timeText(now)
 	var record TokenRecord
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		if IsCredentialBootstrapPrincipal(providerID) {
@@ -582,6 +689,9 @@ SELECT EXISTS(
 			if bootstrapIdentityExists == 1 {
 				return ErrBootstrapIdentityExists
 			}
+		}
+		if err := redeemReferralTx(ctx, conn, policy, referralCode, providerID, now); err != nil {
+			return err
 		}
 		res, err := conn.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, createdAt)
 		if err != nil {
@@ -821,6 +931,14 @@ SELECT COUNT(1)
 				return nil
 			}
 		}
+		referralPolicy := req.ReferralPolicy
+		// Grandfathering is never based on a public provider ID alone. The
+		// bootstrap path may use it only after the exact retained receipt key
+		// above proved custody of an existing bootstrap identity.
+		referralPolicy.GrandfatherProof = identityExists
+		if err := redeemReferralTx(ctx, conn, referralPolicy, req.ReferralCode, req.ProviderID, req.Now); err != nil {
+			return err
+		}
 
 		if activeExists {
 			res, err := conn.ExecContext(ctx, `
@@ -932,10 +1050,167 @@ func deleteRows(ctx context.Context, conn *sql.Conn, query string, args ...any) 
 }
 
 func (s *Store) MintProviderTokenAppTrack(ctx context.Context, providerID string, currentBearer *string) (string, error) {
+	return s.MintProviderTokenAppTrackWithReferral(ctx, providerID, currentBearer, "", ReferralPolicy{})
+}
+
+func (s *Store) MintProviderTokenAppTrackWithReferral(ctx context.Context, providerID string, currentBearer *string, referralCode string, policy ReferralPolicy) (string, error) {
+	token, err := s.mintProviderTokenAppTrackWithReferral(ctx, providerID, currentBearer, referralCode, policy, "", AppTrackRegistrationAttempt{})
+	return token, err
+}
+
+func (s *Store) MintProviderTokenAppTrackWithReferralReservation(ctx context.Context, providerID string, currentBearer *string, referralCode string, policy ReferralPolicy, reservationID string, attempt AppTrackRegistrationAttempt) (string, error) {
+	return s.mintProviderTokenAppTrackWithReferral(ctx, providerID, currentBearer, referralCode, policy, strings.TrimSpace(reservationID), attempt)
+}
+
+// AcknowledgeAppTrackReferralMint removes the durable cross-store saga only
+// after PostgreSQL preparation is known to have committed. The token and
+// referral redemption remain authoritative.
+func (s *Store) AcknowledgeAppTrackReferralMint(ctx context.Context, providerID, cleartextToken string) error {
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(cleartextToken) == "" {
+		return ErrReferralConflict
+	}
+	result, err := s.db.ExecContext(ctx, `
+DELETE FROM apptrack_pending_referral_mints
+ WHERE provider_id = ? AND token_hash = ?`, providerID, tokenHash(strings.TrimSpace(cleartextToken)))
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return ErrReferralConflict
+	}
+	return nil
+}
+
+// RollbackAppTrackReferralMint compensates a fresh, undisclosed App-track
+// token when PostgreSQL preparation is known not to have committed. Whether
+// the current generation created the redemption is read from the saga row, so
+// a revoked provider's historical redemption is never deleted by mistake.
+func (s *Store) RollbackAppTrackReferralMint(ctx context.Context, providerID, cleartextToken string) error {
+	if err := config.ValidateProviderID(providerID); err != nil {
+		return err
+	}
+	cleartextToken = strings.TrimSpace(cleartextToken)
+	if cleartextToken == "" {
+		return ErrReferralConflict
+	}
+	return s.resolvePendingAppTrackReferralMint(ctx, providerID, tokenHash(cleartextToken), false)
+}
+
+// ListPendingAppTrackReferralMints returns only sagas old enough that they
+// cannot belong to an in-flight request. Callers decide whether PostgreSQL
+// committed the matching registration attempt, then resolve each row.
+func (s *Store) ListPendingAppTrackReferralMints(ctx context.Context, createdBefore time.Time) ([]PendingAppTrackReferralMint, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT provider_id, token_hash, registration_source_ip, registration_nonce, registration_observed_at
+  FROM apptrack_pending_referral_mints
+ WHERE created_at <= ?
+ ORDER BY created_at, provider_id`, timeText(createdBefore.UTC()))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pending []PendingAppTrackReferralMint
+	for rows.Next() {
+		var item PendingAppTrackReferralMint
+		var observedAt string
+		if err := rows.Scan(&item.ProviderID, &item.TokenHash, &item.Attempt.SourceIP, &item.Attempt.Nonce, &observedAt); err != nil {
+			return nil, err
+		}
+		item.Attempt.ObservedAt, err = time.Parse(time.RFC3339Nano, observedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse pending App-track registration timestamp: %w", err)
+		}
+		pending = append(pending, item)
+	}
+	return pending, rows.Err()
+}
+
+// ResolvePendingAppTrackReferralMint is the crash-recovery path. A committed
+// PostgreSQL attempt keeps the credential and drops only the saga; an absent
+// attempt atomically removes the undisclosed token and only the referral state
+// created by this exact mint generation.
+func (s *Store) ResolvePendingAppTrackReferralMint(ctx context.Context, pending PendingAppTrackReferralMint, registrationPrepared bool) error {
+	if err := config.ValidateProviderID(pending.ProviderID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(pending.TokenHash) == "" {
+		return ErrReferralConflict
+	}
+	return s.resolvePendingAppTrackReferralMint(ctx, pending.ProviderID, pending.TokenHash, registrationPrepared)
+}
+
+func (s *Store) resolvePendingAppTrackReferralMint(ctx context.Context, providerID, expectedTokenHash string, registrationPrepared bool) error {
+	return sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var campaign string
+		var createdRedemption bool
+		if err := conn.QueryRowContext(ctx, `
+SELECT campaign, created_redemption
+  FROM apptrack_pending_referral_mints
+ WHERE provider_id = ? AND token_hash = ?`, providerID, expectedTokenHash).Scan(&campaign, &createdRedemption); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrReferralConflict
+			}
+			return err
+		}
+		if registrationPrepared {
+			_, err := conn.ExecContext(ctx, `
+DELETE FROM apptrack_pending_referral_mints
+ WHERE provider_id = ? AND token_hash = ?`, providerID, expectedTokenHash)
+			return err
+		}
+		result, err := conn.ExecContext(ctx, `
+DELETE FROM provider_tokens
+ WHERE provider_id = ?
+   AND token_hash = ?
+   AND provider_name = 'malibu-app'
+   AND revoked_at IS NULL
+   AND last_used_at IS NULL`, providerID, expectedTokenHash)
+		if err != nil {
+			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return ErrReferralConflict
+		}
+		if !createdRedemption {
+			_, err = conn.ExecContext(ctx, `
+DELETE FROM apptrack_pending_referral_mints
+ WHERE provider_id = ? AND token_hash = ?`, providerID, expectedTokenHash)
+			return err
+		}
+		result, err = conn.ExecContext(ctx, `
+DELETE FROM referral_redemptions
+ WHERE campaign = ? AND provider_id = ?`, campaign, providerID)
+		if err != nil {
+			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return ErrReferralConflict
+		}
+		_, err = conn.ExecContext(ctx, `
+DELETE FROM provider_referral_admissions
+	WHERE campaign = ? AND provider_id = ? AND decision = 'referred'`, campaign, providerID)
+		if err != nil {
+			return err
+		}
+		_, err = conn.ExecContext(ctx, `
+DELETE FROM apptrack_pending_referral_mints
+ WHERE provider_id = ? AND token_hash = ?`, providerID, expectedTokenHash)
+		return err
+	})
+}
+
+func (s *Store) mintProviderTokenAppTrackWithReferral(ctx context.Context, providerID string, currentBearer *string, referralCode string, policy ReferralPolicy, reservationID string, attempt AppTrackRegistrationAttempt) (string, error) {
 	if err := config.ValidateProviderID(providerID); err != nil {
 		return "", err
 	}
+	if reservationID != "" && (strings.TrimSpace(attempt.SourceIP) == "" || strings.TrimSpace(attempt.Nonce) == "" || attempt.ObservedAt.IsZero()) {
+		return "", ErrReferralConflict
+	}
 	var token string
+	var createdRedemption bool
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
 		nowText := nowString()
 		var active struct {
@@ -978,7 +1253,22 @@ UPDATE provider_tokens
 				return err
 			}
 		}
-
+		if !requiresProof {
+			if reservationID != "" {
+				var existingRedemption int
+				if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(1) FROM referral_redemptions WHERE campaign = ? AND provider_id = ?`, policy.Campaign, providerID).Scan(&existingRedemption); err != nil {
+					return err
+				}
+				createdRedemption = existingRedemption == 0
+				if err := consumeReferralReservationTx(ctx, conn, policy, reservationID, referralCode, providerID, time.Now().UTC()); err != nil {
+					return err
+				}
+			}
+			if err := redeemReferralTx(ctx, conn, policy, referralCode, providerID, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
 		newToken, err := randomHex(32)
 		if err != nil {
 			return err
@@ -996,6 +1286,18 @@ VALUES (?, ?, ?, ?, ?)`, tokenHash(newToken), prefix, providerID, "malibu-app", 
 			if _, err := conn.ExecContext(ctx, `
 INSERT INTO apptrack_register_reissues (provider_id, ts)
 VALUES (?, ?)`, providerID, nowText); err != nil {
+				return err
+			}
+		}
+		if reservationID != "" {
+			if _, err := conn.ExecContext(ctx, `
+INSERT INTO apptrack_pending_referral_mints (
+    provider_id, token_hash, campaign, registration_source_ip,
+    registration_nonce, registration_observed_at, created_redemption, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				providerID, tokenHash(newToken), policy.Campaign, strings.TrimSpace(attempt.SourceIP),
+				strings.TrimSpace(attempt.Nonce), attempt.ObservedAt.UTC().Format(time.RFC3339Nano), createdRedemption, nowText,
+			); err != nil {
 				return err
 			}
 		}
@@ -1762,6 +2064,10 @@ func (s *Store) HasOwnership(ctx context.Context, providerID string) (bool, erro
 }
 
 func (s *Store) MintAdmissionTokenAndPairOT(ctx context.Context, providerID, providerName string, now time.Time) (AdmissionPairMint, error) {
+	return s.MintAdmissionTokenAndPairOTWithReferral(ctx, providerID, providerName, now, "", ReferralPolicy{})
+}
+
+func (s *Store) MintAdmissionTokenAndPairOTWithReferral(ctx context.Context, providerID, providerName string, now time.Time, referralCode string, policy ReferralPolicy) (AdmissionPairMint, error) {
 	// Issue #274 R1 CODE LOW-1: validate the RAW provider_id before any
 	// normalization so admission paths apply the same gate semantics as WS
 	// paths.
@@ -1796,6 +2102,9 @@ SELECT EXISTS(
 			if bootstrapIdentityExists == 1 {
 				return ErrBootstrapIdentityExists
 			}
+		}
+		if err := redeemReferralTx(ctx, conn, policy, referralCode, providerID, now); err != nil {
+			return err
 		}
 		res, err := conn.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, nowText)
 		if err != nil {

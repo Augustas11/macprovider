@@ -77,6 +77,7 @@ struct RegisterRequest: Equatable {
     let hardwareSummary: [String: String]
     let appAttestObject: String?
     let appAttestKeyID: String?
+    let referralCode: String?
     let nonce: String
     let timestampUTC: String
     let signature: String
@@ -88,6 +89,7 @@ struct RegisterRequest: Equatable {
             "hardware_summary": hardwareSummary,
             "app_attest_object": appAttestObject ?? NSNull(),
             "app_attest_key_id": appAttestKeyID ?? NSNull(),
+            "referral_code": referralCode ?? NSNull(),
             "nonce": nonce,
             "ts_utc": timestampUTC,
             "signature": signature
@@ -127,6 +129,7 @@ struct RegisterClient {
         hardwareSummary: [String: String] = Self.currentHardwareSummary(),
         appAttestObject: Data? = nil,
         appAttestKeyID: Data? = nil,
+        referralCode: String? = nil,
         nonce: String = Self.makeNonce(),
         timestamp: Date = Date()
     ) throws -> RegisterRequest {
@@ -138,6 +141,7 @@ struct RegisterClient {
             hardwareSummary: hardwareSummary,
             appAttestObject: appAttestObject?.base64EncodedString(),
             appAttestKeyID: appAttestKeyID?.base64EncodedString(),
+            referralCode: referralCode,
             nonce: nonce,
             timestampUTC: timestampUTC
         )
@@ -149,6 +153,7 @@ struct RegisterClient {
             hardwareSummary: hardwareSummary,
             appAttestObject: appAttestObject?.base64EncodedString(),
             appAttestKeyID: appAttestKeyID?.base64EncodedString(),
+            referralCode: referralCode,
             nonce: nonce,
             timestampUTC: timestampUTC,
             signature: signature
@@ -234,6 +239,7 @@ struct RegisterClient {
             hardwareSummary: request.hardwareSummary,
             appAttestObject: request.appAttestObject,
             appAttestKeyID: request.appAttestKeyID,
+            referralCode: request.referralCode,
             nonce: request.nonce,
             timestampUTC: request.timestampUTC
         ))
@@ -290,6 +296,7 @@ struct RegisterClient {
         hardwareSummary: [String: String],
         appAttestObject: String?,
         appAttestKeyID: String?,
+        referralCode: String?,
         nonce: String,
         timestampUTC: String
     ) -> CanonicalJSONValue {
@@ -299,6 +306,7 @@ struct RegisterClient {
             "hardware_summary": .object(hardwareSummary.mapValues { .string($0) }),
             "app_attest_object": appAttestObject.map(CanonicalJSONValue.string) ?? .null,
             "app_attest_key_id": appAttestKeyID.map(CanonicalJSONValue.string) ?? .null,
+            "referral_code": referralCode.map(CanonicalJSONValue.string) ?? .null,
             "nonce": .string(nonce),
             "ts_utc": .string(timestampUTC)
         ])
