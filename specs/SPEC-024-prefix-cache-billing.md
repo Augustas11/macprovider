@@ -113,7 +113,7 @@ Operator guidance: configured `prompt_cache_hit_credits_per_mtok` SHOULD target 
 
 ## 6. Formula (SPEC-005 Formula Addendum)
 
-Current SPEC-005 v0.4 base numerator:
+Current SPEC-005 v0.5 base numerator (formula unchanged from v0.4):
 
 ```text
 base_numerator = prompt_tokens * prompt_rate_per_mtok + effective_completion_tokens * completion_rate_per_mtok
@@ -407,7 +407,10 @@ to the SPEC-006 §5.3.1 `sticky_affinity` disclosure, `/v1/models tier1_disclosu
   reuses and **re-populates** the entry under the same key — so the provider entry's only
   dependable bound is its own TTL/LRU, and no buyer-triggered provider-side purge primitive
   exists (SPEC-006 §1.3 lifecycle residual gap; closing it needs a provider-side conv-key purge,
-  not shipped).
+  not shipped). Note this bound is on reuse **eligibility**, not guaranteed **physical**
+  deletion: the shipped TTL sweep is lazy (FR-CI4), so expired KV MAY physically persist in
+  process memory past its TTL until the next `begin()`. Buyer-facing disclosure copy MUST NOT
+  imply guaranteed physical erasure at TTL.
 - **(ii) Cross-provider linkability.** Because the derived key is forwarded on cache **misses**
   and **re-routes**, the same stable identifier MAY reach **more than one** provider across a
   conversation's life — broader than the single-provider correlation sticky affinity alone
