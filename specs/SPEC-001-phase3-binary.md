@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.6 (2026-06-22, SPEC-015 v0.1.3 receipt pubkey auth_request absorption)
+**Version:** 1.7 (2026-07-12, binary-1.8.31 drift reconciliation: FR-11 semaphore, FR-16 idle-prewarm, control-socket 17-frame inventory)
 **Revision:** v1.3.1 adds the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -17,6 +17,35 @@ coordinator is the compatibility cutoff for old binaries.
 
 **Triage note 2026-06-26 (no version bump, no normative change):**
 - §10 OQ-1 (streaming usage chunk client compat) and OQ-2 (tier announcement format) are marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-001.
+
+**Change log v1.7 (2026-07-12, binary-1.8.31 drift reconciliation — spec-only, reconciled to shipped code; code is source of truth):**
+The spec header had drifted to 1.6 (2026-06-22) while the shipped `binary_version`
+advanced to **1.8.31**. v1.7 reconciles the three drift areas the runbook named,
+plus the additive wire surface that accumulated in between. No code change.
+- **FR-11 (rewritten).** The "bounded FIFO queue, depth = 2× concurrency, HTTP
+  `429` + `Retry-After`, `rate_limit_exceeded`" contract was **never implemented**
+  and is retired. Shipped: a **blocking `AsyncSemaphore(max(1, max_concurrency))`**
+  serializes the HTTP inference path (excess requests await a permit, never
+  rejected); the WS-tunneled path instead hard-rejects at capacity=1 with
+  `error_queue_full` (FR-27). The §status-code `429` row is struck.
+- **FR-16 (rewritten).** No wake-event detection exists (no IOKit power / wall-clock
+  jump). The coordinator `warm_up` command is a **no-op** (`degraded`→`ready`, no
+  inference). The real warm-up is an **idle-triggered `IdlePrewarmer`** with six
+  `idle_prewarm.*` config keys (FR-19), battery-gated off by default, emitting an
+  `idle_prewarm_event` / `idle_prewarm_skipped` frame (§6.12.4).
+- **Control socket (§6.9.2, R-6.9.3a).** The shipped `ControlSocketFrame` enum has
+  **17** frame types; §6.9 previously documented 5. The 12 additions are enumerated
+  with owner cross-refs — receipt-key rotation (SPEC-015), App-track
+  metrics/pause/resume/shutdown (SPEC-025 §5.2), and the identity-signature
+  challenge/response pair (SPEC-026 §7). SPEC-001 owns the transport; the owner spec
+  owns each frame's semantics.
+- **§6.12 (new) — additive coordinator-wire surface.** Enumerates the fields/frames
+  that later specs own but that transit the binary: `auth_request`
+  tier2/credential/catalog-admission fields (SPEC-008/010/022/026); heartbeat
+  `hardware_summary` / spec-decode (SPEC-028) / `last_autoupdate_event` (SPEC-020);
+  inbound `se_liveness_challenge` + attestation-lifecycle events (SPEC-008); outbound
+  `se_liveness_response` (SPEC-008) and the SPEC-001-owned `idle_prewarm_event`.
+- **FR-19.** Adds the six `idle_prewarm.*` config keys / `--idle-prewarm*` flags.
 
 **Change log v1.6:**
 - **v1.6 (2026-06-22, SPEC-015 v0.1.3 absorption):** Adds one
@@ -525,16 +554,34 @@ detection. Phase 2 adversarial testing (`midstream_disconnect` workload)
 found `mlx_lm.server` handles this via `BrokenPipeError`; the binary
 must do at least as well, without leaking long-running generation.
 
-**FR-11. Concurrent request handling with bounded queue.**
-The binary accepts simultaneous requests up to advertised
-`max_concurrency` (FR-9). The normative default is 1; values >1 are
-operator overrides for experimental use. Requests beyond the advertised
-limit are queued. If the queue exceeds a configurable depth (default:
-2x concurrency limit), new requests are rejected with HTTP 429 and a
-`Retry-After` header estimating when a slot may free up. The queue is
-FIFO with no time-based eviction in v1. Queued requests that are
-cancelled by the client before reaching the inference engine are
-silently removed from the queue.
+**FR-11. Concurrent request handling — semaphore serialization (reconciled v1.7).**
+The binary bounds concurrent inference to advertised `max_concurrency`
+(FR-9). The normative default is 1; values >1 are operator overrides for
+experimental use.
+
+**Shipped behavior (v1.7 reconciliation — code is source of truth).** The
+mechanism is a **blocking semaphore**, not a bounded reject-queue. The HTTP
+inference path serializes through `inferenceGate = AsyncSemaphore(value:
+max(1, max_concurrency))` (`ModelRuntime.swift`), acquired via
+`inferenceGate.withPermit { … }` around the generation call. A request that
+arrives while all permits are held **awaits** a free permit (it blocks in the
+async runtime); it is **not** placed in a depth-bounded FIFO and is **not**
+rejected. There is therefore **no HTTP `429`, no `Retry-After` header, and no
+`rate_limit_exceeded` response on the HTTP inference path** — the earlier
+"bounded FIFO queue, depth = 2× concurrency, 429 + Retry-After, silent removal
+of pre-engine-cancelled queued requests" contract (SPEC-001 ≤ v1.6) was **never
+implemented** and is retired. Client cancellation of a request still waiting on
+a permit is handled by structured-concurrency task cancellation, not by queue
+eviction.
+
+**WS-tunneled path (FR-21–FR-32) capacity handling.** The coordinator-tunneled
+relay bounds in-flight requests differently: `InferenceRelay` hard-**rejects**
+at capacity — `guard active.count < maxActiveRequests` else it emits
+`status: "error_queue_full"` (FR-27), with **no** queue and **no** `Retry-After`.
+`maxActiveRequests` is fixed to **1** (`InferenceRelay.swift`,
+`CoordinatorClient.swift`). So the tunneled path admits one request and
+immediately rejects a concurrent second with `error_queue_full`, whereas the
+local HTTP path blocks on the semaphore.
 
 **FR-12. Graceful SIGTERM drain.**
 On receiving SIGTERM, the binary:
@@ -586,17 +633,39 @@ whenever the state changes (see Section 6.5). A WebSocket close
 without a prior `draining` message indicates an unclean disconnect
 (the 530-equivalent from D1).
 
-**FR-16. Post-wake warm-up hook.**
+**FR-16. Warm-up — idle prewarmer (reconciled v1.7).**
 Phase 2 decision log entry D2 found a -12% throughput dip on the first
-request after a Mac wakes from sleep. The binary detects wake events
-(via IOKit power notifications or by detecting that wall-clock time
-jumped forward significantly since last activity) and runs a synthetic
-warm-up inference (a short fixed prompt, result discarded) before
-transitioning from `degraded` to `ready`. During warm-up, the binary
-reports `degraded` state to the coordinator.
+request after a period of inactivity. The **shipped** mitigation differs
+from the ≤ v1.6 spec text in two ways; code is source of truth.
 
-The coordinator can also send an explicit `warm_up` command over the
-WebSocket to trigger this behavior.
+**No wake-event detection (v1.7).** The binary does **not** detect wake
+events. There is no IOKit power-notification / `didWake` handler and no
+wall-clock-jump detector anywhere in the CLI; the earlier "detects wake
+events … before transitioning from `degraded` to `ready`" contract was
+never implemented and is retired.
+
+**The `warm_up` coordinator command is a no-op (v1.7).** On receiving a
+`warm_up` WebSocket command the binary emits `state_update: degraded`
+("coordinator warm_up requested") immediately followed by
+`state_update: ready` ("warm_up complete") and runs **no** synthetic
+inference between them (`CoordinatorClient.swift`). It is a stateless
+two-message acknowledgement, not a warm-up trigger.
+
+**Shipped warm-up is idle-triggered (`IdlePrewarmer`).** The real warm-up
+is an idle prewarmer (`IdlePrewarmer.swift`), enabled by default. On a tick
+loop (`idle_prewarm.tick_s`, default 5s, range 1…60) it measures elapsed
+time since the last inference; once idle ≥ `idle_prewarm.idle_threshold_s`
+(default 30s, range 5…3600) it runs a synthetic `ModelRuntime`
+`runInternalWarmup` — a short fixed prompt (`idle_prewarm.prompt`, default
+`"warm"`, 1…64 bytes) generating up to `idle_prewarm.max_tokens` tokens
+(default 1, range 1…8), result discarded. It is **battery-gated off by
+default** (`idle_prewarm.on_battery`, default false; power source read via
+`IOKit.ps`) — on battery it skips unless explicitly enabled. Each run (or
+skip) emits an `idle_prewarm_event` / `idle_prewarm_skipped` coordinator
+frame carrying a `reason` (§6.12). The prewarmer does **not** change the
+provider health state (`ready`/`degraded`); it warms the model cache in
+place. See FR-19 for the six `idle_prewarm.*` config keys / `--idle-prewarm*`
+flags.
 
 **FR-17. Capacity advertisement includes model and throughput.**
 Phase 2 decision log entry D4 found that smaller-model-on-slower-hardware
@@ -735,6 +804,22 @@ model path), `coordinator_url`, `log_format` (`json` or `text`),
 `log_file` (optional path; if set, logs are also written to this file),
 `max_context_override`, `max_concurrency_override`, `drain_timeout_s`,
 `warmup_enabled` (bool), `max_request_body_bytes` (Stage 1 pre-flight limit).
+
+**Idle-prewarm config (reconciled v1.7, FR-16).** Six keys govern the shipped
+`IdlePrewarmer` (config keys under `idle_prewarm.*`; matching CLI flags shown):
+
+| Config key | CLI flag | Default | Range |
+|---|---|---|---|
+| `idle_prewarm.enabled` | `--idle-prewarm` / `--no-idle-prewarm` | **on** | bool |
+| `idle_prewarm.idle_threshold_s` | `--idle-prewarm-idle-threshold-s` | 30 | 5…3600 |
+| `idle_prewarm.tick_s` | `--idle-prewarm-tick-s` | 5 | 1…60 |
+| `idle_prewarm.max_tokens` | `--idle-prewarm-max-tokens` | 1 | 1…8 |
+| `idle_prewarm.prompt` | `--idle-prewarm-prompt` | `"warm"` | 1…64 bytes |
+| `idle_prewarm.on_battery` | `--idle-prewarm-on-battery` | **off** | bool |
+
+These supersede the legacy `warmup_enabled` bool as the operative warm-up
+controls (the shipped warm-up is idle-triggered, not startup/wake-triggered;
+see FR-16). `warmup_enabled` is retained for backward compatibility.
 
 **FR-20. Startup self-test.**
 On launch, after loading the model, the binary runs a single short
@@ -1032,7 +1117,7 @@ failure short-circuits:
 | 400 | Missing/invalid fields, malformed tools, n>1 | `invalid_request` or `invalid_tools` |
 | 404 | `model` field doesn't match loaded model | `model_not_found` |
 | 413 | Prompt exceeds context capacity (FR-8) | `context_length_exceeded` |
-| 429 | Request queue full (FR-11) | `rate_limit_exceeded` |
+| ~~429~~ | ~~Request queue full~~ — **not shipped (v1.7)**: the HTTP path blocks on the FR-11 semaphore rather than returning 429; `rate_limit_exceeded` is unused on the inference path. The WS-tunneled path signals capacity via `error_queue_full` (FR-27), not an HTTP status. | ~~`rate_limit_exceeded`~~ |
 | 503 | Model not loaded or draining | `model_not_loaded` |
 
 All error responses use the OpenAI error envelope:
@@ -2066,6 +2151,43 @@ R-6.9.4 `switch_ack` frames MUST include the REQUIRED `type:
 "switch_ack"` field and the REQUIRED `accepted` field per SPEC-011
 v0.5 R-3.1.5 and R-3.7.3.
 
+R-6.9.3a **Full frame inventory (reconciled v1.7).** SPEC-001 owns the
+control-socket **transport** (§6.9.1 wire format, §6.9.4 permissions/
+lifecycle); the `ControlSocketFrame` enum shipped in the binary
+(`ControlSocket.swift`) carries **17** frame `type`s. The five above are the
+SPEC-011 warm-swap set; the remaining twelve were added by later specs and
+their **semantics are owned by those specs** — SPEC-001 enumerates them here
+for transport completeness but does not re-specify their behavior (the
+cross-referenced spec governs on any conflict). A binary MUST accept/emit
+only these `type`s and MUST reject unknown types per §6.9.1.
+
+| `type` | Direction (app↔serve) | Owner spec | SPEC-001 §6.9 |
+|---|---|---|---|
+| `switch_request` | app → serve | SPEC-011 v0.5 | specced |
+| `status_request` | app → serve | SPEC-011 v0.5 | specced |
+| `switch_ack` | serve → app | SPEC-011 v0.5 | specced |
+| `switch_progress` | serve → app | SPEC-011 v0.5 | specced |
+| `status_response` | serve → app | SPEC-011 v0.5 | specced |
+| `rotate_receipt_key_request` | app → serve | **SPEC-015** (receipt-key rotation) | transport only |
+| `rotate_receipt_key_result` | serve → app | **SPEC-015** (status: `accepted` / `rejected` / `committed_unconfirmed`) | transport only |
+| `metrics_request` | app → serve | **SPEC-025 §5.2** (App track) | transport only |
+| `metrics_response` | serve → app | **SPEC-025 §5.2** (carries `ControlMetricsSnapshot`) | transport only |
+| `pause_request` | app → serve | **SPEC-025** | transport only |
+| `pause_ack` | serve → app | **SPEC-025** | transport only |
+| `resume_request` | app → serve | **SPEC-025** | transport only |
+| `resume_ack` | serve → app | **SPEC-025** | transport only |
+| `shutdown_request` | app → serve | **SPEC-025** (carries `grace_seconds`) | transport only |
+| `shutdown_ack` | serve → app | **SPEC-025** | transport only |
+| `identity_signature_request` | serve → app | **SPEC-026 §7** (fields: `auth_attempt_id`, `provider_id`, `binary_version`, `provider_ecdh_public_key`, `transcript_sha256`) | transport only |
+| `identity_signature_response` | app → serve | **SPEC-026 §7** (fields: `accepted`, `identity_signature`, `transcript_sha256`, `reason`) | transport only |
+
+The identity-signature pair (SPEC-026) exists because the provider Ed25519
+identity key lives in Malibu.app's Keychain, so `serve` pushes the
+auth-transcript to the app to be signed; the receipt-key-rotation and
+App-track metrics/pause/resume/shutdown frames are the App-track control
+surface (SPEC-015 / SPEC-025). None of these twelve alter the §6.9.3
+`models`-CLI detection precedence, which keys only on `status_response`.
+
 #### 6.9.3. Detection precedence
 
 R-6.9.5 The `models` CLI MUST use the SPEC-011 v0.5 R-3.1.5.x
@@ -2368,6 +2490,68 @@ sizing (via `/api/models/<id>` per-id metadata), multi-model
 at switch time. The catalog target is named here so reviewers of
 future PRs can refer to a stable concept, but the boundary is not
 yet enforced at the package level.
+
+### 6.12. Additive coordinator-wire surface reconciled in v1.7
+
+Between SPEC-001 v1.6 (2026-06-22) and the shipped binary (`binary_version`
+1.8.31) the coordinator↔binary wire gained fields and frames that later specs
+own but that transit the SPEC-001 binary. SPEC-001 enumerates them here for
+wire completeness; **the cross-referenced spec owns the semantics** and governs
+on any conflict. All are additive — a coordinator that ignores an unknown field
+sees pre-v1.7 behavior.
+
+#### 6.12.1. `auth_request` initial-stage fields (beyond §6.7.1)
+
+Builder: `CoordinatorClient.swift` (`buildAuthRequest` / `appendCatalogAdmissionMetadata`).
+
+- `tier2_capabilities.response_chunk_plaintext_envelope: true` — a 4th sub-field
+  beyond the §6.7.1 `{encrypted_leg, attestation, aead_suites}` schema
+  (**SPEC-008** Tier-2).
+- `credential_bootstrap: true` — provider-credential bootstrap opt-in
+  (**SPEC-026**).
+- Signed-catalog admission block: `catalog_release_id`, `catalog_policy_version`,
+  `catalog_candidate_sha256`, `catalog_signer_key_id`, `catalog_row_identity`
+  (**SPEC-010 / SPEC-022** signed-catalog admission).
+
+#### 6.12.2. Heartbeat fields (beyond §6.5 / §6.10)
+
+Builder: `CoordinatorClient.swift` heartbeat frame.
+
+- `hardware_summary` — provider hardware descriptor (**SPEC-010 / stats hardware-verifier**).
+- `spec_decode_drafted_tokens_since_last`, `spec_decode_accepted_tokens_since_last`,
+  `spec_decode_acceptance_rate` — speculative-decoding telemetry (**SPEC-028**).
+- `last_autoupdate_event` — last auto-update transition (**SPEC-020**).
+
+These are additive to the §6.10 opt-in-gated `model_hash` / `loading` fields and
+do not change the L-1 byte-identical default for a warm-swap-disabled binary
+(they ride the existing heartbeat only when their producing subsystem is active).
+
+#### 6.12.3. New inbound (coordinator server-push) frames
+
+Dispatch: `CoordinatorClient.swift`.
+
+- `se_liveness_challenge` → binary replies `se_liveness_response` (§6.12.4) —
+  Secure-Enclave liveness challenge (**SPEC-008 Pillar C**).
+- `encrypted_leg_invalidated`, `tier_demoted`, `token_revoked`,
+  `attestation_state_degraded` — Tier-2 / attestation lifecycle events the
+  coordinator pushes to the binary (**SPEC-008** / autoupdate). The binary
+  reacts to these (e.g. re-handshake, tier downgrade); SPEC-008 owns the state
+  semantics.
+
+These extend the §6.7 / §6.6 inbound frame set (`hello_ack`, `ownership_event`,
+`ownership_status`, `preflight`, `inference_request`, `cancel_request`, `drain`,
+`warm_up`).
+
+#### 6.12.4. New outbound (binary → coordinator) frames
+
+- `idle_prewarm_event` / `idle_prewarm_skipped` — emitted by the `IdlePrewarmer`
+  (FR-16); `idle_prewarm_skipped` carries a `reason` (e.g. on-battery skip). Owner:
+  SPEC-001 (FR-16) — this frame is SPEC-001's own, new in v1.7.
+- `se_liveness_response` — reply to `se_liveness_challenge`; fields `version`,
+  `nonce`, `timestamp`, `public_key`, `signature` (**SPEC-008 Pillar C**).
+
+These extend the §6.5 outbound set (`auth_request`, `hello`, `heartbeat`,
+`state_update`, `drain_status`, `nak`, `preflight_ack`).
 
 ---
 
