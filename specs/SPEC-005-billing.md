@@ -73,6 +73,17 @@ model (§7) and the cache-**isolation** invariant (§11–§16).
   handoff to §4–§6 only (wire §3 + buyer-mirror §8 retained by SPEC-024); swept stale SPEC-006 v0.9.1
   pins to v0.9.8; reconciled `ledger_config_snapshots` immutability to by-convention (no shipped
   `UNIQUE(config_hash)`). §5.3 breaker-before-null precedence made explicit.
+- **R4-audit corrections (3-lane codex).** All three lanes converged on the **D7 clarification**: R3's
+  claim that operator force-credit "restores the legitimate prompt/completion credit" is **false** —
+  cache quarantine permanently zeroes credits, force-credit re-admits the row **as-is** (no recompute;
+  only §7.5b re-prices), so a force-credited cache-quarantine row pays zero. Retracted the claim;
+  reframed the D7 reconciliation on the *unverifiable-report* basis (ambiguous_cache fires only on a
+  provider report inconsistent with the coordinator route view) and carried the "zero the cache
+  discount vs the whole row" question as an open money-path decision. Fixed the **§4.8**
+  identity-snapshot `provider_reported_prompt_tokens` meaning (still said "raw"; now reported-or-
+  substituted, matching §4.3) and extended **AC-PROMPT-BOUND** to assert the identity-snapshot mirror.
+  Code lane confirmed §5.3.2 provenance/bound, §5.3.1 disclosures, §7.5b, breaker precedence, and
+  schema fidelity all PASS.
 
 **Change log v0.5 (2026-07-08, issue #253 — force-credit + pre-payout hold + corrective resolution):**
 
@@ -513,15 +524,27 @@ Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 **Normative effect:** Implementations MUST satisfy D7 exactly as written.
 **Reference discipline:** Later sections may cite D7; they MUST NOT weaken it.
 
-**Clarification — quarantine is a hold, not a D7 zero-credit (v0.6).** The §5.3.1 cache
-quarantines (`ambiguous_cache`, `invalid_cached_prompt_tokens`) and the §7.5b re-price quarantines set
-a row's payable credits to 0 **with `quarantined = 1`**. This is a **reviewable hold pending operator
-resolution** (force-credit / force-void, §11.6.1 / §OQ-5), **not** the final zero-crediting of
-legitimate work that D7 forbids: an operator force-credit restores the legitimate prompt/completion
-credit, forgoing only the **unverifiable cache discount**. D7's no-zero-credit guarantee is a statement
-about **final settlement outcome** for verified legitimate work; a held row has not reached final
-outcome. This clarification does not weaken D7 — a legitimately-worked row is never *settled* at zero
-solely because its cache signal was unverifiable.
+**Clarification — cache quarantine vs D7, honest shipped behavior (v0.6).** The §5.3.1 cache
+quarantines (`ambiguous_cache`, `invalid_cached_prompt_tokens`) and the §7.5b re-price quarantines
+**permanently store the row's credits as 0** (both ledger tables) with `quarantined = 1`. **Operator
+resolution does NOT recompute those credits:** force-credit (§11.6.1) inserts a resolution and
+re-admits the row to the payable projection **as-is** (`quarantine.go` / `store.go` payable view), so a
+force-credited cache-quarantine row pays its **recorded zero**; force-void voids it. The **only** path
+that recomputes a quarantined row's credits to a non-zero value is §7.5b verified-receipt re-pricing.
+So an earlier draft's claim that force-credit "restores the legitimate prompt/completion credit" is
+**false** and is retracted.
+
+Reconciliation with D7 (which forbids zero-crediting *legitimate completed work*): the `ambiguous_cache`
+quarantine fires only when the provider's **positive** `cached_prompt_tokens` is **inconsistent with the
+coordinator's own route view** (a cache-hit claim on a non-sticky-hit route), i.e. the usage report is
+**not corroborable** — D7's guarantee is scoped to work attributable from a self-consistent report, and
+an unverifiable report is conservatively held at zero rather than clawed back after settlement. This is a
+deliberate money-path stance, **not** a reviewable hold that later pays out. **Carried design
+follow-up:** whether an ambiguous/invalid cache signal should zero only the **cache discount** (re-price
+`cached = 0`, still paying the legitimate uncached-prompt + completion credit) instead of the **entire
+row** is an open money-path decision (a code change gated by the G-series probe + a
+`beta/DECISION_CRITERIA.md` entry); v0.6 documents the shipped whole-row-zero behavior, it does not
+ratify it as optimal.
 
 ### 2.8 D8 - Failed-request accounting
 
@@ -823,7 +846,7 @@ If no snapshot exists for a recoverable row, recovery MUST quarantine instead of
 | `resolved_from` | TEXT | NOT NULL CHECK(resolved_from IN ('pool_entry','response_header','admin_recovery')) | identity source | insert only |
 | `pool_session_started_at_utc` | TEXT | NULL | active session start if known | insert only |
 | `config_snapshot_id` | INTEGER | NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0) | `ledger_config_snapshots.id` the row was priced under; §5.5/§7.5b use it to reconstruct the historical cache-hit rate during verified-receipt re-pricing | insert only |
-| `provider_reported_prompt_tokens` | INTEGER | NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0) | raw provider-reported prompt count before the §5.3.2 charged-prompt bound (diagnostic; mirrors the `ledger_request_credits` column) | insert only |
+| `provider_reported_prompt_tokens` | INTEGER | NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0) | prompt count attributed to the provider before the §5.3.2 bound — the provider's reported value, or the coordinator's `estimateTokens(req.raw)` substitution when omitted (diagnostic; mirrors the `ledger_request_credits` column, §4.3) | insert only |
 | `created_at_utc` | TEXT | NOT NULL | creation time | insert only |
 
 Indexes and uniqueness constraints:
@@ -2525,7 +2548,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 ### AC-PROMPT-BOUND: Charged prompt bounded to coordinator estimate (§5.3.2)
 
 **Verification:** Price a row whose attributed prompt (`provider_reported_prompt_tokens`) **exceeds** the coordinator `PromptTokenUpperBound`, and a second row whose attributed prompt is at or below the bound. Cover both a provider-reported prompt and a coordinator-substituted prompt (prompt absent on a `byte_estimated`/502/504 path).
-**Expected:** For the over-bound row, `prompt_tokens = charged_prompt_tokens = PromptTokenUpperBound` (the raw/attributed value preserved separately in `provider_reported_prompt_tokens`) and §5.3 prices the bounded value; for the at/below-bound row the value passes through unchanged; a NULL bound (legacy/recovery) passes through unbounded. Store order is `prompt_tokens = charged_prompt_tokens = min(attributed, bound)` with `provider_reported_prompt_tokens` = the raw/substituted attribution.
+**Expected:** For the over-bound row, `prompt_tokens = charged_prompt_tokens = PromptTokenUpperBound` (the raw/attributed value preserved separately in `provider_reported_prompt_tokens`) and §5.3 prices the bounded value; for the at/below-bound row the value passes through unchanged; a NULL bound (legacy/recovery) passes through unbounded. Store order is `prompt_tokens = charged_prompt_tokens = min(attributed, bound)` with `provider_reported_prompt_tokens` = the raw/substituted attribution. The **`ledger_provider_identity_snapshots.provider_reported_prompt_tokens`** mirror MUST carry the same reported-or-substituted attribution as the credit-row column (§4.8), including for the substituted-prompt case.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
