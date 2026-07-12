@@ -31,20 +31,26 @@ plus the additive wire surface that accumulated in between. No code change.
 - **FR-16 (rewritten).** No wake-event detection exists (no IOKit power / wall-clock
   jump). The coordinator `warm_up` command is a **no-op** (`degraded`→`ready`, no
   inference). The real warm-up is an **idle-triggered `IdlePrewarmer`** with six
-  `idle_prewarm.*` config keys (FR-19), battery-gated off by default, emitting an
-  `idle_prewarm_event` / `idle_prewarm_skipped` frame (§6.12.4).
+  `idle_prewarm.*` config keys (FR-19), gated on idle-threshold **and** enabled /
+  zero-in-flight / thermal / power / model-loaded, battery-gated off by default,
+  emitting a single `idle_prewarm_event` frame type whose `event` field carries the
+  lifecycle (`fired`/`completed`/`failed`/`cancelled`/`idle_prewarm_skipped`) (§6.15.4).
 - **Control socket (§6.9.2, R-6.9.3a).** The shipped `ControlSocketFrame` enum has
   **17** frame types; §6.9 previously documented 5. The 12 additions are enumerated
   with owner cross-refs — receipt-key rotation (SPEC-015), App-track
   metrics/pause/resume/shutdown (SPEC-025 §5.2), and the identity-signature
-  challenge/response pair (SPEC-026 §7). SPEC-001 owns the transport; the owner spec
-  owns each frame's semantics.
-- **§6.12 (new) — additive coordinator-wire surface.** Enumerates the fields/frames
+  challenge/response pair (SPEC-026 §4.3). SPEC-001 owns the transport; the owner spec
+  owns each frame's semantics. The socket activates when warm-swap **or** receipt
+  rotation is enabled (not warm-swap only), and the peer is authenticated by
+  effective UID only (not app identity).
+- **§6.15 (new) — additive coordinator-wire surface.** Enumerates the fields/frames
   that later specs own but that transit the binary: `auth_request`
   tier2/credential/catalog-admission fields (SPEC-008/010/022/026); heartbeat
-  `hardware_summary` / spec-decode (SPEC-028) / `last_autoupdate_event` (SPEC-020);
-  inbound `se_liveness_challenge` + attestation-lifecycle events (SPEC-008); outbound
-  `se_liveness_response` (SPEC-008) and the SPEC-001-owned `idle_prewarm_event`.
+  `hardware_summary` (untrusted SPEC-017 display fallback) / all six spec-decode
+  fields (SPEC-028) / `last_autoupdate_event` on heartbeat **and** `state_update`
+  (SPEC-020); inbound `se_liveness_challenge` and the `losslessness_probe_v1.*`
+  family (SPEC-008); outbound `se_liveness_response` (SPEC-008) and the
+  SPEC-001-owned `idle_prewarm_event`. (Numbered §6.15 to avoid the existing §6.12.)
 - **FR-19.** Adds the six `idle_prewarm.*` config keys / `--idle-prewarm*` flags.
 
 **Change log v1.6:**
@@ -222,14 +228,14 @@ behind the Phase 4 coordinator.
 - Streaming usage chunk synthesis (mlx_lm.server omits this)
 - Two-stage context length pre-flight (envelope size + token count)
 - Per-RAM-tier capacity computation at startup (8 GB, 16 GB, 32 GB+ tiers)
-- Bounded concurrent request queue with configurable max concurrency
+- Concurrent-request serialization via a blocking semaphore with configurable max concurrency (FR-11; the ≤ v1.6 "bounded reject-queue + 429" was never shipped)
 - Mid-stream client disconnect detection and slot release within 5 seconds
 - Graceful SIGTERM handling: drain in-flight requests before exit
 - Outbound coordinator WebSocket client (connects to configurable URL)
 - Coordinator handshake with tier, model, capacity, and throughput metadata
 - Capacity heartbeat at configurable interval
 - Health state reporting over WebSocket (ready, busy, degraded, draining, unavailable)
-- Post-wake warm-up inference before accepting buyer traffic
+- Idle-triggered prewarm inference to mitigate the post-idle throughput dip (FR-16; the ≤ v1.6 "post-wake warm-up" / wake detection was never shipped — `warm_up` is a no-op)
 - Startup self-test: load model, run one inference, verify output
 - Structured logging to stdout (JSON lines format)
 - macOS code signing (Developer ID, not notarized for v1)
@@ -332,8 +338,8 @@ for each. See Section 3 for hook-point diagram.
 │  │  └────────┬────────┘                            │            │    │
 │  │           ▼                                      │            │    │
 │  │  ┌─────────────────┐                            │            │    │
-│  │  │ Request Queue    │  Bounded concurrency.      │            │    │
-│  │  │                  │  Beyond limit → HTTP 429   │            │    │
+│  │  │ Semaphore Gate   │  Blocking semaphore, no    │            │    │
+│  │  │                  │  queue; beyond limit → wait │            │    │
 │  │  └────────┬────────┘                            │            │    │
 │  │           ▼                                      ▼            │    │
 │  │  ┌────────────────────────────────────────────────┐          │    │
@@ -570,9 +576,20 @@ rejected. There is therefore **no HTTP `429`, no `Retry-After` header, and no
 `rate_limit_exceeded` response on the HTTP inference path** — the earlier
 "bounded FIFO queue, depth = 2× concurrency, 429 + Retry-After, silent removal
 of pre-engine-cancelled queued requests" contract (SPEC-001 ≤ v1.6) was **never
-implemented** and is retired. Client cancellation of a request still waiting on
-a permit is handled by structured-concurrency task cancellation, not by queue
-eviction.
+implemented** and is retired.
+
+The semaphore's waiter list is **unbounded** (`AsyncSemaphore.swift` appends
+every excess acquirer); admission is not depth-capped. A waiter is removed only
+when *its own* Swift task is cancelled. On the HTTP inference path this
+cancellation is **not** wired to client disconnect: requests run in detached
+tasks (`HTTPServer.swift`) and the non-streaming path passes
+`shouldCancel: { false }`, so a client that disconnects while awaiting a permit
+does **not** release its waiter or its later compute. FR-11's earlier assurance
+that awaiting clients are freed by structured-concurrency cancellation on
+disconnect is therefore **not** shipped; a flood of (including disconnected)
+requests can retain parsed request state and later consume compute. Hardening
+this (channel-close → `Task.cancel`, waiter cap) is a carried follow-up, not a
+v1.7 spec claim.
 
 **WS-tunneled path (FR-21–FR-32) capacity handling.** The coordinator-tunneled
 relay bounds in-flight requests differently: `InferenceRelay` hard-**rejects**
@@ -624,7 +641,7 @@ States, informed by Phase 2 decision log entry D1 (502 vs 530 routing):
 |---|---|
 | `ready` | Accepting requests, model loaded |
 | `busy` | All request slots occupied |
-| `degraded` | Post-wake warm-up in progress (see FR-16) |
+| `degraded` | Transient `warm_up`-command acknowledgement only — emitted immediately before `ready` (see FR-16); **not** a post-wake warm-up state (no wake detection ships) and **not** entered by the idle prewarmer |
 | `draining` | SIGTERM received, finishing in-flight |
 | `unavailable` | Model load failed or fatal error |
 
@@ -653,19 +670,33 @@ two-message acknowledgement, not a warm-up trigger.
 
 **Shipped warm-up is idle-triggered (`IdlePrewarmer`).** The real warm-up
 is an idle prewarmer (`IdlePrewarmer.swift`), enabled by default. On a tick
-loop (`idle_prewarm.tick_s`, default 5s, range 1…60) it measures elapsed
-time since the last inference; once idle ≥ `idle_prewarm.idle_threshold_s`
-(default 30s, range 5…3600) it runs a synthetic `ModelRuntime`
+loop (`idle_prewarm.tick_seconds`, default 5s, range 1…60) it measures elapsed
+time since the last inference. The idle threshold
+(`idle_prewarm.idle_threshold_seconds`, default 30s, range 5…3600) is a
+**necessary but not sufficient** trigger: a run fires only when *all* of the
+following also hold (`IdlePrewarmer.swift`) — prewarm is enabled, there are
+zero in-flight requests, thermal state is acceptable (thermal-gated), the power
+source is permitted, and a model with a known hash is loaded; a second
+busy/idle re-check immediately before the run guards against a request arriving
+during setup. When they hold it runs a synthetic `ModelRuntime`
 `runInternalWarmup` — a short fixed prompt (`idle_prewarm.prompt`, default
 `"warm"`, 1…64 bytes) generating up to `idle_prewarm.max_tokens` tokens
 (default 1, range 1…8), result discarded. It is **battery-gated off by
-default** (`idle_prewarm.on_battery`, default false; power source read via
-`IOKit.ps`) — on battery it skips unless explicitly enabled. Each run (or
-skip) emits an `idle_prewarm_event` / `idle_prewarm_skipped` coordinator
-frame carrying a `reason` (§6.12). The prewarmer does **not** change the
-provider health state (`ready`/`degraded`); it warms the model cache in
-place. See FR-19 for the six `idle_prewarm.*` config keys / `--idle-prewarm*`
-flags.
+default** (`idle_prewarm.run_on_battery`, default false; power source read via
+`IOKit.ps`) — on explicit `.battery` it skips unless enabled. Note the gate
+**fails open** when IOKit cannot classify the source: an `.unknown` reading is
+*not* `.battery`, so a synthetic run can proceed under power-detection failure
+(carried LOW residual).
+
+Lifecycle is reported on the coordinator wire as a **single frame type**,
+`type: "idle_prewarm_event"`, whose `event` field carries the transition —
+`fired`, `completed`, `failed`, `cancelled` (pre-empted by a real request), or
+`idle_prewarm_skipped`; a `reason` is attached only on the skipped event. There
+is **no** distinct `idle_prewarm_skipped` frame type, and a single run emits
+*multiple* lifecycle events (e.g. `fired` then `completed`), not one frame per
+run (§6.15.4). The prewarmer does **not** change the provider health state
+(`ready`/`degraded`); it warms the model cache in place. See FR-19 for the six
+`idle_prewarm.*` config keys / `--idle-prewarm*` flags.
 
 **FR-17. Capacity advertisement includes model and throughput.**
 Phase 2 decision log entry D4 found that smaller-model-on-slower-hardware
@@ -723,13 +754,16 @@ Every `inference_response_chunk` and `inference_response_end` MUST
 carry the `request_id` from the originating `inference_request`. The
 provider MUST NOT reuse or reassign `request_id` values.
 
-**FR-25. Multiplexing.**
-The provider handles up to `max_concurrency` concurrent
-`inference_request` messages on a single WebSocket. By default this is
-1; higher values are experimental operator overrides per FR-9. Each
-concurrent request is tracked by its `request_id`. The provider's
-`slots_free` heartbeat field reflects WS-tunneled requests as well as
-local HTTP requests.
+**FR-25. Multiplexing — fixed WS capacity 1 (reconciled v1.7).**
+On the WS-tunneled path the relay capacity is **hardcoded to 1**
+(`InferenceRelay.maxActiveRequests = 1`, `CoordinatorClient.swift`); it does
+**not** track `max_concurrency`. The relay admits one in-flight
+`inference_request` and hard-rejects a concurrent second with
+`inference_response_end status: "error_queue_full"` (FR-27) — there is no WS
+queue and no `Retry-After`. `max_concurrency` > 1 governs only the *local HTTP*
+semaphore (FR-11), not the tunnel. Each admitted request is tracked by its
+`request_id`; the `slots_free` heartbeat field reflects WS-tunneled requests as
+well as local HTTP requests.
 
 **FR-26. Cancellation handling.**
 On receiving `cancel_request` (§ 6.6), the provider aborts the
@@ -811,11 +845,16 @@ model path), `coordinator_url`, `log_format` (`json` or `text`),
 | Config key | CLI flag | Default | Range |
 |---|---|---|---|
 | `idle_prewarm.enabled` | `--idle-prewarm` / `--no-idle-prewarm` | **on** | bool |
-| `idle_prewarm.idle_threshold_s` | `--idle-prewarm-idle-threshold-s` | 30 | 5…3600 |
-| `idle_prewarm.tick_s` | `--idle-prewarm-tick-s` | 5 | 1…60 |
+| `idle_prewarm.idle_threshold_seconds` | `--idle-prewarm-idle-threshold-s` | 30 | 5…3600 |
+| `idle_prewarm.tick_seconds` | `--idle-prewarm-tick-s` | 5 | 1…60 |
 | `idle_prewarm.max_tokens` | `--idle-prewarm-max-tokens` | 1 | 1…8 |
 | `idle_prewarm.prompt` | `--idle-prewarm-prompt` | `"warm"` | 1…64 bytes |
-| `idle_prewarm.on_battery` | `--idle-prewarm-on-battery` | **off** | bool |
+| `idle_prewarm.run_on_battery` | `--idle-prewarm-on-battery` | **off** | bool |
+
+The YAML config keys (`idle_threshold_seconds`, `tick_seconds`, `run_on_battery`)
+differ in spelling from their CLI flags (`--idle-prewarm-idle-threshold-s`,
+`--idle-prewarm-tick-s`, `--idle-prewarm-on-battery`); the parser
+(`Config.swift`) keys on the YAML spellings shown in the left column.
 
 These supersede the legacy `warmup_enabled` bool as the operative warm-up
 controls (the shipped warm-up is idle-triggered, not startup/wake-triggered;
@@ -1078,7 +1117,7 @@ failure short-circuits:
 | 6 | Model match (`model` field vs loaded model, ASCII case-insensitive) | 404 `model_not_found` |
 | 7 | Stage 1 pre-flight (envelope bytes) | 413 `context_length_exceeded` |
 | 8 | Stage 2 pre-flight (token count) | 413 `context_length_exceeded` |
-| 9 | Queue admission | 429 `rate_limit_exceeded` |
+| 9 | Semaphore admission (FR-11) | *blocks* on a permit — **no** failure response; the ≤ v1.6 `429 rate_limit_exceeded` was never shipped |
 
 #### Non-streaming response (200)
 
@@ -1461,7 +1500,7 @@ byte-for-byte when the coordinator omits the field.
 {
   "type": "state_update",
   "state": "degraded",
-  "reason": "post-wake warm-up in progress",
+  "reason": "coordinator warm_up requested",
   "since": "2026-05-27T14:30:00Z",
   "metrics_snapshot": {
     "slots_free": 1,
@@ -1582,15 +1621,20 @@ restart and is a critical bug. This was discovered the hard way in
 phase3-binary v1.1.2 during the first coordinator redeploy on
 2026-05-28 (see Decision log Entry 15).
 
-#### Warm-up command (C->P)
+#### Warm-up command (C->P) — no-op acknowledgement (reconciled v1.7)
 ```json
 {
   "type": "warm_up"
 }
 ```
 
-Provider runs the warm-up inference (FR-16) and responds with a
-`state_update` transitioning to `ready`.
+The shipped provider treats `warm_up` as a **no-op**: it emits
+`state_update: degraded` (`reason: "coordinator warm_up requested"`)
+immediately followed by `state_update: ready` (`reason: "warm_up complete"`),
+running **no** synthetic inference in between (`CoordinatorClient.swift`). It is
+a stateless two-message acknowledgement — the ≤ v1.6 "runs the warm-up
+inference" contract was never shipped. Real prewarming is idle-triggered
+(FR-16, `IdlePrewarmer`), independent of this command.
 
 #### Negative acknowledgement (P->C) — protocol error response
 ```json
@@ -2117,9 +2161,18 @@ existing boot semantics and L-1 back-compat.
 
 ### 6.9. Control socket protocol (NEW in v1.3)
 
-R-6.9.1 The serve process MUST refuse to open the control socket unless
-`--enable-warm-swap` was passed to `serve` per SPEC-011 v0.5 R-3.1.0
-and R-3.1.5. In disabled mode, the socket MUST be absent.
+R-6.9.1 (reconciled v1.7) The serve process opens the control socket when
+**either** `--enable-warm-swap` (SPEC-011 v0.5 R-3.1.0 / R-3.1.5) **or**
+receipt-key rotation is enabled — the latter requires `--enable-receipts` with a
+non-empty `provider_id` and a configured coordinator (`MacProviderCLI.swift`:
+`enableWarmSwap || receiptRotator != nil`). The ≤ v1.6 "socket absent unless
+`--enable-warm-swap`" wording was too narrow: it would make receipt rotation
+impossible in receipts-only mode and understates when this same-EUID privileged
+surface exists. The socket is absent only when **neither** warm-swap nor receipt
+rotation is enabled. (The SPEC-011 warm-swap *frames* remain gated on
+`--enable-warm-swap`; the `models` CLI detection at §6.9.3 still keys on
+`status_response`, so a receipts-only socket correctly reports "warm-swap not
+enabled".)
 
 The macOS-native default path is `$TMPDIR/macprovider-cli/ctl.sock`,
 resolved via `FileManager.default.temporaryDirectory`, per SPEC-011
@@ -2168,8 +2221,8 @@ only these `type`s and MUST reject unknown types per §6.9.1.
 | `switch_ack` | serve → app | SPEC-011 v0.5 | specced |
 | `switch_progress` | serve → app | SPEC-011 v0.5 | specced |
 | `status_response` | serve → app | SPEC-011 v0.5 | specced |
-| `rotate_receipt_key_request` | app → serve | **SPEC-015** (receipt-key rotation) | transport only |
-| `rotate_receipt_key_result` | serve → app | **SPEC-015** (status: `accepted` / `rejected` / `committed_unconfirmed`) | transport only |
+| `rotate_receipt_key_request` | app → serve | **SPEC-015** (receipt-key rotation); field `provider_id` | schema here (see note) |
+| `rotate_receipt_key_result` | serve → app | **SPEC-015**; fields `status` (`accepted`/`rejected`/`committed_unconfirmed`), `accepted` (bool = `status==accepted`), conditional `error` | schema here (see note) |
 | `metrics_request` | app → serve | **SPEC-025 §5.2** (App track) | transport only |
 | `metrics_response` | serve → app | **SPEC-025 §5.2** (carries `ControlMetricsSnapshot`) | transport only |
 | `pause_request` | app → serve | **SPEC-025** | transport only |
@@ -2178,15 +2231,37 @@ only these `type`s and MUST reject unknown types per §6.9.1.
 | `resume_ack` | serve → app | **SPEC-025** | transport only |
 | `shutdown_request` | app → serve | **SPEC-025** (carries `grace_seconds`) | transport only |
 | `shutdown_ack` | serve → app | **SPEC-025** | transport only |
-| `identity_signature_request` | serve → app | **SPEC-026 §7** (fields: `auth_attempt_id`, `provider_id`, `binary_version`, `provider_ecdh_public_key`, `transcript_sha256`) | transport only |
-| `identity_signature_response` | app → serve | **SPEC-026 §7** (fields: `accepted`, `identity_signature`, `transcript_sha256`, `reason`) | transport only |
+| `identity_signature_request` | serve → app | **SPEC-026 §4.3** (fields: `auth_attempt_id`, `provider_id`, `binary_version`, `provider_ecdh_public_key`, `transcript_sha256`) | transport only |
+| `identity_signature_response` | app → serve | **SPEC-026 §4.3** (fields: `accepted`, `identity_signature`, `identity_signature_transcript_sha256`, `reason`) | transport only |
 
-The identity-signature pair (SPEC-026) exists because the provider Ed25519
-identity key lives in Malibu.app's Keychain, so `serve` pushes the
-auth-transcript to the app to be signed; the receipt-key-rotation and
-App-track metrics/pause/resume/shutdown frames are the App-track control
-surface (SPEC-015 / SPEC-025). None of these twelve alter the §6.9.3
+The identity-signature pair (SPEC-026 §4.3) exists because the provider Ed25519
+identity key lives in the Keychain of the expected local peer (Malibu.app), so
+`serve` pushes the auth-transcript to that peer to be signed; the
+receipt-key-rotation and App-track metrics/pause/resume/shutdown frames are the
+App-track control surface (SPEC-015 / SPEC-025). Note the field-name asymmetry:
+the **request** carries `transcript_sha256`, but the **response** echoes it as
+`identity_signature_transcript_sha256` (`ControlSocket.swift`); a spec-literal
+implementation that used `transcript_sha256` on the response would have the
+signature fields silently dropped. None of these twelve alter the §6.9.3
 `models`-CLI detection precedence, which keys only on `status_response`.
+
+**Peer authentication is EUID-only.** The control socket authenticates its peer
+by matching effective UID (`ControlSocket.swift`), **not** by verifying it is
+Malibu.app; any same-EUID local process can connect. Signature requests are
+broadcast to all subscribers and the first uncorrelated response completes the
+pending request (`IdentitySignatureBridge.swift`). A same-user process cannot
+forge the Ed25519 signature, but it can observe auth metadata, race a bogus
+rejection (admission DoS), or initiate receipt rotation. Hardening the peer
+check is a carried follow-up, not a v1.7 claim.
+
+**Receipt-rotation frame schema owner.** SPEC-015 §7.5 defines reconnect/Keychain
+rotation semantics but **not** the local `rotate_receipt_key_*` request/result
+wire schema, and SPEC-025 only names the pair; neither is sufficient for an
+independent compatible implementation. SPEC-001 therefore carries the concrete
+schema inline (request `provider_id`; result `status` ∈
+{`accepted`,`rejected`,`committed_unconfirmed`}, `accepted` bool, conditional
+`error`) as the transport owner of last resort until a downstream spec fully
+specifies it.
 
 #### 6.9.3. Detection precedence
 
@@ -2491,18 +2566,23 @@ at switch time. The catalog target is named here so reviewers of
 future PRs can refer to a stable concept, but the boundary is not
 yet enforced at the package level.
 
-### 6.12. Additive coordinator-wire surface reconciled in v1.7
+### 6.15. Additive coordinator-wire surface reconciled in v1.7
 
 Between SPEC-001 v1.6 (2026-06-22) and the shipped binary (`binary_version`
 1.8.31) the coordinator↔binary wire gained fields and frames that later specs
 own but that transit the SPEC-001 binary. SPEC-001 enumerates them here for
 wire completeness; **the cross-referenced spec owns the semantics** and governs
 on any conflict. All are additive — a coordinator that ignores an unknown field
-sees pre-v1.7 behavior.
+sees pre-v1.7 behavior. (This section is §6.15 — it follows the existing §6.12
+"Ownership server-pushed frames", §6.13, and §6.14; the earlier v1.7 draft
+mis-numbered it §6.12 and collided with the ownership section.)
 
-#### 6.12.1. `auth_request` initial-stage fields (beyond §6.7.1)
+#### 6.15.1. `auth_request` fields (beyond §6.7.1)
 
-Builder: `CoordinatorClient.swift` (`buildAuthRequest` / `appendCatalogAdmissionMetadata`).
+Builder: `CoordinatorClient.swift` (`authInitialMessage` for the initial stage,
+plus `appendCatalogAdmissionMetadata`).
+
+Initial-stage fields:
 
 - `tier2_capabilities.response_chunk_plaintext_envelope: true` — a 4th sub-field
   beyond the §6.7.1 `{encrypted_leg, attestation, aead_suites}` schema
@@ -2511,44 +2591,79 @@ Builder: `CoordinatorClient.swift` (`buildAuthRequest` / `appendCatalogAdmission
   (**SPEC-026**).
 - Signed-catalog admission block: `catalog_release_id`, `catalog_policy_version`,
   `catalog_candidate_sha256`, `catalog_signer_key_id`, `catalog_row_identity`
-  (**SPEC-010 / SPEC-022** signed-catalog admission).
+  (**SPEC-010 / SPEC-022** signed-catalog admission). This block is **also**
+  appended to the legacy `hello` frame (`CoordinatorClient.swift`), not only to
+  the initial-stage `auth_request`.
 
-#### 6.12.2. Heartbeat fields (beyond §6.5 / §6.10)
+Proof-stage `auth_request` (the second handshake message) can additionally
+carry `credential_bootstrap`, `identity_signature`, and
+`identity_signature_transcript_sha256` (**SPEC-026** identity binding;
+`CoordinatorClient.swift`).
+
+#### 6.15.2. Heartbeat fields (beyond §6.5 / §6.10)
 
 Builder: `CoordinatorClient.swift` heartbeat frame.
 
-- `hardware_summary` — provider hardware descriptor (**SPEC-010 / stats hardware-verifier**).
-- `spec_decode_drafted_tokens_since_last`, `spec_decode_accepted_tokens_since_last`,
-  `spec_decode_acceptance_rate` — speculative-decoding telemetry (**SPEC-028**).
-- `last_autoupdate_event` — last auto-update transition (**SPEC-020**).
+- `hardware_summary` — optional provider-reported hardware descriptor used as a
+  **display-capacity fallback** through the **SPEC-017** stats-rollup pipeline;
+  it is **untrusted** and verified `chip_hardware_profiles` inventory overrides
+  it (`beta/DECISION_CRITERIA.md` Entry 105/109). It is explicitly **not** a
+  trusted capacity source and cannot confer attestation.
+- All six speculative-decoding fields (**SPEC-028**): `spec_decode_enabled`,
+  `spec_decode_draft_model_id`, `spec_decode_num_draft_tokens`,
+  `spec_decode_drafted_tokens_since_last`, `spec_decode_accepted_tokens_since_last`,
+  `spec_decode_acceptance_rate`.
+- `last_autoupdate_event` — last auto-update transition. This is a **SPEC-001
+  wire-schema extension** (SPEC-020 R-6.3 consumes it) emitted on **both** the
+  heartbeat **and** `state_update` payloads (`CoordinatorClient.swift`); the
+  value is a structured object ≤4096 UTF-8 bytes.
 
 These are additive to the §6.10 opt-in-gated `model_hash` / `loading` fields and
 do not change the L-1 byte-identical default for a warm-swap-disabled binary
 (they ride the existing heartbeat only when their producing subsystem is active).
 
-#### 6.12.3. New inbound (coordinator server-push) frames
+#### 6.15.3. New inbound (coordinator server-push) frames
 
-Dispatch: `CoordinatorClient.swift`.
+Dispatch: `CoordinatorClient.swift`. The dispatcher recognizes the documented
+frame set and otherwise replies `nak unknown_message_type`.
 
-- `se_liveness_challenge` → binary replies `se_liveness_response` (§6.12.4) —
-  Secure-Enclave liveness challenge (**SPEC-008 Pillar C**).
-- `encrypted_leg_invalidated`, `tier_demoted`, `token_revoked`,
-  `attestation_state_degraded` — Tier-2 / attestation lifecycle events the
-  coordinator pushes to the binary (**SPEC-008** / autoupdate). The binary
-  reacts to these (e.g. re-handshake, tier downgrade); SPEC-008 owns the state
-  semantics.
+- `se_liveness_challenge` → binary replies `se_liveness_response` (§6.15.4) —
+  Secure-Enclave liveness challenge (**SPEC-008 Pillar C**). This is the only
+  genuinely new inbound wire frame in v1.7.
+
+> **Not wire frames.** `encrypted_leg_invalidated`, `tier_demoted`,
+> `token_revoked`, and `attestation_state_degraded` are **not** inbound
+> coordinator frames — the earlier v1.7 draft wrongly listed them as such. They
+> are internal string labels: `encrypted_leg_invalidated` is produced by a local
+> `InferenceRelay` AEAD-failure callback, and the other three are internal
+> auto-update / trust demotion *reason* labels (`CoordinatorClient.swift`). A
+> coordinator MUST NOT send them as frames; the binary would `nak` them.
 
 These extend the §6.7 / §6.6 inbound frame set (`hello_ack`, `ownership_event`,
 `ownership_status`, `preflight`, `inference_request`, `cancel_request`, `drain`,
 `warm_up`).
 
-#### 6.12.4. New outbound (binary → coordinator) frames
+#### 6.15.4. New outbound (binary → coordinator) frames
 
-- `idle_prewarm_event` / `idle_prewarm_skipped` — emitted by the `IdlePrewarmer`
-  (FR-16); `idle_prewarm_skipped` carries a `reason` (e.g. on-battery skip). Owner:
-  SPEC-001 (FR-16) — this frame is SPEC-001's own, new in v1.7.
+- `idle_prewarm_event` — the **single** frame type emitted by the `IdlePrewarmer`
+  (FR-16). Its `event` field carries the transition (`fired`, `completed`,
+  `failed`, `cancelled`, or `idle_prewarm_skipped`); a `reason` is attached only
+  on the skipped event. There is **no** distinct `idle_prewarm_skipped` frame
+  type, and one prewarm run emits *multiple* lifecycle frames (e.g. `fired`
+  then `completed`). Owner: SPEC-001 (FR-16) — this frame is SPEC-001's own, new
+  in v1.7.
 - `se_liveness_response` — reply to `se_liveness_challenge`; fields `version`,
-  `nonce`, `timestamp`, `public_key`, `signature` (**SPEC-008 Pillar C**).
+  `nonce`, `timestamp`, `public_key`, `signature` (**SPEC-008 Pillar C**). Per
+  SPEC-008, the coordinator verifies the signature against the stored
+  attestation-time key, **not** the response's `public_key`.
+
+**Losslessness-probe frames (SPEC-008).** The binary also handles a
+`losslessness_probe_v1.*` family (`LosslessnessProbeProtocol.swift`): inbound
+`losslessness_probe_v1.request` / `.encrypted_request` and outbound
+`losslessness_probe_v1.result` / `.encrypted_result` (plus the
+`.request_plaintext` / `.result_plaintext` plaintext-envelope variants). Owner:
+**SPEC-008** (tier-2 losslessness verification); SPEC-001 carries the transport
+only.
 
 These extend the §6.5 outbound set (`auth_request`, `hello`, `heartbeat`,
 `state_update`, `drain_status`, `nak`, `preflight_ack`).
@@ -2679,10 +2794,14 @@ responsibilities, deferred to SPEC-002.
 **Observation:** M4 post-wake first request was -12% throughput vs
 baseline. mlx weights survived sleep but first inference was slower.
 
-**FR mapping:**
-- **FR-16** (warm-up hook): Binary detects wake events and runs a
-  synthetic inference before accepting buyer traffic. Reports `degraded`
-  during warm-up, `ready` after.
+**FR mapping (reconciled v1.7):**
+- **FR-16** (idle prewarmer): the shipped mitigation is an idle-triggered
+  `IdlePrewarmer`, **not** wake detection. It runs a synthetic inference after
+  an idle period (default ≥ 30s) to keep the model cache warm; it does **not**
+  detect wake events and does **not** change the health state. The coordinator
+  `warm_up` command is a no-op two-message acknowledgement (§6.5). The ≤ v1.6
+  "detects wake events / reports `degraded` during warm-up" contract was never
+  shipped.
 
 ### D3 — Stop-token leakage status
 
@@ -2768,7 +2887,11 @@ Each adversarial workload (`retry_storm`, `concurrent_burst_8way`,
 `midstream_disconnect`, `malformed_tool_call`, `long_context_oom_probe`)
 must complete with NO HTTP 500 responses. Acceptable responses during
 adversarial load are: 200 (success), 400 (malformed request),
-413 (payload too large), 429 (rate limited / queue full). The binary
+413 (payload too large). The local HTTP inference path has **no** 429 —
+excess concurrent requests block on the FR-11 semaphore rather than being
+rejected (the ≤ v1.6 429/queue-full response was never shipped); WS-tunneled
+capacity is signalled out-of-band via `error_queue_full` (FR-27), not an HTTP
+status. The binary
 must remain healthy (passes `GET /v1/health` with 200) within 30
 seconds of workload completion. Any 500 response or process crash is
 a hard failure of AC-2.
@@ -2819,13 +2942,21 @@ exits with code 0.
 **Run by:** Manual test during build. Start 3 concurrent streaming
 requests, send `kill -TERM <pid>`, verify all 3 complete and binary exits 0.
 
-**AC-7. Post-wake warm-up.**
-After receiving a `warm_up` command from the coordinator, the first
-real request shows throughput within 95% of the long-running baseline
-(measured as tok/s on `short_chat` workload).
+**AC-7. Warm-up command + idle prewarm (reconciled v1.7).**
+Two independent checks, since `warm_up` no longer performs inference:
+1. **`warm_up` no-op ack.** Sending a `warm_up` command produces exactly the
+   `state_update: degraded` → `state_update: ready` pair with no intervening
+   synthetic inference and no throughput change attributable to the command.
+2. **Idle prewarm.** After an idle period ≥ `idle_prewarm.idle_threshold_seconds`
+   (with prewarm enabled, on AC power, model loaded), the binary emits an
+   `idle_prewarm_event` (`event: "fired"` then `"completed"`) and the next real
+   request shows throughput within 95% of the long-running baseline (tok/s on
+   `short_chat`). The prewarmer does **not** move the health state.
 
-**Run by:** Send `warm_up` via mock coordinator, then fire `short_chat`
-via harness, compare tok/s to baseline from AC-1.
+**Run by:** (1) Send `warm_up` via mock coordinator; assert the two `state_update`
+frames and no inference. (2) Idle the binary past the threshold; assert the
+`idle_prewarm_event` frames on the mock coordinator, then fire `short_chat` via
+harness and compare tok/s to the AC-1 baseline.
 
 **AC-8. Health endpoint.**
 `GET /v1/health` returns 200 with JSON containing at minimum: `status`,
@@ -3182,10 +3313,13 @@ Implement FR-8 (two-stage pre-flight) and FR-9 (per-RAM capacity at
 startup). Deliverable: a prompt exceeding the context cap returns
 HTTP 413.
 
-**Step 8. Request queue and concurrency.**
-Implement FR-11 (bounded queue with HTTP 429). Wire disconnect
-detection (FR-10). Deliverable: requests beyond max concurrency are
-queued; beyond queue depth get 429.
+**Step 8. Semaphore serialization and concurrency.**
+Implement FR-11 (blocking `AsyncSemaphore`, value = `max(1, max_concurrency)`;
+excess requests await a permit, no queue, no 429). Wire disconnect detection
+(FR-10). Deliverable: requests beyond max concurrency block on the semaphore
+until a permit frees; the WS-tunneled relay (capacity 1) rejects a concurrent
+second with `error_queue_full`. (The ≤ v1.6 "bounded queue + HTTP 429" plan was
+never shipped and is retired in v1.7.)
 
 **Step 9. Coordinator WebSocket client.**
 Implement FR-13 (outbound WebSocket), FR-14 (hello + tier), FR-15
