@@ -1321,6 +1321,19 @@ for encoded in encoded_arguments:
     arguments.append(argument)
 if sum(map(len, arguments)) > 65536:
     raise SystemExit("manual provider argument bounds exceeded")
+# ADV-H1: defense in depth for any pre-fix recovery snapshot. A `--token-fd`
+# provider cannot be relaunched with `stdin=DEVNULL` (the empty bearer would be
+# rejected). Do not replay it — write a `handoff` sentinel and exit cleanly so
+# the caller logs the app-managed handoff instead of relaunching or failing.
+def _references_token_fd(args):
+    for argument in args:
+        if argument == b"--token-fd" or argument.startswith(b"--token-fd="):
+            return True
+    return False
+if _references_token_fd(arguments):
+    with open(pid_path, "w", encoding="ascii") as handle:
+        handle.write("handoff\n")
+    raise SystemExit(0)
 try:
     working_directory = base64.b64decode(record["working_directory_b64"], validate=True)
 except Exception as error:
@@ -1443,10 +1456,17 @@ except BaseException as original_error:
     raise
 PY
   RESTORED_MANUAL_PID="$(cat "$RECOVERY_DIR/manual-restored.pid")"
-  case "$RESTORED_MANUAL_PID" in
-    ''|*[!0-9]*) recovery_failed "restored manual provider pid is invalid" ;;
-  esac
-  recovery_log "Restored prior manual provider pid=$RESTORED_MANUAL_PID with exact prior argv and port ownership."
+  if [ "$RESTORED_MANUAL_PID" = "handoff" ]; then
+    # ADV-H1: the prior manual provider received its bearer on an inherited
+    # token fd (app-managed). It is intentionally not relaunched here; Malibu
+    # restarts it with the Keychain bearer after the failed install rolls back.
+    recovery_log "Previous manual provider used an inherited token fd (app-managed); skipped installer replay and handed its restart to Malibu."
+  else
+    case "$RESTORED_MANUAL_PID" in
+      ''|*[!0-9]*) recovery_failed "restored manual provider pid is invalid" ;;
+    esac
+    recovery_log "Restored prior manual provider pid=$RESTORED_MANUAL_PID with exact prior argv and port ownership."
+  fi
 fi
 
 recovery_log "Previous provider, recommendation, watchdog, manifest, service, and manual-process states were restored and verified."
@@ -1654,6 +1674,24 @@ if len(arguments) > 128 or any(b"\x00" in argument or len(argument) > 4096 for a
     raise SystemExit("manual provider argument bounds exceeded")
 if sum(map(len, arguments)) > 65536:
     raise SystemExit("manual provider argument bounds exceeded")
+# ADV-H1: an app-managed provider receives its bearer on an inherited file
+# descriptor (`--token-fd N`), which is closed when we stop it and cannot be
+# reproduced by a rollback that relaunches with `stdin=DEVNULL`. Do NOT capture
+# a recovery snapshot for such a provider — a replay would feed `--token-fd` an
+# empty bearer and the provider would reject it. Skip capture cleanly (exit 0,
+# no snapshot file) so rollback leaves its restart to Malibu's app-managed start,
+# which owns the Keychain bearer.
+def _references_token_fd(args):
+    for argument in args:
+        if argument == b"--token-fd" or argument.startswith(b"--token-fd="):
+            return True
+    return False
+if _references_token_fd(arguments):
+    sys.stderr.write(
+        "manual provider uses an inherited token fd (app-managed); skipping recovery "
+        "capture so rollback will not relaunch it with an empty bearer\n"
+    )
+    raise SystemExit(0)
 environment = []
 while offset < len(data):
     entry_end = data.find(b"\x00", offset)
@@ -1683,8 +1721,21 @@ def _is_secret_env_key(key):
         if needle in upper:
             return True
     return upper.endswith(b"_KEY") or upper == b"KEY"
+# M1(adv): the secret-substring filter uses ASCII .upper()/substring checks, so
+# fullwidth/Cyrillic confusables (APIＴOKEN, secrе t, ＢEARER) would survive it.
+# Conservatively DROP every non-ASCII-keyed env entry from the recovery snapshot
+# in addition to the ASCII secret filter; a restored serving child never needs a
+# non-ASCII environment key and we must never risk serializing a disguised secret.
+def _is_ascii_key(key):
+    try:
+        key.decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    return True
 environment = [
-    entry for entry in environment if not _is_secret_env_key(entry.split(b"=", 1)[0])
+    entry
+    for entry in environment
+    if _is_ascii_key(entry.split(b"=", 1)[0]) and not _is_secret_env_key(entry.split(b"=", 1)[0])
 ]
 working_directory = os.path.realpath(observed_cwd)
 if not os.path.isabs(working_directory) or not os.path.isdir(working_directory):

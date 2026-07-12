@@ -609,6 +609,60 @@ func TestTerminalSocialRecheckFailsAndSurfacesFailedStatus(t *testing.T) {
 	}
 }
 
+// TestReservationCannotBeExtendedPastAbsoluteLifetime is the FIX-570 H3
+// regression: refreshing a preflight reservation must never push expires_at past
+// its original created_at + maxReservationLifetime, so a single unauthenticated
+// request cannot pin a cap-one invite forever. After the absolute lifetime the
+// slot frees for another provider.
+func TestReservationCannotBeExtendedPastAbsoluteLifetime(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	policy := referralPolicy()
+	code, err := store.CreateSeedReferral(context.Background(), policy, "reslife", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC)
+	// ttl is long enough that each refresh lands before natural expiry, so the only
+	// thing that can free the slot is the absolute-lifetime cap.
+	ttl := 20 * time.Minute
+
+	res1, err := store.ReserveReferralCapacity(context.Background(), policy, code, "provider-a", t0, ttl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Refreshes within the absolute lifetime keep the SAME reservation but clamp
+	// expires_at to created_at+30m (would otherwise be t0+35, then t0+48).
+	res1b, err := store.ReserveReferralCapacity(context.Background(), policy, code, "provider-a", t0.Add(15*time.Minute), ttl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res1b != res1 {
+		t.Fatalf("refresh within lifetime changed reservation id %q -> %q", res1, res1b)
+	}
+	if _, err := store.ReserveReferralCapacity(context.Background(), policy, code, "provider-a", t0.Add(28*time.Minute), ttl); err != nil {
+		t.Fatal(err)
+	}
+	// Absent the absolute cap, the t0+28 refresh would set expires_at=t0+48 and keep
+	// the cap-one slot pinned at t0+31. With the cap, expires_at is clamped to
+	// t0+30, so the slot has freed and another provider can reserve at t0+31.
+	res2, err := store.ReserveReferralCapacity(context.Background(), policy, code, "provider-b", t0.Add(31*time.Minute), ttl)
+	if err != nil {
+		t.Fatalf("slot did not free after absolute lifetime: %v", err)
+	}
+	if res2 == "" || res2 == res1 {
+		t.Fatalf("expected a distinct fresh reservation for provider-b, got %q", res2)
+	}
+	// provider-a re-reserving now would collide with provider-b's live claim on the
+	// cap-one invite, proving the slot is genuinely held by b (not still pinned by a).
+	if _, err := store.ReserveReferralCapacity(context.Background(), policy, code, "provider-a", t0.Add(32*time.Minute), ttl); !errors.Is(err, auth.ErrReferralExhausted) {
+		t.Fatalf("provider-a re-reserve after slot taken err=%v want exhausted", err)
+	}
+}
+
 // TestCustodyProvenRecoveryIgnoresIssuerRevocation is the FIX-570 A3 regression:
 // once a provider is bound to a redemption, presenting the same code must succeed
 // even after the issuer is revoked. Pre-fix redeemReferralTx re-validated the

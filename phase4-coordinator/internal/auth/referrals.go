@@ -492,6 +492,14 @@ SELECT (SELECT COUNT(1) FROM referral_redemptions WHERE issuer_id = ?)
 	return ReferralValidation{Valid: true, Reason: "valid", Type: parsed.Type, IssuerID: parsed.IssuerID, Campaign: issuer.Campaign, RemainingUses: remaining}, nil
 }
 
+// maxReservationLifetime bounds the TOTAL wall-clock lifetime of a single
+// preflight reservation, measured from its original created_at. Refreshing a
+// reservation may extend expires_at only up to created_at + this cap, after
+// which the reservation expires and the slot frees. Without this bound a single
+// unauthenticated /v1/referrals/reserve request could pin a cap-one invite
+// indefinitely by periodically refreshing under the per-IP limit. FIX-570 H3.
+const maxReservationLifetime = 30 * time.Minute
+
 // ReserveReferralCapacity creates a short-lived authoritative claim on one
 // invite use. It lets App-track commit its PostgreSQL identity transaction
 // without holding SQLite's writer lock and without losing a capacity race
@@ -523,11 +531,11 @@ func (s *Store) ReserveReferralCapacity(ctx context.Context, policy ReferralPoli
 		if _, err := conn.ExecContext(ctx, `DELETE FROM referral_reservations WHERE expires_at <= ?`, timeText(now)); err != nil {
 			return err
 		}
-		var existingID, existingDigest string
+		var existingID, existingDigest, existingCreatedAt string
 		err := conn.QueryRowContext(ctx, `
-SELECT reservation_id, code_digest
+SELECT reservation_id, code_digest, created_at
   FROM referral_reservations
- WHERE campaign = ? AND provider_id = ?`, policy.Campaign, providerID).Scan(&existingID, &existingDigest)
+ WHERE campaign = ? AND provider_id = ?`, policy.Campaign, providerID).Scan(&existingID, &existingDigest, &existingCreatedAt)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -535,22 +543,45 @@ SELECT reservation_id, code_digest
 			if !hmac.Equal([]byte(existingDigest), []byte(digestText)) {
 				return ErrReferralConflict
 			}
-			if _, validationErr := validateReferralTxWithCapacity(ctx, conn, policy, code, now, false); validationErr != nil {
-				return validationErr
+			// FIX-570 H3: cap the refresh at the ORIGINAL created_at + absolute
+			// lifetime. A reservation that has already reached its absolute deadline
+			// is treated as expired: it is deleted and re-created fresh below (a new
+			// created_at, subject to current capacity), so a single request can no
+			// longer pin a slot forever by refreshing.
+			createdAt, parseErr := time.Parse(time.RFC3339, existingCreatedAt)
+			if parseErr != nil {
+				return parseErr
 			}
-			result, updateErr := conn.ExecContext(ctx, `
+			absoluteDeadline := createdAt.Add(maxReservationLifetime)
+			if absoluteDeadline.After(now) {
+				if _, validationErr := validateReferralTxWithCapacity(ctx, conn, policy, code, now, false); validationErr != nil {
+					return validationErr
+				}
+				cappedExpiry := expiresAt
+				if cappedExpiry.After(absoluteDeadline) {
+					cappedExpiry = absoluteDeadline
+				}
+				result, updateErr := conn.ExecContext(ctx, `
 UPDATE referral_reservations
    SET expires_at = ?
  WHERE reservation_id = ? AND campaign = ? AND provider_id = ?`,
-				timeText(expiresAt), existingID, policy.Campaign, providerID)
-			if updateErr != nil {
-				return updateErr
+					timeText(cappedExpiry), existingID, policy.Campaign, providerID)
+				if updateErr != nil {
+					return updateErr
+				}
+				if changed, updateErr := result.RowsAffected(); updateErr != nil || changed != 1 {
+					return ErrReferralExhausted
+				}
+				reservationID = existingID
+				return nil
 			}
-			if changed, updateErr := result.RowsAffected(); updateErr != nil || changed != 1 {
-				return ErrReferralExhausted
+			// Past the absolute lifetime: free the slot and fall through to a fresh
+			// reservation with a new created_at.
+			if _, delErr := conn.ExecContext(ctx, `
+DELETE FROM referral_reservations WHERE reservation_id = ? AND campaign = ? AND provider_id = ?`,
+				existingID, policy.Campaign, providerID); delErr != nil {
+				return delErr
 			}
-			reservationID = existingID
-			return nil
 		}
 		validated, err := validateReferralTxWithCapacity(ctx, conn, policy, code, now, false)
 		if err != nil {
