@@ -23,6 +23,11 @@
   SPEC-004 v0.3.2 / SPEC-006 v0.9.8 and to carve out provider-local prefix caching; **§2.2**
   now discloses cross-provider linkability (the key reaches >1 provider across misses/re-routes).
   No code change.
+- **v0.4.1 R3-audit reconciliation (2026-07-12, spec-only).** Closed the shared byte-fidelity
+  HIGH at its last location: the **§2.2 normative-preservation rule** said "Pillar B ciphertext
+  MUST carry only the provider request body" — now includes the authorized `conversation_key`
+  inside the `inference_request_plaintext` envelope (§6.6), while the AAD bar keeps it out of
+  AAD/nonce/outer metadata. No code change.
 
 **Change log v0.4 (runbook item 7 — spec-only reconciliation of shipped attestation):**
 The shipped, default-enabled self-signed Secure-Enclave attestation path
@@ -471,7 +476,11 @@ SPEC-024 v0.2 §11–§12 — but the raw values behind it remain unrecoverable.
 **Normative preservation rule.** Pillar B AEAD AAD MUST NOT include
 `routing_internal.conversation_key`, raw buyer conversation tags, raw
 `account_id`, or sticky-entry IDs. Pillar B ciphertext MUST carry only the
-provider request body and response payload needed for inference. Pillar C
+provider request body — **plus, on the c2p `inference_request`, the authorized
+derived `conversation_key` inside the `inference_request_plaintext` envelope
+(§6.6, v0.4.1)** — and the response payload needed for inference; the AAD
+restriction above still bars the `conv:` value from AAD/nonce/outer metadata,
+so the key travels only inside the ciphertext. Pillar C
 attestation challenges and tokens MUST NOT encode sticky state. Pillar D
 output-safety logs MUST NOT expose `conv:` values to provider-originated
 messages.

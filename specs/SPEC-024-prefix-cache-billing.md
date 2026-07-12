@@ -13,7 +13,8 @@ v0.1 specified the *accounting* of a provider-reported `cached_prompt_tokens` bu
 - **§14 (coordinator cross-check — the deferred §7 item):** resolves the v0.1 deferral; ties trust of a positive `cached_prompt_tokens` to `sticky_result == "hit"` and flags two shipped gaps the coordinator MUST close: the sticky-Lookup account-scope gap (account compared only on write, not on the routing read path — FR-CI13) and the **queued-routing final-provider provenance** gap (the slot-queue `enterBest` path can carry a stale `sticky_result == "hit"` after admitting a different provider — FR-CI11a).
 - **§15 (ingest paths without a fronting gateway):** direct/Tier-2/cleartext ingest accept `conversation_key` with **no provider-side account binding** (the value is trimmed and FR-CI1-validated — an invalid key becomes *absent* and disables caching — so it is not blindly *verbatim*, but no **account** dimension is added); v0.2 states the deployment invariant these paths must preserve.
 - **§16 (acceptance criteria):** adds the missing **non-interference** test requirement (no shipped test drives two distinct keys/accounts against one cache).
-- **R2-audit reconciliation (2026-07-12, spec-only).** Second codex 3-lane pass (code/security/architect) confirmed option (a) resolved but flagged incomplete carve-out reconciliation and new fidelity gaps; all C/H/M addressed in this same change: **§2** now frames the tool-call bullet as v0.1 *accounting* scope (not a cache-mechanism claim) consistent with FR-CI3; **§14 FR-CI11a** documents the queued-routing final-provider provenance gap (`slot_queue.go enterBest`); **§13 FR-CI10a** records the provider-receipt/retention + cross-provider-linkability **disclosure-completeness** items; **§15** distinguishes the three shipped ingest transport shapes (relay top-level field / Tier-2 envelope field / direct-HTTP `X-MacProvider-Provider-Conversation` header); citations corrected (SPEC-008 §2.1 for the derivation, SPEC-006 §5.4/§5.4.1 for the coordinator origin gate); FR-CI1/CI2 and the §16 coverage inventory reconciled to the actual shipped tests (Unicode/grapheme trim semantics; LRU/route/range **are** tested but shallowly; partial-trim + queued-provenance untested).
+- **R2-audit reconciliation (2026-07-12, spec-only).** Second codex 3-lane pass (code/security/architect) confirmed option (a) resolved but flagged incomplete carve-out reconciliation and new fidelity gaps; all C/H/M addressed: **§14 FR-CI11a** documents the queued-routing final-provider provenance gap (`slot_queue.go enterBest`); **§13 FR-CI10a** records the provider-receipt/retention + cross-provider-linkability **disclosure-completeness** items; **§15** distinguishes the three shipped ingest transport shapes (relay top-level field / Tier-2 envelope field / direct-HTTP `X-MacProvider-Provider-Conversation` header); citations corrected (SPEC-008 §2.1 for the derivation, SPEC-006 §5.4/§5.4.1 for the coordinator origin gate); FR-CI1/CI2 and the §16 coverage inventory reconciled to the actual shipped tests (Unicode/grapheme trim semantics; LRU/route/range **are** tested but shallowly; partial-trim + queued-provenance untested).
+- **R3-audit reconciliation (2026-07-12, spec-only).** Third 3-lane pass verified every R2 fix against code (code lane 0 C/H/M) and caught residual stale-text occurrences the R2 sweep missed, all fixed: **SPEC-008 §2.2** normative-preservation rule (ciphertext "carries only the body" → now includes the authorized `conversation_key` envelope, closing the shared byte-fidelity HIGH at its last location); **SPEC-004 §1 mission + §2 scope** (top-level "no provider-wire-change / no provider-managed cache" carved out to match FR-SR-2/§6); **SPEC-006 §5.4.1** ASCII→Unicode trim (matching § 1.3); **SPEC-006 §1.3** buyer-deletion lifecycle now reconciles "buyer-triggered deletion" with the not-directly-purgeable provider KV (indirect: sever routing + TTL); **§2 tool-billing** corrected to shipped reality (the discount applies to the whole `cached_prompt_tokens` aggregate **including** rendered tool history — no role segmentation, `formula.go` — v0.1's "tool-call replies out of scope" retired); **§12** trust-delta no longer understated (provider receipt/retention is genuinely new under (a)); FR-CI10a disclosure citation §5.4→§5.3.1; §16 retry-gate coverage overclaim corrected.
 
 **Change log v0.1 (2026-07-02, prefix-cache billing design):**
 - **Prefix-cache reuse meaning.** Prefix-cache reuse means the same provider that served conversation turn N also serves turn N+1 through SPEC-004 sticky affinity and can skip prefill work for an exact canonical prefix of the new prompt that was already materialized in provider-local KV cache.
@@ -33,7 +34,7 @@ SPEC-024 specifies the billing treatment for provider-reported prefix-cache reus
 - KV-cache implementation **internals** on the provider are out of scope. SPEC-024 defines the reported `cached_prompt_tokens` semantics and (v0.2, §11) the **observable cache-key/reuse invariant**; the mlx-swift cache pinning, materialization, and eviction *mechanism* between `generate()` calls remain IMPL concerns and SPEC-024 MUST NOT prescribe internal mlx APIs. (v0.2 pins the *behavior* — what may be reused for which key — not the mechanism.)
 - ~~Cache-hit fraud detection algorithms are out of scope. Section 7 defines the v0.1 fraud model and defers cross-checked coordinator verification to v0.2.~~ **(v0.2: resolved.)** Coordinator cross-checking of `cached_prompt_tokens` is now in scope — §14. Specific ML-based anomaly-scoring *algorithms* remain out of scope; §14 pins only the deterministic route/attribution gates the coordinator already applies.
 - Cross-provider KV-cache handoff is out of scope. A request that does not route through a sticky hit MUST report `cached_prompt_tokens = 0` or omit the field.
-- **v0.1 billing *accounting* for tool-call replies is out of scope** (unchanged): the v0.1 discounted-price accounting attributes cache credit only to system, user, and assistant message-content prefixes. **This is a v0.1 *accounting-scope* statement, NOT a claim about the shipped cache mechanism.** v0.2 §11 FR-CI3 records the shipped reality: the provider's rendered prompt **does** include tool messages and assistant tool-call content, and that full rendered prompt (`prompt_token_ids ‖ generated_token_ids`) is what is tokenized and cached (`ToolPromptRenderer`, `ModelRuntime.swift`). So tool history participates in the provider-local *cache key / LCP*, even though v0.1 *billing* does not separately credit it. The two are consistent once read as accounting-scope vs cache-key-scope.
+- **Tool-call replies (reconciled to shipped billing, v0.2).** The v0.1 draft said prefix-cache reuse for tool-call replies was "out of scope" and that accounting was "restricted to system, user, and assistant message-content prefixes." **That is NOT what shipped, and v0.2 supersedes it.** The provider renders tool messages and assistant tool-call content into the prompt (`ToolPromptRenderer`, `ModelRuntime.swift`), that full rendered prompt (`prompt_token_ids ‖ generated_token_ids`) is tokenized and cached (§11 FR-CI3), and the coordinator prices the **entire undifferentiated `cached_prompt_tokens` aggregate at the cache-hit rate with no message-type/role segmentation** (`phase4-coordinator/internal/billing/formula.go`). So tool-history tokens **do** participate in the cache LCP **and do** receive the discount. There is no shipped role filter; v0.1's "tool-call replies out of scope" is retired. (Out-of-scope items below are the ones that remain genuinely excluded.)
 - Buyer-side cache-hint headers are out of scope. Buyers MUST NOT send `X-MacProvider-Expect-Cached-Prefix` or an equivalent v0.1 hint. Providers are the source of truth for actual cache reuse; buyers observe `usage.cached_prompt_tokens`.
 - Rate-card hot reload for the new field is out of scope. SPEC-005 Wave 0/1 work continues to govern hot-reload semantics. v0.1 IMPL MAY require coordinator restart to activate `prompt_cache_hit_rate_per_mtok`.
 
@@ -338,11 +339,16 @@ buyer tag or `account_id` (one-way HMAC), and captured network frames still carr
 account/tag. **Cross-provider linkability caveat:** the derived key is forwarded on cache
 **misses** and **re-routes** too, not only on sticky hits, so over a conversation's life the
 **same** identifier MAY reach **more than one** provider — slightly broader than the
-single-provider correlation sticky affinity alone grants. This is the SPEC-006 §5.4
+single-provider correlation sticky affinity alone grants. This is the SPEC-006 §5.3.1
 disclosure-completeness item (§13). §11–§16's isolation guarantees therefore hold at the wire/account-scoping layer,
-and the residual trust assumption is narrowed to: the provider is trusted to **hold (not
-exfiltrate)** the opaque derived key — which it must be trusted to do for sticky affinity
-regardless.
+and the residual trust assumption is: the provider is trusted to **hold (not exfiltrate)** the
+opaque derived key. Note this **is a genuinely new trust delta** under option (a): pre-carve-out
+sticky affinity kept the `conv:` value **coordinator-internal** (SPEC-004 §1 / prior SPEC-008
+§2.2), so the provider did *not* previously receive or retain it — provider **receipt and
+local retention are new consequences of (a)**, as FR-CI10a records. What is *not* new is the
+cross-turn **correlation** capability (sticky affinity already let a provider correlate a
+conversation's turns by serving them); (a) newly hands the provider a durable, stable
+*identifier* for that correlation and a broader (cross-provider) surface.
 
 If FR-CI5/6 hold, §11's key-only partition is sufficient for cross-account **isolation**
 (no cross-buyer *reuse*); if either fails (a derivation bug, a stripped account input, or a
@@ -384,7 +390,7 @@ buyer, and only for the buyer's own account.
 **FR-CI10a (disclosure-completeness — MUST close).** The option-(a) carve-out gives the
 provider a durable artifact and a broader correlation surface than the shipped buyer-facing
 disclosure describes. Two consequences are **not yet disclosed** to buyers and MUST be added
-to the SPEC-006 §5.4 `sticky_affinity` disclosure, `/v1/models tier1_disclosure`, and
+to the SPEC-006 §5.3.1 `sticky_affinity` disclosure, `/v1/models tier1_disclosure`, and
 `disclosure.go`:
 - **(i) Provider receipt + independent retention.** The provider **receives** the derived
   opaque conversation identifier and **retains** it in a provider-local KV cache under its own
@@ -496,8 +502,12 @@ Prefix-cache reuse MUST NOT be enabled on a path where the conversation key is b
 shipped provider tests (`ConversationCacheTests`) lock reuse *correctness* — LCP,
 model/`kvBits` swap → miss, fully-non-trimmable → miss, TTL expiry, LRU and token-cap
 eviction, and cached-token clamping — and the coordinator Go tests exercise the
-`normalizeCachedPromptTokens` **route / retry / range** gates (FR-CI11/CI12) on the normal
-(non-queued) path. *What is NOT tested (the real gaps, MUST-add):* (1) cross-key/cross-account
+`normalizeCachedPromptTokens` **route** (sticky-hit / non-hit) and **range** gates (FR-CI11/CI12)
+on the normal (non-queued) path (`internal/billing/store_test.go`). The **retry** gate
+(FR-CI12 `attempt_n > 0` → null) is only partially covered: the shipped attempt-one test
+inherits a `testHotPathInput` whose cached-token field is nil, so **no test combines a
+*positive* `cached_prompt_tokens` with `attempt_n > 0`** — the retry-null path with a non-nil
+value is a MUST-add. *What is NOT tested (the real gaps, MUST-add):* (1) cross-key/cross-account
 non-interference (AC-CI-1) — the LRU test drives three keys through one cache but asserts only
 **aggregate** entry/token counts, **not which specific LRU key was evicted** nor that key K′
 returns a cold result while key K is warm; (2) the sub-32 LCP / full-prompt miss paths

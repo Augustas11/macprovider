@@ -24,6 +24,10 @@ model ID routing, and no sticky affinity.
   consistent across the whole document; bumped the SPEC-006 dependency to v0.9.8; disclosed
   cross-provider linkability (the key is forwarded on misses/re-routes, so it MAY reach more
   than one provider over a conversation's life).
+- **R3-audit reconciliation (2026-07-12).** Extended the sweep to the top-level document scope:
+  §1 Mission and §2 Scope (in/out-of-scope) previously stated a categorical "no SPEC-001
+  provider-wire change / no provider-managed cache" boundary that contradicted the §6 FR-SR-2
+  carve-out; both now carry the single-field exception explicitly.
 
 ### v0.3.1 (2026-05-30)
 
@@ -93,8 +97,10 @@ Make the coordinator route smartly: reuse warm provider caches across a
 buyer's turns, expose latency/quality-tiered model classes, spread load
 evenly across equivalent providers, and recover transient failures more
 aggressively than the existing one-shot failover, without breaking
-reproducible audit logs, the locked SPEC-001 provider protocol, or the
-current money path.
+reproducible audit logs or the current money path. (v0.3.2: the SPEC-001
+provider protocol is preserved **except** for the single additive
+`conversation_key` field the FR-SR-2 carve-out authorizes for provider-local
+prefix caching — see §2 Scope and §6.)
 
 ---
 
@@ -117,11 +123,17 @@ current money path.
 
 ### Out of scope
 
-- Any SPEC-001 / phase3-binary provider wire-protocol change.
+- Any SPEC-001 / phase3-binary provider wire-protocol change, **except** the
+  single additive `conversation_key` field on the coordinator→provider
+  inference request authorized by the v0.3.2 FR-SR-2 carve-out (§6) for
+  provider-local prefix caching. No other provider wire-protocol change.
 - Rewards, billing, settlement, or contributor distribution logic (SPEC-005).
 - AntFeed seller integration (SPEC-007).
 - Tier-2 attestation, provider-leg encryption, or model-weight verification.
-- New provider binary behavior or provider-managed session caches.
+- New provider binary behavior. **(v0.3.2:)** provider-*local* prefix caching
+  keyed on the derived `conversation_key` is now in scope for SPEC-024 v0.2;
+  SPEC-004 authorizes only the *forwarding* of that key (FR-SR-2), not the
+  cache mechanism.
 - Replacing SPEC-002 § 5. SPEC-004 extends that algorithm only.
 - Reading sticky affinity from raw buyer headers. In particular,
   `X-MacProvider-Session` is never a sticky key; it remains SPEC-002 FR-R3
