@@ -1,6 +1,6 @@
 # SPEC-033 — Hardware-Evidence Verifier (`hardware-verifier.v2`)
 
-**Status:** v0.5-draft
+**Status:** v0.6-draft
 **Date:** 2026-07-12
 **Depends on:** SPEC-023 (autotune — produces the benchmark/recommendation inputs the evidence document carries). **Consumed by:** SPEC-032 (autotune hardware-evidence admission "hello-gate") reads this spec's verdict via an **exact-`hardware-verifier.v2`** lookup and cross-references it as "the item-10 hardware-verifier verdict spec". This spec owns the `hardware-verifier.v2` decision semantics and the job/profile lifecycle; SPEC-032 owns how a `verified` profile gates admission.
 
@@ -377,8 +377,9 @@ matches **zero rows** — the existing (newer) profile is left intact — yet th
 
 ### 7.3 Post-verdict demotion (operator inventory sync) — best-effort (one escape R1, one ergonomics gap R2)
 
-`provider_hardware_profiles.verified` is not permanent, but demotion is **best-effort and has
-documented escape paths (§10.4)** — it is NOT a reliable revocation guarantee. The operator
+`provider_hardware_profiles.verified` is not permanent, but demotion is **best-effort — it has one
+documented escape (R1) and one operator-ergonomics gap (R2) (§10.4)** — it is NOT a reliable
+revocation guarantee. The operator
 inventory sync (`cmd/stats-inventory-sync`, role `stats_inventory_writer`) runs
 `applyTrustDemotions`. The exact predicate (`main.go`) sets `verified = FALSE` for every profile
 where `verified = TRUE` **AND** `source = 'cli_hello'` **AND `NOT EXISTS`** a **combined witness** —
@@ -603,6 +604,12 @@ issues; closing them is code follow-up, not a spec change:
 ---
 
 ## Change log
+
+**v0.6-draft (2026-07-12) — audit reconciliation (SPEC-033 R5, 3-lane codex).**
+R5 confirmed the entire spec against code — all three lanes returned **0 C/H/M** except one shared
+MEDIUM: a leftover §7.3 lead phrase ("has documented escape paths", plural) contradicting the
+heading and §10.4 (R2 is not an escape). Fixed to "one documented escape (R1) and one
+operator-ergonomics gap (R2)". No other change.
 
 **v0.5-draft (2026-07-12) — audit reconciliation (SPEC-033 R4, 3-lane codex).**
 R4 verified all R3 fixes against code (0 HIGH on all three lanes); remaining items were
