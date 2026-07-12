@@ -291,6 +291,10 @@ Implementation:
   // are creditable but have no matching ledger_request_credits row.
   // Writes recovery rows using the latest config snapshot whose
   // effective_at_utc <= request_log.ts_utc.
+  // (v0.6 note: superseded — recovery now selects the EXACT identity-linked
+  // config_snapshot_id first, with the timestamp rule only as fallback; a
+  // positive first-attempt cache row quarantines instead of falling back.
+  // Normative: SPEC-005 §4.7 / §10.2 / §10.4.)
   // Quarantines rows where no config or identity snapshot is available.
   // Writes one ledger_reconciliation_runs row summarising the run.
   // Idempotent: re-running the same window produces zero new rows.
