@@ -105,6 +105,18 @@ model (§7) and the cache-**isolation** invariant (§11–§16).
   recovery flag-only retention as a **shipped deviation** (carried code follow-up: recovery flag-only
   should zero stored credits), with a cross-referenced caveat in SPEC-024 §3 and the fixed AC-CI-5
   wording. Non-§2.7 checks (clamps, caps, cache ceiling, rate resolution, snapshot immutability) PASS.
+- **R7-audit corrections (3-lane codex).** All lanes confirmed the four-shape taxonomy **complete and
+  accurate** ("no fifth cache-quarantine credit mutation"); residual fixes were text-consistency and one
+  adjacent path: (1) the SPEC-024 §3 deviation caveat now applies to **both** quarantine bullets
+  (`ambiguous_cache` + `invalid_cached_prompt_tokens`) as a shared paragraph (recovery flag-only touches
+  both); (2) **AC-CI-5** de-conflicted — the **retry** case is NOT quarantined (nulled + full prompt
+  rate), distinct from the non-hit/range quarantine cases; (3) **§5.3** now notes the out-of-range
+  `null_usage_error` classification is the **formula/hot-path** behavior, while **recovery** reconciles
+  the same out-of-range prompt/completion as an **`invalid_usage_tokens`** quarantine sharing the §2.7
+  two-subpath structure (flag-only retains / insert zeroes); §2.7 cross-references it. **Carried code
+  follow-up (LOW):** the shipped `internal/billing` tests assert the four AC shapes only partially (hot
+  path/recovery-insert check gross but not all rates/provider credits; no test asserts recovery flag-only
+  credit retention; AC-Q055 doesn't snapshot unchanged credits) — a test-hardening task, not a spec gap.
 
 **Change log v0.5 (2026-07-08, issue #253 — force-credit + pre-payout hold + corrective resolution):**
 
@@ -548,7 +560,9 @@ Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 **Clarification — cache quarantine vs D7, honest shipped behavior (v0.6).** A cache quarantine
 (`ambiguous_cache`, `invalid_cached_prompt_tokens`) always sets `quarantined = 1`, but its effect on
 **stored credits depends on which code path applies** — there is **no** universal "cache-quarantined
-rows pay zero" guarantee. Four effects across three paths:
+rows pay zero" guarantee. (The recovery subpaths below carry the same structure for the
+`invalid_usage_tokens` out-of-range prompt/completion reason — see §5.3's recovery-path note.) Four
+effects across three paths:
 - **Hot-path** quarantine (`hotpath.go`, first-write): the formula result is **zeroed**, the row is
   inserted with zero credits, and the path **returns before inserting any `ledger_operator_credits`
   row** — so a hot-path cache-quarantine row stores zero and has **no** operator-credit row.
@@ -1077,6 +1091,14 @@ order: (1) fault/null short-circuits, (2) the completion clamp, (3) the token-va
 # are therefore a defensive backstop that only fires for a code path reaching the formula without
 # the §5.3.1 gate; the prompt/completion bounds and overflow checks are the primary null_error
 # classifiers. Either way credits are zeroed.
+#
+# RECOVERY-path note (v0.6): the null_usage_error classification above is the FORMULA / hot-path
+# behavior. During RECOVERY (recovery.go), an out-of-range prompt/completion/estimate (<0 or
+# >10_000_000) is intercepted BEFORE the formula and classified as an 'invalid_usage_tokens'
+# QUARANTINE (not null_usage_error), sharing the same two recovery subpaths as the cache quarantines
+# (§2.7): flag-only on a pre-existing row (stored credits RETAINED — the §2.7 deviation) or
+# insertQuarantineTx on a new row (zero credits, no operator row). So the "out-of-range => null_error"
+# rule holds for the formula path; recovery reconciles the same condition as invalid_usage_tokens.
 
 # (4) cache-split prompt numerator (SPEC-024, folded in)
 uncached_prompt_tokens = prompt_tokens - cached_prompt_tokens
