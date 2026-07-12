@@ -392,10 +392,16 @@ provider a durable artifact and a broader correlation surface than the shipped b
 disclosure describes. Two consequences are **not yet disclosed** to buyers and MUST be added
 to the SPEC-006 §5.3.1 `sticky_affinity` disclosure, `/v1/models tier1_disclosure`, and
 `disclosure.go`:
-- **(i) Provider receipt + independent retention.** The provider **receives** the derived
-  opaque conversation identifier and **retains** it in a provider-local KV cache under its own
-  TTL/LRU (§11 FR-CI4). `DELETE /v1/sticky` purges only the **coordinator sticky map**, not
-  this provider-local entry (SPEC-006 §1.3 lifecycle clarification).
+- **(i) Provider receipt + independent, non-buyer-purgeable retention.** The provider
+  **receives** the derived opaque conversation identifier and **retains** it in a provider-local
+  KV cache under its own TTL/LRU (§11 FR-CI4). `DELETE /v1/sticky` purges only the **coordinator
+  sticky map**, not this provider-local entry. Deletion is **not** even a reliable *indirect*
+  purge: the derived key is **deterministic** (same account+tag ⇒ same `conv:`), and post-delete
+  **normal** selection (SPEC-004 FR-SR-3) MAY still route to the same provider, which then
+  reuses and **re-populates** the entry under the same key — so the provider entry's only
+  dependable bound is its own TTL/LRU, and no buyer-triggered provider-side purge primitive
+  exists (SPEC-006 §1.3 lifecycle residual gap; closing it needs a provider-side conv-key purge,
+  not shipped).
 - **(ii) Cross-provider linkability.** Because the derived key is forwarded on cache **misses**
   and **re-routes**, the same stable identifier MAY reach **more than one** provider across a
   conversation's life — broader than the single-provider correlation sticky affinity alone

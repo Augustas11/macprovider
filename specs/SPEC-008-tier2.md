@@ -28,6 +28,10 @@
   MUST carry only the provider request body" — now includes the authorized `conversation_key`
   inside the `inference_request_plaintext` envelope (§6.6), while the AAD bar keeps it out of
   AAD/nonce/outer metadata. No code change.
+- **v0.4.1 R4-audit correction (2026-07-12, spec-only).** Updated the **§2.2 threat-model
+  observer inventory** to reflect that the provider now legitimately *holds* the derived `conv:`
+  key: the threat is no longer "reconstruct the key" but reversing the raw tag/`account_id`
+  behind the one-way HMAC or deriving the key via an unauthorized side-channel. No code change.
 
 **Change log v0.4 (runbook item 7 — spec-only reconciliation of shipped attestation):**
 The shipped, default-enabled self-signed Secure-Enclave attestation path
@@ -453,6 +457,8 @@ disclosure-completeness item).
 **Threat model.** A provider observes:
 
 - plaintext prompts and completions at the local MLX runtime,
+- **the authorized derived `conv:` key itself** (v0.4.1: received in the
+  inference request's `conversation_key` field for prefix caching),
 - Tier-1 WebSocket frames when Pillar B is disabled,
 - Pillar B ciphertext, nonce, AAD, and frame metadata when Pillar B is enabled,
 - request timing,
@@ -460,8 +466,12 @@ disclosure-completeness item).
 - provider assignment history,
 - sticky-hit routing behavior.
 
-The provider attempts to reconstruct the buyer's internal `conv:` value or raw
-conversation tag.
+Since the provider now legitimately **holds** the derived `conv:` value, the
+threat is not "reconstruct the key" but: the provider attempts to **reverse the
+raw inputs behind it** (the buyer conversation tag or `account_id`) from the
+one-way HMAC, or to **derive** the key through an **unauthorized** side-channel
+(ciphertext/nonce/AAD/frame metadata/timing/model IDs) rather than the
+authorized `conversation_key` field. Both must remain infeasible.
 
 **Tier-1 mechanism.** The `conv:` value is gateway-to-coordinator internal
 state whose one-way HMAC derivation (SPEC-006 §1.3) makes the raw buyer tag and
